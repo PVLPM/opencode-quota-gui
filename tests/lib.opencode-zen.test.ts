@@ -31,6 +31,7 @@ const SESSION_ERROR =
 
 const credential: OpenCodeConsoleCredential = {
   accessToken: "st_secret-token",
+  accountId: "usr_me",
   orgId: "wrk_abc",
 };
 
@@ -58,12 +59,47 @@ const AUTO_RECHARGE = {
   pending: false,
   failureReason: null,
 };
-const ORG_BUDGET = {
-  limitMicroCents: "6000000000",
-  spentMicroCents: "617355570",
-  exceeded: false,
-  resetsAt: "2026-10-01T00:00:00.000Z",
+// Payload shaped like the policies/members/{userID} response for the signed-in
+// member (ids replaced): one workspace (combined-audience) budget rule in its
+// correlated policy. Model selectors live on the rule, not the policy.
+const MEMBER = {
+  userID: "usr_me",
+  budgets: [
+    {
+      policyID: "pol_ws",
+      ruleID: "rule_ws",
+      scope: "combined",
+      limitDollars: 60,
+      spentDollars: 6.1735557,
+    },
+  ],
+  policies: [
+    {
+      id: "pol_ws",
+      audience: { members: ["usr_me"] },
+      rules: [
+        {
+          id: "rule_ws",
+          kind: "budget",
+          period: "month",
+          scope: "combined",
+          per: "set",
+          limitDollars: 60,
+          spentDollars: 6.1735557,
+          selector: { includeUnknownPrice: false },
+        },
+      ],
+    },
+  ],
 };
+
+/**
+ * The diagnostic queryOpenCodeZenQuota emits when the member response has
+ * budget candidates but none it can safely evaluate.
+ */
+function unevaluableError(count: number): string {
+  return `OpenCode Console member budget present but not safely evaluable (${count} candidate${count === 1 ? "" : "s"}); no monthly budget limit reported`;
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -77,7 +113,7 @@ function routes(overrides: Record<string, () => Response> = {}, consoleApi = CON
     "billing/status": () => json(STATUS),
     "billing/account": () => json(ACCOUNT),
     "billing/auto-recharge": () => json(AUTO_RECHARGE),
-    "budgets/org": () => json(ORG_BUDGET),
+    "policies/members/usr_me": () => json(MEMBER),
     "usage/cost-by-day": () => json([]),
     ...overrides,
   };
@@ -111,7 +147,7 @@ describe("queryOpenCodeZenQuota", () => {
       `${CONSOLE_API}/billing/account`,
       `${CONSOLE_API}/billing/auto-recharge`,
       `${CONSOLE_API}/billing/status`,
-      `${CONSOLE_API}/budgets/org`,
+      `${CONSOLE_API}/policies/members/usr_me`,
       `${CONSOLE_API}/usage/cost-by-day`,
     ]);
     for (const [, options] of mocks.fetchWithTimeout.mock.calls) {
@@ -139,13 +175,41 @@ describe("queryOpenCodeZenQuota", () => {
     const result = await queryOpenCodeZenQuota({ accessToken: "st_secret-token" });
 
     expect(result.success).toBe(true);
-    expect(mocks.fetchWithTimeout).toHaveBeenCalledTimes(5);
+    expect(mocks.fetchWithTimeout).toHaveBeenCalledTimes(4);
     for (const [, options] of mocks.fetchWithTimeout.mock.calls) {
       expect(options.request.headers).toEqual({
         Accept: "application/json",
         Authorization: "Bearer st_secret-token",
       });
     }
+  });
+
+  it("falls back to the credit limit when the sign-in has no account id", async () => {
+    routes({
+      "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+    });
+
+    const result = await queryOpenCodeZenQuota({ accessToken: "st_secret-token" });
+
+    expect(result).toEqual({
+      success: true,
+      data: {
+        balance: 4_250_000_000,
+        monthlyLimit: 100,
+        monthlyUsage: 75_000_000,
+        lastPayment: null,
+        reload: false,
+        reloadAmount: 20,
+        reloadTrigger: 5,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+      },
+      errors: [
+        "OpenCode Console member budgets unavailable: the Console sign-in has no account id",
+      ],
+    });
   });
 
   it("calls the Console server saved with the sign-in", async () => {
@@ -162,7 +226,7 @@ describe("queryOpenCodeZenQuota", () => {
       `${selfHostedApi}/billing/account`,
       `${selfHostedApi}/billing/auto-recharge`,
       `${selfHostedApi}/billing/status`,
-      `${selfHostedApi}/budgets/org`,
+      `${selfHostedApi}/policies/members/usr_me`,
       `${selfHostedApi}/usage/cost-by-day`,
     ]);
   });
@@ -180,92 +244,445 @@ describe("queryOpenCodeZenQuota", () => {
         reload: false,
         reloadAmount: 20,
         reloadTrigger: 5,
-        budgetResetIso: "2026-10-01T00:00:00.000Z",
-        budgetSource: "org_budget",
-      },
-      errors: [],
-    });
-  });
-
-  it("prefers the org budget for the monthly limit, spend, and reset date", async () => {
-    routes({
-      "billing/status": () => json({ ...STATUS, balanceMicroCents: "1822921472" }),
-      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
-      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
-    });
-
-    await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
-      success: true,
-      data: {
-        balance: 1_822_921_472,
-        monthlyLimit: 60,
-        monthlyUsage: 617_355_570,
-        lastPayment: null,
-        reload: false,
-        reloadAmount: 20,
-        reloadTrigger: 5,
-        budgetResetIso: "2026-10-01T00:00:00.000Z",
-        budgetSource: "org_budget",
-      },
-      errors: [],
-    });
-  });
-
-  it("falls back to the credit limit and usage costs when the org budget has no limit", async () => {
-    routes({
-      "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
-      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
-      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
-      "budgets/org": () => json({ limitMicroCents: null, spentMicroCents: null, resetsAt: null }),
-    });
-
-    await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
-      success: true,
-      data: {
-        balance: 4_250_000_000,
-        monthlyLimit: 100,
-        monthlyUsage: 75_000_000,
-        lastPayment: null,
-        reload: false,
-        reloadAmount: 20,
-        reloadTrigger: 5,
         budgetResetIso: null,
-        budgetSource: "credit_limit",
+        budgetSource: "member_budget",
       },
       errors: [],
+    });
+  });
+
+  /**
+   * A monthly budget rule as lines up in a verified policy: `kind: "budget"`,
+   * `period: "month"` with `scope`/`per`/limit/spend, plus a `selector` that is
+   * unfiltered (`includeUnknownPrice: false` restricts nothing).
+   */
+  function budgetRule(id: string, fields: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      id,
+      kind: "budget",
+      period: "month",
+      scope: "combined",
+      per: "set",
+      selector: { includeUnknownPrice: false },
+      ...fields,
+    };
+  }
+
+  function memberBudget(
+    policyID: string,
+    ruleID: string,
+    fields: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return { policyID, ruleID, scope: "combined", ...fields };
+  }
+
+  function memberPayload(
+    budgets: Array<Record<string, unknown>>,
+    policies: Array<Record<string, unknown>>,
+  ): unknown {
+    return { userID: "usr_me", budgets, policies };
+  }
+
+  /**
+   * Mirrors the Console UI for an organization with both a workspace cap
+   * ("Entire workspace can spend up to $40 a month combined") and a personal cap
+   * ("vmvarela@gmail.com can spend up to $30 a month per member"), both $2.44 in.
+   */
+  const WORKSPACE_PLUS_PERSONAL = memberPayload(
+    [
+      memberBudget("pol_ws", "rule_ws", {
+        scope: "combined",
+        limitDollars: 40,
+        spentDollars: 2.44,
+      }),
+      memberBudget("pol_me", "rule_me", { scope: "each", limitDollars: 30, spentDollars: 2.44 }),
+    ],
+    [
+      {
+        id: "pol_ws",
+        audience: { workspace: true },
+        rules: [budgetRule("rule_ws", { limitDollars: 40, spentDollars: 2.44 })],
+      },
+      {
+        id: "pol_me",
+        audience: { members: ["usr_me"] },
+        rules: [budgetRule("rule_me", { scope: "each", limitDollars: 30, spentDollars: 2.44 })],
+      },
+    ],
+  );
+
+  it("selects the workspace budget when the member has no personal budget", async () => {
+    routes({
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_ws", "rule_ws", { limitDollars: 40, spentDollars: 2.44 })],
+            [
+              {
+                id: "pol_ws",
+                rules: [budgetRule("rule_ws", { limitDollars: 40, spentDollars: 2.44 })],
+              },
+            ],
+          ),
+        ),
+    });
+
+    // The workspace rule (shared accounting over its audience) supplies the
+    // budget when the member has none of their own.
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: 40, monthlyUsage: 244_000_000, budgetSource: "member_budget" },
+      errors: [],
+    });
+  });
+
+  it("prefers the personal cap over the workspace cap when both apply", async () => {
+    routes({ "policies/members/usr_me": () => json(WORKSPACE_PLUS_PERSONAL) });
+
+    // Personal remains $30 - $2.44 = $27.56 < workspace $40 - $2.44 = $37.56;
+    // the workspace cap is not org-wide, it is only the shared accounting of
+    // its audience.
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: 30, monthlyUsage: 244_000_000, budgetSource: "member_budget" },
+      errors: [],
+    });
+  });
+
+  it("selects the workspace cap when it binds harder than the personal cap", async () => {
+    routes({
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [
+              memberBudget("pol_ws", "rule_ws", { limitDollars: 40, spentDollars: 35 }),
+              memberBudget("pol_me", "rule_me", {
+                scope: "each",
+                limitDollars: 30,
+                spentDollars: 2.44,
+              }),
+            ],
+            [
+              {
+                id: "pol_ws",
+                rules: [budgetRule("rule_ws", { limitDollars: 40, spentDollars: 35 })],
+              },
+              {
+                id: "pol_me",
+                audience: { members: ["usr_me"] },
+                rules: [
+                  budgetRule("rule_me", { scope: "each", limitDollars: 30, spentDollars: 2.44 }),
+                ],
+              },
+            ],
+          ),
+        ),
+    });
+
+    // Workspace remaining $5 < personal remaining $30 - $2.44 = $27.56.
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: 40, monthlyUsage: 3_500_000_000, budgetSource: "member_budget" },
+      errors: [],
+    });
+  });
+
+  it("selects the lowest absolute remaining and keeps the chosen budget's own amounts", async () => {
+    routes({
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [
+              memberBudget("pol_shared", "r2", { limitDollars: 1000, spentDollars: 900 }),
+              memberBudget("pol_each", "r1", { scope: "each", limitDollars: 60, spentDollars: 59 }),
+            ],
+            [
+              {
+                id: "pol_shared",
+                rules: [budgetRule("r2", { limitDollars: 1000, spentDollars: 900 })],
+              },
+              {
+                id: "pol_each",
+                rules: [budgetRule("r1", { scope: "each", limitDollars: 60, spentDollars: 59 })],
+              },
+            ],
+          ),
+        ),
+    });
+
+    // The $60 personal budget with $59 spent ($1 left) binds; neither the shared
+    // cap's limit ($1000) nor its spend ($900) may be mixed into the entry.
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: 60, monthlyUsage: 5_900_000_000, budgetSource: "member_budget" },
+      errors: [],
+    });
+  });
+
+  it("reports spend-only with a diagnostic for a model-restricted rule budget", async () => {
+    routes({
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_sel", "r1", { scope: "each", limitDollars: 10, spentDollars: 1 })],
+            [
+              {
+                id: "pol_sel",
+                rules: [
+                  budgetRule("r1", {
+                    scope: "each",
+                    selector: { models: ["gpt-5"], vendors: ["openai"] },
+                  }),
+                ],
+              },
+            ],
+          ),
+        ),
+    });
+
+    // The restricted rule may only cap certain models; without the current
+    // model's selector semantics Zen cannot claim it applies, so it reports no
+    // monthly limit (the credit limit is not the member budget) while keeping
+    // this month's real spend.
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
+      errors: [unevaluableError(1)],
+    });
+  });
+
+  it("reports no limit when an unevaluable budget coexists with an applicable one", async () => {
+    routes({
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [
+              memberBudget("pol_ws", "rule_ws", { limitDollars: 40, spentDollars: 2.44 }),
+              memberBudget("pol_sel", "r1", { limitDollars: 10, spentDollars: 1 }),
+            ],
+            [
+              {
+                id: "pol_ws",
+                rules: [budgetRule("rule_ws", { limitDollars: 40, spentDollars: 2.44 })],
+              },
+              {
+                id: "pol_sel",
+                rules: [budgetRule("r1", { selector: { models: ["gpt-5"] } })],
+              },
+            ],
+          ),
+        ),
+    });
+
+    // The skipped candidate could be the binding cap, so the known-applicable
+    // budget is not a trustworthy effective limit: spend-only, with diagnostic.
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
+      errors: [unevaluableError(2)],
     });
   });
 
   it.each([
-    ["a null body", () => json(null)],
-    ["an empty body", () => new Response("", { headers: { "content-type": "application/json" } })],
-    ["an empty object", () => json({})],
-  ])("treats %s from budgets/org as no org budget", async (_label, orgBudget) => {
+    ["a null selector", null],
+    ["a non-object selector", "openai"],
+    ["an unknown selector key", { includeUnknownPrice: false, brands: ["openai"] }],
+    ["a non-string models entry", { models: [7] }],
+    ["a non-array models filter", { models: true }],
+    ["a non-array vendors filter", { vendors: "openai" }],
+    ["an inputPriceAtLeast filter", { inputPriceAtLeast: 0.5 }],
+    ["a non-boolean includeUnknownPrice", { includeUnknownPrice: "no" }],
+  ])("reports no limit and a diagnostic for %s in a rule selector", async (_name, selector) => {
     routes({
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
-      "budgets/org": orgBudget,
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_sel", "r1", { limitDollars: 10, spentDollars: 1 })],
+            [
+              {
+                id: "pol_sel",
+                rules: [budgetRule("r1", { selector })],
+              },
+            ],
+          ),
+        ),
     });
 
     await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
+      errors: [unevaluableError(1)],
+    });
+  });
+
+  it("reports no limit when the member's only budget rule is not monthly budget kind", async () => {
+    routes({
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_1", "r1", { limitDollars: 40, spentDollars: 2 })],
+            [
+              {
+                id: "pol_1",
+                rules: [
+                  {
+                    id: "r1",
+                    kind: "usage",
+                    period: "week",
+                    per: "set",
+                    limitDollars: 40,
+                    spentDollars: 2,
+                  },
+                  budgetRule("r2", { limitDollars: 40, spentDollars: 2 }),
+                ],
+              },
+            ],
+          ),
+        ),
+    });
+
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
+      errors: [unevaluableError(1)],
+    });
+  });
+
+  it("skips per-model budgets and keeps only a $0 per-model limit as blocking", async () => {
+    routes({
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [
+              // A non-zero per-model limit has no per-model spend here, so it
+              // cannot be claimed for the current model.
+              memberBudget("pol_1", "r1", {
+                per: "model",
+                limitDollars: 25,
+                spentDollars: 3,
+                modelCount: 4,
+              }),
+            ],
+            [
+              {
+                id: "pol_1",
+                rules: [budgetRule("r1", { per: "model", limitDollars: 25, spentDollars: 3 })],
+              },
+            ],
+          ),
+        ),
+    });
+
+    const skipped = await queryOpenCodeZenQuota(credential);
+    expect(skipped).toMatchObject({
+      success: true,
+      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
+      errors: [unevaluableError(1)],
+    });
+
+    routes({
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [
+              // $0 per-model limit blocks every model of the unfiltered rule.
+              memberBudget("pol_1", "r1", {
+                per: "model",
+                limitDollars: 0,
+                spentDollars: 0,
+                modelCount: 1,
+              }),
+            ],
+            [
+              {
+                id: "pol_1",
+                rules: [budgetRule("r1", { per: "model", limitDollars: 0, spentDollars: 0 })],
+              },
+            ],
+          ),
+        ),
+    });
+
+    const blocking = await queryOpenCodeZenQuota(credential);
+    expect(blocking).toMatchObject({
+      success: true,
+      data: { monthlyLimit: 0, monthlyUsage: 0, budgetSource: "member_budget" },
+      errors: [],
+    });
+  });
+
+  it("reports no limit when a member budget's rule or policy cannot be matched", async () => {
+    routes({
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [
+              memberBudget("pol_gone", "r1", { limitDollars: 40, spentDollars: 2 }),
+              memberBudget("pol_ws", "rule_gone", { limitDollars: 40, spentDollars: 2 }),
+            ],
+            [
+              {
+                id: "pol_ws",
+                rules: [budgetRule("rule_ws", { limitDollars: 40, spentDollars: 2.44 })],
+              },
+            ],
+          ),
+        ),
+    });
+
+    // Budgets need both their policy and their monthly budget rule matched
+    // before Zen claims the amounts; unmatched ones never reach the entry.
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
+      errors: [unevaluableError(2)],
+    });
+  });
+
+  it("falls back when the member response identity does not match the account id", async () => {
+    routes({
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () => json({ ...MEMBER, userID: "usr_other" }),
+    });
+
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
       success: true,
       data: {
         balance: 0,
         monthlyLimit: 100,
         monthlyUsage: 75_000_000,
+        lastPayment: null,
+        reload: false,
+        reloadAmount: 20,
+        reloadTrigger: 5,
         budgetResetIso: null,
         budgetSource: "credit_limit",
       },
-      errors: [],
+      errors: ["Could not parse OpenCode Console policies/members/usr_me response"],
     });
   });
 
-  it("falls back and lists an error when the org budget route fails", async () => {
+  it("falls back quietly when the member has no applicable budget", async () => {
     routes({
       "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
-      "budgets/org": () => new Response("server error", { status: 500 }),
+      "policies/members/usr_me": () => json({ userID: "usr_me", budgets: [], policies: [] }),
     });
 
     await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
@@ -281,7 +698,63 @@ describe("queryOpenCodeZenQuota", () => {
         budgetResetIso: null,
         budgetSource: "credit_limit",
       },
-      errors: ["OpenCode Console budgets/org error 500"],
+      errors: [],
+    });
+  });
+
+  it("reports no limit for a member budget without usable amounts", async () => {
+    routes({
+      "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_ws", "rule_ws", { limitDollars: null, spentDollars: null })],
+            [
+              {
+                id: "pol_ws",
+                rules: [budgetRule("rule_ws", { limitDollars: null, spentDollars: null })],
+              },
+            ],
+          ),
+        ),
+    });
+
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: {
+        monthlyLimit: null,
+        monthlyUsage: 75_000_000,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+      },
+      errors: [unevaluableError(1)],
+    });
+  });
+
+  it("falls back and lists an error when the member route fails", async () => {
+    routes({
+      "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
+      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
+      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
+      "policies/members/usr_me": () => new Response("server error", { status: 500 }),
+    });
+
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
+      success: true,
+      data: {
+        balance: 4_250_000_000,
+        monthlyLimit: 100,
+        monthlyUsage: 75_000_000,
+        lastPayment: null,
+        reload: false,
+        reloadAmount: 20,
+        reloadTrigger: 5,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+      },
+      errors: ["OpenCode Console policies/members/usr_me error 500"],
     });
   });
 
@@ -290,7 +763,7 @@ describe("queryOpenCodeZenQuota", () => {
       "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "billing/auto-recharge": () => json({ ...AUTO_RECHARGE, enabled: true }),
-      "budgets/org": () => json({ limitMicroCents: null, spentMicroCents: null, resetsAt: null }),
+      "policies/members/usr_me": () => json({ userID: "usr_me", budgets: [], policies: [] }),
       "usage/cost-by-day": () =>
         json([
           { date: "2026-08-31", totalCostMicroCents: "900000000" },
@@ -324,8 +797,8 @@ describe("queryOpenCodeZenQuota", () => {
         monthlyUsage: 617_355_570,
         reload: true,
         reloadAmount: 20,
-        budgetResetIso: "2026-10-01T00:00:00.000Z",
-        budgetSource: "org_budget",
+        budgetResetIso: null,
+        budgetSource: "member_budget",
       },
     ],
     [
@@ -335,8 +808,8 @@ describe("queryOpenCodeZenQuota", () => {
         monthlyUsage: 617_355_570,
         reload: null,
         reloadAmount: null,
-        budgetResetIso: "2026-10-01T00:00:00.000Z",
-        budgetSource: "org_budget",
+        budgetResetIso: null,
+        budgetSource: "member_budget",
       },
     ],
     [
@@ -346,8 +819,8 @@ describe("queryOpenCodeZenQuota", () => {
         monthlyUsage: 617_355_570,
         reload: true,
         reloadAmount: 20,
-        budgetResetIso: "2026-10-01T00:00:00.000Z",
-        budgetSource: "org_budget",
+        budgetResetIso: null,
+        budgetSource: "member_budget",
       },
     ],
   ])("keeps the balance when optional %s fails", async (route, expected) => {
@@ -378,7 +851,7 @@ describe("queryOpenCodeZenQuota", () => {
     routes({
       "billing/account": failed,
       "billing/auto-recharge": failed,
-      "budgets/org": failed,
+      "policies/members/usr_me": failed,
       "usage/cost-by-day": failed,
     });
 
@@ -398,7 +871,7 @@ describe("queryOpenCodeZenQuota", () => {
       errors: [
         "OpenCode Console billing/account error 500",
         "OpenCode Console billing/auto-recharge error 500",
-        "OpenCode Console budgets/org error 500",
+        "OpenCode Console policies/members/usr_me error 500",
         "OpenCode Console usage/cost-by-day error 500",
       ],
     });
@@ -431,7 +904,7 @@ describe("queryOpenCodeZenQuota", () => {
       "billing/status": sessionResponse,
       "billing/account": sessionResponse,
       "billing/auto-recharge": sessionResponse,
-      "budgets/org": sessionResponse,
+      "policies/members/usr_me": sessionResponse,
       "usage/cost-by-day": sessionResponse,
     });
 
@@ -450,12 +923,12 @@ describe("queryOpenCodeZenQuota", () => {
     });
   });
 
-  it("keeps the balance when only budgets/org is forbidden", async () => {
+  it("keeps the balance when only policies/members/usr_me is forbidden", async () => {
     routes({
       "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
-      "budgets/org": () => new Response("forbidden", { status: 403 }),
+      "policies/members/usr_me": () => new Response("forbidden", { status: 403 }),
     });
 
     await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
@@ -471,72 +944,14 @@ describe("queryOpenCodeZenQuota", () => {
         budgetResetIso: null,
         budgetSource: "credit_limit",
       },
-      errors: ["OpenCode Console budgets/org error 403"],
+      errors: ["OpenCode Console policies/members/usr_me error 403"],
     });
-  });
-
-  it("falls back to the credit limit when the org budget spend is negative", async () => {
-    routes({
-      "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
-      "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
-      "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
-      "budgets/org": () => json({ ...ORG_BUDGET, spentMicroCents: "-5" }),
-    });
-
-    await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
-      success: true,
-      data: {
-        balance: 4_250_000_000,
-        monthlyLimit: 100,
-        monthlyUsage: 75_000_000,
-        lastPayment: null,
-        reload: false,
-        reloadAmount: 20,
-        reloadTrigger: 5,
-        budgetResetIso: null,
-        budgetSource: "credit_limit",
-      },
-      errors: [],
-    });
-  });
-
-  it("keeps a usable org budget but omits an invalid reset date", async () => {
-    routes({ "budgets/org": () => json({ ...ORG_BUDGET, resetsAt: "not-a-date" }) });
-
-    const result = await queryOpenCodeZenQuota(credential);
-
-    expect(result).toMatchObject({
-      success: true,
-      data: {
-        balance: 0,
-        monthlyLimit: 60,
-        monthlyUsage: 617_355_570,
-        budgetResetIso: null,
-        budgetSource: "org_budget",
-      },
-      errors: [],
-    });
-  });
-
-  it("normalizes a parseable non-ISO reset date to canonical ISO", async () => {
-    // "2026-10-01T00:00:00" parses but lacks the UTC offset required of ISO;
-    // it must be canonicalized, never passed through as-is.
-    routes({ "budgets/org": () => json({ ...ORG_BUDGET, resetsAt: "2026-10-01T00:00:00" }) });
-
-    const result = await queryOpenCodeZenQuota(credential);
-    expect(result.success).toBe(true);
-    if (!result.success) return;
-
-    expect(result.data.budgetResetIso).toBe(new Date("2026-10-01T00:00:00").toISOString());
-    expect(result.data.budgetResetIso?.endsWith("Z")).toBe(true);
-    expect(result.data).toMatchObject({ balance: 0, monthlyLimit: 60, monthlyUsage: 617_355_570 });
-    expect(result.errors).toEqual([]);
   });
 
   it.each([
     "billing/account",
     "billing/auto-recharge",
-    "budgets/org",
+    "policies/members/usr_me",
     "usage/cost-by-day",
   ])("reports an expired session when only %s is rejected", async (route) => {
     routes({ [route]: () => new Response("unauthorized", { status: 401 }) });
@@ -578,11 +993,107 @@ describe("queryOpenCodeZenQuota", () => {
     ["billing/account", () => json({ orgId: "wrk_ABC" })],
     ["billing/account", () => json({ ...ACCOUNT, creditLimitMicroCents: "9".repeat(309) })],
     ["billing/auto-recharge", () => json({ ...AUTO_RECHARGE, enabled: "no" })],
-    ["budgets/org", () => json([])],
-    ["budgets/org", () => json("none")],
-    ["budgets/org", () => json({ spentMicroCents: "0" })],
-    ["budgets/org", () => json({ limitMicroCents: "abc", spentMicroCents: "0" })],
-    ["budgets/org", () => json({ limitMicroCents: "6000000000", resetsAt: 7 })],
+    ["policies/members/usr_me", () => json({})],
+    ["policies/members/usr_me", () => json("none")],
+    ["policies/members/usr_me", () => json({ userID: "usr_me" })],
+    ["policies/members/usr_me", () => json({ userID: "usr_other", budgets: [], policies: [] })],
+    ["policies/members/usr_me", () => json({ userID: "usr_me", budgets: ["none"], policies: [] })],
+    [
+      "policies/members/usr_me",
+      () =>
+        json({
+          userID: "usr_me",
+          budgets: [{ scope: "combined", limitDollars: 60, spentDollars: 5 }],
+          policies: [],
+        }),
+    ],
+    [
+      "policies/members/usr_me",
+      () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_1", "r1", { scope: "per-user", limitDollars: 60, spentDollars: 5 })],
+            [{ id: "pol_1", rules: [budgetRule("r1")] }],
+          ),
+        ),
+    ],
+    [
+      "policies/members/usr_me",
+      () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_1", "r1", { per: "day", limitDollars: 60, spentDollars: 5 })],
+            [{ id: "pol_1", rules: [budgetRule("r1")] }],
+          ),
+        ),
+    ],
+    [
+      "policies/members/usr_me",
+      () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_1", "r1", { limitDollars: "60", spentDollars: 5 })],
+            [{ id: "pol_1", rules: [budgetRule("r1")] }],
+          ),
+        ),
+    ],
+    [
+      "policies/members/usr_me",
+      () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_1", "r1", { limitDollars: -1, spentDollars: 5 })],
+            [{ id: "pol_1", rules: [budgetRule("r1")] }],
+          ),
+        ),
+    ],
+    [
+      "policies/members/usr_me",
+      () =>
+        json(
+          memberPayload(
+            [memberBudget("pol_1", "r1", { limitDollars: 90_000_001, spentDollars: 5 })],
+            [{ id: "pol_1", rules: [budgetRule("r1")] }],
+          ),
+        ),
+    ],
+    [
+      "policies/members/usr_me",
+      () =>
+        json({
+          userID: "usr_me",
+          budgets: [{ policyID: "pol_1", scope: "combined", limitDollars: 60, spentDollars: 5 }],
+          policies: [{ id: "pol_1" }],
+        }),
+    ],
+    [
+      "policies/members/usr_me",
+      () =>
+        json({
+          userID: "usr_me",
+          budgets: [
+            {
+              policyID: "pol_1",
+              ruleID: "r1",
+              scope: "combined",
+              limitDollars: 60,
+              spentDollars: 5,
+            },
+          ],
+          policies: {},
+        }),
+    ],
+    [
+      "policies/members/usr_me",
+      () =>
+        json({
+          userID: "usr_me",
+          budgets: [
+            { policyID: 7, ruleID: "r1", scope: "combined", limitDollars: 60, spentDollars: 5 },
+          ],
+          policies: [],
+        }),
+    ],
     ["usage/cost-by-day", () => json({ days: [] })],
     ["usage/cost-by-day", () => json([{ date: "2026-09-01", totalCostMicroCents: "abc" }])],
     [

@@ -138,13 +138,46 @@ describe("provider cache policies", () => {
     expect(cloudIdentity).not.toBe(selfHostedIdentity);
     expect(cachePolicyMocks.deriveIdentity).toHaveBeenCalledWith({
       providerId: "opencode",
-      principal: { kind: "stable-id", value: "wrk_shared" },
+      principal: { kind: "stable-id", value: JSON.stringify(["wrk_shared", "acc_1"]) },
       qualifiers: ["https://opencode.ai/console"],
     });
     expect(cachePolicyMocks.deriveIdentity).toHaveBeenCalledWith({
       providerId: "opencode",
-      principal: { kind: "stable-id", value: "wrk_shared" },
+      principal: { kind: "stable-id", value: JSON.stringify(["wrk_shared", "acc_1"]) },
       qualifiers: ["https://console.self-hosted.example"],
+    });
+  });
+
+  it("derives distinct OpenCode Zen identities for two accounts in the same org", async () => {
+    const policy = PROVIDER_CACHE_POLICIES.opencode;
+    if (policy.kind !== "resolved-auth") throw new Error("Expected a resolved-auth policy");
+
+    const ctx = { config: {} } as never;
+    const cacheContext = {} as never;
+    cachePolicyMocks.resolveConsoleAuth.mockResolvedValue({
+      state: "configured",
+      credential: { accessToken: "st_secret-token-1", orgId: "wrk_shared", accountId: "acc_a" },
+    });
+    const identityA = await policy.resolveIdentity(ctx, cacheContext);
+
+    cachePolicyMocks.resolveConsoleAuth.mockResolvedValue({
+      state: "configured",
+      credential: { accessToken: "st_secret-token-2", orgId: "wrk_shared", accountId: "acc_b" },
+    });
+    const identityB = await policy.resolveIdentity(ctx, cacheContext);
+
+    expect(identityA).not.toBeNull();
+    expect(identityB).not.toBeNull();
+    expect(identityA).not.toBe(identityB);
+    expect(cachePolicyMocks.deriveIdentity).toHaveBeenCalledWith({
+      providerId: "opencode",
+      principal: { kind: "stable-id", value: JSON.stringify(["wrk_shared", "acc_a"]) },
+      qualifiers: ["https://opencode.ai/console"],
+    });
+    expect(cachePolicyMocks.deriveIdentity).toHaveBeenCalledWith({
+      providerId: "opencode",
+      principal: { kind: "stable-id", value: JSON.stringify(["wrk_shared", "acc_b"]) },
+      qualifiers: ["https://opencode.ai/console"],
     });
   });
 
