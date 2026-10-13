@@ -270,5 +270,10 @@ describe("google agy provider", () => {
         "[Google AGY Work: Gemini]",
       );
     });
+
+    it("trims whitespace and handles empty family label", () => {
+      expect(formatAgyCredentialGroup("  [Google AGY]  ", "Gemini")).toBe("[Google AGY: Gemini]");
+      expect(formatAgyCredentialGroup("[Google AGY]", "")).toBe("[Google AGY]");
+    });
   });
 });

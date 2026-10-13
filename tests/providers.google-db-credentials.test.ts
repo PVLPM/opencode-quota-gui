@@ -82,6 +82,12 @@ describe.each([
       ["[Google AGY Work 2: Gemini]", "other-id"],
       ["[Google AGY Work 2: Claude/GPT]", "other-id"],
     ],
+    expectedNames: [
+      "[Google AGY Work: Gemini] (active) Weekly",
+      "[Google AGY Work: Claude/GPT] (active) Weekly",
+      "[Google AGY Work 2: Gemini] Weekly",
+      "[Google AGY Work 2: Claude/GPT] Weekly",
+    ],
   },
   {
     name: "Gemini CLI",
@@ -96,8 +102,12 @@ describe.each([
       ["[Gemini CLI Work] (active)", "active-id"],
       ["[Gemini CLI Work 2]", "other-id"],
     ],
+    expectedNames: [
+      "[Gemini CLI Work] (active) Gemini 2.5",
+      "[Gemini CLI Work 2] Gemini 2.5",
+    ],
   },
-])("$name DB credentials", ({ integrationId, provider, query, result, expectedGroups }) => {
+])("$name DB credentials", ({ integrationId, provider, query, result, expectedGroups, expectedNames }) => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.rows.mockResolvedValue([
@@ -126,5 +136,6 @@ describe.each([
     expect(output.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual(
       expectedGroups,
     );
+    expect(output.entries.map((entry) => entry.name)).toEqual(expectedNames);
   });
 });

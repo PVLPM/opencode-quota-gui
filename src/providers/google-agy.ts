@@ -102,12 +102,14 @@ function formatRemainingAmount(value: string | undefined): string | undefined {
 }
 
 export function formatAgyCredentialGroup(credentialName: string, familyLabel: string): string {
-  const match = credentialName.match(/^(\[[^\]]+\])(.*)$/);
+  const trimmed = credentialName.trim();
+  if (!familyLabel?.trim()) return trimmed;
+  const match = trimmed.match(/^(\[[^\]]+\])(.*)$/);
   if (match) {
     const inside = match[1]!.slice(1, -1);
     return `[${inside}: ${familyLabel}]${match[2]}`;
   }
-  return `[${credentialName}: ${familyLabel}]`;
+  return `[${trimmed}: ${familyLabel}]`;
 }
 
 async function isAgyConfigured(): Promise<boolean> {
@@ -188,7 +190,7 @@ export const googleAgyProvider: QuotaProvider = {
               authority: "provider_reported",
               sourceId: row.id,
             },
-            name: `${credentialName} ${familyLabel} ${bucket.windowLabel}`,
+            name: `${group} ${bucket.windowLabel}`,
             group,
             label: `${bucket.windowLabel}:`,
             sortPriority: windowRank(bucket.window),
