@@ -102,12 +102,16 @@ describe.each([
       ["[Gemini CLI Work] (active)", "active-id"],
       ["[Gemini CLI Work 2]", "other-id"],
     ],
-    expectedNames: [
-      "[Gemini CLI Work] (active) Gemini 2.5",
-      "[Gemini CLI Work 2] Gemini 2.5",
-    ],
+    expectedNames: ["[Gemini CLI Work] (active) Gemini 2.5", "[Gemini CLI Work 2] Gemini 2.5"],
   },
-])("$name DB credentials", ({ integrationId, provider, query, result, expectedGroups, expectedNames }) => {
+])("$name DB credentials", ({
+  integrationId,
+  provider,
+  query,
+  result,
+  expectedGroups,
+  expectedNames,
+}) => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.rows.mockResolvedValue([

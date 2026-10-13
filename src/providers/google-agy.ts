@@ -106,8 +106,8 @@ export function formatAgyCredentialGroup(credentialName: string, familyLabel: st
   if (!familyLabel?.trim()) return trimmed;
   const match = trimmed.match(/^(\[[^\]]+\])(.*)$/);
   if (match) {
-    const inside = match[1]!.slice(1, -1);
-    return `[${inside}: ${familyLabel}]${match[2]}`;
+    const inside = match[1]?.slice(1, -1) ?? "";
+    return `[${inside}: ${familyLabel}]${match[2] ?? ""}`;
   }
   return `[${trimmed}: ${familyLabel}]`;
 }
