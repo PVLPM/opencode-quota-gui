@@ -101,6 +101,15 @@ function formatRemainingAmount(value: string | undefined): string | undefined {
   return `${display} left`;
 }
 
+export function formatAgyCredentialGroup(credentialName: string, familyLabel: string): string {
+  const match = credentialName.match(/^(\[[^\]]+\])(.*)$/);
+  if (match) {
+    const inside = match[1]!.slice(1, -1);
+    return `[${inside}: ${familyLabel}]${match[2]}`;
+  }
+  return `[${credentialName}: ${familyLabel}]`;
+}
+
 async function isAgyConfigured(): Promise<boolean> {
   try {
     return await hasAgyQuotaRuntimeAvailable();

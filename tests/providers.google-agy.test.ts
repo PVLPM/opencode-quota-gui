@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { googleAgyProvider } from "../src/providers/google-agy.js";
+import { formatAgyCredentialGroup, googleAgyProvider } from "../src/providers/google-agy.js";
 import {
   expectAttemptedWithErrorLabel,
   expectAttemptedWithNoErrors,
@@ -250,5 +250,25 @@ describe("google agy provider", () => {
     expect(googleAgyProvider.matchesCurrentModel?.("opencode-agy-auth/gpt-4")).toBe(true);
     expect(googleAgyProvider.matchesCurrentModel?.("google-agy-auth/gpt-4")).toBe(true);
     expect(googleAgyProvider.matchesCurrentModel?.("google/claude-opus")).toBe(false);
+  });
+
+  describe("formatAgyCredentialGroup", () => {
+    it("formats credential names with active markers", () => {
+      expect(
+        formatAgyCredentialGroup("[Google AGY Antigravity CLI (plugin) 2] (active)", "Gemini"),
+      ).toBe("[Google AGY Antigravity CLI (plugin) 2: Gemini] (active)");
+    });
+
+    it("formats simple bracketed names", () => {
+      expect(formatAgyCredentialGroup("[Google AGY]", "Claude/GPT")).toBe(
+        "[Google AGY: Claude/GPT]",
+      );
+    });
+
+    it("formats names without brackets", () => {
+      expect(formatAgyCredentialGroup("Google AGY Work", "Gemini")).toBe(
+        "[Google AGY Work: Gemini]",
+      );
+    });
   });
 });
