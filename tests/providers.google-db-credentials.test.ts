@@ -67,8 +67,21 @@ describe.each([
           accountIndex: 0,
           percentRemaining: 70,
         },
+        {
+          family: "Claude and GPT models",
+          window: "weekly",
+          windowLabel: "Weekly",
+          accountIndex: 0,
+          percentRemaining: 50,
+        },
       ],
     },
+    expectedGroups: [
+      ["[Google AGY Work: Gemini] (active)", "active-id"],
+      ["[Google AGY Work: Claude/GPT] (active)", "active-id"],
+      ["[Google AGY Work 2: Gemini]", "other-id"],
+      ["[Google AGY Work 2: Claude/GPT]", "other-id"],
+    ],
   },
   {
     name: "Gemini CLI",
@@ -79,8 +92,12 @@ describe.each([
       success: true,
       buckets: [{ displayName: "Gemini 2.5", percentRemaining: 70 }],
     },
+    expectedGroups: [
+      ["[Gemini CLI Work] (active)", "active-id"],
+      ["[Gemini CLI Work 2]", "other-id"],
+    ],
   },
-])("$name DB credentials", ({ integrationId, provider, query, result }) => {
+])("$name DB credentials", ({ integrationId, provider, query, result, expectedGroups }) => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.rows.mockResolvedValue([
@@ -106,12 +123,8 @@ describe.each([
     const output = await provider.fetch({ client: {}, config: {} } as never);
 
     expect(query).toHaveBeenCalledTimes(2);
-    expect(output.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([
-      [
-        `[${provider.id === "google-agy" ? "Google AGY" : "Gemini CLI"} Work] (active)`,
-        "active-id",
-      ],
-      [`[${provider.id === "google-agy" ? "Google AGY" : "Gemini CLI"} Work 2]`, "other-id"],
-    ]);
+    expect(output.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual(
+      expectedGroups,
+    );
   });
 });

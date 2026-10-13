@@ -170,13 +170,15 @@ export const googleAgyProvider: QuotaProvider = {
       const entries: QuotaToastEntry[] = [];
       const errors: QuotaProviderResult["errors"] = [];
       for (const [index, { row, result }] of results.entries()) {
-        const group = names[index] ?? "Google AGY";
+        const credentialName = names[index] ?? "Google AGY";
         if (!result) continue;
         if (!result.success) {
-          errors.push({ label: group, message: result.error });
+          errors.push({ label: credentialName, message: result.error });
           continue;
         }
         for (const bucket of [...result.buckets].sort(compareBuckets)) {
+          const familyLabel = formatAgyFamilyLabel(bucket.family);
+          const group = formatAgyCredentialGroup(credentialName, familyLabel);
           const right = formatRemainingAmount(bucket.remainingAmount);
           entries.push({
             accounting: {
@@ -186,7 +188,7 @@ export const googleAgyProvider: QuotaProvider = {
               authority: "provider_reported",
               sourceId: row.id,
             },
-            name: `${group} ${formatAgyFamilyLabel(bucket.family)} ${bucket.windowLabel}`,
+            name: `${credentialName} ${familyLabel} ${bucket.windowLabel}`,
             group,
             label: `${bucket.windowLabel}:`,
             sortPriority: windowRank(bucket.window),
@@ -197,7 +199,7 @@ export const googleAgyProvider: QuotaProvider = {
         }
         errors.push(
           ...(result.errors ?? []).map((error) => ({
-            label: group,
+            label: credentialName,
             message: error.error,
           })),
         );
