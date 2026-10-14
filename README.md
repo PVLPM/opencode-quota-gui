@@ -128,7 +128,7 @@ OpenAI ChatGPT quota needs a Codex login (`/connect` → OpenAI → **Codex brow
 | Google AGY         | [Needs setup](docs/readme/providers.md#google-agy-quick-setup) | Remote API         | Quota              |
 | Kilo Gateway       | Automatic                                                      | Remote API         | Quota and balance  |
 | NanoGPT            | Automatic                                                      | Remote API         | Quota and balance  |
-| Ollama Cloud       | Automatic                                                      | Remote API         | Quota and usage    |
+| Ollama Cloud       | Automatic                                                      | Remote API         | Quota and balance  |
 | OpenAI             | Automatic                                                      | Remote API         | Quota              |
 | OpenCode Go        | Automatic                                                      | Remote API         | Quota              |
 | OpenCode Zen       | Automatic                                                      | Remote API         | Budget and balance |

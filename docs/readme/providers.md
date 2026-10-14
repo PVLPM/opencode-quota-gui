@@ -25,7 +25,7 @@ Most providers work automatically. `Automatic` means OpenCode Quota reuses the l
 | Google AGY         | [Needs setup](#google-agy-quick-setup) | Remote API         | Quota              |
 | Kilo Gateway       | Automatic                              | Remote API         | Quota and balance  |
 | NanoGPT            | Automatic                              | Remote API         | Quota and balance  |
-| Ollama Cloud       | Automatic                              | Remote API         | Quota and usage    |
+| Ollama Cloud       | Automatic                              | Remote API         | Quota and balance  |
 | OpenAI             | Automatic                              | Remote API         | Quota              |
 | OpenCode Go        | Automatic                              | Remote API         | Quota              |
 | OpenCode Zen       | Automatic                              | Remote API         | Budget and balance |
@@ -538,8 +538,9 @@ To copy the cookie:
 
 Create an Ollama API key, then set `OLLAMA_API_KEY` (or use trusted user/global `provider.ollama-cloud.options.apiKey`, or an `ollama-cloud` API-key login saved in OpenCode 2).
 
-- Calls `https://ollama.com/api/usage` and shows session, weekly, or monthly usage (newer plans show only a monthly pool).
-- The API gives no reset times and no per-model rows.
+- Calls `https://ollama.com/api/balance`. Credit plans show a **Monthly** row (included credits left, with the period's reset time); legacy plans show **Session** and **Weekly** rows with their reset times.
+- **Purchased** shows unexpired purchased credits in USD when there are some, or when Ollama returns nothing else.
+- The API gives no per-model rows.
 - The old `OLLAMA_USAGE_COOKIE`, `ollama-cloud.json`, and `ollama-usage/config.yaml` cookie setup is no longer supported.
 
 <a id="openai-and-xai"></a>

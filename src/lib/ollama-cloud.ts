@@ -1,16 +1,17 @@
 /**
- * Ollama Cloud usage API client.
+ * Ollama Cloud balance API client.
  *
- * Fetches session, weekly, and monthly usage fractions from the authenticated
- * Ollama Cloud usage endpoint.
+ * Fetches included credits (credit plans) or session and weekly limits (legacy
+ * plans), plus purchased credits, from the authenticated Ollama Cloud balance
+ * endpoint.
  */
 
 import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import { resolveOllamaCloudApiKey } from "./ollama-cloud-config.js";
-import type { OllamaCloudResult, OllamaCloudWindow } from "./types.js";
+import type { OllamaCloudIncludedCredits, OllamaCloudResult, OllamaCloudWindow } from "./types.js";
 
-const OLLAMA_CLOUD_USAGE_URL = "https://ollama.com/api/usage";
+const OLLAMA_CLOUD_BALANCE_URL = "https://ollama.com/api/balance";
 const MAX_RESPONSE_BYTES = 256 * 1024;
 
 type JsonRecord = Record<string, unknown>;
@@ -33,7 +34,7 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
   if (!response.body) {
     const text = await response.text();
     if (new TextEncoder().encode(text).byteLength > maxBytes) {
-      throw new Error(`Ollama Cloud usage API response exceeded ${maxBytes} bytes`);
+      throw new Error(`Ollama Cloud balance API response exceeded ${maxBytes} bytes`);
     }
     return text;
   }
@@ -50,7 +51,7 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
       byteLength += value.byteLength;
       if (byteLength > maxBytes) {
         await reader.cancel();
-        throw new Error(`Ollama Cloud usage API response exceeded ${maxBytes} bytes`);
+        throw new Error(`Ollama Cloud balance API response exceeded ${maxBytes} bytes`);
       }
       text += decoder.decode(value, { stream: true });
     }
@@ -60,65 +61,107 @@ async function readBoundedText(response: Response, maxBytes: number): Promise<st
   }
 }
 
-function parseWindow(value: unknown): OllamaCloudWindow | undefined {
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/** Canonical ISO timestamp, or undefined when the value is not a parseable time. */
+function parseIsoTime(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const timeMs = Date.parse(value);
+  return Number.isFinite(timeMs) ? new Date(timeMs).toISOString() : undefined;
+}
+
+/** Legacy plans: `{ remaining_percent: 0..100, resets_at }`. */
+function parseLegacyWindow(value: unknown): OllamaCloudWindow | undefined {
   if (!isRecord(value)) return undefined;
-  const usageFraction = value.usage;
-  if (
-    typeof usageFraction !== "number" ||
-    !Number.isFinite(usageFraction) ||
-    usageFraction < 0 ||
-    usageFraction > 1
-  ) {
+  const remainingPercent = value.remaining_percent;
+  if (!isFiniteNumber(remainingPercent) || remainingPercent < 0 || remainingPercent > 100) {
     return undefined;
   }
 
-  const usagePercent = usageFraction * 100;
+  const resetTimeIso = parseIsoTime(value.resets_at);
   return {
-    usageFraction,
-    usagePercent,
-    percentRemaining: 100 - usagePercent,
+    percentRemaining: remainingPercent,
+    ...(resetTimeIso ? { resetTimeIso } : {}),
   };
 }
 
-function parseOllamaCloudUsage(payload: unknown): OllamaCloudResult {
+/** Credit plans: `{ balance_usd, allowance_usd, period: { from, until } }`. */
+function parseIncludedCredits(included: JsonRecord): OllamaCloudIncludedCredits | undefined {
+  const balanceUsd = included.balance_usd;
+  const allowanceUsd = included.allowance_usd;
+  if (!isFiniteNumber(balanceUsd) || !isFiniteNumber(allowanceUsd) || allowanceUsd < 0) {
+    return undefined;
+  }
+
+  const period = isRecord(included.period) ? included.period : undefined;
+  const resetTimeIso = parseIsoTime(period?.until);
+  return {
+    balanceUsd,
+    allowanceUsd,
+    // A plan without an included allowance has no share left to show.
+    ...(allowanceUsd > 0
+      ? { percentRemaining: Math.min(100, Math.max(0, (balanceUsd / allowanceUsd) * 100)) }
+      : {}),
+    ...(resetTimeIso ? { resetTimeIso } : {}),
+  };
+}
+
+function parsePurchasedUsd(value: unknown): number | undefined {
+  if (!isRecord(value)) return undefined;
+  const balanceUsd = value.balance_usd;
+  return isFiniteNumber(balanceUsd) && balanceUsd >= 0 ? balanceUsd : undefined;
+}
+
+function parseOllamaCloudBalance(payload: unknown): OllamaCloudResult {
   if (!isRecord(payload)) {
     return {
       success: false,
-      error: "Ollama Cloud usage API returned an unexpected response shape",
+      error: "Ollama Cloud balance API returned an unexpected response shape",
     };
   }
 
   const rowErrors: string[] = [];
-  const limits = isRecord(payload.limits) ? payload.limits : undefined;
-  const session = parseWindow(limits?.session);
-  const weekly = parseWindow(limits?.weekly);
-  const monthly = parseWindow(limits?.monthly);
+  const included = isRecord(payload.included) ? payload.included : undefined;
+  const hasCreditFields =
+    included?.balance_usd !== undefined || included?.allowance_usd !== undefined;
+  const includedCredits = included && hasCreditFields ? parseIncludedCredits(included) : undefined;
+  const session = parseLegacyWindow(included?.session);
+  const weekly = parseLegacyWindow(included?.weekly);
+  const purchasedUsd = parsePurchasedUsd(payload.purchased);
 
-  if (limits?.session !== undefined && !session) {
-    rowErrors.push("Session: ignored invalid usage fraction");
+  if (!included) {
+    rowErrors.push("Included: expected an object");
+  } else if (!hasCreditFields && included.session === undefined && included.weekly === undefined) {
+    rowErrors.push("Included: expected credits or session and weekly limits");
   }
-  if (limits?.weekly !== undefined && !weekly) {
-    rowErrors.push("Weekly: ignored invalid usage fraction");
+  if (hasCreditFields && !includedCredits) {
+    rowErrors.push("Included credits: ignored invalid balance");
   }
-  if (limits?.monthly !== undefined && !monthly) {
-    rowErrors.push("Monthly: ignored invalid usage fraction");
+  if (included?.session !== undefined && !session) {
+    rowErrors.push("Session: ignored invalid remaining percent");
   }
-  if (!limits) {
-    rowErrors.push("Limits: expected an object");
+  if (included?.weekly !== undefined && !weekly) {
+    rowErrors.push("Weekly: ignored invalid remaining percent");
+  }
+  if (payload.purchased !== undefined && purchasedUsd === undefined) {
+    rowErrors.push("Purchased credits: ignored invalid balance");
   }
 
-  if (!session && !weekly && !monthly) {
+  if (!includedCredits && !session && !weekly && purchasedUsd === undefined) {
     return {
       success: false,
-      error: "Ollama Cloud usage API returned no usable usage data",
+      error: "Ollama Cloud balance API returned no limits or balance",
     };
   }
 
   return {
     success: true,
+    ...(includedCredits ? { includedCredits } : {}),
     ...(session ? { session } : {}),
     ...(weekly ? { weekly } : {}),
-    ...(monthly ? { monthly } : {}),
+    ...(purchasedUsd !== undefined ? { purchasedUsd } : {}),
     ...(rowErrors.length > 0 ? { rowErrors } : {}),
   };
 }
@@ -130,12 +173,12 @@ export async function queryOllamaCloudQuota(
   if (!resolved) return null;
 
   try {
-    return await fetchWithTimeout(OLLAMA_CLOUD_USAGE_URL, {
+    return await fetchWithTimeout(OLLAMA_CLOUD_BALANCE_URL, {
       request: {
         method: "GET",
         headers: {
           Accept: "application/json",
-          Authorization: resolved.key,
+          Authorization: `Bearer ${resolved.key}`,
         },
         redirect: "manual",
       },
@@ -146,11 +189,11 @@ export async function queryOllamaCloudQuota(
           const snippet = sanitizeMessage(text, resolved.key);
           return {
             success: false,
-            error: `Ollama Cloud usage API error ${response.status}: ${snippet}`,
+            error: `Ollama Cloud balance API error ${response.status}: ${snippet}`,
           };
         }
 
-        return parseOllamaCloudUsage(JSON.parse(text) as unknown);
+        return parseOllamaCloudBalance(JSON.parse(text) as unknown);
       },
     });
   } catch (error) {
@@ -161,4 +204,4 @@ export async function queryOllamaCloudQuota(
   }
 }
 
-export { parseOllamaCloudUsage as _parseOllamaCloudUsage };
+export { parseOllamaCloudBalance as _parseOllamaCloudBalance };

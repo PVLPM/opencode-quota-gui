@@ -357,7 +357,7 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
       authFallbacks: ["env_api_key", "global_opencode_config"],
       quota: "remote_api",
       notes:
-        "Queries the Ollama Cloud usage API; reports session, weekly, or monthly usage fractions",
+        "Queries the Ollama Cloud balance API; reports included credits or session and weekly limits, plus purchased credits",
     },
   },
   {

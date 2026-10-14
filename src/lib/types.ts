@@ -819,26 +819,38 @@ export type SyntheticResult =
   | QuotaError
   | null;
 
-/** Single usage window from the Ollama Cloud usage API */
+/** Session or weekly limit of a legacy plan from the Ollama Cloud balance API */
 export interface OllamaCloudWindow {
-  /** Provider-reported usage fraction [0..1] */
-  usageFraction: number;
-  /** Usage percentage [0..100] */
-  usagePercent: number;
-  /** Remaining percentage [0..100] */
+  /** Provider-reported remaining percentage [0..100] */
   percentRemaining: number;
+  /** Next reset, when the API returns a valid one */
+  resetTimeIso?: string;
 }
 
-/** Result from the Ollama Cloud usage API */
+/** Included credits of a credit plan from the Ollama Cloud balance API */
+export interface OllamaCloudIncludedCredits {
+  /** Remaining included credits in USD */
+  balanceUsd: number;
+  /** Included credits for the whole period in USD */
+  allowanceUsd: number;
+  /** Remaining percentage [0..100]; undefined when the allowance is 0 */
+  percentRemaining?: number;
+  /** End of the included period, when the API returns a valid one */
+  resetTimeIso?: string;
+}
+
+/** Result from the Ollama Cloud balance API */
 export type OllamaCloudResult =
   | {
       success: true;
-      /** Session usage window, when present */
+      /** Included credits on credit plans */
+      includedCredits?: OllamaCloudIncludedCredits;
+      /** Session limit on legacy plans */
       session?: OllamaCloudWindow;
-      /** Weekly usage window, when present */
+      /** Weekly limit on legacy plans */
       weekly?: OllamaCloudWindow;
-      /** Monthly usage-pool window, when present */
-      monthly?: OllamaCloudWindow;
+      /** Remaining unexpired purchased credits in USD */
+      purchasedUsd?: number;
       /** Independent response fields that could not be used */
       rowErrors?: string[];
     }
