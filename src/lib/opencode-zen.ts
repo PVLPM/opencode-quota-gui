@@ -342,10 +342,12 @@ async function fetchConsoleRoute<T>(params: {
       },
     });
   } catch (error) {
+    const accountId = params.credential.accountId?.trim();
     const message = sanitizeMessage(error instanceof Error ? error.message : String(error), [
       params.credential.accessToken,
       params.credential.orgId,
-      params.credential.accountId,
+      accountId,
+      accountId && encodeURIComponent(accountId),
     ]);
     return { success: false, error: `OpenCode Console ${params.route} request failed: ${message}` };
   }

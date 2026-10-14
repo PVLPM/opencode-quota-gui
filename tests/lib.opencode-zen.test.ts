@@ -1030,6 +1030,24 @@ describe("queryOpenCodeZenQuota", () => {
     expect(JSON.stringify(result)).not.toContain("usr_me");
   });
 
+  it("keeps a padded account id out of a failed member request", async () => {
+    routes({
+      "policies/members/usr_me": () => {
+        throw new Error("connect ECONNREFUSED for /api/policies/members/usr_me");
+      },
+    });
+
+    const result = await queryOpenCodeZenQuota({ ...credential, accountId: " usr_me " });
+
+    expect(result).toMatchObject({
+      success: true,
+      errors: [
+        "OpenCode Console policies/members request failed: connect ECONNREFUSED for /api/policies/members/[redacted]",
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("usr_me");
+  });
+
   it.each([
     "billing/account",
     "billing/auto-recharge",
