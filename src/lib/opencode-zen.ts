@@ -26,10 +26,8 @@ export type OpenCodeZenBudgetSource = "member_budget" | "credit_limit";
 export interface OpenCodeZenBillingData {
   balance: number;
   /**
-   * Monthly limit in USD from `budgetSource`: null when there is no limit, its
-   * route failed, or the member has budgets that cannot be safely evaluated
-   * (then `errors` explains why). A member budget of $0 is a real blocking
-   * limit, not an absence.
+   * Monthly limit in USD from `budgetSource`: null when there is no limit or its
+   * route failed. A member budget of $0 is a real blocking limit, not an absence.
    */
   monthlyLimit: number | null;
   /** Current-month usage in billing units from `budgetSource`; null when its route failed. */
@@ -39,9 +37,18 @@ export interface OpenCodeZenBillingData {
   reload: boolean | null;
   reloadAmount: number | null;
   reloadTrigger: number | null;
-  /** Budget-policy reset ISO timestamp; the Console routes used today supply no reset, so this stays null. */
+  /**
+   * Member-budget reset ISO timestamp: the start of the next UTC month, because
+   * Console monthly budgets run per UTC calendar month. Null for the credit limit.
+   */
   budgetResetIso: string | null;
   budgetSource: OpenCodeZenBudgetSource;
+  /**
+   * True when the member has budgets but not all of them can be safely
+   * evaluated (model filter, per-model limit, unmatched rule, missing amount).
+   * No member budget is used then, and the credit-limit fallback applies.
+   */
+  memberBudgetsSkipped: boolean;
 }
 
 /**
@@ -56,7 +63,7 @@ type ConsoleRoute =
   | "billing/status"
   | "billing/account"
   | "billing/auto-recharge"
-  | `policies/members/${string}`
+  | "policies/members"
   | "usage/cost-by-day";
 
 type ConsoleRouteResult<T> = { success: true; data: T } | { success: false; error: string };
@@ -126,8 +133,8 @@ function toMicroCents(dollars: number): number {
  * outright. A skipped candidate makes the whole selection untrustworthy — it
  * could be the binding cap — so nothing is selected unless every candidate
  * evaluates; the count is returned either way so the caller can tell an empty
- * member from one with budgets it cannot evaluate (the former keeps the
- * credit-limit fallback, the latter reports no limit).
+ * member from one with budgets it cannot evaluate (both keep the credit-limit
+ * fallback; the latter is noted in diagnostics).
  */
 function parseMemberBudgets(json: unknown, accountId: string): MemberBudget {
   const member = asRecord(json);
@@ -255,6 +262,11 @@ function currentUtcMonth(now: Date): string {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+/** 00:00 UTC on the 1st of the month after `now`. */
+function nextUtcMonthStartIso(now: Date): string {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).toISOString();
+}
+
 /** Sums the current UTC month's daily costs in micro-cents; an empty list means no usage. */
 function parseMonthlyUsage(json: unknown, now: Date): number {
   if (!Array.isArray(json)) return invalidResponse();
@@ -283,13 +295,17 @@ function sanitizeMessage(
 }
 
 async function fetchConsoleRoute<T>(params: {
+  /** Names the route in error text. */
   route: ConsoleRoute;
+  /** URL path after `/api/` when it adds an id to `route`; the id stays out of error text. */
+  path?: string;
   credential: OpenCodeConsoleCredential;
   timeoutMs: number;
   parse: (json: unknown) => T;
 }): Promise<ConsoleRouteResult<T>> {
+  const path = params.path ?? params.route;
   try {
-    return await fetchWithTimeout(`${consoleBaseUrl(params.credential)}/api/${params.route}`, {
+    return await fetchWithTimeout(`${consoleBaseUrl(params.credential)}/api/${path}`, {
       request: {
         method: "GET",
         redirect: "manual",
@@ -349,7 +365,8 @@ function memberBudgetRequest(request: {
   }
   return fetchConsoleRoute({
     ...request,
-    route: `policies/members/${encodeURIComponent(accountId)}`,
+    route: "policies/members",
+    path: `policies/members/${encodeURIComponent(accountId)}`,
     parse: (json) => parseMemberBudgets(json, accountId),
   });
 }
@@ -382,29 +399,25 @@ export async function queryOpenCodeZenQuota(
   if (!balance.success) return balance;
 
   // Prefer a member budget whenever the member route confirms the account and a
-  // budget rule applies ($0 included: a binding limit). With no member budgets
-  // at all, fall back to the credit limit plus this month's usage costs. With
-  // budgets present but none safely evaluable, report no monthly limit (the
-  // credit limit is not the member budget) and keep the month's real spend.
+  // budget rule applies ($0 included: a binding limit). Otherwise (no member
+  // budgets, or budgets that cannot all be safely evaluated) fall back to the
+  // credit limit plus this month's usage costs.
   let monthlyLimit = creditLimit.success ? creditLimit.data : null;
   let usage = monthlyUsage.success ? monthlyUsage.data : null;
+  let budgetResetIso: string | null = null;
   let budgetSource: OpenCodeZenBudgetSource = "credit_limit";
-  const errors: string[] = [];
+  let memberBudgetsSkipped = false;
   if (member.success) {
     const { limitMicroCents, spentMicroCents, budgetCount } = member.data;
     if (limitMicroCents !== null && spentMicroCents !== null) {
       monthlyLimit = limitMicroCents / OPENCODE_ZEN_BILLING_UNITS_PER_DOLLAR;
       usage = spentMicroCents;
+      budgetResetIso = nextUtcMonthStartIso(now);
       budgetSource = "member_budget";
     } else if (budgetCount > 0) {
-      // Secret-safe: ids here are org/account identifiers, never the token.
-      monthlyLimit = null;
-      errors.push(
-        `OpenCode Console member budget present but not safely evaluable (${budgetCount} candidate${budgetCount === 1 ? "" : "s"}); no monthly budget limit reported`,
-      );
+      memberBudgetsSkipped = true;
     }
   }
-  errors.push(...optional.flatMap((result) => (result.success ? [] : [result.error])));
 
   return {
     success: true,
@@ -416,9 +429,10 @@ export async function queryOpenCodeZenQuota(
       ...(autoRecharge.success
         ? autoRecharge.data
         : { reload: null, reloadAmount: null, reloadTrigger: null }),
-      budgetResetIso: null,
+      budgetResetIso,
       budgetSource,
+      memberBudgetsSkipped,
     },
-    errors,
+    errors: optional.flatMap((result) => (result.success ? [] : [result.error])),
   };
 }

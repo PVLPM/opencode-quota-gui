@@ -253,6 +253,15 @@ export const opencodeZenProvider: QuotaProvider = {
         value: monthlyUsageUsd === null ? "(unknown)" : `USD ${zenUsdDecimal(monthlyUsageUsd)}`,
       },
       { key: "budget_source", value: result.data.budgetSource },
+      ...(result.data.memberBudgetsSkipped
+        ? [
+            {
+              key: "member_budget_note",
+              value:
+                "member budgets found, but not all can be evaluated (model filters, per-model limits, or missing amounts); using the credit limit",
+            },
+          ]
+        : []),
       {
         key: "auto_reload",
         value: result.data.reload === null ? "(unknown)" : String(result.data.reload),

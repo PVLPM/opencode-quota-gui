@@ -93,13 +93,9 @@ const MEMBER = {
   ],
 };
 
-/**
- * The diagnostic queryOpenCodeZenQuota emits when the member response has
- * budget candidates but none it can safely evaluate.
- */
-function unevaluableError(count: number): string {
-  return `OpenCode Console member budget present but not safely evaluable (${count} candidate${count === 1 ? "" : "s"}); no monthly budget limit reported`;
-}
+// Console monthly budgets reset at the start of the next UTC month; the tests
+// run at 2026-09-25T12:00Z.
+const NEXT_MONTH_RESET = "2026-10-01T00:00:00.000Z";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -205,6 +201,7 @@ describe("queryOpenCodeZenQuota", () => {
         reloadTrigger: 5,
         budgetResetIso: null,
         budgetSource: "credit_limit",
+        memberBudgetsSkipped: false,
       },
       errors: [
         "OpenCode Console member budgets unavailable: the Console sign-in has no account id",
@@ -244,10 +241,21 @@ describe("queryOpenCodeZenQuota", () => {
         reload: false,
         reloadAmount: 20,
         reloadTrigger: 5,
-        budgetResetIso: null,
+        budgetResetIso: NEXT_MONTH_RESET,
         budgetSource: "member_budget",
+        memberBudgetsSkipped: false,
       },
       errors: [],
+    });
+  });
+
+  it("resets a member budget at the start of the next UTC month across a year end", async () => {
+    vi.setSystemTime(new Date("2026-12-31T23:30:00.000Z"));
+    routes();
+
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+      success: true,
+      data: { budgetResetIso: "2027-01-01T00:00:00.000Z", budgetSource: "member_budget" },
     });
   });
 
@@ -330,10 +338,15 @@ describe("queryOpenCodeZenQuota", () => {
     });
 
     // The workspace rule (shared accounting over its audience) supplies the
-    // budget when the member has none of their own.
+    // budget when the member has none of their own; it resets with the UTC month.
     await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
       success: true,
-      data: { monthlyLimit: 40, monthlyUsage: 244_000_000, budgetSource: "member_budget" },
+      data: {
+        monthlyLimit: 40,
+        monthlyUsage: 244_000_000,
+        budgetResetIso: NEXT_MONTH_RESET,
+        budgetSource: "member_budget",
+      },
       errors: [],
     });
   });
@@ -421,7 +434,7 @@ describe("queryOpenCodeZenQuota", () => {
     });
   });
 
-  it("reports spend-only with a diagnostic for a model-restricted rule budget", async () => {
+  it("falls back to the credit limit for a model-restricted rule budget", async () => {
     routes({
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
@@ -445,17 +458,27 @@ describe("queryOpenCodeZenQuota", () => {
     });
 
     // The restricted rule may only cap certain models; without the current
-    // model's selector semantics Zen cannot claim it applies, so it reports no
-    // monthly limit (the credit limit is not the member budget) while keeping
-    // this month's real spend.
-    await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
+    // model's selector semantics Zen cannot claim it applies, so no member
+    // budget is used and the credit-limit fallback applies without an error.
+    await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
       success: true,
-      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
-      errors: [unevaluableError(1)],
+      data: {
+        balance: 0,
+        monthlyLimit: 100,
+        monthlyUsage: 75_000_000,
+        lastPayment: null,
+        reload: false,
+        reloadAmount: 20,
+        reloadTrigger: 5,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+        memberBudgetsSkipped: true,
+      },
+      errors: [],
     });
   });
 
-  it("reports no limit when an unevaluable budget coexists with an applicable one", async () => {
+  it("falls back to the credit limit when an unevaluable budget coexists with an applicable one", async () => {
     routes({
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
@@ -481,11 +504,17 @@ describe("queryOpenCodeZenQuota", () => {
     });
 
     // The skipped candidate could be the binding cap, so the known-applicable
-    // budget is not a trustworthy effective limit: spend-only, with diagnostic.
+    // budget is not a trustworthy effective limit: the credit limit applies.
     await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
       success: true,
-      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
-      errors: [unevaluableError(2)],
+      data: {
+        monthlyLimit: 100,
+        monthlyUsage: 75_000_000,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+        memberBudgetsSkipped: true,
+      },
+      errors: [],
     });
   });
 
@@ -498,7 +527,7 @@ describe("queryOpenCodeZenQuota", () => {
     ["a non-array vendors filter", { vendors: "openai" }],
     ["an inputPriceAtLeast filter", { inputPriceAtLeast: 0.5 }],
     ["a non-boolean includeUnknownPrice", { includeUnknownPrice: "no" }],
-  ])("reports no limit and a diagnostic for %s in a rule selector", async (_name, selector) => {
+  ])("falls back to the credit limit for %s in a rule selector", async (_name, selector) => {
     routes({
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
@@ -518,12 +547,18 @@ describe("queryOpenCodeZenQuota", () => {
 
     await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
       success: true,
-      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
-      errors: [unevaluableError(1)],
+      data: {
+        monthlyLimit: 100,
+        monthlyUsage: 75_000_000,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+        memberBudgetsSkipped: true,
+      },
+      errors: [],
     });
   });
 
-  it("reports no limit when the member's only budget rule is not monthly budget kind", async () => {
+  it("falls back to the credit limit when the member's only budget rule is not monthly budget kind", async () => {
     routes({
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
@@ -553,8 +588,14 @@ describe("queryOpenCodeZenQuota", () => {
 
     await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
       success: true,
-      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
-      errors: [unevaluableError(1)],
+      data: {
+        monthlyLimit: 100,
+        monthlyUsage: 75_000_000,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+        memberBudgetsSkipped: true,
+      },
+      errors: [],
     });
   });
 
@@ -588,8 +629,14 @@ describe("queryOpenCodeZenQuota", () => {
     const skipped = await queryOpenCodeZenQuota(credential);
     expect(skipped).toMatchObject({
       success: true,
-      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
-      errors: [unevaluableError(1)],
+      data: {
+        monthlyLimit: 100,
+        monthlyUsage: 75_000_000,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+        memberBudgetsSkipped: true,
+      },
+      errors: [],
     });
 
     routes({
@@ -623,7 +670,7 @@ describe("queryOpenCodeZenQuota", () => {
     });
   });
 
-  it("reports no limit when a member budget's rule or policy cannot be matched", async () => {
+  it("falls back to the credit limit when a member budget's rule or policy cannot be matched", async () => {
     routes({
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
       "usage/cost-by-day": () => json([{ date: "2026-09-24", totalCostMicroCents: "75000000" }]),
@@ -648,8 +695,14 @@ describe("queryOpenCodeZenQuota", () => {
     // before Zen claims the amounts; unmatched ones never reach the entry.
     await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
       success: true,
-      data: { monthlyLimit: null, monthlyUsage: 75_000_000, budgetSource: "credit_limit" },
-      errors: [unevaluableError(2)],
+      data: {
+        monthlyLimit: 100,
+        monthlyUsage: 75_000_000,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+        memberBudgetsSkipped: true,
+      },
+      errors: [],
     });
   });
 
@@ -672,8 +725,9 @@ describe("queryOpenCodeZenQuota", () => {
         reloadTrigger: 5,
         budgetResetIso: null,
         budgetSource: "credit_limit",
+        memberBudgetsSkipped: false,
       },
-      errors: ["Could not parse OpenCode Console policies/members/usr_me response"],
+      errors: ["Could not parse OpenCode Console policies/members response"],
     });
   });
 
@@ -697,12 +751,13 @@ describe("queryOpenCodeZenQuota", () => {
         reloadTrigger: 5,
         budgetResetIso: null,
         budgetSource: "credit_limit",
+        memberBudgetsSkipped: false,
       },
       errors: [],
     });
   });
 
-  it("reports no limit for a member budget without usable amounts", async () => {
+  it("falls back to the credit limit for a member budget without usable amounts", async () => {
     routes({
       "billing/status": () => json({ ...STATUS, balanceMicroCents: "4250000000" }),
       "billing/account": () => json({ ...ACCOUNT, creditLimitMicroCents: "10000000000" }),
@@ -724,12 +779,13 @@ describe("queryOpenCodeZenQuota", () => {
     await expect(queryOpenCodeZenQuota(credential)).resolves.toMatchObject({
       success: true,
       data: {
-        monthlyLimit: null,
+        monthlyLimit: 100,
         monthlyUsage: 75_000_000,
         budgetResetIso: null,
         budgetSource: "credit_limit",
+        memberBudgetsSkipped: true,
       },
-      errors: [unevaluableError(1)],
+      errors: [],
     });
   });
 
@@ -753,8 +809,9 @@ describe("queryOpenCodeZenQuota", () => {
         reloadTrigger: 5,
         budgetResetIso: null,
         budgetSource: "credit_limit",
+        memberBudgetsSkipped: false,
       },
-      errors: ["OpenCode Console policies/members/usr_me error 500"],
+      errors: ["OpenCode Console policies/members error 500"],
     });
   });
 
@@ -784,6 +841,7 @@ describe("queryOpenCodeZenQuota", () => {
         reloadTrigger: 5,
         budgetResetIso: null,
         budgetSource: "credit_limit",
+        memberBudgetsSkipped: false,
       },
       errors: [],
     });
@@ -797,7 +855,7 @@ describe("queryOpenCodeZenQuota", () => {
         monthlyUsage: 617_355_570,
         reload: true,
         reloadAmount: 20,
-        budgetResetIso: null,
+        budgetResetIso: NEXT_MONTH_RESET,
         budgetSource: "member_budget",
       },
     ],
@@ -808,7 +866,7 @@ describe("queryOpenCodeZenQuota", () => {
         monthlyUsage: 617_355_570,
         reload: null,
         reloadAmount: null,
-        budgetResetIso: null,
+        budgetResetIso: NEXT_MONTH_RESET,
         budgetSource: "member_budget",
       },
     ],
@@ -819,7 +877,7 @@ describe("queryOpenCodeZenQuota", () => {
         monthlyUsage: 617_355_570,
         reload: true,
         reloadAmount: 20,
-        budgetResetIso: null,
+        budgetResetIso: NEXT_MONTH_RESET,
         budgetSource: "member_budget",
       },
     ],
@@ -840,6 +898,7 @@ describe("queryOpenCodeZenQuota", () => {
         balance: 4_250_000_000,
         lastPayment: null,
         reloadTrigger: expected.reload === null ? null : 5,
+        memberBudgetsSkipped: false,
         ...expected,
       },
       errors: [`OpenCode Console ${route} error 500`],
@@ -867,11 +926,12 @@ describe("queryOpenCodeZenQuota", () => {
         reloadTrigger: null,
         budgetResetIso: null,
         budgetSource: "credit_limit",
+        memberBudgetsSkipped: false,
       },
       errors: [
         "OpenCode Console billing/account error 500",
         "OpenCode Console billing/auto-recharge error 500",
-        "OpenCode Console policies/members/usr_me error 500",
+        "OpenCode Console policies/members error 500",
         "OpenCode Console usage/cost-by-day error 500",
       ],
     });
@@ -931,7 +991,9 @@ describe("queryOpenCodeZenQuota", () => {
       "policies/members/usr_me": () => new Response("forbidden", { status: 403 }),
     });
 
-    await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
+    const result = await queryOpenCodeZenQuota(credential);
+
+    expect(result).toEqual({
       success: true,
       data: {
         balance: 4_250_000_000,
@@ -943,9 +1005,29 @@ describe("queryOpenCodeZenQuota", () => {
         reloadTrigger: 5,
         budgetResetIso: null,
         budgetSource: "credit_limit",
+        memberBudgetsSkipped: false,
       },
-      errors: ["OpenCode Console policies/members/usr_me error 403"],
+      errors: ["OpenCode Console policies/members error 403"],
     });
+    expect(JSON.stringify(result)).not.toContain("usr_me");
+  });
+
+  it("keeps the account id out of a failed member request", async () => {
+    routes({
+      "policies/members/usr_me": () => {
+        throw new Error("connect ECONNREFUSED for /api/policies/members/usr_me");
+      },
+    });
+
+    const result = await queryOpenCodeZenQuota(credential);
+
+    expect(result).toMatchObject({
+      success: true,
+      errors: [
+        "OpenCode Console policies/members request failed: connect ECONNREFUSED for /api/policies/members/[redacted]",
+      ],
+    });
+    expect(JSON.stringify(result)).not.toContain("usr_me");
   });
 
   it.each([
@@ -1113,11 +1195,14 @@ describe("queryOpenCodeZenQuota", () => {
 
     const result = await queryOpenCodeZenQuota(credential);
 
+    // Error text names the member route without the account id.
+    const label = route === "policies/members/usr_me" ? "policies/members" : route;
     expect(result).toMatchObject({
       success: true,
       data: { balance: 0 },
-      errors: [`Could not parse OpenCode Console ${route} response`],
+      errors: [`Could not parse OpenCode Console ${label} response`],
     });
+    expect(JSON.stringify(result)).not.toContain("usr_me");
   });
 
   it("sanitizes network and timeout errors and redacts the Bearer token and org id", async () => {

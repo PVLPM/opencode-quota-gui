@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   expectAttemptedWithErrorLabel,
@@ -157,6 +157,7 @@ function success(overrides: Record<string, unknown> = {}, errors: string[] = [])
       reloadTrigger: null,
       budgetResetIso: null,
       budgetSource: "credit_limit",
+      memberBudgetsSkipped: false,
       ...overrides,
     },
   });
@@ -169,6 +170,10 @@ function context(config: Record<string, unknown> = {}): any {
 describe("opencode Zen provider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("uses the original canonical provider id", () => {
@@ -407,11 +412,12 @@ describe("opencode Zen provider", () => {
     expect(result.presentation).toBeUndefined();
   });
 
-  it("omits a reset timestamp for member budgets (no route supplies one)", async () => {
+  it("attaches the member budget reset date to the monthly budget entry", async () => {
     configured();
     success({
       monthlyLimit: 60,
       monthlyUsage: 617_355_570,
+      budgetResetIso: "2026-10-01T00:00:00.000Z",
       budgetSource: "member_budget",
     });
 
@@ -424,12 +430,34 @@ describe("opencode Zen provider", () => {
         used: "6.1735557",
         limit: "60",
         remaining: "53.8264443",
+        resetTimeIso: "2026-10-01T00:00:00.000Z",
       }),
       balanceEntry("supplementary"),
       autoReloadEntry(),
     ]);
-    expect(result.entries[0].resetTimeIso).toBeUndefined();
     expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "member_budget" });
+    expect(result.statusDetails.some((d) => d.key === "member_budget_note")).toBe(false);
+  });
+
+  it("uses the credit limit without an error when member budgets cannot all be evaluated", async () => {
+    configured();
+    success({ monthlyLimit: 100, monthlyUsage: 575_000_000, memberBudgetsSkipped: true });
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expectAttemptedWithNoErrors(result);
+    expect(result.entries).toEqual([
+      budgetEntry(),
+      balanceEntry("supplementary"),
+      autoReloadEntry(),
+    ]);
+    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "credit_limit" });
+    expect(result.statusDetails).toContainEqual({
+      key: "member_budget_note",
+      value:
+        "member budgets found, but not all can be evaluated (model filters, per-model limits, or missing amounts); using the credit limit",
+    });
+    expect(result.statusDetails.some((d) => d.key === "live_fetch_error")).toBe(false);
   });
 
   it("projects a member $0 budget as a blocking 0% budget, not a spend row", async () => {
@@ -457,6 +485,8 @@ describe("opencode Zen provider", () => {
   });
 
   it("parses the policies/members shape in the real query pipeline", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-25T12:00:00.000Z"));
     configured({ ...consoleCredential, accountId: "usr_me" });
     // Run the real query pipeline against a fake HTTP layer serving the actual
     // member-detail response shape (dollar amounts, no reset date).
@@ -527,8 +557,8 @@ describe("opencode Zen provider", () => {
         limit: { quantity: { decimal: "60" } },
       },
     });
-    // No reset timestamp comes from these Console routes.
-    expect(result.entries[0].resetTimeIso).toBeUndefined();
+    // Console monthly budgets reset at the start of the next UTC month.
+    expect(result.entries[0].resetTimeIso).toBe("2026-10-01T00:00:00.000Z");
     expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "member_budget" });
   });
 
