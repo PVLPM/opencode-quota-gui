@@ -3,6 +3,7 @@ import { AGY_V2_QUOTA_SUMMARY_COMMAND, AGY_V2_QUOTA_SUMMARY_COMMAND_TEMPLATE } f
 import { type OpenCodeV2PluginContext, type OpenCodeV2PluginDefinition } from './types';
 export { getSafeHeader, setSafeHeaders, toUrlString } from './headers';
 export { resolveModelTier } from './tier';
+export { getDiskSignatureCache, resetDiskSignatureCacheForTesting } from './cache';
 export { loadStoredAuthFromJson, saveStoredAuthToJson, setStoredAuthOverrideForTesting, } from './v2-storage';
 export { createV2FetchInterceptor } from './v2-fetch';
 export { AGY_V2_QUOTA_COMMAND, AGY_V2_QUOTA_SUMMARY_COMMAND, AGY_V2_QUOTA_COMMAND_TEMPLATE, AGY_V2_QUOTA_SUMMARY_COMMAND_TEMPLATE, };
