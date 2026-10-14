@@ -242,7 +242,7 @@ Check the `opencode_go` section:
 <details>
 <summary><strong>OpenCode Zen</strong></summary>
 
-Check the `opencode_zen` section. `console_auth_state` shows whether OpenCode returned your Console sign-in, `console_server` and `console_org` show which Console and organization Zen reads, and `budget_source` shows whether the budget came from the org budget (`org_budget`) or the credit limit plus this month's usage (`credit_limit`). `live_fetch_error` lists failed Console routes. The token is never shown.
+Check the `opencode_zen` section. `console_auth_state` shows whether OpenCode returned your Console sign-in, `console_server` and `console_org` show which Console and organization Zen reads, and `budget_source` shows whether the budget came from a member budget (`member_budget`) or the credit limit plus this month's usage (`credit_limit`). `member_budget_note` appears when the member has budgets Zen cannot evaluate, so it uses the credit limit. `live_fetch_error` lists failed Console routes. The token is never shown.
 
 | Symptom                                                           | Fix |
 | ----------------------------------------------------------------- | --- |

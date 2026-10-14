@@ -154,10 +154,14 @@ export const opencodeZenProvider: QuotaProvider = {
 
     const hasMonthlyUsage =
       monthlyUsageUsd !== null && Number.isFinite(monthlyUsageUsd) && monthlyUsageUsd >= 0;
+    // A member-budget limit of $0 is a real blocking limit, not an absence;
+    // a $0 credit-limit fallback value still counts as no limit.
+    const zeroBudgetActive =
+      result.data.budgetSource === "member_budget" && effectiveMonthlyLimit === 0;
     const hasMonthlyBudget =
       effectiveMonthlyLimit !== null &&
       Number.isFinite(effectiveMonthlyLimit) &&
-      effectiveMonthlyLimit > 0 &&
+      (effectiveMonthlyLimit > 0 || zeroBudgetActive) &&
       hasMonthlyUsage;
     const entries: QuotaToastEntry[] = [];
 
@@ -167,7 +171,10 @@ export const opencodeZenProvider: QuotaProvider = {
         accounting: OPENCODE_ZEN_BUDGET_ACCOUNTING,
         name: "zen-monthly-budget",
         group: OPENCODE_ZEN_GROUP,
-        percentRemaining: Math.min(100, (monthlyRemainingUsd / effectiveMonthlyLimit) * 100),
+        percentRemaining:
+          effectiveMonthlyLimit > 0
+            ? Math.min(100, (monthlyRemainingUsd / effectiveMonthlyLimit) * 100)
+            : 0,
         ...(result.data.budgetResetIso ? { resetTimeIso: result.data.budgetResetIso } : {}),
         semantic: {
           metric: { kind: "window", window: "month" },
@@ -246,6 +253,15 @@ export const opencodeZenProvider: QuotaProvider = {
         value: monthlyUsageUsd === null ? "(unknown)" : `USD ${zenUsdDecimal(monthlyUsageUsd)}`,
       },
       { key: "budget_source", value: result.data.budgetSource },
+      ...(result.data.memberBudgetsSkipped
+        ? [
+            {
+              key: "member_budget_note",
+              value:
+                "member budgets found, but not all can be evaluated (model filters, per-model limits, or missing amounts); using the credit limit",
+            },
+          ]
+        : []),
       {
         key: "auto_reload",
         value: result.data.reload === null ? "(unknown)" : String(result.data.reload),

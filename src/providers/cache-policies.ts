@@ -234,10 +234,15 @@ export const PROVIDER_CACHE_POLICIES = {
     const resolved = await resolveOpenCodeConsoleAuth();
     if (resolved.state !== "configured") return null;
     const { credential } = resolved;
-    // The identity is the org (else the account, else the token) plus the Console URL:
-    // org ids can collide across self-hosted Console URLs.
+    // The identity distinguishes accounts within the same org (member budgets
+    // are queried per account): org + account, else the account, else the
+    // token. The Console URL qualifies it because org ids can collide across
+    // self-hosted Console URLs.
     return {
-      credential: credential.orgId ?? credential.accountId ?? credential.accessToken,
+      credential:
+        credential.orgId && credential.accountId
+          ? JSON.stringify([credential.orgId, credential.accountId])
+          : (credential.orgId ?? credential.accountId ?? credential.accessToken),
       principalKind: credential.orgId || credential.accountId ? "stable-id" : "credential",
       qualifiers: [consoleBaseUrl(credential)],
     };

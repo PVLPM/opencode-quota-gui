@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   expectAttemptedWithErrorLabel,
@@ -157,6 +157,7 @@ function success(overrides: Record<string, unknown> = {}, errors: string[] = [])
       reloadTrigger: null,
       budgetResetIso: null,
       budgetSource: "credit_limit",
+      memberBudgetsSkipped: false,
       ...overrides,
     },
   });
@@ -169,6 +170,10 @@ function context(config: Record<string, unknown> = {}): any {
 describe("opencode Zen provider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("uses the original canonical provider id", () => {
@@ -407,13 +412,13 @@ describe("opencode Zen provider", () => {
     expect(result.presentation).toBeUndefined();
   });
 
-  it("attaches the org budget reset date to the monthly budget entry", async () => {
+  it("attaches the member budget reset date to the monthly budget entry", async () => {
     configured();
     success({
       monthlyLimit: 60,
       monthlyUsage: 617_355_570,
       budgetResetIso: "2026-10-01T00:00:00.000Z",
-      budgetSource: "org_budget",
+      budgetSource: "member_budget",
     });
 
     const result = await opencodeZenProvider.fetch(context());
@@ -430,14 +435,61 @@ describe("opencode Zen provider", () => {
       balanceEntry("supplementary"),
       autoReloadEntry(),
     ]);
-    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "org_budget" });
+    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "member_budget" });
+    expect(result.statusDetails.some((d) => d.key === "member_budget_note")).toBe(false);
   });
 
-  it("does not reject the whole result for a parseable non-ISO org-budget reset", async () => {
+  it("uses the credit limit without an error when member budgets cannot all be evaluated", async () => {
     configured();
-    // Run the real query pipeline against a fake HTTP layer where budgets/org
-    // returns a parseable-but-non-ISO reset ("0"); the resolver must normalize
-    // it to canonical ISO so shared result validation never drops the result.
+    success({ monthlyLimit: 100, monthlyUsage: 575_000_000, memberBudgetsSkipped: true });
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expectAttemptedWithNoErrors(result);
+    expect(result.entries).toEqual([
+      budgetEntry(),
+      balanceEntry("supplementary"),
+      autoReloadEntry(),
+    ]);
+    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "credit_limit" });
+    expect(result.statusDetails).toContainEqual({
+      key: "member_budget_note",
+      value:
+        "member budgets found, but not all can be evaluated (model filters, per-model limits, or missing amounts); using the credit limit",
+    });
+    expect(result.statusDetails.some((d) => d.key === "live_fetch_error")).toBe(false);
+  });
+
+  it("projects a member $0 budget as a blocking 0% budget, not a spend row", async () => {
+    configured();
+    success({
+      monthlyLimit: 0,
+      monthlyUsage: 0,
+      budgetSource: "member_budget",
+    });
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expectAttemptedWithNoErrors(result);
+    expect(result.entries).toEqual([
+      budgetEntry({ percentRemaining: 0, used: "0", limit: "0", remaining: "0" }),
+      balanceEntry("supplementary"),
+      autoReloadEntry(),
+    ]);
+    expect(JSON.stringify(result)).not.toContain("NaN");
+    expect(result.statusDetails).toContainEqual({
+      key: "monthly_limit_usd",
+      value: "USD 0",
+    });
+    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "member_budget" });
+  });
+
+  it("parses the policies/members shape in the real query pipeline", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-25T12:00:00.000Z"));
+    configured({ ...consoleCredential, accountId: "usr_me" });
+    // Run the real query pipeline against a fake HTTP layer serving the actual
+    // member-detail response shape (dollar amounts, no reset date).
     mocks.fetchResponse.mockImplementation((url: string) => {
       const route = url.slice("https://opencode.ai/console/api/".length);
       const payloads: Record<string, unknown> = {
@@ -450,11 +502,34 @@ describe("opencode Zen provider", () => {
           pending: false,
           failureReason: null,
         },
-        "budgets/org": {
-          limitMicroCents: "6000000000",
-          spentMicroCents: "617355570",
-          exceeded: false,
-          resetsAt: "2026-10-01T00:00:00",
+        "policies/members/usr_me": {
+          userID: "usr_me",
+          budgets: [
+            {
+              policyID: "pol_1",
+              ruleID: "rule_1",
+              scope: "combined",
+              limitDollars: 60,
+              spentDollars: 6.1735557,
+            },
+          ],
+          policies: [
+            {
+              id: "pol_1",
+              rules: [
+                {
+                  id: "rule_1",
+                  kind: "budget",
+                  period: "month",
+                  scope: "combined",
+                  per: "set",
+                  limitDollars: 60,
+                  spentDollars: 6.1735557,
+                  selector: { includeUnknownPrice: false },
+                },
+              ],
+            },
+          ],
         },
         "usage/cost-by-day": [],
       };
@@ -477,10 +552,14 @@ describe("opencode Zen provider", () => {
     expectAttemptedWithNoErrors(result);
     expect(result.entries[0]).toMatchObject({
       percentRemaining: Math.min(100, ((60 - 6.1735557) / 60) * 100),
-      resetTimeIso: new Date("2026-10-01T00:00:00").toISOString(),
+      basis: {
+        used: { quantity: { decimal: "6.1735557" } },
+        limit: { quantity: { decimal: "60" } },
+      },
     });
-    // Canonical ISO only: the parseable non-ISO input must never surface.
-    expect(result.entries[0].resetTimeIso?.endsWith("Z")).toBe(true);
+    // Console monthly budgets reset at the start of the next UTC month.
+    expect(result.entries[0].resetTimeIso).toBe("2026-10-01T00:00:00.000Z");
+    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "member_budget" });
   });
 
   it("prefers the positive plugin monthly-limit override", async () => {
