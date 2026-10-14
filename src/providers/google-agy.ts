@@ -101,6 +101,17 @@ function formatRemainingAmount(value: string | undefined): string | undefined {
   return `${display} left`;
 }
 
+export function formatAgyCredentialGroup(credentialName: string, familyLabel: string): string {
+  const trimmed = credentialName.trim();
+  if (!familyLabel?.trim()) return trimmed;
+  const match = trimmed.match(/^(\[[^\]]+\])(.*)$/);
+  if (match) {
+    const inside = match[1]?.slice(1, -1) ?? "";
+    return `[${inside}: ${familyLabel}]${match[2] ?? ""}`;
+  }
+  return `[${trimmed}: ${familyLabel}]`;
+}
+
 async function isAgyConfigured(): Promise<boolean> {
   try {
     return await hasAgyQuotaRuntimeAvailable();
@@ -161,13 +172,15 @@ export const googleAgyProvider: QuotaProvider = {
       const entries: QuotaToastEntry[] = [];
       const errors: QuotaProviderResult["errors"] = [];
       for (const [index, { row, result }] of results.entries()) {
-        const group = names[index] ?? "Google AGY";
+        const credentialName = names[index] ?? "Google AGY";
         if (!result) continue;
         if (!result.success) {
-          errors.push({ label: group, message: result.error });
+          errors.push({ label: credentialName, message: result.error });
           continue;
         }
         for (const bucket of [...result.buckets].sort(compareBuckets)) {
+          const familyLabel = formatAgyFamilyLabel(bucket.family);
+          const group = formatAgyCredentialGroup(credentialName, familyLabel);
           const right = formatRemainingAmount(bucket.remainingAmount);
           entries.push({
             accounting: {
@@ -177,7 +190,7 @@ export const googleAgyProvider: QuotaProvider = {
               authority: "provider_reported",
               sourceId: row.id,
             },
-            name: `${group} ${formatAgyFamilyLabel(bucket.family)} ${bucket.windowLabel}`,
+            name: `${group} ${bucket.windowLabel}`,
             group,
             label: `${bucket.windowLabel}:`,
             sortPriority: windowRank(bucket.window),
@@ -188,7 +201,7 @@ export const googleAgyProvider: QuotaProvider = {
         }
         errors.push(
           ...(result.errors ?? []).map((error) => ({
-            label: group,
+            label: credentialName,
             message: error.error,
           })),
         );
