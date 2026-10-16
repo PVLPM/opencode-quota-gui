@@ -437,6 +437,76 @@ describe("google agy logic", () => {
     expect(result.buckets.every((bucket) => bucket.sourceKey === "google-agy")).toBe(true);
   });
 
+  it("preserves model-specific Gemini groups such as Gemini 4 Argon as distinct families", async () => {
+    mocks.readAuthFileCached.mockResolvedValueOnce({
+      "google-agy": authAccount("refresh-token", "project-1", "alice@example.com"),
+    });
+    mocks.fetchResponse.mockResolvedValueOnce(
+      mockJsonResponse({
+        groups: [
+          ...summaryResponse().groups,
+          {
+            displayName: "Gemini 4 Argon",
+            description: "For paid Pro plans, Argon quota is separate.",
+            buckets: [
+              {
+                bucketId: "gemini-argon-wtu-weekly",
+                displayName: "Gemini 4 Argon Weekly Limit",
+                window: "weekly",
+                remainingFraction: 0.95,
+                resetTime: "2026-10-23T05:24:42Z",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const result = await queryGoogleAgyQuota();
+    expect(result).toMatchObject({ success: true });
+    if (!result || !result.success) throw new Error("expected success");
+
+    expect(
+      result.buckets.map(({ family, window, bucketId, percentRemaining }) => ({
+        family,
+        window,
+        bucketId,
+        percentRemaining,
+      })),
+    ).toEqual([
+      {
+        family: "Gemini Models",
+        window: "weekly",
+        bucketId: "gemini-weekly",
+        percentRemaining: 58,
+      },
+      {
+        family: "Gemini Models",
+        window: "five_hour",
+        bucketId: "gemini-five-hour",
+        percentRemaining: 25,
+      },
+      {
+        family: "Claude and GPT models",
+        window: "weekly",
+        bucketId: "third-party-weekly",
+        percentRemaining: 100,
+      },
+      {
+        family: "Claude and GPT models",
+        window: "five_hour",
+        bucketId: "third-party-five-hour",
+        percentRemaining: 90,
+      },
+      {
+        family: "Gemini 4 Argon",
+        window: "weekly",
+        bucketId: "gemini-argon-wtu-weekly",
+        percentRemaining: 95,
+      },
+    ]);
+  });
+
   it("uses top-level buckets only when grouped buckets are not usable", async () => {
     mocks.readAuthFileCached.mockResolvedValueOnce({
       "google-agy": authAccount("refresh-token", "project-1"),
