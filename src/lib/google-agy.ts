@@ -482,11 +482,14 @@ function normalizeSummaryFamily(value: unknown): string | undefined {
   if (!displayName) {
     return undefined;
   }
-  const normalized = displayName.toLowerCase();
-  if (normalized.includes("gemini")) {
+  const normalized = displayName.toLowerCase().replace(/\s+/gu, " ");
+  if (normalized === "gemini" || normalized === "gemini models") {
     return "Gemini Models";
   }
-  if (normalized.includes("claude") || normalized.includes("gpt")) {
+  if (
+    normalized === "claude and gpt models" ||
+    (normalized.includes("claude") && normalized.includes("gpt"))
+  ) {
     return "Claude and GPT models";
   }
   return displayName;
