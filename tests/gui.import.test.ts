@@ -80,7 +80,7 @@ describe("settings import preview and apply", () => {
     });
   });
 
-  it("applies the preview, comments the source, and leaves the legacy file untouched", async () => {
+  it("applies the preview, comments the source, and keeps the project override effective", async () => {
     const workspace = makeWorkspace();
     const sidecar = writeQuotaSidecarConfig(workspace.workspaceRoot, {
       minIntervalMs: 1000,
@@ -103,11 +103,17 @@ describe("settings import preview and apply", () => {
     const after = await store.settings();
     expect(after.values.minIntervalMs).toBe(1000);
     expect(after.values.accountingDetail).toBe("detailed");
-    expect(after.sources.minIntervalMs).toBe("opencode-quota-gui/config.jsonc");
-    expect(after.import).toEqual({ available: false, issues: [] });
+    expect(after.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
+    expect(after.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
+    expect(after.import).toEqual({
+      available: true,
+      from: "project opencode-quota/quota-toast.json",
+      keyCount: 2,
+      issues: [],
+    });
   });
 
-  it("writes nothing when every inherited value is already in the canonical file", async () => {
+  it("keeps the project value effective across repeated imports", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 1000 });
     const store = makeStore(workspace);
@@ -116,12 +122,14 @@ describe("settings import preview and apply", () => {
     const bytesAfterFirstImport = readFileSync(workspace.guiConfigPath, "utf8");
 
     const secondPreview = await store.importPreview();
-    expect(secondPreview.keys).toEqual([]);
+    expect(keyMap(secondPreview.keys)).toEqual({ minIntervalMs: 1000 });
     const second = await store.importApply({ expectedRevision: secondPreview.expectedRevision });
 
-    expect(second.applied).toEqual({});
-    expect(second.revision).toBe(secondPreview.expectedRevision);
+    expect(second.applied).toEqual({ minIntervalMs: 1000 });
     expect(readFileSync(workspace.guiConfigPath, "utf8")).toBe(bytesAfterFirstImport);
+    const after = await store.settings();
+    expect(after.values.minIntervalMs).toBe(1000);
+    expect(after.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
   });
 
   it("treats an edit to an inherited source between preview and apply as a conflict", async () => {
@@ -156,7 +164,7 @@ describe("settings import preview and apply", () => {
     });
   });
 
-  it("does not import keys the canonical file already sets", async () => {
+  it("imports the effective project value even when the canonical file also sets it", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, {
       minIntervalMs: 1000,
@@ -170,10 +178,13 @@ describe("settings import preview and apply", () => {
     });
 
     const preview = await store.importPreview();
-    expect(keyMap(preview.keys)).toEqual({ minIntervalMs: 1000 });
+    expect(keyMap(preview.keys)).toEqual({ minIntervalMs: 1000, accountingDetail: "detailed" });
 
     const result = await store.importApply({ expectedRevision: preview.expectedRevision });
-    expect(result.applied).toEqual({ minIntervalMs: 1000 });
+    expect(result.applied).toEqual({ minIntervalMs: 1000, accountingDetail: "detailed" });
+    const after = await store.settings();
+    expect(after.values.accountingDetail).toBe("detailed");
+    expect(after.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
   });
 
   it("reports inherited-layer issues in the preview and keeps canonical issues out of it", async () => {

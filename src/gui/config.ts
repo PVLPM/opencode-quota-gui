@@ -2,7 +2,7 @@
  * GUI settings store over the canonical dashboard config layer (spec §5.4, §7).
  *
  * Reads the effective configuration through the shared core loader
- * (defaults → legacy layers → the global canonical dashboard file) and writes
+ * (defaults → global legacy → global canonical → project layers) and writes
  * only the global canonical `<configDir>/opencode-quota-gui/config.jsonc`
  * through the upstream comment-preserving, symlink-guarded atomic write
  * helpers. Project-scope files are read and reported, never written.

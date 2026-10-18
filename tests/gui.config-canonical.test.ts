@@ -44,24 +44,31 @@ async function load(workspace: GuiConfigWorkspace) {
 }
 
 describe("canonical dashboard config layer", () => {
-  it("appends the canonical candidate last and keeps it the only one", () => {
+  it("places the canonical candidate after global legacy layers and before project layers", () => {
     const workspace = makeWorkspace();
     const candidates = buildConfigLayerCandidates(workspace.configDir, workspace.workspaceRoot);
 
-    const last = candidates.at(-1);
-    expect(last).toBeDefined();
-    expect(last?.path).toBe(getGuiConfigPath(workspace.configDir));
-    expect(last?.kind).toBe("canonical");
-    expect(last?.scope).toBe("global");
+    const canonicalIndex = candidates.findIndex((candidate) => candidate.kind === "canonical");
+    expect(canonicalIndex).toBeGreaterThan(0);
     expect(candidates.filter((candidate) => candidate.kind === "canonical")).toHaveLength(1);
+    expect(candidates[canonicalIndex]).toMatchObject({
+      path: getGuiConfigPath(workspace.configDir),
+      kind: "canonical",
+      scope: "global",
+    });
+    expect(
+      candidates.slice(0, canonicalIndex).every((candidate) => candidate.scope === "global"),
+    ).toBe(true);
+    expect(
+      candidates.slice(canonicalIndex + 1).every((candidate) => candidate.scope === "workspace"),
+    ).toBe(true);
     expect(GUI_CONFIG_RELATIVE_PATH).toBe("opencode-quota-gui/config.jsonc");
   });
 
-  it("applies only the keys the canonical file sets, over every lower layer", async () => {
+  it("applies canonical keys that lower layers do not override and keeps project keys", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, {
       minIntervalMs: 1000,
-      accountingDetail: "detailed",
     });
     writeGuiCanonicalConfig(workspace, {
       accountingDetail: "summary",
@@ -78,6 +85,100 @@ describe("canonical dashboard config layer", () => {
       quotaSidecarConfigSource(workspace.workspaceRoot),
     );
     expect(meta.configIssues).toEqual([]);
+  });
+
+  it("lets project values win on keys the canonical file also sets", async () => {
+    const workspace = makeWorkspace();
+    writeQuotaSidecarConfig(workspace.workspaceRoot, {
+      minIntervalMs: 2222,
+      accountingDetail: "detailed",
+    });
+    writeGuiCanonicalConfig(workspace, {
+      minIntervalMs: 1111,
+      accountingDetail: "summary",
+      waitForQuotaReset: false,
+    });
+
+    const { config, meta } = await load(workspace);
+
+    expect(config.minIntervalMs).toBe(2222);
+    expect(config.accountingDetail).toBe("detailed");
+    expect(config.waitForQuotaReset).toBe(false);
+    expect(meta.settingSources.minIntervalMs).toBe(
+      quotaSidecarConfigSource(workspace.workspaceRoot),
+    );
+    expect(meta.settingSources.accountingDetail).toBe(
+      quotaSidecarConfigSource(workspace.workspaceRoot),
+    );
+    expect(meta.settingSources.waitForQuotaReset).toBe(workspace.guiConfigPath);
+    expect(meta.configIssues).toEqual([]);
+  });
+
+  it("keeps canonical global precedence over legacy layers in the same root", async () => {
+    const workspace = makeWorkspace();
+    writeQuotaSidecarConfig(workspace.configDir, {
+      minIntervalMs: 1000,
+      percentDisplayMode: "used",
+      accountingDetail: "detailed",
+    });
+    writeGuiCanonicalConfig(workspace, { minIntervalMs: 2000, accountingDetail: "summary" });
+
+    const { config, meta } = await load(workspace);
+
+    expect(config.minIntervalMs).toBe(2000);
+    expect(config.accountingDetail).toBe("summary");
+    expect(config.percentDisplayMode).toBe("used");
+    expect(meta.settingSources.minIntervalMs).toBe(workspace.guiConfigPath);
+    expect(meta.settingSources.accountingDetail).toBe(workspace.guiConfigPath);
+    expect(meta.settingSources.percentDisplayMode).toBe(
+      quotaSidecarConfigSource(workspace.configDir),
+    );
+    expect(meta.configIssues).toEqual([]);
+  });
+
+  it("deduplicates project candidates when the project root is the global config dir", async () => {
+    const workspace = makeWorkspace();
+    writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 1000 });
+    writeGuiCanonicalConfig(workspace, {
+      minIntervalMs: 2000,
+      waitForQuotaReset: false,
+      opencodeMonthlyLimit: 0,
+    });
+
+    const candidates = buildConfigLayerCandidates(workspace.configDir, workspace.configDir);
+    expect(candidates.some((candidate) => candidate.scope === "workspace")).toBe(false);
+    expect(candidates.filter((candidate) => candidate.kind === "canonical")).toHaveLength(1);
+
+    const meta = createLoadConfigMeta();
+    const config = await loadConfig(undefined, meta, {
+      configRootDir: workspace.configDir,
+      globalConfigDir: workspace.configDir,
+    });
+
+    expect(config.minIntervalMs).toBe(2000);
+    expect(config.waitForQuotaReset).toBe(false);
+    expect(config.opencodeMonthlyLimit).toBe(0);
+    expect(meta.settingSources.minIntervalMs).toBe(workspace.guiConfigPath);
+    expect(meta.settingSources.opencodeMonthlyLimit).toBe(workspace.guiConfigPath);
+    expect(meta.configIssues).toEqual([]);
+  });
+
+  it("preserves false and zero values from the canonical file", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, {
+      waitForQuotaReset: false,
+      resetTimeDecimals: 0,
+      opencodeMonthlyLimit: 0,
+    });
+
+    const { config, meta } = await load(workspace);
+
+    expect(config.waitForQuotaReset).toBe(false);
+    expect(config.resetTimeDecimals).toBe(0);
+    expect(config.opencodeMonthlyLimit).toBe(0);
+    expect(meta.settingSources.waitForQuotaReset).toBe(workspace.guiConfigPath);
+    expect(meta.settingSources.resetTimeDecimals).toBe(workspace.guiConfigPath);
+    expect(meta.settingSources.opencodeMonthlyLimit).toBe(workspace.guiConfigPath);
   });
 
   it("does not suppress the legacy layer in the same root", async () => {

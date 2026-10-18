@@ -82,7 +82,7 @@ describe("legacy config compatibility beside the canonical layer", () => {
       minIntervalMs: 2222,
       accountingDetail: "detailed",
     });
-    writeGuiCanonicalConfig(workspace, { waitForQuotaReset: false });
+    writeGuiCanonicalConfig(workspace, { minIntervalMs: 3333, waitForQuotaReset: false });
 
     const snapshot = await makeStore(workspace).settings();
 
@@ -94,6 +94,38 @@ describe("legacy config compatibility beside the canonical layer", () => {
     expect(snapshot.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
     expect(snapshot.sources.waitForQuotaReset).toBe("opencode-quota-gui/config.jsonc");
     expect(snapshot.sources.percentLabelStyle).toBe("defaults");
+  });
+
+  it("writes the global canonical file without defeating a project override", async () => {
+    const workspace = makeWorkspace();
+    const sidecar = writeQuotaSidecarConfig(workspace.workspaceRoot, {
+      minIntervalMs: 2222,
+      accountingDetail: "detailed",
+    });
+    const sidecarBytes = readFileSync(sidecar, "utf8");
+    writeGuiCanonicalConfig(workspace, { minIntervalMs: 1111, waitForQuotaReset: false });
+    const store = makeStore(workspace);
+
+    const before = await store.settings();
+    expect(before.values.minIntervalMs).toBe(2222);
+    expect(before.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
+
+    await store.saveSettings({
+      patch: { minIntervalMs: 1000, accountingDetail: "summary" },
+      expectedRevision: before.revision,
+    });
+
+    const after = await store.settings();
+    expect(after.values.minIntervalMs).toBe(2222);
+    expect(after.values.accountingDetail).toBe("detailed");
+    expect(after.values.waitForQuotaReset).toBe(false);
+    expect(after.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
+    expect(after.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
+    expect(after.sources.waitForQuotaReset).toBe("opencode-quota-gui/config.jsonc");
+    expect(readFileSync(sidecar, "utf8")).toBe(sidecarBytes);
+    const canonical = JSON.parse(readFileSync(workspace.guiConfigPath, "utf8"));
+    expect(canonical.minIntervalMs).toBe(1000);
+    expect(canonical.accountingDetail).toBe("summary");
   });
 
   it("never writes a project legacy sidecar and never denies its values", async () => {
@@ -117,8 +149,11 @@ describe("legacy config compatibility beside the canonical layer", () => {
 
     expect(readFileSync(sidecar, "utf8")).toBe(sidecarBytes);
     const after = await store.settings();
-    expect(after.visibility).toEqual({ hiddenCards: ["card-b"], hiddenRows: ["row-b"] });
+    expect(after.visibility).toEqual({ hiddenCards: ["card-a"], hiddenRows: ["row-b"] });
     expect(after.values.waitForQuotaReset).toBe(true);
+    const canonical = JSON.parse(readFileSync(workspace.guiConfigPath, "utf8"));
+    expect(canonical.dashboard.hiddenCards).toEqual(["card-b"]);
+    expect(canonical.dashboard.hiddenRows).toEqual(["row-b"]);
   });
 
   it("keeps an in-repo dashboard config file inactive", async () => {

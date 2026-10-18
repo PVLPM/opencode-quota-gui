@@ -39,8 +39,9 @@ export const QUOTA_TOAST_CONFIG_RELATIVE_PATH = QUOTA_TOAST_CONFIG_RELATIVE_PATH
 
 /**
  * Global canonical dashboard config (spec §7): read/written only here, applied
- * last, and never an authoritative sidecar root. The in-repo
- * `opencode-quota-gui/config.jsonc` stays reserved but inactive.
+ * after every global legacy layer and before project layers, and never an
+ * authoritative sidecar root. The in-repo `opencode-quota-gui/config.jsonc`
+ * stays reserved but inactive.
  */
 export const GUI_CONFIG_RELATIVE_PATH = "opencode-quota-gui/config.jsonc";
 export const GUI_CONFIG_SIBLING_JSON_RELATIVE_PATH = "opencode-quota-gui/config.json";
@@ -1366,15 +1367,15 @@ export function buildConfigLayerCandidates(
 
   return [
     ...globalCandidates,
-    ...workspaceCandidates.filter((candidate) => !globalPaths.has(candidate.path)),
-    // The canonical dashboard file is applied last, only for the keys it sets,
-    // and never joins `authoritativeSidecarRoots`.
+    // The canonical dashboard file is a global layer: it overrides global
+    // legacy values, but a project layer still wins for the same key.
     {
       path: getGuiConfigPath(globalConfigDir),
       rootDir: globalConfigDir,
       scope: "global",
       kind: "canonical",
     },
+    ...workspaceCandidates.filter((candidate) => !globalPaths.has(candidate.path)),
   ];
 }
 
