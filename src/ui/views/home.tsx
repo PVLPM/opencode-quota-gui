@@ -28,8 +28,6 @@ export function HomeView(props: {
   hiddenRows: string[];
   stale: boolean;
   range: RangeKey;
-  onToggleCard: (cardId: string) => Promise<void>;
-  onToggleRow: (rowId: string) => Promise<void>;
 }): JSX.Element {
   const shown = () => visibleCards(props.snapshot.providers.cards, props.hiddenCards);
 
@@ -66,10 +64,7 @@ export function HomeView(props: {
                   card={card}
                   preferences={props.preferences}
                   hiddenRows={props.hiddenRows}
-                  cardHidden={props.hiddenCards.includes(card.cardId)}
                   stale={props.stale}
-                  onToggleCard={props.onToggleCard}
-                  onToggleRow={props.onToggleRow}
                 />
               )}
             </For>
@@ -83,7 +78,7 @@ export function HomeView(props: {
             Usage
           </h2>
           <span class="qg-section__meta qg-bucket-label">
-            {props.snapshot.usage.range} · per {props.snapshot.usage.bucketUnit}
+            {props.snapshot.usage.range} · per {props.snapshot.usage.bucketUnit} · UTC
           </span>
         </header>
         <Show
@@ -112,6 +107,10 @@ export function HomeView(props: {
           }
         >
           <div class="qg-list">
+            <div class="qg-list__head" aria-hidden="true">
+              <span>Project</span>
+              <span>Tokens</span>
+            </div>
             <For each={props.snapshot.projects}>
               {(project) => (
                 <a

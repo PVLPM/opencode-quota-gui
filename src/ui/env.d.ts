@@ -8,3 +8,5 @@
 declare module "*.css";
 /** `@opencode/ui/styles` is a CSS subpath export with no declaration file. */
 declare module "@opencode/ui/styles";
+/** Public v2 component tokens are also a CSS-only subpath. */
+declare module "@opencode/ui/styles/tokens";

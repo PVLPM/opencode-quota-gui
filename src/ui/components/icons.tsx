@@ -42,6 +42,17 @@ export function EyeIcon(props: { size?: number }): JSX.Element {
   );
 }
 
+/** The public window-analytics glyph depicts windows, not a chart. */
+export function AnalyticsIcon(): JSX.Element {
+  return svg(
+    <>
+      {path("M4 4v16h17")}
+      {path("M8 16v-5M13 16V7M18 16v-8")}
+    </>,
+    16,
+  );
+}
+
 export function EyeOffIcon(props: { size?: number }): JSX.Element {
   return svg(
     <>

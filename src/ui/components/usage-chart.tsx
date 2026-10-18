@@ -9,6 +9,7 @@ import {
   toBandPath,
   toLinePath,
 } from "../chart-geometry";
+import { createChartLayout } from "../chart-layout";
 import {
   formatApiEquivalentCost,
   formatBucketTick,
@@ -22,7 +23,7 @@ import {
  * Usage — stacked area chart (design spec §6, §10; R31, R32, R48).
  *
  * Five additive token categories stack in a fixed order and no segment can be
- * hidden; hover/focus highlights a segment and the tooltip always reports all
+ * hidden; transient hover/focus highlights a segment and the tooltip reports all
  * five plus the total. When stacking would be visually meaningless (a single
  * category, or a sliver invisible in every bucket) the chart falls back to one
  * totals series — a frontend rendering choice, never a setting or a payload
@@ -30,10 +31,9 @@ import {
  */
 export function UsageChart(props: { usage: Usage }): JSX.Element {
   const [active, setActive] = createSignal<number | undefined>(undefined);
-  const [pinned, setPinned] = createSignal(false);
   const [highlight, setHighlight] = createSignal<string | undefined>(undefined);
 
-  const size = DEFAULT_USAGE_SIZE;
+  const { size, ref } = createChartLayout(DEFAULT_USAGE_SIZE);
   const geometry = createMemo(() => buildUsageGeometry(props.usage.buckets, size));
   const totalsOnly = createMemo(() => shouldUseTotalsFallback(props.usage.buckets));
   const categoryTotals = createMemo(() =>
@@ -49,20 +49,39 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
   };
 
   function detach(): void {
-    if (pinned()) return;
     setActive(undefined);
   }
 
   function onKeyDown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
-      setPinned(false);
       setActive(undefined);
+      setHighlight(undefined);
     }
   }
 
   return (
     <div class="qg-usage">
-      <div class="qg-chart" data-highlight={highlight() === undefined ? undefined : "true"}>
+      <header class="qg-usage__headline">
+        <div>
+          <span class="qg-summary-label">Total tokens</span>
+          <strong class="qg-summary-number">{formatExactCount(props.usage.totals.total)}</strong>
+        </div>
+        <div>
+          <span class="qg-summary-label">API-equivalent estimate</span>
+          <span class="qg-summary-cost">
+            {formatApiEquivalentCost(props.usage.totals.apiEquivalentCostUsd)}
+          </span>
+        </div>
+        <span class="qg-section__meta">
+          {pluralize(props.usage.stepCount, "step")} ·{" "}
+          {pluralize(props.usage.sessionCount, "session")} · UTC
+        </span>
+      </header>
+      <div
+        ref={ref}
+        class="qg-chart"
+        data-highlight={highlight() === undefined ? undefined : "true"}
+      >
         <svg
           viewBox={`0 0 ${size.width} ${size.height}`}
           role="img"
@@ -179,8 +198,7 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
               <button
                 type="button"
                 class="qg-chart__hit"
-                aria-pressed={active() === index() ? "true" : "false"}
-                aria-label={`${formatBucketTick(bucket.startMs, props.usage.bucketUnit)}: total ${formatExactCount(bucket.tokens.total)} tokens, ${TOKEN_CATEGORIES.map((category) => `${category.label} ${formatExactCount(bucket.tokens[category.key])}`).join(", ")}`}
+                aria-label={`${formatBucketTick(bucket.startMs, props.usage.bucketUnit)} UTC: total ${formatExactCount(bucket.tokens.total)} tokens, ${TOKEN_CATEGORIES.map((category) => `${category.label} ${formatExactCount(bucket.tokens[category.key])}`).join(", ")}`}
                 style={{
                   left: `${((geometry().slotX(index()) - geometry().plot.left) / geometry().plot.width) * 100}%`,
                   width: `${(Math.max(geometry().slot, 1) / geometry().plot.width) * 100}%`,
@@ -189,10 +207,6 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
                 onPointerLeave={detach}
                 onFocus={() => setActive(index())}
                 onBlur={detach}
-                onClick={() => {
-                  setActive(index());
-                  setPinned(true);
-                }}
                 onKeyDown={onKeyDown}
               />
             )}
@@ -204,7 +218,7 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
             <output
               class="qg-tooltip"
               style={{
-                left: `${((geometry().slotX(active() ?? 0) + geometry().slot / 2) / size.width) * 100}%`,
+                left: `clamp(min(120px, 50%), ${((geometry().slotX(active() ?? 0) + geometry().slot / 2) / size.width) * 100}%, max(50%, calc(100% - 120px)))`,
                 top: "0%",
                 transform: "translate(-50%, -100%)",
               }}
@@ -212,7 +226,7 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
               <p class="qg-tooltip__head">
                 <span>
                   {formatBucketTick(bucket().startMs, props.usage.bucketUnit)} –{" "}
-                  {formatBucketTick(bucket().endMs, props.usage.bucketUnit)}
+                  {formatBucketTick(bucket().endMs, props.usage.bucketUnit)} UTC
                 </span>
                 <span class="qg-tooltip__total">{formatExactCount(bucket().tokens.total)}</span>
               </p>
@@ -226,41 +240,14 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
                   </div>
                 )}
               </For>
-              <Show when={pinned()}>
-                <p class="qg-tooltip__hint">Pinned — press Escape to dismiss</p>
-              </Show>
             </output>
           )}
         </Show>
       </div>
 
       <aside class="qg-usage__aside">
-        <div class="qg-totals">
-          <div class="qg-totals__row">
-            <span class="qg-totals__label">Total tokens</span>
-            <span class="qg-totals__value qg-totals__value--total qg-num">
-              {formatExactCount(props.usage.totals.total)}
-            </span>
-          </div>
-          <For each={categoryTotals()}>
-            {(category) => (
-              <div class="qg-totals__row">
-                <span class="qg-totals__label">{category.label}</span>
-                <span class="qg-totals__value">{formatExactCount(category.value)}</span>
-              </div>
-            )}
-          </For>
-          <div class="qg-totals__row">
-            <span class="qg-totals__label">API-equivalent</span>
-            <span class="qg-totals__value">
-              {formatApiEquivalentCost(props.usage.totals.apiEquivalentCostUsd)}
-            </span>
-          </div>
+        <div class="qg-usage__details">
           <p class="qg-totals__notes">
-            <span>
-              {pluralize(props.usage.stepCount, "step")} across{" "}
-              {pluralize(props.usage.sessionCount, "session")}
-            </span>
             <Show
               when={props.usage.totals.unpricedTokens > 0 || props.usage.totals.unknownTokens > 0}
             >
@@ -283,15 +270,13 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
               <button
                 type="button"
                 class="qg-legend__item"
-                aria-pressed={highlight() === category.key ? "true" : "false"}
+                aria-label={`Highlight ${category.label}`}
                 style={{ "--qg-swatch": `var(${category.colorVar})` }}
                 onPointerEnter={() => setHighlight(category.key)}
                 onPointerLeave={() => setHighlight(undefined)}
                 onFocus={() => setHighlight(category.key)}
                 onBlur={() => setHighlight(undefined)}
-                onClick={() =>
-                  setHighlight(highlight() === category.key ? undefined : category.key)
-                }
+                onKeyDown={onKeyDown}
               >
                 <span class="qg-legend__swatch" aria-hidden="true" />
                 <span class="qg-legend__label">{category.label}</span>
@@ -302,29 +287,33 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
         </div>
       </aside>
 
-      <table class="sr-only">
-        <caption>Token usage per {props.usage.bucketUnit}</caption>
-        <thead>
-          <tr>
-            <th scope="col">Bucket</th>
-            <For each={TOKEN_CATEGORIES}>{(category) => <th scope="col">{category.label}</th>}</For>
-            <th scope="col">Total</th>
-          </tr>
-        </thead>
-        <tbody>
-          <For each={props.usage.buckets}>
-            {(bucket) => (
-              <tr>
-                <th scope="row">{new Date(bucket.startMs).toISOString()}</th>
-                <For each={TOKEN_CATEGORIES}>
-                  {(category) => <td>{formatExactCount(bucket.tokens[category.key])}</td>}
-                </For>
-                <td>{formatExactCount(bucket.tokens.total)}</td>
-              </tr>
-            )}
-          </For>
-        </tbody>
-      </table>
+      <div class="sr-only">
+        <table>
+          <caption>Token usage per {props.usage.bucketUnit}</caption>
+          <thead>
+            <tr>
+              <th scope="col">Bucket</th>
+              <For each={TOKEN_CATEGORIES}>
+                {(category) => <th scope="col">{category.label}</th>}
+              </For>
+              <th scope="col">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            <For each={props.usage.buckets}>
+              {(bucket) => (
+                <tr>
+                  <th scope="row">{new Date(bucket.startMs).toISOString()}</th>
+                  <For each={TOKEN_CATEGORIES}>
+                    {(category) => <td>{formatExactCount(bucket.tokens[category.key])}</td>}
+                  </For>
+                  <td>{formatExactCount(bucket.tokens.total)}</td>
+                </tr>
+              )}
+            </For>
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

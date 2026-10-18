@@ -74,6 +74,11 @@ export function ProjectView(props: {
           fallback={<EmptyNotice message="No sessions had activity in this range." />}
         >
           <div class="qg-list qg-list--roots">
+            <div class="qg-list__head" aria-hidden="true">
+              <span>Session</span>
+              <span>Worktree</span>
+              <span>Tokens</span>
+            </div>
             <For each={props.snapshot.roots}>
               {(root) => (
                 <a

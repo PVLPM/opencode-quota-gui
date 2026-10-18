@@ -94,6 +94,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     group: "display",
     control: "select",
     label: "Label style",
+    help: "Full includes used or remaining beside the percentage; bare shows only the number.",
     options: [
       { value: "full", label: "Full" },
       { value: "bare", label: "Bare" },
@@ -344,6 +345,7 @@ export function displayPreferencesFromValues(
   const percentMode = values.percentDisplayMode === "used" ? "used" : "remaining";
   return {
     percentMode,
+    percentLabelStyle: values.percentLabelStyle === "bare" ? "bare" : "full",
     showRunway: values.quotaProjection === "runway",
     detailed: values.accountingDetail === "detailed",
   };

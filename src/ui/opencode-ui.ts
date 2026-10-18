@@ -8,6 +8,11 @@
  * primitives stays a one-file change.
  */
 import "@opencode/ui/styles";
+import "@opencode/ui/styles/tokens";
 
 export { Button, type ButtonProps } from "@opencode/ui/button";
+export { Icon } from "@opencode/ui/icon";
+export { SegmentedControl, SegmentedControlItem } from "@opencode/ui/segmented-control";
+export { Switch } from "@opencode/ui/switch";
 export { TextInput, type TextInputProps } from "@opencode/ui/text-input";
+export { Tooltip } from "@opencode/ui/tooltip";

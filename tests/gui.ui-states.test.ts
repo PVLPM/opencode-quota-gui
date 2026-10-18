@@ -9,6 +9,7 @@ import { buildRowKey, composeRowId } from "../src/contracts/identity";
 import type { RangeKey } from "../src/contracts/ranges";
 import {
   buildStepGeometry,
+  buildUsageGeometry,
   shouldUseTotalsFallback,
   THIN_SLICE_SHARE,
 } from "../src/ui/chart-geometry";
@@ -23,8 +24,10 @@ import {
 } from "../src/ui/dashboard-client";
 import {
   formatApiEquivalentCost,
+  formatBucketTick,
   formatPercent,
   formatRunway,
+  formatTimestamp,
   formatTokenCount,
 } from "../src/ui/format";
 import {
@@ -40,6 +43,7 @@ import {
   applyConflict,
   applyWriteResult,
   dirtyKeys,
+  displayPreferencesFromValues,
   fieldErrors,
   initialDraft,
   providerSelection,
@@ -135,8 +139,25 @@ beforeAll(async () => {
     root: path.join(repoRoot, "src/ui"),
     // The same Solid include as the client build, compiled for the server so a
     // node test can render the real components; only the target differs.
-    plugins: [solid({ include: [...SOLID_JSX_SOURCES], ssr: true })],
-    resolve: { dedupe: ["solid-js", "solid-js/web", "solid-js/store", "@solidjs/meta"] },
+    plugins: [
+      // The public tooltip imports Kobalte's client-only portal at module load.
+      // SSR asserts link semantics; the real tooltip gets browser keyboard/hover QA.
+      {
+        name: "tooltip-ssr-boundary",
+        enforce: "pre",
+        transform(_code, id) {
+          if (id.replaceAll("\\", "/").endsWith("/overlays/tooltip/tooltip.tsx"))
+            return "export function Tooltip(props) { return props.children }";
+        },
+      },
+      solid({ include: [...SOLID_JSX_SOURCES], ssr: true }),
+    ],
+    resolve: {
+      dedupe: ["solid-js", "solid-js/web", "solid-js/store", "@solidjs/meta"],
+    },
+    // The public package exports TSX source, not executable Node modules.
+    // Explicitly keep it inside the Solid/Babel pipeline in both test graphs.
+    ssr: { noExternal: ["@opencode/ui"] },
     logLevel: "silent",
     server: { middlewareMode: true },
     appType: "custom",
@@ -176,7 +197,7 @@ beforeAll(async () => {
         },
       ],
     },
-    ssr: { noExternal: ["solid-js", "solid-js/universal"] },
+    ssr: { noExternal: ["solid-js", "solid-js/universal", "@opencode/ui"] },
     logLevel: "silent",
     server: { middlewareMode: true },
     appType: "custom",
@@ -240,13 +261,70 @@ function homeProps(overrides: Record<string, unknown> = {}) {
     hiddenRows: [],
     stale: false,
     range: "7d" as const,
-    onToggleCard: noop,
-    onToggleRow: noop,
     ...overrides,
   };
 }
 
 describe("section state machine", () => {
+  it("keeps UTC day labels aligned with server buckets across local timezone boundaries", () => {
+    const midnight = Date.UTC(2026, 9, 19);
+    expect(formatBucketTick(midnight, "day")).toBe("19 Oct");
+    expect(formatBucketTick(midnight, "hour")).toBe("00:00");
+    expect(formatTimestamp(midnight)).toContain("UTC");
+  });
+
+  it("wires full and bare percentage labels for both display modes", async () => {
+    const module = await graph.load("/components/quota-card.tsx");
+    const valueText = module.rowValueText as (row: unknown, preferences: unknown) => string;
+    const row = percentRow({ percentUsed: 38, percentRemaining: 62 });
+    for (const percentDisplayMode of ["used", "remaining"]) {
+      const full = displayPreferencesFromValues({ percentDisplayMode, percentLabelStyle: "full" });
+      const bare = displayPreferencesFromValues({ percentDisplayMode, percentLabelStyle: "bare" });
+      expect(valueText(row, full)).toBe(
+        `${percentDisplayMode === "used" ? 38 : 62}% ${percentDisplayMode}`,
+      );
+      expect(valueText(row, bare)).toBe(`${percentDisplayMode === "used" ? 38 : 62}%`);
+    }
+  });
+
+  it("complements an opposite-only percentage and leaves absent percentages unlabelled", async () => {
+    const module = await graph.load("/components/quota-card.tsx");
+    const valueText = module.rowValueText as (row: unknown, preferences: unknown) => string;
+    const shownPercent = module.rowPercent as (
+      row: unknown,
+      preferences: unknown,
+    ) => number | undefined;
+    const remainingOnly = percentRow({ percentRemaining: 30, percentUsed: undefined });
+    const usedOnly = percentRow({ percentRemaining: undefined, percentUsed: 20 });
+    const neither = percentRow({ percentRemaining: undefined, percentUsed: undefined });
+    for (const percentLabelStyle of ["full", "bare"]) {
+      for (const percentDisplayMode of ["used", "remaining"]) {
+        const preferences = displayPreferencesFromValues({ percentDisplayMode, percentLabelStyle });
+        const suffix = percentLabelStyle === "full" ? ` ${percentDisplayMode}` : "";
+        expect(shownPercent(remainingOnly, preferences)).toBe(
+          percentDisplayMode === "used" ? 70 : 30,
+        );
+        expect(valueText(remainingOnly, preferences)).toBe(
+          `${percentDisplayMode === "used" ? 70 : 30}%${suffix}`,
+        );
+        expect(shownPercent(usedOnly, preferences)).toBe(percentDisplayMode === "used" ? 20 : 80);
+        expect(valueText(usedOnly, preferences)).toBe(
+          `${percentDisplayMode === "used" ? 20 : 80}%${suffix}`,
+        );
+        expect(shownPercent(neither, preferences)).toBeUndefined();
+        expect(valueText(neither, preferences)).toBe("—");
+      }
+    }
+  });
+
+  it("keeps chart inspection transient rather than exposing category filters or pinning", () => {
+    const source = readFileSync(path.join(repoRoot, "src/ui/components/usage-chart.tsx"), "utf8");
+    expect(source).toContain("onPointerLeave={() => setHighlight(undefined)}");
+    expect(source).toContain("onBlur={() => setHighlight(undefined)}");
+    expect(source).not.toContain("aria-pressed");
+    expect(source).not.toContain("setPinned");
+    expect(source).not.toContain("onClick=");
+  });
   it("shows a skeleton only on the first load", () => {
     expect(resolveLoadState<number>({ loading: true })).toEqual({ kind: "skeleton" });
     expect(resolveLoadState<number>({ loading: false })).toEqual({ kind: "skeleton" });
@@ -460,13 +538,12 @@ describe("home view composition", () => {
     expect(html).not.toContain("Five hour window");
     expect(html).not.toContain('aria-label="Show the Five hour window row"');
     expect(html).not.toContain('aria-label="Hide the Five hour window row"');
-    // The rows that are not hidden still render, with their own eye toggle.
+    // Home is read-only; visibility is managed exclusively in Settings.
     expect(html).toContain("Current balance");
-    expect(html).toContain('aria-label="Hide the Current balance row"');
-    // The card eye toggle stays, and nothing on Home claims to be pressed.
-    expect(html).toContain('aria-label="Hide the Synthetic Provider card"');
+    expect(html).not.toContain('aria-label="Hide the Current balance row"');
+    expect(html).not.toContain('aria-label="Hide the Synthetic Provider card"');
     expect(html.match(/aria-pressed="true"/g)).toBeNull();
-    expect(html).toContain('class="qg-eye"');
+    expect(html).not.toContain('class="qg-eye"');
   });
 
   it("says so when every row on a card is hidden, instead of claiming it has none", async () => {
@@ -572,6 +649,21 @@ describe("home view composition", () => {
 });
 
 describe("usage chart", () => {
+  it("reduces axis label density at narrow container widths", () => {
+    const buckets = Array.from({ length: 24 }, (_, index) => ({
+      startMs: NOW + index * HOUR_MS,
+      endMs: NOW + (index + 1) * HOUR_MS,
+      tokens: costed({ input: index + 1 }),
+    }));
+    const geometry = buildUsageGeometry(buckets, {
+      width: 291,
+      height: 220,
+      padding: { top: 12, right: 12, bottom: 24, left: 48 },
+    });
+    expect(geometry.labelIndexes.length).toBeLessThanOrEqual(3);
+    expect(geometry.labelIndexes[0]).toBe(0);
+    expect(geometry.labelIndexes.at(-1)).toBe(23);
+  });
   const stackedBuckets = [
     {
       startMs: NOW - DAY_MS,
@@ -614,6 +706,9 @@ describe("usage chart", () => {
       usage: usage("7d", stackedBuckets),
     });
     const table = html.slice(html.indexOf("<table"));
+    // A clipping wrapper is essential: an HTML table keeps its intrinsic minimum
+    // width even when the sr-only class requests 1px on the table itself.
+    expect(html).toContain('class="sr-only"><table>');
     expect(table).toContain("<caption>");
     // Bucket plus the five categories plus the total.
     expect(table.match(/scope="col"/g)?.length).toBe(7);
@@ -940,8 +1035,9 @@ describe("settings page", () => {
     expect(stringList(undefined)).toEqual([]);
   });
 
-  it("renders the requested groups, the read-only dashboard values, and the save bar", async () => {
+  it("renders groups, named visibility eyes, unknown hidden IDs, and the revision-checked save bar", async () => {
     const snapshot = settingsSnapshot();
+    snapshot.values["dashboard.hiddenCards"] = ["card-hidden", "unknown-retained"];
     const html = await renderView("/views/settings.tsx", "SettingsView", {
       snapshot,
       client: {
@@ -957,7 +1053,13 @@ describe("settings page", () => {
         importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
       },
       toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
-      catalog: { cards: [], rows: [] },
+      catalog: {
+        cards: [
+          { id: "card-visible", label: "Visible account" },
+          { id: "card-hidden", label: "Hidden account" },
+        ],
+        rows: [{ id: "row-visible", label: "Weekly quota" }],
+      },
       onReload: noop,
     });
     for (const title of [
@@ -970,14 +1072,25 @@ describe("settings page", () => {
       expect(html).toContain(title);
     }
     expect(html).toContain("4144");
+    expect(html).toContain('aria-label="Hide Visible account"');
+    expect(html).toContain('aria-label="Show Hidden account"');
+    expect(html).toContain('aria-label="Hide Weekly quota"');
+    expect(html).toContain("unknown-retained");
     expect(html).toContain("http://127.0.0.1:4144");
     expect(html).toContain("changing the port needs a restart");
     expect(html).toContain("No unsaved changes.");
+    expect(text(html)).toContain("saved as global defaults");
+    expect(text(html)).toContain("saving here does not edit them");
+    expect(text(html)).toContain("import may remain available after a successful copy");
+    expect(html).toContain("effective value inherited from");
     expect(html).toContain("inherited from opencode-quota/quota-toast.jsonc");
     expect(html).toContain("Preview import");
     expect(html).toContain("Affects toasts, TUI sidebar, and compact status only");
     // The library's own components render in the page: adoption is real, not a plan.
     expect(html).toContain('data-component="button-v2"');
+    expect(html).toContain('data-component="switch"');
+    expect(html).toContain('role="switch"');
+    expect(html).toContain('data-component="segmented-control-v2"');
     expect(html).toContain("text-input-v2");
   });
 });
@@ -1605,9 +1718,13 @@ describe("styles and dependency boundaries", () => {
       importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
     };
     const html = await renderView("/app.tsx", "App", { client });
-    // The shell boots: brand, range selector, settings link, and a first-load skeleton.
-    expect(html).toContain("OpenCode quota");
+    // Icon-only navigation retains explicit names and real route links.
+    expect(html).not.toContain("OpenCode quota");
+    expect(html).toContain('aria-label="Home"');
+    expect(html).toContain('aria-label="Settings"');
+    expect(html).toContain('href="#/?range=7d"');
     expect(html).toContain("Time range");
+    expect(html).toContain('data-component="segmented-control-v2"');
     expect(html).toContain("Settings");
     expect(html).toContain("qg-skeleton");
     expect(html).toContain("Connecting");
@@ -1615,10 +1732,18 @@ describe("styles and dependency boundaries", () => {
     expect(html).not.toContain("qg-card-grid");
   });
 
-  it("keeps the library's tokens in charge, with a local layer for what it leaves open", () => {
+  it("uses a scoped Console palette while retaining public-library typography and motion", () => {
     const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
-    expect(styles).toContain("var(--background-base)");
-    expect(styles).toContain("var(--text-strong)");
+    expect(styles).toContain("--qg-bg: #0a0a0a");
+    expect(styles).toContain("--qg-frame: #151515");
+    expect(styles).toContain("--qg-surface: #232323");
+    expect(styles).toContain("1056px");
+    expect(styles).toContain(".qg-app:has(.qg-form) .qg-toasts");
+    expect(styles).not.toContain(".qg-segmented");
+    expect(styles).not.toContain(".qg-switch");
+    expect(styles).toMatch(
+      /\.sr-only\s*\{[^}]*position: absolute;[^}]*width: 1px;[^}]*height: 1px;[^}]*overflow: hidden;/s,
+    );
     expect(styles).toContain("prefers-color-scheme: dark");
     expect(styles).toContain("prefers-reduced-motion");
     for (const token of ["input", "cache-read", "cache-write", "output", "reasoning"]) {

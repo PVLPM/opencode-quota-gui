@@ -6,9 +6,10 @@ import type {
   JsonValue,
   SettingsSnapshot,
 } from "../../contracts/dashboard";
+import { EyeToggle } from "../components/eye-toggle";
 import type { Toaster } from "../components/toast";
 import { DashboardError } from "../dashboard-client";
-import { Button, TextInput } from "../opencode-ui";
+import { Button, SegmentedControl, SegmentedControlItem, Switch, TextInput } from "../opencode-ui";
 import {
   applyConflict,
   applyWriteResult,
@@ -77,7 +78,7 @@ export function SettingsView(props: {
   const sourceNote = (key: string): string | undefined => {
     const source = props.snapshot.sources[key];
     if (!source || source === props.snapshot.pathLabel) return undefined;
-    return `inherited from ${source}`;
+    return `effective value inherited from ${source}`;
   };
 
   function edit(key: string, value: JsonValue | undefined): void {
@@ -100,7 +101,10 @@ export function SettingsView(props: {
         expectedRevision: draft().revision,
       });
       setDraft(applyWriteResult(result));
-      props.toaster.push("success", "Settings saved.");
+      props.toaster.push(
+        "success",
+        "Global defaults saved. Project and workspace overrides still apply.",
+      );
       await props.onReload();
     } catch (error) {
       if (isConfigChanged(error)) {
@@ -138,7 +142,10 @@ export function SettingsView(props: {
       const result = await props.client.importApply({ expectedRevision: current.expectedRevision });
       setPreview(undefined);
       setDraft(applyWriteResult(result));
-      props.toaster.push("success", "Import applied.");
+      props.toaster.push(
+        "success",
+        "Copied to global defaults. Project and workspace overrides still apply.",
+      );
       await props.onReload();
     } catch (error) {
       props.toaster.push(
@@ -161,18 +168,22 @@ export function SettingsView(props: {
       case "switch": {
         const switchValue = () => (field.clearable ? value() === "runway" : value() === true);
         return (
-          <label class="qg-switch">
-            <input
-              type="checkbox"
+          <>
+            <Switch
+              appearance="compact"
+              hideLabel
               checked={switchValue()}
-              disabled={!writable()}
-              onChange={(event) => {
-                const checked = event.currentTarget.checked;
+              disabled={!writable() || busy()}
+              onChange={(checked) => {
                 edit(field.key, field.clearable ? (checked ? "runway" : null) : checked);
               }}
-            />
-            <span>{switchValue() ? "On" : "Off"}</span>
-          </label>
+            >
+              {field.label}
+            </Switch>
+            <span class="qg-inherited" aria-hidden="true">
+              {switchValue() ? "On" : "Off"}
+            </span>
+          </>
         );
       }
       case "select":
@@ -181,7 +192,13 @@ export function SettingsView(props: {
             class="qg-input"
             aria-label={field.label}
             disabled={!writable()}
-            value={typeof value() === "string" ? (value() as string) : ""}
+            value={
+              typeof value() === "string"
+                ? (value() as string)
+                : field.key === "percentLabelStyle"
+                  ? "full"
+                  : ""
+            }
             onChange={(event) => edit(field.key, event.currentTarget.value)}
           >
             <For each={field.options ?? []}>
@@ -225,25 +242,18 @@ export function SettingsView(props: {
         const selection = () => providerSelection(value());
         return (
           <>
-            <fieldset class="qg-segmented">
-              <legend class="sr-only">Provider selection</legend>
-              <button
-                type="button"
-                aria-pressed={selection().mode === "auto" ? "true" : "false"}
-                disabled={!writable()}
-                onClick={() => edit(field.key, "auto")}
-              >
-                Automatic
-              </button>
-              <button
-                type="button"
-                aria-pressed={selection().mode === "manual" ? "true" : "false"}
-                disabled={!writable()}
-                onClick={() => edit(field.key, parseProviderIds(providerText()))}
-              >
-                Manual
-              </button>
-            </fieldset>
+            <SegmentedControl
+              aria-label="Provider selection"
+              value={selection().mode}
+              disabled={!writable() || busy()}
+              onChange={(mode) => {
+                if (mode === "auto") edit(field.key, "auto");
+                if (mode === "manual") edit(field.key, parseProviderIds(providerText()));
+              }}
+            >
+              <SegmentedControlItem value="auto">Automatic</SegmentedControlItem>
+              <SegmentedControlItem value="manual">Manual</SegmentedControlItem>
+            </SegmentedControl>
             <Show when={selection().mode === "manual"}>
               <TextInput
                 class="qg-input"
@@ -267,7 +277,7 @@ export function SettingsView(props: {
         return (
           <For each={OPENCODE_GO_WINDOWS}>
             {(window) => (
-              <label class="qg-switch">
+              <label class="qg-checkbox-option">
                 <input
                   type="checkbox"
                   checked={selected().includes(window)}
@@ -290,6 +300,8 @@ export function SettingsView(props: {
       }
       case "list": {
         const items = () => stringList(value());
+        const entries = () =>
+          field.key === "dashboard.hiddenCards" ? props.catalog.cards : props.catalog.rows;
         const labelFor = (id: string): string => {
           const entries =
             field.key === "dashboard.hiddenCards" ? props.catalog.cards : props.catalog.rows;
@@ -297,6 +309,37 @@ export function SettingsView(props: {
         };
         return (
           <>
+            <fieldset
+              class="qg-visibility-catalog"
+              aria-label={
+                field.key === "dashboard.hiddenCards"
+                  ? "Provider card visibility"
+                  : "Quota row visibility"
+              }
+            >
+              <For each={entries()}>
+                {(entry) => (
+                  <div class="qg-visibility-entry">
+                    <span>{entry.label}</span>
+                    <EyeToggle
+                      disabled={!writable() || busy()}
+                      pressed={items().includes(entry.id)}
+                      label={`${items().includes(entry.id) ? "Show" : "Hide"} ${entry.label}`}
+                      title={items().includes(entry.id) ? "Show" : "Hide"}
+                      onToggle={async () => {
+                        if (!writable()) return;
+                        edit(
+                          field.key,
+                          items().includes(entry.id)
+                            ? items().filter((id) => id !== entry.id)
+                            : [...items(), entry.id],
+                        );
+                      }}
+                    />
+                  </div>
+                )}
+              </For>
+            </fieldset>
             <Show
               when={items().length > 0}
               fallback={<span class="qg-inherited">Nothing is hidden.</span>}
@@ -329,6 +372,7 @@ export function SettingsView(props: {
               class="qg-input"
               disabled={!writable()}
               placeholder="id to hide"
+              aria-label={`Additional ${field.label.toLowerCase()} ID`}
               value={listDrafts()[field.key] ?? ""}
               onInput={(event) =>
                 setListDrafts((current) => ({ ...current, [field.key]: event.currentTarget.value }))
@@ -367,13 +411,22 @@ export function SettingsView(props: {
 
   return (
     <div class="qg-form">
+      <header class="qg-section__head">
+        <h1 class="qg-page-title">Settings</h1>
+        <span class="qg-section__meta">Display, visibility and preferences</span>
+      </header>
+      <p class="qg-group__note">
+        Changes on this page are saved as global defaults. Project and workspace overrides remain
+        effective; saving here does not edit them. The source beside each field identifies its
+        effective value.
+      </p>
       <section class="qg-group" aria-labelledby="qg-settings-import">
         <h2 class="qg-group__title" id="qg-settings-import">
           Import from inherited settings
         </h2>
         <p class="qg-group__note">
           {props.snapshot.import.available
-            ? `Lower layers supply ${props.snapshot.import.keyCount ?? 0} GUI keys. The import copies them into ${props.snapshot.pathLabel} revision-checked, and leaves the source files untouched.`
+            ? `Inherited sources supply ${props.snapshot.import.keyCount ?? 0} GUI keys. Import copies them into global defaults at ${props.snapshot.pathLabel} with a revision check, leaving source files untouched. Project and workspace overrides still apply, so import may remain available after a successful copy.`
             : "No inherited settings are available to import in this workspace."}
         </p>
         <Show when={props.snapshot.import.issues.length > 0}>
@@ -467,6 +520,7 @@ export function SettingsView(props: {
               class="qg-input"
               numeric
               readOnly
+              aria-label="Dashboard port"
               value={String(props.snapshot.dashboard.port)}
             />
           </div>
@@ -479,7 +533,12 @@ export function SettingsView(props: {
         <div class="qg-field">
           <span class="qg-field__label">Address</span>
           <div class="qg-field__control">
-            <TextInput class="qg-input" readOnly value={props.snapshot.dashboard.url} />
+            <TextInput
+              class="qg-input"
+              aria-label="Dashboard address"
+              readOnly
+              value={props.snapshot.dashboard.url}
+            />
           </div>
           <span class="qg-field__meta">
             <span>Bound to loopback only; the dashboard is not reachable from other machines.</span>

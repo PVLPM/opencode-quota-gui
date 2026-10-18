@@ -3,7 +3,6 @@ import { For, Show } from "solid-js";
 import type { AccountingUnit, ProviderCard, QuotaCardRow } from "../../contracts/dashboard";
 import { formatPercent, formatRunway, formatTimestamp } from "../format";
 import { visibleRows } from "../view-model";
-import { EyeToggle } from "./eye-toggle";
 
 /**
  * One provider account card (design spec §10 "Home").
@@ -18,6 +17,7 @@ import { EyeToggle } from "./eye-toggle";
 export interface DisplayPreferences {
   /** The frontend picks the shown percent; both numbers arrive in the row. */
   percentMode: "used" | "remaining";
+  percentLabelStyle?: "full" | "bare";
   showRunway: boolean;
   detailed: boolean;
 }
@@ -38,11 +38,10 @@ export function unitSuffix(unit: AccountingUnit | undefined): string {
 export function rowValueText(row: QuotaCardRow, preferences: DisplayPreferences): string {
   switch (row.kind) {
     case "percent": {
-      const percent =
-        preferences.percentMode === "used"
-          ? (row.percentUsed ?? row.percentRemaining)
-          : (row.percentRemaining ?? row.percentUsed);
-      return formatPercent(percent);
+      const value = formatPercent(rowPercent(row, preferences));
+      return preferences.percentLabelStyle === "bare" || value === "—"
+        ? value
+        : `${value} ${preferences.percentMode}`;
     }
     case "quantity": {
       if (!row.quantity) return "—";
@@ -56,29 +55,23 @@ export function rowValueText(row: QuotaCardRow, preferences: DisplayPreferences)
   }
 }
 
-/** The shown percent, or `undefined` when the row has none (no bar is drawn then). */
+/** Optional opposite-only values must be complemented, never relabelled unchanged. */
 export function rowPercent(row: QuotaCardRow, preferences: DisplayPreferences): number | undefined {
   if (row.kind !== "percent") return undefined;
-  return preferences.percentMode === "used"
-    ? (row.percentUsed ?? row.percentRemaining)
-    : (row.percentRemaining ?? row.percentUsed);
+  const direct = preferences.percentMode === "used" ? row.percentUsed : row.percentRemaining;
+  if (direct !== undefined) return direct;
+  const opposite = preferences.percentMode === "used" ? row.percentRemaining : row.percentUsed;
+  return opposite === undefined ? undefined : 100 - opposite;
 }
 
 export function QuotaCardView(props: {
   card: ProviderCard;
   preferences: DisplayPreferences;
   hiddenRows: string[];
-  cardHidden: boolean;
   stale: boolean;
-  onToggleRow: (rowId: string) => Promise<void>;
-  onToggleCard: (cardId: string) => Promise<void>;
 }): JSX.Element {
-  const hidden = () => new Set(props.hiddenRows);
   /**
-   * Rows hide by stable id, exactly like cards: a hidden row is not rendered at
-   * all, so the row eye only ever hides. Un-hiding lives in Settings → Visible
-   * cards and rows, which owns the list (invariant 8: hiding changes no payload
-   * and no polling).
+   * Visibility is presentation-only and managed in Settings, never on Home.
    */
   const shownRows = () => visibleRows(props.card.rows, props.hiddenRows);
 
@@ -97,12 +90,6 @@ export function QuotaCardView(props: {
             )}
           </span>
         </div>
-        <EyeToggle
-          pressed={props.cardHidden}
-          label={`${props.cardHidden ? "Show" : "Hide"} the ${props.card.providerLabel} card`}
-          title="Hide this card"
-          onToggle={() => props.onToggleCard(props.card.cardId)}
-        />
       </header>
 
       <Show when={props.card.errors.length > 0}>
@@ -140,9 +127,21 @@ export function QuotaCardView(props: {
         <div class="qg-card__rows">
           <For each={shownRows()}>
             {(row) => (
-              <div class="qg-row">
+              <div
+                class="qg-row"
+                data-kind={row.kind}
+                data-warning={
+                  row.kind === "percent" &&
+                  (row.percentUsed ?? 100 - (row.percentRemaining ?? 100)) >= 80
+                    ? "true"
+                    : undefined
+                }
+              >
                 <span class="qg-row__label">{row.label}</span>
                 <span class="qg-row__value">{rowValueText(row, props.preferences)}</span>
+                <Show when={row.countdown}>
+                  <span class="qg-row__reset">Resets in {row.countdown}</span>
+                </Show>
                 <Show when={rowPercent(row, props.preferences) !== undefined}>
                   <span class="qg-row__bar" aria-hidden="true">
                     <span
@@ -152,9 +151,8 @@ export function QuotaCardView(props: {
                     />
                   </span>
                 </Show>
-                <Show when={row.countdown ?? formatRunway(row.runway)}>
+                <Show when={props.preferences.showRunway ? formatRunway(row.runway) : undefined}>
                   <span class="qg-row__meta">
-                    <Show when={row.countdown}>{(countdown) => <span>{countdown()}</span>}</Show>
                     <Show
                       when={props.preferences.showRunway ? formatRunway(row.runway) : undefined}
                     >
@@ -176,14 +174,6 @@ export function QuotaCardView(props: {
                     </tbody>
                   </table>
                 </Show>
-                <span class="qg-row__toggle">
-                  <EyeToggle
-                    pressed={hidden().has(row.rowId)}
-                    label={`${hidden().has(row.rowId) ? "Show" : "Hide"} the ${row.label} row`}
-                    title="Hide this row"
-                    onToggle={() => props.onToggleRow(row.rowId)}
-                  />
-                </span>
               </div>
             )}
           </For>

@@ -5,14 +5,14 @@ import { EyeIcon, EyeOffIcon } from "./icons";
 /**
  * Visibility eye toggle (design spec §10, R33 / invariant 8).
  *
- * A 32px hit area with `aria-pressed` and a title-based tooltip. The toggle is
- * optimistic — the row or card hides immediately — and reverts if the write
- * fails, because visibility never changes a payload, only presentation.
+ * Settings-only draft control. Changes join the revision-checked settings save;
+ * visibility never changes a payload or provider polling.
  */
 export function EyeToggle(props: {
   pressed: boolean;
   label: string;
   title: string;
+  disabled?: boolean;
   onToggle: () => Promise<void>;
 }): JSX.Element {
   const [pending, setPending] = createSignal(false);
@@ -38,7 +38,7 @@ export function EyeToggle(props: {
       aria-pressed={props.pressed ? "true" : "false"}
       aria-label={props.label}
       title={failed() ? `${props.title} — the change was not saved` : props.title}
-      disabled={pending()}
+      disabled={props.disabled || pending()}
       onClick={() => {
         void toggle();
       }}

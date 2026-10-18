@@ -70,7 +70,7 @@ export function SessionView(props: {
           <h2 class="qg-section__title" id="qg-session-nodes">
             Session tree
           </h2>
-          <span class="qg-section__meta">arbitrary depth · own tokens shown as secondary text</span>
+          <span class="qg-section__meta">Own usage and descendant totals · UTC</span>
         </header>
         <div class="qg-nodes">
           <For each={windowed()}>

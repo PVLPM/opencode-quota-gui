@@ -59,18 +59,26 @@ export function formatPercent(value: number | undefined): string {
   return `${value.toFixed(value < 10 ? 1 : 0)}%`;
 }
 
-/** Timestamps in the browser's locale; the dashboard never shows raw epochs. */
+/** UTC throughout: the analytics server's day boundaries are UTC too. */
 export function formatTimestamp(ms: number | undefined): string {
   if (ms === undefined || !Number.isFinite(ms)) return "—";
-  return new Date(ms).toLocaleString();
+  return new Date(ms).toLocaleString("en-GB", { timeZone: "UTC", timeZoneName: "short" });
 }
 
 export function formatClock(ms: number): string {
-  return new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return new Date(ms).toLocaleTimeString("en-GB", {
+    timeZone: "UTC",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 export function formatDay(ms: number): string {
-  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(ms).toLocaleDateString("en-GB", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 /** Bucket ticks follow the bucket unit the server reported (R28–R30). */

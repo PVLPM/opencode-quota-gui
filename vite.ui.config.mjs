@@ -32,7 +32,12 @@ const rootDir = path.dirname(fileURLToPath(import.meta.url));
  * pipeline can compile it. The patterns match the physical pnpm path as well,
  * so the include never depends on how the store is laid out.
  */
-export const SOLID_JSX_SOURCES = [/src\/ui\//, /@opencode\/ui\//, /@kobalte\/core\//];
+export const SOLID_JSX_SOURCES = [
+  /src\/ui\//,
+  /@opencode\/ui\//,
+  /@kobalte\/core\//,
+  /@kitlangton\/solid-motion\//,
+];
 
 /**
  * The UI build owns `dist/ui` and nothing else in `dist/` (`emptyOutDir: false`

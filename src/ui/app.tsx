@@ -6,11 +6,13 @@ import type {
   SessionSnapshot,
   SettingsSnapshot,
 } from "../contracts/dashboard";
-import { RANGE_KEYS, type RangeKey } from "../contracts/ranges";
+import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
+import { AnalyticsIcon } from "./components/icons";
 import { ProgressLine, QueryState, ReloadRequired, StaleNotice } from "./components/states";
 import { createToaster, type Toaster, ToastRegion } from "./components/toast";
 import type { ConnectionState, DashboardClient } from "./dashboard-client";
 import { RANGE_LABELS } from "./format";
+import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
 import {
   formatHash,
   type Location,
@@ -94,6 +96,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     parseLocation(currentHash(), readStoredRange(browserStorage())),
   );
   const [connection, setConnection] = createSignal<ConnectionState>(props.client.connection());
+  const [navTooltip, setNavTooltip] = createSignal<"home" | "settings" | undefined>();
   const [contractMismatch, setContractMismatch] = createSignal<string | undefined>(undefined);
   const [reloadToken, setReloadToken] = createSignal(0);
   const [homeSnapshot, setHomeSnapshot] = createSignal<HomeSnapshot | undefined>(undefined);
@@ -109,7 +112,16 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const preferences = createMemo(() =>
     displayPreferencesFromValues(settingsQuery.data()?.values ?? {}),
   );
-  const revision = () => settingsQuery.data()?.revision;
+
+  createEffect(() => {
+    if (route().name !== "settings" || homeSnapshot()) return;
+    void props.client
+      .home({ range: range() })
+      .then(setHomeSnapshot)
+      .catch(() => {
+        // Settings remain usable if the optional visibility catalog is unavailable.
+      });
+  });
 
   /**
    * The visibility lists name what they hide. The home snapshot carries the
@@ -206,37 +218,63 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     <div class="qg-app">
       <header class="qg-topbar">
         <div class="qg-topbar__brand">
-          <a class="qg-topbar__title" href={formatHash({ name: "home" }, range())}>
-            OpenCode quota
-          </a>
+          <Tooltip value="Home" forceOpen={navTooltip() === "home"}>
+            <a
+              class="qg-topbar__link qg-nav-icon"
+              aria-label="Home"
+              onFocus={() => setNavTooltip("home")}
+              onBlur={() => setNavTooltip(undefined)}
+              onPointerEnter={() => setNavTooltip("home")}
+              onPointerLeave={() => setNavTooltip(undefined)}
+              onClick={() => setNavTooltip(undefined)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setNavTooltip(undefined);
+              }}
+              aria-current={route().name === "home" ? "page" : undefined}
+              href={formatHash({ name: "home" }, range())}
+            >
+              <AnalyticsIcon />
+            </a>
+          </Tooltip>
         </div>
         <div class="qg-topbar__actions">
           <Show when={routeShowsRangeSelector(route())}>
-            <fieldset class="qg-segmented">
-              <legend class="sr-only">Time range</legend>
+            <SegmentedControl
+              class="qg-range"
+              aria-label="Time range"
+              value={range()}
+              onChange={(value) => {
+                if (isRangeKey(value)) updateRange(value);
+              }}
+            >
               {RANGE_KEYS.map((key) => (
-                <button
-                  type="button"
-                  aria-pressed={range() === key ? "true" : "false"}
-                  onClick={() => updateRange(key)}
-                >
-                  {RANGE_LABELS[key] ?? key}
-                </button>
+                <SegmentedControlItem value={key}>{RANGE_LABELS[key] ?? key}</SegmentedControlItem>
               ))}
-            </fieldset>
+            </SegmentedControl>
           </Show>
           <Show when={connection() !== "live"}>
             <span class="qg-stale" aria-live="polite">
               {connection() === "connecting" ? "Connecting…" : "Reconnecting — data may be stale"}
             </span>
           </Show>
-          <a
-            class="qg-topbar__link"
-            aria-current={route().name === "settings" ? "page" : undefined}
-            href={formatHash({ name: "settings" }, range())}
-          >
-            Settings
-          </a>
+          <Tooltip value="Settings" forceOpen={navTooltip() === "settings"}>
+            <a
+              class="qg-topbar__link"
+              aria-label="Settings"
+              onFocus={() => setNavTooltip("settings")}
+              onBlur={() => setNavTooltip(undefined)}
+              onPointerEnter={() => setNavTooltip("settings")}
+              onPointerLeave={() => setNavTooltip(undefined)}
+              onClick={() => setNavTooltip(undefined)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setNavTooltip(undefined);
+              }}
+              aria-current={route().name === "settings" ? "page" : undefined}
+              href={formatHash({ name: "settings" }, range())}
+            >
+              <Icon name="settings-gear" />
+            </a>
+          </Tooltip>
         </div>
       </header>
 
@@ -252,14 +290,12 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                 range={range()}
                 reloadToken={reloadToken()}
                 reconnectEpoch={reconnectEpoch()}
-                settings={{ revision }}
                 peek={{
                   preferences: preferences(),
                   hiddenCards: settingsQuery.data()?.visibility.hiddenCards ?? [],
                   hiddenRows: settingsQuery.data()?.visibility.hiddenRows ?? [],
                 }}
                 connection={connection()}
-                toaster={toaster}
                 onSnapshot={setHomeSnapshot}
               />
             </Match>
@@ -319,28 +355,22 @@ function HomeRoute(props: {
   range: RangeKey;
   reloadToken: number;
   reconnectEpoch: number;
-  settings: { revision: () => string | undefined };
   peek: {
     preferences: ReturnType<typeof displayPreferencesFromValues>;
     hiddenCards: string[];
     hiddenRows: string[];
   };
   connection: ConnectionState;
-  toaster: Toaster;
   onSnapshot: (snapshot: HomeSnapshot | undefined) => void;
 }): JSX.Element {
   const query = createQuery<HomeSnapshot>(() => props.client.home({ range: props.range }));
-  // Optimistic visibility: the toggle applies at once and reverts if the write fails.
-  const [optimistic, setOptimistic] = createSignal<
-    { hiddenCards: string[]; hiddenRows: string[] } | undefined
-  >(undefined);
   /**
    * The reconnect epoch this route's payload is known to be fresh for. A refetch
    * that only starts after a reconnect must land before the marker clears.
    */
   const [freshEpoch, setFreshEpoch] = createSignal(0);
-  const hiddenCards = () => optimistic()?.hiddenCards ?? props.peek.hiddenCards;
-  const hiddenRows = () => optimistic()?.hiddenRows ?? props.peek.hiddenRows;
+  const hiddenCards = () => props.peek.hiddenCards;
+  const hiddenRows = () => props.peek.hiddenRows;
 
   createEffect(() => {
     const epoch = props.reconnectEpoch;
@@ -356,25 +386,6 @@ function HomeRoute(props: {
   createEffect(() => {
     props.onSnapshot(query.data());
   });
-
-  async function writeVisibility(next: {
-    hiddenCards: string[];
-    hiddenRows: string[];
-  }): Promise<void> {
-    setOptimistic(next);
-    try {
-      const expectedRevision = props.settings.revision();
-      if (expectedRevision === undefined) {
-        throw new Error("Settings are not loaded yet.");
-      }
-      await props.client.saveVisibility({ ...next, expectedRevision });
-      await query.run();
-      setOptimistic(undefined);
-    } catch (error) {
-      setOptimistic(undefined);
-      throw error;
-    }
-  }
 
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
@@ -403,20 +414,6 @@ function HomeRoute(props: {
             hiddenRows={hiddenRows()}
             stale={stale || staleNow()}
             range={props.range}
-            onToggleCard={async (cardId) => {
-              const next = hiddenCards().includes(cardId)
-                ? hiddenCards().filter((id) => id !== cardId)
-                : [...hiddenCards(), cardId];
-              await writeVisibility({ hiddenCards: next, hiddenRows: hiddenRows() });
-              props.toaster.push("success", next.includes(cardId) ? "Card hidden." : "Card shown.");
-            }}
-            onToggleRow={async (rowId) => {
-              const next = hiddenRows().includes(rowId)
-                ? hiddenRows().filter((id) => id !== rowId)
-                : [...hiddenRows(), rowId];
-              await writeVisibility({ hiddenCards: hiddenCards(), hiddenRows: next });
-              props.toaster.push("success", next.includes(rowId) ? "Row hidden." : "Row shown.");
-            }}
           />
         )}
       />

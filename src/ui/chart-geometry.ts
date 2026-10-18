@@ -182,7 +182,7 @@ export function buildUsageGeometry(
     yMax: yMaxRaw,
     ticks: buildTicks(yMaxRaw, 4, plot),
     pointIndexes: buckets.map((_, index) => index),
-    labelIndexes: pickLabelIndexes(count, 6),
+    labelIndexes: pickLabelIndexes(count, Math.max(2, Math.min(6, Math.floor(plot.width / 64)))),
     totalY,
     totalEdgeY,
     slotX,
@@ -344,7 +344,7 @@ export function buildStepGeometry(
     totalRuns,
     compaction,
     stepX,
-    labelIndexes: pickLabelIndexes(count, 6),
+    labelIndexes: pickLabelIndexes(count, Math.max(2, Math.min(6, Math.floor(plot.width / 64)))),
   };
 }
 

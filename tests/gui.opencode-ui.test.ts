@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 
 /**
  * Public UI library adoption (design spec §11.1; R36).
@@ -14,7 +15,16 @@ import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WrapperPath = "src/ui/opencode-ui.ts";
-const START_SUBPATHS = ["/button", "/text-input", "/styles"];
+const START_SUBPATHS = [
+  "/button",
+  "/text-input",
+  "/styles",
+  "/styles/tokens",
+  "/icon",
+  "/tooltip",
+  "/switch",
+  "/segmented-control",
+];
 
 function readJson(relativePath: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path.join(repoRoot, relativePath), "utf8")) as Record<
@@ -46,6 +56,11 @@ function librarySpecifiers(source: string): string[] {
 }
 
 describe("public UI library adoption", () => {
+  it("compiles the JSX shipped by the public segmented control's installed motion dependency", () => {
+    const source = "node_modules/@kitlangton/solid-motion/dist/source/motion/index.jsx";
+    expect(SOLID_JSX_SOURCES.some((pattern) => pattern.test(source))).toBe(true);
+    expect(SOLID_JSX_SOURCES.some((pattern) => pattern.test("src/gui/server.ts"))).toBe(false);
+  });
   it("pins the library, its peer, and the build tooling to exact versions", () => {
     expect(devDependencies["@opencode/ui"]).toBe("2.0.32");
     expect(devDependencies["@solidjs/meta"]).toBe("0.29.4");

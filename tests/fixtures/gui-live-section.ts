@@ -33,8 +33,6 @@ export function LiveHomeSection(props: {
         get range() {
           return props.range();
         },
-        onToggleCard: async () => {},
-        onToggleRow: async () => {},
       }),
   });
 }
