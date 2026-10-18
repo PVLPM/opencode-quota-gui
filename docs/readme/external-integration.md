@@ -6,7 +6,7 @@ OpenCode Quota can share its cached quota data with scripts, status bars, CI, an
 
 | What you need | Use |
 | --- | --- |
-| Run a command and get JSON | `opencode-quota show --json` |
+| Run a command and get JSON | `npx opencode-quota-gui show --json` |
 | Read the same JSON often | Export file |
 | Send numbers to a monitoring system | OpenTelemetry metrics |
 
@@ -15,17 +15,17 @@ OpenCode Quota can share its cached quota data with scripts, status bars, CI, an
 Use this for scripts and CI:
 
 ```bash
-opencode-quota show --json
+npx opencode-quota-gui show --json
 ```
 
 It works with OpenCode closed and reads cached data only. It runs with your terminal's settings; see [Terminal commands](troubleshooting.md#terminal-commands).
 
 ```bash
 # Only Copilot
-opencode-quota show --json --provider copilot
+npx opencode-quota-gui show --json --provider copilot
 
 # Exit with an error when comparable quota is below 5% (for example in CI)
-npx @slkiser/opencode-quota show --json --threshold 5
+npx opencode-quota-gui show --json --threshold 5
 ```
 
 `--threshold` exit codes:
@@ -41,7 +41,7 @@ npx @slkiser/opencode-quota show --json --threshold 5
 Some Copilot rows are values, not percentages, so select a percentage row instead of taking the first one:
 
 ```bash
-opencode-quota show --json --provider copilot \
+npx opencode-quota-gui show --json --provider copilot \
   | jq -r '(.providers.copilot.entries? // []) | map(select(.renderType == "percent" and .percentRemaining != null)) | first | .percentRemaining // empty'
 ```
 

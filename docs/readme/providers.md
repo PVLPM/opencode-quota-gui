@@ -105,7 +105,7 @@ These show only your own member API key's usage, not the whole organization's.
 Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Run the guided setup:
 
 ```bash
-npx @slkiser/opencode-quota@latest provider add
+npx opencode-quota-gui provider add
 ```
 
 It asks how the provider works, previews the exact global config change, and asks before writing. It never asks for a response body, credential, or secret value.
@@ -392,11 +392,11 @@ claude auth status
 
 ### Cursor
 
-Use companion plugin [`cursor-opencode-provider`](https://github.com/oakimov/cursor-opencode-provider#readme). Add its OpenCode 2 entry **before** `@slkiser/opencode-quota` in `opencode.json`:
+Use companion plugin [`cursor-opencode-provider`](https://github.com/oakimov/cursor-opencode-provider#readme). Add its OpenCode 2 entry **before** the `opencode-quota-gui` entry in `opencode.json`:
 
 ```jsonc
 {
-  "plugin": ["cursor-opencode-provider/plugin/opencode2", "@slkiser/opencode-quota"],
+  "plugin": ["cursor-opencode-provider/plugin/opencode2", "opencode-quota-gui"],
 }
 ```
 
@@ -434,7 +434,7 @@ OpenCode Quota's Google integrations use independent community companion plugins
 
 ### Google AGY
 
-Use companion plugin [`@anthonyhaussman/opencode-agy-auth`](https://github.com/anthonyhaussman/opencode-agy-auth). OpenCode 2 needs its OpenCode 2 build, currently the alpha: `@anthonyhaussman/opencode-agy-auth@alpha`. Add it **before** `@slkiser/opencode-quota` in `opencode.json`, then sign in once and choose **Antigravity CLI (OAuth)**:
+Use companion plugin [`@anthonyhaussman/opencode-agy-auth`](https://github.com/anthonyhaussman/opencode-agy-auth). OpenCode 2 needs its OpenCode 2 build, currently the alpha: `@anthonyhaussman/opencode-agy-auth@alpha`. Add it **before** the OpenCode Quota plugin entry in `opencode.json`, then sign in once and choose **Antigravity CLI (OAuth)**:
 
 ```bash
 opencode auth login google-agy
@@ -450,7 +450,7 @@ opencode auth login google-agy
 
 Gemini CLI works only with Gemini Code Assist Standard or Enterprise (organization) accounts. Google ended personal Gemini Code Assist accounts (individual, AI Pro, and AI Ultra) on 2026-06-18; see [Google's notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals). Personal Google users should use [Google AGY](#google-agy-quick-setup).
 
-Use companion plugin [`opencode-gemini-auth`](https://github.com/jenslys/opencode-gemini-auth#readme) 2.x, which supports OpenCode 2. Add it **before** `@slkiser/opencode-quota` in `opencode.json`, then sign in once and choose **OAuth with Google (Gemini CLI)**:
+Use companion plugin [`opencode-gemini-auth`](https://github.com/jenslys/opencode-gemini-auth#readme) 2.x, which supports OpenCode 2. Add it **before** the OpenCode Quota plugin entry in `opencode.json`, then sign in once and choose **OAuth with Google (Gemini CLI)**:
 
 ```bash
 opencode auth login google
@@ -584,7 +584,7 @@ Zen uses your OpenCode Console sign-in from OpenCode 2; no cookie or workspace I
 
 1. Run `opencode auth login opencode`, sign in to the Console in your browser, and pick the organization to track.
 2. To track another organization, sign in again and pick it. With several saved sign-ins, `opencode auth switch opencode` picks the active one.
-3. Check it with `/quota_status` in OpenCode, or `opencode-quota status` in a terminal.
+3. Check it with `/quota_status` in OpenCode, or `npx opencode-quota-gui status` in a terminal.
 
 - Inside OpenCode, an expired token is refreshed; the terminal command does not refresh it.
 - An OpenCode API key alone is not a Console sign-in. Without a sign-in, auto mode skips Zen; include `opencode` in `enabledProviders` to see a sign-in hint instead.

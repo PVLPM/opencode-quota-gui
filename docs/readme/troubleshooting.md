@@ -4,11 +4,11 @@
 
 ## First checks
 
-1. Run `/quota_status` inside OpenCode, or `opencode-quota status` in a terminal. Both show which config, providers, logins, and local files OpenCode Quota found.
+1. Run `/quota_status` inside OpenCode, or `npx opencode-quota-gui status` in a terminal (short `opencode-quota-gui status` if you installed it). Both show which config, providers, logins, and local files OpenCode Quota found.
 2. Find the provider or feature that fails, and follow the matching fix below.
 3. Restart OpenCode after changing config or logins.
 
-Every provider missing? Check that `@slkiser/opencode-quota` is in the `plugin` list of `opencode.jsonc` or `.json`. That one entry also loads the TUI; no `tui.json` entry is needed.
+Every provider missing? Check that the `opencode-quota-gui` entry (or your local tarball spec) is in the `plugin` list of `opencode.jsonc` or `.json`. That one entry also loads the TUI and the dashboard; no `tui.json` entry is needed.
 
 ## Logins
 
@@ -32,7 +32,7 @@ The TUI, Web, and Desktop get their numbers from OpenCode's background service. 
 
 ## Terminal commands
 
-`opencode-quota show` and `opencode-quota status` run in your terminal, not in OpenCode:
+`npx opencode-quota-gui show` and `npx opencode-quota-gui status` run in your terminal, not in OpenCode:
 
 - They work with OpenCode closed and read logins from `opencode.db` read-only.
 - They never refresh a token, so a sign-in can show as expired (for example `Token expired`) until you open OpenCode.
@@ -51,7 +51,7 @@ The TUI, Web, and Desktop get their numbers from OpenCode's background service. 
 | TUI toast is missing                                        | Check `enableToast`, `showOnIdle`, `showOnQuestion`, and `showOnCompact`. Toasts appear only in the TUI. |
 | Token reports are empty                                     | Start OpenCode once so it creates `opencode.db`, then use a model.                                       |
 | Pricing looks old                                           | Run `/pricing_refresh`.                                                                                  |
-| Web report columns do not line up                           | Expected: Web uses a proportional font. Use the TUI or `npx @slkiser/opencode-quota show`.               |
+| Web report columns do not line up                           | Expected: Web uses a proportional font. Use the TUI or `npx opencode-quota-gui show`.                    |
 | Terminal shows a sign-in as expired but OpenCode shows data | The terminal never refreshes tokens. Open OpenCode (or use that provider in it) once, then retry.        |
 | The updater reports findings or fails                       | See [Updating safely](updating.md#what-stays-manual). Never paste credential values into reports.        |
 
@@ -66,7 +66,7 @@ Run `/quota_status` first and check that provider's section. Setup steps and API
 
 | Symptom                                    | Fix |
 | ------------------------------------------ | --- |
-| Config is rejected                         | Run `opencode-quota provider add` and keep `quotaProviders` in global OpenCode JSONC/JSON. Remove `customSources`, unknown fields, duplicate IDs/request identities, or overlapping model coverage. |
+| Config is rejected                         | Run `npx opencode-quota-gui provider add` and keep `quotaProviders` in global OpenCode JSONC/JSON. Remove `customSources`, unknown fields, duplicate IDs/request identities, or overlapping model coverage. |
 | Definition is `unavailable`                | Confirm OpenCode reports the exact `providerId`. With `onlyCurrentModel`, the model id (without provider prefix) must match `modelIds`, or omit `modelIds`. |
 | `missing_credential`                       | Set the `apiKeyEnv` variable, trusted global `provider.<providerId>.options.apiKey`, or an API-key login saved in OpenCode 2 for that provider id. |
 | `http_error`, `timeout`, or response error | Check the endpoint and its response format. `/quota_status` intentionally hides URLs, request/response contents, raw errors, and secret material. |
@@ -125,7 +125,7 @@ Check `copilot_quota_auth`, `deployment`, `api_host`, `enterprise_host_source`, 
 
 | Symptom                                   | Fix |
 | ----------------------------------------- | --- |
-| Cursor not detected                       | Put `cursor-opencode-provider/plugin/opencode2` before `@slkiser/opencode-quota` in `opencode.json`. |
+| Cursor not detected                       | Put `cursor-opencode-provider/plugin/opencode2` before the OpenCode Quota plugin entry in `opencode.json`. |
 | Cursor login missing                      | Run `/connect` → **Cursor** in OpenCode, or set `CURSOR_API_KEY`. |
 | Quota shows but no remaining percentage   | Set `cursorPlan` or `cursorIncludedApiUsd`. |
 | Billing cycle looks wrong                 | Set `cursorBillingCycleStartDay` to your billing day. |
@@ -141,7 +141,7 @@ Check the Alibaba login, tier, state-file path, and `alibaba_coding_plan` live c
 | Symptom              | Fix |
 | -------------------- | --- |
 | API key not detected | See [API keys](providers.md#api-keys). Repo-local provider secrets are ignored. |
-| Limits need tuning   | Run `opencode-quota provider add`, choose local estimate, and use the `alibaba-coding-plan` id with its five-hour, weekly, and monthly rolling windows. |
+| Limits need tuning   | Run `npx opencode-quota-gui provider add`, choose local estimate, and use the `alibaba-coding-plan` id with its five-hour, weekly, and monthly rolling windows. |
 | Counters do not move | Make sure the current model is `alibaba/*` or `alibaba-cn/*`. |
 | Quota seems stale    | Check the state-file path shown in `/quota_status`. |
 
@@ -178,7 +178,7 @@ Check the `google_agy` section.
 
 | Symptom                             | Fix |
 | ----------------------------------- | --- |
-| Companion missing                   | Put `@anthonyhaussman/opencode-agy-auth` before `@slkiser/opencode-quota` in `opencode.json`. |
+| Companion missing                   | Put `@anthonyhaussman/opencode-agy-auth` before the OpenCode Quota plugin entry in `opencode.json`. |
 | Provider not enabled in manual mode | Include `google-agy` in `enabledProviders`. |
 | Login missing                       | Run `opencode auth login google-agy`. |
 | Project missing                     | Set `OPENCODE_AGY_PROJECT_ID` or `provider.google-agy.options.projectId`. |
@@ -193,7 +193,7 @@ Gemini CLI works only with Gemini Code Assist Standard or Enterprise (organizati
 
 | Symptom                             | Fix |
 | ----------------------------------- | --- |
-| Companion missing                   | Put `opencode-gemini-auth` before `@slkiser/opencode-quota` in `opencode.json`. |
+| Companion missing                   | Put `opencode-gemini-auth` before the OpenCode Quota plugin entry in `opencode.json`. |
 | Provider not enabled in manual mode | Include `google-gemini-cli` in `enabledProviders`. |
 | Login missing                       | Run `opencode auth login google`. |
 | Project missing                     | Set `provider.google.options.projectId`, `OPENCODE_GEMINI_PROJECT_ID`, `GOOGLE_CLOUD_PROJECT`, or `GOOGLE_CLOUD_PROJECT_ID`. |

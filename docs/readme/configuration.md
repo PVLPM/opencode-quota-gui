@@ -115,7 +115,7 @@ Session totals count only the current session by default. `sessionTokenScope: "t
 A custom provider connects OpenCode Quota to a provider that is not built in, or tunes a maintained local estimate. Use the guided command:
 
 ```bash
-npx @slkiser/opencode-quota@latest provider add
+npx opencode-quota-gui provider add
 ```
 
 - It asks what kind of provider you have, previews the full merged global config, and asks before writing. It never asks for a response body, credential, or secret.
@@ -183,7 +183,7 @@ Without a `quota-toast` file, the guided command writes `experimental.quotaToast
 
 ## Full configuration reference
 
-Most settings go in the `opencode-quota/quota-toast.jsonc` or `.json` file described above. The guided editor keeps `quotaProviders` in that file when it exists; otherwise it uses the global OpenCode JSONC/JSON `experimental.quotaToast` section; do not duplicate it in a second file. Existing `experimental.quotaToast` settings still work. To also mirror settings into `experimental.quotaToast` for another tool, run `npx @slkiser/opencode-quota init --sync-legacy-config`.
+Most settings go in the `opencode-quota/quota-toast.jsonc` or `.json` file described above. The guided editor keeps `quotaProviders` in that file when it exists; otherwise it uses the global OpenCode JSONC/JSON `experimental.quotaToast` section; do not duplicate it in a second file. Existing `experimental.quotaToast` settings still work. To also mirror settings into `experimental.quotaToast` for another tool, run `npx opencode-quota-gui init --sync-legacy-config`.
 
 Provider credentials (API keys, cookies, tokens) are never set here. See [API keys](providers.md#api-keys) and each provider's [setup notes](providers.md#provider-setup-notes).
 

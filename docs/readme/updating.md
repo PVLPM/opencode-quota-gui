@@ -9,23 +9,24 @@
 3. Preview. This changes nothing:
 
    ```bash
-   npx @slkiser/opencode-quota@latest update --dry-run
+   npx opencode-quota-gui update --dry-run
    ```
 
 4. Read the preview. If it looks right, apply it:
 
    ```bash
-   npx @slkiser/opencode-quota@latest update
+   npx opencode-quota-gui update
    ```
 
    It asks once before changing anything. For scripts, `update --yes` skips the question. It still prints the full preview and applies only the safe config edits and verified cache cleanup, never secret changes.
 
-5. Restart OpenCode, then run `/quota_status` (or `opencode-quota status` in a terminal).
+5. Restart OpenCode, then run `/quota_status` (or `npx opencode-quota-gui status`).
 
 Good to know:
 
-- `npx` downloads and runs the latest CLI before the updater can print anything. The "preview first" promise covers what the updater changes: OpenCode config files and OpenCode Quota package caches.
+- `npx` runs the published CLI without a global install; if you installed the package, `opencode-quota-gui update ...` runs the same commands. For a pre-release local tarball, build and pack it and set the optional `OPENCODE_QUOTA_PLUGIN_SPEC` override to its absolute `file:` URL first (see the [README quick start](../../README.md#quick-start)); `update` then targets that tarball instead of the npm package. The "preview first" promise covers what the updater changes: OpenCode config files and OpenCode Quota package caches.
 - The updater builds one plan, prints all of it, then either stops or applies that same plan.
+- Recognized quota plugin specs follow the independent `opencode-quota-gui` package identity. Legacy `@slkiser/opencode-quota` entries, config, and package caches are migration sources only: the preview shows exactly what would move, and nothing is rewired silently.
 
 ## Moving to OpenCode 2
 
@@ -37,11 +38,11 @@ Good to know:
 
 What changed in `5.0.0`:
 
-- **OpenCode 1 is no longer supported.** `init` and `update` detect it and keep you on 4.x. See [OpenCode 1](#opencode-1).
+- **OpenCode 1 is no longer supported.** `init` detects it and stops without changing anything (upstream 4.x is the historical line for OpenCode 1). See [OpenCode 1](#opencode-1).
 - **Logins come only from OpenCode 2.** Inside OpenCode, logins come through OpenCode 2's plugin API; the terminal command reads `opencode.db` read-only. Neither reads `auth.json`.
 - **Quota runs in OpenCode's background service.** Inside OpenCode, `PATH`, environment variables, and the working folder (your home folder) come from the service, not your terminal. See [Service environment](troubleshooting.md#service-environment).
 - **Web and Desktop get slash commands, but no toasts or panels,** because OpenCode 2 gives plugins no Web UI hooks. See [Web and Desktop notes](manual-install.md#web-and-desktop-notes).
-- **One plugin entry.** One `"plugin"` entry in `opencode.json` loads the server and the TUI; no `tui.json` entry is needed.
+- **One plugin entry.** One `"plugin"` entry in `opencode.json` loads the server, the TUI, and the dashboard; no `tui.json` entry is needed.
 - **TUI reports open in a popup** and leave no chat message. `tuiCommandDisplay` now defaults to `"dialog"`; set `"inline"` to keep them in the chat.
 - **OpenCode Zen uses your OpenCode Console sign-in.** See [OpenCode Zen findings](#opencode-zen-findings).
 - **Removed setting:** `tuiCompactStatus.suppressWhenNativeProviderQuota`. The old key is ignored.
@@ -53,8 +54,8 @@ What changed in `5.0.0`:
 | OpenCode found | What happens |
 | --- | --- |
 | OpenCode 2 | Everything works as described on this page. |
-| OpenCode 1 | `init` stops without changing anything and tells you to run `npx @slkiser/opencode-quota@4 init`. `update` proposes pinning bare, `@latest`, `@next`, and exact-version quota specs to `@slkiser/opencode-quota@4`, applied like any other safe change. |
-| Unknown (for example, `opencode` is not on your `PATH`) | `init` asks which OpenCode you use. `update` assumes OpenCode 2 and prints a note; on OpenCode 1, set `"plugin": ["@slkiser/opencode-quota@4"]` yourself. |
+| OpenCode 1 | This build does not support OpenCode 1. `init` stops without changing anything and tells you to run the upstream `npx @slkiser/opencode-quota@4 init` (historical upstream package, not this one). `update` never migrates an OpenCode 1 setup to this build. |
+| Unknown (for example, `opencode` is not on your `PATH`) | `init` asks which OpenCode you use. `update` assumes OpenCode 2 and prints a note; on OpenCode 1, set `"plugin": ["@slkiser/opencode-quota@4"]` yourself (upstream historical line). |
 
 ## Read the preview
 
@@ -71,7 +72,7 @@ Exit codes:
 
 ## What can change automatically
 
-- Supported OpenCode Quota plugin specs move to `@latest` (on OpenCode 1, to `@4`).
+- Recognized quota plugin specs are updated to the independent `opencode-quota-gui` package identity; legacy `@slkiser/opencode-quota` entries are migrated through this explicit, previewed run. With `OPENCODE_QUOTA_PLUGIN_SPEC` set, that explicit spec is used instead (local tarball verification).
 - Package-cache folders are removed only if they pass path, symlink, containment, and exact package-manifest checks.
 - The removed `opencodeZenDisplay` setting is migrated in known config files: `"default"` becomes root `accountingDetail: "summary"`, and `"detailed"` becomes `accountingDetail: "detailed"`. If a valid `accountingDetail` already exists, it wins and the old key is removed.
 
@@ -91,7 +92,7 @@ OpenCode Go now uses a Console sign-in or an official API key. Set up a supporte
 opencode auth login opencode-go
 ```
 
-Check it with `/quota_status` or `opencode-quota status`. Only then remove the old `OPENCODE_GO_WORKSPACE_ID` and `OPENCODE_GO_AUTH_COOKIE` declarations and any global `opencode-quota/opencode-go.json` file. Workspace/cookie values cannot be turned into an API key.
+Check it with `/quota_status` or `npx opencode-quota-gui status`. Only then remove the old `OPENCODE_GO_WORKSPACE_ID` and `OPENCODE_GO_AUTH_COOKIE` declarations and any global `opencode-quota/opencode-go.json` file. Workspace/cookie values cannot be turned into an API key.
 
 ### OpenCode Zen findings
 

@@ -58,7 +58,8 @@ describe("quota provider Phase 7 documentation consistency", () => {
     const troubleshootingProviderFixes = readMarkdownSection(troubleshooting, /^Provider fixes$/);
     const externalJsonBasics = readMarkdownSection(external, /^JSON basics$/);
 
-    const providerAddCommand = "npx @slkiser/opencode-quota@latest provider add";
+    // The published product CLI (npx form); the upstream npx invocation is no longer documented.
+    const providerAddCommand = "npx opencode-quota-gui provider add";
     expect(readmeCommands).toContain(providerAddCommand);
     expect(readmeCustomProviders).toContain(providerAddCommand);
     expect(
