@@ -13,7 +13,8 @@
       "!!node_modules",
       "!!package-artifacts",
       "!!references/upstream-plugins",
-      "!!src/data/modelsdev-pricing.min.json"
+      "!!src/data/modelsdev-pricing.min.json",
+      "!!tools/oxlint-anti-slop"
     ]
   },
   "formatter": {

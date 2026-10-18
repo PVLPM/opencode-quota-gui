@@ -1,0 +1,17 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/index.ts",
+    "src/plugin.ts",
+    "src/tui-v2.tsx",
+    "src/bin/opencode-quota-gui.ts",
+    "src/ui/index.html",
+    "vite.ui.config.mjs",
+    "scripts/*.mjs",
+    "tools/oxlint-anti-slop/index.ts",
+    "tools/oxlint-anti-slop/effect/index.ts"
+  ],
+  "ignore": ["contributing/**"],
+  "ignoreBinaries": ["opencode"],
+  "ignoreDependencies": ["oxlint"]
+}

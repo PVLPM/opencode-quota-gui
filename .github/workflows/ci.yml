@@ -30,6 +30,10 @@ jobs:
       - name: Run canonical verification
         run: pnpm verify
 
+      - name: Run advisory Knip dead-code report
+        continue-on-error: true
+        run: pnpm run knip
+
       - name: Pack and audit exact npm artifact once
         run: pnpm run pack:release-package package-artifacts
 
