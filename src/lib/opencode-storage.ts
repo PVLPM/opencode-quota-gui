@@ -1,7 +1,7 @@
 import { existsSync } from "fs";
 
 import { getOpenCodeDbPath } from "./opencode-db-path.js";
-import { openOpenCodeSqliteReadOnly } from "./opencode-sqlite.js";
+import { openOpenCodeSqliteReadOnly, type SqliteConn } from "./opencode-sqlite.js";
 
 /**
  * Error thrown when a session is not found.
@@ -53,6 +53,10 @@ export interface OpenCodeSessionInfo {
   id: string;
   title?: string;
   parentID?: string;
+  /** `session_v2.project_id` when the shipped column exists (R46); absent on older schemas. */
+  projectID?: string;
+  /** `session_v2.directory` when the shipped column exists (R46); only basenames reach the browser. */
+  directory?: string;
   time?: {
     created?: number;
     updated?: number;
@@ -88,9 +92,14 @@ type SessionRow = {
   id: string;
   title: string | null;
   parent_id: string | null;
+  project_id?: unknown;
+  directory?: unknown;
   time_created: number;
   time_updated: number;
 };
+
+/** Row shape of `PRAGMA table_info(...)`, used for R46 feature detection. */
+type TableInfoRow = { name: unknown };
 
 // Stay comfortably below SQLite's default host-parameter cap once optional
 // time filters are included in the query.
@@ -260,6 +269,24 @@ async function hasJsonExtract(conn: {
     return row?.r === "assistant";
   } catch {
     return false;
+  }
+}
+
+/**
+ * The columns a table ships with, or `null` when the table is absent or
+ * unreadable. R46 schema drift degrades to "unknown project" instead of
+ * failing; table names here are fixed literals, never user input.
+ */
+function readTableColumns(conn: Pick<SqliteConn, "all">, table: string): Set<string> | null {
+  try {
+    const rows = conn.all<TableInfoRow>(`PRAGMA table_info("${table}")`);
+    const columns = new Set<string>();
+    for (const row of rows) {
+      if (row && typeof row.name === "string") columns.add(row.name);
+    }
+    return columns.size > 0 ? columns : null;
+  } catch {
+    return null;
   }
 }
 
@@ -534,8 +561,15 @@ export async function readAllSessionsIndex(): Promise<Record<string, OpenCodeSes
 
   const conn = await db.open();
   try {
+    const columns = readTableColumns(conn, "session_v2");
+    const metadataColumns = [
+      columns?.has("project_id") ? "project_id" : null,
+      columns?.has("directory") ? "directory" : null,
+    ].filter((column): column is string => column !== null);
     const rows = conn.all<SessionRow>(
-      `SELECT id, title, parent_id, time_created, time_updated FROM "session_v2" ORDER BY time_created ASC, id ASC`,
+      `SELECT id, title, parent_id, time_created, time_updated${
+        metadataColumns.length ? `, ${metadataColumns.join(", ")}` : ""
+      } FROM "session_v2" ORDER BY time_created ASC, id ASC`,
     );
 
     for (const row of rows) {
@@ -544,6 +578,8 @@ export async function readAllSessionsIndex(): Promise<Record<string, OpenCodeSes
         id: row.id,
         title: typeof row.title === "string" && row.title.trim() ? row.title : undefined,
         parentID: typeof row.parent_id === "string" ? row.parent_id : undefined,
+        projectID: normalizeString(row.project_id),
+        directory: normalizeString(row.directory),
         time: {
           created: typeof row.time_created === "number" ? row.time_created : undefined,
           updated: typeof row.time_updated === "number" ? row.time_updated : undefined,
@@ -552,6 +588,215 @@ export async function readAllSessionsIndex(): Promise<Record<string, OpenCodeSes
     }
 
     return idx;
+  } finally {
+    conn.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GUI read-only extension (R46/R47): raw physical rows, project/worktree
+// metadata, and compaction markers. Additive only — the readers above keep
+// their existing behavior, and nothing here writes, migrates, or indexes.
+// ---------------------------------------------------------------------------
+
+/** The five raw additive token categories of one physical assistant message. */
+export interface OpenCodeRawTokenCounts {
+  input: number;
+  output: number;
+  reasoning: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/**
+ * One physical completed assistant message, as stored: no fork dedup, so a
+ * fork copy is its own row; missing token categories read as zero.
+ */
+export interface OpenCodeRawAssistantRow {
+  sessionID: string;
+  messageID: string;
+  createdAtMs: number;
+  completedAtMs: number;
+  tokens: OpenCodeRawTokenCounts;
+  cost?: number;
+  providerID?: string;
+  modelID?: string;
+  agent?: string;
+}
+
+/** `project` + `project_directory` + `worktree` metadata (R46). */
+export interface OpenCodeProjectInfo {
+  id: string;
+  /** `project.name` when the column exists and holds text. */
+  name?: string;
+  /** Directories registered for the project; only basenames ever reach the browser. */
+  directories: string[];
+  /** Git-worktree directories, when the `worktree` table is readable. */
+  worktrees: string[];
+}
+
+/** One compaction marker: a physical `session_message` row of type `compaction`. */
+export interface OpenCodeCompactionMarker {
+  sessionId: string;
+  atMs: number;
+  messageId: string;
+}
+
+type ProjectRow = { id: unknown; name?: unknown };
+type ProjectDirectoryRow = { project_id: unknown; directory: unknown };
+type WorktreeRow = { project_id: unknown; directory: unknown };
+type CompactionRow = { id: unknown; session_id: unknown; time_created: unknown };
+
+function mapRawCompletedAssistantRow(row: ProjectedMessageRow): OpenCodeRawAssistantRow | null {
+  const message = mapRowToOpenCodeMessage(row);
+  if (!message) return null;
+  if (String(message.role).toLowerCase() !== "assistant") return null;
+  const completed = completedAt(message);
+  if (completed === null) return null;
+
+  return {
+    sessionID: message.sessionID,
+    messageID: message.id,
+    createdAtMs: message.time?.created ?? 0,
+    completedAtMs: completed,
+    tokens: {
+      input: message.tokens?.input ?? 0,
+      output: message.tokens?.output ?? 0,
+      reasoning: message.tokens?.reasoning ?? 0,
+      cacheRead: message.tokens?.cache.read ?? 0,
+      cacheWrite: message.tokens?.cache.write ?? 0,
+    },
+    cost: message.cost,
+    providerID: message.providerID,
+    modelID: message.modelID,
+    agent: message.agent,
+  };
+}
+
+/**
+ * Read every physical completed assistant row without fork dedup (R46, R50).
+ *
+ * Completed-only matches the dashboard step rule: an assistant row counts once
+ * `$.time.completed` is a positive number. The optional completed window is
+ * inclusive on both ends, so P3 aggregation can request a range directly.
+ * Schema drift (no message table or no JSON support) degrades to an empty read.
+ */
+export async function readCompletedAssistantRows(params?: {
+  completedSinceMs?: number;
+  completedUntilMs?: number;
+}): Promise<OpenCodeRawAssistantRow[]> {
+  const db = openDbOrNull();
+  if (!db) return [];
+
+  const conn = await db.open();
+  try {
+    const columns = readTableColumns(conn, "session_message");
+    if (!columns?.has("type") || !columns.has("data")) return [];
+    if (!(await hasJsonExtract(conn))) return [];
+
+    const query = buildCompletedAssistantQuery(params ?? {});
+    const out: OpenCodeRawAssistantRow[] = [];
+    for (const row of conn.all<ProjectedMessageRow>(query.sql, query.args)) {
+      const mapped = mapRawCompletedAssistantRow(row);
+      if (mapped) out.push(mapped);
+    }
+    return out;
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * Read project/worktree display metadata: `project.name`, registered
+ * `project_directory` directories, and `worktree` directories with
+ * `strategy = 'git_worktree'` (R46). Missing tables or columns degrade to an
+ * empty index, which P3 reports as the unknown project instead of failing.
+ */
+export async function readProjectsIndex(): Promise<Record<string, OpenCodeProjectInfo>> {
+  const db = openDbOrNull();
+  const index: Record<string, OpenCodeProjectInfo> = {};
+  if (!db) return index;
+
+  const conn = await db.open();
+  try {
+    const projectColumns = readTableColumns(conn, "project");
+    if (!projectColumns?.has("id")) return index;
+    const nameProjection = projectColumns.has("name") ? ", name" : "";
+    const projectRows = conn.all<ProjectRow>(
+      `SELECT id${nameProjection} FROM "project" ORDER BY id ASC`,
+    );
+    for (const row of projectRows) {
+      if (typeof row.id !== "string" || !row.id) continue;
+      const name = normalizeString(row.name);
+      index[row.id] = {
+        id: row.id,
+        name: name?.trim() ? name : undefined,
+        directories: [],
+        worktrees: [],
+      };
+    }
+
+    const directoryColumns = readTableColumns(conn, "project_directory");
+    if (directoryColumns?.has("project_id") && directoryColumns.has("directory")) {
+      const rows = conn.all<ProjectDirectoryRow>(
+        `SELECT project_id, directory FROM "project_directory" ORDER BY project_id ASC, directory ASC`,
+      );
+      for (const row of rows) {
+        const info = typeof row.project_id === "string" ? index[row.project_id] : undefined;
+        if (info && typeof row.directory === "string" && row.directory) {
+          info.directories.push(row.directory);
+        }
+      }
+    }
+
+    const worktreeColumns = readTableColumns(conn, "worktree");
+    if (worktreeColumns?.has("project_id") && worktreeColumns.has("directory")) {
+      const strategyFilter = worktreeColumns.has("strategy")
+        ? ` WHERE strategy = 'git_worktree'`
+        : "";
+      const rows = conn.all<WorktreeRow>(
+        `SELECT project_id, directory FROM "worktree"${strategyFilter} ORDER BY project_id ASC, directory ASC`,
+      );
+      for (const row of rows) {
+        const info = typeof row.project_id === "string" ? index[row.project_id] : undefined;
+        if (info && typeof row.directory === "string" && row.directory) {
+          info.worktrees.push(row.directory);
+        }
+      }
+    }
+
+    return index;
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * Read compaction message rows as ordered markers (R26, R46): ordered at the
+ * source by timestamp, then message id. The assistant readers cannot return
+ * these rows (`type = 'compaction'`), and this reader projects physical
+ * columns only — it never touches the JSON payload. Missing tables degrade to
+ * no markers.
+ */
+export async function readCompactionMarkers(): Promise<OpenCodeCompactionMarker[]> {
+  const db = openDbOrNull();
+  if (!db) return [];
+
+  const conn = await db.open();
+  try {
+    const columns = readTableColumns(conn, "session_message");
+    if (!columns?.has("type")) return [];
+
+    const markers: OpenCodeCompactionMarker[] = [];
+    const rows = conn.all<CompactionRow>(
+      `SELECT id, session_id, time_created FROM "session_message" WHERE type = 'compaction' ORDER BY time_created ASC, id ASC`,
+    );
+    for (const row of rows) {
+      if (typeof row.id !== "string" || typeof row.session_id !== "string") continue;
+      if (typeof row.time_created !== "number" || !Number.isFinite(row.time_created)) continue;
+      markers.push({ sessionId: row.session_id, atMs: row.time_created, messageId: row.id });
+    }
+    return markers;
   } finally {
     conn.close();
   }
