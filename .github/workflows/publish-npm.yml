@@ -1,9 +1,24 @@
-name: Publish to npm (manual)
+name: Publish to npm (manual tag dispatch)
 
-# Manual-only bootstrap guard: the inherited release trigger is disabled, and the
-# jobs that publish, retag, or push stay behind an unset repository variable.
+# Manual-only release path (stabilization plan item 2 / R45). Nothing here runs on
+# release events, tag pushes, schedules, or repository pushes. A maintainer dispatches
+# this workflow with an existing tag; `publish` defaults to false so a rehearsal only
+# verifies and packs. The `publish` job additionally requires the repository variable
+# NPM_PUBLISH_ENABLED to be exactly 'true'. No job creates or moves a tag, rewrites
+# package.json, backfills a branch, or reassigns npm tags: the tag and the package
+# version must already match the checked-out commit.
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to verify and (when confirmed) publish, e.g. v1.0.0"
+        required: true
+        type: string
+      publish:
+        description: "Publish the verified tarball to npm (explicit confirmation)"
+        required: true
+        type: boolean
+        default: false
 
 env:
   PACKAGE_NAME: opencode-quota-gui
@@ -18,7 +33,7 @@ jobs:
       - name: Checkout release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -32,37 +47,27 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.0.0 --activate
 
-      - name: Assert release ref, tag, and commit match
+      - name: Assert tag, commit, and package version match
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           if [ -z "$RELEASE_TAG" ]; then
-            echo "Release tag is empty." >&2
+            echo "A release tag input is required." >&2
             exit 1
           fi
-          if [ "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]; then
-            echo "Expected GITHUB_REF=refs/tags/$RELEASE_TAG, received $GITHUB_REF" >&2
+          if ! git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG^{commit}" >/dev/null; then
+            echo "Tag '$RELEASE_TAG' does not exist in this repository." >&2
             exit 1
           fi
 
           CHECKED_OUT_SHA="$(git rev-parse HEAD)"
-          TAG_SHA="$(git rev-parse "$RELEASE_TAG^{commit}")"
-          if [ "$CHECKED_OUT_SHA" != "$GITHUB_SHA" ] || [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
-            echo "Release tag, event SHA, and checked-out commit do not match." >&2
+          TAG_SHA="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          if [ "$CHECKED_OUT_SHA" != "$TAG_SHA" ]; then
+            echo "Checked-out commit $CHECKED_OUT_SHA does not match tag $RELEASE_TAG ($TAG_SHA)." >&2
             exit 1
           fi
 
-      - name: Sync package version from release tag
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          VERSION="${RELEASE_TAG#v}"
-          echo "Setting package.json version to $VERSION (from tag $RELEASE_TAG)"
-          pnpm version "$VERSION" --no-git-tag-version --allow-same-version
-          pnpm install --lockfile-only
-
-      - name: Verify package version matches release tag
-        run: pnpm run verify:release-version
+          pnpm run verify:release-version
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -89,10 +94,10 @@ jobs:
         node-version: [22.x, 24.x]
 
     steps:
-      - name: Checkout smoke scripts
+      - name: Checkout release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: refs/tags/${{ inputs.tag }}
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v6
@@ -111,16 +116,18 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: [release-package, runtime-smoke]
-    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
+    # Publication needs both the repository opt-in variable and an explicit dispatch
+    # confirmation; the input defaults to false.
+    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' && inputs.publish == true }}
     permissions:
       contents: read
       id-token: write
 
     steps:
-      - name: Checkout artifact verifier
+      - name: Checkout release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.sha }}
+          ref: refs/tags/${{ inputs.tag }}
 
       - name: Setup Node.js 24 for npm
         uses: actions/setup-node@v6
@@ -137,16 +144,14 @@ jobs:
       - name: Choose npm dist-tag
         id: dist-tag
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           VERSION="${RELEASE_TAG#v}"
-          if [ "$RELEASE_PRERELEASE" = "true" ] || [[ "$VERSION" == *-* ]]; then
-            DIST_TAG="next"
-          else
-            DIST_TAG="latest"
-          fi
-          echo "Publishing $VERSION to the npm '$DIST_TAG' dist-tag"
+          case "$VERSION" in
+            *-*) DIST_TAG="next" ;;
+            *) DIST_TAG="latest" ;;
+          esac
+          echo "Publishing $PACKAGE_NAME@$VERSION to the npm '$DIST_TAG' dist-tag"
           echo "dist-tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Verify and publish exact release artifact
@@ -160,132 +165,3 @@ jobs:
             exit 1
           fi
           npm publish "./${TARBALLS[0]}" --tag "$DIST_TAG" --access public --provenance --ignore-scripts
-
-  point-next-at-stable:
-    # A stable release becomes `next` too, so `@next` never stays on an older beta. It leaves
-    # `next` alone when it already points at something newer, such as a beta of the next version.
-    # Needs "Allow npm dist-tag" on this workflow's trusted publisher on npmjs.com.
-    runs-on: ubuntu-latest
-    needs: publish
-    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
-    permissions:
-      contents: read
-      id-token: write
-
-    steps:
-      - name: Setup Node.js 24 for npm
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org/
-
-      - name: Point next at the new stable version
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          VERSION="${RELEASE_TAG#v}"
-          NEXT="$(npm view "$PACKAGE_NAME" dist-tags.next)"
-          # Fetch the semver tool first: a failed download must stop here, not read as "not newer".
-          npx --yes semver@7 0.0.0 >/dev/null
-          if [ -n "$NEXT" ] && npx --yes semver@7 --include-prerelease --range ">$VERSION" "$NEXT" >/dev/null; then
-            echo "next is $NEXT, newer than $VERSION; leaving it."
-            exit 0
-          fi
-          # npm 11.21.0 is the first npm 11 that can change dist-tags with trusted publishing.
-          npx --yes npm@^11.21.0 dist-tag add "$PACKAGE_NAME@$VERSION" next
-
-  backfill-version:
-    runs-on: ubuntu-latest
-    needs: publish
-    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout release tag
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-
-      - name: Activate pnpm
-        run: |
-          corepack enable
-          corepack prepare pnpm@11.0.0 --activate
-
-      - name: Sync and verify version for repository backfill
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          if [ "$GITHUB_REF" != "refs/tags/$RELEASE_TAG" ]; then
-            echo "Expected GITHUB_REF=refs/tags/$RELEASE_TAG, received $GITHUB_REF" >&2
-            exit 1
-          fi
-          VERSION="${RELEASE_TAG#v}"
-          pnpm version "$VERSION" --no-git-tag-version --allow-same-version
-          pnpm install --lockfile-only
-          pnpm run verify:release-version
-
-      - name: Commit synced version back to repository
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          TARGET_BRANCH: ${{ github.event.release.target_commitish }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          if git diff --quiet -- package.json pnpm-lock.yaml; then
-            echo "No package version file changes to commit."
-            exit 0
-          fi
-
-          VERSION="${RELEASE_TAG#v}"
-          BRANCH="${TARGET_BRANCH:-$DEFAULT_BRANCH}"
-
-          if ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            echo "Target '$BRANCH' is not a remote branch; falling back to '$DEFAULT_BRANCH'."
-            BRANCH="$DEFAULT_BRANCH"
-          fi
-
-          git fetch origin "$BRANCH"
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$BRANCH"; then
-            echo "Release commit $GITHUB_SHA is not on branch '$BRANCH'; refusing to commit the version there." >&2
-            exit 1
-          fi
-
-          echo "Committing synced package version to branch '$BRANCH'"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json pnpm-lock.yaml
-          git commit -m "chore(release): sync package version to ${VERSION}"
-
-          git fetch origin "$BRANCH"
-          git rebase "origin/$BRANCH"
-          git push origin HEAD:"$BRANCH"
-
-      - name: Verify committed sync reached remote branch
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-          TARGET_BRANCH: ${{ github.event.release.target_commitish }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          BRANCH="${TARGET_BRANCH:-$DEFAULT_BRANCH}"
-          if ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-            BRANCH="$DEFAULT_BRANCH"
-          fi
-
-          VERSION="${RELEASE_TAG#v}"
-          git fetch origin "$BRANCH"
-          REMOTE_VERSION="$(git show "origin/$BRANCH:package.json" | node -e "process.stdin.setEncoding('utf8'); let d=''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => console.log(JSON.parse(d).version || ''));")"
-
-          if [ "$REMOTE_VERSION" != "$VERSION" ]; then
-            echo "Remote branch $BRANCH package.json version is '$REMOTE_VERSION', expected '$VERSION'" >&2
-            exit 1
-          fi
-
-          echo "Remote branch $BRANCH package.json version matches release tag $RELEASE_TAG"

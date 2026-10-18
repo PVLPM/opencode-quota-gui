@@ -30,6 +30,16 @@ jobs:
       - name: Run canonical verification
         run: pnpm verify
 
+      - name: Run advisory Oxlint anti-slop report
+        id: oxlint-advisory
+        continue-on-error: true
+        run: pnpm run lint:oxlint
+
+      - name: Surface advisory Oxlint outcome
+        if: ${{ steps.oxlint-advisory.outcome == 'failure' }}
+        run: |
+          echo "::warning title=Oxlint advisory::Oxlint anti-slop findings remain on strict paths; advisory only, never a release blocker. See docs/readme/release.md."
+
       - name: Run advisory Knip dead-code report
         continue-on-error: true
         run: pnpm run knip

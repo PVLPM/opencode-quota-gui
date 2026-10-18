@@ -335,4 +335,43 @@ describe("v4 release gates", () => {
     expect(tampered.status).toBe(1);
     expect(tampered.stderr).toContain("SHA-256 mismatch");
   });
+
+  it("keeps the local release check non-recursive and the canonical verify chain linter-free", async () => {
+    const manifest = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { scripts?: Record<string, string> };
+    const scripts = manifest.scripts ?? {};
+
+    expect(scripts.prepublishOnly).toBe("pnpm run release:check");
+    expect(scripts["release:check"]).toBe("pnpm verify && pnpm run verify:release-version");
+    expect(scripts.verify).not.toContain("lint:oxlint");
+    expect(scripts.verify).not.toContain("knip");
+    expect(scripts["lint:oxlint"]).toBe("node scripts/run-oxlint-anti-slop.mjs");
+    for (const script of ["verify", "release:check", "prepublishOnly", "build"]) {
+      expect(scripts[script]).not.toMatch(/npm publish|pnpm publish/u);
+    }
+  });
+
+  it("keeps the manual tag-dispatch workflow free of release-event context and repository writes", async () => {
+    const source = await readFile(
+      new URL("../.github/workflows/publish-npm.yml", import.meta.url),
+      "utf8",
+    );
+
+    for (const forbidden of [
+      "github.event",
+      "github.ref",
+      "github.sha",
+      "target_commitish",
+      "default_branch",
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
+    expect(source).toContain("inputs.tag");
+    expect(source).toContain("inputs.publish == true");
+    expect(source).not.toMatch(/\bgit push\b/u);
+    expect(source).not.toMatch(/\bpnpm version\b/u);
+    expect(source).not.toContain("--lockfile-only");
+    expect(source).not.toMatch(/\bdist-tag add\b/u);
+  });
 });

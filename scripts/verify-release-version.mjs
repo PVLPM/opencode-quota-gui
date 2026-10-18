@@ -15,19 +15,31 @@ if (!packageVersion) {
   process.exit(1);
 }
 
+// The manual tag-dispatch workflow passes the dispatched tag explicitly; local runs and
+// tag-triggered contexts fall back to GITHUB_REF. A RELEASE_TAG that is set but blank is an
+// error, never a silent skip: the workflow-selected tag must always be checked.
+const releaseTagEnv = process.env.RELEASE_TAG;
+const explicitTag = (releaseTagEnv ?? "").trim();
 const githubRef = process.env.GITHUB_REF ?? "";
 const tagPrefix = "refs/tags/";
 
-if (!githubRef.startsWith(tagPrefix)) {
+let rawTag = "";
+if (explicitTag) {
+  rawTag = explicitTag;
+} else if (releaseTagEnv !== undefined) {
+  console.error("Unable to parse tag version from RELEASE_TAG (value is empty)");
+  process.exit(1);
+} else if (githubRef.startsWith(tagPrefix)) {
+  rawTag = githubRef.slice(tagPrefix.length);
+} else {
   console.log("No tag ref detected; skipping release version verification.");
   process.exit(0);
 }
 
-const rawTag = githubRef.slice(tagPrefix.length);
 const tagVersion = rawTag.startsWith("v") ? rawTag.slice(1) : rawTag;
 
 if (!tagVersion) {
-  console.error(`Unable to parse tag version from GITHUB_REF=${githubRef}`);
+  console.error(`Unable to parse tag version from ${explicitTag ? "RELEASE_TAG" : "GITHUB_REF"}`);
   process.exit(1);
 }
 

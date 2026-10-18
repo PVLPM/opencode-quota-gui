@@ -66,7 +66,7 @@ Keep that override absolute, as in the two forms above: a relative spec would re
 
 Upgrading from 4.x? Read [what changed in 5.0](#breaking-changes-in-500).
 
-> Maintainers: the first public version is published manually, after the version is decided and its tarball is verified: `npm publish './opencode-quota-gui-<VERSION>.tgz' --access public`. Automated publishing is not enabled.
+> Maintainers: releases are manual. Dispatch the **Publish to npm (manual tag dispatch)** workflow with an existing release tag and leave `publish` at its `false` default for a publish-free rehearsal; publishing additionally requires the `NPM_PUBLISH_ENABLED` repository variable. The workflow packs once on Node 24, smoke-tests Node 22/24, and publishes that exact tarball with provenance — no version sync, retag, or branch write. See [Releasing](docs/readme/release.md).
 
 ## What you get
 

@@ -51,7 +51,9 @@ interface OxlintTsconfig {
 }
 
 interface WorkflowStep {
+  id?: string;
   name?: string;
+  if?: string;
   run?: string;
   "continue-on-error"?: boolean;
 }
@@ -225,7 +227,7 @@ describe("GUI lint policy (R40, R41)", () => {
     expect(sink?.rules?.["no-console"]).toBe("off");
   });
 
-  it("runs strict new-path and advisory upstream sweeps without a hand-rolled linter", () => {
+  it("keeps the strict Oxlint sweep runnable outside the blocking verify chain", () => {
     expect(manifest.scripts?.["lint:oxlint"]).toBe("node scripts/run-oxlint-anti-slop.mjs");
     expect(manifest.scripts?.["lint:oxlint:upstream"]).toBe(
       "node scripts/run-oxlint-anti-slop.mjs --upstream",
@@ -237,19 +239,28 @@ describe("GUI lint policy (R40, R41)", () => {
     expect(lintRunner).toContain("oxlint.json");
     expect(lintRunner).toContain("node_modules");
     expect(lintRunner).not.toContain("RegExp(");
+    // Strict mode propagates Oxlint's exit code, so the command stays runnable as
+    // a gate while the canonical verify chain links to it only advisorily.
+    expect(lintRunner).toContain("process.exit(status)");
 
     const verify = manifest.scripts?.verify ?? "";
-    expect(verify).toContain("pnpm run lint:oxlint");
+    expect(verify).not.toContain("lint:oxlint");
     expect(verify).not.toContain("knip");
-    expect(verify.indexOf("pnpm run lint:oxlint")).toBeGreaterThan(
-      verify.indexOf("pnpm run check"),
-    );
-    expect(verify.indexOf("pnpm run lint:oxlint")).toBeLessThan(
-      verify.indexOf("pnpm run typecheck"),
-    );
   });
 
-  it("keeps the knip step advisory in CI and never in the blocking verify chain", () => {
+  it("keeps Oxlint and Knip advisory in CI while the blocking verify chain stays linter-free", () => {
+    const oxlintSteps: WorkflowStep[] = [];
+    const oxlintReports: WorkflowStep[] = [];
+    forEachJobStep(ciWorkflow, (step) => {
+      if (step.run === "pnpm run lint:oxlint") oxlintSteps.push(step);
+      if (step.if === "${{ steps.oxlint-advisory.outcome == 'failure' }}") oxlintReports.push(step);
+    });
+    expect(oxlintSteps).toHaveLength(1);
+    expect(oxlintSteps[0]?.id).toBe("oxlint-advisory");
+    expect(oxlintSteps[0]?.["continue-on-error"]).toBe(true);
+    expect(oxlintReports).toHaveLength(1);
+    expect(oxlintReports[0]?.run).toContain("::warning title=Oxlint advisory::");
+
     const knipSteps: WorkflowStep[] = [];
     forEachJobStep(ciWorkflow, (step) => {
       if (step.run === "pnpm run knip") knipSteps.push(step);
@@ -261,6 +272,13 @@ describe("GUI lint policy (R40, R41)", () => {
       expect(manifest.scripts?.knip).not.toContain(rule);
       expect(lintRunner).not.toContain(rule);
     }
+  });
+
+  it("documents the measured advisory Oxlint residual count without suppressions", () => {
+    const releaseDoc = readText("docs/readme/release.md");
+    expect(releaseDoc).toMatch(/Oxlint/u);
+    expect(releaseDoc).toMatch(/\d+ errors \+ \d+ warnings/u);
+    expect(manifest.scripts?.verify).not.toContain("lint:oxlint");
   });
 
   it("excludes the vendor and agent assets from the upstream sweep without hiding GUI tests", () => {

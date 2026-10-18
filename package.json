@@ -57,8 +57,8 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.ui.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify": "pnpm run check && pnpm run lint:oxlint && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents",
-    "prepublishOnly": "pnpm run build",
+    "verify": "pnpm run check && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents",
+    "prepublishOnly": "pnpm run release:check",
     "prepare": "lefthook install"
   },
   "keywords": [

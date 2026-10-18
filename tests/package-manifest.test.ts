@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -116,8 +116,9 @@ const packedRealOtelFixture = await readFile(
 );
 
 const VERIFY_COMMAND =
-  "pnpm run check && pnpm run lint:oxlint && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents";
-const NPM_PUBLISH_GUARD = "${{ vars.NPM_PUBLISH_ENABLED == 'true' }}";
+  "pnpm run check && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents";
+const NPM_PUBLISH_GUARD = "${{ vars.NPM_PUBLISH_ENABLED == 'true' && inputs.publish == true }}";
+const TAG_REF = "refs/tags/${{ inputs.tag }}";
 // Use Git Bash on Windows, not the WSL launcher that can reinterpret native paths.
 const bash =
   process.platform === "win32"
@@ -130,7 +131,6 @@ const bash =
     : "bash";
 const VERIFY_COMPONENT_COMMANDS = [
   "pnpm run check",
-  "pnpm run lint:oxlint",
   "pnpm run verify:typescript-version",
   "pnpm run verify:v4-history",
   "pnpm run typecheck",
@@ -290,12 +290,18 @@ describe("package manifest compatibility", () => {
     });
   });
 
-  it("defines one ordered canonical repository gate and a release-only compatibility alias", () => {
+  it("defines one ordered canonical repository gate and a release-only compatibility check", () => {
     expect(pkg.scripts?.build).toContain("node scripts/clean-dist.mjs && tsc");
     expect(pkg.scripts?.verify).toBe(VERIFY_COMMAND);
+    expect(pkg.scripts?.verify).not.toContain("lint:oxlint");
+    expect(pkg.scripts?.verify).not.toContain("knip");
     expect(pkg.scripts?.verify).not.toContain("verify:release-version");
     expect(pkg.scripts?.verify).not.toContain("verify:release-package");
     expect(pkg.scripts?.["release:check"]).toBe("pnpm verify && pnpm run verify:release-version");
+    expect(pkg.scripts?.prepublishOnly).toBe("pnpm run release:check");
+    for (const script of ["verify", "release:check", "prepublishOnly", "build"]) {
+      expect(pkg.scripts?.[script]).not.toMatch(/npm publish|pnpm publish/u);
+    }
   });
 
   it("appends the browser UI build and covers both TypeScript projects", () => {
@@ -531,11 +537,9 @@ describe("package manifest compatibility", () => {
     expect(packedRealOtelFixture).toContain("disposeQuotaTelemetryOwner");
   });
 
-  it("publishes only a release-tag artifact after both exact-artifact smoke jobs", () => {
-    expect(publishWorkflow.on).toEqual({ workflow_dispatch: null });
+  it("keeps a minimal manual tag-dispatch release path with the exact packed artifact", () => {
+    expect(Object.keys(publishWorkflow.on ?? {})).toEqual(["workflow_dispatch"]);
     expect(Object.keys(publishWorkflow.jobs).sort()).toEqual([
-      "backfill-version",
-      "point-next-at-stable",
       "publish",
       "release-package",
       "runtime-smoke",
@@ -545,7 +549,7 @@ describe("package manifest compatibility", () => {
     const releaseCheckout = namedStep(releasePackage, "Checkout release tag");
     expect(releaseCheckout.uses).toBe("actions/checkout@v6");
     expect(releaseCheckout.with).toEqual({
-      ref: "${{ github.sha }}",
+      ref: TAG_REF,
       "fetch-depth": 0,
       "fetch-tags": true,
     });
@@ -556,9 +560,7 @@ describe("package manifest compatibility", () => {
     ).toBe(24);
 
     const orderedSteps = [
-      "Assert release ref, tag, and commit match",
-      "Sync package version from release tag",
-      "Verify package version matches release tag",
+      "Assert tag, commit, and package version match",
       "Install dependencies",
       "Run canonical verification",
       "Pack and audit the release artifact once",
@@ -576,12 +578,12 @@ describe("package manifest compatibility", () => {
       );
     }
 
-    expect(namedStep(releasePackage, "Sync package version from release tag").run).toContain(
-      'pnpm version "$VERSION" --no-git-tag-version --allow-same-version',
-    );
-    expect(namedStep(releasePackage, "Verify package version matches release tag").run).toBe(
-      "pnpm run verify:release-version",
-    );
+    const identityStep = namedStep(releasePackage, "Assert tag, commit, and package version match");
+    expect(identityStep.env).toEqual({ RELEASE_TAG: "${{ inputs.tag }}" });
+    const identityRun = identityStep.run ?? "";
+    expect(identityRun).toContain('CHECKED_OUT_SHA="$(git rev-parse HEAD)"');
+    expect(identityRun).toContain('TAG_SHA="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"');
+    expect(identityRun).toContain("pnpm run verify:release-version");
     expect(namedStep(releasePackage, "Run canonical verification").run).toBe("pnpm verify");
     expectCanonicalVerificationOnly(releasePackage);
     expect(namedStep(releasePackage, "Pack and audit the release artifact once").run).toBe(
@@ -608,6 +610,7 @@ describe("package manifest compatibility", () => {
     ).toBe("node scripts/smoke-packed-package.mjs package-artifacts");
 
     const publish = publishWorkflow.jobs.publish;
+    expect(publish.if).toBe(NPM_PUBLISH_GUARD);
     expect(publish.needs).toEqual(["release-package", "runtime-smoke"]);
     expect(publish.permissions).toEqual({
       contents: "read",
@@ -631,45 +634,27 @@ describe("package manifest compatibility", () => {
     expect(publishRun).not.toContain("pnpm pack");
     expect(publishRun).not.toContain("pnpm run build");
 
-    const backfill = publishWorkflow.jobs["backfill-version"];
-    for (const job of [releasePackage, smoke, publish, backfill]) {
+    for (const job of [releasePackage, smoke, publish]) {
       const checkouts = job.steps?.filter((step) => step.uses === "actions/checkout@v6") ?? [];
       expect(checkouts.length).toBeGreaterThan(0);
       for (const checkout of checkouts) {
-        expect(checkout.with?.ref).toBe("${{ github.sha }}");
+        expect(checkout.with?.ref).toBe(TAG_REF);
       }
     }
 
-    const releaseIdentityRun =
-      namedStep(releasePackage, "Assert release ref, tag, and commit match").run ?? "";
-    expect(releaseIdentityRun).toContain('CHECKED_OUT_SHA="$(git rev-parse HEAD)"');
-    expect(releaseIdentityRun).toContain('TAG_SHA="$(git rev-parse "$RELEASE_TAG^{commit}")"');
-
-    expect(backfill.needs).toBe("publish");
-    expect(backfill.permissions).toEqual({ contents: "write" });
-    expect(namedStep(backfill, "Sync and verify version for repository backfill").run).toContain(
-      "pnpm run verify:release-version",
-    );
-    const backfillCommitRun =
-      namedStep(backfill, "Commit synced version back to repository").run ?? "";
-    expect(backfillCommitRun).toContain('git push origin HEAD:"$BRANCH"');
-    // A beta targets the v5 branch; never write its version onto a branch without the release commit.
-    const ancestryCheck = backfillCommitRun.indexOf(
-      'git merge-base --is-ancestor "$GITHUB_SHA" "origin/$BRANCH"',
-    );
-    expect(ancestryCheck).toBeGreaterThanOrEqual(0);
-    expect(ancestryCheck).toBeLessThan(backfillCommitRun.indexOf("git commit"));
+    // The remote-backfill and retag jobs are gone: no job writes to the repository.
+    expect(publishWorkflow.jobs["backfill-version"]).toBeUndefined();
+    expect(publishWorkflow.jobs["point-next-at-stable"]).toBeUndefined();
   });
 
   it("publishes prereleases to the npm next tag and stable releases to latest", () => {
     const chooseTag = namedStep(publishWorkflow.jobs.publish, "Choose npm dist-tag");
     expect(chooseTag.id).toBe("dist-tag");
     expect(chooseTag.env).toEqual({
-      RELEASE_TAG: "${{ github.event.release.tag_name }}",
-      RELEASE_PRERELEASE: "${{ github.event.release.prerelease }}",
+      RELEASE_TAG: "${{ inputs.tag }}",
     });
 
-    const distTagFor = (tag: string, prerelease: string): string => {
+    const distTagFor = (tag: string): string => {
       const dir = mkdtempSync(join(tmpdir(), "opencode-quota-dist-tag-"));
       try {
         const output = join(dir, "github-output");
@@ -678,7 +663,6 @@ describe("package manifest compatibility", () => {
           env: {
             ...process.env,
             RELEASE_TAG: tag,
-            RELEASE_PRERELEASE: prerelease,
             GITHUB_OUTPUT: "github-output",
           },
           stdio: "ignore",
@@ -688,63 +672,7 @@ describe("package manifest compatibility", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     };
-    expect(distTagFor("v5.0.0-beta.1", "true")).toBe("dist-tag=next\n");
-    expect(distTagFor("v5.0.0-beta.1", "false")).toBe("dist-tag=next\n");
-    expect(distTagFor("v5.0.0", "true")).toBe("dist-tag=next\n");
-    expect(distTagFor("v5.0.0", "false")).toBe("dist-tag=latest\n");
-  });
-
-  it("points next at each stable release unless next is already newer", () => {
-    const job = publishWorkflow.jobs["point-next-at-stable"];
-    expect(job.needs).toBe("publish");
-    expect(job.if).toBe(NPM_PUBLISH_GUARD);
-    expect(job.permissions).toEqual({ contents: "read", "id-token": "write" });
-    const step = namedStep(job, "Point next at the new stable version");
-
-    // Stand-in npm and npx log their arguments; npx answers the semver check from NEXT_IS_NEWER.
-    const commandsFor = (currentNext: string, nextIsNewer: boolean): string[] => {
-      const dir = mkdtempSync(join(tmpdir(), "opencode-quota-next-tag-"));
-      try {
-        const log = join(dir, "commands");
-        writeFileSync(log, "");
-        writeFileSync(
-          join(dir, "npm"),
-          `#!/bin/sh\necho "npm $*" >> "commands"\necho "${currentNext}"\n`,
-        );
-        writeFileSync(
-          join(dir, "npx"),
-          `#!/bin/sh\necho "npx $*" >> "commands"\ncase "$*" in *"semver@7 0.0.0") ;; *semver@*) [ "$NEXT_IS_NEWER" = 1 ];; esac\n`,
-        );
-        chmodSync(join(dir, "npm"), 0o755);
-        chmodSync(join(dir, "npx"), 0o755);
-        // Let bash construct its own PATH; native Windows paths are not shell paths.
-        execFileSync(bash, ["-e", "-c", `export PATH="$PWD:$PATH"\n${step.run ?? "exit 1"}`], {
-          cwd: dir,
-          env: {
-            ...process.env,
-            ...step.env,
-            PACKAGE_NAME: "opencode-quota-gui",
-            RELEASE_TAG: "v5.0.2",
-            NEXT_IS_NEWER: nextIsNewer ? "1" : "0",
-          },
-          stdio: "ignore",
-        });
-        return readFileSync(log, "utf8").trim().split("\n");
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    };
-
-    expect(commandsFor("5.0.1", false)).toEqual([
-      "npm view opencode-quota-gui dist-tags.next",
-      "npx --yes semver@7 0.0.0",
-      "npx --yes semver@7 --include-prerelease --range >5.0.2 5.0.1",
-      "npx --yes npm@^11.21.0 dist-tag add opencode-quota-gui@5.0.2 next",
-    ]);
-    expect(commandsFor("5.1.0-beta.1", true)).toEqual([
-      "npm view opencode-quota-gui dist-tags.next",
-      "npx --yes semver@7 0.0.0",
-      "npx --yes semver@7 --include-prerelease --range >5.0.2 5.1.0-beta.1",
-    ]);
+    expect(distTagFor("v5.0.0-beta.1")).toBe("dist-tag=next\n");
+    expect(distTagFor("v5.0.0")).toBe("dist-tag=latest\n");
   });
 });
