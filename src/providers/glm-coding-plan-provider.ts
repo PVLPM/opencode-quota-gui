@@ -1,4 +1,10 @@
-import type { QuotaProvider, QuotaProviderContext } from "../lib/entries.js";
+import type {
+  AccountingMetadata,
+  QuotaProvider,
+  QuotaProviderContext,
+  QuotaProviderResult,
+  QuotaToastEntry,
+} from "../lib/entries.js";
 import {
   credentialRowAuthEntry,
   formatCredentialDisplayNames,
@@ -30,6 +36,47 @@ type GlmQuotaResult = {
     mcp?: GlmQuotaWindow;
   };
 };
+
+const GLM_WINDOW_ROW_KEYS = {
+  fiveHour: "window:five_hour",
+  weekly: "window:week",
+  mcp: "window:mcp",
+} as const;
+
+/**
+ * Percent-only window rows carry no typed `semantic`, so they get stable
+ * explicit `rowKey`s (metric + window) instead of label-derived ids.
+ */
+function windowEntriesWithRowKeys(params: {
+  group: string;
+  accounting: AccountingMetadata;
+  windows: GlmQuotaResult["windows"];
+}): QuotaToastEntry[] {
+  const specs: Array<{ window?: GlmQuotaWindow; suffix: string; label: string }> = [];
+  const rowKeys: string[] = [];
+  if (params.windows.fiveHour) {
+    specs.push({ window: params.windows.fiveHour, suffix: "5h", label: "5h:" });
+    rowKeys.push(GLM_WINDOW_ROW_KEYS.fiveHour);
+  }
+  if (params.windows.weekly) {
+    specs.push({ window: params.windows.weekly, suffix: "Weekly", label: "Weekly:" });
+    rowKeys.push(GLM_WINDOW_ROW_KEYS.weekly);
+  }
+  if (params.windows.mcp) {
+    specs.push({ window: params.windows.mcp, suffix: "MCP", label: "MCP:" });
+    rowKeys.push(GLM_WINDOW_ROW_KEYS.mcp);
+  }
+
+  return groupedPercentWindowEntries({
+    group: params.group,
+    accounting: params.accounting,
+    windows: specs,
+  }).map((entry, index) => ({
+    ...entry,
+    // groupedPercentWindowEntries emits one aggregate fallback row when no window exists.
+    rowKey: rowKeys[index] ?? "aggregate",
+  }));
+}
 
 export function createGlmCodingPlanProvider(params: {
   id: "zai" | "zhipu";
@@ -108,15 +155,20 @@ export function createGlmCodingPlanProvider(params: {
               fallbackName: result?.success ? result.label : params.errorLabel,
             })),
           );
-          const entries = [];
-          const errors = [];
+          const accounts = results.map(({ row }, index) => ({
+            sourceId: row.id,
+            label: names[index] ?? params.errorLabel,
+            active: row.active,
+          }));
+          const entries: QuotaToastEntry[] = [];
+          const errors: QuotaProviderResult["errors"] = [];
           for (const [index, { row, result }] of results.entries()) {
             const group = names[index] ?? params.errorLabel;
             const mapped = mapNullableProviderResult(result, {
               errorLabel: group,
               onSuccess: (quota) =>
                 attemptedResult(
-                  groupedPercentWindowEntries({
+                  windowEntriesWithRowKeys({
                     group,
                     accounting: {
                       resultType: "quota",
@@ -125,18 +177,14 @@ export function createGlmCodingPlanProvider(params: {
                       authority: "provider_reported",
                       sourceId: row.id,
                     },
-                    windows: [
-                      { window: quota.windows.fiveHour, suffix: "5h", label: "5h:" },
-                      { window: quota.windows.weekly, suffix: "Weekly", label: "Weekly:" },
-                      { window: quota.windows.mcp, suffix: "MCP", label: "MCP:" },
-                    ],
+                    windows: quota.windows,
                   }),
                 ),
             });
             entries.push(...mapped.entries);
-            errors.push(...mapped.errors);
+            errors.push(...mapped.errors.map((error) => ({ ...error, sourceId: row.id })));
           }
-          return withStatusDetails(attemptedResult(entries, errors), authDetails);
+          return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, authDetails);
         }
       }
       const result = await params.queryQuota({ requestTimeoutMs: ctx.config?.requestTimeoutMs });
@@ -144,7 +192,7 @@ export function createGlmCodingPlanProvider(params: {
         errorLabel: params.errorLabel,
         onSuccess: (quota) =>
           attemptedResult(
-            groupedPercentWindowEntries({
+            windowEntriesWithRowKeys({
               group: quota.label,
               accounting: {
                 resultType: "quota",
@@ -152,11 +200,7 @@ export function createGlmCodingPlanProvider(params: {
                 ownership: "maintained",
                 authority: "provider_reported",
               },
-              windows: [
-                { window: quota.windows.fiveHour, suffix: "5h", label: "5h:" },
-                { window: quota.windows.weekly, suffix: "Weekly", label: "Weekly:" },
-                { window: quota.windows.mcp, suffix: "MCP", label: "MCP:" },
-              ],
+              windows: quota.windows,
             }),
             [],
             { singleWindowDisplayName: quota.label },

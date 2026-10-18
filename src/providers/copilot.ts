@@ -118,6 +118,7 @@ function makeBudgetEntry(
       name: "Copilot Additional Usage",
       group,
       label: "Budget:",
+      rowKey: "named:additional_usage",
       right: `${formatUsd(spent)}/${formatUsd(budget.amountUsd)}`,
       percentRemaining: budget.percentRemaining,
       resetTimeIso,
@@ -134,6 +135,7 @@ function makeBudgetEntry(
     name: "Copilot Additional Usage",
     group,
     label: "Budget:",
+    rowKey: "named:additional_usage",
     value,
     resetTimeIso,
   };
@@ -147,6 +149,7 @@ function planEntries(result: CopilotPlanResult): QuotaToastEntry[] {
       name: "Copilot",
       group: getCopilotGroup(result.mode, result.plan),
       label: "Plan:",
+      rowKey: "named:plan",
       value: result.plan
         ? `${result.plan} | usage needs billing token`
         : "Usage needs billing token",
@@ -172,6 +175,7 @@ function personalEntries(result: CopilotQuotaResult): QuotaToastEntry[] {
         name,
         group,
         label: "Quota:",
+        rowKey: "window:month",
         value: "Unlimited",
         resetTimeIso: result.resetTimeIso,
       },
@@ -185,6 +189,7 @@ function personalEntries(result: CopilotQuotaResult): QuotaToastEntry[] {
       name,
       group,
       label: result.unit === "ai_credits" ? "Credits:" : "Quota:",
+      rowKey: "window:month",
       right: `${formatNumber(result.used)}/${formatNumber(result.total)}`,
       percentRemaining: result.percentRemaining,
       resetTimeIso: result.resetTimeIso,
@@ -196,6 +201,7 @@ function personalEntries(result: CopilotQuotaResult): QuotaToastEntry[] {
       name,
       group,
       label: result.unit === "ai_credits" ? "Credits:" : "Usage:",
+      rowKey: "window:month",
       value:
         result.unit === "ai_credits"
           ? formatAiCreditUsageValue(result)
@@ -267,6 +273,7 @@ function managedEntries(
       name: "Copilot AI Credits",
       group,
       label: "Credits:",
+      rowKey: "window:month",
       value: formatAiCreditUsageValue(result),
       resetTimeIso: result.resetTimeIso,
     },
@@ -334,13 +341,18 @@ export const copilotProvider: QuotaProvider = {
               : "Copilot",
           })),
         );
+        const accounts = results.map(({ row }, index) => ({
+          sourceId: row.id,
+          label: names[index] ?? "Copilot",
+          active: row.active,
+        }));
         const entries: QuotaToastEntry[] = [];
         const errors: QuotaProviderResult["errors"] = [];
         for (const [index, { row, result }] of results.entries()) {
           const group = names[index] ?? "Copilot";
           if (!result) continue;
           if (!result.success) {
-            errors.push({ label: group, message: result.error });
+            errors.push({ label: group, message: result.error, sourceId: row.id });
             continue;
           }
           const resultEntries =
@@ -361,10 +373,11 @@ export const copilotProvider: QuotaProvider = {
             ...("warnings" in result ? (result.warnings ?? []) : []).map((message) => ({
               label: group,
               message,
+              sourceId: row.id,
             })),
           );
         }
-        return withStatusDetails(attemptedResult(entries, errors), statusDetails);
+        return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, statusDetails);
       }
     }
     const result = await queryCopilotQuota({ requestTimeoutMs: ctx.config?.requestTimeoutMs });

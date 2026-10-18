@@ -12,6 +12,9 @@ import {
 } from "./helpers/plugin-test-harness.js";
 import { createProviderAvailabilityContext } from "./helpers/provider-test-harness.js";
 
+/** Live plugin setups are released after each test (dashboard lease included). */
+const pluginCleanups: Array<() => Promise<void> | void> = [];
+
 const TEST_RUNTIME_ROOT = "/tmp/opencode-quota-opencode-go-surfaces";
 const TEST_TOKEN = "distinctive-opencode-go-surface-token";
 
@@ -118,7 +121,7 @@ async function runQuotaStatus(
     | { execute: (input: unknown, context: { sessionID: string }) => Promise<{ content: string }> }
     | undefined;
   const { default: plugin } = await import("../src/plugin.js");
-  await plugin.setup({
+  const cleanup = await plugin.setup({
     location: { directory: process.cwd() },
     provider: { list: vi.fn().mockResolvedValue({ data: [{ id: "opencode-go" }] }) },
     session: {
@@ -138,6 +141,7 @@ async function runQuotaStatus(
         }),
     },
   } as never);
+  if (typeof cleanup === "function") pluginCleanups.push(cleanup);
   if (!quotaTool) throw new Error("V2 quota_status tool was not registered");
   return (await quotaTool.execute({}, { sessionID })).content;
 }
@@ -206,6 +210,9 @@ describe("OpenCode Go shared projections", () => {
   });
 
   afterEach(async () => {
+    for (const cleanup of pluginCleanups.splice(0).reverse()) {
+      await cleanup();
+    }
     const { __resetQuotaStateForTests } = await import("../src/lib/quota-state.js");
     __resetQuotaStateForTests();
     await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });

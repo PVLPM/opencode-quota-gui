@@ -85,13 +85,16 @@ describe("google gemini cli provider", () => {
         name: "Gemini Pro (ali…)",
         group: "Gemini CLI (ali…)",
         label: "Gemini Pro:",
+        rowKey: "named:Gemini Pro",
         right: "1,234 left",
         percentRemaining: 64,
         resetTimeIso: "2026-01-01T00:00:00.000Z",
       },
     ]);
     expect(out.entries[0]?.accounting.sourceId).toBe("alice@example.com");
-    expect(out.errors).toEqual([{ label: "bob…", message: "Unauthorized" }]);
+    expect(out.errors).toEqual([
+      { label: "bob…", message: "Unauthorized", sourceId: "bob@example.com" },
+    ]);
     expect(out.presentation).toEqual({
       singleWindowDisplayName: "Gemini CLI",
       singleWindowShowRight: true,
@@ -140,6 +143,7 @@ describe("google gemini cli provider", () => {
         name: "Gemini Pro (ali…)",
         group: "Gemini CLI (ali…)",
         label: "Gemini Pro:",
+        rowKey: "named:Gemini Pro",
         right: "50 left TOKENS",
         percentRemaining: 20,
         resetTimeIso: "2026-01-01T12:00:00Z",
@@ -148,6 +152,7 @@ describe("google gemini cli provider", () => {
         name: "Gemini Flash (ali…)",
         group: "Gemini CLI (ali…)",
         label: "Gemini Flash:",
+        rowKey: "named:Gemini Flash",
         right: "1,000 left",
         percentRemaining: 50,
         resetTimeIso: "2026-01-01T08:00:00Z",
@@ -156,6 +161,7 @@ describe("google gemini cli provider", () => {
         name: "Gemini Flash Lite (ali…)",
         group: "Gemini CLI (ali…)",
         label: "Gemini Flash Lite:",
+        rowKey: "named:Gemini Flash Lite",
         right: "25 left",
         percentRemaining: 10,
         resetTimeIso: "2026-01-01T06:00:00Z",
@@ -228,6 +234,7 @@ describe("google gemini cli provider", () => {
         label: "[Gemini CLI work@example.com] (active)",
         message:
           "Gemini CLI sign-in could not be refreshed: refresh_failed: HTTP 400. Run `opencode auth login google`.",
+        sourceId: "failed-id",
       },
     ]);
     expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([

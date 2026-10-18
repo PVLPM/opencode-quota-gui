@@ -1,10 +1,12 @@
 import { sanitizeDisplayText } from "../lib/display-sanitize.js";
 import type {
   QuotaProvider,
+  QuotaProviderAccount,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { deriveStableAccountIdentityKey } from "../lib/entries.js";
 import {
   AGY_AUTH_KEYS,
   hasAgyQuotaRuntimeAvailable,
@@ -101,6 +103,35 @@ function formatRemainingAmount(value: string | undefined): string | undefined {
   return `${display} left`;
 }
 
+/** Stable explicit row key for one AGY bucket row (family + window; never the label). */
+export function agyBucketRowKey(bucket: Pick<GoogleAgyQuotaBucket, "family" | "window">): string {
+  return `named:${bucket.family} ${bucket.window}`;
+}
+
+/**
+ * Accounts of the legacy companion path (no `CredentialRow`). `sourceId` keeps
+ * the historical `account-N` ordinal byte-identical for reset/cache
+ * compatibility; when the bucket carries an email the descriptor adds a
+ * server-only email digest as `identityKey`. No key is derived from an ordinal.
+ */
+export function buildAgyLegacyAccounts(params: {
+  buckets: readonly GoogleAgyQuotaBucket[];
+  accountLabels: ReadonlyMap<string, string>;
+}): QuotaProviderAccount[] {
+  const accounts = new Map<string, QuotaProviderAccount>();
+  for (const bucket of [...params.buckets].sort(compareBuckets)) {
+    const sourceId = `account-${bucket.accountIndex + 1}`;
+    if (accounts.has(sourceId)) continue;
+    const email = bucket.accountEmail;
+    accounts.set(sourceId, {
+      sourceId,
+      ...(email ? { identityKey: deriveStableAccountIdentityKey(email) } : {}),
+      label: formatAgyAccountLabel(bucket, params.accountLabels),
+    });
+  }
+  return [...accounts.values()];
+}
+
 export function formatAgyCredentialGroup(credentialName: string, familyLabel: string): string {
   const trimmed = credentialName.trim();
   if (!familyLabel?.trim()) return trimmed;
@@ -125,6 +156,14 @@ export const googleAgyProvider: QuotaProvider = {
 
   async isAvailable(): Promise<boolean> {
     return await isAgyConfigured();
+  },
+
+  async isDiscovered(): Promise<boolean> {
+    try {
+      return (await inspectAgyAuthPresence()).accountCount > 0;
+    } catch {
+      return false;
+    }
   },
 
   matchesCurrentModel(model: string): boolean {
@@ -169,13 +208,18 @@ export const googleAgyProvider: QuotaProvider = {
         "Google AGY",
         results.map(({ row }) => ({ row, fallbackName: "Google AGY" })),
       );
+      const accounts = results.map(({ row }, index) => ({
+        sourceId: row.id,
+        label: names[index] ?? "Google AGY",
+        active: row.active,
+      }));
       const entries: QuotaToastEntry[] = [];
       const errors: QuotaProviderResult["errors"] = [];
       for (const [index, { row, result }] of results.entries()) {
         const credentialName = names[index] ?? "Google AGY";
         if (!result) continue;
         if (!result.success) {
-          errors.push({ label: credentialName, message: result.error });
+          errors.push({ label: credentialName, message: result.error, sourceId: row.id });
           continue;
         }
         for (const bucket of [...result.buckets].sort(compareBuckets)) {
@@ -193,6 +237,7 @@ export const googleAgyProvider: QuotaProvider = {
             name: `${group} ${bucket.windowLabel}`,
             group,
             label: `${bucket.windowLabel}:`,
+            rowKey: agyBucketRowKey(bucket),
             sortPriority: windowRank(bucket.window),
             ...(right ? { right } : {}),
             percentRemaining: bucket.percentRemaining,
@@ -203,11 +248,12 @@ export const googleAgyProvider: QuotaProvider = {
           ...(result.errors ?? []).map((error) => ({
             label: credentialName,
             message: error.error,
+            sourceId: row.id,
           })),
         );
       }
       return withStatusDetails(
-        attemptedResult(entries, errors, { singleWindowShowRight: true }),
+        { ...attemptedResult(entries, errors, { singleWindowShowRight: true }), accounts },
         statusDetails,
       );
     }
@@ -233,6 +279,14 @@ export const googleAgyProvider: QuotaProvider = {
       ],
       "domainHint",
     );
+    const legacyAccounts = buildAgyLegacyAccounts({ buckets: sortedBuckets, accountLabels });
+    const sourceIdByEmail = new Map(
+      sortedBuckets.flatMap((bucket) =>
+        bucket.accountEmail
+          ? [[bucket.accountEmail, `account-${bucket.accountIndex + 1}`] as const]
+          : [],
+      ),
+    );
     const entries: QuotaToastEntry[] = sortedBuckets.map((bucket) => {
       const accountLabel = formatAgyAccountLabel(bucket, accountLabels);
       const right = formatRemainingAmount(bucket.remainingAmount);
@@ -248,21 +302,26 @@ export const googleAgyProvider: QuotaProvider = {
         name: `${bucket.family} (${accountLabel})`,
         group: `AGY (${accountLabel}): ${formatAgyFamilyLabel(bucket.family)}`,
         label: `${bucket.windowLabel}:`,
+        rowKey: agyBucketRowKey(bucket),
         sortPriority: windowRank(bucket.window),
         ...(right ? { right } : {}),
         percentRemaining: bucket.percentRemaining,
         resetTimeIso: bucket.resetTimeIso,
       };
     });
+    const errors = formatGoogleAccountErrors(result.errors, "domainHint", accountLabels).map(
+      (error, index) => {
+        const email = result.errors?.[index]?.email;
+        const sourceId = email ? sourceIdByEmail.get(email) : undefined;
+        return sourceId ? { ...error, sourceId } : error;
+      },
+    );
 
     return withStatusDetails(
-      attemptedResult(
-        entries,
-        formatGoogleAccountErrors(result.errors, "domainHint", accountLabels),
-        {
-          singleWindowShowRight: true,
-        },
-      ),
+      {
+        ...attemptedResult(entries, errors, { singleWindowShowRight: true }),
+        ...(legacyAccounts.length > 0 ? { accounts: legacyAccounts } : {}),
+      },
       statusDetails,
     );
   },

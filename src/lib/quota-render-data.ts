@@ -64,12 +64,12 @@ export type QuotaAvailability = {
 async function getProviderAvailability(params: {
   provider: QuotaProvider;
   ctx: QuotaProviderContext;
+  /** Dashboard-only: also accept a provider whose stored logins are all known-failed. */
+  includeDiscovered?: boolean;
 }): Promise<QuotaAvailability> {
+  let available: boolean;
   try {
-    return {
-      provider: params.provider,
-      ok: await params.provider.isAvailable(params.ctx),
-    };
+    available = await params.provider.isAvailable(params.ctx);
   } catch {
     return {
       provider: params.provider,
@@ -77,6 +77,21 @@ async function getProviderAvailability(params: {
       error: true,
     };
   }
+  if (available) {
+    return { provider: params.provider, ok: true };
+  }
+  if (params.includeDiscovered && params.provider.isDiscovered) {
+    try {
+      return { provider: params.provider, ok: await params.provider.isDiscovered(params.ctx) };
+    } catch {
+      return {
+        provider: params.provider,
+        ok: false,
+        error: true,
+      };
+    }
+  }
+  return { provider: params.provider, ok: false };
 }
 
 export async function collectConcreteEnabledProviderIds(params: {
@@ -360,6 +375,9 @@ export async function collectQuotaStatusLiveProbes(params: {
       ...results[index]!,
       entries: results[index]!.entries.map(cloneQuotaToastEntry),
       errors: results[index]!.errors.map((error) => ({ ...error })),
+      ...(results[index]!.accounts
+        ? { accounts: results[index]!.accounts!.map((account) => ({ ...account })) }
+        : {}),
       ...(results[index]!.statusDetails
         ? { statusDetails: results[index]!.statusDetails!.map((detail) => ({ ...detail })) }
         : {}),
@@ -371,6 +389,37 @@ export async function collectQuotaStatusLiveProbes(params: {
         : {}),
     },
   }));
+}
+
+/**
+ * Dashboard seam (design spec §6 provider cards, R17–R20): one quota cycle for
+ * every active/discovered provider with `onlyCurrentModel` off and no session
+ * metadata, returning the **unprojected** provider results instead of the
+ * legacy format-style projection. Account metadata (`accounts`, error
+ * `sourceId`, entry `rowKey`) survives exactly as the provider emitted it.
+ *
+ * Unlike the legacy collectors it also accepts providers whose `isAvailable` is
+ * false but whose `isDiscovered` probe finds stored (known-failed) logins, so
+ * those accounts still reach the dashboard as failed cards. The legacy gate,
+ * fetch/output paths, and cache policy are unchanged.
+ */
+export async function collectQuotaDashboardProviderResults(params: {
+  client: QuotaProviderContext["client"];
+  config: QuotaToastConfig;
+  workspaceRoot: string;
+  configMeta?: Pick<LoadConfigMeta, "settingSources">;
+  providers?: QuotaProvider[];
+  bypassProviderCache?: boolean;
+  resolveRuntimeProviderIds?: RuntimeProviderIdResolver;
+}): Promise<QuotaStatusLiveProbe[]> {
+  const result = await collectQuotaRenderData({
+    ...params,
+    includeDiscoveredProviders: true,
+    config: { ...params.config, onlyCurrentModel: false },
+    request: undefined,
+    surfaceExplicitProviderIssues: false,
+  });
+  return result.providerResults;
 }
 
 function getExplicitNoDataMessage(provider: QuotaProvider): string {
@@ -470,6 +519,12 @@ export async function collectQuotaRenderData(params: {
   bypassProviderCache?: boolean;
   providers?: QuotaProvider[];
   includeAllWindowsData?: boolean;
+  /**
+   * Dashboard-only: include providers whose `isAvailable` is false but whose
+   * `isDiscovered` probe finds stored (known-failed) logins. Legacy callers
+   * leave this off and keep exactly the old availability gate.
+   */
+  includeDiscoveredProviders?: boolean;
   resolveRuntimeProviderIds?: RuntimeProviderIdResolver;
 }): Promise<CollectQuotaRenderDataResult> {
   const resolveRuntimeProviderIds =
@@ -508,6 +563,7 @@ export async function collectQuotaRenderData(params: {
       getProviderAvailability({
         provider,
         ctx: selection.ctx,
+        includeDiscovered: params.includeDiscoveredProviders === true,
       }),
     ),
   );

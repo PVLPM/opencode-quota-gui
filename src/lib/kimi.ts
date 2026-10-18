@@ -2,9 +2,43 @@ import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
 import { getKimiQuotaEndpoint, type KimiQuotaEndpointId } from "./kimi-endpoints.js";
-import type { KimiQuotaWindow, KimiResult } from "./types.js";
+import type { KimiQuotaWindow, QuotaError } from "./types.js";
 
 const USER_AGENT = "OpenCode-Quota-Toast/1.0";
+
+/**
+ * The root `usage` slot of the Kimi usage payload is the plan's weekly window and
+ * the only root slot the parser reads, so its technical identity is this constant
+ * — never the API's display text.
+ */
+const KIMI_ROOT_USAGE_TECHNICAL_KEY = "weekly";
+
+/**
+ * Constant technical key for a `limits[]` item that reports none of the technical
+ * fields (time unit, duration, type, service id). Such items carry no payload
+ * identity at all; the key never falls back to a label or an ordinal.
+ */
+const KIMI_UNIDENTIFIED_LIMIT_TECHNICAL_KEY = "limits";
+
+/**
+ * A parsed Kimi quota window plus its technical identity captured from the raw
+ * payload. `technicalKey` comes from payload structure (the root slot constant,
+ * or the item's time unit + duration, type, or service id) — never from display
+ * text — so the provider's `rowKey` survives a label rename and cannot collide
+ * with the `Limit #N` ordinal.
+ */
+export interface KimiQuotaWindowWithTechnicalKey extends KimiQuotaWindow {
+  technicalKey: string;
+}
+
+/** Result from fetching Kimi quota, with each window's technical identity attached. */
+export type KimiQuotaResultWithTechnicalKeys = {
+  success: true;
+  label: string;
+  windows: KimiQuotaWindowWithTechnicalKey[];
+};
+
+export type KimiResultWithTechnicalKeys = KimiQuotaResultWithTechnicalKeys | QuotaError;
 
 function getFiniteNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -86,6 +120,41 @@ function buildLimitLabel(
   return `Limit #${index + 1}`;
 }
 
+/**
+ * Technical identity of one `limits[]` item: the parsed time unit + duration
+ * when either is present, else the item's `type`, else its service id, else the
+ * constant unidentified fallback. Never a display label and never the ordinal.
+ */
+function buildLimitTechnicalKey(
+  item: Record<string, unknown>,
+  detail: Record<string, unknown>,
+  window: Record<string, unknown>,
+): string {
+  const timeUnit = getNonEmptyString(window.timeUnit ?? item.timeUnit ?? detail.timeUnit);
+  const duration = getFiniteNumber(window.duration ?? item.duration ?? detail.duration);
+  const windowParts = [
+    ...(timeUnit ? [timeUnit] : []),
+    ...(duration !== undefined ? [String(duration)] : []),
+  ];
+  if (windowParts.length > 0) {
+    return windowParts.join(":");
+  }
+
+  const type = getNonEmptyString(item.type ?? detail.type);
+  if (type) {
+    return type;
+  }
+
+  const serviceId = getNonEmptyString(
+    item.serviceId ?? item.service_id ?? detail.serviceId ?? detail.service_id,
+  );
+  if (serviceId) {
+    return serviceId;
+  }
+
+  return KIMI_UNIDENTIFIED_LIMIT_TECHNICAL_KEY;
+}
+
 function toUsageRow(
   data: Record<string, unknown>,
   defaultLabel: string,
@@ -149,22 +218,16 @@ function describeUnexpectedPayload(topLevelKeys: string[]): string {
 }
 
 function parseKimiUsagePayload(payload: Record<string, unknown>): {
-  windows: KimiQuotaWindow[];
+  windows: KimiQuotaWindowWithTechnicalKey[];
   topLevelKeys: string[];
 } {
   const { usage, limits, topLevelKeys } = extractPayloadData(payload);
-  const windows: KimiQuotaWindow[] = [];
+  const windows: KimiQuotaWindowWithTechnicalKey[] = [];
 
   if (usage !== null && typeof usage === "object") {
     const row = toUsageRow(usage as Record<string, unknown>, "Weekly limit");
     if (row) {
-      windows.push({
-        label: row.label,
-        used: row.used,
-        limit: row.limit,
-        percentRemaining: row.percentRemaining,
-        resetTimeIso: row.resetTimeIso,
-      });
+      windows.push({ ...row, technicalKey: KIMI_ROOT_USAGE_TECHNICAL_KEY });
     }
   }
 
@@ -189,13 +252,7 @@ function parseKimiUsagePayload(payload: Record<string, unknown>): {
       const label = buildLimitLabel(itemMap, detail, window, i);
       const row = toUsageRow(detail, label);
       if (row) {
-        windows.push({
-          label: row.label,
-          used: row.used,
-          limit: row.limit,
-          percentRemaining: row.percentRemaining,
-          resetTimeIso: row.resetTimeIso,
-        });
+        windows.push({ ...row, technicalKey: buildLimitTechnicalKey(itemMap, detail, window) });
       }
     }
   }
@@ -204,7 +261,7 @@ function parseKimiUsagePayload(payload: Record<string, unknown>): {
 }
 
 type FetchResult =
-  | { ok: true; windows: KimiQuotaWindow[]; topLevelKeys: string[] }
+  | { ok: true; windows: KimiQuotaWindowWithTechnicalKey[]; topLevelKeys: string[] }
   | { ok: false; error: string };
 
 async function fetchKimiQuotaFromUrl(
@@ -248,7 +305,7 @@ export async function queryKimiQuota(options: {
   endpoint: KimiQuotaEndpointId;
   label?: string;
   requestTimeoutMs?: number;
-}): Promise<KimiResult> {
+}): Promise<KimiResultWithTechnicalKeys> {
   const endpoint = getKimiQuotaEndpoint(options.endpoint);
   const result = await fetchKimiQuotaFromUrl(
     endpoint.quotaUrl,

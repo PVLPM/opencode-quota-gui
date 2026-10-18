@@ -111,6 +111,7 @@ describe.each(PROVIDERS)("$label GLM provider", (descriptor) => {
         name: `${descriptor.label} 5h`,
         group: descriptor.label,
         label: "5h:",
+        rowKey: "window:five_hour",
         percentRemaining: 80,
         resetTimeIso: "2026-01-01T00:00:00.000Z",
       },
@@ -118,6 +119,7 @@ describe.each(PROVIDERS)("$label GLM provider", (descriptor) => {
         name: `${descriptor.label} Weekly`,
         group: descriptor.label,
         label: "Weekly:",
+        rowKey: "window:week",
         percentRemaining: 30,
         resetTimeIso: "2026-01-02T00:00:00.000Z",
       },
@@ -125,6 +127,7 @@ describe.each(PROVIDERS)("$label GLM provider", (descriptor) => {
         name: `${descriptor.label} MCP`,
         group: descriptor.label,
         label: "MCP:",
+        rowKey: "window:mcp",
         percentRemaining: 90,
         resetTimeIso: "2026-01-03T00:00:00.000Z",
       },
@@ -245,6 +248,7 @@ describe("GLM database credential rows", () => {
       {
         label: "[Z.ai Work] (active)",
         message: "OpenCode could not read this login: refresh_failed: HTTP 401",
+        sourceId: "failed-id",
       },
     ]);
     expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([
@@ -275,6 +279,7 @@ describe("Z.ai credit quota surfaces", () => {
         name: "Z.ai 5h",
         group: "Z.ai",
         label: "5h:",
+        rowKey: "window:five_hour",
         percentRemaining: 96,
         resetTimeIso: undefined,
       },
@@ -282,6 +287,7 @@ describe("Z.ai credit quota surfaces", () => {
         name: "Z.ai Weekly",
         group: "Z.ai",
         label: "Weekly:",
+        rowKey: "window:week",
         percentRemaining: 89,
         resetTimeIso: undefined,
       },

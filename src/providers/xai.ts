@@ -22,8 +22,23 @@ import {
   periodKindLabel,
   queryXaiQuota,
   resolveXaiOAuth,
+  type XaiPeriodKind,
 } from "../lib/xai.js";
 import { attemptedResult, mapNullableProviderResult } from "./result-helpers.js";
+
+/** Stable explicit row key for the single percent row (never the display label). */
+function xaiWindowRowKey(kind: XaiPeriodKind): string {
+  switch (kind) {
+    case "weekly":
+      return "window:week";
+    case "monthly":
+      return "window:month";
+    case "daily":
+      return "window:day";
+    default:
+      return "named:period";
+  }
+}
 
 export const xaiProvider: QuotaProvider = {
   id: "xai",
@@ -69,6 +84,11 @@ export const xaiProvider: QuotaProvider = {
           fallbackName: result?.success ? result.label : "xAI",
         })),
       );
+      const accounts = results.map(({ row }, index) => ({
+        sourceId: row.id,
+        label: names[index] ?? "xAI",
+        active: row.active,
+      }));
       const entries: QuotaProviderResult["entries"] = [];
       const errors: QuotaProviderResult["errors"] = [];
       for (const [index, { row, result }] of results.entries()) {
@@ -89,6 +109,7 @@ export const xaiProvider: QuotaProvider = {
                 name: `${group} ${period}`,
                 group,
                 label: `${period}:`,
+                rowKey: xaiWindowRowKey(result.window.kind),
                 percentRemaining: result.window.percentRemaining,
                 resetTimeIso: result.window.resetTimeIso,
               },
@@ -96,9 +117,9 @@ export const xaiProvider: QuotaProvider = {
           },
         });
         entries.push(...mapped.entries);
-        errors.push(...mapped.errors);
+        errors.push(...mapped.errors.map((error) => ({ ...error, sourceId: row.id })));
       }
-      return attemptedResult(entries, errors);
+      return { ...attemptedResult(entries, errors), accounts };
     }
     const result = await queryXaiQuota({ requestTimeoutMs: ctx.config?.requestTimeoutMs });
 
@@ -118,6 +139,7 @@ export const xaiProvider: QuotaProvider = {
               name: `${result.label} ${period}`,
               group: result.label,
               label: `${period}:`,
+              rowKey: xaiWindowRowKey(result.window.kind),
               percentRemaining: result.window.percentRemaining,
               resetTimeIso: result.window.resetTimeIso,
               ...(result.window.fixedWindow

@@ -1,10 +1,12 @@
 import { sanitizeDisplayText } from "../lib/display-sanitize.js";
 import type {
   QuotaProvider,
+  QuotaProviderAccount,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { deriveStableAccountIdentityKey } from "../lib/entries.js";
 import {
   GEMINI_CLI_AUTH_KEYS,
   hasGeminiCliQuotaRuntimeAvailable,
@@ -14,7 +16,12 @@ import {
 import { inspectGeminiCliCompanionPresence } from "../lib/google-gemini-cli-companion.js";
 import { formatCredentialDisplayNames, readCredentialRows } from "../lib/opencode-auth.js";
 import { parseProviderModelRef } from "../lib/provider-model-matching.js";
-import type { AuthData, GeminiCliResult } from "../lib/types.js";
+import type {
+  AuthData,
+  GeminiCliQuotaBucket,
+  GeminiCliResult,
+  GoogleAccountError,
+} from "../lib/types.js";
 import {
   createGoogleAccountLabelMap,
   formatGoogleAccountErrors,
@@ -46,11 +53,51 @@ async function isGeminiCliConfigured(): Promise<boolean> {
   }
 }
 
+/** Stable explicit row key for one Gemini CLI bucket row (never the row label). */
+export function geminiCliBucketRowKey(bucket: Pick<GeminiCliQuotaBucket, "displayName">): string {
+  return `named:${bucket.displayName}`;
+}
+
+/**
+ * Accounts of the legacy companion path (no `CredentialRow`). `sourceId` keeps
+ * the historical raw email byte-identical for reset/cache compatibility while
+ * `identityKey` carries a server-only email digest; a login OpenCode could not
+ * return (error with no bucket) becomes a zero-entry failed account.
+ */
+export function buildGeminiCliLegacyAccounts(params: {
+  buckets: readonly GeminiCliQuotaBucket[];
+  errors?: readonly GoogleAccountError[];
+  accountLabels: ReadonlyMap<string, string>;
+}): QuotaProviderAccount[] {
+  const accounts = new Map<string, QuotaProviderAccount>();
+  const add = (email: string): void => {
+    if (!email || accounts.has(email)) return;
+    accounts.set(email, {
+      sourceId: email,
+      identityKey: deriveStableAccountIdentityKey(email),
+      label: params.accountLabels.get(email) ?? formatGoogleAccountLabel(email, "domainHint"),
+    });
+  };
+  for (const bucket of params.buckets) {
+    if (bucket.accountEmail) add(bucket.accountEmail);
+  }
+  for (const error of params.errors ?? []) add(error.email);
+  return [...accounts.values()];
+}
+
 export const googleGeminiCliProvider: QuotaProvider = {
   id: "google-gemini-cli",
 
   async isAvailable(): Promise<boolean> {
     return await isGeminiCliConfigured();
+  },
+
+  async isDiscovered(): Promise<boolean> {
+    try {
+      return (await inspectGeminiCliAuthPresence()).accountCount > 0;
+    } catch {
+      return false;
+    }
   },
 
   matchesCurrentModel(model: string): boolean {
@@ -105,13 +152,18 @@ export const googleGeminiCliProvider: QuotaProvider = {
         "Gemini CLI",
         results.map(({ row }) => ({ row, fallbackName: "Gemini CLI" })),
       );
+      const accounts = results.map(({ row }, index) => ({
+        sourceId: row.id,
+        label: names[index] ?? "Gemini CLI",
+        active: row.active,
+      }));
       const entries: QuotaToastEntry[] = [];
       const errors: QuotaProviderResult["errors"] = [];
       for (const [index, { row, result }] of results.entries()) {
         const group = names[index] ?? "Gemini CLI";
         if (!result) continue;
         if (!result.success) {
-          errors.push({ label: group, message: result.error });
+          errors.push({ label: group, message: result.error, sourceId: row.id });
           continue;
         }
         for (const bucket of result.buckets) {
@@ -139,20 +191,28 @@ export const googleGeminiCliProvider: QuotaProvider = {
             name: `${group} ${bucket.displayName}`,
             group,
             label: `${bucket.displayName}:`,
+            rowKey: geminiCliBucketRowKey(bucket),
             ...(right ? { right } : {}),
             percentRemaining: bucket.percentRemaining,
             resetTimeIso: bucket.resetTimeIso,
           });
         }
         errors.push(
-          ...(result.errors ?? []).map((error) => ({ label: group, message: error.error })),
+          ...(result.errors ?? []).map((error) => ({
+            label: group,
+            message: error.error,
+            sourceId: row.id,
+          })),
         );
       }
       return withStatusDetails(
-        attemptedResult(entries, errors, {
-          singleWindowDisplayName: "Gemini CLI",
-          singleWindowShowRight: true,
-        }),
+        {
+          ...attemptedResult(entries, errors, {
+            singleWindowDisplayName: "Gemini CLI",
+            singleWindowShowRight: true,
+          }),
+          accounts,
+        },
         statusDetails,
       );
     }
@@ -204,21 +264,33 @@ export const googleGeminiCliProvider: QuotaProvider = {
         name: `${bucket.displayName} (${emailLabel})`,
         group: `Gemini CLI (${emailLabel})`,
         label: `${bucket.displayName}:`,
+        rowKey: geminiCliBucketRowKey(bucket),
         ...(right ? { right } : {}),
         percentRemaining: bucket.percentRemaining,
         resetTimeIso: bucket.resetTimeIso,
       };
     });
 
+    const legacyAccounts = buildGeminiCliLegacyAccounts({
+      buckets: result.buckets,
+      errors: result.errors,
+      accountLabels,
+    });
+    const errors = formatGoogleAccountErrors(result.errors, "domainHint", accountLabels).map(
+      (error, index) => {
+        const email = result.errors?.[index]?.email;
+        return email ? { ...error, sourceId: email } : error;
+      },
+    );
+
     return withStatusDetails(
-      attemptedResult(
-        entries,
-        formatGoogleAccountErrors(result.errors, "domainHint", accountLabels),
-        {
+      {
+        ...attemptedResult(entries, errors, {
           singleWindowDisplayName: "Gemini CLI",
           singleWindowShowRight: true,
-        },
-      ),
+        }),
+        ...(legacyAccounts.length > 0 ? { accounts: legacyAccounts } : {}),
+      },
       statusDetails,
     );
   },

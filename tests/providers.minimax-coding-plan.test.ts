@@ -208,6 +208,7 @@ describe("minimax-coding-plan provider", () => {
     expect(out.errors).toContainEqual({
       label: "[MiniMax Token Plan shared] (active)",
       message: "empty key",
+      sourceId: "bad",
     });
     expect(out.entries).toContainEqual(
       expect.objectContaining({

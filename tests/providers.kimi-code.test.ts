@@ -42,6 +42,7 @@ import { kimiCodePlanCnProvider, kimiCodePlanGlobalProvider } from "../src/provi
 
 const successfulWindows = [
   {
+    technicalKey: "weekly",
     label: "Weekly limit",
     used: 250,
     limit: 1000,
@@ -49,6 +50,7 @@ const successfulWindows = [
     resetTimeIso: "2026-01-08T00:00:00.000Z",
   },
   {
+    technicalKey: "TIME_UNIT_HOUR:5",
     label: "5h limit",
     used: 100,
     limit: 500,
@@ -147,6 +149,7 @@ describe("Kimi regional providers", () => {
         name: "Kimi Code (CN) Weekly limit",
         group: "Kimi Code (CN)",
         label: "Weekly limit:",
+        rowKey: "named:weekly",
         right: "250/1000",
         percentRemaining: 75,
         resetTimeIso: "2026-01-08T00:00:00.000Z",
@@ -155,6 +158,7 @@ describe("Kimi regional providers", () => {
         name: "Kimi Code (CN) 5h limit",
         group: "Kimi Code (CN)",
         label: "5h limit:",
+        rowKey: "named:TIME_UNIT_HOUR:5",
         right: "100/500",
         percentRemaining: 80,
         resetTimeIso: "2026-01-01T05:00:00.000Z",
@@ -326,7 +330,7 @@ describe("Kimi regional providers", () => {
 
     expect(out.attempted).toBe(true);
     expect(out.errors).toEqual([
-      { label: expect.stringContaining("shared"), message: "empty key" },
+      { label: expect.stringContaining("shared"), message: "empty key", sourceId: "bad" },
     ]);
     expect(out.entries).toHaveLength(2);
     expect(out.entries[0]?.accounting.sourceId).toBe("good");
@@ -377,6 +381,7 @@ describe("Kimi regional providers", () => {
       {
         label: "[Kimi Code (CN) Work]",
         message: "OpenCode could not read this login: resolve_empty: no value",
+        sourceId: "failed",
       },
     ]);
     expect(queryKimiQuota).not.toHaveBeenCalled();

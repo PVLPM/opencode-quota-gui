@@ -42,6 +42,12 @@ const OPENCODE_GO_WINDOW_LABELS: Record<OpenCodeGoWindowKey, { name: string; lab
   weekly: { name: `${OPENCODE_GO_PROVIDER_LABEL} Weekly`, label: "Weekly:" },
   monthly: { name: `${OPENCODE_GO_PROVIDER_LABEL} Monthly`, label: "Monthly:" },
 };
+/** Stable explicit row keys (metric + window) for the percent-only window rows. */
+const OPENCODE_GO_WINDOW_ROW_KEYS: Record<OpenCodeGoWindowKey, string> = {
+  rolling: "window:five_hour",
+  weekly: "window:week",
+  monthly: "window:month",
+};
 
 const notSubscribedCredentialFingerprints = new Set<string>();
 
@@ -94,6 +100,7 @@ function buildOpenCodeGoEntries(
       name: `${group} ${labels.label.slice(0, -1)}`,
       group,
       label: labels.label,
+      rowKey: OPENCODE_GO_WINDOW_ROW_KEYS[window],
       percentRemaining: usage.percentRemaining,
       resetTimeIso: usage.resetTimeIso,
     });
@@ -279,11 +286,17 @@ async function fetchOpenCodeGoLegacy(
         invalidErrors.push({
           label: displayNamesByRowId.get(row.id) ?? OPENCODE_GO_PROVIDER_LABEL,
           message: rowAuth.error,
+          sourceId: row.id,
         });
       }
       return rowAuth.state === "configured" ? [{ row, auth: rowAuth }] : [];
     });
     if (credentials.length > 0 || invalidErrors.length > 0) {
+      const accounts = credentialRows.map((row) => ({
+        sourceId: row.id,
+        label: displayNamesByRowId.get(row.id) ?? OPENCODE_GO_PROVIDER_LABEL,
+        active: row.active,
+      }));
       const credentialFingerprints = new Set(
         credentials.map(({ auth: rowAuth }) => fingerprintCredential(rowAuth.apiKey)),
       );
@@ -310,9 +323,15 @@ async function fetchOpenCodeGoLegacy(
         if (!result) continue;
         const group = displayNamesByRowId.get(row.id) ?? OPENCODE_GO_PROVIDER_LABEL;
         if (result.success) entries.push(...buildOpenCodeGoEntries(result, windows, group, row.id));
-        else errors.push({ label: group, message: result.error, retryable: result.retryable });
+        else
+          errors.push({
+            label: group,
+            message: result.error,
+            retryable: result.retryable,
+            sourceId: row.id,
+          });
       }
-      return withStatusDetails(attemptedResult(entries, errors), [
+      return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, [
         ...baseStatusDetails,
         ...(entries.length === 0 && errors.length === 0 && credentials.length > 0
           ? [{ key: "opencode_go_state", value: "not_subscribed" }]

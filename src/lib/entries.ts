@@ -1,8 +1,20 @@
+import { createHash } from "node:crypto";
+
 import type { QuotaProviderDefinition } from "./quota-providers.js";
 import type { QuotaTelemetryToken } from "./quota-telemetry.js";
 import type { ResolvedAuthIdentity } from "./resolved-auth-identity.js";
 import type { RuntimeProviderIdResolver } from "./runtime-provider-ids.js";
 import type { CursorQuotaPlan, OpenCodeGoWindowKey } from "./types.js";
+
+/**
+ * Stable server-only identity key for an account discriminator that is not a
+ * unique connection id (for example an email-based source). Deterministic
+ * sha256 hex; the raw discriminator never leaves this call and never reaches
+ * the browser, logs, exports, or HTTP payloads.
+ */
+export function deriveStableAccountIdentityKey(discriminator: string): string {
+  return createHash("sha256").update(discriminator.trim().toLowerCase()).digest("hex");
+}
 
 /**
  * Normalized quota output model.
@@ -136,6 +148,11 @@ export interface GroupedQuotaEntryMeta {
   metricLabel?: string;
   /** Complete provider-neutral row semantics. Rich providers require this on every row. */
   semantic?: AccountingSemantic;
+  /**
+   * Optional stable row key for rows without a typed `semantic`. Never a
+   * display label or an ordinal, so a label rename cannot change a row id.
+   */
+  rowKey?: string;
   /** Optional compact right-hand summary for legacy and configured providers only. */
   right?: string;
   /** Optional stable row priority within a group; lower values render first. */
@@ -255,6 +272,12 @@ export interface QuotaToastError {
   retryable?: boolean;
   /** Intentional diagnostics remain verbose but do not count as compact-status issues. */
   kind?: "intentional-filter";
+  /**
+   * Stable account source id when the failure is known to belong to one
+   * discovered account (`CredentialRow.id` for multi-account loops). Absent
+   * means a provider-level error; no account association is invented.
+   */
+  sourceId?: string;
 }
 
 /** Per-model token summary for current session (toast display). */
@@ -334,11 +357,30 @@ export interface QuotaProviderDiagnostic {
   stateLastUpdatedAt?: number | null;
 }
 
+/**
+ * One discovered provider account (additive, optional). Multi-account loops
+ * emit one descriptor per stored login, including zero-entry and failed
+ * accounts, so the dashboard can keep them visible. `sourceId` is the stable
+ * OpenCode connection id (`CredentialRow.id`) for those loops; `identityKey`
+ * defaults to `sourceId` and is supplied only where the source id is not
+ * unique/stable (never a raw address).
+ */
+export interface QuotaProviderAccount {
+  sourceId: string;
+  identityKey?: string;
+  /** Existing display label (e.g. `formatCredentialDisplayNames`); never an identity. */
+  label?: string;
+  /** Whether OpenCode marks this login as the active one. */
+  active?: boolean;
+}
+
 export interface QuotaProviderResult {
   /** True when provider had enough configuration to attempt a query. */
   attempted: boolean;
   entries: QuotaToastEntry[];
   errors: QuotaToastError[];
+  /** Additive discovered-account descriptors; absent when no account identity exists. */
+  accounts?: readonly QuotaProviderAccount[];
   /** Internal provider diagnostics; not projected into normal presentation/export surfaces. */
   diagnostics?: QuotaProviderDiagnostic[];
   /**
@@ -412,6 +454,15 @@ export interface QuotaProvider {
 
   /** Best-effort availability check (no network if possible) */
   isAvailable: (ctx: QuotaProviderContext) => Promise<boolean>;
+
+  /**
+   * Optional dashboard-only discovery probe (no network/OAuth refresh): true
+   * when at least one stored login exists for this provider even if none can
+   * currently resolve. `collectQuotaDashboardProviderResults` consults it only
+   * after `isAvailable` returned false, so known-failed logins stay visible as
+   * cards; legacy TUI availability and collections never call it.
+   */
+  isDiscovered?: (ctx: QuotaProviderContext) => Promise<boolean>;
 
   /** Fetch and normalize quota for this provider. */
   fetch: (

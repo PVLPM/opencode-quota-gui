@@ -64,6 +64,7 @@ describe("openai provider", () => {
         name: "OpenAI (Pro) 5h",
         group: "OpenAI (Pro)",
         label: "5h:",
+        rowKey: "window:five_hour",
         percentRemaining: 42,
         resetTimeIso: "2026-01-01T00:00:00.000Z",
       },
@@ -71,6 +72,7 @@ describe("openai provider", () => {
         name: "OpenAI (Pro) Weekly",
         group: "OpenAI (Pro)",
         label: "Weekly:",
+        rowKey: "window:week",
         percentRemaining: 80,
         resetTimeIso: "2026-01-07T00:00:00.000Z",
       },
@@ -78,6 +80,7 @@ describe("openai provider", () => {
         name: "OpenAI (Pro) Monthly",
         group: "OpenAI (Pro)",
         label: "Monthly:",
+        rowKey: "window:month",
         percentRemaining: 67,
         resetTimeIso: "2026-02-01T00:00:00.000Z",
       },
@@ -85,6 +88,7 @@ describe("openai provider", () => {
         name: "OpenAI (Pro) Code Review",
         group: "OpenAI (Pro)",
         label: "Code Review:",
+        rowKey: "window:code_review",
         percentRemaining: 55,
         resetTimeIso: "2026-01-02T00:00:00.000Z",
       },
@@ -252,6 +256,7 @@ describe("openai provider", () => {
         label: "[OpenAI Work] (active)",
         message:
           "OpenAI sign-in could not be refreshed: refresh_failed: HTTP 400. Run `opencode auth logout openai Work`, then `opencode auth login openai`.",
+        sourceId: "work-id",
       },
     ]);
     expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([
@@ -290,6 +295,7 @@ describe("openai provider", () => {
         kind: "value",
         name: "[OpenAI Key]",
         group: "[OpenAI Key]",
+        rowKey: "named:status",
         value: "ChatGPT quota unavailable for API key",
       },
     ]);
@@ -337,6 +343,7 @@ describe("openai provider", () => {
         kind: "value",
         name: "[OpenAI]",
         group: "[OpenAI]",
+        rowKey: "named:status",
         value: "ChatGPT quota unavailable for Sign in with ChatGPT",
       },
     ]);
@@ -703,6 +710,7 @@ describe("openai provider", () => {
       {
         label: "[OpenAI Key]",
         message: "OpenAI API key could not be read: refresh_failed: HTTP 400",
+        sourceId: "key-id",
       },
     ]);
     expect(out.statusDetails).toEqual(

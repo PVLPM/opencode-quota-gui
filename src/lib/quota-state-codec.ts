@@ -32,6 +32,7 @@ export function cloneQuotaProviderResult(result: QuotaProviderResult): QuotaProv
     attempted: result.attempted,
     entries: result.entries.map(cloneQuotaToastEntry),
     errors: result.errors.map((error) => ({ ...error })),
+    ...(result.accounts ? { accounts: result.accounts.map((account) => ({ ...account })) } : {}),
     ...(result.diagnostics
       ? {
           diagnostics: result.diagnostics.map((diagnostic) => ({
@@ -253,6 +254,7 @@ const COMMON_ENTRY_KEYS = [
   "label",
   "metricLabel",
   "semantic",
+  "rowKey",
   "right",
   "sortPriority",
 ] as const;
@@ -264,6 +266,7 @@ function hasValidEntryBase(entry: Record<string, unknown>, safeText: boolean): b
     isOptionalIsoTimestamp(entry.resetTimeIso) &&
     (entry.sortPriority === undefined ||
       (typeof entry.sortPriority === "number" && Number.isFinite(entry.sortPriority))) &&
+    (entry.rowKey === undefined || typeof entry.rowKey === "string") &&
     ["group", "label", "metricLabel", "right"].every(
       (key) => entry[key] === undefined || typeof entry[key] === "string",
     ) &&
@@ -305,11 +308,23 @@ function isQuotaToastEntry(value: unknown, safeText: boolean): value is QuotaToa
 function isQuotaToastError(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(value, ["label", "message", "retryable", "kind"]) &&
+    hasOnlyKeys(value, ["label", "message", "retryable", "kind", "sourceId"]) &&
     typeof value.label === "string" &&
     typeof value.message === "string" &&
     (value.retryable === undefined || typeof value.retryable === "boolean") &&
-    (value.kind === undefined || value.kind === "intentional-filter")
+    (value.kind === undefined || value.kind === "intentional-filter") &&
+    (value.sourceId === undefined || typeof value.sourceId === "string")
+  );
+}
+
+function isQuotaProviderAccount(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    hasOnlyKeys(value, ["sourceId", "identityKey", "label", "active"]) &&
+    typeof value.sourceId === "string" &&
+    (value.identityKey === undefined || typeof value.identityKey === "string") &&
+    (value.label === undefined || typeof value.label === "string") &&
+    (value.active === undefined || typeof value.active === "boolean")
   );
 }
 
@@ -428,6 +443,7 @@ function isQuotaProviderResult(value: unknown, safeText: boolean): value is Quot
       "attempted",
       "entries",
       "errors",
+      "accounts",
       "diagnostics",
       "statusDetails",
       "rawDetails",
@@ -438,6 +454,8 @@ function isQuotaProviderResult(value: unknown, safeText: boolean): value is Quot
     value.entries.every((entry) => isQuotaToastEntry(entry, safeText)) &&
     isDenseArray(value.errors) &&
     value.errors.every(isQuotaToastError) &&
+    (value.accounts === undefined ||
+      (isDenseArray(value.accounts) && value.accounts.every(isQuotaProviderAccount))) &&
     (value.diagnostics === undefined ||
       (isDenseArray(value.diagnostics) && value.diagnostics.every(isQuotaProviderDiagnostic))) &&
     (value.statusDetails === undefined ||
@@ -452,7 +470,28 @@ function isQuotaProviderResult(value: unknown, safeText: boolean): value is Quot
 export function normalizeQuotaProviderResult(value: unknown): QuotaProviderResult | null {
   if (!isQuotaProviderResult(value, false)) return null;
   const sanitized = sanitizeQuotaProviderResult(value);
-  return isQuotaProviderResult(sanitized, true) ? cloneQuotaProviderResult(sanitized) : null;
+  // The display sanitizer predates the additive account metadata: it rebuilds
+  // `errors` and does not carry `accounts`, so re-attach both here instead of
+  // letting the codec drop metadata. Labels get the same single-line
+  // sanitization; ids are opaque strings that are never rendered.
+  const preserved: QuotaProviderResult = {
+    ...sanitized,
+    errors: sanitized.errors.map((error, index) => {
+      const sourceId = value.errors[index]?.sourceId;
+      return sourceId === undefined ? error : { ...error, sourceId };
+    }),
+    ...(value.accounts
+      ? {
+          accounts: value.accounts.map((account) => ({
+            ...account,
+            ...(account.label !== undefined
+              ? { label: sanitizeSingleLineDisplayText(account.label) }
+              : {}),
+          })),
+        }
+      : {}),
+  };
+  return isQuotaProviderResult(preserved, true) ? cloneQuotaProviderResult(preserved) : null;
 }
 
 export function encodePersistedQuotaProviderCacheEntry(

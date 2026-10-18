@@ -68,6 +68,7 @@ describe("xai provider", () => {
         name: "xAI SuperGrok Weekly",
         group: "xAI SuperGrok",
         label: "Weekly:",
+        rowKey: "window:week",
         percentRemaining: 95,
         resetTimeIso: "2026-07-20T02:24:00.983Z",
       },
@@ -103,6 +104,7 @@ describe("xai provider", () => {
         name: `${label} Weekly`,
         group: label,
         label: "Weekly:",
+        rowKey: "window:week",
         percentRemaining: 95,
         resetTimeIso: "2026-07-20T02:24:00.983Z",
       },
@@ -149,6 +151,7 @@ describe("xai provider", () => {
         label: "[xAI]",
         message:
           "xAI sign-in could not be refreshed: refresh_failed: HTTP 401. Run `opencode auth login xai`.",
+        sourceId: "xai-id",
       },
     ]);
   });

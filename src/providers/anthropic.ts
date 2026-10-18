@@ -124,31 +124,38 @@ export const anthropicProvider: QuotaProvider = {
         "Claude",
         results.map(({ row }) => ({ row, fallbackName: "Claude" })),
       );
+      const accounts = results.map(({ row }, index) => ({
+        sourceId: row.id,
+        label: names[index] ?? "Claude",
+        active: row.active,
+      }));
       const entries: QuotaToastEntry[] = [];
       const errors: QuotaProviderResult["errors"] = [];
       for (const [index, { row, result }] of results.entries()) {
         const group = names[index] ?? "Claude";
         if (!result?.success) {
-          if (result) errors.push({ label: group, message: result.error });
+          if (result) errors.push({ label: group, message: result.error, sourceId: row.id });
           continue;
         }
         entries.push(
-          ...[["5h", result.five_hour] as const, ["Weekly", result.seven_day] as const].map(
-            ([label, window]) => ({
-              accounting: {
-                resultType: "quota" as const,
-                acquisitionMethod: "remote_api" as const,
-                ownership: "maintained" as const,
-                authority: "provider_reported" as const,
-                sourceId: row.id,
-              },
-              name: `${group} ${label}`,
-              group,
-              label: `${label}:`,
-              percentRemaining: window.percentRemaining,
-              resetTimeIso: window.resetTimeIso,
-            }),
-          ),
+          ...[
+            ["5h", result.five_hour, "window:five_hour"] as const,
+            ["Weekly", result.seven_day, "window:week"] as const,
+          ].map(([label, window, rowKey]) => ({
+            accounting: {
+              resultType: "quota" as const,
+              acquisitionMethod: "remote_api" as const,
+              ownership: "maintained" as const,
+              authority: "provider_reported" as const,
+              sourceId: row.id,
+            },
+            name: `${group} ${label}`,
+            group,
+            label: `${label}:`,
+            rowKey,
+            percentRemaining: window.percentRemaining,
+            resetTimeIso: window.resetTimeIso,
+          })),
         );
         if (result.extra_usage) {
           entries.push({
@@ -162,6 +169,7 @@ export const anthropicProvider: QuotaProvider = {
             name: `${group} Usage Credits`,
             group: `${group} Usage Credits`,
             label: "Monthly:",
+            rowKey: "window:month",
             percentRemaining: result.extra_usage.percentRemaining,
           });
         }
@@ -186,7 +194,7 @@ export const anthropicProvider: QuotaProvider = {
           });
         }
       }
-      return withStatusDetails(attemptedResult(entries, errors), statusDetails);
+      return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, statusDetails);
     }
 
     const result = await queryAnthropicQuota(options);
@@ -209,6 +217,7 @@ export const anthropicProvider: QuotaProvider = {
         name: "Claude 5h",
         group: "Claude",
         label: "5h:",
+        rowKey: "window:five_hour",
         percentRemaining: result.five_hour.percentRemaining,
         resetTimeIso: result.five_hour.resetTimeIso,
       },
@@ -222,6 +231,7 @@ export const anthropicProvider: QuotaProvider = {
         name: "Claude Weekly",
         group: "Claude",
         label: "Weekly:",
+        rowKey: "window:week",
         percentRemaining: result.seven_day.percentRemaining,
         resetTimeIso: result.seven_day.resetTimeIso,
       },
@@ -238,6 +248,7 @@ export const anthropicProvider: QuotaProvider = {
         name: "Claude Usage Credits",
         group: "Claude Usage Credits",
         label: "Monthly:",
+        rowKey: "window:month",
         percentRemaining: result.extra_usage.percentRemaining,
       });
     }

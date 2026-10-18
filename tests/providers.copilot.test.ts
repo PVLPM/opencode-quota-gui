@@ -76,6 +76,7 @@ describe("copilot provider", () => {
         name: "Copilot AI Credits",
         group: "Copilot (personal)",
         label: "Credits:",
+        rowKey: "window:month",
         value: "Used 100 | Included 80 | Billed 20 ($0.20)",
         resetTimeIso: undefined,
       },
@@ -109,6 +110,7 @@ describe("copilot provider", () => {
         name: "Copilot Premium Interactions",
         group: "Copilot (enterprise)",
         label: "Quota:",
+        rowKey: "window:month",
         right: "600.5/1,000",
         percentRemaining: 40,
         resetTimeIso: "2026-02-01T00:00:00.000Z",
@@ -141,6 +143,7 @@ describe("copilot provider", () => {
         name: "Copilot AI Credits",
         group: "Copilot (business)",
         label: "Credits:",
+        rowKey: "window:month",
         right: "3,739/3,000",
         percentRemaining: 0,
         resetTimeIso: "2026-02-01T00:00:00.000Z",
@@ -257,7 +260,9 @@ describe("copilot provider", () => {
       { "github-copilot": { type: "oauth", resolveError: "refresh_failed: HTTP 401" } },
       { "github-copilot": { type: "oauth", access: "bob-token" } },
     ]);
-    expect(out.errors).toEqual([{ label: "[Copilot alice] (active)", message: signInError }]);
+    expect(out.errors).toEqual([
+      { label: "[Copilot alice] (active)", message: signInError, sourceId: "copilot-alice" },
+    ]);
     expect(visibleEntries(out.entries, "copilot")[0]?.group).toBe("[Copilot bob] (enterprise)");
   });
 
@@ -292,6 +297,7 @@ describe("copilot provider", () => {
         name: "Copilot AI Credits",
         group: "Copilot (business)",
         label: "Credits:",
+        rowKey: "window:month",
         value: "Used 100 | Included 80 | Billed 20 ($0.20) | 2026-01 | org=acme | user=alice",
         resetTimeIso: undefined,
       },
@@ -299,6 +305,7 @@ describe("copilot provider", () => {
         name: "Copilot Additional Usage",
         group: "Copilot (business)",
         label: "Budget:",
+        rowKey: "named:additional_usage",
         right: "$0.20/$1.00",
         percentRemaining: 80,
         resetTimeIso: undefined,
@@ -337,6 +344,7 @@ describe("copilot provider", () => {
       name: "Copilot Additional Usage",
       group: "Copilot (business)",
       label: "Budget:",
+      rowKey: "named:additional_usage",
       value: "$0.10 spent | $0.00 budget | scope=enterprise",
       resetTimeIso: undefined,
     });
@@ -382,6 +390,7 @@ describe("copilot provider", () => {
         name: "Copilot Premium Requests",
         group: "Copilot (pro+)",
         label: "Quota:",
+        rowKey: "window:month",
         right: "150/1,500",
         percentRemaining: 90,
         resetTimeIso: undefined,
@@ -407,6 +416,7 @@ describe("copilot provider", () => {
         name: "Copilot",
         group: "Copilot (business)",
         label: "Plan:",
+        rowKey: "named:plan",
         value: "business | usage needs billing token",
         resetTimeIso: "2026-02-01T00:00:00.000Z",
       },

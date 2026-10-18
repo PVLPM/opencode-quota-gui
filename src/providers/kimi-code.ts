@@ -117,11 +117,17 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
             invalidErrors.push({
               label: displayNamesByRowId.get(row.id) ?? spec.label,
               message: rowAuth.error,
+              sourceId: row.id,
             });
           }
           return rowAuth.state === "configured" ? [{ row, auth: rowAuth }] : [];
         });
         if (credentials.length > 0 || invalidErrors.length > 0) {
+          const accounts = credentialRows.map((row) => ({
+            sourceId: row.id,
+            label: displayNamesByRowId.get(row.id) ?? spec.label,
+            active: row.active,
+          }));
           const results = await Promise.all(
             credentials.map(async ({ row, auth: rowAuth }) => ({
               row,
@@ -138,7 +144,7 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
           for (const { row, result } of results) {
             const group = displayNamesByRowId.get(row.id) ?? spec.label;
             if (!result.success) {
-              errors.push({ label: group, message: result.error });
+              errors.push({ label: group, message: result.error, sourceId: row.id });
               continue;
             }
             entries.push(
@@ -153,13 +159,14 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
                 name: `${group} ${window.label}`,
                 group,
                 label: `${window.label}:`,
+                rowKey: `named:${window.technicalKey}`,
                 right: formatUsageRight(window),
                 percentRemaining: window.percentRemaining,
                 resetTimeIso: window.resetTimeIso,
               })),
             );
           }
-          return withStatusDetails(attemptedResult(entries, errors), authDetails);
+          return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, authDetails);
         }
       }
 
@@ -191,6 +198,7 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
         name: `${result.label} ${window.label}`,
         group: result.label,
         label: `${window.label}:`,
+        rowKey: `named:${window.technicalKey}`,
         right: formatUsageRight(window),
         percentRemaining: window.percentRemaining,
         resetTimeIso: window.resetTimeIso,

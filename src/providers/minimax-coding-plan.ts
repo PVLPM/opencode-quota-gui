@@ -483,11 +483,17 @@ function createMiniMaxProvider(spec: MiniMaxProviderSpec): QuotaProvider {
             invalidErrors.push({
               label: displayNamesByRowId.get(row.id) ?? spec.label,
               message: rowAuth.error,
+              sourceId: row.id,
             });
           }
           return rowAuth.state === "configured" ? [{ row, auth: rowAuth }] : [];
         });
         if (credentials.length > 0 || invalidErrors.length > 0) {
+          const accounts = credentialRows.map((row) => ({
+            sourceId: row.id,
+            label: displayNamesByRowId.get(row.id) ?? spec.label,
+            active: row.active,
+          }));
           const results = await Promise.all(
             credentials.map(async ({ row, auth }) => ({
               row,
@@ -503,7 +509,9 @@ function createMiniMaxProvider(spec: MiniMaxProviderSpec): QuotaProvider {
           for (const { row, result } of results) {
             const group = displayNamesByRowId.get(row.id) ?? spec.label;
             if (result.errors.length > 0) {
-              errors.push(...result.errors.map((error) => ({ ...error, label: group })));
+              errors.push(
+                ...result.errors.map((error) => ({ ...error, label: group, sourceId: row.id })),
+              );
               continue;
             }
             entries.push(
@@ -517,7 +525,10 @@ function createMiniMaxProvider(spec: MiniMaxProviderSpec): QuotaProvider {
               })),
             );
           }
-          return withStatusDetails(attemptedResult(entries, errors), statusDetails);
+          return withStatusDetails(
+            { ...attemptedResult(entries, errors), accounts },
+            statusDetails,
+          );
         }
       }
 

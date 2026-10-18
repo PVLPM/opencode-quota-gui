@@ -430,6 +430,7 @@ describe("opencode-go provider", () => {
     expect(out.errors).toContainEqual({
       label: "[OpenCode Go shared] (active)",
       message: "empty key",
+      sourceId: "bad",
     });
     expect(out.entries).toContainEqual(
       expect.objectContaining({
@@ -464,8 +465,8 @@ describe("opencode-go provider", () => {
 
     const message = "OpenCode could not read this login: active_failed: database is locked";
     expect(out.errors).toEqual([
-      { label: "[OpenCode Go Personal] (active)", message },
-      { label: "[OpenCode Go Work]", message },
+      { label: "[OpenCode Go Personal] (active)", message, sourceId: "cred_personal" },
+      { label: "[OpenCode Go Work]", message, sourceId: "cred_work" },
     ]);
     expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
   });
@@ -653,6 +654,7 @@ describe("opencode-go provider", () => {
         name: "OpenCode Go 5h",
         group: "OpenCode Go",
         label: "5h:",
+        rowKey: "window:five_hour",
         percentRemaining: 87.5,
         resetTimeIso: "2026-08-12T12:30:00.000Z",
       },
@@ -660,6 +662,7 @@ describe("opencode-go provider", () => {
         name: "OpenCode Go Weekly",
         group: "OpenCode Go",
         label: "Weekly:",
+        rowKey: "window:week",
         percentRemaining: 55,
         resetTimeIso: "2026-08-16T16:00:00.000Z",
       },
@@ -667,6 +670,7 @@ describe("opencode-go provider", () => {
         name: "OpenCode Go Monthly",
         group: "OpenCode Go",
         label: "Monthly:",
+        rowKey: "window:month",
         percentRemaining: 20,
         resetTimeIso: "2026-09-01T04:00:00.000Z",
       },
@@ -784,6 +788,7 @@ describe("opencode-go provider", () => {
         name: "OpenCode Go 5h",
         group: "OpenCode Go",
         label: "5h:",
+        rowKey: "window:five_hour",
         percentRemaining: 87.5,
         resetTimeIso: "2026-08-12T12:30:00.000Z",
       },
@@ -791,6 +796,7 @@ describe("opencode-go provider", () => {
         name: "OpenCode Go Weekly",
         group: "OpenCode Go",
         label: "Weekly:",
+        rowKey: "window:week",
         percentRemaining: 0,
         resetTimeIso: "2026-08-16T16:00:00.000Z",
       },
@@ -798,6 +804,7 @@ describe("opencode-go provider", () => {
         name: "OpenCode Go Monthly",
         group: "OpenCode Go",
         label: "Monthly:",
+        rowKey: "window:month",
         percentRemaining: 20,
         resetTimeIso: "2026-09-01T04:00:00.000Z",
       },

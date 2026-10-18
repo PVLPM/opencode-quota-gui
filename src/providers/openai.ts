@@ -39,6 +39,27 @@ function isTokenSharingLogin(row: CredentialRow): boolean {
   return row.value.methodID === TOKEN_SHARING_METHOD_ID;
 }
 
+const OPENAI_WINDOW_ROW_KEYS: Readonly<Record<string, string>> = {
+  "5h:": "window:five_hour",
+  "Weekly:": "window:week",
+  "Monthly:": "window:month",
+  "Code Review:": "window:code_review",
+};
+
+/**
+ * Percent-only window rows carry no typed `semantic`, so they get stable
+ * explicit `rowKey`s by window (the fallback aggregate row when no window
+ * exists); labels themselves are never used as ids.
+ */
+function withOpenAiWindowRowKeys(
+  entries: QuotaProviderResult["entries"],
+): QuotaProviderResult["entries"] {
+  return entries.map((entry) => ({
+    ...entry,
+    rowKey: (entry.label ? OPENAI_WINDOW_ROW_KEYS[entry.label] : undefined) ?? "aggregate",
+  }));
+}
+
 /** A row that says why a login has no ChatGPT quota number. */
 function statusValueEntry(
   row: CredentialRow,
@@ -56,6 +77,7 @@ function statusValueEntry(
     },
     name,
     group: name,
+    rowKey: "named:status",
     value,
   };
 }
@@ -130,22 +152,28 @@ export const openaiProvider: QuotaProvider = {
         onSuccess: (result) => {
           const group = options.group ?? result.label;
           return attemptedResult(
-            groupedPercentWindowEntries({
-              group,
-              accounting: {
-                resultType: "rate_limit",
-                acquisitionMethod: "remote_api",
-                ownership: "maintained",
-                authority: "provider_reported",
-                ...(options.sourceId ? { sourceId: options.sourceId } : {}),
-              },
-              windows: [
-                { window: result.windows.hourly, suffix: "5h", label: "5h:" },
-                { window: result.windows.weekly, suffix: "Weekly", label: "Weekly:" },
-                { window: result.windows.monthly, suffix: "Monthly", label: "Monthly:" },
-                { window: result.windows.codeReview, suffix: "Code Review", label: "Code Review:" },
-              ],
-            }),
+            withOpenAiWindowRowKeys(
+              groupedPercentWindowEntries({
+                group,
+                accounting: {
+                  resultType: "rate_limit",
+                  acquisitionMethod: "remote_api",
+                  ownership: "maintained",
+                  authority: "provider_reported",
+                  ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+                },
+                windows: [
+                  { window: result.windows.hourly, suffix: "5h", label: "5h:" },
+                  { window: result.windows.weekly, suffix: "Weekly", label: "Weekly:" },
+                  { window: result.windows.monthly, suffix: "Monthly", label: "Monthly:" },
+                  {
+                    window: result.windows.codeReview,
+                    suffix: "Code Review",
+                    label: "Code Review:",
+                  },
+                ],
+              }),
+            ),
             [],
             { singleWindowDisplayName: group },
           );
@@ -178,6 +206,11 @@ export const openaiProvider: QuotaProvider = {
       }),
     );
     const nameByRow = new Map(rows.map((row, index) => [row, names[index]]));
+    const accounts = rows.map((row) => ({
+      sourceId: row.id,
+      label: nameByRow.get(row) ?? "OpenAI",
+      active: row.active,
+    }));
 
     for (const row of rows) {
       const name = nameByRow.get(row) ?? "OpenAI";
@@ -193,7 +226,7 @@ export const openaiProvider: QuotaProvider = {
           sourceId: row.id,
         });
         entries.push(...providerResult.entries);
-        errors.push(...providerResult.errors);
+        errors.push(...providerResult.errors.map((error) => ({ ...error, sourceId: row.id })));
         continue;
       }
 
@@ -203,6 +236,7 @@ export const openaiProvider: QuotaProvider = {
         errors.push({
           label: name,
           message: `OpenAI API key could not be read: ${row.resolveError}`,
+          sourceId: row.id,
         });
         continue;
       }
@@ -213,6 +247,8 @@ export const openaiProvider: QuotaProvider = {
       entries.length > 0 || errors.length > 0
         ? attemptedResult(entries, errors)
         : mapResult(await queryOpenAIQuota({ requestTimeoutMs: ctx.config?.requestTimeoutMs }));
+    const resultWithAccounts: QuotaProviderResult =
+      accounts.length > 0 ? { ...providerResult, accounts } : providerResult;
 
     // The active account describes the status; a row OpenCode did not mark
     // active (e.g. an env-selected connection or a failed active lookup) must
@@ -254,7 +290,7 @@ export const openaiProvider: QuotaProvider = {
       tokenExpiresAt = "unknown";
     }
     return withStatusDetails(
-      providerResult,
+      resultWithAccounts,
       statusDetailsFromRecord({
         auth_configured: authConfigured,
         auth_source: authSource,
