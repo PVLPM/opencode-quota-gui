@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto eol=lf
+
+# Vendored anti-slop plugin: keep bytes byte-identical to the SHA-256 manifest in its UPSTREAM.md
+tools/oxlint-anti-slop/** -text
