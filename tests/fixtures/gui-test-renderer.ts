@@ -18,14 +18,49 @@ export interface TestNode {
   text: string;
   parent: TestNode | undefined;
   children: TestNode[];
+  /** The DOM's `tagName`; shipped controls read it to tell a button from a box. */
+  readonly tagName: string;
+  /** Zero-size layout stubs: a control that measures itself gets a headless answer. */
+  offsetLeft: number;
+  offsetWidth: number;
+  offsetParent: TestNode | null;
+  getBoundingClientRect: () => { left: number };
 }
 
 function elementNode(tag: string): TestNode {
-  return { kind: "element", tag, props: {}, text: "", parent: undefined, children: [] };
+  return {
+    kind: "element",
+    tag,
+    props: {},
+    text: "",
+    parent: undefined,
+    children: [],
+    get tagName() {
+      return tag;
+    },
+    offsetLeft: 0,
+    offsetWidth: 0,
+    offsetParent: null,
+    getBoundingClientRect: () => ({ left: 0 }),
+  };
 }
 
 function textNode(value: string): TestNode {
-  return { kind: "text", tag: "", props: {}, text: value, parent: undefined, children: [] };
+  return {
+    kind: "text",
+    tag: "",
+    props: {},
+    text: value,
+    parent: undefined,
+    children: [],
+    get tagName() {
+      return "";
+    },
+    offsetLeft: 0,
+    offsetWidth: 0,
+    offsetParent: null,
+    getBoundingClientRect: () => ({ left: 0 }),
+  };
 }
 
 const renderer = createRenderer<TestNode>({
@@ -96,4 +131,32 @@ export function elementsNamed(node: TestNode, tag: string): TestNode[] {
   const found = node.kind === "element" && node.tag === tag ? [node] : [];
   for (const child of node.children) found.push(...elementsNamed(child, tag));
   return found;
+}
+
+/**
+ * The event object a test passes to a listener: only the fields the rig's
+ * components actually read, so a click can arrive as `{}` and a typing event
+ * carries the field's next value.
+ */
+export interface TestEvent {
+  readonly currentTarget?: { readonly value: string };
+  readonly defaultPrevented?: boolean;
+}
+
+/** A listener a compiled component attached to a node. */
+export type TestListener = (event: TestEvent) => void;
+
+/**
+ * The event listener compiled code attached under `name`, if the node has one.
+ *
+ * `props` mirrors a DOM property bag, so a value only counts as a listener once
+ * it has been checked callable; this is the rig's one place that reads
+ * callbacks out of that bag for the tests that interact with a field.
+ */
+export function listenerOf(node: TestNode, name: string): TestListener | undefined {
+  const value = node.props[name];
+  // SAFETY: the `instanceof` check establishes the value is callable, and the
+  // Solid compiler stores exactly the listener a component wrote under `on…`;
+  // the parameter type only describes the event object the caller passes.
+  return value instanceof Function ? (value as TestListener) : undefined;
 }

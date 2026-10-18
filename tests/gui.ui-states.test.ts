@@ -4,7 +4,11 @@ import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { HomeSnapshot } from "../src/contracts/dashboard";
+import type {
+  HomeSnapshot,
+  SettingsSnapshot,
+  SettingsWriteResult,
+} from "../src/contracts/dashboard";
 import { buildRowKey, composeRowId } from "../src/contracts/identity";
 import type { RangeKey } from "../src/contracts/ranges";
 import {
@@ -13,7 +17,9 @@ import {
   shouldUseTotalsFallback,
   THIN_SLICE_SHARE,
 } from "../src/ui/chart-geometry";
+import type { Toaster } from "../src/ui/components/toast";
 import {
+  type DashboardClient,
   DashboardError,
   parseHomeSnapshot,
   parseImportPreview,
@@ -68,8 +74,10 @@ import {
   visibleCards,
   visibleRows,
 } from "../src/ui/view-model";
+import type { VisibilityCatalog } from "../src/ui/views/settings";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
-import type { TestNode } from "./fixtures/gui-test-renderer.js";
+import type { SettingsQuerySeam } from "./fixtures/gui-live-settings.js";
+import type { TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
 import {
   costed,
   DAY_MS,
@@ -118,16 +126,28 @@ let server: ViteDevServer | undefined;
 let graph: SsrGraph;
 
 const rendererPath = fileURLToPath(new URL("./fixtures/gui-test-renderer.ts", import.meta.url));
+const solidWebShimPath = fileURLToPath(new URL("./fixtures/gui-solid-web.ts", import.meta.url));
 const liveSectionPath = fileURLToPath(new URL("./fixtures/gui-live-section.ts", import.meta.url));
+const liveSettingsPath = fileURLToPath(new URL("./fixtures/gui-live-settings.ts", import.meta.url));
 
 /** The client-compiled rig: the same components, written to a plain object tree. */
 interface RenderGraph {
   createSignal: <T>(value: T) => [() => T, (next: T) => void];
   liveSection: (props: { state: () => LoadState<HomeSnapshot>; range: () => RangeKey }) => TestNode;
+  liveSettings: (props: {
+    client: DashboardClient;
+    query: SettingsQuerySeam;
+    catalog: () => VisibilityCatalog;
+    toaster: Toaster;
+    stale: () => boolean;
+  }) => TestNode;
+  /** A `config-changed` failure from the same module graph as the mounted route. */
+  configChangedError: () => unknown;
   mount: (code: () => TestNode, root: TestNode) => () => void;
   createTestRoot: () => TestNode;
   textOf: (node: TestNode) => string;
   elementsNamed: (node: TestNode, tag: string) => TestNode[];
+  listenerOf: (node: TestNode, name: string) => TestListener | undefined;
 }
 
 let renderServer: ViteDevServer | undefined;
@@ -179,6 +199,18 @@ beforeAll(async () => {
     configFile: false,
     root: repoRoot,
     plugins: [
+      // The settings route lives in `app.tsx`, which imports the public tooltip
+      // and with it Kobalte's client-only portal at module load. The route never
+      // renders a tooltip on this rig, so the same boundary the SSR server uses
+      // keeps the module graph loadable.
+      {
+        name: "tooltip-render-boundary",
+        enforce: "pre",
+        transform(_code, id) {
+          if (id.replaceAll("\\", "/").endsWith("/overlays/tooltip/tooltip.tsx"))
+            return "export function Tooltip(props) { return props.children }";
+        },
+      },
       solid({
         include: [...SOLID_JSX_SOURCES],
         // `universal` writes the tree through the fixture renderer rather than the
@@ -195,9 +227,34 @@ beforeAll(async () => {
           find: /^solid-js$/,
           replacement: path.join(repoRoot, "node_modules", "solid-js", "dist", "solid.js"),
         },
+        // Kobalte is part of the shipped settings controls; it has to run on the
+        // same client runtime as the components around it. Its `Dynamic` gets a
+        // DOM-free body from the rig (see the shim), so this swaps the whole
+        // module rather than aliasing it directly.
+        { find: /^solid-js\/web$/, replacement: solidWebShimPath },
+        {
+          find: /^solid-js\/store$/,
+          replacement: path.join(repoRoot, "node_modules", "solid-js", "store", "dist", "store.js"),
+        },
       ],
     },
-    ssr: { noExternal: ["solid-js", "solid-js/universal", "@opencode/ui"] },
+    // The settings controls pull Kobalte and its Solid helpers through
+    // `@opencode/ui`. Those packages live in pnpm's nested store, so the Solid
+    // plugin's framework-package crawl cannot see them and would leave them
+    // externalized — where they resolve `solid-js` to the server build and fail
+    // on client-only APIs.
+    ssr: {
+      noExternal: [
+        "solid-js",
+        "solid-js/universal",
+        "@opencode/ui",
+        "@kobalte/core",
+        "@kobalte/utils",
+        "@kitlangton/solid-motion",
+        "@solid-primitives/props",
+        "@solid-primitives/resize-observer",
+      ],
+    },
     logLevel: "silent",
     server: { middlewareMode: true },
     appType: "custom",
@@ -208,13 +265,17 @@ beforeAll(async () => {
   const renderCore = await rendering.ssrLoadModule("solid-js");
   const renderer = await rendering.ssrLoadModule(rendererPath);
   const live = await rendering.ssrLoadModule(liveSectionPath);
+  const liveSettings = await rendering.ssrLoadModule(liveSettingsPath);
   renderGraph = {
     createSignal: renderCore.createSignal,
     liveSection: live.LiveHomeSection,
+    liveSettings: liveSettings.LiveSettingsRoute,
+    configChangedError: liveSettings.configChangedError,
     mount: renderer.mountTestTree,
     createTestRoot: renderer.createTestRoot,
     textOf: renderer.textOf,
     elementsNamed: renderer.elementsNamed,
+    listenerOf: renderer.listenerOf,
   } satisfies RenderGraph;
 }, 60_000);
 
@@ -1233,6 +1294,320 @@ describe("a section follows its payload", () => {
     await settle();
     expect(rig.cardsStale()).toEqual([false]);
     rig.dispose();
+  });
+});
+
+/**
+ * The settings editor holds the only unsaved draft on the dashboard, so unlike
+ * the read-only sections it has to survive a refetch: every `settings.changed`
+ * event (and every reconnect, and the reload after a 409) flips the query's
+ * `loading`, and a keyed section branch would unmount the editor at each flip
+ * and silently drop the draft. These tests mount the real `SettingsRoute` on the
+ * universal renderer, type into the real fields, and drive the route's query
+ * seam themselves, so the assertions read what the editor renders *next*
+ * (design spec §10, §5.4; R14, R15).
+ */
+describe("the settings editor keeps its draft across refetches", () => {
+  /** Render effects run with the update; this lets any deferred one land too. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  type SaveInput = Parameters<DashboardClient["saveSettings"]>[0];
+
+  /** The query seam exactly as `createQuery` behaves: loading wraps the fetch. */
+  function settingsQuery(initial: SettingsSnapshot | undefined) {
+    const [data, setData] = renderGraph.createSignal<SettingsSnapshot | undefined>(initial);
+    const [error, setError] = renderGraph.createSignal<unknown>(undefined);
+    const [loading, setLoading] = renderGraph.createSignal(false);
+    let queued: (() => SettingsSnapshot | Promise<SettingsSnapshot>) | undefined;
+    const query = {
+      data,
+      error,
+      loading,
+      async run(): Promise<boolean> {
+        setLoading(true);
+        try {
+          if (queued === undefined) throw new Error("probe: no settings fetch queued");
+          setData(await queued());
+          setError(undefined);
+          return true;
+        } catch (failure) {
+          setError(failure);
+          return false;
+        } finally {
+          setLoading(false);
+        }
+      },
+    };
+    return {
+      query,
+      setData,
+      setLoading,
+      /** The payload the next `run()` (an `onReload`) will land. */
+      queueFetch(fetcher: () => SettingsSnapshot | Promise<SettingsSnapshot>): void {
+        queued = fetcher;
+      },
+    };
+  }
+
+  const notUsed = (): Promise<never> =>
+    Promise.reject(new Error("probe: unexpected dashboard call"));
+
+  function mountSettings(options: {
+    initial: SettingsSnapshot | undefined;
+    saveSettings?: (input: SaveInput) => Promise<SettingsWriteResult>;
+  }) {
+    const server = settingsQuery(options.initial);
+    const saves: SaveInput[] = [];
+    const toasts: { tone: string; message: string }[] = [];
+    const client: DashboardClient = {
+      health: notUsed,
+      home: notUsed,
+      project: notUsed,
+      session: notUsed,
+      settings: notUsed,
+      saveVisibility: notUsed,
+      importPreview: notUsed,
+      importApply: notUsed,
+      subscribe: () => () => {},
+      connection: () => "live",
+      onConnectionChange: () => () => {},
+      async saveSettings(input) {
+        saves.push(input);
+        if (options.saveSettings) return options.saveSettings(input);
+        return { revision: "revision-saved", applied: {}, warnings: [] };
+      },
+    };
+    const root = renderGraph.createTestRoot();
+    const dispose = renderGraph.mount(
+      () =>
+        renderGraph.liveSettings({
+          client,
+          query: server.query,
+          catalog: () => ({ cards: [], rows: [] }),
+          toaster: {
+            toasts: () => [],
+            push: (tone, message) => toasts.push({ tone, message }),
+            dismiss: () => {},
+          },
+          stale: () => false,
+        }),
+      root,
+    );
+    return { root, server, saves, toasts, dispose };
+  }
+
+  function findNode(nodes: TestNode[], match: (node: TestNode) => boolean, what: string): TestNode {
+    const found = nodes.find(match);
+    if (found === undefined) throw new Error(`probe: no ${what}`);
+    return found;
+  }
+
+  const inputByLabel = (root: TestNode, label: string): TestNode =>
+    findNode(
+      renderGraph.elementsNamed(root, "input"),
+      (node) => node.props["aria-label"] === label,
+      `input labelled ${label}`,
+    );
+
+  const inputByPlaceholder = (root: TestNode, placeholder: string): TestNode =>
+    findNode(
+      renderGraph.elementsNamed(root, "input"),
+      (node) => node.props.placeholder === placeholder,
+      `input with placeholder ${placeholder}`,
+    );
+
+  const buttonByText = (root: TestNode, label: string): TestNode =>
+    findNode(
+      renderGraph.elementsNamed(root, "button"),
+      (node) => renderGraph.textOf(node) === label,
+      `button ${label}`,
+    );
+
+  /** Types into a rendered field the way typing in a browser would: through its own handler. */
+  function typeInto(node: TestNode, value: string): void {
+    const handler = renderGraph.listenerOf(node, "onInput");
+    if (handler === undefined)
+      throw new Error(
+        `probe: <${node.tag}> has no onInput (props: ${Object.keys(node.props).join(", ")})`,
+      );
+    handler({ currentTarget: { value } });
+  }
+
+  function click(node: TestNode): void {
+    const handler = renderGraph.listenerOf(node, "onClick");
+    if (handler === undefined)
+      throw new Error(
+        `probe: <${node.tag}> has no onClick (props: ${Object.keys(node.props).join(", ")})`,
+      );
+    handler({});
+  }
+
+  async function until(predicate: () => boolean, what: string): Promise<void> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (predicate()) return;
+      await settle();
+    }
+    throw new Error(`probe: ${what} never happened`);
+  }
+
+  it("shows the first-load skeleton until a snapshot arrives, then the editor", async () => {
+    const mounted = mountSettings({ initial: undefined });
+    const skeleton = renderGraph.elementsNamed(mounted.root, "output");
+    expect(skeleton.length).toBe(1);
+    expect(skeleton[0]?.props["aria-label"]).toBe("Loading settings");
+    expect(renderGraph.textOf(mounted.root)).not.toContain("No unsaved changes.");
+
+    mounted.server.setData(settingsSnapshot());
+    await settle();
+    expect(renderGraph.elementsNamed(mounted.root, "output")).toHaveLength(0);
+    expect(renderGraph.textOf(mounted.root)).toContain("No unsaved changes.");
+    mounted.dispose();
+  });
+
+  it("keeps a typed edit through a refetch that starts and lands", async () => {
+    const mounted = mountSettings({ initial: settingsSnapshot() });
+    expect(renderGraph.textOf(mounted.root)).toContain("No unsaved changes.");
+
+    const interval = () => inputByLabel(mounted.root, "Minimum refresh interval (ms)");
+    typeInto(interval(), "450000");
+    await settle();
+    expect(renderGraph.textOf(mounted.root)).toContain("1 unsaved change(s)");
+    const mountedInput = interval();
+
+    // A `settings.changed` refetch: the query reports loading before the payload lands.
+    mounted.server.setLoading(true);
+    await settle();
+    expect(interval()).toBe(mountedInput);
+    expect(interval().props.value).toBe("450000");
+    expect(renderGraph.textOf(mounted.root)).toContain("1 unsaved change(s)");
+
+    // The refetch lands the same snapshot: the draft is still the user's.
+    mounted.server.setData(settingsSnapshot());
+    mounted.server.setLoading(false);
+    await settle();
+    expect(interval()).toBe(mountedInput);
+    expect(interval().props.value).toBe("450000");
+    expect(renderGraph.textOf(mounted.root)).toContain("1 unsaved change(s)");
+    mounted.dispose();
+  });
+
+  it("adopts a fresh revision on a clean refresh so the next save carries it", async () => {
+    const mounted = mountSettings({ initial: settingsSnapshot() });
+    const fresh = settingsSnapshot({ revision: "revision-2" });
+    fresh.values.minIntervalMs = 400000;
+    mounted.server.setData(fresh);
+    await settle();
+
+    // The snapshot prop is reactive: the mounted field shows the file's value.
+    expect(inputByLabel(mounted.root, "Minimum refresh interval (ms)").props.value).toBe("400000");
+
+    typeInto(inputByLabel(mounted.root, "Request timeout (ms)"), "25000");
+    await settle();
+    mounted.server.queueFetch(() => settingsSnapshot({ revision: "revision-3" }));
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the save request");
+    expect(mounted.saves[0]).toEqual({
+      patch: { requestTimeoutMs: 25000 },
+      expectedRevision: "revision-2",
+    });
+    await until(
+      () => renderGraph.textOf(mounted.root).includes("No unsaved changes."),
+      "the save to clear the draft",
+    );
+    mounted.dispose();
+  });
+
+  it("keeps the edits and adopts the latest revision after a 409, so an explicit retry saves them", async () => {
+    let attempts = 0;
+    const mounted = mountSettings({
+      initial: settingsSnapshot(),
+      saveSettings: async (input) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw renderGraph.configChangedError();
+        }
+        return { revision: "revision-4", applied: input.patch, warnings: [] };
+      },
+    });
+
+    typeInto(inputByLabel(mounted.root, "Minimum refresh interval (ms)"), "450000");
+    await settle();
+
+    // The reload after the conflict reports what is actually on disk now.
+    const latest = settingsSnapshot({ revision: "revision-2" });
+    latest.values.minIntervalMs = 400000;
+    mounted.server.queueFetch(() => latest);
+
+    click(buttonByText(mounted.root, "Save"));
+    await until(
+      () => renderGraph.textOf(mounted.root).includes("settings changed elsewhere"),
+      "the conflict notice",
+    );
+    expect(mounted.saves[0]?.expectedRevision).toBe("revision-1");
+    expect(renderGraph.textOf(mounted.root)).toContain("1 unsaved change(s)");
+    expect(inputByLabel(mounted.root, "Minimum refresh interval (ms)").props.value).toBe("450000");
+    expect(mounted.toasts.some((toast) => toast.message.includes("Your edits were kept"))).toBe(
+      true,
+    );
+
+    mounted.server.queueFetch(() => settingsSnapshot({ revision: "revision-3" }));
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 2, "the retry");
+    expect(mounted.saves[1]).toEqual({
+      patch: { minIntervalMs: 450000 },
+      expectedRevision: "revision-2",
+    });
+    await until(
+      () => renderGraph.textOf(mounted.root).includes("No unsaved changes."),
+      "the retry to clear the draft",
+    );
+    mounted.dispose();
+  });
+
+  it("discard returns the editor to the fresh snapshot", async () => {
+    const mounted = mountSettings({ initial: settingsSnapshot() });
+    typeInto(inputByLabel(mounted.root, "Minimum refresh interval (ms)"), "450000");
+    await settle();
+
+    const latest = settingsSnapshot({ revision: "revision-2" });
+    latest.values.minIntervalMs = 400000;
+    mounted.server.setData(latest);
+    await settle();
+    expect(inputByLabel(mounted.root, "Minimum refresh interval (ms)").props.value).toBe("450000");
+    expect(renderGraph.textOf(mounted.root)).toContain("settings changed elsewhere");
+
+    click(buttonByText(mounted.root, "Discard"));
+    await settle();
+    expect(inputByLabel(mounted.root, "Minimum refresh interval (ms)").props.value).toBe("400000");
+    expect(renderGraph.textOf(mounted.root)).toContain("No unsaved changes.");
+    expect(renderGraph.textOf(mounted.root)).not.toContain("settings changed elsewhere");
+    mounted.dispose();
+  });
+
+  it("keeps provider text in step with the inherited list until the user types", async () => {
+    const manual = settingsSnapshot();
+    manual.values.enabledProviders = ["anthropic", "openai"];
+    const mounted = mountSettings({ initial: manual });
+    const providerText = () => inputByPlaceholder(mounted.root, "provider ids, comma separated");
+    expect(providerText().props.value).toBe("anthropic, openai");
+
+    // Clean: a refresh brings the file's inherited list and the text follows it.
+    const inherited = settingsSnapshot({ revision: "revision-2" });
+    inherited.values.enabledProviders = ["anthropic"];
+    mounted.server.setData(inherited);
+    await settle();
+    expect(providerText().props.value).toBe("anthropic");
+
+    // Dirty: the user's unsaved text belongs to the user; a refresh must not drop it.
+    typeInto(providerText(), "anthropic, google");
+    await settle();
+    const changed = settingsSnapshot({ revision: "revision-3" });
+    changed.values.enabledProviders = ["openai"];
+    mounted.server.setData(changed);
+    await settle();
+    expect(providerText().props.value).toBe("anthropic, google");
+    expect(renderGraph.textOf(mounted.root)).toContain("1 unsaved change(s)");
+    mounted.dispose();
   });
 });
 

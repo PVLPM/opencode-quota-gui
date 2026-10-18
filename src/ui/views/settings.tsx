@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import type {
   DashboardDataSource,
   ImportPreview,
@@ -62,6 +62,46 @@ export function SettingsView(props: {
     providerSelection(props.snapshot.values.enabledProviders).ids.join(", "),
   );
 
+  /**
+   * The snapshot prop is reactive: a `settings.changed` refresh, a reconnect
+   * refetch, or the reload after a 409 replaces it without remounting this
+   * editor. A clean draft adopts the fresh revision; a draft with dirty edits
+   * keeps them and records the revision the server will now accept, so an
+   * explicit Save is checked against the file that is actually on disk. Edits
+   * the fresh file already contains are not dirty any more, so they collapse
+   * into a clean draft instead of overwriting the same value again.
+   */
+  createEffect(
+    on(
+      () => props.snapshot.revision,
+      (revision) => {
+        setDraft((current) => {
+          if (current.revision === revision) return current;
+          const stillDirty = dirtyKeys(current, props.snapshot.values, props.snapshot.writable);
+          return stillDirty.length === 0
+            ? initialDraft(revision)
+            : applyConflict(current, revision);
+        });
+      },
+    ),
+  );
+
+  /**
+   * The provider text box mirrors the inherited selection while the field is
+   * clean, so a refreshed snapshot shows up there too. Once the user has typed
+   * — the key is edited — their text belongs to them and a refresh must not
+   * drop it; switching modes or discarding puts the box back on the file.
+   */
+  createEffect(
+    on(
+      () => props.snapshot.values.enabledProviders,
+      (value) => {
+        if ("enabledProviders" in draft().edits) return;
+        setProviderText(providerSelection(value).ids.join(", "));
+      },
+    ),
+  );
+
   const editableFields = createMemo(() =>
     SETTINGS_FIELDS.filter(
       (field) => field.control !== "readonly" && props.snapshot.writable.includes(field.key),
@@ -113,7 +153,15 @@ export function SettingsView(props: {
           "Settings changed elsewhere. Your edits were kept — review them against the latest file.",
         );
         await props.onReload();
-        setDraft((current) => applyConflict(current, props.snapshot.revision));
+        // A successful reload has already moved the draft to the fresh revision
+        // through the reconciliation effect above; if the reload failed the
+        // draft still names the old revision, so flag the conflict instead of
+        // pretending the file it will be checked against is current.
+        setDraft((current) =>
+          dirtyKeys(current, props.snapshot.values, props.snapshot.writable).length === 0
+            ? current
+            : applyConflict(current, props.snapshot.revision),
+        );
       } else {
         props.toaster.push("error", describeError(error));
       }

@@ -521,7 +521,7 @@ function SessionRoute(props: {
   );
 }
 
-function SettingsRoute(props: {
+export function SettingsRoute(props: {
   client: DashboardClient;
   query: Query<SettingsSnapshot>;
   catalog: VisibilityCatalog;
@@ -540,12 +540,23 @@ function SettingsRoute(props: {
       <Show when={props.query.data() !== undefined && props.stale}>
         <StaleNotice message="Showing the last good settings — the dashboard has not refreshed them." />
       </Show>
-      <QueryState
-        state={state()}
-        label="Loading settings"
-        render={(snapshot) => (
+      {/*
+        The editor owns an unsaved draft, so — unlike the read-only sections — it
+        stays mounted for as long as a snapshot exists. Every refetch (a
+        `settings.changed` event, a reconnect, or the reload after a 409) flips
+        the query's `loading`, and a `QueryState` ready branch is keyed on that
+        state object: it would unmount this editor at the start and the end of
+        every refresh and silently drop the draft. The snapshot itself stays
+        reactive, so a fresh payload updates the mounted editor in place; the
+        fallback only ever renders the first-load skeleton or first-load error.
+      */}
+      <Show
+        when={props.query.data()}
+        fallback={<QueryState state={state()} label="Loading settings" render={() => null} />}
+      >
+        {(snapshot) => (
           <SettingsView
-            snapshot={snapshot}
+            snapshot={snapshot()}
             client={props.client}
             toaster={props.toaster}
             catalog={props.catalog}
@@ -554,7 +565,7 @@ function SettingsRoute(props: {
             }}
           />
         )}
-      />
+      </Show>
     </>
   );
 }
