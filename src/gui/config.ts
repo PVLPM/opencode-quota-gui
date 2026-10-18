@@ -81,6 +81,16 @@ export const GUI_SETTINGS_KEYS = [
 
 export type GuiSettingsKey = (typeof GUI_SETTINGS_KEYS)[number];
 
+const GUI_SETTINGS_KEY_NAMES: ReadonlySet<string> = new Set<string>(GUI_SETTINGS_KEYS);
+const GUI_SETTINGS_READ_ONLY_KEY_NAMES: ReadonlySet<string> = new Set<string>(
+  GUI_SETTINGS_READ_ONLY_KEYS,
+);
+
+/** The two sets above are the vocabulary; trust them as the membership proof. */
+function isGuiSettingsKey(value: string): value is GuiSettingsKey {
+  return GUI_SETTINGS_KEY_NAMES.has(value);
+}
+
 export type GuiSettingsErrorCode =
   | "config-read-error"
   | "config-changed"
@@ -127,7 +137,7 @@ export function getGuiDashboardPort(
   config: { dashboard?: { port?: number } } | null | undefined,
 ): number {
   const port = config?.dashboard?.port;
-  return typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535
+  return port !== undefined && Number.isInteger(port) && port >= 1 && port <= 65535
     ? port
     : DEFAULT_DASHBOARD_PORT;
 }
@@ -166,11 +176,16 @@ interface ImportPlan {
 interface NormalizedWrite {
   applied: Record<string, JsonValue>;
   warnings: { key: string; message: string }[];
-  changes: Map<string, unknown>;
+  changes: Map<string, JsonValue | undefined>;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Strict finite-number check: `Number.isFinite` coerces nothing, so it implies a number primitive. */
+function isFiniteNumber(value: JsonValue): value is number {
+  return Number.isFinite(value);
 }
 
 /** Never reflects an arbitrary caller key into a message or log. */
@@ -402,7 +417,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return value;
       case "resetTimeSpaced":
       case "waitForQuotaReset":
-        if (typeof value !== "boolean") {
+        if (value !== true && value !== false) {
           throw invalidSetting(key, "expected boolean");
         }
         return value;
@@ -442,7 +457,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         }
         return [...new Set(value)];
       case "opencodeMonthlyLimit":
-        if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        if (!isFiniteNumber(value) || value < 0) {
           throw invalidSetting(key, "expected a number greater than or equal to 0");
         }
         return value;
@@ -471,17 +486,17 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
   function normalizeWrite(patch: Record<string, JsonValue>): NormalizedWrite {
     const applied: Record<string, JsonValue> = {};
     const warnings: { key: string; message: string }[] = [];
-    const changes = new Map<string, unknown>();
+    const changes = new Map<string, JsonValue | undefined>();
 
     for (const [rawKey, rawValue] of Object.entries(patch)) {
-      if (!(GUI_SETTINGS_KEYS as readonly string[]).includes(rawKey)) {
+      if (!isGuiSettingsKey(rawKey)) {
         throw new GuiSettingsError("unknown-setting", "Unknown setting", {
           key: safeSettingKeyLabel(rawKey),
         });
       }
 
-      const key = rawKey as GuiSettingsKey;
-      if ((GUI_SETTINGS_READ_ONLY_KEYS as readonly string[]).includes(rawKey)) {
+      const key = rawKey;
+      if (GUI_SETTINGS_READ_ONLY_KEY_NAMES.has(rawKey)) {
         throw invalidSetting(key, "this setting is read-only; edit the canonical file and restart");
       }
 
@@ -500,7 +515,11 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     return { applied, warnings, changes };
   }
 
-  function setKeyPath(target: Record<string, unknown>, parts: string[], value: unknown): void {
+  function setKeyPath(
+    target: Record<string, unknown>,
+    parts: string[],
+    value: JsonValue | undefined,
+  ): void {
     const leaf = parts.at(-1);
     if (leaf === undefined) {
       return;
@@ -508,17 +527,21 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
     let node = target;
     for (const part of parts.slice(0, -1)) {
-      if (!isPlainObject(node[part])) {
-        node[part] = {};
+      const child = node[part];
+      if (isPlainObject(child)) {
+        node = child;
+      } else {
+        const created: Record<string, unknown> = {};
+        node[part] = created;
+        node = created;
       }
-      node = node[part] as Record<string, unknown>;
     }
     node[leaf] = value;
   }
 
   function applyChanges(
     base: Record<string, unknown>,
-    changes: Map<string, unknown>,
+    changes: Map<string, JsonValue | undefined>,
   ): Record<string, unknown> {
     const desired = structuredClone(base);
     for (const [key, value] of changes) {
@@ -635,9 +658,10 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
   async function settings(): Promise<SettingsSnapshot> {
     const state = await readState();
-    const values = Object.fromEntries(
-      GUI_SETTINGS_KEYS.map((key) => [key, settingValue(state.config, key)]),
-    ) as Record<string, JsonValue>;
+    const values: Record<string, JsonValue> = {};
+    for (const key of GUI_SETTINGS_KEYS) {
+      values[key] = settingValue(state.config, key);
+    }
 
     const sources: Record<string, string> = {};
     for (const key of GUI_SETTINGS_KEYS) {
@@ -647,6 +671,12 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     const importPlan = deriveImportPlan(state);
     const issues = collectIssues(state);
     const port = getGuiDashboardPort(state.config);
+    const importSection: SettingsSnapshot["import"] = {
+      available: importPlan.keys.length > 0,
+      issues: importPlan.issues,
+    };
+    if (importPlan.from) importSection.from = importPlan.from;
+    if (importPlan.keys.length > 0) importSection.keyCount = importPlan.keys.length;
 
     return {
       revision: state.revision,
@@ -659,12 +689,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         hiddenCards: [...state.config.dashboard.hiddenCards],
         hiddenRows: [...state.config.dashboard.hiddenRows],
       },
-      import: {
-        available: importPlan.keys.length > 0,
-        ...(importPlan.from ? { from: importPlan.from } : {}),
-        ...(importPlan.keys.length > 0 ? { keyCount: importPlan.keys.length } : {}),
-        issues: importPlan.issues,
-      },
+      import: importSection,
       issues,
     };
   }

@@ -50,10 +50,13 @@ export function buildRowKey(input: RowKeyInput): RowKey {
           : input.kind === "named"
             ? `named:${requireKeyText(input.name)}`
             : requireKeyText(input.key);
+  // SAFETY: RowKey is the opaque brand of this exact deterministic construction;
+  // this builder is its only producer, and the text above is the whole key.
   return key as RowKey;
 }
 
 /** Composes `rowId = cardId + "#" + rowKey` (R20). */
 export function composeRowId(cardId: CardId, rowKey: RowKey): RowId {
+  // SAFETY: RowId is the opaque brand of exactly `cardId + "#" + rowKey`.
   return `${cardId}#${rowKey}` as RowId;
 }

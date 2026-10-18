@@ -224,6 +224,8 @@ describe("GUI contract identity seam", () => {
   });
 
   it("composes row ids as cardId#rowKey without hashing in contracts", () => {
+    // SAFETY: CardId is a compile-time-only string brand; the literal below is the
+    // exact id text asserted by this test.
     const cardId = "openai:deadbeef" as CardId;
     const rowId = composeRowId(cardId, buildRowKey({ kind: "window", window: "five_hour" }));
     expect(rowId).toBe("openai:deadbeef#window:five_hour");

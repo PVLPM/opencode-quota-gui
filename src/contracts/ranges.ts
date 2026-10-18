@@ -36,8 +36,11 @@ const RANGE_DURATION_MS: Record<Exclude<RangeKey, "lifetime">, number> = {
   "30d": 30 * DAY_MS,
 };
 
+/** Membership set for the range-key vocabulary (identity checks, no coercion). */
+const RANGE_KEY_NAMES: ReadonlySet<unknown> = new Set<unknown>(RANGE_KEYS);
+
 export function isRangeKey(value: unknown): value is RangeKey {
-  return typeof value === "string" && (RANGE_KEYS as readonly string[]).includes(value);
+  return RANGE_KEY_NAMES.has(value);
 }
 
 /** Duration of a finite range, or `null` for the forever range. */

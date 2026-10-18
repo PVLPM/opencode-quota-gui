@@ -13,7 +13,12 @@ import {
   writeGuiDatabase,
 } from "./helpers/gui-database.js";
 
-const sqliteTrace = vi.hoisted(() => ({ opened: 0, statements: [] as string[] }));
+interface SqliteTrace {
+  opened: number;
+  statements: string[];
+}
+
+const sqliteTrace = vi.hoisted((): SqliteTrace => ({ opened: 0, statements: [] }));
 
 vi.mock("../src/lib/opencode-sqlite.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/opencode-sqlite.js")>();

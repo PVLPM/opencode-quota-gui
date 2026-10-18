@@ -13,8 +13,15 @@ export const DASHBOARD_EVENT_TOPICS = [
   "settings.changed",
 ] as const satisfies readonly DashboardEventTopic[];
 
+const DASHBOARD_EVENT_TOPIC_NAMES: ReadonlySet<string> = new Set<string>(DASHBOARD_EVENT_TOPICS);
+
 function isNonNegativeFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+  return isFiniteNumber(value) && value >= 0;
+}
+
+/** Strict finite-number check: `Number.isFinite` coerces nothing, so it implies a number primitive. */
+function isFiniteNumber(value: unknown): value is number {
+  return Number.isFinite(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -52,10 +59,7 @@ export function isCostedTokens(value: unknown): value is CostedTokens {
 export function isDashboardEvent(value: unknown): value is DashboardEvent {
   if (!isRecord(value)) return false;
   if (!isNonNegativeFiniteNumber(value.at)) return false;
-  if (
-    typeof value.topic !== "string" ||
-    !(DASHBOARD_EVENT_TOPICS as readonly string[]).includes(value.topic)
-  ) {
+  if (typeof value.topic !== "string" || !DASHBOARD_EVENT_TOPIC_NAMES.has(value.topic)) {
     return false;
   }
   return value.scope === undefined || value.scope === "visibility";

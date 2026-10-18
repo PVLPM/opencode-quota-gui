@@ -483,13 +483,15 @@ describe("project lookup and naming", () => {
       throw new Error("expected AnalyticsNotFoundError");
     } catch (error) {
       expect(error).toBeInstanceOf(AnalyticsNotFoundError);
-      const notFound = error as AnalyticsNotFoundError;
-      expect(notFound.name).toBe("AnalyticsNotFoundError");
-      expect(notFound.resource).toBe("project");
-      expect(notFound.resourceId).toBe("proj_missing");
-      expect(notFound.message).toBe("Project not found");
-      expect(notFound.message).not.toContain("/");
-      expect(notFound.message).not.toContain("\\");
+      if (!(error instanceof AnalyticsNotFoundError)) {
+        throw new Error("expected AnalyticsNotFoundError");
+      }
+      expect(error.name).toBe("AnalyticsNotFoundError");
+      expect(error.resource).toBe("project");
+      expect(error.resourceId).toBe("proj_missing");
+      expect(error.message).toBe("Project not found");
+      expect(error.message).not.toContain("/");
+      expect(error.message).not.toContain("\\");
     }
   });
 

@@ -343,12 +343,14 @@ describe("session tree scope", () => {
       throw new Error("expected AnalyticsNotFoundError");
     } catch (error) {
       expect(error).toBeInstanceOf(AnalyticsNotFoundError);
-      const notFound = error as AnalyticsNotFoundError;
-      expect(notFound.resource).toBe("session");
-      expect(notFound.resourceId).toBe("ses_missing");
-      expect(notFound.message).toBe("Session not found");
-      expect(notFound.message).not.toContain("/");
-      expect(notFound.message).not.toContain("\\");
+      if (!(error instanceof AnalyticsNotFoundError)) {
+        throw new Error("expected AnalyticsNotFoundError");
+      }
+      expect(error.resource).toBe("session");
+      expect(error.resourceId).toBe("ses_missing");
+      expect(error.message).toBe("Session not found");
+      expect(error.message).not.toContain("/");
+      expect(error.message).not.toContain("\\");
     }
   });
 });

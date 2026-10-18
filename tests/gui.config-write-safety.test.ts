@@ -14,7 +14,11 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createGuiSettingsStore, GuiSettingsError } from "../src/gui/config.js";
+import {
+  createGuiSettingsStore,
+  GuiSettingsError,
+  type GuiSettingsErrorDetails,
+} from "../src/gui/config.js";
 import { parseJsonOrJsonc } from "../src/lib/jsonc.js";
 import {
   createGuiConfigWorkspace,
@@ -75,22 +79,23 @@ function makeStore(workspace: GuiConfigWorkspace) {
   });
 }
 
-async function expectGuiError(
-  run: Promise<unknown>,
+async function expectGuiError<T>(
+  run: Promise<T>,
   code: string,
-  details?: Record<string, unknown>,
+  details?: GuiSettingsErrorDetails,
 ): Promise<GuiSettingsError> {
   const error = await run.then(
     () => null,
-    (thrown: unknown) => thrown,
+    (thrown: Error) => thrown,
   );
-  expect(error).toBeInstanceOf(GuiSettingsError);
-  const guiError = error as GuiSettingsError;
-  expect(guiError.code).toBe(code);
-  if (details) {
-    expect(guiError.details).toMatchObject(details);
+  if (!(error instanceof GuiSettingsError)) {
+    throw new Error("expected the store to reject with GuiSettingsError");
   }
-  return guiError;
+  expect(error.code).toBe(code);
+  if (details) {
+    expect(error.details).toMatchObject(details);
+  }
+  return error;
 }
 
 describe("canonical config write safety", () => {
@@ -137,7 +142,7 @@ describe("canonical config write safety", () => {
     const raw = readFileSync(workspace.guiConfigPath, "utf8");
     expect(raw).toContain("// user comment");
     expect(raw).toContain('"somethingElse"');
-    expect((parseJsonOrJsonc(raw, true) as { minIntervalMs: number }).minIntervalMs).toBe(2000);
+    expect(parseJsonOrJsonc(raw, true)).toMatchObject({ minIntervalMs: 2000 });
   });
 
   it("does not rewrite the file when the written value is identical", async () => {
@@ -213,8 +218,10 @@ describe("canonical config write safety", () => {
     expect(first.status).toBe("fulfilled");
     expect(second.status).toBe("rejected");
     const rejection = second.status === "rejected" ? second.reason : null;
-    expect(rejection).toBeInstanceOf(GuiSettingsError);
-    expect((rejection as GuiSettingsError).code).toBe("config-changed");
+    if (!(rejection instanceof GuiSettingsError)) {
+      throw new Error("expected the loser to reject with GuiSettingsError");
+    }
+    expect(rejection.code).toBe("config-changed");
 
     expect(JSON.parse(readFileSync(workspace.guiConfigPath, "utf8"))).toEqual({
       minIntervalMs: 1000,

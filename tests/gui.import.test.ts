@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { ImportPreview, JsonValue } from "../src/contracts/dashboard.js";
 import { createGuiSettingsStore, GuiSettingsError } from "../src/gui/config.js";
 import {
   createGuiConfigWorkspace,
@@ -32,18 +33,20 @@ function makeStore(workspace: GuiConfigWorkspace) {
   });
 }
 
-function keyMap(keys: { key: string; value: unknown }[]): Record<string, unknown> {
+function keyMap(keys: ImportPreview["keys"]): Record<string, JsonValue> {
   return Object.fromEntries(keys.map((entry) => [entry.key, entry.value]));
 }
 
-async function expectGuiError(run: Promise<unknown>, code: string): Promise<GuiSettingsError> {
+async function expectGuiError<T>(run: Promise<T>, code: string): Promise<GuiSettingsError> {
   const error = await run.then(
     () => null,
-    (thrown: unknown) => thrown,
+    (thrown: Error) => thrown,
   );
-  expect(error).toBeInstanceOf(GuiSettingsError);
-  expect((error as GuiSettingsError).code).toBe(code);
-  return error as GuiSettingsError;
+  if (!(error instanceof GuiSettingsError)) {
+    throw new Error("expected the store to reject with GuiSettingsError");
+  }
+  expect(error.code).toBe(code);
+  return error;
 }
 
 describe("settings import preview and apply", () => {

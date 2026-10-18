@@ -104,9 +104,7 @@ function compareIds(a: string, b: string): number {
 
 function sessionCreatedMs(session: OpenCodeSessionInfo | undefined): number {
   const created = session?.time?.created;
-  return typeof created === "number" && Number.isFinite(created)
-    ? created
-    : Number.MAX_SAFE_INTEGER;
+  return created !== undefined && Number.isFinite(created) ? created : Number.MAX_SAFE_INTEGER;
 }
 
 function compareSessions(a: OpenCodeSessionInfo, b: OpenCodeSessionInfo): number {
@@ -117,7 +115,7 @@ function compareSessions(a: OpenCodeSessionInfo, b: OpenCodeSessionInfo): number
 
 /** Last path segment of a stored directory; the only path data that leaves here. */
 function basenameOf(directory: string | undefined): string | undefined {
-  if (typeof directory !== "string") return undefined;
+  if (directory === undefined) return undefined;
   const trimmed = directory.replace(/[\\/]+$/, "");
   if (!trimmed) return undefined;
   const parts = trimmed.split(/[\\/]+/);

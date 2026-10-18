@@ -9,6 +9,7 @@ import {
   GUI_SETTINGS_WRITABLE_KEYS,
   GuiSettingsError,
   type GuiSettingsErrorCode,
+  type GuiSettingsErrorDetails,
 } from "../src/gui/config.js";
 import {
   createGuiConfigWorkspace,
@@ -37,33 +38,34 @@ function makeStore(workspace: GuiConfigWorkspace) {
   });
 }
 
-async function expectGuiError(
-  run: Promise<unknown>,
+async function expectGuiError<T>(
+  run: Promise<T>,
   code: GuiSettingsErrorCode,
-  details?: Record<string, unknown>,
+  details?: GuiSettingsErrorDetails,
 ): Promise<GuiSettingsError> {
   const error = await run.then(
     () => null,
-    (thrown: unknown) => thrown,
+    (thrown: Error) => thrown,
   );
-  expect(error).toBeInstanceOf(GuiSettingsError);
-  const guiError = error as GuiSettingsError;
-  expect(guiError.code).toBe(code);
-  if (details) {
-    expect(guiError.details).toMatchObject(details);
+  if (!(error instanceof GuiSettingsError)) {
+    throw new Error("expected the store to reject with GuiSettingsError");
   }
-  return guiError;
+  expect(error.code).toBe(code);
+  if (details) {
+    expect(error.details).toMatchObject(details);
+  }
+  return error;
 }
 
-function readCanonicalObject(workspace: GuiConfigWorkspace): Record<string, unknown> {
-  return JSON.parse(readFileSync(workspace.guiConfigPath, "utf8")) as Record<string, unknown>;
+function readCanonicalObject(workspace: GuiConfigWorkspace): Record<string, JsonValue> {
+  return JSON.parse(readFileSync(workspace.guiConfigPath, "utf8"));
 }
 
-function readDotted(workspace: GuiConfigWorkspace, key: string): unknown {
-  let node: unknown = readCanonicalObject(workspace);
+function readDotted(workspace: GuiConfigWorkspace, key: string): JsonValue | undefined {
+  let node: JsonValue | undefined = readCanonicalObject(workspace);
   for (const part of key.split(".")) {
-    if (!node || typeof node !== "object") return undefined;
-    node = (node as Record<string, unknown>)[part];
+    if (node === null || typeof node !== "object") return undefined;
+    node = Array.isArray(node) ? node[Number(part)] : node[part];
   }
   return node;
 }
@@ -108,7 +110,7 @@ describe("GUI settings keys", () => {
       EXPECTED_KEYS.filter((key) => key !== "dashboard.port"),
     );
     for (const legacyOnly of LEGACY_ONLY_KEYS) {
-      expect(GUI_SETTINGS_KEYS as readonly string[]).not.toContain(legacyOnly);
+      expect(GUI_SETTINGS_KEYS).not.toContain(legacyOnly);
     }
   });
 
