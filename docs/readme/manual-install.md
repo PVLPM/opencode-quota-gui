@@ -40,6 +40,35 @@ $env:OPENCODE_QUOTA_PLUGIN_SPEC = node -e "console.log(require('url').pathToFile
 node dist/bin/opencode-quota-gui.js init
 ```
 
+## Local checkout (development)
+
+To load the plugin straight from a checkout — useful while changing it — build once, then point `plugin` at the repository directory with an absolute `file:` URL:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["file:///absolute/path/to/opencode-quota-gui"],
+}
+```
+
+OpenCode resolves a directory plugin entry through its `server` entry first, so this checkout's root `server.ts` is what loads, and the `tui.ts` beside it provides the TUI entry. To load only the server entry, point at the file instead:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["file:///absolute/path/to/opencode-quota-gui/server.ts"],
+}
+```
+
+Both forms need the built output first:
+
+```bash
+pnpm install
+pnpm run build
+```
+
+The root `server.ts` re-exports `dist/index.js`, so it cannot load before the first build. After changing `src/`, rerun `pnpm run build` and restart OpenCode to load the updated plugin; otherwise it keeps using the previous build. OpenCode never rebuilds the checkout for you. Local checkouts are for development only: release installs use the `opencode-quota-gui` package spec or a tarball `file:` URL shown above.
+
 ## Requirements
 
 - OpenCode `2.0.16` or newer. This build does not support OpenCode 1; its last supported line is the upstream `npx @slkiser/opencode-quota@4 init` (historical upstream package, not this one).
