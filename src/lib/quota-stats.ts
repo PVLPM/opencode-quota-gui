@@ -474,7 +474,8 @@ export function resolvePricingKey(source: {
   };
 }
 
-function calculateCostUsd(params: {
+/** Existing per-message cost calculation (P3 reuses it unchanged). */
+export function calculateCostUsd(params: {
   provider: string;
   model: string;
   tokens: TokenBuckets;
@@ -487,7 +488,8 @@ function calculateCostUsd(params: {
   return { ok: true, costUsd: calculateUsdFromTokenBuckets(cost, params.tokens) };
 }
 
-function classifyMissingPricing(params: {
+/** Existing unpriced/unknown classification (P3 reuses it unchanged). */
+export function classifyMissingPricing(params: {
   mappedProvider: string;
   mappedModel: string;
 }): { kind: "unpriced"; reason: string } | { kind: "unknown" } {

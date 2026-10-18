@@ -343,7 +343,11 @@ function buildCompletedAssistantQuery(params: {
   };
 }
 
-function forkCopyFingerprint(message: OpenCodeMessage, completed: number): string {
+/**
+ * Fingerprint shared by the upstream fork-copy dedup and the GUI owner set
+ * (R50). Exported so P3 groups raw rows by the exact upstream formula.
+ */
+export function forkCopyFingerprint(message: OpenCodeMessage, completed: number): string {
   const tokens = message.tokens;
   return JSON.stringify([
     message.time?.created,
