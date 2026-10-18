@@ -54,7 +54,6 @@ Biome remains the blocking formatter/linter in `pnpm verify`.
   advisory-only.
 - `pnpm run knip` still runs advisory in CI (`continue-on-error`) and never fixes or
   deletes anything.
-- Measured residual snapshot (2026-10-19, strict new paths): **150 errors + 4 warnings**.
+- Measured residual snapshot (2026-10-19, strict new paths): **156 errors + 4 warnings**.
   Findings are reported, not suppressed, and no baseline or cleanup campaign is added.
-  These counts are a point-in-time measurement of a worktree that other stabilization
-  lanes were still editing, not a gate.
+  Counts are a point-in-time measurement, not a gate.
