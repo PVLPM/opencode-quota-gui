@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -19,6 +20,7 @@ import {
   writeQuotaSidecarConfig,
   writeQuotaToastConfig,
 } from "./helpers/config-loader-test-harness.js";
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 
 const workspaces: GuiConfigWorkspace[] = [];
 
@@ -278,5 +280,103 @@ describe("canonical dashboard config layer", () => {
     expect(meta.source).toBe("files");
     expect(meta.paths).toEqual([workspace.guiConfigPath]);
     expect(config.enabledProviders).toEqual([]);
+  });
+});
+
+/**
+ * A workspace root path that reaches the same real directory as `dir` but with
+ * a differently cased final segment: the natural Windows/macOS case alias when
+ * that path already resolves, otherwise a junction/symlink at the same
+ * differently cased name. Returns `undefined` after a capability skip when
+ * neither is possible.
+ */
+function differentlyCasedAliasFor(
+  context: { skip: (note?: string) => void },
+  dir: string,
+): string | undefined {
+  const base = basename(dir);
+  const upper = base.toUpperCase();
+  if (upper === base) return undefined;
+
+  const alias = join(dirname(dir), upper);
+  if (existsSync(alias)) {
+    // A case-insensitive root already resolves the differently cased name.
+    if (realpathSync.native(alias) === realpathSync.native(dir)) return alias;
+    context.skip("a differently cased path exists here but is a distinct real directory");
+    return undefined;
+  }
+
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  return symlinkOrSkip(context, dir, alias, linkType) ? alias : undefined;
+}
+
+async function expectAliasResolvesAsGlobal(
+  workspace: GuiConfigWorkspace,
+  aliasRoot: string,
+): Promise<void> {
+  expect(realpathSync.native(aliasRoot)).toBe(realpathSync.native(workspace.configDir));
+
+  writeQuotaSidecarConfig(workspace.configDir, {
+    minIntervalMs: 1000,
+    accountingDetail: "detailed",
+  });
+  writeGuiCanonicalConfig(workspace, { minIntervalMs: 2000 });
+
+  const meta = createLoadConfigMeta();
+  const config = await loadConfig(undefined, meta, {
+    configRootDir: aliasRoot,
+    globalConfigDir: workspace.configDir,
+  });
+
+  expect(config.minIntervalMs).toBe(2000);
+  expect(config.accountingDetail).toBe("detailed");
+  expect(meta.settingSources.minIntervalMs).toBe(workspace.guiConfigPath);
+  expect(meta.globalConfigPaths).toContain(workspace.guiConfigPath);
+  expect(meta.workspaceConfigPaths).toEqual([]);
+  expect(meta.configIssues).toEqual([]);
+
+  const candidates = buildConfigLayerCandidates(workspace.configDir, aliasRoot);
+  expect(candidates.some((candidate) => candidate.scope === "workspace")).toBe(false);
+}
+
+describe("same-root layer identity", () => {
+  it("deduplicates a differently cased workspace root that is the global config dir", async (context) => {
+    const workspace = makeWorkspace();
+    const aliasRoot = differentlyCasedAliasFor(context, workspace.configDir);
+    if (aliasRoot === undefined) return;
+
+    await expectAliasResolvesAsGlobal(workspace, aliasRoot);
+  });
+
+  it("deduplicates a junction or symlinked workspace root aliasing the global config dir", async (context) => {
+    const workspace = makeWorkspace();
+    const aliasRoot = join(workspace.tempDir, "alias-root");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    if (!symlinkOrSkip(context, workspace.configDir, aliasRoot, linkType)) return;
+
+    await expectAliasResolvesAsGlobal(workspace, aliasRoot);
+  });
+
+  it("keeps a genuinely case-distinct project root as a project layer", async (context) => {
+    const workspace = makeWorkspace();
+    const distinctRoot = join(workspace.tempDir, "CONFIG");
+    mkdirSync(distinctRoot, { recursive: true });
+    if (realpathSync.native(distinctRoot) === realpathSync.native(workspace.configDir)) {
+      context.skip("this filesystem is case-insensitive; case-distinct roots cannot coexist");
+      return;
+    }
+
+    writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 1000 });
+    writeGuiCanonicalConfig(workspace, { minIntervalMs: 2000 });
+    writeQuotaSidecarConfig(distinctRoot, { minIntervalMs: 3000 });
+
+    const meta = createLoadConfigMeta();
+    const config = await loadConfig(undefined, meta, {
+      configRootDir: distinctRoot,
+      globalConfigDir: workspace.configDir,
+    });
+
+    expect(config.minIntervalMs).toBe(3000);
+    expect(meta.settingSources.minIntervalMs).toBe(quotaSidecarConfigSource(distinctRoot));
   });
 });

@@ -7,7 +7,7 @@
  * - SDK config is used only as a fallback when no file-backed config exists.
  */
 
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { join } from "path";
 import { isResetTimeDecimals } from "./format-utils.js";
 import {
@@ -1357,12 +1357,32 @@ function buildConfigLayerCandidatesForRoot(
   ];
 }
 
+/**
+ * Filesystem identity of a layer root: the same real directory can be named
+ * through different casing (Windows) or through a symlink/junction, so existing
+ * roots compare by their native real path; a missing root compares by its own
+ * path, with no case folding, keeping distinct case-sensitive roots distinct.
+ */
+function configLayerRootIdentity(path: string): string {
+  if (!existsSync(path)) {
+    return path;
+  }
+
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
+
 export function buildConfigLayerCandidates(
   globalConfigDir: string,
   configRootDir: string,
 ): ConfigLayerCandidate[] {
   const workspaceCandidates = buildConfigLayerCandidatesForRoot(configRootDir, "workspace");
   const globalCandidates = buildConfigLayerCandidatesForRoot(globalConfigDir, "global");
+  const sameRealRoot =
+    configLayerRootIdentity(globalConfigDir) === configLayerRootIdentity(configRootDir);
   const globalPaths = new Set(globalCandidates.map((candidate) => candidate.path));
 
   return [
@@ -1375,7 +1395,11 @@ export function buildConfigLayerCandidates(
       scope: "global",
       kind: "canonical",
     },
-    ...workspaceCandidates.filter((candidate) => !globalPaths.has(candidate.path)),
+    // When both roots name the same real directory, the workspace layer is the
+    // global layer reached through an alias: dropping every workspace candidate
+    // keeps the canonical global layer on top instead of reapplying global
+    // legacy values after it.
+    ...workspaceCandidates.filter((candidate) => !sameRealRoot && !globalPaths.has(candidate.path)),
   ];
 }
 
