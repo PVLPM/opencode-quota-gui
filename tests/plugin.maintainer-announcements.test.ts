@@ -134,6 +134,9 @@ function configureQuestionQuotaToast(
   ]);
 }
 
+/** Live server-plugin setups are released after each test (dashboard lease included). */
+const pluginCleanups: Array<() => Promise<void> | void> = [];
+
 /** Starts the server plugin and the TUI plugin, joined by the quota RPC. */
 async function startCli() {
   vi.stubGlobal("React", {
@@ -142,7 +145,7 @@ async function startCli() {
   });
   const { default: server } = await import("../src/plugin.js");
   const register = vi.fn(async () => ({ dispose: async () => {}, events: { emit: vi.fn() } }));
-  await server.setup({
+  const cleanup = await server.setup({
     location: { directory: process.cwd() },
     provider: { list: vi.fn(async () => ({ data: [{ id: "copilot" }] })) },
     session: { get: vi.fn(async () => ({})), hook: vi.fn() },
@@ -152,6 +155,7 @@ async function startCli() {
     integration: createFakeIntegration([]),
     event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
   } as never);
+  if (typeof cleanup === "function") pluginCleanups.push(cleanup);
   const [, handlers] = register.mock.calls[0] as unknown as [
     unknown,
     Parameters<typeof createQuotaRpcBridge>[0],
@@ -251,6 +255,9 @@ describe("maintainer announcement plugin integration", () => {
   });
 
   afterEach(async () => {
+    for (const cleanup of pluginCleanups.splice(0).reverse()) {
+      await cleanup();
+    }
     vi.unstubAllGlobals();
     await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });
   });

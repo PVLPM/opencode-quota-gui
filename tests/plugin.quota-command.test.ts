@@ -78,7 +78,7 @@ async function createV2StatusTool(directory: string) {
   let execute:
     | ((input: unknown, context: { sessionID: string }) => Promise<{ content: string }>)
     | undefined;
-  await server.setup({
+  const cleanup = await server.setup({
     location: { directory },
     provider: { list: vi.fn().mockResolvedValue({ data: [] }) },
     session: { get: vi.fn().mockResolvedValue({}), hook: vi.fn() },
@@ -97,6 +97,7 @@ async function createV2StatusTool(directory: string) {
         }),
     },
   } as never);
+  if (typeof cleanup === "function") pluginCleanups.push(cleanup);
   if (!execute) throw new Error("quota_status tool was not registered");
   return execute;
 }
@@ -116,6 +117,9 @@ const mocks = vi.hoisted(() => ({
   reconcileDetectedProvidersInGlobalConfig: vi.fn(),
   disposeQuotaTelemetryOwner: vi.fn(),
 }));
+
+/** Live plugin setups are released after each test (dashboard lease included). */
+const pluginCleanups: Array<() => Promise<void> | void> = [];
 
 vi.mock("../src/lib/config.js", () => createConfigModuleMock(mocks.loadConfig));
 
@@ -174,6 +178,9 @@ describe("/quota command behavior", () => {
   });
 
   afterEach(async () => {
+    for (const cleanup of pluginCleanups.splice(0).reverse()) {
+      await cleanup();
+    }
     vi.restoreAllMocks();
     if (savedConfigDir !== undefined) process.env.OPENCODE_CONFIG_DIR = savedConfigDir;
     else delete process.env.OPENCODE_CONFIG_DIR;
@@ -224,7 +231,8 @@ describe("/quota command behavior", () => {
       integration: createFakeIntegration([]),
       event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
     };
-    await server.setup(ctx as never);
+    const cleanup = await server.setup(ctx as never);
+    if (typeof cleanup === "function") pluginCleanups.push(cleanup);
     expect(tool?.name).toBe("quota_status");
     expect(await tool?.execute({}, { sessionID: "session-status" })).toEqual({
       content: "adapter output",

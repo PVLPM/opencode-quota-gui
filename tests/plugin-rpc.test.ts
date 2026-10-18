@@ -85,6 +85,8 @@ function useConfig(overrides: Partial<typeof DEFAULT_CONFIG>): void {
   );
 }
 
+const serverCleanups: Array<() => Promise<void> | void> = [];
+
 async function setupServer(sessionGet = vi.fn().mockResolvedValue({}), directory = process.cwd()) {
   const { default: server } = await import("../src/plugin.js");
   const register = vi.fn(async () => ({ dispose: async () => {}, events: { emit: vi.fn() } }));
@@ -103,7 +105,8 @@ async function setupServer(sessionGet = vi.fn().mockResolvedValue({}), directory
     integration: createFakeIntegration([]),
     event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
   };
-  await server.setup(ctx as never);
+  const cleanup = await server.setup(ctx as never);
+  if (typeof cleanup === "function") serverCleanups.push(cleanup);
   expect(register).toHaveBeenCalledOnce();
   const [definition, handlers] = register.mock.calls[0] as unknown as [
     { id: string; methods: Record<string, unknown> },
@@ -142,6 +145,9 @@ describe("server quota RPC", () => {
   });
 
   afterEach(async () => {
+    for (const cleanup of serverCleanups.splice(0).reverse()) {
+      await cleanup();
+    }
     vi.restoreAllMocks();
     await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });
   });
@@ -151,7 +157,7 @@ describe("server quota RPC", () => {
     const { definition, handlers } = await setupServer();
 
     expect(definition).toBe(QuotaRpc);
-    expect(definition.id).toBe("slkiser.opencode-quota");
+    expect(definition.id).toBe("opencode-quota-gui");
     expect(Object.keys(definition.methods)).toEqual([
       "surface",
       "footer",

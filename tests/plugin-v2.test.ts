@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { messageDocument } from "../src/lib/report-document.js";
 
@@ -10,6 +10,18 @@ vi.mock("../src/lib/quota-dialog-commands.js", async (importOriginal) => ({
 const resolveRetryDelay = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/quota-retry-wait.js", () => ({
   resolveQuotaResetRetryDelayMs: resolveRetryDelay,
+}));
+
+// Keep the plugin's runtime dirs synthetic: the dashboard setup reads the global
+// config dir, and no test may touch the user's real config or data.
+const TEST_RUNTIME_ROOT = vi.hoisted(() => "/tmp/opencode-quota-plugin-v2-tests");
+vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
+  getOpencodeRuntimeDirs: () => ({
+    dataDir: `${TEST_RUNTIME_ROOT}/data`,
+    configDir: `${TEST_RUNTIME_ROOT}/config`,
+    cacheDir: `${TEST_RUNTIME_ROOT}/cache`,
+    stateDir: `${TEST_RUNTIME_ROOT}/state`,
+  }),
 }));
 
 import {
@@ -113,6 +125,27 @@ const user = (text: string, metadata?: Record<string, unknown>): Message => ({
   content: [{ type: "text", text }],
 });
 
+/**
+ * Tracks every setup so a test that never disposes still releases the plugin's
+ * dashboard lease (and its real listener) before the next test runs.
+ */
+const cleanups: Array<() => Promise<void> | void> = [];
+
+async function setupPlugin(context: unknown): Promise<() => Promise<void> | void> {
+  const cleanup = await plugin.setup(context as never);
+  const tracked = async () => {
+    await cleanup?.();
+  };
+  cleanups.push(tracked);
+  return tracked;
+}
+
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0)) {
+    await cleanup();
+  }
+});
+
 describe("V2 server plugin", () => {
   beforeEach(() => {
     buildOutput.mockReset();
@@ -123,7 +156,7 @@ describe("V2 server plugin", () => {
     const { ctx, tools } = createContext();
     buildOutput.mockResolvedValue({ state: "output", output: "Quota ready" });
 
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     expect(tools.map((tool) => tool.name)).toEqual(["quota_status"]);
     const output = await tools[0].execute({}, { sessionID: "session-test" });
     expect(output).toEqual({ content: "Quota ready" });
@@ -139,7 +172,7 @@ describe("V2 server plugin", () => {
   it("registers the same slash commands as the TUI", async () => {
     const { ctx, commands } = createContext();
 
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     expect(commands.map((item) => ({ name: item.name, description: item.description }))).toEqual(
       QUOTA_DIALOG_COMMANDS.map((spec) => ({
         name: spec.slashName,
@@ -159,7 +192,7 @@ describe("V2 server plugin", () => {
     });
     vi.spyOn(Date, "now").mockReturnValue(1_790_000_000_000);
 
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     await runCommand(commands, "quota");
 
     expect(buildOutput).toHaveBeenCalledWith(
@@ -190,7 +223,7 @@ describe("V2 server plugin", () => {
     const { ctx, commands } = createContext();
     buildOutput.mockResolvedValue({ state: "output", title: "Tokens", output: "report" });
 
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     await runCommand(commands, "tokens_between", " 2026-09-01 2026-09-25 ");
 
     expect(buildOutput).toHaveBeenCalledWith(
@@ -203,7 +236,7 @@ describe("V2 server plugin", () => {
     const usage = "Invalid arguments for /tokens_between\n\nExpected: /tokens_between YYYY-MM-DD";
     buildOutput.mockResolvedValue({ state: "output", title: "Tokens", output: usage });
 
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     await runCommand(commands, "tokens_between", "   ");
 
     expect(buildOutput).toHaveBeenCalledWith(
@@ -216,7 +249,7 @@ describe("V2 server plugin", () => {
     const { ctx, commands } = createContext();
     buildOutput.mockResolvedValue({ state: "noop", command: "quota", reason: "disabled" });
 
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     await runCommand(commands, "quota");
 
     expect(ctx.session.wait).not.toHaveBeenCalled();
@@ -225,7 +258,7 @@ describe("V2 server plugin", () => {
 
   it("removes only tagged quota reports from model requests", async () => {
     const { ctx, hooks } = createContext();
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     const report = formatQuotaReportMessage("openai 42%");
 
     expect([...hooks.keys()]).toEqual(["context", "compaction", "generate", "title", "retry"]);
@@ -253,7 +286,7 @@ describe("V2 server plugin", () => {
 
   it("cuts reports out of compaction checkpoint text and keeps the rest", async () => {
     const { ctx, hooks } = createContext();
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     const report = formatQuotaReportMessage("openai 42%\nanthropic 7%");
     const checkpoint: Message = {
       role: "user",
@@ -287,7 +320,7 @@ describe("V2 server plugin", () => {
 
   it("never titles a session from a quota report", async () => {
     const { ctx, hooks } = createContext();
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     const title = hook(hooks, "title");
     const report = formatQuotaReportMessage("openai 42%");
 
@@ -314,7 +347,7 @@ describe("V2 server plugin", () => {
 
   it("retries at the quota reset only when the quota data gives a delay", async () => {
     const { ctx, hooks } = createContext();
-    await plugin.setup(ctx as never);
+    await setupPlugin(ctx);
     const retry = hook(hooks, "retry") as unknown as (event: RetryEvent) => Promise<void>;
     const event = (decision: RetryEvent["decision"]): RetryEvent => ({
       sessionID: "session-1",
@@ -364,7 +397,7 @@ describe("V2 server plugin", () => {
       async *[Symbol.asyncIterator]() {},
     }));
 
-    const cleanup = await plugin.setup({ ...ctx, integration, event: { subscribe } } as never);
+    const cleanup = await setupPlugin({ ...ctx, integration, event: { subscribe } });
     expect(getCredentialSourceDiagnostics()).toMatchObject({
       state: "bound",
       kind: "opencode-integration-api",
@@ -409,7 +442,7 @@ describe("V2 server plugin", () => {
         yield await nextEvent;
       },
     }));
-    const cleanup = await plugin.setup({ ...ctx, integration, event: { subscribe } } as never);
+    const cleanup = await setupPlugin({ ...ctx, integration, event: { subscribe } });
     const read = () => readAuthFileCached({ maxAgeMs: 60_000, integrationIds: ["deepseek"] });
 
     await expect(read()).resolves.toEqual({ deepseek: { type: "api", key: "old-key" } });
@@ -434,7 +467,7 @@ describe("V2 server plugin", () => {
     }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const cleanup = await plugin.setup({ ...ctx, event: { subscribe } } as never);
+    const cleanup = await setupPlugin({ ...ctx, event: { subscribe } });
     await vi.waitFor(() =>
       expect(warn).toHaveBeenCalledWith(
         "[opencode-quota] credential event subscription stopped: event stream closed [redacted]",
@@ -454,7 +487,7 @@ describe("V2 server plugin", () => {
     }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const cleanup = await plugin.setup({ ...ctx, event: { subscribe } } as never);
+    const cleanup = await setupPlugin({ ...ctx, event: { subscribe } });
     await cleanup?.();
     await new Promise((resolve) => setTimeout(resolve, 0));
 

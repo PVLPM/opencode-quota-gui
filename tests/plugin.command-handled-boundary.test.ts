@@ -83,6 +83,8 @@ function startTui() {
 
 describe("V2 CLI command boundary", () => {
   beforeEach(() => {
+    // The server plugin's dashboard setup reads the global config dir: keep it synthetic.
+    vi.stubEnv("OPENCODE_CONFIG_DIR", "/tmp/opencode-quota-plugin-command-boundary/config");
     rpc.surface.mockReset().mockResolvedValue({
       quota: { message: "Copilot 81%", duration: 5000, activeProviderCount: 1 },
     });
@@ -203,7 +205,7 @@ describe("V2 CLI command boundary", () => {
     const server = (await import("../src/plugin.js")).default;
     const transform = vi.fn();
     const commandTransform = vi.fn();
-    await server.setup({
+    const cleanup = await server.setup({
       location: { directory: process.cwd() },
       tool: { transform },
       command: { transform: commandTransform },
@@ -219,5 +221,6 @@ describe("V2 CLI command boundary", () => {
     expect(commandTransform).toHaveBeenCalledOnce();
     expect((server as Record<string, unknown>)["command.execute.before"]).toBeUndefined();
     expect((server as Record<string, unknown>).config).toBeUndefined();
+    await cleanup?.();
   });
 });

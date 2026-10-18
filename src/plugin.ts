@@ -4,6 +4,7 @@
  * through OpenCode's integration API.
  */
 import { Plugin } from "@opencode/plugin";
+import { type DashboardLease, startDashboard } from "./gui/lifecycle.js";
 import { resolveOpenCodeLocationRoots } from "./lib/config-file-utils.js";
 import { sanitizeDisplayText } from "./lib/display-sanitize.js";
 import {
@@ -84,7 +85,7 @@ async function logRpcFailure<T>(method: string, handler: () => Promise<T>): Prom
 }
 
 export const QuotaToastPlugin = Plugin.define({
-  id: "@slkiser/opencode-quota.server",
+  id: "opencode-quota-gui.server",
   async setup(ctx) {
     const roots = resolveOpenCodeLocationRoots(ctx.location.directory);
     // The quota collector accepts a small V1-shaped configuration client. V2
@@ -294,9 +295,31 @@ export const QuotaToastPlugin = Plugin.define({
       console.warn(`[opencode-quota] credential event subscription stopped: ${logReason(error)}`);
     });
 
-    return () => {
+    // The dashboard host binds last — after RPC, commands and the credential binding — and it
+    // never fails setup: every dashboard error stays a controlled log line and an `unavailable`
+    // lease (spec §4.3). The first owner workspace supplies the config import root, and the
+    // settings store reads the global canonical config. Binding is all that happens here; the
+    // first snapshot is computed on the first request.
+    let dashboardLease: DashboardLease | undefined;
+    try {
+      dashboardLease = await startDashboard({
+        client,
+        workspaceRoot: ctx.location.directory,
+      });
+    } catch (error) {
+      console.warn(`[opencode-quota] dashboard unavailable: ${logReason(error)}`);
+    }
+
+    return async () => {
       credentialEvents.abort();
       unbindCredentialSource();
+      if (dashboardLease) {
+        try {
+          await dashboardLease.dispose();
+        } catch (error) {
+          console.warn(`[opencode-quota] dashboard stop failed: ${logReason(error)}`);
+        }
+      }
     };
   },
 });
