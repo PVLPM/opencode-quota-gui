@@ -75,6 +75,28 @@ export interface QuotaTelemetryConfig {
   enabled: boolean;
 }
 
+/**
+ * Local dashboard (GUI) configuration, owned by the global canonical
+ * `opencode-quota-gui/config.jsonc` layer (spec §5.4, §7).
+ */
+export interface QuotaDashboardConfig {
+  /**
+   * Loopback dashboard port (integer 1–65535). Read-only in the GUI: changing it
+   * takes effect on restart and there is no fallback when it is occupied.
+   */
+  port: number;
+  /** Hidden provider card ids (opaque ids; at most `DASHBOARD_HIDDEN_ID_LIMIT`). */
+  hiddenCards: string[];
+  /** Hidden quota row ids (opaque ids; at most `DASHBOARD_HIDDEN_ID_LIMIT`). */
+  hiddenRows: string[];
+}
+
+/** Default dashboard port (spec §5.4); never falls back to another port. */
+export const DEFAULT_DASHBOARD_PORT = 4144;
+
+/** Cap for `dashboard.hiddenCards` / `dashboard.hiddenRows` entries. */
+export const DASHBOARD_HIDDEN_ID_LIMIT = 500;
+
 /** How often Home shows the notice: on the first Home screen of each day, or every time. */
 export type MaintainerAnnouncementHomeFrequency = "daily" | "always";
 
@@ -220,6 +242,9 @@ export interface QuotaToastConfig {
   /** Opt-in quota metrics through the host's global OpenTelemetry MeterProvider. */
   telemetry: QuotaTelemetryConfig;
 
+  /** Local dashboard settings (global canonical `opencode-quota-gui/config.jsonc`). */
+  dashboard: QuotaDashboardConfig;
+
   /** Responsive toast layout breakpoints (not used by the fixed-width TUI sidebar). */
   layout: {
     /** Default max width target for toast formatting */
@@ -296,6 +321,11 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   },
   telemetry: {
     enabled: false,
+  },
+  dashboard: {
+    port: DEFAULT_DASHBOARD_PORT,
+    hiddenCards: [],
+    hiddenRows: [],
   },
   layout: {
     maxWidth: 50,

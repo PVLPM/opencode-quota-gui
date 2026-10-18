@@ -23,18 +23,35 @@ import type {
   PercentDisplayMode,
   PercentLabelStyle,
   PricingSnapshotSource,
+  QuotaDashboardConfig,
   QuotaResetWindow,
   QuotaToastConfig,
   SessionTokenScope,
   TuiCommandDisplay,
 } from "./types.js";
-import { DEFAULT_CONFIG } from "./types.js";
+import { DASHBOARD_HIDDEN_ID_LIMIT, DEFAULT_CONFIG } from "./types.js";
 
 export const QUOTA_TOAST_CONFIG_RELATIVE_PATHS = [
   "opencode-quota/quota-toast.jsonc",
   "opencode-quota/quota-toast.json",
 ] as const;
 export const QUOTA_TOAST_CONFIG_RELATIVE_PATH = QUOTA_TOAST_CONFIG_RELATIVE_PATHS[1];
+
+/**
+ * Global canonical dashboard config (spec §7): read/written only here, applied
+ * last, and never an authoritative sidecar root. The in-repo
+ * `opencode-quota-gui/config.jsonc` stays reserved but inactive.
+ */
+export const GUI_CONFIG_RELATIVE_PATH = "opencode-quota-gui/config.jsonc";
+export const GUI_CONFIG_SIBLING_JSON_RELATIVE_PATH = "opencode-quota-gui/config.json";
+
+export function getGuiConfigPath(configDir: string): string {
+  return join(configDir, GUI_CONFIG_RELATIVE_PATH);
+}
+
+export function getGuiConfigSiblingJsonPath(configDir: string): string {
+  return join(configDir, GUI_CONFIG_SIBLING_JSON_RELATIVE_PATH);
+}
 
 export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "enabled",
@@ -89,6 +106,9 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "export.enabled",
   "export.path",
   "telemetry.enabled",
+  "dashboard.port",
+  "dashboard.hiddenCards",
+  "dashboard.hiddenRows",
 ] as const;
 
 export type QuotaToastSettingSourceKey = (typeof QUOTA_TOAST_SETTING_SOURCE_KEYS)[number];
@@ -114,6 +134,11 @@ export interface LoadConfigOptions {
   /** @deprecated Prefer configRootDir for new callers. */
   cwd?: string;
   configRootDir?: string;
+  /**
+   * Global OpenCode config dir override (defaults to `OPENCODE_CONFIG_DIR` or the
+   * XDG default). The GUI settings store passes its own explicit dir.
+   */
+  globalConfigDir?: string;
 }
 
 export function createLoadConfigMeta(): LoadConfigMeta {
@@ -151,6 +176,7 @@ type MaintainerAnnouncementsPatch = Partial<QuotaToastConfig["maintainerAnnounce
 type LayoutPatch = Partial<QuotaToastConfig["layout"]>;
 type ExportConfigPatch = Partial<QuotaToastConfig["export"]>;
 type TelemetryConfigPatch = Partial<QuotaToastConfig["telemetry"]>;
+type DashboardConfigPatch = Partial<QuotaDashboardConfig>;
 
 type ValidatedQuotaToastPatch = {
   enabled?: boolean;
@@ -192,10 +218,11 @@ type ValidatedQuotaToastPatch = {
   layout?: LayoutPatch;
   export?: ExportConfigPatch;
   telemetry?: TelemetryConfigPatch;
+  dashboard?: DashboardConfigPatch;
 };
 
 export type ConfigLayerScope = "global" | "workspace";
-export type ConfigLayerKind = "legacy" | "plugin";
+export type ConfigLayerKind = "legacy" | "plugin" | "canonical";
 
 export interface ConfigLayerCandidate {
   path: string;
@@ -259,8 +286,16 @@ function isValidSessionTokenScope(value: unknown): value is SessionTokenScope {
   return value === "current" || value === "tree";
 }
 
-function isPositiveNumber(value: unknown): value is number {
+export function isPositiveNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isValidDashboardPort(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535;
 }
 
 function isValidCursorBillingCycleStartDay(value: unknown): value is number {
@@ -278,7 +313,7 @@ function isValidOpenCodeGoWindow(
   );
 }
 
-function isValidOpenCodeGoWindows(
+export function isValidOpenCodeGoWindows(
   value: unknown,
 ): value is Array<"rolling" | "weekly" | "monthly"> {
   if (!Array.isArray(value)) return false;
@@ -354,6 +389,11 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
     layout: { ...config.layout },
     export: { ...config.export },
     telemetry: { ...config.telemetry },
+    dashboard: {
+      port: config.dashboard.port,
+      hiddenCards: [...config.dashboard.hiddenCards],
+      hiddenRows: [...config.dashboard.hiddenRows],
+    },
   };
 }
 
@@ -408,7 +448,8 @@ function describeInvalidProviderValue(value: unknown): string {
   return typeof value === "string" ? value : typeof value;
 }
 
-function normalizeEnabledProviders(value: unknown): NormalizedEnabledProviders {
+/** Shared `enabledProviders` normalization (loader + GUI settings writes). */
+export function normalizeEnabledProviders(value: unknown): NormalizedEnabledProviders {
   if (value === "auto") {
     return { value: "auto", issues: [] };
   }
@@ -624,9 +665,59 @@ function extractTelemetryConfigPatch(value: unknown): TelemetryConfigPatch | und
   return Object.keys(patch).length > 0 ? patch : undefined;
 }
 
+function normalizeHiddenIdList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > 512) {
+      return undefined;
+    }
+    ids.push(entry);
+  }
+
+  return dedupe(ids).slice(0, DASHBOARD_HIDDEN_ID_LIMIT);
+}
+
+function extractDashboardPatch(
+  value: unknown,
+  reportIssue?: (key: string, message: string) => void,
+): DashboardConfigPatch | undefined {
+  if (!isPlainObject(value)) {
+    return undefined;
+  }
+
+  const patch: DashboardConfigPatch = {};
+
+  if (hasOwnKey(value, "port")) {
+    if (isValidDashboardPort(value.port)) {
+      patch.port = value.port;
+    } else {
+      reportIssue?.("dashboard.port", "expected an integer between 1 and 65535");
+    }
+  }
+
+  for (const key of ["hiddenCards", "hiddenRows"] as const) {
+    if (!hasOwnKey(value, key)) {
+      continue;
+    }
+    const ids = normalizeHiddenIdList(value[key]);
+    if (ids) {
+      patch[key] = ids;
+    } else {
+      reportIssue?.(`dashboard.${key}`, "expected an array of id strings");
+    }
+  }
+
+  return Object.keys(patch).length > 0 ? patch : undefined;
+}
+
 function extractValidatedQuotaToastPatch(
   quotaToastConfig: Record<string, unknown>,
   reportIssue?: (key: string, message: string) => void,
+  options: { allowZeroMonthlyLimit?: boolean } = {},
 ): ValidatedQuotaToastPatch {
   const patch: ValidatedQuotaToastPatch = {};
 
@@ -772,11 +863,15 @@ function extractValidatedQuotaToastPatch(
     patch.opencodeGoWindows = quotaToastConfig.opencodeGoWindows;
   }
 
-  if (
-    hasOwnKey(quotaToastConfig, "opencodeMonthlyLimit") &&
-    isPositiveNumber(quotaToastConfig.opencodeMonthlyLimit)
-  ) {
-    patch.opencodeMonthlyLimit = quotaToastConfig.opencodeMonthlyLimit;
+  if (hasOwnKey(quotaToastConfig, "opencodeMonthlyLimit")) {
+    const monthlyLimit = quotaToastConfig.opencodeMonthlyLimit;
+    // The GUI table accepts 0 as a real budget; legacy layers keep the strict form.
+    const monthlyLimitIsValid = options.allowZeroMonthlyLimit
+      ? isNonNegativeNumber(monthlyLimit)
+      : isPositiveNumber(monthlyLimit);
+    if (monthlyLimitIsValid && typeof monthlyLimit === "number") {
+      patch.opencodeMonthlyLimit = monthlyLimit;
+    }
   }
 
   if (hasOwnKey(quotaToastConfig, "opencodeZenDisplay")) {
@@ -905,6 +1000,13 @@ function extractValidatedQuotaToastPatch(
     const telemetry = extractTelemetryConfigPatch(quotaToastConfig.telemetry);
     if (telemetry) {
       patch.telemetry = telemetry;
+    }
+  }
+
+  if (hasOwnKey(quotaToastConfig, "dashboard")) {
+    const dashboard = extractDashboardPatch(quotaToastConfig.dashboard, reportIssue);
+    if (dashboard) {
+      patch.dashboard = dashboard;
     }
   }
 
@@ -1197,6 +1299,23 @@ function applyValidatedQuotaToastPatch(
     config.telemetry.enabled = patch.telemetry.enabled!;
     applySettingSource(settingSources, "telemetry.enabled", sourcePath);
   }
+
+  if (patch.dashboard) {
+    if (hasOwnKey(patch.dashboard, "port")) {
+      config.dashboard.port = patch.dashboard.port!;
+      applySettingSource(settingSources, "dashboard.port", sourcePath);
+    }
+
+    if (hasOwnKey(patch.dashboard, "hiddenCards")) {
+      config.dashboard.hiddenCards = [...patch.dashboard.hiddenCards!];
+      applySettingSource(settingSources, "dashboard.hiddenCards", sourcePath);
+    }
+
+    if (hasOwnKey(patch.dashboard, "hiddenRows")) {
+      config.dashboard.hiddenRows = [...patch.dashboard.hiddenRows!];
+      applySettingSource(settingSources, "dashboard.hiddenRows", sourcePath);
+    }
+  }
 }
 
 function projectNetworkSettingSources(
@@ -1248,10 +1367,22 @@ export function buildConfigLayerCandidates(
   return [
     ...globalCandidates,
     ...workspaceCandidates.filter((candidate) => !globalPaths.has(candidate.path)),
+    // The canonical dashboard file is applied last, only for the keys it sets,
+    // and never joins `authoritativeSidecarRoots`.
+    {
+      path: getGuiConfigPath(globalConfigDir),
+      rootDir: globalConfigDir,
+      scope: "global",
+      kind: "canonical",
+    },
   ];
 }
 
 function getConfigLayerSourceLabel(candidate: ConfigLayerCandidate): string {
+  if (candidate.kind === "canonical") {
+    return candidate.path;
+  }
+
   const suffix =
     candidate.kind === "plugin"
       ? candidate.path.endsWith(".jsonc")
@@ -1298,7 +1429,7 @@ export async function loadConfig(
     configIssues: LoadConfigIssue[];
   }> {
     const configRootDir = options?.configRootDir ?? options?.cwd ?? process.cwd();
-    const { configDir } = getOpencodeRuntimeDirs();
+    const configDir = options?.globalConfigDir ?? getOpencodeRuntimeDirs().configDir;
     const config = cloneDefaultConfig();
     const usedPaths: string[] = [];
     const globalConfigPaths: string[] = [];
@@ -1322,7 +1453,7 @@ export async function loadConfig(
 
       const parsed = await readJson(candidate.path);
       if (!isPlainObject(parsed)) {
-        if (candidate.kind === "plugin") {
+        if (candidate.kind === "plugin" || candidate.kind === "canonical") {
           const sourcePath = getConfigLayerSourceLabel(candidate);
           usedPaths.push(sourcePath);
           if (candidate.scope === "global") {
@@ -1333,7 +1464,10 @@ export async function loadConfig(
           configIssues.push({
             path: sourcePath,
             key: "$root",
-            message: "expected readable JSON object; this sidecar is not authoritative",
+            message:
+              candidate.kind === "canonical"
+                ? "malformed JSONC; lower layers apply and writes are disabled"
+                : "expected readable JSON object; this sidecar is not authoritative",
           });
         }
         continue;
@@ -1354,7 +1488,7 @@ export async function loadConfig(
       }
 
       const extractedQuotaToast =
-        candidate.kind === "plugin"
+        candidate.kind === "plugin" || candidate.kind === "canonical"
           ? parsed
           : isPlainObject(parsed.experimental)
             ? parsed.experimental.quotaToast
@@ -1373,9 +1507,13 @@ export async function loadConfig(
 
       applyValidatedQuotaToastPatch(
         config,
-        extractValidatedQuotaToastPatch(extractedQuotaToast, (key, message) => {
-          configIssues.push({ path: sourcePath, key, message });
-        }),
+        extractValidatedQuotaToastPatch(
+          extractedQuotaToast,
+          (key, message) => {
+            configIssues.push({ path: sourcePath, key, message });
+          },
+          { allowZeroMonthlyLimit: candidate.kind === "canonical" },
+        ),
         sourcePath,
         settingSources,
       );

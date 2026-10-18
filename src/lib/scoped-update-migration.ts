@@ -283,13 +283,17 @@ export function buildScopedUpdateMigrationCandidates(params: {
   globalRoot: string;
   workspaceRoot: string;
 }): ScopedUpdateMigrationCandidate[] {
-  return buildConfigLayerCandidates(params.globalRoot, params.workspaceRoot).map((candidate) => ({
-    path: candidate.path,
-    rootDir: candidate.rootDir,
-    scope: candidate.scope,
-    format: candidate.path.endsWith(".jsonc") ? "jsonc" : "json",
-    container: candidate.kind === "plugin" ? "quota-root" : "experimental.quotaToast",
-  }));
+  // The canonical dashboard file is GUI-owned (plugin-style root) and never part
+  // of the legacy `experimental.quotaToast` migration domain.
+  return buildConfigLayerCandidates(params.globalRoot, params.workspaceRoot)
+    .filter((candidate) => candidate.kind !== "canonical")
+    .map((candidate) => ({
+      path: candidate.path,
+      rootDir: candidate.rootDir,
+      scope: candidate.scope,
+      format: candidate.path.endsWith(".jsonc") ? "jsonc" : "json",
+      container: candidate.kind === "plugin" ? "quota-root" : "experimental.quotaToast",
+    }));
 }
 
 function isMissing(error: unknown): boolean {

@@ -87,6 +87,57 @@ export function createConfigLoaderEnv(
   return env;
 }
 
+export interface GuiConfigWorkspace {
+  tempDir: string;
+  /** Global OpenCode config dir (`OPENCODE_CONFIG_DIR` equivalent). */
+  configDir: string;
+  /** Project/workspace config root. */
+  workspaceRoot: string;
+  guiConfigDir: string;
+  guiConfigPath: string;
+  guiConfigJsonPath: string;
+  cleanup: () => void;
+}
+
+/**
+ * Real filesystem workspace for the canonical dashboard config: a global config
+ * dir plus a project workspace root. The `opencode-quota-gui` dir stays absent
+ * until a test writes to it, so first-write behaviour is exercised for real.
+ */
+export function createGuiConfigWorkspace(prefix: string): GuiConfigWorkspace {
+  const tempDir = mkdtempSync(join(tmpdir(), prefix));
+  const configDir = join(tempDir, "config");
+  const workspaceRoot = join(tempDir, "workspace");
+  const guiConfigDir = join(configDir, "opencode-quota-gui");
+
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(workspaceRoot, { recursive: true });
+
+  return {
+    tempDir,
+    configDir,
+    workspaceRoot,
+    guiConfigDir,
+    guiConfigPath: join(guiConfigDir, "config.jsonc"),
+    guiConfigJsonPath: join(guiConfigDir, "config.json"),
+    cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
+  };
+}
+
+/** Writes the canonical dashboard file (object → JSON, string → verbatim JSONC). */
+export function writeGuiCanonicalConfig(
+  workspace: GuiConfigWorkspace,
+  data: Record<string, unknown> | string,
+): string {
+  mkdirSync(workspace.guiConfigDir, { recursive: true });
+  writeFileSync(
+    workspace.guiConfigPath,
+    typeof data === "string" ? data : `${JSON.stringify(data, null, 2)}\n`,
+    "utf8",
+  );
+  return workspace.guiConfigPath;
+}
+
 export function quotaConfigSource(dir: string): string {
   return join(dir, "opencode.json") + " (experimental.quotaToast)";
 }
