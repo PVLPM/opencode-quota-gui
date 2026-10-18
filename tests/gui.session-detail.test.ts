@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 /**
- * P3 analytics lane — session detail (spec §6, R25–R27).
+ * P3 analytics lane — session detail (spec §6, R25–R27, R50).
  *
- * Session detail is intentionally independent of the global range and counts
- * every physical completed row of the selected tree (no fork dedup).
+ * Session detail is independent of the global range but reuses the same
+ * deterministic global owned set as home and project, so a fork copy is
+ * counted once on every user-facing surface.
  */
 import {
   AnalyticsNotFoundError,
@@ -124,7 +125,7 @@ describe("session tree scope", () => {
       { sessionId: "ses_g", title: "G", isFocus: false },
       { sessionId: "ses_f", title: "F", isFocus: true },
     ]);
-    // Only the tree's physical rows are steps.
+    // Only the tree's owned steps are steps.
     expect(snapshot.steps.map((step) => step.sessionId)).toEqual(["ses_gc"]);
     expect(snapshot.steps.map((step) => step.messageId)).toEqual(["msg_gc"]);
   });
@@ -161,7 +162,7 @@ describe("session tree scope", () => {
     expect(snapshot.steps).toHaveLength(2);
   });
 
-  it("uses all physical rows of the tree with no dedup, diverging from the global owned set", () => {
+  it("uses the global owned set for steps and totals, matching home and project", () => {
     const dataset = makeDataset({
       sessions: [
         sessionInfo({
@@ -188,23 +189,118 @@ describe("session tree scope", () => {
     const analytics = createUsageAnalytics(dataset);
 
     const snapshot = analytics.session("ses_p");
-    // Same start time; ordered by message id (msg_f < msg_p).
-    expect(snapshot.steps.map((step) => step.messageId)).toEqual(["msg_f", "msg_p"]);
-    expect(snapshot.treeTotals.input).toBe(20);
-    expect(snapshot.ownSummary.input).toBe(10);
-    expect(snapshot.ownSummary.stepCount).toBe(1);
+    // The one fingerprint occurrence is owned by its earliest candidate
+    // (message-id tie-break), so the physical copy is counted once.
+    expect(snapshot.steps.map((step) => step.messageId)).toEqual(["msg_f"]);
+    expect(snapshot.treeTotals.input).toBe(10);
+    expect(snapshot.ownSummary.input).toBe(0);
+    expect(snapshot.ownSummary.stepCount).toBe(0);
 
     const byId = new Map(snapshot.nodes.map((node) => [node.sessionId, node]));
     expect(byId.get("ses_c")?.ownTokens.input).toBe(10);
-    expect(byId.get("ses_p")?.subtreeTokens.input).toBe(20);
+    expect(byId.get("ses_c")?.stepCount).toBe(1);
+    expect(byId.get("ses_p")?.subtreeTokens.input).toBe(10);
     expect(snapshot.nodes[0]?.subtreeTokens).toEqual(snapshot.treeTotals);
 
-    // The global path dedupes the fork copy to a single owned row.
+    // Home, project, and session views agree because they share the owned set.
     const home = analytics.home("24h", NOW);
     expect(home.usage.stepCount).toBe(1);
     expect(home.usage.totals.input).toBe(10);
     const project = analytics.project("proj_p", "24h", NOW);
     expect(project.totals.input).toBe(10);
+    expect(project.roots[0]?.tokens.input).toBe(10);
+  });
+
+  it("counts a parent-owned fork copy once and excludes it from the fork's own view", () => {
+    const dataset = makeDataset({
+      sessions: [
+        sessionInfo({
+          id: "ses_parent",
+          title: "Parent",
+          projectID: "proj_p",
+          createdMs: NOW - 10 * HOUR_MS,
+        }),
+        sessionInfo({
+          id: "ses_fork",
+          title: "Fork",
+          parentID: "ses_parent",
+          projectID: "proj_p",
+          createdMs: NOW - 9 * HOUR_MS,
+        }),
+      ],
+      projects: [projectInfo("proj_p", "P")],
+      messages: [
+        assistantRow("ses_parent", "msg_a_original", NOW - 5 * HOUR_MS, { input: 7 }),
+        // Copied into the fork with a different message id but otherwise identical.
+        assistantRow("ses_fork", "msg_z_copy", NOW - 5 * HOUR_MS, { input: 7 }),
+        assistantRow("ses_fork", "msg_child_new", NOW - 4 * HOUR_MS, { input: 3 }),
+      ],
+    });
+    const analytics = createUsageAnalytics(dataset);
+
+    const fork = analytics.session("ses_fork");
+    // The copied row stays parent-owned; focusing the fork does not re-own it.
+    expect(fork.steps.map((step) => step.messageId)).toEqual(["msg_child_new"]);
+    expect(fork.ownSummary).toMatchObject({ input: 3, stepCount: 1 });
+    expect(fork.treeTotals.input).toBe(3);
+
+    const parent = analytics.session("ses_parent");
+    expect(parent.steps.map((step) => step.messageId)).toEqual(["msg_a_original", "msg_child_new"]);
+    expect(parent.ownSummary).toMatchObject({ input: 7, stepCount: 1 });
+    expect(parent.treeTotals.input).toBe(10);
+
+    const home = analytics.home("24h", NOW);
+    expect(home.usage.stepCount).toBe(2);
+    expect(home.usage.totals.input).toBe(10);
+    expect(analytics.project("proj_p", "24h", NOW).totals.input).toBe(10);
+  });
+
+  it("retains max per-session multiplicity for repeated fingerprints and counts each kept occurrence once", () => {
+    const dataset = makeDataset({
+      sessions: [
+        sessionInfo({
+          id: "ses_p",
+          title: "P",
+          projectID: "proj_p",
+          createdMs: NOW - 10 * HOUR_MS,
+        }),
+        sessionInfo({
+          id: "ses_c",
+          title: "C",
+          parentID: "ses_p",
+          projectID: "proj_p",
+          createdMs: NOW - 9 * HOUR_MS,
+        }),
+      ],
+      projects: [projectInfo("proj_p", "P")],
+      messages: [
+        // Two identical occurrences in the parent, one copied into the child.
+        assistantRow("ses_p", "msg_p1", NOW - 6 * HOUR_MS, { input: 5 }),
+        assistantRow("ses_p", "msg_p2", NOW - 6 * HOUR_MS, { input: 5 }),
+        assistantRow("ses_c", "msg_a_copy", NOW - 6 * HOUR_MS, { input: 5 }),
+        assistantRow("ses_c", "msg_new", NOW - 4 * HOUR_MS, { input: 2 }),
+      ],
+    });
+    const analytics = createUsageAnalytics(dataset);
+
+    const snapshot = analytics.session("ses_p");
+    // max(2, 1) occurrences survive; the third physical copy is dropped.
+    expect(snapshot.steps.map((step) => step.messageId)).toEqual([
+      "msg_a_copy",
+      "msg_p2",
+      "msg_new",
+    ]);
+    expect(snapshot.treeTotals.input).toBe(12);
+    expect(snapshot.ownSummary).toMatchObject({ input: 5, stepCount: 1 });
+
+    const byId = new Map(snapshot.nodes.map((node) => [node.sessionId, node]));
+    expect(byId.get("ses_c")?.ownTokens.input).toBe(7);
+    expect(byId.get("ses_c")?.stepCount).toBe(2);
+
+    const home = analytics.home("24h", NOW);
+    expect(home.usage.stepCount).toBe(3);
+    expect(home.usage.totals.input).toBe(12);
+    expect(analytics.project("proj_p", "24h", NOW).totals.input).toBe(12);
   });
 
   it("reports own and subtree figures with recursive latest activity", () => {
@@ -270,6 +366,29 @@ describe("session tree scope", () => {
     expect(selfSnapshot.nodes.map((node) => node.sessionId)).toEqual(["ses_self"]);
     expect(selfSnapshot.nodes[0]?.childIds).toEqual([]);
     expect(selfSnapshot.treeTotals.input).toBe(8);
+  });
+
+  it("stays deterministic for fork copies inside a recursive cycle", () => {
+    const sessions = [
+      sessionInfo({ id: "ses_a", title: "A", parentID: "ses_b", createdMs: NOW - 2 * HOUR_MS }),
+      sessionInfo({ id: "ses_b", title: "B", parentID: "ses_a", createdMs: NOW - 2 * HOUR_MS }),
+    ];
+    const messages = [
+      assistantRow("ses_a", "msg_a", NOW - HOUR_MS, { input: 4 }),
+      // Same fingerprint as msg_a: a copy, not an extra occurrence.
+      assistantRow("ses_b", "msg_b_copy", NOW - HOUR_MS, { input: 4 }),
+      assistantRow("ses_b", "msg_b_new", NOW - 30 * 60_000, { input: 1 }),
+    ];
+    const build = (rows: OpenCodeRawAssistantRow[]) => makeDataset({ sessions, messages: rows });
+
+    const snapshot = createUsageAnalytics(build(messages)).session("ses_a");
+    expect(snapshot.nodes.map((node) => node.sessionId)).toEqual(["ses_a", "ses_b"]);
+    expect(snapshot.steps).toHaveLength(2);
+    expect(snapshot.treeTotals.input).toBe(5);
+    expect(snapshot.nodes.reduce((sum, node) => sum + node.ownTokens.input, 0)).toBe(5);
+
+    // Reordered reads produce byte-identical snapshots.
+    expect(createUsageAnalytics(build([...messages].reverse())).session("ses_a")).toEqual(snapshot);
   });
 
   it("labels nodes with worktree basenames only", () => {

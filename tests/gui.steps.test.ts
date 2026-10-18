@@ -171,6 +171,32 @@ describe("step semantics", () => {
     expect(new Set(snapshot.steps.map((step) => step.branch))).toEqual(new Set([0, 1, 2]));
   });
 
+  it("plots only owned steps and attributes a copied row to its owning session", () => {
+    const dataset = makeDataset({
+      sessions: [
+        sessionInfo({ id: "ses_p", title: "P", createdMs: NOW - 10 * HOUR_MS }),
+        sessionInfo({ id: "ses_c", title: "C", parentID: "ses_p", createdMs: NOW - 9 * HOUR_MS }),
+      ],
+      messages: [
+        assistantRow("ses_p", "msg_a_original", NOW - 2 * HOUR_MS, NOW - HOUR_MS, { input: 6 }),
+        // Same fingerprint as msg_a_original, physically stored in the child.
+        assistantRow("ses_c", "msg_z_copy", NOW - 2 * HOUR_MS, NOW - HOUR_MS, { input: 6 }),
+        assistantRow("ses_c", "msg_child_new", NOW - 30 * 60_000, NOW - 20 * 60_000, {
+          input: 2,
+        }),
+      ],
+    });
+
+    const snapshot = createUsageAnalytics(dataset).session("ses_p");
+    expect(snapshot.steps.map((step) => [step.messageId, step.branch])).toEqual([
+      ["msg_a_original", 0],
+      ["msg_child_new", 1],
+    ]);
+    expect(snapshot.ownSummary.stepCount).toBe(1);
+    expect(snapshot.treeTotals.input).toBe(8);
+    expect(snapshot.stepSemantics).toContain("fork copies are counted once");
+  });
+
   it("keeps compaction markers separate and ordered by timestamp then message id", () => {
     const dataset = makeDataset({
       sessions: [

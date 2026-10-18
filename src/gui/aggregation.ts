@@ -40,11 +40,10 @@ import type { TokenBuckets } from "../lib/token-buckets.js";
  * access happens here; a later P3 source factory loads the readers and calls
  * this one factory.
  *
- * Owner set (R50): global home/project numbers derive from one globally
- * deterministic, multiplicity-preserving owned set built from the raw
- * completed-assistant rows (fork copies included). A later session-detail
- * page intentionally uses all physical rows of the selected tree with no
- * dedup — an asserted, documented divergence.
+ * Owner set (R50): every user-facing home/project/session number derives from
+ * one globally deterministic, multiplicity-preserving owned set built from the
+ * raw completed-assistant rows (fork copies included). Session detail reuses
+ * that same owned set, so a fork copy is counted once on every surface.
  *
  * Rows whose `sessionID` is absent from the sessions index are ignored: the
  * dataset is expected to be the complete, consistent raw read.
@@ -58,7 +57,8 @@ export const UNTITLED_SESSION_TITLE = "Untitled session";
 
 /** One sentence carried into the UI with every session snapshot (spec §6). */
 export const STEP_SEMANTICS =
-  "A step is one completed assistant message. contextTokens = input + cacheRead + cacheWrite; " +
+  "A step is one completed assistant message; fork copies are counted once. " +
+  "contextTokens = input + cacheRead + cacheWrite; " +
   "totalTokens = input + cacheRead + cacheWrite + output + reasoning. " +
   "Tool calls and stream chunks are not steps; compaction markers are separate.";
 
@@ -295,7 +295,6 @@ interface AnalyticsModel {
   ownedSteps: OwnedStep[];
   ownedBySession: Map<string, OwnedStep[]>;
   ownedByProject: Map<string, OwnedStep[]>;
-  stepsBySession: Map<string, OpenCodeRawAssistantRow[]>;
   sessionsByProject: Map<string, string[]>;
   projectIds: string[];
   projectIdSet: Set<string>;
@@ -449,18 +448,11 @@ function computeProjectTrees(
 function buildAnalyticsModel(dataset: UsageAnalyticsDataset): AnalyticsModel {
   const sessions = dataset.sessions;
 
-  const stepsBySession = new Map<string, OpenCodeRawAssistantRow[]>();
   const usable: OwnedStep[] = [];
   for (const row of dataset.messages) {
     const session = sessions[row.sessionID];
     if (!session) continue;
     if (!(row.completedAtMs > 0) || !Number.isFinite(row.completedAtMs)) continue;
-    let list = stepsBySession.get(row.sessionID);
-    if (!list) {
-      list = [];
-      stepsBySession.set(row.sessionID, list);
-    }
-    list.push(row);
     usable.push({
       row,
       sessionId: row.sessionID,
@@ -528,7 +520,6 @@ function buildAnalyticsModel(dataset: UsageAnalyticsDataset): AnalyticsModel {
     ownedSteps,
     ownedBySession,
     ownedByProject,
-    stepsBySession,
     sessionsByProject,
     projectIds,
     projectIdSet,
@@ -812,7 +803,7 @@ function buildProject(
 }
 
 // ---------------------------------------------------------------------------
-// Session detail (all physical rows of the selected tree, no dedup — R25/R26)
+// Session detail (the selected tree's owned steps — R25/R26/R50)
 // ---------------------------------------------------------------------------
 
 function sessionOwnLatestMs(model: AnalyticsModel, sessionId: string): number {
@@ -823,7 +814,7 @@ function sessionOwnLatestMs(model: AnalyticsModel, sessionId: string): number {
   const session = model.dataset.sessions[sessionId];
   consider(session?.time?.created);
   consider(session?.time?.updated);
-  for (const row of model.stepsBySession.get(sessionId) ?? []) consider(stepTimeOf(row));
+  for (const step of model.ownedBySession.get(sessionId) ?? []) consider(step.timeMs);
   return latest;
 }
 
@@ -857,8 +848,8 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
   const ownAccumulators = new Map<string, CostedAccumulator>();
   for (const node of order) {
     const accumulator = createAccumulator();
-    for (const row of model.stepsBySession.get(node.id) ?? []) {
-      addRawStep(accumulator, row, pricingCache);
+    for (const step of model.ownedBySession.get(node.id) ?? []) {
+      addRawStep(accumulator, step.row, pricingCache);
     }
     ownAccumulators.set(node.id, accumulator);
   }
@@ -887,7 +878,7 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
 
   const nodes: SessionNode[] = order.map(({ id, depth }) => {
     const session = model.dataset.sessions[id]!;
-    const ownSteps = model.stepsBySession.get(id) ?? [];
+    const ownSteps = model.ownedBySession.get(id) ?? [];
     const childIds = (model.childrenByParent.get(id) ?? [])
       .filter((child) => visitedFrom.get(child.id) === id)
       .map((child) => child.id);
@@ -912,7 +903,8 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
   const steps: StepPoint[] = [];
   for (const { id } of order) {
     const branch = nodeIndex.get(id)!;
-    for (const row of model.stepsBySession.get(id) ?? []) {
+    for (const ownedStep of model.ownedBySession.get(id) ?? []) {
+      const row = ownedStep.row;
       const stack: TokenStack = {
         input: row.tokens.input,
         cacheRead: row.tokens.cacheRead,
@@ -923,7 +915,7 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
       const step: StepPoint = {
         sessionId: id,
         messageId: row.messageID,
-        atMs: stepTimeOf(row),
+        atMs: ownedStep.timeMs,
         branch,
         stack,
         contextTokens: stack.input + stack.cacheRead + stack.cacheWrite,
@@ -972,7 +964,7 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
   breadcrumbs.reverse();
   breadcrumbs.push({ sessionId, title: sessionTitle(focus), isFocus: true });
 
-  const focusSteps = model.stepsBySession.get(sessionId) ?? [];
+  const focusSteps = model.ownedBySession.get(sessionId) ?? [];
 
   return {
     focusSessionId: sessionId,
