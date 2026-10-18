@@ -14,6 +14,7 @@ import { createGuiLogger } from "../src/gui/log.js";
 import {
   createSnapshotService,
   DEFAULT_POLL_INTERVAL_MS,
+  MAX_TRACKED_PAGES,
   type SnapshotService,
   type SnapshotSource,
 } from "../src/gui/snapshot-service.js";
@@ -185,6 +186,20 @@ function makeService(
   return createSnapshotService({ source, logger: quiet(), ...extra });
 }
 
+/** Project source that records one count per projectId. */
+function countedProjectSource(): { calls: Map<string, number>; source: SnapshotSource } {
+  const calls = new Map<string, number>();
+  const source: SnapshotSource = {
+    home: async ({ range }) => home(range),
+    project: async ({ projectId, range }) => {
+      calls.set(projectId, (calls.get(projectId) ?? 0) + 1);
+      return project(range, projectId);
+    },
+    session: async ({ sessionId }) => session(sessionId),
+  };
+  return { calls, source };
+}
+
 describe("GUI snapshot service", () => {
   it("shares one in-flight computation per cache key", async () => {
     let release!: (value: HomeSnapshot) => void;
@@ -236,6 +251,331 @@ describe("GUI snapshot service", () => {
     expect(calls.session).toBe(1);
     await service.session({ sessionId: "s2" });
     expect(calls.session).toBe(2);
+  });
+
+  it("polls only the bounded most recently loaded pages after churn", async () => {
+    vi.useFakeTimers();
+    const { calls, source } = countedProjectSource();
+    const service = makeService(source, { minIntervalMs: 50 });
+    const pageCount = MAX_TRACKED_PAGES + 3;
+    for (let index = 0; index < pageCount; index += 1) {
+      await service.project({ projectId: `p${index}`, range: "7d" });
+    }
+
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60);
+    for (let index = 0; index < 3; index += 1) {
+      expect(calls.get(`p${index}`)).toBe(1);
+    }
+    for (let index = 3; index < pageCount; index += 1) {
+      expect(calls.get(`p${index}`)).toBe(2);
+    }
+
+    // Another tick does not change which keys are registered.
+    await vi.advanceTimersByTimeAsync(60);
+    expect(calls.get("p0")).toBe(1);
+    expect(calls.get(`p${pageCount - 1}`)).toBe(3);
+    viewer();
+  });
+
+  it("refreshes a revisited page and keeps it in the bounded poll set", async () => {
+    vi.useFakeTimers();
+    const { calls, source } = countedProjectSource();
+    const service = makeService(source, { minIntervalMs: 50 });
+    for (let index = 0; index <= MAX_TRACKED_PAGES; index += 1) {
+      await service.project({ projectId: `p${index}`, range: "7d" });
+    }
+    expect(calls.get("p0")).toBe(1);
+
+    // p0 was evicted by the churn above: revisiting it is a real load again.
+    await service.project({ projectId: "p0", range: "7d" });
+    expect(calls.get("p0")).toBe(2);
+    await service.project({ projectId: `p${MAX_TRACKED_PAGES + 1}`, range: "7d" });
+
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60);
+    expect(calls.get("p0")).toBe(3);
+    expect(calls.get("p1")).toBe(1);
+    expect(calls.get(`p${MAX_TRACKED_PAGES + 1}`)).toBe(2);
+    viewer();
+  });
+
+  it("resolves an evicted in-flight request without caching or re-registering it", async () => {
+    vi.useFakeTimers();
+    let resolveTarget!: (value: ProjectSnapshot) => void;
+    let targetCalls = 0;
+    let otherCalls = 0;
+    const source: SnapshotSource = {
+      home: async ({ range }) => home(range),
+      project: ({ projectId, range }) => {
+        if (projectId === "target") {
+          targetCalls += 1;
+          if (targetCalls === 1) {
+            return new Promise<ProjectSnapshot>((resolve) => {
+              resolveTarget = resolve;
+            });
+          }
+          return Promise.resolve(project(range, projectId));
+        }
+        otherCalls += 1;
+        return Promise.resolve(project(range, projectId));
+      },
+      session: async ({ sessionId }) => session(sessionId),
+    };
+    const service = makeService(source, { minIntervalMs: 50 });
+
+    const target = service.project({ projectId: "target", range: "7d" });
+    expect(targetCalls).toBe(1);
+    for (let index = 0; index < MAX_TRACKED_PAGES; index += 1) {
+      await service.project({ projectId: `p${index}`, range: "7d" });
+    }
+    expect(otherCalls).toBe(MAX_TRACKED_PAGES);
+
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60);
+    expect(targetCalls).toBe(1);
+    expect(otherCalls).toBe(MAX_TRACKED_PAGES * 2);
+
+    resolveTarget(project("7d", "target", 77));
+    await expect(target).resolves.toEqual(project("7d", "target", 77));
+
+    // The late completion is not polled...
+    await vi.advanceTimersByTimeAsync(60);
+    expect(targetCalls).toBe(1);
+
+    // ...and it did not reinsert a cache entry: a fresh load recomputes.
+    await expect(service.project({ projectId: "target", range: "7d" })).resolves.toEqual(
+      project("7d", "target"),
+    );
+    expect(targetCalls).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(60);
+    expect(targetCalls).toBe(3);
+    viewer();
+  });
+
+  it("drops a late poll result for a page evicted mid-poll", async () => {
+    vi.useFakeTimers();
+    let deferPoll = false;
+    let resolveSlow!: (value: ProjectSnapshot) => void;
+    const counts = new Map<string, number>();
+    const source: SnapshotSource = {
+      home: async ({ range }) => home(range),
+      project: ({ projectId, range }) => {
+        counts.set(projectId, (counts.get(projectId) ?? 0) + 1);
+        if (projectId === "slow" && deferPoll) {
+          deferPoll = false;
+          return new Promise<ProjectSnapshot>((resolve) => {
+            resolveSlow = resolve;
+          });
+        }
+        return Promise.resolve(project(range, projectId));
+      },
+      session: async ({ sessionId }) => session(sessionId),
+    };
+    const service = makeService(source, { minIntervalMs: 50 });
+    await service.project({ projectId: "slow", range: "7d" });
+    for (let index = 0; index < MAX_TRACKED_PAGES - 1; index += 1) {
+      await service.project({ projectId: `old${index}`, range: "7d" });
+    }
+
+    deferPoll = true;
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60);
+    expect(counts.get("slow")).toBe(2);
+
+    // Evict `slow` (and every page loaded before it) while its poll is pending.
+    for (let index = 0; index < MAX_TRACKED_PAGES; index += 1) {
+      await service.project({ projectId: `new${index}`, range: "7d" });
+    }
+
+    resolveSlow(project("7d", "slow", 99));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The late poll result neither cached nor re-registered the evicted pages.
+    await vi.advanceTimersByTimeAsync(60);
+    expect(counts.get("slow")).toBe(2);
+    expect(counts.get("old0")).toBe(1);
+    await service.project({ projectId: "slow", range: "7d" });
+    expect(counts.get("slow")).toBe(3);
+    viewer();
+  });
+
+  it("clears registrations on the last viewer disconnect and re-arms only loaded pages", async () => {
+    vi.useFakeTimers();
+    const { calls, source } = fakeSource();
+    const service = makeService(source, { minIntervalMs: 50 });
+    await service.home({ range: "7d" });
+    await service.project({ projectId: "p1", range: "7d" });
+
+    let viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60);
+    expect(calls.home).toBe(2);
+    expect(calls.project).toBe(2);
+
+    viewer();
+    viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(120);
+    expect(calls.home).toBe(2);
+    expect(calls.project).toBe(2);
+
+    // A reconnect polls only what is loaded again; retained cache stays dirty.
+    await service.home({ range: "7d" });
+    expect(calls.home).toBe(3);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(calls.home).toBe(4);
+    expect(calls.project).toBe(2);
+    viewer();
+  });
+
+  it("abandons an in-flight tick when the last viewer disconnects", async () => {
+    vi.useFakeTimers();
+    let firstCalls = 0;
+    let secondCalls = 0;
+    let resolveFirstPoll!: (value: ProjectSnapshot) => void;
+    const source: SnapshotSource = {
+      home: async ({ range }) => home(range),
+      project: ({ projectId, range }) => {
+        if (projectId === "first") {
+          firstCalls += 1;
+          if (firstCalls === 2) {
+            return new Promise<ProjectSnapshot>((resolve) => {
+              resolveFirstPoll = resolve;
+            });
+          }
+          return Promise.resolve(project(range, projectId, firstCalls === 1 ? 10 : 20));
+        }
+        secondCalls += 1;
+        return Promise.resolve(project(range, projectId, 5));
+      },
+      session: async ({ sessionId }) => session(sessionId),
+    };
+    const service = makeService(source, { minIntervalMs: 50 });
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+
+    await service.project({ projectId: "first", range: "7d" });
+    await service.project({ projectId: "second", range: "7d" });
+
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60);
+    expect(firstCalls).toBe(2);
+
+    // The viewer leaves while the first poll of the tick is still pending.
+    viewer();
+
+    resolveFirstPoll(project("7d", "first", 99));
+    await vi.advanceTimersByTimeAsync(120);
+
+    // No late snapshot accepted, no invalidation, and no next key polled.
+    expect(events).toEqual([]);
+    expect(firstCalls).toBe(2);
+    expect(secondCalls).toBe(1);
+
+    // A reconnect polls nothing until a page is loaded again; the still-dirty
+    // retained entry recomputes instead of serving the abandoned late result.
+    const reconnected = service.addViewer();
+    await vi.advanceTimersByTimeAsync(120);
+    expect(firstCalls).toBe(2);
+    expect(secondCalls).toBe(1);
+
+    const refreshed = await service.project({ projectId: "first", range: "7d" });
+    expect(refreshed.totals.total).toBe(20);
+    expect(firstCalls).toBe(3);
+    expect(events).toEqual([]);
+    reconnected();
+  });
+
+  it("cleans up on close while a pending result still resolves its caller", async () => {
+    vi.useFakeTimers();
+    let release!: (value: HomeSnapshot) => void;
+    let calls = 0;
+    const { source } = fakeSource({
+      home: ({ range }) => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<HomeSnapshot>((resolve) => {
+            release = resolve;
+          });
+        }
+        return Promise.resolve(home(range));
+      },
+    });
+    const service = makeService(source, { minIntervalMs: 25 });
+    const pending = service.home({ range: "7d" });
+    service.addViewer();
+    service.close();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(calls).toBe(1);
+
+    release(home("7d"));
+    await expect(pending).resolves.toEqual(home("7d"));
+
+    // close() dropped cached state: a probe load recomputes instead of
+    // resurfacing the pre-close computation.
+    await service.home({ range: "7d" });
+    expect(calls).toBe(2);
+  });
+
+  it("serves the retained last-good snapshot as stale when polling fails", async () => {
+    vi.useFakeTimers();
+    let failing = false;
+    let homeCalls = 0;
+    const { source } = fakeSource({
+      home: async ({ range }) => {
+        homeCalls += 1;
+        if (failing) throw new Error("probe failed");
+        return home(range, { total: 21 });
+      },
+    });
+    const service = makeService(source, { minIntervalMs: 50 });
+    await service.home({ range: "7d" });
+    for (let index = 0; index < MAX_TRACKED_PAGES - 1; index += 1) {
+      await service.project({ projectId: `p${index}`, range: "7d" });
+    }
+
+    const viewer = service.addViewer();
+    failing = true;
+    await vi.advanceTimersByTimeAsync(60);
+    expect(homeCalls).toBe(2);
+
+    const stale = await service.home({ range: "7d" });
+    expect(stale.stale).toBe(true);
+    expect(stale.usage.totals.total).toBe(21);
+    expect(homeCalls).toBe(3);
+    viewer();
+  });
+
+  it("serves refreshed data from polls and recomputes after settings invalidation", async () => {
+    vi.useFakeTimers();
+    let total = 10;
+    let calls = 0;
+    const { source } = fakeSource({
+      home: async ({ range }) => {
+        calls += 1;
+        return home(range, { total });
+      },
+    });
+    const service = makeService(source, { minIntervalMs: 50 });
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(10);
+    const viewer = service.addViewer();
+
+    total = 20;
+    await vi.advanceTimersByTimeAsync(60);
+    expect(calls).toBe(2);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(20);
+    expect(calls).toBe(2);
+    expect(events.map((event) => event.topic)).toEqual(["quota.changed"]);
+
+    total = 30;
+    service.notifySettingsChanged();
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(30);
+    expect(calls).toBe(3);
+    expect(events.map((event) => event.topic)).toEqual(["quota.changed", "settings.changed"]);
+    viewer();
   });
 
   it("serves the last good snapshot marked stale when a recompute fails", async () => {
