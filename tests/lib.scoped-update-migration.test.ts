@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -21,6 +21,8 @@ import {
   sortScopedUpdateManualFindings,
   sortScopedUpdateSafeActions,
 } from "../src/lib/scoped-update-migration.js";
+
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 
 const tempDirs: string[] = [];
 
@@ -344,14 +346,14 @@ describe("migration candidate discovery", () => {
     expect(result.manualFindings).toEqual([]);
   });
 
-  it("rejects a symlinked opencode-quota candidate parent", async () => {
+  it("rejects a symlinked opencode-quota candidate parent", async (context) => {
     const root = tempDir();
     const globalRoot = join(root, "global");
     const outsideParent = join(root, "outside-opencode-quota");
     const candidatePath = join(globalRoot, "opencode-quota", "quota-toast.jsonc");
     write(join(outsideParent, "quota-toast.jsonc"), `{"opencodeZenDisplay":"default"}`);
     mkdirSync(globalRoot, { recursive: true });
-    symlinkSync(outsideParent, join(globalRoot, "opencode-quota"));
+    if (!symlinkOrSkip(context, outsideParent, join(globalRoot, "opencode-quota"))) return;
 
     const result = await discoverExistingScopedUpdateMigrationCandidates({
       globalRoot: globalRoot,
@@ -368,7 +370,7 @@ describe("migration candidate discovery", () => {
     ]);
   });
 
-  it("keeps a package-selected cross-root symlink out of migration discovery", async () => {
+  it("keeps a package-selected cross-root symlink out of migration discovery", async (context) => {
     const root = tempDir();
     const globalRoot = join(root, "global");
     const workspaceRoot = join(root, "workspace");
@@ -376,7 +378,7 @@ describe("migration candidate discovery", () => {
     const symlinkPath = join(globalRoot, "opencode.json");
     write(workspaceFile, `{"experimental":{"quotaToast":{"opencodeZenDisplay":"default"}}}`);
     mkdirSync(dirname(symlinkPath), { recursive: true });
-    symlinkSync(workspaceFile, symlinkPath);
+    if (!symlinkOrSkip(context, workspaceFile, symlinkPath)) return;
 
     const result = await discoverExistingScopedUpdateMigrationCandidates({
       globalRoot: globalRoot,
@@ -403,7 +405,7 @@ describe("migration candidate discovery", () => {
     ]);
   });
 
-  it("reports a distinct symlink before realpath dedupe, even when it targets a selected file", async () => {
+  it("reports a distinct symlink before realpath dedupe, even when it targets a selected file", async (context) => {
     const root = tempDir();
     const globalRoot = join(root, "global");
     const workspaceRoot = join(root, "workspace");
@@ -411,7 +413,7 @@ describe("migration candidate discovery", () => {
     const symlinkPath = join(globalRoot, "opencode-quota", "quota-toast.jsonc");
     write(workspaceFile, `{"opencodeZenDisplay":"default"}`);
     mkdirSync(dirname(symlinkPath), { recursive: true });
-    symlinkSync(workspaceFile, symlinkPath);
+    if (!symlinkOrSkip(context, workspaceFile, symlinkPath)) return;
 
     const result = await discoverExistingScopedUpdateMigrationCandidates({
       globalRoot: globalRoot,
@@ -533,22 +535,7 @@ describe("obsolete source audit", () => {
     expect(JSON.stringify(findings)).not.toContain("zen-secret-canary");
   });
 
-  it.each([
-    "file",
-    "symlink",
-  ])("reports the obsolete Zen %s and still reports ambiguous Zen names", async (kind) => {
-    const root = tempDir();
-    const configDir = join(root, "config");
-    const obsoletePath = join(configDir, OBSOLETE_ZEN_FILE);
-    if (kind === "symlink") {
-      const target = join(root, "target.json");
-      write(target, "zen-file-secret-canary");
-      mkdirSync(dirname(obsoletePath), { recursive: true });
-      symlinkSync(target, obsoletePath);
-    } else {
-      write(obsoletePath, "zen-file-secret-canary");
-    }
-
+  async function expectObsoleteZenFindings(configDir: string, obsoletePath: string): Promise<void> {
     const findings = await auditObsoleteUpdateSources({
       env: {
         OPENCODE_WORKSPACE_ID: "zen-workspace-secret",
@@ -562,6 +549,27 @@ describe("obsolete source audit", () => {
       { kind: "obsolete-zen-file", path: obsoletePath },
     ]);
     expect(JSON.stringify(findings)).not.toMatch(/secret/u);
+  }
+
+  it("reports the obsolete Zen file and still reports ambiguous Zen names", async () => {
+    const root = tempDir();
+    const configDir = join(root, "config");
+    const obsoletePath = join(configDir, OBSOLETE_ZEN_FILE);
+    write(obsoletePath, "zen-file-secret-canary");
+
+    await expectObsoleteZenFindings(configDir, obsoletePath);
+  });
+
+  it("reports the obsolete Zen symlink and still reports ambiguous Zen names", async (context) => {
+    const root = tempDir();
+    const configDir = join(root, "config");
+    const obsoletePath = join(configDir, OBSOLETE_ZEN_FILE);
+    const target = join(root, "target.json");
+    write(target, "zen-file-secret-canary");
+    mkdirSync(dirname(obsoletePath), { recursive: true });
+    if (!symlinkOrSkip(context, target, obsoletePath)) return;
+
+    await expectObsoleteZenFindings(configDir, obsoletePath);
   });
 });
 

@@ -9,7 +9,6 @@ import {
   readlinkSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +24,8 @@ import {
   writeConfiguredJsonAtomic,
   writeResolvedConfigText,
 } from "../src/lib/config-write-target.js";
+
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 
 const tempDirs: string[] = [];
 
@@ -52,14 +53,14 @@ describe("resolveConfigWriteTarget", () => {
     });
   });
 
-  it("canonicalizes an existing regular file under a symlinked directory parent", async () => {
+  it("canonicalizes an existing regular file under a symlinked directory parent", async (context) => {
     const root = makeTempDir();
     const realParent = join(root, "actual");
     const aliasParent = join(root, "alias");
     const realFile = join(realParent, "opencode.json");
     mkdirSync(realParent);
     writeFileSync(realFile, "{}\n");
-    symlinkSync(realParent, aliasParent, "dir");
+    if (!symlinkOrSkip(context, realParent, aliasParent, "dir")) return;
     const configured = join(aliasParent, "opencode.json");
 
     await expect(resolveConfigWriteTarget(configured)).resolves.toEqual({
@@ -70,7 +71,7 @@ describe("resolveConfigWriteTarget", () => {
     });
   });
 
-  it("resolves a relative hop from a symlinked directory parent using kernel semantics", async () => {
+  it("resolves a relative hop from a symlinked directory parent using kernel semantics", async (context) => {
     const root = makeTempDir();
     const realParent = join(root, "actual", "place");
     const aliasParent = join(root, "elsewhere", "alias");
@@ -82,8 +83,9 @@ describe("resolveConfigWriteTarget", () => {
     mkdirSync(join(root, "elsewhere", "secrets"), { recursive: true });
     writeFileSync(realFile, '{"plugin":[]}\n');
     writeFileSync(wrongFile, '{"plugin":["wrong"]}\n');
-    symlinkSync("../secrets/opencode.json", join(realParent, "opencode.json"));
-    symlinkSync(realParent, aliasParent);
+    const linkedFile = join(realParent, "opencode.json");
+    if (!symlinkOrSkip(context, "../secrets/opencode.json", linkedFile)) return;
+    if (!symlinkOrSkip(context, realParent, aliasParent)) return;
 
     const configured = join(aliasParent, "opencode.json");
     // Windows stores backslashes even when symlinkSync receives forward slashes.
@@ -100,14 +102,14 @@ describe("resolveConfigWriteTarget", () => {
     expect(readlinkSync(configured)).toBe(linkText);
   });
 
-  it("resolves a relative symlink to its regular-file target", async () => {
+  it("resolves a relative symlink to its regular-file target", async (context) => {
     const dir = makeTempDir();
     const real = join(dir, "dotfiles", "opencode.json");
     const link = join(dir, "config", "opencode.json");
     mkdirSync(join(dir, "dotfiles"), { recursive: true });
     mkdirSync(join(dir, "config"), { recursive: true });
     writeFileSync(real, '{\n  "plugin": []\n}\n');
-    symlinkSync("../dotfiles/opencode.json", link);
+    if (!symlinkOrSkip(context, "../dotfiles/opencode.json", link)) return;
     const linkText = readlinkSync(link);
 
     await expect(resolveConfigWriteTarget(link)).resolves.toEqual({
@@ -118,14 +120,14 @@ describe("resolveConfigWriteTarget", () => {
     });
   });
 
-  it("resolves an absolute symlink and a valid chain", async () => {
+  it("resolves an absolute symlink and a valid chain", async (context) => {
     const dir = makeTempDir();
     const real = join(dir, "real.json");
     const middle = join(dir, "middle.json");
     const link = join(dir, "link.json");
     writeFileSync(real, "{}\n");
-    symlinkSync(real, middle);
-    symlinkSync(middle, link);
+    if (!symlinkOrSkip(context, real, middle)) return;
+    if (!symlinkOrSkip(context, middle, link)) return;
 
     await expect(resolveConfigWriteTarget(link)).resolves.toEqual({
       configuredPath: link,
@@ -138,34 +140,34 @@ describe("resolveConfigWriteTarget", () => {
     });
   });
 
-  it("fails closed on a dangling symlink", async () => {
+  it("fails closed on a dangling symlink", async (context) => {
     const dir = makeTempDir();
     const missing = join(dir, "missing.json");
     const link = join(dir, "link.json");
-    symlinkSync(missing, link);
+    if (!symlinkOrSkip(context, missing, link)) return;
     await expect(resolveConfigWriteTarget(link)).rejects.toMatchObject({
       reason: "dangling",
       name: "ConfigWriteTargetError",
     });
   });
 
-  it("fails closed on a symlink loop", async () => {
+  it("fails closed on a symlink loop", async (context) => {
     const dir = makeTempDir();
     const a = join(dir, "a.json");
     const b = join(dir, "b.json");
-    symlinkSync(b, a);
-    symlinkSync(a, b);
+    if (!symlinkOrSkip(context, b, a)) return;
+    if (!symlinkOrSkip(context, a, b)) return;
     await expect(resolveConfigWriteTarget(a)).rejects.toMatchObject({ reason: "loop" });
   });
 
-  it("accepts a 40-hop chain and rejects a 41st hop", async () => {
+  it("accepts a 40-hop chain and rejects a 41st hop", async (context) => {
     const dir = makeTempDir();
     const real = join(dir, "real.json");
     writeFileSync(real, "{}\n");
     let current = real;
     for (let index = 0; index < MAX_CONFIG_SYMLINK_HOPS; index += 1) {
       const next = join(dir, `link-${index}.json`);
-      symlinkSync(current, next);
+      if (!symlinkOrSkip(context, current, next)) return;
       current = next;
     }
     await expect(resolveConfigWriteTarget(current)).resolves.toMatchObject({
@@ -174,39 +176,39 @@ describe("resolveConfigWriteTarget", () => {
     });
 
     const extra = join(dir, "link-extra.json");
-    symlinkSync(current, extra);
+    if (!symlinkOrSkip(context, current, extra)) return;
     await expect(resolveConfigWriteTarget(extra)).rejects.toMatchObject({ reason: "depth" });
   });
 
-  it("rejects a non-regular terminal target", async () => {
+  it("rejects a non-regular terminal target", async (context) => {
     const dir = makeTempDir();
     const targetDir = join(dir, "target-dir");
     const link = join(dir, "link.json");
     mkdirSync(targetDir);
-    symlinkSync(targetDir, link);
+    if (!symlinkOrSkip(context, targetDir, link)) return;
     await expect(resolveConfigWriteTarget(link)).rejects.toMatchObject({ reason: "non-regular" });
   });
 
-  it("rejects a terminal it cannot inspect", async () => {
-    if (process.platform === "win32") {
-      return;
-    }
-    const dir = makeTempDir();
-    const hidden = join(dir, "hidden");
-    const real = join(hidden, "opencode.json");
-    const link = join(dir, "link.json");
-    mkdirSync(hidden);
-    writeFileSync(real, "{}\n");
-    symlinkSync(real, link);
-    chmodSync(hidden, 0);
-    try {
-      await expect(resolveConfigWriteTarget(link)).rejects.toMatchObject({
-        reason: "permission",
-      });
-    } finally {
-      chmodSync(hidden, 0o700);
-    }
-  });
+  it.skipIf(process.platform === "win32")(
+    "rejects a terminal it cannot inspect",
+    async (context) => {
+      const dir = makeTempDir();
+      const hidden = join(dir, "hidden");
+      const real = join(hidden, "opencode.json");
+      const link = join(dir, "link.json");
+      mkdirSync(hidden);
+      writeFileSync(real, "{}\n");
+      if (!symlinkOrSkip(context, real, link)) return;
+      chmodSync(hidden, 0);
+      try {
+        await expect(resolveConfigWriteTarget(link)).rejects.toMatchObject({
+          reason: "permission",
+        });
+      } finally {
+        chmodSync(hidden, 0o700);
+      }
+    },
+  );
 });
 
 describe("assertSameConfigWriteTarget", () => {
@@ -292,13 +294,13 @@ describe("writeResolvedConfigText", () => {
 });
 
 describe("writeConfiguredJsonAtomic", () => {
-  it("writes through a symlink without replacing the link", async () => {
+  it("writes through a symlink without replacing the link", async (context) => {
     const dir = makeTempDir();
     const real = join(dir, "dotfiles", "opencode.json");
     const link = join(dir, "opencode.json");
     mkdirSync(join(dir, "dotfiles"), { recursive: true });
     writeFileSync(real, '{"plugin":[]}\n');
-    symlinkSync(real, link);
+    if (!symlinkOrSkip(context, real, link)) return;
 
     await writeConfiguredJsonAtomic(link, { plugin: ["a"] }, { trailingNewline: true });
 

@@ -5,7 +5,6 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
-  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -21,6 +20,8 @@ import {
   planConfigDocumentEdit,
 } from "../src/lib/opencode-config-editor.js";
 import { applyScopedUpdatePlan, planScopedUpdate } from "../src/lib/scoped-update.js";
+
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 
 // These tests pin the explicit spec override; without one, update uses the canonical release tag.
 const EXPLICIT_UPDATE_SPEC = "file:./opencode-quota-gui-5.0.0.tgz";
@@ -53,14 +54,16 @@ async function editLinkedConfig(dir: string, desiredPlugin: string[]): Promise<s
 }
 
 describe("config symlink-preserving writes", () => {
-  it("updates a relative symlink target and leaves the link in place", async () => {
+  it("updates a relative symlink target and leaves the link in place", async (context) => {
     const root = makeTempDir();
     const real = join(root, "dotfiles", "opencode.json");
     const configDir = join(root, "config");
     mkdirSync(join(root, "dotfiles"), { recursive: true });
     mkdirSync(configDir, { recursive: true });
     writeFileSync(real, '{"plugin":[]}\n');
-    symlinkSync("../dotfiles/opencode.json", join(configDir, "opencode.json"));
+    if (!symlinkOrSkip(context, "../dotfiles/opencode.json", join(configDir, "opencode.json"))) {
+      return;
+    }
 
     await editLinkedConfig(configDir, ["a"]);
 
@@ -68,15 +71,15 @@ describe("config symlink-preserving writes", () => {
     expect(JSON.parse(readFileSync(real, "utf8"))).toEqual({ plugin: ["a"] });
   });
 
-  it("updates an absolute symlink and a chained pair", async () => {
+  it("updates an absolute symlink and a chained pair", async (context) => {
     const root = makeTempDir();
     const real = join(root, "real.json");
     const middle = join(root, "middle.json");
     const configDir = join(root, "config");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(real, '{"plugin":[]}\n');
-    symlinkSync(real, middle);
-    symlinkSync(middle, join(configDir, "opencode.json"));
+    if (!symlinkOrSkip(context, real, middle)) return;
+    if (!symlinkOrSkip(context, middle, join(configDir, "opencode.json"))) return;
 
     await editLinkedConfig(configDir, ["chained"]);
 
@@ -93,7 +96,7 @@ describe("config symlink-preserving writes", () => {
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ plugin: ["new"] });
   });
 
-  it("preserves JSONC comments when writing through a symlink", async () => {
+  it("preserves JSONC comments when writing through a symlink", async (context) => {
     const root = makeTempDir();
     const real = join(root, "dotfiles", "opencode.jsonc");
     const configDir = join(root, "config");
@@ -107,7 +110,7 @@ describe("config symlink-preserving writes", () => {
 }
 `,
     );
-    symlinkSync(real, join(configDir, "opencode.jsonc"));
+    if (!symlinkOrSkip(context, real, join(configDir, "opencode.jsonc"))) return;
 
     const plan = await planConfigDocumentEdit({
       target: resolveEditableConfigPath({
@@ -126,14 +129,14 @@ describe("config symlink-preserving writes", () => {
     expect(updated).toContain("@slkiser/opencode-quota@latest");
   });
 
-  it("fails closed instead of deleting a symlinked JSON source during JSONC conversion", async () => {
+  it("fails closed instead of deleting a symlinked JSON source during JSONC conversion", async (context) => {
     const root = makeTempDir();
     const real = join(root, "dotfiles", "opencode.json");
     const configDir = join(root, "config");
     mkdirSync(join(root, "dotfiles"), { recursive: true });
     mkdirSync(configDir, { recursive: true });
     writeFileSync(real, '{"plugin":[]}\n');
-    symlinkSync(real, join(configDir, "opencode.json"));
+    if (!symlinkOrSkip(context, real, join(configDir, "opencode.json"))) return;
 
     await expect(
       planConfigDocumentEdit({
@@ -151,7 +154,7 @@ describe("config symlink-preserving writes", () => {
     expect(readFileSync(real, "utf8")).toBe('{"plugin":[]}\n');
   });
 
-  it("fails closed when the link is retargeted after preview", async () => {
+  it("fails closed when the link is retargeted after preview", async (context) => {
     const root = makeTempDir();
     const real = join(root, "real.json");
     const other = join(root, "other.json");
@@ -160,7 +163,7 @@ describe("config symlink-preserving writes", () => {
     mkdirSync(configDir, { recursive: true });
     writeFileSync(real, '{"plugin":[]}\n');
     writeFileSync(other, '{"plugin":[]}\n');
-    symlinkSync(real, link);
+    if (!symlinkOrSkip(context, real, link)) return;
 
     const plan = await planConfigDocumentEdit({
       target: resolveEditableConfigPath({
@@ -171,7 +174,7 @@ describe("config symlink-preserving writes", () => {
       desiredData: { plugin: ["a"] },
     });
     unlinkSync(link);
-    symlinkSync(other, link);
+    if (!symlinkOrSkip(context, other, link)) return;
 
     await expect(applyConfigDocumentEdit(plan)).rejects.toThrow(/write target changed/);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
@@ -179,13 +182,13 @@ describe("config symlink-preserving writes", () => {
     expect(readFileSync(other, "utf8")).toBe('{"plugin":[]}\n');
   });
 
-  it("fails closed when destination bytes change after preview", async () => {
+  it("fails closed when destination bytes change after preview", async (context) => {
     const root = makeTempDir();
     const real = join(root, "real.json");
     const configDir = join(root, "config");
     mkdirSync(configDir, { recursive: true });
     writeFileSync(real, '{"plugin":[]}\n');
-    symlinkSync(real, join(configDir, "opencode.json"));
+    if (!symlinkOrSkip(context, real, join(configDir, "opencode.json"))) return;
 
     const plan = await planConfigDocumentEdit({
       target: resolveEditableConfigPath({
@@ -202,20 +205,20 @@ describe("config symlink-preserving writes", () => {
     expect(readFileSync(real, "utf8")).toContain('"raced":true');
   });
 
-  it("fails closed on a dangling configured symlink instead of replacing it", async () => {
+  it("fails closed on a dangling configured symlink instead of replacing it", async (context) => {
     const dir = makeTempDir();
-    symlinkSync(join(dir, "missing.json"), join(dir, "opencode.json"));
+    if (!symlinkOrSkip(context, join(dir, "missing.json"), join(dir, "opencode.json"))) return;
     await expect(editLinkedConfig(dir, ["x"])).rejects.toThrow(/Dangling config symlink/);
     expect(lstatSync(join(dir, "opencode.json")).isSymbolicLink()).toBe(true);
     expect(existsSync(join(dir, "missing.json"))).toBe(false);
   });
 
-  it("leaves writeTextAtomic replacing a symlink for non-config callers", async () => {
+  it("leaves writeTextAtomic replacing a symlink for non-config callers", async (context) => {
     const dir = makeTempDir();
     const real = join(dir, "state.json");
     const link = join(dir, "alias.json");
     writeFileSync(real, "{}\n");
-    symlinkSync(real, link);
+    if (!symlinkOrSkip(context, real, link)) return;
     await writeTextAtomic(link, '{"ok":true}\n');
     expect(lstatSync(link).isSymbolicLink()).toBe(false);
     expect(JSON.parse(readFileSync(link, "utf8"))).toEqual({ ok: true });
@@ -224,7 +227,7 @@ describe("config symlink-preserving writes", () => {
 });
 
 describe("scoped update symlink writes", () => {
-  it("updates a linked package spec and deletes cache only after the write", async () => {
+  it("updates a linked package spec and deletes cache only after the write", async (context) => {
     const root = makeTempDir();
     const project = join(root, "project");
     const real = join(root, "dotfiles", "opencode.json");
@@ -235,7 +238,7 @@ describe("scoped update symlink writes", () => {
       real,
       '{"plugin":["@slkiser/opencode-quota@latest","@slkiser/opencode-quota@3.11.1"]}\n',
     );
-    symlinkSync(real, join(project, "opencode.json"));
+    if (!symlinkOrSkip(context, real, join(project, "opencode.json"))) return;
     const manifest = join(cache, "node_modules", "@slkiser", "opencode-quota", "package.json");
     mkdirSync(join(manifest, ".."), { recursive: true });
     writeFileSync(manifest, '{"name":"@slkiser/opencode-quota"}\n');
@@ -263,7 +266,7 @@ describe("scoped update symlink writes", () => {
     expect(existsSync(cache)).toBe(false);
   });
 
-  it("does not delete cache when a linked config is retargeted after preview", async () => {
+  it("does not delete cache when a linked config is retargeted after preview", async (context) => {
     const root = makeTempDir();
     const project = join(root, "project");
     const real = join(root, "dotfiles", "opencode.json");
@@ -274,7 +277,7 @@ describe("scoped update symlink writes", () => {
     writeFileSync(real, '{"plugin":["@slkiser/opencode-quota@3.11.1"]}\n');
     writeFileSync(other, '{"plugin":["@slkiser/opencode-quota@3.11.1"]}\n');
     const link = join(project, "opencode.json");
-    symlinkSync(real, link);
+    if (!symlinkOrSkip(context, real, link)) return;
     const manifest = join(cache, "node_modules", "@slkiser", "opencode-quota", "package.json");
     mkdirSync(join(manifest, ".."), { recursive: true });
     writeFileSync(manifest, '{"name":"@slkiser/opencode-quota"}\n');
@@ -293,7 +296,7 @@ describe("scoped update symlink writes", () => {
       platform: "linux",
     });
     unlinkSync(link);
-    symlinkSync(other, link);
+    if (!symlinkOrSkip(context, other, link)) return;
 
     await expect(applyScopedUpdatePlan(plan)).rejects.toThrow(/write target changed/);
     expect(existsSync(manifest)).toBe(true);

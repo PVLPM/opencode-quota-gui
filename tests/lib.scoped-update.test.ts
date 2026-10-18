@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -14,6 +22,8 @@ import {
   runScopedUpdateCommand,
   sanitizeOpenCodePackageSpec,
 } from "../src/lib/scoped-update.js";
+
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 
 // Commands must not run a real `opencode` binary; undefined matches plans built without a version.
 const openCodeMajor = vi.hoisted(() => ({ value: undefined as 1 | 2 | undefined }));
@@ -485,7 +495,7 @@ describe("scoped update config planning", () => {
     ]);
   });
 
-  it("composes a package-selected alias with a separately discovered real document once", async () => {
+  it("composes a package-selected alias with a separately discovered real document once", async (context) => {
     const f = fixture();
     const packageAlias = join(f.project, "opencode.json");
     const realConfig = join(f.global, "opencode.json");
@@ -494,7 +504,7 @@ describe("scoped update config planning", () => {
       `{"plugin":["@slkiser/opencode-quota@3.11.1"],"experimental":{"quotaToast":{"opencodeZenDisplay":"default"}}}`,
     );
     mkdirSync(dirname(packageAlias), { recursive: true });
-    symlinkSync(realConfig, packageAlias);
+    if (!symlinkOrSkip(context, realConfig, packageAlias)) return;
 
     const plan = await planScopedUpdate({
       cwd: f.project,
@@ -525,13 +535,13 @@ describe("scoped update config planning", () => {
     );
   });
 
-  it("reports a distinct migration symlink alias after package realpath dedupe", async () => {
+  it("reports a distinct migration symlink alias after package realpath dedupe", async (context) => {
     const f = fixture();
     const projectConfig = join(f.project, "opencode.json");
     const globalAlias = join(f.global, "opencode.json");
     write(projectConfig, `{"plugin":["@slkiser/opencode-quota@latest"]}`);
     mkdirSync(dirname(globalAlias), { recursive: true });
-    symlinkSync(projectConfig, globalAlias);
+    if (!symlinkOrSkip(context, projectConfig, globalAlias)) return;
 
     const plan = await planScopedUpdate({
       cwd: f.project,
@@ -786,7 +796,7 @@ describe("scoped update application safety", () => {
     expect(readFileSync(second, "utf8")).toBe(original);
   });
 
-  it("rejects a migration parent replaced between planning and apply", async () => {
+  it("rejects a migration parent replaced between planning and apply", async (context) => {
     const f = fixture();
     const sidecar = join(f.project, "opencode-quota", "quota-toast.jsonc");
     const original = `{"opencodeZenDisplay":"default"}`;
@@ -802,7 +812,7 @@ describe("scoped update application safety", () => {
     });
 
     rmSync(dirname(sidecar), { recursive: true });
-    symlinkSync(redirectedParent, dirname(sidecar));
+    if (!symlinkOrSkip(context, redirectedParent, dirname(sidecar))) return;
 
     await expect(applyScopedUpdatePlan(plan)).rejects.toThrow(
       "Config write target changed since preview",
@@ -894,7 +904,35 @@ describe("scoped update application safety", () => {
     ).not.toThrow();
   });
 
-  it("skips symlinks and wrong manifests without broadening deletion", async () => {
+  it("keeps wrong manifests out of cache deletion", async () => {
+    const f = fixture();
+    write(
+      join(f.project, "opencode.json"),
+      `{"plugin":["@slkiser/opencode-quota@latest","@slkiser/opencode-quota@3.11.1"]}`,
+    );
+    const exact = join(f.cache, "packages", "@slkiser", "opencode-quota@3.11.1");
+    const latest = join(f.cache, "packages", "@slkiser", "opencode-quota@latest");
+    const manifests = [exact, latest].map((dir) =>
+      join(dir, "node_modules", "@slkiser", "opencode-quota", "package.json"),
+    );
+    for (const manifest of manifests) write(manifest, `{"name":"not-the-package"}`);
+
+    const result = await applyScopedUpdatePlan(
+      await planScopedUpdate({
+        cwd: f.project,
+        env: withUpdateSpec(f.env),
+        homeDir: join(f.root, "home"),
+      }),
+    );
+
+    expect(result.removedCachePaths).toEqual([]);
+    expect(result.skippedCachePaths).toEqual(expect.arrayContaining([exact, latest]));
+    for (const manifest of manifests) {
+      expect(readFileSync(manifest, "utf8")).toContain("not-the-package");
+    }
+  });
+
+  it("skips a symlinked cache entry without broadening deletion", async (context) => {
     const f = fixture();
     write(
       join(f.project, "opencode.json"),
@@ -904,12 +942,13 @@ describe("scoped update application safety", () => {
     mkdirSync(outside);
     const exact = join(f.cache, "packages", "@slkiser", "opencode-quota@3.11.1");
     mkdirSync(dirname(exact), { recursive: true });
-    symlinkSync(outside, exact);
+    if (!symlinkOrSkip(context, outside, exact)) return;
     const latest = join(f.cache, "packages", "@slkiser", "opencode-quota@latest");
     write(
       join(latest, "node_modules", "@slkiser", "opencode-quota", "package.json"),
       `{"name":"not-the-package"}`,
     );
+
     const result = await applyScopedUpdatePlan(
       await planScopedUpdate({
         cwd: f.project,
@@ -917,8 +956,11 @@ describe("scoped update application safety", () => {
         homeDir: join(f.root, "home"),
       }),
     );
+
     expect(result.removedCachePaths).toEqual([]);
     expect(result.skippedCachePaths).toEqual(expect.arrayContaining([exact, latest]));
+    expect(lstatSync(exact).isSymbolicLink()).toBe(true);
+    expect(existsSync(outside)).toBe(true);
   });
 
   it("prints the complete preview before dry-run completion or confirmation", async () => {

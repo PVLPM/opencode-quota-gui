@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 
 const commandMocks = vi.hoisted(() => ({
   runInitInstaller: vi.fn(),
@@ -171,7 +173,21 @@ describe("opencode-quota-gui bin", () => {
     log.mockRestore();
   });
 
-  it("treats symlinked bin paths as direct CLI execution", async () => {
+  it("classifies non-symlinked bin paths as non-direct execution", async () => {
+    const { cliShouldRunMain } = await import("../src/bin/opencode-quota-gui.js");
+
+    const modulePath = fileURLToPath(new URL("../src/bin/opencode-quota-gui.ts", import.meta.url));
+    const tempDir = mkdtempSync(join(tmpdir(), "opencode-quota-gui-bin-"));
+
+    try {
+      expect(cliShouldRunMain(join(tempDir, "other.js"), modulePath)).toBe(false);
+      expect(cliShouldRunMain(undefined, modulePath)).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats symlinked bin paths as direct CLI execution", async (context) => {
     const { cliShouldRunMain } = await import("../src/bin/opencode-quota-gui.js");
 
     const modulePath = fileURLToPath(new URL("../src/bin/opencode-quota-gui.ts", import.meta.url));
@@ -179,11 +195,9 @@ describe("opencode-quota-gui bin", () => {
     const symlinkPath = join(tempDir, "opencode-quota-gui");
 
     try {
-      symlinkSync(modulePath, symlinkPath);
+      if (!symlinkOrSkip(context, modulePath, symlinkPath)) return;
 
       expect(cliShouldRunMain(symlinkPath, modulePath)).toBe(true);
-      expect(cliShouldRunMain(join(tempDir, "other.js"), modulePath)).toBe(false);
-      expect(cliShouldRunMain(undefined, modulePath)).toBe(false);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
