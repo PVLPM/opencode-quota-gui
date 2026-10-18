@@ -4,7 +4,7 @@ import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { verifyReleaseArtifact } from "./lib/release-artifact.mjs";
+import { resolvePackageManagerInvocation, verifyReleaseArtifact } from "./lib/release-artifact.mjs";
 
 const inputPath = path.resolve(process.argv[2] ?? "package-artifacts");
 const nodeMajor = Number(process.versions.node.split(".")[0]);
@@ -44,6 +44,7 @@ function run(command, args, cwd, options = {}) {
 
 const artifact = await verifyReleaseArtifact(inputPath);
 const tarball = artifact.tarballPath;
+const npm = resolvePackageManagerInvocation("npm");
 const rootPackage = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 const sdkMetricsVersion = rootPackage.devDependencies?.["@opentelemetry/sdk-metrics"];
 if (!/^\d+\.\d+\.\d+$/.test(sdkMetricsVersion ?? "")) {
@@ -52,8 +53,8 @@ if (!/^\d+\.\d+\.\d+$/.test(sdkMetricsVersion ?? "")) {
 const workdir = await mkdtemp(path.join(tmpdir(), "opencode-quota-package-smoke-"));
 
 try {
-  run("npm", ["init", "-y"], workdir);
-  run("npm", ["install", "--omit=dev", tarball], workdir);
+  run(npm.command, [...npm.args, "init", "-y"], workdir);
+  run(npm.command, [...npm.args, "install", "--omit=dev", tarball], workdir);
 
   const moduleSmoke = `
     import assert from "node:assert/strict";
@@ -61,24 +62,24 @@ try {
     import path from "node:path";
     import { fileURLToPath, pathToFileURL } from "node:url";
 
-    const rootExportUrl = import.meta.resolve("@slkiser/opencode-quota");
-    const { default: server } = await import("@slkiser/opencode-quota");
-    await import("@slkiser/opencode-quota/server");
+    const rootExportUrl = import.meta.resolve("opencode-quota-gui");
+    const { default: server } = await import("opencode-quota-gui");
+    await import("opencode-quota-gui/server");
     assert.equal(typeof server.setup, "function");
     const { metrics } = await import("@opentelemetry/api");
     assert.equal(typeof metrics.getMeter, "function");
 
-    const tuiExportUrl = import.meta.resolve("@slkiser/opencode-quota/tui");
+    const tuiExportUrl = import.meta.resolve("opencode-quota-gui/tui");
     const tuiExportPath = fileURLToPath(tuiExportUrl);
-    assert.match(tuiExportPath, /node_modules\\/\\@slkiser\\/opencode-quota\\/dist\\/tui\\.js$/);
+    assert.match(tuiExportPath.replace(/\\\\/g, "/"), /node_modules\\/opencode-quota-gui\\/dist\\/tui\\.js$/);
     const tuiSource = await readFile(tuiExportPath, "utf8");
-    assert.ok(tuiSource.includes("@slkiser/opencode-quota"));
+    assert.ok(tuiSource.includes("opencode-quota-gui.tui"));
     assert.ok(tuiSource.includes("Plugin.define"));
     assert.ok(tuiSource.includes("prompt.footer"));
     assert.ok(!tuiSource.includes("jsx-dev-runtime"));
 
     const pkg = JSON.parse(
-      await readFile("node_modules/@slkiser/opencode-quota/package.json", "utf8"),
+      await readFile("node_modules/opencode-quota-gui/package.json", "utf8"),
     );
     assert.equal(pkg.engines?.node, "^22.13.0 || >=23.4.0");
     assert.equal(pkg.dependencies?.["@opentelemetry/api"], "^1.9.1");
@@ -106,7 +107,11 @@ try {
 
   run(process.execPath, ["--input-type=module", "--eval", moduleSmoke], workdir);
 
-  run("npm", ["install", "--omit=dev", `@opentelemetry/sdk-metrics@${sdkMetricsVersion}`], workdir);
+  run(
+    npm.command,
+    [...npm.args, "install", "--omit=dev", `@opentelemetry/sdk-metrics@${sdkMetricsVersion}`],
+    workdir,
+  );
 
   const realOtelFixture = path.join(workdir, "smoke-packed-real-otel.mjs");
   await copyFile(
@@ -132,18 +137,17 @@ try {
   const cliPath = path.join(
     workdir,
     "node_modules",
-    "@slkiser",
-    "opencode-quota",
+    "opencode-quota-gui",
     "dist",
     "bin",
-    "opencode-quota.js",
+    "opencode-quota-gui.js",
   );
   const cliOutput = run(process.execPath, [cliPath, "--help"], workdir);
   for (const expected of [
     "Usage:",
-    "opencode-quota init",
-    "opencode-quota show",
-    "opencode-quota update",
+    "opencode-quota-gui init",
+    "opencode-quota-gui show",
+    "opencode-quota-gui update",
   ]) {
     if (!cliOutput.includes(expected)) {
       throw new Error(`Packed CLI help is missing: ${expected}`);
@@ -158,12 +162,23 @@ try {
   );
   const cachedOpenRouter = JSON.parse(cachedOpenRouterOutput);
   assert.equal(cachedOpenRouter.fromCache, true);
-  assert.equal(cachedOpenRouter.providers.openrouter.status, "ok");
-  assert.equal(
-    cachedOpenRouter.providers.openrouter.entries[0].name,
-    "Packed production OpenRouter",
-  );
-  assert.equal(cachedOpenRouter.providers.openrouter.entries[0].percentRemaining, 67);
+  if (process.platform === "win32") {
+    // Protected resolved-auth identity storage is POSIX-only (src/lib/resolved-auth-identity.ts),
+    // so resolved-auth provider caches cannot persist across processes on Windows and the
+    // cache-only CLI reports the provider as unavailable. The in-process seed scenario above
+    // still proves the writer, and Linux CI keeps the strong cross-process cache assertion.
+    assert.equal(cachedOpenRouter.providers.openrouter.status, "unavailable");
+    console.log(
+      "Packed CLI cache note: Windows has no protected resolved-auth identity storage, so the cache-only openrouter report is unavailable; POSIX CI asserts the cached ok result.",
+    );
+  } else {
+    assert.equal(cachedOpenRouter.providers.openrouter.status, "ok");
+    assert.equal(
+      cachedOpenRouter.providers.openrouter.entries[0].name,
+      "Packed production OpenRouter",
+    );
+    assert.equal(cachedOpenRouter.providers.openrouter.entries[0].percentRemaining, 67);
+  }
 
   const readTree = async (directory) => {
     const chunks = [];

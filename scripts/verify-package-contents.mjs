@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePackageManagerInvocation } from "./lib/release-artifact.mjs";
+import { extensionOf, UI_PACKAGED_ASSET_EXTENSIONS } from "./lib/ui-bundle-checks.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -30,13 +32,10 @@ let rawManifest;
 if (manifestPath) {
   rawManifest = await readFile(path.resolve(repoRoot, manifestPath), "utf8");
 } else {
-  const pnpmCliPath = process.env.npm_execpath;
-  if (!pnpmCliPath) {
-    throw new Error("pnpm CLI path is unavailable; run this script through pnpm.");
-  }
+  const pnpm = resolvePackageManagerInvocation("pnpm");
   const result = spawnSync(
-    process.execPath,
-    [pnpmCliPath, "--config.ignore-scripts=true", "pack", "--json", "--dry-run"],
+    pnpm.command,
+    [...pnpm.args, "--config.ignore-scripts=true", "pack", "--json", "--dry-run"],
     {
       cwd: repoRoot,
       encoding: "utf8",
@@ -69,6 +68,8 @@ const requiredFiles = new Set([
   "README.md",
   "package.json",
   "dist/data/modelsdev-pricing.min.json",
+  // The dashboard server serves this entry and the assets beside it (spec §5.3, §9).
+  "dist/ui/index.html",
 ]);
 
 function addManifestPath(value) {
@@ -95,7 +96,39 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+// The browser bundle ships inside dist/ui under the local packaged-asset
+// allowlist (spec §9): the entry point, a script and a stylesheet are required,
+// and every UI file must be a served asset type — including any packaged font.
+const uiFiles = files.filter((file) => file.startsWith("dist/ui/"));
+const uiProblems = [];
+for (const required of [
+  { suffix: ".js", prefix: "dist/ui/assets/" },
+  { suffix: ".css", prefix: "dist/ui/assets/" },
+]) {
+  if (!uiFiles.some((file) => file.startsWith(required.prefix) && file.endsWith(required.suffix))) {
+    uiProblems.push(`no ${required.suffix} asset under ${required.prefix}`);
+  }
+}
+for (const file of uiFiles) {
+  if (file.split("/").includes("..")) uiProblems.push(`${file}: path traversal segment`);
+  const extension = extensionOf(file);
+  if (!UI_PACKAGED_ASSET_EXTENSIONS.includes(extension)) {
+    uiProblems.push(`${file}: extension ${extension || "(none)"} is not a packaged UI asset type`);
+  }
+  // Build provenance stays out of the artifact: the module graph is build-only
+  // evidence and never ships, and neither do source maps or their references.
+  if (extension === ".map") uiProblems.push(`${file}: source maps must not ship`);
+  if (/(^|\/)(ui-graph\.json|.*\.js\.map)$/.test(file)) {
+    uiProblems.push(`${file}: build-only evidence must not ship`);
+  }
+}
+if (uiProblems.length > 0) {
+  console.error("npm package UI assets are incomplete or unexpected:");
+  for (const problem of uiProblems) console.error(`- ${problem}`);
+  process.exit(1);
+}
+
 const distCount = files.filter((file) => file.startsWith("dist/")).length;
 console.log(
-  `npm contents verified: ${files.length} files (${distCount} dist files plus package.json, README.md, and LICENSE).`,
+  `npm contents verified: ${files.length} files (${distCount} dist files plus package.json, README.md, and LICENSE), including ${files.filter((file) => file.startsWith("dist/ui/")).length} UI assets, with no build-only graph metadata and no source maps.`,
 );

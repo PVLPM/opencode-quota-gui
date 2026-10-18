@@ -6,10 +6,10 @@ import { getQuotaProviderShape } from "./provider-metadata.js";
 import { classifyQuotaWindowText } from "./quota-entry-display.js";
 import { QUOTA_PROVIDERS_AGGREGATE_ID } from "./quota-providers.js";
 
-const METER_NAME = "@slkiser/opencode-quota";
+const METER_NAME = "opencode-quota-gui";
 const CONSUMED_METRIC_NAME = "opencode.quota.consumed";
 const CACHE_AGE_METRIC_NAME = "opencode.quota.cache.age";
-const TELEMETRY_STATE_KEY = Symbol.for("@slkiser/opencode-quota/quota-telemetry/v2");
+const TELEMETRY_STATE_KEY = Symbol.for("opencode-quota-gui/quota-telemetry/v2");
 
 type ObservableCallback = (result: ObservableResult) => void;
 type ObservableGauge = {

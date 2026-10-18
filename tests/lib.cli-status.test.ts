@@ -253,7 +253,7 @@ describe("runCliStatusCommand", () => {
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("--threshold is not supported by status");
-    expect(result.stderr).toContain("opencode-quota show --json --threshold");
+    expect(result.stderr).toContain("opencode-quota-gui show --json --threshold");
     expect(buildStatusReportData).not.toHaveBeenCalled();
   });
 
@@ -279,7 +279,7 @@ describe("runCliStatusCommand", () => {
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("Missing value for --provider");
-    expect(result.stderr).toContain("opencode-quota status");
+    expect(result.stderr).toContain("opencode-quota-gui status");
   });
 
   it("rejects an unknown flag", async () => {
@@ -287,7 +287,7 @@ describe("runCliStatusCommand", () => {
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("Unknown option: --bogus");
-    expect(result.stderr).toContain("opencode-quota status");
+    expect(result.stderr).toContain("opencode-quota-gui status");
   });
 
   it("returns non-zero when quota is disabled in config", async () => {
@@ -309,7 +309,7 @@ describe("runCliStatusCommand", () => {
 
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("opencode-quota status");
+    expect(result.stdout).toContain("opencode-quota-gui status");
     expect(result.stdout).toContain("Exit codes:");
     expect(buildStatusReportData).not.toHaveBeenCalled();
   });

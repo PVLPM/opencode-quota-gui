@@ -33,6 +33,12 @@ interface Workflow {
 }
 
 const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as {
+  name?: string;
+  version?: string;
+  description?: string;
+  homepage?: string;
+  bugs?: { url?: string };
+  repository?: { type?: string; url?: string };
   main?: string;
   bin?: Record<string, string>;
   exports?: Record<string, { default?: string; types?: string }>;
@@ -110,9 +116,21 @@ const packedRealOtelFixture = await readFile(
 );
 
 const VERIFY_COMMAND =
-  "pnpm run check && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents";
+  "pnpm run check && pnpm run lint:oxlint && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents";
+const NPM_PUBLISH_GUARD = "${{ vars.NPM_PUBLISH_ENABLED == 'true' }}";
+// Use Git Bash on Windows, not the WSL launcher that can reinterpret native paths.
+const bash =
+  process.platform === "win32"
+    ? join(
+        execFileSync("git", ["--exec-path"], { encoding: "utf8" }).trim(),
+        "../../..",
+        "bin",
+        "bash.exe",
+      )
+    : "bash";
 const VERIFY_COMPONENT_COMMANDS = [
   "pnpm run check",
+  "pnpm run lint:oxlint",
   "pnpm run verify:typescript-version",
   "pnpm run verify:v4-history",
   "pnpm run typecheck",
@@ -280,10 +298,47 @@ describe("package manifest compatibility", () => {
     expect(pkg.scripts?.["release:check"]).toBe("pnpm verify && pnpm run verify:release-version");
   });
 
+  it("appends the browser UI build and covers both TypeScript projects", () => {
+    // The backend chain is unchanged except for the appended UI step (spec §11.1, R39).
+    expect(pkg.scripts?.build).toBe(
+      "node scripts/clean-dist.mjs && tsc && node scripts/copy-data.mjs && node scripts/prepare-tui-dist.mjs && pnpm run build:ui",
+    );
+    expect(pkg.scripts?.["build:ui"]).toBe("vite build --config vite.ui.config.mjs");
+    expect(pkg.scripts?.["verify:ui-bundle"]).toBe("node scripts/verify-ui-bundle.mjs");
+    // Typecheck runs the backend project and the browser-only UI project.
+    expect(pkg.scripts?.typecheck).toBe("tsc --noEmit && tsc -p tsconfig.ui.json");
+  });
+
+  it("renames the package identity while preserving upstream attribution", async () => {
+    expect(pkg.name).toBe("opencode-quota-gui");
+    expect(pkg.repository).toEqual({
+      type: "git",
+      url: "git+https://github.com/PVLPM/opencode-quota-gui.git",
+    });
+    expect(pkg.bugs).toEqual({ url: "https://github.com/PVLPM/opencode-quota-gui/issues" });
+    expect(pkg.homepage).toBe("https://github.com/PVLPM/opencode-quota-gui#readme");
+    expect(pkg.description).toContain("opencode-quota-gui");
+
+    // The bin, RPC, and plugin ids carry the renamed package identity.
+    expect(pkg.bin).toEqual({ "opencode-quota-gui": "./dist/bin/opencode-quota-gui.js" });
+    const [rpcSource, pluginSource] = await Promise.all([
+      readFile(new URL("../src/rpc.ts", import.meta.url), "utf8"),
+      readFile(new URL("../src/plugin.ts", import.meta.url), "utf8"),
+    ]);
+    expect(rpcSource).toContain('"opencode-quota-gui"');
+    expect(pluginSource).toContain('"opencode-quota-gui.server"');
+
+    // README yields the renamed identity and the explicit local-pack install rule.
+    expect(readme).toContain("opencode-quota-gui");
+    expect(readme).toContain("OPENCODE_QUOTA_PLUGIN_SPEC");
+    // Upstream attribution stays.
+    expect(readme).toContain("https://github.com/slkiser/opencode-quota");
+  });
+
   it("ships explicit server, tui, and init bin entrypoints for OpenCode", () => {
     expect(pkg.main).toBe("./dist/index.js");
     expect(pkg.bin).toEqual({
-      "opencode-quota": "./dist/bin/opencode-quota.js",
+      "opencode-quota-gui": "./dist/bin/opencode-quota-gui.js",
     });
     expect(pkg["oc-plugin"]).toBeUndefined();
     expect(pkg.dependencies?.["@clack/prompts"]).toBeTruthy();
@@ -415,16 +470,16 @@ describe("package manifest compatibility", () => {
   });
 
   it("smoke-tests public imports, CLI commands, and the compiled TUI export", () => {
-    expect(packedSmoke).toContain('await import("@slkiser/opencode-quota");');
-    expect(packedSmoke).toContain('await import("@slkiser/opencode-quota/server");');
-    expect(packedSmoke).toContain('"opencode-quota init"');
-    expect(packedSmoke).toContain('"opencode-quota show"');
-    expect(packedSmoke).toContain('"opencode-quota update"');
-    expect(packedSmoke).toContain("@slkiser/opencode-quota/tui");
-    expect(packedSmoke).toContain('import.meta.resolve("@slkiser/opencode-quota/tui")');
+    expect(packedSmoke).toContain('await import("opencode-quota-gui");');
+    expect(packedSmoke).toContain('await import("opencode-quota-gui/server");');
+    expect(packedSmoke).toContain('"opencode-quota-gui init"');
+    expect(packedSmoke).toContain('"opencode-quota-gui show"');
+    expect(packedSmoke).toContain('"opencode-quota-gui update"');
+    expect(packedSmoke).toContain("opencode-quota-gui/tui");
+    expect(packedSmoke).toContain('import.meta.resolve("opencode-quota-gui/tui")');
     expect(packedSmoke).toContain('readFile(tuiExportPath, "utf8")');
     expect(packedSmoke).toContain("dist\\\\/tui\\\\.js");
-    expect(packedSmoke).not.toContain('await import("@slkiser/opencode-quota/tui")');
+    expect(packedSmoke).not.toContain('await import("opencode-quota-gui/tui")');
     expect(packedSmoke).toContain('const { metrics } = await import("@opentelemetry/api");');
     expect(packedSmoke).toContain('assert.equal(typeof metrics.getMeter, "function");');
     expect(packedSmoke).toContain(
@@ -438,7 +493,7 @@ describe("package manifest compatibility", () => {
     );
     expect(packedSmoke).toContain('rootPackage.devDependencies?.["@opentelemetry/sdk-metrics"]');
     expect(packedSmoke).toContain(
-      '["install", "--omit=dev", `@opentelemetry/sdk-metrics@${sdkMetricsVersion}`]',
+      '[...npm.args, "install", "--omit=dev", `@opentelemetry/sdk-metrics@${sdkMetricsVersion}`]',
     );
     expect(packedSmoke).toContain("smoke-packed-real-otel.mjs");
     expect(packedSmoke).toContain('"happy"');
@@ -448,7 +503,7 @@ describe("package manifest compatibility", () => {
     expect(packedSmoke).toContain('identity: "packed-runtime-dependency"');
 
     const tarballInstallIndex = packedSmoke.indexOf(
-      'run("npm", ["install", "--omit=dev", tarball], workdir);',
+      'run(npm.command, [...npm.args, "install", "--omit=dev", tarball], workdir);',
     );
     const moduleSmokeRunIndex = packedSmoke.indexOf(
       'run(process.execPath, ["--input-type=module", "--eval", moduleSmoke], workdir);',
@@ -477,11 +532,7 @@ describe("package manifest compatibility", () => {
   });
 
   it("publishes only a release-tag artifact after both exact-artifact smoke jobs", () => {
-    expect(publishWorkflow.on).toEqual({
-      release: {
-        types: ["published"],
-      },
-    });
+    expect(publishWorkflow.on).toEqual({ workflow_dispatch: null });
     expect(Object.keys(publishWorkflow.jobs).sort()).toEqual([
       "backfill-version",
       "point-next-at-stable",
@@ -622,12 +673,13 @@ describe("package manifest compatibility", () => {
       const dir = mkdtempSync(join(tmpdir(), "opencode-quota-dist-tag-"));
       try {
         const output = join(dir, "github-output");
-        execFileSync("bash", ["-e", "-c", chooseTag.run ?? "exit 1"], {
+        execFileSync(bash, ["-e", "-c", chooseTag.run ?? "exit 1"], {
+          cwd: dir,
           env: {
             ...process.env,
             RELEASE_TAG: tag,
             RELEASE_PRERELEASE: prerelease,
-            GITHUB_OUTPUT: output,
+            GITHUB_OUTPUT: "github-output",
           },
           stdio: "ignore",
         });
@@ -645,9 +697,7 @@ describe("package manifest compatibility", () => {
   it("points next at each stable release unless next is already newer", () => {
     const job = publishWorkflow.jobs["point-next-at-stable"];
     expect(job.needs).toBe("publish");
-    expect(job.if).toBe(
-      "${{ !github.event.release.prerelease && !contains(github.event.release.tag_name, '-') }}",
-    );
+    expect(job.if).toBe(NPM_PUBLISH_GUARD);
     expect(job.permissions).toEqual({ contents: "read", "id-token": "write" });
     const step = namedStep(job, "Point next at the new stable version");
 
@@ -659,21 +709,23 @@ describe("package manifest compatibility", () => {
         writeFileSync(log, "");
         writeFileSync(
           join(dir, "npm"),
-          `#!/bin/sh\necho "npm $*" >> "${log}"\necho "${currentNext}"\n`,
+          `#!/bin/sh\necho "npm $*" >> "commands"\necho "${currentNext}"\n`,
         );
         writeFileSync(
           join(dir, "npx"),
-          `#!/bin/sh\necho "npx $*" >> "${log}"\ncase "$*" in *"semver@7 0.0.0") ;; *semver@*) [ "$NEXT_IS_NEWER" = 1 ];; esac\n`,
+          `#!/bin/sh\necho "npx $*" >> "commands"\ncase "$*" in *"semver@7 0.0.0") ;; *semver@*) [ "$NEXT_IS_NEWER" = 1 ];; esac\n`,
         );
         chmodSync(join(dir, "npm"), 0o755);
         chmodSync(join(dir, "npx"), 0o755);
-        execFileSync("bash", ["-e", "-c", step.run ?? "exit 1"], {
+        // Let bash construct its own PATH; native Windows paths are not shell paths.
+        execFileSync(bash, ["-e", "-c", `export PATH="$PWD:$PATH"\n${step.run ?? "exit 1"}`], {
+          cwd: dir,
           env: {
             ...process.env,
             ...step.env,
+            PACKAGE_NAME: "opencode-quota-gui",
             RELEASE_TAG: "v5.0.2",
             NEXT_IS_NEWER: nextIsNewer ? "1" : "0",
-            PATH: `${dir}:${process.env.PATH}`,
           },
           stdio: "ignore",
         });
@@ -684,13 +736,13 @@ describe("package manifest compatibility", () => {
     };
 
     expect(commandsFor("5.0.1", false)).toEqual([
-      "npm view @slkiser/opencode-quota dist-tags.next",
+      "npm view opencode-quota-gui dist-tags.next",
       "npx --yes semver@7 0.0.0",
       "npx --yes semver@7 --include-prerelease --range >5.0.2 5.0.1",
-      "npx --yes npm@^11.21.0 dist-tag add @slkiser/opencode-quota@5.0.2 next",
+      "npx --yes npm@^11.21.0 dist-tag add opencode-quota-gui@5.0.2 next",
     ]);
     expect(commandsFor("5.1.0-beta.1", true)).toEqual([
-      "npm view @slkiser/opencode-quota dist-tags.next",
+      "npm view opencode-quota-gui dist-tags.next",
       "npx --yes semver@7 0.0.0",
       "npx --yes semver@7 --include-prerelease --range >5.0.2 5.1.0-beta.1",
     ]);

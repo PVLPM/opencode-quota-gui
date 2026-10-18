@@ -1,8 +1,12 @@
-name: Publish to npm on release
+name: Publish to npm (manual)
 
+# Manual-only bootstrap guard: the inherited release trigger is disabled, and the
+# jobs that publish, retag, or push stay behind an unset repository variable.
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+
+env:
+  PACKAGE_NAME: opencode-quota-gui
 
 jobs:
   release-package:
@@ -107,6 +111,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: [release-package, runtime-smoke]
+    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
     permissions:
       contents: read
       id-token: write
@@ -162,7 +167,7 @@ jobs:
     # Needs "Allow npm dist-tag" on this workflow's trusted publisher on npmjs.com.
     runs-on: ubuntu-latest
     needs: publish
-    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name, '-') }}
+    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
     permissions:
       contents: read
       id-token: write
@@ -177,10 +182,9 @@ jobs:
       - name: Point next at the new stable version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          PACKAGE: "@slkiser/opencode-quota"
         run: |
           VERSION="${RELEASE_TAG#v}"
-          NEXT="$(npm view "$PACKAGE" dist-tags.next)"
+          NEXT="$(npm view "$PACKAGE_NAME" dist-tags.next)"
           # Fetch the semver tool first: a failed download must stop here, not read as "not newer".
           npx --yes semver@7 0.0.0 >/dev/null
           if [ -n "$NEXT" ] && npx --yes semver@7 --include-prerelease --range ">$VERSION" "$NEXT" >/dev/null; then
@@ -188,11 +192,12 @@ jobs:
             exit 0
           fi
           # npm 11.21.0 is the first npm 11 that can change dist-tags with trusted publishing.
-          npx --yes npm@^11.21.0 dist-tag add "$PACKAGE@$VERSION" next
+          npx --yes npm@^11.21.0 dist-tag add "$PACKAGE_NAME@$VERSION" next
 
   backfill-version:
     runs-on: ubuntu-latest
     needs: publish
+    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
     permissions:
       contents: write
 

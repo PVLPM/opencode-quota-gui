@@ -12,7 +12,7 @@ import {
 
 const scenario = process.argv[2];
 const packageRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.resolve("@slkiser/opencode-quota"))),
+  path.dirname(fileURLToPath(import.meta.resolve("opencode-quota-gui"))),
   "..",
 );
 

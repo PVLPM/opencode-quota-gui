@@ -15,7 +15,7 @@ type ParsedStatusArgs =
 
 const STATUS_USAGE = [
   "Usage:",
-  "  npx @slkiser/opencode-quota status [--provider <provider-id>] [--json]",
+  "  npx opencode-quota-gui status [--provider <provider-id>] [--json]",
   "",
   "Print the same Quota Status diagnostics as the /quota_status slash command,",
   "without launching OpenCode.",
@@ -33,7 +33,7 @@ const STATUS_USAGE = [
 ].join("\n");
 
 const THRESHOLD_REDIRECT =
-  "--threshold is not supported by status. For threshold exit codes, use: opencode-quota show --json --threshold <pct>";
+  "--threshold is not supported by status. For threshold exit codes, use: opencode-quota-gui show --json --threshold <pct>";
 
 function parseStatusArgs(argv: string[]): ParsedStatusArgs {
   let providerId: string | undefined;

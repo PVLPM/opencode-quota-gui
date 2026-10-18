@@ -1,8 +1,59 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export const RELEASE_ARTIFACT_MANIFEST = "release-artifact.json";
+
+const PACKAGE_MANAGER_CLI_FILES = { npm: "npm-cli.js", pnpm: "pnpm.cjs" };
+
+function isPackageManagerCli(command, candidate) {
+  if (typeof candidate !== "string" || candidate.length === 0) return false;
+  const name = path.basename(candidate).toLowerCase();
+  if (command === "npm") return name === "npm-cli.js";
+  return name.startsWith("pnpm") && /\.(?:cjs|mjs|js)$/.test(name);
+}
+
+/**
+ * Resolves an `npm`/`pnpm` command to a direct Node invocation. On Windows both commands are
+ * `.cmd` shims that `spawnSync` cannot execute (ENOENT), so the package manager's real JS CLI
+ * runs with the current Node executable; every argument stays plain argv (no shell, no
+ * quoting). Resolution order: `npm_execpath` (set by `npm run`/`pnpm run`/`npm exec`), a CLI
+ * beside the running Node, the npm global prefix, and npm's default Windows global root. On
+ * POSIX the plain command is kept when nothing matches, preserving existing behavior.
+ */
+export function resolvePackageManagerInvocation(command) {
+  const cliFile = PACKAGE_MANAGER_CLI_FILES[command];
+  if (!cliFile) throw new Error(`Unknown package manager: ${command}`);
+
+  const candidates = [process.env.npm_execpath];
+  candidates.push(
+    path.join(path.dirname(process.execPath), "node_modules", command, "bin", cliFile),
+  );
+  if (process.env.npm_config_prefix) {
+    candidates.push(
+      path.join(process.env.npm_config_prefix, "node_modules", command, "bin", cliFile),
+    );
+  }
+  if (process.platform === "win32" && process.env.APPDATA) {
+    candidates.push(path.join(process.env.APPDATA, "npm", "node_modules", command, "bin", cliFile));
+  }
+
+  for (const candidate of candidates) {
+    if (isPackageManagerCli(command, candidate) && existsSync(candidate)) {
+      return { command: process.execPath, args: [candidate] };
+    }
+  }
+
+  if (process.platform !== "win32") {
+    return { command, args: [] };
+  }
+
+  throw new Error(
+    `Cannot resolve the ${command} CLI on Windows: the ${command}.cmd shim cannot be spawned directly. ` +
+      `Run packaging through \`pnpm run\` or npm exec, or make ${cliFile} resolvable via npm_execpath, npm_config_prefix, or the Node installation.`,
+  );
+}
 
 async function sha256(filePath) {
   const contents = await readFile(filePath);

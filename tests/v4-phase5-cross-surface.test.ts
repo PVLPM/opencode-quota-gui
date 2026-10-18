@@ -155,11 +155,14 @@ type RegisteredTool = {
   execute(input: object, context: { sessionID: string }): Promise<{ content: string }>;
 };
 
+/** Live server-plugin setups are released after each test (dashboard lease included). */
+const pluginCleanups: Array<() => Promise<void> | void> = [];
+
 async function setupV2Surfaces(client: ReturnType<typeof createClient>, providerIds: string[]) {
   let tool: RegisteredTool | undefined;
   const { default: serverPlugin } = await import("../src/plugin.js");
   const register = vi.fn(async () => ({ dispose: async () => {}, events: { emit: vi.fn() } }));
-  await serverPlugin.setup({
+  const cleanup = await serverPlugin.setup({
     location: { directory: process.cwd() },
     provider: { list: vi.fn(async () => ({ data: providerIds.map((id) => ({ id })) })) },
     session: {
@@ -180,6 +183,7 @@ async function setupV2Surfaces(client: ReturnType<typeof createClient>, provider
       }),
     },
   } as never);
+  if (typeof cleanup === "function") pluginCleanups.push(cleanup);
   expect(tool?.name).toBe("quota_status");
   // The TUI computes nothing itself: every surface reaches the server's RPC handlers.
   const [, handlers] = register.mock.calls[0] as unknown as [
@@ -558,6 +562,9 @@ describe("v4 Phase 5 cross-surface release evidence", () => {
   });
 
   afterEach(async () => {
+    for (const cleanup of pluginCleanups.splice(0).reverse()) {
+      await cleanup();
+    }
     for (const [name, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;

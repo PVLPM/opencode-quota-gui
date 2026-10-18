@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 const pluginMocks = vi.hoisted(() => ({
   tui: {
-    id: "@slkiser/opencode-quota",
+    id: "opencode-quota-gui",
     setup: vi.fn(),
   },
 }));

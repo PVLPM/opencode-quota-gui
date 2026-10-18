@@ -14,6 +14,7 @@ import {
   writeResolvedConfigText,
 } from "./config-write-target.js";
 import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
+import { resolveExplicitQuotaPluginSpec } from "./init-installer.js";
 import { editConfigDocumentPaths, parseConfigDocument } from "./opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { detectOpenCodeMajor, type OpenCodeMajor } from "./opencode-version.js";
@@ -29,16 +30,20 @@ import {
   sortScopedUpdateSafeActions,
 } from "./scoped-update-migration.js";
 
-export const QUOTA_PACKAGE_NAME = "@slkiser/opencode-quota";
+export const QUOTA_PACKAGE_NAME = "opencode-quota-gui";
+export const LEGACY_QUOTA_PACKAGE_NAME = "@slkiser/opencode-quota";
 export const QUOTA_LATEST_SPEC = `${QUOTA_PACKAGE_NAME}@latest`;
-export const QUOTA_V4_SPEC = `${QUOTA_PACKAGE_NAME}@4`;
+const QUOTA_NEXT_SPEC = `${QUOTA_PACKAGE_NAME}@next`;
+export const QUOTA_V4_SPEC = `${LEGACY_QUOTA_PACKAGE_NAME}@4`;
 /** Moving specs that update keeps as written; OpenCode re-resolves them after the cache cleanup. */
 const QUOTA_MOVING_SPECS: ReadonlySet<string> = new Set([
   QUOTA_LATEST_SPEC,
-  `${QUOTA_PACKAGE_NAME}@next`,
+  QUOTA_NEXT_SPEC,
   QUOTA_V4_SPEC,
+  `${LEGACY_QUOTA_PACKAGE_NAME}@latest`,
+  `${LEGACY_QUOTA_PACKAGE_NAME}@next`,
 ]);
-const GITHUB_REPO_URL = "https://github.com/slkiser/opencode-quota";
+const GITHUB_REPO_URL = "https://github.com/PVLPM/opencode-quota-gui";
 
 const EXACT_SEMVER =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
@@ -93,10 +98,19 @@ export class ScopedUpdateError extends Error {
   }
 }
 
-export function isCanonicalQuotaUpdateSpec(spec: string): boolean {
-  if (spec === QUOTA_PACKAGE_NAME || QUOTA_MOVING_SPECS.has(spec)) return true;
-  const prefix = `${QUOTA_PACKAGE_NAME}@`;
+function hasExactSemverSuffix(spec: string, packageName: string): boolean {
+  const prefix = `${packageName}@`;
   return spec.startsWith(prefix) && EXACT_SEMVER.test(spec.slice(prefix.length));
+}
+
+/** Recognizes both this project's package identity and legacy `@slkiser/opencode-quota` specs. */
+export function isCanonicalQuotaUpdateSpec(spec: string): boolean {
+  if (spec === QUOTA_PACKAGE_NAME || spec === LEGACY_QUOTA_PACKAGE_NAME) return true;
+  if (QUOTA_MOVING_SPECS.has(spec)) return true;
+  return (
+    hasExactSemverSuffix(spec, QUOTA_PACKAGE_NAME) ||
+    hasExactSemverSuffix(spec, LEGACY_QUOTA_PACKAGE_NAME)
+  );
 }
 
 export function sanitizeOpenCodePackageSpec(
@@ -146,19 +160,66 @@ function pluginArrays(config: unknown): Array<{ path: (string | number)[]; entri
   return arrays;
 }
 
-/** OpenCode Quota 5 needs OpenCode 2, so on OpenCode 1 every quota spec except `@4` is pinned to `@4`. */
-function quotaUpdateTarget(openCodeMajor: OpenCodeMajor | undefined): {
+/**
+ * OpenCode Quota 5 needs OpenCode 2. On OpenCode 2 update rewrites every recognized non-moving
+ * spec — this package's bare/exact specs and the legacy `@slkiser/opencode-quota` ones — to the
+ * canonical `opencode-quota-gui` release spec, keeps moving specs as written, and honors an
+ * explicit package-spec override. On OpenCode 1 it leaves specs as written and never pins them
+ * to the upstream package.
+ */
+function quotaUpdateTarget(
+  openCodeMajor: OpenCodeMajor | undefined,
+  env: NodeJS.ProcessEnv,
+): QuotaUpdateTarget {
+  return {
+    keptSpecs: QUOTA_MOVING_SPECS,
+    replacementSpec:
+      openCodeMajor === 1 ? null : (resolveExplicitQuotaPluginSpec({ env }) ?? QUOTA_LATEST_SPEC),
+  };
+}
+
+interface QuotaUpdateTarget {
   keptSpecs: ReadonlySet<string>;
-  replacementSpec: string;
-} {
-  return openCodeMajor === 1
-    ? { keptSpecs: new Set([QUOTA_V4_SPEC]), replacementSpec: QUOTA_V4_SPEC }
-    : { keptSpecs: QUOTA_MOVING_SPECS, replacementSpec: QUOTA_LATEST_SPEC };
+  replacementSpec: string | null;
+}
+
+function updateTargetUnavailableMessage(path: string): string {
+  return `Cannot update ${path}: you're on OpenCode 1 and opencode-quota-gui requires OpenCode 2, so update will not pin plugin specs to the upstream @slkiser/opencode-quota package. Keep the existing specs, or move to OpenCode 2 before updating.`;
+}
+
+function quotaUpdateSpecFromEntry(entry: unknown): string | null {
+  if (typeof entry === "string") return entry;
+  if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
+  if (isPackageEntry(entry)) return entry.package;
+  return null;
+}
+
+function parseUpdateConfig(raw: string, path: string): Record<string, unknown> {
+  const format: ConfigFileFormat = path.endsWith(".jsonc") ? "jsonc" : "json";
+  try {
+    return parseConfigDocument(raw, format, path);
+  } catch {
+    throw new ScopedUpdateError(`Cannot update unparseable config: ${path}`, { path });
+  }
+}
+
+/** Collects recognized quota specs without editing or refusing; used by the pre-cache authority check. */
+function collectQuotaUpdateSpecs(raw: string, path: string): string[] {
+  const parsed = parseUpdateConfig(raw, path);
+  const specs: string[] = [];
+  for (const array of pluginArrays(parsed)) {
+    for (const entry of array.entries) {
+      const spec = quotaUpdateSpecFromEntry(entry);
+      if (spec !== null && isCanonicalQuotaUpdateSpec(spec)) specs.push(spec);
+    }
+  }
+  return specs;
 }
 
 function updateConfig(
   raw: string,
   path: string,
+  target: QuotaUpdateTarget,
   openCodeMajor: OpenCodeMajor | undefined,
 ): {
   updated: string;
@@ -166,31 +227,21 @@ function updateConfig(
   specs: string[];
 } {
   const format: ConfigFileFormat = path.endsWith(".jsonc") ? "jsonc" : "json";
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = parseConfigDocument(raw, format, path);
-  } catch {
-    throw new ScopedUpdateError(`Cannot update unparseable config: ${path}`, { path });
-  }
+  const parsed = parseUpdateConfig(raw, path);
 
-  const target = quotaUpdateTarget(openCodeMajor);
   const edits: Array<{ path: (string | number)[]; value: unknown }> = [];
   let replacements = 0;
   const specs: string[] = [];
   for (const array of pluginArrays(parsed)) {
     for (let index = array.entries.length - 1; index >= 0; index--) {
       const entry = array.entries[index];
-      const spec =
-        typeof entry === "string"
-          ? entry
-          : Array.isArray(entry) && typeof entry[0] === "string"
-            ? entry[0]
-            : isPackageEntry(entry)
-              ? entry.package
-              : null;
+      const spec = quotaUpdateSpecFromEntry(entry);
       if (spec === null || !isCanonicalQuotaUpdateSpec(spec)) continue;
       specs.push(spec);
       if (target.keptSpecs.has(spec)) continue;
+      if (target.replacementSpec === null) {
+        throw new ScopedUpdateError(updateTargetUnavailableMessage(path), { path });
+      }
       // Replace only the package spec; keep the entry's plugin options.
       const targetPath =
         typeof entry === "string"
@@ -245,12 +296,13 @@ export async function planScopedUpdate(
   const foundSpecs: string[] = [];
   const safeActions: ScopedUpdateSafeAction[] = [];
   const manualFindings: ScopedUpdateManualFinding[] = [];
+  const updateTarget = quotaUpdateTarget(params.openCodeMajor, env);
 
   for (const path of configPaths) {
     const canonicalPath = await realpath(path);
     const originalBytes = await readFile(path);
     const original = originalBytes.toString("utf8");
-    const planned = updateConfig(original, path, params.openCodeMajor);
+    const planned = updateConfig(original, path, updateTarget, params.openCodeMajor);
     foundSpecs.push(...planned.specs);
     const roles = new Set<ScopedUpdateConfigRole>(["package-authority"]);
     if (planned.replacements > 0) {
@@ -375,9 +427,7 @@ export async function planScopedUpdate(
   }
 
   const uniqueSpecs = [...new Set(foundSpecs)];
-  const cacheSpecs = [
-    ...new Set([...uniqueSpecs, quotaUpdateTarget(params.openCodeMajor).replacementSpec]),
-  ];
+  const cacheSpecs = [...new Set([...uniqueSpecs, QUOTA_LATEST_SPEC])];
   const cacheCandidates = cacheSpecs.map((spec) =>
     join(runtime.cacheDir, "packages", sanitizeOpenCodePackageSpec(spec, params.platform)),
   );
@@ -400,6 +450,12 @@ function containedBy(root: string, candidate: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/** Package-cache manifests that can verify a cache directory: independent and legacy layouts. */
+const VERIFIED_CACHE_MANIFESTS: ReadonlyArray<{ path: readonly string[]; name: string }> = [
+  { path: ["@slkiser", "opencode-quota", "package.json"], name: LEGACY_QUOTA_PACKAGE_NAME },
+  { path: ["opencode-quota-gui", "package.json"], name: QUOTA_PACKAGE_NAME },
+];
+
 async function removeVerifiedCacheCandidate(path: string): Promise<"removed" | "skipped"> {
   const packagesPath = dirname(dirname(path));
   try {
@@ -413,17 +469,20 @@ async function removeVerifiedCacheCandidate(path: string): Promise<"removed" | "
     if (!containedBy(packagesReal, candidateReal) || candidateReal === packagesReal)
       return "skipped";
 
-    const manifestPath = join(
-      candidateReal,
-      "node_modules",
-      "@slkiser",
-      "opencode-quota",
-      "package.json",
-    );
-    const manifestStat = await lstat(manifestPath);
-    if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) return "skipped";
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { name?: unknown };
-    if (manifest.name !== QUOTA_PACKAGE_NAME) return "skipped";
+    let verified = false;
+    for (const expected of VERIFIED_CACHE_MANIFESTS) {
+      try {
+        const manifestPath = join(candidateReal, "node_modules", ...expected.path);
+        const manifestStat = await lstat(manifestPath);
+        if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) continue;
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { name?: unknown };
+        if (manifest.name === expected.name) {
+          verified = true;
+          break;
+        }
+      } catch {}
+    }
+    if (!verified) return "skipped";
 
     await rm(candidateReal, { recursive: true, force: false });
     return "removed";
@@ -457,7 +516,7 @@ const OBSOLETE_GO_GUIDANCE =
   "OpenCode Go no longer uses this workspace/cookie source, and it cannot be converted into the official API key. Configure OPENCODE_API_KEY, trusted global provider.opencode-go.options.apiKey, fallback provider.opencode.options.apiKey, or run opencode auth login opencode-go. This updater will not read, copy, or delete credentials; remove the old variable/file manually after the supported key works.";
 
 const ZEN_CONSOLE_GUIDANCE =
-  "OpenCode Zen now uses the OpenCode Console sign-in: run opencode auth login opencode (and opencode auth switch opencode to pick a saved organization), then verify with opencode-quota status.";
+  "OpenCode Zen now uses the OpenCode Console sign-in: run opencode auth login opencode (and opencode auth switch opencode to pick a saved organization), then verify with opencode-quota-gui status.";
 
 function formatManualFinding(finding: ScopedUpdateManualFinding): string {
   switch (finding.kind) {
@@ -504,12 +563,12 @@ export function formatScopedUpdatePreview(plan: ScopedUpdatePlan): string[] {
   if (plan.openCodeMajor === 1) {
     lines.push(
       "",
-      `You're on OpenCode 1. OpenCode Quota 5 needs OpenCode 2, so update keeps you on OpenCode Quota 4 by pinning ${QUOTA_V4_SPEC}.`,
+      "You're on OpenCode 1. opencode-quota-gui requires OpenCode 2, so update leaves plugin specs as written and never pins them to the upstream @slkiser/opencode-quota package.",
     );
   } else if (plan.openCodeMajor === undefined) {
     lines.push(
       "",
-      `Could not detect your OpenCode version; assuming OpenCode 2. On OpenCode 1, use ${QUOTA_V4_SPEC} instead.`,
+      "Could not detect your OpenCode version; assuming OpenCode 2 (opencode-quota-gui requires OpenCode 2).",
     );
   }
 
@@ -659,8 +718,8 @@ export async function applyScopedUpdatePlan(
       throw failure("Config changed before cache deletion:", snapshot.path);
     }
     if (!snapshot.roles.includes("package-authority")) continue;
-    const currentPlan = updateConfig(current.toString("utf8"), snapshot.path, plan.openCodeMajor);
-    if (currentPlan.specs.some((spec) => QUOTA_MOVING_SPECS.has(spec))) authoritativeLatest = true;
+    const currentSpecs = collectQuotaUpdateSpecs(current.toString("utf8"), snapshot.path);
+    if (currentSpecs.some((spec) => QUOTA_MOVING_SPECS.has(spec))) authoritativeLatest = true;
   }
 
   const removedCachePaths: string[] = [];

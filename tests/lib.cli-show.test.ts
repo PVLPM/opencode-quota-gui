@@ -316,7 +316,7 @@ describe("runCliShowCommand", () => {
     expect(code).toBe(1);
     expect(stdout.output).toBe("");
     expect(stderr.output).toContain("Missing value for --provider");
-    expect(stderr.output).toContain("opencode-quota show");
+    expect(stderr.output).toContain("opencode-quota-gui show");
   });
 
   it("returns non-zero when quota is disabled in config", async () => {
@@ -514,7 +514,7 @@ describe("runCliShowCommand", () => {
 
     expect(jsonCode).toBe(1);
     expect(jsonErr.output).toContain("Unknown option: --bogus-flag");
-    expect(jsonErr.output).toContain("opencode-quota show");
+    expect(jsonErr.output).toContain("opencode-quota-gui show");
   });
 
   it("--threshold validates input and requires --json", async () => {
@@ -564,7 +564,7 @@ describe("runCliShowCommand", () => {
 
     expect(code).toBe(0);
     expect(stderr.output).toBe("");
-    expect(stdout.output).toContain("opencode-quota show");
+    expect(stdout.output).toContain("opencode-quota-gui show");
     expect(stdout.output).not.toContain("OpenCode running");
     expect(stdout.output).not.toMatch(/exit code 3/i);
   });

@@ -29,7 +29,7 @@ vi.mock("../src/lib/scoped-update.js", () => ({
   runScopedUpdateCommand: commandMocks.runScopedUpdateCommand,
 }));
 
-describe("opencode-quota bin", () => {
+describe("opencode-quota-gui bin", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     commandMocks.runInitInstaller.mockResolvedValue(0);
@@ -39,7 +39,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("dispatches init to the interactive installer", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["init"]);
 
@@ -49,7 +49,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("passes the legacy config sync option to init", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["init", "--sync-legacy-config"]);
 
@@ -59,7 +59,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("passes init dry-run and legacy sync flags in either order", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["init", "--sync-legacy-config", "--dry-run"]);
 
@@ -71,7 +71,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("dispatches show to the quota CLI command", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["show"]);
 
@@ -81,7 +81,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("passes show provider args through to the quota CLI command", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["show", "--provider", "copilot"]);
 
@@ -92,7 +92,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("dispatches update args to the scoped updater", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["update", "--dry-run", "--yes"]);
 
@@ -103,7 +103,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("dispatches status to the quota status CLI command", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["status"]);
 
@@ -113,7 +113,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("passes status provider args through to the status CLI command", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["status", "--provider", "copilot", "--json"]);
 
@@ -124,15 +124,15 @@ describe("opencode-quota bin", () => {
   });
 
   it("prints help and exits zero for --help", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main(["--help"]);
 
     expect(code).toBe(0);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota show"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota status"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota-gui show"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota-gui status"));
     expect(log).toHaveBeenCalledWith(expect.stringContaining("responsible preview"));
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("Credential-specific audit sources and values are not read"),
@@ -148,35 +148,35 @@ describe("opencode-quota bin", () => {
   });
 
   it("prints usage and exits non-zero for no args", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main([]);
 
     expect(code).toBe(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota status"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota-gui status"));
     log.mockRestore();
   });
 
   it("prints usage and exits non-zero for unknown commands", async () => {
-    const { main } = await import("../src/bin/opencode-quota.js");
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main(["wat"]);
 
     expect(code).toBe(1);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota status"));
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota-gui status"));
     log.mockRestore();
   });
 
   it("treats symlinked bin paths as direct CLI execution", async () => {
-    const { cliShouldRunMain } = await import("../src/bin/opencode-quota.js");
+    const { cliShouldRunMain } = await import("../src/bin/opencode-quota-gui.js");
 
-    const modulePath = fileURLToPath(new URL("../src/bin/opencode-quota.ts", import.meta.url));
-    const tempDir = mkdtempSync(join(tmpdir(), "opencode-quota-bin-"));
-    const symlinkPath = join(tempDir, "opencode-quota");
+    const modulePath = fileURLToPath(new URL("../src/bin/opencode-quota-gui.ts", import.meta.url));
+    const tempDir = mkdtempSync(join(tmpdir(), "opencode-quota-gui-bin-"));
+    const symlinkPath = join(tempDir, "opencode-quota-gui");
 
     try {
       symlinkSync(modulePath, symlinkPath);
@@ -190,7 +190,7 @@ describe("opencode-quota bin", () => {
   });
 
   it("hides only Node's experimental SQLite warning", async () => {
-    const { hideSqliteExperimentalWarning } = await import("../src/bin/opencode-quota.js");
+    const { hideSqliteExperimentalWarning } = await import("../src/bin/opencode-quota-gui.js");
     const originalEmitWarning = process.emitWarning;
     const emitWarning = vi.fn();
     process.emitWarning = emitWarning as unknown as typeof process.emitWarning;
@@ -215,7 +215,7 @@ describe("opencode-quota bin", () => {
 
   // Run after `pnpm build`: loads node:sqlite in a real Node process.
   it("keeps the SQLite warning off stderr when the built CLI loads node:sqlite", () => {
-    const bin = fileURLToPath(new URL("../dist/bin/opencode-quota.js", import.meta.url));
+    const bin = fileURLToPath(new URL("../dist/bin/opencode-quota-gui.js", import.meta.url));
     expect(existsSync(bin)).toBe(true);
     const script = [
       `const { hideSqliteExperimentalWarning } = await import(${JSON.stringify(pathToFileURL(bin).href)});`,

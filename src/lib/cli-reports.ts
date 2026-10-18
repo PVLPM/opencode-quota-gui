@@ -1,5 +1,5 @@
 /**
- * The reports behind `opencode-quota show` and `status`. The terminal command builds them
+ * The reports behind `opencode-quota-gui show` and `status`. The terminal command builds them
  * in its own process (`cli-show.ts`) and prints them.
  */
 import { sanitizeQuotaRenderData } from "./display-sanitize.js";

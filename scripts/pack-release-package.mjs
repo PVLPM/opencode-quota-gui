@@ -3,7 +3,11 @@ import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { verifyReleaseArtifact, writeReleaseArtifactManifest } from "./lib/release-artifact.mjs";
+import {
+  resolvePackageManagerInvocation,
+  verifyReleaseArtifact,
+  writeReleaseArtifactManifest,
+} from "./lib/release-artifact.mjs";
 
 const nodeMajor = Number(process.versions.node.split(".")[0]);
 if (nodeMajor !== 24) {
@@ -61,7 +65,9 @@ function run(command, args, options = {}) {
   return result.stdout;
 }
 
-const packJson = run("pnpm", [
+const pnpm = resolvePackageManagerInvocation("pnpm");
+const packJson = run(pnpm.command, [
+  ...pnpm.args,
   "--config.ignore-scripts=true",
   "pack",
   "--json",

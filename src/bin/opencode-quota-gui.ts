@@ -8,12 +8,12 @@ import { runInitInstaller } from "../lib/init-installer.js";
 
 const USAGE = [
   "Usage:",
-  "  npx @slkiser/opencode-quota init [--dry-run] [--sync-legacy-config]",
-  "  npx @slkiser/opencode-quota show [--provider <provider-id>] [--json] [--threshold <pct>]",
-  "  npx @slkiser/opencode-quota status [--provider <provider-id>] [--json]",
-  "  npx @slkiser/opencode-quota update [--dry-run] [--yes]",
-  "  npx @slkiser/opencode-quota provider add [--dry-run]",
-  "  npx @slkiser/opencode-quota --help",
+  "  opencode-quota-gui init [--dry-run] [--sync-legacy-config]",
+  "  opencode-quota-gui show [--provider <provider-id>] [--json] [--threshold <pct>]",
+  "  opencode-quota-gui status [--provider <provider-id>] [--json]",
+  "  opencode-quota-gui update [--dry-run] [--yes]",
+  "  opencode-quota-gui provider add [--dry-run]",
+  "  opencode-quota-gui --help",
   "",
   "Commands:",
   "  init    Run the interactive quota installer",

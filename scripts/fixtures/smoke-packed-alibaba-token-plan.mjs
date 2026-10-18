@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const packageRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.resolve("@slkiser/opencode-quota"))),
+  path.dirname(fileURLToPath(import.meta.resolve("opencode-quota-gui"))),
   "..",
 );
 

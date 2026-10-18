@@ -42,7 +42,7 @@ import type { QuotaToastConfig, SessionTokenScope, TuiCommandDisplay } from "./t
 import { getPackageVersion } from "./version.js";
 
 const OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json";
-const GITHUB_REPO_URL = "https://github.com/slkiser/opencode-quota";
+const GITHUB_REPO_URL = "https://github.com/PVLPM/opencode-quota-gui";
 const GITHUB_STAR_NOTE = `if this helps, stars are appreciated: ${GITHUB_REPO_URL}`;
 const TUI_COMMAND_DISPLAY_COMMENT =
   "// OpenCode Quota: tuiCommandDisplay chooses whether native TUI command output appears in the session transcript or a local popup dialog.";
@@ -120,12 +120,66 @@ export class InitInstallerError extends Error {
 
 type JsonObject = Record<string, unknown>;
 
+/** The renamed package identity. Legacy `@slkiser/opencode-quota` installs stay recognized. */
+export const QUOTA_PLUGIN_PACKAGE_NAME = "opencode-quota-gui";
+/** Optional explicit pack/tarball (or other) spec for new installs; local development and tests. */
+export const QUOTA_PLUGIN_SPEC_ENV = "OPENCODE_QUOTA_PLUGIN_SPEC";
+
 /** A prerelease (version with `-`) installs from the npm `next` tag; a stable release from `latest`. */
-export function getQuotaPluginSpecForVersion(version: string): string {
-  return version.includes("-") ? "@slkiser/opencode-quota@next" : "@slkiser/opencode-quota@latest";
+export function getQuotaPluginSpecForVersion(
+  version: string,
+  packageName: string = QUOTA_PLUGIN_PACKAGE_NAME,
+): string {
+  return version.includes("-") ? `${packageName}@next` : `${packageName}@latest`;
 }
 
-async function resolveQuotaPluginSpec(): Promise<string> {
+function normalizePluginSpecText(spec: string): string {
+  return spec.replace(/\\/g, "/").toLowerCase();
+}
+
+function isUpstreamQuotaPackageSpec(spec: string): boolean {
+  return normalizePluginSpecText(spec).includes("@slkiser/opencode-quota");
+}
+
+/**
+ * Resolves an explicit plugin spec (a local pack/tarball or the user's own package), or null when
+ * none is given. An explicit spec that points at the upstream `@slkiser/opencode-quota` package
+ * is refused.
+ */
+export function resolveExplicitQuotaPluginSpec(params: {
+  pluginSpec?: string | undefined;
+  env?: NodeJS.ProcessEnv | undefined;
+}): string | null {
+  const env = params.env ?? process.env;
+  const raw = params.pluginSpec ?? env[QUOTA_PLUGIN_SPEC_ENV];
+  const spec = typeof raw === "string" ? raw.trim() : "";
+
+  if (!spec) {
+    return null;
+  }
+
+  if (isUpstreamQuotaPackageSpec(spec)) {
+    throw new InitInstallerError(
+      `Refusing to install the upstream @slkiser/opencode-quota package; provide a local pack/tarball or an explicit spec for the ${QUOTA_PLUGIN_PACKAGE_NAME} package.`,
+    );
+  }
+
+  return spec;
+}
+
+/**
+ * Resolves the plugin spec new installs write: an explicit spec when provided, otherwise the
+ * canonical `opencode-quota-gui` npm tag for the running package version.
+ */
+async function resolveQuotaPluginSpec(params: {
+  pluginSpec?: string | undefined;
+  env?: NodeJS.ProcessEnv | undefined;
+}): Promise<string> {
+  const explicit = resolveExplicitQuotaPluginSpec(params);
+  if (explicit !== null) {
+    return explicit;
+  }
+
   const version = await getPackageVersion();
   if (!version) {
     throw new InitInstallerError("Cannot read the OpenCode Quota package version.");
@@ -296,9 +350,20 @@ function ensureSchema(root: JsonObject, schemaUrl: string, edit: PlannedConfigEd
   pushSkippedIfChanged(edit, "$schema", root.$schema, schemaUrl);
 }
 
-function isQuotaPluginEntry(entry: unknown): boolean {
+function isQuotaPluginEntry(entry: unknown, installedSpec?: string | null): boolean {
   const spec = getPluginSpecFromEntry(entry);
-  return typeof spec === "string" && isQuotaPluginSpec(spec);
+  if (typeof spec !== "string") {
+    return false;
+  }
+
+  if (installedSpec && spec === installedSpec) {
+    return true;
+  }
+
+  // Legacy upstream specs, local checkouts, and this package's own identity all count.
+  return (
+    isQuotaPluginSpec(spec) || normalizePluginSpecText(spec).includes(QUOTA_PLUGIN_PACKAGE_NAME)
+  );
 }
 
 function appendQuotaPluginIfMissing(params: {
@@ -307,10 +372,12 @@ function appendQuotaPluginIfMissing(params: {
   pluginSpec: string;
   edit: PlannedConfigEdit;
 }): void {
-  const alreadyConfigured = params.container.some(isQuotaPluginEntry);
+  const alreadyConfigured = params.container.some((entry) =>
+    isQuotaPluginEntry(entry, params.pluginSpec),
+  );
 
   if (alreadyConfigured) {
-    params.edit.skippedValues.push(`${params.pathLabel} already includes ${params.pluginSpec}`);
+    params.edit.skippedValues.push(`${params.pathLabel} already includes a quota plugin entry`);
     return;
   }
 
@@ -657,8 +724,11 @@ async function planOpencodeEdit(params: {
   }
 
   // OpenCode 2 also loads plugins from the native `plugins` array; never add a second entry.
-  if (Array.isArray(root.plugins) && root.plugins.some(isQuotaPluginEntry)) {
-    edit.skippedValues.push(`plugins already includes ${params.pluginSpec}`);
+  if (
+    Array.isArray(root.plugins) &&
+    root.plugins.some((entry) => isQuotaPluginEntry(entry, params.pluginSpec))
+  ) {
+    edit.skippedValues.push("plugins already includes a quota plugin entry");
   } else {
     const plugin = ensureTopLevelPluginArray(root, edit);
     appendQuotaPluginIfMissing({
@@ -1029,6 +1099,7 @@ export async function planInitInstaller(params: {
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
   syncLegacyConfig?: boolean;
+  pluginSpec?: string;
 }): Promise<InitInstallerPlan> {
   const requestedSelections: InitInstallerSelections = {
     ...params.selections,
@@ -1056,11 +1127,15 @@ export async function planInitInstaller(params: {
     homeDir: params.homeDir,
   });
   const quotaEdit = await planQuotaConfigEdit({ selections, quotaUiIntent, baseDir });
+  const pluginSpec = await resolveQuotaPluginSpec({
+    pluginSpec: params.pluginSpec,
+    env: params.env,
+  });
   const edits = [
     await planOpencodeEdit({
       selections,
       baseDir,
-      pluginSpec: await resolveQuotaPluginSpec(),
+      pluginSpec,
       legacyQuotaToastToSync: params.syncLegacyConfig ? quotaEdit.plannedData : undefined,
     }),
     quotaEdit,
@@ -1212,7 +1287,12 @@ async function readExistingInstallerAnswers(baseDir: string): Promise<ExistingIn
 
 async function promptForSelections(
   prompts: PromptAdapter,
-  context: { cwd?: string; env?: NodeJS.ProcessEnv; homeDir?: string; pluginSpec: string },
+  context: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    homeDir?: string;
+    pluginSpec: string;
+  },
 ): Promise<InitInstallerSelections | null> {
   const interfaces = await prompts.select({
     message: "Which OpenCode interfaces do you use?",
@@ -1453,10 +1533,11 @@ export async function runInitInstaller(params?: {
   prompts?: PromptAdapter;
   syncLegacyConfig?: boolean;
   dryRun?: boolean;
+  pluginSpec?: string;
 }): Promise<number> {
   const prompts = params?.prompts ?? ((await import("@clack/prompts")) as unknown as PromptAdapter);
 
-  prompts.intro("Configure @slkiser/opencode-quota");
+  prompts.intro(`Configure ${QUOTA_PLUGIN_PACKAGE_NAME}`);
 
   try {
     let openCodeMajor = await detectOpenCodeMajor();
@@ -1481,7 +1562,10 @@ export async function runInitInstaller(params?: {
       return 1;
     }
 
-    const pluginSpec = await resolveQuotaPluginSpec();
+    const pluginSpec = await resolveQuotaPluginSpec({
+      pluginSpec: params?.pluginSpec,
+      env: params?.env,
+    });
     const selections = await promptForSelections(prompts, {
       cwd: params?.cwd,
       env: params?.env,
@@ -1499,6 +1583,7 @@ export async function runInitInstaller(params?: {
       env: params?.env,
       homeDir: params?.homeDir,
       syncLegacyConfig: params?.syncLegacyConfig,
+      pluginSpec,
     });
 
     for (const line of plan.summaryLines) {
@@ -1557,7 +1642,7 @@ export async function runInitInstaller(params?: {
         "Configured paths:",
         ...configuredPaths.map((path) => `- ${path}`),
         plan.selections.interfaces === "web"
-          ? "Run `npx @slkiser/opencode-quota show` in a terminal to check quota."
+          ? `Run \`npx ${pluginSpec} show\` in a terminal to check quota.`
           : "Restart OpenCode and run /quota.",
         `If OpenCode Quota helps, please consider a star: ${GITHUB_REPO_URL}`,
       ].join("\n"),

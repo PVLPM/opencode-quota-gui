@@ -34,7 +34,7 @@ const methods = QuotaRpc.methods;
 
 describe("quota RPC definition", () => {
   it("defines the plain RPC id, no events and four methods", () => {
-    expect(QUOTA_RPC_ID).toBe("slkiser.opencode-quota");
+    expect(QUOTA_RPC_ID).toBe("opencode-quota-gui");
     expect(QuotaRpc.id).toBe(QUOTA_RPC_ID);
     expect(QuotaRpc.events).toEqual({});
     expect(Object.keys(methods)).toEqual(["surface", "footer", "writeExport", "command"]);

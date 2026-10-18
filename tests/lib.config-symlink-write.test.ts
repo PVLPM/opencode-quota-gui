@@ -22,6 +22,9 @@ import {
 } from "../src/lib/opencode-config-editor.js";
 import { applyScopedUpdatePlan, planScopedUpdate } from "../src/lib/scoped-update.js";
 
+// These tests pin the explicit spec override; without one, update uses the canonical release tag.
+const EXPLICIT_UPDATE_SPEC = "file:./opencode-quota-gui-5.0.0.tgz";
+
 const tempDirs: string[] = [];
 
 function makeTempDir(): string {
@@ -228,7 +231,10 @@ describe("scoped update symlink writes", () => {
     const cache = join(root, "cache", "opencode", "packages", "@slkiser", "opencode-quota@latest");
     mkdirSync(join(project, ".git"), { recursive: true });
     mkdirSync(join(root, "dotfiles"), { recursive: true });
-    writeFileSync(real, '{"plugin":["@slkiser/opencode-quota@3.11.1"]}\n');
+    writeFileSync(
+      real,
+      '{"plugin":["@slkiser/opencode-quota@latest","@slkiser/opencode-quota@3.11.1"]}\n',
+    );
     symlinkSync(real, join(project, "opencode.json"));
     const manifest = join(cache, "node_modules", "@slkiser", "opencode-quota", "package.json");
     mkdirSync(join(manifest, ".."), { recursive: true });
@@ -239,6 +245,7 @@ describe("scoped update symlink writes", () => {
       XDG_CACHE_HOME: join(root, "cache"),
       XDG_DATA_HOME: join(root, "data"),
       XDG_STATE_HOME: join(root, "state"),
+      OPENCODE_QUOTA_PLUGIN_SPEC: EXPLICIT_UPDATE_SPEC,
     } satisfies NodeJS.ProcessEnv;
     const plan = await planScopedUpdate({
       cwd: project,
@@ -251,7 +258,7 @@ describe("scoped update symlink writes", () => {
     const result = await applyScopedUpdatePlan(plan);
     expect(result.writtenPaths).toEqual([join(project, "opencode.json")]);
     expect(lstatSync(join(project, "opencode.json")).isSymbolicLink()).toBe(true);
-    expect(readFileSync(real, "utf8")).toContain("@latest");
+    expect(readFileSync(real, "utf8")).toContain(EXPLICIT_UPDATE_SPEC);
     expect(result.removedCachePaths).toContain(cache);
     expect(existsSync(cache)).toBe(false);
   });
@@ -277,6 +284,7 @@ describe("scoped update symlink writes", () => {
       XDG_CACHE_HOME: join(root, "cache"),
       XDG_DATA_HOME: join(root, "data"),
       XDG_STATE_HOME: join(root, "state"),
+      OPENCODE_QUOTA_PLUGIN_SPEC: EXPLICIT_UPDATE_SPEC,
     } satisfies NodeJS.ProcessEnv;
     const plan = await planScopedUpdate({
       cwd: project,

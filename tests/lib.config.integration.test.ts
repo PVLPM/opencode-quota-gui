@@ -254,6 +254,8 @@ describe("loadConfig integration runtime-path resolution", () => {
     const initPlan = await planInitInstaller({
       env,
       homeDir: tempDir,
+      // New installs default to the canonical release tag; this test pins the explicit pack override.
+      pluginSpec: "file:./opencode-quota-gui-5.0.0.tgz",
       selections: {
         interfaces: "web",
         scope: "global",

@@ -10,7 +10,7 @@ import {
   type QuotaDialogCommandOutputResult,
 } from "./lib/quota-dialog-command-specs.js";
 
-export const QUOTA_RPC_ID = "slkiser.opencode-quota";
+export const QUOTA_RPC_ID = "opencode-quota-gui";
 
 export type QuotaRpcSurfaceInput = {
   surface: "sidebar" | "idle" | "compacted" | "question";

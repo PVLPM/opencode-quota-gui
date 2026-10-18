@@ -49,6 +49,9 @@ function requiredPackageFiles(): string[] {
     "README.md",
     "package.json",
     "dist/data/modelsdev-pricing.min.json",
+    "dist/ui/index.html",
+    "dist/ui/assets/dashboard.js",
+    "dist/ui/assets/dashboard.css",
   ]);
   const add = (value: string) => paths.add(value.replace(/^\.\//, ""));
 
