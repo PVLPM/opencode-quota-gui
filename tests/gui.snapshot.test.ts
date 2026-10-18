@@ -486,6 +486,120 @@ describe("GUI snapshot service", () => {
     reconnected();
   });
 
+  it("does not let a pre-disconnect load re-freshen a dirtied page", async () => {
+    let calls = 0;
+    let deferred = false;
+    let resolveOld!: (value: HomeSnapshot) => void;
+    let total = 10;
+    const { source } = fakeSource({
+      home: ({ range }) => {
+        calls += 1;
+        if (deferred) {
+          deferred = false;
+          return new Promise<HomeSnapshot>((resolve) => {
+            resolveOld = resolve;
+          });
+        }
+        return Promise.resolve(home(range, { total }));
+      },
+    });
+    const service = makeService(source);
+
+    const viewer = service.addViewer();
+    deferred = true;
+    const old = service.home({ range: "7d" });
+    expect(calls).toBe(1);
+
+    // The viewer leaves (dirtying retained entries) before the load settles.
+    viewer();
+    total = 20;
+    resolveOld(home("7d", { total: 10 }));
+    await expect(old).resolves.toEqual(home("7d", { total: 10 }));
+
+    // The reconnect load recomputes and caches within the new viewer epoch.
+    const refreshed = await service.home({ range: "7d" });
+    expect(refreshed.stale).toBe(false);
+    expect(refreshed.usage.totals.total).toBe(20);
+    expect(calls).toBe(2);
+
+    await service.home({ range: "7d" });
+    expect(calls).toBe(2);
+  });
+
+  it("runs a fresh compute when a reconnect load finds a pre-disconnect task pending", async () => {
+    let calls = 0;
+    let resolveOld!: (value: HomeSnapshot) => void;
+    let resolveNew!: (value: HomeSnapshot) => void;
+    const { source } = fakeSource({
+      home: () =>
+        new Promise<HomeSnapshot>((resolve) => {
+          calls += 1;
+          if (calls === 1) resolveOld = resolve;
+          else resolveNew = resolve;
+        }),
+    });
+    const service = makeService(source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+
+    const viewer = service.addViewer();
+    const old = service.home({ range: "7d" });
+    viewer();
+
+    // The reconnect request must not join the pre-disconnect task.
+    const fresh = service.home({ range: "7d" });
+    expect(calls).toBe(2);
+
+    // The newer result completes first and commits.
+    resolveNew(home("7d", { total: 20 }));
+    await expect(fresh).resolves.toEqual(home("7d", { total: 20 }));
+
+    // The late old result still resolves its caller but cannot overwrite it.
+    resolveOld(home("7d", { total: 10 }));
+    await expect(old).resolves.toEqual(home("7d", { total: 10 }));
+
+    const cached = await service.home({ range: "7d" });
+    expect(cached.usage.totals.total).toBe(20);
+    expect(calls).toBe(2);
+    expect(events).toEqual([]);
+  });
+
+  it("keeps the reconnect task intact when the old pending load settles first", async () => {
+    let calls = 0;
+    let resolveOld!: (value: HomeSnapshot) => void;
+    let resolveNew!: (value: HomeSnapshot) => void;
+    const { source } = fakeSource({
+      home: () =>
+        new Promise<HomeSnapshot>((resolve) => {
+          calls += 1;
+          if (calls === 1) resolveOld = resolve;
+          else resolveNew = resolve;
+        }),
+    });
+    const service = makeService(source);
+
+    const viewer = service.addViewer();
+    const old = service.home({ range: "7d" });
+    viewer();
+    const fresh = service.home({ range: "7d" });
+    expect(calls).toBe(2);
+
+    // The old task settles first; it must not delete the current inflight task.
+    resolveOld(home("7d", { total: 10 }));
+    await expect(old).resolves.toEqual(home("7d", { total: 10 }));
+
+    const joined = service.home({ range: "7d" });
+    expect(calls).toBe(2);
+
+    resolveNew(home("7d", { total: 20 }));
+    await expect(fresh).resolves.toEqual(home("7d", { total: 20 }));
+    await expect(joined).resolves.toEqual(home("7d", { total: 20 }));
+
+    const cached = await service.home({ range: "7d" });
+    expect(cached.usage.totals.total).toBe(20);
+    expect(calls).toBe(2);
+  });
+
   it("cleans up on close while a pending result still resolves its caller", async () => {
     vi.useFakeTimers();
     let release!: (value: HomeSnapshot) => void;

@@ -14,8 +14,12 @@
  * clears all registrations (and dirties retained entries), so a reconnect only
  * polls pages that are loaded again. A tick in flight when the last viewer
  * disconnects is abandoned: it polls no further keys and discards any result
- * that settles afterwards. A load on a closed service still computes for its
- * caller but never touches tracking, registration, or cache.
+ * that settles afterwards. The same viewer epoch guards HTTP commits: a load
+ * that began before the last disconnect cannot re-freshen a dirtied entry, and
+ * a post-reconnect load never joins a pre-disconnect in-flight task (the old
+ * caller still resolves, and its late completion cannot delete or overwrite the
+ * newer one). A load on a closed service still computes for its caller but
+ * never touches tracking, registration, or cache.
  *
  * No TTL, sequence, watermark, or budget machinery exists (R9).
  */
@@ -81,6 +85,8 @@ interface CacheEntry {
 
 interface InflightTask {
   promise: Promise<unknown>;
+  /** Viewer epoch at creation; ending that session disowns this task. */
+  epoch: number;
   /** Recency generation captured when this compute should be allowed to cache. */
   version: number;
 }
@@ -172,8 +178,11 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   let versionCounter = 0;
 
   let viewers = 0;
-  /** Bumped when the viewer session ends (last disconnect or close). */
-  let pollEpoch = 0;
+  /**
+   * Bumped when the viewer session ends (last disconnect or close). It disowns
+   * in-flight poll ticks and any HTTP cache commit started before that point.
+   */
+  let viewerEpoch = 0;
   let pollTimer: NodeJS.Timeout | undefined;
   let ticking = false;
   let closed = false;
@@ -224,6 +233,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   }
 
   function load<T>(key: string, compute: () => Promise<T>): Promise<T> {
+    const epoch = viewerEpoch;
     // A closed service does not track, register, or cache: the caller still
     // gets its computation, but a probe (or a late request) cannot repopulate
     // state that close() released.
@@ -237,14 +247,16 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     }
 
     const pending = inflight.get(key);
-    if (pending) {
-      // The key was requested again while its compute was still pending:
-      // preserve single-flight and allow the shared result to cache again.
+    if (pending && pending.epoch === epoch) {
+      // The key was requested again in the same viewer session while its compute
+      // was still pending: preserve single-flight and let it cache again.
       if (!closed) pending.version = version;
       // SAFETY: same key contract as the cache above; the inflight task was created
       // by a `load<T>` call for this exact key.
       return pending.promise as Promise<T>;
     }
+    // A pending task from an ended viewer session is disowned: this caller runs
+    // its own compute instead of joining a pre-disconnect task.
 
     let computation: Promise<T>;
     try {
@@ -253,10 +265,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       computation = Promise.reject(error);
     }
 
-    const task: InflightTask = { promise: Promise.resolve(), version };
+    const task: InflightTask = { epoch, promise: Promise.resolve(), version };
     task.promise = computation
       .then((snapshot) => {
-        if (!closed && tracked.get(key) === task.version) {
+        // A commit belongs to the viewer session that started the load: the
+        // last disconnect already dirtied the entries, so a pre-disconnect
+        // result never re-freshens them.
+        if (!closed && task.epoch === viewerEpoch && tracked.get(key) === task.version) {
           cache.set(key, { snapshot, substantive: substantiveOf(snapshot), stale: false });
         }
         return snapshot;
@@ -264,13 +279,16 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       .catch((error: unknown) => {
         const fallback = tracked.get(key) === task.version ? cache.get(key) : undefined;
         if (!fallback) throw error;
-        fallback.stale = true;
-        logger.warn("snapshot compute failed; serving last good snapshot", failureLabel(error));
+        if (!closed && task.epoch === viewerEpoch) {
+          fallback.stale = true;
+          logger.warn("snapshot compute failed; serving last good snapshot", failureLabel(error));
+        }
         // SAFETY: the cached entry under this key is a previous successful compute
         // of the same `(kind, resourceId, range)` key, so it is a T snapshot.
         return markStale(fallback.snapshot) as T;
       })
       .finally(() => {
+        // Never delete a newer task that replaced this one after reconnect.
         if (inflight.get(key) === task) inflight.delete(key);
       });
 
@@ -281,7 +299,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   async function tick(): Promise<void> {
     if (ticking || closed || viewers === 0) return;
     ticking = true;
-    const epoch = pollEpoch;
+    const epoch = viewerEpoch;
     const changed = new Set<DashboardEventTopic>();
     try {
       // Copy before the async body: `load` can register new computes while a
@@ -289,7 +307,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       for (const [key, compute] of Array.from(computes)) {
         // The viewer session that started this tick has ended: poll no further
         // keys for it, no matter how many entries the copied list holds.
-        if (closed || pollEpoch !== epoch || viewers === 0) break;
+        if (closed || viewerEpoch !== epoch || viewers === 0) break;
         if (computes.get(key) !== compute) continue;
         if (inflight.has(key)) continue;
         const version = tracked.get(key);
@@ -301,7 +319,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
           // A key evicted (or re-loaded) while the poll was pending must not be
           // marked current by this late result; an ended viewer session must
           // not be updated or logged for at all.
-          if (closed || pollEpoch !== epoch || viewers === 0) break;
+          if (closed || viewerEpoch !== epoch || viewers === 0) break;
           if (tracked.get(key) === version && computes.get(key) === compute) {
             const entry = cache.get(key);
             if (entry) entry.stale = true;
@@ -311,7 +329,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         }
         // Late poll results never resurrect an evicted key, overwrite a key
         // loaded again mid-poll, or land in a viewer session that has ended.
-        if (closed || pollEpoch !== epoch || viewers === 0) break;
+        if (closed || viewerEpoch !== epoch || viewers === 0) break;
         if (tracked.get(key) !== version || computes.get(key) !== compute) continue;
         const substantive = substantiveOf(snapshot);
         const entry = cache.get(key);
@@ -323,7 +341,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       ticking = false;
     }
 
-    if (closed || pollEpoch !== epoch || viewers === 0) return;
+    if (closed || viewerEpoch !== epoch) return;
     if (changed.has("quota.changed")) emit({ topic: "quota.changed", at: now() });
     if (changed.has("sessions.changed")) emit({ topic: "sessions.changed", at: now() });
   }
@@ -376,7 +394,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
           // End the viewer session: abandoned ticks poll no further keys, a
           // reconnect starts with no stale poll interests, and pages are only
           // polled again after an actual load re-registers them.
-          pollEpoch += 1;
+          viewerEpoch += 1;
           computes.clear();
           dirty();
         }
@@ -404,7 +422,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     close(): void {
       if (closed) return;
       closed = true;
-      pollEpoch += 1;
+      viewerEpoch += 1;
       stopPoller();
       listeners.clear();
       computes.clear();
