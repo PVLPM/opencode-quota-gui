@@ -14,6 +14,7 @@ import type {
   ProjectSnapshot,
   ProviderCard,
   QuotaCardRow,
+  QuotaSnapshot,
   RunwayProjection,
   SessionNode,
   SessionSnapshot,
@@ -321,6 +322,8 @@ function readRow(value: JsonValue, endpoint: string): QuotaCardRow {
   if (resetAtIso !== undefined) parsed.resetAtIso = resetAtIso;
   const countdown = readOptionalText(row.countdown, endpoint, `${detail}.countdown`);
   if (countdown !== undefined) parsed.countdown = countdown;
+  const info = readOptionalText(row.info, endpoint, `${detail}.info`);
+  if (info !== undefined) parsed.info = info;
   if (row.quantity !== undefined) {
     const quantity = readRecord(row.quantity, endpoint, `${detail}.quantity`);
     parsed.quantity = {
@@ -441,7 +444,28 @@ function readUsage(value: JsonValue | undefined, endpoint: string): Usage {
   };
 }
 
-/** Decodes `HomeSnapshot` (spec §5.2). */
+/** Decodes the independent, range-free quota payload. */
+export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota"): QuotaSnapshot {
+  const root = readRecord(value, endpoint, "not an object");
+  const providers = readRecord(root.providers, endpoint, "providers");
+  return {
+    generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
+    stale: readBoolean(root.stale, endpoint, "stale"),
+    providers: {
+      cards: readArray(providers.cards, endpoint, "providers.cards").map((card) =>
+        readCard(card, endpoint),
+      ),
+      enabledProviders: readEnabledProviders(
+        providers.enabledProviders,
+        endpoint,
+        "providers.enabledProviders",
+      ),
+      polledAtMs: readNumber(providers.polledAtMs, endpoint, "providers.polledAtMs"),
+    },
+  };
+}
+
+/** Decodes the compatible Analytics payload (`HomeSnapshot`, spec §5.2). */
 export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): HomeSnapshot {
   const root = readRecord(value, endpoint, "not an object");
   const providers = readRecord(root.providers, endpoint, "providers");
@@ -579,6 +603,8 @@ export function parseSessionSnapshot(value: JsonValue, endpoint: string): Sessio
   const ownSummary = readCostedTokens(ownSummaryRecord, endpoint, "ownSummary");
   return {
     focusSessionId: readText(root.focusSessionId, endpoint, "focusSessionId"),
+    projectId: readText(root.projectId, endpoint, "projectId"),
+    projectName: readText(root.projectName, endpoint, "projectName"),
     breadcrumbs: readArray(root.breadcrumbs, endpoint, "breadcrumbs").map((entry) =>
       readBreadcrumb(entry, endpoint),
     ),
@@ -734,7 +760,11 @@ async function toDashboardError(response: Response, endpoint: string): Promise<D
   }
 }
 
+export type ActiveViewScope = "quota" | "analytics";
+
 export interface DashboardClient extends DashboardDataSource {
+  /** Optional for older injected clients; failure must not block the read UI. */
+  setActiveView?(scope: ActiveViewScope): Promise<void>;
   /** SSE transport state; `live` means the stream is open. */
   connection(): ConnectionState;
   /** Observes transport state; returns an unsubscribe function. */
@@ -743,6 +773,8 @@ export interface DashboardClient extends DashboardDataSource {
 
 /** Every body the dashboard PUTs or POSTs, exactly as the seam declares it. */
 type DashboardWriteBody =
+  | Record<string, never>
+  | { scope: ActiveViewScope }
   | Parameters<DashboardDataSource["saveSettings"]>[0]
   | Parameters<DashboardDataSource["saveVisibility"]>[0]
   | Parameters<DashboardDataSource["importApply"]>[0];
@@ -793,6 +825,13 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
   }
 
   return {
+    async setActiveView(scope) {
+      const endpoint = "/api/v1/view";
+      const root = readRecord(await write(endpoint, { scope }, "PUT"), endpoint, "not an object");
+      const applied = readEnum(root.scope, ["quota", "analytics"], endpoint, "scope");
+      if (applied !== scope) throw faulty(endpoint, "scope does not match the requested view");
+    },
+
     connection: () => connectionState,
 
     onConnectionChange(listener) {
@@ -809,6 +848,10 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
       };
     },
 
+    async quota() {
+      return parseQuotaSnapshot(await request("/api/v1/quota"));
+    },
+
     async home(input) {
       const endpoint = `/api/v1/home?range=${encodeURIComponent(input.range)}`;
       return parseHomeSnapshot(await request(endpoint), endpoint);
@@ -822,6 +865,13 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
     async session(input) {
       const endpoint = `/api/v1/sessions/${encodeURIComponent(input.sessionId)}`;
       return parseSessionSnapshot(await request(endpoint), endpoint);
+    },
+
+    async openSettingsFile() {
+      const endpoint = "/api/v1/settings/open";
+      const root = readRecord(await write(endpoint, {}, "POST"), endpoint, "not an object");
+      if (!readBoolean(root.opened, endpoint, "opened"))
+        throw faulty(endpoint, "file was not opened");
     },
 
     async settings() {

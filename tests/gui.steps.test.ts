@@ -100,8 +100,8 @@ describe("step semantics", () => {
     expect(step).toMatchObject({
       sessionId: "ses_f",
       messageId: "msg_1",
-      // Steps count at their start time, not their completion time.
-      atMs: NOW - 2 * HOUR_MS,
+      // Steps count at their completion time (created time only feeds ownership).
+      atMs: NOW - HOUR_MS,
       branch: 0,
       stack: { input: 100, cacheRead: 20, cacheWrite: 30, output: 40, reasoning: 5 },
       contextTokens: 150,

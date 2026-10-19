@@ -418,6 +418,26 @@ describe("session tree scope", () => {
     }
   });
 
+  it("carries the focus session's owning project id and display name", () => {
+    const dataset = makeDataset({
+      sessions: [
+        sessionInfo({
+          id: "ses_f",
+          title: "F",
+          projectID: "proj_alpha",
+          createdMs: NOW - HOUR_MS,
+        }),
+      ],
+      projects: [projectInfo("proj_alpha", "Alpha workspace")],
+    });
+
+    const snapshot = createUsageAnalytics(dataset).session("ses_f");
+    expect(snapshot.projectId).toBe("proj_alpha");
+    expect(snapshot.projectName).toBe("Alpha workspace");
+    // The project is explicit metadata, not another session-ancestor crumb.
+    expect(snapshot.breadcrumbs).toEqual([{ sessionId: "ses_f", title: "F", isFocus: true }]);
+  });
+
   it("uses breadcrumbs for ancestors and stops at missing links", () => {
     const withMissing = makeDataset({
       sessions: [

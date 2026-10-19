@@ -151,8 +151,8 @@ describe("home usage over ranges", () => {
       projects: [projectInfo("proj_p", { name: "P" })],
       messages: [
         assistantRow("ses_s", "msg_in", NOW - HOUR_MS, NOW - HOUR_MS + 1_000, { input: 10 }),
-        assistantRow("ses_s", "msg_first", NOW - DAY_MS, NOW - DAY_MS + 1_000, { input: 1 }),
-        assistantRow("ses_s", "msg_before", NOW - DAY_MS - 1, NOW - DAY_MS + 500, { input: 100 }),
+        assistantRow("ses_s", "msg_first", NOW - DAY_MS, NOW - DAY_MS + 500, { input: 1 }),
+        assistantRow("ses_s", "msg_before", NOW - DAY_MS - 1, NOW - DAY_MS - 1, { input: 100 }),
         assistantRow("ses_s", "msg_now", NOW, NOW + 10, { input: 1_000 }),
       ],
     });
@@ -168,7 +168,8 @@ describe("home usage over ranges", () => {
       endMs: NOW - DAY_MS + HOUR_MS,
     });
     expect(usage.buckets[23]).toMatchObject({ startMs: NOW - HOUR_MS, endMs: NOW });
-    // The step exactly at `since` is inside; steps at `since - 1` and at `now` are outside.
+    // Completion-time boundaries: the step at `since` is inside; steps completed
+    // before `since` or at/after `now` are outside.
     expect(usage.stepCount).toBe(2);
     expect(usage.sessionCount).toBe(1);
     expect(usage.totals.input).toBe(11);
@@ -183,9 +184,30 @@ describe("home usage over ranges", () => {
       projectId: "proj_p",
       name: "P",
       rootSessionCount: 1,
-      latestActivityAtMs: NOW - HOUR_MS,
+      latestActivityAtMs: NOW - HOUR_MS + 1_000,
     });
     expect(projects[0]?.tokens.input).toBe(11);
+  });
+
+  it("counts a step in the window containing its completion time, not its creation time", () => {
+    const dataset = makeDataset({
+      sessions: [sessionInfo({ id: "ses_s", projectID: "proj_p", createdMs: NOW - 3 * DAY_MS })],
+      messages: [
+        // Created before the 24h window, completed inside it: counted.
+        assistantRow("ses_s", "msg_cross", NOW - DAY_MS - 60_000, NOW - DAY_MS + 1_000, {
+          input: 10,
+        }),
+        // Created inside the window, completed after `now`: not counted yet.
+        assistantRow("ses_s", "msg_after", NOW - HOUR_MS, NOW + 1_000, { input: 1_000 }),
+      ],
+    });
+
+    const { usage, projects } = createUsageAnalytics(dataset).home("24h", NOW);
+
+    expect(usage.stepCount).toBe(1);
+    expect(usage.totals.input).toBe(10);
+    expect(usage.buckets[0]?.tokens.input).toBe(10);
+    expect(projects[0]?.latestActivityAtMs).toBe(NOW - DAY_MS + 1_000);
   });
 
   it("renders 7d as 8 clipped daily buckets and 30d as 31 when now is not UTC midnight", () => {

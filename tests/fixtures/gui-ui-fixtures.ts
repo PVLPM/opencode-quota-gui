@@ -188,6 +188,8 @@ export function projectSnapshot(overrides: Partial<ProjectSnapshot> = {}): Proje
 export function sessionSnapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
   return {
     focusSessionId: "session-root-1",
+    projectId: "project-alpha",
+    projectName: "Alpha",
     breadcrumbs: [
       { sessionId: "session-ancestor", title: "Earlier exploration", isFocus: false },
       { sessionId: "session-root-1", title: "Refactor the quota aggregation", isFocus: true },
@@ -276,6 +278,7 @@ export function settingsSnapshot(overrides: Partial<SettingsSnapshot> = {}): Set
     opencodeGoWindows: ["rolling", "weekly", "monthly"],
     "dashboard.hiddenCards": [],
     "dashboard.hiddenRows": [],
+    "dashboard.providerOrder": [],
     "dashboard.port": 4144,
   };
   return {

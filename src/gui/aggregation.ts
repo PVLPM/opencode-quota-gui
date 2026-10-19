@@ -19,20 +19,15 @@ import {
   rangeWindow,
 } from "../contracts/ranges.js";
 import {
-  forkCopyFingerprint,
   type OpenCodeCompactionMarker,
-  type OpenCodeMessage,
   type OpenCodeProjectInfo,
   type OpenCodeRawAssistantRow,
   type OpenCodeSessionInfo,
+  rawAssistantRowFingerprint,
 } from "../lib/opencode-storage.js";
-import {
-  calculateCostUsd,
-  classifyMissingPricing,
-  type PricingResolution,
-  resolvePricingKey,
-} from "../lib/quota-stats.js";
+import { type PricingResolution, priceTokenBuckets } from "../lib/quota-stats.js";
 import type { TokenBuckets } from "../lib/token-buckets.js";
+import { type ForkOwnerCandidate, selectForkOwnerCandidates } from "../lib/usage-ownership.js";
 
 /**
  * Pure, in-memory GUI analytics over the raw P1 reads (design spec §6,
@@ -57,7 +52,8 @@ export const UNTITLED_SESSION_TITLE = "Untitled session";
 
 /** One sentence carried into the UI with every session snapshot (spec §6). */
 export const STEP_SEMANTICS =
-  "A step is one completed assistant message; fork copies are counted once. " +
+  "A step is one completed assistant message counted at its completion time; " +
+  "fork copies are counted once. " +
   "contextTokens = input + cacheRead + cacheWrite; " +
   "totalTokens = input + cacheRead + cacheWrite + output + reasoning. " +
   "Tool calls and stream chunks are not steps; compaction markers are separate.";
@@ -134,7 +130,7 @@ function projectIdOf(session: OpenCodeSessionInfo): string {
 }
 
 function stepTimeOf(row: OpenCodeRawAssistantRow): number {
-  return row.createdAtMs > 0 ? row.createdAtMs : row.completedAtMs;
+  return row.completedAtMs;
 }
 
 function inWindow(timestampMs: number, window: RangeWindow): boolean {
@@ -238,39 +234,25 @@ function addRawStep(
   accumulator.output += tokens.output;
   accumulator.reasoning += tokens.reasoning;
 
-  const cacheKey = `${row.providerID ?? ""}|||${row.modelID ?? ""}`;
-  let mapping = pricingCache.get(cacheKey);
-  if (!mapping) {
-    mapping = resolvePricingKey({ providerID: row.providerID, modelID: row.modelID });
-    pricingCache.set(cacheKey, mapping);
+  const outcome = priceTokenBuckets({
+    providerID: row.providerID,
+    modelID: row.modelID,
+    tokens,
+    cache: pricingCache,
+  });
+
+  if (outcome.status === "priced") {
+    accumulator.pricedAny = true;
+    accumulator.costUsd += outcome.costUsd;
+    return;
   }
 
   const total = totalBucketTokens(tokens);
-  if (!mapping.ok) {
+  if (outcome.status === "unpriced") {
+    accumulator.unpricedTokens += total;
+  } else {
     accumulator.unknownTokens += total;
-    return;
   }
-
-  const priced = calculateCostUsd({
-    provider: mapping.key.provider,
-    model: mapping.key.model,
-    tokens,
-  });
-  if (!priced.ok) {
-    const classification = classifyMissingPricing({
-      mappedProvider: mapping.key.provider,
-      mappedModel: mapping.key.model,
-    });
-    if (classification.kind === "unpriced") {
-      accumulator.unpricedTokens += total;
-    } else {
-      accumulator.unknownTokens += total;
-    }
-    return;
-  }
-
-  accumulator.pricedAny = true;
-  accumulator.costUsd += priced.costUsd;
 }
 
 // ---------------------------------------------------------------------------
@@ -302,25 +284,6 @@ interface AnalyticsModel {
   childrenByParent: Map<string, OpenCodeSessionInfo[]>;
 }
 
-function rawRowFingerprint(row: OpenCodeRawAssistantRow): string {
-  const message: OpenCodeMessage = {
-    id: row.messageID,
-    sessionID: row.sessionID,
-    role: "assistant",
-    providerID: row.providerID,
-    modelID: row.modelID,
-    tokens: {
-      input: row.tokens.input,
-      output: row.tokens.output,
-      reasoning: row.tokens.reasoning,
-      cache: { read: row.tokens.cacheRead, write: row.tokens.cacheWrite },
-    },
-    cost: row.cost,
-    time: { created: row.createdAtMs, completed: row.completedAtMs },
-  };
-  return forkCopyFingerprint(message, row.completedAtMs);
-}
-
 function compareOccurrence(a: OwnedStep, b: OwnedStep): number {
   if (a.createdAtMs !== b.createdAtMs) return a.createdAtMs - b.createdAtMs;
   const byMessage = compareIds(a.row.messageID, b.row.messageID);
@@ -329,50 +292,26 @@ function compareOccurrence(a: OwnedStep, b: OwnedStep): number {
 }
 
 /**
- * R50 owned set: group raw rows by the upstream fingerprint; per session sort
- * occurrences by `time.created` then messageId; for occurrence index
- * `0..maxCount-1` select the earliest candidate across sessions (`time.created`,
- * then messageId, then sessionId). The winner's project owns that occurrence,
- * so a fingerprint repeated k times in one session contributes k rows and the
+ * R50 owned set: raw rows are grouped by the shared upstream fingerprint and
+ * selected through the shared deterministic ownership primitive
+ * (`selectForkOwnerCandidates`): per session occurrences sort by `time.created`
+ * then messageId, and occurrence index `0..maxCount-1` selects the earliest
+ * candidate across sessions. The winner's project owns that occurrence, so a
+ * fingerprint repeated k times in one session contributes k rows and the
  * result never depends on read order.
  */
 function buildOwnedSteps(usable: OwnedStep[]): OwnedStep[] {
-  const byFingerprint = new Map<string, Map<string, OwnedStep[]>>();
-  for (const step of usable) {
-    const fingerprint = rawRowFingerprint(step.row);
-    let bySession = byFingerprint.get(fingerprint);
-    if (!bySession) {
-      bySession = new Map();
-      byFingerprint.set(fingerprint, bySession);
-    }
-    let occurrences = bySession.get(step.sessionId);
-    if (!occurrences) {
-      occurrences = [];
-      bySession.set(step.sessionId, occurrences);
-    }
-    occurrences.push(step);
-  }
+  const candidates: Array<ForkOwnerCandidate<OwnedStep>> = usable.map((step) => ({
+    item: step,
+    sessionID: step.sessionId,
+    fingerprint: rawAssistantRowFingerprint(step.row),
+    createdAtMs: step.createdAtMs,
+    messageID: step.row.messageID,
+  }));
 
-  const owned: OwnedStep[] = [];
-  for (const bySession of byFingerprint.values()) {
-    const occurrenceLists = [...bySession.values()];
-    for (const occurrences of occurrenceLists) occurrences.sort(compareOccurrence);
-    let maxCount = 0;
-    for (const occurrences of occurrenceLists) {
-      if (occurrences.length > maxCount) maxCount = occurrences.length;
-    }
-    for (let index = 0; index < maxCount; index += 1) {
-      let winner: OwnedStep | undefined;
-      for (const occurrences of occurrenceLists) {
-        const candidate = occurrences[index];
-        if (!candidate) continue;
-        if (!winner || compareOccurrence(candidate, winner) < 0) winner = candidate;
-      }
-      if (winner) owned.push(winner);
-    }
-  }
-  owned.sort(compareOccurrence);
-  return owned;
+  return selectForkOwnerCandidates(candidates)
+    .map((candidate) => candidate.item)
+    .sort(compareOccurrence);
 }
 
 /**
@@ -821,6 +760,8 @@ function sessionOwnLatestMs(model: AnalyticsModel, sessionId: string): number {
 function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): SessionSnapshot {
   const focus = model.dataset.sessions[sessionId];
   if (!focus) throw new AnalyticsNotFoundError("session", sessionId);
+  const focusProjectId = projectIdOf(focus);
+  const focusProjectName = projectName(model, focusProjectId);
 
   // Iterative DFS pre-order: arbitrary depth, no node cap, visited-set cycle guard.
   const order: Array<{ id: string; depth: number }> = [];
@@ -968,6 +909,8 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
 
   return {
     focusSessionId: sessionId,
+    projectId: focusProjectId,
+    projectName: focusProjectName,
     breadcrumbs,
     nodes,
     steps,

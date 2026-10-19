@@ -115,6 +115,8 @@ export interface Usage {
 export interface QuotaCardRow {
   rowId: RowId;
   label: string;
+  /** Optional short help text for the GUI row label. */
+  info?: string;
   kind: "percent" | "value" | "quantity" | "boolean";
   resultType: AccountingResultType;
   metric?: AccountingMetric;
@@ -161,6 +163,16 @@ export interface HomeSnapshot {
   providers: { cards: ProviderCard[]; enabledProviders: string[] | "auto"; polledAtMs: number };
   usage: Usage;
   projects: ProjectActivityRow[];
+}
+
+/**
+ * Independent quota/provider read (transport contract). Analytics never waits
+ * on this; a quota viewer never starts the analytics worker.
+ */
+export interface QuotaSnapshot {
+  generatedAtMs: number;
+  stale: boolean;
+  providers: HomeSnapshot["providers"];
 }
 
 export interface ProjectRootRow {
@@ -210,6 +222,9 @@ export interface StepPoint {
 
 export interface SessionSnapshot {
   focusSessionId: string;
+  /** Owning project of the focus session; the explicit parent crumb above session ancestors. */
+  projectId: string;
+  projectName: string;
   breadcrumbs: { sessionId: string; title: string; isFocus: boolean }[];
   nodes: SessionNode[];
   steps: StepPoint[];
@@ -221,6 +236,11 @@ export interface SessionSnapshot {
 
 export interface SettingsSnapshot {
   revision: string;
+  /**
+   * Absolute canonical GUI settings file path. This is the one deliberate
+   * display exception requested by the user; every other field stays
+   * path-redacted.
+   */
   pathLabel: string;
   values: Record<string, JsonValue>;
   sources: Record<string, string>;
@@ -262,6 +282,7 @@ export interface DashboardEvent {
 export interface DashboardDataSource {
   health(): Promise<{ app: "opencode-quota-gui"; contractVersion: number }>;
   home(input: { range: RangeKey }): Promise<HomeSnapshot>;
+  quota(): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
   settings(): Promise<SettingsSnapshot>;
@@ -276,11 +297,21 @@ export interface DashboardDataSource {
   }): Promise<SettingsWriteResult>;
   importPreview(): Promise<ImportPreview>;
   importApply(input: { expectedRevision: string }): Promise<SettingsWriteResult>;
+  /**
+   * Optional additive seam: open the fixed canonical GUI settings file with
+   * the OS default application. No arguments, no caller path.
+   */
+  openSettingsFile?(): Promise<void>;
   subscribe(onEvent: (event: DashboardEvent) => void): () => void;
 }
 
 /** Read/write config seam for the GUI server (P2 store satisfies this Pick). */
 export type GuiSettingsStore = Pick<
   DashboardDataSource,
-  "settings" | "saveSettings" | "saveVisibility" | "importPreview" | "importApply"
+  | "settings"
+  | "saveSettings"
+  | "saveVisibility"
+  | "importPreview"
+  | "importApply"
+  | "openSettingsFile"
 >;

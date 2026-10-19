@@ -167,13 +167,13 @@ describe("project roots and recursive totals", () => {
         sessionId: "ses_d",
         title: "Root D",
         tokens: costed({ input: 4 }, { unknownTokens: 4 }),
-        latestActivityAtMs: NOW - 7 * HOUR_MS,
+        latestActivityAtMs: NOW - 7 * HOUR_MS + 1_000,
       },
       {
         sessionId: "ses_r",
         title: "Root R",
         tokens: costed({ input: 3 }, { unknownTokens: 3 }),
-        latestActivityAtMs: NOW - 8 * HOUR_MS,
+        latestActivityAtMs: NOW - 8 * HOUR_MS + 1_000,
       },
     ]);
     expect(snapshot.totals).toEqual({
@@ -560,6 +560,94 @@ describe("project lookup and naming", () => {
     expect(names.get("proj_1")).toBe("beta");
     expect(names.get("proj_2")).toBe("Gamma");
     expect(names.get("proj_3")).toBe("Project");
+  });
+
+  it("keeps explicit project.name and otherwise uses the canonical root basename", () => {
+    const dataset = makeDataset({
+      sessions: [
+        sessionInfo({ id: "ses_e", projectID: "proj_explicit", createdMs: NOW - 2 * HOUR_MS }),
+        sessionInfo({ id: "ses_f", projectID: "proj_fallback", createdMs: NOW - 2 * HOUR_MS }),
+      ],
+      projects: [
+        projectInfo("proj_explicit", {
+          name: "Explicit",
+          directories: ["/srv/canonical-root", "/srv/aaa-linked"],
+        }),
+        projectInfo("proj_fallback", {
+          directories: ["/srv/canonical-root", "/srv/aaa-linked"],
+          worktrees: ["/srv/aaa-linked"],
+        }),
+      ],
+    });
+
+    const home = createUsageAnalytics(dataset).home("lifetime", NOW);
+    const names = new Map(home.projects.map((row) => [row.projectId, row.name]));
+
+    expect(names.get("proj_explicit")).toBe("Explicit");
+    // The canonical root is first even though the linked worktree sorts first
+    // lexicographically; the fallback name is its basename, not the linked one.
+    expect(names.get("proj_fallback")).toBe("canonical-root");
+  });
+
+  it("keeps totals under the same project id when the canonical root is renamed", () => {
+    const parts = {
+      sessions: [
+        sessionInfo({
+          id: "ses_r",
+          title: "Root",
+          projectID: "proj_p",
+          directory: "/srv/root-old",
+          createdMs: NOW - 2 * HOUR_MS,
+        }),
+      ],
+      messages: [assistantRow("ses_r", "msg_r", NOW - HOUR_MS, { input: 9 })],
+    };
+    const before = createUsageAnalytics(
+      makeDataset({
+        ...parts,
+        projects: [projectInfo("proj_p", { name: "P", directories: ["/srv/root-old"] })],
+      }),
+    );
+    const after = createUsageAnalytics(
+      makeDataset({
+        ...parts,
+        projects: [projectInfo("proj_p", { name: "P", directories: ["/srv/root-new"] })],
+      }),
+    );
+
+    expect(after.home("24h", NOW).usage).toEqual(before.home("24h", NOW).usage);
+    expect(after.project("proj_p", "24h", NOW)).toEqual(before.project("proj_p", "24h", NOW));
+  });
+
+  it("keeps sessions from retired worktrees visible and counted", () => {
+    const dataset = makeDataset({
+      sessions: [
+        sessionInfo({
+          id: "ses_retired",
+          title: "Retired",
+          projectID: "proj_p",
+          directory: "/srv/retired-linked",
+          createdMs: NOW - 2 * HOUR_MS,
+        }),
+      ],
+      projects: [
+        projectInfo("proj_p", {
+          name: "P",
+          directories: ["/srv/canonical-root"],
+          // The retired linked worktree is no longer listed in current metadata.
+          worktrees: [],
+        }),
+      ],
+      messages: [assistantRow("ses_retired", "msg_r", NOW - HOUR_MS, { input: 9 })],
+    });
+
+    const analytics = createUsageAnalytics(dataset);
+    const snapshot = analytics.project("proj_p", "24h", NOW);
+
+    expect(snapshot.totals.input).toBe(9);
+    expect(snapshot.roots.map((root) => root.sessionId)).toEqual(["ses_retired"]);
+    expect(snapshot.roots[0]?.worktreeLabel).toBe("retired-linked");
+    expect(analytics.home("24h", NOW).projects[0]?.tokens.input).toBe(9);
   });
 
   it("returns an empty project snapshot for a record-only project", () => {
