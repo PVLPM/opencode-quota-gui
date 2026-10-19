@@ -329,6 +329,7 @@ describe("opencode Zen provider", () => {
         kind: "quantity",
         name: "zen-monthly-spend",
         group: "OpenCode Zen",
+        info: "Workspace monthly spend (includes Go API equivalent)",
         semantic: {
           metric: { kind: "window", window: "month" },
           prominence: "primary",

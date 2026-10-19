@@ -203,6 +203,7 @@ export const opencodeZenProvider: QuotaProvider = {
         kind: "quantity",
         name: "zen-monthly-spend",
         group: OPENCODE_ZEN_GROUP,
+        info: "Workspace monthly spend (includes Go API equivalent)",
         semantic: {
           metric: { kind: "window", window: "month" },
           prominence: "primary",

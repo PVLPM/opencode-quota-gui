@@ -27,11 +27,17 @@ vi.mock("../src/lib/modelsdev-pricing.js", () => ({
   hasCost: vi.fn(
     (providerID: string, modelID: string) => providerID === "openai" && modelID === "gpt-5",
   ),
-  hasProvider: vi.fn((providerID: string) => providerID === "openai"),
-  hasModel: vi.fn(
-    (providerID: string, modelID: string) => providerID === "openai" && modelID === "gpt-5",
+  hasProvider: vi.fn(
+    (providerID: string) => providerID === "openai" || providerID === "unpriced-labs",
   ),
-  isModelsDevProviderId: vi.fn((providerID: string) => providerID === "openai"),
+  hasModel: vi.fn(
+    (providerID: string, modelID: string) =>
+      (providerID === "openai" && modelID === "gpt-5") ||
+      (providerID === "unpriced-labs" && modelID === "mystery-1"),
+  ),
+  isModelsDevProviderId: vi.fn(
+    (providerID: string) => providerID === "openai" || providerID === "unpriced-labs",
+  ),
   listProvidersForModelId: vi.fn((modelID: string) => (modelID === "gpt-5" ? ["openai"] : [])),
   lookupCost: vi.fn((providerID: string, modelID: string) =>
     providerID === "openai" && modelID === "gpt-5"
@@ -66,9 +72,70 @@ import {
   aggregateUsage,
   getSessionTokenSummary,
   getSessionTreeTokenSummary,
+  priceTokenBuckets,
   resolveSessionTree,
   SessionNotFoundError,
 } from "../src/lib/quota-stats.js";
+
+describe("shared priceTokenBuckets primitive", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const tokens = { input: 2, output: 3, reasoning: 4, cache_read: 5, cache_write: 6 };
+
+  it("returns a priced outcome with the resolved key and cost", () => {
+    expect(priceTokenBuckets({ providerID: "openai", modelID: "gpt-5", tokens })).toEqual({
+      status: "priced",
+      key: { provider: "openai", model: "gpt-5" },
+      costUsd: 20,
+    });
+  });
+
+  it("classifies a mapped model without rates as unpriced", () => {
+    const outcome = priceTokenBuckets({
+      providerID: "unpriced-labs",
+      modelID: "mystery-1",
+      tokens,
+    });
+
+    expect(outcome).toMatchObject({
+      status: "unpriced",
+      key: { provider: "unpriced-labs", model: "mystery-1" },
+    });
+    if (outcome.status === "unpriced") {
+      expect(outcome.reason).toContain("no token pricing");
+    }
+  });
+
+  it("classifies an unmappable source as unknown", () => {
+    const outcome = priceTokenBuckets({
+      providerID: "phantom-labs",
+      modelID: "ghost-9",
+      tokens,
+    });
+
+    expect(outcome.status).toBe("unknown");
+    if (outcome.status === "unknown") {
+      expect(outcome.unknown.sourceProviderID).toBe("phantom-labs");
+      expect(outcome.unknown.sourceModelID).toBe("ghost-9");
+    }
+  });
+
+  it("reuses a supplied resolution cache across calls", async () => {
+    const modelsdev = await import("../src/lib/modelsdev-pricing.js");
+    const callsBefore = vi.mocked(modelsdev.isModelsDevProviderId).mock.calls.length;
+    const cache = new Map();
+
+    priceTokenBuckets({ providerID: "openai", modelID: "gpt-5", tokens, cache });
+    const callsAfterFirst = vi.mocked(modelsdev.isModelsDevProviderId).mock.calls.length;
+    priceTokenBuckets({ providerID: "openai", modelID: "gpt-5", tokens, cache });
+
+    expect(callsAfterFirst).toBeGreaterThan(callsBefore);
+    expect(vi.mocked(modelsdev.isModelsDevProviderId).mock.calls.length).toBe(callsAfterFirst);
+    expect(cache.size).toBe(1);
+  });
+});
 
 describe("quota stats session tree", () => {
   beforeEach(() => {

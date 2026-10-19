@@ -17,6 +17,7 @@ describe("sanitizeQuotaProviderResult", () => {
           name: "Budget\u001b[31m",
           group: "Example\u001b[0m",
           metricLabel: "Monthly\u001b[31m",
+          info: "  Workspace\nmonthly spend\u001b[31m  ",
           percentRemaining: 75,
           resetTimeIso: "2026-09-01T00:00:00.000Z",
           fixedWindow: {
@@ -84,6 +85,7 @@ describe("sanitizeQuotaProviderResult", () => {
       name: "Budget",
       group: "Example",
       metricLabel: "Monthly",
+      info: "Workspace monthly spend",
       semantic: { metric: { kind: "named", name: "Known API" } },
       basis: { used: { quantity: { unit: { kind: "custom", symbol: "NANO" } } } },
       fixedWindow: {

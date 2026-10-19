@@ -1,7 +1,8 @@
-import { existsSync } from "fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 
 import { getOpenCodeDbPath } from "./opencode-db-path.js";
 import { openOpenCodeSqliteReadOnly, type SqliteConn } from "./opencode-sqlite.js";
+import { type ForkOwnerCandidate, selectForkOwners } from "./usage-ownership.js";
 
 /**
  * Error thrown when a session is not found.
@@ -259,9 +260,9 @@ function buildMessageQuery(params: {
   return { sql, args };
 }
 
-async function hasJsonExtract(conn: {
+function hasJsonExtract(conn: {
   get<T = unknown>(sql: string, params?: unknown[]): T | null;
-}): Promise<boolean> {
+}): boolean {
   try {
     const row = conn.get<{ r: string }>(
       "SELECT json_extract('{\"role\":\"assistant\"}', '$.role') as r",
@@ -315,6 +316,9 @@ function mapCompletedAssistantMessages(rows: ProjectedMessageRow[]): OpenCodeMes
 function buildCompletedAssistantQuery(params: {
   completedSinceMs?: number;
   completedUntilMs?: number;
+  sessionID?: string;
+  sessionIDs?: readonly string[];
+  messageIDs?: readonly string[];
 }): { sql: string; args: unknown[] } {
   const completedScalar = guardedJsonScalar("$.time.completed");
   const completedExpression = `CAST(${completedScalar} AS REAL)`;
@@ -333,6 +337,25 @@ function buildCompletedAssistantQuery(params: {
     where.push(`${completedExpression} <= ?`);
     args.push(params.completedUntilMs);
   }
+  if (params.sessionID !== undefined) {
+    where.push(`session_id = ?`);
+    args.push(params.sessionID);
+  } else if (params.sessionIDs !== undefined) {
+    if (params.sessionIDs.length === 0) {
+      where.push(`1 = 0`);
+    } else {
+      where.push(`session_id IN (${params.sessionIDs.map(() => "?").join(", ")})`);
+      args.push(...params.sessionIDs);
+    }
+  }
+  if (params.messageIDs !== undefined) {
+    if (params.messageIDs.length === 0) {
+      where.push(`1 = 0`);
+    } else {
+      where.push(`id IN (${params.messageIDs.map(() => "?").join(", ")})`);
+      args.push(...params.messageIDs);
+    }
+  }
 
   return {
     sql:
@@ -341,6 +364,117 @@ function buildCompletedAssistantQuery(params: {
       ` ORDER BY ${completedExpression} ASC, id ASC`,
     args,
   };
+}
+
+/** Deterministic code-unit comparison used for raw message ids. */
+function compareStringIds(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function compareRawCompletedRows(a: OpenCodeRawAssistantRow, b: OpenCodeRawAssistantRow): number {
+  if (a.completedAtMs !== b.completedAtMs) return a.completedAtMs - b.completedAtMs;
+  return compareStringIds(a.messageID, b.messageID);
+}
+
+function dedupeStrings(values: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+/** One session/message id scope shared by all scoped readers. */
+interface StorageIdScope {
+  sessionID?: string;
+  sessionIDs?: string[];
+  messageIDs?: string[];
+}
+
+type StorageScope = { kind: "all" } | { kind: "scope"; ids: StorageIdScope } | { kind: "empty" };
+
+/**
+ * Resolve the id scope shared by the raw completed reader, the compaction
+ * reader, and the revision snapshot. `messageIDs` combines with a session
+ * scope (AND); `sessionID` and `sessionIDs` are mutually exclusive. Any empty
+ * id list resolves to `empty` so no SQLite connection is opened.
+ */
+function normalizeStorageScope(params: {
+  sessionID?: string;
+  sessionIDs?: readonly string[];
+  messageIDs?: readonly string[];
+}): StorageScope {
+  if (params.sessionID !== undefined && params.sessionIDs !== undefined) {
+    throw new Error("received both sessionID and sessionIDs");
+  }
+  if (params.sessionID === "") return { kind: "empty" };
+  if (params.sessionIDs !== undefined && params.sessionIDs.length === 0) return { kind: "empty" };
+  if (params.messageIDs !== undefined && params.messageIDs.length === 0) return { kind: "empty" };
+
+  const ids: StorageIdScope = {};
+  if (params.sessionID !== undefined) ids.sessionID = params.sessionID;
+  if (params.sessionIDs !== undefined) ids.sessionIDs = dedupeStrings(params.sessionIDs);
+  if (params.messageIDs !== undefined) ids.messageIDs = dedupeStrings(params.messageIDs);
+
+  if (ids.sessionID === undefined && ids.sessionIDs === undefined && ids.messageIDs === undefined) {
+    return { kind: "all" };
+  }
+  return { kind: "scope", ids };
+}
+
+/**
+ * Chunk one scope into queries under a bind-argument budget. `messageIDs` and
+ * session ids combine with AND semantics; when both lists are present they are
+ * chunked together so every emitted query stays within the budget.
+ */
+function scopedIdQueries<T>(
+  ids: StorageIdScope,
+  budget: number,
+  build: (clause: StorageIdScope) => T,
+): T[] {
+  const queries: T[] = [];
+  const { sessionID, sessionIDs, messageIDs } = ids;
+
+  if (messageIDs === undefined) {
+    if (sessionID !== undefined) return [build({ sessionID })];
+    if (sessionIDs !== undefined) {
+      for (const chunk of chunkArray(sessionIDs, budget)) {
+        queries.push(build({ sessionIDs: chunk }));
+      }
+    }
+    return queries;
+  }
+
+  if (sessionID !== undefined) {
+    for (const chunk of chunkArray(messageIDs, Math.max(1, budget - 1))) {
+      queries.push(build({ sessionID, messageIDs: chunk }));
+    }
+    return queries;
+  }
+
+  if (sessionIDs === undefined) {
+    for (const chunk of chunkArray(messageIDs, budget)) queries.push(build({ messageIDs: chunk }));
+    return queries;
+  }
+
+  for (const messageChunk of chunkArray(messageIDs, Math.max(1, budget - 1))) {
+    const remaining = Math.max(1, budget - messageChunk.length);
+    for (const sessionChunk of chunkArray(sessionIDs, remaining)) {
+      queries.push(build({ sessionIDs: sessionChunk, messageIDs: messageChunk }));
+    }
+  }
+  return queries;
+}
+
+function countDefined(values: readonly unknown[]): number {
+  let count = 0;
+  for (const value of values) if (value !== undefined) count += 1;
+  return count;
 }
 
 /**
@@ -364,33 +498,52 @@ export function forkCopyFingerprint(message: OpenCodeMessage, completed: number)
 }
 
 /**
+ * The same upstream fingerprint derived from a raw completed row, for the
+ * shared deterministic ownership primitive. Exported so the GUI aggregation
+ * and the analytics worker use one formula.
+ */
+export function rawAssistantRowFingerprint(row: OpenCodeRawAssistantRow): string {
+  return forkCopyFingerprint(
+    {
+      id: row.messageID,
+      sessionID: row.sessionID,
+      role: "assistant",
+      providerID: row.providerID,
+      modelID: row.modelID,
+      tokens: {
+        input: row.tokens.input,
+        output: row.tokens.output,
+        reasoning: row.tokens.reasoning,
+        cache: { read: row.tokens.cacheRead, write: row.tokens.cacheWrite },
+      },
+      cost: row.cost,
+      time: { created: row.createdAtMs, completed: row.completedAtMs },
+    },
+    row.completedAtMs,
+  );
+}
+
+/**
  * OpenCode copies a parent's finished messages into each fork with new ids but
- * identical times, model, tokens, and cost. Count each finished fingerprint as
- * many times as the session that has it most often, and drop the extra copies.
- * Unfinished rows are always kept.
+ * identical times, model, tokens, and cost. Each finished fingerprint is owned
+ * as many times as the session that has it most often; unfinished rows are
+ * always kept. Shared deterministic selection lives in `usage-ownership.ts`.
  */
 function dropForkCopies(messages: OpenCodeMessage[]): OpenCodeMessage[] {
-  const countBySessionFingerprint = new Map<string, number>();
-  const keptCountByFingerprint = new Map<string, number>();
-  const out: OpenCodeMessage[] = [];
+  const candidates: Array<ForkOwnerCandidate<OpenCodeMessage>> = [];
   for (const message of messages) {
+    const candidate: ForkOwnerCandidate<OpenCodeMessage> = {
+      item: message,
+      sessionID: message.sessionID,
+      messageID: message.id,
+    };
     const completed = completedAt(message);
-    if (completed === null) {
-      out.push(message);
-      continue;
-    }
-    const fingerprint = forkCopyFingerprint(message, completed);
-    const sessionFingerprintKey = JSON.stringify([message.sessionID, fingerprint]);
-    const sessionCount = (countBySessionFingerprint.get(sessionFingerprintKey) ?? 0) + 1;
-    countBySessionFingerprint.set(sessionFingerprintKey, sessionCount);
-    const keptCount = keptCountByFingerprint.get(fingerprint) ?? 0;
-    if (sessionCount <= keptCount) {
-      continue;
-    }
-    keptCountByFingerprint.set(fingerprint, sessionCount);
-    out.push(message);
+    if (completed !== null) candidate.fingerprint = forkCopyFingerprint(message, completed);
+    const created = message.time?.created;
+    if (typeof created === "number" && Number.isFinite(created)) candidate.createdAtMs = created;
+    candidates.push(candidate);
   }
-  return out;
+  return selectForkOwners(candidates);
 }
 
 function compareMessageOrder(a: OpenCodeMessage, b: OpenCodeMessage): number {
@@ -526,11 +679,12 @@ export async function iterAssistantMessagesForSessions(params: {
   untilMs?: number;
 }): Promise<OpenCodeMessage[]> {
   const sessionIDs = normalizeSessionIdsOrThrow(params.sessionIDs);
-  if (sessionIDs.length === 0) return [];
+  const [firstSessionID] = sessionIDs;
+  if (firstSessionID === undefined) return [];
 
   const db = openDbOrNull();
   if (!db) {
-    throw new SessionNotFoundError(sessionIDs[0]!, getOpenCodeDbPath());
+    throw new SessionNotFoundError(firstSessionID, getOpenCodeDbPath());
   }
 
   const conn = await db.open();
@@ -558,40 +712,46 @@ export async function iterAssistantMessagesForSessions(params: {
   }
 }
 
+function readAllSessionsIndexFrom(
+  conn: Pick<SqliteConn, "all">,
+): Record<string, OpenCodeSessionInfo> {
+  const idx: Record<string, OpenCodeSessionInfo> = {};
+  const columns = readTableColumns(conn, "session_v2");
+  const metadataColumns = [
+    columns?.has("project_id") ? "project_id" : null,
+    columns?.has("directory") ? "directory" : null,
+  ].filter((column): column is string => column !== null);
+  const rows = conn.all<SessionRow>(
+    `SELECT id, title, parent_id, time_created, time_updated${
+      metadataColumns.length ? `, ${metadataColumns.join(", ")}` : ""
+    } FROM "session_v2" ORDER BY time_created ASC, id ASC`,
+  );
+
+  for (const row of rows) {
+    if (!row || typeof row.id !== "string" || !row.id.startsWith("ses_")) continue;
+    idx[row.id] = {
+      id: row.id,
+      title: typeof row.title === "string" && row.title.trim() ? row.title : undefined,
+      parentID: typeof row.parent_id === "string" ? row.parent_id : undefined,
+      projectID: normalizeString(row.project_id),
+      directory: normalizeString(row.directory),
+      time: {
+        created: typeof row.time_created === "number" ? row.time_created : undefined,
+        updated: typeof row.time_updated === "number" ? row.time_updated : undefined,
+      },
+    };
+  }
+
+  return idx;
+}
+
 export async function readAllSessionsIndex(): Promise<Record<string, OpenCodeSessionInfo>> {
   const db = openDbOrNull();
-  const idx: Record<string, OpenCodeSessionInfo> = {};
-  if (!db) return idx;
+  if (!db) return {};
 
   const conn = await db.open();
   try {
-    const columns = readTableColumns(conn, "session_v2");
-    const metadataColumns = [
-      columns?.has("project_id") ? "project_id" : null,
-      columns?.has("directory") ? "directory" : null,
-    ].filter((column): column is string => column !== null);
-    const rows = conn.all<SessionRow>(
-      `SELECT id, title, parent_id, time_created, time_updated${
-        metadataColumns.length ? `, ${metadataColumns.join(", ")}` : ""
-      } FROM "session_v2" ORDER BY time_created ASC, id ASC`,
-    );
-
-    for (const row of rows) {
-      if (!row || typeof row.id !== "string" || !row.id.startsWith("ses_")) continue;
-      idx[row.id] = {
-        id: row.id,
-        title: typeof row.title === "string" && row.title.trim() ? row.title : undefined,
-        parentID: typeof row.parent_id === "string" ? row.parent_id : undefined,
-        projectID: normalizeString(row.project_id),
-        directory: normalizeString(row.directory),
-        time: {
-          created: typeof row.time_created === "number" ? row.time_created : undefined,
-          updated: typeof row.time_updated === "number" ? row.time_updated : undefined,
-        },
-      };
-    }
-
-    return idx;
+    return readAllSessionsIndexFrom(conn);
   } finally {
     conn.close();
   }
@@ -646,7 +806,7 @@ export interface OpenCodeCompactionMarker {
   messageId: string;
 }
 
-type ProjectRow = { id: unknown; name?: unknown };
+type ProjectRow = { id: unknown; name?: unknown; worktree?: unknown };
 type ProjectDirectoryRow = { project_id: unknown; directory: unknown };
 type WorktreeRow = { project_id: unknown; directory: unknown };
 type CompactionRow = { id: unknown; session_id: unknown; time_created: unknown };
@@ -677,34 +837,78 @@ function mapRawCompletedAssistantRow(row: ProjectedMessageRow): OpenCodeRawAssis
   };
 }
 
+export interface ReadCompletedAssistantRowsParams {
+  completedSinceMs?: number;
+  completedUntilMs?: number;
+  sessionID?: string;
+  sessionIDs?: readonly string[];
+  messageIDs?: readonly string[];
+}
+
 /**
- * Read every physical completed assistant row without fork dedup (R46, R50).
+ * Read physical completed assistant rows without fork dedup (R46, R50).
  *
  * Completed-only matches the dashboard step rule: an assistant row counts once
  * `$.time.completed` is a positive number. The optional completed window is
  * inclusive on both ends, so P3 aggregation can request a range directly.
- * Schema drift (no message table or no JSON support) degrades to an empty read.
+ *
+ * `sessionID`, `sessionIDs`, and `messageIDs` are mutually exclusive scopes;
+ * empty `sessionIDs`/`messageIDs` resolve to an empty read without opening the
+ * database. Large scopes are chunked under the SQLite bind-argument bound and
+ * merged back into completion-time order. `messageIDs` is the incremental
+ * reconciliation fetch after a `readMessageRevisions` diff. Schema drift (no
+ * message table or no JSON support) degrades to an empty read.
  */
-export async function readCompletedAssistantRows(params?: {
-  completedSinceMs?: number;
-  completedUntilMs?: number;
-}): Promise<OpenCodeRawAssistantRow[]> {
+function readCompletedAssistantRowsFrom(
+  conn: SqliteConn,
+  params: ReadCompletedAssistantRowsParams,
+): OpenCodeRawAssistantRow[] {
+  const scope = normalizeStorageScope(params);
+  if (scope.kind === "empty") return [];
+
+  const columns = readTableColumns(conn, "session_message");
+  if (!columns?.has("type") || !columns.has("data")) return [];
+  if (!hasJsonExtract(conn)) return [];
+
+  const reservedArgs = countDefined([params.completedSinceMs, params.completedUntilMs]);
+  const maxIdsPerQuery = Math.max(1, SQLITE_MAX_MESSAGE_QUERY_ARGS - reservedArgs);
+  const out: OpenCodeRawAssistantRow[] = [];
+
+  const collect = (query: { sql: string; args: unknown[] }): void => {
+    for (const row of conn.all<ProjectedMessageRow>(query.sql, query.args)) {
+      const mapped = mapRawCompletedAssistantRow(row);
+      if (mapped) out.push(mapped);
+    }
+  };
+
+  if (scope.kind === "all") {
+    collect(buildCompletedAssistantQuery(params));
+  } else {
+    const queries = scopedIdQueries(scope.ids, maxIdsPerQuery, (clause) =>
+      buildCompletedAssistantQuery({
+        completedSinceMs: params.completedSinceMs,
+        completedUntilMs: params.completedUntilMs,
+        ...clause,
+      }),
+    );
+    for (const query of queries) collect(query);
+  }
+
+  out.sort(compareRawCompletedRows);
+  return out;
+}
+
+export async function readCompletedAssistantRows(
+  params: ReadCompletedAssistantRowsParams = {},
+): Promise<OpenCodeRawAssistantRow[]> {
+  if (normalizeStorageScope(params).kind === "empty") return [];
+
   const db = openDbOrNull();
   if (!db) return [];
 
   const conn = await db.open();
   try {
-    const columns = readTableColumns(conn, "session_message");
-    if (!columns?.has("type") || !columns.has("data")) return [];
-    if (!(await hasJsonExtract(conn))) return [];
-
-    const query = buildCompletedAssistantQuery(params ?? {});
-    const out: OpenCodeRawAssistantRow[] = [];
-    for (const row of conn.all<ProjectedMessageRow>(query.sql, query.args)) {
-      const mapped = mapRawCompletedAssistantRow(row);
-      if (mapped) out.push(mapped);
-    }
-    return out;
+    return readCompletedAssistantRowsFrom(conn, params);
   } finally {
     conn.close();
   }
@@ -716,91 +920,612 @@ export async function readCompletedAssistantRows(params?: {
  * `strategy = 'git_worktree'` (R46). Missing tables or columns degrade to an
  * empty index, which P3 reports as the unknown project instead of failing.
  */
+function readProjectsIndexFrom(conn: SqliteConn): Record<string, OpenCodeProjectInfo> {
+  const index: Record<string, OpenCodeProjectInfo> = {};
+  const projectColumns = readTableColumns(conn, "project");
+  if (!projectColumns?.has("id")) return index;
+  const projectProjection = [
+    "id",
+    projectColumns.has("name") ? "name" : null,
+    // `project.worktree` is the canonical root in the shipped schema. It takes
+    // precedence over registered/linked directories for name/root display.
+    projectColumns.has("worktree") ? "worktree" : null,
+  ].filter((column): column is string => column !== null);
+  const projectRows = conn.all<ProjectRow>(
+    `SELECT ${projectProjection.join(", ")} FROM "project" ORDER BY id ASC`,
+  );
+  for (const row of projectRows) {
+    if (typeof row.id !== "string" || !row.id) continue;
+    const name = normalizeString(row.name);
+    const canonicalRoot = normalizeString(row.worktree)?.trim();
+    index[row.id] = {
+      id: row.id,
+      name: name?.trim() ? name : undefined,
+      directories: canonicalRoot ? [canonicalRoot] : [],
+      worktrees: [],
+    };
+  }
+
+  const directoryColumns = readTableColumns(conn, "project_directory");
+  if (directoryColumns?.has("project_id") && directoryColumns.has("directory")) {
+    const rows = conn.all<ProjectDirectoryRow>(
+      `SELECT project_id, directory FROM "project_directory" ORDER BY project_id ASC, directory ASC`,
+    );
+    for (const row of rows) {
+      const info = typeof row.project_id === "string" ? index[row.project_id] : undefined;
+      if (!info || typeof row.directory !== "string" || !row.directory) continue;
+      // Canonical root first, then registered directories without duplicates.
+      if (info.directories.includes(row.directory)) continue;
+      info.directories.push(row.directory);
+    }
+  }
+
+  const worktreeColumns = readTableColumns(conn, "worktree");
+  if (worktreeColumns?.has("project_id") && worktreeColumns.has("directory")) {
+    // Shipped rows use `'git'` for linked worktrees and may also carry the
+    // historical `'git_worktree'`; NULL marks canonical roots, not linked ones.
+    // Missing strategy column degrades to the previous include-all behavior.
+    const strategyFilter = worktreeColumns.has("strategy")
+      ? ` WHERE strategy IN ('git', 'git_worktree')`
+      : "";
+    const rows = conn.all<WorktreeRow>(
+      `SELECT project_id, directory FROM "worktree"${strategyFilter} ORDER BY project_id ASC, directory ASC`,
+    );
+    for (const row of rows) {
+      const info = typeof row.project_id === "string" ? index[row.project_id] : undefined;
+      if (info && typeof row.directory === "string" && row.directory) {
+        info.worktrees.push(row.directory);
+      }
+    }
+  }
+
+  return index;
+}
+
 export async function readProjectsIndex(): Promise<Record<string, OpenCodeProjectInfo>> {
   const db = openDbOrNull();
-  const index: Record<string, OpenCodeProjectInfo> = {};
-  if (!db) return index;
+  if (!db) return {};
 
   const conn = await db.open();
   try {
-    const projectColumns = readTableColumns(conn, "project");
-    if (!projectColumns?.has("id")) return index;
-    const nameProjection = projectColumns.has("name") ? ", name" : "";
-    const projectRows = conn.all<ProjectRow>(
-      `SELECT id${nameProjection} FROM "project" ORDER BY id ASC`,
-    );
-    for (const row of projectRows) {
-      if (typeof row.id !== "string" || !row.id) continue;
-      const name = normalizeString(row.name);
-      index[row.id] = {
-        id: row.id,
-        name: name?.trim() ? name : undefined,
-        directories: [],
-        worktrees: [],
-      };
-    }
-
-    const directoryColumns = readTableColumns(conn, "project_directory");
-    if (directoryColumns?.has("project_id") && directoryColumns.has("directory")) {
-      const rows = conn.all<ProjectDirectoryRow>(
-        `SELECT project_id, directory FROM "project_directory" ORDER BY project_id ASC, directory ASC`,
-      );
-      for (const row of rows) {
-        const info = typeof row.project_id === "string" ? index[row.project_id] : undefined;
-        if (info && typeof row.directory === "string" && row.directory) {
-          info.directories.push(row.directory);
-        }
-      }
-    }
-
-    const worktreeColumns = readTableColumns(conn, "worktree");
-    if (worktreeColumns?.has("project_id") && worktreeColumns.has("directory")) {
-      const strategyFilter = worktreeColumns.has("strategy")
-        ? ` WHERE strategy = 'git_worktree'`
-        : "";
-      const rows = conn.all<WorktreeRow>(
-        `SELECT project_id, directory FROM "worktree"${strategyFilter} ORDER BY project_id ASC, directory ASC`,
-      );
-      for (const row of rows) {
-        const info = typeof row.project_id === "string" ? index[row.project_id] : undefined;
-        if (info && typeof row.directory === "string" && row.directory) {
-          info.worktrees.push(row.directory);
-        }
-      }
-    }
-
-    return index;
+    return readProjectsIndexFrom(conn);
   } finally {
     conn.close();
   }
+}
+
+export interface ReadCompactionMarkersParams {
+  sessionID?: string;
+  sessionIDs?: readonly string[];
+  /** Inclusive lower bound on `time_created`. */
+  sinceMs?: number;
+  /** Inclusive upper bound on `time_created`. */
+  untilMs?: number;
 }
 
 /**
  * Read compaction message rows as ordered markers (R26, R46): ordered at the
  * source by timestamp, then message id. The assistant readers cannot return
  * these rows (`type = 'compaction'`), and this reader projects physical
- * columns only — it never touches the JSON payload. Missing tables degrade to
- * no markers.
+ * columns only — it never touches the JSON payload. `sessionID`/`sessionIDs`
+ * scope the read; empty id lists return no markers without opening the
+ * database. Missing tables degrade to no markers.
  */
-export async function readCompactionMarkers(): Promise<OpenCodeCompactionMarker[]> {
+function readCompactionMarkersFrom(
+  conn: SqliteConn,
+  params: ReadCompactionMarkersParams,
+): OpenCodeCompactionMarker[] {
+  const scope = normalizeStorageScope(params);
+  if (scope.kind === "empty") return [];
+
+  const columns = readTableColumns(conn, "session_message");
+  if (!columns?.has("type")) return [];
+
+  const markers: OpenCodeCompactionMarker[] = [];
+  const maxIdsPerQuery = Math.max(
+    1,
+    SQLITE_MAX_MESSAGE_QUERY_ARGS - countDefined([params.sinceMs, params.untilMs]),
+  );
+
+  const collect = (query: { sql: string; args: unknown[] }): void => {
+    for (const row of conn.all<CompactionRow>(query.sql, query.args)) {
+      if (typeof row.id !== "string" || typeof row.session_id !== "string") continue;
+      if (typeof row.time_created !== "number" || !Number.isFinite(row.time_created)) continue;
+      markers.push({ sessionId: row.session_id, atMs: row.time_created, messageId: row.id });
+    }
+  };
+
+  const build = (scopeClause?: StorageIdScope): { sql: string; args: unknown[] } => {
+    const where = [`type = 'compaction'`];
+    const args: unknown[] = [];
+    if (scopeClause?.sessionID !== undefined) {
+      where.push(`session_id = ?`);
+      args.push(scopeClause.sessionID);
+    } else if (scopeClause?.sessionIDs !== undefined) {
+      where.push(`session_id IN (${scopeClause.sessionIDs.map(() => "?").join(", ")})`);
+      args.push(...scopeClause.sessionIDs);
+    }
+    if (typeof params.sinceMs === "number") {
+      where.push(`time_created >= ?`);
+      args.push(params.sinceMs);
+    }
+    if (typeof params.untilMs === "number") {
+      where.push(`time_created <= ?`);
+      args.push(params.untilMs);
+    }
+    return {
+      sql:
+        `SELECT id, session_id, time_created FROM "session_message"` +
+        ` WHERE ${where.join(" AND ")} ORDER BY time_created ASC, id ASC`,
+      args,
+    };
+  };
+
+  if (scope.kind === "all") {
+    collect(build());
+  } else {
+    const queries = scopedIdQueries(scope.ids, maxIdsPerQuery, (clause) => build(clause));
+    for (const query of queries) collect(query);
+  }
+
+  markers.sort((a, b) => a.atMs - b.atMs || compareStringIds(a.messageId, b.messageId));
+  return markers;
+}
+
+export async function readCompactionMarkers(
+  params: ReadCompactionMarkersParams = {},
+): Promise<OpenCodeCompactionMarker[]> {
+  if (normalizeStorageScope(params).kind === "empty") return [];
+
   const db = openDbOrNull();
   if (!db) return [];
 
   const conn = await db.open();
   try {
-    const columns = readTableColumns(conn, "session_message");
-    if (!columns?.has("type")) return [];
+    return readCompactionMarkersFrom(conn, params);
+  } finally {
+    conn.close();
+  }
+}
 
-    const markers: OpenCodeCompactionMarker[] = [];
-    const rows = conn.all<CompactionRow>(
-      `SELECT id, session_id, time_created FROM "session_message" WHERE type = 'compaction' ORDER BY time_created ASC, id ASC`,
-    );
-    for (const row of rows) {
-      if (typeof row.id !== "string" || typeof row.session_id !== "string") continue;
-      if (typeof row.time_created !== "number" || !Number.isFinite(row.time_created)) continue;
-      markers.push({ sessionId: row.session_id, atMs: row.time_created, messageId: row.id });
+// ---------------------------------------------------------------------------
+// Incremental reconciliation seam (worker): message revisions + source
+// identity. Identity snapshots are full for the requested scope so deletions,
+// type changes, and completion transitions are all detectable by diffing.
+// ---------------------------------------------------------------------------
+
+/** One physical `session_message` identity, projected without the JSON payload. */
+export interface OpenCodeMessageRevision {
+  messageID: string;
+  sessionID: string;
+  type: string;
+  createdAtMs: number;
+  /** `session_message.time_updated`; null when the column is absent or non-numeric. */
+  updatedAtMs: number | null;
+  /** Positive parsed `$.time.completed`; null when unfinished or unavailable. */
+  completedAtMs: number | null;
+}
+
+export interface OpenCodeMessageRevisionSnapshot {
+  /** false when `session_message` is absent or unreadable. */
+  available: boolean;
+  /** false when the schema has no usable `time_updated` column. */
+  updatedAtAvailable: boolean;
+  /** false when SQLite JSON extraction is unavailable for `time.completed`. */
+  completedAtAvailable: boolean;
+  /** Full identity snapshot for the requested scope, ordered by messageID. */
+  revisions: OpenCodeMessageRevision[];
+}
+
+export interface ReadMessageRevisionsParams {
+  sessionID?: string;
+  sessionIDs?: readonly string[];
+  messageIDs?: readonly string[];
+}
+
+type RevisionRow = {
+  id: unknown;
+  session_id: unknown;
+  type: unknown;
+  time_created: unknown;
+  time_updated: unknown;
+  completed: unknown;
+};
+
+const UNAVAILABLE_REVISION_SNAPSHOT: OpenCodeMessageRevisionSnapshot = {
+  available: false,
+  updatedAtAvailable: false,
+  completedAtAvailable: false,
+  revisions: [],
+};
+
+function revisionSnapshot(
+  updatedAtAvailable: boolean,
+  completedAtAvailable: boolean,
+  revisions: OpenCodeMessageRevision[],
+): OpenCodeMessageRevisionSnapshot {
+  return { available: true, updatedAtAvailable, completedAtAvailable, revisions };
+}
+
+/**
+ * Read every physical message identity in scope for worker reconciliation.
+ *
+ * The snapshot deliberately includes unfinished, non-assistant, and compaction
+ * rows: diffing message-id sets detects deletions, and per-row `type`,
+ * `updatedAtMs`, and `completedAtMs` detect edits, type transitions, and
+ * completion/uncompletion. Fetch changed completed assistant rows with
+ * `readCompletedAssistantRows({ messageIDs })`. Empty scopes return an empty
+ * snapshot without opening the database.
+ */
+function readMessageRevisionsFrom(
+  conn: SqliteConn,
+  params: ReadMessageRevisionsParams,
+): OpenCodeMessageRevisionSnapshot {
+  const scope = normalizeStorageScope(params);
+  if (scope.kind === "empty") return UNAVAILABLE_REVISION_SNAPSHOT;
+
+  const columns = readTableColumns(conn, "session_message");
+  if (!columns?.has("id") || !columns.has("session_id")) {
+    return UNAVAILABLE_REVISION_SNAPSHOT;
+  }
+
+  const updatedAtAvailable = columns.has("time_updated");
+  const completedAtAvailable = columns.has("data") && hasJsonExtract(conn);
+  const projection = [
+    "id",
+    "session_id",
+    columns.has("type") ? "type" : "NULL AS type",
+    columns.has("time_created") ? "time_created" : "NULL AS time_created",
+    updatedAtAvailable ? "time_updated" : "NULL AS time_updated",
+    completedAtAvailable
+      ? `${guardedJsonScalar("$.time.completed")} AS completed`
+      : "NULL AS completed",
+  ].join(", ");
+
+  const maxIdsPerQuery = SQLITE_MAX_MESSAGE_QUERY_ARGS;
+  const revisions: OpenCodeMessageRevision[] = [];
+
+  const build = (scopeClause?: StorageIdScope): { sql: string; args: unknown[] } => {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (scopeClause?.sessionID !== undefined) {
+      where.push(`session_id = ?`);
+      args.push(scopeClause.sessionID);
+    } else if (scopeClause?.sessionIDs !== undefined) {
+      where.push(`session_id IN (${scopeClause.sessionIDs.map(() => "?").join(", ")})`);
+      args.push(...scopeClause.sessionIDs);
     }
-    return markers;
+    if (scopeClause?.messageIDs !== undefined) {
+      where.push(`id IN (${scopeClause.messageIDs.map(() => "?").join(", ")})`);
+      args.push(...scopeClause.messageIDs);
+    }
+    return {
+      sql:
+        `SELECT ${projection} FROM "session_message"` +
+        (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
+        ` ORDER BY id ASC`,
+      args,
+    };
+  };
+
+  const collect = (query: { sql: string; args: unknown[] }): void => {
+    for (const row of conn.all<RevisionRow>(query.sql, query.args)) {
+      if (typeof row.id !== "string" || typeof row.session_id !== "string") continue;
+      const createdAt = normalizeNumber(row.time_created);
+      const updatedAt = normalizeNumber(row.time_updated);
+      const completed = normalizeNumber(row.completed);
+      revisions.push({
+        messageID: row.id,
+        sessionID: row.session_id,
+        type: normalizeString(row.type) ?? "unknown",
+        createdAtMs: createdAt ?? 0,
+        updatedAtMs: updatedAt ?? null,
+        completedAtMs: completed !== undefined && completed > 0 ? Math.trunc(completed) : null,
+      });
+    }
+  };
+
+  if (scope.kind === "all") {
+    collect(build());
+  } else {
+    const queries = scopedIdQueries(scope.ids, maxIdsPerQuery, (clause) => build(clause));
+    for (const query of queries) collect(query);
+  }
+
+  revisions.sort((a, b) => compareStringIds(a.messageID, b.messageID));
+  return revisionSnapshot(updatedAtAvailable, completedAtAvailable, revisions);
+}
+
+export async function readMessageRevisions(
+  params: ReadMessageRevisionsParams = {},
+): Promise<OpenCodeMessageRevisionSnapshot> {
+  if (normalizeStorageScope(params).kind === "empty") return UNAVAILABLE_REVISION_SNAPSHOT;
+
+  const db = openDbOrNull();
+  if (!db) return UNAVAILABLE_REVISION_SNAPSHOT;
+
+  const conn = await db.open();
+  try {
+    return readMessageRevisionsFrom(conn, params);
+  } finally {
+    conn.close();
+  }
+}
+
+/**
+ * Local-only source identity for worker cache invalidation; never browser data.
+ *
+ * The stable comparison key is the file identity (`device` + `inode`, falling
+ * back to `realPath` + `birthtimeMs`) plus the readable schema layout token —
+ * never `sizeBytes`/`mtimeMs`, which change on ordinary writes and WAL
+ * checkpoints and must not trigger a rebuild. `sizeBytes`/`mtimeMs` are kept
+ * as informational metadata for existing consumers.
+ */
+export type OpenCodeSourceIdentityStatus = "ok" | "missing" | "unreadable";
+
+export interface OpenCodeSourceIdentity {
+  dbPath: string;
+  /** True when the path names a file on disk, even if it cannot be opened. */
+  exists: boolean;
+  /** `ok` only when the file is present and the schema could be read. */
+  status: OpenCodeSourceIdentityStatus;
+  /** Informational only; never part of the identity comparison. */
+  sizeBytes?: number;
+  /** Informational only; never part of the identity comparison. */
+  mtimeMs?: number;
+  /** Canonical path when resolvable (symlink target). */
+  realPath?: string;
+  /** Stable `stat.dev`, decimal string, when available. */
+  device?: string;
+  /** Stable `stat.ino` (file id), decimal string, when available and non-zero. */
+  inode?: string;
+  /** Creation time in ms; stable fallback key when device/inode are unavailable. */
+  birthtimeMs?: number;
+  /** Sorted column layout of the OpenCode tables, read from the database. */
+  schemaToken?: string;
+}
+
+/** Explicit comparison outcome for `compareOpenCodeSourceIdentity`. */
+export type OpenCodeSourceIdentityComparison = "same" | "changed" | "unavailable" | "unknown";
+
+function fileIdentityKey(identity: OpenCodeSourceIdentity): string | undefined {
+  if (identity.device !== undefined && identity.inode !== undefined && identity.inode !== "0") {
+    return `d:${identity.device}:${identity.inode}`;
+  }
+  if (identity.birthtimeMs !== undefined) {
+    return `b:${identity.realPath ?? identity.dbPath}:${identity.birthtimeMs}`;
+  }
+  return undefined;
+}
+
+/**
+ * Compare a previously accepted good identity with the latest read.
+ *
+ * - `unavailable`: the latest read could not reach a readable file. Keep the
+ *   current good state (and the last good identity) untouched.
+ * - `changed`: stable file identity or schema layout changed (reset,
+ *   replacement, deletion+recreate). Rebuild from scratch.
+ * - `unknown`: the platform did not expose a stable file key. Callers should
+ *   treat this as unchanged to avoid rebuild churn on content writes.
+ * - `same`: content may have changed; reconcile through the revision diff.
+ */
+export function compareOpenCodeSourceIdentity(
+  previous: OpenCodeSourceIdentity | undefined,
+  next: OpenCodeSourceIdentity,
+): OpenCodeSourceIdentityComparison {
+  if (next.status !== "ok") return "unavailable";
+  if (previous === undefined || previous.status !== "ok") return "changed";
+  if ((previous.realPath ?? previous.dbPath) !== (next.realPath ?? next.dbPath)) return "changed";
+
+  const previousKey = fileIdentityKey(previous);
+  const nextKey = fileIdentityKey(next);
+  if (previousKey === undefined || nextKey === undefined) return "unknown";
+  if (previousKey !== nextKey) return "changed";
+
+  if (
+    previous.schemaToken !== undefined &&
+    next.schemaToken !== undefined &&
+    previous.schemaToken !== next.schemaToken
+  ) {
+    return "changed";
+  }
+  return "same";
+}
+
+const SCHEMA_TOKEN_TABLES = [
+  "session_v2",
+  "session_message",
+  "project",
+  "project_directory",
+  "worktree",
+] as const;
+
+function readSchemaToken(conn: Pick<SqliteConn, "all" | "get">): string {
+  // Force a header read: a file that is not a database throws here, so the
+  // identity/snapshot seams report "unreadable" instead of an empty DB.
+  conn.get<{ c: number }>("SELECT count(*) AS c FROM sqlite_master");
+
+  const parts: string[] = [];
+  for (const table of SCHEMA_TOKEN_TABLES) {
+    const columns = readTableColumns(conn, table);
+    parts.push(columns ? `${table}(${[...columns].sort().join(",")})` : `${table}()`);
+  }
+  return parts.join("|");
+}
+
+function readSourceIdentityStat(): OpenCodeSourceIdentity {
+  const dbPath = getOpenCodeDbPath();
+  if (dbPath === ":memory:") return { dbPath, exists: false, status: "missing" };
+
+  let stat: ReturnType<typeof statSync>;
+  try {
+    stat = statSync(dbPath);
+  } catch {
+    return { dbPath, exists: false, status: "missing" };
+  }
+
+  if (!stat.isFile()) {
+    return {
+      dbPath,
+      exists: false,
+      status: "unreadable",
+      sizeBytes: stat.size,
+      mtimeMs: stat.mtimeMs,
+      birthtimeMs: stat.birthtimeMs,
+    };
+  }
+
+  const identity: OpenCodeSourceIdentity = {
+    dbPath,
+    exists: true,
+    status: "ok",
+    sizeBytes: stat.size,
+    mtimeMs: stat.mtimeMs,
+    birthtimeMs: stat.birthtimeMs,
+  };
+  try {
+    identity.realPath = realpathSync(dbPath);
+  } catch {
+    // Keep dbPath as the path component of the fallback key.
+  }
+  try {
+    // BigInt stat keeps 64-bit file ids exact across platforms.
+    const big = statSync(dbPath, { bigint: true });
+    identity.device = big.dev.toString();
+    identity.inode = big.ino.toString();
+    identity.birthtimeMs = Number(big.birthtimeMs);
+  } catch {
+    // Fall back to the birthtime from the regular stat.
+  }
+  return identity;
+}
+
+/**
+ * Read the local source identity. `status: "ok"` means the file exists and the
+ * schema was readable (including a successfully opened, empty database);
+ * `"missing"` and `"unreadable"` are explicit so callers can preserve the last
+ * good state instead of replacing it with an empty generation.
+ */
+export async function readOpenCodeSourceIdentity(): Promise<OpenCodeSourceIdentity> {
+  const identity = readSourceIdentityStat();
+  if (identity.status !== "ok") return identity;
+
+  let conn: SqliteConn;
+  try {
+    conn = await openOpenCodeSqliteReadOnly(identity.dbPath);
+  } catch {
+    return { ...identity, status: "unreadable", schemaToken: undefined };
+  }
+  try {
+    return { ...identity, schemaToken: readSchemaToken(conn) };
+  } catch {
+    return { ...identity, status: "unreadable", schemaToken: undefined };
+  } finally {
+    conn.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Consistent read snapshot seam (worker): one read-only connection with one
+// read transaction. Every metadata/revision/payload read inside the callback
+// observes the same database snapshot, and the transaction is committed on
+// success, rolled back on error, and the connection closed in `finally`.
+// ---------------------------------------------------------------------------
+
+export interface OpenCodeStorageSnapshot {
+  readonly dbPath: string;
+  /** Identity captured for the transaction that backs every reader below. */
+  readonly identity: OpenCodeSourceIdentity;
+  readAllSessionsIndex(): Record<string, OpenCodeSessionInfo>;
+  readProjectsIndex(): Record<string, OpenCodeProjectInfo>;
+  readCompletedAssistantRows(params?: ReadCompletedAssistantRowsParams): OpenCodeRawAssistantRow[];
+  readCompactionMarkers(params?: ReadCompactionMarkersParams): OpenCodeCompactionMarker[];
+  readMessageRevisions(params?: ReadMessageRevisionsParams): OpenCodeMessageRevisionSnapshot;
+}
+
+/**
+ * `missing`/`unreadable` are control results, not errors: the caller keeps its
+ * last good state instead of publishing an empty or partial generation.
+ */
+export type OpenCodeStorageSnapshotResult<T> =
+  | { status: "ok"; value: T }
+  | { status: "missing" }
+  | { status: "unreadable" };
+
+function createStorageSnapshot(
+  conn: SqliteConn,
+  identity: OpenCodeSourceIdentity,
+): OpenCodeStorageSnapshot {
+  return {
+    dbPath: identity.dbPath,
+    identity,
+    readAllSessionsIndex: () => readAllSessionsIndexFrom(conn),
+    readProjectsIndex: () => readProjectsIndexFrom(conn),
+    readCompletedAssistantRows: (params = {}) => readCompletedAssistantRowsFrom(conn, params),
+    readCompactionMarkers: (params = {}) => readCompactionMarkersFrom(conn, params),
+    readMessageRevisions: (params = {}) => readMessageRevisionsFrom(conn, params),
+  };
+}
+
+/**
+ * Run `read` against one transaction-bound snapshot of the OpenCode database.
+ *
+ * The first `SELECT` after `BEGIN` establishes the read snapshot, so changed
+ * payload reads and the membership/revision read inside the callback cannot
+ * observe a concurrently committed generation. Callback errors propagate after
+ * a rollback; only opening/transaction/schema failures map to `missing` or
+ * `unreadable`.
+ */
+export async function withOpenCodeStorageSnapshot<T>(
+  read: (snapshot: OpenCodeStorageSnapshot) => T | Promise<T>,
+): Promise<OpenCodeStorageSnapshotResult<T>> {
+  const statIdentity = readSourceIdentityStat();
+  if (statIdentity.status === "missing") return { status: "missing" };
+  if (statIdentity.status === "unreadable") return { status: "unreadable" };
+
+  let conn: SqliteConn;
+  try {
+    conn = await openOpenCodeSqliteReadOnly(statIdentity.dbPath);
+  } catch {
+    return { status: "unreadable" };
+  }
+
+  let began = false;
+  try {
+    try {
+      conn.get("BEGIN");
+      began = true;
+      conn.get("SELECT 1");
+    } catch {
+      return { status: "unreadable" };
+    }
+
+    let identity: OpenCodeSourceIdentity;
+    try {
+      identity = { ...statIdentity, schemaToken: readSchemaToken(conn) };
+    } catch {
+      return { status: "unreadable" };
+    }
+
+    const value = await read(createStorageSnapshot(conn, identity));
+    if (began) {
+      try {
+        conn.get("COMMIT");
+      } catch {
+        // A read-only transaction commit has no observable effect.
+      }
+      began = false;
+    }
+    return { status: "ok", value };
+  } catch (error) {
+    if (began) {
+      try {
+        conn.get("ROLLBACK");
+      } catch {
+        // The connection is closed in `finally` regardless.
+      }
+    }
+    throw error;
   } finally {
     conn.close();
   }

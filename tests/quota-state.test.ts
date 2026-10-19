@@ -3,6 +3,7 @@ import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promise
 import { basename } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { QuotaProvider } from "../src/lib/entries.js";
 import { validateQuotaProviders } from "../src/lib/quota-providers.js";
 import { PROVIDER_CACHE_POLICIES } from "../src/providers/cache-policies.js";
 
@@ -2151,6 +2152,49 @@ describe("quota-state shared cache", () => {
     await expect(readCachedProviderResult({ provider, ctx, ttlMs: 60_000 })).resolves.toEqual({
       hit: false,
     });
+  });
+
+  it("accepts a live entry carrying optional info text", async () => {
+    const { __resetQuotaStateForTests, fetchQuotaProviderResult } = await import(
+      "../src/lib/quota-state.js"
+    );
+    __resetQuotaStateForTests();
+    const provider: QuotaProvider = {
+      id: "opencode",
+      cachePolicy: { kind: "account-neutral" },
+      isAvailable: vi.fn(async () => true),
+      fetch: vi.fn(async () => ({
+        attempted: true,
+        entries: [
+          {
+            accounting: { ...TEST_ACCOUNTING, resultType: "spend" },
+            kind: "quantity",
+            name: "zen-monthly-spend",
+            group: "OpenCode Zen",
+            info: "Workspace monthly spend (includes Go API equivalent)",
+            semantic: {
+              metric: { kind: "window", window: "month" },
+              prominence: "primary",
+            },
+            quantity: { decimal: "12.34", unit: { kind: "currency", code: "USD" } },
+          },
+        ],
+        errors: [],
+      })),
+    };
+
+    const result = await fetchQuotaProviderResult({
+      provider,
+      ctx: createTestContext(),
+      ttlMs: 60_000,
+    });
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0]).toMatchObject({
+      name: "zen-monthly-spend",
+      info: "Workspace monthly spend (includes Go API equivalent)",
+    });
+    expect(result.errors).toEqual([]);
   });
 
   it("rejects cache v3 timestamps that are parseable but not ISO", async () => {

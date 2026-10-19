@@ -144,6 +144,8 @@ export interface GroupedQuotaEntryMeta {
   group?: string;
   /** Optional row label inside the group, e.g. "5h:" or "Usage:". */
   label?: string;
+  /** Optional GUI help text for the row label; not a label and never rendered as one. */
+  info?: string;
   /** Optional legacy label for verbose command output when it differs from resultType. */
   metricLabel?: string;
   /** Complete provider-neutral row semantics. Rich providers require this on every row. */

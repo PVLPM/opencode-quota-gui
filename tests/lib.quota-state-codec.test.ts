@@ -272,6 +272,47 @@ describe("quota-state codec", () => {
     expect(normalized?.presentation).toEqual({ singleWindowDisplayName: "Synthetic" });
   });
 
+  it("accepts and sanitizes optional info text on quantity and percent entries", () => {
+    const input = createValidResult();
+    const quantity = input.entries[2] as any;
+    quantity.info = "  Workspace\nmonthly spend\u001b[31m  ";
+    const percent = input.entries[0] as any;
+    percent.info = "Budget info";
+
+    const normalized = normalizeQuotaProviderResult(input);
+    expect(normalized).not.toBeNull();
+    expect(normalized?.entries[0]?.info).toBe("Budget info");
+    expect(normalized?.entries[2]?.info).toBe("Workspace monthly spend");
+  });
+
+  it("normalizes the OpenCode Zen monthly-spend entry instead of rejecting it", () => {
+    const result = {
+      attempted: true,
+      entries: [
+        {
+          accounting: {
+            resultType: "spend",
+            acquisitionMethod: "remote_api",
+            ownership: "maintained",
+            authority: "provider_reported",
+          },
+          kind: "quantity",
+          name: "zen-monthly-spend",
+          group: "OpenCode Zen",
+          info: "Workspace monthly spend (includes Go API equivalent)",
+          semantic: {
+            metric: { kind: "window", window: "month" },
+            prominence: "primary",
+          },
+          quantity: { decimal: "12.34", unit: { kind: "currency", code: "USD" } },
+        },
+      ],
+      errors: [],
+    };
+
+    expect(normalizeQuotaProviderResult(result)).toEqual(result);
+  });
+
   it("accepts local-estimate diagnostics without a remote format", () => {
     const input = createValidResult();
     input.diagnostics = [
@@ -396,6 +437,7 @@ describe("quota-state codec", () => {
       (value: any) => (value.entries[0].basis.used.authority = "other"),
     ],
     ["value rows require strings", (value: any) => (value.entries[1].value = true)],
+    ["entry info is a string", (value: any) => (value.entries[2].info = 42)],
     ["quantity rows require semantics", (value: any) => delete value.entries[2].semantic],
     [
       "quantity decimals are canonical",

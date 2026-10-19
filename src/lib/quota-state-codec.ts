@@ -251,6 +251,7 @@ const COMMON_ENTRY_KEYS = [
   "name",
   "resetTimeIso",
   "group",
+  "info",
   "label",
   "metricLabel",
   "semantic",
@@ -267,7 +268,7 @@ function hasValidEntryBase(entry: Record<string, unknown>, safeText: boolean): b
     (entry.sortPriority === undefined ||
       (typeof entry.sortPriority === "number" && Number.isFinite(entry.sortPriority))) &&
     (entry.rowKey === undefined || typeof entry.rowKey === "string") &&
-    ["group", "label", "metricLabel", "right"].every(
+    ["group", "info", "label", "metricLabel", "right"].every(
       (key) => entry[key] === undefined || typeof entry[key] === "string",
     ) &&
     (entry.semantic === undefined || isAccountingSemantic(entry.semantic, safeText))

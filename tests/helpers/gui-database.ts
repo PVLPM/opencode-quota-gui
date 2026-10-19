@@ -31,6 +31,8 @@ export type GuiDatabaseMessageRow = {
   type?: string;
   seq?: number;
   createdMs: number;
+  /** `session_message.time_updated`; defaults to `completedMs ?? createdMs`. */
+  updatedMs?: number;
   completedMs?: number | null;
   model?: { providerID: string; id: string } | null;
   tokens?: {
@@ -44,13 +46,21 @@ export type GuiDatabaseMessageRow = {
   agent?: string | null;
 };
 
-export type GuiDatabaseProjectRow = { id: string; name?: string | null };
+export type GuiDatabaseProjectRow = {
+  id: string;
+  name?: string | null;
+  /** Canonical project root (`project.worktree`); absent/null when unknown. */
+  worktree?: string | null;
+};
 export type GuiDatabaseProjectDirectoryRow = { projectID: string; directory: string };
 export type GuiDatabaseWorktreeRow = {
   projectID: string;
   directory: string;
-  /** Defaults to `git_worktree`, the strategy the spec records. */
-  strategy?: string;
+  /**
+   * Linked-worktree strategy. Live OpenCode rows use `'git'`, `'git_worktree'`,
+   * or NULL (canonical roots); defaults to `'git'`.
+   */
+  strategy?: string | null;
 };
 
 export type GuiDatabaseSchema = {
@@ -58,10 +68,20 @@ export type GuiDatabaseSchema = {
   sessionProjectColumns?: boolean;
   /** Create the `session_message` table. Defaults to `true`. */
   messageTable?: boolean;
+  /** Create the `session_message.time_updated` column. Defaults to `true`. */
+  messageUpdatedColumn?: boolean;
+  /** Journal mode to set before closing; e.g. `"wal"` for concurrent-reader tests. */
+  journalMode?: string;
   /** Create `project`, `project_directory`, and `worktree`. Defaults to `true`. */
   projectTables?: boolean;
   /** Create the `project.name` column. Defaults to `true`. */
   projectNameColumn?: boolean;
+  /** Create the `project.worktree` canonical-root column. Defaults to `true`. */
+  projectWorktreeColumn?: boolean;
+  /** Create the `project_directory` table. Defaults to `true`. */
+  projectDirectoryTable?: boolean;
+  /** Create the `worktree` table. Defaults to `true`. */
+  worktreeTable?: boolean;
   /** Create the `worktree.strategy` column. Defaults to `true`. */
   worktreeStrategyColumn?: boolean;
   sessions?: readonly GuiDatabaseSessionRow[];
@@ -144,6 +164,7 @@ export function writeGuiDatabase(root: string, schema: GuiDatabaseSchema = {}): 
     }
 
     if (schema.messageTable ?? true) {
+      const messageUpdatedColumn = schema.messageUpdatedColumn ?? true;
       database.exec(`
         CREATE TABLE "session_message" (
           id TEXT PRIMARY KEY,
@@ -151,74 +172,93 @@ export function writeGuiDatabase(root: string, schema: GuiDatabaseSchema = {}): 
           type TEXT NOT NULL,
           seq INTEGER NOT NULL,
           time_created INTEGER NOT NULL,
-          time_updated INTEGER NOT NULL,
+          ${messageUpdatedColumn ? "time_updated INTEGER NOT NULL," : ""}
           data TEXT NOT NULL
         );
       `);
       const insertMessage = database.prepare(
         `INSERT INTO "session_message" (
-          id, session_id, type, seq, time_created, time_updated, data
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          id, session_id, type, seq, time_created${messageUpdatedColumn ? ", time_updated" : ""}, data
+        ) VALUES (?, ?, ?, ?, ?${messageUpdatedColumn ? ", ?" : ""}, ?)`,
       );
       (schema.messages ?? []).forEach((row, index) => {
-        insertMessage.run(
+        const args: unknown[] = [
           row.id,
           row.sessionID,
           row.type ?? "assistant",
           row.seq ?? index + 1,
           row.createdMs,
-          row.completedMs ?? row.createdMs,
-          JSON.stringify(buildMessageData(row)),
-        );
+        ];
+        if (messageUpdatedColumn) args.push(row.updatedMs ?? row.completedMs ?? row.createdMs);
+        args.push(JSON.stringify(buildMessageData(row)));
+        insertMessage.run(...args);
       });
     }
 
     if (schema.projectTables ?? true) {
       const projectNameColumn = schema.projectNameColumn ?? true;
+      const projectWorktreeColumn = schema.projectWorktreeColumn ?? true;
       database.exec(
-        `CREATE TABLE "project" (id TEXT PRIMARY KEY${projectNameColumn ? ", name TEXT" : ""});`,
+        `CREATE TABLE "project" (id TEXT PRIMARY KEY${projectNameColumn ? ", name TEXT" : ""}${
+          projectWorktreeColumn ? ", worktree TEXT" : ""
+        });`,
       );
+      const projectColumns = [
+        "id",
+        ...(projectNameColumn ? ["name"] : []),
+        ...(projectWorktreeColumn ? ["worktree"] : []),
+      ];
       const insertProject = database.prepare(
-        `INSERT INTO "project" (id${projectNameColumn ? ", name" : ""}) VALUES (?${
-          projectNameColumn ? ", ?" : ""
-        })`,
+        `INSERT INTO "project" (${projectColumns.join(", ")}) VALUES (${projectColumns
+          .map(() => "?")
+          .join(", ")})`,
       );
       for (const row of schema.projects ?? []) {
-        if (projectNameColumn) insertProject.run(row.id, row.name ?? null);
-        else insertProject.run(row.id);
+        const args: unknown[] = [row.id];
+        if (projectNameColumn) args.push(row.name ?? null);
+        if (projectWorktreeColumn) args.push(row.worktree ?? null);
+        insertProject.run(...args);
       }
 
-      database.exec(
-        `CREATE TABLE "project_directory" (project_id TEXT NOT NULL, directory TEXT NOT NULL);`,
-      );
-      const insertProjectDirectory = database.prepare(
-        `INSERT INTO "project_directory" (project_id, directory) VALUES (?, ?)`,
-      );
-      for (const row of schema.projectDirectories ?? []) {
-        insertProjectDirectory.run(row.projectID, row.directory);
+      if (schema.projectDirectoryTable ?? true) {
+        database.exec(
+          `CREATE TABLE "project_directory" (project_id TEXT NOT NULL, directory TEXT NOT NULL);`,
+        );
+        const insertProjectDirectory = database.prepare(
+          `INSERT INTO "project_directory" (project_id, directory) VALUES (?, ?)`,
+        );
+        for (const row of schema.projectDirectories ?? []) {
+          insertProjectDirectory.run(row.projectID, row.directory);
+        }
       }
 
-      const worktreeStrategyColumn = schema.worktreeStrategyColumn ?? true;
-      database.exec(
-        `CREATE TABLE "worktree" (
-          project_id TEXT NOT NULL,
-          directory TEXT NOT NULL${worktreeStrategyColumn ? ", strategy TEXT" : ""}
-        );`,
-      );
-      const insertWorktree = database.prepare(
-        `INSERT INTO "worktree" (project_id, directory${
-          worktreeStrategyColumn ? ", strategy" : ""
-        }) VALUES (?, ?${worktreeStrategyColumn ? ", ?" : ""})`,
-      );
-      for (const row of schema.worktrees ?? []) {
-        if (worktreeStrategyColumn) {
-          insertWorktree.run(row.projectID, row.directory, row.strategy ?? "git_worktree");
-        } else {
-          insertWorktree.run(row.projectID, row.directory);
+      if (schema.worktreeTable ?? true) {
+        const worktreeStrategyColumn = schema.worktreeStrategyColumn ?? true;
+        database.exec(
+          `CREATE TABLE "worktree" (
+            project_id TEXT NOT NULL,
+            directory TEXT NOT NULL${worktreeStrategyColumn ? ", strategy TEXT" : ""}
+          );`,
+        );
+        const insertWorktree = database.prepare(
+          `INSERT INTO "worktree" (project_id, directory${
+            worktreeStrategyColumn ? ", strategy" : ""
+          }) VALUES (?, ?${worktreeStrategyColumn ? ", ?" : ""})`,
+        );
+        for (const row of schema.worktrees ?? []) {
+          if (worktreeStrategyColumn) {
+            const strategy = row.strategy === undefined ? "git" : row.strategy;
+            insertWorktree.run(row.projectID, row.directory, strategy);
+          } else {
+            insertWorktree.run(row.projectID, row.directory);
+          }
         }
       }
     }
   } finally {
+    if (schema.journalMode) {
+      database.exec(`PRAGMA journal_mode=${schema.journalMode};`);
+    }
     database.close();
   }
   return dbPath;

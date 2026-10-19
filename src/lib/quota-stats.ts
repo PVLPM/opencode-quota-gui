@@ -514,6 +514,66 @@ export function classifyMissingPricing(params: {
   return { kind: "unknown" };
 }
 
+/** One message's pricing outcome: priced cost, unpriced tokens, or an unknown mapping. */
+export type TokenPricingOutcome =
+  | { status: "priced"; key: PricedKey; costUsd: number }
+  | { status: "unpriced"; key: PricedKey; reason: string }
+  | { status: "unknown"; unknown: UnknownKey };
+
+/**
+ * The one shared pricing primitive. Both `aggregateUsage` (upstream surfaces)
+ * and the GUI aggregation call this; neither resolves keys, computes cost, or
+ * classifies missing pricing on its own.
+ *
+ * `cache` is optional and keyed exactly `"<providerID>|||<modelID>"`, so a
+ * caller can reuse key resolution across many messages of the same source.
+ */
+export function priceTokenBuckets(params: {
+  providerID?: string;
+  modelID?: string;
+  tokens: TokenBuckets;
+  cache?: Map<string, PricingResolution>;
+}): TokenPricingOutcome {
+  const cacheKey = `${params.providerID ?? ""}|||${params.modelID ?? ""}`;
+  let resolution = params.cache?.get(cacheKey);
+  if (!resolution) {
+    resolution = resolvePricingKey({ providerID: params.providerID, modelID: params.modelID });
+    params.cache?.set(cacheKey, resolution);
+  }
+
+  if (!resolution.ok) {
+    return { status: "unknown", unknown: resolution.unknown };
+  }
+
+  const key = resolution.key;
+  const priced = calculateCostUsd({
+    provider: key.provider,
+    model: key.model,
+    tokens: params.tokens,
+  });
+  if (priced.ok) {
+    return { status: "priced", key, costUsd: priced.costUsd };
+  }
+
+  const classification = classifyMissingPricing({
+    mappedProvider: key.provider,
+    mappedModel: key.model,
+  });
+  if (classification.kind === "unpriced") {
+    return { status: "unpriced", key, reason: classification.reason };
+  }
+
+  return {
+    status: "unknown",
+    unknown: {
+      sourceProviderID: params.providerID ?? "unknown",
+      sourceModelID: params.modelID ?? "unknown",
+      mappedProvider: key.provider,
+      mappedModel: key.model,
+    },
+  };
+}
+
 function compareSessionCreatedAt(
   a: Awaited<ReturnType<typeof readAllSessionsIndex>>[string],
   b: Awaited<ReturnType<typeof readAllSessionsIndex>>[string],
@@ -641,77 +701,48 @@ export async function aggregateUsage(params: {
       });
     }
 
-    const cacheKey = `${msg.providerID ?? ""}|||${msg.modelID ?? ""}`;
-    const cached = resolutionCache.get(cacheKey);
-    const mapping =
-      cached ?? resolvePricingKey({ providerID: msg.providerID, modelID: msg.modelID });
-    if (!cached) resolutionCache.set(cacheKey, mapping);
+    const outcome = priceTokenBuckets({
+      providerID: msg.providerID,
+      modelID: msg.modelID,
+      tokens,
+      cache: resolutionCache,
+    });
 
-    if (!mapping.ok) {
+    if (outcome.status === "unknown") {
       unknownTotals = addTokenBuckets(unknownTotals, tokens);
-      const k = JSON.stringify(mapping.unknown);
+      const k = JSON.stringify(outcome.unknown);
       const row = unknown.get(k);
       if (row) {
         row.tokens = addTokenBuckets(row.tokens, tokens);
         row.messageCount += 1;
       } else {
-        unknown.set(k, { key: mapping.unknown, tokens, messageCount: 1 });
+        unknown.set(k, { key: outcome.unknown, tokens, messageCount: 1 });
       }
       continue;
     }
 
-    const priced = calculateCostUsd({
-      provider: mapping.key.provider,
-      model: mapping.key.model,
-      tokens,
-    });
-    if (!priced.ok) {
-      const classification = classifyMissingPricing({
-        mappedProvider: mapping.key.provider,
-        mappedModel: mapping.key.model,
-      });
-
-      if (classification.kind === "unpriced") {
-        unpricedTotals = addTokenBuckets(unpricedTotals, tokens);
-        const rowKey: UnpricedKey = {
-          sourceProviderID: msg.providerID ?? "unknown",
-          sourceModelID: msg.modelID ?? "unknown",
-          mappedProvider: mapping.key.provider,
-          mappedModel: mapping.key.model,
-          reason: classification.reason,
-        };
-        const k = JSON.stringify(rowKey);
-        const row = unpriced.get(k);
-        if (row) {
-          row.tokens = addTokenBuckets(row.tokens, tokens);
-          row.messageCount += 1;
-        } else {
-          unpriced.set(k, { key: rowKey, tokens, messageCount: 1 });
-        }
-        continue;
-      }
-
-      // Mapping succeeded but pricing missing.
-      unknownTotals = addTokenBuckets(unknownTotals, tokens);
-      const unk: UnknownKey = {
+    if (outcome.status === "unpriced") {
+      unpricedTotals = addTokenBuckets(unpricedTotals, tokens);
+      const rowKey: UnpricedKey = {
         sourceProviderID: msg.providerID ?? "unknown",
         sourceModelID: msg.modelID ?? "unknown",
-        mappedProvider: mapping.key.provider,
-        mappedModel: mapping.key.model,
+        mappedProvider: outcome.key.provider,
+        mappedModel: outcome.key.model,
+        reason: outcome.reason,
       };
-      const k = JSON.stringify(unk);
-      const row = unknown.get(k);
+      const k = JSON.stringify(rowKey);
+      const row = unpriced.get(k);
       if (row) {
         row.tokens = addTokenBuckets(row.tokens, tokens);
         row.messageCount += 1;
       } else {
-        unknown.set(k, { key: unk, tokens, messageCount: 1 });
+        unpriced.set(k, { key: rowKey, tokens, messageCount: 1 });
       }
       continue;
     }
 
     pricedTotals = addTokenBuckets(pricedTotals, tokens);
-    costTotal += priced.costUsd;
+    costTotal += outcome.costUsd;
 
     // Tokscale-style: key by OpenCode source provider + source model id.
     const srcProviderID = msg.providerID ?? "unknown";
@@ -720,14 +751,14 @@ export async function aggregateUsage(params: {
     const sm = bySourceModel.get(srcModelKey);
     if (sm) {
       sm.tokens = addTokenBuckets(sm.tokens, tokens);
-      sm.costUsd += priced.costUsd;
+      sm.costUsd += outcome.costUsd;
       sm.messageCount += 1;
     } else {
       bySourceModel.set(srcModelKey, {
         sourceProviderID: srcProviderID,
         sourceModelID: srcModelID,
         tokens,
-        costUsd: priced.costUsd,
+        costUsd: outcome.costUsd,
         messageCount: 1,
       });
     }
@@ -736,35 +767,35 @@ export async function aggregateUsage(params: {
     const src = bySourceProvider.get(srcProvider);
     if (src) {
       src.tokens = addTokenBuckets(src.tokens, tokens);
-      src.costUsd += priced.costUsd;
+      src.costUsd += outcome.costUsd;
       src.messageCount += 1;
     } else {
       bySourceProvider.set(srcProvider, {
         providerID: srcProvider,
         tokens,
-        costUsd: priced.costUsd,
+        costUsd: outcome.costUsd,
         messageCount: 1,
       });
     }
 
-    const modelKey = `${mapping.key.provider}/${mapping.key.model}`;
+    const modelKey = `${outcome.key.provider}/${outcome.key.model}`;
     const existing = byModel.get(modelKey);
     if (existing) {
       existing.tokens = addTokenBuckets(existing.tokens, tokens);
-      existing.costUsd += priced.costUsd;
+      existing.costUsd += outcome.costUsd;
       existing.messageCount += 1;
     } else {
       byModel.set(modelKey, {
-        key: mapping.key,
+        key: outcome.key,
         tokens,
-        costUsd: priced.costUsd,
+        costUsd: outcome.costUsd,
         messageCount: 1,
       });
     }
 
     const s = bySession.get(sid);
     if (s) {
-      s.costUsd += priced.costUsd;
+      s.costUsd += outcome.costUsd;
     }
   }
 

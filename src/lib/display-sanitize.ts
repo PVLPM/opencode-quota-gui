@@ -98,6 +98,7 @@ export function sanitizeQuotaToastEntry(entry: QuotaToastEntry): QuotaToastEntry
     sanitized.metricLabel = sanitizeDisplayText(entry.metricLabel);
   }
   if (entry.right !== undefined) sanitized.right = sanitizeDisplayText(entry.right);
+  if (entry.info !== undefined) sanitized.info = sanitizeSingleLineDisplayText(entry.info);
   if (entry.semantic) sanitized.semantic = sanitizeAccountingSemantic(entry.semantic);
 
   if (isValueEntry(sanitized)) {
