@@ -78,6 +78,7 @@ import {
   visibleRows,
 } from "../src/ui/view-model";
 import type { VisibilityCatalog } from "../src/ui/views/settings";
+import { readVisibilityCatalog } from "../src/ui/visibility-catalog";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { SettingsQuerySeam } from "./fixtures/gui-live-settings.js";
 import type { TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
@@ -1749,6 +1750,51 @@ describe("settings page", () => {
     expect(html).toContain("text-input-v2");
   });
 
+  it("names the account inline on every row when a provider has multiple accounts", async () => {
+    const snapshot = settingsSnapshot();
+    const html = await renderView("/views/settings.tsx", "SettingsView", {
+      snapshot,
+      client: {
+        settings: async () => snapshot,
+        saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+        saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+        importPreview: async () => ({ from: "w", keys: [], issues: [], expectedRevision: "r" }),
+        importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      },
+      toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
+      catalog: {
+        providers: [
+          {
+            providerId: "multi-provider",
+            providerLabel: "Multi Provider",
+            accountLabels: ["Plus", "Team"],
+            cardIds: ["multi-provider#plus", "multi-provider#team"],
+            rows: [
+              {
+                id: "multi-provider#plus#window:weekly",
+                label: "Weekly",
+                accountLabel: "Plus",
+              },
+              {
+                id: "multi-provider#team#window:weekly",
+                label: "Weekly",
+                accountLabel: "Team",
+              },
+            ],
+          },
+        ],
+      },
+      onReload: noop,
+    });
+
+    expect(text(html)).toContain("Weekly · Plus");
+    expect(text(html)).toContain("Weekly · Team");
+    expect(html).toContain('aria-label="Hide Weekly · Plus"');
+    expect(html).toContain('aria-label="Hide Weekly · Team"');
+    expect(html).not.toContain("multi-provider");
+    expect(html).not.toContain("#window");
+  });
+
   it("shows a plain, id-free empty state when the visibility catalog is unavailable", async () => {
     const snapshot = settingsSnapshot();
     snapshot.values["dashboard.hiddenCards"] = ["provider-x#cardhash"];
@@ -1783,6 +1829,175 @@ describe("settings page", () => {
     expect(quota).toContain('viewBox="0 0 256 256"');
     expect(quota).toContain('fill="currentColor"');
     expect(quota).toContain("M180,80a4,4,0,0,1,4-4h32");
+  });
+});
+
+describe("cached visibility catalog", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  async function until(predicate: () => boolean, what: string): Promise<void> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (predicate()) return;
+      await settle();
+    }
+    throw new Error(`probe: ${what} never happened`);
+  }
+
+  it("keeps a hidden provider configurable across filtered quota cycles, navigation and reload", async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+    };
+    let onHashChange: (() => void) | undefined;
+    const browser = {
+      location: { hash: "#/?range=7d" },
+      localStorage: storage,
+      addEventListener: (_name: string, callback: () => void) => {
+        onHashChange = callback;
+      },
+      removeEventListener: () => {
+        onHashChange = undefined;
+      },
+    };
+    vi.stubGlobal("window", browser);
+
+    const visibleCard = providerCard();
+    const hiddenCard = providerCard({
+      cardId: "hidden-provider#cardhash" as never,
+      providerId: "hidden-provider",
+      providerLabel: "Hidden Provider",
+      accountLabel: "Team",
+      rows: [
+        percentRow({
+          rowId: "hidden-provider#cardhash#window:weekly" as never,
+          label: "Weekly",
+        }),
+      ],
+    });
+    const snapshot = settingsSnapshot();
+    let filtered = false;
+    let onEvent: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+    const saves: Parameters<DashboardClient["saveSettings"]>[0][] = [];
+    const client: DashboardClient = {
+      setActiveView: async () => {},
+      connection: () => "live",
+      onConnectionChange: () => () => {},
+      subscribe: (callback) => {
+        onEvent = callback;
+        return () => {
+          onEvent = undefined;
+        };
+      },
+      health: async () => ({ app: "opencode-quota-gui", contractVersion: 1 }),
+      quota: async () =>
+        homeSnapshot({
+          providers: {
+            cards: filtered ? [visibleCard] : [visibleCard, hiddenCard],
+            enabledProviders: "auto",
+            polledAtMs: NOW,
+          },
+        }),
+      home: async () => homeSnapshot(),
+      project: async () => projectSnapshot(),
+      session: async () => sessionSnapshot(),
+      settings: async () => snapshot,
+      saveSettings: async (input) => {
+        saves.push(input);
+        return { revision: "revision-2", applied: input.patch, warnings: [] };
+      },
+      saveVisibility: async () => ({ revision: "revision-2", applied: {}, warnings: [] }),
+      importPreview: async () => ({
+        from: "workspace: synthetic",
+        keys: [],
+        issues: [],
+        expectedRevision: snapshot.revision,
+      }),
+      importApply: async () => ({ revision: "revision-2", applied: {}, warnings: [] }),
+    };
+
+    const root = renderGraph.createTestRoot();
+    let dispose = renderGraph.mount(() => renderGraph.app({ client }), root);
+    let reloadedDispose: (() => void) | undefined;
+    const buttonByLabel = (scope: TestNode, label: string): TestNode => {
+      const found = renderGraph
+        .elementsNamed(scope, "button")
+        .find((node) => node.props["aria-label"] === label);
+      if (found === undefined) throw new Error(`probe: no button labelled ${label}`);
+      return found;
+    };
+    const navigate = async (hash: string) => {
+      browser.location.hash = hash;
+      onHashChange?.();
+      await settle();
+    };
+
+    try {
+      // The first unfiltered snapshot reaches the browser-local cache.
+      await until(
+        () =>
+          readVisibilityCatalog(storage).providers.some(
+            (entry) => entry.providerId === "hidden-provider",
+          ),
+        "the cache to learn both providers",
+      );
+
+      await navigate("#/settings?range=7d");
+      expect(renderGraph.textOf(root)).toContain("Hidden Provider");
+      renderGraph.listenerOf(buttonByLabel(root, "Hide Hidden Provider"), "onClick")?.({});
+      await settle();
+      // Persist the hidden provider id before the filtered cycle arrives.
+      snapshot.values["dashboard.hiddenCards"] = ["hidden-provider"];
+      snapshot.visibility.hiddenCards = ["hidden-provider"];
+      const saveButton = renderGraph
+        .elementsNamed(root, "button")
+        .find((node) => renderGraph.textOf(node) === "Save");
+      if (saveButton === undefined) throw new Error("probe: no Save button");
+      renderGraph.listenerOf(saveButton, "onClick")?.({});
+      await until(() => saves.length === 1, "the visibility save");
+      expect(saves[0]?.patch["dashboard.hiddenCards"]).toEqual(["hidden-provider"]);
+
+      // The server now excludes the hidden provider from quota probes. The
+      // filtered snapshot must not erase its Settings card.
+      filtered = true;
+      await navigate("#/?range=7d");
+      await settle();
+      onEvent?.({ topic: "quota.changed", at: NOW });
+      await settle();
+      expect(renderGraph.textOf(root)).not.toContain("Hidden Provider");
+      expect(readVisibilityCatalog(storage).providers.map((entry) => entry.providerId)).toContain(
+        "hidden-provider",
+      );
+
+      await navigate("#/settings?range=7d");
+      expect(renderGraph.textOf(root)).toContain("Hidden Provider");
+      expect(buttonByLabel(root, "Show Hidden Provider").props["aria-pressed"]).toBe("true");
+      expect(buttonByLabel(root, "Hide Weekly")).toBeDefined();
+
+      // Leaving and returning still finds the cached provider.
+      await navigate("#/?range=7d");
+      await navigate("#/settings?range=7d");
+      expect(renderGraph.textOf(root)).toContain("Hidden Provider");
+      expect(buttonByLabel(root, "Show Hidden Provider")).toBeDefined();
+
+      // A reload starts from storage alone; the quota snapshot stays filtered.
+      dispose();
+      dispose = () => {};
+      const reloaded = renderGraph.createTestRoot();
+      reloadedDispose = renderGraph.mount(() => renderGraph.app({ client }), reloaded);
+      await until(
+        () => renderGraph.textOf(reloaded).includes("Hidden Provider"),
+        "the cached provider after reload",
+      );
+      expect(buttonByLabel(reloaded, "Show Hidden Provider")).toBeDefined();
+      expect(buttonByLabel(reloaded, "Hide Weekly")).toBeDefined();
+    } finally {
+      reloadedDispose?.();
+      dispose();
+      vi.unstubAllGlobals();
+    }
   });
 });
 

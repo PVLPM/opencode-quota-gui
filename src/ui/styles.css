@@ -1487,6 +1487,11 @@ body {
   overflow-wrap: anywhere;
 }
 
+.qg-vis-row__account {
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+}
+
 /* Rows reserve the grip column so labels share the provider name's left edge. */
 .qg-vis-provider__head > .qg-eye,
 .qg-vis-row > .qg-eye {

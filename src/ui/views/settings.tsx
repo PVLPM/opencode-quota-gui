@@ -10,14 +10,7 @@ import { EyeToggle } from "../components/eye-toggle";
 import { GripDotsIcon } from "../components/icons";
 import type { Toaster } from "../components/toast";
 import { DashboardError } from "../dashboard-client";
-import {
-  Button,
-  Icon,
-  SegmentedControl,
-  SegmentedControlItem,
-  Switch,
-  TextInput,
-} from "../opencode-ui";
+import { Button, SegmentedControl, SegmentedControlItem, Switch, TextInput } from "../opencode-ui";
 import {
   applyConflict,
   applyWriteResult,
@@ -41,30 +34,9 @@ import {
   windowSelection,
 } from "../settings-model";
 import { describeError } from "../view-model";
+import type { VisibilityCatalog, VisibilityProvider, VisibilityRow } from "../visibility-catalog";
 
-/** One quota row a visibility eye can hide; the id is stored, never displayed. */
-export interface VisibilityRow {
-  id: string;
-  label: string;
-  accountLabel?: string;
-}
-
-/** One provider's remembered cards and rows, grouped for the visibility cards. */
-export interface VisibilityProvider {
-  providerId: string;
-  providerLabel: string;
-  /** Unique, for identification only; generated `[Provider] (Plan)` forms are unwrapped. */
-  accountLabels: string[];
-  /** Stable card ids, never displayed. */
-  cardIds: string[];
-  /** Unique by row id across the provider's cards. */
-  rows: VisibilityRow[];
-}
-
-/** Last-seen providers with their cards and rows, so an eye can name what it hides. */
-export interface VisibilityCatalog {
-  providers: VisibilityProvider[];
-}
+export type { VisibilityCatalog, VisibilityProvider, VisibilityRow } from "../visibility-catalog";
 
 /**
  * Settings (design spec §5.4, §7, §10; R14, R15).
@@ -461,14 +433,25 @@ export function SettingsView(props: {
                     <For each={provider.rows}>
                       {(row) => {
                         const rowHidden = () => hiddenRowIds().includes(row.id);
+                        const rowAccount = () =>
+                          needsAccountLabels(provider) ? row.accountLabel : undefined;
+                        const rowName = () =>
+                          rowAccount() === undefined ? row.label : `${row.label} · ${rowAccount()}`;
                         return (
                           <div class="qg-vis-row">
-                            <span class="qg-vis-row__label">{row.label}</span>
+                            <span class="qg-vis-row__label">
+                              {row.label}
+                              <Show when={rowAccount()}>
+                                {(account) => (
+                                  <span class="qg-vis-row__account"> · {account()}</span>
+                                )}
+                              </Show>
+                            </span>
                             <EyeToggle
                               variant="row"
                               disabled={!hiddenRowsWritable() || busy()}
                               pressed={rowHidden()}
-                              label={`${rowHidden() ? "Show" : "Hide"} ${row.label}`}
+                              label={`${rowHidden() ? "Show" : "Hide"} ${rowName()}`}
                               title={rowHidden() ? "Show" : "Hide"}
                               onToggle={async () => toggleRowEye(row)}
                             />
@@ -844,6 +827,16 @@ export function SettingsView(props: {
       </div>
     </div>
   );
+}
+
+function needsAccountLabels(provider: VisibilityProvider): boolean {
+  if (provider.accountLabels.length > 1) return true;
+  const labels = new Set<string>();
+  for (const row of provider.rows) {
+    if (labels.has(row.label)) return true;
+    labels.add(row.label);
+  }
+  return false;
 }
 
 function isConfigChanged(error: unknown): boolean {

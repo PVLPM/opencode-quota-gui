@@ -42,7 +42,15 @@ import {
 import { HomeView, QuotaLoading, QuotaView } from "./views/home";
 import { ProjectView } from "./views/project";
 import { SessionView } from "./views/session";
-import { SettingsView, type VisibilityCatalog, type VisibilityProvider } from "./views/settings";
+import { SettingsView } from "./views/settings";
+import {
+  mergeVisibilityCatalog,
+  readVisibilityCatalog,
+  type VisibilityCatalog,
+  type VisibilityProvider,
+  visibilityCatalogEquals,
+  writeVisibilityCatalog,
+} from "./visibility-catalog";
 
 /**
  * Dashboard shell (design spec §10).
@@ -102,6 +110,37 @@ function browserStorage(): Storage | undefined {
   }
 }
 
+/** Groups one quota snapshot's cards exactly as the Settings visibility section expects. */
+function catalogFromSnapshot(snapshot: QuotaSnapshot | undefined): VisibilityCatalog {
+  if (snapshot === undefined) return { providers: [] };
+  const providers = new Map<string, VisibilityProvider>();
+  for (const card of snapshot.providers.cards) {
+    let provider = providers.get(card.providerId);
+    if (provider === undefined) {
+      provider = {
+        providerId: card.providerId,
+        providerLabel: card.providerLabel,
+        accountLabels: [],
+        cardIds: [],
+        rows: [],
+      };
+      providers.set(card.providerId, provider);
+    }
+    if (!provider.cardIds.includes(card.cardId)) provider.cardIds.push(card.cardId);
+    const account = card.accountLabel
+      ? inlineAccountLabel(card.providerLabel, card.accountLabel)
+      : undefined;
+    if (account !== undefined && !provider.accountLabels.includes(account)) {
+      provider.accountLabels.push(account);
+    }
+    for (const row of card.rows) {
+      if (provider.rows.some((existing) => existing.id === row.rowId)) continue;
+      provider.rows.push({ id: row.rowId, label: row.label, accountLabel: account });
+    }
+  }
+  return { providers: [...providers.values()] };
+}
+
 export function App(props: { client: DashboardClient }): JSX.Element {
   const [location, setLocation] = createSignal<Location>(
     parseLocation(currentHash(), readStoredRange(browserStorage())),
@@ -158,38 +197,25 @@ export function App(props: { client: DashboardClient }): JSX.Element {
 
   /**
    * The visibility section names what it hides. The catalog is grouped by
-   * provider: ids are stored for stable configuration but never rendered, and
-   * the section shows a plain empty state until the quota snapshot arrives.
+   * provider: ids are stored for stable configuration but never rendered. The
+   * browser-local cache keeps providers the server has filtered out of quota
+   * probes, so a hidden provider keeps its Settings card and can be shown again
+   * after navigation or a reload; the section shows a plain empty state only
+   * until either source has something to show.
    */
-  const catalog = createMemo<VisibilityCatalog>(() => {
-    const home = homeSnapshot();
-    if (!home) return { providers: [] };
-    const providers = new Map<string, VisibilityProvider>();
-    for (const card of home.providers.cards) {
-      let provider = providers.get(card.providerId);
-      if (provider === undefined) {
-        provider = {
-          providerId: card.providerId,
-          providerLabel: card.providerLabel,
-          accountLabels: [],
-          cardIds: [],
-          rows: [],
-        };
-        providers.set(card.providerId, provider);
-      }
-      if (!provider.cardIds.includes(card.cardId)) provider.cardIds.push(card.cardId);
-      const account = card.accountLabel
-        ? inlineAccountLabel(card.providerLabel, card.accountLabel)
-        : undefined;
-      if (account !== undefined && !provider.accountLabels.includes(account)) {
-        provider.accountLabels.push(account);
-      }
-      for (const row of card.rows) {
-        if (provider.rows.some((existing) => existing.id === row.rowId)) continue;
-        provider.rows.push({ id: row.rowId, label: row.label, accountLabel: account });
-      }
-    }
-    return { providers: [...providers.values()] };
+  const [catalogCache, setCatalogCache] = createSignal<VisibilityCatalog>(
+    readVisibilityCatalog(browserStorage()),
+  );
+  const quotaCatalog = createMemo(() => catalogFromSnapshot(homeSnapshot()));
+  const catalog = createMemo(() => mergeVisibilityCatalog(quotaCatalog(), catalogCache()));
+
+  // Compare before writing: the cache signal feeds the merged catalog, so a
+  // blind set would rerun this effect forever.
+  createEffect(() => {
+    const merged = catalog();
+    if (visibilityCatalogEquals(merged, catalogCache())) return;
+    setCatalogCache(merged);
+    writeVisibilityCatalog(browserStorage(), merged);
   });
 
   function updateRange(next: RangeKey): void {
