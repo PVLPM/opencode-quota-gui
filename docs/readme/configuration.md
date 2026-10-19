@@ -197,7 +197,7 @@ Provider credentials (API keys, cookies, tokens) are never set here. See [API ke
 | `enabled`                     | `true`         | Master switch. When `false`, `/quota`, `/quota_status`, `/pricing_refresh`, and `/tokens_*` do nothing. |
 | `enabledProviders`            | `"auto"`       | Auto-detect providers, or list them. Use `quota-providers` for custom definitions. |
 | `quotaProviders`              | `[]`           | Custom provider definitions (global-only). See [Custom providers](#custom-providers). |
-| `minIntervalMs`               | `300000`       | Minimum time between provider updates. |
+| `minIntervalMs`               | `60000`        | Minimum time between provider updates (default 1 minute). |
 | `requestTimeoutMs`            | `5000`         | Provider request timeout in milliseconds. |
 | `formatStyle`                 | `singleWindow` | `singleWindow` shows one reset period per provider; `allWindows` shows all. Used by toasts, the sidebar, and the compact line unless they override it. Old `classic`/`grouped` names still work. |
 | `percentDisplayMode`          | `remaining`    | `remaining` shows what is left; `used` shows what is used. |

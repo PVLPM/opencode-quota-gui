@@ -80,6 +80,10 @@ async function importDistModules() {
  */
 export async function startSyntheticDashboard(options = {}) {
   const nowMs = options.nowMs ?? Date.now();
+  // The analytics worker reads its own live clock, so fixture rows are seeded
+  // relative to the wall clock to fall inside the requested range windows.
+  // Provider synthesis keeps the caller-provided clock (deterministic probes).
+  const fixtureNowMs = options.fixtureNowMs ?? Date.now();
   const root = await mkdtemp(join(tmpdir(), "opencode-quota-gui-smoke-"));
   const previousEnv = new Map();
 
@@ -101,7 +105,7 @@ export async function startSyntheticDashboard(options = {}) {
   let dashboard;
 
   try {
-    const fixture = seedSyntheticFixture(root, nowMs);
+    const fixture = seedSyntheticFixture(root, fixtureNowMs);
     for (const key of ENV_KEYS) previousEnv.set(key, process.env[key]);
     process.env.OPENCODE_DB = fixture.dbPath;
     process.env.OPENCODE_CONFIG_DIR = fixture.configDir;

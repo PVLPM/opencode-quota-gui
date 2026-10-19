@@ -58,6 +58,16 @@ interface HomePayload {
   providers: { cards: ProviderCardPayload[] };
 }
 
+interface QuotaPayload {
+  generatedAtMs: number;
+  stale: boolean;
+  providers: {
+    cards: ProviderCardPayload[];
+    enabledProviders: string[] | "auto";
+    polledAtMs: number;
+  };
+}
+
 interface ProjectPayload {
   name: string;
   roots: { sessionId: string; worktreeLabel?: string; tokens: TokenTotals }[];
@@ -215,8 +225,17 @@ describe("synthetic GUI smoke", () => {
   });
 
   it("maps two synthetic accounts and a provider amount that is not the API-equivalent cost", async () => {
+    // The quota surface is independent; home analytics must not wait on or
+    // carry provider cards.
     const home = await requestJson<HomePayload>(apiUrl("/home?range=lifetime"));
-    const cards = home.body.providers.cards;
+    expect(home.status).toBe(200);
+    expect(home.body.providers.cards).toEqual([]);
+
+    const quota = await requestJson<QuotaPayload>(apiUrl("/quota"));
+    expect(quota.status).toBe(200);
+    expect(quota.body.stale).toBe(false);
+    expect(quota.body.providers.polledAtMs).toBe(FIXED_NOW_MS);
+    const cards = quota.body.providers.cards;
 
     expect(cards).toHaveLength(3);
     expect(new Set(cards.map((card) => card.cardId)).size).toBe(3);
