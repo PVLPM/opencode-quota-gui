@@ -4,17 +4,14 @@ import { TOKEN_CATEGORIES } from "./format";
 /**
  * Chart geometry (design spec §6, §10; R31, R32, R48).
  *
- * Pure number crunching, no DOM: the stacked-area chart, its totals-only
- * fallback decision, and the two session series all come from here, so the
+ * Pure number crunching, no DOM: the five stacked areas and the two session
+ * series all come from here, so the
  * chart's honesty rules are unit-testable.
  */
 
 export const CATEGORY_KEYS: readonly (keyof TokenStack)[] = TOKEN_CATEGORIES.map(
   (category) => category.key,
 );
-
-/** A slice thinner than this share of its bucket is invisible at any plot height. */
-export const THIN_SLICE_SHARE = 0.005;
 
 export interface ChartSize {
   width: number;
@@ -101,7 +98,7 @@ export function buildTicks(yMax: number, ticks: number, plot: PlotRect): AxisTic
   if (yMax <= 0) return [{ value: 0, y: plot.bottom }];
   const step = niceTickStep(yMax, ticks);
   const result: AxisTick[] = [];
-  for (let value = 0; value <= yMax + step / 2; value += step) {
+  for (let value = 0; value <= yMax; value += step) {
     result.push({ value, y: plot.bottom - (value / yMax) * plot.height });
   }
   return result;
@@ -188,54 +185,6 @@ export function buildUsageGeometry(
     slotX,
     bucketIndexAt,
   };
-}
-
-/**
- * The totals-only series: one band from the baseline to the stacked total,
- * used when stacking would be unreadable (R32).
- */
-export function buildTotalsBand(geometry: UsageGeometry): StackBand {
-  return {
-    key: "input",
-    colorVar: "--qg-token-total",
-    xs: geometry.bands[0]?.xs ?? [],
-    upper: geometry.totalEdgeY,
-    lower: (geometry.bands[0]?.xs ?? []).map(() => geometry.plot.bottom),
-  };
-}
-
-/**
- * Totals-only fallback (R32, frontend-only).
- *
- * Stacking earns its complexity only when it shows something: if the window
- * uses fewer than two categories, or a used category is a sub-pixel sliver in
- * every bucket it appears in, the chart falls back to one totals series. The
- * numbers, the legend and the tooltip are unchanged either way.
- */
-export function shouldUseTotalsFallback(buckets: Bucket[]): boolean {
-  const used = new Set<keyof TokenStack>();
-  let anyValue = false;
-  const invisibleEverywhere = new Map<keyof TokenStack, boolean>();
-
-  for (const bucket of buckets) {
-    const total = bucket.tokens.total;
-    if (total <= 0) continue;
-    anyValue = true;
-    for (const key of CATEGORY_KEYS) {
-      const value = bucket.tokens[key];
-      if (value <= 0) continue;
-      used.add(key);
-      const visible = value / total >= THIN_SLICE_SHARE;
-      invisibleEverywhere.set(key, (invisibleEverywhere.get(key) ?? true) && !visible);
-    }
-  }
-
-  if (!anyValue) return false;
-  if (used.size < 2) return true;
-  for (const key of used) {
-    if (invisibleEverywhere.get(key) === true) return true;
-  }
-  return false;
 }
 
 export const DEFAULT_SESSION_SIZE: ChartSize = {
@@ -360,15 +309,33 @@ export function toLinePath(points: { x: number; y: number }[]): string {
     .join(" ");
 }
 
-/** Closed SVG path for one stacked band. */
+/**
+ * Shared zero-tangent cubic interpolation. Every boundary uses the same convex
+ * smoothstep weights, so adjacent bands share their exact edge and ordered
+ * boundaries cannot cross, even when a category is zero beside a sharp spike.
+ * Full-precision coordinates preserve tiny categories rather than rounding them
+ * to an artificial minimum height (or erasing them at two decimal places).
+ */
+function monotoneBoundary(xs: number[], ys: number[], reverse: boolean): string {
+  const indexes = xs.map((_, index) => index);
+  if (reverse) indexes.reverse();
+  let result = "";
+  for (let position = 1; position < indexes.length; position += 1) {
+    const previous = indexes[position - 1] as number;
+    const current = indexes[position] as number;
+    const x0 = xs[previous] as number;
+    const x1 = xs[current] as number;
+    const y0 = ys[previous] ?? 0;
+    const y1 = ys[current] ?? 0;
+    const dx = (x1 - x0) / 3;
+    result += ` C ${x0 + dx} ${y0} ${x1 - dx} ${y1} ${x1} ${y1}`;
+  }
+  return result;
+}
+
+/** Closed monotone SVG area; upper/lower edges are shared cumulative boundaries. */
 export function toBandPath(band: StackBand): string {
-  const upperPoints = band.xs
-    .map((x, index) => ({ x, y: band.upper[index] ?? 0 }))
-    .map((point) => `${point.x.toFixed(2)} ${point.y.toFixed(2)}`);
-  const lowerPoints = band.xs
-    .map((x, index) => ({ x, y: band.lower[index] ?? 0 }))
-    .reverse()
-    .map((point) => `${point.x.toFixed(2)} ${point.y.toFixed(2)}`);
-  if (upperPoints.length === 0) return "";
-  return `M ${upperPoints.join(" L ")} L ${lowerPoints.join(" L ")} Z`;
+  if (band.upper.length === 0 || band.xs.length === 0) return "";
+  const last = band.xs.length - 1;
+  return `M ${band.xs[0]} ${band.upper[0]}${monotoneBoundary(band.xs, band.upper, false)} L ${band.xs[last]} ${band.lower[last]}${monotoneBoundary(band.xs, band.lower, true)} Z`;
 }

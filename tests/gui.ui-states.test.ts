@@ -3,20 +3,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type {
   HomeSnapshot,
   SettingsSnapshot,
   SettingsWriteResult,
+  Usage,
 } from "../src/contracts/dashboard";
 import { buildRowKey, composeRowId } from "../src/contracts/identity";
 import type { RangeKey } from "../src/contracts/ranges";
-import {
-  buildStepGeometry,
-  buildUsageGeometry,
-  shouldUseTotalsFallback,
-  THIN_SLICE_SHARE,
-} from "../src/ui/chart-geometry";
+import { buildStepGeometry, buildUsageGeometry, toBandPath } from "../src/ui/chart-geometry";
 import type { Toaster } from "../src/ui/components/toast";
 import {
   type DashboardClient,
@@ -52,7 +48,10 @@ import {
   displayPreferencesFromValues,
   fieldErrors,
   initialDraft,
+  keyboardMovedProviderOrder,
+  orderedProviderIds,
   providerSelection,
+  reorderedProviderOrder,
   SETTINGS_FIELDS,
   SETTINGS_GROUPS,
   type SettingsField,
@@ -132,6 +131,9 @@ const liveSettingsPath = fileURLToPath(new URL("./fixtures/gui-live-settings.ts"
 
 /** The client-compiled rig: the same components, written to a plain object tree. */
 interface RenderGraph {
+  dashboardFailure: (code: string, status: number, message: string) => unknown;
+  app: (props: { client: DashboardClient }) => TestNode;
+  chart: (props: { usage: Usage }) => TestNode;
   createSignal: <T>(value: T) => [() => T, (next: T) => void];
   liveSection: (props: { state: () => LoadState<HomeSnapshot>; range: () => RangeKey }) => TestNode;
   liveSettings: (props: {
@@ -266,7 +268,18 @@ beforeAll(async () => {
   const renderer = await rendering.ssrLoadModule(rendererPath);
   const live = await rendering.ssrLoadModule(liveSectionPath);
   const liveSettings = await rendering.ssrLoadModule(liveSettingsPath);
+  const chartModule = await rendering.ssrLoadModule(
+    path.join(repoRoot, "src/ui/components/usage-chart.tsx"),
+  );
+  const appModule = await rendering.ssrLoadModule(path.join(repoRoot, "src/ui/app.tsx"));
+  const clientModule = await rendering.ssrLoadModule(
+    path.join(repoRoot, "src/ui/dashboard-client.ts"),
+  );
   renderGraph = {
+    dashboardFailure: (code, status, message) =>
+      new clientModule.DashboardError(code, status, message),
+    app: (props) => renderCore.createComponent(appModule.App, props),
+    chart: (props) => renderCore.createComponent(chartModule.UsageChart, props),
     createSignal: renderCore.createSignal,
     liveSection: live.LiveHomeSection,
     liveSettings: liveSettings.LiveSettingsRoute,
@@ -378,13 +391,37 @@ describe("section state machine", () => {
     }
   });
 
-  it("keeps chart inspection transient rather than exposing category filters or pinning", () => {
-    const source = readFileSync(path.join(repoRoot, "src/ui/components/usage-chart.tsx"), "utf8");
-    expect(source).toContain("onPointerLeave={() => setHighlight(undefined)}");
-    expect(source).toContain("onBlur={() => setHighlight(undefined)}");
-    expect(source).not.toContain("aria-pressed");
-    expect(source).not.toContain("setPinned");
-    expect(source).not.toContain("onClick=");
+  it("rounds currency quantities to two decimals and leaves other units exact", async () => {
+    const module = await graph.load("/components/quota-card.tsx");
+    const valueText = module.rowValueText as (row: unknown, preferences: unknown) => string;
+    const quantityRow = (decimal: string, unit: unknown) => ({
+      kind: "quantity",
+      quantity: { decimal, unit },
+    });
+
+    expect(
+      valueText(quantityRow("1.62481239", { kind: "currency", code: "USD" }), preferences),
+    ).toBe("1.62 USD");
+    expect(valueText(quantityRow("0", { kind: "currency", code: "USD" }), preferences)).toBe(
+      "0.00 USD",
+    );
+    expect(valueText(quantityRow("-0.004", { kind: "currency", code: "USD" }), preferences)).toBe(
+      "0.00 USD",
+    );
+    expect(valueText(quantityRow("-1.625", { kind: "currency", code: "USD" }), preferences)).toBe(
+      "-1.63 USD",
+    );
+    expect(
+      valueText(quantityRow("1.62481239", { kind: "count", unit: "token" }), preferences),
+    ).toBe("1.62481239 token");
+  });
+
+  it("labels legend inspection without exposing toggle semantics", async () => {
+    const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
+      usage: homeSnapshot().usage,
+    });
+    expect(html).toContain('aria-label="Highlight Input"');
+    expect(html).not.toContain("aria-pressed");
   });
   it("shows a skeleton only on the first load", () => {
     expect(resolveLoadState<number>({ loading: true })).toEqual({ kind: "skeleton" });
@@ -445,10 +482,21 @@ describe("section state machine", () => {
     expect(describeEmptyActivity(true)).toContain("No tokens were recorded");
   });
 
-  it("hides cards and rows by stable id only", () => {
-    const cards = [providerCard(), providerCard({ cardId: "provider-2#hash" as never })];
-    expect(visibleCards(cards, [])).toHaveLength(2);
-    expect(visibleCards(cards, ["provider-2#hash"])).toHaveLength(1);
+  it("hides cards by stable card id or provider id, and rows by stable id only", () => {
+    const cards = [
+      providerCard(),
+      providerCard({
+        cardId: "opencode#hash" as never,
+        providerId: "opencode",
+        providerLabel: "OpenCode Zen",
+      }),
+    ];
+    expect(visibleCards(cards, [])).toEqual(cards);
+    // The provider-level key hides that provider's whole card group.
+    expect(visibleCards(cards, ["opencode"])).toEqual([cards[0]]);
+    expect(visibleCards(cards, ["synthetic-provider", "opencode"])).toEqual([]);
+    // A legacy card-level key still hides exactly its own card.
+    expect(visibleCards(cards, ["opencode#hash"])).toEqual([cards[0]]);
     const rows = [percentRow(), percentRow({ rowId: "provider-1#cardhash#aggregate" as never })];
     expect(visibleRows(rows, ["provider-1#cardhash#aggregate"]).map((row) => row.rowId)).toEqual([
       "provider-1#cardhash#window:five_hour",
@@ -469,20 +517,163 @@ describe("section state machine", () => {
 });
 
 describe("home view composition", () => {
-  it("renders quota cards, usage and projects in the fixed order", async () => {
+  it("does not collapse separate accounts when their provider names match", async () => {
+    // Card ids are opaque server-side hashes (`provider#hash`); two accounts
+    // under the same provider name must keep distinct ids and distinct cards.
+    const cards = ["Synthetic team one", "Synthetic team two"].map((accountLabel, index) =>
+      providerCard({ cardId: `synthetic-provider#${index + 1}` as never, accountLabel }),
+    );
+    const html = await renderView(
+      "/views/home.tsx",
+      "QuotaView",
+      homeProps({
+        snapshot: homeSnapshot({ providers: { cards, enabledProviders: "auto", polledAtMs: NOW } }),
+      }),
+    );
+    expect(html.match(/class="qg-card"/g)).toHaveLength(2);
+    expect(text(html)).toContain("Synthetic team one");
+    expect(text(html)).toContain("Synthetic team two");
+  });
+  it("keeps provider and subscription/account in one inline hierarchy", async () => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({ accountLabel: "[Synthetic Provider] (Standard)" }),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+    });
+    const identity = text(html).slice(
+      html.indexOf('class="qg-card__identity"'),
+      html.indexOf("</header>"),
+    );
+    expect(identity).toContain('class="qg-card__provider">Synthetic Provider</span>');
+    expect(identity).toContain(
+      'class="qg-card__account"><span aria-hidden="true">· </span>Standard</span>',
+    );
+    expect(identity).not.toContain("[Synthetic Provider]");
+    expect(identity).not.toContain("<br");
+  });
+
+  it.each([
+    "[Other Provider] (Standard)",
+    "Standard · Synthetic team one",
+    "[Synthetic Provider] (Standard) · Synthetic team two",
+    "[Synthetic Provider] (Team (West))",
+  ])("preserves distinguishing account text: %s", async (accountLabel) => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({ accountLabel }),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+    });
+    expect(text(html)).toContain(accountLabel);
+  });
+  it.each([0, 0.1, 25.125, 100])("renders an honest used-quota bar at %s percent", async (used) => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaBar", {
+      label: "Synthetic window",
+      used,
+    });
+    expect(html).toContain("<meter");
+    expect(html).toContain(`value="${used}"`);
+    expect(html).toContain(`aria-valuetext="${used}% used"`);
+    expect(html).toContain(`--qg-used-position:${used}%`);
+    expect(html.includes('class="qg-row__bar-gap"')).toBe(used > 0 && used < 100);
+  });
+
+  it("keeps the bar on used quota when the badge displays remaining quota", async () => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({ rows: [percentRow({ percentUsed: 25, percentRemaining: 75 })] }),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+    });
+    expect(text(html)).toContain("75% remaining");
+    expect(html).toContain('value="25"');
+    expect(html).toContain("--qg-used-position:25%");
+  });
+
+  it.each([
+    [90, "critical"],
+    [89.9, "warning"],
+    [70, "warning"],
+    [69.9, "healthy"],
+    [100, "critical"],
+    [0, "healthy"],
+  ])("bands %s true used percent as %s", async (percentUsed, severity) => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({
+        rows: [percentRow({ percentUsed, percentRemaining: 100 - percentUsed })],
+      }),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+    });
+    expect(html).toContain(`data-severity="${severity}"`);
+  });
+
+  it.each([
+    [10, "critical"],
+    [10.1, "warning"],
+    [30, "warning"],
+    [30.1, "healthy"],
+  ])("bands %s true remaining percent as %s from the used complement", async (percentRemaining, severity) => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({
+        rows: [percentRow({ percentUsed: undefined, percentRemaining })],
+      }),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+    });
+    expect(html).toContain(`data-severity="${severity}"`);
+  });
+
+  it("shows the row info affordance only when the row carries info, and keeps the label", async () => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({
+        rows: [
+          percentRow({
+            label: "Monthly spend",
+            info: "Workspace monthly spend (includes Go API equivalent)",
+          }),
+          percentRow({
+            rowId: "provider-1#cardhash#window:weekly" as never,
+            label: "Weekly quota",
+          }),
+        ],
+      }),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+    });
+    // Only the row that carries `info` gets the affordance; the other stays bare.
+    expect(html.match(/class="qg-row__info"/g)).toHaveLength(1);
+    // The affordance is an accessible control that names what it explains.
+    expect(text(html)).toContain("More information about Monthly spend");
+    expect(text(html)).not.toContain("More information about Weekly quota");
+    // The label text is untouched: the sentence travels in the tooltip value.
+    expect(html).toContain('class="qg-row__label">Monthly spend</span>');
+    expect(html).not.toContain('class="qg-row__label">Monthly spend (includes');
+  });
+
+  it("separates Quota from Analytics and keeps usage before projects", async () => {
     const html = await renderView("/views/home.tsx", "HomeView", homeProps());
     const quota = html.indexOf('id="qg-home-quota"');
     const usageSection = html.indexOf('id="qg-home-usage"');
     const projects = html.indexOf('id="qg-home-projects"');
-    expect(quota).toBeGreaterThan(-1);
+    expect(quota).toBe(-1);
     expect(usageSection).toBeGreaterThan(quota);
     expect(projects).toBeGreaterThan(usageSection);
+    const quotaHtml = await renderView("/views/home.tsx", "QuotaView", homeProps());
+    expect(quotaHtml).toContain('id="qg-home-quota"');
+    expect(quotaHtml).not.toContain('id="qg-home-usage"');
+    expect(quotaHtml).not.toContain("Observed");
+    expect(quotaHtml).toContain("Polled");
   });
 
   it("keeps a provider failure card-local and names it provider-level when no account is known", async () => {
     const html = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({
         snapshot: homeSnapshot({
           providers: {
@@ -513,7 +704,7 @@ describe("home view composition", () => {
   it("attributes a failure to its account when the card knows one", async () => {
     const html = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({
         snapshot: homeSnapshot({
           providers: {
@@ -536,7 +727,7 @@ describe("home view composition", () => {
   it("states the empty provider and empty activity cases explicitly", async () => {
     const emptyProviders = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({
         snapshot: homeSnapshot({ providers: { cards: [], enabledProviders: [], polledAtMs: NOW } }),
       }),
@@ -558,11 +749,59 @@ describe("home view composition", () => {
   it("reports every card as hidden rather than pretending there are none", async () => {
     const html = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({ hiddenCards: ["provider-1#cardhash"] }),
     );
     expect(html).toContain("Every provider card is hidden");
     expect(html).not.toContain("qg-card-grid");
+  });
+
+  it("a provider-level hidden-card key hides that provider on Home while others stay", async () => {
+    const balanceRowId = composeRowId(
+      "opencode#hash" as never,
+      "component:current_balance" as never,
+    );
+    const html = await renderView(
+      "/views/home.tsx",
+      "QuotaView",
+      homeProps({
+        snapshot: homeSnapshot({
+          providers: {
+            cards: [
+              providerCard(),
+              providerCard({
+                cardId: "opencode#hash" as never,
+                providerId: "opencode",
+                providerLabel: "OpenCode Zen",
+                rows: [
+                  percentRow({
+                    rowId: composeRowId("opencode#hash" as never, "window:five_hour" as never),
+                  }),
+                  percentRow({
+                    rowId: balanceRowId,
+                    label: "Current balance",
+                    kind: "value",
+                    value: "12.50 USD",
+                  }),
+                ],
+              }),
+            ],
+            enabledProviders: "auto",
+            polledAtMs: NOW,
+          },
+        }),
+        // The provider eye's providerId key, saved by Settings.
+        hiddenCards: ["synthetic-provider"],
+        // Row hiding keeps filtering within the provider that stays visible.
+        hiddenRows: [composeRowId("opencode#hash" as never, "window:five_hour" as never)],
+      }),
+    );
+    // The whole OpenCode Zen provider is hidden by its provider id; the other
+    // provider's card remains, and a hidden row still filters inside it.
+    expect(html).not.toContain("Synthetic Provider");
+    expect(html).toContain("OpenCode Zen");
+    expect(html).not.toContain("Five hour window");
+    expect(html).toContain("Current balance");
   });
 
   it("omits a hidden row entirely and keeps the unhide path in Settings", async () => {
@@ -582,7 +821,7 @@ describe("home view composition", () => {
     const hiddenRowId = "provider-1#cardhash#window:five_hour";
     const html = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({
         snapshot: homeSnapshot({
           providers: {
@@ -595,7 +834,7 @@ describe("home view composition", () => {
       }),
     );
     // The hidden row is gone: no label, no value, and no in-place "Show … row"
-    // toggle — Settings → Visible cards and rows is the one unhide path.
+    // toggle — Settings → Visibility is the one unhide path.
     expect(html).not.toContain("Five hour window");
     expect(html).not.toContain('aria-label="Show the Five hour window row"');
     expect(html).not.toContain('aria-label="Hide the Five hour window row"');
@@ -610,13 +849,13 @@ describe("home view composition", () => {
   it("says so when every row on a card is hidden, instead of claiming it has none", async () => {
     const allHidden = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({
         hiddenRows: ["provider-1#cardhash#window:five_hour"],
       }),
     );
     expect(allHidden).toContain("Every row on this card is hidden");
-    expect(allHidden).toContain("Settings → Visible cards and rows");
+    expect(allHidden).toContain("Settings → Visibility");
     expect(allHidden).not.toContain("Five hour window");
     // The card itself is not hidden, so it stays on the page.
     expect(allHidden).toContain("qg-card-grid");
@@ -625,7 +864,7 @@ describe("home view composition", () => {
 
     const genuinelyEmpty = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({
         snapshot: homeSnapshot({
           providers: {
@@ -644,16 +883,17 @@ describe("home view composition", () => {
     const snapshot = homeSnapshot({
       providers: { cards: [providerCard()], enabledProviders: "auto", polledAtMs: NOW },
     });
-    const remaining = await renderView("/views/home.tsx", "HomeView", homeProps({ snapshot }));
-    expect(remaining).toContain("62%");
-    expect(remaining).not.toContain("38%");
+    const remaining = await renderView("/views/home.tsx", "QuotaView", homeProps({ snapshot }));
+    expect(remaining).toContain('class="qg-row__value">62% remaining</span>');
+    expect(remaining).not.toContain('class="qg-row__value">38%');
+    expect(remaining).toContain('aria-valuetext="38% used"');
     expect(text(remaining)).toContain("Runs out");
     const used = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({ snapshot, preferences: { ...preferences, percentMode: "used" } }),
     );
-    expect(used).toContain("38%");
+    expect(used).toContain('class="qg-row__value">38% used</span>');
   });
 
   it("reveals detail rows only for the detailed accounting setting, and keeps details collapsed", async () => {
@@ -676,11 +916,11 @@ describe("home view composition", () => {
         polledAtMs: NOW,
       },
     });
-    const summary = await renderView("/views/home.tsx", "HomeView", homeProps({ snapshot }));
+    const summary = await renderView("/views/home.tsx", "QuotaView", homeProps({ snapshot }));
     expect(summary).not.toContain("Requests");
     const detailed = await renderView(
       "/views/home.tsx",
-      "HomeView",
+      "QuotaView",
       homeProps({ snapshot, preferences: { ...preferences, detailed: true } }),
     );
     expect(detailed).toContain("Requests");
@@ -691,9 +931,9 @@ describe("home view composition", () => {
     expect(summary).toContain("Plan");
   });
 
-  it("marks a card stale without replacing its numbers", async () => {
-    const html = await renderView("/views/home.tsx", "HomeView", homeProps({ stale: true }));
-    expect(html).toContain('data-stale="true"');
+  it("keeps stale card numbers without duplicating chrome status", async () => {
+    const html = await renderView("/views/home.tsx", "QuotaView", homeProps({ stale: true }));
+    expect(html).not.toContain('data-stale="true"');
     expect(html).toContain("Five hour window");
   });
 
@@ -710,6 +950,99 @@ describe("home view composition", () => {
 });
 
 describe("usage chart", () => {
+  it.each([
+    "24h",
+    "7d",
+    "30d",
+    "lifetime",
+  ] as const)("keeps true zero-thickness stacking for an empty %s bucket and omits the zero cache-write series", async (range) => {
+    const buckets = [{ startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({}) }];
+    const geometry = buildUsageGeometry(buckets);
+    expect(geometry.bands).toHaveLength(5);
+    for (const band of geometry.bands) {
+      expect(band.upper).toEqual(band.lower);
+      expect(band.upper.every((value) => value === geometry.plot.bottom)).toBe(true);
+      expect(toBandPath(band)).not.toMatch(/NaN|Infinity/);
+    }
+    const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
+      usage: usage(range, buckets),
+    });
+    // The zero-total cache-write series is omitted from the graph and its legend
+    // entry instead of being drawn as a flat zero area, while the hit-area
+    // labels keep reporting every category.
+    expect(html.match(/qg-chart__segment/g)).toHaveLength(4);
+    // Every remaining series is still zero-thickness here: flagged so the
+    // hairline stroke never draws a zero series into existence as a white line.
+    expect(html.match(/data-thin="true"/g)).toHaveLength(4);
+    expect(html).toContain(
+      "total 0 tokens, Input 0, Cache read 0, Cache write 0, Output 0, Reasoning 0",
+    );
+    expect(html).not.toContain("Highlight Cache write");
+    expect(html).toContain("Highlight Cache read");
+  });
+
+  it.each([
+    "24h",
+    "7d",
+    "30d",
+    "lifetime",
+  ] as const)("keeps exact zero/tiny inspection transient in %s", async (range) => {
+    const root = renderGraph.createTestRoot();
+    const snapshot = usage(range, [
+      { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 1000000, reasoning: 1 }) },
+    ]);
+    const dispose = renderGraph.mount(() => renderGraph.chart({ usage: snapshot }), root);
+    const paths = () =>
+      renderGraph
+        .elementsNamed(root, "path")
+        .filter((node) => node.props.class === "qg-chart__segment");
+    const buttons = renderGraph.elementsNamed(root, "button");
+    const hit = buttons.find((node) => node.props.class === "qg-chart__hit");
+    const legend = buttons.find((node) => node.props["aria-label"] === "Highlight Reasoning");
+    expect(hit).toBeDefined();
+    expect(legend).toBeDefined();
+    if (!hit || !legend) {
+      dispose();
+      return;
+    }
+    const initialPaths = paths().map((node) => node.props.d);
+    // Cache write's range total is zero here, so its series is omitted; the
+    // remaining four categories keep their zero/tiny thickness and transient
+    // inspection behaviour.
+    expect(initialPaths).toHaveLength(4);
+    expect(renderGraph.elementsNamed(root, "output")).toHaveLength(0);
+    renderGraph.listenerOf(hit, "onFocus")?.({});
+    await Promise.resolve();
+    const tooltip = renderGraph.elementsNamed(root, "output")[0];
+    expect(tooltip).toBeDefined();
+    if (tooltip) {
+      const values = renderGraph
+        .elementsNamed(tooltip, "span")
+        .filter((node) => node.props.class === "qg-totals__value")
+        .map(renderGraph.textOf);
+      expect(values).toEqual(["1,000,000", "0", "0", "0", "1"]);
+    }
+    renderGraph.listenerOf(hit, "onBlur")?.({});
+    expect(renderGraph.elementsNamed(root, "output")).toHaveLength(0);
+    renderGraph.listenerOf(legend, "onPointerEnter")?.({});
+    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
+    renderGraph.listenerOf(legend, "onClick")?.({});
+    renderGraph.listenerOf(legend, "onPointerLeave")?.({});
+    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(4);
+    renderGraph.listenerOf(legend, "onFocus")?.({});
+    renderGraph.listenerOf(legend, "onPointerEnter")?.({});
+    renderGraph.listenerOf(legend, "onPointerLeave")?.({});
+    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
+    renderGraph.listenerOf(legend, "onBlur")?.({});
+    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(4);
+    renderGraph.listenerOf(legend, "onFocus")?.({});
+    const escapeEvent = { key: "Escape", defaultPrevented: false };
+    renderGraph.listenerOf(legend, "onKeyDown")?.(escapeEvent);
+    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(4);
+    expect(paths().map((node) => node.props.d)).toEqual(initialPaths);
+    dispose();
+  });
+
   it("reduces axis label density at narrow container widths", () => {
     const buckets = Array.from({ length: 24 }, (_, index) => ({
       startMs: NOW + index * HOUR_MS,
@@ -747,19 +1080,26 @@ describe("usage chart", () => {
     for (const label of ["Input", "Cache read", "Cache write", "Output", "Reasoning"]) {
       expect(html).toContain(label);
     }
+    // All five series carry real thickness here, so none is flagged thin and the
+    // legend keeps every entry including cache write.
+    expect(html).not.toContain('data-thin="true"');
+    expect(html).toContain("Highlight Cache write");
     expect(html).toContain("9,250");
     expect(html).toContain("API-equivalent");
   });
 
-  it("falls back to one totals series when stacking would show nothing", async () => {
+  it("retains every drawn series with a nonzero total when only one category is used", async () => {
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage("7d", [{ startMs: NOW - DAY_MS, endMs: NOW, tokens: costed({ input: 1000 }) }]),
     });
-    expect(html.match(/qg-chart__segment/g)).toHaveLength(1);
-    expect(html).toContain("totals series");
-    // The legend still names every category, and no segment can be hidden.
+    // Only a zero-total cache-write series is omitted, never a drawn one: the
+    // zero-thickness neighbours and their legend entries stay.
+    expect(html.match(/qg-chart__segment/g)).toHaveLength(4);
+    expect(html).not.toContain("totals series");
     expect(html).toContain("Reasoning");
     expect(html).toContain('class="qg-legend__item"');
+    expect(html).toContain("Highlight Reasoning");
+    expect(html).not.toContain("Highlight Cache write");
   });
 
   it("duplicates the series in a visually hidden table with five categories plus the total", async () => {
@@ -793,21 +1133,29 @@ describe("usage chart", () => {
     expect(text(html)).toContain("3 unknown");
   });
 
-  it("decides the fallback from the data, not from a setting", () => {
-    expect(shouldUseTotalsFallback([])).toBe(false);
-    expect(shouldUseTotalsFallback([{ startMs: 0, endMs: 1, tokens: costed({ input: 10 }) }])).toBe(
-      true,
-    );
-    expect(
-      shouldUseTotalsFallback([
-        { startMs: 0, endMs: 1, tokens: costed({ input: 5000, output: 5000 }) },
-      ]),
-    ).toBe(false);
-    // A category that is a sliver in every bucket it appears in stacks to nothing visible.
-    const sliver = costed({ input: 1000 });
-    sliver.reasoning = 1000 * THIN_SLICE_SHARE * 0.5;
-    sliver.total = sliver.input + sliver.reasoning;
-    expect(shouldUseTotalsFallback([{ startMs: 0, endMs: 1, tokens: sliver }])).toBe(true);
+  it("preserves shared boundaries, exact zero thickness and tiny categories", () => {
+    const geometry = buildUsageGeometry([
+      { startMs: 0, endMs: 1, tokens: costed({ input: 1000000, reasoning: 1 }) },
+      { startMs: 1, endMs: 2, tokens: costed({ output: 3 }) },
+      { startMs: 2, endMs: 3, tokens: costed({ input: 100 }) },
+    ]);
+    expect(geometry.bands).toHaveLength(5);
+    for (let index = 0; index < geometry.bands.length; index += 1) {
+      const band = geometry.bands[index];
+      expect(band).toBeDefined();
+      if (!band) continue;
+      const previous = geometry.bands[index - 1];
+      if (previous) expect(band.lower).toEqual(previous.upper);
+      for (let point = 0; point < band.xs.length; point += 1) {
+        expect(band.upper[point]).toBeLessThanOrEqual(band.lower[point] ?? 0);
+      }
+      expect(toBandPath(band)).toContain(" C ");
+      expect(toBandPath(band)).not.toMatch(/NaN|Infinity/);
+    }
+    expect(geometry.bands[1]?.upper).toEqual(geometry.bands[1]?.lower);
+    const tiny = geometry.bands[4];
+    expect((tiny?.lower[1] ?? 0) - (tiny?.upper[1] ?? 0)).toBeGreaterThan(0);
+    expect((tiny?.lower[1] ?? 0) - (tiny?.upper[1] ?? 0)).toBeLessThan(0.001);
   });
 
   it("formats numbers and cost predictably", () => {
@@ -889,16 +1237,44 @@ describe("session view composition", () => {
     expect(html).toContain("One step is one completed assistant message");
   });
 
-  it("shows each node's own tokens as secondary text and links immediate children", async () => {
+  it("puts the project between Analytics and the session ancestors", async () => {
+    const snapshot = sessionSnapshot({
+      projectId: "project-gamma",
+      projectName: "Gamma Workspace",
+    });
+    const html = await renderView("/views/session.tsx", "SessionView", { snapshot, range: "7d" });
+    const crumbs = html.slice(html.indexOf('class="qg-breadcrumbs"'), html.indexOf("</nav>"));
+    expect(crumbs).toContain('href="#/project/project-gamma?range=7d">Gamma Workspace</a>');
+    const analyticsAt = crumbs.indexOf('href="#/analytics?range=7d"');
+    const projectAt = crumbs.indexOf("Gamma Workspace");
+    const ancestorAt = crumbs.indexOf('href="#/session/session-ancestor?range=7d"');
+    const focusAt = crumbs.indexOf('aria-current="page"');
+    expect(analyticsAt).toBeGreaterThan(-1);
+    expect(projectAt).toBeGreaterThan(analyticsAt);
+    expect(ancestorAt).toBeGreaterThan(projectAt);
+    expect(focusAt).toBeGreaterThan(ancestorAt);
+    // One project crumb only: the ancestors and the focus stay single, too.
+    expect(crumbs.match(/Gamma Workspace/g)).toHaveLength(1);
+    expect(crumbs.match(/aria-current="page"/g)).toHaveLength(1);
+  });
+
+  it("makes each tree row the session link and drops the duplicated child list", async () => {
     const html = await renderView("/views/session.tsx", "SessionView", {
       snapshot: sessionSnapshot(),
       range: "7d",
     });
     expect(text(html)).toContain("own 1,500");
     expect(text(html)).toContain("subtree 2,900");
+    // The row itself is the interactive control: the child is reached through
+    // its own row, and the separate child-link list is gone.
     expect(html).toContain('href="#/session/session-child-1?range=7d"');
     expect(html).toContain("alpha-feature");
     expect(html).toContain('data-focus="true"');
+    expect(html).not.toContain("children:");
+    expect(html).not.toContain('class="qg-node__children"');
+    // Both rendered nodes are row links; the current page's row is aria-current.
+    expect((html.match(/<a[^>]*class="qg-node"/g) ?? []).length).toBe(2);
+    expect(html).toContain('aria-current="page"');
   });
 
   it("draws compaction markers as ticks, never as steps", async () => {
@@ -965,6 +1341,7 @@ describe("settings page", () => {
         "dashboard.hiddenCards",
         "dashboard.hiddenRows",
         "dashboard.port",
+        "dashboard.providerOrder",
         "enabledProviders",
         "formatStyle",
         "minIntervalMs",
@@ -980,6 +1357,14 @@ describe("settings page", () => {
       ].sort(),
     );
     expect(fieldFor("dashboard.port")?.control).toBe("readonly");
+  });
+
+  it("keeps provider order as a hidden string-list field in the visibility group", () => {
+    const order = fieldFor("dashboard.providerOrder");
+    expect(order.group).toBe("visibility");
+    expect(order.hidden).toBe(true);
+    expect(validateValue(order, [])).toBeUndefined();
+    expect(validateValue(order, ["a", 1])).toContain("takes a list of ids");
   });
 
   it("offers the requested groups only", () => {
@@ -1096,9 +1481,38 @@ describe("settings page", () => {
     expect(stringList(undefined)).toEqual([]);
   });
 
-  it("renders groups, named visibility eyes, unknown hidden IDs, and the revision-checked save bar", async () => {
+  it("orders visibility providers by the stored order first, appending unknown or new ones", () => {
+    expect(orderedProviderIds([], ["a", "b", "c"])).toEqual(["a", "b", "c"]);
+    expect(orderedProviderIds(["c", "a"], ["a", "b", "c"])).toEqual(["c", "a", "b"]);
+    expect(orderedProviderIds(["a", "a"], ["a", "b"])).toEqual(["a", "b"]);
+    // A stored id the catalog no longer knows is ignored; new providers append.
+    expect(orderedProviderIds(["d", "a"], ["a", "b", "d"])).toEqual(["d", "a", "b"]);
+  });
+
+  it("computes a remove-then-insert full order for drag and keyboard moves", () => {
+    expect(reorderedProviderOrder(["a", "b", "c"], "b", 0)).toEqual(["b", "a", "c"]);
+    expect(reorderedProviderOrder(["a", "b", "c"], "a", 2)).toEqual(["b", "c", "a"]);
+    expect(reorderedProviderOrder(["a", "b", "c"], "a", 99)).toEqual(["b", "c", "a"]);
+    expect(keyboardMovedProviderOrder(["a", "b", "c"], "a", 1)).toEqual(["b", "a", "c"]);
+    expect(keyboardMovedProviderOrder(["a", "b", "c"], "c", -1)).toEqual(["a", "c", "b"]);
+    // The ends clamp instead of wrapping.
+    expect(keyboardMovedProviderOrder(["a", "b"], "a", -1)).toEqual(["a", "b"]);
+    expect(keyboardMovedProviderOrder(["a", "b"], "b", 1)).toEqual(["a", "b"]);
+  });
+
+  it("drafts a provider-order edit and saves it through the revision-checked patch", () => {
+    const values = { "dashboard.providerOrder": [] };
+    const writable = ["dashboard.providerOrder"];
+    const draft = { ...initialDraft("r1"), edits: { "dashboard.providerOrder": ["b", "a"] } };
+    expect(dirtyKeys(draft, values, writable)).toEqual(["dashboard.providerOrder"]);
+    expect(toPatch(draft, dirtyKeys(draft, values, writable))).toEqual({
+      "dashboard.providerOrder": ["b", "a"],
+    });
+  });
+
+  it("renders provider-grouped visibility cards with named eyes and unknown retained ids", async () => {
     const snapshot = settingsSnapshot();
-    snapshot.values["dashboard.hiddenCards"] = ["card-hidden", "unknown-retained"];
+    snapshot.values["dashboard.hiddenCards"] = ["hidden-provider#cardhash", "unknown-retained"];
     const html = await renderView("/views/settings.tsx", "SettingsView", {
       snapshot,
       client: {
@@ -1115,11 +1529,22 @@ describe("settings page", () => {
       },
       toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
       catalog: {
-        cards: [
-          { id: "card-visible", label: "Visible account" },
-          { id: "card-hidden", label: "Hidden account" },
+        providers: [
+          {
+            providerId: "visible-provider",
+            providerLabel: "Visible Provider",
+            accountLabels: ["Plus"],
+            cardIds: ["visible-provider#cardhash"],
+            rows: [{ id: "visible-provider#cardhash#window:five_hour", label: "5h" }],
+          },
+          {
+            providerId: "hidden-provider",
+            providerLabel: "Hidden Provider",
+            accountLabels: ["Legacy", "Team"],
+            cardIds: ["hidden-provider#cardhash"],
+            rows: [{ id: "hidden-provider#cardhash#component:current_balance", label: "Balance" }],
+          },
         ],
-        rows: [{ id: "row-visible", label: "Weekly quota" }],
       },
       onReload: noop,
     });
@@ -1127,18 +1552,46 @@ describe("settings page", () => {
       "Wait for quota reset",
       "Display",
       "Advanced",
-      "Visible cards and rows",
+      "Visibility",
       "Dashboard",
     ]) {
       expect(html).toContain(title);
     }
     expect(html).toContain("4144");
-    expect(html).toContain('aria-label="Hide Visible account"');
-    expect(html).toContain('aria-label="Show Hidden account"');
-    expect(html).toContain('aria-label="Hide Weekly quota"');
-    expect(html).toContain("unknown-retained");
+    // One dark card per provider, with inline account identification.
+    expect(html.match(/class="qg-vis-provider"/g)).toHaveLength(2);
+    expect(html).toContain('class="qg-vis-provider__name">Visible Provider</span>');
+    expect(html).toContain('class="qg-vis-provider__account">Plus</span>');
+    expect(html).toContain("Legacy · Team");
+    // The provider eye hides/shows all of a provider's cards, not the row list.
+    expect(html).toContain('aria-label="Hide Visible Provider"');
+    expect(html).toContain('aria-label="Show Hidden Provider"');
+    // Row eyes keep working while the provider is hidden; labels only, no ids.
+    expect(html).toContain('aria-label="Hide 5h"');
+    expect(html).toContain('aria-label="Hide Balance"');
+    expect(html).toContain("outline-eye-slash");
+    expect(html).toContain("outline-eye");
+    // Grip affordance on every card, never the eye as a drag handle.
+    expect(html.match(/class="qg-vis-grip"/g)).toHaveLength(2);
+    expect(html).not.toContain('aria-label="Hide id');
+    // No manual id editors, no chips, no raw ids, unknown or known — retained ids
+    // keep working in storage but never surface anywhere.
+    expect(html).not.toContain("id to hide");
+    expect(html).not.toContain("Additional Hidden cards ID");
+    expect(html).not.toContain("Clear all");
+    expect(html).not.toContain("unknown-retained");
+    expect(html).not.toContain("cardhash");
+    expect(html).not.toContain("#window");
+    expect(html).not.toContain("qg-chip");
+    // This section configures visibility only: no live quota values.
+    expect(html).not.toContain("qg-row__bar");
+    expect(html).not.toContain("Resets in");
+    expect(html).not.toContain("12.50");
     expect(html).toContain("http://127.0.0.1:4144");
-    expect(html).toContain("changing the port needs a restart");
+    // One read-only Address row carries the full loopback URL; the separate
+    // Port row is gone, but the server resilience note stays beside it.
+    expect(html.match(/qg-field__label">Address</g)).toHaveLength(1);
+    expect(html).toContain("Bound to loopback only");
     expect(html).toContain("No unsaved changes.");
     expect(text(html)).toContain("saved as global defaults");
     expect(text(html)).toContain("saving here does not edit them");
@@ -1153,6 +1606,42 @@ describe("settings page", () => {
     expect(html).toContain('role="switch"');
     expect(html).toContain('data-component="segmented-control-v2"');
     expect(html).toContain("text-input-v2");
+  });
+
+  it("shows a plain, id-free empty state when the visibility catalog is unavailable", async () => {
+    const snapshot = settingsSnapshot();
+    snapshot.values["dashboard.hiddenCards"] = ["provider-x#cardhash"];
+    const html = await renderView("/views/settings.tsx", "SettingsView", {
+      snapshot,
+      client: {
+        settings: async () => snapshot,
+        saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+        saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+        importPreview: async () => ({ from: "w", keys: [], issues: [], expectedRevision: "r" }),
+        importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      },
+      toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
+      catalog: { providers: [] },
+      onReload: noop,
+    });
+    expect(html).toContain("No provider accounts are available to configure yet.");
+    expect(html).not.toContain("provider-x");
+    expect(html).not.toContain("cardhash");
+    expect(html).not.toContain("qg-vis-provider");
+  });
+
+  it("renders the supplied chart-line and faders glyphs as the tab icons", async () => {
+    const analytics = await renderView("/components/icons.tsx", "AnalyticsIcon", {});
+    expect(analytics).toContain('viewBox="0 0 256 256"');
+    expect(analytics).toContain('width="16"');
+    expect(analytics).toContain('height="16"');
+    expect(analytics).toContain('fill="currentColor"');
+    expect(analytics).not.toContain('stroke-width="1.5"');
+    expect(analytics).toContain("V151.19L93.37");
+    const quota = await renderView("/components/icons.tsx", "QuotaIcon", {});
+    expect(quota).toContain('viewBox="0 0 256 256"');
+    expect(quota).toContain('fill="currentColor"');
+    expect(quota).toContain("M180,80a4,4,0,0,1,4-4h32");
   });
 });
 
@@ -1220,11 +1709,6 @@ describe("a section follows its payload", () => {
       setState,
       setRange,
       text: () => renderGraph.textOf(root),
-      /** The quota cards' stale flag, which the card renders as `data-stale`. */
-      cardsStale: () =>
-        renderGraph
-          .elementsNamed(root, "article")
-          .map((card) => card.props["data-stale"] === "true"),
       dispose,
     };
   }
@@ -1273,10 +1757,10 @@ describe("a section follows its payload", () => {
     rig.dispose();
   });
 
-  it("keeps the stale marker in step with the payload it describes", async () => {
+  it("retains last-good Analytics during failure and accepts recovery", async () => {
     const fresh = payload("7d", "alpha-7d", 960);
     const rig = mountSection({ data: fresh, loading: false });
-    expect(rig.cardsStale()).toEqual([false]);
+    expect(rig.text()).toContain("alpha-7d");
 
     // A failed refetch keeps the payload and marks it stale.
     rig.setState(
@@ -1287,12 +1771,14 @@ describe("a section follows its payload", () => {
       }),
     );
     await settle();
-    expect(rig.cardsStale()).toEqual([true]);
+    expect(rig.text()).toContain("alpha-7d");
+    expect(rig.text()).toContain("Total tokens960");
 
     // The next good payload is not stale any more.
     rig.setState(resolveLoadState({ data: payload("24h", "beta-24h", 480), loading: false }));
     await settle();
-    expect(rig.cardsStale()).toEqual([false]);
+    expect(rig.text()).toContain("beta-24h");
+    expect(rig.text()).not.toContain("alpha-7d");
     rig.dispose();
   });
 });
@@ -1355,13 +1841,17 @@ describe("the settings editor keeps its draft across refetches", () => {
   function mountSettings(options: {
     initial: SettingsSnapshot | undefined;
     saveSettings?: (input: SaveInput) => Promise<SettingsWriteResult>;
+    openSettingsFile?: () => Promise<void>;
+    catalog?: VisibilityCatalog;
   }) {
     const server = settingsQuery(options.initial);
     const saves: SaveInput[] = [];
     const toasts: { tone: string; message: string }[] = [];
     const client: DashboardClient = {
+      openSettingsFile: options.openSettingsFile,
       health: notUsed,
       home: notUsed,
+      quota: notUsed,
       project: notUsed,
       session: notUsed,
       settings: notUsed,
@@ -1383,7 +1873,7 @@ describe("the settings editor keeps its draft across refetches", () => {
         renderGraph.liveSettings({
           client,
           query: server.query,
-          catalog: () => ({ cards: [], rows: [] }),
+          catalog: () => options.catalog ?? { providers: [] },
           toaster: {
             toasts: () => [],
             push: (tone, message) => toasts.push({ tone, message }),
@@ -1394,6 +1884,28 @@ describe("the settings editor keeps its draft across refetches", () => {
       root,
     );
     return { root, server, saves, toasts, dispose };
+  }
+
+  /** Two providers with one card each; Beta carries no account identification. */
+  function visibilityCatalog(): VisibilityCatalog {
+    return {
+      providers: [
+        {
+          providerId: "prov-alpha",
+          providerLabel: "Alpha Provider",
+          accountLabels: ["Plus"],
+          cardIds: ["prov-alpha#cardhash"],
+          rows: [{ id: "prov-alpha#cardhash#window:five_hour", label: "5h" }],
+        },
+        {
+          providerId: "prov-beta",
+          providerLabel: "Beta Provider",
+          accountLabels: [],
+          cardIds: ["prov-beta#cardhash"],
+          rows: [{ id: "prov-beta#cardhash#window:weekly", label: "Weekly" }],
+        },
+      ],
+    };
   }
 
   function findNode(nodes: TestNode[], match: (node: TestNode) => boolean, what: string): TestNode {
@@ -1442,6 +1954,27 @@ describe("the settings editor keeps its draft across refetches", () => {
     handler({});
   }
 
+  /**
+   * Fires one event listener out of the node's prop bag, whatever casing the
+   * Solid compiler used for it, and explains the bag when it is missing: drag
+   * events may not be delegated, so the exact stored name is not portable.
+   */
+  function fire(node: TestNode, name: string, event: TestEvent = {}): void {
+    const key = Object.keys(node.props).find(
+      (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+    );
+    if (key === undefined)
+      throw new Error(
+        `probe: <${node.tag}> has no ${name} (props: ${Object.keys(node.props).join(", ")})`,
+      );
+    const handler = renderGraph.listenerOf(node, key);
+    if (handler === undefined)
+      throw new Error(
+        `probe: <${node.tag}>.${key} is not a listener (props: ${Object.keys(node.props).join(", ")})`,
+      );
+    handler(event);
+  }
+
   async function until(predicate: () => boolean, what: string): Promise<void> {
     for (let attempt = 0; attempt < 50; attempt += 1) {
       if (predicate()) return;
@@ -1449,6 +1982,107 @@ describe("the settings editor keeps its draft across refetches", () => {
     }
     throw new Error(`probe: ${what} never happened`);
   }
+
+  it("shows one Address, a complete native settings path, and opens only on explicit activation", async () => {
+    const nativePath = path.join(
+      path.parse(process.cwd()).root,
+      "synthetic-settings",
+      "quota",
+      "config.jsonc",
+    );
+    let opens = 0;
+    let finishOpen: (() => void) | undefined;
+    const mounted = mountSettings({
+      initial: settingsSnapshot({ pathLabel: nativePath }),
+      openSettingsFile: async () => {
+        opens += 1;
+        await new Promise<void>((resolve) => {
+          finishOpen = resolve;
+        });
+      },
+    });
+    const input = inputByLabel(mounted.root, "Minimum refresh interval (ms)");
+    typeInto(input, "450000");
+    const opener = renderGraph
+      .elementsNamed(mounted.root, "button")
+      .find((node) => node.props["aria-label"] === `Open settings file: ${nativePath}`);
+    expect(opener).toBeDefined();
+    if (!opener) throw new Error("Settings-file action missing");
+    expect(renderGraph.textOf(opener)).toBe(nativePath);
+    expect(
+      renderGraph
+        .elementsNamed(mounted.root, "a")
+        .some((node) => String(node.props.href).startsWith("file:")),
+    ).toBe(false);
+    expect(
+      renderGraph
+        .elementsNamed(mounted.root, "input")
+        .filter((node) => node.props["aria-label"] === "Dashboard address"),
+    ).toHaveLength(1);
+    expect(
+      renderGraph
+        .elementsNamed(mounted.root, "input")
+        .some((node) => node.props["aria-label"] === "Dashboard port"),
+    ).toBe(false);
+    expect(opener.props.type).toBe("button");
+    expect(opens).toBe(0);
+    click(opener);
+    await settle();
+    expect(opens).toBe(1);
+    expect(opener.props.disabled).toBe(true);
+    click(opener);
+    expect(opens).toBe(1);
+    expect(inputByLabel(mounted.root, "Minimum refresh interval (ms)")).toBe(input);
+    finishOpen?.();
+    await settle();
+    expect(opener.props.disabled).toBe(false);
+    expect(mounted.saves).toHaveLength(0);
+    expect(mounted.toasts).toHaveLength(0);
+    expect(renderGraph.textOf(mounted.root)).toContain("1 unsaved change(s)");
+    mounted.dispose();
+  });
+
+  it.each([
+    ["config-target-error", 409, "The settings file does not exist."],
+    ["config-write-error", 500, "The default application could not be started."],
+  ] as const)("keeps draft and shows an inline %s error without a success", async (code, status, message) => {
+    const mounted = mountSettings({
+      initial: settingsSnapshot(),
+      openSettingsFile: async () => {
+        throw renderGraph.dashboardFailure(code, status, message);
+      },
+    });
+    const input = inputByLabel(mounted.root, "Minimum refresh interval (ms)");
+    typeInto(input, "450000");
+    const opener = renderGraph
+      .elementsNamed(mounted.root, "button")
+      .find((node) => String(node.props["aria-label"]).startsWith("Open settings file:"));
+    if (!opener) throw new Error("Settings-file action missing");
+    click(opener);
+    await settle();
+    expect(renderGraph.textOf(mounted.root)).toContain(message);
+    expect(inputByLabel(mounted.root, "Minimum refresh interval (ms)")).toBe(input);
+    expect(input.props.value).toBe("450000");
+    expect(mounted.toasts).toHaveLength(0);
+    expect(mounted.saves).toHaveLength(0);
+    expect(opener.props.disabled).toBe(false);
+    mounted.dispose();
+  });
+
+  it("gracefully reports an older client without a file-open capability", async () => {
+    const mounted = mountSettings({ initial: settingsSnapshot() });
+    const opener = renderGraph
+      .elementsNamed(mounted.root, "button")
+      .find((node) => String(node.props["aria-label"]).startsWith("Open settings file:"));
+    if (!opener) throw new Error("Settings-file action missing");
+    click(opener);
+    await settle();
+    expect(renderGraph.textOf(mounted.root)).toContain(
+      "Opening the settings file is not available with this server.",
+    );
+    expect(mounted.toasts).toHaveLength(0);
+    mounted.dispose();
+  });
 
   it("shows the first-load skeleton until a snapshot arrives, then the editor", async () => {
     const mounted = mountSettings({ initial: undefined });
@@ -1488,6 +2122,124 @@ describe("the settings editor keeps its draft across refetches", () => {
     expect(interval()).toBe(mountedInput);
     expect(interval().props.value).toBe("450000");
     expect(renderGraph.textOf(mounted.root)).toContain("1 unsaved change(s)");
+    mounted.dispose();
+  });
+
+  it("the provider eye stores a provider id, leaves row ids alone, and surfaces no ids", async () => {
+    const mounted = mountSettings({
+      initial: settingsSnapshot(),
+      catalog: visibilityCatalog(),
+    });
+    const eyeByLabel = (label: string): TestNode =>
+      findNode(
+        renderGraph.elementsNamed(mounted.root, "button"),
+        (node) => node.props["aria-label"] === label,
+        `eye ${label}`,
+      );
+
+    expect(eyeByLabel("Hide Alpha Provider").props["aria-pressed"]).toBe("false");
+    expect(eyeByLabel("Hide Weekly").props["aria-pressed"]).toBe("false");
+
+    // Hiding the provider names its id only; row eyes keep working underneath.
+    click(eyeByLabel("Hide Alpha Provider"));
+    await settle();
+    expect(eyeByLabel("Show Alpha Provider").props["aria-pressed"]).toBe("true");
+    click(eyeByLabel("Hide 5h"));
+    await settle();
+    expect(eyeByLabel("Show 5h").props["aria-pressed"]).toBe("true");
+
+    // Showing the provider clears its card entries; the hidden row id survives.
+    click(eyeByLabel("Show Alpha Provider"));
+    await settle();
+    expect(eyeByLabel("Hide Alpha Provider").props["aria-pressed"]).toBe("false");
+    expect(eyeByLabel("Show 5h").props["aria-pressed"]).toBe("true");
+
+    // Stable ids never display anywhere, retained or drafted.
+    expect(renderGraph.textOf(mounted.root)).not.toContain("prov-alpha");
+    expect(renderGraph.textOf(mounted.root)).not.toContain("cardhash");
+
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the save");
+    expect(mounted.saves[0]?.patch["dashboard.hiddenRows"]).toEqual([
+      "prov-alpha#cardhash#window:five_hour",
+    ]);
+    expect(mounted.saves[0]?.patch["dashboard.hiddenCards"]).toBeUndefined();
+    mounted.dispose();
+  });
+
+  it("Alt+Arrow reorders a provider and the save carries the complete provider order", async () => {
+    const mounted = mountSettings({
+      initial: settingsSnapshot(),
+      catalog: visibilityCatalog(),
+    });
+    const betaGrip = findNode(
+      renderGraph.elementsNamed(mounted.root, "button"),
+      (node) => node.props["aria-label"] === "Reorder Beta Provider",
+      "the Beta grip",
+    );
+    expect(betaGrip.props.draggable).toBe(true);
+    const keyDown = renderGraph.listenerOf(betaGrip, "onKeyDown");
+    expect(keyDown).toBeDefined();
+
+    // A move writes the full current order, not a partial compare.
+    keyDown?.({ altKey: true, key: "ArrowUp", preventDefault: () => {} });
+    await settle();
+    expect(renderGraph.textOf(mounted.root)).toContain("Beta Provider moved up.");
+    expect(
+      renderGraph
+        .elementsNamed(mounted.root, "article")
+        .find((node) => renderGraph.textOf(node).includes("Beta Provider")),
+    ).toBeDefined();
+
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the save");
+    expect(mounted.saves[0]?.patch["dashboard.providerOrder"]).toEqual(["prov-beta", "prov-alpha"]);
+    expect(mounted.saves[0]?.expectedRevision).toBe("revision-1");
+    mounted.dispose();
+  });
+
+  it("dragging one provider card onto another writes the remove-then-insert order", async () => {
+    const mounted = mountSettings({
+      initial: settingsSnapshot(),
+      catalog: visibilityCatalog(),
+    });
+    const cardOf = (label: string): TestNode =>
+      findNode(
+        renderGraph.elementsNamed(mounted.root, "article"),
+        (node) => renderGraph.textOf(node).includes(label),
+        `the ${label} card`,
+      );
+    const betaGrip = findNode(
+      renderGraph.elementsNamed(mounted.root, "button"),
+      (node) => node.props["aria-label"] === "Reorder Beta Provider",
+      "the Beta grip",
+    );
+    const transfer = {
+      setData: () => {},
+      getData: () => "prov-beta",
+      dropEffect: "",
+      effectAllowed: "",
+    };
+
+    // The grip — never the eye — is the drag handle, and it carries the id.
+    fire(betaGrip, "onDragStart", { dataTransfer: transfer });
+    await settle();
+    expect(cardOf("Beta Provider").props["data-dragging"]).toBe("true");
+    fire(cardOf("Alpha Provider"), "onDragOver", {
+      preventDefault: () => {},
+      dataTransfer: transfer,
+    });
+    await settle();
+    expect(cardOf("Alpha Provider").props["data-drop"]).toBe("true");
+
+    fire(cardOf("Alpha Provider"), "onDrop", { preventDefault: () => {}, dataTransfer: transfer });
+    await settle();
+    expect(cardOf("Beta Provider").props["data-dragging"]).toBeUndefined();
+    expect(cardOf("Alpha Provider").props["data-drop"]).toBeUndefined();
+
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the save");
+    expect(mounted.saves[0]?.patch["dashboard.providerOrder"]).toEqual(["prov-beta", "prov-alpha"]);
     mounted.dispose();
   });
 
@@ -1916,6 +2668,8 @@ describe("response boundary decoding", () => {
 
     const sessionPayload = {
       focusSessionId: "session-root-1",
+      projectId: "project-alpha",
+      projectName: "Alpha",
       breadcrumbs: [{ sessionId: "session-root-1", title: "Refactor", isFocus: true }],
       nodes: [
         {
@@ -1951,6 +2705,8 @@ describe("response boundary decoding", () => {
     expect(session.ownSummary.stepCount).toBe(1);
     expect(session.compactionMarkers[0]?.messageId).toBe("msg-0");
     expect(session.breadcrumbs[0]?.isFocus).toBe(true);
+    expect(session.projectId).toBe("project-alpha");
+    expect(session.projectName).toBe("Alpha");
 
     // A flat count is the wrong shape: the nested field is what the contract and the
     // server both carry, so the reader must keep requiring it instead of quietly
@@ -1975,12 +2731,20 @@ describe("response boundary decoding", () => {
         ),
       "ownSummary.stepCount",
     );
+    const { projectName, ...sessionWithoutProjectName } = sessionPayload;
+    void projectName;
+    expectRejected(
+      () => parseSessionSnapshot(sessionWithoutProjectName, "/api/v1/sessions/session-root-1"),
+      "projectName",
+    );
 
     expectRejected(
       () =>
         parseSessionSnapshot(
           {
             focusSessionId: "s",
+            projectId: "p",
+            projectName: "Project",
             breadcrumbs: [],
             nodes: [],
             steps: [
@@ -2009,6 +2773,10 @@ describe("response boundary decoding", () => {
 describe("routing and range persistence", () => {
   it("parses the four hash routes", () => {
     expect(parseLocation("#/", "7d").route).toEqual({ name: "home" });
+    expect(parseLocation("#/analytics?range=24h", "7d")).toEqual({
+      route: { name: "analytics" },
+      range: "24h",
+    });
     expect(parseLocation("#/settings", "7d").route).toEqual({ name: "settings" });
     expect(parseLocation("#/project/alpha?range=30d", "7d")).toEqual({
       route: { name: "project", projectId: "alpha" },
@@ -2028,16 +2796,19 @@ describe("routing and range persistence", () => {
       route: { name: "session", sessionId: "abc" },
       range: "24h",
     });
-    expect(routeUsesRange({ name: "home" })).toBe(true);
+    expect(routeUsesRange({ name: "home" })).toBe(false);
+    expect(routeUsesRange({ name: "analytics" })).toBe(true);
     expect(routeUsesRange({ name: "project", projectId: "a" })).toBe(true);
     expect(routeUsesRange({ name: "session", sessionId: "a" })).toBe(false);
     expect(routeShowsRangeSelector({ name: "session", sessionId: "a" })).toBe(false);
     expect(routeShowsRangeSelector({ name: "settings" })).toBe(false);
-    expect(routeShowsRangeSelector({ name: "home" })).toBe(true);
+    expect(routeShowsRangeSelector({ name: "home" })).toBe(false);
+    expect(routeShowsRangeSelector({ name: "analytics" })).toBe(true);
   });
 
   it("round-trips every route through the hash builder", () => {
     expect(formatHash({ name: "home" }, "7d")).toBe("#/?range=7d");
+    expect(formatHash({ name: "analytics" }, "30d")).toBe("#/analytics?range=30d");
     expect(formatHash({ name: "project", projectId: "a b" }, "24h")).toBe(
       "#/project/a%20b?range=24h",
     );
@@ -2071,6 +2842,240 @@ describe("routing and range persistence", () => {
 });
 
 describe("styles and dependency boundaries", () => {
+  it("loads Quota without analytics and reports reconnect only in chrome", async () => {
+    let hashChange: (() => void) | undefined;
+    const browser = {
+      location: { hash: "#/" },
+      localStorage: { getItem: () => null, setItem: () => {} },
+      addEventListener: (_name: string, callback: () => void) => {
+        hashChange = callback;
+      },
+      removeEventListener: () => {
+        hashChange = undefined;
+      },
+    };
+    vi.stubGlobal("window", browser);
+    let onConnection: ((state: "connecting" | "live" | "reconnecting") => void) | undefined;
+    let onEvent: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+    let quotaReads = 0;
+    let analyticsReads = 0;
+    let failQuota = false;
+    const viewSignals: string[] = [];
+    let failViewSignal = false;
+    let finishInitialSignal: (() => void) | undefined;
+    const client: DashboardClient = {
+      setActiveView: async (scope) => {
+        viewSignals.push(scope);
+        if (viewSignals.length === 1) {
+          await new Promise<void>((resolve) => {
+            finishInitialSignal = resolve;
+          });
+        }
+        if (failViewSignal)
+          throw new DashboardError("not-found", 404, "Optional endpoint unavailable.");
+      },
+      connection: () => "live",
+      onConnectionChange: (callback) => {
+        onConnection = callback;
+        return () => {
+          onConnection = undefined;
+        };
+      },
+      subscribe: (callback) => {
+        onEvent = callback;
+        return () => {
+          onEvent = undefined;
+        };
+      },
+      health: async () => ({ app: "opencode-quota-gui", contractVersion: 1 }),
+      quota: async () => {
+        quotaReads += 1;
+        if (failQuota) throw new Error("synthetic failure");
+        return homeSnapshot();
+      },
+      home: async () => {
+        analyticsReads += 1;
+        return homeSnapshot();
+      },
+      project: async () => projectSnapshot(),
+      session: async () => sessionSnapshot(),
+      settings: async () => settingsSnapshot(),
+      saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      importPreview: async () => ({
+        from: "workspace: synthetic",
+        keys: [],
+        issues: [],
+        expectedRevision: "r",
+      }),
+      importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    };
+    const root = renderGraph.createTestRoot();
+    let dispose: (() => void) | undefined;
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    try {
+      dispose = renderGraph.mount(() => renderGraph.app({ client }), root);
+      await settle();
+      expect(quotaReads).toBe(1);
+      expect(analyticsReads).toBe(0);
+      expect(viewSignals).toEqual(["quota"]);
+      onEvent?.({ topic: "sessions.changed", at: NOW });
+      await settle();
+      expect(quotaReads).toBe(1);
+      expect(analyticsReads).toBe(0);
+      expect(renderGraph.textOf(root)).toContain("Five hour window");
+      expect(renderGraph.textOf(root)).not.toContain("Total tokens");
+      const ancestors = (node: TestNode): TestNode[] => {
+        const parents: TestNode[] = [];
+        for (let parent = node.parent; parent; parent = parent.parent) parents.push(parent);
+        return parents;
+      };
+      const chrome = renderGraph
+        .elementsNamed(root, "header")
+        .find((node) => node.props.class === "qg-chrome");
+      const frame = renderGraph
+        .elementsNamed(root, "div")
+        .find((node) => node.props.class === "qg-frame");
+      expect(chrome).toBeDefined();
+      expect(frame).toBeDefined();
+      for (const label of ["Quota", "Analytics", "Settings"]) {
+        const link = renderGraph
+          .elementsNamed(root, "a")
+          .find((node) => node.props["aria-label"] === label);
+        expect(link).toBeDefined();
+        if (link) {
+          expect(ancestors(link)).toContain(chrome);
+          expect(ancestors(link)).not.toContain(frame);
+        }
+      }
+      expect(renderGraph.textOf(root)).not.toContain("OpenCode");
+      expect(viewSignals).toEqual(["quota"]);
+      finishInitialSignal?.();
+      await settle();
+      expect(viewSignals).toEqual(["quota"]);
+      const status = () =>
+        renderGraph.elementsNamed(root, "span").filter((node) => node.props.class === "qg-stale");
+      expect(status()).toHaveLength(0);
+      onConnection?.("reconnecting");
+      expect(status()).toHaveLength(1);
+      expect(renderGraph.textOf(root)).toContain("Reconnecting…");
+      expect(
+        renderGraph.elementsNamed(root, "div").filter((node) => node.props.class === "qg-toast"),
+      ).toHaveLength(0);
+      failQuota = true;
+      onConnection?.("live");
+      await settle();
+      expect(quotaReads).toBe(2);
+      expect(viewSignals).toEqual(["quota", "quota"]);
+      onConnection?.("live");
+      await settle();
+      expect(viewSignals).toEqual(["quota", "quota"]);
+      expect(analyticsReads).toBe(0);
+      expect(status()).toHaveLength(1);
+      expect(renderGraph.textOf(root)).toContain("Data may be stale");
+      expect(renderGraph.textOf(root)).toContain("Five hour window");
+      failQuota = false;
+      onConnection?.("reconnecting");
+      onConnection?.("live");
+      await settle();
+      expect(status()).toHaveLength(0);
+      expect(viewSignals).toEqual(["quota", "quota", "quota"]);
+      browser.location.hash = "#/analytics?range=30d";
+      hashChange?.();
+      await settle();
+      expect(analyticsReads).toBe(1);
+      expect(viewSignals).toEqual(["quota", "quota", "quota", "analytics"]);
+      const rangeButton = renderGraph
+        .elementsNamed(root, "button")
+        .find((node) => renderGraph.textOf(node) === "24h");
+      expect(rangeButton).toBeDefined();
+      if (rangeButton) {
+        expect(ancestors(rangeButton)).toContain(frame);
+        expect(ancestors(rangeButton)).not.toContain(chrome);
+      }
+      onEvent?.({ topic: "quota.changed", at: NOW });
+      await settle();
+      expect(analyticsReads).toBe(1);
+      expect(renderGraph.textOf(root)).toContain("Total tokens");
+      expect(renderGraph.textOf(root)).not.toContain("Five hour window");
+      expect(
+        renderGraph
+          .elementsNamed(root, "a")
+          .find((node) => node.props["aria-label"] === "Analytics")?.props["aria-current"],
+      ).toBe("page");
+      const navigate = async (hash: string) => {
+        browser.location.hash = hash;
+        hashChange?.();
+        await settle();
+      };
+      await navigate("#/analytics?range=7d");
+      await navigate("#/project/project-alpha?range=7d");
+      await navigate("#/session/session-root-1?range=7d");
+      expect(viewSignals).toEqual(["quota", "quota", "quota", "analytics"]);
+      onConnection?.("reconnecting");
+      onConnection?.("live");
+      await settle();
+      expect(viewSignals.at(-1)).toBe("analytics");
+      expect(viewSignals).toHaveLength(5);
+      await navigate("#/?range=7d");
+      expect(viewSignals.at(-1)).toBe("quota");
+      expect(viewSignals).toHaveLength(6);
+      expect(renderGraph.textOf(root)).toContain("Five hour window");
+      failViewSignal = true;
+      await navigate("#/settings?range=7d");
+      const interval = () =>
+        renderGraph
+          .elementsNamed(root, "input")
+          .find((node) => node.props["aria-label"] === "Minimum refresh interval (ms)");
+      const editorInput = interval();
+      const dock = renderGraph
+        .elementsNamed(root, "div")
+        .find((node) => node.props.class === "qg-savebar");
+      const scrollContent = renderGraph
+        .elementsNamed(root, "div")
+        .find((node) => node.props.class === "qg-form qg-settings__scroll");
+      expect(dock).toBeDefined();
+      expect(scrollContent).toBeDefined();
+      expect(dock?.parent).toBe(scrollContent?.parent);
+      expect(dock?.parent?.props.class).toBe("qg-settings");
+      if (dock && scrollContent) expect(ancestors(dock)).not.toContain(scrollContent);
+      expect(editorInput).toBeDefined();
+      if (!editorInput) throw new Error("Settings editor did not mount");
+      renderGraph.listenerOf(editorInput, "onInput")?.({ currentTarget: { value: "450000" } });
+      await settle();
+      expect(renderGraph.textOf(root)).toContain("1 unsaved change(s)");
+      // Reassertion rejects like an older backend: no remount, blanking or retries.
+      onConnection?.("reconnecting");
+      onConnection?.("live");
+      await settle();
+      expect(viewSignals).toHaveLength(7);
+      expect(viewSignals.at(-1)).toBe("quota");
+      expect(interval()).toBe(editorInput);
+      expect(
+        renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-savebar"),
+      ).toBe(dock);
+      expect(interval()?.props.value).toBe("450000");
+      expect(renderGraph.textOf(root)).toContain("1 unsaved change(s)");
+      onEvent?.({ topic: "settings.changed", at: NOW });
+      onConnection?.("live");
+      await settle();
+      await settle();
+      expect(viewSignals).toHaveLength(7);
+      expect(interval()).toBe(editorInput);
+      expect(renderGraph.textOf(root)).not.toContain("Optional endpoint unavailable");
+      client.setActiveView = undefined;
+      await navigate("#/analytics?range=7d");
+      expect(renderGraph.textOf(root)).toContain("Total tokens");
+      expect(viewSignals).toHaveLength(7);
+    } finally {
+      dispose?.();
+      vi.unstubAllGlobals();
+    }
+    expect(onConnection).toBeUndefined();
+    expect(onEvent).toBeUndefined();
+    expect(hashChange).toBeUndefined();
+  });
+
   it("composes the whole shell against an in-memory data source", async () => {
     const snapshot = settingsSnapshot();
     const client = {
@@ -2079,6 +3084,7 @@ describe("styles and dependency boundaries", () => {
       subscribe: () => () => {},
       health: async () => ({ app: "opencode-quota-gui" as const, contractVersion: 1 }),
       home: async () => homeSnapshot(),
+      quota: async () => homeSnapshot(),
       project: async () => projectSnapshot(),
       session: async () => sessionSnapshot(),
       settings: async () => snapshot,
@@ -2095,23 +3101,36 @@ describe("styles and dependency boundaries", () => {
     const html = await renderView("/app.tsx", "App", { client });
     // Icon-only navigation retains explicit names and real route links.
     expect(html).not.toContain("OpenCode quota");
-    expect(html).toContain('aria-label="Home"');
+    expect(html).toContain('aria-label="Quota"');
+    expect(html).toContain('aria-label="Analytics"');
     expect(html).toContain('aria-label="Settings"');
     expect(html).toContain('href="#/?range=7d"');
-    expect(html).toContain("Time range");
-    expect(html).toContain('data-component="segmented-control-v2"');
+    expect(html).not.toContain("Time range");
+    expect(html).not.toContain('data-component="segmented-control-v2"');
     expect(html).toContain("Settings");
     expect(html).toContain("qg-skeleton");
     expect(html).toContain("Connecting");
-    // No route data has arrived yet, so no card grid or chart is rendered.
-    expect(html).not.toContain("qg-card-grid");
+    // Provider-shaped loading reserves the grid, not fabricated quota data.
+    expect(html).toContain("qg-card-grid");
+    expect(html).toContain('aria-busy="true"');
+    expect(html).not.toContain('class="qg-card"');
+    expect(html).not.toContain('class="qg-usage"');
   });
 
   it("uses a scoped Console palette while retaining public-library typography and motion", () => {
     const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
     expect(styles).toContain("--qg-bg: #0a0a0a");
-    expect(styles).toContain("--qg-frame: #151515");
+    expect(styles).toContain("--qg-frame: #161616");
     expect(styles).toContain("--qg-surface: #232323");
+    // Swapped series palette: input uses the former cache-read hue and vice versa.
+    expect(styles).toContain("--qg-token-input: #618e85");
+    expect(styles).toContain("--qg-token-cache-read: #708fbb");
+    // Neighbouring series carry a 1px white hairline; zero-thickness series never do.
+    expect(styles).toContain("stroke: #ffffff");
+    expect(styles).toContain('.qg-chart__segment[data-thin="true"]');
+    // Loading motion loops continuously: linear timing, no paused restart.
+    expect(styles).toContain("qg-shimmer 1.4s linear infinite");
+    expect(styles).toContain("qg-progress 1.1s linear infinite");
     expect(styles).toContain("1056px");
     expect(styles).toContain(".qg-app:has(.qg-form) .qg-toasts");
     expect(styles).not.toContain(".qg-segmented");

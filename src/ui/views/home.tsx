@@ -1,9 +1,9 @@
 import type { JSX } from "solid-js";
 import { For, Show } from "solid-js";
-import type { HomeSnapshot } from "../../contracts/dashboard";
+import type { HomeSnapshot, QuotaSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
 import { type DisplayPreferences, QuotaCardView } from "../components/quota-card";
-import { EmptyNotice } from "../components/states";
+import { EmptyNotice, Skeleton } from "../components/states";
 import { UsageChart } from "../components/usage-chart";
 import { formatExactCount, formatTimestamp, formatTokenCount, pluralize } from "../format";
 import { formatHash } from "../routing";
@@ -15,19 +15,19 @@ import {
 } from "../view-model";
 
 /**
- * Home (design spec §10): quota cards → usage → projects, in that fixed order.
+ * Quota is the default independent surface. Analytics below uses the compatible
+ * HomeSnapshot for usage and projects only; it never renders provider cards.
  *
  * Cards are one per provider account in provider-registration order; usage is
  * the stacked area chart; projects are exactly two columns — name and tokens —
  * in the server's latest-activity order, which the frontend never re-sorts.
  */
-export function HomeView(props: {
-  snapshot: HomeSnapshot;
+export function QuotaView(props: {
+  snapshot: QuotaSnapshot;
   preferences: DisplayPreferences;
   hiddenCards: string[];
   hiddenRows: string[];
   stale: boolean;
-  range: RangeKey;
 }): JSX.Element {
   const shown = () => visibleCards(props.snapshot.providers.cards, props.hiddenCards);
 
@@ -71,7 +71,28 @@ export function HomeView(props: {
           </div>
         </Show>
       </section>
+    </>
+  );
+}
 
+export function QuotaLoading(): JSX.Element {
+  return (
+    <section class="qg-section" aria-labelledby="qg-loading-quota">
+      <header class="qg-section__head">
+        <h2 class="qg-section__title" id="qg-loading-quota">
+          Quota
+        </h2>
+      </header>
+      <div class="qg-card-grid">
+        <Skeleton label="Loading providers" />
+      </div>
+    </section>
+  );
+}
+
+export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JSX.Element {
+  return (
+    <>
       <section class="qg-section" aria-labelledby="qg-home-usage">
         <header class="qg-section__head">
           <h2 class="qg-section__title" id="qg-home-usage">

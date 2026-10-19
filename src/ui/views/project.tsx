@@ -2,7 +2,7 @@ import type { JSX } from "solid-js";
 import { For, Show } from "solid-js";
 import type { ProjectSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
-import { EmptyNotice, StaleNotice } from "../components/states";
+import { EmptyNotice } from "../components/states";
 import { UsageChart } from "../components/usage-chart";
 import { formatApiEquivalentCost, formatExactCount, formatTokenCount, pluralize } from "../format";
 import { formatHash } from "../routing";
@@ -32,11 +32,8 @@ export function ProjectView(props: {
 
   return (
     <>
-      <Show when={props.stale}>
-        <StaleNotice message="Showing the last good snapshot for this project." />
-      </Show>
       <nav class="qg-breadcrumbs" aria-label="Breadcrumb">
-        <a href={formatHash({ name: "home" }, props.range)}>Home</a>
+        <a href={formatHash({ name: "analytics" }, props.range)}>Analytics</a>
         <span aria-hidden="true">›</span>
         <span aria-current="page">{props.snapshot.name}</span>
       </nav>

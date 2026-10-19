@@ -3,7 +3,6 @@ import { createSignal, For, Show } from "solid-js";
 import type { SessionSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
 import { SessionChart } from "../components/session-chart";
-import { StaleNotice } from "../components/states";
 import { formatExactCount, pluralize } from "../format";
 import { formatHash } from "../routing";
 
@@ -15,9 +14,10 @@ const NODE_PAGE_SIZE = 200;
  *
  * Breadcrumbs carry the ancestors only — the current page is `aria-current` —
  * and the opened session's own usage is reported separately from the tree
- * total. The node list indents by `depth`, shows each node's own tokens as
- * secondary text, and links immediate children; the list may be windowed, while
- * the totals and both graphs always cover the whole tree.
+ * total. Each tree row is itself the link, so no separate child-link list is
+ * rendered; the list indents by `depth`, shows each node's own tokens as
+ * secondary text, and may be windowed, while the totals and both graphs always
+ * cover the whole tree.
  */
 export function SessionView(props: {
   snapshot: SessionSnapshot;
@@ -27,15 +27,15 @@ export function SessionView(props: {
   const [visibleNodes, setVisibleNodes] = createSignal(NODE_PAGE_SIZE);
   const nodes = () => props.snapshot.nodes;
   const windowed = () => nodes().slice(0, visibleNodes());
-  const nodeById = (id: string) => nodes().find((node) => node.sessionId === id);
 
   return (
     <>
-      <Show when={props.stale}>
-        <StaleNotice message="Showing the last good snapshot for this session tree." />
-      </Show>
       <nav class="qg-breadcrumbs" aria-label="Breadcrumb">
-        <a href={formatHash({ name: "home" }, props.range)}>Home</a>
+        <a href={formatHash({ name: "analytics" }, props.range)}>Analytics</a>
+        <span aria-hidden="true">›</span>
+        <a href={formatHash({ name: "project", projectId: props.snapshot.projectId }, props.range)}>
+          {props.snapshot.projectName}
+        </a>
         <For each={props.snapshot.breadcrumbs}>
           {(crumb) => (
             <>
@@ -75,8 +75,10 @@ export function SessionView(props: {
         <div class="qg-nodes">
           <For each={windowed()}>
             {(node) => (
-              <div
+              <a
                 class="qg-node"
+                href={formatHash({ name: "session", sessionId: node.sessionId }, props.range)}
+                aria-current={node.sessionId === props.snapshot.focusSessionId ? "page" : undefined}
                 data-focus={node.sessionId === props.snapshot.focusSessionId ? "true" : undefined}
                 style={{ "padding-left": `${16 + node.depth * 16}px` }}
               >
@@ -92,25 +94,11 @@ export function SessionView(props: {
                     {formatExactCount(node.subtreeTokens.total)} ·{" "}
                     {pluralize(node.stepCount, "step")}
                   </span>
-                  <Show when={node.childIds.length > 0}>
-                    <span class="qg-node__children">
-                      <span class="qg-muted">children:</span>
-                      <For each={node.childIds}>
-                        {(childId) => (
-                          <a
-                            href={formatHash({ name: "session", sessionId: childId }, props.range)}
-                          >
-                            {nodeById(childId)?.title ?? childId}
-                          </a>
-                        )}
-                      </For>
-                    </span>
-                  </Show>
                 </div>
                 <span class="qg-list__tokens" title={formatExactCount(node.subtreeTokens.total)}>
                   {formatExactCount(node.subtreeTokens.total)}
                 </span>
-              </div>
+              </a>
             )}
           </For>
         </div>

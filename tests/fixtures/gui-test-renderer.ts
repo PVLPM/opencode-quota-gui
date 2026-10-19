@@ -141,6 +141,17 @@ export function elementsNamed(node: TestNode, tag: string): TestNode[] {
 export interface TestEvent {
   readonly currentTarget?: { readonly value: string };
   readonly defaultPrevented?: boolean;
+  /** Keyboard events: the grip's Alt+Arrow reorder reads `key` and `altKey`. */
+  readonly key?: string;
+  readonly altKey?: boolean;
+  /** Drag events: `dataTransfer` may be a stub; `preventDefault` is a no-op. */
+  readonly preventDefault?: () => void;
+  readonly dataTransfer?: {
+    setData(type: string, value: string): void;
+    getData(type: string): string;
+    dropEffect: string;
+    effectAllowed: string;
+  };
 }
 
 /** A listener a compiled component attached to a node. */

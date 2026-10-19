@@ -2,12 +2,10 @@ import type { JSX } from "solid-js";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { Bucket, Usage } from "../../contracts/dashboard";
 import {
-  buildTotalsBand,
   buildUsageGeometry,
   DEFAULT_USAGE_SIZE,
-  shouldUseTotalsFallback,
+  type StackBand,
   toBandPath,
-  toLinePath,
 } from "../chart-geometry";
 import { createChartLayout } from "../chart-layout";
 import {
@@ -18,29 +16,55 @@ import {
   pluralize,
   TOKEN_CATEGORIES,
 } from "../format";
+import { createChartTooltipLayout } from "../tooltip-layout";
+
+/**
+ * A series whose band never leaves its lower boundary carries no visible area;
+ * flagging it keeps the hairline stroke from drawing a zero series into
+ * existence as a white line.
+ */
+function bandIsZeroThickness(band: StackBand): boolean {
+  return band.lower.every((value, index) => Math.abs((band.upper[index] ?? value) - value) < 0.001);
+}
 
 /**
  * Usage — stacked area chart (design spec §6, §10; R31, R32, R48).
  *
- * Five additive token categories stack in a fixed order and no segment can be
- * hidden; transient hover/focus highlights a segment and the tooltip reports all
- * five plus the total. When stacking would be visually meaningless (a single
- * category, or a sliver invisible in every bucket) the chart falls back to one
- * totals series — a frontend rendering choice, never a setting or a payload
- * change. A visually hidden table duplicates the series for screen readers.
+ * Five additive token categories stack in a fixed order and no series with a
+ * nonzero range total can be hidden; the cache-write series is omitted from the
+ * graph and its legend while its range total is zero, so no flat zero area is
+ * drawn. Transient hover/focus highlights a segment and the tooltip reports all
+ * five plus the total. Zero and tiny categories retain their true thickness.
+ * A visually hidden table duplicates the series for screen readers.
  */
 export function UsageChart(props: { usage: Usage }): JSX.Element {
-  const [active, setActive] = createSignal<number | undefined>(undefined);
-  const [highlight, setHighlight] = createSignal<string | undefined>(undefined);
+  const [hoveredBucket, setHoveredBucket] = createSignal<number | undefined>();
+  const [focusedBucket, setFocusedBucket] = createSignal<number | undefined>();
+  const [hoveredCategory, setHoveredCategory] = createSignal<string | undefined>();
+  const [focusedCategory, setFocusedCategory] = createSignal<string | undefined>();
+  const active = () => hoveredBucket() ?? focusedBucket();
+  const highlight = () => hoveredCategory() ?? focusedCategory();
 
   const { size, ref } = createChartLayout(DEFAULT_USAGE_SIZE);
   const geometry = createMemo(() => buildUsageGeometry(props.usage.buckets, size));
-  const totalsOnly = createMemo(() => shouldUseTotalsFallback(props.usage.buckets));
+  const tooltipLayout = createChartTooltipLayout(
+    () => (geometry().slotX(active() ?? 0) + geometry().slot / 2) / size.width,
+  );
+  // The hover/focus layers, the aria labels and the sr-only table keep reporting
+  // every category; only the drawn series and its legend entry may be omitted.
+  const omitCacheWrite = () => props.usage.totals.cacheWrite === 0;
+  const bands = createMemo(() =>
+    omitCacheWrite()
+      ? geometry().bands.filter((band) => band.key !== "cacheWrite")
+      : geometry().bands,
+  );
   const categoryTotals = createMemo(() =>
-    TOKEN_CATEGORIES.map((category) => ({
-      ...category,
-      value: props.usage.totals[category.key],
-    })),
+    TOKEN_CATEGORIES.filter((category) => !omitCacheWrite() || category.key !== "cacheWrite").map(
+      (category) => ({
+        ...category,
+        value: props.usage.totals[category.key],
+      }),
+    ),
   );
 
   const activeBucket = (): Bucket | undefined => {
@@ -48,14 +72,12 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
     return index === undefined ? undefined : props.usage.buckets[index];
   };
 
-  function detach(): void {
-    setActive(undefined);
-  }
-
   function onKeyDown(event: KeyboardEvent): void {
     if (event.key === "Escape") {
-      setActive(undefined);
-      setHighlight(undefined);
+      setHoveredBucket(undefined);
+      setFocusedBucket(undefined);
+      setHoveredCategory(undefined);
+      setFocusedCategory(undefined);
     }
   }
 
@@ -78,7 +100,10 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
         </span>
       </header>
       <div
-        ref={ref}
+        ref={(element) => {
+          ref(element);
+          tooltipLayout.chartRef(element);
+        }}
         class="qg-chart"
         data-highlight={highlight() === undefined ? undefined : "true"}
       >
@@ -109,44 +134,20 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
             )}
           </For>
 
-          <Show
-            when={!totalsOnly()}
-            fallback={
+          <For each={bands()}>
+            {(band) => (
               <path
                 class="qg-chart__segment"
-                data-highlighted="true"
-                d={toBandPath(buildTotalsBand(geometry()))}
-                fill="var(--qg-token-total)"
-                fill-opacity="0.28"
-                stroke="var(--qg-token-total)"
-                stroke-width="1.5"
+                data-highlighted={
+                  highlight() === undefined || highlight() === band.key ? "true" : undefined
+                }
+                data-thin={bandIsZeroThickness(band) ? "true" : undefined}
+                d={toBandPath(band)}
+                fill={`var(${band.colorVar})`}
+                fill-opacity="0.72"
               />
-            }
-          >
-            <For each={geometry().bands}>
-              {(band) => (
-                <path
-                  class="qg-chart__segment"
-                  data-highlighted={
-                    highlight() === undefined || highlight() === band.key ? "true" : undefined
-                  }
-                  d={toBandPath(band)}
-                  fill={`var(${band.colorVar})`}
-                  fill-opacity="0.62"
-                  stroke={`var(${band.colorVar})`}
-                  stroke-width="1"
-                />
-              )}
-            </For>
-            <path
-              class="qg-chart__total-line"
-              d={toLinePath(geometry().totalLine)}
-              fill="none"
-              stroke="var(--qg-text-muted)"
-              stroke-width="1"
-              stroke-dasharray="2 3"
-            />
-          </Show>
+            )}
+          </For>
 
           <For each={geometry().labelIndexes}>
             {(index) => {
@@ -203,10 +204,10 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
                   left: `${((geometry().slotX(index()) - geometry().plot.left) / geometry().plot.width) * 100}%`,
                   width: `${(Math.max(geometry().slot, 1) / geometry().plot.width) * 100}%`,
                 }}
-                onPointerEnter={() => setActive(index())}
-                onPointerLeave={detach}
-                onFocus={() => setActive(index())}
-                onBlur={detach}
+                onPointerEnter={() => setHoveredBucket(index())}
+                onPointerLeave={() => setHoveredBucket(undefined)}
+                onFocus={() => setFocusedBucket(index())}
+                onBlur={() => setFocusedBucket(undefined)}
                 onKeyDown={onKeyDown}
               />
             )}
@@ -216,11 +217,14 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
         <Show when={activeBucket()}>
           {(bucket) => (
             <output
+              ref={tooltipLayout.tooltipRef}
               class="qg-tooltip"
               style={{
-                left: `clamp(min(120px, 50%), ${((geometry().slotX(active() ?? 0) + geometry().slot / 2) / size.width) * 100}%, max(50%, calc(100% - 120px)))`,
-                top: "0%",
-                transform: "translate(-50%, -100%)",
+                left: `${tooltipLayout.position().left}px`,
+                top: `${tooltipLayout.position().top}px`,
+                "max-width": `${tooltipLayout.position().maxWidth}px`,
+                "max-height": `${tooltipLayout.position().maxHeight}px`,
+                visibility: tooltipLayout.position().visible ? "visible" : "hidden",
               }}
             >
               <p class="qg-tooltip__head">
@@ -259,7 +263,6 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
             </Show>
             <span>
               Per {props.usage.bucketUnit}, {pluralize(props.usage.buckets.length, "bucket")}
-              {totalsOnly() ? " · totals series (stacking would be unreadable)" : ""}
             </span>
           </p>
         </div>
@@ -272,10 +275,10 @@ export function UsageChart(props: { usage: Usage }): JSX.Element {
                 class="qg-legend__item"
                 aria-label={`Highlight ${category.label}`}
                 style={{ "--qg-swatch": `var(${category.colorVar})` }}
-                onPointerEnter={() => setHighlight(category.key)}
-                onPointerLeave={() => setHighlight(undefined)}
-                onFocus={() => setHighlight(category.key)}
-                onBlur={() => setHighlight(undefined)}
+                onPointerEnter={() => setHoveredCategory(category.key)}
+                onPointerLeave={() => setHoveredCategory(undefined)}
+                onFocus={() => setFocusedCategory(category.key)}
+                onBlur={() => setFocusedCategory(undefined)}
                 onKeyDown={onKeyDown}
               >
                 <span class="qg-legend__swatch" aria-hidden="true" />
