@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGuiSettingsStore, getGuiDashboardPort } from "../src/gui/config.js";
-import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
+import { createLoadConfigMeta, getGuiConfigPath, loadConfig } from "../src/lib/config.js";
 import {
   createGuiConfigWorkspace,
   type GuiConfigWorkspace,
@@ -189,12 +189,13 @@ describe("legacy config compatibility beside the canonical layer", () => {
     expect(getGuiDashboardPort({ dashboard: { port: 70000 } })).toBe(4144);
   });
 
-  it("keeps absolute paths out of the settings payload", async () => {
+  it("exposes only the absolute canonical pathLabel and keeps other strings path-free", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 1000 });
     writeGuiCanonicalConfig(workspace, { dashboard: { port: 4999 } });
 
     const snapshot = await makeStore(workspace).settings();
+    const { pathLabel, ...pathFreePayload } = snapshot;
     const strings: string[] = [];
     const walk = (value: unknown): void => {
       if (typeof value === "string") strings.push(value);
@@ -203,7 +204,7 @@ describe("legacy config compatibility beside the canonical layer", () => {
         for (const entry of Object.values(value)) walk(entry);
       }
     };
-    walk(snapshot);
+    walk(pathFreePayload);
 
     expect(strings.length).toBeGreaterThan(0);
     for (const entry of strings) {
@@ -211,6 +212,9 @@ describe("legacy config compatibility beside the canonical layer", () => {
       expect(entry).not.toContain(workspace.configDir);
       expect(entry).not.toContain(workspace.workspaceRoot);
     }
-    expect(snapshot.pathLabel).toBe("opencode-quota-gui/config.jsonc");
+
+    // The sole authorized absolute-path display exception.
+    expect(pathLabel).toBe(getGuiConfigPath(workspace.configDir));
+    expect(pathLabel).toBe(workspace.guiConfigPath);
   });
 });

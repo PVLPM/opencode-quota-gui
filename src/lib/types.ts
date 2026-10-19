@@ -89,6 +89,12 @@ export interface QuotaDashboardConfig {
   hiddenCards: string[];
   /** Hidden quota row ids (opaque ids; at most `DASHBOARD_HIDDEN_ID_LIMIT`). */
   hiddenRows: string[];
+  /**
+   * Preferred provider card display order (opaque ids; at most
+   * `DASHBOARD_HIDDEN_ID_LIMIT`). Display order only; providers absent from
+   * this list keep their backend order.
+   */
+  providerOrder: string[];
 }
 
 /** Default dashboard port (spec §5.4); never falls back to another port. */
@@ -270,7 +276,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   percentDisplayMode: "remaining",
   accountingDetail: "summary",
   resetTimeSpaced: true,
-  minIntervalMs: 300000, // 5 minutes
+  minIntervalMs: 60000, // 1 minute
   requestTimeoutMs: REQUEST_TIMEOUT_MS,
 
   debug: false,
@@ -326,6 +332,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
     port: DEFAULT_DASHBOARD_PORT,
     hiddenCards: [],
     hiddenRows: [],
+    providerOrder: [],
   },
   layout: {
     maxWidth: 50,

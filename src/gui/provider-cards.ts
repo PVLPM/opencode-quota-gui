@@ -54,6 +54,13 @@ export interface ProviderCardPreferences {
   quotaProjection?: QuotaToastConfig["quotaProjection"];
   resetTimeDecimals?: QuotaToastConfig["resetTimeDecimals"];
   resetTimeSpaced?: QuotaToastConfig["resetTimeSpaced"];
+  /**
+   * Preferred provider card display order (`dashboard.providerOrder`). Affects
+   * only the sequence of provider cards: listed providers come first in saved
+   * order, unlisted providers keep probe order afterward. Data, rows, and
+   * visibility are untouched.
+   */
+  providerOrder?: readonly string[];
 }
 
 export interface BuildProviderCardsInput {
@@ -169,15 +176,23 @@ function detailRowsFor(basis: AccountingPercentageBasis): { label: string; value
  * The canonical label for an entry. `interpretAccountingRow` formats a
  * quantity eagerly, and a provider-supplied non-canonical decimal would throw;
  * fall back to the raw display name so one malformed row cannot fail a read.
+ *
+ * GUI cards drop a trailing colon (and the whitespace around it) because the
+ * label renders before its value, not as a prompt. Provider/TUI labels and the
+ * underlying accounting label are untouched.
  */
+function normalizeRowLabel(label: string): string {
+  return sanitizeSingleLineDisplayText(label)
+    .replace(/\s*:\s*$/u, "")
+    .trimEnd();
+}
+
 function labelForEntry(entry: QuotaToastEntry): string {
   try {
-    return sanitizeSingleLineDisplayText(
-      interpretAccountingRow(entry, { booleanWording: "semantic" }).label,
-    );
+    return normalizeRowLabel(interpretAccountingRow(entry, { booleanWording: "semantic" }).label);
   } catch {
     const fallback = entry.metricLabel?.trim() || entry.label?.trim() || entry.name;
-    return sanitizeSingleLineDisplayText(fallback);
+    return normalizeRowLabel(fallback);
   }
 }
 
@@ -196,6 +211,7 @@ function mapEntryRow(params: {
     resultType: entry.accounting.resultType,
   };
   if (entry.semantic) row.metric = { ...entry.semantic.metric };
+  if (entry.info !== undefined) row.info = entry.info;
 
   if (isPercentEntry(entry)) {
     row.kind = "percent";
@@ -354,17 +370,43 @@ function buildAccountCard(params: {
 }
 
 /**
+ * Stable probe ordering by saved provider preference: listed providers first
+ * in saved order, unlisted providers after them in original probe order.
+ * Original probe index is the tie-breaker (duplicate ids and unlisted ids).
+ */
+function orderProbesByProviderPreference(
+  probes: readonly QuotaStatusLiveProbe[],
+  providerOrder: readonly string[] | undefined,
+): readonly QuotaStatusLiveProbe[] {
+  if (providerOrder === undefined || providerOrder.length === 0) return probes;
+  const rankByProviderId = new Map<string, number>();
+  for (const [rank, providerId] of providerOrder.entries()) {
+    if (!rankByProviderId.has(providerId)) rankByProviderId.set(providerId, rank);
+  }
+  return probes
+    .map((probe, originalIndex) => ({
+      probe,
+      originalIndex,
+      rank: rankByProviderId.get(probe.providerId) ?? Number.POSITIVE_INFINITY,
+    }))
+    .sort((a, b) => (a.rank === b.rank ? a.originalIndex - b.originalIndex : a.rank - b.rank))
+    .map(({ probe }) => probe);
+}
+
+/**
  * One card per discovered account (zero-entry and failed ones included) plus a
  * provider-scope card for unscoped content or when no account was discovered.
- * Cards keep probe (provider-registration) order; a provider-scope card
- * precedes its account cards. Provider-level failures never invent an account.
+ * Cards keep probe (provider-registration) order, optionally reordered by the
+ * saved provider preference; a provider-scope card precedes its account cards.
+ * Provider-level failures never invent an account.
  */
 export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard[] {
   const labelFor = input.providerLabel ?? getQuotaProviderDisplayLabel;
   const cards: ProviderCard[] = [];
   const seenCardIds = new Set<CardId>();
+  const probes = orderProbesByProviderPreference(input.probes, input.preferences.providerOrder);
 
-  for (const probe of input.probes) {
+  for (const probe of probes) {
     const providerId = probe.providerId;
     const providerLabel = sanitizeSingleLineDisplayText(labelFor(providerId));
     const accounts = dedupeAccounts(probe.result.accounts ?? []);

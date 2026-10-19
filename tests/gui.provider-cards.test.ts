@@ -558,6 +558,176 @@ describe("gui provider cards — account mapping", () => {
     expect(rows[0]?.label).toBe("Weekly");
     expect(rows[1]?.value).toBe("okay");
   });
+
+  it("copies sanitized entry info onto the mapped row and omits absent info", () => {
+    const cards = cardsFor([
+      probe(
+        "opencode",
+        result({
+          entries: [
+            {
+              kind: "quantity",
+              name: "Monthly spend",
+              info: "  Workspace\nmonthly spend\u001B[31m  ",
+              quantity: { decimal: "11.8202", unit: { kind: "currency", code: "USD" } },
+              accounting: { ...TEST_ACCOUNTING, resultType: "spend" },
+              semantic: {
+                metric: { kind: "window", window: "month" },
+                prominence: "primary",
+              },
+            } satisfies QuotaToastEntry,
+            percentEntry({ window: "week" }),
+          ],
+        }),
+      ),
+    ]);
+    const rows = cards[0]?.rows ?? [];
+    expect(rows[0]?.info).toBe("Workspace monthly spend");
+    expect(rows[1]?.info).toBeUndefined();
+  });
+
+  it("removes a trailing colon from canonical GUI row labels", () => {
+    const cards = cardsFor([
+      probe(
+        "kimi",
+        result({
+          entries: [
+            {
+              kind: "boolean",
+              name: "Weekly quota:",
+              value: true,
+              accounting: { ...TEST_ACCOUNTING, resultType: "status" },
+              semantic: {
+                metric: { kind: "named", name: "Weekly quota:" },
+                prominence: "primary",
+              },
+            } satisfies QuotaToastEntry,
+          ],
+        }),
+      ),
+    ]);
+    expect(cards[0]?.rows[0]?.label).toBe("Weekly quota");
+  });
+
+  it("removes a trailing colon from fallback GUI row labels", () => {
+    const cards = cardsFor([
+      probe(
+        "chutes",
+        result({
+          entries: [
+            {
+              kind: "quantity",
+              name: "Chutes balance",
+              label: "5h: ",
+              quantity: { decimal: "1e3", unit: { kind: "count", unit: "credit" } },
+              accounting: { ...TEST_ACCOUNTING, resultType: "balance" },
+            } satisfies QuotaToastEntry,
+          ],
+        }),
+      ),
+    ]);
+    expect(cards[0]?.rows[0]?.label).toBe("5h");
+  });
+});
+
+describe("gui provider cards — provider order", () => {
+  function cardsInOrder(
+    probes: readonly QuotaStatusLiveProbe[],
+    providerOrder?: readonly string[],
+  ): ReturnType<typeof buildProviderCards> {
+    const preferences: ProviderCardPreferences =
+      providerOrder === undefined ? SUMMARY : { ...SUMMARY, providerOrder };
+    return buildProviderCards({ probes, preferences, nowMs: NOW });
+  }
+
+  const threeProbes = [
+    probe("alpha", result({ entries: [percentEntry({ window: "week" })] })),
+    probe("beta", result({ entries: [percentEntry({ window: "month" })] })),
+    probe("gamma", result({ entries: [percentEntry({ window: "five_hour" })] })),
+  ];
+
+  it("applies the saved provider order", () => {
+    const cards = cardsInOrder(threeProbes, ["gamma", "alpha"]);
+    expect(cards.map((card) => card.providerId)).toEqual(["gamma", "alpha", "beta"]);
+  });
+
+  it("keeps providers absent from the saved order stable at the end", () => {
+    const probes = [
+      probe("alpha", result({ entries: [percentEntry({ window: "week" })] })),
+      probe("unknown-b", result({ entries: [percentEntry({ window: "week" })] })),
+      probe("beta", result({ entries: [percentEntry({ window: "week" })] })),
+      probe("unknown-a", result({ entries: [percentEntry({ window: "week" })] })),
+    ];
+
+    const cards = cardsInOrder(probes, ["beta"]);
+    expect(cards.map((card) => card.providerId)).toEqual([
+      "beta",
+      "alpha",
+      "unknown-b",
+      "unknown-a",
+    ]);
+  });
+
+  it("preserves probe order when no saved order exists", () => {
+    expect(cardsInOrder(threeProbes).map((card) => card.providerId)).toEqual([
+      "alpha",
+      "beta",
+      "gamma",
+    ]);
+    expect(cardsInOrder(threeProbes, []).map((card) => card.providerId)).toEqual([
+      "alpha",
+      "beta",
+      "gamma",
+    ]);
+  });
+
+  it("keeps account cards grouped immediately after their provider-scope card", () => {
+    const probes = [
+      probe(
+        "alpha",
+        result({
+          accounts: [{ sourceId: "raw-a1", label: "A1" }, { sourceId: "raw-a2" }],
+          entries: [
+            percentEntry({ window: "month" }),
+            percentEntry({ sourceId: "raw-a1", window: "week" }),
+          ],
+        }),
+      ),
+      probe(
+        "beta",
+        result({
+          accounts: [{ sourceId: "raw-b1", label: "B1" }],
+          entries: [
+            percentEntry({ window: "month" }),
+            percentEntry({ sourceId: "raw-b1", window: "week" }),
+          ],
+        }),
+      ),
+    ];
+
+    const cards = cardsInOrder(probes, ["beta", "alpha"]);
+    expect(cards.map((card) => card.providerId)).toEqual([
+      "beta",
+      "beta",
+      "alpha",
+      "alpha",
+      "alpha",
+    ]);
+    expect(cards.map((card) => card.labelSource)).toEqual([
+      "provider",
+      "connection",
+      "provider",
+      "connection",
+      "account",
+    ]);
+    expect(cards.map((card) => card.accountLabel)).toEqual([
+      undefined,
+      "B1",
+      undefined,
+      "A1",
+      "Account 2",
+    ]);
+  });
 });
 
 describe("gui read source — composition", () => {
@@ -588,21 +758,32 @@ describe("gui read source — composition", () => {
 
     expect(home.generatedAtMs).toBe(NOW);
     expect(home.range).toBe("7d");
-    expect(home.providers.polledAtMs).toBe(NOW);
-    expect(home.providers.enabledProviders).toBe(config.enabledProviders);
-    expect(home.providers.cards).toHaveLength(1);
-    expect(home.providers.cards[0]?.rows.map((row) => row.label)).toEqual([
-      "5h quota",
-      "Weekly quota",
-    ]);
+    // Analytics never waits on quota: providers are empty here.
+    expect(home.providers).toEqual({ cards: [], enabledProviders: [], polledAtMs: NOW });
     expect(home.usage.window.untilMs).toBe(NOW);
     expect(home.usage.totals.total).toBe(15);
     expect(home.usage.totals.apiEquivalentCostUsd).toBeNull();
     expect(home.projects.map((row) => row.projectId)).toEqual(["p1"]);
+    expect(harness.collectorCalls).toHaveLength(0);
+    expect(harness.datasetCalls.count).toBe(1);
+
+    const snapshot = await harness.source.quota();
+    expect(snapshot.generatedAtMs).toBe(NOW);
+    expect(snapshot.stale).toBe(false);
+    expect(snapshot.providers.polledAtMs).toBe(NOW);
+    expect(snapshot.providers.enabledProviders).toBe(config.enabledProviders);
+    expect(snapshot.providers.cards).toHaveLength(1);
+    expect(snapshot.providers.cards[0]?.rows.map((row) => row.label)).toEqual([
+      "5h quota",
+      "Weekly quota",
+    ]);
 
     expect(harness.collectorCalls).toHaveLength(1);
     expect(harness.collectorCalls[0]?.nowMs).toBe(NOW);
     expect(harness.collectorCalls[0]?.config).toBe(config);
+    expect(harness.collectorCalls[0]?.providers.map((provider) => provider.id)).toContain(
+      "anthropic",
+    );
     expect(harness.datasetCalls.count).toBe(1);
   });
 
@@ -658,9 +839,55 @@ describe("gui read source — composition", () => {
     const home = await harness.source.home({ range: "lifetime" });
     expect(home.usage.totals.total).toBe(0);
     expect(home.usage.totals.apiEquivalentCostUsd).toBeNull();
-    const row = home.providers.cards[0]?.rows[0];
+    expect(home.providers.cards).toEqual([]);
+
+    const snapshot = await harness.source.quota();
+    const row = snapshot.providers.cards[0]?.rows[0];
     expect(row?.kind).toBe("quantity");
     expect(row?.resultType).toBe("spend");
     expect(row?.quantity?.decimal).toBe("12.50");
+  });
+
+  it("applies dashboard.providerOrder to quota cards without reordering rows", async () => {
+    const config = baseConfig({
+      dashboard: { ...DEFAULT_CONFIG.dashboard, providerOrder: ["gamma", "alpha"] },
+    });
+    const harness = createHarness({
+      config,
+      probes: [
+        probe(
+          "alpha",
+          result({
+            entries: [percentEntry({ window: "week" }), percentEntry({ window: "month" })],
+          }),
+        ),
+        probe("beta", result({ entries: [percentEntry({ window: "week" })] })),
+        probe(
+          "gamma",
+          result({
+            entries: [percentEntry({ window: "five_hour" }), percentEntry({ window: "week" })],
+          }),
+        ),
+      ],
+    });
+
+    const snapshot = await harness.source.quota();
+
+    expect(snapshot.providers.cards.map((card) => card.providerId)).toEqual([
+      "gamma",
+      "alpha",
+      "beta",
+    ]);
+    expect(snapshot.providers.cards.map((card) => card.rows.map((row) => row.metric))).toEqual([
+      [
+        { kind: "window", window: "five_hour" },
+        { kind: "window", window: "week" },
+      ],
+      [
+        { kind: "window", window: "week" },
+        { kind: "window", window: "month" },
+      ],
+      [{ kind: "window", window: "week" }],
+    ]);
   });
 });

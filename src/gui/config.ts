@@ -34,7 +34,10 @@ import {
   normalizeEnabledProviders,
 } from "../lib/config.js";
 import type { EditableConfigPath } from "../lib/config-file-utils.js";
-import { ConfigWriteTargetError } from "../lib/config-write-target.js";
+import {
+  ConfigWriteTargetError,
+  type ConfigWriteTargetReason,
+} from "../lib/config-write-target.js";
 import { isResetTimeDecimals } from "../lib/format-utils.js";
 import {
   applyConfigDocumentEdit,
@@ -50,6 +53,11 @@ import {
   DEFAULT_DASHBOARD_PORT,
   type QuotaToastConfig,
 } from "../lib/types.js";
+import {
+  createSettingsFileOpener,
+  SettingsFileOpenError,
+  type SettingsFileOpener,
+} from "./settings-file-opener.js";
 
 /** Writable GUI settings keys (spec §5.4 table order, port excluded). */
 export const GUI_SETTINGS_WRITABLE_KEYS = [
@@ -68,6 +76,7 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "opencodeMonthlyLimit",
   "dashboard.hiddenCards",
   "dashboard.hiddenRows",
+  "dashboard.providerOrder",
 ] as const;
 
 /** Read-only GUI settings keys: the port needs a restart and has no fallback. */
@@ -151,6 +160,8 @@ export interface GuiSettingsStoreOptions {
   configDir: string;
   /** Project config root whose legacy layers are read and reported, never written. */
   workspaceRoot?: string;
+  /** Test/embedding seam: replaces the OS default-application opener. */
+  settingsFileOpener?: SettingsFileOpener;
 }
 
 interface CanonicalDocument {
@@ -195,11 +206,59 @@ function safeSettingKeyLabel(key: string): string {
     : "$unknown";
 }
 
+/** Reasons the HTTP layer already forwards; anything else is dropped. */
+const OPEN_TARGET_REASONS: ReadonlySet<ConfigWriteTargetReason> = new Set([
+  "dangling",
+  "loop",
+  "depth",
+  "non-regular",
+  "permission",
+]);
+
+/**
+ * Maps opener failures to the existing controlled settings vocabulary without
+ * ever carrying the absolute path, command, or OS error text.
+ */
+function settingsOpenError(error: SettingsFileOpenError): GuiSettingsError {
+  if (error instanceof SettingsFileOpenError) {
+    switch (error.code) {
+      case "missing":
+        return new GuiSettingsError(
+          "config-target-error",
+          "The dashboard config file does not exist",
+        );
+      case "unsafe-target": {
+        const reason =
+          error.reason !== undefined && OPEN_TARGET_REASONS.has(error.reason)
+            ? error.reason
+            : undefined;
+        return new GuiSettingsError(
+          "config-target-error",
+          "The dashboard config path cannot be opened",
+          reason === undefined ? undefined : { reason },
+        );
+      }
+      case "unsupported-platform":
+        return new GuiSettingsError(
+          "config-target-error",
+          "Opening files is not supported on this platform",
+        );
+      case "launch-failed":
+        return new GuiSettingsError(
+          "config-write-error",
+          "Failed to open the dashboard config file",
+        );
+    }
+  }
+  return new GuiSettingsError("config-write-error", "Failed to open the dashboard config file");
+}
+
 export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSettingsStore {
   const configDir = resolve(options.configDir);
   const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
   const canonicalPath = getGuiConfigPath(configDir);
   const siblingJsonPath = getGuiConfigSiblingJsonPath(configDir);
+  const settingsFileOpener = options.settingsFileOpener ?? createSettingsFileOpener();
 
   let lockTail: Promise<unknown> = Promise.resolve();
 
@@ -282,6 +341,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return [...config.dashboard.hiddenCards];
       case "dashboard.hiddenRows":
         return [...config.dashboard.hiddenRows];
+      case "dashboard.providerOrder":
+        return [...config.dashboard.providerOrder];
       case "dashboard.port":
         return config.dashboard.port;
     }
@@ -462,7 +523,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         }
         return value;
       case "dashboard.hiddenCards":
-      case "dashboard.hiddenRows": {
+      case "dashboard.hiddenRows":
+      case "dashboard.providerOrder": {
         if (!Array.isArray(value)) {
           throw invalidSetting(key, "expected a list of id strings");
         }
@@ -680,7 +742,9 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
     return {
       revision: state.revision,
-      pathLabel: GUI_CONFIG_RELATIVE_PATH,
+      // Deliberate narrow display exception requested by the user: the full
+      // OS-native canonical path, never an arbitrary caller path.
+      pathLabel: canonicalPath,
       values,
       sources,
       writable: [...GUI_SETTINGS_WRITABLE_KEYS],
@@ -767,5 +831,23 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     });
   }
 
-  return { settings, saveSettings, saveVisibility, importPreview, importApply };
+  /** No arguments: the target is always the canonical GUI settings file. */
+  async function openSettingsFile(): Promise<void> {
+    try {
+      await settingsFileOpener.open(canonicalPath);
+    } catch (error) {
+      if (error instanceof SettingsFileOpenError) throw settingsOpenError(error);
+      // Injected openers are untrusted too: never forward their message.
+      throw new GuiSettingsError("config-write-error", "Failed to open the dashboard config file");
+    }
+  }
+
+  return {
+    settings,
+    saveSettings,
+    saveVisibility,
+    importPreview,
+    importApply,
+    openSettingsFile,
+  };
 }

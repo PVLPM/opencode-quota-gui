@@ -252,6 +252,62 @@ describe("canonical dashboard config layer", () => {
     expect(invalid.meta.configIssues.some((entry) => entry.key === "dashboard.port")).toBe(true);
   });
 
+  it("defaults dashboard.providerOrder to an empty list when the key is absent", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, { minIntervalMs: 500 });
+
+    const { config, meta } = await load(workspace);
+
+    expect(config.dashboard.providerOrder).toEqual([]);
+    expect(meta.settingSources).not.toHaveProperty("dashboard.providerOrder");
+    expect(meta.configIssues).toEqual([]);
+  });
+
+  it("reads, dedupes, and merges dashboard.providerOrder across layers", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { providerOrder: ["provider-b", "provider-a", "provider-b"] },
+    });
+
+    const global = await load(workspace);
+    expect(global.config.dashboard.providerOrder).toEqual(["provider-b", "provider-a"]);
+    expect(global.meta.settingSources["dashboard.providerOrder"]).toBe(workspace.guiConfigPath);
+
+    writeQuotaSidecarConfig(workspace.workspaceRoot, {
+      dashboard: { providerOrder: ["project-first", "provider-a"] },
+    });
+
+    const merged = await load(workspace);
+    expect(merged.config.dashboard.providerOrder).toEqual(["project-first", "provider-a"]);
+    expect(merged.meta.settingSources["dashboard.providerOrder"]).toBe(
+      quotaSidecarConfigSource(workspace.workspaceRoot),
+    );
+  });
+
+  it("rejects invalid dashboard.providerOrder entries and caps the list", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { providerOrder: ["provider-a", 7] },
+    });
+
+    const invalid = await load(workspace);
+    expect(invalid.config.dashboard.providerOrder).toEqual([]);
+    const issue = invalid.meta.configIssues.find(
+      (entry) => entry.key === "dashboard.providerOrder",
+    );
+    expect(issue?.message).toMatch(/array of id strings/);
+
+    const oversized = Array.from({ length: 501 }, (_value, index) => `provider-${index}`);
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { providerOrder: oversized },
+    });
+
+    const capped = await load(workspace);
+    expect(capped.config.dashboard.providerOrder).toHaveLength(500);
+    expect(capped.config.dashboard.providerOrder[0]).toBe("provider-0");
+    expect(capped.config.dashboard.providerOrder[499]).toBe("provider-499");
+  });
+
   it("ignores a sibling config.json and raises an unread issue for it", async () => {
     const workspace = makeWorkspace();
     writeGuiCanonicalConfig(workspace, { minIntervalMs: 500 });

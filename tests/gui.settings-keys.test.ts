@@ -11,6 +11,7 @@ import {
   type GuiSettingsErrorCode,
   type GuiSettingsErrorDetails,
 } from "../src/gui/config.js";
+import { getGuiConfigPath } from "../src/lib/config.js";
 import {
   createGuiConfigWorkspace,
   type GuiConfigWorkspace,
@@ -86,6 +87,7 @@ const EXPECTED_KEYS = [
   "opencodeMonthlyLimit",
   "dashboard.hiddenCards",
   "dashboard.hiddenRows",
+  "dashboard.providerOrder",
   "dashboard.port",
 ] as const;
 
@@ -118,7 +120,7 @@ describe("GUI settings keys", () => {
     const workspace = makeWorkspace();
     const snapshot = await makeStore(workspace).settings();
 
-    expect(snapshot.pathLabel).toBe("opencode-quota-gui/config.jsonc");
+    expect(snapshot.pathLabel).toBe(getGuiConfigPath(workspace.configDir));
     expect(snapshot.values).toEqual({
       formatStyle: "singleWindow",
       percentDisplayMode: "remaining",
@@ -128,13 +130,14 @@ describe("GUI settings keys", () => {
       resetTimeSpaced: true,
       waitForQuotaReset: true,
       enabledProviders: "auto",
-      minIntervalMs: 300000,
+      minIntervalMs: 60000,
       requestTimeoutMs: 5000,
       accountingDetail: "summary",
       opencodeGoWindows: ["rolling", "weekly", "monthly"],
       opencodeMonthlyLimit: null,
       "dashboard.hiddenCards": [],
       "dashboard.hiddenRows": [],
+      "dashboard.providerOrder": [],
       "dashboard.port": 4144,
     });
     expect(snapshot.sources).toEqual(
@@ -197,6 +200,7 @@ describe("GUI settings keys", () => {
     ["opencodeMonthlyLimit", 42.5, 42.5],
     ["dashboard.hiddenCards", ["card-1"], ["card-1"]],
     ["dashboard.hiddenRows", ["card-1#row-1"], ["card-1#row-1"]],
+    ["dashboard.providerOrder", ["provider-1", "provider-2"], ["provider-1", "provider-2"]],
   ];
 
   it.each(writeCases)("writes %s = %j for real", async (key, value, expected) => {
@@ -289,12 +293,14 @@ describe("GUI settings keys", () => {
       patch: {
         opencodeGoWindows: ["weekly", "weekly", "monthly"],
         "dashboard.hiddenCards": ["a", "a", "b"],
+        "dashboard.providerOrder": ["second", "first", "second"],
       },
       expectedRevision: before.revision,
     });
 
     expect(readDotted(workspace, "opencodeGoWindows")).toEqual(["weekly", "monthly"]);
     expect(readDotted(workspace, "dashboard.hiddenCards")).toEqual(["a", "b"]);
+    expect(readDotted(workspace, "dashboard.providerOrder")).toEqual(["second", "first"]);
   });
 
   it("rejects unknown keys with unknown-setting and writes nothing", async () => {
@@ -337,7 +343,14 @@ describe("GUI settings keys", () => {
     ["opencodeMonthlyLimit", "0"],
     ["dashboard.hiddenCards", "x"],
     ["dashboard.hiddenRows", [1]],
+    ["dashboard.providerOrder", "x"],
+    ["dashboard.providerOrder", [""]],
+    ["dashboard.providerOrder", ["ok", 1]],
     ["dashboard.hiddenCards", Array.from({ length: 501 }, (_value, index) => `card-${index}`)],
+    [
+      "dashboard.providerOrder",
+      Array.from({ length: 501 }, (_value, index) => `provider-${index}`),
+    ],
   ];
 
   it.each(invalidCases)("rejects invalid %s = %j with invalid-setting", async (key, value) => {
@@ -367,15 +380,17 @@ describe("GUI settings keys", () => {
 
     expect(existsSync(workspace.guiConfigPath)).toBe(false);
     const after = await store.settings();
-    expect(after.values.minIntervalMs).toBe(300000);
+    expect(after.values.minIntervalMs).toBe(60000);
     expect(after.values.accountingDetail).toBe("summary");
   });
 
-  it("reports symbolic sources and never an absolute path in the snapshot", async () => {
+  it("reports symbolic sources and exempts only pathLabel from the absolute-path walk", async () => {
     const workspace = makeWorkspace();
     writeGuiCanonicalConfig(workspace, { minIntervalMs: 1000 });
 
     const snapshot = await makeStore(workspace).settings();
+    // Deliberate narrow exception: only the top-level pathLabel may be absolute.
+    const { pathLabel, ...pathFreeSnapshot } = snapshot;
     const strings: string[] = [];
     const walk = (value: unknown): void => {
       if (typeof value === "string") strings.push(value);
@@ -383,11 +398,12 @@ describe("GUI settings keys", () => {
       else if (value && typeof value === "object")
         for (const entry of Object.values(value)) walk(entry);
     };
-    walk(snapshot);
+    walk(pathFreeSnapshot);
 
     expect(strings.length).toBeGreaterThan(0);
     for (const entry of strings) {
       expect(entry).not.toContain(workspace.tempDir);
     }
+    expect(pathLabel).toBe(getGuiConfigPath(workspace.configDir));
   });
 });

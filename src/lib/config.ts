@@ -110,6 +110,7 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "dashboard.port",
   "dashboard.hiddenCards",
   "dashboard.hiddenRows",
+  "dashboard.providerOrder",
 ] as const;
 
 export type QuotaToastSettingSourceKey = (typeof QUOTA_TOAST_SETTING_SOURCE_KEYS)[number];
@@ -394,6 +395,7 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
       port: config.dashboard.port,
       hiddenCards: [...config.dashboard.hiddenCards],
       hiddenRows: [...config.dashboard.hiddenRows],
+      providerOrder: [...config.dashboard.providerOrder],
     },
   };
 }
@@ -700,7 +702,7 @@ function extractDashboardPatch(
     }
   }
 
-  for (const key of ["hiddenCards", "hiddenRows"] as const) {
+  for (const key of ["hiddenCards", "hiddenRows", "providerOrder"] as const) {
     if (!hasOwnKey(value, key)) {
       continue;
     }
@@ -1315,6 +1317,11 @@ function applyValidatedQuotaToastPatch(
     if (hasOwnKey(patch.dashboard, "hiddenRows")) {
       config.dashboard.hiddenRows = [...patch.dashboard.hiddenRows!];
       applySettingSource(settingSources, "dashboard.hiddenRows", sourcePath);
+    }
+
+    if (patch.dashboard.providerOrder) {
+      config.dashboard.providerOrder = [...patch.dashboard.providerOrder];
+      applySettingSource(settingSources, "dashboard.providerOrder", sourcePath);
     }
   }
 }
