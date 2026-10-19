@@ -9,6 +9,7 @@ import type {
   ImportPreview,
   JsonValue,
   ProjectSnapshot,
+  QuotaSnapshot,
   SessionSnapshot,
   SettingsSnapshot,
   SettingsWriteResult,
@@ -65,6 +66,14 @@ function homeSnapshot(range: RangeKey): HomeSnapshot {
   };
 }
 
+function quotaSnapshot(): QuotaSnapshot {
+  return {
+    generatedAtMs: NOW,
+    stale: false,
+    providers: { cards: [], enabledProviders: "auto", polledAtMs: NOW },
+  };
+}
+
 function projectSnapshot(projectId: string, range: RangeKey): ProjectSnapshot {
   return {
     projectId,
@@ -81,6 +90,8 @@ function projectSnapshot(projectId: string, range: RangeKey): ProjectSnapshot {
 function sessionSnapshot(sessionId: string): SessionSnapshot {
   return {
     focusSessionId: sessionId,
+    projectId: "project-1",
+    projectName: "Project",
     breadcrumbs: [{ sessionId, title: "Root", isFocus: true }],
     nodes: [],
     steps: [],
@@ -94,6 +105,7 @@ function sessionSnapshot(sessionId: string): SessionSnapshot {
 interface RouteFixtures {
   state: {
     homeRanges: RangeKey[];
+    quotaCalls: number;
     projectRanges: RangeKey[];
     lastSettingsInput?: { patch: Record<string, JsonValue>; expectedRevision: string };
     lastVisibilityInput?: {
@@ -102,17 +114,27 @@ interface RouteFixtures {
       expectedRevision: string;
     };
     lastImportInput?: { expectedRevision: string };
+    openCalls: number;
   };
   source: SnapshotSource;
   store: GuiSettingsStore;
 }
 
 function buildFixtures(): RouteFixtures {
-  const state: RouteFixtures["state"] = { homeRanges: [], projectRanges: [] };
+  const state: RouteFixtures["state"] = {
+    homeRanges: [],
+    quotaCalls: 0,
+    projectRanges: [],
+    openCalls: 0,
+  };
   const source: SnapshotSource = {
     home: async ({ range }) => {
       state.homeRanges.push(range);
       return homeSnapshot(range);
+    },
+    quota: async () => {
+      state.quotaCalls += 1;
+      return quotaSnapshot();
     },
     project: async ({ projectId, range }) => {
       state.projectRanges.push(range);
@@ -167,6 +189,9 @@ function buildFixtures(): RouteFixtures {
     importApply: async (input): Promise<SettingsWriteResult> => {
       state.lastImportInput = input;
       return { revision: "rev-2", applied: {}, warnings: [] };
+    },
+    openSettingsFile: async () => {
+      state.openCalls += 1;
     },
   };
   return { state, source, store };
@@ -267,6 +292,96 @@ describe("GUI HTTP routes", () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it("serves the independent quota snapshot without coupling it to home", async () => {
+    const { handle, state } = await start();
+    try {
+      const home = await get(handle.port, "/api/v1/home");
+      expect(home.status).toBe(200);
+      expect(home.body).toMatchObject({
+        providers: { cards: [], enabledProviders: "auto" },
+      });
+      expect(state.quotaCalls).toBe(0);
+
+      const quota = await get(handle.port, "/api/v1/quota");
+      expect(quota.status).toBe(200);
+      expect(quota.body).toEqual(quotaSnapshot());
+      expect(state.quotaCalls).toBe(1);
+
+      const head = await fetch(`${base(handle.port)}/api/v1/quota`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("closes the optional source on final close and on bind failure", async () => {
+    const logger = createGuiLogger({ sink: () => {} });
+    let closes = 0;
+    const { source, store } = buildFixtures();
+    const tracked: SnapshotSource = {
+      ...source,
+      close: async () => {
+        closes += 1;
+      },
+    };
+    const handle = await createDashboardServer({
+      port: 0,
+      source: tracked,
+      settings: store,
+      assetRoot,
+      logger,
+    });
+    await handle.close();
+    await handle.close();
+    expect(closes).toBe(1);
+
+    // A terminal bind failure releases source resources even though no handle
+    // is returned.
+    const occupied = await start();
+    let bindCloses = 0;
+    const failing = buildFixtures();
+    const failingSource: SnapshotSource = {
+      ...failing.source,
+      close: async () => {
+        bindCloses += 1;
+      },
+    };
+    await expect(
+      createDashboardServer({
+        port: occupied.handle.port,
+        source: failingSource,
+        settings: failing.store,
+        assetRoot,
+        logger,
+      }),
+    ).rejects.toMatchObject({ code: "unavailable" });
+    for (let index = 0; index < 50 && bindCloses === 0; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(bindCloses).toBe(1);
+    await occupied.handle.close();
+  });
+
+  it("still closes when the source close itself fails", async () => {
+    const logger = createGuiLogger({ sink: () => {} });
+    const { source, store } = buildFixtures();
+    const failing: SnapshotSource = {
+      ...source,
+      close: async () => {
+        throw new Error("source close failed");
+      },
+    };
+    const handle = await createDashboardServer({
+      port: 0,
+      source: failing,
+      settings: store,
+      assetRoot,
+      logger,
+    });
+    await expect(handle.close()).resolves.toBeUndefined();
   });
 
   it("serves index.html at / and packaged assets under /assets", async () => {
@@ -409,6 +524,104 @@ describe("GUI HTTP routes", () => {
     }
   });
 
+  it("opens the fixed settings file through the guarded empty-body route", async () => {
+    const { handle, state } = await start();
+    try {
+      const opened = await post(handle.port, "/api/v1/settings/open", {});
+      expect(opened.status).toBe(200);
+      expect(await opened.json()).toEqual({ opened: true });
+      expect(state.openCalls).toBe(1);
+
+      const wrongMethod = await get(handle.port, "/api/v1/settings/open");
+      expect(wrongMethod.status).toBe(405);
+      expect(wrongMethod.headers.get("allow")).toBe("POST");
+      expect(errorOf(wrongMethod.body).code).toBe("method-not-allowed");
+
+      const wrongType = await fetch(`${base(handle.port)}/api/v1/settings/open`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: "{}",
+      });
+      expect(wrongType.status).toBe(415);
+      expect(errorOf(await wrongType.json()).code).toBe("unsupported-media-type");
+
+      const wrongOrigin = await fetch(`${base(handle.port)}/api/v1/settings/open`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://evil.example",
+        },
+        body: "{}",
+      });
+      expect(wrongOrigin.status).toBe(403);
+      expect(errorOf(await wrongOrigin.json()).code).toBe("bad-origin");
+
+      const crossSite = await fetch(`${base(handle.port)}/api/v1/settings/open`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "sec-fetch-site": "cross-site",
+        },
+        body: "{}",
+      });
+      expect(crossSite.status).toBe(403);
+      expect(errorOf(await crossSite.json()).code).toBe("bad-origin");
+
+      const malformed = await fetch(`${base(handle.port)}/api/v1/settings/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{not json",
+      });
+      expect(malformed.status).toBe(400);
+      expect(errorOf(await malformed.json()).code).toBe("bad-request");
+
+      const nonEmpty = await post(handle.port, "/api/v1/settings/open", { path: "C:/secret" });
+      expect(nonEmpty.status).toBe(400);
+      expect(errorOf(await nonEmpty.json()).code).toBe("bad-request");
+
+      const nonObject = await fetch(`${base(handle.port)}/api/v1/settings/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "[]",
+      });
+      expect(nonObject.status).toBe(400);
+      expect(errorOf(await nonObject.json()).code).toBe("bad-request");
+
+      expect(state.openCalls).toBe(1);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("reports a controlled error when the settings store cannot open files", async () => {
+    const { source, store } = buildFixtures();
+    const { settings, saveSettings, saveVisibility, importPreview, importApply } = store;
+    const withoutOpen: GuiSettingsStore = {
+      settings,
+      saveSettings,
+      saveVisibility,
+      importPreview,
+      importApply,
+    };
+    const handle = await createDashboardServer({
+      port: 0,
+      source,
+      settings: withoutOpen,
+      assetRoot,
+      logger: createGuiLogger({ sink: () => {} }),
+    });
+    try {
+      const response = await post(handle.port, "/api/v1/settings/open", {});
+      expect(response.status).toBe(409);
+      const error = errorOf(await response.json());
+      expect(error.code).toBe("config-target-error");
+      expect(error.message).toBe("The dashboard config path is not writable");
+      expect(error.message).not.toContain(assetRoot);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("maps settings store errors to the controlled envelope", async () => {
     const { handle } = await start();
     try {
@@ -425,6 +638,38 @@ describe("GUI HTTP routes", () => {
       });
       expect(stale.status).toBe(409);
       expect(errorOf(await stale.json()).code).toBe("config-changed");
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("accepts the explicit view-scope signal and rejects malformed ones", async () => {
+    const { handle } = await start();
+    try {
+      const quota = await put(handle.port, "/api/v1/view", { scope: "quota" });
+      expect(quota.status).toBe(200);
+      expect(await quota.json()).toEqual({ scope: "quota" });
+
+      const analytics = await put(handle.port, "/api/v1/view", { scope: "analytics" });
+      expect(analytics.status).toBe(200);
+      expect(await analytics.json()).toEqual({ scope: "analytics" });
+
+      const unknownScope = await put(handle.port, "/api/v1/view", { scope: "other" });
+      expect(unknownScope.status).toBe(400);
+      expect(errorOf(await unknownScope.json()).code).toBe("bad-request");
+
+      const notScope = await put(handle.port, "/api/v1/view", { view: "quota" });
+      expect(notScope.status).toBe(400);
+
+      const extra = await put(handle.port, "/api/v1/view", { scope: "quota", extra: true });
+      expect(extra.status).toBe(400);
+
+      const notJson = await fetch(`${base(handle.port)}/api/v1/view`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: "{not json",
+      });
+      expect(notJson.status).toBe(400);
     } finally {
       await handle.close();
     }
@@ -489,6 +734,10 @@ describe("GUI HTTP routes", () => {
       expect(postHome.status).toBe(405);
       expect(postHome.headers.get("allow") ?? "").toContain("GET");
 
+      const postQuota = await post(handle.port, "/api/v1/quota", {});
+      expect(postQuota.status).toBe(405);
+      expect(postQuota.headers.get("allow") ?? "").toContain("GET");
+
       const deleteSettings = await fetch(`${base(handle.port)}/api/v1/settings`, {
         method: "DELETE",
       });
@@ -500,6 +749,10 @@ describe("GUI HTTP routes", () => {
       const postEvents = await post(handle.port, "/api/v1/events", {});
       expect(postEvents.status).toBe(405);
       expect(postEvents.headers.get("allow") ?? "").toContain("GET");
+
+      const deleteView = await fetch(`${base(handle.port)}/api/v1/view`, { method: "DELETE" });
+      expect(deleteView.status).toBe(405);
+      expect(deleteView.headers.get("allow") ?? "").toContain("PUT");
 
       const unknown = await get(handle.port, "/api/v1/nope");
       expect(unknown.status).toBe(404);

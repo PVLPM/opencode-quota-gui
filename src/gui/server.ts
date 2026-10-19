@@ -33,8 +33,15 @@ export interface DashboardServerOptions {
   settings: GuiSettingsStore;
   /** Static root; defaults to `<package>/dist/ui` derived from this module. */
   assetRoot?: string;
-  /** Fixed poll interval or a getter re-read on settings changes. */
+  /**
+   * Existing quota poll interval (positive config value, no new floor) or a
+   * getter re-read on settings changes. Analytics has its own interval below.
+   */
   minIntervalMs?: number | (() => number);
+  /** Explicit quota interval; wins over `minIntervalMs`. */
+  quotaIntervalMs?: number | (() => number);
+  /** Analytics poll interval; defaults to 600000ms. */
+  analyticsIntervalMs?: number | (() => number);
   /** SSE heartbeat override (test seam; default 20 s). */
   heartbeatMs?: number;
   logger?: GuiLogger;
@@ -423,6 +430,8 @@ export function createDashboardServer(
   const snapshots = createSnapshotService({
     source: options.source,
     minIntervalMs: options.minIntervalMs,
+    quotaIntervalMs: options.quotaIntervalMs,
+    analyticsIntervalMs: options.analyticsIntervalMs,
     logger,
   });
 
@@ -592,6 +601,14 @@ export function createDashboardServer(
       return;
     }
 
+    if (rest.length === 1 && rest[0] === "quota") {
+      if (!requireMethods(req, res, ["GET", "HEAD"])) return;
+      // Inference only; an explicit PUT /api/v1/view signal wins.
+      snapshots.setViewScope("quota", "request");
+      sendJson(res, 200, await snapshots.quota());
+      return;
+    }
+
     if (rest.length === 1 && rest[0] === "home") {
       if (!requireMethods(req, res, ["GET", "HEAD"])) return;
       const range = parseRange(url);
@@ -599,6 +616,7 @@ export function createDashboardServer(
         sendError(res, "bad-request");
         return;
       }
+      snapshots.setViewScope("analytics", "request");
       sendJson(res, 200, await snapshots.home({ range }));
       return;
     }
@@ -615,6 +633,7 @@ export function createDashboardServer(
         sendError(res, "bad-request");
         return;
       }
+      snapshots.setViewScope("analytics", "request");
       sendJson(res, 200, await snapshots.project({ projectId, range }));
       return;
     }
@@ -626,6 +645,7 @@ export function createDashboardServer(
         sendError(res, "bad-request");
         return;
       }
+      snapshots.setViewScope("analytics", "request");
       sendJson(res, 200, await snapshots.session({ sessionId }));
       return;
     }
@@ -687,6 +707,46 @@ export function createDashboardServer(
         return;
       }
       sendJson(res, 200, await options.settings.importPreview());
+      return;
+    }
+
+    if (rest.length === 2 && rest[0] === "settings" && rest[1] === "open") {
+      if (!requireMethods(req, res, ["POST"])) return;
+      const parsed = await readWriteJson(req, res);
+      if (!parsed.ok) return;
+      if (!isRecord(parsed.value) || !hasExactKeys(parsed.value, [])) {
+        sendError(res, "bad-request");
+        return;
+      }
+      const open = options.settings.openSettingsFile;
+      if (!open) {
+        throw new GuiSettingsError(
+          "config-target-error",
+          "Opening the settings file is not available",
+        );
+      }
+      await open();
+      sendJson(res, 200, { opened: true });
+      return;
+    }
+
+    if (rest.length === 1 && rest[0] === "view") {
+      if (!requireMethods(req, res, ["PUT"])) return;
+      const parsed = await readWriteJson(req, res);
+      if (!parsed.ok) return;
+      const body = parsed.value;
+      if (
+        !isRecord(body) ||
+        !hasExactKeys(body, ["scope"]) ||
+        (body.scope !== "quota" && body.scope !== "analytics")
+      ) {
+        sendError(res, "bad-request");
+        return;
+      }
+      // The UI's active-surface signal; it stops analytics refresh while the
+      // quota view is open and resumes it on the analytics view.
+      snapshots.setViewScope(body.scope);
+      sendJson(res, 200, { scope: body.scope });
       return;
     }
 
@@ -773,13 +833,40 @@ export function createDashboardServer(
 
   let actualPort = options.port;
   let closing: Promise<void> | undefined;
+  let released: Promise<void> | undefined;
+
+  /**
+   * Stops snapshot work and closes the optional source. Used by both the final
+   * server close and a terminal bind failure, so a worker/DB resource created
+   * by the source is never leaked. Idempotent and never rejects.
+   */
+  function releaseResources(): Promise<void> {
+    if (released) return released;
+    try {
+      snapshots.close();
+      unsubscribe();
+      sse.close();
+    } catch (error: unknown) {
+      logger.warn("dashboard release failed", isErrnoCode(error) ? error.code : "failed");
+    }
+    const closeSource = options.source.close;
+    released = closeSource
+      ? Promise.resolve()
+          .then(() => closeSource())
+          .catch((error: unknown) => {
+            logger.warn(
+              "dashboard source close failed",
+              isErrnoCode(error) ? error.code : "failed",
+            );
+          })
+      : Promise.resolve();
+    return released;
+  }
 
   function close(): Promise<void> {
     if (closing) return closing;
     closing = (async () => {
-      snapshots.close();
-      unsubscribe();
-      sse.close();
+      const resources = releaseResources();
       const killTimer = setTimeout(() => {
         server.closeAllConnections();
       }, 1000);
@@ -789,15 +876,27 @@ export function createDashboardServer(
         server.closeIdleConnections();
       });
       clearTimeout(killTimer);
+      await resources;
     })();
     return closing;
   }
 
   return new Promise<DashboardServerHandle>((resolve, reject) => {
-    const onListenError = (error: unknown) => {
-      const reason = isErrnoCode(error) ? error.code : undefined;
+    const failBind = (reason: string | undefined) => {
       logger.error("dashboard server unavailable", reason ?? "unknown");
+      // Terminal: no alternate port is attempted, and source resources created
+      // before the bind are released even though no handle was returned.
+      try {
+        server.close();
+      } catch {
+        // The listener never started (bind error) or was already closed.
+      }
+      void releaseResources();
       reject(new DashboardBindError(options.port, reason));
+    };
+
+    const onListenError = (error: unknown) => {
+      failBind(isErrnoCode(error) ? error.code : undefined);
     };
 
     server.once("error", onListenError);
@@ -809,7 +908,7 @@ export function createDashboardServer(
         });
         const address = server.address();
         if (address === null || typeof address === "string") {
-          reject(new DashboardBindError(options.port, "listen-failed"));
+          failBind("listen-failed");
           return;
         }
         actualPort = address.port;
@@ -821,9 +920,7 @@ export function createDashboardServer(
       });
     } catch (error: unknown) {
       server.off("error", onListenError);
-      const reason = isErrnoCode(error) ? error.code : undefined;
-      logger.error("dashboard server unavailable", reason ?? "unknown");
-      reject(new DashboardBindError(options.port, reason));
+      failBind(isErrnoCode(error) ? error.code : undefined);
     }
   });
 }

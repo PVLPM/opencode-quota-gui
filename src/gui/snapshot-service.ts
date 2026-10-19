@@ -1,10 +1,21 @@
 /**
  * One snapshot service over the transport-neutral source (design spec §4.2, R9).
  *
- * Owns computation, caching, single-flight, the viewer-scoped poller, and
- * invalidation. Cache key is `(kind, resourceId, range)`; failures serve the
- * last good snapshot with `stale: true` when one exists. The poller runs only
- * while at least one SSE viewer is attached and ticks never overlap.
+ * Owns computation, caching, single-flight, viewer-scoped polling and
+ * invalidation. Cache keys are `(kind, resourceId, range)`; quota is its own
+ * key. Failures serve the last good snapshot with `stale: true` when one
+ * exists. Pollers run only while at least one SSE viewer is attached and ticks
+ * never overlap within a kind.
+ *
+ * Quota and analytics poll on independent timers: quota uses the existing
+ * positive `minIntervalMs` configuration (default 60000), analytics defaults
+ * to 600000. One analytics tick asks the source for at most one shared
+ * underlying refresh, then re-derives only the loaded home/project/session
+ * keys; a quota-only viewer therefore starts no analytics work, and a slow
+ * provider cycle never delays a home/project/session read. The quota
+ * registration is pinned outside the analytics LRU bound, and a viewer-scoped
+ * view signal (`quota`) suspends analytics refresh even when analytics pages
+ * were visited earlier.
  *
  * Retention is bounded: at most `MAX_TRACKED_PAGES` keys keep a cache entry and
  * a poll registration, ordered by actual page loads (HTTP requests), never by
@@ -30,38 +41,76 @@ import type {
   DashboardEventTopic,
   HomeSnapshot,
   ProjectSnapshot,
+  QuotaSnapshot,
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import type { RangeKey } from "../contracts/ranges.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 
-/** Effective poll interval when nothing valid is configured (spec §4.2). */
-export const DEFAULT_POLL_INTERVAL_MS = 300_000;
+/** Default quota/provider poll interval (spec §4.2; existing config overrides). */
+export const DEFAULT_QUOTA_INTERVAL_MS = 60_000;
+
+/** Backwards-compatible alias for the quota interval (existing importers). */
+export const DEFAULT_POLL_INTERVAL_MS = DEFAULT_QUOTA_INTERVAL_MS;
+
+/** Default analytics refresh/poll interval (spec: 600000ms). */
+export const DEFAULT_ANALYTICS_INTERVAL_MS = 600_000;
 
 /**
- * Hard cap on pages with a cache entry and poll registration (R9 poller fix).
+ * Hard cap on *analytics* pages with a cache entry and poll registration (R9
+ * poller fix). The independent quota registration is pinned and excluded from
+ * the bound, so analytics page churn can never evict the quota poller.
  *
  * Recency is refreshed only by an actual page load (`load`, i.e. an HTTP
  * snapshot request), never by a poll tick. When a new load pushes the tracked
- * set past this bound, the least recently loaded key is evicted: its cache
- * entry, poll registration, and recency record are dropped together.
+ * analytic set past this bound, the least recently loaded key is evicted: its
+ * cache entry, poll registration, and recency record are dropped together.
  */
 export const MAX_TRACKED_PAGES = 16;
 
-/** The read side of the dashboard source the service consumes. */
-export type SnapshotSource = Pick<DashboardDataSource, "home" | "project" | "session">;
+/**
+ * The read side of the dashboard source the service consumes. `quota` is
+ * optional at this seam so older injected mocks keep compiling; production
+ * always provides it and `/api/v1/quota` returns a controlled 500 otherwise.
+ * `refreshAnalytics` is an optional shared worker refresh seam, and `close` is
+ * closed by the server's final dispose/bind-failure path, not by this service.
+ */
+export type SnapshotSource = Pick<DashboardDataSource, "home" | "project" | "session"> & {
+  quota?: DashboardDataSource["quota"];
+  refreshAnalytics?: () => Promise<void>;
+  /** Optional worker generation notifications; never starts analytics eagerly. */
+  subscribeAnalytics?: (listener: () => void) => () => void;
+  close?: () => void | Promise<void>;
+};
 
 export interface SnapshotServiceOptions {
   source: SnapshotSource;
-  /** Fixed interval, or a getter re-read on settings changes (P2 production seam). */
+  /**
+   * Quota poll interval (legacy name retained for the production lifecycle):
+   * a fixed value or a getter re-read on settings changes. This is the existing
+   * `minIntervalMs` setting, with no invented minimum.
+   */
   minIntervalMs?: number | (() => number);
+  /** Explicit quota interval; wins over `minIntervalMs`. */
+  quotaIntervalMs?: number | (() => number);
+  /** Analytics poll interval; defaults to `DEFAULT_ANALYTICS_INTERVAL_MS`. */
+  analyticsIntervalMs?: number | (() => number);
   /** Test seam for deterministic event timestamps. */
   now?: () => number;
   logger?: GuiLogger;
 }
 
+/**
+ * Which surface the attached viewers are currently looking at. `quota` stops
+ * automatic analytics refresh even when analytics pages were loaded before
+ * (visited once is not an active interest); `analytics` restores it. Defaults
+ * to `analytics` so clients that never signal keep the previous behaviour.
+ */
+export type SnapshotViewScope = "analytics" | "quota";
+
 export interface SnapshotService {
   home(input: { range: RangeKey }): Promise<HomeSnapshot>;
+  quota(): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
   /** Invalidations broadcast over SSE (three topics, never raw snapshots). */
@@ -69,11 +118,18 @@ export interface SnapshotService {
   /** Registers an SSE viewer; the returned disposer detaches it. */
   addViewer(): () => void;
   /**
-   * A settings write: clears home/project caches and broadcasts
+   * A settings write: clears quota/home/project caches and broadcasts
    * `settings.changed`. `scope: "visibility"` only broadcasts (no invalidation,
-   * no provider poll, no analytics change).
+   * no provider poll, no analytics change); the next quota cycle still uses the
+   * current selected-provider set.
    */
   notifySettingsChanged(options?: { scope?: "visibility" }): void;
+  /**
+   * Viewer-scoped interest signal. An explicit `signal` (UI route change) wins
+   * over an inferred `request` (a read of that kind) until the last disconnect;
+   * while the scope is `quota`, analytics refresh/derivation is skipped.
+   */
+  setViewScope(scope: SnapshotViewScope, origin?: "signal" | "request"): void;
   close(): void;
 }
 
@@ -89,6 +145,10 @@ interface InflightTask {
   epoch: number;
   /** Recency generation captured when this compute should be allowed to cache. */
   version: number;
+}
+
+function quotaKey(): string {
+  return "quota\u0000\u0000";
 }
 
 function homeKey(range: RangeKey): string {
@@ -109,7 +169,10 @@ function kindOf(key: string): string {
 }
 
 function topicFor(key: string): DashboardEventTopic {
-  return kindOf(key) === "home" ? "quota.changed" : "sessions.changed";
+  // Home used to include provider cards and emit quota.changed. It is now
+  // analytics-only (usage/projects), so only the independent quota key emits
+  // quota.changed; every analytics key is a session change.
+  return kindOf(key) === "quota" ? "quota.changed" : "sessions.changed";
 }
 
 /**
@@ -149,6 +212,22 @@ function substantiveOf(snapshot: unknown): string {
   return JSON.stringify(stripDerivedNoise(snapshot));
 }
 
+function staleFlag(value: unknown): boolean {
+  return typeof value === "object" && value !== null && "stale" in value && value.stale === true;
+}
+
+/**
+ * True when the source payload itself reports stale data. Such a payload must
+ * not enter the cache as fresh: the next read revalidates instead of serving it
+ * as current until the next poll. Home/project snapshots also flag staleness on
+ * `usage`; session snapshots have no `stale` field and stay unchanged.
+ */
+function payloadIsStale(snapshot: unknown): boolean {
+  if (staleFlag(snapshot)) return true;
+  if (typeof snapshot !== "object" || snapshot === null || !("usage" in snapshot)) return false;
+  return staleFlag(snapshot.usage);
+}
+
 /** Session snapshots have no `stale` field; they are served as-is. */
 function markStale<T>(snapshot: T): T {
   if (typeof snapshot !== "object" || snapshot === null || !("stale" in snapshot)) {
@@ -183,21 +262,67 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
    * in-flight poll ticks and any HTTP cache commit started before that point.
    */
   let viewerEpoch = 0;
-  let pollTimer: NodeJS.Timeout | undefined;
-  let ticking = false;
+  let viewScope: SnapshotViewScope = "analytics";
+  /** Explicit UI signal outranks read-request inference for this viewer session. */
+  let viewScopeExplicit = false;
+  let quotaTimer: NodeJS.Timeout | undefined;
+  let analyticsTimer: NodeJS.Timeout | undefined;
+  let quotaTicking = false;
+  let analyticsTicking = false;
+  let analyticsRetryPending = false;
   let closed = false;
+  let unsubscribeAnalytics: (() => void) | undefined;
+  let analyticsNotifyChain: Promise<void> | undefined;
 
-  function effectiveIntervalMs(): number {
+  function handleGenerationNotification(): void {
+    if (closed || viewers === 0) return;
+    const epoch = viewerEpoch;
+    const run = async (): Promise<void> => {
+      // Let reads already in flight finish first; otherwise an old result could
+      // re-cache itself after invalidation and delay the fresh SSE event.
+      const pending = Array.from(inflight.entries())
+        .filter(([key]) => kindOf(key) !== "quota")
+        .map(([, task]) => task.promise.catch(() => undefined));
+      if (pending.length > 0) await Promise.all(pending);
+      if (closed || viewerEpoch !== epoch || viewers === 0) return;
+      for (const [key, entry] of cache) {
+        if (kindOf(key) !== "quota") entry.stale = true;
+      }
+      // Derivation only: the worker already produced this generation.
+      await tickAnalytics(false, true);
+    };
+    analyticsNotifyChain = (analyticsNotifyChain ?? Promise.resolve())
+      .then(run, run)
+      .catch(() => undefined);
+  }
+
+  if (options.source.subscribeAnalytics) {
+    try {
+      unsubscribeAnalytics = options.source.subscribeAnalytics(handleGenerationNotification);
+    } catch {
+      unsubscribeAnalytics = undefined;
+    }
+  }
+
+  function readInterval(configured: number | (() => number) | undefined, fallback: number): number {
     let value: number | undefined;
     try {
-      const configured = options.minIntervalMs;
       value = typeof configured === "function" ? configured() : configured;
     } catch {
       value = undefined;
     }
-    return value !== undefined && Number.isFinite(value) && value > 0
-      ? value
-      : DEFAULT_POLL_INTERVAL_MS;
+    return value !== undefined && Number.isFinite(value) && value > 0 ? value : fallback;
+  }
+
+  function quotaIntervalMs(): number {
+    return readInterval(
+      options.quotaIntervalMs ?? options.minIntervalMs,
+      DEFAULT_QUOTA_INTERVAL_MS,
+    );
+  }
+
+  function analyticsIntervalMs(): number {
+    return readInterval(options.analyticsIntervalMs, DEFAULT_ANALYTICS_INTERVAL_MS);
   }
 
   function emit(event: DashboardEvent): void {
@@ -219,15 +344,37 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     // share the result, but its guarded completion cannot cache this key.
   }
 
-  /** Marks a page as the most recently loaded and evicts past the bound. */
+  function isQuotaKey(key: string): boolean {
+    return kindOf(key) === "quota";
+  }
+
+  function analyticsTrackedCount(): number {
+    let count = 0;
+    for (const key of tracked.keys()) {
+      if (!isQuotaKey(key)) count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * Marks a page as the most recently loaded and evicts analytics pages past
+   * the bound. The quota registration is never a victim (checkpoint limitation
+   * 115: analytics churn must not stop the independent quota poller).
+   */
   function touch(key: string): number {
     const version = ++versionCounter;
     tracked.delete(key);
     tracked.set(key, version);
-    while (tracked.size > MAX_TRACKED_PAGES) {
-      const oldest = tracked.keys().next().value;
-      if (oldest === undefined) break;
-      evict(oldest);
+    while (analyticsTrackedCount() > MAX_TRACKED_PAGES) {
+      let oldestAnalytics: string | undefined;
+      for (const candidate of tracked.keys()) {
+        if (!isQuotaKey(candidate)) {
+          oldestAnalytics = candidate;
+          break;
+        }
+      }
+      if (oldestAnalytics === undefined) break;
+      evict(oldestAnalytics);
     }
     return version;
   }
@@ -272,7 +419,14 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         // last disconnect already dirtied the entries, so a pre-disconnect
         // result never re-freshens them.
         if (!closed && task.epoch === viewerEpoch && tracked.get(key) === task.version) {
-          cache.set(key, { snapshot, substantive: substantiveOf(snapshot), stale: false });
+          cache.set(key, {
+            snapshot,
+            substantive: substantiveOf(snapshot),
+            // A payload the source already reports stale stays a cache hit only
+            // for this caller; the next read must recompute rather than serve
+            // stale data as fresh until the next poll.
+            stale: payloadIsStale(snapshot),
+          });
         }
         return snapshot;
       })
@@ -296,68 +450,149 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     return task.promise as Promise<T>;
   }
 
-  async function tick(): Promise<void> {
-    if (ticking || closed || viewers === 0) return;
-    ticking = true;
+  /**
+   * Polls one registered key. Returns false when the viewer session ended or
+   * the service closed and the tick must stop.
+   */
+  async function pollOne(
+    key: string,
+    compute: () => Promise<unknown>,
+    epoch: number,
+    changed: Set<DashboardEventTopic>,
+  ): Promise<boolean> {
+    if (closed || viewerEpoch !== epoch || viewers === 0) return false;
+    if (computes.get(key) !== compute) return true;
+    if (inflight.has(key)) return true;
+    const version = tracked.get(key);
+    if (version === undefined) return true;
+    let snapshot: unknown;
+    try {
+      snapshot = await compute();
+    } catch (error: unknown) {
+      // A key evicted (or re-loaded) while the poll was pending must not be
+      // marked current by this late result; an ended viewer session must not
+      // be updated or logged for at all.
+      if (closed || viewerEpoch !== epoch || viewers === 0) return false;
+      if (tracked.get(key) === version && computes.get(key) === compute) {
+        const entry = cache.get(key);
+        if (entry) entry.stale = true;
+        logger.warn("snapshot poll failed", failureLabel(error));
+      }
+      return true;
+    }
+    // Late poll results never resurrect an evicted key, overwrite a key loaded
+    // again mid-poll, or land in a viewer session that has ended.
+    if (closed || viewerEpoch !== epoch || viewers === 0) return false;
+    if (tracked.get(key) !== version || computes.get(key) !== compute) return true;
+    const substantive = substantiveOf(snapshot);
+    const entry = cache.get(key);
+    const changedNow = entry === undefined || entry.stale || entry.substantive !== substantive;
+    cache.set(key, { snapshot, substantive, stale: false });
+    if (changedNow) changed.add(topicFor(key));
+    return true;
+  }
+
+  async function tickQuota(): Promise<void> {
+    if (quotaTicking || closed || viewers === 0) return;
+    quotaTicking = true;
     const epoch = viewerEpoch;
     const changed = new Set<DashboardEventTopic>();
     try {
       // Copy before the async body: `load` can register new computes while a
       // tick awaits, and one tick must not grow while it runs.
       for (const [key, compute] of Array.from(computes)) {
-        // The viewer session that started this tick has ended: poll no further
-        // keys for it, no matter how many entries the copied list holds.
-        if (closed || viewerEpoch !== epoch || viewers === 0) break;
-        if (computes.get(key) !== compute) continue;
-        if (inflight.has(key)) continue;
-        const version = tracked.get(key);
-        if (version === undefined) continue;
-        let snapshot: unknown;
-        try {
-          snapshot = await compute();
-        } catch (error: unknown) {
-          // A key evicted (or re-loaded) while the poll was pending must not be
-          // marked current by this late result; an ended viewer session must
-          // not be updated or logged for at all.
-          if (closed || viewerEpoch !== epoch || viewers === 0) break;
-          if (tracked.get(key) === version && computes.get(key) === compute) {
-            const entry = cache.get(key);
-            if (entry) entry.stale = true;
-            logger.warn("snapshot poll failed", failureLabel(error));
-          }
-          continue;
-        }
-        // Late poll results never resurrect an evicted key, overwrite a key
-        // loaded again mid-poll, or land in a viewer session that has ended.
-        if (closed || viewerEpoch !== epoch || viewers === 0) break;
-        if (tracked.get(key) !== version || computes.get(key) !== compute) continue;
-        const substantive = substantiveOf(snapshot);
-        const entry = cache.get(key);
-        const changedNow = entry === undefined || entry.stale || entry.substantive !== substantive;
-        cache.set(key, { snapshot, substantive, stale: false });
-        if (changedNow) changed.add(topicFor(key));
+        if (kindOf(key) !== "quota") continue;
+        if (!(await pollOne(key, compute, epoch, changed))) break;
       }
     } finally {
-      ticking = false;
+      quotaTicking = false;
     }
 
     if (closed || viewerEpoch !== epoch) return;
     if (changed.has("quota.changed")) emit({ topic: "quota.changed", at: now() });
+  }
+
+  async function tickAnalytics(refresh = true, retryIfBusy = false): Promise<void> {
+    if (analyticsTicking) {
+      // A periodic tick or another notification tick is still running. Only a
+      // generation notification retries after it; periodic ticks still skip
+      // (the running tick already covers their interval).
+      if (retryIfBusy && !closed && viewers > 0) analyticsRetryPending = true;
+      return;
+    }
+    if (closed || viewers === 0) return;
+    // Visited once is not an active interest: on the quota surface, no
+    // analytics refresh or range derivation runs even though keys are loaded.
+    if (viewScope === "quota") return;
+    const epoch = viewerEpoch;
+    // Analytics interests are exactly the loaded home/project/session keys.
+    // With only quota viewers this list is empty, so no analytics refresh and
+    // no worker start happens.
+    const analyticsComputes = Array.from(computes).filter(([key]) => kindOf(key) !== "quota");
+    if (analyticsComputes.length === 0) return;
+
+    analyticsTicking = true;
+    const changed = new Set<DashboardEventTopic>();
+    try {
+      // A generation notification means fresh data already exists: derive the
+      // loaded views without forcing another refresh (no feedback loop).
+      // A periodic tick still performs one shared underlying refresh first.
+      if (refresh && options.source.refreshAnalytics) {
+        try {
+          await options.source.refreshAnalytics();
+        } catch (error: unknown) {
+          if (!closed && viewerEpoch === epoch && viewers > 0) {
+            logger.warn("analytics refresh failed", failureLabel(error));
+          }
+        }
+      }
+      for (const [key, compute] of analyticsComputes) {
+        if (!(await pollOne(key, compute, epoch, changed))) break;
+      }
+    } finally {
+      analyticsTicking = false;
+      if (analyticsRetryPending) {
+        analyticsRetryPending = false;
+        if (!closed && viewers > 0 && viewerEpoch === epoch) {
+          queueMicrotask(() => {
+            void tickAnalytics(false, true);
+          });
+        }
+      }
+    }
+
+    if (closed || viewerEpoch !== epoch) return;
     if (changed.has("sessions.changed")) emit({ topic: "sessions.changed", at: now() });
   }
 
-  function startPoller(): void {
-    if (closed || pollTimer) return;
-    pollTimer = setInterval(() => {
-      void tick();
-    }, effectiveIntervalMs());
-    pollTimer.unref();
+  function startPollers(): void {
+    if (closed || quotaTimer || analyticsTimer) return;
+    quotaTimer = setInterval(() => {
+      void tickQuota();
+    }, quotaIntervalMs());
+    quotaTimer.unref();
+    analyticsTimer = setInterval(() => {
+      void tickAnalytics();
+    }, analyticsIntervalMs());
+    analyticsTimer.unref();
   }
 
-  function stopPoller(): void {
-    if (!pollTimer) return;
-    clearInterval(pollTimer);
-    pollTimer = undefined;
+  function stopPollers(): void {
+    if (quotaTimer) {
+      clearInterval(quotaTimer);
+      quotaTimer = undefined;
+    }
+    if (analyticsTimer) {
+      clearInterval(analyticsTimer);
+      analyticsTimer = undefined;
+    }
+  }
+
+  /** Restarts both timers so getter-based settings are read again immediately. */
+  function restartPollers(): void {
+    if (closed || viewers === 0) return;
+    stopPollers();
+    startPollers();
   }
 
   function dirty(): void {
@@ -366,6 +601,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
   return {
     home: (input) => load(homeKey(input.range), () => options.source.home({ range: input.range })),
+    quota: () =>
+      load(quotaKey(), () => {
+        if (!options.source.quota) {
+          return Promise.reject(new Error("Quota source unavailable"));
+        }
+        return options.source.quota();
+      }),
     project: (input) =>
       load(projectKey(input.projectId, input.range), () =>
         options.source.project({ projectId: input.projectId, range: input.range }),
@@ -383,18 +625,21 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     addViewer() {
       if (closed) return () => {};
       viewers += 1;
-      if (viewers === 1) startPoller();
+      if (viewers === 1) startPollers();
       let released = false;
       return () => {
         if (released || closed) return;
         released = true;
         viewers = Math.max(0, viewers - 1);
         if (viewers === 0) {
-          stopPoller();
+          stopPollers();
           // End the viewer session: abandoned ticks poll no further keys, a
           // reconnect starts with no stale poll interests, and pages are only
-          // polled again after an actual load re-registers them.
+          // polled again after an actual load re-registers them. The explicit
+          // view signal is viewer-scoped and resets with it.
           viewerEpoch += 1;
+          viewScope = "analytics";
+          viewScopeExplicit = false;
           computes.clear();
           dirty();
         }
@@ -406,24 +651,33 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       if (settingsOptions?.scope !== "visibility") {
         for (const [key, entry] of cache) {
           const kind = kindOf(key);
-          if (kind === "home" || kind === "project") entry.stale = true;
+          if (kind === "quota" || kind === "home" || kind === "project") entry.stale = true;
         }
-        if (viewers > 0) {
-          // Re-read the poll interval from the getter (spec §7, R16).
-          stopPoller();
-          startPoller();
-        }
+        // Re-read both interval getters from live settings (R16).
+        restartPollers();
       }
       const event: DashboardEvent = { topic: "settings.changed", at: now() };
       if (settingsOptions?.scope) event.scope = settingsOptions.scope;
       emit(event);
     },
 
+    setViewScope(scope, origin = "signal") {
+      if (closed) return;
+      // A later read-request must not undo the UI's explicit route signal.
+      if (origin === "request" && viewScopeExplicit) return;
+      viewScope = scope;
+      if (origin === "signal") viewScopeExplicit = true;
+    },
+
     close(): void {
       if (closed) return;
       closed = true;
       viewerEpoch += 1;
-      stopPoller();
+      stopPollers();
+      if (unsubscribeAnalytics) {
+        unsubscribeAnalytics();
+        unsubscribeAnalytics = undefined;
+      }
       listeners.clear();
       computes.clear();
       cache.clear();

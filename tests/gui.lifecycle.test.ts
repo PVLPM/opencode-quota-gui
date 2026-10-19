@@ -5,6 +5,7 @@ import type {
   CostedTokens,
   HomeSnapshot,
   ProjectSnapshot,
+  QuotaSnapshot,
   SessionSnapshot,
 } from "../src/contracts/dashboard.js";
 import type { RangeKey } from "../src/contracts/ranges.js";
@@ -93,6 +94,8 @@ function projectSnapshot(projectId: string, range: RangeKey): ProjectSnapshot {
 function sessionSnapshot(sessionId: string): SessionSnapshot {
   return {
     focusSessionId: sessionId,
+    projectId: "project-1",
+    projectName: "Project",
     breadcrumbs: [{ sessionId, title: "Root", isFocus: true }],
     nodes: [],
     steps: [],
@@ -125,6 +128,73 @@ function buildSource(): SourceFixture {
     },
   };
   return { source, calls };
+}
+
+interface OwnerSourceFixture {
+  source: SnapshotSource;
+  calls: { home: number; project: number; session: number; quota: number };
+  readonly closes: number;
+  /** When set, every read throws; simulates a delegate whose client died. */
+  fails: boolean;
+}
+
+function quotaSnapshot(marker: number): QuotaSnapshot {
+  return {
+    generatedAtMs: NOW,
+    stale: false,
+    providers: { cards: [], enabledProviders: [], polledAtMs: marker },
+  };
+}
+
+/**
+ * An owner-lifetime source: its marker identifies the owner, `close()` stops
+ * every later read (a disposed plugin's client is gone), and `fails` simulates
+ * a live delegate whose reads fail.
+ */
+function buildOwnerSource(marker: number): OwnerSourceFixture {
+  const calls = { home: 0, project: 0, session: 0, quota: 0 };
+  const state = { closes: 0, fails: false };
+  const guard = () => {
+    if (state.fails || state.closes > 0) throw new Error(`owner source ${marker} unavailable`);
+  };
+  const source: SnapshotSource = {
+    home: async ({ range }) => {
+      calls.home += 1;
+      guard();
+      return { ...homeSnapshot(range), usage: usageFor(range, marker) };
+    },
+    project: async ({ projectId, range }) => {
+      calls.project += 1;
+      guard();
+      return projectSnapshot(projectId, range);
+    },
+    session: async ({ sessionId }) => {
+      calls.session += 1;
+      guard();
+      return sessionSnapshot(sessionId);
+    },
+    quota: async () => {
+      calls.quota += 1;
+      guard();
+      return quotaSnapshot(marker);
+    },
+    close: async () => {
+      state.closes += 1;
+    },
+  };
+  return {
+    source,
+    calls,
+    get closes() {
+      return state.closes;
+    },
+    get fails() {
+      return state.fails;
+    },
+    set fails(value: boolean) {
+      state.fails = value;
+    },
+  };
 }
 
 function listen(server: NetServer, port: number): Promise<void> {
@@ -301,6 +371,137 @@ describe("dashboard production lifecycle", () => {
     await second.dispose();
     expect(await tryBind(port)).toBe(true);
     expect(calls).toEqual({ home: 0, project: 0, session: 0 });
+  });
+
+  it("hands off to a live owner's source when the first owner disposes without dropping the socket", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const first = buildOwnerSource(11);
+    const second = buildOwnerSource(22);
+    let firstCreates = 0;
+    let secondCreates = 0;
+
+    const leaseA = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => {
+        firstCreates += 1;
+        return first.source;
+      },
+      logger: silent,
+    });
+    const leaseB = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => {
+        secondCreates += 1;
+        return second.source;
+      },
+      logger: silent,
+    });
+    expect(leaseA.state).toBe("running");
+    expect(leaseB.state).toBe("running");
+    // The first owner's source is built eagerly; the attached owner's is not.
+    expect(firstCreates).toBe(1);
+    expect(secondCreates).toBe(0);
+
+    // The first owner serves while it is live.
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      usage: { totals: { total: 11 } },
+    });
+    expect(first.calls.home).toBe(1);
+
+    await leaseA.dispose();
+    // The socket survives, the disposed owner's source is closed, and the live
+    // delegate source is still not built just because it became active.
+    expect(await tryBind(port)).toBe(false);
+    expect(first.closes).toBe(1);
+    expect(secondCreates).toBe(0);
+    expect(second.calls).toEqual({ home: 0, project: 0, session: 0, quota: 0 });
+
+    // The surviving owner serves analytics and quota on the same port, lazily.
+    expect(await readJson(port, "/api/v1/home?range=30d")).toMatchObject({
+      usage: { totals: { total: 22 } },
+    });
+    expect(secondCreates).toBe(1);
+    expect(second.calls.home).toBe(1);
+    expect(first.calls.home).toBe(1);
+    expect(await readJson(port, "/api/v1/quota")).toMatchObject({
+      providers: { polledAtMs: 22 },
+    });
+    expect(secondCreates).toBe(1);
+    expect(second.calls.quota).toBe(1);
+
+    await leaseB.dispose();
+    expect(await tryBind(port)).toBe(true);
+    expect(second.closes).toBe(1);
+    // The first source was closed exactly once, at its own owner's disposal.
+    expect(first.closes).toBe(1);
+  });
+
+  it("contains a failing delegate source as last-good or a controlled failure", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const first = buildOwnerSource(11);
+    const second = buildOwnerSource(22);
+
+    const leaseA = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => first.source,
+      logger: silent,
+    });
+    const leaseB = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => second.source,
+      logger: silent,
+    });
+
+    // Cache a good A snapshot before the first owner goes away.
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      stale: false,
+      usage: { totals: { total: 11 } },
+    });
+    await leaseA.dispose();
+    second.fails = true;
+
+    // Dirty the caches with a real settings write.
+    const settingsBody = await readJson(port, "/api/v1/settings");
+    expect(settingsBody).toMatchObject({ revision: expect.any(String) });
+    // SAFETY: the `toMatchObject` proof above establishes a string `revision`.
+    const settings = settingsBody as { revision: string };
+    const saved = await writeJson(port, "/api/v1/settings", "PUT", {
+      patch: { minIntervalMs: 45000 },
+      expectedRevision: settings.revision,
+    });
+    expect(saved.status).toBe(200);
+
+    // The cached page falls back to A's last good snapshot, marked stale.
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      stale: true,
+      usage: { totals: { total: 11 } },
+    });
+
+    // Uncached analytics and quota become controlled 500s, never exceptions.
+    const failedHome = await fetch(`http://127.0.0.1:${port}/api/v1/home?range=30d`);
+    expect(failedHome.status).toBe(500);
+    expect(await failedHome.json()).toMatchObject({ error: { code: "internal" } });
+    const failedQuota = await fetch(`http://127.0.0.1:${port}/api/v1/quota`);
+    expect(failedQuota.status).toBe(500);
+    expect(await failedQuota.json()).toMatchObject({ error: { code: "internal" } });
+
+    // The failing delegate was asked, never silently replaced or re-created.
+    expect(second.calls).toEqual({ home: 2, project: 0, session: 0, quota: 1 });
+    await leaseB.dispose();
+    expect(await tryBind(port)).toBe(true);
+    expect(second.closes).toBe(1);
   });
 
   it("resolves an unavailable lease for an occupied port with one controlled log line", async () => {
@@ -484,10 +685,10 @@ describe("dashboard production lifecycle", () => {
     expect(interval.read()).toBe(120000);
     await lease.dispose();
 
-    // Nothing configured: the transport default (300 000, no invented floor) applies.
+    // Nothing configured: the transport default (60 000, no invented floor) applies.
     writeGuiCanonicalConfig(workspace, {});
     const bare = await start();
-    expect(interval.read()).toBe(300_000);
+    expect(interval.read()).toBe(60_000);
     await bare.dispose();
   });
 

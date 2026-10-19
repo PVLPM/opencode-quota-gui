@@ -85,6 +85,8 @@ function projectSnapshot(projectId: string, range: RangeKey): ProjectSnapshot {
 function sessionSnapshot(sessionId: string): SessionSnapshot {
   return {
     focusSessionId: sessionId,
+    projectId: "project-1",
+    projectName: "Project",
     breadcrumbs: [],
     nodes: [],
     steps: [],

@@ -74,6 +74,8 @@ function projectSnapshot(projectId: string, range: RangeKey): ProjectSnapshot {
 function sessionSnapshot(sessionId: string): SessionSnapshot {
   return {
     focusSessionId: sessionId,
+    projectId: "project-1",
+    projectName: "Project",
     breadcrumbs: [{ sessionId, title: "Root", isFocus: true }],
     nodes: [],
     steps: [],
@@ -152,13 +154,13 @@ interface RunningServer {
   state: FixtureState;
 }
 
-async function startServer(overrides: { heartbeatMs?: number; minIntervalMs?: number } = {}) {
+async function startServer(overrides: { heartbeatMs?: number; analyticsIntervalMs?: number } = {}) {
   const { state, source, store } = buildFixtures();
   const handle = await createDashboardServer({
     port: 0,
     source,
     settings: store,
-    minIntervalMs: overrides.minIntervalMs,
+    analyticsIntervalMs: overrides.analyticsIntervalMs,
     heartbeatMs: overrides.heartbeatMs,
     logger: createGuiLogger({ sink: () => {} }),
   });
@@ -276,7 +278,7 @@ describe("GUI SSE stream", () => {
   });
 
   it("cleans up per client, polls while viewers exist, and dirties after the last disconnect", async () => {
-    const { handle, state } = await startServer({ minIntervalMs: 25 });
+    const { handle, state } = await startServer({ analyticsIntervalMs: 25 });
     try {
       const first = await fetch(`${base(handle.port)}/api/v1/home`);
       expect(first.status).toBe(200);

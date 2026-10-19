@@ -5,6 +5,7 @@ import type {
   HomeSnapshot,
   ProjectSnapshot,
   ProviderCard,
+  QuotaSnapshot,
   SessionSnapshot,
 } from "../src/contracts/dashboard.js";
 import type { CardId, RowId } from "../src/contracts/identity.js";
@@ -13,7 +14,9 @@ import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts
 import { createGuiLogger } from "../src/gui/log.js";
 import {
   createSnapshotService,
+  DEFAULT_ANALYTICS_INTERVAL_MS,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_QUOTA_INTERVAL_MS,
   MAX_TRACKED_PAGES,
   type SnapshotService,
   type SnapshotSource,
@@ -39,7 +42,7 @@ function costed(total: number): CostedTokens {
   };
 }
 
-function countdownCard(countdown: string): ProviderCard {
+function countdownCard(countdown: string, percentRemaining = 50): ProviderCard {
   // SAFETY: CardId/RowId are compile-time-only string brands; the literals below
   // are the exact id texts asserted by the snapshot tests.
   return {
@@ -53,7 +56,7 @@ function countdownCard(countdown: string): ProviderCard {
         label: "Quota",
         kind: "percent",
         resultType: "quota",
-        percentRemaining: 50,
+        percentRemaining,
         countdown,
       },
     ],
@@ -122,6 +125,8 @@ function project(range: RangeKey, projectId = "p1", total = 5): ProjectSnapshot 
 function session(sessionId = "s1"): SessionSnapshot {
   return {
     focusSessionId: sessionId,
+    projectId: "project-1",
+    projectName: "Project",
     breadcrumbs: [{ sessionId, title: "Root", isFocus: true }],
     nodes: [
       {
@@ -154,17 +159,33 @@ function session(sessionId = "s1"): SessionSnapshot {
   };
 }
 
+function quota(stale = false, percentRemaining = 50): QuotaSnapshot {
+  return {
+    generatedAtMs: NOW,
+    stale,
+    providers: {
+      cards: [countdownCard("1m 0s", percentRemaining)],
+      enabledProviders: "auto",
+      polledAtMs: NOW,
+    },
+  };
+}
+
 interface FakeSource {
-  calls: { home: number; project: number; session: number };
+  calls: { home: number; project: number; session: number; quota: number };
   source: SnapshotSource;
 }
 
 function fakeSource(overrides: Partial<SnapshotSource> = {}): FakeSource {
-  const calls = { home: 0, project: 0, session: 0 };
+  const calls = { home: 0, project: 0, session: 0, quota: 0 };
   const source: SnapshotSource = {
     home: async ({ range }) => {
       calls.home += 1;
       return home(range);
+    },
+    quota: async () => {
+      calls.quota += 1;
+      return quota();
     },
     project: async ({ projectId, range }) => {
       calls.project += 1;
@@ -181,7 +202,7 @@ function fakeSource(overrides: Partial<SnapshotSource> = {}): FakeSource {
 
 function makeService(
   source: SnapshotSource,
-  extra: { minIntervalMs?: number | (() => number) } = {},
+  extra: { analyticsIntervalMs?: number | (() => number) } = {},
 ): SnapshotService {
   return createSnapshotService({ source, logger: quiet(), ...extra });
 }
@@ -253,10 +274,69 @@ describe("GUI snapshot service", () => {
     expect(calls.session).toBe(2);
   });
 
+  it("revalidates a payload the source reports stale instead of caching it as fresh", async () => {
+    let sourceStale = true;
+    let calls = 0;
+    const { source } = fakeSource({
+      home: async ({ range }) => {
+        calls += 1;
+        const snapshot = home(range);
+        return sourceStale ? { ...snapshot, stale: true } : snapshot;
+      },
+    });
+    const service = makeService(source);
+
+    const first = await service.home({ range: "7d" });
+    expect(first.stale).toBe(true);
+    expect(calls).toBe(1);
+
+    // The stale payload was not cached as fresh: the next read calls the source
+    // again and can return a fresh result.
+    sourceStale = false;
+    const second = await service.home({ range: "7d" });
+    expect(calls).toBe(2);
+    expect(second.stale).toBe(false);
+
+    // That fresh result is cached again: no unnecessary third source call.
+    await expect(service.home({ range: "7d" })).resolves.toEqual(second);
+    expect(calls).toBe(2);
+  });
+
+  it("treats a project payload whose usage reports stale as stale", async () => {
+    let usageStale = true;
+    let calls = 0;
+    const { source } = fakeSource({
+      project: async ({ projectId, range }) => {
+        calls += 1;
+        const snapshot = project(range, projectId);
+        return usageStale ? { ...snapshot, usage: { ...snapshot.usage, stale: true } } : snapshot;
+      },
+    });
+    const service = makeService(source);
+
+    await service.project({ projectId: "p1", range: "7d" });
+    expect(calls).toBe(1);
+
+    usageStale = false;
+    await expect(service.project({ projectId: "p1", range: "7d" })).resolves.toEqual(project("7d"));
+    expect(calls).toBe(2);
+  });
+
+  it("uses the cache for a fresh payload without a second source call", async () => {
+    const { calls, source } = fakeSource();
+    const service = makeService(source);
+
+    const first = await service.home({ range: "7d" });
+    const second = await service.home({ range: "7d" });
+
+    expect(second).toBe(first);
+    expect(calls.home).toBe(1);
+  });
+
   it("polls only the bounded most recently loaded pages after churn", async () => {
     vi.useFakeTimers();
     const { calls, source } = countedProjectSource();
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     const pageCount = MAX_TRACKED_PAGES + 3;
     for (let index = 0; index < pageCount; index += 1) {
       await service.project({ projectId: `p${index}`, range: "7d" });
@@ -281,7 +361,7 @@ describe("GUI snapshot service", () => {
   it("refreshes a revisited page and keeps it in the bounded poll set", async () => {
     vi.useFakeTimers();
     const { calls, source } = countedProjectSource();
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     for (let index = 0; index <= MAX_TRACKED_PAGES; index += 1) {
       await service.project({ projectId: `p${index}`, range: "7d" });
     }
@@ -322,7 +402,7 @@ describe("GUI snapshot service", () => {
       },
       session: async ({ sessionId }) => session(sessionId),
     };
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
 
     const target = service.project({ projectId: "target", range: "7d" });
     expect(targetCalls).toBe(1);
@@ -373,7 +453,7 @@ describe("GUI snapshot service", () => {
       },
       session: async ({ sessionId }) => session(sessionId),
     };
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     await service.project({ projectId: "slow", range: "7d" });
     for (let index = 0; index < MAX_TRACKED_PAGES - 1; index += 1) {
       await service.project({ projectId: `old${index}`, range: "7d" });
@@ -404,7 +484,7 @@ describe("GUI snapshot service", () => {
   it("clears registrations on the last viewer disconnect and re-arms only loaded pages", async () => {
     vi.useFakeTimers();
     const { calls, source } = fakeSource();
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     await service.home({ range: "7d" });
     await service.project({ projectId: "p1", range: "7d" });
 
@@ -450,7 +530,7 @@ describe("GUI snapshot service", () => {
       },
       session: async ({ sessionId }) => session(sessionId),
     };
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     const events: DashboardEvent[] = [];
     service.subscribe((event) => events.push(event));
 
@@ -615,7 +695,7 @@ describe("GUI snapshot service", () => {
         return Promise.resolve(home(range));
       },
     });
-    const service = makeService(source, { minIntervalMs: 25 });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
     const pending = service.home({ range: "7d" });
     service.addViewer();
     service.close();
@@ -642,7 +722,7 @@ describe("GUI snapshot service", () => {
         return home(range, { total: 21 });
       },
     });
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     await service.home({ range: "7d" });
     for (let index = 0; index < MAX_TRACKED_PAGES - 1; index += 1) {
       await service.project({ projectId: `p${index}`, range: "7d" });
@@ -670,7 +750,7 @@ describe("GUI snapshot service", () => {
         return home(range, { total });
       },
     });
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     const events: DashboardEvent[] = [];
     service.subscribe((event) => events.push(event));
 
@@ -682,13 +762,13 @@ describe("GUI snapshot service", () => {
     expect(calls).toBe(2);
     expect((await service.home({ range: "7d" })).usage.totals.total).toBe(20);
     expect(calls).toBe(2);
-    expect(events.map((event) => event.topic)).toEqual(["quota.changed"]);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]);
 
     total = 30;
     service.notifySettingsChanged();
     expect((await service.home({ range: "7d" })).usage.totals.total).toBe(30);
     expect(calls).toBe(3);
-    expect(events.map((event) => event.topic)).toEqual(["quota.changed", "settings.changed"]);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed", "settings.changed"]);
     viewer();
   });
 
@@ -728,7 +808,7 @@ describe("GUI snapshot service", () => {
   it("polls only while a viewer is connected, with no extra floor, and dirties on the last disconnect", async () => {
     vi.useFakeTimers();
     const { calls, source } = fakeSource();
-    const service = makeService(source, { minIntervalMs: 25 });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
 
     await service.home({ range: "7d" });
     expect(calls.home).toBe(1);
@@ -762,7 +842,7 @@ describe("GUI snapshot service", () => {
         });
       },
     });
-    const service = makeService(source, { minIntervalMs: 100 });
+    const service = makeService(source, { analyticsIntervalMs: 100 });
 
     await service.home({ range: "7d" });
     expect(calls.home).toBe(1);
@@ -786,7 +866,7 @@ describe("GUI snapshot service", () => {
     vi.useFakeTimers();
     let current = home("7d", { total: 42, countdown: "1m 0s" });
     const { source } = fakeSource({ home: async () => current });
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     const events: DashboardEvent[] = [];
     service.subscribe((event) => events.push(event));
 
@@ -804,7 +884,7 @@ describe("GUI snapshot service", () => {
 
     current = home("7d", { total: 52, countdown: "0m 58s", generatedAtMs: NOW + 2000 });
     await vi.advanceTimersByTimeAsync(60);
-    expect(events.map((event) => event.topic)).toEqual(["quota.changed"]);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]);
     expect(events[0]?.at).toBeTypeOf("number");
   });
 
@@ -839,7 +919,7 @@ describe("GUI snapshot service", () => {
       session: async ({ sessionId }) => session(sessionId),
     };
 
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     const events: DashboardEvent[] = [];
     service.subscribe((event) => events.push(event));
 
@@ -851,27 +931,27 @@ describe("GUI snapshot service", () => {
     await vi.advanceTimersByTimeAsync(60);
     expect(events).toEqual([]);
 
-    // A token value change is substantive: exactly one home event.
+    // A token value change is substantive: exactly one home (sessions) event.
     total = 25;
     clock = NOW + 2 * HOUR_MS;
     await vi.advanceTimersByTimeAsync(60);
-    expect(events.map((event) => event.topic)).toEqual(["quota.changed"]);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]);
     expect(events[0]?.scope).toBeUndefined();
 
     // Row-set changes stay substantive.
     rows = 2;
     clock = NOW + 3 * HOUR_MS;
     await vi.advanceTimersByTimeAsync(60);
-    expect(events.map((event) => event.topic)).toEqual(["quota.changed", "quota.changed"]);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed", "sessions.changed"]);
 
     // Bucket-count changes stay substantive too.
     bucketTrim = 1;
     clock = NOW + 4 * HOUR_MS;
     await vi.advanceTimersByTimeAsync(60);
     expect(events.map((event) => event.topic)).toEqual([
-      "quota.changed",
-      "quota.changed",
-      "quota.changed",
+      "sessions.changed",
+      "sessions.changed",
+      "sessions.changed",
     ]);
   });
 
@@ -885,7 +965,7 @@ describe("GUI snapshot service", () => {
         return current;
       },
     });
-    const service = makeService(source, { minIntervalMs: 50 });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
     const events: DashboardEvent[] = [];
     service.subscribe((event) => events.push(event));
 
@@ -939,11 +1019,11 @@ describe("GUI snapshot service", () => {
     expect(calls.session).toBe(1);
   });
 
-  it("re-reads a minIntervalMs getter when settings change", async () => {
+  it("re-reads an analytics interval getter when settings change", async () => {
     vi.useFakeTimers();
     let interval = 60_000;
     const { calls, source } = fakeSource();
-    const service = makeService(source, { minIntervalMs: () => interval });
+    const service = makeService(source, { analyticsIntervalMs: () => interval });
 
     await service.home({ range: "7d" });
     const viewer = service.addViewer();
@@ -957,25 +1037,27 @@ describe("GUI snapshot service", () => {
     viewer();
   });
 
-  it("falls back to the default poll interval when the getter yields a non-positive value", async () => {
+  it("falls back to the default intervals when a getter yields a non-positive value", async () => {
     vi.useFakeTimers();
-    expect(DEFAULT_POLL_INTERVAL_MS).toBe(300_000);
+    expect(DEFAULT_POLL_INTERVAL_MS).toBe(60_000);
+    expect(DEFAULT_QUOTA_INTERVAL_MS).toBe(60_000);
+    expect(DEFAULT_ANALYTICS_INTERVAL_MS).toBe(600_000);
 
     const { calls, source } = fakeSource();
-    const service = makeService(source, { minIntervalMs: () => 0 });
+    const service = makeService(source, { analyticsIntervalMs: () => 0 });
     await service.home({ range: "7d" });
     service.addViewer();
 
     await vi.advanceTimersByTimeAsync(60_000);
     expect(calls.home).toBe(1);
-    await vi.advanceTimersByTimeAsync(DEFAULT_POLL_INTERVAL_MS);
+    await vi.advanceTimersByTimeAsync(DEFAULT_ANALYTICS_INTERVAL_MS);
     expect(calls.home).toBe(2);
   });
 
   it("stops polling and emitting after close()", async () => {
     vi.useFakeTimers();
     const { calls, source } = fakeSource();
-    const service = makeService(source, { minIntervalMs: 25 });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
     const events: DashboardEvent[] = [];
     service.subscribe((event) => events.push(event));
 
@@ -988,5 +1070,208 @@ describe("GUI snapshot service", () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(calls.home).toBe(2);
     expect(events).toEqual([]);
+  });
+
+  it("polls quota and analytics independently with their own intervals and topics", async () => {
+    vi.useFakeTimers();
+    let percent = 50;
+    let homeTotal = 10;
+    const { calls, source } = fakeSource({
+      quota: async () => {
+        calls.quota += 1;
+        return quota(false, percent);
+      },
+      home: async ({ range }) => {
+        calls.home += 1;
+        return home(range, { total: homeTotal });
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 25, analyticsIntervalMs: 60 });
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+
+    await service.quota();
+    await service.home({ range: "7d" });
+    expect(calls.quota).toBe(1);
+    expect(calls.home).toBe(1);
+
+    percent = 40;
+    homeTotal = 20;
+
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(30);
+    // Only the quota timer fired.
+    expect(calls.quota).toBe(2);
+    expect(calls.home).toBe(1);
+    expect(events.map((event) => event.topic)).toEqual(["quota.changed"]);
+
+    await vi.advanceTimersByTimeAsync(40);
+    // The analytics timer fired without another quota cycle at 60ms.
+    expect(calls.home).toBe(2);
+    expect(events.map((event) => event.topic)).toEqual(["quota.changed", "sessions.changed"]);
+    viewer();
+  });
+
+  it("starts no analytics work when only quota is loaded", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 25, analyticsIntervalMs: 30 });
+
+    await service.quota();
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(100);
+    viewer();
+
+    expect(calls.quota).toBeGreaterThan(1);
+    expect(calls.home).toBe(0);
+    expect(calls.project).toBe(0);
+    expect(calls.session).toBe(0);
+    expect(refreshes).toBe(0);
+  });
+
+  it("performs one shared analytics refresh per tick across loaded pages", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
+
+    await service.home({ range: "7d" });
+    await service.project({ projectId: "p1", range: "7d" });
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect(refreshes).toBe(1);
+    expect(calls.home).toBe(2);
+    expect(calls.project).toBe(2);
+    expect(calls.quota).toBe(0);
+    viewer();
+  });
+
+  it("keeps the quota poll registration protected from analytics page churn", async () => {
+    vi.useFakeTimers();
+    const { calls, source } = fakeSource();
+    const service = makeService(source, { quotaIntervalMs: 50, analyticsIntervalMs: 50 });
+    await service.quota();
+    for (let index = 0; index < MAX_TRACKED_PAGES + 3; index += 1) {
+      await service.project({ projectId: `p${index}`, range: "7d" });
+    }
+    expect(calls.quota).toBe(1);
+
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60);
+    // The independent quota registration survived the analytics LRU churn and
+    // is still polled alongside the bounded analytics set.
+    expect(calls.quota).toBe(2);
+    expect(calls.project).toBeGreaterThan(0);
+    viewer();
+  });
+
+  it("skips analytics refresh on the quota view scope and resumes on analytics", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 25, analyticsIntervalMs: 25 });
+    await service.home({ range: "7d" });
+    await service.quota();
+    const viewer = service.addViewer();
+
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+    expect(calls.home).toBe(2);
+
+    // Visited-once analytics is not an active interest while Quota is shown.
+    service.setViewScope("quota");
+    const quotaCallsAfterSwitch = calls.quota;
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+    expect(calls.home).toBe(2);
+    expect(calls.quota).toBeGreaterThan(quotaCallsAfterSwitch);
+
+    service.setViewScope("analytics");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(2);
+    expect(calls.home).toBe(3);
+    viewer();
+  });
+
+  it("lets an explicit view signal outrank read inference and resets it per viewer session", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
+
+    await service.home({ range: "7d" });
+    let viewer = service.addViewer();
+    service.setViewScope("quota");
+    service.setViewScope("analytics", "request");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(0);
+    expect(calls.home).toBe(1);
+    viewer();
+
+    // The signal is viewer-scoped: a reconnect is back to the default scope.
+    viewer = service.addViewer();
+    await service.home({ range: "7d" }); // reconnect reload: calls.home 2
+    await vi.advanceTimersByTimeAsync(30); // tick re-derives: calls.home 3
+    expect(refreshes).toBe(1);
+    expect(calls.home).toBe(3);
+    viewer();
+  });
+
+  it("stops analytics refresh after the last viewer disconnects", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
+    await service.home({ range: "7d" });
+    const viewer = service.addViewer();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+
+    viewer();
+    await vi.advanceTimersByTimeAsync(120);
+    expect(refreshes).toBe(1);
+  });
+
+  it("serves the last good quota snapshot as stale when a whole cycle fails", async () => {
+    let failing = false;
+    const { source } = fakeSource({
+      quota: async () => {
+        if (failing) throw new Error("quota cycle failed");
+        return quota();
+      },
+    });
+    const service = makeService(source);
+
+    const fresh = await service.quota();
+    expect(fresh.stale).toBe(false);
+    expect(fresh.providers.cards).toHaveLength(1);
+
+    failing = true;
+    service.notifySettingsChanged();
+    const stale = await service.quota();
+    expect(stale.stale).toBe(true);
+    expect(stale.providers.cards).toHaveLength(1);
   });
 });
