@@ -69,11 +69,16 @@ export function resolveLoadState<T>(
   return { kind: "skeleton" };
 }
 
-/** A provider card is visible unless its id is in the hidden-card list. */
+/**
+ * A card is visible unless the hidden-card list contains its `cardId` or its
+ * `providerId`: the Settings provider-level eye stores the provider id, so a
+ * provider key hides that provider's whole card group on Home. Row hiding is
+ * separate (`visibleRows`) and is never affected by this list.
+ */
 export function visibleCards(cards: ProviderCard[], hiddenCards: string[]): ProviderCard[] {
   if (hiddenCards.length === 0) return cards;
   const hidden = new Set(hiddenCards);
-  return cards.filter((card) => !hidden.has(card.cardId));
+  return cards.filter((card) => !hidden.has(card.cardId) && !hidden.has(card.providerId));
 }
 
 /**
@@ -116,7 +121,7 @@ export function hasNoProviders(
 
 export function describeNoProviders(enabledProviders: string[] | "auto"): string {
   if (enabledProviders === "auto") {
-    return "No provider accounts are available for this workspace. Check the OpenCode quota plugin configuration.";
+    return "No provider accounts are available for this workspace. Check the quota plugin configuration.";
   }
   if (enabledProviders.length === 0) {
     return "No providers are enabled. Turn at least one on under Settings → Advanced, or set providers to automatic.";

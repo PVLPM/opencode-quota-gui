@@ -3,7 +3,7 @@ import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/range
 /**
  * Hash routing and range persistence (design spec §10, R35).
  *
- * Routes: `#/`, `#/project/<id>?range=`, `#/session/<id>?range=`,
+ * Routes: Quota `#/`, Analytics `#/analytics`, `#/project/<id>?range=`, `#/session/<id>?range=`,
  * `#/settings`. The range lives in the URL and in `localStorage`; both agree
  * after any change, and a URL range wins on load so a shared link is honest.
  */
@@ -12,6 +12,7 @@ export const RANGE_STORAGE_KEY = "opencode-quota-gui.range";
 
 export type Route =
   | { name: "home" }
+  | { name: "analytics" }
   | { name: "project"; projectId: string }
   | { name: "session"; sessionId: string }
   | { name: "settings" }
@@ -67,6 +68,9 @@ export function parseLocation(hash: string, fallbackRange: RangeKey): Location {
 
   const segments = path.split("/").filter((segment) => segment.length > 0);
   if (segments.length === 0) return { route: { name: "home" }, range };
+  if (segments.length === 1 && segments[0] === "analytics") {
+    return { route: { name: "analytics" }, range };
+  }
   if (segments.length === 1 && segments[0] === "settings") {
     return { route: { name: "settings" }, range };
   }
@@ -85,6 +89,8 @@ export function formatHash(route: Route, range: RangeKey): string {
   switch (route.name) {
     case "home":
       return `#/${suffix}`;
+    case "analytics":
+      return `#/analytics${suffix}`;
     case "project":
       return `#/project/${encodeURIComponent(route.projectId)}${suffix}`;
     case "session":
@@ -98,7 +104,7 @@ export function formatHash(route: Route, range: RangeKey): string {
 
 /** True for routes whose data is range-scoped, so a range change refetches only those. */
 export function routeUsesRange(route: Route): boolean {
-  return route.name === "home" || route.name === "project";
+  return route.name === "analytics" || route.name === "project";
 }
 
 /**
@@ -107,5 +113,5 @@ export function routeUsesRange(route: Route): boolean {
  * change never touches session queries.
  */
 export function routeShowsRangeSelector(route: Route): boolean {
-  return route.name !== "session" && route.name !== "settings";
+  return routeUsesRange(route);
 }

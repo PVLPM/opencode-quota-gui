@@ -29,8 +29,8 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDescriptor[] = [
   },
   {
     id: "visibility",
-    title: "Visible cards and rows",
-    note: "Presentation only: hiding a card or row never changes what the dashboard polls or fetches.",
+    title: "Visibility",
+    note: "Presentation only: hiding a provider or a row never changes what the dashboard polls or fetches.",
   },
   { id: "dashboard", title: "Dashboard" },
 ];
@@ -56,6 +56,11 @@ export interface SettingsField {
   max?: number;
   /** `null` clears the key in the canonical file. */
   clearable?: boolean;
+  /**
+   * A hidden field stays in the table for validation and patching but is never
+   * rendered as a generic control; its UI lives in a dedicated section instead.
+   */
+  hidden?: boolean;
   /**
    * The value a clearable switch writes when it is on. Without it a switch is a
    * plain boolean; with it the on-value is this string, which is what the plugin
@@ -171,14 +176,14 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     key: "opencodeGoWindows",
     group: "advanced",
     control: "windows",
-    label: "OpenCode Go windows",
+    label: "Go windows",
     help: "At least one of rolling, weekly, or monthly.",
   },
   {
     key: "opencodeMonthlyLimit",
     group: "advanced",
     control: "number",
-    label: "OpenCode monthly limit",
+    label: "Monthly limit",
     help: "A number of at least zero, or clear the key to leave it unset.",
     min: 0,
     clearable: true,
@@ -194,6 +199,13 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     group: "visibility",
     control: "list",
     label: "Hidden rows",
+  },
+  {
+    key: "dashboard.providerOrder",
+    group: "visibility",
+    control: "list",
+    label: "Provider order",
+    hidden: true,
   },
   {
     key: "dashboard.port",
@@ -336,6 +348,52 @@ export function windowSelection(value: JsonValue | undefined): string[] {
 export function stringList(value: JsonValue | undefined): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+/**
+ * Display order for the visibility catalog: provider ids named in the stored
+ * `dashboard.providerOrder` keep their stored relative order first, and every
+ * remaining catalog provider follows in catalog order. Stored ids that the
+ * catalog no longer knows are ignored, so unknown or new providers append.
+ */
+export function orderedProviderIds(
+  providerOrder: readonly string[],
+  catalogIds: readonly string[],
+): string[] {
+  const catalog = catalogIds.filter((id, index) => catalogIds.indexOf(id) === index);
+  const head: string[] = [];
+  for (const id of providerOrder) {
+    if (catalog.includes(id) && !head.includes(id)) head.push(id);
+  }
+  return [...head, ...catalog.filter((id) => !head.includes(id))];
+}
+
+/**
+ * A drag or keyboard move is remove-then-insert: the moved provider is placed
+ * at the target displayed index (clamped to the ends) and the complete
+ * resulting order is the next `dashboard.providerOrder` value, so the stored
+ * list never carries stale gaps or depends on a partial compare.
+ */
+export function reorderedProviderOrder(
+  ids: readonly string[],
+  fromId: string,
+  toIndex: number,
+): string[] {
+  const without = ids.filter((id) => id !== fromId);
+  without.splice(Math.max(0, Math.min(Math.trunc(toIndex), without.length)), 0, fromId);
+  return without;
+}
+
+/** One keyboard step: `step` −1 is up, +1 is down, clamped at the list ends. */
+export function keyboardMovedProviderOrder(
+  ids: readonly string[],
+  fromId: string,
+  step: -1 | 1,
+): string[] {
+  const index = ids.indexOf(fromId);
+  if (index === -1) return [...ids];
+  const target = Math.max(0, Math.min(index + step, ids.length - 1));
+  return reorderedProviderOrder(ids, fromId, target);
 }
 
 /** Display preferences the Home and Project views read from the settings snapshot. */

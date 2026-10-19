@@ -1,7 +1,8 @@
 import type { JSX } from "solid-js";
 import { For, Show } from "solid-js";
 import type { AccountingUnit, ProviderCard, QuotaCardRow } from "../../contracts/dashboard";
-import { formatPercent, formatRunway, formatTimestamp } from "../format";
+import { formatPercent, formatRunway } from "../format";
+import { Icon, Tooltip } from "../opencode-ui";
 import { visibleRows } from "../view-model";
 
 /**
@@ -34,6 +35,23 @@ export function unitSuffix(unit: AccountingUnit | undefined): string {
   }
 }
 
+/** Currency rows show exactly two decimals; other units keep the exact server decimal. */
+export function formatCurrencyDecimal(decimal: string): string {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/u.exec(decimal);
+  if (!match) return decimal;
+  const [, sign = "", integer = "0", fraction = ""] = match;
+  const cents = Number(`${fraction}000`.slice(0, 2));
+  const roundedCents = cents + (Number(fraction.charAt(2) || "0") >= 5 ? 1 : 0);
+  let whole = BigInt(integer);
+  let displayedCents = roundedCents;
+  if (displayedCents === 100) {
+    whole += 1n;
+    displayedCents = 0;
+  }
+  const negative = sign === "-" && (whole !== 0n || displayedCents !== 0);
+  return `${negative ? "-" : ""}${whole}.${String(displayedCents).padStart(2, "0")}`;
+}
+
 /** The value cell text for a row, by entry kind. */
 export function rowValueText(row: QuotaCardRow, preferences: DisplayPreferences): string {
   switch (row.kind) {
@@ -46,7 +64,11 @@ export function rowValueText(row: QuotaCardRow, preferences: DisplayPreferences)
     case "quantity": {
       if (!row.quantity) return "—";
       const suffix = unitSuffix(row.quantity.unit);
-      return suffix ? `${row.quantity.decimal} ${suffix}` : row.quantity.decimal;
+      const amount =
+        row.quantity.unit.kind === "currency"
+          ? formatCurrencyDecimal(row.quantity.decimal)
+          : row.quantity.decimal;
+      return suffix ? `${amount} ${suffix}` : amount;
     }
     case "boolean":
       return row.booleanValue === undefined ? "—" : row.booleanValue ? "yes" : "no";
@@ -64,6 +86,59 @@ export function rowPercent(row: QuotaCardRow, preferences: DisplayPreferences): 
   return opposite === undefined ? undefined : 100 - opposite;
 }
 
+/**
+ * The bar measures used quota even when the badge displays remaining quota.
+ */
+export function quotaUsedPercent(row: QuotaCardRow): number | undefined {
+  if (row.kind !== "percent") return undefined;
+  return (
+    row.percentUsed ?? (row.percentRemaining === undefined ? undefined : 100 - row.percentRemaining)
+  );
+}
+
+/**
+ * Severity band for a percent row, derived only from the true used quota so the
+ * badge's used/remaining preference never moves the boundary. Critical is
+ * used ≥ 90% (equivalently ≤ 10% remaining), warning is used 70–89.9%, and
+ * everything below the warning band is healthy.
+ */
+export function quotaSeverity(usedPercent: number | undefined): "healthy" | "warning" | "critical" {
+  if (usedPercent === undefined) return "healthy";
+  if (usedPercent >= 90) return "critical";
+  if (usedPercent >= 70) return "warning";
+  return "healthy";
+}
+
+export function QuotaBar(props: { label: string; used: number }): JSX.Element {
+  const position = () => Math.min(Math.max(props.used, 0), 100);
+  return (
+    <span class="qg-row__bar" style={{ "--qg-used-position": `${position()}%` }}>
+      <meter
+        class="sr-only"
+        aria-label={`${props.label} quota used`}
+        min={Math.min(0, props.used)}
+        max={Math.max(100, props.used)}
+        value={props.used}
+        aria-valuetext={`${props.used}% used`}
+      />
+      <span class="qg-row__bar-used" aria-hidden="true" />
+      <Show when={position() > 0 && position() < 100}>
+        <span class="qg-row__bar-gap" aria-hidden="true" />
+      </Show>
+    </span>
+  );
+}
+
+/** Only unwrap the exact generated `[provider] (label)` form; never infer identity. */
+export function inlineAccountLabel(provider: string, account: string): string {
+  const prefix = `[${provider}] (`;
+  if (account.startsWith(prefix) && account.endsWith(")")) {
+    const label = account.slice(prefix.length, -1);
+    if (label.length > 0 && !/[()[\]\r\n]/.test(label)) return label;
+  }
+  return account;
+}
+
 export function QuotaCardView(props: {
   card: ProviderCard;
   preferences: DisplayPreferences;
@@ -76,19 +151,18 @@ export function QuotaCardView(props: {
   const shownRows = () => visibleRows(props.card.rows, props.hiddenRows);
 
   return (
-    <article class="qg-card" data-stale={props.stale ? "true" : undefined}>
+    <article class="qg-card" data-error={props.card.errors.length > 0 ? "true" : undefined}>
       <header class="qg-card__head">
         <div class="qg-card__identity">
           <span class="qg-card__provider">{props.card.providerLabel}</span>
           <Show when={props.card.accountLabel}>
-            {(account) => <span class="qg-card__account">{account()}</span>}
-          </Show>
-          <span class="qg-card__observed">
-            Observed{" "}
-            {formatTimestamp(
-              props.card.observedAtIso ? Date.parse(props.card.observedAtIso) : undefined,
+            {(account) => (
+              <span class="qg-card__account">
+                <span aria-hidden="true">· </span>
+                {inlineAccountLabel(props.card.providerLabel, account())}
+              </span>
             )}
-          </span>
+          </Show>
         </div>
       </header>
 
@@ -118,7 +192,7 @@ export function QuotaCardView(props: {
             </Show>
             <Show when={props.card.rows.length > 0}>
               <p class="qg-muted">
-                Every row on this card is hidden — clear them in Settings → Visible cards and rows.
+                Every row on this card is hidden — clear them in Settings → Visibility.
               </p>
             </Show>
           </>
@@ -130,26 +204,34 @@ export function QuotaCardView(props: {
               <div
                 class="qg-row"
                 data-kind={row.kind}
-                data-warning={
-                  row.kind === "percent" &&
-                  (row.percentUsed ?? 100 - (row.percentRemaining ?? 100)) >= 80
-                    ? "true"
-                    : undefined
+                data-severity={
+                  row.kind === "percent" ? quotaSeverity(quotaUsedPercent(row)) : undefined
                 }
               >
-                <span class="qg-row__label">{row.label}</span>
+                <span class="qg-row__labelgroup">
+                  <span class="qg-row__label">{row.label}</span>
+                  <Show when={row.info}>
+                    {(info) => (
+                      <Tooltip
+                        value={info()}
+                        triggerTabIndex={0}
+                        appearance="large"
+                        contentClass="qg-row__tooltip"
+                      >
+                        <span class="sr-only">More information about {row.label}</span>
+                        <span class="qg-row__info" aria-hidden="true">
+                          <Icon name="info" size="small" />
+                        </span>
+                      </Tooltip>
+                    )}
+                  </Show>
+                </span>
                 <span class="qg-row__value">{rowValueText(row, props.preferences)}</span>
                 <Show when={row.countdown}>
                   <span class="qg-row__reset">Resets in {row.countdown}</span>
                 </Show>
-                <Show when={rowPercent(row, props.preferences) !== undefined}>
-                  <span class="qg-row__bar" aria-hidden="true">
-                    <span
-                      style={{
-                        width: `${Math.min(Math.max(rowPercent(row, props.preferences) ?? 0, 0), 100)}%`,
-                      }}
-                    />
-                  </span>
+                <Show when={quotaUsedPercent(row) !== undefined}>
+                  <QuotaBar label={row.label} used={quotaUsedPercent(row) ?? 0} />
                 </Show>
                 <Show when={props.preferences.showRunway ? formatRunway(row.runway) : undefined}>
                   <span class="qg-row__meta">

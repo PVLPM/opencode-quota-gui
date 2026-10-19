@@ -3,7 +3,9 @@ import type { JSX } from "solid-js";
 /**
  * Inline SVG icons (design spec §10: inline-SVG icons only, no icon font, no
  * network request). Kept as plain data so a `createComponent`-based test can
- * render them without a JSX pragma.
+ * render them without a JSX pragma. The two nav glyphs are the user-supplied
+ * filled shapes on a 256 viewBox, scaled down to 16px; `fill="currentColor"` —
+ * never the supplied black — keeps them responsive to the chrome state.
  */
 function path(d: string): JSX.Element {
   return (
@@ -32,35 +34,48 @@ function svg(children: JSX.Element, size: number): JSX.Element {
   );
 }
 
-export function EyeIcon(props: { size?: number }): JSX.Element {
-  return svg(
-    <>
-      {path("M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z")}
-      {path("M12 14.8a2.8 2.8 0 1 0 0-5.6 2.8 2.8 0 0 0 0 5.6Z")}
-    </>,
-    props.size ?? 16,
+const CHART_LINE_THIN_PATH =
+  "M228,208a4,4,0,0,1-4,4H32a4,4,0,0,1-4-4V48a4,4,0,0,1,8,0V151.19L93.37,101a4,4,0,0,1,5-.19l61.41,46.05L221.37,93a4,4,0,0,1,5.26,6l-64,56a4,4,0,0,1-5,.19l-61.41-46L36,161.81V204H224A4,4,0,0,1,228,208Z";
+
+const FADERS_HORIZONTAL_THIN_PATH =
+  "M180,80a4,4,0,0,1,4-4h32a4,4,0,0,1,0,8H184A4,4,0,0,1,180,80ZM40,84H148v20a4,4,0,0,0,8,0V56a4,4,0,0,0-8,0V76H40a4,4,0,0,0,0,8Zm176,88H120a4,4,0,0,0,0,8h96a4,4,0,0,0,0-8ZM88,148a4,4,0,0,0-4,4v20H40a4,4,0,0,0,0,8H84v20a4,4,0,0,0,8,0V152A4,4,0,0,0,88,148Z";
+
+function filledIcon(d: string): JSX.Element {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 256 256"
+      aria-hidden="true"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path d={d} fill="currentColor" />
+    </svg>
   );
 }
 
-/** The public window-analytics glyph depicts windows, not a chart. */
+/** Analytics tab: the user-supplied `chart-line-thin` shape. */
 export function AnalyticsIcon(): JSX.Element {
-  return svg(
-    <>
-      {path("M4 4v16h17")}
-      {path("M8 16v-5M13 16V7M18 16v-8")}
-    </>,
-    16,
-  );
+  return filledIcon(CHART_LINE_THIN_PATH);
 }
 
-export function EyeOffIcon(props: { size?: number }): JSX.Element {
+/** Quota tab: the user-supplied `faders-horizontal-thin` shape. */
+export function QuotaIcon(): JSX.Element {
+  return filledIcon(FADERS_HORIZONTAL_THIN_PATH);
+}
+
+/** A six-dot drag grip for the visibility provider cards. */
+export function GripDotsIcon(): JSX.Element {
   return svg(
-    <>
-      {path("M3 3l18 18")}
-      {path("M10.6 5.7A10.6 10.6 0 0 1 12 5.5c6.4 0 10 6.5 10 6.5a17 17 0 0 1-3.2 4")}
-      {path("M6.3 7.9A17.4 17.4 0 0 0 2 12s3.6 6.5 10 6.5a10.9 10.9 0 0 0 4.2-.8")}
-    </>,
-    props.size ?? 16,
+    <g fill="currentColor">
+      <circle cx="7" cy="5" r="1.4" />
+      <circle cx="13" cy="5" r="1.4" />
+      <circle cx="7" cy="12" r="1.4" />
+      <circle cx="13" cy="12" r="1.4" />
+      <circle cx="7" cy="19" r="1.4" />
+      <circle cx="13" cy="19" r="1.4" />
+    </g>,
+    16,
   );
 }
 

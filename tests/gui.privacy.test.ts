@@ -2,7 +2,7 @@
  * P3B — outgoing provider-error privacy (design spec §9 R38/R51, plan P3
  * step 6).
  *
- * Every assertion runs against the actual mapped home DTO produced by
+ * Every assertion runs against the actual mapped quota DTO produced by
  * `createDashboardReadSource` with synthetic malicious inputs: credential
  * shapes, absolute paths, raw account ids, `rai1_` values, and raw
  * `statusDetails`/`rawDetails`/diagnostics dumps. Human labels stay; internal
@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import type { UsageAnalyticsDataset } from "../src/gui/aggregation.js";
+import type { QuotaSnapshot } from "../src/contracts/dashboard.js";
 import {
   PROVIDER_ERROR_GENERIC_LABEL,
   PROVIDER_ERROR_GENERIC_MESSAGE,
@@ -31,13 +31,6 @@ const FAKE_JWT =
 const RAI1_VALUE = "rai1_2f8a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a";
 const ABSOLUTE_PATH = "C:\\Users\\secret-user\\.config\\opencode\\auth.json";
 const POSIX_PATH = "/home/secret-user/.local/share/opencode/state.json";
-
-const EMPTY_DATASET: UsageAnalyticsDataset = {
-  sessions: {},
-  projects: {},
-  messages: [],
-  compactions: [],
-};
 
 function percentEntry(params: {
   sourceId: string;
@@ -102,7 +95,7 @@ function config(): QuotaToastConfig {
   return { ...DEFAULT_CONFIG, dashboard: { ...DEFAULT_CONFIG.dashboard } };
 }
 
-async function mappedHome() {
+async function mappedQuota(): Promise<QuotaSnapshot> {
   const source = createDashboardReadSource({
     client: {
       config: {
@@ -114,16 +107,15 @@ async function mappedHome() {
     configDir: "C:/synthetic-config",
     now: () => NOW,
     loadConfig: async () => config(),
-    loadDataset: async () => EMPTY_DATASET,
     collectProviderResults: async () => [maliciousProbe()],
   });
-  return source.home({ range: "7d" });
+  return source.quota();
 }
 
 describe("gui privacy — outgoing provider errors", () => {
   it("scrubs credentials, redacts internal ids, and falls back to the generic message", async () => {
-    const home = await mappedHome();
-    const errors = home.providers.cards.flatMap((card) => card.errors);
+    const quota = await mappedQuota();
+    const errors = quota.providers.cards.flatMap((card) => card.errors);
 
     const byLabel = new Map(errors.map((error) => [error.label, error.message]));
     expect(byLabel.get("Credentials")).toContain("[redacted]");
@@ -138,8 +130,8 @@ describe("gui privacy — outgoing provider errors", () => {
   });
 
   it("never serializes raw ids, tokens, paths, or diagnostics dumps", async () => {
-    const home = await mappedHome();
-    const serialized = JSON.stringify(home);
+    const quota = await mappedQuota();
+    const serialized = JSON.stringify(quota);
 
     expect(serialized).not.toContain(RAW_ACCOUNT_ID);
     expect(serialized).not.toContain(RAW_IDENTITY_KEY);
@@ -158,10 +150,11 @@ describe("gui privacy — outgoing provider errors", () => {
   });
 
   it("keeps human account labels and opaque hashed ids while dropping no card", async () => {
-    const home = await mappedHome();
+    const quota = await mappedQuota();
+    expect(quota.stale).toBe(false);
     // Provider-scope card (unscoped errors) + the discovered account card.
-    expect(home.providers.cards).toHaveLength(2);
-    const card = home.providers.cards.find((item) => item.accountLabel === HUMAN_LABEL);
+    expect(quota.providers.cards).toHaveLength(2);
+    const card = quota.providers.cards.find((item) => item.accountLabel === HUMAN_LABEL);
     expect(card).toBeDefined();
     expect(card?.accountLabel).toBe(HUMAN_LABEL);
     expect(card?.providerLabel).toBe("Anthropic");
@@ -170,6 +163,6 @@ describe("gui privacy — outgoing provider errors", () => {
     expect(card?.cardId.startsWith("anthropic:")).toBe(true);
     expect(card?.cardId).not.toContain(RAW_ACCOUNT_ID);
     expect(card?.rows[0]?.rowId.startsWith(card?.cardId ?? "")).toBe(true);
-    expect(JSON.stringify(home)).toContain(HUMAN_LABEL);
+    expect(JSON.stringify(quota)).toContain(HUMAN_LABEL);
   });
 });

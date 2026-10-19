@@ -7,20 +7,31 @@ import type {
   SettingsSnapshot,
 } from "../../contracts/dashboard";
 import { EyeToggle } from "../components/eye-toggle";
+import { GripDotsIcon } from "../components/icons";
 import type { Toaster } from "../components/toast";
 import { DashboardError } from "../dashboard-client";
-import { Button, SegmentedControl, SegmentedControlItem, Switch, TextInput } from "../opencode-ui";
+import {
+  Button,
+  Icon,
+  SegmentedControl,
+  SegmentedControlItem,
+  Switch,
+  TextInput,
+} from "../opencode-ui";
 import {
   applyConflict,
   applyWriteResult,
   dirtyKeys,
   fieldErrors,
   initialDraft,
+  keyboardMovedProviderOrder,
   OPENCODE_GO_WINDOWS,
+  orderedProviderIds,
   parseIntegerInput,
   parseNumberInput,
   parseProviderIds,
   providerSelection,
+  reorderedProviderOrder,
   SETTINGS_FIELDS,
   SETTINGS_GROUPS,
   type SettingsDraft,
@@ -31,10 +42,28 @@ import {
 } from "../settings-model";
 import { describeError } from "../view-model";
 
-/** Last-seen cards and rows, so a visibility list can name what it hides. */
+/** One quota row a visibility eye can hide; the id is stored, never displayed. */
+export interface VisibilityRow {
+  id: string;
+  label: string;
+  accountLabel?: string;
+}
+
+/** One provider's remembered cards and rows, grouped for the visibility cards. */
+export interface VisibilityProvider {
+  providerId: string;
+  providerLabel: string;
+  /** Unique, for identification only; generated `[Provider] (Plan)` forms are unwrapped. */
+  accountLabels: string[];
+  /** Stable card ids, never displayed. */
+  cardIds: string[];
+  /** Unique by row id across the provider's cards. */
+  rows: VisibilityRow[];
+}
+
+/** Last-seen providers with their cards and rows, so an eye can name what it hides. */
 export interface VisibilityCatalog {
-  cards: { id: string; label: string }[];
-  rows: { id: string; label: string }[];
+  providers: VisibilityProvider[];
 }
 
 /**
@@ -43,7 +72,7 @@ export interface VisibilityCatalog {
  * Grouped fields with inline validation, an inherited-source note per key, and
  * a save bar enabled only on change: the patch travels with `expectedRevision`,
  * `null` clears a key, and a 409 refetches, keeps the edits, and says the
- * settings changed elsewhere. The port and URL stay read-only, and the import
+ * settings changed elsewhere. The URL stays read-only, and the import
  * action is a preview → apply flow that names the owner workspace.
  */
 export function SettingsView(props: {
@@ -57,7 +86,8 @@ export function SettingsView(props: {
   const [busy, setBusy] = createSignal(false);
   const [preview, setPreview] = createSignal<ImportPreview | undefined>(undefined);
   const [previewError, setPreviewError] = createSignal<string | undefined>(undefined);
-  const [listDrafts, setListDrafts] = createSignal<Record<string, string>>({});
+  const [openingFile, setOpeningFile] = createSignal(false);
+  const [openFileError, setOpenFileError] = createSignal<string | undefined>();
   const [providerText, setProviderText] = createSignal(
     providerSelection(props.snapshot.values.enabledProviders).ids.join(", "),
   );
@@ -104,7 +134,10 @@ export function SettingsView(props: {
 
   const editableFields = createMemo(() =>
     SETTINGS_FIELDS.filter(
-      (field) => field.control !== "readonly" && props.snapshot.writable.includes(field.key),
+      (field) =>
+        !field.hidden &&
+        field.control !== "readonly" &&
+        props.snapshot.writable.includes(field.key),
     ),
   );
   const dirty = createMemo(() =>
@@ -128,7 +161,6 @@ export function SettingsView(props: {
   function discard(): void {
     setDraft(initialDraft(props.snapshot.revision));
     setProviderText(providerSelection(props.snapshot.values.enabledProviders).ids.join(", "));
-    setListDrafts({});
   }
 
   async function save(): Promise<void> {
@@ -170,6 +202,23 @@ export function SettingsView(props: {
     }
   }
 
+  async function openSettingsFile(): Promise<void> {
+    if (openingFile()) return;
+    setOpenFileError(undefined);
+    if (!props.client.openSettingsFile) {
+      setOpenFileError("Opening the settings file is not available with this server.");
+      return;
+    }
+    setOpeningFile(true);
+    try {
+      await props.client.openSettingsFile();
+    } catch (error) {
+      setOpenFileError(describeError(error));
+    } finally {
+      setOpeningFile(false);
+    }
+  }
+
   async function previewImport(): Promise<void> {
     setBusy(true);
     setPreviewError(undefined);
@@ -205,6 +254,239 @@ export function SettingsView(props: {
     } finally {
       setBusy(false);
     }
+  }
+
+  /**
+   * Visibility (provider-grouped redesign).
+   *
+   * Ids live in the draft only and are never rendered: the provider cards hold
+   * hidden-card semantics (provider eye: hide adds the provider id; show
+   * removes the provider id and all its known card ids so a legacy card entry
+   * cannot keep it hidden), the row eyes keep working while a provider is
+   * hidden, and a reorder writes the complete current provider-id order to the
+   * draft for the normal revision-checked save. Unknown retained ids in either
+   * list survive every toggle and still never surface.
+   */
+  const [draggingProviderId, setDraggingProviderId] = createSignal<string | undefined>();
+  const [dropTargetProviderId, setDropTargetProviderId] = createSignal<string | undefined>();
+  const [providerOrderAnnouncement, setProviderOrderAnnouncement] = createSignal("");
+
+  const valueForKey = (key: string): JsonValue | undefined =>
+    key in draft().edits ? draft().edits[key] : props.snapshot.values[key];
+  const hiddenCardIds = () => stringList(valueForKey("dashboard.hiddenCards"));
+  const hiddenRowIds = () => stringList(valueForKey("dashboard.hiddenRows"));
+  const providerOrderWritable = () => props.snapshot.writable.includes("dashboard.providerOrder");
+  const hiddenCardsWritable = () => props.snapshot.writable.includes("dashboard.hiddenCards");
+  const hiddenRowsWritable = () => props.snapshot.writable.includes("dashboard.hiddenRows");
+
+  const orderedProviders = createMemo(() => {
+    const catalogProviders = props.catalog.providers;
+    const byId = new Map(catalogProviders.map((provider) => [provider.providerId, provider]));
+    return orderedProviderIds(
+      stringList(valueForKey("dashboard.providerOrder")),
+      catalogProviders.map((provider) => provider.providerId),
+    ).flatMap((id) => {
+      const provider = byId.get(id);
+      return provider === undefined ? [] : [provider];
+    });
+  });
+
+  /** Hidden when the provider id is listed, or every known card of it is listed. */
+  function providerEyeHidden(provider: VisibilityProvider): boolean {
+    const hidden = hiddenCardIds();
+    return (
+      hidden.includes(provider.providerId) ||
+      (provider.cardIds.length > 0 && provider.cardIds.every((cardId) => hidden.includes(cardId)))
+    );
+  }
+
+  function toggleProviderEye(provider: VisibilityProvider): void {
+    if (!hiddenCardsWritable() || busy()) return;
+    const hidden = hiddenCardIds();
+    if (providerEyeHidden(provider)) {
+      edit(
+        "dashboard.hiddenCards",
+        hidden.filter((id) => id !== provider.providerId && !provider.cardIds.includes(id)),
+      );
+      return;
+    }
+    edit(
+      "dashboard.hiddenCards",
+      hidden.includes(provider.providerId) ? hidden : [...hidden, provider.providerId],
+    );
+  }
+
+  /** Row state is independent of the provider eye and never cleared by it. */
+  function toggleRowEye(row: VisibilityRow): void {
+    if (!hiddenRowsWritable() || busy()) return;
+    const hidden = hiddenRowIds();
+    edit(
+      "dashboard.hiddenRows",
+      hidden.includes(row.id) ? hidden.filter((entry) => entry !== row.id) : [...hidden, row.id],
+    );
+  }
+
+  function writeProviderOrder(next: string[], movedId: string, direction: string): void {
+    const current = orderedProviders().map((provider) => provider.providerId);
+    if (JSON.stringify(next) === JSON.stringify(current)) return;
+    edit("dashboard.providerOrder", next);
+    const label =
+      props.catalog.providers.find((provider) => provider.providerId === movedId)?.providerLabel ??
+      "";
+    setProviderOrderAnnouncement(`${label} ${direction}.`);
+  }
+
+  function moveProvider(dragedId: string, toIndex: number): void {
+    if (!providerOrderWritable()) return;
+    const current = orderedProviders().map((provider) => provider.providerId);
+    writeProviderOrder(reorderedProviderOrder(current, dragedId, toIndex), dragedId, "moved");
+  }
+
+  function moveProviderByKeyboard(providerId: string, step: -1 | 1): void {
+    if (!providerOrderWritable()) return;
+    const current = orderedProviders().map((provider) => provider.providerId);
+    writeProviderOrder(
+      keyboardMovedProviderOrder(current, providerId, step),
+      providerId,
+      step === -1 ? "moved up" : "moved down",
+    );
+  }
+
+  function clearProviderDrag(): void {
+    setDraggingProviderId(undefined);
+    setDropTargetProviderId(undefined);
+  }
+
+  function onProviderDragStart(event: DragEvent, provider: VisibilityProvider): void {
+    if (!providerOrderWritable()) return;
+    event.dataTransfer?.setData("text/plain", provider.providerId);
+    if (event.dataTransfer !== null) event.dataTransfer.effectAllowed = "move";
+    setDraggingProviderId(provider.providerId);
+  }
+
+  function onProviderDragOver(event: DragEvent, provider: VisibilityProvider): void {
+    const dragged = draggingProviderId();
+    if (dragged === undefined || dragged === provider.providerId) return;
+    // Marks the target and allows the drop; the visual is a subtle border only.
+    event.preventDefault?.();
+    if (event.dataTransfer !== null) event.dataTransfer.dropEffect = "move";
+    setDropTargetProviderId(provider.providerId);
+  }
+
+  function onProviderDrop(event: DragEvent, provider: VisibilityProvider): void {
+    event.preventDefault?.();
+    const dragged = draggingProviderId() ?? event.dataTransfer?.getData("text/plain");
+    if (dragged !== undefined && dragged !== provider.providerId) {
+      const index = orderedProviders().findIndex(
+        (entry) => entry.providerId === provider.providerId,
+      );
+      if (index >= 0) moveProvider(dragged, index);
+    }
+    clearProviderDrag();
+  }
+
+  function onProviderDragEnd(): void {
+    clearProviderDrag();
+  }
+
+  function onProviderGrabKey(event: KeyboardEvent, provider: VisibilityProvider): void {
+    if (event.altKey !== true) return;
+    if (event.key === "ArrowUp") {
+      event.preventDefault?.();
+      moveProviderByKeyboard(provider.providerId, -1);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault?.();
+      moveProviderByKeyboard(provider.providerId, 1);
+    }
+  }
+
+  /** One dark card per provider: name, inline accounts, grip, eyes — no live values. */
+  function renderVisibilitySection(): JSX.Element {
+    return (
+      <>
+        <fieldset class="qg-vis-list" aria-label="Provider visibility">
+          <Show
+            when={orderedProviders().length > 0}
+            fallback={
+              <p class="qg-inherited">No provider accounts are available to configure yet.</p>
+            }
+          >
+            <For each={orderedProviders()}>
+              {(provider) => {
+                const providerHidden = () => providerEyeHidden(provider);
+                return (
+                  <article
+                    class="qg-vis-provider"
+                    data-hidden={providerHidden() ? "true" : undefined}
+                    data-dragging={
+                      draggingProviderId() === provider.providerId ? "true" : undefined
+                    }
+                    data-drop={dropTargetProviderId() === provider.providerId ? "true" : undefined}
+                    onDragOver={(event) => onProviderDragOver(event, provider)}
+                    onDrop={(event) => onProviderDrop(event, provider)}
+                    onDragEnd={onProviderDragEnd}
+                  >
+                    <header class="qg-vis-provider__head">
+                      <button
+                        type="button"
+                        class="qg-vis-grip"
+                        title="Drag to reorder; Alt plus arrow keys move it too"
+                        aria-label={`Reorder ${provider.providerLabel}`}
+                        draggable={providerOrderWritable()}
+                        onDragStart={(event) => onProviderDragStart(event, provider)}
+                        onDragEnd={onProviderDragEnd}
+                        onKeyDown={(event) => onProviderGrabKey(event, provider)}
+                      >
+                        <GripDotsIcon />
+                      </button>
+                      <div class="qg-vis-provider__identity">
+                        <span class="qg-vis-provider__name">{provider.providerLabel}</span>
+                        <Show when={provider.accountLabels.length > 0}>
+                          <span class="qg-vis-provider__account">
+                            {provider.accountLabels.join(" · ")}
+                          </span>
+                        </Show>
+                      </div>
+                      <EyeToggle
+                        variant="provider"
+                        disabled={!hiddenCardsWritable() || busy()}
+                        pressed={providerHidden()}
+                        label={`${providerHidden() ? "Show" : "Hide"} ${provider.providerLabel}`}
+                        title={providerHidden() ? "Show provider" : "Hide provider"}
+                        onToggle={async () => toggleProviderEye(provider)}
+                      />
+                    </header>
+                    <For each={provider.rows}>
+                      {(row) => {
+                        const rowHidden = () => hiddenRowIds().includes(row.id);
+                        return (
+                          <div class="qg-vis-row">
+                            <span class="qg-vis-row__label">{row.label}</span>
+                            <EyeToggle
+                              variant="row"
+                              disabled={!hiddenRowsWritable() || busy()}
+                              pressed={rowHidden()}
+                              label={`${rowHidden() ? "Show" : "Hide"} ${row.label}`}
+                              title={rowHidden() ? "Show" : "Hide"}
+                              onToggle={async () => toggleRowEye(row)}
+                            />
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </article>
+                );
+              }}
+            </For>
+          </Show>
+        </fieldset>
+        <span class="qg-inherited" aria-live="polite">
+          {providerOrderAnnouncement()}
+        </span>
+      </>
+    );
   }
 
   function renderControl(field: SettingsField): JSX.Element {
@@ -346,277 +628,192 @@ export function SettingsView(props: {
           </For>
         );
       }
-      case "list": {
-        const items = () => stringList(value());
-        const entries = () =>
-          field.key === "dashboard.hiddenCards" ? props.catalog.cards : props.catalog.rows;
-        const labelFor = (id: string): string => {
-          const entries =
-            field.key === "dashboard.hiddenCards" ? props.catalog.cards : props.catalog.rows;
-          return entries.find((entry) => entry.id === id)?.label ?? id;
-        };
-        return (
-          <>
-            <fieldset
-              class="qg-visibility-catalog"
-              aria-label={
-                field.key === "dashboard.hiddenCards"
-                  ? "Provider card visibility"
-                  : "Quota row visibility"
-              }
-            >
-              <For each={entries()}>
-                {(entry) => (
-                  <div class="qg-visibility-entry">
-                    <span>{entry.label}</span>
-                    <EyeToggle
-                      disabled={!writable() || busy()}
-                      pressed={items().includes(entry.id)}
-                      label={`${items().includes(entry.id) ? "Show" : "Hide"} ${entry.label}`}
-                      title={items().includes(entry.id) ? "Show" : "Hide"}
-                      onToggle={async () => {
-                        if (!writable()) return;
-                        edit(
-                          field.key,
-                          items().includes(entry.id)
-                            ? items().filter((id) => id !== entry.id)
-                            : [...items(), entry.id],
-                        );
-                      }}
-                    />
-                  </div>
-                )}
-              </For>
-            </fieldset>
-            <Show
-              when={items().length > 0}
-              fallback={<span class="qg-inherited">Nothing is hidden.</span>}
-            >
-              <div class="qg-visibility">
-                <For each={items()}>
-                  {(id) => (
-                    <span class="qg-chip" title={id}>
-                      <span>{labelFor(id)}</span>
-                      <button
-                        type="button"
-                        aria-label={`Stop hiding ${labelFor(id)}`}
-                        title="Clear"
-                        disabled={!writable()}
-                        onClick={() =>
-                          edit(
-                            field.key,
-                            items().filter((entry) => entry !== id),
-                          )
-                        }
-                      >
-                        ×
-                      </button>
-                    </span>
-                  )}
-                </For>
-              </div>
-            </Show>
-            <TextInput
-              class="qg-input"
-              disabled={!writable()}
-              placeholder="id to hide"
-              aria-label={`Additional ${field.label.toLowerCase()} ID`}
-              value={listDrafts()[field.key] ?? ""}
-              onInput={(event) =>
-                setListDrafts((current) => ({ ...current, [field.key]: event.currentTarget.value }))
-              }
-            />
-            <Button
-              variant="ghost-muted"
-              size="small"
-              disabled={!writable() || (listDrafts()[field.key] ?? "").trim() === ""}
-              onClick={() => {
-                const id = (listDrafts()[field.key] ?? "").trim();
-                if (id === "" || items().includes(id)) return;
-                edit(field.key, [...items(), id]);
-                setListDrafts((current) => ({ ...current, [field.key]: "" }));
-              }}
-            >
-              Hide
-            </Button>
-            <Show when={items().length > 0}>
-              <Button
-                variant="ghost-muted"
-                size="small"
-                disabled={!writable()}
-                onClick={() => edit(field.key, [])}
-              >
-                Clear all
-              </Button>
-            </Show>
-          </>
-        );
-      }
       default:
         return <span class="qg-inherited">{String(value() ?? "—")}</span>;
     }
   }
 
   return (
-    <div class="qg-form">
-      <header class="qg-section__head">
-        <h1 class="qg-page-title">Settings</h1>
-        <span class="qg-section__meta">Display, visibility and preferences</span>
-      </header>
-      <p class="qg-group__note">
-        Changes on this page are saved as global defaults. Project and workspace overrides remain
-        effective; saving here does not edit them. The source beside each field identifies its
-        effective value.
-      </p>
-      <section class="qg-group" aria-labelledby="qg-settings-import">
-        <h2 class="qg-group__title" id="qg-settings-import">
-          Import from inherited settings
-        </h2>
+    <div class="qg-settings">
+      <div class="qg-form qg-settings__scroll">
+        <header class="qg-section__head">
+          <h1 class="qg-page-title">Settings</h1>
+          <span class="qg-section__meta">Display, visibility and preferences</span>
+        </header>
         <p class="qg-group__note">
-          {props.snapshot.import.available
-            ? `Inherited sources supply ${props.snapshot.import.keyCount ?? 0} GUI keys. Import copies them into global defaults at ${props.snapshot.pathLabel} with a revision check, leaving source files untouched. Project and workspace overrides still apply, so import may remain available after a successful copy.`
-            : "No inherited settings are available to import in this workspace."}
+          Changes on this page are saved as global defaults. Project and workspace overrides remain
+          effective; saving here does not edit them. The source beside each field identifies its
+          effective value.
         </p>
-        <Show when={props.snapshot.import.issues.length > 0}>
-          <ul class="qg-note-list">
-            <For each={props.snapshot.import.issues}>
-              {(issue) => (
-                <li>
-                  {issue.key}: {issue.message}
-                </li>
-              )}
-            </For>
-          </ul>
-        </Show>
-        <div class="qg-field__control">
-          <Button
-            variant="outline"
-            size="small"
-            disabled={!props.snapshot.import.available || busy()}
-            onClick={() => void previewImport()}
-          >
-            Preview import
-          </Button>
-          <Show when={preview()}>
-            {(current) => (
-              <>
-                <span class="qg-inherited">from {current().from}</span>
-                <Button
-                  variant="contrast"
-                  size="small"
-                  disabled={busy()}
-                  onClick={() => void applyImport()}
-                >
-                  Apply {current().keys.length} keys
-                </Button>
-              </>
-            )}
-          </Show>
-        </div>
-        <Show when={previewError()}>{(message) => <p class="qg-field__error">{message()}</p>}</Show>
-        <Show when={preview()}>
-          {(current) => (
+        <section class="qg-group" aria-labelledby="qg-settings-import">
+          <h2 class="qg-group__title" id="qg-settings-import">
+            Import from inherited settings
+          </h2>
+          <p class="qg-group__note">
+            {props.snapshot.import.available
+              ? `Inherited sources supply ${props.snapshot.import.keyCount ?? 0} GUI keys. Import copies them into global defaults at ${props.snapshot.pathLabel} with a revision check, leaving source files untouched. Project and workspace overrides still apply, so import may remain available after a successful copy.`
+              : "No inherited settings are available to import in this workspace."}
+          </p>
+          <Show when={props.snapshot.import.issues.length > 0}>
             <ul class="qg-note-list">
-              <For each={current().keys}>
-                {(key) => (
+              <For each={props.snapshot.import.issues}>
+                {(issue) => (
                   <li>
-                    {key.key} → {JSON.stringify(key.value)}
+                    {issue.key}: {issue.message}
                   </li>
                 )}
               </For>
             </ul>
-          )}
-        </Show>
-      </section>
-
-      <For each={SETTINGS_GROUPS}>
-        {(group) => (
-          <Show when={editableFields().some((field) => field.group === group.id)}>
-            <section class="qg-group" aria-labelledby={`qg-settings-${group.id}`}>
-              <h2 class="qg-group__title" id={`qg-settings-${group.id}`}>
-                {group.title}
-              </h2>
-              <Show when={group.note}>{(note) => <p class="qg-group__note">{note()}</p>}</Show>
-              <For each={editableFields().filter((field) => field.group === group.id)}>
-                {(field) => (
-                  <div class="qg-field" data-invalid={errorFor(field.key) ? "true" : undefined}>
-                    <span class="qg-field__label">{field.label}</span>
-                    <div class="qg-field__control">{renderControl(field)}</div>
-                    <span class="qg-field__meta">
-                      <Show when={field.help}>{(help) => <span>{help()}</span>}</Show>
-                      <Show when={sourceNote(field.key)}>{(note) => <span>{note()}</span>}</Show>
-                    </span>
-                    <Show when={errorFor(field.key)}>
-                      {(message) => <span class="qg-field__error">{message()}</span>}
-                    </Show>
-                  </div>
-                )}
-              </For>
-            </section>
           </Show>
-        )}
-      </For>
-
-      <section class="qg-group" aria-labelledby="qg-settings-dashboard">
-        <h2 class="qg-group__title" id="qg-settings-dashboard">
-          Dashboard
-        </h2>
-        <div class="qg-field">
-          <span class="qg-field__label">Port</span>
           <div class="qg-field__control">
-            <TextInput
-              class="qg-input"
-              numeric
-              readOnly
-              aria-label="Dashboard port"
-              value={String(props.snapshot.dashboard.port)}
-            />
+            <Button
+              variant="outline"
+              size="small"
+              disabled={!props.snapshot.import.available || busy()}
+              onClick={() => void previewImport()}
+            >
+              Preview import
+            </Button>
+            <Show when={preview()}>
+              {(current) => (
+                <>
+                  <span class="qg-inherited">from {current().from}</span>
+                  <Button
+                    variant="contrast"
+                    size="small"
+                    disabled={busy()}
+                    onClick={() => void applyImport()}
+                  >
+                    Apply {current().keys.length} keys
+                  </Button>
+                </>
+              )}
+            </Show>
           </div>
-          <span class="qg-field__meta">
-            <span>
-              Read-only: changing the port needs a restart, and there is no fallback port.
-            </span>
-          </span>
-        </div>
-        <div class="qg-field">
-          <span class="qg-field__label">Address</span>
-          <div class="qg-field__control">
-            <TextInput
-              class="qg-input"
-              aria-label="Dashboard address"
-              readOnly
-              value={props.snapshot.dashboard.url}
-            />
-          </div>
-          <span class="qg-field__meta">
-            <span>Bound to loopback only; the dashboard is not reachable from other machines.</span>
-          </span>
-        </div>
-        <div class="qg-field">
-          <span class="qg-field__label">Settings file</span>
-          <div class="qg-field__control">
-            <span class="qg-inherited">{props.snapshot.pathLabel}</span>
-            <span class="qg-badge">revision {props.snapshot.revision.slice(0, 8)}</span>
-          </div>
-        </div>
-        <Show when={props.snapshot.issues.length > 0}>
-          <div class="qg-field">
-            <span class="qg-field__label">Reported issues</span>
-            <div class="qg-field__control">
+          <Show when={previewError()}>
+            {(message) => <p class="qg-field__error">{message()}</p>}
+          </Show>
+          <Show when={preview()}>
+            {(current) => (
               <ul class="qg-note-list">
-                <For each={props.snapshot.issues}>
-                  {(issue) => (
+                <For each={current().keys}>
+                  {(key) => (
                     <li>
-                      {issue.label}: {issue.message} ({issue.key})
+                      {key.key} → {JSON.stringify(key.value)}
                     </li>
                   )}
                 </For>
               </ul>
-            </div>
-          </div>
-        </Show>
-      </section>
+            )}
+          </Show>
+        </section>
 
+        <For each={SETTINGS_GROUPS}>
+          {(group) => (
+            <Show when={editableFields().some((field) => field.group === group.id)}>
+              <section class="qg-group" aria-labelledby={`qg-settings-${group.id}`}>
+                <h2 class="qg-group__title" id={`qg-settings-${group.id}`}>
+                  {group.title}
+                </h2>
+                <Show when={group.note}>{(note) => <p class="qg-group__note">{note()}</p>}</Show>
+                <Show
+                  when={group.id === "visibility"}
+                  fallback={
+                    <For each={editableFields().filter((field) => field.group === group.id)}>
+                      {(field) => (
+                        <div
+                          class="qg-field"
+                          data-invalid={errorFor(field.key) ? "true" : undefined}
+                        >
+                          <span class="qg-field__label">{field.label}</span>
+                          <div class="qg-field__control">{renderControl(field)}</div>
+                          <span class="qg-field__meta">
+                            <Show when={field.help}>{(help) => <span>{help()}</span>}</Show>
+                            <Show when={sourceNote(field.key)}>
+                              {(note) => <span>{note()}</span>}
+                            </Show>
+                          </span>
+                          <Show when={errorFor(field.key)}>
+                            {(message) => <span class="qg-field__error">{message()}</span>}
+                          </Show>
+                        </div>
+                      )}
+                    </For>
+                  }
+                >
+                  {renderVisibilitySection()}
+                </Show>
+              </section>
+            </Show>
+          )}
+        </For>
+
+        <section class="qg-group" aria-labelledby="qg-settings-dashboard">
+          <h2 class="qg-group__title" id="qg-settings-dashboard">
+            Dashboard
+          </h2>
+          <div class="qg-field">
+            <span class="qg-field__label">Address</span>
+            <div class="qg-field__control">
+              <TextInput
+                class="qg-input"
+                aria-label="Dashboard address"
+                readOnly
+                value={props.snapshot.dashboard.url}
+              />
+            </div>
+            <span class="qg-field__meta">
+              <span>
+                Bound to loopback only; the dashboard is not reachable from other machines.
+              </span>
+            </span>
+          </div>
+          <div class="qg-field">
+            <span class="qg-field__label">Settings file</span>
+            <div class="qg-field__control">
+              <Button
+                class="qg-settings-file"
+                variant="ghost-muted"
+                size="small"
+                aria-label={`Open settings file: ${props.snapshot.pathLabel}`}
+                aria-describedby="qg-settings-file-help"
+                aria-busy={openingFile()}
+                disabled={openingFile()}
+                onClick={() => void openSettingsFile()}
+              >
+                {props.snapshot.pathLabel}
+              </Button>
+              <span class="qg-badge">revision {props.snapshot.revision.slice(0, 8)}</span>
+            </div>
+            <span class="qg-field__meta" id="qg-settings-file-help">
+              Open in the default application. Unsaved changes are not included.
+            </span>
+            <Show when={openFileError()}>
+              {(message) => (
+                <p class="qg-field__error" role="alert">
+                  {message()}
+                </p>
+              )}
+            </Show>
+          </div>
+          <Show when={props.snapshot.issues.length > 0}>
+            <div class="qg-field">
+              <span class="qg-field__label">Reported issues</span>
+              <div class="qg-field__control">
+                <ul class="qg-note-list">
+                  <For each={props.snapshot.issues}>
+                    {(issue) => (
+                      <li>
+                        {issue.label}: {issue.message} ({issue.key})
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </div>
+            </div>
+          </Show>
+        </section>
+      </div>
       <div class="qg-savebar">
         <span class="qg-savebar__status" aria-live="polite">
           <Show when={dirty().length > 0} fallback={<span>No unsaved changes.</span>}>

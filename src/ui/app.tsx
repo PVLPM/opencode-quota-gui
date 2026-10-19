@@ -1,16 +1,27 @@
 import type { JSX } from "solid-js";
-import { createEffect, createMemo, createSignal, Match, onMount, Show, Switch } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  Match,
+  onCleanup,
+  onMount,
+  Show,
+  Switch,
+} from "solid-js";
 import type {
   HomeSnapshot,
   ProjectSnapshot,
+  QuotaSnapshot,
   SessionSnapshot,
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
-import { AnalyticsIcon } from "./components/icons";
-import { ProgressLine, QueryState, ReloadRequired, StaleNotice } from "./components/states";
+import { AnalyticsIcon, QuotaIcon } from "./components/icons";
+import { inlineAccountLabel } from "./components/quota-card";
+import { ProgressLine, QueryState, ReloadRequired } from "./components/states";
 import { createToaster, type Toaster, ToastRegion } from "./components/toast";
-import type { ConnectionState, DashboardClient } from "./dashboard-client";
+import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashboard-client";
 import { RANGE_LABELS } from "./format";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
 import {
@@ -28,10 +39,10 @@ import {
   resolveLoadState,
   shouldRefetchOnReconnect,
 } from "./view-model";
-import { HomeView } from "./views/home";
+import { HomeView, QuotaLoading, QuotaView } from "./views/home";
 import { ProjectView } from "./views/project";
 import { SessionView } from "./views/session";
-import { SettingsView, type VisibilityCatalog } from "./views/settings";
+import { SettingsView, type VisibilityCatalog, type VisibilityProvider } from "./views/settings";
 
 /**
  * Dashboard shell (design spec §10).
@@ -96,10 +107,12 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     parseLocation(currentHash(), readStoredRange(browserStorage())),
   );
   const [connection, setConnection] = createSignal<ConnectionState>(props.client.connection());
-  const [navTooltip, setNavTooltip] = createSignal<"home" | "settings" | undefined>();
+  const [navTooltip, setNavTooltip] = createSignal<"home" | "analytics" | "settings" | undefined>();
   const [contractMismatch, setContractMismatch] = createSignal<string | undefined>(undefined);
   const [reloadToken, setReloadToken] = createSignal(0);
-  const [homeSnapshot, setHomeSnapshot] = createSignal<HomeSnapshot | undefined>(undefined);
+  const [quotaReloadToken, setQuotaReloadToken] = createSignal(0);
+  const [homeSnapshot, setHomeSnapshot] = createSignal<QuotaSnapshot | undefined>(undefined);
+  const [routeStale, setRouteStale] = createSignal(false);
   /** Bumped on every reconnection: it refetches each route and anchors staleness. */
   const [reconnectEpoch, setReconnectEpoch] = createSignal(0);
   const [settingsFreshEpoch, setSettingsFreshEpoch] = createSignal(0);
@@ -107,6 +120,26 @@ export function App(props: { client: DashboardClient }): JSX.Element {
 
   const range = () => location().range;
   const route = () => location().route;
+  const activeScope = createMemo<ActiveViewScope>(() => {
+    const name = route().name;
+    return name === "analytics" || name === "project" || name === "session" ? "analytics" : "quota";
+  });
+
+  async function signalActiveView(scope: ActiveViewScope): Promise<void> {
+    try {
+      await props.client.setActiveView?.(scope);
+    } catch {
+      // Older servers may not expose this advisory endpoint; reads still work.
+    }
+  }
+
+  createEffect(() => {
+    const scope = activeScope();
+    if (connection() !== "live") return;
+    // Surface changes and each stream opening reassert interest; reads, range
+    // updates and signal completion do not feed this effect or retry it.
+    void signalActiveView(scope);
+  });
 
   const settingsQuery = createQuery<SettingsSnapshot>(() => props.client.settings());
   const preferences = createMemo(() =>
@@ -116,7 +149,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   createEffect(() => {
     if (route().name !== "settings" || homeSnapshot()) return;
     void props.client
-      .home({ range: range() })
+      .quota()
       .then(setHomeSnapshot)
       .catch(() => {
         // Settings remain usable if the optional visibility catalog is unavailable.
@@ -124,24 +157,39 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   });
 
   /**
-   * The visibility lists name what they hide. The home snapshot carries the
-   * labels; before it loads the lists fall back to the opaque ids, which are
-   * still safe to show (they never contain a credential, spec §8).
+   * The visibility section names what it hides. The catalog is grouped by
+   * provider: ids are stored for stable configuration but never rendered, and
+   * the section shows a plain empty state until the quota snapshot arrives.
    */
   const catalog = createMemo<VisibilityCatalog>(() => {
     const home = homeSnapshot();
-    if (!home) return { cards: [], rows: [] };
-    return {
-      cards: home.providers.cards.map((card) => ({
-        id: card.cardId,
-        label: card.accountLabel
-          ? `${card.providerLabel} · ${card.accountLabel}`
-          : card.providerLabel,
-      })),
-      rows: home.providers.cards.flatMap((card) =>
-        card.rows.map((row) => ({ id: row.rowId, label: `${card.providerLabel} · ${row.label}` })),
-      ),
-    };
+    if (!home) return { providers: [] };
+    const providers = new Map<string, VisibilityProvider>();
+    for (const card of home.providers.cards) {
+      let provider = providers.get(card.providerId);
+      if (provider === undefined) {
+        provider = {
+          providerId: card.providerId,
+          providerLabel: card.providerLabel,
+          accountLabels: [],
+          cardIds: [],
+          rows: [],
+        };
+        providers.set(card.providerId, provider);
+      }
+      if (!provider.cardIds.includes(card.cardId)) provider.cardIds.push(card.cardId);
+      const account = card.accountLabel
+        ? inlineAccountLabel(card.providerLabel, card.accountLabel)
+        : undefined;
+      if (account !== undefined && !provider.accountLabels.includes(account)) {
+        provider.accountLabels.push(account);
+      }
+      for (const row of card.rows) {
+        if (provider.rows.some((existing) => existing.id === row.rowId)) continue;
+        provider.rows.push({ id: row.rowId, label: row.label, accountLabel: account });
+      }
+    }
+    return { providers: [...providers.values()] };
   });
 
   function updateRange(next: RangeKey): void {
@@ -171,12 +219,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     if (previousConnection === state) return;
     const previous = previousConnection;
     previousConnection = state;
-    if (state === "reconnecting") {
-      toaster.push("info", "Lost the live update stream — retrying.");
-      return;
-    }
     if (!shouldRefetchOnReconnect(previous, state)) return;
-    toaster.push("success", "Live updates restored.");
     const epoch = reconnectEpoch() + 1;
     setReconnectEpoch(epoch);
     void settingsQuery.run().then((applied) => {
@@ -196,6 +239,10 @@ export function App(props: { client: DashboardClient }): JSX.Element {
         void settingsQuery.run();
         return;
       }
+      if (event.topic === "quota.changed") {
+        setQuotaReloadToken((token) => token + 1);
+        return;
+      }
       setReloadToken((token) => token + 1);
     });
     void (async () => {
@@ -207,21 +254,21 @@ export function App(props: { client: DashboardClient }): JSX.Element {
       }
       await settingsQuery.run();
     })();
-    return () => {
+    onCleanup(() => {
       window.removeEventListener("hashchange", onHashChange);
       unsubscribeConnection();
       unsubscribeEvents();
-    };
+    });
   });
 
   return (
     <div class="qg-app">
-      <header class="qg-topbar">
-        <div class="qg-topbar__brand">
-          <Tooltip value="Home" forceOpen={navTooltip() === "home"}>
+      <header class="qg-chrome">
+        <nav class="qg-topbar__brand" aria-label="Views">
+          <Tooltip value="Quota" forceOpen={navTooltip() === "home"}>
             <a
               class="qg-topbar__link qg-nav-icon"
-              aria-label="Home"
+              aria-label="Quota"
               onFocus={() => setNavTooltip("home")}
               onBlur={() => setNavTooltip(undefined)}
               onPointerEnter={() => setNavTooltip("home")}
@@ -233,28 +280,50 @@ export function App(props: { client: DashboardClient }): JSX.Element {
               aria-current={route().name === "home" ? "page" : undefined}
               href={formatHash({ name: "home" }, range())}
             >
+              <QuotaIcon />
+            </a>
+          </Tooltip>
+          <Tooltip value="Analytics" forceOpen={navTooltip() === "analytics"}>
+            <a
+              class="qg-topbar__link qg-nav-icon"
+              aria-label="Analytics"
+              aria-current={
+                route().name === "analytics" ||
+                route().name === "project" ||
+                route().name === "session"
+                  ? "page"
+                  : undefined
+              }
+              href={formatHash({ name: "analytics" }, range())}
+              onFocus={() => setNavTooltip("analytics")}
+              onBlur={() => setNavTooltip(undefined)}
+              onPointerEnter={() => setNavTooltip("analytics")}
+              onPointerLeave={() => setNavTooltip(undefined)}
+              onClick={() => setNavTooltip(undefined)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setNavTooltip(undefined);
+              }}
+            >
               <AnalyticsIcon />
             </a>
           </Tooltip>
-        </div>
+        </nav>
         <div class="qg-topbar__actions">
-          <Show when={routeShowsRangeSelector(route())}>
-            <SegmentedControl
-              class="qg-range"
-              aria-label="Time range"
-              value={range()}
-              onChange={(value) => {
-                if (isRangeKey(value)) updateRange(value);
-              }}
-            >
-              {RANGE_KEYS.map((key) => (
-                <SegmentedControlItem value={key}>{RANGE_LABELS[key] ?? key}</SegmentedControlItem>
-              ))}
-            </SegmentedControl>
-          </Show>
-          <Show when={connection() !== "live"}>
+          <Show
+            when={
+              connection() !== "live" ||
+              (route().name === "settings"
+                ? isStaleAfterReconnect(reconnectEpoch(), settingsFreshEpoch()) ||
+                  settingsQuery.error() !== undefined
+                : routeStale())
+            }
+          >
             <span class="qg-stale" aria-live="polite">
-              {connection() === "connecting" ? "Connecting…" : "Reconnecting — data may be stale"}
+              {connection() === "connecting"
+                ? "Connecting…"
+                : connection() === "reconnecting"
+                  ? "Reconnecting…"
+                  : "Data may be stale"}
             </span>
           </Show>
           <Tooltip value="Settings" forceOpen={navTooltip() === "settings"}>
@@ -277,91 +346,178 @@ export function App(props: { client: DashboardClient }): JSX.Element {
           </Tooltip>
         </div>
       </header>
+      <div class="qg-frame">
+        <header class="qg-topbar">
+          <span class="qg-frame-tab">
+            {route().name === "home"
+              ? "Quota"
+              : route().name === "analytics"
+                ? "Analytics"
+                : route().name === "project"
+                  ? "Project"
+                  : route().name === "session"
+                    ? "Session"
+                    : route().name === "settings"
+                      ? "Settings"
+                      : "Dashboard"}
+          </span>
+          <Show when={routeShowsRangeSelector(route())}>
+            <SegmentedControl
+              class="qg-range"
+              aria-label="Time range"
+              value={range()}
+              onChange={(value) => {
+                if (isRangeKey(value)) updateRange(value);
+              }}
+            >
+              {RANGE_KEYS.map((key) => (
+                <SegmentedControlItem value={key}>{RANGE_LABELS[key] ?? key}</SegmentedControlItem>
+              ))}
+            </SegmentedControl>
+          </Show>
+        </header>
 
-      <main class="qg-main">
-        <Show
-          when={contractMismatch() === undefined}
-          fallback={<ReloadRequired message={contractMismatch() ?? ""} />}
-        >
-          <Switch>
-            <Match when={route().name === "home"}>
-              <HomeRoute
-                client={props.client}
-                range={range()}
-                reloadToken={reloadToken()}
-                reconnectEpoch={reconnectEpoch()}
-                peek={{
-                  preferences: preferences(),
-                  hiddenCards: settingsQuery.data()?.visibility.hiddenCards ?? [],
-                  hiddenRows: settingsQuery.data()?.visibility.hiddenRows ?? [],
-                }}
-                connection={connection()}
-                onSnapshot={setHomeSnapshot}
-              />
-            </Match>
+        <main class="qg-main" data-settings={route().name === "settings" ? "true" : undefined}>
+          <Show
+            when={contractMismatch() === undefined}
+            fallback={<ReloadRequired message={contractMismatch() ?? ""} />}
+          >
+            <Switch>
+              <Match when={route().name === "home"}>
+                <QuotaRoute
+                  client={props.client}
+                  reloadToken={quotaReloadToken()}
+                  reconnectEpoch={reconnectEpoch()}
+                  preferences={preferences()}
+                  hiddenCards={settingsQuery.data()?.visibility.hiddenCards ?? []}
+                  hiddenRows={settingsQuery.data()?.visibility.hiddenRows ?? []}
+                  onSnapshot={setHomeSnapshot}
+                  onStale={setRouteStale}
+                />
+              </Match>
+              <Match when={route().name === "analytics"}>
+                <AnalyticsRoute
+                  client={props.client}
+                  range={range()}
+                  reloadToken={reloadToken()}
+                  reconnectEpoch={reconnectEpoch()}
+                  connection={connection()}
+                  onStale={setRouteStale}
+                />
+              </Match>
 
-            <Match when={route().name === "project"}>
-              <ProjectRoute
-                client={props.client}
-                range={range()}
-                projectId={(route() as { projectId: string }).projectId}
-                reloadToken={reloadToken()}
-                reconnectEpoch={reconnectEpoch()}
-                connection={connection()}
-              />
-            </Match>
+              <Match when={route().name === "project"}>
+                <ProjectRoute
+                  client={props.client}
+                  range={range()}
+                  projectId={(route() as { projectId: string }).projectId}
+                  reloadToken={reloadToken()}
+                  reconnectEpoch={reconnectEpoch()}
+                  connection={connection()}
+                  onStale={setRouteStale}
+                />
+              </Match>
 
-            <Match when={route().name === "session"}>
-              <SessionRoute
-                client={props.client}
-                range={range()}
-                sessionId={(route() as { sessionId: string }).sessionId}
-                reloadToken={reloadToken()}
-                reconnectEpoch={reconnectEpoch()}
-                connection={connection()}
-              />
-            </Match>
+              <Match when={route().name === "session"}>
+                <SessionRoute
+                  client={props.client}
+                  range={range()}
+                  sessionId={(route() as { sessionId: string }).sessionId}
+                  reloadToken={reloadToken()}
+                  reconnectEpoch={reconnectEpoch()}
+                  connection={connection()}
+                  onStale={setRouteStale}
+                />
+              </Match>
 
-            <Match when={route().name === "settings"}>
-              <SettingsRoute
-                client={props.client}
-                query={settingsQuery}
-                catalog={catalog()}
-                toaster={toaster}
-                stale={
-                  connection() !== "live" ||
-                  isStaleAfterReconnect(reconnectEpoch(), settingsFreshEpoch())
-                }
-              />
-            </Match>
+              <Match when={route().name === "settings"}>
+                <SettingsRoute
+                  client={props.client}
+                  query={settingsQuery}
+                  catalog={catalog()}
+                  toaster={toaster}
+                  stale={
+                    connection() !== "live" ||
+                    isStaleAfterReconnect(reconnectEpoch(), settingsFreshEpoch())
+                  }
+                />
+              </Match>
 
-            <Match when={true}>
-              <div class="qg-error-card" role="alert">
-                <span>That address does not match a dashboard page.</span>
-                <a href={formatHash({ name: "home" }, range())}>Go home</a>
-              </div>
-            </Match>
-          </Switch>
-        </Show>
-      </main>
+              <Match when={true}>
+                <div class="qg-error-card" role="alert">
+                  <span>That address does not match a dashboard page.</span>
+                  <a href={formatHash({ name: "home" }, range())}>Go home</a>
+                </div>
+              </Match>
+            </Switch>
+          </Show>
+        </main>
+      </div>
 
       <ToastRegion toaster={toaster} />
     </div>
   );
 }
 
-function HomeRoute(props: {
+function QuotaRoute(props: {
+  client: DashboardClient;
+  reloadToken: number;
+  reconnectEpoch: number;
+  preferences: ReturnType<typeof displayPreferencesFromValues>;
+  hiddenCards: string[];
+  hiddenRows: string[];
+  onSnapshot: (snapshot: QuotaSnapshot | undefined) => void;
+  onStale: (stale: boolean) => void;
+}): JSX.Element {
+  const query = createQuery<QuotaSnapshot>(() => props.client.quota());
+  const [freshEpoch, setFreshEpoch] = createSignal(0);
+  createEffect(() => {
+    const epoch = props.reconnectEpoch;
+    void props.reloadToken;
+    void query.run().then((applied) => {
+      if (applied) setFreshEpoch(epoch);
+    });
+  });
+  createEffect(() => {
+    if (query.data()) props.onSnapshot(query.data());
+  });
+  const state = () =>
+    resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+  createEffect(() =>
+    props.onStale(
+      query.data()?.stale === true ||
+        query.error() !== undefined ||
+        isStaleAfterReconnect(props.reconnectEpoch, freshEpoch()),
+    ),
+  );
+  return (
+    <>
+      <ProgressLine active={query.loading() && query.data() !== undefined} />
+      <QueryState
+        state={state()}
+        label="Loading providers"
+        skeleton={<QuotaLoading />}
+        render={(snapshot, stale) => (
+          <QuotaView
+            snapshot={snapshot}
+            preferences={props.preferences}
+            hiddenCards={props.hiddenCards}
+            hiddenRows={props.hiddenRows}
+            stale={stale}
+          />
+        )}
+      />
+    </>
+  );
+}
+
+function AnalyticsRoute(props: {
   client: DashboardClient;
   range: RangeKey;
   reloadToken: number;
   reconnectEpoch: number;
-  peek: {
-    preferences: ReturnType<typeof displayPreferencesFromValues>;
-    hiddenCards: string[];
-    hiddenRows: string[];
-  };
   connection: ConnectionState;
-  onSnapshot: (snapshot: HomeSnapshot | undefined) => void;
+  onStale: (stale: boolean) => void;
 }): JSX.Element {
   const query = createQuery<HomeSnapshot>(() => props.client.home({ range: props.range }));
   /**
@@ -369,8 +525,6 @@ function HomeRoute(props: {
    * that only starts after a reconnect must land before the marker clears.
    */
   const [freshEpoch, setFreshEpoch] = createSignal(0);
-  const hiddenCards = () => props.peek.hiddenCards;
-  const hiddenRows = () => props.peek.hiddenRows;
 
   createEffect(() => {
     const epoch = props.reconnectEpoch;
@@ -383,10 +537,6 @@ function HomeRoute(props: {
     });
   });
 
-  createEffect(() => {
-    props.onSnapshot(query.data());
-  });
-
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
   const staleNow = () => {
@@ -395,27 +545,17 @@ function HomeRoute(props: {
     if (isStaleAfterReconnect(props.reconnectEpoch, freshEpoch())) return true;
     return props.connection !== "live";
   };
-  const hasPayload = () => query.data() !== undefined;
+  createEffect(() =>
+    props.onStale(staleNow() || query.data()?.stale === true || query.data()?.usage.stale === true),
+  );
 
   return (
     <>
       <ProgressLine active={query.loading() && query.data() !== undefined} />
-      <Show when={hasPayload() && staleNow()}>
-        <StaleNotice message="Showing the last good snapshot — the dashboard has not refreshed it." />
-      </Show>
       <QueryState
         state={state()}
-        label="Loading quota"
-        render={(snapshot, stale) => (
-          <HomeView
-            snapshot={snapshot}
-            preferences={props.peek.preferences}
-            hiddenCards={hiddenCards()}
-            hiddenRows={hiddenRows()}
-            stale={stale || staleNow()}
-            range={props.range}
-          />
-        )}
+        label="Loading analytics"
+        render={(snapshot) => <HomeView snapshot={snapshot} range={props.range} />}
       />
     </>
   );
@@ -428,6 +568,7 @@ function ProjectRoute(props: {
   reloadToken: number;
   reconnectEpoch: number;
   connection: ConnectionState;
+  onStale: (stale: boolean) => void;
 }): JSX.Element {
   const query = createQuery<ProjectSnapshot>(() =>
     props.client.project({ projectId: props.projectId, range: props.range }),
@@ -448,6 +589,15 @@ function ProjectRoute(props: {
 
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+
+  createEffect(() =>
+    props.onStale(
+      query.error() !== undefined ||
+        query.data()?.stale === true ||
+        query.data()?.usage.stale === true ||
+        isStaleAfterReconnect(props.reconnectEpoch, freshEpoch()),
+    ),
+  );
 
   return (
     <>
@@ -478,6 +628,7 @@ function SessionRoute(props: {
   reloadToken: number;
   reconnectEpoch: number;
   connection: ConnectionState;
+  onStale: (stale: boolean) => void;
 }): JSX.Element {
   // The session page ignores the range entirely: its graphs always cover the
   // opened session and every descendant (R25–R27).
@@ -498,6 +649,12 @@ function SessionRoute(props: {
 
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+
+  createEffect(() =>
+    props.onStale(
+      query.error() !== undefined || isStaleAfterReconnect(props.reconnectEpoch, freshEpoch()),
+    ),
+  );
 
   return (
     <>
@@ -537,9 +694,6 @@ export function SettingsRoute(props: {
 
   return (
     <>
-      <Show when={props.query.data() !== undefined && props.stale}>
-        <StaleNotice message="Showing the last good settings — the dashboard has not refreshed them." />
-      </Show>
       {/*
         The editor owns an unsaved draft, so — unlike the read-only sections — it
         stays mounted for as long as a snapshot exists. Every refetch (a

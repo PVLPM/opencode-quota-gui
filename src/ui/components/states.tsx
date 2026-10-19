@@ -24,6 +24,7 @@ import type { LoadState } from "../view-model";
 export function QueryState<T>(props: {
   state: LoadState<T>;
   label: string;
+  skeleton?: JSX.Element;
   render: (data: T, stale: boolean) => JSX.Element;
 }): JSX.Element {
   const ready = () => (props.state.kind === "ready" ? props.state : undefined);
@@ -35,7 +36,7 @@ export function QueryState<T>(props: {
   return (
     <Switch>
       <Match when={props.state.kind === "skeleton"}>
-        <Skeleton label={props.label} />
+        {props.skeleton ?? <Skeleton label={props.label} />}
       </Match>
       <Match keyed when={failed()}>
         {(state) => (
@@ -53,7 +54,7 @@ export function QueryState<T>(props: {
 export function Skeleton(props: { lines?: number; label?: string }): JSX.Element {
   const lines = () => props.lines ?? 3;
   return (
-    <output class="qg-skeleton" aria-label={props.label ?? "Loading"}>
+    <output class="qg-skeleton" aria-label={props.label ?? "Loading"} aria-busy="true">
       {Array.from({ length: lines() }, () => (
         <span class="qg-skeleton__line" aria-hidden="true" />
       ))}
