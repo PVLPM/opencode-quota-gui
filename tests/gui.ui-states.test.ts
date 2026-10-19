@@ -6,6 +6,7 @@ import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type {
   HomeSnapshot,
+  ProjectSnapshot,
   SettingsSnapshot,
   SettingsWriteResult,
   Usage,
@@ -2136,6 +2137,304 @@ describe("a section follows its payload", () => {
     expect(rig.text()).toContain("beta-24h");
     expect(rig.text()).not.toContain("alpha-7d");
     rig.dispose();
+  });
+});
+
+describe("range transitions name the range still on screen", () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  interface Deferred<T> {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (reason: unknown) => void;
+  }
+
+  function deferred<T>(): Deferred<T> {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function analyticsPayload(range: RangeKey, projectName: string, tokens: number): HomeSnapshot {
+    return homeSnapshot({
+      range,
+      usage: usage(range, [
+        { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: tokens }) },
+      ]),
+      projects: [
+        {
+          projectId: "project-alpha",
+          name: projectName,
+          tokens: costed({ input: tokens }),
+          rootSessionCount: 1,
+          latestActivityAtMs: NOW,
+        },
+      ],
+    });
+  }
+
+  function projectPayload(range: RangeKey, projectName: string): ProjectSnapshot {
+    return projectSnapshot({
+      range,
+      name: projectName,
+      totals: { ...costed({ input: 700 }), sessionCount: 1 },
+      usage: usage(range, [{ startMs: NOW - DAY_MS, endMs: NOW, tokens: costed({ input: 700 }) }]),
+      roots: [
+        {
+          sessionId: "session-root-1",
+          title: `root-${range}`,
+          worktreeLabel: "alpha-main",
+          tokens: costed({ input: 700 }),
+          latestActivityAtMs: NOW,
+        },
+      ],
+    });
+  }
+
+  interface AppHarness {
+    root: TestNode;
+    navigate: (hash: string) => Promise<void>;
+    text: () => string;
+    notice: () => TestNode | undefined;
+    mainLink: (href: string) => TestNode | undefined;
+    dispose: () => void;
+  }
+
+  /**
+   * Mounts the real `App` on the test renderer with a controllable data source.
+   * The hash navigation goes through the same `hashchange` path a user action
+   * takes, so the range and route signals update exactly as they do in a tab.
+   */
+  function mountApp(options: {
+    hash: string;
+    home?: DashboardClient["home"];
+    project?: DashboardClient["project"];
+  }): AppHarness {
+    let hashChange: (() => void) | undefined;
+    const browser = {
+      location: { hash: options.hash },
+      localStorage: { getItem: () => null, setItem: () => {} },
+      addEventListener: (_name: string, callback: () => void) => {
+        hashChange = callback;
+      },
+      removeEventListener: () => {
+        hashChange = undefined;
+      },
+    };
+    vi.stubGlobal("window", browser);
+
+    const client: DashboardClient = {
+      connection: () => "live",
+      onConnectionChange: () => () => {},
+      subscribe: () => () => {},
+      health: async () => ({ app: "opencode-quota-gui", contractVersion: 1 }),
+      home: options.home ?? (async () => homeSnapshot()),
+      quota: async () => homeSnapshot(),
+      project: options.project ?? (async () => projectSnapshot()),
+      session: async () => sessionSnapshot(),
+      settings: async () => settingsSnapshot(),
+      saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      importPreview: async () => ({
+        from: "workspace: synthetic",
+        keys: [],
+        issues: [],
+        expectedRevision: "r",
+      }),
+      importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    };
+
+    const root = renderGraph.createTestRoot();
+    const stop = renderGraph.mount(() => renderGraph.app({ client }), root);
+    return {
+      root,
+      navigate: async (hash) => {
+        browser.location.hash = hash;
+        hashChange?.();
+        await settle();
+      },
+      text: () => renderGraph.textOf(root),
+      notice: () =>
+        [
+          ...renderGraph.elementsNamed(root, "div"),
+          ...renderGraph.elementsNamed(root, "output"),
+        ].find((node) => node.props.class === "qg-range-notice"),
+      mainLink: (href) => {
+        const main = renderGraph.elementsNamed(root, "main")[0];
+        if (!main) return undefined;
+        return renderGraph.elementsNamed(main, "a").find((node) => node.props.href === href);
+      },
+      dispose: () => {
+        stop();
+        vi.unstubAllGlobals();
+      },
+    };
+  }
+
+  it("shows a polite status while Analytics keeps the old range on screen", async () => {
+    const oldPayload = analyticsPayload("7d", "alpha-7d", 960);
+    const nextPayload = deferred<HomeSnapshot>();
+    const requests: RangeKey[] = [];
+    const app = mountApp({
+      hash: "#/analytics?range=7d",
+      home: ({ range }) => {
+        requests.push(range);
+        return range === "7d" ? Promise.resolve(oldPayload) : nextPayload.promise;
+      },
+    });
+
+    try {
+      await settle();
+      expect(requests).toEqual(["7d"]);
+      expect(app.text()).toContain("alpha-7d");
+
+      await app.navigate("#/analytics?range=30d");
+      expect(requests).toEqual(["7d", "30d"]);
+
+      const notice = app.notice();
+      expect(notice?.tagName).toBe("output");
+      expect(notice?.props["aria-live"]).toBe("polite");
+      expect(notice ? renderGraph.textOf(notice) : "").toBe(
+        "Showing 7 days while updating to 30 days…",
+      );
+      // The old payload keeps its own labels and links until the new one lands.
+      expect(app.text()).toContain("7d · per day");
+      expect(app.mainLink("#/project/project-alpha?range=7d")).toBeDefined();
+      expect(app.mainLink("#/project/project-alpha?range=30d")).toBeUndefined();
+
+      nextPayload.resolve(analyticsPayload("30d", "beta-30d", 480));
+      await settle();
+      await settle();
+
+      expect(app.notice()).toBeUndefined();
+      expect(app.text()).toContain("30d · per day");
+      expect(app.text()).toContain("beta-30d");
+      expect(app.text()).not.toContain("alpha-7d");
+      expect(app.mainLink("#/project/project-alpha?range=30d")).toBeDefined();
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("keeps the old view and offers a local Retry when the range fetch fails", async () => {
+    const oldPayload = analyticsPayload("7d", "alpha-7d", 960);
+    const pending: Deferred<HomeSnapshot>[] = [];
+    const requests: RangeKey[] = [];
+    const app = mountApp({
+      hash: "#/analytics?range=7d",
+      home: ({ range }) => {
+        requests.push(range);
+        if (range === "7d") return Promise.resolve(oldPayload);
+        const next = deferred<HomeSnapshot>();
+        pending.push(next);
+        return next.promise;
+      },
+    });
+
+    try {
+      await settle();
+      await app.navigate("#/analytics?range=30d");
+      const first = pending[0];
+      if (!first) throw new Error("the range request did not start");
+      first.reject(new DashboardError("internal", 500, "range update failed"));
+      await settle();
+      await settle();
+
+      // The failed range change leaves the last good payload untouched.
+      expect(app.text()).toContain("alpha-7d");
+      expect(app.text()).toContain("7d · per day");
+      expect(app.text()).not.toContain("beta-30d");
+
+      const alert = app.notice();
+      expect(alert?.props.role).toBe("alert");
+      const alertText = alert ? renderGraph.textOf(alert) : "";
+      expect(alertText).toContain("Showing 7 days");
+      expect(alertText).toContain("Updating to 30 days failed");
+      const retry = alert
+        ? renderGraph
+            .elementsNamed(alert, "button")
+            .find((node) => renderGraph.textOf(node) === "Retry")
+        : undefined;
+      expect(retry).toBeDefined();
+      if (!retry) throw new Error("the failed notice did not offer Retry");
+
+      const beforeRetry = requests.length;
+      renderGraph.listenerOf(retry, "onClick")?.({});
+      await settle();
+
+      expect(requests).toHaveLength(beforeRetry + 1);
+      expect(requests.at(-1)).toBe("30d");
+      expect(pending).toHaveLength(2);
+      expect(app.notice()?.tagName).toBe("output");
+
+      const second = pending[1];
+      if (!second) throw new Error("Retry did not start a new range request");
+      second.resolve(analyticsPayload("30d", "beta-30d", 480));
+      await settle();
+      await settle();
+
+      expect(app.notice()).toBeUndefined();
+      expect(app.text()).toContain("beta-30d");
+      expect(app.text()).toContain("30d · per day");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("passes the payload's own range to the project view during a transition", async () => {
+    const oldPayload = projectPayload("7d", "alpha-7d");
+    const nextPayload = deferred<ProjectSnapshot>();
+    const app = mountApp({
+      hash: "#/project/project-alpha?range=7d",
+      project: ({ range }) => (range === "7d" ? Promise.resolve(oldPayload) : nextPayload.promise),
+    });
+
+    try {
+      await settle();
+      expect(app.text()).toContain("alpha-7d");
+
+      await app.navigate("#/project/project-alpha?range=30d");
+      const notice = app.notice();
+      expect(notice?.tagName).toBe("output");
+      expect(notice ? renderGraph.textOf(notice) : "").toBe(
+        "Showing 7 days while updating to 30 days…",
+      );
+      // Inside the route, the breadcrumb and rows follow the payload, not the
+      // range selector in the chrome.
+      expect(app.text()).toContain("root-7d");
+      expect(app.mainLink("#/analytics?range=7d")).toBeDefined();
+      expect(app.mainLink("#/analytics?range=30d")).toBeUndefined();
+
+      nextPayload.resolve(projectPayload("30d", "alpha-30d"));
+      await settle();
+      await settle();
+
+      expect(app.notice()).toBeUndefined();
+      expect(app.text()).toContain("alpha-30d");
+      expect(app.text()).toContain("root-30d");
+      expect(app.mainLink("#/analytics?range=30d")).toBeDefined();
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("leaves the session route and Quota without a range notice", async () => {
+    const app = mountApp({ hash: "#/session/session-root-1?range=30d" });
+    try {
+      await settle();
+      expect(app.notice()).toBeUndefined();
+
+      await app.navigate("#/?range=30d");
+      await settle();
+      expect(app.notice()).toBeUndefined();
+      expect(app.text()).toContain("Five hour window");
+    } finally {
+      app.dispose();
+    }
   });
 });
 

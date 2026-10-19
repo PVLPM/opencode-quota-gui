@@ -98,6 +98,69 @@ function createQuery<T>(fetcher: () => Promise<T>): Query<T> {
   return { data, error, loading, run };
 }
 
+interface RangeTransition {
+  from: RangeKey;
+  to: RangeKey;
+  failed: boolean;
+}
+
+function rangeLabel(range: RangeKey): string {
+  return RANGE_LABELS[range] ?? range;
+}
+
+/**
+ * A range change deliberately keeps the previous payload on screen while the
+ * next one loads. That payload is only honest if the route says which range it
+ * belongs to, so the notice covers exactly the two states where a request is
+ * outstanding or failed — and disappears the moment the payload matches.
+ */
+function describeRangeTransition(
+  data: { range: RangeKey } | undefined,
+  requested: RangeKey,
+  loading: boolean,
+  failed: boolean,
+): RangeTransition | undefined {
+  if (data === undefined || data.range === requested) return undefined;
+  if (loading) return { from: data.range, to: requested, failed: false };
+  if (failed) return { from: data.range, to: requested, failed: true };
+  return undefined;
+}
+
+/**
+ * The notice is one row in both states, so a failed update replaces the status
+ * in place rather than shifting the route output down.
+ */
+function RangeNotice(props: { transition: RangeTransition; onRetry: () => void }): JSX.Element {
+  return (
+    <Show
+      when={props.transition.failed}
+      fallback={
+        <output class="qg-range-notice" aria-live="polite">
+          <span>
+            Showing {rangeLabel(props.transition.from)} while updating to{" "}
+            {rangeLabel(props.transition.to)}…
+          </span>
+        </output>
+      }
+    >
+      <div class="qg-range-notice" data-tone="error" role="alert">
+        <span>
+          Showing {rangeLabel(props.transition.from)}. Updating to {rangeLabel(props.transition.to)}{" "}
+          failed.
+        </span>
+        <button
+          type="button"
+          class="qg-range-notice__retry"
+          aria-label={`Retry updating to ${rangeLabel(props.transition.to)}`}
+          onClick={() => props.onRetry()}
+        >
+          Retry
+        </button>
+      </div>
+    </Show>
+  );
+}
+
 function currentHash(): string {
   return typeof window === "undefined" ? "#/" : window.location.hash || "#/";
 }
@@ -565,6 +628,13 @@ function AnalyticsRoute(props: {
 
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+  const rangeTransition = () =>
+    describeRangeTransition(
+      query.data(),
+      props.range,
+      query.loading(),
+      query.error() !== undefined,
+    );
   const staleNow = () => {
     const current = state();
     if (current.kind === "ready" && current.stale) return true;
@@ -578,10 +648,13 @@ function AnalyticsRoute(props: {
   return (
     <>
       <ProgressLine active={query.loading() && query.data() !== undefined} />
+      <Show when={rangeTransition()}>
+        {(notice) => <RangeNotice transition={notice()} onRetry={() => void query.run()} />}
+      </Show>
       <QueryState
         state={state()}
         label="Loading analytics"
-        render={(snapshot) => <HomeView snapshot={snapshot} range={props.range} />}
+        render={(snapshot) => <HomeView snapshot={snapshot} range={snapshot.range} />}
       />
     </>
   );
@@ -615,6 +688,13 @@ function ProjectRoute(props: {
 
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+  const rangeTransition = () =>
+    describeRangeTransition(
+      query.data(),
+      props.range,
+      query.loading(),
+      query.error() !== undefined,
+    );
 
   createEffect(() =>
     props.onStale(
@@ -628,13 +708,16 @@ function ProjectRoute(props: {
   return (
     <>
       <ProgressLine active={query.loading() && query.data() !== undefined} />
+      <Show when={rangeTransition()}>
+        {(notice) => <RangeNotice transition={notice()} onRetry={() => void query.run()} />}
+      </Show>
       <QueryState
         state={state()}
         label="Loading project"
         render={(snapshot, stale) => (
           <ProjectView
             snapshot={snapshot}
-            range={props.range}
+            range={snapshot.range}
             stale={
               stale ||
               props.connection !== "live" ||
