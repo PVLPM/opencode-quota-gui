@@ -795,6 +795,77 @@ body {
   stroke-dasharray: 3 3;
 }
 
+/* Session chart: blue focus context (left) and gold cumulative tree (right). */
+.qg-chart__axis-title {
+  fill: var(--qg-text-muted);
+  font-size: 10px;
+  font-weight: 550;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.qg-chart__axis-title--context,
+.qg-chart__axis-label--context {
+  fill: var(--qg-token-cache-read);
+}
+
+.qg-chart__axis-title--total,
+.qg-chart__axis-label--total {
+  fill: var(--qg-token-output);
+}
+
+.qg-chart__tick-mark {
+  stroke: var(--border-weaker-base);
+  stroke-width: 1;
+}
+
+.qg-chart__area--context {
+  fill: var(--qg-token-cache-read);
+  fill-opacity: 0.14;
+  stroke: none;
+}
+
+.qg-chart__area--total {
+  fill: var(--qg-token-output);
+  fill-opacity: 0.1;
+  stroke: none;
+}
+
+.qg-chart__line--context {
+  fill: none;
+  stroke: var(--qg-token-cache-read);
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.qg-chart__line--total {
+  fill: none;
+  stroke: var(--qg-token-output);
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.qg-chart__point--context {
+  fill: var(--qg-token-cache-read);
+}
+
+.qg-chart__point--total {
+  fill: var(--qg-token-output);
+}
+
+.qg-chart__hover {
+  fill: transparent;
+  pointer-events: all;
+}
+
+.qg-chart__note {
+  margin: -6px 0 0;
+  color: var(--qg-text-muted);
+  font-size: 12px;
+}
+
 .qg-chart__cursor {
   stroke: var(--qg-accent-border);
   stroke-width: 1;

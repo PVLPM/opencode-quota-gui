@@ -12,7 +12,11 @@ import type {
 } from "../src/contracts/dashboard";
 import { buildRowKey, composeRowId } from "../src/contracts/identity";
 import type { RangeKey } from "../src/contracts/ranges";
-import { buildStepGeometry, buildUsageGeometry, toBandPath } from "../src/ui/chart-geometry";
+import {
+  buildSessionChartGeometry,
+  buildUsageGeometry,
+  toBandPath,
+} from "../src/ui/chart-geometry";
 import type { Toaster } from "../src/ui/components/toast";
 import {
   type DashboardClient,
@@ -1313,17 +1317,154 @@ describe("session view composition", () => {
     expect(text(html)).toContain("250 nodes");
   });
 
-  it("breaks a branch's context line at a session or branch change", () => {
+  it("plots focus-session context separately from a cumulative tree total", () => {
     const snapshot = sessionSnapshot();
-    const geometry = buildStepGeometry(snapshot.steps, snapshot.compactionMarkers);
-    expect(geometry.contextRuns).toHaveLength(2);
-    expect(geometry.totalRuns).toHaveLength(2);
-    expect(geometry.contextRuns.map((run) => run.sessionId)).toEqual([
-      "session-root-1",
-      "session-child-1",
-    ]);
-    expect(geometry.compaction).toHaveLength(1);
+    const geometry = buildSessionChartGeometry(snapshot);
+
     expect(geometry.stepCount).toBe(3);
+    expect(geometry.focusStepCount).toBe(2);
+    // Context comes from the two root steps only: the child's 1,200-token
+    // context is never stitched into the focus line.
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1]);
+    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 800]);
+    // The total runs over the whole scope, branch change included.
+    expect(geometry.total.points.map((point) => point.value)).toEqual([500, 1500, 2900]);
+    // Separate domains: one shared scale would flatten the context line.
+    expect(geometry.context.domainMax).toBe(800);
+    expect(geometry.total.domainMax).toBe(2900);
+    expect(geometry.compaction).toHaveLength(1);
+    expect(geometry.compaction[0]).toMatchObject({
+      stepIndex: 1,
+      sessionId: "session-root-1",
+    });
+  });
+
+  it("keeps the cumulative total monotonic across branches and compactions", () => {
+    const snapshot = sessionSnapshot();
+    const geometry = buildSessionChartGeometry(snapshot);
+
+    for (let index = 1; index < geometry.total.points.length; index += 1) {
+      const previous = geometry.total.points[index - 1];
+      const current = geometry.total.points[index];
+      expect(current?.value).toBeGreaterThanOrEqual(previous?.value as number);
+      // Value grows, so its pixel y must fall (or stay flat), never rise.
+      expect(current?.y).toBeLessThanOrEqual((previous?.y as number) + 1e-9);
+    }
+    const markerIndex = geometry.compaction[0]?.stepIndex as number;
+    expect(geometry.total.points[markerIndex]?.value).toBeGreaterThanOrEqual(
+      geometry.total.points[markerIndex - 1]?.value as number,
+    );
+    expect(geometry.total.linePath).toContain(" C ");
+    expect(geometry.total.linePath).not.toMatch(/NaN|Infinity|undefined/);
+  });
+
+  it("renders labelled dual axes from the same chart on root and subsession pages", async () => {
+    const rootSnapshot = sessionSnapshot();
+    const childNode = rootSnapshot.nodes[1];
+    const childStep = rootSnapshot.steps[2];
+    if (!childNode || !childStep) throw new Error("session fixture is missing the child rows");
+    const subsessionSnapshot = sessionSnapshot({
+      focusSessionId: "session-child-1",
+      breadcrumbs: [
+        { sessionId: "session-root-1", title: "Refactor the quota aggregation", isFocus: false },
+        {
+          sessionId: "session-child-1",
+          title: "Sub-agent: verify the bucket edges",
+          isFocus: true,
+        },
+      ],
+      nodes: [childNode],
+      steps: [childStep],
+      compactionMarkers: [],
+      ownSummary: { ...costed({ input: 1200, output: 200 }), stepCount: 1 },
+      treeTotals: costed({ input: 1200, output: 200 }),
+    });
+
+    const root = await renderView("/views/session.tsx", "SessionView", {
+      snapshot: rootSnapshot,
+      range: "7d",
+    });
+    const subsession = await renderView("/views/session.tsx", "SessionView", {
+      snapshot: subsessionSnapshot,
+      range: "7d",
+    });
+
+    for (const html of [root, subsession]) {
+      expect(html).toContain('class="qg-usage qg-usage--session"');
+      expect(html).toContain("Context · focus session (left)");
+      expect(html).toContain("Total consumption · this session tree (right)");
+      expect(html).toContain("qg-chart__axis-title--context");
+      expect(html).toContain("qg-chart__axis-title--total");
+      expect(html).toContain("qg-chart__axis-label--context");
+      expect(html).toContain("qg-chart__axis-label--total");
+      expect(html).toContain("qg-chart__line--context");
+      expect(html).toContain("qg-chart__line--total");
+      expect(html).not.toMatch(/NaN|Infinity/);
+    }
+    // Multi-point areas fill under each line; the one-step subsession keeps
+    // single-point dots instead of an invented area.
+    expect(root).toContain("qg-chart__area--context");
+    expect(root).toContain("qg-chart__area--total");
+    expect(subsession).toContain("qg-chart__point--context");
+    expect(subsession).toContain("qg-chart__point--total");
+  });
+
+  it("keeps both session scales finite for zero, tiny, single-point, and focus-less data", () => {
+    const base = sessionSnapshot();
+    const empty = sessionSnapshot({ steps: [] });
+    const zero = sessionSnapshot({
+      steps: base.steps.map((step) => ({ ...step, contextTokens: 0, totalTokens: 0 })),
+    });
+    const tiny = sessionSnapshot({
+      steps: base.steps.map((step) => ({ ...step, contextTokens: 0.4, totalTokens: 0.2 })),
+    });
+    const noFocusSnapshot = sessionSnapshot({
+      focusSessionId: "session-missing",
+      steps: base.steps,
+    });
+
+    for (const snapshot of [empty, zero, tiny, noFocusSnapshot]) {
+      const geometry = buildSessionChartGeometry(snapshot);
+      for (const series of [geometry.context, geometry.total]) {
+        expect(Number.isFinite(series.domainMax)).toBe(true);
+        expect(series.domainMax).toBeGreaterThanOrEqual(0);
+        expect(series.linePath).not.toMatch(/NaN|Infinity|undefined/);
+        expect(series.areaPath).not.toMatch(/NaN|Infinity|undefined/);
+        for (const point of series.points) {
+          expect(Number.isFinite(point.x)).toBe(true);
+          expect(Number.isFinite(point.y)).toBe(true);
+          expect(point.value).toBeGreaterThanOrEqual(0);
+          expect(point.y).toBeGreaterThanOrEqual(geometry.plot.top - 1e-9);
+          expect(point.y).toBeLessThanOrEqual(geometry.plot.bottom + 1e-9);
+        }
+      }
+    }
+
+    const single = buildSessionChartGeometry({
+      ...base,
+      steps: base.steps.slice(0, 1),
+    });
+    expect(single.context.points).toHaveLength(1);
+    expect(single.total.points).toHaveLength(1);
+    expect(single.context.linePath).toMatch(/^M /);
+    expect(single.context.areaPath).toBe("");
+
+    const noFocus = buildSessionChartGeometry(noFocusSnapshot);
+    expect(noFocus.focusStepCount).toBe(0);
+    expect(noFocus.context.points).toHaveLength(0);
+    expect(noFocus.total.points).toHaveLength(3);
+    expect(noFocus.total.areaPath).toContain(" C ");
+  });
+
+  it("explains a focus-less chart while keeping the tree total visible", async () => {
+    const snapshot = sessionSnapshot({ focusSessionId: "session-missing" });
+    const html = await renderView("/views/session.tsx", "SessionView", {
+      snapshot,
+      range: "7d",
+    });
+    expect(text(html)).toContain("No completed steps in the focus session yet");
+    expect(html).toContain("qg-chart__line--total");
+    expect(html).not.toContain("qg-chart__line--context");
   });
 });
 
