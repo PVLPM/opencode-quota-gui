@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { HomeSnapshot, SessionSnapshot } from "../src/contracts/dashboard.js";
 import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/aggregation.js";
 import {
   ANALYTICS_FULL_REPAIR_INTERVAL_MS,
@@ -7,8 +8,11 @@ import {
 } from "../src/gui/analytics-engine.js";
 import type { AnalyticsReader } from "../src/gui/analytics-reader.js";
 import {
+  ANALYTICS_PRESENTATION_SESSION_LIMIT,
   type AnalyticsState,
+  decodeAnalyticsPresentation,
   decodeAnalyticsState,
+  encodeAnalyticsPresentation,
   encodeAnalyticsState,
   type PersistedAnalyticsState,
   rowKey,
@@ -364,9 +368,17 @@ function harness(
     loadPresentation: overrides.loadPresentation ?? (async () => undefined),
     savePresentation:
       overrides.savePresentation ??
-      (async (_path, state) => {
+      (async (_path, state, savedAtMs) => {
         if (state.presentation) {
-          savedPresentations.push(structuredClone(state.presentation));
+          savedPresentations.push({
+            ...structuredClone(state.presentation),
+            ...(state.sourceIdentity
+              ? { sourceIdentity: structuredClone(state.sourceIdentity) }
+              : {}),
+            savedAtMs,
+            frontierAtMs: state.frontierAtMs,
+            ...(state.extent ? { coverage: { ...state.extent } } : {}),
+          });
         }
         return true;
       }),
@@ -443,6 +455,8 @@ async function warmRestartFixture(): Promise<{
     sourceIdentity: db.identity,
   };
   db.rows.push(row("ses_root", "msg_restart", NOW - 30 * 60_000, { input: 5 }));
+  // Make the persisted index newer than the sidecar.
+  first.setNow(NOW + 60_000);
   await first.engine.refresh();
   await flushAsync();
   const saved = first.savedStates[first.savedStates.length - 1];
@@ -465,6 +479,44 @@ function datasetOf(db: FakeDb): UsageAnalyticsDataset {
     projects: structuredClone(db.projects),
     messages: [...db.rows],
     compactions: [...db.compactions],
+  };
+}
+
+function homeFromDataset(db: FakeDb, range: "24h" | "7d" | "30d"): HomeSnapshot {
+  const evaluation = createUsageAnalytics(datasetOf(db)).home(range, NOW);
+  return {
+    generatedAtMs: NOW,
+    range,
+    stale: false,
+    providers: { cards: [], enabledProviders: [], polledAtMs: NOW },
+    usage: { ...evaluation.usage, stale: false },
+    projects: evaluation.projects,
+  };
+}
+
+function sidecarSession(sessionId: string): SessionSnapshot {
+  const tokens = {
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+    apiEquivalentCostUsd: null,
+    unpricedTokens: 0,
+    unknownTokens: 0,
+  };
+  return {
+    focusSessionId: sessionId,
+    projectId: "p1",
+    projectName: "Project One",
+    breadcrumbs: [{ sessionId, title: sessionId, isFocus: true }],
+    nodes: [],
+    steps: [],
+    compactionMarkers: [],
+    ownSummary: { ...tokens, stepCount: 0 },
+    treeTotals: tokens,
+    stepSemantics: "test",
   };
 }
 
@@ -714,6 +766,69 @@ describe("analytics engine: revision reconciliation", () => {
     const after = await engine.home("24h");
     expect(after.usage.totals.input).toBe(700);
     expect(after.usage.stepCount).toBe(3);
+  });
+
+  it("full repair rereads cached owners outside the global extent after restart", async () => {
+    const db = baseDb();
+    const oldAt = NOW - 2 * DAY;
+    db.sessions.ses_old_a = session("ses_old_a", "p1");
+    db.sessions.ses_old_b = session("ses_old_b", "p1");
+    const owner = row("ses_old_a", "msg_old_owner", oldAt, { input: 100 });
+    const fork = row("ses_old_b", "msg_old_fork", oldAt, { input: 100 });
+    db.rows.push(owner, fork);
+    db.updatedAt.set(rowKey("ses_old_a", "msg_old_owner"), oldAt);
+    db.updatedAt.set(rowKey("ses_old_b", "msg_old_fork"), oldAt);
+
+    const first = harness(db);
+    await first.engine.home("24h");
+    await first.engine.project("p1", "7d");
+    await flushAsync();
+    const saved = first.savedStates[first.savedStates.length - 1];
+    if (!saved) throw new Error("expected a persisted index");
+    expect(saved.occurrences.has("msg_old_owner")).toBe(true);
+    expect(saved.occurrences.has("msg_old_fork")).toBe(true);
+    const persisted = cloneState(saved);
+    await first.engine.close();
+
+    owner.tokens.input = 999;
+    // Deliberately leave the source timestamp unchanged: only a payload read
+    // can see this edit.
+    const states: AnalyticsState[] = [];
+    const repairCalls: ReaderCall[] = [];
+    const second = createAnalyticsEngine({
+      reader: createFakeReader(db, repairCalls),
+      now: () => NOW + 1,
+      refreshIntervalMs: INTERVAL,
+      fullRepairIntervalMs: 1,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => cloneState(persisted),
+      loadPresentation: async () => undefined,
+      saveSnapshot: async (_path, state) => {
+        states.push(cloneState(state));
+        return true;
+      },
+      savePresentation: async () => true,
+    });
+
+    await second.home("24h");
+    await second.refresh();
+    await flushAsync();
+    const repaired = states[states.length - 1];
+    const ownerOccurrence = repaired?.occurrences.get("msg_old_owner");
+    const forkOccurrence = repaired?.occurrences.get("msg_old_fork");
+    if (!repaired || !ownerOccurrence || !forkOccurrence) {
+      throw new Error("expected repaired occurrences");
+    }
+    expect(
+      repairCalls.some(
+        (call) =>
+          call.method === "loadCompletedRows" &&
+          call.params?.messageIDs?.includes("msg_old_owner") === true,
+      ),
+    ).toBe(true);
+    expect(repaired.fingerprints[ownerOccurrence.fingerprintIndex]?.[4]).toBe(999);
+    expect(repaired.fingerprints[forkOccurrence.fingerprintIndex]?.[4]).toBe(100);
+    await second.close();
   });
 
   it("treats same-timestamp arrivals deterministically", async () => {
@@ -1155,6 +1270,48 @@ describe("analytics engine: scope reads", () => {
     for (const call of calls.filter((entry) => entry.method === "loadRevisions")) {
       expect(call.params?.sessionIDs).toBeDefined();
     }
+  });
+
+  it("invalidates cached session DTOs and notifies on compaction-only refreshes", async () => {
+    const db = baseDb();
+    const { engine, calls, generations } = harness(db);
+    const initial = await engine.session("ses_root");
+    expect(initial.compactionMarkers.map((marker) => marker.messageId)).toEqual(["msg_c"]);
+
+    const afterInitial = generations.length;
+    const baselineCalls = calls.length;
+    db.compactions.push({
+      sessionId: "ses_child",
+      atMs: NOW - 2 * HOUR,
+      messageId: "msg_compaction_new",
+    });
+    await engine.refresh();
+
+    expect(generations.length).toBeGreaterThan(afterInitial);
+    const globalHistoryReads = calls
+      .slice(baselineCalls)
+      .filter(
+        (call) =>
+          call.method === "loadCompletedRows" &&
+          call.params?.sessionIDs === undefined &&
+          call.params?.messageIDs === undefined &&
+          call.params?.completedAtTimes === undefined,
+      );
+    expect(globalHistoryReads).toHaveLength(0);
+
+    const updated = await engine.session("ses_root");
+    expect(updated.compactionMarkers.map((marker) => marker.messageId).sort()).toEqual([
+      "msg_c",
+      "msg_compaction_new",
+    ]);
+
+    const beforeRemoval = generations.length;
+    db.compactions = db.compactions.filter((marker) => marker.messageId !== "msg_compaction_new");
+    await engine.refresh();
+    expect(generations.length).toBeGreaterThan(beforeRemoval);
+    const removed = await engine.session("ses_root");
+    expect(removed.compactionMarkers.map((marker) => marker.messageId)).toEqual(["msg_c"]);
+    await engine.close();
   });
 
   it("uses the warm detail revision diff and fetches only changed tree ids", async () => {
@@ -1696,6 +1853,300 @@ describe("analytics engine: scope reads", () => {
 });
 
 describe("analytics engine: warm presentation and scheduler behavior", () => {
+  it("does no source or index work at construction", async () => {
+    const { engine, calls } = harness(baseDb());
+    await Promise.resolve();
+    expect(calls).toEqual([]);
+    await engine.close();
+    expect(calls).toEqual([]);
+  });
+
+  it("serves covered warm home ranges without source or index reads", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    let snapshotLoads = 0;
+    const warm: WarmAnalyticsPresentation = {
+      home: {
+        "24h": homeFromDataset(db, "24h"),
+        "7d": homeFromDataset(db, "7d"),
+        "30d": homeFromDataset(db, "30d"),
+      },
+      project: [],
+      sourceIdentity: db.identity,
+      savedAtMs: NOW,
+      coverage: { sinceMs: NOW - 30 * DAY, untilMs: NOW },
+    };
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW + 60_000,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => {
+        snapshotLoads += 1;
+        return undefined;
+      },
+      loadPresentation: async () => warm,
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+
+    expect((await engine.home("24h")).usage.totals.input).toBe(700);
+    expect((await engine.home("7d")).usage.totals.input).toBe(1_500);
+    expect((await engine.home("30d")).usage.totals.input).toBe(1_500);
+    expect(snapshotLoads).toBe(0);
+    expect(calls.filter((call) => call.method === "loadCompletedRows")).toHaveLength(0);
+    expect(calls.filter((call) => call.method === "loadRevisions")).toHaveLength(0);
+    expect(calls.filter((call) => call.method === "withSnapshot")).toHaveLength(1);
+    await engine.close();
+  });
+
+  it("rederives finite Home DTOs when the rolling window advances", async () => {
+    const db = baseDb();
+    const age24 = row("ses_root", "msg_age24", NOW - 23 * HOUR, { input: 11 });
+    const age7 = row("ses_root", "msg_age7", NOW - 7 * DAY + HOUR, { input: 13 });
+    db.rows.push(age24, age7);
+    db.updatedAt.set(rowKey("ses_root", "msg_age24"), age24.completedAtMs);
+    db.updatedAt.set(rowKey("ses_root", "msg_age7"), age7.completedAtMs);
+    const { engine, setNow } = harness(db);
+
+    expect((await engine.home("24h")).usage.totals.input).toBe(711);
+    expect((await engine.home("7d")).usage.totals.input).toBe(1_524);
+
+    setNow(NOW + 2 * HOUR);
+    for (const range of ["24h", "7d"] as const) {
+      const fresh = createUsageAnalytics(datasetOf(db)).home(range, NOW + 2 * HOUR);
+      const actual = await engine.home(range);
+      expect(actual.usage.totals.input).toBe(fresh.usage.totals.input);
+      expect(actual.usage.window).toEqual(fresh.usage.window);
+    }
+    await engine.close();
+  });
+
+  it("does not treat warm coverage as a substitute for missing index data", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    let snapshotLoads = 0;
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW + 60_000,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => {
+        snapshotLoads += 1;
+        return undefined;
+      },
+      loadPresentation: async () => ({
+        home: {},
+        project: [],
+        sourceIdentity: db.identity,
+        savedAtMs: NOW,
+        frontierAtMs: NOW,
+        coverage: { sinceMs: NOW - 30 * DAY, untilMs: NOW },
+      }),
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(700);
+    expect(snapshotLoads).toBe(1);
+    expect(calls.filter((call) => call.method === "loadCompletedRows").length).toBeGreaterThan(0);
+    await engine.close();
+  });
+
+  it("serves a warm session immediately while the scoped catchup is blocked", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    const warmSession = createUsageAnalytics(datasetOf(db)).session("ses_root");
+    const fake = createFakeReader(db, calls);
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let snapshotCount = 0;
+    let catchupCompleted = false;
+    const reader: AnalyticsReader = {
+      async withSnapshot(read) {
+        calls.push({ method: "withSnapshot" });
+        snapshotCount += 1;
+        if (snapshotCount > 1) await gate;
+        const result = await fake.withSnapshot(read);
+        if (snapshotCount > 1) catchupCompleted = true;
+        return result;
+      },
+    };
+    const engine = createAnalyticsEngine({
+      reader,
+      now: () => NOW,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => undefined,
+      loadPresentation: async () => ({
+        home: {},
+        project: [],
+        session: [["ses_root", warmSession]],
+        sourceIdentity: db.identity,
+        savedAtMs: NOW,
+        coverage: { sinceMs: NOW - 7 * DAY, untilMs: NOW },
+      }),
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+
+    const cached = await engine.session("ses_root");
+    expect(cached.focusSessionId).toBe("ses_root");
+    expect(cached.nodes.map((node) => node.sessionId)).toEqual(["ses_root", "ses_child"]);
+    expect(catchupCompleted).toBe(false);
+    expect(calls.filter((call) => call.method === "loadCompletedRows")).toHaveLength(0);
+
+    release?.();
+    await engine.refresh();
+    await engine.close();
+  });
+
+  it("moves warm session hits to the newest LRU slot and persists a bounded cache", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    const savedPresentations: WarmAnalyticsPresentation[] = [];
+    const ordered: Array<[string, SessionSnapshot]> = Array.from(
+      { length: ANALYTICS_PRESENTATION_SESSION_LIMIT },
+      (_, index) => [`ses_${index}`, sidecarSession(`ses_${index}`)],
+    );
+    const fake = createFakeReader(db, calls);
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let snapshotCount = 0;
+    const reader: AnalyticsReader = {
+      async withSnapshot(read) {
+        calls.push({ method: "withSnapshot" });
+        snapshotCount += 1;
+        if (snapshotCount > 1) await gate;
+        return await fake.withSnapshot(read);
+      },
+    };
+    const engine = createAnalyticsEngine({
+      reader,
+      now: () => NOW,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => undefined,
+      loadPresentation: async () => ({
+        home: {},
+        project: [],
+        session: ordered,
+        sourceIdentity: db.identity,
+        savedAtMs: NOW,
+        coverage: { sinceMs: NOW - 7 * DAY, untilMs: NOW },
+      }),
+      saveSnapshot: async () => true,
+      savePresentation: async (_path, state) => {
+        if (state.presentation) {
+          savedPresentations.push({ ...structuredClone(state.presentation) });
+        }
+        return true;
+      },
+    });
+
+    await engine.session("ses_0");
+    await engine.session("ses_1");
+    await engine.close();
+    const latest = savedPresentations[savedPresentations.length - 1];
+    expect(latest?.session?.map(([sessionId]) => sessionId)).toEqual([
+      "ses_2",
+      "ses_3",
+      "ses_4",
+      "ses_5",
+      "ses_6",
+      "ses_7",
+      "ses_0",
+      "ses_1",
+    ]);
+    release?.();
+    await flushAsync();
+  });
+
+  it("does not freshen an older sidecar timestamp while warming its LRU before index load", async () => {
+    const db = baseDb();
+    const oldSavedAt = NOW - 60_000;
+    const calls: ReaderCall[] = [];
+    const savedAts: number[] = [];
+    const warmSession = createUsageAnalytics(datasetOf(db)).session("ses_root");
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => await new Promise<AnalyticsState | undefined>(() => {}),
+      loadPresentation: async () => ({
+        home: {},
+        project: [],
+        session: [["ses_root", warmSession]],
+        sourceIdentity: db.identity,
+        savedAtMs: oldSavedAt,
+        frontierAtMs: oldSavedAt,
+        coverage: { sinceMs: NOW - 7 * DAY, untilMs: oldSavedAt },
+      }),
+      saveSnapshot: async () => true,
+      savePresentation: async (_path, _state, savedAtMs) => {
+        savedAts.push(savedAtMs);
+        return true;
+      },
+    });
+
+    await engine.session("ses_root");
+    await vi.waitFor(() => expect(savedAts.length).toBeGreaterThan(0));
+    await engine.close();
+    expect(savedAts.every((savedAtMs) => savedAtMs === oldSavedAt)).toBe(true);
+  });
+
+  it("preserves the sidecar source identity in pre-index writes", async () => {
+    const db = baseDb();
+    const warmSession = createUsageAnalytics(datasetOf(db)).session("ses_root");
+    const decodedWrites: WarmAnalyticsPresentation[] = [];
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, []),
+      now: () => NOW,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => await new Promise<AnalyticsState | undefined>(() => {}),
+      loadPresentation: async () => ({
+        home: {},
+        project: [],
+        session: [["ses_root", warmSession]],
+        sourceIdentity: db.identity,
+        savedAtMs: NOW,
+        frontierAtMs: NOW,
+      }),
+      saveSnapshot: async () => true,
+      savePresentation: async (_path, state, savedAtMs) => {
+        const decoded = decodeAnalyticsPresentation(
+          JSON.parse(JSON.stringify(encodeAnalyticsPresentation(state, savedAtMs))) as unknown,
+        );
+        if (decoded) decodedWrites.push(decoded);
+        return true;
+      },
+    });
+
+    await engine.session("ses_root");
+    await vi.waitFor(() => expect(decodedWrites.length).toBeGreaterThan(0));
+    await engine.close();
+
+    expect(decodedWrites.length).toBeGreaterThan(0);
+    for (const write of decodedWrites) {
+      expect(write.sourceIdentity).toMatchObject({
+        dbPath: db.identity.dbPath,
+        realPath: db.identity.realPath,
+        device: db.identity.device,
+        inode: db.identity.inode,
+        birthtimeMs: db.identity.birthtimeMs,
+        schemaToken: db.identity.schemaToken,
+      });
+      expect(write.session?.map(([sessionId]) => sessionId)).toEqual(["ses_root"]);
+    }
+  });
+
   it("serves a persisted presentation DTO before any refresh completes", async () => {
     const first = harness(baseDb());
     await first.engine.home("24h");
@@ -1717,12 +2168,15 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     const calls: ReaderCall[] = [];
     const backgroundDb = baseDb();
     backgroundDb.rows.push(row("ses_root", "msg_background", NOW + 30_000, { input: 5 }));
+    let snapshotCount = 0;
     const reader: AnalyticsReader = {
       async withSnapshot(read) {
         calls.push({ method: "withSnapshot" });
-        await gate;
+        snapshotCount += 1;
+        // The first transaction is the lightweight sidecar identity check.
+        if (snapshotCount > 1) await gate;
         const result = await createFakeReader(backgroundDb, calls).withSnapshot(read);
-        backgroundCompleted = true;
+        if (snapshotCount > 1) backgroundCompleted = true;
         return result;
       },
     };
@@ -1826,7 +2280,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.close();
   });
 
-  it("reattaches a warm presentation after index load when the identity matches", async () => {
+  it("does not let an older same-source sidecar override a newer index", async () => {
     const { db, persisted, warm } = await warmRestartFixture();
     const calls: ReaderCall[] = [];
     const engine = createAnalyticsEngine({
@@ -1842,9 +2296,108 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
 
     await engine.project("p1", "24h");
     const home = await engine.home("24h");
-    // The matching sidecar DTO wins over the newer persisted index (705).
-    expect(home.usage.totals.input).toBe(700);
+    // The sidecar was saved before the newer persisted index (705).
+    expect(home.usage.totals.input).toBe(705);
     expect(home.stale).toBe(false);
+    await engine.close();
+  });
+
+  it("attaches a same-source sidecar that is not older than the index", async () => {
+    const { db, persisted, warm } = await warmRestartFixture();
+    // The fixture's compact metadata is already the source metadata; keep the
+    // metadata-only refresh from looking like a data change.
+    db.sessions = structuredClone(persisted.sessions);
+    db.projects = structuredClone(persisted.projects);
+    const newer: WarmAnalyticsPresentation = {
+      ...structuredClone(warm),
+      savedAtMs: (persisted.savedAtMs ?? NOW) + 1,
+      frontierAtMs: NOW + 60_000,
+    };
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, []),
+      now: () => NOW + 5 * 60_000,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => cloneState(persisted),
+      loadPresentation: async () => newer,
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+
+    await engine.refresh();
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(700);
+    // The sidecar DTO is servable, but its newer wall time is not checkpoint
+    // proof for the persisted index coverage/freshness.
+    expect(home.stale).toBe(true);
+    await engine.close();
+  });
+
+  it("does not certify sidecar coverage when the compact snapshot write failed", async () => {
+    const db = baseDb();
+    const indexStates: AnalyticsState[] = [];
+    let failSnapshotWrites = false;
+    const first = harness(db, {
+      saveSnapshot: async (_path, state) => {
+        if (failSnapshotWrites) return false;
+        indexStates.push(cloneState(state));
+        return true;
+      },
+    });
+    await first.engine.home("30d");
+    await flushAsync();
+    const oldIndex = indexStates[indexStates.length - 1];
+    if (!oldIndex) throw new Error("expected the first compact snapshot");
+    const persistedIndex = cloneState(oldIndex);
+
+    db.rows.push(row("ses_root", "msg_backfill", NOW - 10 * 60_000, { input: 50 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_backfill"), NOW - 10 * 60_000);
+    failSnapshotWrites = true;
+    await first.engine.refresh();
+    await flushAsync();
+    expect(indexStates).toHaveLength(1);
+
+    const newer = first.savedPresentations[first.savedPresentations.length - 1];
+    const newer30 = newer?.home["30d"];
+    if (!newer30) throw new Error("expected the newer 30d DTO");
+    expect(newer30.usage.totals.input).toBe(1_550);
+    // The failed compact write is marked as an uncertified sidecar checkpoint,
+    // even when its wall-clock savedAt equals the older index.
+    expect(newer?.frontierAtMs).toBe(0);
+    expect(newer?.coverage).toBeUndefined();
+    const fastSidecar: WarmAnalyticsPresentation = {
+      ...structuredClone(newer),
+      home: { "30d": structuredClone(newer30) },
+    };
+    await first.engine.close();
+
+    const calls: ReaderCall[] = [];
+    let snapshotLoads = 0;
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => {
+        snapshotLoads += 1;
+        return cloneState(persistedIndex);
+      },
+      loadPresentation: async () => fastSidecar,
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+
+    const cached = await engine.home("30d");
+    expect(cached.usage.totals.input).toBe(1_550);
+    expect(snapshotLoads).toBe(0);
+
+    // The smaller index extent is authoritative. The missing 7d cache must
+    // refresh the delta and rebackfill msg_backfill instead of deriving from
+    // the older compact index.
+    const missing = await engine.home("7d");
+    expect(missing.usage.totals.input).toBe(1_550);
+    expect(snapshotLoads).toBe(1);
+    expect(calls.some((call) => call.method === "loadCompletedRows")).toBe(true);
     await engine.close();
   });
 
@@ -1917,6 +2470,168 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     expect(home.usage.totals.input).toBe(705);
     expect(home.stale).toBe(false);
     expect(fullReads(calls, beforeHome).length).toBeGreaterThan(0);
+    await engine.close();
+  });
+
+  it("does not rewrite the compact index on a no-change refresh", async () => {
+    const db = baseDb();
+    const { engine, savedStates, setNow } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+    const before = savedStates.length;
+
+    setNow(NOW + 1);
+    await engine.refresh();
+    await flushAsync();
+
+    expect(savedStates).toHaveLength(before);
+    const first = savedStates[0];
+    expect(first?.frontierAtMs).toBe(NOW);
+    await engine.close();
+  });
+
+  it("serves 7d first and extends only the missing 30d side in the background", async () => {
+    const db = baseDb();
+    const { engine, calls } = harness(db);
+    const home = await engine.home("7d");
+    expect(home.usage.totals.input).toBe(1_500);
+    const initial = fullReads(calls);
+    expect(initial).toHaveLength(1);
+    expect(initial[0]?.params).toMatchObject({
+      sinceMs: NOW - 7 * DAY,
+      untilMs: NOW,
+    });
+
+    await flushAsync();
+    await engine.refresh();
+    const reads = fullReads(calls);
+    expect(reads.length).toBeGreaterThanOrEqual(2);
+    const extension = reads[reads.length - 1];
+    expect(extension?.params).toMatchObject({
+      sinceMs: NOW - 30 * DAY,
+      untilMs: NOW - 7 * DAY,
+    });
+    // Lifetime was never requested by the automatic extension.
+    expect(reads.every((call) => call.params?.sinceMs !== undefined)).toBe(true);
+
+    const beforeCached = calls.length;
+    const home24 = await engine.home("24h");
+    const home7 = await engine.home("7d");
+    const home30 = await engine.home("30d");
+    expect(home24.usage.totals.input).toBe(700);
+    expect(home7.usage.totals.input).toBe(1_500);
+    expect(home30.usage.totals.input).toBe(1_500);
+    expect(
+      calls.slice(beforeCached).filter((call) => call.method === "loadCompletedRows"),
+    ).toHaveLength(0);
+    await engine.close();
+  });
+
+  it("extends lifetime only on the older side after 30d coverage", async () => {
+    const db = baseDb();
+    const { engine, calls } = harness(db);
+    await engine.home("30d");
+    const baseline = calls.length;
+
+    await engine.home("lifetime");
+
+    const reads = fullReads(calls, baseline);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]?.params).toHaveProperty("untilMs", NOW - 30 * DAY);
+    expect(reads[0]?.params).not.toHaveProperty("sinceMs");
+    await engine.close();
+  });
+
+  it("coalesces rapid range requests into the wider refresh", async () => {
+    const db = baseDb();
+    const { engine, calls } = harness(db);
+    await Promise.all([engine.home("24h"), engine.home("7d"), engine.home("30d")]);
+
+    const reads = fullReads(calls);
+    expect(reads).toHaveLength(1);
+    expect(reads[0]?.params).toMatchObject({
+      sinceMs: NOW - 30 * DAY,
+      untilMs: NOW,
+    });
+    await engine.close();
+  });
+
+  it("cancels the low-priority extension on close and flushes a useful sidecar", async () => {
+    vi.useFakeTimers();
+    try {
+      const db = baseDb();
+      const { engine, calls, savedPresentations } = harness(db);
+      await engine.home("7d");
+      const beforeClose = calls.filter((call) => call.method === "withSnapshot").length;
+      await engine.close();
+      expect(savedPresentations.length).toBeGreaterThan(0);
+      const afterClose = calls.filter((call) => call.method === "withSnapshot").length;
+      vi.advanceTimersByTime(3 * INTERVAL);
+      expect(calls.filter((call) => call.method === "withSnapshot")).toHaveLength(afterClose);
+      expect(afterClose).toBeLessThanOrEqual(beforeClose);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a changed-identity warm DTO before the cached serve", async () => {
+    const db = baseDb();
+    const warmHome = homeFromDataset(db, "24h");
+    const target = db.rows.find((entry) => entry.messageID === "msg_o");
+    if (!target) throw new Error("msg_o missing");
+    target.tokens.input = 401;
+    db.updatedAt.set(rowKey("ses_other", "msg_o"), NOW);
+    db.identity = identity({ inode: "new" });
+    const calls: ReaderCall[] = [];
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW + 60_000,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => undefined,
+      loadPresentation: async () => ({
+        home: { "24h": warmHome },
+        project: [],
+        sourceIdentity: identity({ inode: "old" }),
+        savedAtMs: NOW,
+        coverage: { sinceMs: NOW - DAY, untilMs: NOW },
+      }),
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(701);
+    expect(calls.some((call) => call.method === "loadCompletedRows")).toBe(true);
+    expect(home.stale).toBe(false);
+    await engine.close();
+  });
+
+  it("keeps a warm DTO stale when the source identity check is unavailable", async () => {
+    const db = baseDb();
+    db.status = "missing";
+    const warmHome = homeFromDataset(db, "24h");
+    const calls: ReaderCall[] = [];
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW + 60_000,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => undefined,
+      loadPresentation: async () => ({
+        home: { "24h": warmHome },
+        project: [],
+        sourceIdentity: db.identity,
+        savedAtMs: NOW,
+        coverage: { sinceMs: NOW - DAY, untilMs: NOW },
+      }),
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(700);
+    expect(home.stale).toBe(true);
     await engine.close();
   });
 
@@ -2038,6 +2753,56 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     expect(maxConcurrent).toBe(1);
     expect(nullPresentationWrites).toBe(0);
     await engine.close();
+  });
+
+  it("retains a dirty compact revision through failed writes and retries on close", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    const states: AnalyticsState[] = [];
+    let attempts = 0;
+    let releaseFirst: (() => void) | undefined;
+    let nowMs = NOW;
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => nowMs,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => undefined,
+      loadPresentation: async () => undefined,
+      saveSnapshot: async (_path, state) => {
+        attempts += 1;
+        if (attempts === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+          return false;
+        }
+        if (attempts === 2) return false;
+        states.push(cloneState(state));
+        return true;
+      },
+      savePresentation: async () => true,
+    });
+
+    await engine.home("24h");
+    await vi.waitFor(() => expect(attempts).toBe(1));
+    const target = db.rows.find((entry) => entry.messageID === "msg_o");
+    if (!target) throw new Error("msg_o missing");
+    target.tokens.input = 401;
+    db.updatedAt.set(rowKey("ses_other", "msg_o"), NOW);
+    await engine.refresh();
+    nowMs = NOW + 1;
+    await engine.refresh();
+
+    releaseFirst?.();
+    await vi.waitFor(() => expect(attempts).toBeGreaterThanOrEqual(2));
+    expect(states).toHaveLength(0);
+    await engine.close();
+    expect(attempts).toBeGreaterThanOrEqual(3);
+    expect(states).toHaveLength(1);
+    const occurrence = states[0]?.occurrences.get("msg_o");
+    if (!states[0] || !occurrence) throw new Error("expected retried snapshot");
+    expect(states[0].fingerprints[occurrence.fingerprintIndex]?.[4]).toBe(401);
   });
 
   it("drains queued persistence during close within a bound", async () => {

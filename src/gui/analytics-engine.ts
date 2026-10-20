@@ -30,6 +30,7 @@ import { type AnalyticsModel, createAnalyticsModel } from "./analytics-model.js"
 import type { AnalyticsPhaseMetrics } from "./analytics-protocol.js";
 import { type AnalyticsReader, createAnalyticsReader } from "./analytics-reader.js";
 import {
+  ANALYTICS_PRESENTATION_SESSION_LIMIT,
   type AnalyticsCoverage,
   type AnalyticsPresentation,
   type AnalyticsState,
@@ -54,6 +55,10 @@ export const ANALYTICS_SOURCE_CURSOR_OVERLAP_MS = 5 * 60_000;
 const MAX_SCOPE_BATCH = 8;
 const MAX_PROJECT_CACHE = 12;
 const PRESENTATION_SAVE_INTERVAL_MS = 60_000;
+const LOW_PRIORITY_EXTENSION_DELAY_MS = 0;
+const HOME_PRECOMPUTE_RANGES: readonly RangeKey[] = ["24h", "7d", "30d"];
+
+type LowPriorityTimer = ReturnType<typeof setTimeout> & { unref?: () => void };
 
 /**
  * Fixed instrumentation labels. Each phase is timed around the operation it
@@ -376,12 +381,19 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   let indexLoaded = false;
   let indexLoading: Promise<void> | undefined;
   let warmPresentation: WarmAnalyticsPresentation | undefined;
+  let warmSourceIdentity: OpenCodeSourceIdentity | undefined;
+  let warmIdentityVerification: Promise<boolean> | undefined;
+  let warmIdentityVerifiedGeneration = -1;
+  let coverageTrusted = false;
+  let sidecarNewerThanIndex = false;
+  let lowPriorityTimer: LowPriorityTimer | undefined;
   let closed = false;
   let closing = false;
   let closePromise: Promise<void> | undefined;
   let modelHydrated = false;
   let modelDirty = true;
   let lastPresentationSaveAtMs = 0;
+  let presentationSavedAtMs = 0;
   let generation = 0;
   const projectFreshAt = new Map<string, number>();
   const detailFreshAt = new Map<string, number>();
@@ -408,8 +420,12 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   // Persistence is serialized so an older generation can never rename over a
   // newer one, and writes capture the generation they are allowed to publish.
   let writeChain: Promise<void> = Promise.resolve();
-  let snapshotWritePending: { generation: number; atMs: number } | undefined;
-  let presentationWritePending: { generation: number; atMs: number } | undefined;
+  let snapshotWritePending: { revision: number; atMs: number } | undefined;
+  let presentationWritePending:
+    | { generation: number; atMs: number; savedAtMs: number; force: boolean }
+    | undefined;
+  let compactRevision = 0;
+  let compactDirty = false;
   let writeDrainScheduled = false;
 
   function samplePeak(): void {
@@ -482,7 +498,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
   /**
    * Loads only the small warm presentation sidecar. The big index loads lazily
-   * so the first useful home/project view never waits for 120k occurrences.
+   * so the first useful home/project/session view never waits for occurrences.
    */
   async function ensureLoaded(): Promise<void> {
     if (loaded) return;
@@ -495,12 +511,61 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       } catch {
         warmPresentation = undefined;
       }
-      if (warmPresentation) state.presentation = warmPresentation;
+      if (warmPresentation) {
+        state.presentation = warmPresentation;
+        warmSourceIdentity = warmPresentation.sourceIdentity;
+        presentationSavedAtMs = warmPresentation.savedAtMs ?? 0;
+        if (warmPresentation.coverage) state.extent = warmPresentation.coverage;
+        const warmFreshness = warmPresentation.frontierAtMs ?? warmPresentation.savedAtMs;
+        if (warmFreshness !== undefined) {
+          state.frontierAtMs = Math.max(state.frontierAtMs, warmFreshness);
+        }
+      }
       loaded = true;
     })().finally(() => {
       loading = undefined;
     });
     return loading;
+  }
+
+  /**
+   * A sidecar hit must not bypass a definite source replacement. This opens the
+   * lightweight identity-only snapshot (no metadata, revision, or payload scan).
+   * An unavailable source keeps the last good DTOs for a stale response.
+   */
+  function warmCacheAllowed(): Promise<boolean> {
+    if (!warmPresentation) return Promise.resolve(true);
+    if (warmIdentityVerification && warmIdentityVerifiedGeneration === generation) {
+      return warmIdentityVerification;
+    }
+    const checkGeneration = generation;
+    warmIdentityVerifiedGeneration = checkGeneration;
+    warmIdentityVerification = (async () => {
+      let result: OpenCodeStorageSnapshotResult<OpenCodeSourceIdentity>;
+      try {
+        result = await reader.withSnapshot((snapshot) => snapshot.identity);
+      } catch {
+        unavailable = true;
+        return true;
+      }
+      if (result.status !== "ok") {
+        unavailable = true;
+        return true;
+      }
+      if (
+        compareOpenCodeSourceIdentity(warmPresentation?.sourceIdentity, result.value) !== "changed"
+      ) {
+        return true;
+      }
+      warmPresentation = undefined;
+      warmSourceIdentity = undefined;
+      warmIdentityVerifiedGeneration = -1;
+      state.presentation = undefined;
+      state.extent = undefined;
+      state.frontierAtMs = 0;
+      return false;
+    })();
+    return warmIdentityVerification;
   }
 
   /** Loads the persisted compact index (occurrences/fingerprints/identity). */
@@ -517,20 +582,51 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       if (persisted) {
         state = persisted;
+        coverageTrusted = true;
         const persistedIdentity = persisted.sourceIdentity;
         const warmIdentity = warmPresentation?.sourceIdentity;
-        if (
-          warmPresentation &&
+        const warmSavedAtMs = warmPresentation?.savedAtMs;
+        const persistedSavedAtMs = persisted.savedAtMs;
+        const sameIdentity =
+          warmPresentation !== undefined &&
           persistedIdentity !== undefined &&
           warmIdentity !== undefined &&
-          compareOpenCodeSourceIdentity(persistedIdentity, warmIdentity) === "same"
-        ) {
+          compareOpenCodeSourceIdentity(persistedIdentity, warmIdentity) === "same";
+        const notOlder =
+          warmSavedAtMs !== undefined &&
+          persistedSavedAtMs !== undefined &&
+          warmSavedAtMs >= persistedSavedAtMs;
+        if (sameIdentity && notOlder) {
+          // The sidecar may serve its cached DTOs, but only the compact index
+          // certifies loaded occurrences, cursor, extent, and freshness. A
+          // newer savedAt alone is not checkpoint proof; merging sidecar
+          // coverage would let a failed snapshot write hide missing history.
           state.presentation = warmPresentation;
+          const uncertified =
+            warmPresentation?.frontierAtMs === 0 || warmPresentation?.coverage === undefined;
+          sidecarNewerThanIndex =
+            uncertified ||
+            (warmSavedAtMs !== undefined &&
+              persistedSavedAtMs !== undefined &&
+              warmSavedAtMs > persistedSavedAtMs);
+          if (sidecarNewerThanIndex) coverageTrusted = false;
+          // Re-check the source lazily on the next cached serve after loading
+          // the compact index; a replacement may have happened while the index
+          // was being read.
+          warmIdentityVerification = undefined;
+          warmIdentityVerifiedGeneration = -1;
         } else if (warmPresentation) {
-          // A missing/mismatched token cannot certify these DTOs against the
-          // persisted index; never let an old-DB sidecar shadow fresh data.
+          // A missing/mismatched token or an older sidecar cannot certify these
+          // DTOs against the persisted index; never let it shadow newer data.
           state.presentation = undefined;
+          warmPresentation = undefined;
+          warmSourceIdentity = undefined;
+          sidecarNewerThanIndex = false;
         }
+        presentationSavedAtMs =
+          state.presentation !== undefined
+            ? (warmSavedAtMs ?? presentationSavedAtMs)
+            : (persistedSavedAtMs ?? presentationSavedAtMs);
       }
       indexes.rebuild(state.occurrences.values(), state.sessions);
       lastSessionIndexSignature = sessionIndexSignature(state.sessions);
@@ -646,10 +742,14 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     return atMs - baseline >= refreshIntervalMs;
   }
 
-  function cacheHome(range: RangeKey, snapshot: HomeSnapshot, atMs: number): void {
+  function setHomeCache(range: RangeKey, snapshot: HomeSnapshot): void {
     const presentation: AnalyticsPresentation = state.presentation ?? { home: {}, project: [] };
     presentation.home[range] = snapshot;
     state.presentation = presentation;
+  }
+
+  function cacheHome(range: RangeKey, snapshot: HomeSnapshot, atMs: number): void {
+    setHomeCache(range, snapshot);
     persistPresentation(atMs);
   }
 
@@ -672,12 +772,95 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     return entry?.[2];
   }
 
+  function projectScopeCovered(projectId: string, range: RangeKey, atMs: number): boolean {
+    const coverage = projectCoverage.get(projectId);
+    if (!coverage) return false;
+    if (
+      coverage.signature !== projectSignature(projectId, range, indexes.projectSessions(projectId))
+    ) {
+      return false;
+    }
+    return coversSince(rangeWindow(range, atMs).sinceMs, coverage);
+  }
+
+  function cachedSession(sessionId: string): SessionSnapshot | undefined {
+    const entry = state.presentation?.session?.find(([id]) => id === sessionId);
+    return entry?.[1];
+  }
+
+  /** Cache a fresh session DTO as the newest LRU entry (oldest-first order). */
+  function cacheSession(sessionId: string, snapshot: SessionSnapshot, atMs: number): void {
+    const presentation: AnalyticsPresentation = state.presentation ?? { home: {}, project: [] };
+    const session = (presentation.session ?? []).filter(([id]) => id !== sessionId);
+    session.push([sessionId, snapshot]);
+    while (session.length > ANALYTICS_PRESENTATION_SESSION_LIMIT) session.shift();
+    presentation.session = session;
+    state.presentation = presentation;
+    persistPresentation(atMs);
+  }
+
+  function touchSessionCache(sessionId: string, atMs: number): void {
+    const presentation = state.presentation;
+    const session = presentation?.session;
+    if (!presentation || !session) return;
+    const index = session.findIndex(([id]) => id === sessionId);
+    if (index < 0) return;
+    const [entry] = session.splice(index, 1);
+    if (!entry) return;
+    session.push(entry);
+    while (session.length > ANALYTICS_PRESENTATION_SESSION_LIMIT) session.shift();
+    persistPresentation(atMs);
+  }
+
+  /**
+   * Drops cached session DTOs for a changed detail tree. The compact index
+   * carries no detail markers, so a marker-only scoped refresh must notify the
+   * host and rewrite the small sidecar even when usage data is unchanged.
+   */
+  function invalidateCachedSessions(sessionIds: ReadonlySet<string>): boolean {
+    const presentation = state.presentation;
+    const session = presentation?.session;
+    if (!presentation || !session || session.length === 0) return false;
+    const next = session.filter(([, snapshot]) => {
+      if (sessionIds.has(snapshot.focusSessionId)) return false;
+      return !snapshot.nodes.some((node) => sessionIds.has(node.sessionId));
+    });
+    if (next.length === session.length) return false;
+    if (next.length > 0) presentation.session = next;
+    else delete presentation.session;
+    state.presentation = presentation;
+    return true;
+  }
+
   function hasUsefulPresentation(): boolean {
     const presentation = state.presentation;
     return (
       presentation !== undefined &&
-      (Object.keys(presentation.home).length > 0 || presentation.project.length > 0)
+      (Object.keys(presentation.home).length > 0 ||
+        presentation.project.length > 0 ||
+        (presentation.session?.length ?? 0) > 0)
     );
+  }
+
+  /**
+   * Before the compact index is loaded, the sidecar identity is not installed
+   * on the state (it must not certify indexed data). Preserve it only in the
+   * serialized DTO sidecar so a restart can still validate the warm cache.
+   */
+  function presentationStateForWrite(): AnalyticsState {
+    let view = state;
+    if (view.sourceIdentity === undefined && warmSourceIdentity !== undefined) {
+      view = { ...view, sourceIdentity: warmSourceIdentity };
+    }
+    if (compactDirty) {
+      // The DTOs may be newer than the last successful compact checkpoint.
+      // Omit coverage/freshness so restart cannot derive missing ranges from
+      // that unchecked index; cached DTOs can still be served while catching up.
+      view = { ...view };
+      delete view.extent;
+      view.frontierAtMs = 0;
+    }
+    return view;
   }
 
   async function drainWrites(): Promise<void> {
@@ -687,14 +870,29 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const presentationJob = presentationWritePending;
       presentationWritePending = undefined;
       if (!snapshotJob && !presentationJob) return;
-      if (snapshotJob && snapshotJob.generation === generation) {
-        await measureAsync("persistenceWrite", () =>
+      if (snapshotJob) {
+        const writtenRevision = snapshotJob.revision;
+        const saved = await measureAsync("persistenceWrite", () =>
           saveSnapshot(snapshotPath, state, snapshotJob.atMs).catch(() => false),
         );
+        if (saved && compactRevision === writtenRevision) {
+          compactDirty = false;
+        } else if (!saved) {
+          compactDirty = true;
+        }
       }
-      if (presentationJob && presentationJob.generation === generation && hasUsefulPresentation()) {
+      if (
+        presentationJob &&
+        presentationJob.generation === generation &&
+        (presentationJob.force || hasUsefulPresentation())
+      ) {
+        presentationSavedAtMs = presentationJob.savedAtMs;
         await measureAsync("persistenceWrite", () =>
-          savePresentation(presentationPath, state, presentationJob.atMs).catch(() => false),
+          savePresentation(
+            presentationPath,
+            presentationStateForWrite(),
+            presentationJob.savedAtMs,
+          ).catch(() => false),
         );
       }
     }
@@ -709,15 +907,36 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     });
   }
 
-  function queueSnapshotWrite(atMs: number): void {
-    if (closed || closing) return;
-    snapshotWritePending = { generation, atMs };
+  /** Wait for the serialized writer to become idle after a final queue. */
+  async function drainAllWrites(): Promise<void> {
+    for (;;) {
+      const chain = writeChain;
+      await chain.catch(() => undefined);
+      if (!writeDrainScheduled && !snapshotWritePending && !presentationWritePending) return;
+      if (!writeDrainScheduled) scheduleWriteDrain();
+    }
+  }
+
+  function queueSnapshotWrite(atMs: number, force = false): void {
+    if ((closed || closing) && !force) return;
+    compactDirty = true;
+    snapshotWritePending = { revision: compactRevision, atMs };
     scheduleWriteDrain();
   }
 
-  function queuePresentationWrite(atMs: number): void {
-    if (closed || closing || !hasUsefulPresentation()) return;
-    presentationWritePending = { generation, atMs };
+  function queuePresentationWrite(atMs: number, savedAtMs = atMs, force = false): void {
+    if (closed || closing) return;
+    if (!force && !hasUsefulPresentation()) return;
+    if (!state.presentation) return;
+    presentationWritePending = { generation, atMs, savedAtMs, force };
+    scheduleWriteDrain();
+  }
+
+  /** Final flush bypasses the cache-write throttle during close. */
+  function queueFinalPresentationWrite(atMs: number, savedAtMs: number): void {
+    if (!hasUsefulPresentation()) return;
+    lastPresentationSaveAtMs = atMs;
+    presentationWritePending = { generation, atMs, savedAtMs, force: false };
     scheduleWriteDrain();
   }
 
@@ -726,8 +945,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       return;
     }
     lastPresentationSaveAtMs = atMs;
-    queuePresentationWrite(atMs);
-    if (indexLoaded) queueSnapshotWrite(atMs);
+    // Before the compact index is loaded, keep the sidecar's original save
+    // time. A warm LRU touch must not make an older sidecar look newer than a
+    // newer persisted index.
+    queuePresentationWrite(atMs, indexLoaded ? atMs : presentationSavedAtMs);
   }
 
   function homeSnapshotWithStaleness(
@@ -757,6 +978,103 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     };
   }
 
+  function deriveProjectSnapshot(
+    projectId: string,
+    range: RangeKey,
+    atMs: number,
+  ): ProjectSnapshot {
+    const stale = isStale(atMs);
+    const snapshot = measureSync("dtoAggregation", () => model.project(projectId, range, atMs));
+    return {
+      ...snapshot,
+      stale,
+      usage: { ...snapshot.usage, stale },
+    };
+  }
+
+  /**
+   * Advance cached finite Home/Project DTOs with the refresh clock so the
+   * persisted sidecar never keeps a previous rolling window for a later start.
+   * Only ranges certifiably covered by the loaded index are rebuilt.
+   */
+  function refreshFinitePresentationWindows(atMs: number): void {
+    if (!modelHydrated || modelDirty || !coverageTrusted) return;
+    const presentation = state.presentation;
+    if (!presentation) return;
+    for (const key of Object.keys(presentation.home)) {
+      if (!isRangeKey(key) || key === "lifetime") continue;
+      if (!coversSince(rangeWindow(key, atMs).sinceMs, state.extent)) continue;
+      if (presentation.home[key]?.usage.window.untilMs === atMs) continue;
+      presentation.home[key] = deriveHomeSnapshot(key, atMs);
+    }
+    if (presentation.project.length > 0) {
+      presentation.project = presentation.project.map(([projectId, range, snapshot]) => {
+        if (range === "lifetime" || snapshot.usage.window.untilMs === atMs) {
+          return [projectId, range, snapshot];
+        }
+        if (!projectScopeCovered(projectId, range, atMs)) {
+          return [projectId, range, snapshot];
+        }
+        return [projectId, range, deriveProjectSnapshot(projectId, range, atMs)];
+      });
+    }
+    state.presentation = presentation;
+  }
+
+  function deriveHomeSnapshot(range: RangeKey, atMs: number): HomeSnapshot {
+    const stale = isStale(atMs);
+    const snapshot = measureSync("dtoAggregation", () => model.home(range, atMs));
+    return {
+      generatedAtMs: atMs,
+      range,
+      stale,
+      providers: { cards: [], enabledProviders: [], polledAtMs: atMs },
+      usage: { ...snapshot.usage, stale },
+      projects: snapshot.projects,
+    };
+  }
+
+  /**
+   * Once 30d is indexed, derive the three bounded Home DTOs together while the
+   * model is already hydrated. Missing entries are filled; this never triggers
+   * a second model hydration.
+   */
+  function precomputeHomeSnapshots(atMs: number): void {
+    if (!modelHydrated || modelDirty || !coverageTrusted) return;
+    if (!coversSince(rangeWindow("30d", atMs).sinceMs, state.extent)) return;
+    let changed = false;
+    for (const range of HOME_PRECOMPUTE_RANGES) {
+      if (state.presentation?.home[range] !== undefined) continue;
+      setHomeCache(range, deriveHomeSnapshot(range, atMs));
+      changed = true;
+    }
+    if (changed) queuePresentationWrite(atMs);
+  }
+
+  /**
+   * The UI's default finite view is 7d. After that response is ready, extend
+   * once to 30d in a deferred, unref'd timer. The zero-delay timer yields one
+   * event-loop turn; it cannot preempt a synchronous SQLite read. Lifetime is
+   * never scheduled.
+   */
+  function scheduleThirtyDayExtension(range: RangeKey, atMs: number): void {
+    if (range !== "7d" || closed || closing || lowPriorityTimer !== undefined) return;
+    if (coversSince(rangeWindow("30d", atMs).sinceMs, state.extent)) return;
+    const timer = setTimeout(() => {
+      lowPriorityTimer = undefined;
+      if (closed || closing) return;
+      const scheduledAtMs = now();
+      if (coversSince(rangeWindow("30d", scheduledAtMs).sinceMs, state.extent)) return;
+      void requestRefresh({
+        globalRange: "30d",
+        detailSessionIds: [],
+        projectScopes: [],
+      }).catch(() => {});
+    }, LOW_PRIORITY_EXTENSION_DELAY_MS) as LowPriorityTimer;
+    timer.unref?.();
+    lowPriorityTimer = timer;
+  }
+
   function buildCandidate(
     snapshot: OpenCodeStorageSnapshot,
     job: RefreshJob,
@@ -771,7 +1089,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       comparison === "changed" &&
       state.sourceIdentity === undefined &&
       state.occurrences.size === 0 &&
-      Object.keys(state.sessions).length === 0;
+      Object.keys(state.sessions).length === 0 &&
+      state.presentation === undefined;
     const replaced = comparison === "changed" && !pristine;
 
     const readHistoricalRows = (
@@ -883,6 +1202,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const changedMap = new Map<string, StagedUpsert>();
     const changedIds = new Map<string, { updatedAtMs: number | null }>();
     const removalKeys = new Set<string>();
+    const authoritativePayloadIDs = new Set<string>();
     const watermarks =
       revisionSnapshot !== undefined && !fullProjection && revisionSnapshot.updatedAtAvailable
         ? new Map<string, number | null>(
@@ -895,6 +1215,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
     const stageChanged = (row: OpenCodeRawAssistantRow, updatedAtMs: number | null): void => {
       const key = row.messageID;
+      authoritativePayloadIDs.add(key);
       const entry: StagedUpsert = { row, updatedAtMs };
       if (row.agent !== undefined) entry.agent = row.agent;
       changedMap.set(key, entry);
@@ -903,6 +1224,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
     const stageBulk = (row: OpenCodeRawAssistantRow, updatedAtMs?: number | null): void => {
       const key = row.messageID;
+      authoritativePayloadIDs.add(key);
       const existing = bulkMap.get(key);
       if (existing) {
         if (updatedAtMs !== undefined) setWatermark(existing, updatedAtMs);
@@ -1383,6 +1705,28 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       detailSignatureChanges.push([focusId, signature]);
     }
 
+    // A full repair must revisit every cached payload outside this refresh's
+    // authoritative extent/scope reads. Otherwise an unchanged timestamp or
+    // completion token hides a payload edit in an older/evicted scope or a
+    // restart-restored occurrence.
+    if (fullRepairRead && !replaced) {
+      const unreadIDs: string[] = [];
+      for (const key of state.occurrences.keys()) {
+        if (!authoritativePayloadIDs.has(key) && !removalKeys.has(key)) unreadIDs.push(key);
+      }
+      if (unreadIDs.length > 0) {
+        const resolved = new Set<string>();
+        const rows = readChangedRows(unreadIDs);
+        for (const row of rows) {
+          resolved.add(row.messageID);
+          stageChanged(row, row.updatedAtMs ?? null);
+        }
+        for (const key of unreadIDs) {
+          if (!resolved.has(key)) removalKeys.add(key);
+        }
+      }
+    }
+
     // Apply the projected revision delta after every payload/membership read.
     // Only a full projection may sweep stored rows as deleted.
     const seenKeys =
@@ -1538,6 +1882,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   async function refreshBatch(job: RefreshJob): Promise<void> {
     await ensureIndexLoaded();
     const atMs = now();
+    const priorSourceCursorAtMs = state.sourceCursorAtMs;
+    const priorLastFullRepairAtMs = state.lastFullRepairAtMs;
+    const priorExtentSinceMs = state.extent?.sinceMs;
+    const priorSourceIdentity = state.sourceIdentity;
     if (job.globalRange !== undefined) lastGlobalAttemptAtMs = atMs;
     else lastScopedAttemptAtMs = atMs;
 
@@ -1613,6 +1961,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       state.presentation = undefined;
       state.sourceCursorAtMs = undefined;
       state.lastFullRepairAtMs = undefined;
+      warmPresentation = undefined;
+      warmSourceIdentity = undefined;
+      warmIdentityVerification = undefined;
+      warmIdentityVerifiedGeneration = -1;
       projectSignatures.clear();
       detailSignatures.clear();
       detailCompactions.clear();
@@ -1670,7 +2022,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (candidate.extentChanged) state.extent = candidate.nextExtent;
     // A scoped-only refresh never certifies global freshness or advances the
     // source cursor; only a successful global candidate may do either.
-    if (effectiveJob.globalRange !== undefined) state.frontierAtMs = atMs;
+    if (effectiveJob.globalRange !== undefined) {
+      state.frontierAtMs = atMs;
+      coverageTrusted = true;
+      sidecarNewerThanIndex = false;
+    }
     if (candidate.sourceCursorAtMs !== undefined) {
       if (candidate.sourceCursorAtMs === null) state.sourceCursorAtMs = undefined;
       else state.sourceCursorAtMs = candidate.sourceCursorAtMs;
@@ -1694,7 +2050,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     for (const [focusId, coverage] of candidate.detailCoverageChanges) {
       detailCoverage.set(focusId, coverage);
     }
+    const markerChangedFocusIds = new Set<string>();
     for (const [focusId, markers] of candidate.detailCompactions) {
+      if (metadataChanged(detailCompactions.get(focusId), markers)) {
+        markerChangedFocusIds.add(focusId);
+      }
       detailCompactions.set(focusId, markers);
     }
     for (const [projectId, signature] of candidate.projectSignatures) {
@@ -1718,7 +2078,24 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       upserts.length > 0 ||
       sessionsChanged ||
       projectsChanged;
-    if (dataChanged || candidate.extentChanged) {
+    const cursorChanged =
+      candidate.sourceCursorAtMs !== undefined && state.sourceCursorAtMs !== priorSourceCursorAtMs;
+    const repairChanged =
+      candidate.repairCompletedAtMs !== undefined &&
+      state.lastFullRepairAtMs !== priorLastFullRepairAtMs;
+    const extentSinceChanged = state.extent?.sinceMs !== priorExtentSinceMs;
+    const identityEstablished =
+      priorSourceIdentity === undefined && state.sourceIdentity !== undefined;
+    let sessionCacheInvalidated = false;
+    if (!dataChanged && markerChangedFocusIds.size > 0) {
+      const affectedSessionIds = new Set<string>();
+      for (const focusId of markerChangedFocusIds) {
+        affectedSessionIds.add(focusId);
+        for (const sessionId of indexes.treeIds(focusId)) affectedSessionIds.add(sessionId);
+      }
+      sessionCacheInvalidated = invalidateCachedSessions(affectedSessionIds);
+    }
+    if (dataChanged || candidate.extentChanged || sessionCacheInvalidated) {
       generation += 1;
       // Extending empty coverage is not a visible data change; keep the sidecar
       // and avoid a no-op host notification in that case.
@@ -1742,11 +2119,27 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (removals.length > 0 && state.fingerprints.length > state.occurrences.size + 32) {
       pruneFingerprints();
     }
+    refreshFinitePresentationWindows(atMs);
+    precomputeHomeSnapshots(atMs);
     samplePeak();
 
-    queueSnapshotWrite(atMs);
-    if (hasUsefulPresentation()) queuePresentationWrite(atMs);
-    if (dataChanged && !closed && !closing) {
+    // A no-change refresh only moves wall freshness (and possibly the extent's
+    // until bound); the compact index already carries the prior cursor/data.
+    // Persist it only when an index-bearing field actually changed.
+    const snapshotNeeded =
+      dataChanged || cursorChanged || repairChanged || extentSinceChanged || identityEstablished;
+    if (snapshotNeeded) {
+      compactRevision += 1;
+      queueSnapshotWrite(atMs);
+    } else if (compactDirty) {
+      // A failed/blocked compact write stays dirty across no-change refreshes
+      // until the checkpoint for its revision succeeds.
+      queueSnapshotWrite(atMs);
+    }
+    if (hasUsefulPresentation() || sessionCacheInvalidated) {
+      queuePresentationWrite(atMs, atMs, sessionCacheInvalidated);
+    }
+    if ((dataChanged || sessionCacheInvalidated) && !closed && !closing) {
       try {
         options.onGeneration?.(generation);
       } catch {
@@ -1825,8 +2218,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     return kickRefresh();
   }
 
-  function requestBackground(job: RefreshJob): void {
-    if (closed || closing || !dueForAttempt(job, now())) return;
+  function requestBackground(job: RefreshJob, force = false): void {
+    if (closed || closing || (!force && !dueForAttempt(job, now()))) return;
     void requestRefresh(job).catch(() => {});
   }
 
@@ -1839,15 +2232,35 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const window = rangeWindow(range, atMs);
       lastGlobalRange.value = widerRange(lastGlobalRange.value, range);
       const cached = state.presentation?.home[range];
-      if (cached) {
-        const stale = isStale(atMs) || !coversSince(window.sinceMs, state.extent);
-        if (stale) {
-          requestBackground({ globalRange: range, detailSessionIds: [], projectScopes: [] });
+      if (cached && (await warmCacheAllowed())) {
+        let current = cached;
+        // A finite DTO is tied to the rolling calculation window at the time
+        // it was built. Re-derive from the loaded model as the window advances;
+        // refreshing only generatedAt/stale would keep aged-out rows forever.
+        if (
+          modelHydrated &&
+          !modelDirty &&
+          coverageTrusted &&
+          range !== "lifetime" &&
+          current.usage.window.untilMs !== atMs &&
+          coversSince(window.sinceMs, state.extent)
+        ) {
+          current = deriveHomeSnapshot(range, atMs);
+          cacheHome(range, current, atMs);
         }
-        return homeSnapshotWithStaleness(cached, range, atMs, stale);
+        const missingCoverage = !coversSince(window.sinceMs, state.extent);
+        const stale = sidecarNewerThanIndex || isStale(atMs) || missingCoverage;
+        if (stale) {
+          requestBackground(
+            { globalRange: range, detailSessionIds: [], projectScopes: [] },
+            sidecarNewerThanIndex || missingCoverage,
+          );
+        }
+        scheduleThirtyDayExtension(range, atMs);
+        return homeSnapshotWithStaleness(current, range, atMs, stale);
       }
       await ensureIndexLoaded();
-      if (!coversSince(window.sinceMs, state.extent)) {
+      if (!coverageTrusted || !coversSince(window.sinceMs, state.extent)) {
         await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
         if (
           unavailable &&
@@ -1860,20 +2273,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (isStale(now())) {
         requestBackground({ globalRange: range, detailSessionIds: [], projectScopes: [] });
       }
-      const stale = isStale(now());
       ensureModel();
-      const result = measureSync("dtoAggregation", (): HomeSnapshot => {
-        const snapshot = model.home(range, atMs);
-        return {
-          generatedAtMs: atMs,
-          range,
-          stale,
-          providers: { cards: [], enabledProviders: [], polledAtMs: atMs },
-          usage: { ...snapshot.usage, stale },
-          projects: snapshot.projects,
-        };
-      });
+      const result = deriveHomeSnapshot(range, atMs);
       cacheHome(range, result, atMs);
+      precomputeHomeSnapshots(atMs);
+      scheduleThirtyDayExtension(range, atMs);
       return result;
     },
 
@@ -1885,21 +2289,40 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const atMs = now();
       lastProjectScopes.set(projectId, widerRange(lastProjectScopes.get(projectId), range));
       const cached = cachedProject(projectId, range);
-      if (cached) {
-        const stale = isStale(atMs) && !isProjectFresh(projectId, atMs);
-        if (stale) {
-          requestBackground({ detailSessionIds: [], projectScopes: [{ projectId, range }] });
+      if (cached && (await warmCacheAllowed())) {
+        let current = cached;
+        const scopeCovered = projectScopeCovered(projectId, range, atMs);
+        if (
+          modelHydrated &&
+          !modelDirty &&
+          coverageTrusted &&
+          range !== "lifetime" &&
+          current.usage.window.untilMs !== atMs &&
+          scopeCovered
+        ) {
+          current = deriveProjectSnapshot(projectId, range, atMs);
+          cacheProject(current, atMs);
         }
-        return projectSnapshotWithStaleness(cached, stale);
+        const fresh = isProjectFresh(projectId, atMs);
+        const missingCoverage = !scopeCovered && !fresh;
+        const stale = sidecarNewerThanIndex || missingCoverage || (isStale(atMs) && !fresh);
+        if (stale) {
+          requestBackground(
+            { detailSessionIds: [], projectScopes: [{ projectId, range }] },
+            sidecarNewerThanIndex || missingCoverage,
+          );
+        }
+        return projectSnapshotWithStaleness(current, stale);
       }
       await ensureIndexLoaded();
 
       const window = rangeWindow(range, atMs);
       const signature = projectSignature(projectId, range, indexes.projectSessions(projectId));
       const covered =
-        isProjectFresh(projectId, atMs) ||
-        coversSince(window.sinceMs, state.extent) ||
-        projectSignatures.get(projectId) === signature;
+        coverageTrusted &&
+        (isProjectFresh(projectId, atMs) ||
+          coversSince(window.sinceMs, state.extent) ||
+          projectSignatures.get(projectId) === signature);
       if (!covered || !stateHasProject(projectId)) {
         await requestRefresh({
           detailSessionIds: [],
@@ -1927,9 +2350,19 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     async session(sessionId) {
       if (closed) throw new Error("analytics closed");
       if (!sessionId) throw new AnalyticsLookupError("bad-request");
-      await ensureIndexLoaded();
+      await ensureLoaded();
       lastDetailSessionIds.add(sessionId);
       trimSet(lastDetailSessionIds, MAX_SCOPE_BATCH * 4);
+      const cached = cachedSession(sessionId);
+      if (cached && (await warmCacheAllowed())) {
+        touchSessionCache(sessionId, now());
+        requestBackground(
+          { detailSessionIds: [sessionId], projectScopes: [] },
+          sidecarNewerThanIndex,
+        );
+        return cached;
+      }
+      await ensureIndexLoaded();
       let focus = state.sessions[sessionId];
       if (!focus) {
         await requestRefresh({ detailSessionIds: [sessionId], projectScopes: [] });
@@ -1948,9 +2381,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       // Session detail reuses the shared aggregation DTO builder over the
       // scoped tree plus global owner candidates instead of duplicating it.
       try {
-        return measureSync("dtoAggregation", () =>
+        const result = measureSync("dtoAggregation", () =>
           createUsageAnalytics(sessionDataset(sessionId)).session(sessionId),
         );
+        cacheSession(sessionId, result, now());
+        return result;
       } catch {
         throw new AnalyticsLookupError("session-not-found");
       }
@@ -2012,11 +2447,18 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (closed) return;
       closing = true;
       closePromise = (async () => {
+        if (lowPriorityTimer !== undefined) {
+          clearTimeout(lowPriorityTimer);
+          lowPriorityTimer = undefined;
+        }
         pendingGlobal = undefined;
         pendingMetadataOnly = false;
         pendingDetailSessions.clear();
         pendingProjectScopes.clear();
-        const drained = writeChain.catch(() => undefined);
+        const closeAtMs = now();
+        if (compactDirty) queueSnapshotWrite(closeAtMs, true);
+        queueFinalPresentationWrite(closeAtMs, indexLoaded ? closeAtMs : presentationSavedAtMs);
+        const drained = drainAllWrites();
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, closeWriteTimeoutMs);
           void drained.finally(() => {

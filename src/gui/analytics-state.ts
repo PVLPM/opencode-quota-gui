@@ -5,15 +5,16 @@
  * compact fingerprint contribution dictionary (referenced by numeric index),
  * occurrence membership (message/session identity + revision watermark), the
  * stable source identity, the coverage extent/frontier, the trusted source
- * cursor and rare-repair wall time, and a bounded warm presentation cache for
- * home/project DTOs. It never stores raw message JSON, agent strings,
- * compaction markers, or a duplicate raw dataset.
+ * cursor and rare-repair wall time. The compact index excludes raw message
+ * JSON, agent strings, compaction markers, and duplicate raw rows. A separate
+ * local presentation sidecar may carry bounded Home/Project/Session DTO detail
+ * (including the DTO's agent fields and compaction markers).
  */
 import { existsSync } from "node:fs";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { HomeSnapshot, ProjectSnapshot } from "../contracts/dashboard.js";
+import type { HomeSnapshot, ProjectSnapshot, SessionSnapshot } from "../contracts/dashboard.js";
 import { isRangeKey, type RangeKey } from "../contracts/ranges.js";
 import { getOpencodeRuntimeDirs } from "../lib/opencode-runtime-paths.js";
 import {
@@ -61,14 +62,25 @@ export interface Occurrence {
 }
 
 /**
+ * In-memory newest session DTOs retained. The serialized sidecar can keep
+ * fewer because its byte budget is a disk cap, not a heap bound.
+ */
+export const ANALYTICS_PRESENTATION_SESSION_LIMIT = 8;
+
+export type PresentationSessionEntry = [sessionId: string, snapshot: SessionSnapshot];
+
+/**
  * Bounded warm presentation cache. Home/project DTOs are compact (buckets and
  * roots, no steps), so a warm worker can answer the first useful view without
- * rebuilding ownership/rollups from every occurrence.
+ * rebuilding ownership/rollups from every occurrence. Session DTOs are
+ * sidecar-only and LRU-ordered; an absent `session` is equivalent to `[]`.
  */
 export interface AnalyticsPresentation {
   home: Partial<Record<RangeKey, HomeSnapshot>>;
   /** LRU-ordered [projectId, range, snapshot] entries. */
   project: Array<[projectId: string, range: RangeKey, snapshot: ProjectSnapshot]>;
+  /** LRU-ordered [sessionId, snapshot] entries; absent legacy means empty. */
+  session?: PresentationSessionEntry[];
 }
 
 /**
@@ -78,6 +90,12 @@ export interface AnalyticsPresentation {
  */
 export interface WarmAnalyticsPresentation extends AnalyticsPresentation {
   sourceIdentity?: OpenCodeSourceIdentity;
+  /** Sidecar save time; legacy sidecars may omit it. */
+  savedAtMs?: number;
+  /** Wall time of the last successful refresh captured with these DTOs. */
+  frontierAtMs?: number;
+  /** Coverage captured with these DTOs; legacy sidecars may omit it. */
+  coverage?: AnalyticsCoverage;
 }
 
 export interface AnalyticsState {
@@ -95,6 +113,8 @@ export interface AnalyticsState {
   sourceIdentity?: OpenCodeSourceIdentity;
   /** Wall time of the last successful refresh (frontier freshness). */
   frontierAtMs: number;
+  /** Wall time the compact index file was saved (when decoded). */
+  savedAtMs?: number;
   /**
    * Trusted source `time_updated` frontier, capped at the wall time observed
    * when it was established. Absent means a full source baseline is required;
@@ -503,6 +523,7 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
       ? {}
       : { sourceIdentity: identityFromTuple(identityValue) }),
     frontierAtMs: record.frontierAtMs,
+    savedAtMs: record.savedAtMs,
     ...(typeof cursorValue === "number" ? { sourceCursorAtMs: cursorValue } : {}),
     ...(typeof repairValue === "number" ? { lastFullRepairAtMs: repairValue } : {}),
     ...(persistedPresentation
@@ -513,6 +534,8 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
               ([projectId, range, snapshot]) =>
                 [projectId, range, snapshot] as [string, RangeKey, ProjectSnapshot],
             ),
+            // Session DTOs are sidecar-only; never restore them from the
+            // compact index even if a legacy file happens to contain them.
           },
         }
       : {}),
@@ -530,10 +553,13 @@ export function defaultAnalyticsPresentationPath(snapshotPath: string): string {
 interface PersistedPresentationFile {
   version: typeof ANALYTICS_SNAPSHOT_VERSION;
   savedAtMs: number;
+  frontierAtMs: number;
   sourceIdentity: SourceIdentityTuple | null;
+  coverage: { sinceMs: number | null; untilMs: number } | null;
   presentation: {
     home: Partial<Record<RangeKey, HomeSnapshot>>;
     project: Array<[projectId: string, range: RangeKey, snapshot: ProjectSnapshot]>;
+    session?: PresentationSessionEntry[];
   } | null;
 }
 
@@ -541,10 +567,20 @@ export function encodeAnalyticsPresentation(
   state: AnalyticsState,
   savedAtMs: number,
 ): PersistedPresentationFile {
+  const session = (state.presentation?.session ?? [])
+    .slice(-ANALYTICS_PRESENTATION_SESSION_LIMIT)
+    .map(
+      ([sessionId, snapshot]) =>
+        [sessionId, snapshot] as [sessionId: string, snapshot: SessionSnapshot],
+    );
   return {
     version: ANALYTICS_SNAPSHOT_VERSION,
     savedAtMs,
+    frontierAtMs: state.frontierAtMs,
     sourceIdentity: state.sourceIdentity ? identityToTuple(state.sourceIdentity) : null,
+    coverage: state.extent
+      ? { sinceMs: state.extent.sinceMs ?? null, untilMs: state.extent.untilMs }
+      : null,
     presentation: state.presentation
       ? {
           home: state.presentation.home,
@@ -552,9 +588,51 @@ export function encodeAnalyticsPresentation(
             ([projectId, range, snapshot]) =>
               [projectId, range, snapshot] as [string, RangeKey, ProjectSnapshot],
           ),
+          ...(session.length > 0 ? { session } : {}),
         }
       : null,
   };
+}
+
+function isSessionSnapshot(value: unknown, sessionId: string): value is SessionSnapshot {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (record.focusSessionId !== sessionId) return false;
+  if (typeof record.projectId !== "string" || typeof record.projectName !== "string") return false;
+  if (
+    !Array.isArray(record.breadcrumbs) ||
+    !Array.isArray(record.nodes) ||
+    !Array.isArray(record.steps) ||
+    !Array.isArray(record.compactionMarkers)
+  ) {
+    return false;
+  }
+  if (typeof record.ownSummary !== "object" || record.ownSummary === null) return false;
+  if (typeof record.treeTotals !== "object" || record.treeTotals === null) return false;
+  return typeof record.stepSemantics === "string";
+}
+
+/**
+ * Legacy absence means empty. All present entries are validated before the
+ * newest `ANALYTICS_PRESENTATION_SESSION_LIMIT` are retained; a malformed or
+ * duplicate entry anywhere rejects the sidecar rather than trusting a
+ * partially decoded cache.
+ */
+function decodePresentationSessions(value: unknown): PresentationSessionEntry[] | undefined {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return undefined;
+  const entries: PresentationSessionEntry[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length !== 2) return undefined;
+    const sessionId = entry[0];
+    if (typeof sessionId !== "string" || sessionId.length === 0) return undefined;
+    if (seen.has(sessionId)) return undefined;
+    if (!isSessionSnapshot(entry[1], sessionId)) return undefined;
+    seen.add(sessionId);
+    entries.push([sessionId, entry[1]]);
+  }
+  return entries.slice(-ANALYTICS_PRESENTATION_SESSION_LIMIT);
 }
 
 export function decodeAnalyticsPresentation(value: unknown): WarmAnalyticsPresentation | undefined {
@@ -574,17 +652,79 @@ export function decodeAnalyticsPresentation(value: unknown): WarmAnalyticsPresen
   if (!isPresentation(record.presentation)) return undefined;
   const presentation = record.presentation;
   if (!presentation) return undefined;
+  const session = decodePresentationSessions((presentation as { session?: unknown }).session);
+  if (session === undefined) return undefined;
+  const frontierValue = record.frontierAtMs;
+  if (frontierValue !== undefined && frontierValue !== null && !isFiniteNumber(frontierValue)) {
+    return undefined;
+  }
+
+  const coverageValue = record.coverage;
+  let coverage: AnalyticsCoverage | undefined;
+  if (coverageValue !== undefined && coverageValue !== null) {
+    if (typeof coverageValue !== "object") return undefined;
+    const coverageRecord = coverageValue as Record<string, unknown>;
+    const sinceMs = coverageRecord.sinceMs;
+    const untilMs = coverageRecord.untilMs;
+    if (!isFiniteNumber(untilMs)) return undefined;
+    if (sinceMs !== null && !isFiniteNumber(sinceMs)) return undefined;
+    if (typeof sinceMs === "number" && sinceMs > untilMs) return undefined;
+    coverage = sinceMs === null ? { untilMs } : { sinceMs, untilMs };
+  }
+
   return {
     home: presentation.home,
     project: presentation.project.map(
       ([projectId, range, snapshot]) =>
         [projectId, range, snapshot] as [string, RangeKey, ProjectSnapshot],
     ),
+    session,
+    ...(coverage ? { coverage } : {}),
+    savedAtMs: record.savedAtMs,
+    ...(typeof frontierValue === "number" ? { frontierAtMs: frontierValue } : {}),
     sourceIdentity:
       identityValue === undefined || identityValue === null
         ? undefined
         : identityFromTuple(identityValue),
   };
+}
+
+const PRESENTATION_SIDECAR_SUFFIX = ".presentation.json";
+const PRESENTATION_MAX_SIDECAR_BYTES = 4 * 1024 * 1024;
+
+function compactSnapshotPathForPresentationPath(path: string): string | undefined {
+  if (!path.endsWith(PRESENTATION_SIDECAR_SUFFIX)) return undefined;
+  const snapshotPath = path.slice(0, -PRESENTATION_SIDECAR_SUFFIX.length);
+  return snapshotPath.length > 0 ? snapshotPath : undefined;
+}
+
+function byteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function withoutPresentationSessions(payload: string): string {
+  const candidate = JSON.parse(payload) as PersistedPresentationFile;
+  if (candidate.presentation) delete candidate.presentation.session;
+  return JSON.stringify(candidate);
+}
+
+/**
+ * Evict LRU-oldest session DTOs until the sidecar fits the compact snapshot
+ * budget. Home/project are never dropped: if they alone exceed the budget the
+ * fitted payload is still written, but sessions cannot add growth.
+ */
+function fitPresentationSessions(payload: string, budget: number): string {
+  if (byteLength(payload) <= budget) return payload;
+  const candidate = JSON.parse(payload) as PersistedPresentationFile;
+  const session = candidate.presentation?.session;
+  if (!session || session.length === 0) return payload;
+
+  let fitted = payload;
+  while (session.length > 0 && byteLength(fitted) > budget) {
+    session.shift();
+    fitted = JSON.stringify(candidate);
+  }
+  return fitted;
 }
 
 /** Atomically replace the small warm presentation sidecar. */
@@ -602,6 +742,31 @@ export async function saveAnalyticsPresentation(
   } catch {
     return false;
   }
+
+  try {
+    const compactSnapshotPath = compactSnapshotPathForPresentationPath(path);
+    if (compactSnapshotPath === undefined) {
+      payload = withoutPresentationSessions(payload);
+    } else {
+      let budget: number | undefined;
+      try {
+        const compact = await stat(compactSnapshotPath);
+        if (compact.isFile()) {
+          budget = Math.min(PRESENTATION_MAX_SIDECAR_BYTES, compact.size);
+        }
+      } catch {
+        // No known compact snapshot: keep home/project, omit sessions rather
+        // than serializing the compact state into this sidecar.
+      }
+      payload =
+        budget === undefined
+          ? withoutPresentationSessions(payload)
+          : fitPresentationSessions(payload, budget);
+    }
+  } catch {
+    return false;
+  }
+
   const temporary = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   try {
     await mkdir(dirname(path), { recursive: true });

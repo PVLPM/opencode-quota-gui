@@ -1,19 +1,23 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HomeSnapshot } from "../src/contracts/dashboard.js";
+import type { HomeSnapshot, SessionSnapshot } from "../src/contracts/dashboard.js";
 import {
+  ANALYTICS_PRESENTATION_SESSION_LIMIT,
   ANALYTICS_SNAPSHOT_SCHEMA,
   ANALYTICS_SNAPSHOT_VERSION,
   type AnalyticsState,
   decodeAnalyticsPresentation,
   decodeAnalyticsState,
+  defaultAnalyticsPresentationPath,
   encodeAnalyticsPresentation,
   encodeAnalyticsState,
   fingerprintOf,
+  loadAnalyticsPresentation,
   loadAnalyticsSnapshot,
   rowKey,
+  saveAnalyticsPresentation,
   saveAnalyticsSnapshot,
 } from "../src/gui/analytics-state.js";
 import type {
@@ -82,6 +86,46 @@ function homeSnapshot(range: "24h" | "7d" | "30d" | "lifetime"): HomeSnapshot {
     },
     projects: [],
   };
+}
+
+function zeroTokens() {
+  return {
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    total: 0,
+    apiEquivalentCostUsd: null,
+    unpricedTokens: 0,
+    unknownTokens: 0,
+  };
+}
+
+function sessionSnapshot(
+  sessionId: string,
+  overrides: Partial<SessionSnapshot> = {},
+): SessionSnapshot {
+  return {
+    focusSessionId: sessionId,
+    projectId: "p1",
+    projectName: "p1",
+    breadcrumbs: [{ sessionId, title: sessionId, isFocus: true }],
+    nodes: [],
+    steps: [],
+    compactionMarkers: [],
+    ownSummary: { ...zeroTokens(), stepCount: 0 },
+    treeTotals: zeroTokens(),
+    stepSemantics: "test",
+    ...overrides,
+  };
+}
+
+function sessionEntries(count: number): Array<[string, SessionSnapshot]> {
+  return Array.from({ length: count }, (_, index) => {
+    const id = `ses_${index}`;
+    return [id, sessionSnapshot(id, { stepSemantics: "x".repeat(200) })];
+  });
 }
 
 function baseState(): AnalyticsState {
@@ -169,6 +213,7 @@ describe("analytics snapshot codec v3", () => {
     expect(decoded?.extent).toEqual({ sinceMs: NOW - 3_600_000, untilMs: NOW });
     expect(decoded?.sourceIdentity?.inode).toBe("2");
     expect(decoded?.frontierAtMs).toBe(NOW);
+    expect(decoded?.savedAtMs).toBe(NOW);
     expect(decoded?.sourceCursorAtMs).toBe(NOW - 60_000);
     expect(decoded?.lastFullRepairAtMs).toBe(NOW);
     expect(decoded?.fingerprintIndex.size).toBe(1);
@@ -208,7 +253,11 @@ describe("analytics snapshot codec v3", () => {
     const decoded = decodeAnalyticsPresentation(JSON.parse(JSON.stringify(encoded)) as unknown);
     expect(decoded?.home["24h"]?.range).toBe("24h");
     expect(decoded?.project).toEqual([]);
+    expect(decoded?.session).toEqual([]);
     expect(decoded?.sourceIdentity).toEqual(identity());
+    expect(decoded?.savedAtMs).toBe(NOW);
+    expect(decoded?.frontierAtMs).toBe(NOW);
+    expect(decoded?.coverage).toEqual({ sinceMs: NOW - 3_600_000, untilMs: NOW });
     // The big index deliberately does not duplicate the presentation cache.
     const index = decodeAnalyticsState(
       JSON.parse(JSON.stringify(encodeAnalyticsState(state, NOW))) as unknown,
@@ -218,6 +267,109 @@ describe("analytics snapshot codec v3", () => {
     const withoutIdentity = withRows();
     delete withoutIdentity.sourceIdentity;
     expect(encodeAnalyticsPresentation(withoutIdentity, NOW).sourceIdentity).toBeNull();
+  });
+
+  it("caps LRU session DTOs and does not mutate the live presentation cache", () => {
+    const state = withRows();
+    state.presentation = {
+      home: { "24h": homeSnapshot("24h") },
+      project: [],
+      session: sessionEntries(10),
+    };
+
+    const encoded = encodeAnalyticsPresentation(state, NOW);
+    expect(encoded.savedAtMs).toBe(NOW);
+    expect(encoded.sourceIdentity).not.toBeNull();
+    expect(encoded.presentation?.session).toHaveLength(ANALYTICS_PRESENTATION_SESSION_LIMIT);
+    expect(encoded.presentation?.session?.map(([sessionId]) => sessionId)).toEqual([
+      "ses_2",
+      "ses_3",
+      "ses_4",
+      "ses_5",
+      "ses_6",
+      "ses_7",
+      "ses_8",
+      "ses_9",
+    ]);
+    // The encoder caps a copy, never the live LRU array.
+    const liveSession = state.presentation.session;
+    expect(liveSession).toHaveLength(10);
+    expect(liveSession?.map(([sessionId]) => sessionId)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `ses_${index}`),
+    );
+
+    const decoded = decodeAnalyticsPresentation(JSON.parse(JSON.stringify(encoded)) as unknown);
+    expect(decoded?.session).toHaveLength(ANALYTICS_PRESENTATION_SESSION_LIMIT);
+    expect(decoded?.session?.map(([sessionId]) => sessionId)).toEqual([
+      "ses_2",
+      "ses_3",
+      "ses_4",
+      "ses_5",
+      "ses_6",
+      "ses_7",
+      "ses_8",
+      "ses_9",
+    ]);
+    // The compact index still never duplicates presentation DTOs.
+    expect(encodeAnalyticsState(state, NOW).presentation).toBeNull();
+  });
+
+  it("treats missing sessions as empty and rejects malformed session data", () => {
+    const state = withRows();
+    state.presentation = { home: { "24h": homeSnapshot("24h") }, project: [] };
+    const raw = JSON.parse(JSON.stringify(encodeAnalyticsPresentation(state, NOW))) as {
+      presentation: { session?: unknown };
+    };
+
+    delete raw.presentation.session;
+    expect(decodeAnalyticsPresentation(raw)?.session).toEqual([]);
+
+    raw.presentation.session = "not-an-array";
+    expect(decodeAnalyticsPresentation(raw)).toBeUndefined();
+
+    raw.presentation.session = [["ses_mismatch", sessionSnapshot("ses_other")]];
+    expect(decodeAnalyticsPresentation(raw)).toBeUndefined();
+
+    raw.presentation.session = [
+      ["ses_bad_arrays", sessionSnapshot("ses_bad_arrays", { nodes: {} as never })],
+    ];
+    expect(decodeAnalyticsPresentation(raw)).toBeUndefined();
+
+    const duplicate = sessionSnapshot("ses_ok");
+    raw.presentation.session = [
+      ["ses_ok", duplicate],
+      ["ses_ok", duplicate],
+    ];
+    expect(decodeAnalyticsPresentation(raw)).toBeUndefined();
+
+    // A malformed ninth entry is outside the retained window but must still
+    // invalidate the sidecar because all present entries are validated.
+    raw.presentation.session = [
+      ...sessionEntries(8),
+      ["ses_bad_ninth", sessionSnapshot("ses_other")],
+    ];
+    expect(decodeAnalyticsPresentation(raw)).toBeUndefined();
+
+    // A duplicate spanning the eviction boundary must also be rejected even
+    // though only the newest eight entries are retained.
+    const acrossBoundary = sessionEntries(9);
+    acrossBoundary[0] = ["ses_8", sessionSnapshot("ses_8")];
+    raw.presentation.session = acrossBoundary;
+    expect(decodeAnalyticsPresentation(raw)).toBeUndefined();
+
+    raw.presentation.session = sessionEntries(10);
+    const capped = decodeAnalyticsPresentation(raw);
+    expect(capped?.session).toHaveLength(ANALYTICS_PRESENTATION_SESSION_LIMIT);
+    expect(capped?.session?.map(([sessionId]) => sessionId)).toEqual([
+      "ses_2",
+      "ses_3",
+      "ses_4",
+      "ses_5",
+      "ses_6",
+      "ses_7",
+      "ses_8",
+      "ses_9",
+    ]);
   });
 
   it("reads legacy tokenless presentations but rejects invalid identity tokens", () => {
@@ -323,5 +475,132 @@ describe("analytics snapshot store", () => {
     expect(await saveAnalyticsSnapshot(path, second, NOW + 5_000)).toBe(true);
     const reloaded = await loadAnalyticsSnapshot(path);
     expect(reloaded?.frontierAtMs).toBe(NOW + 5_000);
+  });
+});
+
+describe("analytics presentation store", () => {
+  it("atomically replaces the sidecar and cleans temp files on failure", async () => {
+    const root = await tempRoot();
+    const compactPath = join(root, "analytics-v3.json");
+    const sidecarPath = defaultAnalyticsPresentationPath(compactPath);
+    await writeFile(compactPath, "x".repeat(100_000));
+    const first = withRows();
+    first.presentation = {
+      home: { "24h": homeSnapshot("24h") },
+      project: [],
+      session: sessionEntries(2),
+    };
+    expect(await saveAnalyticsPresentation(sidecarPath, first, NOW)).toBe(true);
+    const firstText = await readFile(sidecarPath, "utf8");
+
+    const second = withRows();
+    second.presentation = {
+      home: { "7d": homeSnapshot("7d") },
+      project: [],
+      session: sessionEntries(2),
+    };
+    const failed = await saveAnalyticsPresentation(sidecarPath, second, NOW + 1_000, {
+      beforeRename: () => {
+        throw new Error("simulated crash before rename");
+      },
+    });
+    expect(failed).toBe(false);
+    expect(await readFile(sidecarPath, "utf8")).toBe(firstText);
+    expect((await readdir(root)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("captures the presentation generation before async IO starts", async () => {
+    const root = await tempRoot();
+    const compactPath = join(root, "analytics-v3.json");
+    const sidecarPath = defaultAnalyticsPresentationPath(compactPath);
+    await writeFile(compactPath, "x".repeat(100_000));
+    const state = withRows();
+    state.presentation = {
+      home: { "24h": homeSnapshot("24h") },
+      project: [],
+      session: sessionEntries(1),
+    };
+
+    const writing = saveAnalyticsPresentation(sidecarPath, state, NOW);
+    state.presentation = {
+      home: { "7d": homeSnapshot("7d") },
+      project: [],
+      session: sessionEntries(2),
+    };
+    expect(await writing).toBe(true);
+    const loaded = await loadAnalyticsPresentation(sidecarPath);
+    expect(Object.keys(loaded?.home ?? {})).toEqual(["24h"]);
+    expect(loaded?.home["24h"]?.range).toBe("24h");
+    expect(loaded?.session?.map(([sessionId]) => sessionId)).toEqual(["ses_0"]);
+  });
+
+  it("evicts LRU-oldest session DTOs to fit the compact snapshot budget", async () => {
+    const root = await tempRoot();
+    const compactPath = join(root, "analytics-v3.json");
+    const sidecarPath = defaultAnalyticsPresentationPath(compactPath);
+    const state = withRows();
+    const ordered = sessionEntries(8);
+    state.presentation = {
+      home: { "24h": homeSnapshot("24h") },
+      project: [],
+      session: ordered,
+    };
+    const fullPayload = JSON.stringify(encodeAnalyticsPresentation(state, NOW));
+    const budget = Buffer.byteLength(fullPayload, "utf8") - 1;
+    await writeFile(compactPath, "x".repeat(budget));
+
+    expect(await saveAnalyticsPresentation(sidecarPath, state, NOW)).toBe(true);
+    const text = await readFile(sidecarPath, "utf8");
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(budget);
+
+    const loaded = await loadAnalyticsPresentation(sidecarPath);
+    expect(loaded?.home["24h"]?.range).toBe("24h");
+    expect(loaded?.sourceIdentity).toEqual(identity());
+    const kept = loaded?.session ?? [];
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(ordered.length);
+    expect(kept.map(([sessionId]) => sessionId)).toEqual(
+      ordered.slice(ordered.length - kept.length).map(([sessionId]) => sessionId),
+    );
+  });
+
+  it("preserves home/project while omitting sessions when base DTOs exceed the budget", async () => {
+    const root = await tempRoot();
+    const compactPath = join(root, "tiny.json");
+    const sidecarPath = defaultAnalyticsPresentationPath(compactPath);
+    await writeFile(compactPath, "x");
+    const state = withRows();
+    state.presentation = {
+      home: { "24h": homeSnapshot("24h") },
+      project: [],
+      session: sessionEntries(8),
+    };
+
+    expect(await saveAnalyticsPresentation(sidecarPath, state, NOW)).toBe(true);
+    const loaded = await loadAnalyticsPresentation(sidecarPath);
+    expect(loaded?.home["24h"]?.range).toBe("24h");
+    expect(loaded?.session).toEqual([]);
+  });
+
+  it("omits sessions when the compact snapshot is absent or the sidecar path is nonstandard", async () => {
+    const root = await tempRoot();
+    const state = withRows();
+    state.presentation = {
+      home: { "24h": homeSnapshot("24h") },
+      project: [],
+      session: sessionEntries(3),
+    };
+
+    const absentPath = join(root, "missing.presentation.json");
+    expect(await saveAnalyticsPresentation(absentPath, state, NOW)).toBe(true);
+    const absent = await loadAnalyticsPresentation(absentPath);
+    expect(absent?.home["24h"]?.range).toBe("24h");
+    expect(absent?.session).toEqual([]);
+
+    const nonstandardPath = join(root, "sidecar.json");
+    expect(await saveAnalyticsPresentation(nonstandardPath, state, NOW)).toBe(true);
+    const nonstandard = await loadAnalyticsPresentation(nonstandardPath);
+    expect(nonstandard?.home["24h"]?.range).toBe("24h");
+    expect(nonstandard?.session).toEqual([]);
   });
 });
