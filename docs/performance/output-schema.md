@@ -95,7 +95,9 @@ fixed synthetic profile counts, not measurements from any machine.
         "deltaTwoDayHome7d": null,
         "coldResumeHomeAfterRestart": null,
         "coldResumeRefresh": null,
-        "coldResumeHomeAfterRefresh": null
+        "coldResumeHomeAfterRefresh": null,
+        "coldResumeRefreshAgain": null,
+        "coldResumeHomeAfterRefreshAgain": null
       },
       "phases": {
         "available": true,
@@ -133,6 +135,9 @@ fixed synthetic profile counts, not measurements from any machine.
         "scenarios": {
           "noChange": {
             "status": "not-mutated",
+            "semantics": "no-mutation",
+            "updateClock": null,
+            "completionSpanDays": 0,
             "insertedRows": 0,
             "days": 0,
             "expectedStepDelta": 0,
@@ -143,6 +148,9 @@ fixed synthetic profile counts, not measurements from any machine.
           },
           "add100": {
             "status": "skipped",
+            "semantics": "current-completion-updates",
+            "updateClock": "completion",
+            "completionSpanDays": 0,
             "insertedRows": 0,
             "days": 0,
             "expectedStepDelta": 0,
@@ -153,6 +161,9 @@ fixed synthetic profile counts, not measurements from any machine.
           },
           "add1000": {
             "status": "skipped",
+            "semantics": "current-completion-updates",
+            "updateClock": "completion",
+            "completionSpanDays": 0,
             "insertedRows": 0,
             "days": 0,
             "expectedStepDelta": 0,
@@ -163,6 +174,9 @@ fixed synthetic profile counts, not measurements from any machine.
           },
           "twoDay": {
             "status": "skipped",
+            "semantics": "current-write-with-historical-completions",
+            "updateClock": "current-write",
+            "completionSpanDays": 2,
             "insertedRows": 0,
             "days": 0,
             "expectedStepDelta": 0,
@@ -179,19 +193,32 @@ fixed synthetic profile counts, not measurements from any machine.
         "simulatedInactivityDays": 2,
         "actualInactivityMs": null,
         "clockSimulation": {
-          "mode": "aged-isolated-snapshot",
+          "mode": "aged-isolated-snapshot-replay",
           "days": 2,
+          "snapshotAgedBeforeInsert": true,
           "sourceCursorShifted": true,
-          "repairClockShifted": true
+          "cursorProof": "aged-source-cursor",
+          "repairClockShifted": true,
+          "updatesInsideAgedCursorInterval": true,
+          "authenticHistoricalSnapshot": false
         },
         "snapshotReused": true,
         "snapshotSource": "persisted-worker-snapshot",
+        "scopeFallback": false,
+        "updateWindowBounded": null,
+        "updateLowerBoundMs": null,
+        "updateUpperBoundMs": null,
+        "updateMinMs": null,
+        "updateMaxMs": null,
         "insertedRows": 400,
         "expectedStepDelta": 400,
         "observedStepDelta": null,
         "homeAfterRestartMs": null,
         "refreshMs": null,
         "homeAfterRefreshMs": null,
+        "secondRefreshMs": null,
+        "secondRefreshStepDelta": null,
+        "secondRefreshPassed": null,
         "passed": null
       },
       "http": {
@@ -242,23 +269,36 @@ fixed synthetic profile counts, not measurements from any machine.
   source identifiers or paths.
 - `durationsMs` always contains the fixed key set. A `null` means skipped or
   unavailable; it is never zero-filled. The `coldResume*` keys are `null` for
-  real-local.
+  real-local, including `coldResumeRefreshAgain` and
+  `coldResumeHomeAfterRefreshAgain`.
 - `warmSwitches.operations` contains per-operation `samples`, `failures`,
   `p50Ms`, `p95Ms`, and `maxMs`.
 - `deltas.finalStepCount` is the aggregate 7d step count after the last delta;
   the cold-resume comparison uses it as the pre-restart baseline.
 - `deltas.scenarios` always contains `noChange`, `add100`, `add1000`, and
-  `twoDay`. `twoDay` is a live-service delta, not a cold restart. Real-local
-  marks mutation scenarios `skipped`.
-- `coldResume` applies only to synthetic runs. `simulatedInactivityDays`
-  describes the completion-timestamp span; `actualInactivityMs` is the real gap
-  between snapshot close and fresh-worker start, which is much shorter than two
-  days. `clockSimulation` records that only the isolated snapshot's
-  `sourceCursorAtMs` and `lastFullRepairAtMs` were shifted back two days; source
-  row timestamps are unchanged. This is not a two-day wall-clock pause. A
-  separate engine test covers an aged two-day snapshot with an injectable
-  clock. Real-local reports `skipped` with reason
-  `real-source-is-never-mutated`.
+  `twoDay`. The legacy `twoDay` key now means
+  `current-write-with-historical-completions`: physical `time_updated` is the
+  current write time (anchor boundary inclusive), while completion timestamps
+  span two days. It is a live-service delta, not a cold restart. Archived BEFORE
+  output used backdated physical updates, so that scenario is not directly
+  comparable. Real-local marks mutation scenarios `skipped`.
+- `coldResume` applies only to synthetic runs. The isolated snapshot is aged
+  **before** inserts; physical row update times are distributed linearly from
+  just after the aged cursor to a resume clock captured before insertion. The
+  last update cannot exceed that clock. `updateLowerBoundMs`, `updateUpperBoundMs`,
+  `updateMinMs`, and `updateMaxMs` are recorded; `updateWindowBounded` verifies
+  both bounds and requires distinct min/max. Completion timestamps remain
+  historical. `clockSimulation` records `snapshotAgedBeforeInsert`,
+  `cursorProof` (`aged-source-cursor` or `unavailable-scope-fallback`),
+  `updatesInsideAgedCursorInterval`, and `authenticHistoricalSnapshot: false`:
+  this is a replay workload, not an authentic two-day-old snapshot. A snapshot
+  without `sourceCursorAtMs` is a scope fallback (`scopeFallback: true`,
+  `passed: null`) and cannot claim cursor proof. `actualInactivityMs` is the real gap between snapshot close and fresh-worker
+  start, much shorter than two days. `secondRefreshStepDelta` must be `0`;
+  `secondRefreshPassed` records it. A separate engine test covers an aged
+  two-day snapshot with an injectable clock. Real-local reports `skipped` with
+  reason `real-source-is-never-mutated`; synthetic runs report
+  `prior-delta-correctness-failed` instead of running a dependent cold check.
 - `http.index` and `http.health` are separate sample sets. Their percentiles
   are never combined.
 - `phases.intervals` contains phase-timing differences between cumulative

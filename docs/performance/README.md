@@ -53,20 +53,31 @@ message, project, and model values are generated in a disposable SQLite file.
 - Warm switches — three rounds of 24h/7d/30d/lifetime home, dense/long project,
   root/deep session calls after the warm start.
 - Deltas — no-change refresh, +100 rows, +1,000 rows, and a two-day 400-row
-  spread while the **same service stays alive**. The two-day delta adds rows
-  with two-day-spread timestamps; it is not a cold resume. Synthetic profiles
-  may mutate only their disposable temp database. Real-local runs no-change
-  only and never writes.
+  spread while the **same service stays alive**. The legacy `twoDay` key now
+  means **current physical updates with historical completions**: physical
+  `time_updated` is the deterministic current write time (the anchor boundary
+  qualifies), while completion timestamps span an actual two days. It is not a
+  backdated-update case and not a cold resume. The older BEFORE `twoDay`
+  fixture used backdated physical updates, so that scenario is not directly
+  comparable to the corrected key. Synthetic profiles may mutate only their
+  disposable temp database. Real-local runs no-change only and never writes.
 - Cold resume (synthetic only) — close the worker after its snapshot is
-  persisted, copy that snapshot to an isolated path, append 400 rows with
-  two-day-spread timestamps while no worker is running, shift only the isolated
-  snapshot's `sourceCursorAtMs` and `lastFullRepairAtMs` back two days, then
-  start a fresh worker against the isolated snapshot. Record first home,
-  refresh, and post-refresh home. Source row timestamps are unchanged. The
-  actual wall-clock gap is reported and is not two days; this is a simulated
-  cold resume, not a two-day wall-clock pause. A separate engine test covers an
+  persisted, copy that snapshot to an isolated path, **age only the isolated
+  copy's `sourceCursorAtMs` and `lastFullRepairAtMs` before inserting**, then
+  append 400 rows with historical completion dates spanning two days. Physical
+  updates are distributed linearly from just after the aged cursor to a resume
+  clock captured before insertion, so the last update cannot exceed the resume
+  time. Record and verify inserted update min/max against both bounds. Start a
+  fresh worker against the isolated snapshot. Record first home, refresh,
+  post-refresh home, and a second refresh that must add zero steps. The age is a
+  replay workload, not an authentic two-day-old historical snapshot. A snapshot
+  without `sourceCursorAtMs` is labeled `unavailable-scope-fallback` and cannot
+  claim cursor-window proof. The actual wall-clock gap is reported and is not
+  two days; this is a simulated cold resume. A separate engine test covers an
   aged two-day snapshot with an injectable clock. Real-local reports this
-  scenario skipped because it never mutates the source.
+  scenario skipped because it never mutates the source. If any prior synthetic
+  delta correctness check fails, cold resume is skipped rather than reported as
+  a dependent failure.
 - `GET /` and `GET /api/v1/health` are sampled into **separate** arrays, so
   their p50/p95/max values are never conflated. Both are real loopback HTTP
   probes against the dashboard server.
@@ -165,18 +176,23 @@ JSON object is stable (`schemaVersion: 1`). Per profile:
   compactions, tree shape (synthetic only; `null` for real).
 - `selected` — anonymous dense/long/tree aggregate descriptions.
 - `durationsMs` — fixed key set; unavailable/skipped scenarios remain `null`.
-  Includes the cold-resume first-home, refresh, and post-refresh keys.
+  Includes cold-resume first-home, first-refresh, post-refresh home, second
+  refresh, and second post-refresh home keys.
 - `phases` — available flag, fixed labels, interval phase metrics (including
   `coldResume`), and the raw cumulative marks.
 - `warmSwitches` — overall and per-operation p50/p95.
 - `deltas` — `noChange`, `add100`, `add1000`, `twoDay`, with inserted rows,
-  expected/observed step deltas, refresh/home time, status, pass flag, and the
-  final aggregate step count used as the cold-resume baseline. `twoDay` is a
-  live-service delta, not a restart.
+  expected/observed step deltas, refresh/home time, status, pass flag, update
+  semantics, completion span, and the final aggregate step count used as the
+  cold-resume baseline. `twoDay` is a live-service current-update/historical-
+  completion delta, not a restart.
 - `coldResume` — synthetic-only persisted-snapshot restart: status, simulated
-  inactivity days, actual wall-clock gap, clock-simulation note, inserted rows,
-  expected/observed step delta, first-home/refresh/post-refresh times, and pass
-  flag. Real-local is `skipped`.
+  inactivity days, actual wall-clock gap, aged-snapshot replay metadata,
+  cursor-proof/fallback label, inserted update lower/upper bounds and
+  min/max, bounded-window flag, inserted rows, expected/observed step delta,
+  first-home/refresh/post-refresh times, second-refresh delta/time, and pass
+  flags. Real-local is `skipped`; synthetic runs skip it when prior delta
+  correctness fails.
 - `http` — separate `index` and `health` summaries for `idle`, `active`,
   `delta`.
 - `memory` — host and worker before/after/peak. Host peaks are sampled every
@@ -271,3 +287,7 @@ available from the current worker interface.
   Unchanged scenarios remain comparable; cold resume needs a fresh BEFORE/AFTER
   pair on the same machine and runtime before comparison. Do not present the
   older live-service `twoDay` delta as a cold-resume result.
+- The corrected `twoDay` fixture uses current physical updates with historical
+  completions. The archived BEFORE `twoDay` used backdated physical updates, so
+  that one scenario is not apples-to-apples and must be labeled as an exception
+  in comparisons. Common-timing scenarios remain valid.

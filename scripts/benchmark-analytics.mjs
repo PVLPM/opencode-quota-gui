@@ -114,6 +114,8 @@ const DURATION_KEYS = [
   "coldResumeHomeAfterRestart",
   "coldResumeRefresh",
   "coldResumeHomeAfterRefresh",
+  "coldResumeRefreshAgain",
+  "coldResumeHomeAfterRefreshAgain",
 ];
 
 function buildInstrumentation(profiles) {
@@ -364,9 +366,12 @@ async function measureWarmSwitches(service, internal, rounds) {
   };
 }
 
-function emptyDelta(status) {
+function emptyDelta(status, definition = null) {
   return {
     status,
+    semantics: definition?.semantics ?? null,
+    updateClock: definition?.updateClock ?? null,
+    completionSpanDays: definition?.completionSpanDays ?? 0,
     insertedRows: 0,
     days: 0,
     expectedStepDelta: 0,
@@ -387,16 +392,48 @@ async function measureDeltas(options) {
   };
   let baseline = (await service.home({ range: "7d" })).usage.stepCount;
   const definitions = [
-    { name: "noChange", mutation: false, insertedRows: 0, days: 0 },
-    { name: "add100", mutation: true, insertedRows: 100, days: 1 },
-    { name: "add1000", mutation: true, insertedRows: 1_000, days: 1 },
-    { name: "twoDay", mutation: true, insertedRows: 400, days: 2 },
+    {
+      name: "noChange",
+      mutation: false,
+      insertedRows: 0,
+      days: 0,
+      semantics: "no-mutation",
+      updateClock: null,
+      completionSpanDays: 0,
+    },
+    {
+      name: "add100",
+      mutation: true,
+      insertedRows: 100,
+      days: 1,
+      semantics: "current-completion-updates",
+      updateClock: "completion",
+      completionSpanDays: 0,
+    },
+    {
+      name: "add1000",
+      mutation: true,
+      insertedRows: 1_000,
+      days: 1,
+      semantics: "current-completion-updates",
+      updateClock: "completion",
+      completionSpanDays: 0,
+    },
+    {
+      name: "twoDay",
+      mutation: true,
+      insertedRows: 400,
+      days: 2,
+      semantics: "current-write-with-historical-completions",
+      updateClock: "current-write",
+      completionSpanDays: 2,
+    },
   ];
 
   for (const definition of definitions) {
     const prefix = `delta${definition.name[0].toUpperCase()}${definition.name.slice(1)}`;
     if (mode === "real-local" && definition.mutation) {
-      deltas.scenarios[definition.name] = emptyDelta("skipped");
+      deltas.scenarios[definition.name] = emptyDelta("skipped", definition);
       continue;
     }
     let insertedRows = 0;
@@ -406,6 +443,7 @@ async function measureDeltas(options) {
         targetSessionId,
         scenario: definition.name,
         anchorMs,
+        updatedAtMs: definition.updateClock === "current-write" ? anchorMs : undefined,
       });
       insertedRows = appended.insertedRows;
     }
@@ -426,6 +464,9 @@ async function measureDeltas(options) {
         : observedStepDelta === expectedStepDelta;
     deltas.scenarios[definition.name] = {
       status: definition.mutation ? "applied" : "not-mutated",
+      semantics: definition.semantics,
+      updateClock: definition.updateClock,
+      completionSpanDays: definition.completionSpanDays,
       insertedRows,
       days: definition.days,
       expectedStepDelta,
@@ -445,16 +486,18 @@ function ageIsolatedSnapshot(path, days) {
   const shiftMs = days * DAY_MS;
   let sourceCursorShifted = false;
   let repairClockShifted = false;
+  let agedSourceCursorAtMs = null;
   if (typeof snapshot.sourceCursorAtMs === "number") {
     snapshot.sourceCursorAtMs = Math.max(0, snapshot.sourceCursorAtMs - shiftMs);
     sourceCursorShifted = true;
+    agedSourceCursorAtMs = snapshot.sourceCursorAtMs;
   }
   if (typeof snapshot.lastFullRepairAtMs === "number") {
     snapshot.lastFullRepairAtMs = Math.max(0, snapshot.lastFullRepairAtMs - shiftMs);
     repairClockShifted = true;
   }
   writeFileSync(path, `${JSON.stringify(snapshot)}\n`);
-  return { sourceCursorShifted, repairClockShifted };
+  return { sourceCursorShifted, repairClockShifted, agedSourceCursorAtMs };
 }
 
 function emptyColdResume(status, reason = null) {
@@ -466,12 +509,21 @@ function emptyColdResume(status, reason = null) {
     clockSimulation: null,
     snapshotReused: false,
     snapshotSource: null,
+    scopeFallback: false,
+    updateWindowBounded: null,
+    updateLowerBoundMs: null,
+    updateUpperBoundMs: null,
+    updateMinMs: null,
+    updateMaxMs: null,
     insertedRows: 0,
     expectedStepDelta: 0,
     observedStepDelta: null,
     homeAfterRestartMs: null,
     refreshMs: null,
     homeAfterRefreshMs: null,
+    secondRefreshMs: null,
+    secondRefreshStepDelta: null,
+    secondRefreshPassed: null,
     passed: null,
   };
 }
@@ -514,14 +566,31 @@ async function measureColdResume(options) {
   }
 
   const isolatedSnapshotPath = join(root, "cold-resume-analytics-v3.json");
+  const simulatedDays = 2;
   copyFileSync(snapshotPath, isolatedSnapshotPath);
+  const clockShift = ageIsolatedSnapshot(isolatedSnapshotPath, simulatedDays);
+  const cursorAvailable =
+    clockShift.sourceCursorShifted && typeof clockShift.agedSourceCursorAtMs === "number";
+  const resumeClockAtMs = Date.now();
+  const updateLowerBoundMs = cursorAvailable ? clockShift.agedSourceCursorAtMs + 1 : null;
+  const updateUpperBoundMs = cursorAvailable ? resumeClockAtMs : null;
   const appended = await appendDeltaRows({
     dbPath,
     targetSessionId,
     scenario: "coldResume",
     anchorMs,
+    updatedAtMs: cursorAvailable ? undefined : resumeClockAtMs,
+    updatedSinceMs: updateLowerBoundMs ?? undefined,
+    updatedUntilMs: updateUpperBoundMs ?? undefined,
   });
-  const clockShift = ageIsolatedSnapshot(isolatedSnapshotPath, appended.days);
+  const updateWindowBounded = cursorAvailable
+    ? appended.updatedMinMs !== null &&
+      appended.updatedMaxMs !== null &&
+      appended.updatedMinMs >= updateLowerBoundMs &&
+      appended.updatedMaxMs <= updateUpperBoundMs &&
+      appended.updatedMinMs > clockShift.agedSourceCursorAtMs &&
+      appended.updatedMinMs < appended.updatedMaxMs
+    : null;
   const actualInactivityMs = measure(inactivityStarted);
 
   const service = createAnalyticsService(modules, {
@@ -536,29 +605,53 @@ async function measureColdResume(options) {
     const homeAfterRefresh = await timed(durations, "coldResumeHomeAfterRefresh", () =>
       service.home({ range: "7d" }),
     );
+    const secondRefreshBaseline = homeAfterRefresh.usage.stepCount;
+    await timed(durations, "coldResumeRefreshAgain", () => service.refresh());
+    const homeAfterSecondRefresh = await timed(durations, "coldResumeHomeAfterRefreshAgain", () =>
+      service.home({ range: "7d" }),
+    );
+    const secondRefreshStepDelta = homeAfterSecondRefresh.usage.stepCount - secondRefreshBaseline;
     const workerAfter = await workerStats(service);
     const observedStepDelta = homeAfterRefresh.usage.stepCount - baselineStepCount;
+    const scopeFallback = !cursorAvailable;
     return {
       result: {
         status: "applied",
         reason: null,
-        simulatedInactivityDays: appended.days,
+        simulatedInactivityDays: simulatedDays,
         actualInactivityMs,
         clockSimulation: {
-          mode: "aged-isolated-snapshot",
-          days: appended.days,
+          mode: "aged-isolated-snapshot-replay",
+          days: simulatedDays,
+          snapshotAgedBeforeInsert: true,
           sourceCursorShifted: clockShift.sourceCursorShifted,
+          cursorProof: cursorAvailable ? "aged-source-cursor" : "unavailable-scope-fallback",
           repairClockShifted: clockShift.repairClockShifted,
+          updatesInsideAgedCursorInterval: updateWindowBounded ?? false,
+          authenticHistoricalSnapshot: false,
         },
         snapshotReused: true,
         snapshotSource: "persisted-worker-snapshot",
+        scopeFallback,
+        updateWindowBounded,
+        updateLowerBoundMs,
+        updateUpperBoundMs,
+        updateMinMs: appended.updatedMinMs,
+        updateMaxMs: appended.updatedMaxMs,
         insertedRows: appended.insertedRows,
         expectedStepDelta: appended.insertedRows,
         observedStepDelta,
         homeAfterRestartMs: durations.coldResumeHomeAfterRestart,
         refreshMs: durations.coldResumeRefresh,
         homeAfterRefreshMs: durations.coldResumeHomeAfterRefresh,
-        passed: observedStepDelta === appended.insertedRows,
+        secondRefreshMs: durations.coldResumeRefreshAgain,
+        secondRefreshStepDelta,
+        secondRefreshPassed: secondRefreshStepDelta === 0,
+        passed: cursorAvailable
+          ? observedStepDelta === appended.insertedRows &&
+            secondRefreshStepDelta === 0 &&
+            updateWindowBounded === true
+          : null,
       },
       workerBefore,
       workerAfter,
@@ -597,6 +690,8 @@ async function executeProfile(options) {
     deltaAdd1000Passed: null,
     deltaTwoDayPassed: null,
     coldResumeDeltaPassed: null,
+    coldResumeSecondRefreshPassed: null,
+    coldResumeUpdateWindowBounded: null,
     httpIndexNoFailures: null,
     httpHealthNoFailures: null,
     persistenceSnapshotWritten: null,
@@ -757,25 +852,42 @@ async function executeProfile(options) {
     server = null;
     const hostAfterClose = hostMemory();
 
-    const cold = await measureColdResume({
-      mode,
-      dbPath,
-      targetSessionId: selection.internal.deltaTargetSessionId,
-      anchorMs,
-      snapshotPath,
-      root,
-      modules,
-      durations,
-      baselineStepCount: coldResumeBaselineStepCount,
-      inactivityStarted: coldResumeGapStarted,
-    });
-    if (cold.workerBefore) markPhases("coldResumeBefore", cold.workerBefore);
-    if (cold.workerAfter) {
+    const priorDeltaCorrect =
+      mode === "synthetic" &&
+      Object.values(deltas.scenarios).every((scenario) => scenario.passed === true);
+    let cold = null;
+    if (priorDeltaCorrect) {
+      cold = await measureColdResume({
+        mode,
+        dbPath,
+        targetSessionId: selection.internal.deltaTargetSessionId,
+        anchorMs,
+        snapshotPath,
+        root,
+        modules,
+        durations,
+        baselineStepCount: coldResumeBaselineStepCount,
+        inactivityStarted: coldResumeGapStarted,
+      });
+    }
+    if (cold?.workerBefore) markPhases("coldResumeBefore", cold.workerBefore);
+    if (cold?.workerAfter) {
       markPhases("coldResumeAfter", cold.workerAfter);
       phaseWorkerMemory.coldResume = summarizeWorkerMemory(cold.workerAfter);
     }
-    const coldResume = cold.result;
+    const coldResume =
+      cold?.result ??
+      emptyColdResume(
+        "skipped",
+        mode === "real-local" ? "real-source-is-never-mutated" : "prior-delta-correctness-failed",
+      );
     if (typeof coldResume.passed === "boolean") checks.coldResumeDeltaPassed = coldResume.passed;
+    if (typeof coldResume.secondRefreshPassed === "boolean") {
+      checks.coldResumeSecondRefreshPassed = coldResume.secondRefreshPassed;
+    }
+    if (typeof coldResume.updateWindowBounded === "boolean") {
+      checks.coldResumeUpdateWindowBounded = coldResume.updateWindowBounded;
+    }
 
     const indexIdle = summarize(probeSamples.idle.index);
     const indexActive = summarize(probeSamples.active.index);

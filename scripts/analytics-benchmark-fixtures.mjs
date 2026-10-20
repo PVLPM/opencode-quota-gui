@@ -974,7 +974,15 @@ export function selectFromGraph(graph, rowsBySession) {
  * after the initial fixture build; real-local mode never calls it.
  */
 export async function appendDeltaRows(options) {
-  const { dbPath, targetSessionId, scenario, anchorMs } = options;
+  const {
+    dbPath,
+    targetSessionId,
+    scenario,
+    anchorMs,
+    updatedAtMs,
+    updatedSinceMs,
+    updatedUntilMs,
+  } = options;
   const definitions = {
     add100: { rows: 100, days: 1 },
     add1000: { rows: 1_000, days: 1 },
@@ -983,6 +991,18 @@ export async function appendDeltaRows(options) {
   };
   const definition = definitions[scenario];
   if (!definition) throw new Error("unknown-delta");
+  const currentWriteAtMs = Number.isFinite(updatedAtMs)
+    ? Math.floor(updatedAtMs)
+    : Math.floor(anchorMs);
+  const updateSinceMs = Number.isFinite(updatedSinceMs) ? Math.floor(updatedSinceMs) : null;
+  const updateUntilMs = Number.isFinite(updatedUntilMs) ? Math.floor(updatedUntilMs) : null;
+  const distributedUpdates =
+    scenario === "coldResume" &&
+    updateSinceMs !== null &&
+    updateUntilMs !== null &&
+    updateUntilMs > updateSinceMs;
+  let updatedMinMs = null;
+  let updatedMaxMs = null;
   const db = await openDatabase(dbPath);
   const insert = db.prepare(
     `INSERT INTO "session_message"
@@ -993,32 +1013,44 @@ export async function appendDeltaRows(options) {
   let inserted = 0;
   try {
     if (scenario === "twoDay" || scenario === "coldResume") {
-      for (let day = 0; day < definition.days; day += 1) {
-        for (let index = 0; index < definition.rows / definition.days; index += 1) {
-          const completed = anchorMs - (day + 1) * 6 * HOUR_MS - index * 1_000;
-          const created = completed - 2_000;
-          const provider = PROVIDERS[day % PROVIDERS.length];
-          insert.run(
-            `msg_bench_delta_${scenario}_${day}_${index}`,
-            targetSessionId,
-            "assistant",
-            Math.floor(created),
-            Math.floor(completed),
-            JSON.stringify({
-              time: { created: Math.floor(created), completed: Math.floor(completed) },
-              model: { providerID: provider.providerID, id: provider.modelID },
-              tokens: {
-                input: 40 + index,
-                output: 10 + (index % 7),
-                reasoning: 0,
-                cache: { read: 1_000 + index * 2, write: 4 },
-              },
-              cost: 0.000001 * (index + 1),
-              agent: "build",
-            }),
-          );
-          inserted += 1;
-        }
+      const spanMs = definition.days * DAY_MS;
+      const updateSpanMs =
+        distributedUpdates && definition.rows > 1 ? updateUntilMs - updateSinceMs : 0;
+      for (let index = 0; index < definition.rows; index += 1) {
+        // Completion history spans the full two days. Physical updates stay on a
+        // single current write clock for live rows; cold-resume rows get a
+        // deterministic linear clock inside the aged-cursor window instead.
+        const completionOffset =
+          definition.rows === 1 ? 0 : Math.floor((index * spanMs) / (definition.rows - 1));
+        const completed = anchorMs - spanMs + completionOffset;
+        const created = completed - 2_000;
+        const provider = PROVIDERS[index % PROVIDERS.length];
+        const updatedAt =
+          distributedUpdates && definition.rows > 1
+            ? updateSinceMs + Math.floor((index * updateSpanMs) / (definition.rows - 1))
+            : currentWriteAtMs;
+        updatedMinMs = updatedMinMs === null ? updatedAt : Math.min(updatedMinMs, updatedAt);
+        updatedMaxMs = updatedMaxMs === null ? updatedAt : Math.max(updatedMaxMs, updatedAt);
+        insert.run(
+          `msg_bench_delta_${scenario}_${index}`,
+          targetSessionId,
+          "assistant",
+          Math.floor(created),
+          Math.floor(updatedAt),
+          JSON.stringify({
+            time: { created: Math.floor(created), completed: Math.floor(completed) },
+            model: { providerID: provider.providerID, id: provider.modelID },
+            tokens: {
+              input: 40 + (index % 400),
+              output: 10 + (index % 7),
+              reasoning: 0,
+              cache: { read: 1_000 + (index % 400) * 2, write: 4 },
+            },
+            cost: 0.000001 * (index + 1),
+            agent: "build",
+          }),
+        );
+        inserted += 1;
       }
     } else {
       for (let index = 0; index < definition.rows; index += 1) {
@@ -1058,7 +1090,26 @@ export async function appendDeltaRows(options) {
   } finally {
     db.close();
   }
-  return { insertedRows: inserted, days: definition.days };
+  return {
+    insertedRows: inserted,
+    days: definition.days,
+    updateModel:
+      scenario === "twoDay"
+        ? "current-write-with-historical-completions"
+        : scenario === "coldResume" && distributedUpdates
+          ? "distributed-within-aged-cursor-interval-with-historical-completions"
+          : scenario === "coldResume"
+            ? "single-current-write-with-historical-completions"
+            : "completion-as-update",
+    updatedAtMs:
+      scenario === "twoDay" || (scenario === "coldResume" && !distributedUpdates)
+        ? currentWriteAtMs
+        : null,
+    updatedSinceMs: distributedUpdates ? updateSinceMs : null,
+    updatedUntilMs: distributedUpdates ? updateUntilMs : null,
+    updatedMinMs,
+    updatedMaxMs,
+  };
 }
 
 export function round(value, digits) {
