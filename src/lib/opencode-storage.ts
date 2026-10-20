@@ -928,6 +928,7 @@ function readCompletedAssistantRowsFrom(
         {
           completedSinceMs: params.completedSinceMs,
           completedUntilMs: params.completedUntilMs,
+          completedAtTimes: params.completedAtTimes,
           ...clause,
         },
         hasUpdatedAt,

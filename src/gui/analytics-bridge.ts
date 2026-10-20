@@ -199,13 +199,21 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     if (code === "unavailable" && !closed) registerFailure();
   }
 
-  function onWorkerFailure(): void {
+  function onWorkerFailure(instance: AnalyticsWorkerLike): void {
     if (closed) return;
-    retire(worker, "unavailable");
+    if (retiredInstances.has(instance)) return;
+    if (worker !== instance) return;
+    retire(instance, "unavailable");
   }
 
   function attach(instance: AnalyticsWorkerLike): void {
+    // A retired instance's late events must never affect its successor. During
+    // close the current worker has already been detached from `worker`, so a
+    // close reply from the instance being closed is still accepted.
+    const isInactive = (): boolean =>
+      retiredInstances.has(instance) || (worker !== undefined && worker !== instance);
     const onMessage = (value: unknown): void => {
+      if (isInactive()) return;
       if (typeof value !== "object" || value === null) return;
       const record = value as Record<string, unknown>;
       if (record.type === "analytics-generation") {
@@ -226,13 +234,12 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       clearTimeout(entry.timer);
       entry.resolve(response);
     };
+    const onFailure = (): void => onWorkerFailure(instance);
 
     if (typeof instance.on === "function") {
       instance.on("message", onMessage);
-      instance.on("error", onWorkerFailure);
-      instance.on("exit", () => {
-        if (!closed) onWorkerFailure();
-      });
+      instance.on("error", onFailure);
+      instance.on("exit", onFailure);
       return;
     }
     if (typeof instance.addEventListener === "function") {
@@ -241,11 +248,11 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
           onMessage((event as { data: unknown }).data);
         }
       });
-      instance.addEventListener("error", onWorkerFailure);
+      instance.addEventListener("error", onFailure);
       return;
     }
     instance.onmessage = (event) => onMessage(event.data);
-    instance.onerror = () => onWorkerFailure();
+    instance.onerror = onFailure;
   }
 
   function send(
@@ -291,8 +298,10 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
           instance.terminate();
           throw new AnalyticsReadError("closed");
         }
-        attach(instance);
+        // Publish the instance before attaching so a synchronously delivered
+        // failure is recognized as the current worker rather than a stale one.
         worker = instance;
+        attach(instance);
         try {
           instance.unref?.();
         } catch {
@@ -304,7 +313,10 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
         nextRetryAtMs = 0;
         return instance;
       } catch (error: unknown) {
+        const wasRetired = instance !== undefined && retiredInstances.has(instance);
         if (instance !== undefined) {
+          // Even an init-failure instance gets no further event handling.
+          retiredInstances.add(instance);
           if (worker === instance) {
             worker = undefined;
             workerPromise = undefined;
@@ -317,7 +329,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
         }
         if (closed) throw new AnalyticsReadError("closed");
         if (error instanceof AnalyticsReadError && error.code === "closed") throw error;
-        if (instance === undefined || !retiredInstances.has(instance)) registerFailure();
+        if (instance === undefined || !wasRetired) registerFailure();
         throw new AnalyticsReadError("unavailable");
       }
     })().finally(() => {

@@ -252,6 +252,72 @@ describe("analytics worker bridge", () => {
     await bridge.close();
   });
 
+  it("ignores delayed failures and messages from a retired worker after recovery", async () => {
+    let created = 0;
+    const retired = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    let holdHome = false;
+    const healthy = new FakeWorker((command) => {
+      if (command.kind === "init") return undefined;
+      if (holdHome && command.kind === "home") return "ignore";
+      return answerEcho(command);
+    });
+    const bridge = createAnalyticsBridge({
+      createWorker: () => {
+        created += 1;
+        return created === 1 ? retired : healthy;
+      },
+      requestTimeoutMs: 20,
+      retryBaseMs: 0,
+      maxRecoveryAttempts: 2,
+      logger,
+    });
+    let notifications = 0;
+    bridge.subscribe?.(() => {
+      notifications += 1;
+    });
+
+    await expect(bridge.home("24h")).rejects.toMatchObject({ code: "timeout" });
+    expect(retired.terminated).toBe(1);
+    await expect(bridge.home("24h")).resolves.toMatchObject({ marker: "home:24h" });
+    expect(created).toBe(2);
+    expect(healthy.terminated).toBe(0);
+
+    holdHome = true;
+    const first = bridge.home("7d");
+    const second = bridge.home("7d");
+    await flushMicrotasks();
+    const held = framesOf(healthy, "home").at(-1);
+    if (held === undefined) throw new Error("held home request was not sent");
+
+    // The retired worker can still deliver late lifecycle events and frames.
+    retired.emit("exit", 1);
+    retired.emit("error", new Error("late failure"));
+    retired.emit("message", { type: "analytics-generation", generation: 99 });
+    retired.emit("message", {
+      id: held.id,
+      ok: true,
+      result: { marker: "stale" },
+    });
+    await flushMicrotasks();
+
+    expect(notifications).toBe(0);
+    expect(healthy.terminated).toBe(0);
+
+    healthy.emit("message", {
+      id: held.id,
+      ok: true,
+      result: { marker: "b-shared" },
+    });
+    await expect(first).resolves.toMatchObject({ marker: "b-shared" });
+    await expect(second).resolves.toMatchObject({ marker: "b-shared" });
+
+    // Late failures must not consume the bounded recovery budget.
+    holdHome = false;
+    await expect(bridge.home("24h")).resolves.toMatchObject({ marker: "home:24h" });
+    expect(created).toBe(2);
+    await bridge.close();
+  });
+
   it("does not post a read onto a worker retired before the frame was sent", async () => {
     const worker = new FakeWorker(answerEcho);
     const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });

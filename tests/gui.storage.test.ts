@@ -514,6 +514,66 @@ describe("scoped completed assistant reader", () => {
     expect(rows.map((row) => row.messageID)).toEqual(["msg_mid", "msg_late"]);
   });
 
+  it("applies exact completion times with combined session, message, and window scopes", async () => {
+    stubDatabase({
+      sessions: [
+        { id: "ses_a", createdMs: 1 },
+        { id: "ses_b", createdMs: 1 },
+      ],
+      messages: [
+        { id: "msg_a1", sessionID: "ses_a", createdMs: 10, completedMs: 100 },
+        { id: "msg_a2", sessionID: "ses_a", createdMs: 20, completedMs: 200 },
+        { id: "msg_a3", sessionID: "ses_a", createdMs: 30, completedMs: 300 },
+        { id: "msg_b1", sessionID: "ses_b", createdMs: 40, completedMs: 100 },
+        { id: "msg_b2", sessionID: "ses_b", createdMs: 50, completedMs: 200 },
+        { id: "msg_b3", sessionID: "ses_b", createdMs: 60, completedMs: 300 },
+      ],
+    });
+
+    const rows = await readCompletedAssistantRows({
+      sessionIDs: ["ses_a", "ses_b"],
+      messageIDs: ["msg_a1", "msg_a2", "msg_a3", "msg_b1", "msg_b2", "msg_b3"],
+      completedAtTimes: [100, 300],
+      completedSinceMs: 100,
+      completedUntilMs: 300,
+    });
+
+    expect(rows.map((row) => row.messageID)).toEqual(["msg_a1", "msg_b1", "msg_a3", "msg_b3"]);
+  });
+
+  it("keeps combined exact-time scoped chunks under the bind bound", async () => {
+    const messages = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `msg_${String(index).padStart(4, "0")}`,
+      sessionID: index % 2 === 0 ? "ses_a" : "ses_b",
+      createdMs: 1,
+      completedMs: 10_000 + index,
+    }));
+    stubDatabase({
+      sessions: [
+        { id: "ses_a", createdMs: 1 },
+        { id: "ses_b", createdMs: 1 },
+      ],
+      messages,
+    });
+    const exactTimes = messages
+      .filter((_, index) => index % 2 === 0)
+      .map((message) => message.completedMs);
+
+    const rows = await readCompletedAssistantRows({
+      sessionIDs: ["ses_a", "ses_b"],
+      messageIDs: messages.map((message) => message.id),
+      completedAtTimes: exactTimes,
+      completedSinceMs: 10_000,
+      completedUntilMs: 20_000,
+    });
+
+    expect(rows).toHaveLength(500);
+    expect(rows.every((row) => exactTimes.includes(row.completedAtMs))).toBe(true);
+    for (const params of sqliteTrace.params) {
+      expect(params.length).toBeLessThanOrEqual(900);
+    }
+  });
+
   it("treats empty message/session scopes as an empty read without opening the database", async () => {
     stubDatabase({ sessions: [{ id: "ses_a", createdMs: 1 }] });
     const opened = sqliteTrace.opened;
