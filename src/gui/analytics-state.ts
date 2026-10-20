@@ -4,9 +4,10 @@
  * The worker owns the large in-memory analytics index. Persistence keeps one
  * compact fingerprint contribution dictionary (referenced by numeric index),
  * occurrence membership (message/session identity + revision watermark), the
- * stable source identity, the coverage extent/frontier, and a bounded warm
- * presentation cache for home/project DTOs. It never stores raw message JSON,
- * agent strings, compaction markers, or a duplicate raw dataset.
+ * stable source identity, the coverage extent/frontier, the trusted source
+ * cursor and rare-repair wall time, and a bounded warm presentation cache for
+ * home/project DTOs. It never stores raw message JSON, agent strings,
+ * compaction markers, or a duplicate raw dataset.
  */
 import { existsSync } from "node:fs";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
@@ -57,8 +58,6 @@ export interface Occurrence {
   updatedAtMs: number | null;
   /** In-memory only: never persisted, so detail-only agents stay transient. */
   agent?: string;
-  /** In-memory revision-scan epoch; deletion = epoch not updated this refresh. */
-  seenEpoch?: number;
 }
 
 /**
@@ -96,6 +95,14 @@ export interface AnalyticsState {
   sourceIdentity?: OpenCodeSourceIdentity;
   /** Wall time of the last successful refresh (frontier freshness). */
   frontierAtMs: number;
+  /**
+   * Trusted source `time_updated` frontier, capped at the wall time observed
+   * when it was established. Absent means a full source baseline is required;
+   * it must never be inferred from `frontierAtMs` or cached occurrence times.
+   */
+  sourceCursorAtMs?: number;
+  /** Wall time of the last completed full reconciliation (7-day repair). */
+  lastFullRepairAtMs?: number;
   presentation?: AnalyticsPresentation;
 }
 
@@ -151,6 +158,10 @@ interface PersistedAnalyticsStateV3 {
   schema: typeof ANALYTICS_SNAPSHOT_SCHEMA;
   savedAtMs: number;
   frontierAtMs: number;
+  /** Additive v3 field: absent/null in legacy files means "baseline required". */
+  sourceCursorAtMs: number | null;
+  /** Additive v3 field: absent/null in legacy files means "repair due". */
+  lastFullRepairAtMs: number | null;
   sourceIdentity: SourceIdentityTuple | null;
   extent: { sinceMs: number | null; untilMs: number } | null;
   fingerprints: CompactFingerprint[];
@@ -229,6 +240,8 @@ export function encodeAnalyticsState(
     schema: ANALYTICS_SNAPSHOT_SCHEMA,
     savedAtMs,
     frontierAtMs: state.frontierAtMs,
+    sourceCursorAtMs: state.sourceCursorAtMs ?? null,
+    lastFullRepairAtMs: state.lastFullRepairAtMs ?? null,
     sourceIdentity: state.sourceIdentity ? identityToTuple(state.sourceIdentity) : null,
     extent:
       state.extent === undefined
@@ -375,6 +388,17 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
   if (!isFiniteNumber(record.frontierAtMs)) return undefined;
   if (!isFiniteNumber(record.savedAtMs)) return undefined;
 
+  // Additive fields. A missing value is the safe legacy state: it forces a full
+  // source baseline instead of guessing a cursor from wall/cached timestamps.
+  const cursorValue = record.sourceCursorAtMs;
+  if (cursorValue !== undefined && cursorValue !== null && !isFiniteNumber(cursorValue)) {
+    return undefined;
+  }
+  const repairValue = record.lastFullRepairAtMs;
+  if (repairValue !== undefined && repairValue !== null && !isFiniteNumber(repairValue)) {
+    return undefined;
+  }
+
   const identityValue = record.sourceIdentity;
   if (
     identityValue !== null &&
@@ -479,6 +503,8 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
       ? {}
       : { sourceIdentity: identityFromTuple(identityValue) }),
     frontierAtMs: record.frontierAtMs,
+    ...(typeof cursorValue === "number" ? { sourceCursorAtMs: cursorValue } : {}),
+    ...(typeof repairValue === "number" ? { lastFullRepairAtMs: repairValue } : {}),
     ...(persistedPresentation
       ? {
           presentation: {

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/aggregation.js";
-import { createAnalyticsEngine } from "../src/gui/analytics-engine.js";
+import {
+  ANALYTICS_FULL_REPAIR_INTERVAL_MS,
+  ANALYTICS_SOURCE_CURSOR_OVERLAP_MS,
+  createAnalyticsEngine,
+} from "../src/gui/analytics-engine.js";
 import type { AnalyticsReader } from "../src/gui/analytics-reader.js";
 import {
   type AnalyticsState,
@@ -32,6 +36,7 @@ interface ReaderCall {
     | "loadSessions"
     | "loadProjects"
     | "loadRevisions"
+    | "loadRevisionFrontier"
     | "loadCompletedRows"
     | "loadCompactions";
   params?: Record<string, unknown>;
@@ -107,6 +112,16 @@ function identity(overrides: Partial<OpenCodeSourceIdentity> = {}): OpenCodeSour
 }
 
 function baseDb(): FakeDb {
+  const rows = [
+    row("ses_root", "msg_a", NOW - HOUR, { input: 100 }),
+    row("ses_child", "msg_a_fork", NOW - HOUR, { input: 100 }),
+    row("ses_root", "msg_b", NOW - HOUR, { input: 200 }),
+    row("ses_other", "msg_o", NOW - HOUR, { input: 400 }),
+    row("ses_other", "msg_old", NOW - 2 * DAY, { input: 800 }),
+  ];
+  const updatedAt = new Map<string, number | null>();
+  for (const entry of rows)
+    updatedAt.set(rowKey(entry.sessionID, entry.messageID), entry.completedAtMs);
   return {
     sessions: {
       ses_root: session("ses_root", "p1"),
@@ -117,14 +132,8 @@ function baseDb(): FakeDb {
       p1: { id: "p1", name: "Project One", directories: [], worktrees: [] },
       p2: { id: "p2", name: "Project Two", directories: [], worktrees: [] },
     },
-    rows: [
-      row("ses_root", "msg_a", NOW - HOUR, { input: 100 }),
-      row("ses_child", "msg_a_fork", NOW - HOUR, { input: 100 }),
-      row("ses_root", "msg_b", NOW - HOUR, { input: 200 }),
-      row("ses_other", "msg_o", NOW - HOUR, { input: 400 }),
-      row("ses_other", "msg_old", NOW - 2 * DAY, { input: 800 }),
-    ],
-    updatedAt: new Map(),
+    rows,
+    updatedAt,
     revisionOverrides: new Map(),
     extraRevisions: [],
     compactions: [{ sessionId: "ses_root", atMs: NOW - HOUR, messageId: "msg_c" }],
@@ -181,7 +190,12 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
     rows.sort(
       (a, b) => a.completedAtMs - b.completedAtMs || a.messageID.localeCompare(b.messageID),
     );
-    return rows;
+    return rows.map((entry) => ({
+      ...entry,
+      ...(db.updatedAtAvailable
+        ? { updatedAtMs: db.updatedAt.get(rowKey(entry.sessionID, entry.messageID)) ?? null }
+        : {}),
+    }));
   }
 
   return {
@@ -230,14 +244,40 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
             method: "loadRevisions",
             params: {
               ...(params.sessionIDs === undefined ? {} : { sessionIDs: params.sessionIDs }),
+              ...(params.updatedSinceMs === undefined
+                ? {}
+                : { updatedSinceMs: params.updatedSinceMs }),
             },
           });
+          let revisions = revisionsFor(params.sessionIDs);
+          const updatedSinceMs = params.updatedSinceMs;
+          if (db.updatedAtAvailable && updatedSinceMs !== undefined) {
+            revisions = revisions.filter(
+              (revision) => revision.updatedAtMs === null || revision.updatedAtMs >= updatedSinceMs,
+            );
+          }
           return {
             available: true,
             updatedAtAvailable: db.updatedAtAvailable,
             completedAtAvailable: true,
-            revisions: revisionsFor(params.sessionIDs),
+            revisions,
           };
+        },
+        readMessageRevisionFrontier: () => {
+          calls.push({ method: "loadRevisionFrontier" });
+          if (!db.updatedAtAvailable) {
+            return { available: true, updatedAtAvailable: false, maxUpdatedAtMs: null };
+          }
+          let maxUpdatedAtMs: number | null = null;
+          for (const revision of revisionsFor()) {
+            if (
+              revision.updatedAtMs !== null &&
+              (maxUpdatedAtMs === null || revision.updatedAtMs > maxUpdatedAtMs)
+            ) {
+              maxUpdatedAtMs = revision.updatedAtMs;
+            }
+          }
+          return { available: true, updatedAtAvailable: true, maxUpdatedAtMs };
         },
       };
       return { status: "ok", value: await read(snapshot) };
@@ -263,6 +303,7 @@ function harness(
     saveSnapshot?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
     loadPresentation?: () => Promise<WarmAnalyticsPresentation | undefined>;
     savePresentation?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
+    fullRepairIntervalMs?: number;
   } = {},
 ): Harness {
   const calls: ReaderCall[] = [];
@@ -275,6 +316,9 @@ function harness(
     reader,
     now: () => nowMs,
     refreshIntervalMs: INTERVAL,
+    ...(overrides.fullRepairIntervalMs === undefined
+      ? {}
+      : { fullRepairIntervalMs: overrides.fullRepairIntervalMs }),
     snapshotPath: "memory.json",
     onGeneration: (value) => generations.push(value),
     loadSnapshot: overrides.loadSnapshot ?? (async () => undefined),
@@ -429,6 +473,25 @@ describe("analytics engine: rollup views and coverage", () => {
     expect(reads[0]?.params).toMatchObject({ sinceMs: NOW - 7 * DAY, untilMs: NOW - DAY });
   });
 
+  it("does not reread covered bounded ranges after a lifetime extent", async () => {
+    const db = baseDb();
+    const { engine, calls, setNow } = harness(db);
+
+    await engine.home("lifetime");
+    const baseline = calls.length;
+    // Force real refreshes (not just DTO derivation) for bounded ranges while
+    // the stored extent already reaches the beginning of history.
+    setNow(NOW + INTERVAL + 1);
+    await engine.home("24h");
+    await engine.home("7d");
+    await engine.home("30d");
+    await engine.refresh();
+
+    expect(
+      calls.slice(baseline).filter((call) => call.method === "loadCompletedRows"),
+    ).toHaveLength(0);
+  });
+
   it("reads lifetime only when requested", async () => {
     const db = baseDb();
     const { engine, calls } = harness(db);
@@ -468,7 +531,7 @@ describe("analytics engine: rollup views and coverage", () => {
 describe("analytics engine: revision reconciliation", () => {
   it("detects edits, insertions, and deletions without session metadata changes", async () => {
     const db = baseDb();
-    const { engine } = harness(db);
+    const { engine, setNow } = harness(db, { fullRepairIntervalMs: 1 });
     await engine.home("24h");
 
     const edited = db.rows.find((entry) => entry.messageID === "msg_b");
@@ -480,7 +543,10 @@ describe("analytics engine: revision reconciliation", () => {
     const afterEdit = await engine.home("24h");
     expect(afterEdit.usage.totals.input).toBe(1_050);
 
+    // Deletions have no timestamp tombstone in the source; the approved policy
+    // only removes them during the rare full reconciliation.
     db.rows = db.rows.filter((entry) => entry.messageID !== "msg_b");
+    setNow(NOW + 1);
     await engine.refresh();
     const afterDelete = await engine.home("24h");
     expect(afterDelete.usage.stepCount).toBe(3);
@@ -570,11 +636,12 @@ describe("analytics engine: revision reconciliation", () => {
 
   it("promotes the remaining fork copy when the owner is deleted", async () => {
     const db = baseDb();
-    const { engine } = harness(db);
+    const { engine, setNow } = harness(db, { fullRepairIntervalMs: 1 });
     const before = await engine.home("24h");
     expect(before.usage.totals.input).toBe(700);
 
     db.rows = db.rows.filter((entry) => entry.messageID !== "msg_a");
+    setNow(NOW + 1);
     await engine.refresh();
     const after = await engine.home("24h");
     expect(after.usage.totals.input).toBe(700);
@@ -607,17 +674,19 @@ describe("analytics engine: revision reconciliation", () => {
       ),
       row("ses_root", "priced_2", NOW - HOUR, { input: 30 }),
     ];
-    const { engine } = harness(db);
+    const { engine, setNow } = harness(db, { fullRepairIntervalMs: 1 });
     const first = await engine.home("24h");
     expect(first.usage.totals.apiEquivalentCostUsd).not.toBeNull();
 
     db.rows = db.rows.filter((entry) => entry.messageID !== "priced_2");
+    setNow(NOW + 1);
     await engine.refresh();
     const after = await engine.home("24h");
     expect(after.usage.totals.unpricedTokens + after.usage.totals.unknownTokens).toBeGreaterThan(0);
     expect(after.usage.totals.apiEquivalentCostUsd).not.toBeNull();
 
     db.rows = db.rows.filter((entry) => entry.messageID !== "priced");
+    setNow(NOW + 2);
     await engine.refresh();
     const onlyUnpriced = await engine.home("24h");
     expect(onlyUnpriced.usage.totals.apiEquivalentCostUsd).toBeNull();
@@ -631,10 +700,11 @@ describe("analytics engine: revision reconciliation", () => {
 
   it("clears empty hour buckets after all steps are deleted", async () => {
     const db = baseDb();
-    const { engine } = harness(db);
+    const { engine, setNow } = harness(db, { fullRepairIntervalMs: 1 });
     const before = await engine.home("24h");
     expect(before.usage.buckets.some((bucket) => bucket.tokens.input > 0)).toBe(true);
     db.rows = [];
+    setNow(NOW + 1);
     await engine.refresh();
     const after = await engine.home("24h");
     expect(after.usage.totals.total).toBe(0);
@@ -692,6 +762,211 @@ describe("analytics engine: revision reconciliation", () => {
     expect(calls.slice(baseline).filter((call) => call.method === "withSnapshot")).toHaveLength(1);
   });
 
+  it("establishes the first baseline cursor from the source frontier, not wall time", async () => {
+    const db = baseDb();
+    const { engine, calls, savedStates } = harness(db);
+
+    await engine.home("24h");
+    await flushAsync();
+
+    expect(calls.some((call) => call.method === "loadRevisionFrontier")).toBe(true);
+    // A cold empty index does not need a lifetime revision projection.
+    expect(calls.some((call) => call.method === "loadRevisions")).toBe(false);
+    const saved = savedStates[savedStates.length - 1];
+    expect(saved?.sourceCursorAtMs).toBe(NOW - HOUR);
+    expect(saved?.sourceCursorAtMs).not.toBe(NOW);
+    expect(saved?.lastFullRepairAtMs).toBe(NOW);
+  });
+
+  it("uses only the inclusive cursor-overlap delta on a no-change refresh", async () => {
+    const db = baseDb();
+    const { engine, calls } = harness(db);
+    await engine.home("24h");
+    const baseline = calls.length;
+
+    await engine.refresh();
+
+    const revisionReads = calls.slice(baseline).filter((call) => call.method === "loadRevisions");
+    expect(revisionReads).toHaveLength(1);
+    expect(revisionReads[0]?.params?.updatedSinceMs).toBe(
+      NOW - HOUR - ANALYTICS_SOURCE_CURSOR_OVERLAP_MS,
+    );
+    expect(fullReads(calls, baseline)).toHaveLength(0);
+    expect(calls.slice(baseline).some((call) => call.method === "loadRevisionFrontier")).toBe(
+      false,
+    );
+  });
+
+  it("does not sweep stored rows that a partial delta did not mention", async () => {
+    const db = baseDb();
+    const { engine, savedStates } = harness(db);
+    await engine.home("lifetime");
+    await flushAsync();
+    const before = savedStates[savedStates.length - 1];
+    if (!before) throw new Error("expected baseline state");
+
+    await engine.refresh();
+    await flushAsync();
+
+    const after = savedStates[savedStates.length - 1];
+    expect(after?.occurrences.size).toBe(before.occurrences.size);
+    expect(after?.occurrences.has("msg_old")).toBe(true);
+    expect(after?.sourceCursorAtMs).toBe(before.sourceCursorAtMs);
+  });
+
+  it("conservatively refetches eligible null-timestamp payloads on a delta", async () => {
+    const db = baseDb();
+    db.rows.push(row("ses_root", "msg_null", NOW - 30 * 60_000, { input: 10 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_null"), null);
+    const { engine, calls } = harness(db);
+    await engine.home("24h");
+    const baseline = calls.length;
+
+    const target = db.rows.find((entry) => entry.messageID === "msg_null");
+    if (!target) throw new Error("msg_null missing");
+    target.tokens.input = 60;
+    await engine.refresh();
+
+    const changed = calls
+      .slice(baseline)
+      .filter((call) => call.method === "loadCompletedRows" && call.params?.messageIDs)
+      .flatMap((call) => call.params?.messageIDs as string[]);
+    expect(changed).toContain("msg_null");
+    expect((await engine.home("24h")).usage.totals.input).toBe(760);
+  });
+
+  it("replays new rows with the cursor timestamp and lexically earlier ids", async () => {
+    const db = baseDb();
+    const { engine } = harness(db);
+    await engine.home("24h");
+
+    db.rows.push(row("ses_root", "msg_0", NOW - HOUR, { input: 33 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_0"), NOW - HOUR);
+    await engine.refresh();
+
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(733);
+    expect(home.usage.stepCount).toBe(4);
+  });
+
+  it("caps the cursor at wall time for future rows and applies them when eligible", async () => {
+    const db = baseDb();
+    const { engine, savedStates, setNow } = harness(db);
+    await engine.home("24h");
+
+    db.rows.push(row("ses_root", "msg_future", NOW + DAY, { input: 50 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_future"), NOW + DAY);
+    await engine.refresh();
+    await flushAsync();
+    let saved = savedStates[savedStates.length - 1];
+    expect(saved?.sourceCursorAtMs).toBe(NOW);
+    expect(saved?.sourceCursorAtMs).toBeLessThanOrEqual(NOW);
+    expect((await engine.home("24h")).usage.totals.input).toBe(700);
+
+    setNow(NOW + DAY + 1);
+    await engine.refresh();
+    const futureHome = await engine.home("24h");
+    expect(futureHome.usage.totals.input).toBe(50);
+    await flushAsync();
+    saved = savedStates[savedStates.length - 1];
+    expect(saved?.sourceCursorAtMs).toBe(NOW + DAY);
+  });
+
+  it("repairs deletions and unchanged-timestamp edits only on the persisted 7-day cadence", async () => {
+    const db = baseDb();
+    const { engine, calls, savedStates, setNow } = harness(db);
+    await engine.home("lifetime");
+    await flushAsync();
+    const baseline = calls.length;
+
+    // Backdate both changes to the already-seen source timestamp: the delta
+    // cannot distinguish them, so only the rare payload repair can.
+    const edited = db.rows.find((entry) => entry.messageID === "msg_o");
+    if (!edited) throw new Error("msg_o missing");
+    edited.tokens.input = 401;
+    db.rows = db.rows.filter((entry) => entry.messageID !== "msg_b");
+    await engine.refresh();
+    const beforeRepair = await engine.home("lifetime");
+    expect(beforeRepair.usage.totals.input).toBe(1_500);
+
+    setNow(NOW + ANALYTICS_FULL_REPAIR_INTERVAL_MS + 1);
+    await engine.refresh();
+    const repaired = await engine.home("lifetime");
+    expect(repaired.usage.totals.input).toBe(1_301);
+    expect(repaired.usage.stepCount).toBe(3);
+
+    const repairReads = calls.slice(baseline).filter((call) => call.method === "loadRevisions");
+    expect(repairReads.some((call) => call.params?.updatedSinceMs === undefined)).toBe(true);
+    await flushAsync();
+    expect(savedStates[savedStates.length - 1]?.lastFullRepairAtMs).toBe(
+      NOW + ANALYTICS_FULL_REPAIR_INTERVAL_MS + 1,
+    );
+  });
+
+  it("keeps contributions and the cursor unchanged when the source is unavailable", async () => {
+    const db = baseDb();
+    const { engine, savedStates } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+    const before = savedStates[savedStates.length - 1];
+    if (!before) throw new Error("expected baseline state");
+    const writesBefore = savedStates.length;
+
+    const target = db.rows.find((entry) => entry.messageID === "msg_o");
+    if (!target) throw new Error("msg_o missing");
+    target.tokens.input = 999;
+    db.updatedAt.set(rowKey("ses_other", "msg_o"), NOW);
+    db.status = "unreadable";
+    await engine.refresh();
+
+    expect(savedStates.length).toBe(writesBefore);
+    expect(savedStates[savedStates.length - 1]?.sourceCursorAtMs).toBe(before.sourceCursorAtMs);
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(700);
+    expect(home.stale).toBe(true);
+  });
+
+  it("reconciles conservatively when the wall clock rolls back behind the cursor", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("lifetime");
+
+    // msg_old already completed before the rolled-back wall clock, so it can
+    // still appear in a lifetime view at that time.
+    const target = db.rows.find((entry) => entry.messageID === "msg_old");
+    if (!target) throw new Error("msg_old missing");
+    target.tokens.input = 801;
+    const rolledBack = NOW - 2 * HOUR;
+    db.updatedAt.set(rowKey("ses_other", "msg_old"), rolledBack);
+    setNow(rolledBack);
+    await engine.refresh();
+
+    const home = await engine.home("lifetime");
+    expect(home.usage.totals.input).toBe(801);
+  });
+
+  it("does not let a scoped session read advance the global cursor or repair clock", async () => {
+    const db = baseDb();
+    const { engine, calls, savedStates, setNow } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+    const before = savedStates[savedStates.length - 1];
+    if (!before) throw new Error("expected baseline state");
+    const baseline = calls.length;
+
+    setNow(NOW + INTERVAL + 1);
+    await engine.session("ses_root");
+    await flushAsync();
+
+    const after = savedStates[savedStates.length - 1];
+    expect(after?.sourceCursorAtMs).toBe(before.sourceCursorAtMs);
+    expect(after?.lastFullRepairAtMs).toBe(before.lastFullRepairAtMs);
+    expect(after?.frontierAtMs).toBe(before.frontierAtMs);
+    for (const call of calls.slice(baseline).filter((entry) => entry.method === "loadRevisions")) {
+      expect(call.params?.sessionIDs).toBeDefined();
+    }
+  });
+
   it("exposes worker stats and a best-effort gc hook", async () => {
     const { engine } = harness(baseDb());
     const stats = await engine.stats();
@@ -714,11 +989,67 @@ describe("analytics engine: scope reads", () => {
     const reads = calls.filter((call) => call.method === "loadCompletedRows");
     expect(
       reads.every(
-        (call) => call.params?.sessionIDs !== undefined || call.params?.messageIDs !== undefined,
+        (call) =>
+          call.params?.sessionIDs !== undefined ||
+          call.params?.messageIDs !== undefined ||
+          call.params?.sinceMs !== undefined,
       ),
     ).toBe(true);
-    const ownerFetch = reads.find((call) => call.params?.messageIDs !== undefined);
-    expect(ownerFetch?.params?.messageIDs).toContain("msg!a");
+    const ownerFetch = reads.find(
+      (call) => call.params?.sessionIDs === undefined && call.params?.sinceMs !== undefined,
+    );
+    expect(ownerFetch?.params?.sinceMs).toBe(NOW - HOUR);
+    expect(ownerFetch?.params?.untilMs).toBe(NOW - HOUR);
+  });
+
+  it("discovers unseen multiplicity and lexically earlier external fork owners", async () => {
+    const db = baseDb();
+    db.rows = [
+      row("ses_root", "msg_a1", NOW - HOUR, { input: 100 }),
+      row("ses_root", "msg_a2", NOW - HOUR, { input: 100 }),
+      row("ses_root", "msg_b", NOW - 30 * 60_000, { input: 200 }),
+      row("ses_other", "msg!1", NOW - HOUR, { input: 100 }),
+    ];
+    for (const entry of db.rows) {
+      db.updatedAt.set(rowKey(entry.sessionID, entry.messageID), NOW - HOUR);
+    }
+
+    const first = harness(db);
+    const before = await first.engine.project("p1", "7d");
+    // Only one external copy is known: the in-scope second copy is still owned.
+    expect(before.totals.input).toBe(300);
+    await flushAsync();
+    const saved = first.savedStates[first.savedStates.length - 1];
+    if (!saved) throw new Error("expected persisted scoped state");
+    const persisted = cloneState(saved);
+    await first.engine.close();
+
+    db.rows.push(row("ses_other", "msg!2", NOW - HOUR, { input: 100 }));
+    db.updatedAt.set(rowKey("ses_other", "msg!2"), NOW - HOUR);
+    const calls: ReaderCall[] = [];
+    const savedStates: AnalyticsState[] = [];
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => cloneState(persisted),
+      loadPresentation: async () => undefined,
+      saveSnapshot: async (_path, state) => {
+        savedStates.push(cloneState(state));
+        return true;
+      },
+      savePresentation: async () => true,
+    });
+
+    const after = await engine.project("p1", "7d");
+    // The unseen second external copy must be discovered even though one
+    // same-fingerprint external occurrence was already indexed.
+    expect(after.totals.input).toBe(200);
+    await flushAsync();
+    const latest = savedStates[savedStates.length - 1];
+    expect(latest?.occurrences.get("msg!2")?.updatedAtMs).toBe(NOW - HOUR);
+    await engine.close();
   });
 
   it("scopes session detail to the tree and reads compactions only for the tree", async () => {
@@ -745,9 +1076,15 @@ describe("analytics engine: scope reads", () => {
         (call) =>
           call.method === "loadCompletedRows" &&
           call.params?.sessionIDs === undefined &&
-          call.params?.messageIDs === undefined,
+          call.params?.messageIDs === undefined &&
+          call.params?.sinceMs === undefined &&
+          call.params?.untilMs === undefined,
       ),
     ).toBe(false);
+    // Session detail reconciles only its own tree revisions, never a global one.
+    for (const call of calls.filter((entry) => entry.method === "loadRevisions")) {
+      expect(call.params?.sessionIDs).toBeDefined();
+    }
   });
 
   it("never silently drops more than eight scopes", async () => {
@@ -939,6 +1276,78 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     expect(refreshed.usage.totals.input).toBe(705);
     expect(refreshed.stale).toBe(false);
     expect(generations.length).toBeGreaterThan(0);
+    await engine.close();
+  });
+
+  it("resumes a two-day-old snapshot with a delta, not a full baseline", async () => {
+    const { db, persisted } = await warmRestartFixture();
+    const resumeAt = NOW + 2 * DAY - 30 * 60_000;
+    db.rows.push(row("ses_root", "msg_resume", resumeAt, { input: 7 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_resume"), resumeAt);
+    const calls: ReaderCall[] = [];
+    const saved: AnalyticsState[] = [];
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW + 2 * DAY,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => cloneState(persisted),
+      loadPresentation: async () => undefined,
+      saveSnapshot: async (_path, state) => {
+        saved.push(cloneState(state));
+        return true;
+      },
+      savePresentation: async () => true,
+    });
+
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(7);
+    const revisionReads = calls.filter((call) => call.method === "loadRevisions");
+    expect(revisionReads).toHaveLength(1);
+    expect(revisionReads[0]?.params?.updatedSinceMs).toBe(
+      NOW - HOUR - ANALYTICS_SOURCE_CURSOR_OVERLAP_MS,
+    );
+    expect(calls.some((call) => call.method === "loadRevisionFrontier")).toBe(false);
+    expect(fullReads(calls)).toHaveLength(0);
+
+    await flushAsync();
+    const last = saved[saved.length - 1];
+    expect(last?.lastFullRepairAtMs).toBe(NOW);
+    expect(last?.sourceCursorAtMs).toBe(resumeAt);
+    await engine.close();
+  });
+
+  it("baselines a cursorless legacy snapshot instead of inferring from wall freshness", async () => {
+    const { db, persisted } = await warmRestartFixture();
+    const legacy = cloneState(persisted);
+    delete legacy.sourceCursorAtMs;
+    delete legacy.lastFullRepairAtMs;
+    const calls: ReaderCall[] = [];
+    const saved: AnalyticsState[] = [];
+    const engine = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW + INTERVAL + 1,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => legacy,
+      loadPresentation: async () => undefined,
+      saveSnapshot: async (_path, state) => {
+        saved.push(cloneState(state));
+        return true;
+      },
+      savePresentation: async () => true,
+    });
+
+    await engine.home("24h");
+    await engine.refresh();
+    const revisionReads = calls.filter((call) => call.method === "loadRevisions");
+    expect(revisionReads.length).toBeGreaterThan(0);
+    expect(revisionReads[0]?.params?.updatedSinceMs).toBeUndefined();
+    await flushAsync();
+    const last = saved[saved.length - 1];
+    expect(last?.sourceCursorAtMs).toBe(NOW - HOUR);
+    expect(last?.sourceCursorAtMs).not.toBe(last?.frontierAtMs);
+    expect(last?.lastFullRepairAtMs).toBe(NOW + INTERVAL + 1);
     await engine.close();
   });
 
@@ -1181,10 +1590,11 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     for (let index = 0; index < 80; index += 1) {
       db.rows.push(row("ses_root", `msg_prune_${index}`, NOW - HOUR + index, { input: index + 5 }));
     }
-    const { engine, savedStates } = harness(db);
+    const { engine, savedStates, setNow } = harness(db, { fullRepairIntervalMs: 1 });
     await engine.home("lifetime");
     await flushAsync();
     db.rows = db.rows.filter((entry) => !/^msg_prune_(?:[0-5]?\d)$/.test(entry.messageID));
+    setNow(NOW + 1);
     await engine.refresh();
     await flushAsync();
     const last = savedStates[savedStates.length - 1];

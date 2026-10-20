@@ -97,6 +97,8 @@ function baseState(): AnalyticsState {
     extent: { sinceMs: NOW - 3_600_000, untilMs: NOW },
     sourceIdentity: identity(),
     frontierAtMs: NOW,
+    sourceCursorAtMs: NOW - 60_000,
+    lastFullRepairAtMs: NOW,
   };
 }
 
@@ -167,7 +169,33 @@ describe("analytics snapshot codec v3", () => {
     expect(decoded?.extent).toEqual({ sinceMs: NOW - 3_600_000, untilMs: NOW });
     expect(decoded?.sourceIdentity?.inode).toBe("2");
     expect(decoded?.frontierAtMs).toBe(NOW);
+    expect(decoded?.sourceCursorAtMs).toBe(NOW - 60_000);
+    expect(decoded?.lastFullRepairAtMs).toBe(NOW);
     expect(decoded?.fingerprintIndex.size).toBe(1);
+  });
+
+  it("never infers a source cursor from wall freshness or cached occurrence times", () => {
+    const state = baseState();
+    delete state.sourceCursorAtMs;
+    delete state.lastFullRepairAtMs;
+    // Keep the occurrence at a much older timestamp than `frontierAtMs`.
+    const older = withRows();
+    delete older.sourceCursorAtMs;
+    delete older.lastFullRepairAtMs;
+    older.frontierAtMs = NOW;
+    older.occurrences.forEach((occurrence) => {
+      occurrence.updatedAtMs = NOW - 30 * 24 * 3_600_000;
+    });
+
+    for (const candidate of [state, older]) {
+      const persisted = encodeAnalyticsState(candidate, NOW);
+      expect(persisted.sourceCursorAtMs).toBeNull();
+      expect(persisted.lastFullRepairAtMs).toBeNull();
+      const decoded = decodeAnalyticsState(JSON.parse(JSON.stringify(persisted)) as unknown);
+      expect(decoded?.frontierAtMs).toBe(NOW);
+      expect(decoded?.sourceCursorAtMs).toBeUndefined();
+      expect(decoded?.lastFullRepairAtMs).toBeUndefined();
+    }
   });
 
   it("round-trips a bounded warm presentation sidecar", () => {
@@ -221,6 +249,8 @@ describe("analytics snapshot codec v3", () => {
     expect(decodeAnalyticsState({ ...persisted, schema: "other" })).toBeUndefined();
     expect(decodeAnalyticsState({ ...persisted, frontierAtMs: "soon" })).toBeUndefined();
     expect(decodeAnalyticsState({ ...persisted, sourceIdentity: [1, 2] })).toBeUndefined();
+    expect(decodeAnalyticsState({ ...persisted, sourceCursorAtMs: "later" })).toBeUndefined();
+    expect(decodeAnalyticsState({ ...persisted, lastFullRepairAtMs: Number.NaN })).toBeUndefined();
     expect(
       decodeAnalyticsState({ ...persisted, occurrences: [[99, "ses", "msg", null]] }),
     ).toBeUndefined();

@@ -125,12 +125,33 @@ function fakeReader(db: FakeDb): AnalyticsReader {
           return rows;
         },
         readCompactionMarkers: () => [],
-        readMessageRevisions: () => ({
-          available: true,
-          updatedAtAvailable: true,
-          completedAtAvailable: true,
-          revisions: revisionsFor(),
-        }),
+        readMessageRevisions: (params = {}) => {
+          let revisions = revisionsFor();
+          const updatedSinceMs = params.updatedSinceMs;
+          if (updatedSinceMs !== undefined) {
+            revisions = revisions.filter(
+              (revision) => revision.updatedAtMs === null || revision.updatedAtMs >= updatedSinceMs,
+            );
+          }
+          return {
+            available: true,
+            updatedAtAvailable: true,
+            completedAtAvailable: true,
+            revisions,
+          };
+        },
+        readMessageRevisionFrontier: () => {
+          let maxUpdatedAtMs: number | null = null;
+          for (const revision of revisionsFor()) {
+            if (
+              revision.updatedAtMs !== null &&
+              (maxUpdatedAtMs === null || revision.updatedAtMs > maxUpdatedAtMs)
+            ) {
+              maxUpdatedAtMs = revision.updatedAtMs;
+            }
+          }
+          return { available: true, updatedAtAvailable: true, maxUpdatedAtMs };
+        },
       };
       return { status: "ok", value: await read(snapshot) };
     },

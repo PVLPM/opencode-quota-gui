@@ -75,6 +75,7 @@ type ProjectedMessageRow = {
   id: string;
   session_id: string;
   time_created: number;
+  time_updated?: unknown;
   role: unknown;
   provider_id: unknown;
   model_id: unknown;
@@ -313,15 +314,21 @@ function mapCompletedAssistantMessages(rows: ProjectedMessageRow[]): OpenCodeMes
   return mapAssistantMessages(rows).filter((message) => completedAt(message) !== null);
 }
 
-function buildCompletedAssistantQuery(params: {
-  completedSinceMs?: number;
-  completedUntilMs?: number;
-  sessionID?: string;
-  sessionIDs?: readonly string[];
-  messageIDs?: readonly string[];
-}): { sql: string; args: unknown[] } {
+function buildCompletedAssistantQuery(
+  params: {
+    completedSinceMs?: number;
+    completedUntilMs?: number;
+    sessionID?: string;
+    sessionIDs?: readonly string[];
+    messageIDs?: readonly string[];
+  },
+  includeUpdatedAt = false,
+): { sql: string; args: unknown[] } {
   const completedScalar = guardedJsonScalar("$.time.completed");
   const completedExpression = `CAST(${completedScalar} AS REAL)`;
+  const projectedColumns = includeUpdatedAt
+    ? `${PROJECTED_MESSAGE_COLUMNS}, time_updated`
+    : PROJECTED_MESSAGE_COLUMNS;
   const where = [
     ASSISTANT_FILTER,
     `CASE WHEN json_valid(data) THEN json_type(data, '$.time.completed') END IN ('integer', 'real')`,
@@ -359,7 +366,7 @@ function buildCompletedAssistantQuery(params: {
 
   return {
     sql:
-      `SELECT ${PROJECTED_MESSAGE_COLUMNS} FROM "session_message"` +
+      `SELECT ${projectedColumns} FROM "session_message"` +
       ` WHERE ${where.join(" AND ")}` +
       ` ORDER BY ${completedExpression} ASC, id ASC`,
     args,
@@ -781,6 +788,11 @@ export interface OpenCodeRawAssistantRow {
   messageID: string;
   createdAtMs: number;
   completedAtMs: number;
+  /**
+   * `session_message.time_updated` when the column was read; null when the
+   * column exists but holds no number. Additive: fingerprints ignore it.
+   */
+  updatedAtMs?: number | null;
   tokens: OpenCodeRawTokenCounts;
   cost?: number;
   providerID?: string;
@@ -869,6 +881,7 @@ function readCompletedAssistantRowsFrom(
   const columns = readTableColumns(conn, "session_message");
   if (!columns?.has("type") || !columns.has("data")) return [];
   if (!hasJsonExtract(conn)) return [];
+  const hasUpdatedAt = columns.has("time_updated");
 
   const reservedArgs = countDefined([params.completedSinceMs, params.completedUntilMs]);
   const maxIdsPerQuery = Math.max(1, SQLITE_MAX_MESSAGE_QUERY_ARGS - reservedArgs);
@@ -877,19 +890,24 @@ function readCompletedAssistantRowsFrom(
   const collect = (query: { sql: string; args: unknown[] }): void => {
     for (const row of conn.all<ProjectedMessageRow>(query.sql, query.args)) {
       const mapped = mapRawCompletedAssistantRow(row);
-      if (mapped) out.push(mapped);
+      if (!mapped) continue;
+      if (hasUpdatedAt) mapped.updatedAtMs = normalizeNumber(row.time_updated) ?? null;
+      out.push(mapped);
     }
   };
 
   if (scope.kind === "all") {
-    collect(buildCompletedAssistantQuery(params));
+    collect(buildCompletedAssistantQuery(params, hasUpdatedAt));
   } else {
     const queries = scopedIdQueries(scope.ids, maxIdsPerQuery, (clause) =>
-      buildCompletedAssistantQuery({
-        completedSinceMs: params.completedSinceMs,
-        completedUntilMs: params.completedUntilMs,
-        ...clause,
-      }),
+      buildCompletedAssistantQuery(
+        {
+          completedSinceMs: params.completedSinceMs,
+          completedUntilMs: params.completedUntilMs,
+          ...clause,
+        },
+        hasUpdatedAt,
+      ),
     );
     for (const query of queries) collect(query);
   }
@@ -1121,6 +1139,27 @@ export interface ReadMessageRevisionsParams {
   sessionID?: string;
   sessionIDs?: readonly string[];
   messageIDs?: readonly string[];
+  /**
+   * Inclusive lower bound on `session_message.time_updated` for an incremental
+   * revision read. Rows with a NULL timestamp are always included so a legacy
+   * row never becomes invisible to reconciliation. Installed OpenCode has no
+   * `time_updated` index, so the query still scans SQLite; it avoids projecting
+   * the JSON completion payload for rows outside the delta.
+   */
+  updatedSinceMs?: number;
+}
+
+/**
+ * Cheap source frontier for first-baseline cursor establishment: the maximum
+ * physical `time_updated`, without projecting any JSON completion payload.
+ */
+export interface OpenCodeMessageRevisionFrontier {
+  /** false when `session_message` is absent or unreadable. */
+  available: boolean;
+  /** false when the schema has no usable `time_updated` column. */
+  updatedAtAvailable: boolean;
+  /** Maximum non-null `time_updated`, or null when the table is empty. */
+  maxUpdatedAtMs: number | null;
 }
 
 type RevisionRow = {
@@ -1182,8 +1221,15 @@ function readMessageRevisionsFrom(
       : "NULL AS completed",
   ].join(", ");
 
-  const maxIdsPerQuery = SQLITE_MAX_MESSAGE_QUERY_ARGS;
   const revisions: OpenCodeMessageRevision[] = [];
+  const updatedDelta =
+    updatedAtAvailable && typeof params.updatedSinceMs === "number"
+      ? params.updatedSinceMs
+      : undefined;
+  const maxIdsPerQuery = Math.max(
+    1,
+    SQLITE_MAX_MESSAGE_QUERY_ARGS - (updatedDelta === undefined ? 0 : 1),
+  );
 
   const build = (scopeClause?: StorageIdScope): { sql: string; args: unknown[] } => {
     const where: string[] = [];
@@ -1199,11 +1245,17 @@ function readMessageRevisionsFrom(
       where.push(`id IN (${scopeClause.messageIDs.map(() => "?").join(", ")})`);
       args.push(...scopeClause.messageIDs);
     }
+    if (updatedDelta !== undefined) {
+      // NULL timestamps are replayed rather than silently skipped; a new legacy
+      // row must remain visible even when it cannot advance the cursor.
+      where.push(`(time_updated IS NULL OR time_updated >= ?)`);
+      args.push(updatedDelta);
+    }
     return {
       sql:
         `SELECT ${projection} FROM "session_message"` +
         (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
-        ` ORDER BY id ASC`,
+        ` ORDER BY ${updatedDelta === undefined ? "id" : "COALESCE(time_updated, 0), id"} ASC`,
       args,
     };
   };
@@ -1234,6 +1286,42 @@ function readMessageRevisionsFrom(
 
   revisions.sort((a, b) => compareStringIds(a.messageID, b.messageID));
   return revisionSnapshot(updatedAtAvailable, completedAtAvailable, revisions);
+}
+
+/**
+ * Read only the source `time_updated` frontier. This is the first-baseline
+ * establishment path: it scans the physical column but never projects JSON, so
+ * it cannot accidentally turn a cold start into a lifetime completion read.
+ */
+function readMessageRevisionFrontierFrom(conn: SqliteConn): OpenCodeMessageRevisionFrontier {
+  const columns = readTableColumns(conn, "session_message");
+  if (!columns?.has("id")) {
+    return { available: false, updatedAtAvailable: false, maxUpdatedAtMs: null };
+  }
+  if (!columns.has("time_updated")) {
+    return { available: true, updatedAtAvailable: false, maxUpdatedAtMs: null };
+  }
+  const row = conn.get<{ max_updated: unknown }>(
+    `SELECT MAX(time_updated) AS max_updated FROM "session_message"`,
+  );
+  const maxUpdatedAtMs = normalizeNumber(row?.max_updated);
+  return {
+    available: true,
+    updatedAtAvailable: true,
+    maxUpdatedAtMs: maxUpdatedAtMs ?? null,
+  };
+}
+
+export async function readMessageRevisionFrontier(): Promise<OpenCodeMessageRevisionFrontier> {
+  const db = openDbOrNull();
+  if (!db) return { available: false, updatedAtAvailable: false, maxUpdatedAtMs: null };
+
+  const conn = await db.open();
+  try {
+    return readMessageRevisionFrontierFrom(conn);
+  } finally {
+    conn.close();
+  }
 }
 
 export async function readMessageRevisions(
@@ -1441,6 +1529,7 @@ export interface OpenCodeStorageSnapshot {
   readCompletedAssistantRows(params?: ReadCompletedAssistantRowsParams): OpenCodeRawAssistantRow[];
   readCompactionMarkers(params?: ReadCompactionMarkersParams): OpenCodeCompactionMarker[];
   readMessageRevisions(params?: ReadMessageRevisionsParams): OpenCodeMessageRevisionSnapshot;
+  readMessageRevisionFrontier(): OpenCodeMessageRevisionFrontier;
 }
 
 /**
@@ -1464,7 +1553,37 @@ function createStorageSnapshot(
     readCompletedAssistantRows: (params = {}) => readCompletedAssistantRowsFrom(conn, params),
     readCompactionMarkers: (params = {}) => readCompactionMarkersFrom(conn, params),
     readMessageRevisions: (params = {}) => readMessageRevisionsFrom(conn, params),
+    readMessageRevisionFrontier: () => readMessageRevisionFrontierFrom(conn),
   };
+}
+
+/**
+ * The stable path identity observed before opening must still describe the
+ * path while the transaction runs. A replacement between `stat` and `open`
+ * otherwise pairs one file's identity with another file's rows.
+ */
+function sameStablePathIdentity(
+  before: OpenCodeSourceIdentity,
+  after: OpenCodeSourceIdentity,
+): boolean {
+  if (before.status !== "ok" || after.status !== "ok") return false;
+  if ((before.realPath ?? before.dbPath) !== (after.realPath ?? after.dbPath)) return false;
+  if (
+    before.birthtimeMs !== undefined &&
+    after.birthtimeMs !== undefined &&
+    before.birthtimeMs !== after.birthtimeMs
+  ) {
+    return false;
+  }
+  const beforeKey = fileIdentityKey(before);
+  const afterKey = fileIdentityKey(after);
+  if (beforeKey !== undefined && afterKey !== undefined) return beforeKey === afterKey;
+  if (before.birthtimeMs !== undefined && after.birthtimeMs !== undefined) {
+    return before.birthtimeMs === after.birthtimeMs;
+  }
+  // No stable key is exposed on this platform; keep the existing "unknown"
+  // policy rather than inventing a stronger generation guarantee.
+  return true;
 }
 
 /**
@@ -1472,9 +1591,11 @@ function createStorageSnapshot(
  *
  * The first `SELECT` after `BEGIN` establishes the read snapshot, so changed
  * payload reads and the membership/revision read inside the callback cannot
- * observe a concurrently committed generation. Callback errors propagate after
- * a rollback; only opening/transaction/schema failures map to `missing` or
- * `unreadable`.
+ * observe a concurrently committed generation. The same stable path identity
+ * is rechecked after opening and before commit; a path replacement maps to
+ * `unreadable` so the caller keeps its last good state. Callback errors
+ * propagate after a rollback; only opening/transaction/schema/path-identity
+ * failures map to `missing` or `unreadable`.
  */
 export async function withOpenCodeStorageSnapshot<T>(
   read: (snapshot: OpenCodeStorageSnapshot) => T | Promise<T>,
@@ -1500,6 +1621,10 @@ export async function withOpenCodeStorageSnapshot<T>(
       return { status: "unreadable" };
     }
 
+    if (!sameStablePathIdentity(statIdentity, readSourceIdentityStat())) {
+      return { status: "unreadable" };
+    }
+
     let identity: OpenCodeSourceIdentity;
     try {
       identity = { ...statIdentity, schemaToken: readSchemaToken(conn) };
@@ -1508,6 +1633,12 @@ export async function withOpenCodeStorageSnapshot<T>(
     }
 
     const value = await read(createStorageSnapshot(conn, identity));
+    // Do not publish a generation if the path was replaced during the read;
+    // the connection remains the old file while the path already points at a
+    // different generation.
+    if (!sameStablePathIdentity(statIdentity, readSourceIdentityStat())) {
+      return { status: "unreadable" };
+    }
     if (began) {
       try {
         conn.get("COMMIT");

@@ -9,6 +9,7 @@ import {
   readAllSessionsIndex,
   readCompactionMarkers,
   readCompletedAssistantRows,
+  readMessageRevisionFrontier,
   readMessageRevisions,
   readOpenCodeSourceIdentity,
   readProjectsIndex,
@@ -29,10 +30,19 @@ interface SqliteTrace {
 
 const sqliteTrace = vi.hoisted((): SqliteTrace => ({ opened: 0, statements: [], params: [] }));
 
+const storageRace = vi.hoisted((): { replaceBeforeOpen: (() => void) | null } => ({
+  replaceBeforeOpen: null,
+}));
+
 vi.mock("../src/lib/opencode-sqlite.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/opencode-sqlite.js")>();
   return {
     openOpenCodeSqliteReadOnly: async (dbPath: string) => {
+      const replacement = storageRace.replaceBeforeOpen;
+      if (replacement) {
+        storageRace.replaceBeforeOpen = null;
+        replacement();
+      }
       sqliteTrace.opened += 1;
       const conn = await actual.openOpenCodeSqliteReadOnly(dbPath);
       return {
@@ -60,6 +70,7 @@ beforeEach(async () => {
   sqliteTrace.opened = 0;
   sqliteTrace.statements.length = 0;
   sqliteTrace.params.length = 0;
+  storageRace.replaceBeforeOpen = null;
   root = await createGuiDatabaseRoot();
 });
 
@@ -114,6 +125,7 @@ describe("raw completed assistant reader", () => {
       messageID: "msg_original",
       createdAtMs: 1_000,
       completedAtMs: 1_500,
+      updatedAtMs: 1_500,
       tokens: { input: 1_000, output: 500, reasoning: 10, cacheRead: 20, cacheWrite: 30 },
       cost: 10,
       providerID: "openai",
@@ -699,6 +711,80 @@ describe("message revision snapshot", () => {
 
     expect(sqliteTrace.opened).toBe(opened);
   });
+
+  it("reads an inclusive updated-since delta in deterministic time-then-id order", async () => {
+    stubDatabase({
+      sessions: [{ id: "ses_a", createdMs: 1 }],
+      messages: [
+        { id: "msg_old", sessionID: "ses_a", createdMs: 1, updatedMs: 100, completedMs: 90 },
+        { id: "msg_edge", sessionID: "ses_a", createdMs: 1, updatedMs: 200, completedMs: 190 },
+        {
+          id: "msg_equal_b",
+          sessionID: "ses_a",
+          createdMs: 1,
+          updatedMs: 300,
+          completedMs: 290,
+        },
+        {
+          id: "msg_equal_a",
+          sessionID: "ses_a",
+          createdMs: 1,
+          updatedMs: 300,
+          completedMs: 280,
+        },
+      ],
+    });
+
+    const snapshot = await readMessageRevisions({ updatedSinceMs: 200 });
+
+    // Inclusive lower bound, plus code-unit id ordering inside equal timestamps
+    // so a lexically earlier late commit is never skipped.
+    expect(snapshot.revisions.map((revision) => revision.messageID)).toEqual([
+      "msg_edge",
+      "msg_equal_a",
+      "msg_equal_b",
+    ]);
+    expect(
+      sqliteTrace.statements.some((statement) =>
+        statement.includes("time_updated IS NULL OR time_updated >="),
+      ),
+    ).toBe(true);
+  });
+
+  it("reads the cheap source frontier without completion projection", async () => {
+    stubDatabase({
+      sessions: [{ id: "ses_a", createdMs: 1 }],
+      messages: [
+        { id: "msg_a", sessionID: "ses_a", createdMs: 1, updatedMs: 100, completedMs: 90 },
+        { id: "msg_b", sessionID: "ses_a", createdMs: 1, updatedMs: 400, completedMs: 390 },
+      ],
+    });
+
+    await expect(readMessageRevisionFrontier()).resolves.toEqual({
+      available: true,
+      updatedAtAvailable: true,
+      maxUpdatedAtMs: 400,
+    });
+    const frontierRead = sqliteTrace.statements.find((statement) =>
+      statement.includes("MAX(time_updated)"),
+    );
+    expect(frontierRead).toBeDefined();
+    expect(frontierRead).not.toContain("json_extract");
+  });
+
+  it("reports the frontier as unavailable without a time_updated column", async () => {
+    stubDatabase({
+      messageUpdatedColumn: false,
+      sessions: [{ id: "ses_a", createdMs: 1 }],
+      messages: [{ id: "msg_a", sessionID: "ses_a", createdMs: 1, completedMs: 90 }],
+    });
+
+    await expect(readMessageRevisionFrontier()).resolves.toEqual({
+      available: true,
+      updatedAtAvailable: false,
+      maxUpdatedAtMs: null,
+    });
+  });
 });
 
 describe("source identity", () => {
@@ -899,6 +985,28 @@ describe("consistent storage snapshot", () => {
     expect(empty.value.compactions).toEqual([]);
     expect(empty.value.rows).toEqual([]);
     expect(empty.value.identityStatus).toBe("ok");
+  });
+
+  it("rejects a path replacement between the pre-stat and opening the transaction", async () => {
+    const dbPath = stubDatabase({
+      sessions: [{ id: "ses_old", createdMs: 1 }],
+      messages: [{ id: "msg_old", sessionID: "ses_old", createdMs: 10, completedMs: 20 }],
+    });
+    storageRace.replaceBeforeOpen = () => {
+      rmSync(dbPath, { force: true });
+      rmSync(`${dbPath}-wal`, { force: true });
+      rmSync(`${dbPath}-shm`, { force: true });
+      writeGuiDatabase(root, { sessions: [{ id: "ses_new", createdMs: 2 }] });
+    };
+
+    const result = await withOpenCodeStorageSnapshot(() => "never");
+
+    expect(result).toEqual({ status: "unreadable" });
+    // The next read opens the replacement normally instead of publishing it
+    // under the old path identity.
+    await expect(readAllSessionsIndex()).resolves.toMatchObject({
+      ses_new: { id: "ses_new" },
+    });
   });
 
   it("serves one consistent snapshot while another connection commits (WAL)", async () => {

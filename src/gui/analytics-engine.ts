@@ -3,10 +3,12 @@
  *
  * Every refresh stages a complete candidate inside one
  * `withOpenCodeStorageSnapshot` transaction (identity + metadata + revision
- * membership + changed-ID payload). Historical extent is separate from frontier
- * freshness, so a warm persisted presentation snapshot is served immediately
- * while an age-gated refresh advances newer rows. There is no autonomous timer;
- * work is request-driven.
+ * membership + changed-ID payload). Historical extent, the trusted source
+ * `time_updated` cursor, and wall-time frontier freshness are separate: normal
+ * global refreshes read only the inclusive cursor-overlap delta, scoped reads
+ * never advance the cursor, and a persisted 7-day repair re-reads the indexed
+ * extent plus cached scopes. There is no autonomous timer; work is
+ * request-driven.
  */
 import { performance } from "node:perf_hooks";
 
@@ -14,6 +16,7 @@ import type { HomeSnapshot, ProjectSnapshot, SessionSnapshot } from "../contract
 import { isRangeKey, type RangeKey, rangeWindow } from "../contracts/ranges.js";
 import {
   compareOpenCodeSourceIdentity,
+  type OpenCodeMessageRevisionSnapshot,
   type OpenCodeRawAssistantRow,
   type OpenCodeSessionInfo,
   type OpenCodeSourceIdentity,
@@ -43,6 +46,10 @@ import {
 } from "./analytics-state.js";
 
 export const ANALYTICS_REFRESH_INTERVAL_MS = 600_000;
+/** Explicit, rare full reconciliation cadence (persisted across restarts). */
+export const ANALYTICS_FULL_REPAIR_INTERVAL_MS = 7 * 24 * 60 * 60_000;
+/** Inclusive replay overlap for equal/late `time_updated` values (clock skew). */
+export const ANALYTICS_SOURCE_CURSOR_OVERLAP_MS = 5 * 60_000;
 const MAX_SCOPE_BATCH = 8;
 const MAX_PROJECT_CACHE = 12;
 const PRESENTATION_SAVE_INTERVAL_MS = 60_000;
@@ -85,6 +92,8 @@ export interface AnalyticsEngineOptions {
   snapshotPath?: string;
   now?: () => number;
   refreshIntervalMs?: number;
+  /** Testable override for the persisted full-reconciliation cadence. */
+  fullRepairIntervalMs?: number;
   loadSnapshot?: (path: string) => Promise<AnalyticsState | undefined>;
   saveSnapshot?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
   loadPresentation?: (path: string) => Promise<WarmAnalyticsPresentation | undefined>;
@@ -136,6 +145,8 @@ interface RefreshJob {
   globalRange?: RangeKey;
   detailSessionIds: string[];
   projectScopes: Array<{ projectId: string; range: RangeKey }>;
+  /** Set only by the engine when a persisted full reconciliation is due. */
+  repair?: boolean;
 }
 
 interface StagedUpsert {
@@ -165,6 +176,14 @@ interface Candidate {
   detailSignatures: Array<[string, string]>;
   detailCompactions: Array<[string, Array<{ sessionId: string; atMs: number; messageId: string }>]>;
   projectSignatures: Array<[string, string]>;
+  /**
+   * Global-refresh cursor outcome: a number establishes the next half-open
+   * source frontier, `null` clears it because timestamps are unusable, and
+   * `undefined` means this scoped refresh must not touch it.
+   */
+  sourceCursorAtMs?: number | null;
+  /** Set when this global refresh completed a baseline/full repair. */
+  repairCompletedAtMs?: number;
 }
 
 const RANGE_WIDTH: Record<RangeKey, number> = {
@@ -280,16 +299,21 @@ function projectSignature(
   return `${projectId}|${range}|${projectSessionIds(sessions, projectId).join(",")}`;
 }
 
-function metadataChanged(
-  previousSessions: AnalyticsState["sessions"],
-  nextSessions: AnalyticsState["sessions"],
-  previousProjects: AnalyticsState["projects"],
-  nextProjects: AnalyticsState["projects"],
-): boolean {
-  return (
-    JSON.stringify(previousSessions) !== JSON.stringify(nextSessions) ||
-    JSON.stringify(previousProjects) !== JSON.stringify(nextProjects)
-  );
+function metadataChanged(previous: unknown, next: unknown): boolean {
+  return JSON.stringify(previous) !== JSON.stringify(next);
+}
+
+function compareIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Positive completion time only for completed assistant rows; 0 otherwise. */
+function revisionCompletedAt(revision: { type: string; completedAtMs: number | null }): number {
+  return revision.type === "assistant" &&
+    revision.completedAtMs !== null &&
+    revision.completedAtMs > 0
+    ? revision.completedAtMs
+    : 0;
 }
 
 export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): AnalyticsEngine {
@@ -300,6 +324,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     options.refreshIntervalMs !== undefined && Number.isFinite(options.refreshIntervalMs)
       ? Math.max(0, options.refreshIntervalMs)
       : ANALYTICS_REFRESH_INTERVAL_MS;
+  const fullRepairIntervalMs =
+    options.fullRepairIntervalMs !== undefined && Number.isFinite(options.fullRepairIntervalMs)
+      ? Math.max(0, options.fullRepairIntervalMs)
+      : ANALYTICS_FULL_REPAIR_INTERVAL_MS;
   const loadSnapshot = options.loadSnapshot ?? loadAnalyticsSnapshot;
   const saveSnapshot = options.saveSnapshot ?? saveAnalyticsSnapshot;
   const presentationPath =
@@ -385,7 +413,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   let lastGlobalAttemptAtMs = 0;
   let lastScopedAttemptAtMs = 0;
   let unavailable = false;
-  let scanEpochCounter = 0;
   let peakHeapUsed = 0;
   let peakRss = 0;
 
@@ -400,11 +427,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const usage = process.memoryUsage();
     if (usage.heapUsed > peakHeapUsed) peakHeapUsed = usage.heapUsed;
     if (usage.rss > peakRss) peakRss = usage.rss;
-  }
-
-  function nextScanEpoch(): number {
-    scanEpochCounter += 1;
-    return scanEpochCounter;
   }
 
   function setWatermark(row: OpenCodeRawAssistantRow, value: number | null): void {
@@ -723,7 +745,14 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const identity = snapshot.identity;
     const comparison = compareOpenCodeSourceIdentity(state.sourceIdentity, identity);
     if (comparison === "unavailable") return "unavailable";
-    const replaced = comparison === "changed";
+    // A truly pristine in-memory state is the first baseline, not a source
+    // replacement; it has nothing to clear and needs no lifetime projection.
+    const pristine =
+      comparison === "changed" &&
+      state.sourceIdentity === undefined &&
+      state.occurrences.size === 0 &&
+      Object.keys(state.sessions).length === 0;
+    const replaced = comparison === "changed" && !pristine;
 
     const readHistoricalRows = (
       params: ReadCompletedAssistantRowsParams = {},
@@ -734,22 +763,112 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
     const sessions = measureSync("metadataRead", () => snapshot.readAllSessionsIndex());
     const projects = measureSync("metadataRead", () => snapshot.readProjectsIndex());
-    const revisionSnapshot = measureSync("revisionDiscovery", () =>
-      snapshot.readMessageRevisions(),
-    );
-    const updatedAtAvailable = revisionSnapshot.updatedAtAvailable;
-    const completedAtAvailable = revisionSnapshot.completedAtAvailable;
-    const revisions = revisionSnapshot.revisions;
-    const revisionMembershipActive = completedAtAvailable;
-    const updateWatermarkActive = updatedAtAvailable;
+
+    const globalRefresh = job.globalRange !== undefined;
+    const effectiveExtent = replaced ? undefined : state.extent;
+    const priorCursor = replaced ? undefined : state.sourceCursorAtMs;
+    const priorRepairAtMs = replaced ? undefined : state.lastFullRepairAtMs;
+    const repairDue =
+      globalRefresh &&
+      (job.repair === true ||
+        priorRepairAtMs === undefined ||
+        atMs - priorRepairAtMs >= fullRepairIntervalMs ||
+        // A wall-clock rollback can move the inclusive window past unseen
+        // source timestamps; reconcile fully rather than skip them.
+        (priorCursor !== undefined && atMs < priorCursor));
+
+    // Establish the source cursor either from a cheap physical frontier (no
+    // stored contribution needs membership) or from one full revision
+    // projection. Normal refreshes use only the cursor-overlap delta.
+    let revisionSnapshot: OpenCodeMessageRevisionSnapshot | undefined;
+    let fullProjection = false;
+    let cursorBaseline = false;
+    let deltaValid = false;
+    let sourceCursorAtMs: number | null | undefined;
+
+    if (globalRefresh) {
+      const emptyBaseline = priorCursor === undefined && state.occurrences.size === 0 && !replaced;
+      if (emptyBaseline) {
+        const frontier = measureSync("revisionDiscovery", () =>
+          snapshot.readMessageRevisionFrontier(),
+        );
+        sourceCursorAtMs =
+          frontier.available && frontier.updatedAtAvailable
+            ? Math.min(frontier.maxUpdatedAtMs ?? 0, atMs)
+            : null;
+        cursorBaseline = true;
+      } else if (priorCursor !== undefined && !repairDue) {
+        revisionSnapshot = measureSync("revisionDiscovery", () =>
+          snapshot.readMessageRevisions({
+            updatedSinceMs: Math.max(0, priorCursor - ANALYTICS_SOURCE_CURSOR_OVERLAP_MS),
+          }),
+        );
+        if (!revisionSnapshot.available) return "unavailable";
+        if (!revisionSnapshot.updatedAtAvailable) {
+          // The storage filter is not applicable without a time_updated column,
+          // so this result is already the full identity set.
+          fullProjection = true;
+        } else if (!revisionSnapshot.completedAtAvailable) {
+          // The timestamp filter applied, but completion identity is missing;
+          // reconcile the full identity set conservatively.
+          revisionSnapshot = measureSync("revisionDiscovery", () =>
+            snapshot.readMessageRevisions(),
+          );
+          if (!revisionSnapshot.available) return "unavailable";
+          fullProjection = true;
+        }
+      } else {
+        revisionSnapshot = measureSync("revisionDiscovery", () => snapshot.readMessageRevisions());
+        if (!revisionSnapshot.available) return "unavailable";
+        fullProjection = true;
+      }
+
+      if (revisionSnapshot) {
+        fullProjection =
+          fullProjection ||
+          !revisionSnapshot.updatedAtAvailable ||
+          !revisionSnapshot.completedAtAvailable;
+        const revisions = revisionSnapshot.revisions;
+        if (!fullProjection) {
+          // Deterministic time-then-id order keeps equal timestamps and
+          // lexically earlier late commits replayable and idempotent.
+          revisions.sort(
+            (a, b) =>
+              (a.updatedAtMs ?? Number.NEGATIVE_INFINITY) -
+                (b.updatedAtMs ?? Number.NEGATIVE_INFINITY) || compareIds(a.messageID, b.messageID),
+          );
+        }
+        let maxUpdated = priorCursor;
+        for (const revision of revisions) {
+          if (
+            revision.updatedAtMs !== null &&
+            (maxUpdated === undefined || revision.updatedAtMs > maxUpdated)
+          ) {
+            maxUpdated = revision.updatedAtMs;
+          }
+        }
+        sourceCursorAtMs =
+          revisionSnapshot.updatedAtAvailable && revisionSnapshot.completedAtAvailable
+            ? Math.min(maxUpdated ?? 0, atMs)
+            : null;
+      }
+      deltaValid = !fullProjection && revisionSnapshot !== undefined && !repairDue;
+    }
 
     const bulkRows: OpenCodeRawAssistantRow[] = [];
     const bulkMap = new Map<string, OpenCodeRawAssistantRow>();
     const changedMap = new Map<string, StagedUpsert>();
     const changedIds = new Map<string, { updatedAtMs: number | null }>();
-    const candidateWatermarks = new Map<string, number | null>();
     const removalKeys = new Set<string>();
-    const effectiveExtent = replaced ? undefined : state.extent;
+    const watermarks =
+      revisionSnapshot !== undefined && !fullProjection && revisionSnapshot.updatedAtAvailable
+        ? new Map<string, number | null>(
+            revisionSnapshot.revisions.map((revision) => [
+              revision.messageID,
+              revision.updatedAtMs,
+            ]),
+          )
+        : undefined;
 
     const stageChanged = (row: OpenCodeRawAssistantRow, updatedAtMs: number | null): void => {
       const key = row.messageID;
@@ -759,13 +878,41 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       removalKeys.delete(key);
     };
 
-    const stageBulk = (row: OpenCodeRawAssistantRow): void => {
+    const stageBulk = (row: OpenCodeRawAssistantRow, updatedAtMs?: number | null): void => {
       const key = row.messageID;
-      if (bulkMap.has(key)) return;
+      const existing = bulkMap.get(key);
+      if (existing) {
+        if (updatedAtMs !== undefined) setWatermark(existing, updatedAtMs);
+        return;
+      }
+      setWatermark(
+        row,
+        updatedAtMs !== undefined
+          ? updatedAtMs
+          : row.updatedAtMs !== undefined
+            ? row.updatedAtMs
+            : (watermarks?.get(key) ?? null),
+      );
       bulkMap.set(key, row);
       bulkRows.push(row);
     };
 
+    // Removed session metadata is authoritative for its stored occurrences.
+    // The session key walk is small; the occurrence walk only runs when a
+    // session actually disappeared.
+    if (!replaced) {
+      const removedSessionIds = new Set<string>();
+      for (const id of Object.keys(state.sessions)) {
+        if (!Object.hasOwn(sessions, id)) removedSessionIds.add(id);
+      }
+      if (removedSessionIds.size > 0) {
+        for (const [key, occurrence] of state.occurrences) {
+          if (removedSessionIds.has(occurrence.sessionID)) removalKeys.add(key);
+        }
+      }
+    }
+
+    const fullRepairRead = fullProjection && !replaced && effectiveExtent !== undefined;
     const window = job.globalRange ? rangeWindow(job.globalRange, atMs) : undefined;
     let nextExtent = effectiveExtent;
     let extentChanged = false;
@@ -778,20 +925,28 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         })) {
           stageBulk(row);
         }
-      } else {
-        if (!coversSince(window.sinceMs, prior)) {
-          const rows =
-            window.sinceMs === undefined
-              ? readHistoricalRows({
-                  completedUntilMs: prior.sinceMs ?? prior.untilMs,
-                })
-              : readHistoricalRows({
-                  completedSinceMs: window.sinceMs,
-                  completedUntilMs: prior.sinceMs ?? atMs,
-                });
-          for (const row of rows) stageBulk(row);
+      } else if (!fullRepairRead) {
+        // Extend only the actually missing older side of the extent.
+        if (window.sinceMs === undefined) {
+          if (prior.sinceMs !== undefined) {
+            for (const row of readHistoricalRows({ completedUntilMs: prior.sinceMs })) {
+              stageBulk(row);
+            }
+          }
+        } else if (prior.sinceMs !== undefined && window.sinceMs < prior.sinceMs) {
+          // Bounded requests inside an already-lifetime extent are covered;
+          // only a genuinely older requested start needs an extra read.
+          for (const row of readHistoricalRows({
+            completedSinceMs: window.sinceMs,
+            completedUntilMs: prior.sinceMs,
+          })) {
+            stageBulk(row);
+          }
         }
-        if (prior.untilMs < atMs) {
+        // The completion frontier is already supplied by a valid revision
+        // delta, and a full repair below re-reads the whole extent; do not
+        // re-read the same leaving payload every refresh.
+        if (prior.untilMs < atMs && !deltaValid) {
           for (const row of readHistoricalRows({
             completedSinceMs: prior.untilMs,
             completedUntilMs: atMs,
@@ -804,28 +959,72 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       extentChanged = true;
     }
 
+    // A full reconciliation re-reads the indexed extent (and, below, cached
+    // scopes) so payload edits that did not move the source timestamp repair.
+    if (fullRepairRead && nextExtent) {
+      for (const row of readHistoricalRows({
+        ...(nextExtent.sinceMs === undefined ? {} : { completedSinceMs: nextExtent.sinceMs }),
+        completedUntilMs: nextExtent.untilMs,
+      })) {
+        stageBulk(row);
+      }
+    }
+
+    const completedMembership = revisionSnapshot?.completedAtAvailable === true;
+    if (fullProjection && !completedMembership && !replaced && nextExtent) {
+      // No completion identity: the extent payload read above is authoritative
+      // for completion/type membership inside the indexed extent.
+      for (const [key, occurrence] of state.occurrences) {
+        const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
+        if (!fingerprint) continue;
+        if (fingerprint[1] > atMs) continue;
+        if (nextExtent.sinceMs !== undefined && fingerprint[1] < nextExtent.sinceMs) continue;
+        removalKeys.add(key);
+      }
+    }
+
     interface ScopeRead {
+      ids: Set<string>;
       fingerprints: Set<string>;
-      keys: Set<string>;
       times: Set<number>;
     }
-    const scopeReads: ScopeRead[] = [];
     const detailSignatureChanges: Array<[string, string]> = [];
     const detailCompactionChanges: Array<
       [string, Array<{ sessionId: string; atMs: number; messageId: string }>]
     > = [];
     const projectSignatureChanges: Array<[string, string]> = [];
-    const candidateTimes = new Set<number>();
+
+    /**
+     * Cross-scope fork owners must stay in the contribution set for exact
+     * ownership. For new/unknown scoped fingerprints, query only the completed
+     * time span of the scope instead of paying a global revision projection.
+     */
+    const discoverExternalOwners = (read: ScopeRead): void => {
+      if (read.times.size === 0) return;
+      let minMs = Number.POSITIVE_INFINITY;
+      let maxMs = Number.NEGATIVE_INFINITY;
+      for (const time of read.times) {
+        if (time < minMs) minMs = time;
+        if (time > maxMs) maxMs = time;
+      }
+      const candidates = readHistoricalRows({
+        completedSinceMs: minMs,
+        completedUntilMs: maxMs,
+      });
+      for (const row of candidates) {
+        if (read.ids.has(row.sessionID)) continue;
+        if (!read.times.has(row.completedAtMs)) continue;
+        if (!read.fingerprints.has(fingerprintOf(row))) continue;
+        if (bulkMap.has(row.messageID) || changedMap.has(row.messageID)) continue;
+        if (state.occurrences.has(row.messageID)) continue;
+        stageChanged(row, row.updatedAtMs ?? null);
+      }
+    };
 
     for (const scope of job.projectScopes) {
       const scopeWindow = rangeWindow(scope.range, atMs);
       const ids = projectSessionIds(sessions, scope.projectId);
       if (ids.length === 0) continue;
-      const rows = readHistoricalRows({
-        sessionIDs: ids,
-        ...(scopeWindow.sinceMs === undefined ? {} : { completedSinceMs: scopeWindow.sinceMs }),
-        completedUntilMs: atMs,
-      });
       const scopeSessions = new Set(ids);
       for (const [key, occurrence] of state.occurrences) {
         if (!scopeSessions.has(occurrence.sessionID)) continue;
@@ -838,15 +1037,18 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           removalKeys.add(key);
         }
       }
-      const read: ScopeRead = { fingerprints: new Set(), keys: new Set(), times: new Set() };
+      const rows = readHistoricalRows({
+        sessionIDs: ids,
+        ...(scopeWindow.sinceMs === undefined ? {} : { completedSinceMs: scopeWindow.sinceMs }),
+        completedUntilMs: atMs,
+      });
+      const read: ScopeRead = { ids: scopeSessions, fingerprints: new Set(), times: new Set() };
       for (const row of rows) {
         read.fingerprints.add(fingerprintOf(row));
-        read.keys.add(row.messageID);
         read.times.add(row.completedAtMs);
         stageBulk(row);
       }
-      for (const time of read.times) candidateTimes.add(time);
-      scopeReads.push(read);
+      discoverExternalOwners(read);
       projectSignatureChanges.push([
         scope.projectId,
         projectSignature(sessions, scope.projectId, scope.range),
@@ -861,19 +1063,26 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       const ids = treeIds(sessions, focusId);
       const idSet = new Set(ids);
-      const rows = readHistoricalRows({ sessionIDs: ids });
+      const scopedRevisions = measureSync("revisionDiscovery", () =>
+        snapshot.readMessageRevisions({ sessionIDs: ids }),
+      );
+      const scopedWatermarks = new Map<string, number | null>();
+      if (scopedRevisions.available) {
+        for (const revision of scopedRevisions.revisions) {
+          scopedWatermarks.set(revision.messageID, revision.updatedAtMs);
+        }
+      }
       for (const [key, occurrence] of state.occurrences) {
         if (idSet.has(occurrence.sessionID)) removalKeys.add(key);
       }
-      const read: ScopeRead = { fingerprints: new Set(), keys: new Set(), times: new Set() };
+      const rows = readHistoricalRows({ sessionIDs: ids });
+      const read: ScopeRead = { ids: idSet, fingerprints: new Set(), times: new Set() };
       for (const row of rows) {
         read.fingerprints.add(fingerprintOf(row));
-        read.keys.add(row.messageID);
         read.times.add(row.completedAtMs);
-        stageBulk(row);
+        stageBulk(row, scopedWatermarks.get(row.messageID) ?? null);
       }
-      for (const time of read.times) candidateTimes.add(time);
-      scopeReads.push(read);
+      discoverExternalOwners(read);
       const markers = measureSync("historicalPayloadRead", () =>
         snapshot.readCompactionMarkers({ sessionIDs: ids }),
       );
@@ -881,80 +1090,53 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       detailSignatureChanges.push([focusId, sessionRevisionSignature(sessions, ids)]);
     }
 
-    // One projected revision scan drives deletion/edit/new-row detection and
-    // owner-candidate ids; no full maps of every revision are retained.
-    const scanEpoch = nextScanEpoch();
-    const storedKeys = state.occurrences;
+    // Apply the projected revision delta after every payload/membership read.
+    // Only a full projection may sweep stored rows as deleted.
+    const seenKeys =
+      fullProjection && revisionSnapshot?.completedAtAvailable ? new Set<string>() : undefined;
     const extentSince = nextExtent?.sinceMs;
     const extentUntil = nextExtent?.untilMs ?? atMs;
-    if (revisionMembershipActive) {
-      for (const revision of revisions) {
+    if (revisionSnapshot?.completedAtAvailable) {
+      for (const revision of revisionSnapshot.revisions) {
         const key = revision.messageID;
-        const completed =
-          revision.type === "assistant" &&
-          revision.completedAtMs !== null &&
-          revision.completedAtMs > 0
-            ? revision.completedAtMs
-            : 0;
-        const occurrence = replaced ? undefined : storedKeys.get(key);
-        if (occurrence) {
-          occurrence.seenEpoch = scanEpoch;
-          const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
-          if (completed === 0) {
-            // Completion/type reversal: the stored contribution is no longer
-            // eligible; drop it before any replacement payload is fetched.
-            removalKeys.add(key);
-          } else if (
-            !fingerprint ||
-            completed !== fingerprint[1] ||
-            (updateWatermarkActive && revision.updatedAtMs !== occurrence.updatedAtMs)
-          ) {
-            changedIds.set(revision.messageID, { updatedAtMs: revision.updatedAtMs });
-          }
-        } else if (!replaced && completed > 0 && window && !bulkMap.has(key)) {
-          if (completed <= extentUntil && (extentSince === undefined || completed >= extentSince)) {
-            changedIds.set(revision.messageID, { updatedAtMs: revision.updatedAtMs });
-          }
-        }
+        const completed = revisionCompletedAt(revision);
         const bulkRow = bulkMap.get(key);
         if (bulkRow) setWatermark(bulkRow, revision.updatedAtMs);
-        if (completed > 0 && candidateTimes.has(completed)) {
+        const occurrence = replaced ? undefined : state.occurrences.get(key);
+        if (occurrence) {
+          seenKeys?.add(key);
+          if (completed === 0) {
+            // Completion/type reversal is authoritative for this id only.
+            removalKeys.add(key);
+            continue;
+          }
+          const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
+          // A null/non-numeric source timestamp cannot prove the payload is
+          // unchanged, so re-read it conservatively on every delta.
+          const unknownTimestamp =
+            revisionSnapshot.updatedAtAvailable && revision.updatedAtMs === null;
           if (
-            (replaced || !storedKeys.has(key)) &&
-            !bulkMap.has(key) &&
-            !changedMap.has(key) &&
-            !candidateWatermarks.has(revision.messageID)
+            !bulkRow &&
+            (unknownTimestamp ||
+              !fingerprint ||
+              completed !== fingerprint[1] ||
+              (revisionSnapshot.updatedAtAvailable &&
+                revision.updatedAtMs !== occurrence.updatedAtMs))
           ) {
-            candidateWatermarks.set(revision.messageID, revision.updatedAtMs);
+            changedIds.set(key, { updatedAtMs: revision.updatedAtMs });
+          }
+        } else if (!replaced && !bulkRow && completed > 0 && window) {
+          if (completed <= extentUntil && (extentSince === undefined || completed >= extentSince)) {
+            changedIds.set(key, { updatedAtMs: revision.updatedAtMs });
           }
         }
       }
-      if (!replaced) {
-        for (const [key, occurrence] of storedKeys) {
-          if (occurrence.seenEpoch !== scanEpoch) removalKeys.add(key);
+      if (seenKeys && !replaced) {
+        for (const key of state.occurrences.keys()) {
+          if (!seenKeys.has(key)) removalKeys.add(key);
         }
       }
     }
-
-    // Without time_updated we cannot detect same-completion edits incrementally.
-    // Reconcile the known global extent payload once so contributions and fork
-    // ownership remain exact; scoped payloads were already read above.
-    if (!updateWatermarkActive && !replaced && nextExtent) {
-      for (const row of readHistoricalRows({
-        ...(nextExtent.sinceMs === undefined ? {} : { completedSinceMs: nextExtent.sinceMs }),
-        completedUntilMs: atMs,
-      })) {
-        stageBulk(row);
-      }
-      for (const [key, occurrence] of state.occurrences) {
-        const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
-        if (!fingerprint) continue;
-        if (fingerprint[1] > atMs) continue;
-        if (nextExtent.sinceMs !== undefined && fingerprint[1] < nextExtent.sinceMs) continue;
-        removalKeys.add(key);
-      }
-    }
-    revisions.length = 0;
 
     if (changedIds.size > 0) {
       const resolved = new Set<string>();
@@ -967,27 +1149,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       for (const key of changedIds.keys()) {
         if (!resolved.has(key) && state.occurrences.has(key)) removalKeys.add(key);
-      }
-    }
-
-    if (candidateWatermarks.size > 0 && scopeReads.length > 0) {
-      const rows = readChangedRows([...candidateWatermarks.keys()]);
-      for (const row of rows) {
-        const key = row.messageID;
-        const fingerprint = fingerprintOf(row);
-        let matches = false;
-        for (const read of scopeReads) {
-          if (read.keys.has(key)) {
-            matches = false;
-            break;
-          }
-          if (read.fingerprints.has(fingerprint)) {
-            matches = true;
-            break;
-          }
-        }
-        if (!matches) continue;
-        stageChanged(row, candidateWatermarks.get(row.messageID) ?? null);
       }
     }
 
@@ -1004,6 +1165,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       detailSignatures: detailSignatureChanges,
       detailCompactions: detailCompactionChanges,
       projectSignatures: projectSignatureChanges,
+      ...(globalRefresh ? { sourceCursorAtMs } : {}),
+      ...(globalRefresh && (cursorBaseline || fullProjection) ? { repairCompletedAtMs: atMs } : {}),
     };
   }
   /** Drops fingerprint tuples no occurrence references (small periodic GC). */
@@ -1042,9 +1205,48 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (job.globalRange !== undefined) lastGlobalAttemptAtMs = atMs;
     else lastScopedAttemptAtMs = atMs;
 
+    // The rare full reconciliation is explicit and clock-driven. It also
+    // repairs the scopes this worker has cached, so unchanged/backdated edits
+    // in scoped data are caught by the same persisted cadence.
+    let effectiveJob = job;
+    const repairDue =
+      job.globalRange !== undefined &&
+      (state.lastFullRepairAtMs === undefined ||
+        atMs - state.lastFullRepairAtMs >= fullRepairIntervalMs ||
+        (state.sourceCursorAtMs !== undefined && atMs < state.sourceCursorAtMs) ||
+        job.repair === true);
+    if (repairDue) {
+      const projectScopes = new Map<string, RangeKey>();
+      for (const scope of job.projectScopes) {
+        projectScopes.set(
+          scope.projectId,
+          widerRange(projectScopes.get(scope.projectId), scope.range),
+        );
+      }
+      for (const [projectId, range] of lastProjectScopes) {
+        projectScopes.set(projectId, widerRange(projectScopes.get(projectId), range));
+      }
+      // Persisted project DTO entries are a scoped cache too; repair them when
+      // they survived a restart even though the in-memory scope list is empty.
+      for (const [projectId, range] of state.presentation?.project ?? []) {
+        projectScopes.set(projectId, widerRange(projectScopes.get(projectId), range));
+      }
+      effectiveJob = {
+        ...job,
+        repair: true,
+        projectScopes: [...projectScopes.entries()].map(([projectId, range]) => ({
+          projectId,
+          range,
+        })),
+        detailSessionIds: [...new Set([...job.detailSessionIds, ...lastDetailSessionIds])],
+      };
+    }
+
     let result: OpenCodeStorageSnapshotResult<Candidate | "unavailable">;
     try {
-      result = await reader.withSnapshot((snapshot) => buildCandidate(snapshot, job, atMs));
+      result = await reader.withSnapshot((snapshot) =>
+        buildCandidate(snapshot, effectiveJob, atMs),
+      );
     } catch {
       unavailable = true;
       return;
@@ -1060,12 +1262,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const candidate = result.value;
     samplePeak();
 
-    const sessionsChanged = metadataChanged(
-      state.sessions,
-      candidate.sessions,
-      state.projects,
-      candidate.projects,
-    );
+    const sessionsChanged = metadataChanged(state.sessions, candidate.sessions);
+    const projectsChanged = metadataChanged(state.projects, candidate.projects);
 
     // Apply synchronously after the transaction has returned.
     if (candidate.replaced) {
@@ -1074,6 +1272,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       state.fingerprintIndex.clear();
       state.extent = undefined;
       state.presentation = undefined;
+      state.sourceCursorAtMs = undefined;
+      state.lastFullRepairAtMs = undefined;
       projectSignatures.clear();
       detailSignatures.clear();
       detailCompactions.clear();
@@ -1120,8 +1320,16 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     state.projects = candidate.projects;
     state.sourceIdentity = candidate.identity;
     if (candidate.extentChanged) state.extent = candidate.nextExtent;
-    // A scoped-only refresh never certifies global freshness.
-    if (job.globalRange !== undefined) state.frontierAtMs = atMs;
+    // A scoped-only refresh never certifies global freshness or advances the
+    // source cursor; only a successful global candidate may do either.
+    if (effectiveJob.globalRange !== undefined) state.frontierAtMs = atMs;
+    if (candidate.sourceCursorAtMs !== undefined) {
+      if (candidate.sourceCursorAtMs === null) state.sourceCursorAtMs = undefined;
+      else state.sourceCursorAtMs = candidate.sourceCursorAtMs;
+    }
+    if (candidate.repairCompletedAtMs !== undefined) {
+      state.lastFullRepairAtMs = candidate.repairCompletedAtMs;
+    }
     unavailable = false;
 
     for (const [focusId, signature] of candidate.detailSignatures) {
@@ -1148,7 +1356,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     trimMap(projectFreshAt, MAX_SCOPE_BATCH * 4);
 
     const dataChanged =
-      candidate.replaced || removals.length > 0 || upserts.length > 0 || sessionsChanged;
+      candidate.replaced ||
+      removals.length > 0 ||
+      upserts.length > 0 ||
+      sessionsChanged ||
+      projectsChanged;
     if (dataChanged || candidate.extentChanged) {
       generation += 1;
       // Extending empty coverage is not a visible data change; keep the sidecar
@@ -1157,10 +1369,16 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     if (modelHydrated) {
-      measureSync("modelUpdate", () => {
-        model.setMetadata(candidate.sessions, candidate.projects);
-        model.apply(upserts, removals);
-      });
+      if (removals.length > 0 || upserts.length > 0 || sessionsChanged || projectsChanged) {
+        measureSync("modelUpdate", () => {
+          if (sessionsChanged || projectsChanged) {
+            model.setMetadata(candidate.sessions, candidate.projects);
+          }
+          if (removals.length > 0 || upserts.length > 0) {
+            model.apply(upserts, removals);
+          }
+        });
+      }
     } else {
       modelDirty = true;
     }
