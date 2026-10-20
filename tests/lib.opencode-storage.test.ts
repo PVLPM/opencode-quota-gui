@@ -43,7 +43,8 @@ describe("opencode storage multi-session reads", () => {
         expect(sql).toContain(
           "CASE WHEN json_valid(data) THEN json_extract(data, '$.time.completed') END",
         );
-        expect(sql).toContain("ORDER BY CAST(CASE WHEN json_valid(data)");
+        // The reader sorts in memory; SQLite must not build a temp B-tree here.
+        expect(sql).not.toContain("ORDER BY");
         expect(sql).not.toMatch(/SELECT[\s\S]*\bdata\b\s+FROM/);
         expect(sql).not.toContain("time_created >=");
         expect(params).toEqual([completedSinceMs, completedUntilMs]);

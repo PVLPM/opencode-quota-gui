@@ -379,10 +379,11 @@ function buildCompletedAssistantQuery(
   }
 
   return {
-    sql:
-      `SELECT ${projectedColumns} FROM "session_message"` +
-      ` WHERE ${where.join(" AND ")}` +
-      ` ORDER BY ${completedExpression} ASC, id ASC`,
+    // `readCompletedAssistantRowsFrom` sorts the projected rows itself
+    // (`completedAtMs ASC, messageID ASC`), so a SQL ORDER BY here only adds a
+    // temp B-tree over every matched row. Keep the scan unsorted and let the
+    // single deterministic in-memory sort define the result order.
+    sql: `SELECT ${projectedColumns} FROM "session_message"` + ` WHERE ${where.join(" AND ")}`,
     args,
   };
 }
@@ -1277,10 +1278,13 @@ function readMessageRevisionsFrom(
       args.push(updatedDelta);
     }
     return {
+      // The reader sorts the collected revisions by message id, and the
+      // incremental engine re-sorts a delta by `(updatedAtMs, messageId)`
+      // before replay. A SQL ORDER BY would add a second temp B-tree (notably
+      // over a full identity projection) without changing the final order.
       sql:
         `SELECT ${projection} FROM "session_message"` +
-        (where.length ? ` WHERE ${where.join(" AND ")}` : "") +
-        ` ORDER BY ${updatedDelta === undefined ? "id" : "COALESCE(time_updated, 0), id"} ASC`,
+        (where.length ? ` WHERE ${where.join(" AND ")}` : ""),
       args,
     };
   };
