@@ -8,6 +8,8 @@
  * while an age-gated refresh advances newer rows. There is no autonomous timer;
  * work is request-driven.
  */
+import { performance } from "node:perf_hooks";
+
 import type { HomeSnapshot, ProjectSnapshot, SessionSnapshot } from "../contracts/dashboard.js";
 import { isRangeKey, type RangeKey, rangeWindow } from "../contracts/ranges.js";
 import {
@@ -17,9 +19,11 @@ import {
   type OpenCodeSourceIdentity,
   type OpenCodeStorageSnapshot,
   type OpenCodeStorageSnapshotResult,
+  type ReadCompletedAssistantRowsParams,
 } from "../lib/opencode-storage.js";
 import { createUsageAnalytics } from "./aggregation.js";
 import { type AnalyticsModel, createAnalyticsModel } from "./analytics-model.js";
+import type { AnalyticsPhaseMetrics } from "./analytics-protocol.js";
 import { type AnalyticsReader, createAnalyticsReader } from "./analytics-reader.js";
 import {
   type AnalyticsCoverage,
@@ -42,6 +46,39 @@ export const ANALYTICS_REFRESH_INTERVAL_MS = 600_000;
 const MAX_SCOPE_BATCH = 8;
 const MAX_PROJECT_CACHE = 12;
 const PRESENTATION_SAVE_INTERVAL_MS = 60_000;
+
+/**
+ * Fixed instrumentation labels. Each phase is timed around the operation it
+ * names and accumulates for the engine lifetime:
+ *
+ * - `presentationLoad` / `indexLoad`: the awaited sidecar/index loads only.
+ * - `metadataRead`: session and project index reads (one count per read).
+ * - `revisionDiscovery`: the projected revision scan read.
+ * - `historicalPayloadRead`: every non-changed-ID row payload read, including
+ *   global extent windows, scoped project/tree reads, and compaction markers.
+ * - `changedPayloadRead`: `messageIDs`-keyed payload reads after revision diffs.
+ * - `modelUpdate`: model clear/setMetadata/apply work, including hydration.
+ * - `dtoAggregation`: model home/project derivation and session DTO assembly;
+ *   `ensureModel()` is excluded and counted under `modelUpdate` instead.
+ * - `persistenceWrite`: each awaited snapshot/presentation save.
+ *
+ * Phases deliberately exclude cache hits and queueing. Metrics contain only
+ * these labels plus counts and durations; no session/project/message identity
+ * or other data is recorded.
+ */
+const PHASE_LABELS = [
+  "presentationLoad",
+  "indexLoad",
+  "metadataRead",
+  "revisionDiscovery",
+  "historicalPayloadRead",
+  "changedPayloadRead",
+  "modelUpdate",
+  "dtoAggregation",
+  "persistenceWrite",
+] as const;
+
+type PhaseLabel = (typeof PHASE_LABELS)[number];
 
 export interface AnalyticsEngineOptions {
   reader?: AnalyticsReader;
@@ -67,6 +104,11 @@ export interface AnalyticsWorkerMemory {
   /** Highest heap sample observed during refresh work since engine start. */
   peakHeapUsed: number;
   peakRss: number;
+  /**
+   * Cumulative phase timings since engine start. Always contains every fixed
+   * phase label; never contains source identifiers or raw data.
+   */
+  phases?: AnalyticsPhaseMetrics;
 }
 
 export interface AnalyticsEngine {
@@ -267,6 +309,49 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   const loadPresentation = options.loadPresentation ?? loadAnalyticsPresentation;
   const savePresentation = options.savePresentation ?? saveAnalyticsPresentation;
 
+  // Instrumentation-only accounting; it never affects control flow or results.
+  const phaseTotals = new Map<PhaseLabel, { count: number; totalMs: number }>();
+
+  function recordPhase(label: PhaseLabel, startedAtMs: number): void {
+    const totalMs = performance.now() - startedAtMs;
+    const entry = phaseTotals.get(label);
+    if (entry) {
+      entry.count += 1;
+      entry.totalMs += totalMs;
+    } else {
+      phaseTotals.set(label, { count: 1, totalMs });
+    }
+  }
+
+  function measureSync<T>(label: PhaseLabel, work: () => T): T {
+    const startedAtMs = performance.now();
+    try {
+      return work();
+    } finally {
+      recordPhase(label, startedAtMs);
+    }
+  }
+
+  async function measureAsync<T>(label: PhaseLabel, work: () => Promise<T>): Promise<T> {
+    const startedAtMs = performance.now();
+    try {
+      return await work();
+    } finally {
+      recordPhase(label, startedAtMs);
+    }
+  }
+
+  function phaseMetrics(): AnalyticsPhaseMetrics {
+    const metrics: AnalyticsPhaseMetrics = {};
+    for (const label of PHASE_LABELS) {
+      const entry = phaseTotals.get(label);
+      metrics[label] = entry
+        ? { count: entry.count, totalMs: entry.totalMs }
+        : { count: 0, totalMs: 0 };
+    }
+    return metrics;
+  }
+
   const model: AnalyticsModel = createAnalyticsModel();
   let state = emptyState();
   let loaded = false;
@@ -390,7 +475,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (loading) return loading;
     loading = (async () => {
       try {
-        warmPresentation = await loadPresentation(presentationPath);
+        warmPresentation = await measureAsync("presentationLoad", () =>
+          loadPresentation(presentationPath),
+        );
       } catch {
         warmPresentation = undefined;
       }
@@ -410,7 +497,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     indexLoading = (async () => {
       let persisted: AnalyticsState | undefined;
       try {
-        persisted = await loadSnapshot(snapshotPath);
+        persisted = await measureAsync("indexLoad", () => loadSnapshot(snapshotPath));
       } catch {
         persisted = undefined;
       }
@@ -440,15 +527,17 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
   function ensureModel(): void {
     if (modelHydrated && !modelDirty) return;
-    model.clear();
-    model.setMetadata(state.sessions, state.projects);
-    const rows = function* rowsForModel(): Generator<OpenCodeRawAssistantRow> {
-      for (const occurrence of state.occurrences.values()) {
-        const row = rowOf(occurrence);
-        if (row) yield row;
-      }
-    };
-    model.apply(rows(), []);
+    measureSync("modelUpdate", () => {
+      model.clear();
+      model.setMetadata(state.sessions, state.projects);
+      const rows = function* rowsForModel(): Generator<OpenCodeRawAssistantRow> {
+        for (const occurrence of state.occurrences.values()) {
+          const row = rowOf(occurrence);
+          if (row) yield row;
+        }
+      };
+      model.apply(rows(), []);
+    });
     modelHydrated = true;
     modelDirty = false;
   }
@@ -557,10 +646,14 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       presentationWritePending = undefined;
       if (!snapshotJob && !presentationJob) return;
       if (snapshotJob && snapshotJob.generation === generation) {
-        await saveSnapshot(snapshotPath, state, snapshotJob.atMs).catch(() => false);
+        await measureAsync("persistenceWrite", () =>
+          saveSnapshot(snapshotPath, state, snapshotJob.atMs).catch(() => false),
+        );
       }
       if (presentationJob && presentationJob.generation === generation && hasUsefulPresentation()) {
-        await savePresentation(presentationPath, state, presentationJob.atMs).catch(() => false);
+        await measureAsync("persistenceWrite", () =>
+          savePresentation(presentationPath, state, presentationJob.atMs).catch(() => false),
+        );
       }
     }
   }
@@ -632,9 +725,18 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (comparison === "unavailable") return "unavailable";
     const replaced = comparison === "changed";
 
-    const sessions = snapshot.readAllSessionsIndex();
-    const projects = snapshot.readProjectsIndex();
-    const revisionSnapshot = snapshot.readMessageRevisions();
+    const readHistoricalRows = (
+      params: ReadCompletedAssistantRowsParams = {},
+    ): OpenCodeRawAssistantRow[] =>
+      measureSync("historicalPayloadRead", () => snapshot.readCompletedAssistantRows(params));
+    const readChangedRows = (messageIDs: readonly string[]): OpenCodeRawAssistantRow[] =>
+      measureSync("changedPayloadRead", () => snapshot.readCompletedAssistantRows({ messageIDs }));
+
+    const sessions = measureSync("metadataRead", () => snapshot.readAllSessionsIndex());
+    const projects = measureSync("metadataRead", () => snapshot.readProjectsIndex());
+    const revisionSnapshot = measureSync("revisionDiscovery", () =>
+      snapshot.readMessageRevisions(),
+    );
     const updatedAtAvailable = revisionSnapshot.updatedAtAvailable;
     const completedAtAvailable = revisionSnapshot.completedAtAvailable;
     const revisions = revisionSnapshot.revisions;
@@ -670,7 +772,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (window) {
       const prior = effectiveExtent;
       if (!prior) {
-        for (const row of snapshot.readCompletedAssistantRows({
+        for (const row of readHistoricalRows({
           ...(window.sinceMs === undefined ? {} : { completedSinceMs: window.sinceMs }),
           completedUntilMs: atMs,
         })) {
@@ -680,17 +782,17 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         if (!coversSince(window.sinceMs, prior)) {
           const rows =
             window.sinceMs === undefined
-              ? snapshot.readCompletedAssistantRows({
+              ? readHistoricalRows({
                   completedUntilMs: prior.sinceMs ?? prior.untilMs,
                 })
-              : snapshot.readCompletedAssistantRows({
+              : readHistoricalRows({
                   completedSinceMs: window.sinceMs,
                   completedUntilMs: prior.sinceMs ?? atMs,
                 });
           for (const row of rows) stageBulk(row);
         }
         if (prior.untilMs < atMs) {
-          for (const row of snapshot.readCompletedAssistantRows({
+          for (const row of readHistoricalRows({
             completedSinceMs: prior.untilMs,
             completedUntilMs: atMs,
           })) {
@@ -719,7 +821,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const scopeWindow = rangeWindow(scope.range, atMs);
       const ids = projectSessionIds(sessions, scope.projectId);
       if (ids.length === 0) continue;
-      const rows = snapshot.readCompletedAssistantRows({
+      const rows = readHistoricalRows({
         sessionIDs: ids,
         ...(scopeWindow.sinceMs === undefined ? {} : { completedSinceMs: scopeWindow.sinceMs }),
         completedUntilMs: atMs,
@@ -759,7 +861,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       const ids = treeIds(sessions, focusId);
       const idSet = new Set(ids);
-      const rows = snapshot.readCompletedAssistantRows({ sessionIDs: ids });
+      const rows = readHistoricalRows({ sessionIDs: ids });
       for (const [key, occurrence] of state.occurrences) {
         if (idSet.has(occurrence.sessionID)) removalKeys.add(key);
       }
@@ -772,7 +874,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       for (const time of read.times) candidateTimes.add(time);
       scopeReads.push(read);
-      const markers = snapshot.readCompactionMarkers({ sessionIDs: ids });
+      const markers = measureSync("historicalPayloadRead", () =>
+        snapshot.readCompactionMarkers({ sessionIDs: ids }),
+      );
       detailCompactionChanges.push([focusId, markers]);
       detailSignatureChanges.push([focusId, sessionRevisionSignature(sessions, ids)]);
     }
@@ -836,7 +940,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     // Reconcile the known global extent payload once so contributions and fork
     // ownership remain exact; scoped payloads were already read above.
     if (!updateWatermarkActive && !replaced && nextExtent) {
-      for (const row of snapshot.readCompletedAssistantRows({
+      for (const row of readHistoricalRows({
         ...(nextExtent.sinceMs === undefined ? {} : { completedSinceMs: nextExtent.sinceMs }),
         completedUntilMs: atMs,
       })) {
@@ -854,9 +958,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
     if (changedIds.size > 0) {
       const resolved = new Set<string>();
-      const rows = snapshot.readCompletedAssistantRows({
-        messageIDs: [...changedIds.keys()],
-      });
+      const rows = readChangedRows([...changedIds.keys()]);
       for (const row of rows) {
         const entry = changedIds.get(row.messageID);
         if (!entry) continue;
@@ -869,9 +971,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     if (candidateWatermarks.size > 0 && scopeReads.length > 0) {
-      const rows = snapshot.readCompletedAssistantRows({
-        messageIDs: [...candidateWatermarks.keys()],
-      });
+      const rows = readChangedRows([...candidateWatermarks.keys()]);
       for (const row of rows) {
         const key = row.messageID;
         const fingerprint = fingerprintOf(row);
@@ -979,7 +1079,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       detailCompactions.clear();
       projectFreshAt.clear();
       detailFreshAt.clear();
-      model.clear();
+      measureSync("modelUpdate", () => model.clear());
       modelHydrated = false;
       modelDirty = true;
     }
@@ -1057,8 +1157,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     if (modelHydrated) {
-      model.setMetadata(candidate.sessions, candidate.projects);
-      model.apply(upserts, removals);
+      measureSync("modelUpdate", () => {
+        model.setMetadata(candidate.sessions, candidate.projects);
+        model.apply(upserts, removals);
+      });
     } else {
       modelDirty = true;
     }
@@ -1185,15 +1287,17 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       const stale = isStale(now());
       ensureModel();
-      const snapshot = model.home(range, atMs);
-      const result: HomeSnapshot = {
-        generatedAtMs: atMs,
-        range,
-        stale,
-        providers: { cards: [], enabledProviders: [], polledAtMs: atMs },
-        usage: { ...snapshot.usage, stale },
-        projects: snapshot.projects,
-      };
+      const result = measureSync("dtoAggregation", (): HomeSnapshot => {
+        const snapshot = model.home(range, atMs);
+        return {
+          generatedAtMs: atMs,
+          range,
+          stale,
+          providers: { cards: [], enabledProviders: [], polledAtMs: atMs },
+          usage: { ...snapshot.usage, stale },
+          projects: snapshot.projects,
+        };
+      });
       cacheHome(range, result, atMs);
       return result;
     },
@@ -1233,12 +1337,14 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       const stale = isStale(now());
       ensureModel();
-      const snapshot = model.project(projectId, range, atMs);
-      const result: ProjectSnapshot = {
-        ...snapshot,
-        stale,
-        usage: { ...snapshot.usage, stale },
-      };
+      const result = measureSync("dtoAggregation", (): ProjectSnapshot => {
+        const snapshot = model.project(projectId, range, atMs);
+        return {
+          ...snapshot,
+          stale,
+          usage: { ...snapshot.usage, stale },
+        };
+      });
       cacheProject(result, atMs);
       return result;
     },
@@ -1267,7 +1373,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       // Session detail reuses the shared aggregation DTO builder over the
       // scoped tree plus global owner candidates instead of duplicating it.
       try {
-        return createUsageAnalytics(sessionDataset(sessionId)).session(sessionId);
+        return measureSync("dtoAggregation", () =>
+          createUsageAnalytics(sessionDataset(sessionId)).session(sessionId),
+        );
       } catch {
         throw new AnalyticsLookupError("session-not-found");
       }
@@ -1302,6 +1410,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         arrayBuffers: usage.arrayBuffers,
         peakHeapUsed,
         peakRss,
+        phases: phaseMetrics(),
       };
     },
 

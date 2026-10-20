@@ -34,6 +34,15 @@ export interface AnalyticsInitOptions {
   refreshIntervalMs?: number;
 }
 
+/** Cumulative timing for one fixed worker phase; contains no identifying data. */
+export interface AnalyticsPhaseTiming {
+  count: number;
+  totalMs: number;
+}
+
+/** Fixed-label phase metrics returned with worker stats. */
+export type AnalyticsPhaseMetrics = Record<string, AnalyticsPhaseTiming>;
+
 /** Worker-side memory sample used by the benchmark and diagnostics. */
 export interface AnalyticsWorkerMemoryStats {
   rss: number;
@@ -43,6 +52,8 @@ export interface AnalyticsWorkerMemoryStats {
   arrayBuffers: number;
   peakHeapUsed: number;
   peakRss: number;
+  /** Cumulative phase timings since worker start; labels/counts/times only. */
+  phases?: AnalyticsPhaseMetrics;
 }
 
 /** A command sent to the one analytics worker. IDs are added by the bridge. */
