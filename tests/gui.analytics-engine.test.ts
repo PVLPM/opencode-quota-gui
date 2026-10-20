@@ -4,6 +4,7 @@ import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/agg
 import {
   ANALYTICS_FULL_REPAIR_INTERVAL_MS,
   ANALYTICS_SOURCE_CURSOR_OVERLAP_MS,
+  ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS,
   createAnalyticsEngine,
 } from "../src/gui/analytics-engine.js";
 import type { AnalyticsReader } from "../src/gui/analytics-reader.js";
@@ -2907,41 +2908,109 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.close();
   });
 
-  it("serves 7d first and extends only the missing 30d side in the background", async () => {
-    const db = baseDb();
-    const { engine, calls } = harness(db);
-    const home = await engine.home("7d");
-    expect(home.usage.totals.input).toBe(1_500);
-    const initial = fullReads(calls);
-    expect(initial).toHaveLength(1);
-    expect(initial[0]?.params).toMatchObject({
-      sinceMs: NOW - 7 * DAY,
-      untilMs: NOW,
-    });
+  it("serves 7d first and extends only the missing 30d side after the idle grace", async () => {
+    vi.useFakeTimers();
+    try {
+      const db = baseDb();
+      const { engine, calls } = harness(db);
+      const home = await engine.home("7d");
+      expect(home.usage.totals.input).toBe(1_500);
+      const initial = fullReads(calls);
+      expect(initial).toHaveLength(1);
+      expect(initial[0]?.params).toMatchObject({
+        sinceMs: NOW - 7 * DAY,
+        untilMs: NOW,
+      });
 
-    await flushAsync();
-    await engine.refresh();
-    const reads = fullReads(calls);
-    expect(reads.length).toBeGreaterThanOrEqual(2);
-    const extension = reads[reads.length - 1];
-    expect(extension?.params).toMatchObject({
-      sinceMs: NOW - 30 * DAY,
-      untilMs: NOW - 7 * DAY,
-    });
-    // Lifetime was never requested by the automatic extension.
-    expect(reads.every((call) => call.params?.sinceMs !== undefined)).toBe(true);
+      // The zero-delay behavior is gone: nothing starts during the grace.
+      expect(fullReads(calls)).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS);
+      await vi.advanceTimersByTimeAsync(0);
+      const reads = fullReads(calls);
+      expect(reads.length).toBeGreaterThanOrEqual(2);
+      const extension = reads[reads.length - 1];
+      expect(extension?.params).toMatchObject({
+        sinceMs: NOW - 30 * DAY,
+        untilMs: NOW - 7 * DAY,
+      });
+      // Lifetime was never requested by the automatic extension.
+      expect(reads.every((call) => call.params?.sinceMs !== undefined)).toBe(true);
 
-    const beforeCached = calls.length;
-    const home24 = await engine.home("24h");
-    const home7 = await engine.home("7d");
-    const home30 = await engine.home("30d");
-    expect(home24.usage.totals.input).toBe(700);
-    expect(home7.usage.totals.input).toBe(1_500);
-    expect(home30.usage.totals.input).toBe(1_500);
-    expect(
-      calls.slice(beforeCached).filter((call) => call.method === "loadCompletedRows"),
-    ).toHaveLength(0);
-    await engine.close();
+      const beforeCached = calls.length;
+      const home24 = await engine.home("24h");
+      const home7 = await engine.home("7d");
+      const home30 = await engine.home("30d");
+      expect(home24.usage.totals.input).toBe(700);
+      expect(home7.usage.totals.input).toBe(1_500);
+      expect(home30.usage.totals.input).toBe(1_500);
+      expect(
+        calls.slice(beforeCached).filter((call) => call.method === "loadCompletedRows"),
+      ).toHaveLength(0);
+      await engine.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defers the 30d extension while a foreground refresh is in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const db = baseDb();
+      const calls: ReaderCall[] = [];
+      const baseReader = createFakeReader(db, calls);
+      let gate: { promise: Promise<void>; release: () => void } | undefined;
+      const reader: AnalyticsReader = {
+        withSnapshot: async (read) => {
+          if (gate) await gate.promise;
+          return baseReader.withSnapshot(read);
+        },
+      };
+      const engine = createAnalyticsEngine({
+        reader,
+        now: () => NOW,
+        refreshIntervalMs: INTERVAL,
+        snapshotPath: "memory.json",
+        loadSnapshot: async () => undefined,
+        loadPresentation: async () => undefined,
+        saveSnapshot: async () => true,
+        savePresentation: async () => true,
+      });
+
+      await engine.home("7d");
+      const readsAfterHome = fullReads(calls).length;
+      expect(readsAfterHome).toBe(1);
+
+      let release: (() => void) | undefined;
+      gate = {
+        promise: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+        release: () => release?.(),
+      };
+      const foreground = engine.project("p1", "7d");
+      await vi.advanceTimersByTimeAsync(0);
+
+      // The first grace fires while the foreground refresh owns the queue.
+      await vi.advanceTimersByTimeAsync(ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS);
+      expect(fullReads(calls)).toHaveLength(readsAfterHome);
+
+      gate = undefined;
+      release?.();
+      await foreground;
+
+      // The bounded retry starts the extension only after the queue is idle.
+      await vi.advanceTimersByTimeAsync(ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS);
+      await vi.advanceTimersByTimeAsync(0);
+      const reads = fullReads(calls);
+      expect(reads.length).toBeGreaterThanOrEqual(2);
+      expect(reads[reads.length - 1]?.params).toMatchObject({
+        sinceMs: NOW - 30 * DAY,
+        untilMs: NOW - 7 * DAY,
+      });
+      await engine.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("extends lifetime only on the older side after 30d coverage", async () => {

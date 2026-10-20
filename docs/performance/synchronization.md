@@ -122,11 +122,16 @@ timestamp cannot always be detected by a timestamp delta.
   the serialized writer and flushes the latest useful DTOs within the existing
   bound.
 - The default 7d response may schedule one deferred, unref'd 30d extension
-  after that response is ready. The zero-delay timer yields one event-loop turn;
-  it is not an OS scheduling priority and cannot preempt a synchronous SQLite
-  read. It is canceled on close, never scheduled at construction, and never
-  extends to lifetime automatically. Once 30d is covered, bounded Home caches
-  may be derived together without duplicate model hydration.
+  after that response is ready. The timer uses a short idle grace (two seconds)
+  instead of a zero-delay turn, so a foreground navigation that arrives first is
+  not queued behind a synchronous SQLite scan. At each firing the engine checks
+  for in-flight/pending refresh work (global, detail, project, or metadata
+  only); it retries at most once, then leaves rescheduling to the next 7d
+  response. This is not preemption: a read that has already started still runs
+  to completion, and the engine does not claim a foreground-priority queue. It
+  is canceled on close, never scheduled at construction, and never extends to
+  lifetime automatically. Once 30d is covered, bounded Home caches may be
+  derived together without duplicate model hydration.
 
 ## Source limitations
 

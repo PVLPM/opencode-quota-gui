@@ -55,7 +55,14 @@ export const ANALYTICS_SOURCE_CURSOR_OVERLAP_MS = 5 * 60_000;
 const MAX_SCOPE_BATCH = 8;
 const MAX_PROJECT_CACHE = 12;
 const PRESENTATION_SAVE_INTERVAL_MS = 60_000;
-const LOW_PRIORITY_EXTENSION_DELAY_MS = 0;
+/**
+ * Idle grace before the automatic 7d -> 30d extension starts. A zero-delay
+ * timer only yields one event-loop turn and can immediately queue a long
+ * synchronous SQL read ahead of foreground navigation.
+ */
+export const ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS = 2_000;
+/** Bounded busy retries; a later 7d response schedules a fresh attempt. */
+const LOW_PRIORITY_EXTENSION_MAX_DEFERRALS = 1;
 const HOME_PRECOMPUTE_RANGES: readonly RangeKey[] = ["24h", "7d", "30d"];
 
 type LowPriorityTimer = ReturnType<typeof setTimeout> & { unref?: () => void };
@@ -1109,26 +1116,48 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
   /**
    * The UI's default finite view is 7d. After that response is ready, extend
-   * once to 30d in a deferred, unref'd timer. The zero-delay timer yields one
-   * event-loop turn; it cannot preempt a synchronous SQLite read. Lifetime is
-   * never scheduled.
+   * once to 30d after a short idle grace. A foreground request that arrives
+   * during the grace (or a refresh already in flight) wins: the extension
+   * retries at most once, then leaves rescheduling to the next 7d response.
+   * This is not preemption; a synchronous SQLite read that has already started
+   * still runs to completion. Lifetime is never scheduled automatically.
    */
   function scheduleThirtyDayExtension(range: RangeKey, atMs: number): void {
     if (range !== "7d" || closed || closing || lowPriorityTimer !== undefined) return;
     if (coversSince(rangeWindow("30d", atMs).sinceMs, state.extent)) return;
-    const timer = setTimeout(() => {
-      lowPriorityTimer = undefined;
-      if (closed || closing) return;
-      const scheduledAtMs = now();
-      if (coversSince(rangeWindow("30d", scheduledAtMs).sinceMs, state.extent)) return;
-      void requestRefresh({
-        globalRange: "30d",
-        detailSessionIds: [],
-        projectScopes: [],
-      }).catch(() => {});
-    }, LOW_PRIORITY_EXTENSION_DELAY_MS) as LowPriorityTimer;
-    timer.unref?.();
-    lowPriorityTimer = timer;
+
+    const hasPendingRefreshWork = (): boolean =>
+      refreshPromise !== undefined ||
+      pendingGlobal !== undefined ||
+      pendingMetadataOnly ||
+      pendingDetailSessions.size > 0 ||
+      pendingProjectScopes.size > 0;
+
+    let deferrals = 0;
+    const arm = (): void => {
+      const timer = setTimeout(() => {
+        lowPriorityTimer = undefined;
+        if (closed || closing) return;
+        const scheduledAtMs = now();
+        if (coversSince(rangeWindow("30d", scheduledAtMs).sinceMs, state.extent)) return;
+        if (hasPendingRefreshWork()) {
+          if (deferrals < LOW_PRIORITY_EXTENSION_MAX_DEFERRALS) {
+            deferrals += 1;
+            arm();
+          }
+          return;
+        }
+        void requestRefresh({
+          globalRange: "30d",
+          detailSessionIds: [],
+          projectScopes: [],
+        }).catch(() => {});
+      }, ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS) as LowPriorityTimer;
+      timer.unref?.();
+      lowPriorityTimer = timer;
+    };
+
+    arm();
   }
 
   function buildCandidate(
