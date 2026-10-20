@@ -318,6 +318,7 @@ function buildCompletedAssistantQuery(
   params: {
     completedSinceMs?: number;
     completedUntilMs?: number;
+    completedAtTimes?: readonly number[];
     sessionID?: string;
     sessionIDs?: readonly string[];
     messageIDs?: readonly string[];
@@ -343,6 +344,19 @@ function buildCompletedAssistantQuery(
   if (typeof params.completedUntilMs === "number") {
     where.push(`${completedExpression} <= ?`);
     args.push(params.completedUntilMs);
+  }
+  if (params.completedAtTimes !== undefined) {
+    const times = [...new Set(params.completedAtTimes)]
+      .filter((time) => Number.isFinite(time))
+      .sort((a, b) => a - b);
+    if (times.length === 0) {
+      where.push(`1 = 0`);
+    } else {
+      // One JSON-array bind keeps the exact-time candidate projection to a
+      // single SQLite scan instead of one scan per completion timestamp.
+      where.push(`${completedExpression} IN (SELECT value FROM json_each(?))`);
+      args.push(JSON.stringify(times));
+    }
   }
   if (params.sessionID !== undefined) {
     where.push(`session_id = ?`);
@@ -852,6 +866,12 @@ function mapRawCompletedAssistantRow(row: ProjectedMessageRow): OpenCodeRawAssis
 export interface ReadCompletedAssistantRowsParams {
   completedSinceMs?: number;
   completedUntilMs?: number;
+  /**
+   * Exact physical completion timestamps to project. Used by scoped ownership
+   * discovery so a wide min/max span never stands in for the exact candidate
+   * set. Emitted as one bound JSON numeric array through `json_each`.
+   */
+  completedAtTimes?: readonly number[];
   sessionID?: string;
   sessionIDs?: readonly string[];
   messageIDs?: readonly string[];
@@ -883,7 +903,11 @@ function readCompletedAssistantRowsFrom(
   if (!hasJsonExtract(conn)) return [];
   const hasUpdatedAt = columns.has("time_updated");
 
-  const reservedArgs = countDefined([params.completedSinceMs, params.completedUntilMs]);
+  const reservedArgs = countDefined([
+    params.completedSinceMs,
+    params.completedUntilMs,
+    params.completedAtTimes,
+  ]);
   const maxIdsPerQuery = Math.max(1, SQLITE_MAX_MESSAGE_QUERY_ARGS - reservedArgs);
   const out: OpenCodeRawAssistantRow[] = [];
 

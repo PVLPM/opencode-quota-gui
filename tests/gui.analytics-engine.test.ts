@@ -25,6 +25,19 @@ import type {
   OpenCodeStorageSnapshotResult,
 } from "../src/lib/opencode-storage.js";
 
+const capturedDatasets = vi.hoisted((): UsageAnalyticsDataset[] => []);
+
+vi.mock("../src/gui/aggregation.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/gui/aggregation.js")>();
+  return {
+    ...actual,
+    createUsageAnalytics: (dataset: UsageAnalyticsDataset) => {
+      capturedDatasets.push(dataset);
+      return actual.createUsageAnalytics(dataset);
+    },
+  };
+});
+
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -144,7 +157,10 @@ function baseDb(): FakeDb {
 }
 
 function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
-  const revisionsFor = (sessionIds?: readonly string[]): OpenCodeMessageRevision[] => {
+  const revisionsFor = (
+    sessionIds?: readonly string[],
+    messageIds?: readonly string[],
+  ): OpenCodeMessageRevision[] => {
     const revisions: OpenCodeMessageRevision[] = [];
     for (const entry of db.rows) {
       const key = rowKey(entry.sessionID, entry.messageID);
@@ -159,14 +175,22 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
       });
     }
     revisions.push(...db.extraRevisions);
-    if (sessionIds === undefined) return revisions;
-    const set = new Set(sessionIds);
-    return revisions.filter((revision) => set.has(revision.sessionID));
+    let filtered = revisions;
+    if (sessionIds !== undefined) {
+      const set = new Set(sessionIds);
+      filtered = filtered.filter((revision) => set.has(revision.sessionID));
+    }
+    if (messageIds !== undefined) {
+      const set = new Set(messageIds);
+      filtered = filtered.filter((revision) => set.has(revision.messageID));
+    }
+    return filtered;
   };
 
   function completedRows(params: {
     completedSinceMs?: number;
     completedUntilMs?: number;
+    completedAtTimes?: readonly number[];
     sessionIDs?: readonly string[];
     messageIDs?: readonly string[];
   }): OpenCodeRawAssistantRow[] {
@@ -178,6 +202,11 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
     if (params.sessionIDs) {
       const ids = new Set(params.sessionIDs);
       rows = rows.filter((entry) => ids.has(entry.sessionID));
+    }
+    const atTimes = params.completedAtTimes;
+    if (atTimes) {
+      const times = new Set(atTimes);
+      rows = rows.filter((entry) => times.has(entry.completedAtMs));
     }
     const sinceMs = params.completedSinceMs;
     if (sinceMs !== undefined) {
@@ -227,6 +256,9 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
               ...(params.completedUntilMs === undefined
                 ? {}
                 : { untilMs: params.completedUntilMs }),
+              ...(params.completedAtTimes === undefined
+                ? {}
+                : { completedAtTimes: [...params.completedAtTimes] }),
             },
           });
           return completedRows(params);
@@ -244,12 +276,13 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
             method: "loadRevisions",
             params: {
               ...(params.sessionIDs === undefined ? {} : { sessionIDs: params.sessionIDs }),
+              ...(params.messageIDs === undefined ? {} : { messageIDs: params.messageIDs }),
               ...(params.updatedSinceMs === undefined
                 ? {}
                 : { updatedSinceMs: params.updatedSinceMs }),
             },
           });
-          let revisions = revisionsFor(params.sessionIDs);
+          let revisions = revisionsFor(params.sessionIDs, params.messageIDs);
           const updatedSinceMs = params.updatedSinceMs;
           if (db.updatedAtAvailable && updatedSinceMs !== undefined) {
             revisions = revisions.filter(
@@ -351,6 +384,40 @@ function harness(
   };
 }
 
+class TrackingMap<K, V> extends Map<K, V> {
+  valuesReads = 0;
+  keysReads = 0;
+  entriesReads = 0;
+  iteratorReads = 0;
+
+  reset(): void {
+    this.valuesReads = 0;
+    this.keysReads = 0;
+    this.entriesReads = 0;
+    this.iteratorReads = 0;
+  }
+
+  override values() {
+    this.valuesReads += 1;
+    return super.values();
+  }
+
+  override keys() {
+    this.keysReads += 1;
+    return super.keys();
+  }
+
+  override entries() {
+    this.entriesReads += 1;
+    return super.entries();
+  }
+
+  override [Symbol.iterator]() {
+    this.iteratorReads += 1;
+    return super[Symbol.iterator]();
+  }
+}
+
 function flushAsync(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -408,7 +475,8 @@ function fullReads(calls: ReaderCall[], afterIndex = 0): ReaderCall[] {
       (call) =>
         call.method === "loadCompletedRows" &&
         call.params?.messageIDs === undefined &&
-        call.params?.sessionIDs === undefined,
+        call.params?.sessionIDs === undefined &&
+        call.params?.completedAtTimes === undefined,
     );
 }
 
@@ -992,14 +1060,11 @@ describe("analytics engine: scope reads", () => {
         (call) =>
           call.params?.sessionIDs !== undefined ||
           call.params?.messageIDs !== undefined ||
-          call.params?.sinceMs !== undefined,
+          call.params?.completedAtTimes !== undefined,
       ),
     ).toBe(true);
-    const ownerFetch = reads.find(
-      (call) => call.params?.sessionIDs === undefined && call.params?.sinceMs !== undefined,
-    );
-    expect(ownerFetch?.params?.sinceMs).toBe(NOW - HOUR);
-    expect(ownerFetch?.params?.untilMs).toBe(NOW - HOUR);
+    const ownerFetch = reads.find((call) => call.params?.completedAtTimes !== undefined);
+    expect(ownerFetch?.params?.completedAtTimes).toEqual([NOW - HOUR]);
   });
 
   it("discovers unseen multiplicity and lexically earlier external fork owners", async () => {
@@ -1077,14 +1142,379 @@ describe("analytics engine: scope reads", () => {
           call.method === "loadCompletedRows" &&
           call.params?.sessionIDs === undefined &&
           call.params?.messageIDs === undefined &&
+          call.params?.completedAtTimes === undefined &&
           call.params?.sinceMs === undefined &&
           call.params?.untilMs === undefined,
       ),
     ).toBe(false);
+    const ownerRead = calls.find(
+      (call) => call.method === "loadCompletedRows" && call.params?.completedAtTimes !== undefined,
+    );
+    expect(ownerRead?.params?.completedAtTimes).toEqual([NOW - HOUR]);
     // Session detail reconciles only its own tree revisions, never a global one.
     for (const call of calls.filter((entry) => entry.method === "loadRevisions")) {
       expect(call.params?.sessionIDs).toBeDefined();
     }
+  });
+
+  it("uses the warm detail revision diff and fetches only changed tree ids", async () => {
+    const db = baseDb();
+    const target = db.rows.find((entry) => entry.messageID === "msg_b");
+    if (!target) throw new Error("msg_b missing");
+    target.agent = "build";
+    const { engine, calls, setNow } = harness(db);
+    const first = await engine.session("ses_root");
+    expect(first.steps.find((step) => step.messageId === "msg_b")?.agent).toBe("build");
+
+    const baseline = calls.length;
+    setNow(NOW + INTERVAL + 1);
+    await engine.refresh();
+
+    const warmRefresh = calls.slice(baseline);
+    expect(
+      warmRefresh.filter(
+        (call) => call.method === "loadCompletedRows" && call.params?.sessionIDs !== undefined,
+      ),
+    ).toHaveLength(0);
+    const ownerRead = warmRefresh.find(
+      (call) => call.method === "loadCompletedRows" && call.params?.completedAtTimes !== undefined,
+    );
+    expect(ownerRead?.params?.completedAtTimes).toEqual([NOW - HOUR]);
+
+    target.tokens.input = 222;
+    db.updatedAt.set(rowKey("ses_root", "msg_b"), NOW + 1);
+    const changedBaseline = calls.length;
+    setNow(NOW + 2 * INTERVAL + 1);
+    await engine.refresh();
+
+    const changedRefresh = calls.slice(changedBaseline);
+    const changedReads = changedRefresh.filter(
+      (call) => call.method === "loadCompletedRows" && call.params?.messageIDs !== undefined,
+    );
+    expect(changedReads.flatMap((call) => call.params?.messageIDs as string[])).toEqual(["msg_b"]);
+    expect(
+      changedRefresh.filter(
+        (call) => call.method === "loadCompletedRows" && call.params?.sessionIDs !== undefined,
+      ),
+    ).toHaveLength(0);
+
+    const snapshot = await engine.session("ses_root");
+    expect(snapshot.ownSummary.input).toBe(322);
+    expect(snapshot.steps.find((step) => step.messageId === "msg_b")?.agent).toBe("build");
+  });
+
+  it("applies warm detail changes whose revision timestamp is null", async () => {
+    const db = baseDb();
+    db.updatedAt.set(rowKey("ses_root", "msg_b"), null);
+    const { engine, setNow } = harness(db);
+    await engine.session("ses_root");
+
+    const target = db.rows.find((entry) => entry.messageID === "msg_b");
+    if (!target) throw new Error("msg_b missing");
+    target.tokens.input = 222;
+    setNow(NOW + INTERVAL + 1);
+    await engine.refresh();
+
+    const snapshot = await engine.session("ses_root");
+    expect(snapshot.ownSummary.input).toBe(322);
+    expect(snapshot.steps.find((step) => step.messageId === "msg_b")?.stack.input).toBe(222);
+  });
+
+  it("applies warm detail new rows whose revision timestamp is zero", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.session("ses_root");
+
+    db.rows.push(row("ses_root", "msg_zero", NOW - 30 * 60_000, { input: 50 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_zero"), 0);
+    setNow(NOW + INTERVAL + 1);
+    await engine.refresh();
+
+    const snapshot = await engine.session("ses_root");
+    expect(snapshot.ownSummary.input).toBe(350);
+    expect(snapshot.steps.some((step) => step.messageId === "msg_zero")).toBe(true);
+  });
+
+  it("reconciles known external fork owners on a scoped-only refresh", async () => {
+    const scenarios: Array<[string, (db: FakeDb) => void]> = [
+      [
+        "token edit",
+        (db) => {
+          const external = db.rows.find((entry) => entry.messageID === "msg!a");
+          if (!external) throw new Error("external missing");
+          external.tokens.input = 101;
+          db.updatedAt.set(rowKey("ses_other", "msg!a"), NOW);
+        },
+      ],
+      [
+        "completion move",
+        (db) => {
+          const external = db.rows.find((entry) => entry.messageID === "msg!a");
+          if (!external) throw new Error("external missing");
+          external.completedAtMs = NOW - 2 * HOUR;
+          db.updatedAt.set(rowKey("ses_other", "msg!a"), NOW);
+        },
+      ],
+      [
+        "delete",
+        (db) => {
+          db.rows = db.rows.filter((entry) => entry.messageID !== "msg!a");
+          db.updatedAt.delete(rowKey("ses_other", "msg!a"));
+        },
+      ],
+      [
+        "type change",
+        (db) => {
+          const external = db.rows.find((entry) => entry.messageID === "msg!a");
+          if (!external) throw new Error("external missing");
+          db.rows = db.rows.filter((entry) => entry.messageID !== "msg!a");
+          db.updatedAt.delete(rowKey("ses_other", "msg!a"));
+          db.extraRevisions.push({
+            messageID: "msg!a",
+            sessionID: "ses_other",
+            type: "user",
+            createdAtMs: external.createdAtMs,
+            updatedAtMs: NOW,
+            completedAtMs: null,
+          });
+        },
+      ],
+    ];
+
+    for (const [label, mutate] of scenarios) {
+      const db = baseDb();
+      db.rows.push(row("ses_other", "msg!a", NOW - HOUR, { input: 100 }));
+      db.updatedAt.set(rowKey("ses_other", "msg!a"), NOW - HOUR);
+      const { engine, calls, setNow } = harness(db);
+      const before = await engine.session("ses_root");
+      expect(before.treeTotals.input, label).toBe(200);
+
+      const baseline = calls.length;
+      mutate(db);
+      setNow(NOW + INTERVAL + 1);
+      await engine.refresh();
+
+      const after = await engine.session("ses_root");
+      expect(after.treeTotals.input, label).toBe(300);
+      const revisions = calls.slice(baseline).filter((call) => call.method === "loadRevisions");
+      expect(
+        revisions.every(
+          (call) => call.params?.sessionIDs !== undefined || call.params?.messageIDs !== undefined,
+        ),
+        label,
+      ).toBe(true);
+      expect(
+        revisions.some((call) =>
+          (call.params?.messageIDs as string[] | undefined)?.includes("msg!a"),
+        ),
+        label,
+      ).toBe(true);
+      await engine.close();
+    }
+  });
+
+  it("keeps repeated warm session detail off the global occurrence iterator", async () => {
+    const db = baseDb();
+    const first = harness(db);
+    await first.engine.home("lifetime");
+    await flushAsync();
+    const saved = first.savedStates[first.savedStates.length - 1];
+    if (!saved) throw new Error("expected a persisted state");
+    const persisted = cloneState(saved);
+    await first.engine.close();
+
+    const tracked = new TrackingMap(persisted.occurrences);
+    persisted.occurrences = tracked;
+    const second = harness(db, {
+      loadSnapshot: async () => persisted,
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+    await second.engine.session("ses_root");
+    await flushAsync();
+    tracked.reset();
+
+    second.setNow(NOW + INTERVAL + 1);
+    await second.engine.refresh();
+    await second.engine.session("ses_root");
+
+    expect(tracked.valuesReads).toBe(0);
+    expect(tracked.keysReads).toBe(0);
+    expect(tracked.entriesReads).toBe(0);
+    expect(tracked.iteratorReads).toBe(0);
+  });
+
+  it("builds session DTO metadata only for the tree, fork owners, and ancestors", async () => {
+    const db = baseDb();
+    db.sessions.ses_unrelated = session("ses_unrelated", "p9");
+    db.projects.p9 = { id: "p9", name: "Unrelated", directories: [], worktrees: [] };
+    db.rows.push(row("ses_unrelated", "msg_unrelated", NOW - 3 * HOUR, { input: 999 }));
+    const { engine } = harness(db);
+
+    await engine.session("ses_root");
+    const dataset = capturedDatasets.at(-1);
+    expect(dataset).toBeDefined();
+    expect(Object.keys(dataset?.sessions ?? {}).sort()).toEqual(["ses_child", "ses_root"]);
+    expect(Object.keys(dataset?.projects ?? {})).toEqual(["p1"]);
+    expect(dataset?.messages.some((entry) => entry.messageID === "msg_unrelated")).toBe(false);
+  });
+
+  it("keeps global fork multiplicity and breadcrumb ancestors in session detail", async () => {
+    const db = baseDb();
+    db.sessions.ses_grand = session("ses_grand", "p1", { parentID: "ses_child" });
+    db.rows.push(row("ses_grand", "msg_grand", NOW - 30 * 60_000, { input: 77 }));
+    db.rows.push(row("ses_other", "msg!a", NOW - HOUR, { input: 100 }));
+    const { engine } = harness(db);
+
+    const root = await engine.session("ses_root");
+    expect(root).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_root"));
+
+    const grand = await engine.session("ses_grand");
+    expect(grand.breadcrumbs.map((crumb) => crumb.sessionId)).toEqual([
+      "ses_root",
+      "ses_child",
+      "ses_grand",
+    ]);
+    expect(grand).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_grand"));
+    await engine.close();
+  });
+
+  it("rebuilds indexes from a decoded persisted index before session detail", async () => {
+    const { db, persisted } = await warmRestartFixture();
+    const { engine } = harness(db, { loadSnapshot: async () => cloneState(persisted) });
+
+    const snapshot = await engine.session("ses_root");
+
+    expect(snapshot).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_root"));
+    await engine.close();
+  });
+
+  it("keeps insert, update, move, and removal exact across project and session views", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db, { fullRepairIntervalMs: 1 });
+    await engine.home("24h");
+    expect((await engine.project("p1", "24h")).totals.input).toBe(300);
+
+    db.rows.push(row("ses_root", "msg_new", NOW - 30 * 60_000, { input: 50 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_new"), NOW - 30 * 60_000);
+    await engine.refresh();
+    expect((await engine.project("p1", "24h")).totals.input).toBe(350);
+
+    const edited = db.rows.find((entry) => entry.messageID === "msg_b");
+    if (!edited) throw new Error("msg_b missing");
+    edited.tokens.input = 250;
+    db.updatedAt.set(rowKey("ses_root", "msg_b"), NOW);
+    await engine.refresh();
+    expect((await engine.project("p1", "24h")).totals.input).toBe(400);
+
+    edited.sessionID = "ses_other";
+    db.updatedAt.delete(rowKey("ses_root", "msg_b"));
+    db.updatedAt.set(rowKey("ses_other", "msg_b"), NOW);
+    await engine.refresh();
+    expect((await engine.project("p1", "24h")).totals.input).toBe(150);
+
+    const moved = await engine.session("ses_root");
+    expect(moved).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_root"));
+
+    db.rows = db.rows.filter((entry) => entry.messageID !== "msg_new");
+    setNow(NOW + 1);
+    await engine.refresh();
+    const removed = await engine.session("ses_root");
+    expect(removed).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_root"));
+    await engine.close();
+  });
+
+  it("keeps ownership exact when a global delta and scoped read share one transaction", async () => {
+    const db = baseDb();
+    const { engine } = harness(db);
+    await engine.home("24h");
+    expect((await engine.project("p1", "24h")).totals.input).toBe(300);
+
+    db.rows.push(row("ses_other", "msg!a", NOW - HOUR, { input: 100 }));
+    db.updatedAt.set(rowKey("ses_other", "msg!a"), NOW);
+    await engine.refresh();
+
+    expect((await engine.project("p1", "24h")).totals.input).toBe(200);
+    await engine.close();
+  });
+
+  it("reuses cached project/session scopes under a trusted global delta", async () => {
+    const db = baseDb();
+    db.rows.push(row("ses_root", "msg_root_old", NOW - 3 * DAY, { input: 25 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_root_old"), NOW - 3 * DAY);
+    const { engine, calls } = harness(db);
+    await engine.home("24h");
+    expect((await engine.project("p1", "lifetime")).totals.input).toBe(325);
+    await engine.session("ses_root");
+
+    const baseline = calls.length;
+    await engine.refresh();
+    expect(
+      calls.slice(baseline).filter((call) => call.method === "loadCompletedRows"),
+    ).toHaveLength(0);
+
+    // New row inside the cached lifetime project scope but outside the global
+    // 24h extent: the global delta must stage it through the scope coverage.
+    db.rows.push(row("ses_child", "msg_old_scope", NOW - 3 * DAY, { input: 55 }));
+    db.updatedAt.set(rowKey("ses_child", "msg_old_scope"), NOW);
+    const newRowBaseline = calls.length;
+    await engine.refresh();
+
+    const newRowReads = calls.slice(newRowBaseline);
+    expect(
+      newRowReads.some(
+        (call) => call.method === "loadCompletedRows" && call.params?.sessionIDs !== undefined,
+      ),
+    ).toBe(false);
+    const changedIds = newRowReads
+      .filter(
+        (call) => call.method === "loadCompletedRows" && call.params?.messageIDs !== undefined,
+      )
+      .flatMap((call) => call.params?.messageIDs as string[]);
+    expect(changedIds).toContain("msg_old_scope");
+    expect((await engine.project("p1", "lifetime")).totals.input).toBe(380);
+    expect((await engine.session("ses_root")).treeTotals.input).toBe(380);
+    await engine.close();
+  });
+
+  it("discovers external owners for cached scopes without a scoped payload read", async () => {
+    const db = baseDb();
+    db.rows.push(row("ses_root", "msg_root_old", NOW - 3 * DAY, { input: 25 }));
+    db.updatedAt.set(rowKey("ses_root", "msg_root_old"), NOW - 3 * DAY);
+    const { engine, calls } = harness(db);
+    await engine.home("24h");
+    expect((await engine.project("p1", "lifetime")).totals.input).toBe(325);
+    await engine.session("ses_root");
+
+    db.rows.push(row("ses_other", "msg!old", NOW - 3 * DAY, { input: 25 }));
+    db.updatedAt.set(rowKey("ses_other", "msg!old"), NOW);
+    const baseline = calls.length;
+    await engine.refresh();
+
+    const reads = calls.slice(baseline).filter((call) => call.method === "loadCompletedRows");
+    expect(reads.some((call) => call.params?.sessionIDs !== undefined)).toBe(false);
+    expect((await engine.project("p1", "lifetime")).totals.input).toBe(300);
+    await engine.close();
+  });
+
+  it("forces authoritative cached scope payloads on a repair refresh", async () => {
+    const db = baseDb();
+    const { engine, calls, setNow } = harness(db, { fullRepairIntervalMs: 1 });
+    await engine.home("24h");
+    await engine.project("p1", "lifetime");
+    await engine.session("ses_root");
+
+    setNow(NOW + 1);
+    const baseline = calls.length;
+    await engine.refresh();
+
+    const repairReads = calls
+      .slice(baseline)
+      .filter((call) => call.method === "loadCompletedRows" && call.params?.sessionIDs);
+    expect(
+      repairReads.some((call) => (call.params?.sessionIDs as string[]).includes("ses_root")),
+    ).toBe(true);
+    await engine.close();
   });
 
   it("never silently drops more than eight scopes", async () => {
@@ -1132,6 +1562,10 @@ describe("analytics engine: scope reads", () => {
     const project = await engine.project("p1", "30d");
     expect(project.totals.input).toBe(42);
 
+    const freshSession = await engine.session("ses_new");
+    expect(freshSession.focusSessionId).toBe("ses_new");
+    expect(freshSession.ownSummary.input).toBe(42);
+
     // The old global extent/certificate is gone, so home must perform a full
     // foreground read for the new generation instead of serving the old cache.
     const beforeHome = calls.length;
@@ -1144,7 +1578,41 @@ describe("analytics engine: scope reads", () => {
     await engine.close();
   });
 
-  it("refreshes every remembered periodic scope beyond one batch", async () => {
+  it("refreshes every remembered scope on a scoped-only refresh beyond one batch", async () => {
+    const db = baseDb();
+    for (let index = 0; index < 10; index += 1) {
+      const id = `ses_scope_${index}`;
+      db.sessions[id] = session(id, `p_scope_${index}`);
+      db.projects[`p_scope_${index}`] = {
+        id: `p_scope_${index}`,
+        name: `Scope ${index}`,
+        directories: [],
+        worktrees: [],
+      };
+      db.rows.push(row(id, `msg_scope_${index}`, NOW - HOUR, { input: index + 1 }));
+    }
+    const { engine, calls, setNow } = harness(db);
+    for (let index = 0; index < 10; index += 1) {
+      await engine.project(`p_scope_${index}`, "24h");
+      await engine.session(`ses_scope_${index}`);
+    }
+    setNow(NOW + INTERVAL + 1);
+    const baseline = calls.length;
+    await engine.refresh();
+
+    const scopedIds = new Set<string>();
+    for (const call of calls.slice(baseline)) {
+      if (call.method !== "loadCompletedRows") continue;
+      const values = call.params?.sessionIDs;
+      if (Array.isArray(values)) for (const value of values) scopedIds.add(String(value));
+    }
+    for (let index = 0; index < 10; index += 1) {
+      expect(scopedIds.has(`ses_scope_${index}`)).toBe(true);
+    }
+    await engine.close();
+  });
+
+  it("does not reread remembered scopes covered by a global refresh beyond one batch", async () => {
     const db = baseDb();
     for (let index = 0; index < 10; index += 1) {
       const id = `ses_interest_${index}`;
@@ -1166,14 +1634,21 @@ describe("analytics engine: scope reads", () => {
     setNow(NOW + INTERVAL + 1);
     const baseline = calls.length;
     await engine.refresh();
-    const scopedIds = new Set<string>();
-    for (const call of calls.slice(baseline)) {
-      if (call.method !== "loadCompletedRows") continue;
-      const values = call.params?.sessionIDs;
-      if (Array.isArray(values)) for (const value of values) scopedIds.add(String(value));
-    }
+
+    expect(
+      calls
+        .slice(baseline)
+        .filter(
+          (call) => call.method === "loadCompletedRows" && call.params?.sessionIDs !== undefined,
+        ),
+    ).toHaveLength(0);
     for (let index = 0; index < 10; index += 1) {
-      expect(scopedIds.has(`ses_interest_${index}`)).toBe(true);
+      expect((await engine.project(`p_interest_${index}`, "24h")).projectId).toBe(
+        `p_interest_${index}`,
+      );
+      expect((await engine.session(`ses_interest_${index}`)).focusSessionId).toBe(
+        `ses_interest_${index}`,
+      );
     }
     await engine.close();
   });
@@ -1600,6 +2075,9 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     const last = savedStates[savedStates.length - 1];
     if (!last) throw new Error("expected saved state");
     expect(last.fingerprints.length).toBeLessThanOrEqual(last.occurrences.size + 32);
+    expect(await engine.session("ses_root")).toEqual(
+      createUsageAnalytics(datasetOf(db)).session("ses_root"),
+    );
     await engine.close();
   });
 });

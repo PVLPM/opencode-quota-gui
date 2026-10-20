@@ -24,7 +24,8 @@ import {
   type OpenCodeStorageSnapshotResult,
   type ReadCompletedAssistantRowsParams,
 } from "../lib/opencode-storage.js";
-import { createUsageAnalytics } from "./aggregation.js";
+import { createUsageAnalytics, UNKNOWN_PROJECT_ID } from "./aggregation.js";
+import { createAnalyticsIndexes } from "./analytics-indexes.js";
 import { type AnalyticsModel, createAnalyticsModel } from "./analytics-model.js";
 import type { AnalyticsPhaseMetrics } from "./analytics-protocol.js";
 import { type AnalyticsReader, createAnalyticsReader } from "./analytics-reader.js";
@@ -155,6 +156,20 @@ interface StagedUpsert {
   agent?: string;
 }
 
+/** Explicit loaded extent for a remembered project scope. */
+interface ProjectScopeCoverage {
+  signature: string;
+  sessionIds: string[];
+  sinceMs?: number;
+  untilMs: number;
+}
+
+/** Explicit loaded tree extent for a warm session detail. */
+interface DetailScopeCoverage {
+  signature: string;
+  untilMs: number;
+}
+
 /**
  * Revision watermark attached to a bulk payload row without allocating a
  * parallel map for every row.
@@ -175,7 +190,10 @@ interface Candidate {
   extentChanged: boolean;
   detailSignatures: Array<[string, string]>;
   detailCompactions: Array<[string, Array<{ sessionId: string; atMs: number; messageId: string }>]>;
+  /** Detail focuses whose full tree payload (agents included) is now loaded. */
+  detailCoverageChanges: Array<[string, DetailScopeCoverage]>;
   projectSignatures: Array<[string, string]>;
+  projectCoverages: Array<[string, ProjectScopeCoverage]>;
   /**
    * Global-refresh cursor outcome: a number establishes the next half-open
    * source frontier, `null` clears it because timestamps are unusable, and
@@ -211,7 +229,7 @@ function emptyState(): AnalyticsState {
 
 function projectIdOf(session: OpenCodeSessionInfo): string {
   const value = session.projectID?.trim();
-  return value ? value : "unknown";
+  return value ? value : UNKNOWN_PROJECT_ID;
 }
 
 function coversSince(sinceMs: number | undefined, extent: AnalyticsCoverage | undefined): boolean {
@@ -238,45 +256,6 @@ function mergeExtent(
   };
 }
 
-function projectSessionIds(
-  sessions: Record<string, OpenCodeSessionInfo>,
-  projectId: string,
-): string[] {
-  return Object.values(sessions)
-    .filter((session) => projectIdOf(session) === projectId)
-    .map((session) => session.id)
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-}
-
-function treeIds(sessions: Record<string, OpenCodeSessionInfo>, focusId: string): string[] {
-  const childrenByParent = new Map<string, string[]>();
-  for (const session of Object.values(sessions)) {
-    if (!session.parentID) continue;
-    let children = childrenByParent.get(session.parentID);
-    if (!children) {
-      children = [];
-      childrenByParent.set(session.parentID, children);
-    }
-    children.push(session.id);
-  }
-  for (const children of childrenByParent.values()) children.sort();
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  const pending = [focusId];
-  while (pending.length > 0) {
-    const id = pending.pop();
-    if (id === undefined || seen.has(id)) continue;
-    seen.add(id);
-    ids.push(id);
-    const children = childrenByParent.get(id) ?? [];
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      const child = children[index];
-      if (child !== undefined) pending.push(child);
-    }
-  }
-  return ids;
-}
-
 function sessionRevisionSignature(
   sessions: Record<string, OpenCodeSessionInfo>,
   ids: readonly string[],
@@ -291,12 +270,20 @@ function sessionRevisionSignature(
     .join("|");
 }
 
+/** Parent/project topology only; title and timestamp churn must not reindex. */
+function sessionIndexSignature(sessions: Record<string, OpenCodeSessionInfo>): string {
+  return Object.values(sessions)
+    .map((session) => `${session.id}\u0000${session.parentID ?? ""}\u0000${projectIdOf(session)}`)
+    .sort()
+    .join("\u0001");
+}
+
 function projectSignature(
-  sessions: Record<string, OpenCodeSessionInfo>,
   projectId: string,
   range: RangeKey,
+  sessionIds: readonly string[],
 ): string {
-  return `${projectId}|${range}|${projectSessionIds(sessions, projectId).join(",")}`;
+  return `${projectId}|${range}|${sessionIds.join(",")}`;
 }
 
 function metadataChanged(previous: unknown, next: unknown): boolean {
@@ -381,7 +368,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   }
 
   const model: AnalyticsModel = createAnalyticsModel();
+  const indexes = createAnalyticsIndexes();
   let state = emptyState();
+  let lastSessionIndexSignature = "";
   let loaded = false;
   let loading: Promise<void> | undefined;
   let indexLoaded = false;
@@ -439,6 +428,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     Array<{ sessionId: string; atMs: number; messageId: string }>
   >();
   const projectSignatures = new Map<string, string>();
+  const projectCoverage = new Map<string, ProjectScopeCoverage>();
+  const detailCoverage = new Map<string, DetailScopeCoverage>();
 
   function rowOf(occurrence: Occurrence): OpenCodeRawAssistantRow | undefined {
     const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
@@ -470,6 +461,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     };
     if (agent !== undefined) occurrence.agent = agent;
     state.occurrences.set(row.messageID, occurrence);
+    indexes.upsert(occurrence);
   }
 
   function trimMap<K, V>(map: Map<K, V>, limit: number): void {
@@ -540,6 +532,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           state.presentation = undefined;
         }
       }
+      indexes.rebuild(state.occurrences.values(), state.sessions);
+      lastSessionIndexSignature = sessionIndexSignature(state.sessions);
       indexLoaded = true;
     })().finally(() => {
       indexLoading = undefined;
@@ -566,7 +560,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
   /**
    * Minimal scoped dataset for the shared session DTO builder: tree rows plus
-   * every stored occurrence that shares a tree fingerprint (fork owners).
+   * every stored occurrence that shares a tree fingerprint (fork owners). The
+   * metadata is narrowed to those rows' sessions plus their ancestors so the
+   * shared builder never rebuilds unrelated session/project trees.
    */
   function sessionDataset(sessionId: string): {
     sessions: AnalyticsState["sessions"];
@@ -574,33 +570,57 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     messages: OpenCodeRawAssistantRow[];
     compactions: Array<{ sessionId: string; atMs: number; messageId: string }>;
   } {
-    const tree = new Set(treeIds(state.sessions, sessionId));
+    const ids = indexes.treeIds(sessionId);
     const fingerprintIndexes = new Set<number>();
-    for (const occurrence of state.occurrences.values()) {
-      if (tree.has(occurrence.sessionID)) fingerprintIndexes.add(occurrence.fingerprintIndex);
+    const includedSessionIds = new Set(ids);
+    for (const messageID of indexes.sessionMessages(ids)) {
+      const occurrence = state.occurrences.get(messageID);
+      if (occurrence) fingerprintIndexes.add(occurrence.fingerprintIndex);
     }
+
     const messages: OpenCodeRawAssistantRow[] = [];
-    for (const occurrence of state.occurrences.values()) {
-      if (!tree.has(occurrence.sessionID) && !fingerprintIndexes.has(occurrence.fingerprintIndex)) {
-        continue;
-      }
+    for (const messageID of indexes.fingerprintMessages(fingerprintIndexes)) {
+      const occurrence = state.occurrences.get(messageID);
+      if (!occurrence) continue;
       const row = rowOf(occurrence);
-      if (row) messages.push(row);
+      if (!row) continue;
+      messages.push(row);
+      includedSessionIds.add(occurrence.sessionID);
     }
+
+    const sessions: AnalyticsState["sessions"] = {};
+    for (const id of includedSessionIds) {
+      let ancestorId: string | undefined = id;
+      const seen = new Set<string>();
+      while (ancestorId !== undefined && !seen.has(ancestorId)) {
+        seen.add(ancestorId);
+        const session: OpenCodeSessionInfo | undefined = state.sessions[ancestorId];
+        if (!session) break;
+        sessions[ancestorId] = session;
+        ancestorId = session.parentID;
+      }
+    }
+
+    const projects: AnalyticsState["projects"] = {};
+    const focus = state.sessions[sessionId];
+    if (focus) {
+      const projectId = projectIdOf(focus);
+      const info = state.projects[projectId];
+      if (info) projects[projectId] = info;
+    }
+
     return {
-      sessions: state.sessions,
-      projects: state.projects,
+      sessions,
+      projects,
       messages,
       compactions: detailCompactions.get(sessionId) ?? [],
     };
   }
 
   function stateHasProject(projectId: string): boolean {
-    if (Object.hasOwn(state.projects, projectId)) return true;
-    for (const session of Object.values(state.sessions)) {
-      if (projectIdOf(session) === projectId) return true;
-    }
-    return false;
+    return (
+      Object.hasOwn(state.projects, projectId) || indexes.projectSessions(projectId).length > 0
+    );
   }
 
   function isStale(atMs: number): boolean {
@@ -763,6 +783,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
     const sessions = measureSync("metadataRead", () => snapshot.readAllSessionsIndex());
     const projects = measureSync("metadataRead", () => snapshot.readProjectsIndex());
+    // Stage metadata topology without touching committed indexes until commit.
+    const candidateIndexes = createAnalyticsIndexes();
+    candidateIndexes.setSessions(sessions);
 
     const globalRefresh = job.globalRange !== undefined;
     const effectiveExtent = replaced ? undefined : state.extent;
@@ -898,16 +921,16 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     };
 
     // Removed session metadata is authoritative for its stored occurrences.
-    // The session key walk is small; the occurrence walk only runs when a
-    // session actually disappeared.
+    // The session index narrows the walk to messages of sessions that actually
+    // disappeared; the committed occurrence index is never rebuilt here.
     if (!replaced) {
       const removedSessionIds = new Set<string>();
       for (const id of Object.keys(state.sessions)) {
         if (!Object.hasOwn(sessions, id)) removedSessionIds.add(id);
       }
       if (removedSessionIds.size > 0) {
-        for (const [key, occurrence] of state.occurrences) {
-          if (removedSessionIds.has(occurrence.sessionID)) removalKeys.add(key);
+        for (const messageID of indexes.sessionMessages(removedSessionIds)) {
+          removalKeys.add(messageID);
         }
       }
     }
@@ -992,67 +1015,239 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const detailCompactionChanges: Array<
       [string, Array<{ sessionId: string; atMs: number; messageId: string }>]
     > = [];
+    const detailCoverageChanges: Array<[string, DetailScopeCoverage]> = [];
     const projectSignatureChanges: Array<[string, string]> = [];
+    const projectCoverageChanges: Array<[string, ProjectScopeCoverage]> = [];
+    const reusedScopes: Array<{
+      sessionIds: Set<string>;
+      sinceMs?: number;
+      untilMs: number;
+      read: ScopeRead;
+      dirty: boolean;
+    }> = [];
+    const reconciledOwnerMessageIDs = new Set<string>();
+
+    /**
+     * Safe owner-read elision: a valid global delta reconciled in this same
+     * transaction already staged every external row that could share a scoped
+     * fingerprint, but only when the loaded completion extent covers every
+     * scoped time. Wall-clock/global freshness alone proves nothing about
+     * external source changes and never takes this path.
+     */
+    const ownershipReconciledInSnapshot = globalRefresh && deltaValid && nextExtent !== undefined;
+    const timesCoveredByExtent = (times: ReadonlySet<number>): boolean => {
+      if (!ownershipReconciledInSnapshot || !nextExtent) return false;
+      for (const time of times) {
+        if (time > nextExtent.untilMs) return false;
+        if (nextExtent.sinceMs !== undefined && time < nextExtent.sinceMs) return false;
+      }
+      return true;
+    };
 
     /**
      * Cross-scope fork owners must stay in the contribution set for exact
-     * ownership. For new/unknown scoped fingerprints, query only the completed
-     * time span of the scope instead of paying a global revision projection.
+     * ownership. Query only the exact completion timestamps of the scope
+     * instead of projecting every row in the min/max span.
      */
+    /**
+     * Scoped-only reads have no global revision scan, so a known external fork
+     * owner can be stale. Resolve its current identity through the fingerprint
+     * reverse index and the scoped message-ID revision projection; update or
+     * remove it before ownership is evaluated. A same-snapshot global delta
+     * already reconciled every stored occurrence, so this is skipped then.
+     */
+    const reconcileKnownExternalOwners = (read: ScopeRead): void => {
+      if (ownershipReconciledInSnapshot || read.fingerprints.size === 0) return;
+      const candidates = new Set<string>();
+      for (const fingerprint of read.fingerprints) {
+        const fingerprintIndex = state.fingerprintIndex.get(fingerprint);
+        if (fingerprintIndex === undefined) continue;
+        for (const messageID of indexes.fingerprintMessages([fingerprintIndex])) {
+          if (reconciledOwnerMessageIDs.has(messageID)) continue;
+          if (bulkMap.has(messageID) || changedMap.has(messageID)) continue;
+          const occurrence = state.occurrences.get(messageID);
+          if (!occurrence || read.ids.has(occurrence.sessionID)) continue;
+          candidates.add(messageID);
+        }
+      }
+      if (candidates.size === 0) return;
+
+      const revisions = measureSync("revisionDiscovery", () =>
+        snapshot.readMessageRevisions({ messageIDs: [...candidates] }),
+      );
+      if (!revisions.available) return;
+      const byId = new Map(revisions.revisions.map((revision) => [revision.messageID, revision]));
+      const changedForOwner = new Map<string, number | null>();
+      for (const messageID of candidates) {
+        reconciledOwnerMessageIDs.add(messageID);
+        const occurrence = state.occurrences.get(messageID);
+        if (!occurrence) continue;
+        const revision = byId.get(messageID);
+        if (!revision) {
+          removalKeys.add(messageID);
+          continue;
+        }
+        if (revisions.completedAtAvailable) {
+          if (revisionCompletedAt(revision) === 0) {
+            removalKeys.add(messageID);
+            continue;
+          }
+        }
+        const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
+        const identityChanged =
+          !revisions.updatedAtAvailable ||
+          !revisions.completedAtAvailable ||
+          revision.updatedAtMs === null ||
+          !fingerprint ||
+          revision.sessionID !== occurrence.sessionID ||
+          revision.completedAtMs !== fingerprint[1] ||
+          revision.updatedAtMs !== occurrence.updatedAtMs;
+        if (identityChanged) changedForOwner.set(messageID, revision.updatedAtMs);
+      }
+
+      if (changedForOwner.size === 0) return;
+      const resolved = new Set<string>();
+      const rows = readChangedRows([...changedForOwner.keys()]);
+      for (const row of rows) {
+        if (!changedForOwner.has(row.messageID)) continue;
+        const updatedAtMs = changedForOwner.get(row.messageID) ?? null;
+        resolved.add(row.messageID);
+        stageChanged(row, updatedAtMs);
+      }
+      for (const messageID of changedForOwner.keys()) {
+        if (!resolved.has(messageID) && state.occurrences.has(messageID)) {
+          removalKeys.add(messageID);
+        }
+      }
+    };
+
     const discoverExternalOwners = (read: ScopeRead): void => {
       if (read.times.size === 0) return;
-      let minMs = Number.POSITIVE_INFINITY;
-      let maxMs = Number.NEGATIVE_INFINITY;
-      for (const time of read.times) {
-        if (time < minMs) minMs = time;
-        if (time > maxMs) maxMs = time;
-      }
-      const candidates = readHistoricalRows({
-        completedSinceMs: minMs,
-        completedUntilMs: maxMs,
-      });
+      reconcileKnownExternalOwners(read);
+      if (timesCoveredByExtent(read.times)) return;
+      const candidates = readHistoricalRows({ completedAtTimes: [...read.times] });
       for (const row of candidates) {
         if (read.ids.has(row.sessionID)) continue;
         if (!read.times.has(row.completedAtMs)) continue;
         if (!read.fingerprints.has(fingerprintOf(row))) continue;
         if (bulkMap.has(row.messageID) || changedMap.has(row.messageID)) continue;
-        if (state.occurrences.has(row.messageID)) continue;
+        const occurrence = state.occurrences.get(row.messageID);
+        if (occurrence) {
+          const stored = state.fingerprints[occurrence.fingerprintIndex];
+          if (
+            stored &&
+            occurrence.sessionID === row.sessionID &&
+            occurrence.updatedAtMs === (row.updatedAtMs ?? null) &&
+            fingerprintOf(rowFromFingerprint(stored, occurrence)) === fingerprintOf(row)
+          ) {
+            continue;
+          }
+        }
         stageChanged(row, row.updatedAtMs ?? null);
       }
     };
 
+    const markReusedScopesDirty = (sessionID: string, completedAtMs: number): void => {
+      for (const scope of reusedScopes) {
+        if (!scope.sessionIds.has(sessionID)) {
+          // A new/changed external copy at a cached scope time can change the
+          // deterministic owner even though it belongs to another session.
+          if (completedAtMs > 0 && scope.read.times.has(completedAtMs)) scope.dirty = true;
+          continue;
+        }
+        if (completedAtMs === 0) {
+          scope.dirty = true;
+          continue;
+        }
+        if (completedAtMs > scope.untilMs) continue;
+        if (scope.sinceMs !== undefined && completedAtMs < scope.sinceMs) continue;
+        scope.dirty = true;
+      }
+    };
+
+    const revisionEligibleInReusedScope = (sessionID: string, completedAtMs: number): boolean => {
+      for (const scope of reusedScopes) {
+        if (!scope.sessionIds.has(sessionID)) continue;
+        if (completedAtMs > scope.untilMs) continue;
+        if (scope.sinceMs !== undefined && completedAtMs < scope.sinceMs) continue;
+        return true;
+      }
+      return false;
+    };
+
     for (const scope of job.projectScopes) {
       const scopeWindow = rangeWindow(scope.range, atMs);
-      const ids = projectSessionIds(sessions, scope.projectId);
+      const ids = candidateIndexes.projectSessions(scope.projectId);
       if (ids.length === 0) continue;
+      const signature = projectSignature(scope.projectId, scope.range, ids);
       const scopeSessions = new Set(ids);
-      for (const [key, occurrence] of state.occurrences) {
-        if (!scopeSessions.has(occurrence.sessionID)) continue;
-        const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
-        if (
-          fingerprint &&
-          fingerprint[1] <= atMs &&
-          (scopeWindow.sinceMs === undefined || fingerprint[1] >= scopeWindow.sinceMs)
-        ) {
-          removalKeys.add(key);
+      const priorCoverage = projectCoverage.get(scope.projectId);
+      const coveredByGlobalExtent =
+        globalRefresh && deltaValid && coversSince(scopeWindow.sinceMs, nextExtent);
+      const reusableCoverage =
+        globalRefresh && deltaValid && priorCoverage?.signature === signature;
+
+      if (coveredByGlobalExtent) {
+        // The valid global delta already reconciles this whole window; the
+        // project DTO derives from the shared model, so no scoped payload.
+      } else if (reusableCoverage) {
+        // Cached coverage: the valid global delta already updates existing
+        // occurrences and stages new eligible ids. No historical payload read.
+        const read: ScopeRead = { ids: scopeSessions, fingerprints: new Set(), times: new Set() };
+        for (const messageID of indexes.sessionMessages(scopeSessions)) {
+          if (removalKeys.has(messageID)) continue;
+          const occurrence = state.occurrences.get(messageID);
+          if (!occurrence) continue;
+          const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
+          if (!fingerprint) continue;
+          if (fingerprint[1] > atMs) continue;
+          if (scopeWindow.sinceMs !== undefined && fingerprint[1] < scopeWindow.sinceMs) continue;
+          read.fingerprints.add(fingerprintOf(rowFromFingerprint(fingerprint, occurrence)));
+          read.times.add(fingerprint[1]);
         }
+        reusedScopes.push({
+          sessionIds: scopeSessions,
+          sinceMs: scopeWindow.sinceMs,
+          untilMs: atMs,
+          read,
+          dirty: false,
+        });
+      } else {
+        for (const messageID of indexes.sessionMessages(scopeSessions)) {
+          const occurrence = state.occurrences.get(messageID);
+          if (!occurrence) continue;
+          const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
+          if (
+            fingerprint &&
+            fingerprint[1] <= atMs &&
+            (scopeWindow.sinceMs === undefined || fingerprint[1] >= scopeWindow.sinceMs)
+          ) {
+            removalKeys.add(messageID);
+          }
+        }
+        const rows = readHistoricalRows({
+          sessionIDs: ids,
+          ...(scopeWindow.sinceMs === undefined ? {} : { completedSinceMs: scopeWindow.sinceMs }),
+          completedUntilMs: atMs,
+        });
+        const read: ScopeRead = { ids: scopeSessions, fingerprints: new Set(), times: new Set() };
+        for (const row of rows) {
+          read.fingerprints.add(fingerprintOf(row));
+          read.times.add(row.completedAtMs);
+          stageBulk(row);
+        }
+        discoverExternalOwners(read);
       }
-      const rows = readHistoricalRows({
-        sessionIDs: ids,
-        ...(scopeWindow.sinceMs === undefined ? {} : { completedSinceMs: scopeWindow.sinceMs }),
-        completedUntilMs: atMs,
-      });
-      const read: ScopeRead = { ids: scopeSessions, fingerprints: new Set(), times: new Set() };
-      for (const row of rows) {
-        read.fingerprints.add(fingerprintOf(row));
-        read.times.add(row.completedAtMs);
-        stageBulk(row);
-      }
-      discoverExternalOwners(read);
-      projectSignatureChanges.push([
+      projectCoverageChanges.push([
         scope.projectId,
-        projectSignature(sessions, scope.projectId, scope.range),
+        {
+          signature,
+          sessionIds: ids,
+          ...(scopeWindow.sinceMs === undefined ? {} : { sinceMs: scopeWindow.sinceMs }),
+          untilMs: atMs,
+        },
       ]);
+      projectSignatureChanges.push([scope.projectId, signature]);
     }
 
     for (const focusId of job.detailSessionIds) {
@@ -1061,7 +1256,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         detailSignatureChanges.push([focusId, ""]);
         continue;
       }
-      const ids = treeIds(sessions, focusId);
+      const ids = candidateIndexes.treeIds(focusId);
       const idSet = new Set(ids);
       const scopedRevisions = measureSync("revisionDiscovery", () =>
         snapshot.readMessageRevisions({ sessionIDs: ids }),
@@ -1072,22 +1267,120 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           scopedWatermarks.set(revision.messageID, revision.updatedAtMs);
         }
       }
-      for (const [key, occurrence] of state.occurrences) {
-        if (idSet.has(occurrence.sessionID)) removalKeys.add(key);
-      }
-      const rows = readHistoricalRows({ sessionIDs: ids });
+      const signature = sessionRevisionSignature(sessions, ids);
       const read: ScopeRead = { ids: idSet, fingerprints: new Set(), times: new Set() };
-      for (const row of rows) {
-        read.fingerprints.add(fingerprintOf(row));
-        read.times.add(row.completedAtMs);
-        stageBulk(row, scopedWatermarks.get(row.messageID) ?? null);
+      const warmPayloads =
+        !replaced &&
+        !repairDue &&
+        detailCoverage.has(focusId) &&
+        detailCompactions.has(focusId) &&
+        scopedRevisions.available &&
+        scopedRevisions.updatedAtAvailable &&
+        scopedRevisions.completedAtAvailable;
+
+      if (warmPayloads) {
+        // Warm detail: the full tree payload (including transient agents) was
+        // already loaded. Reconcile identities through the revision diff and
+        // fetch payloads only for changed/new ids.
+        const previousMessageIDs = new Set(indexes.sessionMessages(ids));
+        const seenMessageIDs = new Set<string>();
+        const changedForDetail = new Map<string, number | null>();
+        let detailDirty = false;
+        for (const revision of scopedRevisions.revisions) {
+          seenMessageIDs.add(revision.messageID);
+          const occurrence = state.occurrences.get(revision.messageID);
+          const completed = revisionCompletedAt(revision);
+          if (completed === 0) {
+            if (occurrence) {
+              removalKeys.add(revision.messageID);
+              detailDirty = true;
+            }
+            continue;
+          }
+          if (!occurrence) {
+            changedForDetail.set(revision.messageID, revision.updatedAtMs);
+            detailDirty = true;
+            continue;
+          }
+          const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
+          if (
+            revision.updatedAtMs === null ||
+            !fingerprint ||
+            occurrence.sessionID !== revision.sessionID ||
+            completed !== fingerprint[1] ||
+            revision.updatedAtMs !== occurrence.updatedAtMs
+          ) {
+            changedForDetail.set(revision.messageID, revision.updatedAtMs);
+            detailDirty = true;
+            continue;
+          }
+          const row = rowOf(occurrence);
+          if (row) {
+            read.fingerprints.add(fingerprintOf(row));
+            read.times.add(row.completedAtMs);
+          }
+        }
+        for (const messageID of previousMessageIDs) {
+          if (!seenMessageIDs.has(messageID)) {
+            removalKeys.add(messageID);
+            detailDirty = true;
+          }
+        }
+        if (changedForDetail.size > 0) {
+          const resolved = new Set<string>();
+          const rows = readChangedRows([...changedForDetail.keys()]);
+          for (const row of rows) {
+            if (!changedForDetail.has(row.messageID)) continue;
+            const entry = changedForDetail.get(row.messageID) ?? null;
+            resolved.add(row.messageID);
+            stageChanged(row, entry);
+            read.fingerprints.add(fingerprintOf(row));
+            read.times.add(row.completedAtMs);
+          }
+          for (const messageID of changedForDetail.keys()) {
+            if (!resolved.has(messageID) && state.occurrences.has(messageID)) {
+              removalKeys.add(messageID);
+              detailDirty = true;
+            }
+          }
+        }
+        if (globalRefresh && deltaValid) {
+          // The same-snapshot global delta can certify exact owner discovery;
+          // defer it until changed payloads are known so no-change warm detail
+          // performs no historical payload read.
+          reusedScopes.push({
+            sessionIds: idSet,
+            untilMs: atMs,
+            read,
+            dirty: detailDirty,
+          });
+        } else {
+          discoverExternalOwners(read);
+        }
+        const markers = measureSync("historicalPayloadRead", () =>
+          snapshot.readCompactionMarkers({ sessionIDs: ids }),
+        );
+        detailCompactionChanges.push([focusId, markers]);
+        detailCoverageChanges.push([focusId, { signature: ids.join("\u0001"), untilMs: atMs }]);
+      } else {
+        // First detail load (or a schema without revision times) needs the full
+        // tree payload because agents and compaction markers are not in the
+        // revision projection.
+        for (const messageID of indexes.sessionMessages(idSet)) removalKeys.add(messageID);
+        const rows = readHistoricalRows({ sessionIDs: ids });
+        for (const row of rows) {
+          read.fingerprints.add(fingerprintOf(row));
+          read.times.add(row.completedAtMs);
+          stageBulk(row, scopedWatermarks.get(row.messageID) ?? null);
+        }
+        discoverExternalOwners(read);
+        const markers = measureSync("historicalPayloadRead", () =>
+          snapshot.readCompactionMarkers({ sessionIDs: ids }),
+        );
+        detailCompactionChanges.push([focusId, markers]);
+        detailCoverageChanges.push([focusId, { signature: ids.join("\u0001"), untilMs: atMs }]);
       }
-      discoverExternalOwners(read);
-      const markers = measureSync("historicalPayloadRead", () =>
-        snapshot.readCompactionMarkers({ sessionIDs: ids }),
-      );
-      detailCompactionChanges.push([focusId, markers]);
-      detailSignatureChanges.push([focusId, sessionRevisionSignature(sessions, ids)]);
+      detailSignatureChanges.push([focusId, signature]);
     }
 
     // Apply the projected revision delta after every payload/membership read.
@@ -1108,6 +1401,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           if (completed === 0) {
             // Completion/type reversal is authoritative for this id only.
             removalKeys.add(key);
+            markReusedScopesDirty(revision.sessionID, 0);
             continue;
           }
           const fingerprint = state.fingerprints[occurrence.fingerprintIndex];
@@ -1115,18 +1409,22 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           // unchanged, so re-read it conservatively on every delta.
           const unknownTimestamp =
             revisionSnapshot.updatedAtAvailable && revision.updatedAtMs === null;
-          if (
-            !bulkRow &&
-            (unknownTimestamp ||
-              !fingerprint ||
-              completed !== fingerprint[1] ||
-              (revisionSnapshot.updatedAtAvailable &&
-                revision.updatedAtMs !== occurrence.updatedAtMs))
-          ) {
-            changedIds.set(key, { updatedAtMs: revision.updatedAtMs });
+          const changed =
+            unknownTimestamp ||
+            !fingerprint ||
+            occurrence.sessionID !== revision.sessionID ||
+            completed !== fingerprint[1] ||
+            (revisionSnapshot.updatedAtAvailable &&
+              revision.updatedAtMs !== occurrence.updatedAtMs);
+          if (changed) {
+            markReusedScopesDirty(revision.sessionID, completed);
+            if (!bulkRow) changedIds.set(key, { updatedAtMs: revision.updatedAtMs });
           }
         } else if (!replaced && !bulkRow && completed > 0 && window) {
-          if (completed <= extentUntil && (extentSince === undefined || completed >= extentSince)) {
+          markReusedScopesDirty(revision.sessionID, completed);
+          const inGlobalExtent =
+            completed <= extentUntil && (extentSince === undefined || completed >= extentSince);
+          if (inGlobalExtent || revisionEligibleInReusedScope(revision.sessionID, completed)) {
             changedIds.set(key, { updatedAtMs: revision.updatedAtMs });
           }
         }
@@ -1152,6 +1450,40 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
     }
 
+    // Cached project scopes skipped their payload read. If the delta touched
+    // them, recover exact cross-scope fork owners from stored/changed rows
+    // without rereading the project's historical payload.
+    for (const scope of reusedScopes) {
+      if (!scope.dirty) continue;
+      const read: ScopeRead = { ids: scope.sessionIds, fingerprints: new Set(), times: new Set() };
+      const seen = new Set<string>();
+      const addRow = (row: OpenCodeRawAssistantRow): void => {
+        if (!scope.sessionIds.has(row.sessionID)) return;
+        if (row.completedAtMs > scope.untilMs) return;
+        if (scope.sinceMs !== undefined && row.completedAtMs < scope.sinceMs) return;
+        read.fingerprints.add(fingerprintOf(row));
+        read.times.add(row.completedAtMs);
+      };
+      for (const messageID of indexes.sessionMessages(scope.sessionIds)) {
+        seen.add(messageID);
+        if (removalKeys.has(messageID)) continue;
+        const changed = changedMap.get(messageID);
+        if (changed) {
+          addRow(changed.row);
+          continue;
+        }
+        const occurrence = state.occurrences.get(messageID);
+        if (!occurrence) continue;
+        const row = rowOf(occurrence);
+        if (row) addRow(row);
+      }
+      for (const [messageID, entry] of changedMap) {
+        if (seen.has(messageID)) continue;
+        addRow(entry.row);
+      }
+      discoverExternalOwners(read);
+    }
+
     return {
       identity,
       sessions,
@@ -1164,7 +1496,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       extentChanged,
       detailSignatures: detailSignatureChanges,
       detailCompactions: detailCompactionChanges,
+      detailCoverageChanges,
       projectSignatures: projectSignatureChanges,
+      projectCoverages: projectCoverageChanges,
       ...(globalRefresh ? { sourceCursorAtMs } : {}),
       ...(globalRefresh && (cursorBaseline || fullProjection) ? { repairCompletedAtMs: atMs } : {}),
     };
@@ -1197,6 +1531,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
     state.fingerprints = next;
     state.fingerprintIndex = nextIndex;
+    // Fingerprint buckets are positional: rebuild them once after the remap.
+    indexes.rebuild(state.occurrences.values(), state.sessions);
   }
 
   async function refreshBatch(job: RefreshJob): Promise<void> {
@@ -1264,6 +1600,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
     const sessionsChanged = metadataChanged(state.sessions, candidate.sessions);
     const projectsChanged = metadataChanged(state.projects, candidate.projects);
+    const nextSessionIndexSignature = sessionIndexSignature(candidate.sessions);
+    const sessionIndexChanged =
+      candidate.replaced || nextSessionIndexSignature !== lastSessionIndexSignature;
 
     // Apply synchronously after the transaction has returned.
     if (candidate.replaced) {
@@ -1277,8 +1616,12 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       projectSignatures.clear();
       detailSignatures.clear();
       detailCompactions.clear();
+      detailCoverage.clear();
+      projectCoverage.clear();
       projectFreshAt.clear();
       detailFreshAt.clear();
+      indexes.rebuild([], {});
+      lastSessionIndexSignature = "";
       measureSync("modelUpdate", () => model.clear());
       modelHydrated = false;
       modelDirty = true;
@@ -1291,6 +1634,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const row = rowOf(occurrence);
       if (row) removals.push(row);
       state.occurrences.delete(key);
+      indexes.remove(key);
     }
 
     const upserts: OpenCodeRawAssistantRow[] = [];
@@ -1303,7 +1647,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         const oldRow = rowOf(existing);
         if (oldRow) removals.push(oldRow);
       }
-      setRow(row, (row as WatermarkedRow)[WATERMARK] ?? null);
+      setRow(row, (row as WatermarkedRow)[WATERMARK] ?? null, row.agent);
       upserts.push(row);
     }
     for (const [key, entry] of candidate.changedMap) {
@@ -1318,6 +1662,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
     state.sessions = candidate.sessions;
     state.projects = candidate.projects;
+    if (sessionIndexChanged) {
+      indexes.setSessions(candidate.sessions);
+      lastSessionIndexSignature = nextSessionIndexSignature;
+    }
     state.sourceIdentity = candidate.identity;
     if (candidate.extentChanged) state.extent = candidate.nextExtent;
     // A scoped-only refresh never certifies global freshness or advances the
@@ -1336,23 +1684,32 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (signature === "") {
         detailSignatures.delete(focusId);
         detailCompactions.delete(focusId);
+        detailCoverage.delete(focusId);
         detailFreshAt.delete(focusId);
       } else {
         detailSignatures.set(focusId, signature);
         detailFreshAt.set(focusId, atMs);
       }
     }
+    for (const [focusId, coverage] of candidate.detailCoverageChanges) {
+      detailCoverage.set(focusId, coverage);
+    }
     for (const [focusId, markers] of candidate.detailCompactions) {
       detailCompactions.set(focusId, markers);
     }
-    trimMap(detailSignatures, MAX_SCOPE_BATCH * 4);
-    trimMap(detailCompactions, MAX_SCOPE_BATCH * 4);
-    trimMap(detailFreshAt, MAX_SCOPE_BATCH * 4);
     for (const [projectId, signature] of candidate.projectSignatures) {
       projectSignatures.set(projectId, signature);
       projectFreshAt.set(projectId, atMs);
     }
+    for (const [projectId, coverage] of candidate.projectCoverages) {
+      projectCoverage.set(projectId, coverage);
+    }
+    trimMap(detailSignatures, MAX_SCOPE_BATCH * 4);
+    trimMap(detailCompactions, MAX_SCOPE_BATCH * 4);
+    trimMap(detailCoverage, MAX_SCOPE_BATCH * 4);
+    trimMap(detailFreshAt, MAX_SCOPE_BATCH * 4);
     trimMap(projectSignatures, MAX_SCOPE_BATCH * 4);
+    trimMap(projectCoverage, MAX_SCOPE_BATCH * 4);
     trimMap(projectFreshAt, MAX_SCOPE_BATCH * 4);
 
     const dataChanged =
@@ -1538,7 +1895,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       await ensureIndexLoaded();
 
       const window = rangeWindow(range, atMs);
-      const signature = projectSignature(state.sessions, projectId, range);
+      const signature = projectSignature(projectId, range, indexes.projectSessions(projectId));
       const covered =
         isProjectFresh(projectId, atMs) ||
         coversSince(window.sinceMs, state.extent) ||
@@ -1579,7 +1936,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         focus = state.sessions[sessionId];
         if (!focus) throw new AnalyticsLookupError("session-not-found");
       }
-      const ids = treeIds(state.sessions, sessionId);
+      const ids = indexes.treeIds(sessionId);
       const signature = sessionRevisionSignature(state.sessions, ids);
       const markers = detailCompactions.get(sessionId);
       if (detailSignatures.get(sessionId) !== signature || markers === undefined) {
@@ -1602,6 +1959,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     async refresh() {
       if (closed) throw new Error("analytics closed");
       await ensureIndexLoaded();
+      const atMs = now();
       const hasInterests =
         lastGlobalRange.value !== undefined ||
         lastDetailSessionIds.size > 0 ||
@@ -1610,10 +1968,13 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       await requestRefresh({
         ...(lastGlobalRange.value === undefined ? {} : { globalRange: lastGlobalRange.value }),
         detailSessionIds: [...lastDetailSessionIds],
-        projectScopes: [...lastProjectScopes.entries()].map(([projectId, range]) => ({
-          projectId,
-          range,
-        })),
+        projectScopes: [...lastProjectScopes.entries()]
+          .filter(
+            ([, range]) =>
+              lastGlobalRange.value === undefined ||
+              !coversSince(rangeWindow(range, atMs).sinceMs, state.extent),
+          )
+          .map(([projectId, range]) => ({ projectId, range })),
       });
     },
 
@@ -1668,7 +2029,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         lastProjectScopes.clear();
         detailSignatures.clear();
         detailCompactions.clear();
+        detailCoverage.clear();
         projectSignatures.clear();
+        projectCoverage.clear();
         projectFreshAt.clear();
         detailFreshAt.clear();
       })();

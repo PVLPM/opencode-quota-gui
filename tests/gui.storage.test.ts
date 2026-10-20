@@ -195,6 +195,37 @@ describe("raw completed assistant reader", () => {
     expect(rows.map((row) => row.messageID)).toEqual(["msg_inside", "msg_after"]);
   });
 
+  it("projects an exact completion-time candidate set through one JSON bind", async () => {
+    stubDatabase({
+      sessions: [{ id: "ses_one", createdMs: 1 }],
+      messages: [
+        { id: "msg_a", sessionID: "ses_one", createdMs: 10, completedMs: 100 },
+        { id: "msg_b", sessionID: "ses_one", createdMs: 20, completedMs: 200 },
+        { id: "msg_c", sessionID: "ses_one", createdMs: 30, completedMs: 200 },
+        { id: "msg_d", sessionID: "ses_one", createdMs: 40, completedMs: 300 },
+      ],
+    });
+
+    const rows = await readCompletedAssistantRows({ completedAtTimes: [200, 100, 200] });
+
+    expect(rows.map((row) => row.messageID)).toEqual(["msg_a", "msg_b", "msg_c"]);
+    const statement = sqliteTrace.statements.find((sql) => sql.includes("json_each"));
+    expect(statement).toContain("IN (SELECT value FROM json_each(?))");
+    const jsonBinds = sqliteTrace.params
+      .map((params) => params[0])
+      .filter((value): value is string => typeof value === "string" && value.startsWith("["));
+    expect(jsonBinds).toContain("[100,200]");
+  });
+
+  it("returns no rows for an empty exact completion-time set", async () => {
+    stubDatabase({
+      sessions: [{ id: "ses_one", createdMs: 1 }],
+      messages: [{ id: "msg_a", sessionID: "ses_one", createdMs: 10, completedMs: 100 }],
+    });
+
+    await expect(readCompletedAssistantRows({ completedAtTimes: [] })).resolves.toEqual([]);
+  });
+
   it("orders rows by completion time then message id", async () => {
     stubDatabase({
       sessions: [{ id: "ses_one", createdMs: 1 }],
