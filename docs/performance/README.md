@@ -118,6 +118,25 @@ Useful environment overrides:
   (`rows = sessions * steps`).
 - `OCQ_BENCH_TMP_DIR` — benchmark temp parent (default `<tmp>/opencode`).
 
+## Query-plan diagnostic
+
+`scripts/analytics-query-plan.mjs` opens OpenCode's database read-only and prints
+the representative analytics query plans plus aggregate `session_message` page
+composition. It never emits identifiers or payloads.
+
+```sh
+pnpm exec tsc
+pnpm run diagnose:analytics-query-plan
+pnpm run diagnose:analytics-query-plan -- --timings
+pnpm run diagnose:analytics-query-plan -- --json
+```
+
+`--timings` executes each projection once and is opt-in because a cold global
+scan can take tens of seconds. The diagnostic mirrors the SQL shapes in
+`src/lib/opencode-storage.ts`; update it when those builders change. It is a
+diagnostic, not a performance claim: plans are source-schema facts, timings are
+machine-local.
+
 ## Model-only allocation check
 
 To isolate retained rollup-model allocations from storage and persistence:
@@ -252,6 +271,34 @@ available from the current worker interface.
 
 ## Installed-source limitations and scope correctness
 
+- **No index can serve completed time.** `$.time.completed` lives inside the
+  JSON `data` column. The installed OpenCode schema has indexes on
+  `session_id`/`seq`, `session_id`/`time_created`/`id`,
+  `session_id`/`type`/`seq`, and `time_created`, but none on the completion
+  expression. A global finite-range completed read therefore scans
+  `session_message` and evaluates JSON for every row. On a real source the
+  `data` payload (including overflow pages) dominates the scan; cold cost is
+  I/O-bound, not fixable by a projection or sort change alone. A physical
+  `time_created <= completedUntil` prefilter is deliberately **not** used: it
+  is only safe if `completed >= created` is a guaranteed source invariant, and
+  it cannot reduce a window ending at the current wall clock anyway. Adding an
+  index, a sidecar database, or a migration is post-v1.0 work.
+- **Session-scoped reads still seek.** A tree payload read uses
+  `session_id`/`type` and is cheap. Session detail's dominant cost is the
+  separate **exact-completion fork-owner discovery** scan, not the tree read.
+  The engine also reconciles known external owners by message id. A shortcut
+  based on `MAX(time_updated) <= cursor` was evaluated and rejected: an unseen
+  fork copy can commit with `time_updated` equal to (or just below) the cursor,
+  and NULL timestamps are replayed by the normal delta, so the shortcut would
+  drop valid owners. Exact cross-scope ownership still requires the source
+  scan in an uncached case.
+- **Redundant sorts were removed.** The raw completed reader and revision reader
+  sort their projected rows deterministically in memory, so their SQL builders
+  no longer add `ORDER BY`/temp B-trees. Filtering semantics and final row order
+  are unchanged; the diagnostic shows the plans without `USE TEMP B-TREE`.
+- **The 7d -> 30d extension is idle-graced.** See `synchronization.md`; it is
+  still not preemption, and foreground work that arrives after a synchronous
+  read has started cannot cancel it.
 - **No assumed `time_updated` index.** The installed OpenCode schema used for
   the BEFORE baseline has no index on `session_message.time_updated`.
   Timestamp/revision filtering therefore scans SQLite rather than using an
