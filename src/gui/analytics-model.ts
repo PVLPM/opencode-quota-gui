@@ -394,6 +394,10 @@ export function createAnalyticsModel(): AnalyticsModel {
     }
   }
 
+  function stepKey(value: { sessionID: string; messageID: string }): string {
+    return `${value.sessionID}\u0000${value.messageID}`;
+  }
+
   function toOwnedStep(occurrence: GroupOccurrence): OwnedStep {
     const step: OwnedStep = {
       sessionID: occurrence.sessionID,
@@ -419,51 +423,92 @@ export function createAnalyticsModel(): AnalyticsModel {
     return step;
   }
 
+  function sameOwnedStep(step: OwnedStep, occurrence: GroupOccurrence): boolean {
+    return (
+      step.tokens.input === occurrence.input &&
+      step.tokens.cacheRead === occurrence.cacheRead &&
+      step.tokens.cacheWrite === occurrence.cacheWrite &&
+      step.tokens.output === occurrence.output &&
+      step.tokens.reasoning === occurrence.reasoning &&
+      step.agent === occurrence.agent &&
+      step.completedAtMs === occurrence.completedAtMs &&
+      step.costUsd === occurrence.costUsd &&
+      step.pricedAny === occurrence.pricedAny &&
+      step.unpricedTokens === occurrence.unpricedTokens &&
+      step.unknownTokens === occurrence.unknownTokens
+    );
+  }
+
+  /**
+   * Reuse the canonical step object for an unchanged winner. The same object is
+   * held by `ownedByFp`, the hour bucket, and the session map; replacing it on
+   * every re-upsert would retain a detached copy and let a metadata project move
+   * update one copy but not the others.
+   */
+  function ownedStepFor(
+    occurrence: GroupOccurrence,
+    previous: Map<string, OwnedStep> | undefined,
+  ): OwnedStep {
+    const before = previous?.get(stepKey(occurrence));
+    if (before === undefined || !sameOwnedStep(before, occurrence)) {
+      return toOwnedStep(occurrence);
+    }
+    const projectID = projectBySession.get(occurrence.sessionID) ?? UNKNOWN_PROJECT_ID;
+    if (before.projectID !== projectID) {
+      // Defensive: normally setMetadata moved this canonical object already.
+      removeStep(before);
+      before.projectID = projectID;
+      addStep(before);
+    }
+    return before;
+  }
+
   function recomputeFingerprint(fingerprint: string): void {
-    const previous = ownedByFp.get(fingerprint) ?? new Map<string, OwnedStep>();
+    const previous = ownedByFp.get(fingerprint);
     const occurrences = groups.get(fingerprint);
     const next = new Map<string, OwnedStep>();
-    if (occurrences && occurrences.length > 0) {
-      const candidates: ForkOwnerCandidate<OwnedStep>[] = [];
-      for (const occurrence of occurrences) {
-        candidates.push({
-          item: toOwnedStep(occurrence),
+    if (occurrences !== undefined && occurrences.length > 0) {
+      if (occurrences.length === 1) {
+        // Singleton fast path: one occurrence is always its own owner.
+        const occurrence = occurrences[0];
+        if (occurrence !== undefined) {
+          next.set(stepKey(occurrence), ownedStepFor(occurrence, previous));
+        }
+      } else {
+        // Choose owners over the compact occurrences first; allocate an
+        // OwnedStep only for the winners.
+        const candidates: ForkOwnerCandidate<GroupOccurrence>[] = occurrences.map((occurrence) => ({
+          item: occurrence,
           sessionID: occurrence.sessionID,
           fingerprint,
           createdAtMs: occurrence.createdAtMs,
           messageID: occurrence.messageID,
-        });
-      }
-      for (const step of selectForkOwners(candidates)) {
-        next.set(`${step.sessionID}\u0000${step.messageID}`, step);
+        }));
+        for (const occurrence of selectForkOwners(candidates)) {
+          next.set(stepKey(occurrence), ownedStepFor(occurrence, previous));
+        }
       }
     }
-    for (const [key, step] of previous) {
-      if (!next.has(key)) removeStep(step);
+    if (previous !== undefined) {
+      for (const [key, step] of previous) {
+        if (!next.has(key)) removeStep(step);
+      }
     }
     for (const [key, step] of next) {
-      const before = previous.get(key);
-      if (!before) {
+      const before = previous?.get(key);
+      if (before === undefined) {
         addStep(step);
         continue;
       }
-      if (
-        before.tokens.input !== step.tokens.input ||
-        before.tokens.cacheRead !== step.tokens.cacheRead ||
-        before.tokens.cacheWrite !== step.tokens.cacheWrite ||
-        before.tokens.output !== step.tokens.output ||
-        before.tokens.reasoning !== step.tokens.reasoning ||
-        before.completedAtMs !== step.completedAtMs ||
-        before.costUsd !== step.costUsd ||
-        before.pricedAny !== step.pricedAny ||
-        before.unpricedTokens !== step.unpricedTokens ||
-        before.unknownTokens !== step.unknownTokens
-      ) {
+      if (before !== step) {
         removeStep(before);
         addStep(step);
       }
     }
-    ownedByFp.set(fingerprint, next);
+    // Fingerprints with no owned rows must not leave an empty map behind:
+    // churn and full removal otherwise retain one map per removed fingerprint.
+    if (next.size === 0) ownedByFp.delete(fingerprint);
+    else ownedByFp.set(fingerprint, next);
   }
 
   function upsertOccurrence(row: OpenCodeRawAssistantRow): void {
