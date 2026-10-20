@@ -995,30 +995,45 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   /**
    * Advance cached finite Home/Project DTOs with the refresh clock so the
    * persisted sidecar never keeps a previous rolling window for a later start.
-   * Only ranges certifiably covered by the loaded index are rebuilt.
+   * Rebuild ranges the loaded model can certify; otherwise expire the entry so
+   * the next request hydrates/rebuilds instead of serving an aged-out window.
    */
-  function refreshFinitePresentationWindows(atMs: number): void {
-    if (!modelHydrated || modelDirty || !coverageTrusted) return;
+  function refreshFinitePresentationWindows(atMs: number): boolean {
     const presentation = state.presentation;
-    if (!presentation) return;
+    if (!presentation) return false;
+    const canDerive = modelHydrated && !modelDirty && coverageTrusted;
+    let changed = false;
     for (const key of Object.keys(presentation.home)) {
       if (!isRangeKey(key) || key === "lifetime") continue;
-      if (!coversSince(rangeWindow(key, atMs).sinceMs, state.extent)) continue;
-      if (presentation.home[key]?.usage.window.untilMs === atMs) continue;
-      presentation.home[key] = deriveHomeSnapshot(key, atMs);
+      const snapshot = presentation.home[key];
+      if (!snapshot || snapshot.usage.window.untilMs >= atMs) continue;
+      if (canDerive && coversSince(rangeWindow(key, atMs).sinceMs, state.extent)) {
+        presentation.home[key] = deriveHomeSnapshot(key, atMs);
+      } else {
+        delete presentation.home[key];
+      }
+      changed = true;
     }
     if (presentation.project.length > 0) {
-      presentation.project = presentation.project.map(([projectId, range, snapshot]) => {
-        if (range === "lifetime" || snapshot.usage.window.untilMs === atMs) {
-          return [projectId, range, snapshot];
+      let projectChanged = false;
+      const next: typeof presentation.project = [];
+      for (const [projectId, range, snapshot] of presentation.project) {
+        if (range === "lifetime" || snapshot.usage.window.untilMs >= atMs) {
+          next.push([projectId, range, snapshot]);
+          continue;
         }
-        if (!projectScopeCovered(projectId, range, atMs)) {
-          return [projectId, range, snapshot];
+        if (canDerive && projectScopeCovered(projectId, range, atMs)) {
+          next.push([projectId, range, deriveProjectSnapshot(projectId, range, atMs)]);
         }
-        return [projectId, range, deriveProjectSnapshot(projectId, range, atMs)];
-      });
+        projectChanged = true;
+      }
+      if (projectChanged) {
+        presentation.project = next;
+        changed = true;
+      }
     }
-    state.presentation = presentation;
+    if (changed) state.presentation = presentation;
+    return changed;
   }
 
   function deriveHomeSnapshot(range: RangeKey, atMs: number): HomeSnapshot {
@@ -1258,6 +1273,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     const fullRepairRead = fullProjection && !replaced && effectiveExtent !== undefined;
+    // Even a scope-only snapshot has no global extent but can carry cached
+    // occurrences. A full projection/baseline must still refresh those cached
+    // payloads by id, not only the newly requested extent.
+    const fullCachedRepairRead = fullProjection && !replaced;
     const window = job.globalRange ? rangeWindow(job.globalRange, atMs) : undefined;
     let nextExtent = effectiveExtent;
     let extentChanged = false;
@@ -1709,7 +1728,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     // authoritative extent/scope reads. Otherwise an unchanged timestamp or
     // completion token hides a payload edit in an older/evicted scope or a
     // restart-restored occurrence.
-    if (fullRepairRead && !replaced) {
+    if (fullCachedRepairRead) {
       const unreadIDs: string[] = [];
       for (const key of state.occurrences.keys()) {
         if (!authoritativePayloadIDs.has(key) && !removalKeys.has(key)) unreadIDs.push(key);
@@ -2119,7 +2138,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (removals.length > 0 && state.fingerprints.length > state.occurrences.size + 32) {
       pruneFingerprints();
     }
-    refreshFinitePresentationWindows(atMs);
+    const finitePresentationChanged = refreshFinitePresentationWindows(atMs);
     precomputeHomeSnapshots(atMs);
     samplePeak();
 
@@ -2136,8 +2155,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       // until the checkpoint for its revision succeeds.
       queueSnapshotWrite(atMs);
     }
-    if (hasUsefulPresentation() || sessionCacheInvalidated) {
-      queuePresentationWrite(atMs, atMs, sessionCacheInvalidated);
+    if (hasUsefulPresentation() || sessionCacheInvalidated || finitePresentationChanged) {
+      queuePresentationWrite(atMs, atMs, sessionCacheInvalidated || finitePresentationChanged);
     }
     if ((dataChanged || sessionCacheInvalidated) && !closed && !closing) {
       try {

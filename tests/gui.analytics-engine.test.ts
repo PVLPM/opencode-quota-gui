@@ -831,6 +831,70 @@ describe("analytics engine: revision reconciliation", () => {
     await second.close();
   });
 
+  it("repairs cached scope-only owners on the first global baseline", async () => {
+    const db = baseDb();
+    const oldAt = NOW - 10 * DAY;
+    db.sessions.ses_old_a = session("ses_old_a", "p1");
+    db.sessions.ses_old_b = session("ses_old_b", "p1");
+    const owner = row("ses_old_a", "msg_baseline_owner", oldAt, { input: 100 });
+    const fork = row("ses_old_b", "msg_baseline_fork", oldAt, { input: 100 });
+    db.rows.push(owner, fork);
+    db.updatedAt.set(rowKey("ses_old_a", "msg_baseline_owner"), oldAt);
+    db.updatedAt.set(rowKey("ses_old_b", "msg_baseline_fork"), oldAt);
+
+    const first = harness(db);
+    await first.engine.project("p1", "lifetime");
+    await flushAsync();
+    const saved = first.savedStates[first.savedStates.length - 1];
+    if (!saved) throw new Error("expected a scope-only compact snapshot");
+    expect(saved.extent).toBeUndefined();
+    expect(saved.occurrences.has("msg_baseline_owner")).toBe(true);
+    const persisted = cloneState(saved);
+    await first.engine.close();
+
+    owner.tokens.input = 999;
+    // The source timestamp deliberately stays unchanged; only the full cached
+    // payload read can observe the edit.
+    const states: AnalyticsState[] = [];
+    const calls: ReaderCall[] = [];
+    const second = createAnalyticsEngine({
+      reader: createFakeReader(db, calls),
+      now: () => NOW + 1,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => cloneState(persisted),
+      loadPresentation: async () => undefined,
+      saveSnapshot: async (_path, state) => {
+        states.push(cloneState(state));
+        return true;
+      },
+      savePresentation: async () => true,
+    });
+
+    await second.home("7d");
+    await flushAsync();
+    expect(
+      calls.some(
+        (call) =>
+          call.method === "loadCompletedRows" &&
+          call.params?.messageIDs?.includes("msg_baseline_owner") === true,
+      ),
+    ).toBe(true);
+    const repaired = states[states.length - 1];
+    const ownerOccurrence = repaired?.occurrences.get("msg_baseline_owner");
+    const forkOccurrence = repaired?.occurrences.get("msg_baseline_fork");
+    if (!repaired || !ownerOccurrence || !forkOccurrence) {
+      throw new Error("expected repaired cached owners");
+    }
+    expect(repaired.fingerprints[ownerOccurrence.fingerprintIndex]?.[4]).toBe(999);
+    expect(repaired.fingerprints[forkOccurrence.fingerprintIndex]?.[4]).toBe(100);
+
+    const expected = createUsageAnalytics(datasetOf(db)).project("p1", "lifetime", NOW + 1);
+    const project = await second.project("p1", "lifetime");
+    expect(project.totals).toEqual(expected.totals);
+    await second.close();
+  });
+
   it("treats same-timestamp arrivals deterministically", async () => {
     const db = baseDb();
     const { engine } = harness(db);
@@ -1922,6 +1986,82 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.close();
   });
 
+  it("expires finite warm DTOs when a no-change refresh advances the window", async () => {
+    const db = baseDb();
+    const age24 = row("ses_root", "msg_age24_warm", NOW - 23 * HOUR, { input: 11 });
+    db.rows.push(age24);
+    db.updatedAt.set(rowKey("ses_root", "msg_age24_warm"), age24.completedAtMs);
+
+    const first = harness(db);
+    expect((await first.engine.home("24h")).usage.totals.input).toBe(711);
+    await flushAsync();
+    const persisted = first.savedStates[first.savedStates.length - 1];
+    const sidecar = first.savedPresentations[first.savedPresentations.length - 1];
+    if (!persisted || !sidecar?.home["24h"]) {
+      throw new Error("expected matching compact index and warm 24h DTO");
+    }
+    const warm: WarmAnalyticsPresentation = {
+      ...structuredClone(sidecar),
+      sourceIdentity: db.identity,
+    };
+    await first.engine.close();
+
+    // Match cloned compact metadata to the source so this refresh is a true
+    // no-change metadata pass, not a metadata replacement.
+    db.sessions = structuredClone(persisted.sessions);
+    db.projects = structuredClone(persisted.projects);
+    const writes: WarmAnalyticsPresentation[] = [];
+    const second = createAnalyticsEngine({
+      reader: createFakeReader(db, []),
+      now: () => NOW + 2 * HOUR,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => cloneState(persisted),
+      loadPresentation: async () => structuredClone(warm),
+      saveSnapshot: async () => true,
+      savePresentation: async (_path, state, savedAtMs) => {
+        if (state.presentation) {
+          writes.push({
+            ...structuredClone(state.presentation),
+            savedAtMs,
+            frontierAtMs: state.frontierAtMs,
+            ...(state.extent ? { coverage: { ...state.extent } } : {}),
+          });
+        }
+        return true;
+      },
+    });
+
+    await second.refresh();
+    await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0));
+    const invalidated = writes[writes.length - 1];
+    expect(invalidated?.home["24h"]).toBeUndefined();
+
+    const fresh = createUsageAnalytics(datasetOf(db)).home("24h", NOW + 2 * HOUR);
+    const rebuilt = await second.home("24h");
+    expect(rebuilt.usage.totals.input).toBe(fresh.usage.totals.input);
+    expect(rebuilt.usage.window).toEqual(fresh.usage.window);
+
+    // The expired sidecar must not bring the old DTO back after another start.
+    if (!invalidated) throw new Error("expected an invalidated sidecar");
+    const third = createAnalyticsEngine({
+      reader: createFakeReader(db, []),
+      now: () => NOW + 2 * HOUR,
+      refreshIntervalMs: INTERVAL,
+      snapshotPath: "memory.json",
+      loadSnapshot: async () => cloneState(persisted),
+      loadPresentation: async () => structuredClone(invalidated),
+      saveSnapshot: async () => true,
+      savePresentation: async () => true,
+    });
+    const restarted = await third.home("24h");
+    expect(restarted.usage.totals.input).toBe(fresh.usage.totals.input);
+    expect(restarted.usage.window).toEqual(fresh.usage.window);
+
+    await second.close();
+    await third.close();
+  });
+
   it("does not treat warm coverage as a substitute for missing index data", async () => {
     const db = baseDb();
     const calls: ReaderCall[] = [];
@@ -2324,12 +2464,16 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
       savePresentation: async () => true,
     });
 
+    // The first warm response is immediate.
+    const warmHome = await engine.home("24h");
+    expect(warmHome.usage.totals.input).toBe(700);
+
+    // The sidecar was attached but its finite window advanced; a refresh without
+    // a hydrated model expires it, so the next request rebuilds from the index.
     await engine.refresh();
     const home = await engine.home("24h");
-    expect(home.usage.totals.input).toBe(700);
-    // The sidecar DTO is servable, but its newer wall time is not checkpoint
-    // proof for the persisted index coverage/freshness.
-    expect(home.stale).toBe(true);
+    expect(home.usage.totals.input).toBe(705);
+    expect(home.stale).toBe(false);
     await engine.close();
   });
 
