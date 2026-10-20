@@ -204,21 +204,35 @@ Real-local:
 Environment:
   ANALYTICS_BENCH_MEMORY_CAP_MIB, ANALYTICS_BENCH_DENSE_SESSIONS,
   ANALYTICS_BENCH_DENSE_ROWS, ANALYTICS_BENCH_SESSIONS, ANALYTICS_BENCH_STEPS,
-  OCQ_BENCH_TMP_DIR`;
+  ANALYTICS_BENCH_SUITE_TIMEOUT_MS, OCQ_BENCH_TMP_DIR`;
 }
+
+const KEEPALIVE_INTERVAL_MS = 1_000;
+const DEFAULT_SUITE_TIMEOUT_MS = 20 * 60_000;
+const activeTempRoots = new Set();
 
 function benchmarkTempRoot() {
   const parent = process.env.OCQ_BENCH_TMP_DIR?.trim() || join(tmpdir(), "opencode");
   mkdirSync(parent, { recursive: true });
-  return mkdtempSync(join(parent, "ocq-analytics-bench-"));
+  const root = mkdtempSync(join(parent, "ocq-analytics-bench-"));
+  activeTempRoots.add(root);
+  return root;
 }
 
 function removeTempRoot(root) {
+  activeTempRoots.delete(root);
   try {
     rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } catch {
     // A temp directory cleanup failure never changes benchmark results.
   }
+}
+
+function suiteTimeoutMs() {
+  const configured = Number(process.env.ANALYTICS_BENCH_SUITE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.floor(configured)
+    : DEFAULT_SUITE_TIMEOUT_MS;
 }
 
 const ENV_KEYS = [
@@ -1011,7 +1025,19 @@ async function main() {
     return;
   }
 
+  let keepalive = null;
+  let watchdog = null;
   try {
+    // Production unrefs the analytics worker. Once the probes/server close, an
+    // unref'd worker alone cannot keep this CLI alive while an awaited
+    // cold-resume request is pending. This bounded interval is the only
+    // benchmark-owned referenced handle; finally clears it.
+    keepalive = setInterval(() => {}, KEEPALIVE_INTERVAL_MS);
+    watchdog = setTimeout(() => {
+      process.stderr.write("benchmark failed: suite-timeout\n");
+      for (const root of activeTempRoots) removeTempRoot(root);
+      process.exit(1);
+    }, suiteTimeoutMs());
     const modules = await loadDistModules(repoRoot);
     const profiles = options.realLocal
       ? await runRealLocal(options, modules)
@@ -1067,6 +1093,9 @@ async function main() {
       process.stderr.write(`benchmark failed: ${code}\n`);
     }
     process.exitCode = 1;
+  } finally {
+    if (keepalive) clearInterval(keepalive);
+    if (watchdog) clearTimeout(watchdog);
   }
 }
 

@@ -1,7 +1,9 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -19,6 +21,7 @@ import {
 
 const ANCHOR_MS = Date.parse("2026-10-20T12:00:00.000Z");
 const SMALL_DENSE = { sessions: 60, rows: 6_000 };
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const roots: string[] = [];
 
 function tempRoot(): string {
@@ -109,3 +112,52 @@ describe("analytics benchmark real-source read-only isolation", () => {
     expect(hashFile(fixture.dbPath)).toBe(beforeHash);
   });
 });
+
+// Canonical `pnpm verify` builds first; source-only test runs may lack the CLI worker.
+describe.skipIf(!existsSync(join(REPO_ROOT, "dist/gui/analytics-worker.js")))(
+  "analytics benchmark CLI liveness (built worker)",
+  () => {
+    it("keeps a fresh child alive through cold resume and writes its JSON artifact", () => {
+      const root = tempRoot();
+      const outPath = join(root, "after-deep.json");
+      const child = spawnSync(
+        process.execPath,
+        [
+          join(REPO_ROOT, "scripts/benchmark-analytics.mjs"),
+          "--profile",
+          "deep-session-tree",
+          "--json-out",
+          outPath,
+        ],
+        {
+          cwd: REPO_ROOT,
+          env: {
+            ...process.env,
+            ANALYTICS_BENCH_SUITE_TIMEOUT_MS: "120000",
+            OCQ_BENCH_TMP_DIR: join(root, "bench-tmp"),
+          },
+          encoding: "utf8",
+          timeout: 180_000,
+        },
+      );
+
+      expect(child.error).toBeUndefined();
+      expect(child.status === 0 || child.status === 1).toBe(true);
+      expect(existsSync(outPath)).toBe(true);
+      const result = JSON.parse(readFileSync(outPath, "utf8"));
+      assertSanitized(result);
+      const profile = result.profiles[0];
+      expect(profile.name).toBe("deep-session-tree");
+      expect(profile.coldResume.status).toBe("applied");
+      expect(profile.coldResume.passed).toBe(true);
+      expect(profile.durationsMs.coldResumeHomeAfterRestart).toEqual(expect.any(Number));
+      expect(profile.checks.coldResumeDeltaPassed).toBe(true);
+      expect(profile.persistence.snapshotWritten).toBe(true);
+      const failed = Object.entries(profile.checks)
+        .filter(([, value]) => value === false)
+        .map(([name]) => name);
+      if (child.status === 1) expect(failed).toEqual(["workerRetainedBounded"]);
+      else expect(failed).toEqual([]);
+    }, 120_000);
+  },
+);
