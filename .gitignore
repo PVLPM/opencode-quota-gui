@@ -31,6 +31,12 @@ references/*
 docs/*
 !docs/readme/
 !docs/readme/**
+!docs/performance/
+# Generated benchmark results are local-only. Only these committed artifacts
+# (methodology and synthetic schema/example) are allowed under docs/performance.
+docs/performance/*
+!docs/performance/README.md
+!docs/performance/output-schema.md
 /docs/readme/v4-release-readiness.md
 /docs/adr/
 /.agents
