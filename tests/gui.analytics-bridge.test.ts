@@ -49,6 +49,26 @@ function answerHome(command: AnalyticsWorkerRequest["command"]): unknown {
   return { marker: "fresh" };
 }
 
+function answerEcho(command: AnalyticsWorkerRequest["command"]): unknown {
+  switch (command.kind) {
+    case "home":
+      return { marker: `home:${command.range}` };
+    case "project":
+      return { marker: `project:${command.projectId}:${command.range}` };
+    case "session":
+      return { marker: `session:${command.sessionId}` };
+    default:
+      return undefined;
+  }
+}
+
+function framesOf(
+  worker: FakeWorker,
+  kind: AnalyticsWorkerRequest["command"]["kind"],
+): AnalyticsWorkerRequest[] {
+  return worker.messages.filter((message) => message.command.kind === kind);
+}
+
 async function flushMicrotasks(rounds = 50): Promise<void> {
   for (let round = 0; round < rounds; round += 1) {
     await Promise.resolve();
@@ -82,6 +102,185 @@ describe("analytics worker bridge", () => {
     // Close asks the engine to drain persistence before terminating.
     expect(second.messages.at(-1)?.command.kind).toBe("close");
     expect(second.terminated).toBe(1);
+  });
+
+  it("coalesces identical in-flight reads into one worker frame per command", async () => {
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+
+    const [homeA, homeB] = await Promise.all([bridge.home("24h"), bridge.home("24h")]);
+    expect(homeA).toEqual(homeB);
+    expect(framesOf(worker, "home")).toHaveLength(1);
+
+    const [projectA, projectB] = await Promise.all([
+      bridge.project("p1", "7d"),
+      bridge.project("p1", "7d"),
+    ]);
+    expect(projectA).toEqual(projectB);
+    expect(framesOf(worker, "project")).toHaveLength(1);
+
+    const [sessionA, sessionB] = await Promise.all([
+      bridge.session("ses_1"),
+      bridge.session("ses_1"),
+    ]);
+    expect(sessionA).toEqual(sessionB);
+    expect(framesOf(worker, "session")).toHaveLength(1);
+
+    await Promise.all([bridge.refresh(), bridge.refresh()]);
+    expect(framesOf(worker, "refresh")).toHaveLength(1);
+
+    // A settled command is not reused: the next identical read is a new frame.
+    await bridge.home("24h");
+    expect(framesOf(worker, "home")).toHaveLength(2);
+    await bridge.close();
+  });
+
+  it("keeps diagnostics one-per-call instead of coalescing them", async () => {
+    const worker = new FakeWorker(() => undefined);
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+
+    await Promise.all([bridge.stats?.(), bridge.stats?.()]);
+    expect(framesOf(worker, "stats")).toHaveLength(2);
+    await Promise.all([bridge.gc?.(), bridge.gc?.()]);
+    expect(framesOf(worker, "gc")).toHaveLength(2);
+
+    // Refresh is a shared read: concurrent callers join one forced refresh.
+    await Promise.all([bridge.refresh(), bridge.refresh()]);
+    expect(framesOf(worker, "refresh")).toHaveLength(1);
+    await bridge.close();
+  });
+
+  it("never merges different ranges or resource identities", async () => {
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+
+    const results = await Promise.all([
+      bridge.home("24h"),
+      bridge.home("24h"),
+      bridge.home("7d"),
+      bridge.project("p1", "24h"),
+      bridge.project("p1", "24h"),
+      bridge.project("p1", "7d"),
+      bridge.project("p2", "24h"),
+      bridge.session("ses_1"),
+      bridge.session("ses_1"),
+      bridge.session("ses_2"),
+    ]);
+
+    expect(results).toEqual([
+      { marker: "home:24h" },
+      { marker: "home:24h" },
+      { marker: "home:7d" },
+      { marker: "project:p1:24h" },
+      { marker: "project:p1:24h" },
+      { marker: "project:p1:7d" },
+      { marker: "project:p2:24h" },
+      { marker: "session:ses_1" },
+      { marker: "session:ses_1" },
+      { marker: "session:ses_2" },
+    ]);
+    expect(framesOf(worker, "home")).toHaveLength(2);
+    expect(framesOf(worker, "project")).toHaveLength(3);
+    expect(framesOf(worker, "session")).toHaveLength(2);
+    await bridge.close();
+  });
+
+  it("fails every identical joiner on an error and retries with a new frame", async () => {
+    const worker = new FakeWorker(() => undefined);
+    let homeAttempts = 0;
+    worker.postMessage = (value: unknown): void => {
+      const request = value as AnalyticsWorkerRequest;
+      worker.messages.push(request);
+      queueMicrotask(() => {
+        if (request.command.kind === "home") {
+          homeAttempts += 1;
+          if (homeAttempts === 1) {
+            worker.emit("message", {
+              id: request.id,
+              ok: false,
+              error: { code: "unavailable" },
+            });
+            return;
+          }
+        }
+        worker.emit("message", { id: request.id, ok: true, result: { marker: "retry" } });
+      });
+    };
+    const bridge = createAnalyticsBridge({
+      createWorker: () => worker,
+      requestTimeoutMs: 1_000,
+      logger,
+    });
+
+    const first = bridge.home("24h");
+    const second = bridge.home("24h");
+    await expect(first).rejects.toMatchObject({ code: "unavailable" });
+    await expect(second).rejects.toMatchObject({ code: "unavailable" });
+    expect(framesOf(worker, "home")).toHaveLength(1);
+
+    await expect(bridge.home("24h")).resolves.toMatchObject({ marker: "retry" });
+    expect(framesOf(worker, "home")).toHaveLength(2);
+    await bridge.close();
+  });
+
+  it("fails every joiner on a worker crash and recreates for the next read", async () => {
+    let created = 0;
+    const crashed = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    const healthy = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({
+      createWorker: () => {
+        created += 1;
+        return created === 1 ? crashed : healthy;
+      },
+      retryBaseMs: 0,
+      logger,
+    });
+
+    const first = bridge.home("24h");
+    const second = bridge.home("24h");
+    await flushMicrotasks();
+    expect(framesOf(crashed, "home")).toHaveLength(1);
+
+    crashed.emit("error", new Error("crashed"));
+    await expect(first).rejects.toMatchObject({ code: "unavailable" });
+    await expect(second).rejects.toMatchObject({ code: "unavailable" });
+    expect(crashed.terminated).toBe(1);
+
+    await expect(bridge.home("24h")).resolves.toMatchObject({ marker: "home:24h" });
+    expect(created).toBe(2);
+    expect(framesOf(healthy, "home")).toHaveLength(1);
+    await bridge.close();
+  });
+
+  it("does not post a read onto a worker retired before the frame was sent", async () => {
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    await bridge.init({});
+
+    const pending = bridge.home("24h");
+    // Retire synchronously before the resolved-worker continuation can post.
+    worker.emit("error", new Error("crashed"));
+    await expect(pending).rejects.toMatchObject({ code: "unavailable" });
+    expect(framesOf(worker, "home")).toHaveLength(0);
+    await bridge.close();
+  });
+
+  it("rejects every shared waiter on close and sends no further reads", async () => {
+    const worker = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+
+    const first = bridge.home("24h");
+    const second = bridge.home("24h");
+    await flushMicrotasks();
+    expect(framesOf(worker, "home")).toHaveLength(1);
+
+    const closing = bridge.close();
+    await expect(first).rejects.toMatchObject({ code: "closed" });
+    await expect(second).rejects.toMatchObject({ code: "closed" });
+    await closing;
+
+    await expect(bridge.home("24h")).rejects.toMatchObject({ code: "closed" });
+    expect(framesOf(worker, "home")).toHaveLength(1);
   });
 
   it("allows a cold request to outlive the old 30 s budget at the new default", async () => {

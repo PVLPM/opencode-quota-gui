@@ -90,6 +90,27 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/**
+ * Identity for a read that any number of callers can share while it is in
+ * flight. Only pure, id-and-range-addressed reads qualify. `stats`, `gc`,
+ * `init`, and `close` are diagnostics/lifecycle commands and must stay
+ * one-per-call.
+ */
+function coalescedCommandKey(command: AnalyticsWorkerRequest["command"]): string | undefined {
+  switch (command.kind) {
+    case "home":
+      return `home\u0000${command.range}`;
+    case "project":
+      return `project\u0000${command.projectId}\u0000${command.range}`;
+    case "session":
+      return `session\u0000${command.sessionId}`;
+    case "refresh":
+      return "refresh";
+    default:
+      return undefined;
+  }
+}
+
 export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): AnalyticsTransport {
   const logger = options.logger ?? createGuiLogger();
   const createWorker =
@@ -122,11 +143,22 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
   let nextRetryAtMs = 0;
   let nextRequestId = 1;
   const pending = new Map<number, PendingRequest>();
+  /**
+   * In-flight reads keyed by command identity. Identical reads from reconnect
+   * replays or duplicate viewers join this promise instead of posting another
+   * worker frame. This shares compatible work; it does not abort the running
+   * job (the protocol has no cancel command), so a shared read still finishes
+   * even if every original caller has gone away.
+   */
+  const inFlightReads = new Map<string, Promise<unknown>>();
   const listeners = new Set<() => void>();
   const retiredInstances = new WeakSet<AnalyticsWorkerLike>();
 
   function failPending(code: "unavailable" | "closed"): void {
     const error = new AnalyticsReadError(code);
+    // A failure retires every read belonging to this worker. Drop the shared
+    // entries first so even a synchronous retry cannot join a settled promise.
+    inFlightReads.clear();
     for (const entry of pending.values()) {
       clearTimeout(entry.timer);
       entry.reject(error);
@@ -296,10 +328,36 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
   }
 
   async function call<TResult>(command: AnalyticsWorkerRequest["command"]): Promise<TResult> {
-    const instance = await ensureWorker();
-    const response = await send(instance, command);
-    if (!response.ok) throw new AnalyticsReadError(response.error.code);
-    return response.result as TResult;
+    const key = coalescedCommandKey(command);
+    if (key !== undefined) {
+      const existing = inFlightReads.get(key);
+      // SAFETY: the key covers every input of the command, and all callers of
+      // that key request the same result type.
+      if (existing !== undefined) return existing as Promise<TResult>;
+    }
+
+    const request = (async () => {
+      const instance = await ensureWorker();
+      // `close` may have run, or the resolved worker may have crashed, while
+      // this call was waiting. Never post into a dead instance that already
+      // failed its other waiters.
+      if (closed) throw new AnalyticsReadError("closed");
+      if (retiredInstances.has(instance)) throw new AnalyticsReadError("unavailable");
+      const response = await send(instance, command);
+      if (!response.ok) throw new AnalyticsReadError(response.error.code);
+      return response.result as TResult;
+    })();
+
+    if (key !== undefined) {
+      inFlightReads.set(key, request);
+      const clear = (): void => {
+        if (inFlightReads.get(key) === request) inFlightReads.delete(key);
+      };
+      // Registered before any joiner awaits the promise, so a settled entry is
+      // gone before a rejection reaches caller code: a retry always re-posts.
+      void request.then(clear, clear);
+    }
+    return request;
   }
 
   return {
