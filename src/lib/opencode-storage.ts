@@ -400,6 +400,26 @@ function compareRawCompletedRows(a: OpenCodeRawAssistantRow, b: OpenCodeRawAssis
   return compareStringIds(a.messageID, b.messageID);
 }
 
+/**
+ * Completion-time order for the public message iterator. The SQL builder no
+ * longer sorts (the analytics reader sorts its own projection), so this path
+ * applies the same `CAST(completed AS REAL), id` order in memory.
+ */
+function compareCompletedMessageOrder(a: OpenCodeMessage, b: OpenCodeMessage): number {
+  const aCompleted = a.time?.completed;
+  const bCompleted = b.time?.completed;
+  const aValue =
+    typeof aCompleted === "number" && Number.isFinite(aCompleted)
+      ? aCompleted
+      : Number.NEGATIVE_INFINITY;
+  const bValue =
+    typeof bCompleted === "number" && Number.isFinite(bCompleted)
+      ? bCompleted
+      : Number.NEGATIVE_INFINITY;
+  if (aValue !== bValue) return aValue - bValue;
+  return compareStringIds(a.id, b.id);
+}
+
 function dedupeStrings(values: readonly string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -645,9 +665,11 @@ export async function iterCompletedAssistantMessages(params: {
   try {
     if (await hasJsonExtract(conn)) {
       const query = buildCompletedAssistantQuery(params);
-      return dropForkCopies(
-        mapCompletedAssistantMessages(conn.all<ProjectedMessageRow>(query.sql, query.args)),
+      const messages = mapCompletedAssistantMessages(
+        conn.all<ProjectedMessageRow>(query.sql, query.args),
       );
+      messages.sort(compareCompletedMessageOrder);
+      return dropForkCopies(messages);
     }
 
     return [];
