@@ -451,16 +451,20 @@ export function createDashboardServer(
   const unsubscribe = snapshots.subscribe((event) => sse.broadcast(event));
 
   const assetRootPath = resolve(options.assetRoot ?? DEFAULT_ASSET_ROOT);
-  let assetRootReal: string | null | undefined;
+  let assetRootReal: string | undefined;
 
   async function resolveAssetRoot(): Promise<string | null> {
     if (assetRootReal !== undefined) return assetRootReal;
+    let resolved: string;
     try {
-      assetRootReal = await realpath(assetRootPath);
+      resolved = await realpath(assetRootPath);
     } catch {
-      assetRootReal = null;
+      // Cache only a successful lookup: `dist/ui` may be built while the
+      // dashboard is already running, so a missing root must be retried.
+      return null;
     }
-    return assetRootReal;
+    assetRootReal = resolved;
+    return resolved;
   }
 
   async function serveAsset(

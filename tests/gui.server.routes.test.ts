@@ -436,6 +436,36 @@ describe("GUI HTTP routes", () => {
     }
   });
 
+  it("retries a missing asset root instead of caching the miss", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "gui-p4-late-root-"));
+    const lateRoot = join(parent, "ui");
+    const { source, store } = buildFixtures();
+    const handle = await createDashboardServer({
+      port: 0,
+      source,
+      settings: store,
+      assetRoot: lateRoot,
+      logger: createGuiLogger({ sink: () => {} }),
+    });
+    try {
+      const missing = await fetch(`${base(handle.port)}/`);
+      expect(missing.status).toBe(404);
+
+      // `dist/ui` may be produced while the dashboard is already running; the
+      // next request must observe the rebuilt root rather than a cached miss.
+      await mkdir(lateRoot, { recursive: true });
+      await writeFile(join(lateRoot, "index.html"), INDEX_HTML);
+
+      const served = await fetch(`${base(handle.port)}/`);
+      expect(served.status).toBe(200);
+      expect(served.headers.get("content-type")).toContain("text/html");
+      expect(await served.text()).toBe(INDEX_HTML);
+    } finally {
+      await handle.close();
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it("passes the range through with the 7d default and rejects invalid ranges", async () => {
     const { handle, state } = await start();
     try {
