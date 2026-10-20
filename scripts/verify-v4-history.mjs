@@ -28,6 +28,17 @@ function isWithin(file, directory) {
   return file === directory || file.startsWith(`${directory}/`);
 }
 
+/**
+ * Exact public documentation paths approved for the reusable performance docs.
+ * Keep this an exact-file allowlist: directory prefixes would admit local
+ * benchmark results, personal notes, JSON captures, and future loose docs.
+ */
+const approvedPublicDocs = new Set([
+  "docs/performance/README.md",
+  "docs/performance/output-schema.md",
+  "docs/performance/synchronization.md",
+]);
+
 const publicImageFiles = new Set([
   "images/opencode-quota-logo-dark.svg",
   "images/opencode-quota-logo-light.svg",
@@ -61,6 +72,7 @@ function isForbidden(file) {
   }
 
   if (isWithin(file, "docs")) {
+    if (approvedPublicDocs.has(file)) return false;
     return !file.startsWith("docs/readme/") || file === "docs/readme/v4-release-readiness.md";
   }
 

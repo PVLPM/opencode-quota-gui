@@ -37,6 +37,7 @@ docs/*
 docs/performance/*
 !docs/performance/README.md
 !docs/performance/output-schema.md
+!docs/performance/synchronization.md
 /docs/readme/v4-release-readiness.md
 /docs/adr/
 /.agents

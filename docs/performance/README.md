@@ -107,6 +107,18 @@ Useful environment overrides:
   (`rows = sessions * steps`).
 - `OCQ_BENCH_TMP_DIR` — benchmark temp parent (default `<tmp>/opencode`).
 
+## Model-only allocation check
+
+To isolate retained rollup-model allocations from storage and persistence:
+
+```sh
+node scripts/benchmark-analytics-model.mjs --sizes 32000,128000 --json
+```
+
+This uses lazy synthetic rows and explicit GC. Compare load, unchanged-upsert,
+removal, and clear samples separately; retained bytes per row are not a
+whole-worker memory estimate. Keep actual results local, like the full suite.
+
 ## Real-local safety and privacy
 
 `--real-local`:
