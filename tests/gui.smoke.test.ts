@@ -125,11 +125,11 @@ beforeAll(async () => {
   // to the handle with the URL asserted below.
   const smoke = (await import(SMOKE_SCRIPT_URL)) as SmokeModule;
   dashboard = await smoke.startSyntheticDashboard({ port: 0, nowMs: FIXED_NOW_MS });
-});
+}, 30_000);
 
 afterAll(async () => {
   await dashboard?.close();
-});
+}, 30_000);
 
 function apiUrl(path: string): string {
   if (dashboard === undefined) throw new Error("smoke dashboard is not running");
