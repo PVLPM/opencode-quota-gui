@@ -159,6 +159,8 @@ interface StagedUpsert {
   row: OpenCodeRawAssistantRow;
   updatedAtMs: number | null;
   agent?: string;
+  /** The payload reader projected the agent field (absence is authoritative). */
+  agentProjected?: boolean;
 }
 
 /** Explicit loaded extent for a remembered project scope. */
@@ -1270,7 +1272,14 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const stageChanged = (row: OpenCodeRawAssistantRow, updatedAtMs: number | null): void => {
       const key = row.messageID;
       authoritativePayloadIDs.add(key);
-      const entry: StagedUpsert = { row, updatedAtMs };
+      const entry: StagedUpsert = {
+        row,
+        updatedAtMs,
+        // The source payload reader projects the agent field; an absent agent
+        // is authoritative there and must not be confused with a cached
+        // synthetic occurrence that simply has no transient agent loaded.
+        agentProjected: true,
+      };
       if (row.agent !== undefined) entry.agent = row.agent;
       changedMap.set(key, entry);
       removalKeys.delete(key);
@@ -2038,36 +2047,74 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     const removals: OpenCodeRawAssistantRow[] = [];
+    const upserts: OpenCodeRawAssistantRow[] = [];
+    const agentUpserts: OpenCodeRawAssistantRow[] = [];
+    const agentAffectedSessionIds = new Set<string>();
+    let updatedAtChanged = false;
+    let occurrenceRemoved = false;
+
+    // The final staged row is the only authoritative payload for a message id:
+    // changedMap wins over a bulk projection, and a retained row cancels any
+    // provisional scope removal. Classify it against the still-committed
+    // occurrence before applying removals so unchanged rows stay no-ops.
+    const changedKeys = new Set(candidate.changedMap.keys());
+    const finalKeys = new Set(changedKeys);
+    for (const row of candidate.bulkRows) finalKeys.add(row.messageID);
+
+    const applyStagedRow = (
+      row: OpenCodeRawAssistantRow,
+      updatedAtMs: number | null,
+      agentProjected: boolean,
+    ): void => {
+      const key = row.messageID;
+      const occurrence = state.occurrences.get(key);
+      if (!occurrence) {
+        setRow(row, updatedAtMs, row.agent);
+        upserts.push(row);
+        return;
+      }
+      const oldRow = rowOf(occurrence);
+      const sameContribution =
+        oldRow !== undefined &&
+        occurrence.sessionID === row.sessionID &&
+        fingerprintOf(oldRow) === fingerprintOf(row);
+      if (!sameContribution) {
+        if (oldRow) removals.push(oldRow);
+        setRow(row, updatedAtMs, row.agent);
+        upserts.push(row);
+        return;
+      }
+      if (updatedAtMs !== occurrence.updatedAtMs) {
+        occurrence.updatedAtMs = updatedAtMs;
+        updatedAtChanged = true;
+      }
+      if (agentProjected && row.agent !== occurrence.agent) {
+        if (row.agent === undefined) delete occurrence.agent;
+        else occurrence.agent = row.agent;
+        agentUpserts.push(row);
+        agentAffectedSessionIds.add(row.sessionID);
+      }
+    };
+
+    for (const entry of candidate.changedMap.values()) {
+      applyStagedRow(entry.row, entry.updatedAtMs, entry.agentProjected ?? true);
+    }
+    for (const row of candidate.bulkRows) {
+      if (changedKeys.has(row.messageID)) continue;
+      // Both bulk and changed payloads come from the source reader, which
+      // projects agent; cached synthetic rows never enter this final set.
+      applyStagedRow(row, (row as WatermarkedRow)[WATERMARK] ?? null, true);
+    }
+
     for (const key of candidate.removalKeys) {
+      if (finalKeys.has(key)) continue;
       const occurrence = state.occurrences.get(key);
       if (!occurrence) continue;
       const row = rowOf(occurrence);
       if (row) removals.push(row);
       state.occurrences.delete(key);
       indexes.remove(key);
-    }
-
-    const upserts: OpenCodeRawAssistantRow[] = [];
-    const changedKeys = new Set(candidate.changedMap.keys());
-    for (const row of candidate.bulkRows) {
-      const key = row.messageID;
-      if (changedKeys.has(key)) continue;
-      const existing = state.occurrences.get(key);
-      if (existing) {
-        const oldRow = rowOf(existing);
-        if (oldRow) removals.push(oldRow);
-      }
-      setRow(row, (row as WatermarkedRow)[WATERMARK] ?? null, row.agent);
-      upserts.push(row);
-    }
-    for (const [key, entry] of candidate.changedMap) {
-      const existing = state.occurrences.get(key);
-      if (existing) {
-        const oldRow = rowOf(existing);
-        if (oldRow) removals.push(oldRow);
-      }
-      setRow(entry.row, entry.updatedAtMs, entry.agent);
-      upserts.push(entry.row);
+      occurrenceRemoved = true;
     }
 
     state.sessions = candidate.sessions;
@@ -2110,7 +2157,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
     const markerChangedFocusIds = new Set<string>();
     for (const [focusId, markers] of candidate.detailCompactions) {
-      if (metadataChanged(detailCompactions.get(focusId), markers)) {
+      if (metadataChanged(detailCompactions.get(focusId) ?? [], markers)) {
         markerChangedFocusIds.add(focusId);
       }
       detailCompactions.set(focusId, markers);
@@ -2132,6 +2179,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
     const dataChanged =
       candidate.replaced ||
+      occurrenceRemoved ||
       removals.length > 0 ||
       upserts.length > 0 ||
       sessionsChanged ||
@@ -2145,13 +2193,16 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const identityEstablished =
       priorSourceIdentity === undefined && state.sourceIdentity !== undefined;
     let sessionCacheInvalidated = false;
+    if (!dataChanged && agentAffectedSessionIds.size > 0) {
+      sessionCacheInvalidated = invalidateCachedSessions(agentAffectedSessionIds);
+    }
     if (!dataChanged && markerChangedFocusIds.size > 0) {
       const affectedSessionIds = new Set<string>();
       for (const focusId of markerChangedFocusIds) {
         affectedSessionIds.add(focusId);
         for (const sessionId of indexes.treeIds(focusId)) affectedSessionIds.add(sessionId);
       }
-      sessionCacheInvalidated = invalidateCachedSessions(affectedSessionIds);
+      if (invalidateCachedSessions(affectedSessionIds)) sessionCacheInvalidated = true;
     }
     if (dataChanged || candidate.extentChanged || sessionCacheInvalidated) {
       generation += 1;
@@ -2161,13 +2212,14 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     if (modelHydrated) {
-      if (removals.length > 0 || upserts.length > 0 || sessionsChanged || projectsChanged) {
+      const modelUpserts = agentUpserts.length > 0 ? [...upserts, ...agentUpserts] : upserts;
+      if (removals.length > 0 || modelUpserts.length > 0 || sessionsChanged || projectsChanged) {
         measureSync("modelUpdate", () => {
           if (sessionsChanged || projectsChanged) {
             model.setMetadata(candidate.sessions, candidate.projects);
           }
-          if (removals.length > 0 || upserts.length > 0) {
-            model.apply(upserts, removals);
+          if (removals.length > 0 || modelUpserts.length > 0) {
+            model.apply(modelUpserts, removals);
           }
         });
       }
@@ -2186,7 +2238,12 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     // until bound); the compact index already carries the prior cursor/data.
     // Persist it only when an index-bearing field actually changed.
     const snapshotNeeded =
-      dataChanged || cursorChanged || repairChanged || extentSinceChanged || identityEstablished;
+      dataChanged ||
+      updatedAtChanged ||
+      cursorChanged ||
+      repairChanged ||
+      extentSinceChanged ||
+      identityEstablished;
     if (snapshotNeeded) {
       compactRevision += 1;
       queueSnapshotWrite(atMs);

@@ -52,6 +52,16 @@ timestamp cannot always be detected by a timestamp delta.
   revisions by `time_updated`, falls back to a conservative full projection.
 - A scoped project/session read remains authoritative for its own scope and
   performs its own removal/replacement reads.
+- Refresh classifies the final staged row for each id against the still-committed
+  occurrence before applying removals. A retained identical row cancels its
+  provisional scope removal; an unchanged contribution with only a revision
+  timestamp update refreshes the persisted watermark without a model apply or
+  DTO invalidation; an agent-only change updates the transient agent and
+  invalidates affected session DTOs with a notification and sidecar write, but
+  never rewrites the compact index or invalidates Home/Project DTOs. Contributor,
+  membership, and metadata changes keep the existing model/global invalidation
+  path. Agent absence is authoritative only for staged source payloads, never
+  for cached synthetic rows that may not have loaded transient agents.
 
 ## Presentation DTO sidecar
 

@@ -672,6 +672,36 @@ describe("analytics engine: revision reconciliation", () => {
     expect(afterDelete.usage.stepCount).toBe(3);
   });
 
+  it("matches a fresh projection after mixed new, edited, deleted, and unchanged rows", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db, { fullRepairIntervalMs: 1 });
+    await engine.home("24h");
+    await engine.project("p1", "24h");
+    await engine.session("ses_root");
+
+    const edited = db.rows.find((entry) => entry.messageID === "msg_b");
+    if (!edited) throw new Error("msg_b missing");
+    edited.tokens.input = 500;
+    db.updatedAt.set(rowKey("ses_root", "msg_b"), NOW);
+    const added = row("ses_root", "msg_new", NOW - 30 * 60_000, { input: 50 });
+    db.rows.push(added);
+    db.updatedAt.set(rowKey(added.sessionID, added.messageID), added.completedAtMs);
+    db.rows = db.rows.filter((entry) => entry.messageID !== "msg_o");
+
+    setNow(NOW + 1);
+    await engine.refresh();
+
+    const expected = createUsageAnalytics(datasetOf(db));
+    expect((await engine.home("24h")).usage.totals).toEqual(
+      expected.home("24h", NOW + 1).usage.totals,
+    );
+    expect((await engine.project("p1", "24h")).totals).toEqual(
+      expected.project("p1", "24h", NOW + 1).totals,
+    );
+    expect(await engine.session("ses_root")).toEqual(expected.session("ses_root"));
+    await engine.close();
+  });
+
   it("fetches only changed message ids after an ordinary write (no full payload reread)", async () => {
     const db = baseDb();
     const { engine, calls } = harness(db);
@@ -2120,6 +2150,108 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
             call.params.sessionIDs.length > 0,
         ),
     ).toBe(true);
+    await engine.close();
+  });
+
+  it("preserves Home, Project, and session DTOs across an unchanged detail view", async () => {
+    const db = baseDb();
+    const { engine, savedPresentations, savedStates, setNow } = harness(db);
+    await engine.home("lifetime");
+    await engine.project("p1", "lifetime");
+    await engine.session("ses_root");
+    await flushAsync();
+
+    const modelUpdates = (await engine.stats()).phases?.modelUpdate?.count ?? 0;
+    const compactWrites = savedStates.length;
+    setNow(NOW + 60_001);
+    await engine.session("ses_child");
+    await flushAsync();
+
+    expect((await engine.stats()).phases?.modelUpdate?.count ?? 0).toBe(modelUpdates);
+    expect(savedStates.length).toBe(compactWrites);
+
+    const latest = savedPresentations[savedPresentations.length - 1];
+    expect(Object.keys(latest?.home ?? {}).sort()).toEqual(["24h", "30d", "7d", "lifetime"]);
+    expect(latest?.project.some(([id, range]) => id === "p1" && range === "lifetime")).toBe(true);
+    expect(latest?.session?.map(([id]) => id)).toEqual(["ses_root", "ses_child"]);
+    await engine.close();
+  });
+
+  it("persists timestamp-only changes without model or DTO invalidation", async () => {
+    const db = baseDb();
+    const { engine, savedPresentations, savedStates, setNow } = harness(db);
+    await engine.home("24h");
+    await engine.project("p1", "24h");
+    await engine.session("ses_root");
+    await flushAsync();
+
+    const modelUpdates = (await engine.stats()).phases?.modelUpdate?.count ?? 0;
+    const compactWrites = savedStates.length;
+    const changedAt = NOW + 60_001;
+    setNow(changedAt);
+    db.updatedAt.set(rowKey("ses_root", "msg_b"), changedAt);
+
+    await engine.project("p1", "30d");
+    await flushAsync();
+
+    expect((await engine.stats()).phases?.modelUpdate?.count ?? 0).toBe(modelUpdates);
+    expect(savedStates.length).toBeGreaterThan(compactWrites);
+    expect(savedStates[savedStates.length - 1]?.occurrences.get("msg_b")?.updatedAtMs).toBe(
+      changedAt,
+    );
+    const latest = savedPresentations[savedPresentations.length - 1];
+    expect(latest?.home["24h"]).toBeDefined();
+    expect(latest?.session?.some(([id]) => id === "ses_root")).toBe(true);
+    await engine.close();
+  });
+
+  it("keeps agent-only changes scoped to session DTOs", async () => {
+    const db = baseDb();
+    const { engine, generations, savedStates, setNow } = harness(db);
+    await engine.home("24h");
+    await engine.project("p1", "24h");
+    await engine.session("ses_root");
+    await engine.session("ses_child");
+    await flushAsync();
+
+    const target = db.rows.find((entry) => entry.messageID === "msg_b");
+    if (!target) throw new Error("msg_b missing");
+    const compactWrites = savedStates.length;
+    const ranges = ["30d", "7d", "lifetime"] as const;
+    const agents: Array<string | undefined> = ["build", "review", undefined];
+
+    for (let index = 0; index < agents.length; index += 1) {
+      const agent = agents[index];
+      if (agent === undefined) delete target.agent;
+      else target.agent = agent;
+      const atMs = NOW + 60_001 + index;
+      setNow(atMs);
+      const generationsBefore = generations.length;
+      await engine.project("p1", ranges[index]);
+      await flushAsync();
+
+      expect(savedStates.length).toBe(compactWrites);
+
+      const homeDtoBefore = (await engine.stats()).phases?.dtoAggregation?.count ?? 0;
+      const home = await engine.home("24h");
+      expect(home.usage.totals.input).toBe(700);
+      expect((await engine.stats()).phases?.dtoAggregation?.count ?? 0).toBe(homeDtoBefore);
+
+      const projectDtoBefore = (await engine.stats()).phases?.dtoAggregation?.count ?? 0;
+      const project = await engine.project("p1", "24h");
+      expect(project.totals.input).toBe(300);
+      expect((await engine.stats()).phases?.dtoAggregation?.count ?? 0).toBe(projectDtoBefore);
+
+      const sessionDtoBefore = (await engine.stats()).phases?.dtoAggregation?.count ?? 0;
+      const session = await engine.session("ses_root");
+      expect(session.steps.find((step) => step.messageId === "msg_b")?.agent).toBe(agent);
+      expect((await engine.stats()).phases?.dtoAggregation?.count ?? 0).toBeGreaterThan(
+        sessionDtoBefore,
+      );
+      expect(generations.length).toBeGreaterThan(generationsBefore);
+
+      if (index < agents.length - 1) await engine.session("ses_child");
+    }
     await engine.close();
   });
 
