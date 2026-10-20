@@ -985,6 +985,8 @@ describe("analytics engine: revision reconciliation", () => {
     const after = await engine.home("24h");
     expect(after.stale).toBe(true);
     expect(after.usage.totals).toEqual(before.usage.totals);
+    // A failed refresh cannot advance the certified sync epoch.
+    expect(after.usage.window).toEqual(before.usage.window);
   });
 
   it("retains the last good snapshot when the source is unreadable", async () => {
@@ -1964,7 +1966,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.close();
   });
 
-  it("rederives finite Home DTOs when the rolling window advances", async () => {
+  it("advances finite Home DTOs at the certified sync epoch", async () => {
     const db = baseDb();
     const age24 = row("ses_root", "msg_age24", NOW - 23 * HOUR, { input: 11 });
     const age7 = row("ses_root", "msg_age7", NOW - 7 * DAY + HOUR, { input: 13 });
@@ -1976,13 +1978,148 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     expect((await engine.home("24h")).usage.totals.input).toBe(711);
     expect((await engine.home("7d")).usage.totals.input).toBe(1_524);
 
+    // Wall time alone does not move a finite DTO. A successful refresh
+    // establishes the new certified sync epoch.
     setNow(NOW + 2 * HOUR);
+    await engine.refresh();
     for (const range of ["24h", "7d"] as const) {
       const fresh = createUsageAnalytics(datasetOf(db)).home(range, NOW + 2 * HOUR);
       const actual = await engine.home(range);
       expect(actual.usage.totals.input).toBe(fresh.usage.totals.input);
       expect(actual.usage.window).toEqual(fresh.usage.window);
     }
+    await engine.close();
+  });
+
+  it("keeps finite Home/Project DTOs cached within the refresh interval", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("24h");
+    await engine.project("p1", "24h");
+    const home = await engine.home("24h");
+    const project = await engine.project("p1", "24h");
+    const homeWindow = home.usage.window;
+    const projectWindow = project.usage.window;
+    const baseline = (await engine.stats()).phases?.dtoAggregation?.count ?? 0;
+
+    for (const offset of [1, 60_000, 300_000, 599_999]) {
+      setNow(NOW + offset);
+      const currentHome = await engine.home("24h");
+      const currentProject = await engine.project("p1", "24h");
+      expect(currentHome.usage.window).toEqual(homeWindow);
+      expect(currentHome.usage.totals.input).toBe(700);
+      expect(currentProject.usage.window).toEqual(projectWindow);
+      expect(currentProject.totals.input).toBe(300);
+    }
+
+    expect((await engine.stats()).phases?.dtoAggregation?.count ?? 0).toBe(baseline);
+    await engine.close();
+  });
+
+  it("re-derives finite views at the certified epoch on a no-change refresh", async () => {
+    const db = baseDb();
+    const age24 = row("ses_root", "msg_age24_boundary", NOW - 23 * HOUR - 55 * 60_000, {
+      input: 11,
+    });
+    db.rows.push(age24);
+    db.updatedAt.set(rowKey("ses_root", "msg_age24_boundary"), age24.completedAtMs);
+    const { engine, setNow } = harness(db);
+
+    await engine.home("24h");
+    await engine.project("p1", "24h");
+    setNow(NOW + INTERVAL);
+    await engine.refresh();
+
+    const expectedHome = createUsageAnalytics(datasetOf(db)).home("24h", NOW + INTERVAL);
+    const home = await engine.home("24h");
+    expect(home.usage.totals).toEqual(expectedHome.usage.totals);
+    expect(home.usage.window).toEqual(expectedHome.usage.window);
+
+    const expectedProject = createUsageAnalytics(datasetOf(db)).project(
+      "p1",
+      "24h",
+      NOW + INTERVAL,
+    );
+    const project = await engine.project("p1", "24h");
+    expect(project.totals).toEqual(expectedProject.totals);
+    expect(project.usage.window).toEqual(expectedProject.usage.window);
+    await engine.close();
+  });
+
+  it("keeps a covered project-only refresh fresh while the global frontier is stale", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("24h");
+
+    setNow(NOW + INTERVAL);
+    const project = await engine.project("p1", "30d");
+    expect(project.stale).toBe(false);
+    expect(project.usage.window.untilMs).toBe(NOW + INTERVAL);
+    await engine.close();
+  });
+
+  it("does not let a narrow project refresh make a wider cached project fresh", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("30d");
+    const wide = await engine.project("p1", "30d");
+    expect(wide.stale).toBe(false);
+    const wideWindow = wide.usage.window;
+    await engine.project("p1", "24h");
+
+    // The global frontier is stale. The narrow 24h scoped read occurs at the
+    // current time and covers no p1 rows, so the wide cached DTO survives.
+    setNow(NOW + 2 * DAY);
+    await engine.project("p1", "24h");
+    await flushAsync();
+    await flushAsync();
+
+    const narrow = await engine.project("p1", "24h");
+    expect(narrow.stale).toBe(false);
+    expect(narrow.usage.window.untilMs).toBe(NOW + 2 * DAY);
+
+    const dtoCount = (await engine.stats()).phases?.dtoAggregation?.count ?? 0;
+    const cachedWide = await engine.project("p1", "30d");
+    expect(cachedWide.stale).toBe(true);
+    expect(cachedWide.usage.window).toEqual(wideWindow);
+    expect((await engine.stats()).phases?.dtoAggregation?.count ?? 0).toBe(dtoCount);
+    await engine.close();
+  });
+
+  it("does not let a project-only scope advance certify Home or other ranges", async () => {
+    const db = baseDb();
+    const { engine, calls, setNow } = harness(db);
+    await engine.home("24h");
+    const certifiedHomeWindow = (await engine.home("24h")).usage.window;
+
+    setNow(NOW + 1);
+    const p1Wide = await engine.project("p1", "30d");
+    const p1WideWindow = p1Wide.usage.window;
+    expect(p1WideWindow.untilMs).toBe(NOW + 1);
+
+    const home = await engine.home("24h");
+    expect(home.usage.window).toEqual(certifiedHomeWindow);
+
+    const p1Narrow = await engine.project("p1", "24h");
+    expect(p1Narrow.usage.window).toEqual(certifiedHomeWindow);
+
+    const p2Narrow = await engine.project("p2", "24h");
+    expect(p2Narrow.usage.window).toEqual(certifiedHomeWindow);
+
+    // A 30d scoped certificate cannot cover a wider 7d request for the same
+    // project; the engine must perform the matching scoped read instead.
+    const beforeWider = calls.length;
+    await engine.project("p1", "7d");
+    expect(
+      calls
+        .slice(beforeWider)
+        .some(
+          (call) =>
+            call.method === "loadCompletedRows" &&
+            Array.isArray(call.params?.sessionIDs) &&
+            call.params.sessionIDs.length > 0,
+        ),
+    ).toBe(true);
     await engine.close();
   });
 
@@ -2007,13 +2144,14 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await first.engine.close();
 
     // Match cloned compact metadata to the source so this refresh is a true
-    // no-change metadata pass, not a metadata replacement.
+    // no-change global pass, not a metadata replacement.
     db.sessions = structuredClone(persisted.sessions);
     db.projects = structuredClone(persisted.projects);
     const writes: WarmAnalyticsPresentation[] = [];
+    let secondNow = NOW;
     const second = createAnalyticsEngine({
       reader: createFakeReader(db, []),
-      now: () => NOW + 2 * HOUR,
+      now: () => secondNow,
       refreshIntervalMs: INTERVAL,
       snapshotPath: "memory.json",
       loadSnapshot: async () => cloneState(persisted),
@@ -2032,6 +2170,9 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
       },
     });
 
+    const warmHome = await second.home("24h");
+    expect(warmHome.usage.totals.input).toBe(711);
+    secondNow = NOW + 2 * HOUR;
     await second.refresh();
     await vi.waitFor(() => expect(writes.length).toBeGreaterThan(0));
     const invalidated = writes[writes.length - 1];

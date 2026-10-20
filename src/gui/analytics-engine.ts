@@ -724,11 +724,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     return atMs - state.frontierAtMs >= refreshIntervalMs;
   }
 
-  function isProjectFresh(projectId: string, atMs: number): boolean {
-    const freshAt = projectFreshAt.get(projectId);
-    return freshAt !== undefined && atMs - freshAt < refreshIntervalMs;
-  }
-
   function isDetailFresh(sessionId: string, atMs: number): boolean {
     const freshAt = detailFreshAt.get(sessionId);
     return freshAt !== undefined && atMs - freshAt < refreshIntervalMs;
@@ -781,6 +776,38 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       return false;
     }
     return coversSince(rangeWindow(range, atMs).sinceMs, coverage);
+  }
+
+  /**
+   * The only epochs a cached Home/Project window may be advanced to are actual
+   * successful sync epochs. Wall-clock time, a cached DTO's generatedAt, or a
+   * project-only scope refresh must never create one.
+   */
+  function homeCertifiedSyncAtMs(range: RangeKey, atMs: number): number | undefined {
+    if (!indexLoaded || !coverageTrusted || state.frontierAtMs <= 0) return undefined;
+    if (!coversSince(rangeWindow(range, atMs).sinceMs, state.extent)) return undefined;
+    return state.frontierAtMs;
+  }
+
+  function projectCertifiedSyncAtMs(
+    projectId: string,
+    range: RangeKey,
+    atMs: number,
+  ): number | undefined {
+    let certified: number | undefined;
+    if (
+      indexLoaded &&
+      coverageTrusted &&
+      state.frontierAtMs > 0 &&
+      coversSince(rangeWindow(range, atMs).sinceMs, state.extent)
+    ) {
+      certified = state.frontierAtMs;
+    }
+    const projectFresh = projectFreshAt.get(projectId);
+    if (projectFresh !== undefined && projectScopeCovered(projectId, range, atMs)) {
+      certified = certified === undefined ? projectFresh : Math.max(certified, projectFresh);
+    }
+    return certified;
   }
 
   function cachedSession(sessionId: string): SessionSnapshot | undefined {
@@ -993,37 +1020,47 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   }
 
   /**
-   * Advance cached finite Home/Project DTOs with the refresh clock so the
-   * persisted sidecar never keeps a previous rolling window for a later start.
-   * Rebuild ranges the loaded model can certify; otherwise expire the entry so
-   * the next request hydrates/rebuilds instead of serving an aged-out window.
+   * Advance cached finite Home/Project DTOs to their actual certified sync
+   * epoch. Home only moves on a successful global refresh; project entries may
+   * also move on a matching scoped refresh. If the model cannot rebuild a
+   * moved entry, expire it so the next request hydrates/rebuilds lazily.
    */
-  function refreshFinitePresentationWindows(atMs: number): boolean {
+  function refreshFinitePresentationWindows(atMs: number, globalRefresh: boolean): boolean {
     const presentation = state.presentation;
     if (!presentation) return false;
-    const canDerive = modelHydrated && !modelDirty && coverageTrusted;
+    const canDerive = modelHydrated && !modelDirty;
     let changed = false;
-    for (const key of Object.keys(presentation.home)) {
-      if (!isRangeKey(key) || key === "lifetime") continue;
-      const snapshot = presentation.home[key];
-      if (!snapshot || snapshot.usage.window.untilMs >= atMs) continue;
-      if (canDerive && coversSince(rangeWindow(key, atMs).sinceMs, state.extent)) {
-        presentation.home[key] = deriveHomeSnapshot(key, atMs);
-      } else {
-        delete presentation.home[key];
+    if (globalRefresh) {
+      for (const key of Object.keys(presentation.home)) {
+        if (!isRangeKey(key) || key === "lifetime") continue;
+        const snapshot = presentation.home[key];
+        const certified = homeCertifiedSyncAtMs(key, atMs);
+        if (!snapshot || certified === undefined || snapshot.usage.window.untilMs >= certified) {
+          continue;
+        }
+        if (canDerive) {
+          presentation.home[key] = deriveHomeSnapshot(key, certified);
+        } else {
+          delete presentation.home[key];
+        }
+        changed = true;
       }
-      changed = true;
     }
     if (presentation.project.length > 0) {
       let projectChanged = false;
       const next: typeof presentation.project = [];
       for (const [projectId, range, snapshot] of presentation.project) {
-        if (range === "lifetime" || snapshot.usage.window.untilMs >= atMs) {
+        const certified = projectCertifiedSyncAtMs(projectId, range, atMs);
+        if (range === "lifetime" || certified === undefined) {
           next.push([projectId, range, snapshot]);
           continue;
         }
-        if (canDerive && projectScopeCovered(projectId, range, atMs)) {
-          next.push([projectId, range, deriveProjectSnapshot(projectId, range, atMs)]);
+        if (snapshot.usage.window.untilMs >= certified) {
+          next.push([projectId, range, snapshot]);
+          continue;
+        }
+        if (canDerive) {
+          next.push([projectId, range, deriveProjectSnapshot(projectId, range, certified)]);
         }
         projectChanged = true;
       }
@@ -1060,7 +1097,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     let changed = false;
     for (const range of HOME_PRECOMPUTE_RANGES) {
       if (state.presentation?.home[range] !== undefined) continue;
-      setHomeCache(range, deriveHomeSnapshot(range, atMs));
+      const certified = homeCertifiedSyncAtMs(range, atMs);
+      if (certified === undefined) continue;
+      setHomeCache(range, deriveHomeSnapshot(range, certified));
       changed = true;
     }
     if (changed) queuePresentationWrite(atMs);
@@ -2138,8 +2177,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (removals.length > 0 && state.fingerprints.length > state.occurrences.size + 32) {
       pruneFingerprints();
     }
-    const finitePresentationChanged = refreshFinitePresentationWindows(atMs);
-    precomputeHomeSnapshots(atMs);
+    const globalRefresh = effectiveJob.globalRange !== undefined;
+    const finitePresentationChanged = refreshFinitePresentationWindows(atMs, globalRefresh);
+    if (globalRefresh) precomputeHomeSnapshots(atMs);
     samplePeak();
 
     // A no-change refresh only moves wall freshness (and possibly the extent's
@@ -2253,30 +2293,33 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const cached = state.presentation?.home[range];
       if (cached && (await warmCacheAllowed())) {
         let current = cached;
-        // A finite DTO is tied to the rolling calculation window at the time
-        // it was built. Re-derive from the loaded model as the window advances;
-        // refreshing only generatedAt/stale would keep aged-out rows forever.
+        let expired = false;
+        const certified = homeCertifiedSyncAtMs(range, atMs);
         if (
-          modelHydrated &&
-          !modelDirty &&
-          coverageTrusted &&
           range !== "lifetime" &&
-          current.usage.window.untilMs !== atMs &&
-          coversSince(window.sinceMs, state.extent)
+          certified !== undefined &&
+          current.usage.window.untilMs < certified
         ) {
-          current = deriveHomeSnapshot(range, atMs);
-          cacheHome(range, current, atMs);
+          if (modelHydrated && !modelDirty) {
+            current = deriveHomeSnapshot(range, certified);
+            cacheHome(range, current, atMs);
+          } else {
+            delete state.presentation?.home[range];
+            expired = true;
+          }
         }
-        const missingCoverage = !coversSince(window.sinceMs, state.extent);
-        const stale = sidecarNewerThanIndex || isStale(atMs) || missingCoverage;
-        if (stale) {
-          requestBackground(
-            { globalRange: range, detailSessionIds: [], projectScopes: [] },
-            sidecarNewerThanIndex || missingCoverage,
-          );
+        if (!expired) {
+          const missingCoverage = !coversSince(window.sinceMs, state.extent);
+          const stale = sidecarNewerThanIndex || isStale(atMs) || missingCoverage;
+          if (stale) {
+            requestBackground(
+              { globalRange: range, detailSessionIds: [], projectScopes: [] },
+              sidecarNewerThanIndex || missingCoverage,
+            );
+          }
+          scheduleThirtyDayExtension(range, atMs);
+          return homeSnapshotWithStaleness(current, range, atMs, stale);
         }
-        scheduleThirtyDayExtension(range, atMs);
-        return homeSnapshotWithStaleness(current, range, atMs, stale);
       }
       await ensureIndexLoaded();
       if (!coverageTrusted || !coversSince(window.sinceMs, state.extent)) {
@@ -2289,15 +2332,20 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           throw new AnalyticsLookupError("unavailable");
         }
       }
-      if (isStale(now())) {
+      const stale = isStale(now());
+      if (stale) {
         requestBackground({ globalRange: range, detailSessionIds: [], projectScopes: [] });
       }
       ensureModel();
-      const result = deriveHomeSnapshot(range, atMs);
+      const certified = homeCertifiedSyncAtMs(range, atMs);
+      const result = deriveHomeSnapshot(
+        range,
+        range !== "lifetime" && certified !== undefined ? certified : atMs,
+      );
       cacheHome(range, result, atMs);
       precomputeHomeSnapshots(atMs);
       scheduleThirtyDayExtension(range, atMs);
-      return result;
+      return homeSnapshotWithStaleness(result, range, atMs, stale);
     },
 
     async project(projectId, range) {
@@ -2310,38 +2358,46 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const cached = cachedProject(projectId, range);
       if (cached && (await warmCacheAllowed())) {
         let current = cached;
-        const scopeCovered = projectScopeCovered(projectId, range, atMs);
+        let expired = false;
+        const certified = projectCertifiedSyncAtMs(projectId, range, atMs);
         if (
-          modelHydrated &&
-          !modelDirty &&
-          coverageTrusted &&
           range !== "lifetime" &&
-          current.usage.window.untilMs !== atMs &&
-          scopeCovered
+          certified !== undefined &&
+          current.usage.window.untilMs < certified
         ) {
-          current = deriveProjectSnapshot(projectId, range, atMs);
-          cacheProject(current, atMs);
+          if (modelHydrated && !modelDirty) {
+            current = deriveProjectSnapshot(projectId, range, certified);
+            cacheProject(current, atMs);
+          } else {
+            const presentation = state.presentation;
+            if (presentation) {
+              presentation.project = presentation.project.filter(
+                ([id, entryRange]) => id !== projectId || entryRange !== range,
+              );
+              state.presentation = presentation;
+            }
+            expired = true;
+          }
         }
-        const fresh = isProjectFresh(projectId, atMs);
-        const missingCoverage = !scopeCovered && !fresh;
-        const stale = sidecarNewerThanIndex || missingCoverage || (isStale(atMs) && !fresh);
-        if (stale) {
-          requestBackground(
-            { detailSessionIds: [], projectScopes: [{ projectId, range }] },
-            sidecarNewerThanIndex || missingCoverage,
-          );
+        if (!expired) {
+          const stale =
+            sidecarNewerThanIndex ||
+            certified === undefined ||
+            unavailable ||
+            atMs - certified >= refreshIntervalMs;
+          if (stale) {
+            requestBackground(
+              { detailSessionIds: [], projectScopes: [{ projectId, range }] },
+              sidecarNewerThanIndex || certified === undefined,
+            );
+          }
+          return projectSnapshotWithStaleness(current, stale);
         }
-        return projectSnapshotWithStaleness(current, stale);
       }
       await ensureIndexLoaded();
 
-      const window = rangeWindow(range, atMs);
-      const signature = projectSignature(projectId, range, indexes.projectSessions(projectId));
-      const covered =
-        coverageTrusted &&
-        (isProjectFresh(projectId, atMs) ||
-          coversSince(window.sinceMs, state.extent) ||
-          projectSignatures.get(projectId) === signature);
+      const certifiedBefore = projectCertifiedSyncAtMs(projectId, range, atMs);
+      const covered = certifiedBefore !== undefined;
       if (!covered || !stateHasProject(projectId)) {
         await requestRefresh({
           detailSessionIds: [],
@@ -2349,13 +2405,25 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         });
       }
       if (!stateHasProject(projectId)) throw new AnalyticsLookupError("project-not-found");
-      if (isStale(now())) {
-        requestBackground({ detailSessionIds: [], projectScopes: [{ projectId, range }] });
+      const certified = projectCertifiedSyncAtMs(projectId, range, atMs);
+      const stale =
+        sidecarNewerThanIndex ||
+        certified === undefined ||
+        unavailable ||
+        atMs - certified >= refreshIntervalMs;
+      if (stale) {
+        requestBackground(
+          { detailSessionIds: [], projectScopes: [{ projectId, range }] },
+          sidecarNewerThanIndex || certified === undefined,
+        );
       }
-      const stale = isStale(now());
       ensureModel();
       const result = measureSync("dtoAggregation", (): ProjectSnapshot => {
-        const snapshot = model.project(projectId, range, atMs);
+        const snapshot = model.project(
+          projectId,
+          range,
+          range !== "lifetime" && certified !== undefined ? certified : atMs,
+        );
         return {
           ...snapshot,
           stale,

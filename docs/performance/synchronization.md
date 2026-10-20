@@ -91,9 +91,19 @@ timestamp cannot always be detected by a timestamp delta.
   wrong indefinitely. A compaction-only scoped refresh also invalidates the
   affected cached session DTOs and emits a generation notification, because
   markers do not change usage rows and must not be mistaken for a no-op.
-- Finite Home/Project cache entries are tied to their rolling calculation
-  window. When the loaded model can re-derive them, a window advance re-derives
-  the DTO instead of refreshing only `generatedAt`/`stale` over aged-out rows.
+- Finite Home/Project DTOs are as-of a certified sync epoch, not wall-clock
+  `now`. Home is certified only by a successful global frontier backed by
+  loaded-index coverage of the requested range. Project certification is the
+  maximum eligible global frontier, or an eligible project refresh time only
+  when matching project-scope coverage covers the requested range. Sidecar
+  presentation timestamps are never source certification. A cached DTO is
+  re-derived or expired only when its window ends before that certified epoch;
+  staleness is also measured from that epoch, so an unrelated or range-ineligible
+  project refresh cannot make a wider cached DTO fresh. Wall time and project-only
+  scope advances cannot create a new epoch. If the loaded model cannot re-derive
+  a moved entry, it is expired for a lazy rebuild. An unavailable or failed
+  refresh leaves the previous certification and last good DTO stale, while TTL
+  catch-up establishes the next epoch.
 - Saving a cached DTO does not rewrite the compact index. The compact index is
   written only when its data, cursor, repair time, source identity, or older
   coverage bound changes; wall-freshness and until-bound-only changes stay in
