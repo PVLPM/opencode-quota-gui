@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS,
   type AnalyticsWorkerLike,
   createAnalyticsBridge,
   workerResourceLimits,
@@ -372,7 +373,7 @@ describe("analytics worker bridge", () => {
     }
   });
 
-  it("keeps the default timeout finite: retires a stuck worker at 90 s and recovers", async () => {
+  it("keeps the default timeout finite: retires a stuck worker at the budget and recovers", async () => {
     vi.useFakeTimers();
     try {
       let created = 0;
@@ -392,7 +393,7 @@ describe("analytics worker bridge", () => {
       await flushMicrotasks();
       expect(stuck.messages.at(-1)?.command.kind).toBe("home");
 
-      await vi.advanceTimersByTimeAsync(89_999);
+      await vi.advanceTimersByTimeAsync(ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS - 1);
       expect(stuck.terminated).toBe(0);
 
       await vi.advanceTimersByTimeAsync(2);

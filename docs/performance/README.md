@@ -299,6 +299,13 @@ available from the current worker interface.
 - **The 7d -> 30d extension is idle-graced.** See `synchronization.md`; it is
   still not preemption, and foreground work that arrives after a synchronous
   read has started cannot cancel it.
+- **Worker request budget.** A cold 7d read on a measured slow source approached
+  the old 90 s bridge budget, and a foreground request queued behind it could
+  exceed it; the bridge then retired a healthy worker and the next request
+  surfaced `unavailable`. The default budget is now 180 s, enough for two cold
+  reads while still retiring a genuinely stuck worker. Queueing remains
+  non-preemptive: a request that arrives during a started scan waits. A
+  browser/proxy-level 502 has not been reproduced and is not claimed fixed.
 - **No assumed `time_updated` index.** The installed OpenCode schema used for
   the BEFORE baseline has no index on `session_message.time_updated`.
   Timestamp/revision filtering therefore scans SQLite rather than using an

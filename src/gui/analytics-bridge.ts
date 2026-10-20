@@ -40,13 +40,14 @@ export interface AnalyticsBridgeOptions {
 }
 
 /**
- * Cold 30d/lifetime analytics catch-up reads the full source store and can
- * legitimately take tens of seconds (about 24 s observed on a real database).
- * The old 30 s budget retired healthy workers mid-read and surfaced `timeout`.
- * Keep a finite budget with headroom, so genuinely stuck workers are still
+ * Cold 7d/30d/lifetime analytics catch-up reads the full source store and can
+ * legitimately take tens of seconds on a slow local disk; a foreground request
+ * queued behind one can add its own scoped read. The old 90 s budget retired
+ * healthy workers mid-read on measured sources. Keep a finite budget with
+ * enough headroom for two cold reads, so genuinely stuck workers are still
  * retired and recovered on the next request.
  */
-const DEFAULT_REQUEST_TIMEOUT_MS = 90_000;
+export const ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
 const DEFAULT_RETRY_BASE_MS = 250;
 const DEFAULT_MAX_RECOVERY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_MS = 5_000;
@@ -120,7 +121,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     Number.isFinite(options.requestTimeoutMs) &&
     options.requestTimeoutMs > 0
       ? options.requestTimeoutMs
-      : DEFAULT_REQUEST_TIMEOUT_MS;
+      : ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS;
   const retryBaseMs =
     options.retryBaseMs !== undefined &&
     Number.isFinite(options.retryBaseMs) &&
