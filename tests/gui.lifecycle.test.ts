@@ -736,8 +736,8 @@ describe("dashboard production lifecycle", () => {
     const workspace = makeWorkspace();
     const port = await freePort();
     writeGuiCanonicalConfig(workspace, { dashboard: { port } });
-    // The inherited project layer wins at startup; the canonical file has no key yet.
-    writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 90000 });
+    // Actual global legacy settings are eligible; ordinary workspace overrides are not.
+    writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 90000 });
     const { source } = buildSource();
     const interval = captureInterval();
 
@@ -751,10 +751,14 @@ describe("dashboard production lifecycle", () => {
     });
     expect(interval.read()).toBe(90000);
 
-    // Config is read per call, so editing the inherited file changes the import source.
-    writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 30000 });
+    // Config is read per call, so editing the legacy file changes the import source.
+    writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 30000 });
     const previewBody = await readJson(port, "/api/v1/settings/import");
-    expect(previewBody).toMatchObject({ expectedRevision: expect.any(String) });
+    expect(previewBody).toMatchObject({
+      from: "global opencode-quota/quota-toast.json",
+      keys: [{ key: "minIntervalMs", value: 30000 }],
+      expectedRevision: expect.any(String),
+    });
     // SAFETY: the `toMatchObject` proof above establishes a string `expectedRevision`.
     const preview = previewBody as { expectedRevision: string };
     const applied = await writeJson(port, "/api/v1/settings/import", "POST", {

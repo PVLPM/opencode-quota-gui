@@ -128,6 +128,10 @@ export interface LoadConfigMeta {
   globalConfigPaths: string[];
   workspaceConfigPaths: string[];
   settingSources: QuotaToastSettingSources;
+  /** Winning file-layer identity, recorded at application time, not guessed from paths. */
+  settingSourceLayers: Partial<
+    Record<QuotaToastSettingSourceKey, { scope: ConfigLayerScope; kind: ConfigLayerKind }>
+  >;
   networkSettingSources: Record<string, string>;
   configIssues: LoadConfigIssue[];
 }
@@ -150,6 +154,7 @@ export function createLoadConfigMeta(): LoadConfigMeta {
     globalConfigPaths: [],
     workspaceConfigPaths: [],
     settingSources: {},
+    settingSourceLayers: {},
     networkSettingSources: {},
     configIssues: [],
   };
@@ -1457,6 +1462,7 @@ export async function loadConfig(
     globalConfigPaths: string[];
     workspaceConfigPaths: string[];
     settingSources: QuotaToastSettingSources;
+    settingSourceLayers: LoadConfigMeta["settingSourceLayers"];
     networkSettingSources: Record<string, string>;
     configIssues: LoadConfigIssue[];
   }> {
@@ -1467,6 +1473,7 @@ export async function loadConfig(
     const globalConfigPaths: string[] = [];
     const workspaceConfigPaths: string[] = [];
     const settingSources: QuotaToastSettingSources = {};
+    const settingSourceLayers: LoadConfigMeta["settingSourceLayers"] = {};
     const configIssues: LoadConfigIssue[] = [];
     const authoritativeSidecarRoots = new Set<string>();
 
@@ -1584,6 +1591,12 @@ export async function loadConfig(
           });
         }
       }
+      // Only keys actually applied from this layer acquire its structured scope.
+      for (const key of QUOTA_TOAST_SETTING_SOURCE_KEYS) {
+        if (settingSources[key] === sourcePath) {
+          settingSourceLayers[key] = { scope: candidate.scope, kind: candidate.kind };
+        }
+      }
     }
 
     if (usedPaths.length === 0) {
@@ -1593,6 +1606,7 @@ export async function loadConfig(
         globalConfigPaths: [],
         workspaceConfigPaths: [],
         settingSources: {},
+        settingSourceLayers: {},
         networkSettingSources: {},
         configIssues: [],
       };
@@ -1604,6 +1618,7 @@ export async function loadConfig(
       globalConfigPaths,
       workspaceConfigPaths,
       settingSources,
+      settingSourceLayers,
       networkSettingSources: projectNetworkSettingSources(settingSources),
       configIssues,
     };
@@ -1617,6 +1632,7 @@ export async function loadConfig(
       meta.globalConfigPaths = fileConfig.globalConfigPaths;
       meta.workspaceConfigPaths = fileConfig.workspaceConfigPaths;
       meta.settingSources = fileConfig.settingSources;
+      meta.settingSourceLayers = fileConfig.settingSourceLayers;
       meta.networkSettingSources = fileConfig.networkSettingSources;
       meta.configIssues = fileConfig.configIssues;
     }
@@ -1671,6 +1687,7 @@ export async function loadConfig(
           meta.globalConfigPaths = [];
           meta.workspaceConfigPaths = [];
           meta.settingSources = settingSources;
+          meta.settingSourceLayers = {};
           meta.networkSettingSources = projectNetworkSettingSources(settingSources);
           meta.configIssues = configIssues;
         }
@@ -1688,6 +1705,7 @@ export async function loadConfig(
     meta.globalConfigPaths = [];
     meta.workspaceConfigPaths = [];
     meta.settingSources = {};
+    meta.settingSourceLayers = {};
     meta.networkSettingSources = {};
     meta.configIssues = [];
   }

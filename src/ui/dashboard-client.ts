@@ -676,11 +676,33 @@ export function parseSettingsSnapshot(
   const root = readRecord(value, endpoint, "not an object");
   const dashboard = readRecord(root.dashboard, endpoint, "dashboard");
   const visibility = readRecord(root.visibility, endpoint, "visibility");
+  const provenance: SettingsSnapshot["provenance"] =
+    root.provenance === undefined
+      ? undefined
+      : Object.fromEntries(
+          Object.entries(readRecord(root.provenance, endpoint, "provenance")).map(
+            ([key, value]) => {
+              const source = readRecord(value, endpoint, "provenance[]");
+              return [
+                key,
+                {
+                  scope: readEnum(
+                    source.scope,
+                    ["defaults", "global", "workspace", "project", "legacy"] as const,
+                    endpoint,
+                    "provenance[].scope",
+                  ),
+                },
+              ];
+            },
+          ),
+        );
   return {
     revision: readText(root.revision, endpoint, "revision"),
     pathLabel: readText(root.pathLabel, endpoint, "pathLabel"),
     values: readRecord(root.values, endpoint, "values"),
     sources: readStringMap(root.sources, endpoint, "sources"),
+    ...(provenance === undefined ? {} : { provenance }),
     writable: readStringList(root.writable, endpoint, "writable"),
     dashboard: {
       port: readNumber(dashboard.port, endpoint, "dashboard.port"),

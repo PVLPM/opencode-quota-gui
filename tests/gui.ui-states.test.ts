@@ -1905,7 +1905,9 @@ describe("settings page", () => {
   });
 
   it("renders provider-grouped visibility cards with named eyes and unknown retained ids", async () => {
-    const snapshot = settingsSnapshot();
+    const snapshot = settingsSnapshot({
+      provenance: { percentDisplayMode: { scope: "legacy" } },
+    });
     snapshot.values["dashboard.hiddenCards"] = ["hidden-provider#cardhash", "unknown-retained"];
     const html = await renderView("/views/settings.tsx", "SettingsView", {
       snapshot,
@@ -1989,17 +1991,68 @@ describe("settings page", () => {
     expect(html).toContain("No unsaved changes.");
     expect(text(html)).toContain("saved as global defaults");
     expect(text(html)).toContain("saving here does not edit them");
-    expect(text(html)).toContain("import may remain available after a successful copy");
-    expect(html).toContain("effective value inherited from");
-    expect(html).toContain("inherited from opencode-quota/quota-toast.jsonc");
-    expect(html).toContain("Preview import");
-    expect(html).toContain("Affects toasts, TUI sidebar, and compact status only");
+    expect(html).toContain("Legacy OpenCode Quota settings detected");
+    expect(html).toContain("Legacy override");
+    expect(html).not.toContain("effective value inherited from");
+    expect(html).toContain("Preview migration");
+    expect(html).not.toContain("Affects toasts, TUI sidebar, and compact status only");
     // The library's own components render in the page: adoption is real, not a plan.
     expect(html).toContain('data-component="button-v2"');
     expect(html).toContain('data-component="switch"');
     expect(html).toContain('role="switch"');
     expect(html).toContain('data-component="segmented-control-v2"');
     expect(html).toContain("text-input-v2");
+  });
+
+  it.each([
+    ["defaults", undefined],
+    ["global", undefined],
+    ["workspace", "Workspace override"],
+    ["project", "Project override"],
+    ["legacy", "Legacy override"],
+  ] as const)("renders only meaningful structured %s provenance", async (scope, note) => {
+    const html = await renderView("/views/settings.tsx", "SettingsView", {
+      snapshot: settingsSnapshot({
+        sources: { minIntervalMs: "synthetic/raw/source.json" },
+        provenance: { minIntervalMs: { scope } },
+        import: { available: false, issues: [] },
+      }),
+      client: {},
+      toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
+      catalog: { providers: [] },
+      onReload: noop,
+    });
+    expect(html).not.toContain("synthetic/raw/source.json");
+    expect(html).not.toContain("effective value inherited from");
+    if (note) expect(html).toContain(note);
+    else expect(html).not.toMatch(/(?:Workspace|Project|Legacy) override/);
+    expect(html).not.toContain('id="qg-settings-import"');
+    expect(html).not.toContain("Preview migration");
+    for (const label of [
+      "Runway projection",
+      "Countdown decimals",
+      "Space countdown units",
+      "Quota row style",
+      "Go windows",
+      "Monthly limit",
+    ]) {
+      expect(html).not.toContain(label);
+    }
+  });
+
+  it("does not guess provenance from source strings on older hosts", async () => {
+    const html = await renderView("/views/settings.tsx", "SettingsView", {
+      snapshot: settingsSnapshot({
+        sources: { minIntervalMs: "defaults", percentDisplayMode: "project synthetic.json" },
+        import: { available: false, issues: [] },
+      }),
+      client: {},
+      toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
+      catalog: { providers: [] },
+      onReload: noop,
+    });
+    expect(html).not.toContain("effective value inherited from");
+    expect(html).not.toMatch(/(?:Workspace|Project|Legacy) override/);
   });
 
   it("names the account inline on every row when a provider has multiple accounts", async () => {

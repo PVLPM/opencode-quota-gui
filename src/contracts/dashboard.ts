@@ -246,6 +246,10 @@ export interface SessionSnapshot {
   stepSemantics: string;
 }
 
+export interface SettingProvenance {
+  scope: "defaults" | "global" | "workspace" | "project" | "legacy";
+}
+
 export interface SettingsSnapshot {
   revision: string;
   /**
@@ -256,6 +260,8 @@ export interface SettingsSnapshot {
   pathLabel: string;
   values: Record<string, JsonValue>;
   sources: Record<string, string>;
+  /** Actual winning loader scope. Optional for older contract-2 hosts. No paths. */
+  provenance?: Record<string, SettingProvenance>;
   writable: readonly string[];
   dashboard: { port: number; url: string };
   visibility: { hiddenCards: string[]; hiddenRows: string[] };

@@ -20,6 +20,7 @@ import type {
   SettingsSnapshot,
   SettingsWriteResult,
 } from "../contracts/dashboard.js";
+import { LEGACY_IMPORT_KEYS } from "../contracts/settings.js";
 import {
   buildConfigLayerCandidates,
   type ConfigLayerCandidate,
@@ -261,6 +262,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
   const settingsFileOpener = options.settingsFileOpener ?? createSettingsFileOpener();
 
   let lockTail: Promise<unknown> = Promise.resolve();
+  let previewedRevision: string | undefined;
 
   /** One serialized queue for all writers: the loser's stale revision yields 409. */
   function withLock<T>(run: () => Promise<T>): Promise<T> {
@@ -427,11 +429,10 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     const keys: ImportPlan["keys"] = [];
     const origins: string[] = [];
 
-    for (const key of GUI_SETTINGS_WRITABLE_KEYS) {
+    for (const key of LEGACY_IMPORT_KEYS) {
+      const layer = state.meta.settingSourceLayers[key];
+      if (!layer || layer.scope !== "global" || layer.kind === "canonical") continue;
       const label = sourceLabelFor(state.meta.settingSources[key], state.candidates);
-      if (label === "defaults" || label === GUI_CONFIG_RELATIVE_PATH) {
-        continue;
-      }
       keys.push({ key, value: settingValue(state.config, key) });
       if (!origins.includes(label)) {
         origins.push(label);
@@ -439,7 +440,10 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     }
 
     const issues = state.meta.configIssues
-      .filter((issue) => sourceLabelFor(issue.path, state.candidates) !== GUI_CONFIG_RELATIVE_PATH)
+      .filter(
+        (issue) =>
+          state.meta.globalConfigPaths.includes(issue.path) && issue.path !== canonicalPath,
+      )
       .map((issue) => ({ key: issue.key, message: issue.message }));
 
     return { from: origins.join(", "), keys, issues };
@@ -726,8 +730,19 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     }
 
     const sources: Record<string, string> = {};
+    const provenance: NonNullable<SettingsSnapshot["provenance"]> = {};
     for (const key of GUI_SETTINGS_KEYS) {
       sources[key] = sourceLabelFor(state.meta.settingSources[key], state.candidates);
+      const layer = state.meta.settingSourceLayers[key];
+      provenance[key] = {
+        scope: !layer
+          ? "defaults"
+          : layer.scope === "workspace"
+            ? "workspace"
+            : layer.kind === "canonical"
+              ? "global"
+              : "legacy",
+      };
     }
 
     const importPlan = deriveImportPlan(state);
@@ -747,6 +762,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       pathLabel: canonicalPath,
       values,
       sources,
+      provenance,
       writable: [...GUI_SETTINGS_WRITABLE_KEYS],
       dashboard: { port, url: resolveGuiDashboardUrl(port) },
       visibility: {
@@ -784,6 +800,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
   async function importPreview(): Promise<ImportPreview> {
     const state = await readState();
     const plan = deriveImportPlan(state);
+    previewedRevision = state.revision;
     return {
       from: plan.from,
       keys: plan.keys.map(({ key, value }) => ({ key, value })),
@@ -794,6 +811,9 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
   async function importApply(input: { expectedRevision: string }): Promise<SettingsWriteResult> {
     return withLock(async () => {
+      if (previewedRevision !== input.expectedRevision) {
+        throw new GuiSettingsError("config-changed", "Preview migration before applying");
+      }
       const state = await readState();
       assertRevision(state.revision, input.expectedRevision);
 

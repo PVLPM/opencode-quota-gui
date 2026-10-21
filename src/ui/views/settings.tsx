@@ -29,6 +29,7 @@ import {
   SETTINGS_GROUPS,
   type SettingsDraft,
   type SettingsField,
+  settingProvenanceNote,
   stringList,
   toPatch,
   windowSelection,
@@ -45,7 +46,7 @@ export type { VisibilityCatalog, VisibilityProvider, VisibilityRow } from "../vi
  * a save bar enabled only on change: the patch travels with `expectedRevision`,
  * `null` clears a key, and a 409 refetches, keeps the edits, and says the
  * settings changed elsewhere. The URL stays read-only, and the import
- * action is a preview → apply flow that names the owner workspace.
+ * action is a preview → apply flow for eligible actual legacy sources.
  */
 export function SettingsView(props: {
   snapshot: SettingsSnapshot;
@@ -120,11 +121,8 @@ export function SettingsView(props: {
   const fieldValue = (field: SettingsField): JsonValue | undefined =>
     field.key in draft().edits ? draft().edits[field.key] : props.snapshot.values[field.key];
 
-  const sourceNote = (key: string): string | undefined => {
-    const source = props.snapshot.sources[key];
-    if (!source || source === props.snapshot.pathLabel) return undefined;
-    return `effective value inherited from ${source}`;
-  };
+  const sourceNote = (key: string): string | undefined =>
+    settingProvenanceNote(props.snapshot, key);
 
   function edit(key: string, value: JsonValue | undefined): void {
     setDraft((current) => ({ ...current, edits: { ...current.edits, [key]: value } }));
@@ -625,71 +623,72 @@ export function SettingsView(props: {
         </header>
         <p class="qg-group__note">
           Changes on this page are saved as global defaults. Project and workspace overrides remain
-          effective; saving here does not edit them. The source beside each field identifies its
-          effective value.
+          effective; saving here does not edit them. Meaningful overriding sources are noted beside
+          affected fields.
         </p>
-        <section class="qg-group" aria-labelledby="qg-settings-import">
-          <h2 class="qg-group__title" id="qg-settings-import">
-            Import from inherited settings
-          </h2>
-          <p class="qg-group__note">
-            {props.snapshot.import.available
-              ? `Inherited sources supply ${props.snapshot.import.keyCount ?? 0} GUI keys. Import copies them into global defaults at ${props.snapshot.pathLabel} with a revision check, leaving source files untouched. Project and workspace overrides still apply, so import may remain available after a successful copy.`
-              : "No inherited settings are available to import in this workspace."}
-          </p>
-          <Show when={props.snapshot.import.issues.length > 0}>
-            <ul class="qg-note-list">
-              <For each={props.snapshot.import.issues}>
-                {(issue) => (
-                  <li>
-                    {issue.key}: {issue.message}
-                  </li>
-                )}
-              </For>
-            </ul>
-          </Show>
-          <div class="qg-field__control">
-            <Button
-              variant="outline"
-              size="small"
-              disabled={!props.snapshot.import.available || busy()}
-              onClick={() => void previewImport()}
-            >
-              Preview import
-            </Button>
-            <Show when={preview()}>
-              {(current) => (
-                <>
-                  <span class="qg-inherited">from {current().from}</span>
-                  <Button
-                    variant="contrast"
-                    size="small"
-                    disabled={busy()}
-                    onClick={() => void applyImport()}
-                  >
-                    Apply {current().keys.length} keys
-                  </Button>
-                </>
-              )}
-            </Show>
-          </div>
-          <Show when={previewError()}>
-            {(message) => <p class="qg-field__error">{message()}</p>}
-          </Show>
-          <Show when={preview()}>
-            {(current) => (
+        <Show when={props.snapshot.import.available}>
+          <section class="qg-group" aria-labelledby="qg-settings-import">
+            <h2 class="qg-group__title" id="qg-settings-import">
+              Legacy OpenCode Quota settings detected
+            </h2>
+            <p class="qg-group__note">
+              Preview eligible settings before copying them into global defaults. Source files
+              remain untouched.
+            </p>
+            <Show when={props.snapshot.import.issues.length > 0}>
               <ul class="qg-note-list">
-                <For each={current().keys}>
-                  {(key) => (
+                <For each={props.snapshot.import.issues}>
+                  {(issue) => (
                     <li>
-                      {key.key} → {JSON.stringify(key.value)}
+                      {issue.key}: {issue.message}
                     </li>
                   )}
                 </For>
               </ul>
-            )}
-          </Show>
-        </section>
+            </Show>
+            <div class="qg-field__control">
+              <Button
+                variant="outline"
+                size="small"
+                disabled={!props.snapshot.import.available || busy()}
+                onClick={() => void previewImport()}
+              >
+                Preview migration
+              </Button>
+              <Show when={preview()}>
+                {(current) => (
+                  <>
+                    <span class="qg-inherited">from {current().from}</span>
+                    <Button
+                      variant="contrast"
+                      size="small"
+                      disabled={busy()}
+                      onClick={() => void applyImport()}
+                    >
+                      Apply {current().keys.length} keys
+                    </Button>
+                  </>
+                )}
+              </Show>
+            </div>
+            <Show when={previewError()}>
+              {(message) => <p class="qg-field__error">{message()}</p>}
+            </Show>
+            <Show when={preview()}>
+              {(current) => (
+                <ul class="qg-note-list">
+                  <For each={current().keys}>
+                    {(key) => (
+                      <li>
+                        {key.key} → {JSON.stringify(key.value)}
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              )}
+            </Show>
+          </section>
+        </Show>
 
         <For each={SETTINGS_GROUPS}>
           {(group) => (

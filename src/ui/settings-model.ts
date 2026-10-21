@@ -1,4 +1,5 @@
-import type { JsonValue, SettingsWriteResult } from "../contracts/dashboard";
+import type { JsonValue, SettingsSnapshot, SettingsWriteResult } from "../contracts/dashboard";
+import { isLegacyImportKey } from "../contracts/settings";
 import type { DisplayPreferences } from "./components/quota-card";
 
 /**
@@ -47,6 +48,8 @@ export type SettingsControl =
 
 export interface SettingsField {
   key: string;
+  /** Derived from the shared v1 rule, never a second allowlist. */
+  importable?: boolean;
   group: SettingsGroupId;
   control: SettingsControl;
   label: string;
@@ -58,7 +61,7 @@ export interface SettingsField {
   clearable?: boolean;
   /**
    * A hidden field stays in the table for validation and patching but is never
-   * rendered as a generic control; its UI lives in a dedicated section instead.
+   * rendered as a generic control (compatibility-only or dedicated UI).
    */
   hidden?: boolean;
   /**
@@ -76,7 +79,11 @@ export function isPositiveNumberValue(value: JsonValue | undefined): boolean {
 
 export const OPENCODE_GO_WINDOWS = ["rolling", "weekly", "monthly"] as const;
 
-export const SETTINGS_FIELDS: readonly SettingsField[] = [
+function withImportEligibility(fields: SettingsField[]): readonly SettingsField[] {
+  return fields.map((field) => ({ ...field, importable: isLegacyImportKey(field.key) }));
+}
+
+export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
   {
     key: "waitForQuotaReset",
     group: "wait",
@@ -107,6 +114,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: "quotaProjection",
+    hidden: true,
     group: "display",
     control: "switch",
     label: "Runway projection",
@@ -116,6 +124,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: "resetTimeDecimals",
+    hidden: true,
     group: "display",
     control: "integer",
     label: "Countdown decimals",
@@ -126,12 +135,14 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: "resetTimeSpaced",
+    hidden: true,
     group: "display",
     control: "switch",
     label: "Space countdown units",
   },
   {
     key: "formatStyle",
+    hidden: true,
     group: "display",
     control: "select",
     label: "Quota row style",
@@ -174,6 +185,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: "opencodeGoWindows",
+    hidden: true,
     group: "advanced",
     control: "windows",
     label: "Go windows",
@@ -181,6 +193,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
   },
   {
     key: "opencodeMonthlyLimit",
+    hidden: true,
     group: "advanced",
     control: "number",
     label: "Monthly limit",
@@ -216,7 +229,24 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = [
     min: 1,
     max: 65535,
   },
-];
+]);
+
+/** No path heuristics or fallback to the compatibility `sources` strings. */
+export function settingProvenanceNote(
+  snapshot: Pick<SettingsSnapshot, "provenance">,
+  key: string,
+): string | undefined {
+  switch (snapshot.provenance?.[key]?.scope) {
+    case "workspace":
+      return "Workspace override";
+    case "project":
+      return "Project override";
+    case "legacy":
+      return "Legacy override";
+    default:
+      return undefined;
+  }
+}
 
 /** Validates one value; `undefined` means the key is unset, which is valid for clearable fields. */
 export function validateValue(

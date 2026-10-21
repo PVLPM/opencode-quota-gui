@@ -50,9 +50,9 @@ async function expectGuiError<T>(run: Promise<T>, code: string): Promise<GuiSett
 }
 
 describe("settings import preview and apply", () => {
-  it("previews inherited lower-layer values with a relative source and a covering revision", async () => {
+  it("previews actual global legacy values with a relative source and a covering revision", async () => {
     const workspace = makeWorkspace();
-    const sidecar = writeQuotaSidecarConfig(workspace.workspaceRoot, {
+    const sidecar = writeQuotaSidecarConfig(workspace.configDir, {
       minIntervalMs: 1000,
       accountingDetail: "detailed",
       percentLabelStyle: "bare",
@@ -61,7 +61,7 @@ describe("settings import preview and apply", () => {
 
     const preview = await store.importPreview();
 
-    expect(preview.from).toBe("project opencode-quota/quota-toast.json");
+    expect(preview.from).toBe("global opencode-quota/quota-toast.json");
     expect(keyMap(preview.keys)).toEqual({
       percentLabelStyle: "bare",
       minIntervalMs: 1000,
@@ -74,15 +74,15 @@ describe("settings import preview and apply", () => {
     const snapshot = await store.settings();
     expect(snapshot.import).toEqual({
       available: true,
-      from: "project opencode-quota/quota-toast.json",
+      from: "global opencode-quota/quota-toast.json",
       keyCount: 3,
       issues: [],
     });
   });
 
-  it("applies the preview, comments the source, and keeps the project override effective", async () => {
+  it("applies the preview, comments the source, and leaves legacy bytes untouched", async () => {
     const workspace = makeWorkspace();
-    const sidecar = writeQuotaSidecarConfig(workspace.workspaceRoot, {
+    const sidecar = writeQuotaSidecarConfig(workspace.configDir, {
       minIntervalMs: 1000,
       accountingDetail: "detailed",
     });
@@ -97,48 +97,46 @@ describe("settings import preview and apply", () => {
     expect(result.revision).not.toBe(preview.expectedRevision);
 
     const raw = readFileSync(workspace.guiConfigPath, "utf8");
-    expect(raw).toContain("// Imported from project opencode-quota/quota-toast.json");
+    expect(raw).toContain("// Imported from global opencode-quota/quota-toast.json");
     expect(readFileSync(sidecar, "utf8")).toBe(legacyBytes);
 
     const after = await store.settings();
     expect(after.values.minIntervalMs).toBe(1000);
     expect(after.values.accountingDetail).toBe("detailed");
-    expect(after.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
-    expect(after.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
+    expect(after.sources.minIntervalMs).toBe("opencode-quota-gui/config.jsonc");
+    expect(after.sources.accountingDetail).toBe("opencode-quota-gui/config.jsonc");
     expect(after.import).toEqual({
-      available: true,
-      from: "project opencode-quota/quota-toast.json",
-      keyCount: 2,
+      available: false,
       issues: [],
     });
   });
 
-  it("keeps the project value effective across repeated imports", async () => {
+  it("does not repeat an already migrated legacy key", async () => {
     const workspace = makeWorkspace();
-    writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 1000 });
+    writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 1000 });
     const store = makeStore(workspace);
     const preview = await store.importPreview();
     await store.importApply({ expectedRevision: preview.expectedRevision });
     const bytesAfterFirstImport = readFileSync(workspace.guiConfigPath, "utf8");
 
     const secondPreview = await store.importPreview();
-    expect(keyMap(secondPreview.keys)).toEqual({ minIntervalMs: 1000 });
+    expect(keyMap(secondPreview.keys)).toEqual({});
     const second = await store.importApply({ expectedRevision: secondPreview.expectedRevision });
 
-    expect(second.applied).toEqual({ minIntervalMs: 1000 });
+    expect(second.applied).toEqual({});
     expect(readFileSync(workspace.guiConfigPath, "utf8")).toBe(bytesAfterFirstImport);
     const after = await store.settings();
     expect(after.values.minIntervalMs).toBe(1000);
-    expect(after.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
+    expect(after.sources.minIntervalMs).toBe("opencode-quota-gui/config.jsonc");
   });
 
   it("treats an edit to an inherited source between preview and apply as a conflict", async () => {
     const workspace = makeWorkspace();
-    writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 1000 });
+    writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 1000 });
     const store = makeStore(workspace);
     const preview = await store.importPreview();
 
-    writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 2000 });
+    writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 2000 });
 
     await expectGuiError(
       store.importApply({ expectedRevision: preview.expectedRevision }),
@@ -164,7 +162,7 @@ describe("settings import preview and apply", () => {
     });
   });
 
-  it("imports the effective project value even when the canonical file also sets it", async () => {
+  it("never migrates project overrides even when the canonical file also sets them", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, {
       minIntervalMs: 1000,
@@ -178,10 +176,10 @@ describe("settings import preview and apply", () => {
     });
 
     const preview = await store.importPreview();
-    expect(keyMap(preview.keys)).toEqual({ minIntervalMs: 1000, accountingDetail: "detailed" });
+    expect(keyMap(preview.keys)).toEqual({});
 
     const result = await store.importApply({ expectedRevision: preview.expectedRevision });
-    expect(result.applied).toEqual({ minIntervalMs: 1000, accountingDetail: "detailed" });
+    expect(result.applied).toEqual({});
     const after = await store.settings();
     expect(after.values.accountingDetail).toBe("detailed");
     expect(after.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
@@ -189,7 +187,7 @@ describe("settings import preview and apply", () => {
 
   it("reports inherited-layer issues in the preview and keeps canonical issues out of it", async () => {
     const workspace = makeWorkspace();
-    writeQuotaSidecarConfig(workspace.workspaceRoot, { quotaProjection: "other" });
+    writeQuotaSidecarConfig(workspace.configDir, { quotaProjection: "other" });
     writeGuiCanonicalConfig(workspace, { dashboard: { port: 0 } });
     const store = makeStore(workspace);
 
@@ -202,7 +200,7 @@ describe("settings import preview and apply", () => {
 
   it("refuses to import into a malformed canonical file and keeps its bytes", async () => {
     const workspace = makeWorkspace();
-    writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 1000 });
+    writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 1000 });
     writeGuiCanonicalConfig(workspace, "{ broken");
     const store = makeStore(workspace);
 
