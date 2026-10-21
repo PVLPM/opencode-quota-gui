@@ -13,7 +13,7 @@ import {
   pluralize,
   usageChartTitle,
 } from "../format";
-import { formatHash } from "../routing";
+import { formatPath } from "../routing";
 import { sortProjectRows } from "../sorting";
 import {
   describeEmptyActivity,
@@ -143,7 +143,7 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
                 <a
                   class="qg-list__row"
                   data-clickable="true"
-                  href={formatHash({ name: "project", projectId: project.projectId }, props.range)}
+                  href={formatPath({ name: "project", projectId: project.projectId }, props.range)}
                 >
                   <span class="qg-list__title" title={project.name}>
                     {project.name}

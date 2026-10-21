@@ -1,11 +1,8 @@
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges";
 
 /**
- * Hash routing and range persistence (design spec §10, R35).
- *
- * Routes: Quota `#/`, Analytics `#/analytics`, `#/project/<id>?range=`, `#/session/<id>?range=`,
- * `#/settings`. The range lives in the URL and in `localStorage`; both agree
- * after any change, and a URL range wins on load so a shared link is honest.
+ * History routing and range persistence. Only Analytics and Project carry a
+ * range query; an explicit URL range wins over the remembered browser range.
  */
 
 export const RANGE_STORAGE_KEY = "opencode-quota-gui.range";
@@ -46,60 +43,91 @@ export function writeStoredRange(
   }
 }
 
-function decodeSegment(segment: string): string {
+function decodeSegment(segment: string): string | undefined {
   try {
-    return decodeURIComponent(segment);
+    const decoded = decodeURIComponent(segment);
+    if (
+      decoded.length === 0 ||
+      decoded.length > 256 ||
+      decoded.includes("\\") ||
+      [...decoded].some((char) => (char.codePointAt(0) ?? 0) < 32 || char === "\u007f") ||
+      decoded.split("/").some((part) => part === "." || part === "..") ||
+      /\.(?:html|css|js|map|svg|woff2?|ttf)\/*$/i.test(decoded)
+    )
+      return undefined;
+    return decoded;
   } catch {
-    return segment;
+    return undefined;
   }
 }
 
 /**
- * Parses a location hash. `fallbackRange` is the remembered range: the session
- * route ignores its `?range=` for data but keeps it in the URL, so it is
- * echoed back rather than dropped.
+ * Parses a clean path. A legacy session range can be remembered during startup
+ * migration, but is never emitted in a canonical session URL or used for data.
  */
-export function parseLocation(hash: string, fallbackRange: RangeKey): Location {
-  const raw = hash.startsWith("#") ? hash.slice(1) : hash;
-  const [path = "", query = ""] = raw.split("?");
+export function parseLocation(pathWithQuery: string, fallbackRange: RangeKey): Location {
+  const [path = "", query = ""] = pathWithQuery.split("?");
   const params = new URLSearchParams(query);
   const requested = params.get("range");
   const range: RangeKey = isRangeKey(requested) ? requested : fallbackRange;
 
-  const segments = path.split("/").filter((segment) => segment.length > 0);
-  if (segments.length === 0) return { route: { name: "home" }, range };
-  if (segments.length === 1 && segments[0] === "analytics") {
+  if (path === "/" || path === "/quota") return { route: { name: "home" }, range };
+  if (path === "/analytics") {
     return { route: { name: "analytics" }, range };
   }
-  if (segments.length === 1 && segments[0] === "settings") {
+  if (path === "/settings") {
     return { route: { name: "settings" }, range };
   }
-  if (segments.length === 2 && segments[0] === "project") {
-    return { route: { name: "project", projectId: decodeSegment(segments[1] ?? "") }, range };
-  }
-  if (segments.length === 2 && segments[0] === "session") {
-    return { route: { name: "session", sessionId: decodeSegment(segments[1] ?? "") }, range };
+  const match = /^\/(project|session)\/([^/]+)$/.exec(path);
+  const id = match ? decodeSegment(match[2] ?? "") : undefined;
+  if (match && id !== undefined) {
+    return {
+      route:
+        match[1] === "project"
+          ? { name: "project", projectId: id }
+          : { name: "session", sessionId: id },
+      range,
+    };
   }
   return { route: { name: "not-found", path }, range };
 }
 
-/** Builds the hash for a route; the range travels with every route. */
-export function formatHash(route: Route, range: RangeKey): string {
+/** Builds a clean URL, keeping non-range-scoped routes query-free. */
+export function formatPath(route: Route, range: RangeKey): string {
   const suffix = `?range=${range}`;
   switch (route.name) {
     case "home":
-      return `#/${suffix}`;
+      return "/quota";
     case "analytics":
-      return `#/analytics${suffix}`;
+      return `/analytics${suffix}`;
     case "project":
-      return `#/project/${encodeURIComponent(route.projectId)}${suffix}`;
+      return `/project/${encodeURIComponent(route.projectId)}${suffix}`;
     case "session":
-      return `#/session/${encodeURIComponent(route.sessionId)}${suffix}`;
+      return `/session/${encodeURIComponent(route.sessionId)}`;
     case "settings":
-      return `#/settings${suffix}`;
+      return "/settings";
     default:
-      return `#/${suffix}`;
+      return "/quota";
   }
+}
+
+/** Pure startup migration; the shell applies the result with replaceState once. */
+export function canonicalizeLocation(
+  browser: Pick<globalThis.Location, "pathname" | "search" | "hash">,
+  fallbackRange: RangeKey,
+): { location: Location; path: string } {
+  const input =
+    browser.pathname === "/" && browser.hash.startsWith("#/")
+      ? browser.hash.slice(1)
+      : browser.pathname + browser.search;
+  const location = parseLocation(input, fallbackRange);
+  return {
+    location,
+    path:
+      location.route.name === "not-found"
+        ? browser.pathname + browser.search
+        : formatPath(location.route, location.range),
+  };
 }
 
 /** True for routes whose data is range-scoped, so a range change refetches only those. */

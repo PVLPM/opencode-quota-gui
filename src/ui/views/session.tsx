@@ -5,7 +5,7 @@ import type { RangeKey } from "../../contracts/ranges";
 import { SessionChart } from "../components/session-chart";
 import { SortControl } from "../components/sort-control";
 import { formatExactCount, formatTokenCount } from "../format";
-import { formatHash } from "../routing";
+import { formatPath } from "../routing";
 import { sortSessionTree } from "../sorting";
 
 /** Very large trees are windowed for rendering only; totals and both graphs always cover every node. */
@@ -33,9 +33,9 @@ export function SessionView(props: {
   return (
     <>
       <nav class="qg-breadcrumbs" aria-label="Breadcrumb">
-        <a href={formatHash({ name: "analytics" }, props.range)}>Analytics</a>
+        <a href={formatPath({ name: "analytics" }, props.range)}>Analytics</a>
         <span aria-hidden="true">›</span>
-        <a href={formatHash({ name: "project", projectId: props.snapshot.projectId }, props.range)}>
+        <a href={formatPath({ name: "project", projectId: props.snapshot.projectId }, props.range)}>
           {props.snapshot.projectName}
         </a>
         <For each={props.snapshot.breadcrumbs}>
@@ -43,7 +43,7 @@ export function SessionView(props: {
             <>
               <span aria-hidden="true">›</span>
               <Show when={!crumb.isFocus} fallback={<span aria-current="page">{crumb.title}</span>}>
-                <a href={formatHash({ name: "session", sessionId: crumb.sessionId }, props.range)}>
+                <a href={formatPath({ name: "session", sessionId: crumb.sessionId }, props.range)}>
                   {crumb.title}
                 </a>
               </Show>
@@ -80,7 +80,7 @@ export function SessionView(props: {
             {(node) => (
               <a
                 class="qg-node"
-                href={formatHash({ name: "session", sessionId: node.sessionId }, props.range)}
+                href={formatPath({ name: "session", sessionId: node.sessionId }, props.range)}
                 aria-current={node.sessionId === props.snapshot.focusSessionId ? "page" : undefined}
                 data-focus={node.sessionId === props.snapshot.focusSessionId ? "true" : undefined}
               >

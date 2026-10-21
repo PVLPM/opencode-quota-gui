@@ -26,7 +26,8 @@ import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashbo
 import { RANGE_LABELS } from "./format";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
 import {
-  formatHash,
+  canonicalizeLocation,
+  formatPath,
   type Location,
   parseLocation,
   readStoredRange,
@@ -56,7 +57,7 @@ import {
 /**
  * Dashboard shell (design spec §10).
  *
- * Owns the hash route, the range (URL plus `localStorage`), the SSE connection
+ * Owns the history route, the range (URL plus `localStorage`), the SSE connection
  * state, and one settings read that supplies the visibility lists and display
  * preferences. Views stay presentational; each route container owns its own
  * fetch, so a range change refetches range-scoped queries only and the session
@@ -143,8 +144,15 @@ function RangeFailureNotice(props: { failure: RangeFailure; onRetry: () => void 
   );
 }
 
-function currentHash(): string {
-  return typeof window === "undefined" ? "#/" : window.location.hash || "#/";
+function initialLocation(): Location {
+  const fallback = readStoredRange(browserStorage());
+  if (typeof window === "undefined") return parseLocation("/quota", fallback);
+  const initial = canonicalizeLocation(window.location, fallback);
+  if (window.location.pathname + window.location.search + window.location.hash !== initial.path) {
+    window.history.replaceState(null, "", initial.path);
+  }
+  writeStoredRange(browserStorage(), initial.location.range);
+  return initial.location;
 }
 
 function browserStorage(): Storage | undefined {
@@ -187,9 +195,7 @@ function catalogFromSnapshot(snapshot: QuotaSnapshot | undefined): VisibilityCat
 }
 
 export function App(props: { client: DashboardClient }): JSX.Element {
-  const [location, setLocation] = createSignal<Location>(
-    parseLocation(currentHash(), readStoredRange(browserStorage())),
-  );
+  const [location, setLocation] = createSignal<Location>(initialLocation());
   const [connection, setConnection] = createSignal<ConnectionState>(props.client.connection());
   const [navTooltip, setNavTooltip] = createSignal<"home" | "analytics" | "settings" | undefined>();
   const [contractMismatch, setContractMismatch] = createSignal<string | undefined>(undefined);
@@ -264,16 +270,46 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   });
 
   function updateRange(next: RangeKey): void {
-    writeStoredRange(browserStorage(), next);
-    setLocation((current) => ({ range: next, route: current.route }));
+    navigate(formatPath(route(), next));
   }
 
-  // The range travels in the URL for every route; the session route keeps it in
-  // the address bar but its queries ignore it (R25–R27).
-  createEffect(() => {
-    const next = formatHash(route(), range());
-    if (typeof window !== "undefined" && currentHash() !== next) window.location.hash = next;
-  });
+  function navigate(path: string): void {
+    const next = parseLocation(path, range());
+    if (next.route.name === "not-found") return;
+    const canonical = formatPath(next.route, next.range);
+    if (window.location.pathname + window.location.search === canonical) return;
+    window.history.pushState(null, "", canonical);
+    writeStoredRange(browserStorage(), next.range);
+    setLocation(next);
+  }
+
+  // One delegated listener also covers the presentational project/session links.
+  // Preserve native new-tab, download, external and modifier-click behavior.
+  function onNavigate(event: MouseEvent): void {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    )
+      return;
+    const anchor = (event.target as Element | null)?.closest?.("a");
+    const href = anchor?.getAttribute("href");
+    if (
+      !anchor ||
+      !href ||
+      !href.startsWith("/") ||
+      href.startsWith("//") ||
+      anchor.hasAttribute("download") ||
+      (anchor.getAttribute("target") && anchor.getAttribute("target") !== "_self") ||
+      parseLocation(href, range()).route.name === "not-found"
+    )
+      return;
+    event.preventDefault();
+    navigate(href);
+  }
 
   /**
    * Connection transitions (spec §10 States). Returning from a drop is the one
@@ -299,10 +335,16 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   });
 
   onMount(() => {
-    const onHashChange = () => {
-      setLocation(parseLocation(currentHash(), readStoredRange(browserStorage())));
+    const onPopState = () => {
+      const next = parseLocation(
+        window.location.pathname + window.location.search,
+        readStoredRange(browserStorage()),
+      );
+      writeStoredRange(browserStorage(), next.range);
+      setLocation(next);
     };
-    window.addEventListener("hashchange", onHashChange);
+    window.addEventListener("popstate", onPopState);
+    window.addEventListener("click", onNavigate);
     const unsubscribeConnection = props.client.onConnectionChange(setConnection);
     const unsubscribeEvents = props.client.subscribe((event) => {
       // Invalidation is silent by design: only meaningful events toast.
@@ -326,7 +368,8 @@ export function App(props: { client: DashboardClient }): JSX.Element {
       await settingsQuery.run();
     })();
     onCleanup(() => {
-      window.removeEventListener("hashchange", onHashChange);
+      window.removeEventListener("popstate", onPopState);
+      window.removeEventListener("click", onNavigate);
       unsubscribeConnection();
       unsubscribeEvents();
     });
@@ -349,7 +392,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                 if (event.key === "Escape") setNavTooltip(undefined);
               }}
               aria-current={route().name === "home" ? "page" : undefined}
-              href={formatHash({ name: "home" }, range())}
+              href={formatPath({ name: "home" }, range())}
             >
               <QuotaIcon />
             </a>
@@ -365,7 +408,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   ? "page"
                   : undefined
               }
-              href={formatHash({ name: "analytics" }, range())}
+              href={formatPath({ name: "analytics" }, range())}
               onFocus={() => setNavTooltip("analytics")}
               onBlur={() => setNavTooltip(undefined)}
               onPointerEnter={() => setNavTooltip("analytics")}
@@ -410,7 +453,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                 if (event.key === "Escape") setNavTooltip(undefined);
               }}
               aria-current={route().name === "settings" ? "page" : undefined}
-              href={formatHash({ name: "settings" }, range())}
+              href={formatPath({ name: "settings" }, range())}
             >
               <Icon name="settings-gear" />
             </a>
@@ -517,7 +560,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
               <Match when={true}>
                 <div class="qg-error-card" role="alert">
                   <span>That address does not match a dashboard page.</span>
-                  <a href={formatHash({ name: "home" }, range())}>Go home</a>
+                  <a href={formatPath({ name: "home" }, range())}>Go home</a>
                 </div>
               </Match>
             </Switch>

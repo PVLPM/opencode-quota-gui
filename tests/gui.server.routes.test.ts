@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -283,6 +284,103 @@ function errorOf(body: JsonValue | undefined): { code: string; message: string }
 }
 
 describe("GUI HTTP routes", () => {
+  it.each([
+    "/assets/../quota",
+    "/project/%2e%2e/quota",
+    "/assets\\..\\quota",
+  ])("does not normalize raw traversal %s into a shell request", async (path) => {
+    const { handle } = await start();
+    try {
+      const result = await new Promise<{ status: number | undefined; body: string }>(
+        (resolve, reject) => {
+          const req = request(`${base(handle.port)}/`, { path }, (res) => {
+            let body = "";
+            res.setEncoding("utf8");
+            res.on("data", (chunk) => {
+              body += chunk;
+            });
+            res.on("end", () => resolve({ status: res.statusCode, body }));
+          });
+          req.on("error", reject);
+          req.end();
+        },
+      );
+      expect(result.status).toBe(404);
+      expect(result.body).not.toBe(INDEX_HTML);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it.each([
+    "/quota",
+    "/analytics?range=7d",
+    "/project/a%20b?range=30d",
+    "/project/a%2Fb?range=7d",
+    "/session/ses%201",
+    "/settings",
+  ])("serves the shell on direct navigation and HEAD to %s without analytics work", async (path) => {
+    const { handle, state } = await start();
+    try {
+      const response = await get(handle.port, path);
+      expect(response.status).toBe(200);
+      expect(response.body).toBe(INDEX_HTML);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+      const head = await fetch(`${base(handle.port)}${path}`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+      expect(state.homeRanges).toEqual([]);
+      expect(state.projectRanges).toEqual([]);
+      const post = await fetch(`${base(handle.port)}${path}`, { method: "POST" });
+      expect(post.status).toBe(405);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it.each([
+    "/api/analytics",
+    "/api/v1/nope",
+    "/assets/nope.js",
+    "/assets/nope.css",
+    "/assets/app.js.map",
+    "/assets/notes.txt",
+    "/quota.js",
+    "/analytics.css",
+    "/project/",
+    "/session/",
+    "/project/a/extra",
+    "/session/a/extra",
+    "/settings/extra",
+    "/project/%ZZ",
+    "/session/%00",
+    "/project/%2E%2E%2Fquota",
+    "/session/a%5Cb",
+    "/project/a.js",
+    "/project/.js",
+    "/project/a.js%2F",
+    "/session/.js",
+    "/session/a.js%2F",
+    "/session/a.css",
+    "/project/a.map",
+    `/project/${"a".repeat(257)}`,
+    "/project//a",
+    "/quota/",
+    "/assets/%2e%2e%2fquota",
+  ])("does not return the shell for invalid or reserved path %s", async (path) => {
+    const { handle } = await start();
+    try {
+      const response = await get(handle.port, path);
+      expect([400, 404]).toContain(response.status);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.body).not.toBe(INDEX_HTML);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("serves health with the frozen app id and contract version", async () => {
     const { handle } = await start();
     try {

@@ -39,7 +39,7 @@ import {
   formatTokenCount,
 } from "../src/ui/format";
 import {
-  formatHash,
+  formatPath,
   parseLocation,
   RANGE_STORAGE_KEY,
   readStoredRange,
@@ -331,6 +331,53 @@ function text(html: string): string {
 }
 
 const noop = async (): Promise<void> => {};
+
+/** Browser seam for the universal renderer: links invoke the shipped click
+ * listener and the app, not the harness, performs History API navigation. */
+function historyBrowser(
+  initialPath: string,
+  storage: Pick<Storage, "getItem" | "setItem"> = { getItem: () => null, setItem: () => {} },
+) {
+  let location = new URL(initialPath, "http://localhost:4144");
+  const listeners = new Map<string, (event: unknown) => void>();
+  return {
+    get location() {
+      return location;
+    },
+    localStorage: storage,
+    history: {
+      pushState: (_state: unknown, _title: string, path: string) => {
+        location = new URL(path, location);
+      },
+      replaceState: (_state: unknown, _title: string, path: string) => {
+        location = new URL(path, location);
+      },
+    },
+    addEventListener: (name: string, listener: (event: unknown) => void) => {
+      listeners.set(name, listener);
+    },
+    removeEventListener: (name: string) => {
+      listeners.delete(name);
+    },
+    listenerCount: () => listeners.size,
+    follow: (href: string) => {
+      const preventDefault = vi.fn();
+      listeners.get("click")?.({
+        button: 0,
+        defaultPrevented: false,
+        target: {
+          closest: () => ({
+            getAttribute: (key: string) => (key === "href" ? href : null),
+            hasAttribute: () => false,
+          }),
+        },
+        preventDefault,
+      });
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(location.pathname + location.search).toBe(href);
+    },
+  };
+}
 
 const preferences = { percentMode: "remaining" as const, showRunway: true, detailed: false };
 
@@ -1004,7 +1051,7 @@ describe("home view composition", () => {
     expect(projects).not.toContain("qg-list__worktree");
     expect(projects).not.toContain("USD");
     expect(projects.indexOf("alpha")).toBeLessThan(projects.indexOf("beta"));
-    expect(projects).toContain('href="#/project/project-alpha?range=7d"');
+    expect(projects).toContain('href="/project/project-alpha?range=7d"');
   });
 });
 
@@ -1312,7 +1359,7 @@ describe("project view composition", () => {
     expect(html).toContain("qg-list__worktree");
     expect(html).toContain("qg-list__tokens");
     expect(html).toContain("alpha-main");
-    expect(html).toContain('href="#/session/session-root-1?range=7d"');
+    expect(html).toContain('href="/session/session-root-1"');
     // No step count and no latest-activity column on this page's root rows.
     const roots = sectionOf(html, "qg-project-roots");
     expect(roots).not.toContain("steps");
@@ -1387,7 +1434,7 @@ describe("session view composition", () => {
       range: "7d",
     });
     expect(html).toContain('aria-current="page"');
-    expect(html).toContain('href="#/session/session-ancestor?range=7d"');
+    expect(html).toContain('href="/session/session-ancestor"');
     expect(text(html)).toContain("Tree total tokens");
     expect(text(html)).toContain("2,900");
     expect(text(html)).toContain("This session");
@@ -1404,10 +1451,10 @@ describe("session view composition", () => {
     });
     const html = await renderView("/views/session.tsx", "SessionView", { snapshot, range: "7d" });
     const crumbs = html.slice(html.indexOf('class="qg-breadcrumbs"'), html.indexOf("</nav>"));
-    expect(crumbs).toContain('href="#/project/project-gamma?range=7d">Gamma Workspace</a>');
-    const analyticsAt = crumbs.indexOf('href="#/analytics?range=7d"');
+    expect(crumbs).toContain('href="/project/project-gamma?range=7d">Gamma Workspace</a>');
+    const analyticsAt = crumbs.indexOf('href="/analytics?range=7d"');
     const projectAt = crumbs.indexOf("Gamma Workspace");
-    const ancestorAt = crumbs.indexOf('href="#/session/session-ancestor?range=7d"');
+    const ancestorAt = crumbs.indexOf('href="/session/session-ancestor"');
     const focusAt = crumbs.indexOf('aria-current="page"');
     expect(analyticsAt).toBeGreaterThan(-1);
     expect(projectAt).toBeGreaterThan(analyticsAt);
@@ -1441,7 +1488,7 @@ describe("session view composition", () => {
     expect(text(html)).not.toContain("subtree");
     expect(html).toContain('class="qg-node__steps">3</span>');
     expect(html).toContain('class="qg-node__steps">2</span>');
-    expect(html).toContain('href="#/session/session-child-1?range=7d"');
+    expect(html).toContain('href="/session/session-child-1"');
     expect(html).toContain("alpha-feature");
     expect(html).toContain('data-focus="true"');
     expect(html).not.toContain("children:");
@@ -2056,17 +2103,7 @@ describe("cached visibility catalog", () => {
         values.set(key, value);
       },
     };
-    let onHashChange: (() => void) | undefined;
-    const browser = {
-      location: { hash: "#/?range=7d" },
-      localStorage: storage,
-      addEventListener: (_name: string, callback: () => void) => {
-        onHashChange = callback;
-      },
-      removeEventListener: () => {
-        onHashChange = undefined;
-      },
-    };
+    const browser = historyBrowser("/quota", storage);
     vi.stubGlobal("window", browser);
 
     const visibleCard = providerCard();
@@ -2133,9 +2170,8 @@ describe("cached visibility catalog", () => {
       if (found === undefined) throw new Error(`probe: no button labelled ${label}`);
       return found;
     };
-    const navigate = async (hash: string) => {
-      browser.location.hash = hash;
-      onHashChange?.();
+    const navigate = async (path: string) => {
+      browser.follow(path);
       await settle();
     };
 
@@ -2149,7 +2185,7 @@ describe("cached visibility catalog", () => {
         "the cache to learn both providers",
       );
 
-      await navigate("#/settings?range=7d");
+      await navigate("/settings");
       expect(renderGraph.textOf(root)).toContain("Hidden Provider");
       renderGraph.listenerOf(buttonByLabel(root, "Hide Hidden Provider"), "onClick")?.({});
       await settle();
@@ -2167,7 +2203,7 @@ describe("cached visibility catalog", () => {
       // The server now excludes the hidden provider from quota probes. The
       // filtered snapshot must not erase its Settings card.
       filtered = true;
-      await navigate("#/?range=7d");
+      await navigate("/quota");
       await settle();
       onEvent?.({ topic: "quota.changed", at: NOW });
       await settle();
@@ -2176,14 +2212,14 @@ describe("cached visibility catalog", () => {
         "hidden-provider",
       );
 
-      await navigate("#/settings?range=7d");
+      await navigate("/settings");
       expect(renderGraph.textOf(root)).toContain("Hidden Provider");
       expect(buttonByLabel(root, "Show Hidden Provider").props["aria-pressed"]).toBe("true");
       expect(buttonByLabel(root, "Hide Weekly")).toBeDefined();
 
       // Leaving and returning still finds the cached provider.
-      await navigate("#/?range=7d");
-      await navigate("#/settings?range=7d");
+      await navigate("/quota");
+      await navigate("/settings");
       expect(renderGraph.textOf(root)).toContain("Hidden Provider");
       expect(buttonByLabel(root, "Show Hidden Provider")).toBeDefined();
 
@@ -2401,7 +2437,7 @@ describe("range transitions name the range still on screen", () => {
 
   interface AppHarness {
     root: TestNode;
-    navigate: (hash: string) => Promise<void>;
+    navigate: (path: string) => Promise<void>;
     text: () => string;
     notice: () => TestNode | undefined;
     mainLink: (href: string) => TestNode | undefined;
@@ -2410,26 +2446,16 @@ describe("range transitions name the range still on screen", () => {
 
   /**
    * Mounts the real `App` on the test renderer with a controllable data source.
-   * The hash navigation goes through the same `hashchange` path a user action
-   * takes, so the range and route signals update exactly as they do in a tab.
+   * Link navigation goes through the production click/History API path, so
+   * range and route signals update exactly as they do in a tab.
    */
   function mountApp(options: {
-    hash: string;
+    path: string;
     home?: DashboardClient["home"];
     project?: DashboardClient["project"];
     health?: DashboardClient["health"];
   }): AppHarness {
-    let hashChange: (() => void) | undefined;
-    const browser = {
-      location: { hash: options.hash },
-      localStorage: { getItem: () => null, setItem: () => {} },
-      addEventListener: (_name: string, callback: () => void) => {
-        hashChange = callback;
-      },
-      removeEventListener: () => {
-        hashChange = undefined;
-      },
-    };
+    const browser = historyBrowser(options.path);
     vi.stubGlobal("window", browser);
 
     const client: DashboardClient = {
@@ -2457,9 +2483,8 @@ describe("range transitions name the range still on screen", () => {
     const stop = renderGraph.mount(() => renderGraph.app({ client }), root);
     return {
       root,
-      navigate: async (hash) => {
-        browser.location.hash = hash;
-        hashChange?.();
+      navigate: async (path) => {
+        browser.follow(path);
         await settle();
       },
       text: () => renderGraph.textOf(root),
@@ -2482,7 +2507,7 @@ describe("range transitions name the range still on screen", () => {
 
   it("blocks an older server contract before treating its payload as ready", async () => {
     const app = mountApp({
-      hash: "#/analytics?range=7d",
+      path: "/analytics?range=7d",
       health: async () => ({
         app: "opencode-quota-gui",
         contractVersion: DASHBOARD_CONTRACT_VERSION - 1,
@@ -2504,7 +2529,7 @@ describe("range transitions name the range still on screen", () => {
     const nextPayload = deferred<HomeSnapshot>();
     const requests: RangeKey[] = [];
     const app = mountApp({
-      hash: "#/analytics?range=7d",
+      path: "/analytics?range=7d",
       home: ({ range }) => {
         requests.push(range);
         return range === "7d" ? Promise.resolve(oldPayload) : nextPayload.promise;
@@ -2516,7 +2541,7 @@ describe("range transitions name the range still on screen", () => {
       expect(requests).toEqual(["7d"]);
       expect(app.text()).toContain("alpha-7d");
 
-      await app.navigate("#/analytics?range=30d");
+      await app.navigate("/analytics?range=30d");
       expect(requests).toEqual(["7d", "30d"]);
 
       // No inline "Showing X while updating Y" row exists at all.
@@ -2524,8 +2549,8 @@ describe("range transitions name the range still on screen", () => {
       expect(app.notice()).toBeUndefined();
       // The old payload keeps its own labels and links until the new one lands.
       expect(app.text()).toContain("Daily token usage");
-      expect(app.mainLink("#/project/project-alpha?range=7d")).toBeDefined();
-      expect(app.mainLink("#/project/project-alpha?range=30d")).toBeUndefined();
+      expect(app.mainLink("/project/project-alpha?range=7d")).toBeDefined();
+      expect(app.mainLink("/project/project-alpha?range=30d")).toBeUndefined();
 
       nextPayload.resolve(analyticsPayload("30d", "beta-30d", 480));
       await settle();
@@ -2534,7 +2559,7 @@ describe("range transitions name the range still on screen", () => {
       expect(app.notice()).toBeUndefined();
       expect(app.text()).toContain("beta-30d");
       expect(app.text()).not.toContain("alpha-7d");
-      expect(app.mainLink("#/project/project-alpha?range=30d")).toBeDefined();
+      expect(app.mainLink("/project/project-alpha?range=30d")).toBeDefined();
     } finally {
       app.dispose();
     }
@@ -2545,7 +2570,7 @@ describe("range transitions name the range still on screen", () => {
     const pending: Deferred<HomeSnapshot>[] = [];
     const requests: RangeKey[] = [];
     const app = mountApp({
-      hash: "#/analytics?range=7d",
+      path: "/analytics?range=7d",
       home: ({ range }) => {
         requests.push(range);
         if (range === "7d") return Promise.resolve(oldPayload);
@@ -2557,7 +2582,7 @@ describe("range transitions name the range still on screen", () => {
 
     try {
       await settle();
-      await app.navigate("#/analytics?range=30d");
+      await app.navigate("/analytics?range=30d");
       const first = pending[0];
       if (!first) throw new Error("the range request did not start");
       first.reject(new DashboardError("internal", 500, "range update failed"));
@@ -2607,7 +2632,7 @@ describe("range transitions name the range still on screen", () => {
     const oldPayload = projectPayload("7d", "alpha-7d");
     const nextPayload = deferred<ProjectSnapshot>();
     const app = mountApp({
-      hash: "#/project/project-alpha?range=7d",
+      path: "/project/project-alpha?range=7d",
       project: ({ range }) => (range === "7d" ? Promise.resolve(oldPayload) : nextPayload.promise),
     });
 
@@ -2615,14 +2640,14 @@ describe("range transitions name the range still on screen", () => {
       await settle();
       expect(app.text()).toContain("alpha-7d");
 
-      await app.navigate("#/project/project-alpha?range=30d");
+      await app.navigate("/project/project-alpha?range=30d");
       expect(app.notice()).toBeUndefined();
       expect(app.text()).not.toContain("Showing 7 days while updating");
       // Inside the route, the breadcrumb and rows follow the payload, not the
       // range selector in the chrome.
       expect(app.text()).toContain("root-7d");
-      expect(app.mainLink("#/analytics?range=7d")).toBeDefined();
-      expect(app.mainLink("#/analytics?range=30d")).toBeUndefined();
+      expect(app.mainLink("/analytics?range=7d")).toBeDefined();
+      expect(app.mainLink("/analytics?range=30d")).toBeUndefined();
 
       nextPayload.resolve(projectPayload("30d", "alpha-30d"));
       await settle();
@@ -2631,19 +2656,19 @@ describe("range transitions name the range still on screen", () => {
       expect(app.notice()).toBeUndefined();
       expect(app.text()).toContain("alpha-30d");
       expect(app.text()).toContain("root-30d");
-      expect(app.mainLink("#/analytics?range=30d")).toBeDefined();
+      expect(app.mainLink("/analytics?range=30d")).toBeDefined();
     } finally {
       app.dispose();
     }
   });
 
   it("leaves the session route and Quota without a range notice", async () => {
-    const app = mountApp({ hash: "#/session/session-root-1?range=30d" });
+    const app = mountApp({ path: "/session/session-root-1" });
     try {
       await settle();
       expect(app.notice()).toBeUndefined();
 
-      await app.navigate("#/?range=30d");
+      await app.navigate("/quota");
       await settle();
       expect(app.notice()).toBeUndefined();
       expect(app.text()).toContain("Five hour window");
@@ -3644,28 +3669,228 @@ describe("response boundary decoding", () => {
 });
 
 describe("routing and range persistence", () => {
-  it("parses the four hash routes", () => {
-    expect(parseLocation("#/", "7d").route).toEqual({ name: "home" });
-    expect(parseLocation("#/analytics?range=24h", "7d")).toEqual({
+  it("replaces root with Quota and leaves analytics lazy while remembering the stored range", async () => {
+    let url = new URL("http://localhost:4144/");
+    const replace = vi.fn((_state: unknown, _title: string, path: string) => {
+      url = new URL(path, url);
+    });
+    const stored = new Map([[RANGE_STORAGE_KEY, "30d"]]);
+    vi.stubGlobal("window", {
+      get location() {
+        return url;
+      },
+      history: { replaceState: replace },
+      localStorage: {
+        getItem: (key: string) => stored.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          stored.set(key, value);
+        },
+      },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    });
+    let quotaReads = 0;
+    let analyticsReads = 0;
+    const client: DashboardClient = {
+      connection: () => "live",
+      onConnectionChange: () => () => {},
+      subscribe: () => () => {},
+      health: async () => ({ app: "opencode-quota-gui", contractVersion: 2 }),
+      quota: async () => {
+        quotaReads += 1;
+        return homeSnapshot();
+      },
+      home: async () => {
+        analyticsReads += 1;
+        return homeSnapshot();
+      },
+      project: async () => projectSnapshot(),
+      session: async () => sessionSnapshot(),
+      settings: async () => settingsSnapshot(),
+      saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      importPreview: async () => ({
+        from: "synthetic",
+        keys: [],
+        issues: [],
+        expectedRevision: "r",
+      }),
+      importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    };
+    const root = renderGraph.createTestRoot();
+    let dispose: (() => void) | undefined;
+    try {
+      dispose = renderGraph.mount(() => renderGraph.app({ client }), root);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(replace).toHaveBeenCalledExactlyOnceWith(null, "", "/quota");
+      expect(url.pathname).toBe("/quota");
+      expect(quotaReads).toBe(1);
+      expect(analyticsReads).toBe(0);
+      expect(
+        renderGraph
+          .elementsNamed(root, "a")
+          .find((node) => node.props["aria-label"] === "Analytics")?.props.href,
+      ).toBe("/analytics?range=30d");
+    } finally {
+      dispose?.();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("replaces startup URLs, pushes links once and follows back/forward without duplicate reads", async () => {
+    const entries = [new URL("http://localhost:4144/#/analytics?range=24h")];
+    let index = 0;
+    const listeners = new Map<string, (event?: unknown) => void>();
+    const stored = new Map([[RANGE_STORAGE_KEY, "30d"]]);
+    const browser = {
+      get location() {
+        return entries[index];
+      },
+      localStorage: {
+        getItem: (key: string) => stored.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          stored.set(key, value);
+        },
+      },
+      history: {
+        replaceState: (_state: unknown, _title: string, path: string) => {
+          entries[index] = new URL(path, entries[index]);
+        },
+        pushState: (_state: unknown, _title: string, path: string) => {
+          entries.splice(index + 1);
+          entries.push(new URL(path, entries[index]));
+          index += 1;
+        },
+        back: () => {
+          index -= 1;
+          listeners.get("popstate")?.();
+        },
+        forward: () => {
+          index += 1;
+          listeners.get("popstate")?.();
+        },
+      },
+      addEventListener: (name: string, callback: () => void) => {
+        listeners.set(name, callback);
+      },
+      removeEventListener: (name: string) => {
+        listeners.delete(name);
+      },
+    };
+    vi.stubGlobal("window", browser);
+    const ranges: RangeKey[] = [];
+    const sessions: string[] = [];
+    let subscriptions = 0;
+    const client: DashboardClient = {
+      connection: () => "live",
+      onConnectionChange: () => () => {},
+      subscribe: () => {
+        subscriptions += 1;
+        return () => {
+          subscriptions -= 1;
+        };
+      },
+      health: async () => ({ app: "opencode-quota-gui", contractVersion: 2 }),
+      quota: async () => homeSnapshot(),
+      home: async ({ range }) => {
+        ranges.push(range);
+        return homeSnapshot({ range });
+      },
+      project: async () => projectSnapshot(),
+      session: async ({ sessionId }) => {
+        sessions.push(sessionId);
+        return sessionSnapshot();
+      },
+      settings: async () => settingsSnapshot(),
+      saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      importPreview: async () => ({
+        from: "synthetic",
+        keys: [],
+        issues: [],
+        expectedRevision: "r",
+      }),
+      importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    };
+    const root = renderGraph.createTestRoot();
+    let dispose: (() => void) | undefined;
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const click = (href: string, modifiers: Record<string, unknown> = {}) => {
+      const preventDefault = vi.fn();
+      const anchor = {
+        getAttribute: (key: string) => (key === "href" ? href : null),
+        hasAttribute: () => false,
+      };
+      listeners.get("click")?.({
+        button: 0,
+        defaultPrevented: false,
+        target: { closest: () => anchor },
+        preventDefault,
+        ...modifiers,
+      });
+      return preventDefault;
+    };
+    try {
+      dispose = renderGraph.mount(() => renderGraph.app({ client }), root);
+      await settle();
+      expect(browser.location?.pathname + browser.location?.search).toBe("/analytics?range=24h");
+      expect(browser.location?.hash).toBe("");
+      expect(entries).toHaveLength(1);
+      expect(ranges).toEqual(["24h"]);
+      expect(stored.get(RANGE_STORAGE_KEY)).toBe("24h");
+      expect(listeners.has("hashchange")).toBe(false);
+      expect(subscriptions).toBe(1);
+      expect(click("/analytics?range=7d", { ctrlKey: true })).not.toHaveBeenCalled();
+      expect(click("/analytics?range=7d")).toHaveBeenCalledOnce();
+      await settle();
+      expect(entries).toHaveLength(2);
+      expect(ranges).toEqual(["24h", "7d"]);
+      click("/analytics?range=7d");
+      await settle();
+      expect(entries).toHaveLength(2);
+      expect(ranges).toEqual(["24h", "7d"]);
+      browser.history.back();
+      await settle();
+      expect(ranges).toEqual(["24h", "7d", "24h"]);
+      expect(stored.get(RANGE_STORAGE_KEY)).toBe("24h");
+      browser.history.forward();
+      await settle();
+      expect(ranges).toEqual(["24h", "7d", "24h", "7d"]);
+      click("/session/ses%201");
+      await settle();
+      expect(sessions).toEqual(["ses 1"]);
+      expect(browser.location?.search).toBe("");
+      expect(subscriptions).toBe(1);
+    } finally {
+      dispose?.();
+      expect(subscriptions).toBe(0);
+      expect(listeners.size).toBe(0);
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("parses clean routes", () => {
+    expect(parseLocation("/quota", "7d").route).toEqual({ name: "home" });
+    expect(parseLocation("/analytics?range=24h", "7d")).toEqual({
       route: { name: "analytics" },
       range: "24h",
     });
-    expect(parseLocation("#/settings", "7d").route).toEqual({ name: "settings" });
-    expect(parseLocation("#/project/alpha?range=30d", "7d")).toEqual({
+    expect(parseLocation("/settings", "7d").route).toEqual({ name: "settings" });
+    expect(parseLocation("/project/alpha?range=30d", "7d")).toEqual({
       route: { name: "project", projectId: "alpha" },
       range: "30d",
     });
-    expect(parseLocation("#/session/ses%201", "7d").route).toEqual({
+    expect(parseLocation("/session/ses%201", "7d").route).toEqual({
       name: "session",
       sessionId: "ses 1",
     });
-    expect(parseLocation("#/nope", "7d").route).toEqual({ name: "not-found", path: "/nope" });
+    expect(parseLocation("/nope", "7d").route).toEqual({ name: "not-found", path: "/nope" });
   });
 
   it("lets a URL range win and keeps the session page range-free", () => {
-    expect(parseLocation("#/?range=24h", "30d").range).toBe("24h");
-    expect(parseLocation("#/?range=bogus", "30d").range).toBe("30d");
-    expect(parseLocation("#/session/abc?range=24h", "30d")).toEqual({
+    expect(parseLocation("/analytics?range=24h", "30d").range).toBe("24h");
+    expect(parseLocation("/analytics?range=bogus", "30d").range).toBe("30d");
+    expect(parseLocation("/session/abc?range=24h", "30d")).toEqual({
       route: { name: "session", sessionId: "abc" },
       range: "24h",
     });
@@ -3679,16 +3904,14 @@ describe("routing and range persistence", () => {
     expect(routeShowsRangeSelector({ name: "analytics" })).toBe(true);
   });
 
-  it("round-trips every route through the hash builder", () => {
-    expect(formatHash({ name: "home" }, "7d")).toBe("#/?range=7d");
-    expect(formatHash({ name: "analytics" }, "30d")).toBe("#/analytics?range=30d");
-    expect(formatHash({ name: "project", projectId: "a b" }, "24h")).toBe(
-      "#/project/a%20b?range=24h",
+  it("formats canonical paths with only range-scoped queries", () => {
+    expect(formatPath({ name: "home" }, "7d")).toBe("/quota");
+    expect(formatPath({ name: "analytics" }, "30d")).toBe("/analytics?range=30d");
+    expect(formatPath({ name: "project", projectId: "a b" }, "24h")).toBe(
+      "/project/a%20b?range=24h",
     );
-    expect(formatHash({ name: "session", sessionId: "ses_1" }, "30d")).toBe(
-      "#/session/ses_1?range=30d",
-    );
-    expect(formatHash({ name: "settings" }, "lifetime")).toBe("#/settings?range=lifetime");
+    expect(formatPath({ name: "session", sessionId: "ses_1" }, "30d")).toBe("/session/ses_1");
+    expect(formatPath({ name: "settings" }, "lifetime")).toBe("/settings");
   });
 
   it("persists the range and falls back safely", () => {
@@ -3716,17 +3939,7 @@ describe("routing and range persistence", () => {
 
 describe("styles and dependency boundaries", () => {
   it("loads Quota without analytics and reports reconnect only in chrome", async () => {
-    let hashChange: (() => void) | undefined;
-    const browser = {
-      location: { hash: "#/" },
-      localStorage: { getItem: () => null, setItem: () => {} },
-      addEventListener: (_name: string, callback: () => void) => {
-        hashChange = callback;
-      },
-      removeEventListener: () => {
-        hashChange = undefined;
-      },
-    };
+    const browser = historyBrowser("/quota");
     vi.stubGlobal("window", browser);
     let onConnection: ((state: "connecting" | "live" | "reconnecting") => void) | undefined;
     let onEvent: Parameters<DashboardClient["subscribe"]>[0] | undefined;
@@ -3853,8 +4066,7 @@ describe("styles and dependency boundaries", () => {
       await settle();
       expect(status()).toHaveLength(0);
       expect(viewSignals).toEqual(["quota", "quota", "quota"]);
-      browser.location.hash = "#/analytics?range=30d";
-      hashChange?.();
+      browser.follow("/analytics?range=30d");
       await settle();
       expect(analyticsReads).toBe(1);
       expect(viewSignals).toEqual(["quota", "quota", "quota", "analytics"]);
@@ -3876,26 +4088,25 @@ describe("styles and dependency boundaries", () => {
           .elementsNamed(root, "a")
           .find((node) => node.props["aria-label"] === "Analytics")?.props["aria-current"],
       ).toBe("page");
-      const navigate = async (hash: string) => {
-        browser.location.hash = hash;
-        hashChange?.();
+      const navigate = async (path: string) => {
+        browser.follow(path);
         await settle();
       };
-      await navigate("#/analytics?range=7d");
-      await navigate("#/project/project-alpha?range=7d");
-      await navigate("#/session/session-root-1?range=7d");
+      await navigate("/analytics?range=7d");
+      await navigate("/project/project-alpha?range=7d");
+      await navigate("/session/session-root-1");
       expect(viewSignals).toEqual(["quota", "quota", "quota", "analytics"]);
       onConnection?.("reconnecting");
       onConnection?.("live");
       await settle();
       expect(viewSignals.at(-1)).toBe("analytics");
       expect(viewSignals).toHaveLength(5);
-      await navigate("#/?range=7d");
+      await navigate("/quota");
       expect(viewSignals.at(-1)).toBe("quota");
       expect(viewSignals).toHaveLength(6);
       expect(renderGraph.textOf(root)).toContain("Five hour window");
       failViewSignal = true;
-      await navigate("#/settings?range=7d");
+      await navigate("/settings");
       const interval = () =>
         renderGraph
           .elementsNamed(root, "input")
@@ -3937,7 +4148,7 @@ describe("styles and dependency boundaries", () => {
       expect(interval()).toBe(editorInput);
       expect(renderGraph.textOf(root)).not.toContain("Optional endpoint unavailable");
       client.setActiveView = undefined;
-      await navigate("#/analytics?range=7d");
+      await navigate("/analytics?range=7d");
       expect(renderGraph.textOf(root)).toContain("Total tokens");
       expect(viewSignals).toHaveLength(7);
     } finally {
@@ -3946,7 +4157,7 @@ describe("styles and dependency boundaries", () => {
     }
     expect(onConnection).toBeUndefined();
     expect(onEvent).toBeUndefined();
-    expect(hashChange).toBeUndefined();
+    expect(browser.listenerCount()).toBe(0);
   });
 
   it("composes the whole shell against an in-memory data source", async () => {
@@ -3977,7 +4188,7 @@ describe("styles and dependency boundaries", () => {
     expect(html).toContain('aria-label="Quota"');
     expect(html).toContain('aria-label="Analytics"');
     expect(html).toContain('aria-label="Settings"');
-    expect(html).toContain('href="#/?range=7d"');
+    expect(html).toContain('href="/quota"');
     expect(html).not.toContain("Time range");
     expect(html).not.toContain('data-component="segmented-control-v2"');
     expect(html).toContain("Settings");

@@ -416,6 +416,25 @@ function parseRange(url: URL): RangeKey | undefined {
   return isRangeKey(raw) ? raw : undefined;
 }
 
+/** Known UI paths only: never reinterpret an asset or malformed id as HTML. */
+function isUiPath(pathname: string): boolean {
+  if (["/", "/quota", "/analytics", "/settings"].includes(pathname)) return true;
+  const match = /^\/(?:project|session)\/([^/]+)$/.exec(pathname);
+  if (!match) return false;
+  let id: string;
+  try {
+    id = decodeURIComponent(match[1] ?? "");
+  } catch {
+    return false;
+  }
+  return (
+    isValidResourceId(id) &&
+    !id.includes("\\") &&
+    !id.split("/").some((part) => part === "." || part === "..") &&
+    !/\.(?:html|css|js|map|svg|woff2?|ttf)\/*$/i.test(id)
+  );
+}
+
 function isErrnoCode(error: unknown): error is NodeJS.ErrnoException & { code: string } {
   if (error === null || typeof error !== "object" || !("code" in error)) return false;
   return typeof error.code === "string";
@@ -805,9 +824,8 @@ export function createDashboardServer(
       }
 
       const pathname = url.pathname;
-      if (pathname === "/" || pathname === "") {
-        if (!requireMethods(req, res, ["GET", "HEAD"])) return;
-        await serveAsset(res, "index.html", req.method === "HEAD");
+      if (pathname.startsWith("/api/")) {
+        await handleApi(req, res, url);
         return;
       }
       if (pathname.startsWith("/assets/")) {
@@ -817,11 +835,15 @@ export function createDashboardServer(
         await serveAsset(res, pathname.slice(1), req.method === "HEAD");
         return;
       }
-      if (!pathname.startsWith("/api/v1/")) {
-        sendError(res, "not-found");
+      // Check the raw request path too: WHATWG URL parsing normalizes dot
+      // segments and backslashes, which must not turn traversal into a UI route.
+      const rawPath = (req.url ?? "/").split("?")[0] ?? "/";
+      if (rawPath === pathname && isUiPath(pathname)) {
+        if (!requireMethods(req, res, ["GET", "HEAD"])) return;
+        await serveAsset(res, "index.html", req.method === "HEAD");
         return;
       }
-      await handleApi(req, res, url);
+      sendError(res, "not-found");
     } catch (error: unknown) {
       const mapped = mapError(error);
       if (shouldLog(mapped.code)) {

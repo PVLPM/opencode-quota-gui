@@ -12,7 +12,7 @@ import {
   formatTokenCount,
   usageChartTitle,
 } from "../format";
-import { formatHash } from "../routing";
+import { formatPath } from "../routing";
 import { sortRootRows } from "../sorting";
 
 /**
@@ -42,7 +42,7 @@ export function ProjectView(props: {
   return (
     <>
       <nav class="qg-breadcrumbs" aria-label="Breadcrumb">
-        <a href={formatHash({ name: "analytics" }, props.range)}>Analytics</a>
+        <a href={formatPath({ name: "analytics" }, props.range)}>Analytics</a>
         <span aria-hidden="true">›</span>
         <span aria-current="page">{props.snapshot.name}</span>
       </nav>
@@ -112,7 +112,7 @@ export function ProjectView(props: {
                 <a
                   class="qg-list__row"
                   data-clickable="true"
-                  href={formatHash({ name: "session", sessionId: root.sessionId }, props.range)}
+                  href={formatPath({ name: "session", sessionId: root.sessionId }, props.range)}
                 >
                   <span class="qg-list__title" title={root.title}>
                     {root.title}
