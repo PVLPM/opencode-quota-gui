@@ -206,6 +206,8 @@ export interface SessionNode {
   sessionId: string;
   parentId?: string;
   title: string;
+  /** Persisted session agent, falling back to the latest known owned assistant agent. */
+  agent?: string;
   depth: number;
   worktreeLabel?: string;
   childIds: string[];

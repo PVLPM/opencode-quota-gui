@@ -86,6 +86,28 @@ function stubDatabase(schema?: GuiDatabaseSchema): string {
 }
 
 describe("raw completed assistant reader", () => {
+  it("feature-detects the persisted session agent without reading message or session payloads", async () => {
+    const path = stubDatabase({ sessions: [{ id: "ses_agent", createdMs: 1 }] });
+    expect((await readAllSessionsIndex()).ses_agent?.agent).toBeUndefined();
+    const db = new DatabaseSync(path);
+    db.exec("ALTER TABLE session_v2 ADD COLUMN agent TEXT");
+    db.prepare("UPDATE session_v2 SET agent = ? WHERE id = ?").run(
+      "session-authority",
+      "ses_agent",
+    );
+    db.close();
+    expect((await readAllSessionsIndex()).ses_agent?.agent).toBe("session-authority");
+    expect(
+      sqliteTrace.statements.some((sql) => /SELECT.*\bagent\b.*FROM "session_v2"/.test(sql)),
+    ).toBe(true);
+    const result = await withOpenCodeStorageSnapshot((snapshot) => snapshot.readAllSessionsIndex());
+    expect(result.status === "ok" && result.value.ses_agent?.agent).toBe("session-authority");
+    const update = new DatabaseSync(path);
+    update.prepare("UPDATE session_v2 SET agent = ? WHERE id = ?").run("  ", "ses_agent");
+    update.close();
+    expect((await readAllSessionsIndex()).ses_agent?.agent).toBeUndefined();
+  });
+
   it("returns every physical completed assistant row without fork dedup", async () => {
     stubDatabase({
       sessions: [

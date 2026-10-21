@@ -282,7 +282,7 @@ function sessionRevisionSignature(
       const session = sessions[id];
       return `${id}:${session?.title ?? ""}:${session?.parentID ?? ""}:${
         session?.time?.created ?? ""
-      }:${session?.time?.updated ?? ""}`;
+      }:${session?.time?.updated ?? ""}:${session?.agent ?? ""}`;
     })
     .join("|");
 }

@@ -406,6 +406,53 @@ function harness(
   };
 }
 
+const sessionAgentCases = ["session-authority", undefined];
+it.each(
+  sessionAgentCases,
+)("keeps node agents through cold, sidecar and compact reload (%s)", async (sessionAgent) => {
+  const db = baseDb();
+  db.sessions.ses_root!.agent = sessionAgent;
+  const expectedRootAgent = sessionAgent ?? "message-fallback";
+  db.rows.find((entry) => entry.messageID === "msg_b")!.agent = "message-fallback";
+  db.rows.push(row("ses_child", "msg_child", NOW - 1000, { input: 7 }, { agent: "child-agent" }));
+  const first = harness(db);
+  const cold = await first.engine.session("ses_root");
+  expect(cold.nodes.map((node) => node.agent)).toEqual([expectedRootAgent, "child-agent"]);
+  expect((await first.engine.session("ses_child")).nodes[0]?.agent).toBe("child-agent");
+  await first.engine.close();
+  const persisted = decodeAnalyticsState(
+    JSON.parse(JSON.stringify(encodeAnalyticsState(first.savedStates.at(-1)!, NOW))),
+  )!;
+  const warm = decodeAnalyticsPresentation(
+    JSON.parse(
+      JSON.stringify(
+        encodeAnalyticsPresentation(
+          { ...persisted, presentation: first.savedPresentations.at(-1)! },
+          NOW,
+        ),
+      ),
+    ),
+  )!;
+  const second = harness(db, {
+    loadSnapshot: async () => structuredClone(persisted),
+    loadPresentation: async () => structuredClone(warm),
+  });
+  const cached = await second.engine.session("ses_root");
+  expect(cached.nodes.map((node) => node.agent)).toEqual([expectedRootAgent, "child-agent"]);
+  expect(cached.treeTotals).toEqual(cold.treeTotals);
+  await second.engine.close();
+  const third = harness(db, { loadSnapshot: async () => structuredClone(persisted) });
+  const rebuilt = await third.engine.session("ses_root");
+  expect(rebuilt.nodes.map((node) => node.agent)).toEqual([expectedRootAgent, "child-agent"]);
+  expect(rebuilt.treeTotals).toEqual(cold.treeTotals);
+  // Agent-only metadata edits must invalidate DTOs even without timestamp churn.
+  db.sessions.ses_root!.agent = "new-authority";
+  third.setNow(NOW + INTERVAL + 1);
+  await third.engine.refresh();
+  expect((await third.engine.session("ses_root")).nodes[0]?.agent).toBe("new-authority");
+  await third.engine.close();
+});
+
 class TrackingMap<K, V> extends Map<K, V> {
   valuesReads = 0;
   keysReads = 0;

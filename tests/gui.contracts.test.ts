@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { DASHBOARD_CONTRACT_VERSION } from "../src/contracts/dashboard.js";
+import { DASHBOARD_CONTRACT_VERSION, type SessionNode } from "../src/contracts/dashboard.js";
 import {
   DASHBOARD_EVENT_TOPICS,
   isCostedTokens,
@@ -23,6 +23,14 @@ import {
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
+
+it("keeps node agent optional and additive on contract revision 2", () => {
+  const metadata: Pick<SessionNode, "agent"> = { agent: "build" };
+  const unknown: Pick<SessionNode, "agent"> = {};
+  expect(metadata.agent).toBe("build");
+  expect(unknown.agent).toBeUndefined();
+  expect(DASHBOARD_CONTRACT_VERSION).toBe(2);
+});
 
 function expectContiguous(buckets: { startMs: number; endMs: number }[]): void {
   expect(buckets.length).toBeGreaterThan(0);

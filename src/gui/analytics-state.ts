@@ -6,7 +6,7 @@
  * occurrence membership (message/session identity + revision watermark), the
  * stable source identity, the coverage extent/frontier, the trusted source
  * cursor and rare-repair wall time. The compact index excludes raw message
- * JSON, agent strings, compaction markers, and duplicate raw rows. A separate
+ * JSON, assistant agent strings, compaction markers, and duplicate raw rows. A separate
  * local presentation sidecar may carry bounded Home/Project/Session DTO detail
  * (including the DTO's agent fields and compaction markers).
  */
@@ -197,6 +197,7 @@ interface PersistedAnalyticsStateV3 {
       directory: string | null,
       createdMs: number | null,
       updatedMs: number | null,
+      agent?: string | null,
     ]
   >;
   projects: Array<[id: string, name: string | null, directories: string[], worktrees: string[]]>;
@@ -244,6 +245,7 @@ export function encodeAnalyticsState(
       session.directory ?? null,
       session.time?.created ?? null,
       session.time?.updated ?? null,
+      session.agent ?? null,
     ]);
 
   const projects: PersistedAnalyticsStateV3["projects"] = Object.values(state.projects)
@@ -339,7 +341,8 @@ function isOccurrenceTuple(value: unknown, fingerprintCount: number): boolean {
 }
 
 function isCompactSession(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length !== 7) return false;
+  if (!Array.isArray(value) || (value.length !== 7 && value.length !== 8)) return false;
+  if (value.length === 8 && !isStringOrNull(value[7])) return false;
   if (typeof value[0] !== "string" || value[0].length === 0) return false;
   if (!isStringOrNull(value[1]) || !isStringOrNull(value[2])) return false;
   if (!isStringOrNull(value[3]) || !isStringOrNull(value[4])) return false;
@@ -465,6 +468,7 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
     if (session[2] !== null) info.parentID = session[2];
     if (session[3] !== null) info.projectID = session[3];
     if (session[4] !== null) info.directory = session[4];
+    if (typeof session[7] === "string") info.agent = session[7];
     if (session[5] !== null || session[6] !== null) {
       info.time = {
         ...(session[5] === null ? {} : { created: session[5] }),

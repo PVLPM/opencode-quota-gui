@@ -82,6 +82,62 @@ function makeDataset(parts: {
 }
 
 describe("session tree scope", () => {
+  it("prefers session agent, otherwise latest known own completed agent, without descendant inference", () => {
+    const dataset = makeDataset({
+      sessions: [
+        { id: "ses_root", agent: "session-authority" },
+        { id: "ses_child", parentID: "ses_root", agent: "  " },
+        { id: "ses_unknown", parentID: "ses_root", title: "build", directory: "/review" },
+        { id: "ses_leaf", parentID: "ses_unknown" },
+      ],
+      messages: [
+        { ...assistantRow("ses_child", "msg_new", 30, { input: 3 }), agent: "review" },
+        { ...assistantRow("ses_root", "msg_root", 10, { input: 1 }), agent: "message-fallback" },
+        { ...assistantRow("ses_child", "msg_old", 20, { input: 2 }), agent: "build" },
+        assistantRow("ses_child", "msg_missing", 40, { input: 4 }),
+        { ...assistantRow("ses_child", "msg_blank", 50, { input: 5 }), agent: "  " },
+        { ...assistantRow("ses_leaf", "msg_leaf", 60, { input: 6 }), agent: "explore" },
+      ],
+    });
+    const analytics = createUsageAnalytics(dataset);
+    const snapshot = analytics.session("ses_root");
+    expect(snapshot.nodes.map((node) => node.agent)).toEqual([
+      "session-authority",
+      "review",
+      undefined,
+      "explore",
+    ]);
+    expect(analytics.session("ses_child").nodes[0]?.agent).toBe("review");
+    expect(snapshot.treeTotals.input).toBe(21);
+    expect(snapshot.ownSummary.input).toBe(1);
+    expect(snapshot.steps).toHaveLength(6);
+  });
+
+  it("uses completion chronology with a stable message-id tie break and excludes non-owned copies", () => {
+    const original = { ...assistantRow("ses_root", "msg_a", 10, { input: 1 }), agent: "build" };
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        { ...original, sessionID: "ses_child", messageID: "msg_copy", agent: "copied-agent" },
+        {
+          ...assistantRow("ses_root", "msg_z", 5, { input: 2 }),
+          completedAtMs: 2000,
+          agent: "review",
+        },
+        original,
+        {
+          ...assistantRow("ses_root", "msg_y", 6, { input: 3 }),
+          completedAtMs: 2000,
+          agent: "earlier-tie",
+        },
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_root");
+    expect(snapshot.nodes.map((node) => node.agent)).toEqual(["review", undefined]);
+    expect(snapshot.treeTotals.input).toBe(6);
+    expect(snapshot.steps).toHaveLength(3);
+  });
+
   it("returns the opened session plus all descendants only — never ancestors or siblings", () => {
     const dataset = makeDataset({
       sessions: [

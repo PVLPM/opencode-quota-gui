@@ -770,6 +770,27 @@ function sessionOwnLatestMs(model: AnalyticsModel, sessionId: string): number {
   return latest;
 }
 
+/** Metadata is node-local: descendants and non-owned fork copies cannot label it. */
+function sessionAgent(
+  session: OpenCodeSessionInfo,
+  ownSteps: readonly OwnedStep[],
+): string | undefined {
+  const authoritative = session.agent?.trim();
+  if (authoritative) return authoritative;
+  let latest: OwnedStep | undefined;
+  for (const step of ownSteps) {
+    if (!step.row.agent?.trim()) continue;
+    if (
+      latest === undefined ||
+      step.timeMs > latest.timeMs ||
+      (step.timeMs === latest.timeMs && compareIds(step.row.messageID, latest.row.messageID) > 0)
+    ) {
+      latest = step;
+    }
+  }
+  return latest?.row.agent?.trim();
+}
+
 function buildSessionSnapshot(
   model: AnalyticsModel,
   sessionId: string,
@@ -853,6 +874,8 @@ function buildSessionSnapshot(
       latestActivityAtMs: subtreeLatest.get(id)!,
     };
     if (session.parentID !== undefined) node.parentId = session.parentID;
+    const agent = sessionAgent(session, ownSteps);
+    if (agent !== undefined) node.agent = agent;
     if (worktreeLabel) node.worktreeLabel = worktreeLabel;
     return node;
   });

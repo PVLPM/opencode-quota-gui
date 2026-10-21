@@ -147,6 +147,17 @@ function baseState(): AnalyticsState {
   };
 }
 
+it("roundtrips optional authoritative session agents and accepts legacy seven-field sessions", () => {
+  const state = baseState();
+  state.sessions.ses_parent!.agent = "session-authority";
+  const encoded = encodeAnalyticsState(state, NOW);
+  expect(
+    decodeAnalyticsState(JSON.parse(JSON.stringify(encoded)))?.sessions.ses_parent?.agent,
+  ).toBe("session-authority");
+  for (const session of encoded.sessions) session.splice(7);
+  expect(decodeAnalyticsState(encoded)?.sessions.ses_parent?.agent).toBeUndefined();
+});
+
 function withRows(): AnalyticsState {
   const state = baseState();
   const entries = [row("ses_parent", "msg_a"), row("ses_fork", "msg_a_copy", { agent: "build" })];
@@ -427,7 +438,7 @@ describe("analytics snapshot codec v3", () => {
     ).toBeUndefined();
   });
 
-  it("persists no compaction markers or agents (schema has no such fields)", () => {
+  it("persists no compaction markers or assistant agents in the compact occurrence index", () => {
     const persisted = encodeAnalyticsState(withRows(), NOW);
     expect(Object.keys(persisted)).not.toContain("compactions");
     expect(Object.keys(persisted)).not.toContain("agent");

@@ -53,6 +53,8 @@ export interface OpenCodeMessage {
 export interface OpenCodeSessionInfo {
   id: string;
   title?: string;
+  /** Authoritative `session_v2.agent` when the shipped column exists. */
+  agent?: string;
   parentID?: string;
   /** `session_v2.project_id` when the shipped column exists (R46); absent on older schemas. */
   projectID?: string;
@@ -93,6 +95,7 @@ type ProjectedMessageRow = {
 type SessionRow = {
   id: string;
   title: string | null;
+  agent?: unknown;
   parent_id: string | null;
   project_id?: unknown;
   directory?: unknown;
@@ -762,6 +765,7 @@ function readAllSessionsIndexFrom(
   const idx: Record<string, OpenCodeSessionInfo> = {};
   const columns = readTableColumns(conn, "session_v2");
   const metadataColumns = [
+    columns?.has("agent") ? "agent" : null,
     columns?.has("project_id") ? "project_id" : null,
     columns?.has("directory") ? "directory" : null,
   ].filter((column): column is string => column !== null);
@@ -776,6 +780,7 @@ function readAllSessionsIndexFrom(
     idx[row.id] = {
       id: row.id,
       title: typeof row.title === "string" && row.title.trim() ? row.title : undefined,
+      agent: normalizeString(row.agent)?.trim() || undefined,
       parentID: typeof row.parent_id === "string" ? row.parent_id : undefined,
       projectID: normalizeString(row.project_id),
       directory: normalizeString(row.directory),
