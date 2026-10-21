@@ -1072,22 +1072,94 @@ describe("usage chart", () => {
     }
     renderGraph.listenerOf(hit, "onBlur")?.({});
     expect(renderGraph.elementsNamed(root, "output")).toHaveLength(0);
+    // Hover emphasis is transient: only while the pointer is over the legend.
     renderGraph.listenerOf(legend, "onPointerEnter")?.({});
     expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
-    renderGraph.listenerOf(legend, "onClick")?.({});
+    expect(paths()).toHaveLength(5);
     renderGraph.listenerOf(legend, "onPointerLeave")?.({});
     expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(5);
+    // Focus emphasis is transient too.
     renderGraph.listenerOf(legend, "onFocus")?.({});
-    renderGraph.listenerOf(legend, "onPointerEnter")?.({});
-    renderGraph.listenerOf(legend, "onPointerLeave")?.({});
     expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
     renderGraph.listenerOf(legend, "onBlur")?.({});
     expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(5);
-    renderGraph.listenerOf(legend, "onFocus")?.({});
-    const escapeEvent = { key: "Escape", defaultPrevented: false };
-    renderGraph.listenerOf(legend, "onKeyDown")?.(escapeEvent);
-    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(5);
+    // There is no click/pin or keyboard-release handler on a legend entry.
+    expect(renderGraph.listenerOf(legend, "onClick")).toBeUndefined();
+    expect(renderGraph.listenerOf(legend, "onKeyDown")).toBeUndefined();
     expect(paths().map((node) => node.props.d)).toEqual(initialPaths);
+    dispose();
+  });
+
+  it("keeps legend emphasis transient and never pins a clicked series", () => {
+    const root = renderGraph.createTestRoot();
+    const snapshot = usage("7d", [
+      { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 10, cacheRead: 5 }) },
+    ]);
+    const dispose = renderGraph.mount(() => renderGraph.chart({ usage: snapshot }), root);
+    const segments = () =>
+      renderGraph
+        .elementsNamed(root, "path")
+        .filter((node) => node.props.class === "qg-chart__segment");
+    const highlighted = () =>
+      segments().filter((node) => node.props["data-highlighted"] === "true");
+    const buttons = renderGraph.elementsNamed(root, "button");
+    const legend = buttons.find((node) => node.props["aria-label"] === "Highlight Input");
+    expect(legend).toBeDefined();
+    if (!legend) {
+      dispose();
+      return;
+    }
+    const baseline = segments().map((node) => node.props.d);
+    expect(segments()).toHaveLength(5);
+
+    // A legend entry is never a toggle: there is no click handler, no pressed
+    // state, and no keyboard release step that could strand persistent emphasis.
+    expect(renderGraph.listenerOf(legend, "onClick")).toBeUndefined();
+    expect(renderGraph.listenerOf(legend, "onKeyDown")).toBeUndefined();
+    expect(legend.props["aria-pressed"]).toBeUndefined();
+    expect(legend.props["data-pressed"]).toBeUndefined();
+
+    // Hover emphasises exactly one series while all five remain present.
+    renderGraph.listenerOf(legend, "onPointerEnter")?.({});
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+    expect(segments()).toHaveLength(5);
+    expect(
+      renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-chart")?.props[
+        "data-highlight"
+      ],
+    ).toBe("true");
+
+    // Clicking during hover cannot pin the highlight; leaving restores normal.
+    renderGraph.listenerOf(legend, "onClick")?.({});
+    renderGraph.listenerOf(legend, "onPointerLeave")?.({});
+    expect(highlighted()).toHaveLength(5);
+    expect(
+      renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-chart")?.props[
+        "data-highlight"
+      ],
+    ).toBeUndefined();
+
+    // Keyboard focus emphasises one series and losing focus restores normal,
+    // even when the entry is activated while focused.
+    renderGraph.listenerOf(legend, "onFocus")?.({});
+    expect(highlighted()).toHaveLength(1);
+    renderGraph.listenerOf(legend, "onClick")?.({});
+    renderGraph.listenerOf(legend, "onBlur")?.({});
+    expect(highlighted()).toHaveLength(5);
+
+    // No series is hidden or toggled at any point, and the stack is unchanged.
+    expect(
+      segments().every(
+        (node) =>
+          node.props.hidden === undefined &&
+          node.props["aria-hidden"] === undefined &&
+          node.props["aria-pressed"] === undefined &&
+          node.props.display === undefined,
+      ),
+    ).toBe(true);
+    expect(segments()).toHaveLength(5);
+    expect(segments().map((node) => node.props.d)).toEqual(baseline);
     dispose();
   });
 

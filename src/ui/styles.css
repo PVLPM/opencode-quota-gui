@@ -742,10 +742,6 @@ body {
   background: var(--surface-raised-base-hover);
 }
 
-.qg-chart__hit[aria-pressed="true"] {
-  background: var(--surface-base-active);
-}
-
 .qg-chart__hit:focus-visible {
   outline: 2px solid var(--qg-accent-border);
   outline-offset: -2px;
@@ -944,12 +940,6 @@ body {
 .qg-legend__item:hover,
 .qg-legend__item:focus-visible {
   border-color: var(--qg-border);
-}
-
-.qg-legend__item[aria-pressed="true"] {
-  border-color: var(--qg-border-strong);
-  background: var(--surface-raised-base-hover);
-  color: var(--qg-text);
 }
 
 .qg-legend__swatch {

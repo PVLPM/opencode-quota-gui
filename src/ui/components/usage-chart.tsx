@@ -73,15 +73,6 @@ export function UsageChart(props: {
   const rateText = (value: number | null | undefined): string =>
     value === undefined || value === null ? "—" : formatPercent(value);
 
-  function onKeyDown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      setHoveredBucket(undefined);
-      setFocusedBucket(undefined);
-      setHoveredCategory(undefined);
-      setFocusedCategory(undefined);
-    }
-  }
-
   return (
     <div class="qg-usage">
       <header class="qg-usage__headline">
@@ -274,7 +265,6 @@ export function UsageChart(props: {
                 onPointerLeave={() => setHoveredBucket(undefined)}
                 onFocus={() => setFocusedBucket(index())}
                 onBlur={() => setFocusedBucket(undefined)}
-                onKeyDown={onKeyDown}
               />
             )}
           </For>
@@ -332,7 +322,6 @@ export function UsageChart(props: {
                 onPointerLeave={() => setHoveredCategory(undefined)}
                 onFocus={() => setFocusedCategory(category.key)}
                 onBlur={() => setFocusedCategory(undefined)}
-                onKeyDown={onKeyDown}
               >
                 <span class="qg-legend__swatch" aria-hidden="true" />
                 <span class="qg-legend__label">{category.label}</span>
