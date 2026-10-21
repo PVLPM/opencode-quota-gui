@@ -22,7 +22,7 @@ export interface ChartSize {
 export const DEFAULT_USAGE_SIZE: ChartSize = {
   width: 900,
   height: 260,
-  padding: { top: 12, right: 12, bottom: 24, left: 48 },
+  padding: { top: 12, right: 46, bottom: 24, left: 48 },
 };
 
 export interface PlotRect {
@@ -50,6 +50,21 @@ export interface StackBand {
   xs: number[];
   upper: number[];
   lower: number[];
+  /** Whole-range raw total; zero decides whether an overlay line is truthful. */
+  total: number;
+}
+
+export interface CacheRatePoint {
+  x: number;
+  y: number;
+  value: number;
+  bucketIndex: number;
+}
+
+export interface StackBoundary {
+  key: keyof TokenStack;
+  colorVar: string;
+  path: string;
 }
 
 export interface UsageGeometry {
@@ -58,6 +73,14 @@ export interface UsageGeometry {
   slot: number;
   totalLine: { x: number; y: number }[];
   bands: StackBand[];
+  /** Cumulative stack boundaries in category colour, drawn above the fills. */
+  boundaries: StackBoundary[];
+  /** Cache-hit-rate overlay points; a bucket with no input-side traffic is absent. */
+  cacheRatePoints: CacheRatePoint[];
+  /** One path per contiguous non-null cache-rate run. */
+  cacheRatePath: string;
+  /** Fixed 0..100% right-axis ticks. */
+  cacheRateTicks: AxisTick[];
   yMax: number;
   ticks: AxisTick[];
   pointIndexes: number[];
@@ -139,6 +162,7 @@ export function buildUsageGeometry(
       xs,
       upper: [],
       lower: [],
+      total: buckets.reduce((sum, bucket) => sum + bucket.tokens[key], 0),
     };
   });
 
@@ -170,12 +194,50 @@ export function buildUsageGeometry(
   const totalEdgeY = totalY.length > 0 ? [firstTotal, ...totalY, lastTotal] : [];
   const totalLine = xs.map((x, index) => ({ x, y: totalEdgeY[index] ?? plot.bottom }));
 
+  const boundaries: StackBoundary[] = bands
+    .filter((band) => band.total > 0)
+    .map((band) => ({
+      key: band.key,
+      colorVar: band.colorVar,
+      path: toBandUpperPath(band),
+    }));
+
+  const cacheRatePoints: CacheRatePoint[] = [];
+  for (let index = 0; index < buckets.length; index += 1) {
+    const bucket = buckets[index];
+    if (!bucket) continue;
+    const rate = cacheHitRate(bucket.tokens);
+    if (rate === null) continue;
+    cacheRatePoints.push({
+      x: slotX(index) + slot / 2,
+      y: plot.bottom - (rate / 100) * plot.height,
+      value: rate,
+      bucketIndex: index,
+    });
+  }
+  let cacheRatePath = "";
+  let previousBucket: number | undefined;
+  for (const point of cacheRatePoints) {
+    const move = previousBucket === undefined || point.bucketIndex !== previousBucket + 1;
+    cacheRatePath += `${move ? "M" : "L"} ${coordinate(point.x)} ${coordinate(point.y)} `;
+    previousBucket = point.bucketIndex;
+  }
+  cacheRatePath = cacheRatePath.trim();
+  const cacheRateTicks: AxisTick[] = [0, 25, 50, 75, 100].map((value) => ({
+    value,
+    y: plot.bottom - (value / 100) * plot.height,
+  }));
+
   return {
     plot,
     bucketCount: count,
     slot,
     totalLine,
     bands,
+    boundaries,
+    cacheRatePoints,
+    cacheRatePath,
+    cacheRateTicks,
     yMax: yMaxRaw,
     ticks: buildTicks(yMaxRaw, 4, plot),
     pointIndexes: buckets.map((_, index) => index),
@@ -185,6 +247,17 @@ export function buildUsageGeometry(
     slotX,
     bucketIndexAt,
   };
+}
+
+/**
+ * `cacheRead / (input + cacheRead + cacheWrite)`. Cache writes are input-side
+ * traffic but never cache hits, so they belong in the denominator. No traffic
+ * has no meaningful rate: `null`, not a manufactured 0%.
+ */
+export function cacheHitRate(tokens: TokenStack): number | null {
+  const denominator = tokens.input + tokens.cacheRead + tokens.cacheWrite;
+  if (!(denominator > 0)) return null;
+  return (tokens.cacheRead / denominator) * 100;
 }
 
 export const DEFAULT_SESSION_SIZE: ChartSize = {
@@ -394,11 +467,16 @@ export function buildSessionChartGeometry(
   const compaction: SessionCompactionTick[] = [];
   if (count > 0) {
     for (const marker of snapshot.compactionMarkers) {
+      // Markers explain drops in the focus-context series only. A marker with
+      // no scoped focus step cannot be placed truthfully and is skipped rather
+      // than snapped onto an unrelated descendant step.
+      if (marker.sessionId !== snapshot.focusSessionId) continue;
       const firstAtOrAfter = source.findIndex(
         (step) => step.sessionId === marker.sessionId && step.atMs >= marker.atMs,
       );
       const fallback = source.findIndex((step) => step.sessionId === marker.sessionId);
-      const index = firstAtOrAfter >= 0 ? firstAtOrAfter : Math.max(fallback, 0);
+      if (firstAtOrAfter < 0 && fallback < 0) continue;
+      const index = firstAtOrAfter >= 0 ? firstAtOrAfter : fallback;
       compaction.push({
         x: stepX(index),
         atMs: marker.atMs,
@@ -463,4 +541,13 @@ export function toBandPath(band: StackBand): string {
   if (band.upper.length === 0 || band.xs.length === 0) return "";
   const last = band.xs.length - 1;
   return `M ${band.xs[0]} ${band.upper[0]}${monotoneBoundary(band.xs, band.upper, false)} L ${band.xs[last]} ${band.lower[last]}${monotoneBoundary(band.xs, band.lower, true)} Z`;
+}
+
+/**
+ * Open path tracing the band's upper edge with the exact interpolation the
+ * closed area uses, so a boundary overlay can never drift from the fill.
+ */
+export function toBandUpperPath(band: StackBand): string {
+  if (band.upper.length === 0 || band.xs.length === 0) return "";
+  return `M ${band.xs[0]} ${band.upper[0]}${monotoneBoundary(band.xs, band.upper, false)}`;
 }

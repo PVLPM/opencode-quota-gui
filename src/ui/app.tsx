@@ -17,9 +17,10 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
+import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
 import { inlineAccountLabel } from "./components/quota-card";
-import { ProgressLine, QueryState, ReloadRequired } from "./components/states";
+import { QueryState, ReloadRequired } from "./components/states";
 import { createToaster, type Toaster, ToastRegion } from "./components/toast";
 import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashboard-client";
 import { RANGE_LABELS } from "./format";
@@ -98,10 +99,9 @@ function createQuery<T>(fetcher: () => Promise<T>): Query<T> {
   return { data, error, loading, run };
 }
 
-interface RangeTransition {
+interface RangeFailure {
   from: RangeKey;
   to: RangeKey;
-  failed: boolean;
 }
 
 function rangeLabel(range: RangeKey): string {
@@ -109,55 +109,37 @@ function rangeLabel(range: RangeKey): string {
 }
 
 /**
- * A range change deliberately keeps the previous payload on screen while the
- * next one loads. That payload is only honest if the route says which range it
- * belongs to, so the notice covers exactly the two states where a request is
- * outstanding or failed — and disappears the moment the payload matches.
+ * A range change keeps the previous payload on screen while the next one loads.
+ * A failed update leaves that payload in place, so the failure is surfaced as a
+ * fixed banner (never an inline row) naming what is still on screen and offering
+ * a local retry.
  */
-function describeRangeTransition(
+function describeRangeFailure(
   data: { range: RangeKey } | undefined,
   requested: RangeKey,
   loading: boolean,
   failed: boolean,
-): RangeTransition | undefined {
-  if (data === undefined || data.range === requested) return undefined;
-  if (loading) return { from: data.range, to: requested, failed: false };
-  if (failed) return { from: data.range, to: requested, failed: true };
-  return undefined;
+): RangeFailure | undefined {
+  if (data === undefined || data.range === requested || loading || !failed) return undefined;
+  return { from: data.range, to: requested };
 }
 
-/**
- * The notice is one row in both states, so a failed update replaces the status
- * in place rather than shifting the route output down.
- */
-function RangeNotice(props: { transition: RangeTransition; onRetry: () => void }): JSX.Element {
+/** Failure banner overlay: one fixed position, no document-flow row, no layout shift. */
+function RangeFailureNotice(props: { failure: RangeFailure; onRetry: () => void }): JSX.Element {
   return (
-    <Show
-      when={props.transition.failed}
-      fallback={
-        <output class="qg-range-notice" aria-live="polite">
-          <span>
-            Showing {rangeLabel(props.transition.from)} while updating to{" "}
-            {rangeLabel(props.transition.to)}…
-          </span>
-        </output>
-      }
-    >
-      <div class="qg-range-notice" data-tone="error" role="alert">
-        <span>
-          Showing {rangeLabel(props.transition.from)}. Updating to {rangeLabel(props.transition.to)}{" "}
-          failed.
-        </span>
-        <button
-          type="button"
-          class="qg-range-notice__retry"
-          aria-label={`Retry updating to ${rangeLabel(props.transition.to)}`}
-          onClick={() => props.onRetry()}
-        >
-          Retry
-        </button>
-      </div>
-    </Show>
+    <div class="qg-range-failure" role="alert">
+      <span>
+        Showing {rangeLabel(props.failure.from)}. Updating to {rangeLabel(props.failure.to)} failed.
+      </span>
+      <button
+        type="button"
+        class="qg-range-failure__retry"
+        aria-label={`Retry updating to ${rangeLabel(props.failure.to)}`}
+        onClick={() => props.onRetry()}
+      >
+        Retry
+      </button>
+    </div>
   );
 }
 
@@ -560,6 +542,14 @@ function QuotaRoute(props: {
 }): JSX.Element {
   const query = createQuery<QuotaSnapshot>(() => props.client.quota());
   const [freshEpoch, setFreshEpoch] = createSignal(0);
+  const busy = createBusyIndicator();
+  createEffect(() => {
+    busy.update({
+      active: query.loading() && query.data() === undefined,
+      hasData: query.data() !== undefined,
+    });
+  });
+  onCleanup(() => busy.dispose());
   createEffect(() => {
     const epoch = props.reconnectEpoch;
     void props.reloadToken;
@@ -581,7 +571,7 @@ function QuotaRoute(props: {
   );
   return (
     <>
-      <ProgressLine active={query.loading() && query.data() !== undefined} />
+      <BusyOverlay indicator={busy} label="quota" />
       <QueryState
         state={state()}
         label="Loading providers"
@@ -628,13 +618,17 @@ function AnalyticsRoute(props: {
 
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
-  const rangeTransition = () =>
-    describeRangeTransition(
-      query.data(),
-      props.range,
-      query.loading(),
-      query.error() !== undefined,
-    );
+  const rangeFailure = () =>
+    describeRangeFailure(query.data(), props.range, query.loading(), query.error() !== undefined);
+  const busy = createBusyIndicator();
+  createEffect(() => {
+    const data = query.data();
+    busy.update({
+      active: query.loading() && (data === undefined || data.range !== props.range),
+      hasData: data !== undefined,
+    });
+  });
+  onCleanup(() => busy.dispose());
   const staleNow = () => {
     const current = state();
     if (current.kind === "ready" && current.stale) return true;
@@ -647,9 +641,9 @@ function AnalyticsRoute(props: {
 
   return (
     <>
-      <ProgressLine active={query.loading() && query.data() !== undefined} />
-      <Show when={rangeTransition()}>
-        {(notice) => <RangeNotice transition={notice()} onRetry={() => void query.run()} />}
+      <BusyOverlay indicator={busy} label="analytics" />
+      <Show when={rangeFailure()}>
+        {(failure) => <RangeFailureNotice failure={failure()} onRetry={() => void query.run()} />}
       </Show>
       <QueryState
         state={state()}
@@ -688,13 +682,19 @@ function ProjectRoute(props: {
 
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
-  const rangeTransition = () =>
-    describeRangeTransition(
-      query.data(),
-      props.range,
-      query.loading(),
-      query.error() !== undefined,
-    );
+  const rangeFailure = () =>
+    describeRangeFailure(query.data(), props.range, query.loading(), query.error() !== undefined);
+  const busy = createBusyIndicator();
+  createEffect(() => {
+    const data = query.data();
+    busy.update({
+      active:
+        query.loading() &&
+        (data === undefined || data.range !== props.range || data.projectId !== props.projectId),
+      hasData: data !== undefined,
+    });
+  });
+  onCleanup(() => busy.dispose());
 
   createEffect(() =>
     props.onStale(
@@ -707,9 +707,9 @@ function ProjectRoute(props: {
 
   return (
     <>
-      <ProgressLine active={query.loading() && query.data() !== undefined} />
-      <Show when={rangeTransition()}>
-        {(notice) => <RangeNotice transition={notice()} onRetry={() => void query.run()} />}
+      <BusyOverlay indicator={busy} label="analytics" />
+      <Show when={rangeFailure()}>
+        {(failure) => <RangeFailureNotice failure={failure()} onRetry={() => void query.run()} />}
       </Show>
       <QueryState
         state={state()}
@@ -758,6 +758,15 @@ function SessionRoute(props: {
 
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+  const busy = createBusyIndicator();
+  createEffect(() => {
+    const data = query.data();
+    busy.update({
+      active: query.loading() && (data === undefined || data.focusSessionId !== props.sessionId),
+      hasData: data !== undefined,
+    });
+  });
+  onCleanup(() => busy.dispose());
 
   createEffect(() =>
     props.onStale(
@@ -767,7 +776,7 @@ function SessionRoute(props: {
 
   return (
     <>
-      <ProgressLine active={query.loading() && query.data() !== undefined} />
+      <BusyOverlay indicator={busy} label="analytics" />
       <QueryState
         state={state()}
         label="Loading session"

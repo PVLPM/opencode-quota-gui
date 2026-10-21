@@ -322,8 +322,8 @@ function sectionOf(html: string, sectionId: string): string {
 
 /**
  * Solid's SSR output separates adjacent dynamic text with hydration comments, so
- * `own <!--$-->1,500<!--/--> tokens` is the same sentence a browser shows as
- * `own 1,500 tokens`. Prose assertions read the normalized text.
+ * `Tree <!--$-->2,900<!--/--> tokens` is the same sentence a browser shows as
+ * `Tree 2,900 tokens`. Prose assertions read the normalized text.
  */
 function text(html: string): string {
   return html.replace(/<!--\$-->|<!--\/-->|<!--#-->/g, "");
@@ -346,11 +346,14 @@ function homeProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe("section state machine", () => {
-  it("keeps UTC day labels aligned with server buckets across local timezone boundaries", () => {
+  it("formats labels in the supplied host timezone, never the browser default", () => {
     const midnight = Date.UTC(2026, 9, 19);
-    expect(formatBucketTick(midnight, "day")).toBe("19 Oct");
-    expect(formatBucketTick(midnight, "hour")).toBe("00:00");
-    expect(formatTimestamp(midnight)).toContain("UTC");
+    expect(formatBucketTick(midnight, "day", "UTC")).toBe("19 Oct");
+    expect(formatBucketTick(midnight, "hour", "UTC")).toBe("00:00");
+    // The same instant in a host zone west of UTC is still the previous evening.
+    expect(formatBucketTick(midnight, "hour", "America/New_York")).toBe("20:00");
+    expect(formatTimestamp(midnight, "UTC")).toBe("19/10/2026, 00:00:00");
+    expect(formatTimestamp(midnight, "UTC")).not.toContain("UTC");
   });
 
   it("wires full and bare percentage labels for both display modes", async () => {
@@ -546,6 +549,7 @@ describe("home view composition", () => {
       preferences,
       hiddenRows: [],
       stale: false,
+      timeZone: "UTC",
     });
     const identity = text(html).slice(
       html.indexOf('class="qg-card__identity"'),
@@ -570,31 +574,68 @@ describe("home view composition", () => {
       preferences,
       hiddenRows: [],
       stale: false,
+      timeZone: "UTC",
     });
     expect(text(html)).toContain(accountLabel);
   });
-  it.each([0, 0.1, 25.125, 100])("renders an honest used-quota bar at %s percent", async (used) => {
+  it.each([0, 0.1, 25.125, 100])("renders an honest used-mode bar at %s percent", async (used) => {
     const html = await renderView("/components/quota-card.tsx", "QuotaBar", {
       label: "Synthetic window",
-      used,
+      displayPercent: used,
+      displayMode: "used",
     });
     expect(html).toContain("<meter");
+    expect(html).toContain('min="0"');
+    expect(html).toContain('max="100"');
     expect(html).toContain(`value="${used}"`);
     expect(html).toContain(`aria-valuetext="${used}% used"`);
-    expect(html).toContain(`--qg-used-position:${used}%`);
-    expect(html.includes('class="qg-row__bar-gap"')).toBe(used > 0 && used < 100);
+    expect(html).toContain(`--qg-fill-position:${used}%`);
+    expect(html).not.toContain("qg-row__bar-gap");
   });
 
-  it("keeps the bar on used quota when the badge displays remaining quota", async () => {
+  it.each([
+    0, 0.1, 25.125, 100,
+  ])("paints the displayed remaining percent without inverting twice at %s", async (remaining) => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaBar", {
+      label: "Synthetic window",
+      displayPercent: remaining,
+      displayMode: "remaining",
+    });
+    expect(html).toContain(`value="${remaining}"`);
+    expect(html).toContain(`aria-valuetext="${remaining}% remaining"`);
+    expect(html).toContain(`--qg-fill-position:${remaining}%`);
+  });
+
+  it("keeps the bar on the displayed quota while severity uses true used quota", async () => {
     const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
       card: providerCard({ rows: [percentRow({ percentUsed: 25, percentRemaining: 75 })] }),
       preferences,
       hiddenRows: [],
       stale: false,
+      timeZone: "UTC",
     });
+    // Remaining mode shows 75% and paints 75% inside the track.
     expect(text(html)).toContain("75% remaining");
-    expect(html).toContain('value="25"');
-    expect(html).toContain("--qg-used-position:25%");
+    expect(html).toContain('value="75"');
+    expect(html).toContain('data-mode="remaining"');
+    expect(html).toContain("--qg-fill-position:75%");
+    // 25% used is healthy even though the painted fraction is large.
+    expect(html).toContain('data-severity="healthy"');
+  });
+
+  it("maps complementary used/remaining values to the same exhaustion band", async () => {
+    // 5% remaining == 95% used: critical in either display mode.
+    for (const percentDisplayMode of ["used", "remaining"] as const) {
+      const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+        card: providerCard({ rows: [percentRow({ percentUsed: 95, percentRemaining: 5 })] }),
+        preferences: displayPreferencesFromValues({ percentDisplayMode }),
+        hiddenRows: [],
+        stale: false,
+        timeZone: "UTC",
+      });
+      expect(html).toContain('data-severity="critical"');
+      expect(html).toContain(percentDisplayMode === "used" ? 'value="95"' : 'value="5"');
+    }
   });
 
   it.each([
@@ -612,6 +653,7 @@ describe("home view composition", () => {
       preferences,
       hiddenRows: [],
       stale: false,
+      timeZone: "UTC",
     });
     expect(html).toContain(`data-severity="${severity}"`);
   });
@@ -629,6 +671,7 @@ describe("home view composition", () => {
       preferences,
       hiddenRows: [],
       stale: false,
+      timeZone: "UTC",
     });
     expect(html).toContain(`data-severity="${severity}"`);
   });
@@ -650,6 +693,7 @@ describe("home view composition", () => {
       preferences,
       hiddenRows: [],
       stale: false,
+      timeZone: "UTC",
     });
     // Only the row that carries `info` gets the affordance; the other stays bare.
     expect(html.match(/class="qg-row__info"/g)).toHaveLength(1);
@@ -892,7 +936,8 @@ describe("home view composition", () => {
     const remaining = await renderView("/views/home.tsx", "QuotaView", homeProps({ snapshot }));
     expect(remaining).toContain('class="qg-row__value">62% remaining</span>');
     expect(remaining).not.toContain('class="qg-row__value">38%');
-    expect(remaining).toContain('aria-valuetext="38% used"');
+    expect(remaining).toContain('aria-valuetext="62% remaining"');
+    expect(remaining).not.toContain('aria-valuetext="38%');
     expect(text(remaining)).toContain("Runs out");
     const used = await renderView(
       "/views/home.tsx",
@@ -900,6 +945,7 @@ describe("home view composition", () => {
       homeProps({ snapshot, preferences: { ...preferences, percentMode: "used" } }),
     );
     expect(used).toContain('class="qg-row__value">38% used</span>');
+    expect(used).toContain('aria-valuetext="38% used"');
   });
 
   it("reveals detail rows only for the detailed accounting setting, and keeps details collapsed", async () => {
@@ -961,7 +1007,7 @@ describe("usage chart", () => {
     "7d",
     "30d",
     "lifetime",
-  ] as const)("keeps true zero-thickness stacking for an empty %s bucket and omits the zero cache-write series", async (range) => {
+  ] as const)("keeps true zero-thickness stacking for an empty %s bucket and keeps all five series", async (range) => {
     const buckets = [{ startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({}) }];
     const geometry = buildUsageGeometry(buckets);
     expect(geometry.bands).toHaveLength(5);
@@ -973,17 +1019,15 @@ describe("usage chart", () => {
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage(range, buckets),
     });
-    // The zero-total cache-write series is omitted from the graph and its legend
-    // entry instead of being drawn as a flat zero area, while the hit-area
-    // labels keep reporting every category.
-    expect(html.match(/qg-chart__segment/g)).toHaveLength(4);
-    // Every remaining series is still zero-thickness here: flagged so the
-    // hairline stroke never draws a zero series into existence as a white line.
-    expect(html.match(/data-thin="true"/g)).toHaveLength(4);
+    // Five true series, including a zero cache-write layer; no series is hidden.
+    expect(html.match(/qg-chart__segment/g)).toHaveLength(5);
+    // Every series is zero-thickness here; no boundary overlay is invented.
+    expect(html.match(/data-thin="true"/g)).toHaveLength(5);
+    expect(html).not.toContain("qg-chart__boundary");
     expect(html).toContain(
       "total 0 tokens, Input 0, Cache read 0, Cache write 0, Output 0, Reasoning 0",
     );
-    expect(html).not.toContain("Highlight Cache write");
+    expect(html).toContain("Highlight Cache write");
     expect(html).toContain("Highlight Cache read");
   });
 
@@ -1012,10 +1056,8 @@ describe("usage chart", () => {
       return;
     }
     const initialPaths = paths().map((node) => node.props.d);
-    // Cache write's range total is zero here, so its series is omitted; the
-    // remaining four categories keep their zero/tiny thickness and transient
-    // inspection behaviour.
-    expect(initialPaths).toHaveLength(4);
+    // All five layers stay present; cache write is a true zero-thickness layer.
+    expect(initialPaths).toHaveLength(5);
     expect(renderGraph.elementsNamed(root, "output")).toHaveLength(0);
     renderGraph.listenerOf(hit, "onFocus")?.({});
     await Promise.resolve();
@@ -1026,7 +1068,7 @@ describe("usage chart", () => {
         .elementsNamed(tooltip, "span")
         .filter((node) => node.props.class === "qg-totals__value")
         .map(renderGraph.textOf);
-      expect(values).toEqual(["1,000,000", "0", "0", "0", "1"]);
+      expect(values).toEqual(["0.0%", "1,000,000", "0", "0", "0", "1"]);
     }
     renderGraph.listenerOf(hit, "onBlur")?.({});
     expect(renderGraph.elementsNamed(root, "output")).toHaveLength(0);
@@ -1034,17 +1076,17 @@ describe("usage chart", () => {
     expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
     renderGraph.listenerOf(legend, "onClick")?.({});
     renderGraph.listenerOf(legend, "onPointerLeave")?.({});
-    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(4);
+    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(5);
     renderGraph.listenerOf(legend, "onFocus")?.({});
     renderGraph.listenerOf(legend, "onPointerEnter")?.({});
     renderGraph.listenerOf(legend, "onPointerLeave")?.({});
     expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
     renderGraph.listenerOf(legend, "onBlur")?.({});
-    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(4);
+    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(5);
     renderGraph.listenerOf(legend, "onFocus")?.({});
     const escapeEvent = { key: "Escape", defaultPrevented: false };
     renderGraph.listenerOf(legend, "onKeyDown")?.(escapeEvent);
-    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(4);
+    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(5);
     expect(paths().map((node) => node.props.d)).toEqual(initialPaths);
     dispose();
   });
@@ -1098,14 +1140,13 @@ describe("usage chart", () => {
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage("7d", [{ startMs: NOW - DAY_MS, endMs: NOW, tokens: costed({ input: 1000 }) }]),
     });
-    // Only a zero-total cache-write series is omitted, never a drawn one: the
-    // zero-thickness neighbours and their legend entries stay.
-    expect(html.match(/qg-chart__segment/g)).toHaveLength(4);
+    // Every series stays present even when only one category is non-zero.
+    expect(html.match(/qg-chart__segment/g)).toHaveLength(5);
     expect(html).not.toContain("totals series");
     expect(html).toContain("Reasoning");
     expect(html).toContain('class="qg-legend__item"');
     expect(html).toContain("Highlight Reasoning");
-    expect(html).not.toContain("Highlight Cache write");
+    expect(html).toContain("Highlight Cache write");
   });
 
   it("duplicates the series in a visually hidden table with five categories plus the total", async () => {
@@ -1117,12 +1158,12 @@ describe("usage chart", () => {
     // width even when the sr-only class requests 1px on the table itself.
     expect(html).toContain('class="sr-only"><table>');
     expect(table).toContain("<caption>");
-    // Bucket plus the five categories plus the total.
-    expect(table.match(/scope="col"/g)?.length).toBe(7);
+    // Bucket plus the five categories plus the cache rate plus the total.
+    expect(table.match(/scope="col"/g)?.length).toBe(8);
     expect(table).toContain("9,250");
   });
 
-  it("reports unpriced tokens instead of quietly shrinking the estimate", async () => {
+  it("puts estimate exclusions behind one info affordance, not in the summary body", async () => {
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage("7d", [
         {
@@ -1135,8 +1176,9 @@ describe("usage chart", () => {
         },
       ]),
     });
-    expect(text(html)).toContain("7 unpriced");
-    expect(text(html)).toContain("3 unknown");
+    expect(text(html)).not.toContain("7 unpriced");
+    expect(text(html)).not.toContain("3 unknown");
+    expect(text(html)).toContain("About the API-equivalent estimate");
   });
 
   it("preserves shared boundaries, exact zero thickness and tiny categories", () => {
@@ -1170,10 +1212,10 @@ describe("usage chart", () => {
     expect(formatApiEquivalentCost(null)).toBe("≈ USD —");
     expect(formatApiEquivalentCost(1.5)).toBe("≈ USD 1.50");
     expect(formatPercent(62)).toBe("62%");
-    expect(formatRunway(undefined)).toBeUndefined();
-    expect(formatRunway({ kind: "lasts_past_reset" })).toBe("Lasts past reset");
+    expect(formatRunway(undefined, "UTC")).toBeUndefined();
+    expect(formatRunway({ kind: "lasts_past_reset" }, "UTC")).toBe("Lasts past reset");
     expect(
-      formatRunway({ kind: "before_reset", projectedAtIso: new Date(NOW).toISOString() }),
+      formatRunway({ kind: "before_reset", projectedAtIso: new Date(NOW).toISOString() }, "UTC"),
     ).toContain("Runs out");
   });
 });
@@ -1217,29 +1259,59 @@ describe("project view composition", () => {
     expect(mixed).toContain("alpha-feature");
   });
 
-  it("marks the current page and keeps the server's root order", async () => {
+  it("keeps metrics in one summary strip, not duplicated in the header", async () => {
+    const html = await renderView("/views/project.tsx", "ProjectView", {
+      snapshot: projectSnapshot(),
+      range: "7d",
+    });
+    const header = html.slice(0, html.indexOf('class="qg-summary"'));
+    expect(header).toContain("alpha-main");
+    expect(text(header)).not.toContain("4 sessions");
+    expect(text(header)).not.toContain("≈ USD");
+    expect(text(header)).not.toContain("tokens");
+    const summary = html.slice(
+      html.indexOf('class="qg-summary"'),
+      html.indexOf('class="qg-usage"'),
+    );
+    expect(text(summary)).toContain("Sessions");
+    expect(summary).toContain(">4</span>");
+    expect(text(html)).toContain("Total tokens");
+    expect(text(html)).toContain("API-equivalent estimate");
+    expect(text(html)).toContain("About the API-equivalent estimate");
+    // The chart carries the semantic title only; the summary strip is the one place
+    // project totals and the estimate are stated.
+    expect(html).toContain('class="qg-chart__title">Daily token usage</span>');
+    expect(html.match(/class="qg-summary-number"/g) ?? []).toHaveLength(0);
+    expect(html.match(/class="qg-summary-cost"/g) ?? []).toHaveLength(0);
+    expect(text(html).match(/≈ USD/g) ?? []).toHaveLength(1);
+  });
+
+  it("marks the current page and keeps the server's activity order", async () => {
     const snapshot = projectSnapshot();
     const html = await renderView("/views/project.tsx", "ProjectView", { snapshot, range: "7d" });
     expect(html).toContain('aria-current="page"');
     expect(html.indexOf(snapshot.roots[0]?.title ?? "")).toBeLessThan(
       html.indexOf(snapshot.roots[1]?.title ?? ""),
     );
-    expect(text(html)).toContain("4 sessions");
-    expect(html).toContain("≈ USD 0.60");
-    expect(text(html)).toContain("2 root sessions");
+    expect(html).toContain('aria-label="Sort sessions"');
+    expect(text(html)).not.toContain("root sessions");
   });
 });
 
 describe("session view composition", () => {
-  it("renders breadcrumbs with the current page marked, the own summary, and tree totals", async () => {
+  it("renders breadcrumbs with the current page marked and the chart summaries", async () => {
     const html = await renderView("/views/session.tsx", "SessionView", {
       snapshot: sessionSnapshot(),
       range: "7d",
     });
     expect(html).toContain('aria-current="page"');
     expect(html).toContain('href="#/session/session-ancestor?range=7d"');
-    expect(text(html)).toContain("own 1,500 tokens");
-    expect(text(html)).toContain("tree 2,900 tokens");
+    expect(text(html)).toContain("Tree total tokens");
+    expect(text(html)).toContain("2,900");
+    expect(text(html)).toContain("This session");
+    expect(text(html)).toContain("1,500");
+    expect(text(html)).not.toContain("own 1,500 tokens");
+    expect(text(html)).not.toContain("tree 2,900 tokens");
     expect(html).toContain("One step is one completed assistant message");
   });
 
@@ -1264,15 +1336,27 @@ describe("session view composition", () => {
     expect(crumbs.match(/aria-current="page"/g)).toHaveLength(1);
   });
 
-  it("makes each tree row the session link and drops the duplicated child list", async () => {
+  it("renders aligned Name | Worktree | Steps | Tokens rows without own/subtree prose", async () => {
     const html = await renderView("/views/session.tsx", "SessionView", {
       snapshot: sessionSnapshot(),
       range: "7d",
     });
-    expect(text(html)).toContain("own 1,500");
-    expect(text(html)).toContain("subtree 2,900");
-    // The row itself is the interactive control: the child is reached through
-    // its own row, and the separate child-link list is gone.
+    expect(text(html)).not.toContain("own 1,500");
+    expect(text(html)).not.toContain("tree 2,900");
+    // Totals stay in the chart summary, not as a prose sentence in the header.
+    expect(text(html)).toContain("Tree total tokens");
+    expect(text(html)).toContain("This session");
+    // Explicit columns replace the old secondary own/subtree sentence.
+    expect(html).toContain('class="qg-nodes__head"');
+    expect(text(html)).toContain("Name");
+    expect(text(html)).toContain("Worktree");
+    expect(text(html)).toContain("Steps");
+    expect(text(html)).toContain("Tokens");
+    expect(html).not.toContain("qg-node__own");
+    expect(text(html)).not.toContain("own 2,900");
+    expect(text(html)).not.toContain("subtree");
+    expect(html).toContain('class="qg-node__steps">3</span>');
+    expect(html).toContain('class="qg-node__steps">2</span>');
     expect(html).toContain('href="#/session/session-child-1?range=7d"');
     expect(html).toContain("alpha-feature");
     expect(html).toContain('data-focus="true"');
@@ -1283,15 +1367,16 @@ describe("session view composition", () => {
     expect(html).toContain('aria-current="page"');
   });
 
-  it("draws compaction markers as ticks, never as steps", async () => {
+  it("draws focus compaction markers as ticks and drops the prose list", async () => {
     const html = await renderView("/views/session.tsx", "SessionView", {
       snapshot: sessionSnapshot(),
       range: "7d",
     });
     expect(html).toContain("qg-chart__marker");
-    expect(html).toContain("Compaction markers");
-    expect(html).toContain("session-root-1");
-    expect(text(html)).toContain("3 steps");
+    expect(html).toContain("Compaction in this session");
+    expect(text(html)).not.toContain("Compaction markers");
+    expect(text(html)).not.toContain("msg-compaction");
+    expect(html).toContain('class="qg-node__steps">3</span>');
   });
 
   it("windows a very large node list without shrinking the totals", async () => {
@@ -1315,8 +1400,8 @@ describe("session view composition", () => {
       range: "7d",
     });
     expect(text(html)).toContain("Show 50 more nodes");
-    expect(text(html)).toContain("tree 999,999 tokens");
-    expect(text(html)).toContain("250 nodes");
+    expect(text(html)).toContain("Tree total tokens");
+    expect(text(html)).toContain("999,999");
   });
 
   it("plots focus-session context separately from a cumulative tree total", () => {
@@ -1393,8 +1478,10 @@ describe("session view composition", () => {
 
     for (const html of [root, subsession]) {
       expect(html).toContain('class="qg-usage qg-usage--session"');
-      expect(html).toContain("Context · focus session (left)");
-      expect(html).toContain("Total consumption · this session tree (right)");
+      expect(html).toContain("Context · focus session");
+      expect(html).toContain("Total consumption · this session tree");
+      expect(html).not.toContain("(left)");
+      expect(html).not.toContain("(right)");
       expect(html).toContain("qg-chart__axis-title--context");
       expect(html).toContain("qg-chart__axis-title--total");
       expect(html).toContain("qg-chart__axis-label--context");
@@ -2075,7 +2162,7 @@ describe("a section follows its payload", () => {
 
   it("renders the new range's numbers after the payload changes", async () => {
     const rig = mountSection({ data: payload("7d", "alpha-7d", 960), loading: false });
-    expect(rig.text()).toContain("7d · per day");
+    expect(rig.text()).toContain("Daily token usage");
     expect(rig.text()).toContain("alpha-7d");
     expect(rig.text()).toContain("Total tokens960");
 
@@ -2084,11 +2171,11 @@ describe("a section follows its payload", () => {
     await settle();
 
     const text = rig.text();
-    expect(text).toContain("24h · per hour");
+    expect(text).toContain("Hourly token usage");
     expect(text).toContain("beta-24h");
     expect(text).toContain("Total tokens480");
     // The previous range's numbers are gone, not merely joined by new ones.
-    expect(text).not.toContain("7d · per day");
+    expect(text).not.toContain("Daily token usage");
     expect(text).not.toContain("alpha-7d");
     expect(text).not.toContain("Total tokens960");
     rig.dispose();
@@ -2262,7 +2349,7 @@ describe("range transitions name the range still on screen", () => {
         [
           ...renderGraph.elementsNamed(root, "div"),
           ...renderGraph.elementsNamed(root, "output"),
-        ].find((node) => node.props.class === "qg-range-notice"),
+        ].find((node) => node.props.class === "qg-range-failure"),
       mainLink: (href) => {
         const main = renderGraph.elementsNamed(root, "main")[0];
         if (!main) return undefined;
@@ -2275,7 +2362,7 @@ describe("range transitions name the range still on screen", () => {
     };
   }
 
-  it("shows a polite status while Analytics keeps the old range on screen", async () => {
+  it("keeps the old range on screen without adding an inline transition row", async () => {
     const oldPayload = analyticsPayload("7d", "alpha-7d", 960);
     const nextPayload = deferred<HomeSnapshot>();
     const requests: RangeKey[] = [];
@@ -2295,14 +2382,11 @@ describe("range transitions name the range still on screen", () => {
       await app.navigate("#/analytics?range=30d");
       expect(requests).toEqual(["7d", "30d"]);
 
-      const notice = app.notice();
-      expect(notice?.tagName).toBe("output");
-      expect(notice?.props["aria-live"]).toBe("polite");
-      expect(notice ? renderGraph.textOf(notice) : "").toBe(
-        "Showing 7 days while updating to 30 days…",
-      );
+      // No inline "Showing X while updating Y" row exists at all.
+      expect(app.text()).not.toContain("Showing 7 days while updating");
+      expect(app.notice()).toBeUndefined();
       // The old payload keeps its own labels and links until the new one lands.
-      expect(app.text()).toContain("7d · per day");
+      expect(app.text()).toContain("Daily token usage");
       expect(app.mainLink("#/project/project-alpha?range=7d")).toBeDefined();
       expect(app.mainLink("#/project/project-alpha?range=30d")).toBeUndefined();
 
@@ -2311,7 +2395,6 @@ describe("range transitions name the range still on screen", () => {
       await settle();
 
       expect(app.notice()).toBeUndefined();
-      expect(app.text()).toContain("30d · per day");
       expect(app.text()).toContain("beta-30d");
       expect(app.text()).not.toContain("alpha-7d");
       expect(app.mainLink("#/project/project-alpha?range=30d")).toBeDefined();
@@ -2346,7 +2429,7 @@ describe("range transitions name the range still on screen", () => {
 
       // The failed range change leaves the last good payload untouched.
       expect(app.text()).toContain("alpha-7d");
-      expect(app.text()).toContain("7d · per day");
+      expect(app.text()).toContain("Daily token usage");
       expect(app.text()).not.toContain("beta-30d");
 
       const alert = app.notice();
@@ -2369,7 +2452,6 @@ describe("range transitions name the range still on screen", () => {
       expect(requests).toHaveLength(beforeRetry + 1);
       expect(requests.at(-1)).toBe("30d");
       expect(pending).toHaveLength(2);
-      expect(app.notice()?.tagName).toBe("output");
 
       const second = pending[1];
       if (!second) throw new Error("Retry did not start a new range request");
@@ -2379,7 +2461,6 @@ describe("range transitions name the range still on screen", () => {
 
       expect(app.notice()).toBeUndefined();
       expect(app.text()).toContain("beta-30d");
-      expect(app.text()).toContain("30d · per day");
     } finally {
       app.dispose();
     }
@@ -2398,11 +2479,8 @@ describe("range transitions name the range still on screen", () => {
       expect(app.text()).toContain("alpha-7d");
 
       await app.navigate("#/project/project-alpha?range=30d");
-      const notice = app.notice();
-      expect(notice?.tagName).toBe("output");
-      expect(notice ? renderGraph.textOf(notice) : "").toBe(
-        "Showing 7 days while updating to 30 days…",
-      );
+      expect(app.notice()).toBeUndefined();
+      expect(app.text()).not.toContain("Showing 7 days while updating");
       // Inside the route, the breadcrumb and rows follow the payload, not the
       // range selector in the chrome.
       expect(app.text()).toContain("root-7d");
@@ -3070,6 +3148,7 @@ describe("response boundary decoding", () => {
         range: "7d",
         window: { sinceMs: 1_699_000_000_000, untilMs: 1_700_000_000_000 },
         bucketUnit: "day",
+        timeZone: "UTC",
         buckets: [{ startMs: 1_699_000_000_000, endMs: 1_700_000_000_000, tokens: costed(150) }],
         totals: costed(150),
         stepCount: 1,
@@ -3325,6 +3404,7 @@ describe("response boundary decoding", () => {
       focusSessionId: "session-root-1",
       projectId: "project-alpha",
       projectName: "Alpha",
+      timeZone: "UTC",
       breadcrumbs: [{ sessionId: "session-root-1", title: "Refactor", isFocus: true }],
       nodes: [
         {
@@ -3400,6 +3480,7 @@ describe("response boundary decoding", () => {
             focusSessionId: "s",
             projectId: "p",
             projectName: "Project",
+            timeZone: "UTC",
             breadcrumbs: [],
             nodes: [],
             steps: [
@@ -3777,15 +3858,19 @@ describe("styles and dependency boundaries", () => {
     expect(styles).toContain("--qg-bg: #0a0a0a");
     expect(styles).toContain("--qg-frame: #161616");
     expect(styles).toContain("--qg-surface: #232323");
-    // Swapped series palette: input uses the former cache-read hue and vice versa.
+    // Cache read is the fixed v1 hue; input keeps the shared console green.
     expect(styles).toContain("--qg-token-input: #618e85");
-    expect(styles).toContain("--qg-token-cache-read: #708fbb");
+    expect(styles).toContain("--qg-token-cache-read: #3b5cf6");
     // Neighbouring series carry a 1px white hairline; zero-thickness series never do.
     expect(styles).toContain("stroke: #ffffff");
+    expect(styles).toContain(".qg-chart__cursor");
+    expect(styles).toContain(".qg-chart__boundary");
     expect(styles).toContain('.qg-chart__segment[data-thin="true"]');
     // Loading motion loops continuously: linear timing, no paused restart.
     expect(styles).toContain("qg-shimmer 1.4s linear infinite");
-    expect(styles).toContain("qg-progress 1.1s linear infinite");
+    expect(styles).toContain("qg-busy-pulse 1.2s ease-in-out infinite");
+    expect(styles).toContain(".qg-busy");
+    expect(styles).not.toContain("qg-progress");
     expect(styles).toContain("1056px");
     expect(styles).toContain(".qg-app:has(.qg-form) .qg-toasts");
     expect(styles).not.toContain(".qg-segmented");

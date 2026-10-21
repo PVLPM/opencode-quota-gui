@@ -23,6 +23,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
   const geometry = createMemo(() => buildSessionChartGeometry(props.snapshot, size));
   const own = () => props.snapshot.ownSummary;
   const tree = () => props.snapshot.treeTotals;
+  const timeZone = () => props.snapshot.timeZone;
 
   const compactionAt = (index: number): SessionCompactionTick[] =>
     geometry().compaction.filter((marker) => marker.stepIndex === index);
@@ -57,7 +58,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
           <span class="qg-summary-label">This session · own tokens</span>
           <span class="qg-summary-cost">{formatExactCount(own().total)}</span>
         </div>
-        <span class="qg-section__meta">Completed steps · UTC</span>
+        <span class="qg-section__meta">Completed steps</span>
       </header>
       <div ref={ref} class="qg-chart">
         <Show
@@ -139,7 +140,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
                   y1={geometry().plot.top}
                   y2={geometry().plot.bottom}
                 >
-                  <title>{`Compaction in ${marker.sessionId} at ${formatTimestamp(marker.atMs)} · marks this session tree`}</title>
+                  <title>{`Compaction in this session at ${formatTimestamp(marker.atMs, timeZone())}`}</title>
                 </line>
               )}
             </For>
@@ -205,12 +206,12 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
                   >
                     <title>
                       {[
-                        `Step ${index() + 1} · ${formatTimestamp(step.atMs)}`,
+                        `Step ${index() + 1} · ${formatTimestamp(step.atMs, timeZone())}`,
                         `Context (focus session): ${contextValue(index()) === undefined ? "—" : formatExactCount(contextValue(index()) as number)}`,
                         `Cumulative (session tree): ${formatExactCount(cumulative())}`,
                         ...markers().map(
                           (marker) =>
-                            `Compaction in ${marker.sessionId} at ${formatTimestamp(marker.atMs)}`,
+                            `Compaction in this session at ${formatTimestamp(marker.atMs, timeZone())}`,
                         ),
                       ].join("\n")}
                     </title>
@@ -231,7 +232,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
                         y={size.height - 8}
                         text-anchor="middle"
                       >
-                        {formatDay(value().atMs)}
+                        {formatDay(value().atMs, timeZone())}
                       </text>
                     )}
                   </Show>
@@ -259,7 +260,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
             <span class="qg-totals__value">{formatExactCount(props.snapshot.steps.length)}</span>
           </div>
           <div class="qg-totals__row">
-            <span class="qg-totals__label">Compactions</span>
+            <span class="qg-totals__label">Compactions (focus session)</span>
             <span class="qg-totals__value">
               {formatExactCount(props.snapshot.compactionMarkers.length)}
             </span>
@@ -269,26 +270,13 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
         <div class="qg-legend">
           <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-token-cache-read)" }}>
             <span class="qg-legend__swatch" aria-hidden="true" />
-            <span class="qg-legend__label">Context · focus session (left)</span>
+            <span class="qg-legend__label">Context · focus session</span>
           </div>
           <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-token-output)" }}>
             <span class="qg-legend__swatch" aria-hidden="true" />
-            <span class="qg-legend__label">Total consumption · this session tree (right)</span>
+            <span class="qg-legend__label">Total consumption · this session tree</span>
           </div>
         </div>
-
-        <Show when={props.snapshot.compactionMarkers.length > 0}>
-          <div class="qg-compaction-list">
-            <span class="qg-muted">Compaction markers</span>
-            <For each={props.snapshot.compactionMarkers}>
-              {(marker) => (
-                <span>
-                  {formatTimestamp(marker.atMs)} · {marker.sessionId}
-                </span>
-              )}
-            </For>
-          </div>
-        </Show>
       </aside>
 
       <div class="sr-only">
@@ -315,7 +303,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
                   <th scope="row">{index() + 1}</th>
                   <td>{step.sessionId}</td>
                   <td>{step.branch}</td>
-                  <td>{new Date(step.atMs).toISOString()}</td>
+                  <td>{formatTimestamp(step.atMs, timeZone())}</td>
                   <td>
                     {contextValue(index()) === undefined
                       ? "—"
@@ -326,7 +314,10 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
                     {compactionAt(index()).length === 0
                       ? "—"
                       : compactionAt(index())
-                          .map((marker) => `${marker.sessionId} at ${formatTimestamp(marker.atMs)}`)
+                          .map(
+                            (marker) =>
+                              `${marker.sessionId} at ${formatTimestamp(marker.atMs, timeZone())}`,
+                          )
                           .join("; ")}
                   </td>
                 </tr>

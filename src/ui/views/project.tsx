@@ -1,26 +1,35 @@
 import type { JSX } from "solid-js";
-import { For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { ProjectSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
+import { EstimateInfo } from "../components/estimate";
+import { SortControl } from "../components/sort-control";
 import { EmptyNotice } from "../components/states";
 import { UsageChart } from "../components/usage-chart";
-import { formatApiEquivalentCost, formatExactCount, formatTokenCount, pluralize } from "../format";
+import {
+  formatApiEquivalentCost,
+  formatExactCount,
+  formatTokenCount,
+  usageChartTitle,
+} from "../format";
 import { formatHash } from "../routing";
+import { sortRootRows } from "../sorting";
 
 /**
  * Project page (design spec §10; R24).
  *
- * Header with the project name, the shared worktree basename when every root
- * agrees on one, the totals strip, and the usage chart; then one row per root
- * with exactly three columns — title, muted worktree basename, tokens. No step
- * count and no latest-activity column: the server already ordered the rows by
- * latest activity, so the frontend never re-sorts.
+ * The header identifies the project (name and the shared worktree basename when
+ * every root agrees); the actual metrics live once in the compact summary strip
+ * below it. Usage keeps the five-series chart; roots are one row per root with
+ * exactly three columns — title, muted worktree, tokens.
  */
 export function ProjectView(props: {
   snapshot: ProjectSnapshot;
   range: RangeKey;
   stale?: boolean;
 }): JSX.Element {
+  const [sortMode, setSortMode] = createSignal<"activity" | "tokens">("activity");
+  const roots = createMemo(() => sortRootRows(props.snapshot.roots, sortMode()));
   const sharedWorktree = (): string | undefined => {
     const labels = props.snapshot.roots
       .map((root) => root.worktreeLabel)
@@ -42,18 +51,42 @@ export function ProjectView(props: {
           <h2 class="qg-section__title" id="qg-project-head">
             {props.snapshot.name}
           </h2>
-          <span class="qg-section__meta">
-            <Show when={sharedWorktree()}>{(worktree) => <span>{worktree()} · </span>}</Show>
-            {formatExactCount(props.snapshot.totals.total)} tokens ·{" "}
-            {formatApiEquivalentCost(props.snapshot.totals.apiEquivalentCostUsd)} ·{" "}
-            {pluralize(props.snapshot.totals.sessionCount, "session")}
-          </span>
+          <Show when={sharedWorktree()}>
+            {(worktree) => <span class="qg-section__meta">{worktree()}</span>}
+          </Show>
         </header>
+        <div class="qg-summary">
+          <div class="qg-summary__item">
+            <span class="qg-summary-label">Total tokens</span>
+            <strong class="qg-summary__value">
+              {formatExactCount(props.snapshot.totals.total)}
+            </strong>
+          </div>
+          <div class="qg-summary__item">
+            <span class="qg-summary-label qg-estimate-label">
+              API-equivalent estimate
+              <EstimateInfo totals={props.snapshot.totals} />
+            </span>
+            <span class="qg-summary__value qg-summary__value--secondary">
+              {formatApiEquivalentCost(props.snapshot.totals.apiEquivalentCostUsd)}
+            </span>
+          </div>
+          <div class="qg-summary__item">
+            <span class="qg-summary-label">Sessions</span>
+            <span class="qg-summary__value qg-summary__value--secondary">
+              {formatExactCount(props.snapshot.totals.sessionCount)}
+            </span>
+          </div>
+        </div>
         <Show
           when={props.snapshot.usage.buckets.length > 0}
           fallback={<EmptyNotice message="No activity in this range." />}
         >
-          <UsageChart usage={props.snapshot.usage} />
+          <UsageChart
+            usage={props.snapshot.usage}
+            title={usageChartTitle(props.snapshot.usage.bucketUnit)}
+            showSummary={false}
+          />
         </Show>
       </section>
 
@@ -62,9 +95,7 @@ export function ProjectView(props: {
           <h2 class="qg-section__title" id="qg-project-roots">
             Sessions
           </h2>
-          <span class="qg-section__meta">
-            {pluralize(props.snapshot.roots.length, "root session")}
-          </span>
+          <SortControl label="sessions" value={sortMode()} onChange={setSortMode} />
         </header>
         <Show
           when={props.snapshot.roots.length > 0}
@@ -76,7 +107,7 @@ export function ProjectView(props: {
               <span>Worktree</span>
               <span>Tokens</span>
             </div>
-            <For each={props.snapshot.roots}>
+            <For each={roots()}>
               {(root) => (
                 <a
                   class="qg-list__row"

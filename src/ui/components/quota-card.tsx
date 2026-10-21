@@ -109,22 +109,27 @@ export function quotaSeverity(usedPercent: number | undefined): "healthy" | "war
   return "healthy";
 }
 
-export function QuotaBar(props: { label: string; used: number }): JSX.Element {
-  const position = () => Math.min(Math.max(props.used, 0), 100);
+export function QuotaBar(props: {
+  label: string;
+  displayPercent: number;
+  displayMode: "used" | "remaining";
+}): JSX.Element {
+  const position = () => Math.min(Math.max(props.displayPercent, 0), 100);
   return (
-    <span class="qg-row__bar" style={{ "--qg-used-position": `${position()}%` }}>
+    <span
+      class="qg-row__bar"
+      data-mode={props.displayMode}
+      style={{ "--qg-fill-position": `${position()}%` }}
+    >
       <meter
         class="sr-only"
-        aria-label={`${props.label} quota used`}
-        min={Math.min(0, props.used)}
-        max={Math.max(100, props.used)}
-        value={props.used}
-        aria-valuetext={`${props.used}% used`}
+        aria-label={`${props.label} quota ${props.displayMode}`}
+        min={0}
+        max={100}
+        value={position()}
+        aria-valuetext={`${position()}% ${props.displayMode}`}
       />
-      <span class="qg-row__bar-used" aria-hidden="true" />
-      <Show when={position() > 0 && position() < 100}>
-        <span class="qg-row__bar-gap" aria-hidden="true" />
-      </Show>
+      <span class="qg-row__bar-fill" aria-hidden="true" />
     </span>
   );
 }
@@ -144,6 +149,7 @@ export function QuotaCardView(props: {
   preferences: DisplayPreferences;
   hiddenRows: string[];
   stale: boolean;
+  timeZone: string;
 }): JSX.Element {
   /**
    * Visibility is presentation-only and managed in Settings, never on Home.
@@ -230,13 +236,27 @@ export function QuotaCardView(props: {
                 <Show when={row.countdown}>
                   <span class="qg-row__reset">Resets in {row.countdown}</span>
                 </Show>
-                <Show when={quotaUsedPercent(row) !== undefined}>
-                  <QuotaBar label={row.label} used={quotaUsedPercent(row) ?? 0} />
+                <Show when={rowPercent(row, props.preferences) !== undefined}>
+                  <QuotaBar
+                    label={row.label}
+                    displayPercent={rowPercent(row, props.preferences) ?? 0}
+                    displayMode={props.preferences.percentMode}
+                  />
                 </Show>
-                <Show when={props.preferences.showRunway ? formatRunway(row.runway) : undefined}>
+                <Show
+                  when={
+                    props.preferences.showRunway
+                      ? formatRunway(row.runway, props.timeZone)
+                      : undefined
+                  }
+                >
                   <span class="qg-row__meta">
                     <Show
-                      when={props.preferences.showRunway ? formatRunway(row.runway) : undefined}
+                      when={
+                        props.preferences.showRunway
+                          ? formatRunway(row.runway, props.timeZone)
+                          : undefined
+                      }
                     >
                       {(runway) => <span>{runway()}</span>}
                     </Show>

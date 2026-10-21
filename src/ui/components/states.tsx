@@ -62,10 +62,6 @@ export function Skeleton(props: { lines?: number; label?: string }): JSX.Element
   );
 }
 
-export function ProgressLine(props: { active: boolean }): JSX.Element {
-  return <Show when={props.active}>{<div class="qg-progress" role="presentation" />}</Show>;
-}
-
 export function EmptyNotice(props: { message: string; children?: JSX.Element }): JSX.Element {
   return (
     <div class="qg-empty">

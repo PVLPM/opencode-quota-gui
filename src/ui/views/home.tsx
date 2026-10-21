@@ -1,12 +1,20 @@
 import type { JSX } from "solid-js";
-import { For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { HomeSnapshot, QuotaSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
 import { type DisplayPreferences, QuotaCardView } from "../components/quota-card";
+import { SortControl } from "../components/sort-control";
 import { EmptyNotice, Skeleton } from "../components/states";
 import { UsageChart } from "../components/usage-chart";
-import { formatExactCount, formatTimestamp, formatTokenCount, pluralize } from "../format";
+import {
+  formatExactCount,
+  formatTimestamp,
+  formatTokenCount,
+  pluralize,
+  usageChartTitle,
+} from "../format";
 import { formatHash } from "../routing";
+import { sortProjectRows } from "../sorting";
 import {
   describeEmptyActivity,
   describeNoProviders,
@@ -39,7 +47,7 @@ export function QuotaView(props: {
             Quota
           </h2>
           <span class="qg-section__meta">
-            Polled {formatTimestamp(props.snapshot.providers.polledAtMs)} ·{" "}
+            Polled {formatTimestamp(props.snapshot.providers.polledAtMs, props.snapshot.timeZone)} ·{" "}
             {props.snapshot.providers.enabledProviders === "auto"
               ? "automatic provider selection"
               : pluralize(props.snapshot.providers.enabledProviders.length, "enabled provider")}
@@ -65,6 +73,7 @@ export function QuotaView(props: {
                   preferences={props.preferences}
                   hiddenRows={props.hiddenRows}
                   stale={props.stale}
+                  timeZone={props.snapshot.timeZone}
                 />
               )}
             </For>
@@ -91,16 +100,15 @@ export function QuotaLoading(): JSX.Element {
 }
 
 export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JSX.Element {
+  const [sortMode, setSortMode] = createSignal<"activity" | "tokens">("activity");
+  const projects = createMemo(() => sortProjectRows(props.snapshot.projects, sortMode()));
   return (
     <>
       <section class="qg-section" aria-labelledby="qg-home-usage">
         <header class="qg-section__head">
           <h2 class="qg-section__title" id="qg-home-usage">
-            Usage
+            {usageChartTitle(props.snapshot.usage.bucketUnit)}
           </h2>
-          <span class="qg-section__meta qg-bucket-label">
-            {props.snapshot.usage.range} · per {props.snapshot.usage.bucketUnit} · UTC
-          </span>
         </header>
         <Show
           when={props.snapshot.usage.buckets.length > 0}
@@ -117,9 +125,7 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
           <h2 class="qg-section__title" id="qg-home-projects">
             Projects
           </h2>
-          <span class="qg-section__meta">
-            {pluralize(props.snapshot.projects.length, "project")} with in-range activity
-          </span>
+          <SortControl label="projects" value={sortMode()} onChange={setSortMode} />
         </header>
         <Show
           when={props.snapshot.projects.length > 0}
@@ -132,7 +138,7 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
               <span>Project</span>
               <span>Tokens</span>
             </div>
-            <For each={props.snapshot.projects}>
+            <For each={projects()}>
               {(project) => (
                 <a
                   class="qg-list__row"
