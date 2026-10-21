@@ -59,31 +59,31 @@ export function formatPercent(value: number | undefined): string {
   return `${value.toFixed(value < 10 ? 1 : 0)}%`;
 }
 
-/** UTC throughout: the analytics server's day boundaries are UTC too. */
-export function formatTimestamp(ms: number | undefined): string {
+/** Formats in the explicit host zone supplied by the payload; never the browser default. */
+export function formatTimestamp(ms: number | undefined, timeZone: string): string {
   if (ms === undefined || !Number.isFinite(ms)) return "—";
-  return new Date(ms).toLocaleString("en-GB", { timeZone: "UTC", timeZoneName: "short" });
+  return new Date(ms).toLocaleString("en-GB", { timeZone });
 }
 
-export function formatClock(ms: number): string {
+export function formatClock(ms: number, timeZone: string): string {
   return new Date(ms).toLocaleTimeString("en-GB", {
-    timeZone: "UTC",
+    timeZone,
     hour: "2-digit",
     minute: "2-digit",
   });
 }
 
-export function formatDay(ms: number): string {
+export function formatDay(ms: number, timeZone: string): string {
   return new Date(ms).toLocaleDateString("en-GB", {
-    timeZone: "UTC",
+    timeZone,
     month: "short",
     day: "numeric",
   });
 }
 
 /** Bucket ticks follow the bucket unit the server reported (R28–R30). */
-export function formatBucketTick(ms: number, unit: "hour" | "day"): string {
-  return unit === "hour" ? formatClock(ms) : formatDay(ms);
+export function formatBucketTick(ms: number, unit: "hour" | "day", timeZone: string): string {
+  return unit === "hour" ? formatClock(ms, timeZone) : formatDay(ms, timeZone);
 }
 
 export function formatRunway(
@@ -91,12 +91,18 @@ export function formatRunway(
     | { kind: "before_reset"; projectedAtIso: string }
     | { kind: "lasts_past_reset" }
     | undefined,
+  timeZone: string,
 ): string | undefined {
   if (!runway) return undefined;
   if (runway.kind === "lasts_past_reset") return "Lasts past reset";
   const projected = Date.parse(runway.projectedAtIso);
   if (!Number.isFinite(projected)) return "Runs out before reset";
-  return `Runs out ${formatTimestamp(projected)}`;
+  return `Runs out ${formatTimestamp(projected, timeZone)}`;
+}
+
+/** Concise, truthful title: Lifetime is day-bucketed too. */
+export function usageChartTitle(unit: "hour" | "day"): string {
+  return unit === "hour" ? "Hourly token usage" : "Daily token usage";
 }
 
 export const RANGE_LABELS: Record<string, string> = {

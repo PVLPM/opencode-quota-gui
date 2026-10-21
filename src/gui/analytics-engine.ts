@@ -46,6 +46,7 @@ import {
   saveAnalyticsSnapshot,
   type WarmAnalyticsPresentation,
 } from "./analytics-state.js";
+import { resolveHostTimeZone } from "./time-zone.js";
 
 export const ANALYTICS_REFRESH_INTERVAL_MS = 600_000;
 /** Explicit, rare full reconciliation cadence (persisted across restarts). */
@@ -111,6 +112,8 @@ export interface AnalyticsEngineOptions {
   saveSnapshot?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
   loadPresentation?: (path: string) => Promise<WarmAnalyticsPresentation | undefined>;
   savePresentation?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
+  /** Host calendar zone; defaults to the machine running the worker. */
+  timeZone?: string;
   /** Host notification after a refresh produced a new data generation. */
   onGeneration?: (generation: number) => void;
   /** Bound on draining queued persistence during close. */
@@ -320,6 +323,7 @@ function revisionCompletedAt(revision: { type: string; completedAtMs: number | n
 export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): AnalyticsEngine {
   const reader = options.reader ?? createAnalyticsReader();
   const now = options.now ?? Date.now;
+  const timeZone = options.timeZone ?? resolveHostTimeZone();
   const snapshotPath = options.snapshotPath ?? defaultAnalyticsSnapshotPath();
   const refreshIntervalMs =
     options.refreshIntervalMs !== undefined && Number.isFinite(options.refreshIntervalMs)
@@ -381,7 +385,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     return metrics;
   }
 
-  const model: AnalyticsModel = createAnalyticsModel();
+  const model: AnalyticsModel = createAnalyticsModel({ timeZone });
   const indexes = createAnalyticsIndexes();
   let state = emptyState();
   let lastSessionIndexSignature = "";
@@ -773,7 +777,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const entry = state.presentation?.project.find(
       ([id, entryRange]) => id === projectId && entryRange === range,
     );
-    return entry?.[2];
+    const snapshot = entry?.[2];
+    return snapshot?.usage.timeZone === timeZone ? snapshot : undefined;
   }
 
   function projectScopeCovered(projectId: string, range: RangeKey, atMs: number): boolean {
@@ -821,7 +826,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
   function cachedSession(sessionId: string): SessionSnapshot | undefined {
     const entry = state.presentation?.session?.find(([id]) => id === sessionId);
-    return entry?.[1];
+    const snapshot = entry?.[1];
+    return snapshot?.timeZone === timeZone ? snapshot : undefined;
   }
 
   /** Cache a fresh session DTO as the newest LRU entry (oldest-first order). */
@@ -1105,7 +1111,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (!coversSince(rangeWindow("30d", atMs).sinceMs, state.extent)) return;
     let changed = false;
     for (const range of HOME_PRECOMPUTE_RANGES) {
-      if (state.presentation?.home[range] !== undefined) continue;
+      const cachedHome = state.presentation?.home[range];
+      if (cachedHome !== undefined && cachedHome.usage.timeZone === timeZone) continue;
+      if (cachedHome !== undefined) delete state.presentation?.home[range];
       const certified = homeCertifiedSyncAtMs(range, atMs);
       if (certified === undefined) continue;
       setHomeCache(range, deriveHomeSnapshot(range, certified));
@@ -2376,7 +2384,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const atMs = now();
       const window = rangeWindow(range, atMs);
       lastGlobalRange.value = widerRange(lastGlobalRange.value, range);
-      const cached = state.presentation?.home[range];
+      const cachedEntry = state.presentation?.home[range];
+      const cached = cachedEntry?.usage.timeZone === timeZone ? cachedEntry : undefined;
       if (cached && (await warmCacheAllowed())) {
         let current = cached;
         let expired = false;
@@ -2446,15 +2455,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         let current = cached;
         let expired = false;
         const certified = projectCertifiedSyncAtMs(projectId, range, atMs);
-        if (
-          range !== "lifetime" &&
-          certified !== undefined &&
-          current.usage.window.untilMs < certified
-        ) {
+        if (certified !== undefined && current.usage.window.untilMs < certified) {
           if (modelHydrated && !modelDirty) {
             current = deriveProjectSnapshot(projectId, range, certified);
             cacheProject(current, atMs);
-          } else {
+          } else if (range !== "lifetime") {
             const presentation = state.presentation;
             if (presentation) {
               presentation.project = presentation.project.filter(
@@ -2555,7 +2560,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       // scoped tree plus global owner candidates instead of duplicating it.
       try {
         const result = measureSync("dtoAggregation", () =>
-          createUsageAnalytics(sessionDataset(sessionId)).session(sessionId),
+          createUsageAnalytics(sessionDataset(sessionId), { timeZone }).session(sessionId),
         );
         cacheSession(sessionId, result, now());
         return result;

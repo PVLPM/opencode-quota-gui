@@ -3,10 +3,16 @@
  *
  * Browser-safe: no Node, no DOM, no `src/lib` imports. Finite ranges are exact
  * rolling intervals `[nowMs - duration, nowMs)`; interior bucket boundaries are
- * UTC-aligned; a partial edge bucket is clipped to the window. `lifetime` uses
- * daily buckets from the earliest activity and has no fixed bucket count; with
- * no activity at all it returns one bucket for the current UTC day.
+ * aligned to the **host machine's** local clock. A partial edge bucket is
+ * clipped to the window. `lifetime` uses daily buckets from the earliest
+ * activity and has no fixed bucket count.
+ *
+ * `timeZone` is always supplied by the caller in production (the Node host
+ * resolves it once). The `"UTC"` default exists only so pure contract tests are
+ * deterministic; it is not a UI convention.
  */
+
+import { nextZonedUnitStart, startOfZonedUnit } from "./time-zone.js";
 
 export const RANGE_KEYS = ["24h", "7d", "30d", "lifetime"] as const;
 
@@ -27,8 +33,12 @@ export interface RangeBucketBoundary {
   endMs: number;
 }
 
-const HOUR_MS = 3_600_000;
-const DAY_MS = 24 * HOUR_MS;
+export interface RangeBucketOptions {
+  /** IANA zone of the machine hosting the plugin. Production always passes it. */
+  timeZone?: string;
+}
+
+const DAY_MS = 24 * 3_600_000;
 
 const RANGE_DURATION_MS: Record<Exclude<RangeKey, "lifetime">, number> = {
   "24h": DAY_MS,
@@ -59,46 +69,50 @@ export function rangeWindow(range: RangeKey, nowMs: number): RangeWindow {
   return { sinceMs: nowMs - duration, untilMs: nowMs };
 }
 
-/** Epoch milliseconds rounded down to a UTC-aligned multiple (hours or days). */
-function utcFloor(ms: number, unitMs: number): number {
-  return Math.floor(ms / unitMs) * unitMs;
-}
+/** Guard against a pathological input producing an unbounded bucket array. */
+const MAX_BUCKETS = 200_000;
 
 /**
- * Plans the UTC-aligned bucket boundaries a range renders, ready for P3 to
- * zero-fill. Finite ranges cover the exact rolling window, so `24h` renders
- * 24 or 25 hourly buckets and the daily ranges render 7/8, 30/31, or a
- * data-dependent number of lifetime buckets — never a fixed cap.
+ * Plans the host-local bucket boundaries a range renders, ready for P3 to
+ * zero-fill. Finite ranges cover the exact rolling window, so `24h` renders 24
+ * hourly buckets (a local hour label may repeat or be skipped), and the daily
+ * ranges render 7/8, 30/31, or a data-dependent number of lifetime buckets —
+ * never a fixed cap. Daily buckets across a DST transition are 23/25 hours long.
  *
  * `earliestMs` is the earliest known activity (P3 supplies it for `lifetime`);
- * without it the forever range returns one bucket for the current UTC day.
+ * without it the forever range returns one bucket for the current local day.
  */
 export function planRangeBuckets(
   range: RangeKey,
   nowMs: number,
   earliestMs?: number,
+  options: RangeBucketOptions = {},
 ): RangeBucketBoundary[] {
   if (!Number.isFinite(nowMs)) {
     throw new RangeError("nowMs must be a finite epoch-millisecond timestamp");
   }
 
-  const unitMs = rangeBucketUnit(range) === "hour" ? HOUR_MS : DAY_MS;
+  const timeZone = options.timeZone ?? "UTC";
+  const unit = rangeBucketUnit(range);
   const window = rangeWindow(range, nowMs);
   const lifetimeStartMs =
     earliestMs !== undefined && Number.isFinite(earliestMs) && earliestMs < nowMs
       ? earliestMs
       : nowMs;
-  const firstStartMs =
-    window.sinceMs === undefined
-      ? utcFloor(lifetimeStartMs, unitMs)
-      : utcFloor(window.sinceMs, unitMs);
+  const anchor = window.sinceMs ?? lifetimeStartMs;
+  const firstStartMs = startOfZonedUnit(anchor, unit, timeZone);
 
   const buckets: RangeBucketBoundary[] = [];
-  for (let startMs = firstStartMs; startMs < nowMs; startMs += unitMs) {
+  let startMs = firstStartMs;
+  for (let guard = 0; startMs < nowMs && guard < MAX_BUCKETS; guard += 1) {
+    const nextStartMs = nextZonedUnitStart(startMs, unit, timeZone);
+    const endMs = Math.min(nextStartMs, nowMs);
     buckets.push({
       startMs: Math.max(startMs, window.sinceMs ?? startMs),
-      endMs: Math.min(startMs + unitMs, nowMs),
+      endMs,
     });
+    if (nextStartMs <= startMs) break;
+    startMs = nextStartMs;
   }
 
   if (buckets.length === 0) {

@@ -60,8 +60,18 @@ describe("independent browser quota transport", () => {
       enabledProviders: "auto",
       polledAtMs: NOW,
     };
-    const snapshot = parseQuotaSnapshot({ generatedAtMs: NOW, stale: false, providers });
-    expect(snapshot).toEqual({ generatedAtMs: NOW, stale: false, providers });
+    const snapshot = parseQuotaSnapshot({
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers,
+    });
+    expect(snapshot).toEqual({
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers,
+    });
     expect(snapshot).not.toHaveProperty("usage");
     expect(snapshot).not.toHaveProperty("projects");
   });
@@ -72,6 +82,7 @@ describe("independent browser quota transport", () => {
     const payload = {
       generatedAtMs: NOW,
       stale: false,
+      timeZone: "UTC",
       providers: {
         ...snapshot.providers,
         cards: snapshot.providers.cards.map((card) => ({
@@ -104,6 +115,7 @@ describe("independent browser quota transport", () => {
         return Response.json({
           generatedAtMs: NOW,
           stale: true,
+          timeZone: "UTC",
           providers: homeSnapshot().providers,
         });
       },

@@ -214,8 +214,9 @@ describe("step semantics", () => {
     });
 
     const snapshot = createUsageAnalytics(dataset).session("ses_f");
+    // Compaction markers annotate the focus session only; descendants and
+    // unrelated sessions never contribute ticks to this chart.
     expect(snapshot.compactionMarkers).toEqual([
-      { sessionId: "ses_c", atMs: 150, messageId: "msg_c" },
       { sessionId: "ses_f", atMs: 200, messageId: "msg_a" },
       { sessionId: "ses_f", atMs: 200, messageId: "msg_z" },
     ]);

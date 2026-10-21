@@ -434,6 +434,7 @@ function readUsage(value: JsonValue | undefined, endpoint: string): Usage {
     range: readRangeKey(usage.range, endpoint, `${detail}.range`),
     window: readRangeWindow(usage.window, endpoint),
     bucketUnit: readEnum(usage.bucketUnit, BUCKET_UNITS, endpoint, `${detail}.bucketUnit`),
+    timeZone: readText(usage.timeZone, endpoint, `${detail}.timeZone`),
     buckets: readArray(usage.buckets, endpoint, `${detail}.buckets`).map((bucket) =>
       readBucket(bucket, endpoint),
     ),
@@ -451,6 +452,7 @@ export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota")
   return {
     generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
     stale: readBoolean(root.stale, endpoint, "stale"),
+    timeZone: readText(root.timeZone, endpoint, "timeZone"),
     providers: {
       cards: readArray(providers.cards, endpoint, "providers.cards").map((card) =>
         readCard(card, endpoint),
@@ -603,6 +605,7 @@ export function parseSessionSnapshot(value: JsonValue, endpoint: string): Sessio
   const ownSummary = readCostedTokens(ownSummaryRecord, endpoint, "ownSummary");
   return {
     focusSessionId: readText(root.focusSessionId, endpoint, "focusSessionId"),
+    timeZone: readText(root.timeZone, endpoint, "timeZone"),
     projectId: readText(root.projectId, endpoint, "projectId"),
     projectName: readText(root.projectName, endpoint, "projectName"),
     breadcrumbs: readArray(root.breadcrumbs, endpoint, "breadcrumbs").map((entry) =>

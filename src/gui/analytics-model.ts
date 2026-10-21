@@ -246,7 +246,13 @@ export interface AnalyticsModel {
   ownedStepCount(): number;
 }
 
-export function createAnalyticsModel(): AnalyticsModel {
+/** Host calendar zone used for every bucket boundary in this model. */
+export interface AnalyticsModelOptions {
+  timeZone?: string;
+}
+
+export function createAnalyticsModel(options: AnalyticsModelOptions = {}): AnalyticsModel {
+  const timeZone = options.timeZone ?? "UTC";
   const pricingCache = new Map<string, PricingResolution>();
   const groups = new Map<string, GroupOccurrence[]>();
   const ownedByFp = new Map<string, Map<string, OwnedStep>>();
@@ -742,9 +748,14 @@ export function createAnalyticsModel(): AnalyticsModel {
     return { totals, stepCount, sessions: sessionsSet };
   }
 
-  function buildUsage(range: RangeKey, nowMs: number, options: SumOptions = {}): Usage {
+  function buildUsage(
+    range: RangeKey,
+    nowMs: number,
+    options: SumOptions = {},
+    earliestMs: number | undefined = earliestActivity(),
+  ): Usage {
     const window = rangeWindow(range, nowMs);
-    const boundaries = planRangeBuckets(range, nowMs, earliestActivity());
+    const boundaries = planRangeBuckets(range, nowMs, earliestMs, { timeZone });
     const buckets = boundaries.map((boundary) => {
       const sum = accumulateRange(boundary.startMs, boundary.endMs, {
         ...options,
@@ -761,6 +772,7 @@ export function createAnalyticsModel(): AnalyticsModel {
       range,
       window,
       bucketUnit: rangeBucketUnit(range),
+      timeZone,
       buckets,
       totals: finalize(totals.totals),
       stepCount: totals.stepCount,
@@ -806,6 +818,26 @@ export function createAnalyticsModel(): AnalyticsModel {
         latest = candidate;
     }
     return latest;
+  }
+
+  /**
+   * Earliest activity belonging to one project, below `nowMs`. A project
+   * lifetime graph starts here — never at the first global activity, which may
+   * predate the project by months.
+   */
+  function projectEarliestActivity(projectId: string, nowMs: number): number | undefined {
+    let earliest: number | undefined;
+    const consider = (value: number | undefined) => {
+      if (value === undefined || !Number.isFinite(value) || value >= nowMs) return;
+      if (earliest === undefined || value < earliest) earliest = value;
+    };
+    for (const sessionId of sessionsByProject.get(projectId) ?? []) {
+      const session = sessions[sessionId];
+      consider(session?.time?.created);
+      consider(session?.time?.updated);
+      consider(earliestStepBySession.get(sessionId));
+    }
+    return earliest;
   }
 
   function projectName(projectId: string): string {
@@ -857,7 +889,12 @@ export function createAnalyticsModel(): AnalyticsModel {
 
   function project(projectId: string, range: RangeKey, nowMs: number): ProjectSnapshot {
     const window = rangeWindow(range, nowMs);
-    const usage = buildUsage(range, nowMs, { projectId });
+    const usage = buildUsage(
+      range,
+      nowMs,
+      { projectId },
+      projectEarliestActivity(projectId, nowMs),
+    );
     const roots: ProjectRootRow[] = [];
     for (const tree of treesFor(projectId)) {
       const latest = treeLatestInWindow(tree, window);

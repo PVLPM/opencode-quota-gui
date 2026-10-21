@@ -25,6 +25,7 @@ function homeFor(range: RangeKey, input: number): HomeSnapshot {
       range,
       window: range === "lifetime" ? { untilMs: NOW } : { sinceMs: NOW - 3_600_000, untilMs: NOW },
       bucketUnit: "hour",
+      timeZone: "UTC",
       buckets: [],
       totals: {
         input,

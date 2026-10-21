@@ -88,6 +88,11 @@ export interface UsageAnalytics {
   session(sessionId: string): SessionSnapshot;
 }
 
+/** Calendar zone for bucket boundaries and DTO formatting (host zone in production). */
+export interface UsageAnalyticsOptions {
+  timeZone?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Small deterministic helpers
 // ---------------------------------------------------------------------------
@@ -570,9 +575,10 @@ function buildUsage(
   nowMs: number,
   steps: readonly OwnedStep[],
   earliestMs: number | undefined,
+  timeZone: string,
 ): Usage {
   const window = rangeWindow(range, nowMs);
-  const boundaries = planRangeBuckets(range, nowMs, earliestMs);
+  const boundaries = planRangeBuckets(range, nowMs, earliestMs, { timeZone });
   const bucketAccumulators = boundaries.map(() => createAccumulator());
   const totals = createAccumulator();
   const pricingCache = new Map<string, PricingResolution>();
@@ -589,6 +595,7 @@ function buildUsage(
     range,
     window,
     bucketUnit: rangeBucketUnit(range),
+    timeZone,
     buckets: boundaries.map((boundary, index) => ({
       startMs: boundary.startMs,
       endMs: boundary.endMs,
@@ -622,7 +629,12 @@ function compareProjectRows(a: ProjectActivityRow, b: ProjectActivityRow): numbe
   return compareIds(a.projectId, b.projectId);
 }
 
-function buildHome(model: AnalyticsModel, range: RangeKey, nowMs: number): HomeAnalytics {
+function buildHome(
+  model: AnalyticsModel,
+  range: RangeKey,
+  nowMs: number,
+  timeZone: string,
+): HomeAnalytics {
   const window = rangeWindow(range, nowMs);
   const scopedSteps = model.ownedSteps.filter((step) => inWindow(step.timeMs, window));
   const earliestMs = earliestActivityMs(
@@ -631,7 +643,7 @@ function buildHome(model: AnalyticsModel, range: RangeKey, nowMs: number): HomeA
     model.ownedSteps,
     nowMs,
   );
-  const usage = buildUsage(range, nowMs, scopedSteps, earliestMs);
+  const usage = buildUsage(range, nowMs, scopedSteps, earliestMs, timeZone);
 
   const projects: ProjectActivityRow[] = [];
   for (const projectId of model.projectIds) {
@@ -680,6 +692,7 @@ function buildProject(
   projectId: string,
   range: RangeKey,
   nowMs: number,
+  timeZone: string,
 ): ProjectSnapshot {
   if (!model.projectIdSet.has(projectId)) {
     throw new AnalyticsNotFoundError("project", projectId);
@@ -694,7 +707,7 @@ function buildProject(
     projectSteps,
     nowMs,
   );
-  const usage = buildUsage(range, nowMs, scopedSteps, earliestMs);
+  const usage = buildUsage(range, nowMs, scopedSteps, earliestMs, timeZone);
 
   const pricingCache = new Map<string, PricingResolution>();
   const roots: ProjectRootRow[] = [];
@@ -757,7 +770,11 @@ function sessionOwnLatestMs(model: AnalyticsModel, sessionId: string): number {
   return latest;
 }
 
-function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): SessionSnapshot {
+function buildSessionSnapshot(
+  model: AnalyticsModel,
+  sessionId: string,
+  timeZone: string,
+): SessionSnapshot {
   const focus = model.dataset.sessions[sessionId];
   if (!focus) throw new AnalyticsNotFoundError("session", sessionId);
   const focusProjectId = projectIdOf(focus);
@@ -840,7 +857,6 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
     return node;
   });
 
-  const treeIds = new Set(order.map((node) => node.id));
   const steps: StepPoint[] = [];
   for (const { id } of order) {
     const branch = nodeIndex.get(id)!;
@@ -879,8 +895,11 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
   const treeTotals = createAccumulator();
   for (const node of order) mergeAccumulator(treeTotals, ownAccumulators.get(node.id)!);
 
+  // Markers explain drops in the blue focus-context series, so only the focus
+  // session's own compactions belong here. A descendant compaction is not a
+  // context drop on this page and must never be drawn as one.
   const compactionMarkers = model.dataset.compactions
-    .filter((marker) => treeIds.has(marker.sessionId))
+    .filter((marker) => marker.sessionId === sessionId)
     .sort((a, b) => a.atMs - b.atMs || compareIds(a.messageId, b.messageId))
     .map((marker) => ({
       sessionId: marker.sessionId,
@@ -909,6 +928,7 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
 
   return {
     focusSessionId: sessionId,
+    timeZone,
     projectId: focusProjectId,
     projectName: focusProjectName,
     breadcrumbs,
@@ -928,11 +948,15 @@ function buildSessionSnapshot(model: AnalyticsModel, sessionId: string): Session
  * The one P3 analytics factory: pure Node/in-memory over a raw dataset.
  * Reading the database, config, or user state is the caller's job.
  */
-export function createUsageAnalytics(dataset: UsageAnalyticsDataset): UsageAnalytics {
+export function createUsageAnalytics(
+  dataset: UsageAnalyticsDataset,
+  options: UsageAnalyticsOptions = {},
+): UsageAnalytics {
+  const timeZone = options.timeZone ?? "UTC";
   const model = buildAnalyticsModel(dataset);
   return {
-    home: (range, nowMs) => buildHome(model, range, nowMs),
-    project: (projectId, range, nowMs) => buildProject(model, projectId, range, nowMs),
-    session: (sessionId) => buildSessionSnapshot(model, sessionId),
+    home: (range, nowMs) => buildHome(model, range, nowMs, timeZone),
+    project: (projectId, range, nowMs) => buildProject(model, projectId, range, nowMs, timeZone),
+    session: (sessionId) => buildSessionSnapshot(model, sessionId, timeZone),
   };
 }

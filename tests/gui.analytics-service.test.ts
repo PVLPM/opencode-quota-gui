@@ -37,6 +37,7 @@ function homeFor(range: RangeKey): HomeSnapshot {
       range,
       window: range === "lifetime" ? { untilMs: NOW } : { sinceMs: NOW - DAY, untilMs: NOW },
       bucketUnit: range === "24h" ? "hour" : "day",
+      timeZone: "UTC",
       buckets: [],
       totals: costed(1),
       stepCount: 1,

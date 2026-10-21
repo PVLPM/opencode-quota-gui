@@ -105,6 +105,12 @@ export interface Usage {
   range: RangeKey;
   window: RangeWindow;
   bucketUnit: BucketUnit;
+  /**
+   * IANA zone of the machine that owns the calendar buckets. Every bucket
+   * boundary is that zone's local hour/day; the browser must format with this
+   * zone rather than its own.
+   */
+  timeZone: string;
   buckets: Bucket[];
   totals: CostedTokens;
   stepCount: number;
@@ -172,6 +178,8 @@ export interface HomeSnapshot {
 export interface QuotaSnapshot {
   generatedAtMs: number;
   stale: boolean;
+  /** Host zone used to format `polledAtMs` and quota reset timestamps. */
+  timeZone: string;
   providers: HomeSnapshot["providers"];
 }
 
@@ -222,6 +230,8 @@ export interface StepPoint {
 
 export interface SessionSnapshot {
   focusSessionId: string;
+  /** Host zone used to format every step/compaction timestamp. */
+  timeZone: string;
   /** Owning project of the focus session; the explicit parent crumb above session ancestors. */
   projectId: string;
   projectName: string;

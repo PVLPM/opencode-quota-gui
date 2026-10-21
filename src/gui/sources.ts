@@ -47,6 +47,7 @@ import {
   PROVIDER_SCOPE_IDENTITY_KEY,
 } from "./identity.js";
 import { buildProviderCards, type ProviderCardPreferences } from "./provider-cards.js";
+import { resolveHostTimeZone } from "./time-zone.js";
 
 /**
  * Controlled source error codes the HTTP layer maps to status codes
@@ -85,6 +86,8 @@ export interface DashboardReadSourceOptions {
   configDir?: string;
   /** Clock for one snapshot read; defaults to `Date.now`. */
   now?: () => number;
+  /** Host calendar zone for DTO formatting; defaults to the machine zone. */
+  timeZone?: string;
   loadConfig?: () => Promise<QuotaToastConfig>;
   /** Test seam: per-request in-memory dataset (never the production default). */
   loadDataset?: () => Promise<UsageAnalyticsDataset>;
@@ -193,6 +196,7 @@ export function createDashboardReadSource(
   options: DashboardReadSourceOptions,
 ): DashboardReadSource {
   const now = options.now ?? Date.now;
+  const timeZone = options.timeZone ?? resolveHostTimeZone();
 
   // -------------------------------------------------------------------------
   // Lazy analytics service
@@ -220,7 +224,9 @@ export function createDashboardReadSource(
   }
 
   function createLegacyAnalyticsService(): DashboardAnalyticsService {
-    const createAnalytics = options.createAnalytics ?? createUsageAnalytics;
+    const createAnalytics =
+      options.createAnalytics ??
+      ((dataset: UsageAnalyticsDataset) => createUsageAnalytics(dataset, { timeZone }));
     const loadDataset = options.loadDataset;
     if (!loadDataset) throw new Error("Analytics dataset seam unavailable");
 
@@ -402,6 +408,7 @@ export function createDashboardReadSource(
       const snapshot: QuotaSnapshot = {
         generatedAtMs: nowMs,
         stale: merged.substituted,
+        timeZone,
         providers: {
           cards,
           enabledProviders: config.enabledProviders,

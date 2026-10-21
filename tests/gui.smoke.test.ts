@@ -299,7 +299,12 @@ describe("synthetic GUI smoke", () => {
       "msg_a_c1_week",
       "msg_a_c1_recent",
     ]);
-    expect(session.body.compactionMarkers.map((marker) => marker.messageId)).toEqual([
+    // Compaction ticks annotate the focus session only; a descendant's marker
+    // never appears on the ancestor's chart.
+    expect(session.body.compactionMarkers).toEqual([]);
+    const child = await requestJson<SessionPayload>(apiUrl("/sessions/ses_alpha_child2"));
+    expect(child.status).toBe(200);
+    expect(child.body.compactionMarkers.map((marker) => marker.messageId)).toEqual([
       "msg_compaction_c2",
     ]);
     expect(session.body.ownSummary.stepCount).toBe(2);

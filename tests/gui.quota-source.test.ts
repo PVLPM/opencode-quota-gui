@@ -57,6 +57,7 @@ function homeSnapshot(): HomeSnapshot {
       range: "7d",
       window: rangeWindow("7d", NOW),
       bucketUnit: rangeBucketUnit("7d"),
+      timeZone: "UTC",
       buckets: planRangeBuckets("7d", NOW).map((bucket) => ({ ...bucket, tokens: costed(0) })),
       totals: costed(7),
       stepCount: 1,

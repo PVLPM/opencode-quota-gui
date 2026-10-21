@@ -19,6 +19,7 @@ import {
   rowKey,
   type WarmAnalyticsPresentation,
 } from "../src/gui/analytics-state.js";
+import { resolveHostTimeZone } from "../src/gui/time-zone.js";
 import type {
   OpenCodeCompactionMarker,
   OpenCodeMessageRevision,
@@ -32,13 +33,21 @@ import type {
 
 const capturedDatasets = vi.hoisted((): UsageAnalyticsDataset[] => []);
 
+/**
+ * Production analytics always runs in the host calendar zone, so every fixture
+ * that must be accepted by the engine's cache has to carry that same zone.
+ */
+const HOST_ZONE = resolveHostTimeZone();
+const analytics = (dataset: UsageAnalyticsDataset) =>
+  createUsageAnalytics(dataset, { timeZone: HOST_ZONE });
+
 vi.mock("../src/gui/aggregation.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/gui/aggregation.js")>();
   return {
     ...actual,
-    createUsageAnalytics: (dataset: UsageAnalyticsDataset) => {
+    createUsageAnalytics: (dataset: UsageAnalyticsDataset, options?: { timeZone?: string }) => {
       capturedDatasets.push(dataset);
-      return actual.createUsageAnalytics(dataset);
+      return actual.createUsageAnalytics(dataset, options);
     },
   };
 });
@@ -484,7 +493,7 @@ function datasetOf(db: FakeDb): UsageAnalyticsDataset {
 }
 
 function homeFromDataset(db: FakeDb, range: "24h" | "7d" | "30d"): HomeSnapshot {
-  const evaluation = createUsageAnalytics(datasetOf(db)).home(range, NOW);
+  const evaluation = analytics(datasetOf(db)).home(range, NOW);
   return {
     generatedAtMs: NOW,
     range,
@@ -509,6 +518,7 @@ function sidecarSession(sessionId: string): SessionSnapshot {
   };
   return {
     focusSessionId: sessionId,
+    timeZone: HOST_ZONE,
     projectId: "p1",
     projectName: "Project One",
     breadcrumbs: [{ sessionId, title: sessionId, isFocus: true }],
@@ -629,7 +639,7 @@ describe("analytics engine: rollup views and coverage", () => {
     const { engine } = harness(db);
 
     await engine.home("7d");
-    const expectedHome = createUsageAnalytics(datasetOf(db)).home("7d", NOW);
+    const expectedHome = analytics(datasetOf(db)).home("7d", NOW);
     const home = await engine.home("7d");
     expect(home.usage.totals).toEqual(expectedHome.usage.totals);
     expect(home.usage.buckets.map((bucket) => bucket.tokens)).toEqual(
@@ -637,13 +647,13 @@ describe("analytics engine: rollup views and coverage", () => {
     );
     expect(home.projects).toEqual(expectedHome.projects);
 
-    const expectedProject = createUsageAnalytics(datasetOf(db)).project("p1", "7d", NOW);
+    const expectedProject = analytics(datasetOf(db)).project("p1", "7d", NOW);
     const project = await engine.project("p1", "7d");
     expect(project.totals).toEqual(expectedProject.totals);
     expect(project.roots).toEqual(expectedProject.roots);
     expect(project.usage.totals).toEqual(expectedProject.usage.totals);
 
-    const expectedSession = createUsageAnalytics(datasetOf(db)).session("ses_root");
+    const expectedSession = analytics(datasetOf(db)).session("ses_root");
     const sessionSnapshot = await engine.session("ses_root");
     expect(sessionSnapshot).toEqual(expectedSession);
   });
@@ -692,7 +702,7 @@ describe("analytics engine: revision reconciliation", () => {
     setNow(NOW + 1);
     await engine.refresh();
 
-    const expected = createUsageAnalytics(datasetOf(db));
+    const expected = analytics(datasetOf(db));
     expect((await engine.home("24h")).usage.totals).toEqual(
       expected.home("24h", NOW + 1).usage.totals,
     );
@@ -920,7 +930,7 @@ describe("analytics engine: revision reconciliation", () => {
     expect(repaired.fingerprints[ownerOccurrence.fingerprintIndex]?.[4]).toBe(999);
     expect(repaired.fingerprints[forkOccurrence.fingerprintIndex]?.[4]).toBe(100);
 
-    const expected = createUsageAnalytics(datasetOf(db)).project("p1", "lifetime", NOW + 1);
+    const expected = analytics(datasetOf(db)).project("p1", "lifetime", NOW + 1);
     const project = await second.project("p1", "lifetime");
     expect(project.totals).toEqual(expected.totals);
     await second.close();
@@ -1397,10 +1407,9 @@ describe("analytics engine: scope reads", () => {
     expect(globalHistoryReads).toHaveLength(0);
 
     const updated = await engine.session("ses_root");
-    expect(updated.compactionMarkers.map((marker) => marker.messageId).sort()).toEqual([
-      "msg_c",
-      "msg_compaction_new",
-    ]);
+    // Markers annotate the focus session only; a child compaction still bumps the
+    // revision but never leaks into the focus chart.
+    expect(updated.compactionMarkers.map((marker) => marker.messageId).sort()).toEqual(["msg_c"]);
 
     const beforeRemoval = generations.length;
     db.compactions = db.compactions.filter((marker) => marker.messageId !== "msg_compaction_new");
@@ -1621,7 +1630,7 @@ describe("analytics engine: scope reads", () => {
     const { engine } = harness(db);
 
     const root = await engine.session("ses_root");
-    expect(root).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_root"));
+    expect(root).toEqual(analytics(datasetOf(db)).session("ses_root"));
 
     const grand = await engine.session("ses_grand");
     expect(grand.breadcrumbs.map((crumb) => crumb.sessionId)).toEqual([
@@ -1629,7 +1638,7 @@ describe("analytics engine: scope reads", () => {
       "ses_child",
       "ses_grand",
     ]);
-    expect(grand).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_grand"));
+    expect(grand).toEqual(analytics(datasetOf(db)).session("ses_grand"));
     await engine.close();
   });
 
@@ -1639,7 +1648,7 @@ describe("analytics engine: scope reads", () => {
 
     const snapshot = await engine.session("ses_root");
 
-    expect(snapshot).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_root"));
+    expect(snapshot).toEqual(analytics(datasetOf(db)).session("ses_root"));
     await engine.close();
   });
 
@@ -1668,13 +1677,13 @@ describe("analytics engine: scope reads", () => {
     expect((await engine.project("p1", "24h")).totals.input).toBe(150);
 
     const moved = await engine.session("ses_root");
-    expect(moved).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_root"));
+    expect(moved).toEqual(analytics(datasetOf(db)).session("ses_root"));
 
     db.rows = db.rows.filter((entry) => entry.messageID !== "msg_new");
     setNow(NOW + 1);
     await engine.refresh();
     const removed = await engine.session("ses_root");
-    expect(removed).toEqual(createUsageAnalytics(datasetOf(db)).session("ses_root"));
+    expect(removed).toEqual(analytics(datasetOf(db)).session("ses_root"));
     await engine.close();
   });
 
@@ -2014,7 +2023,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     setNow(NOW + 2 * HOUR);
     await engine.refresh();
     for (const range of ["24h", "7d"] as const) {
-      const fresh = createUsageAnalytics(datasetOf(db)).home(range, NOW + 2 * HOUR);
+      const fresh = analytics(datasetOf(db)).home(range, NOW + 2 * HOUR);
       const actual = await engine.home(range);
       expect(actual.usage.totals.input).toBe(fresh.usage.totals.input);
       expect(actual.usage.window).toEqual(fresh.usage.window);
@@ -2061,16 +2070,12 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     setNow(NOW + INTERVAL);
     await engine.refresh();
 
-    const expectedHome = createUsageAnalytics(datasetOf(db)).home("24h", NOW + INTERVAL);
+    const expectedHome = analytics(datasetOf(db)).home("24h", NOW + INTERVAL);
     const home = await engine.home("24h");
     expect(home.usage.totals).toEqual(expectedHome.usage.totals);
     expect(home.usage.window).toEqual(expectedHome.usage.window);
 
-    const expectedProject = createUsageAnalytics(datasetOf(db)).project(
-      "p1",
-      "24h",
-      NOW + INTERVAL,
-    );
+    const expectedProject = analytics(datasetOf(db)).project("p1", "24h", NOW + INTERVAL);
     const project = await engine.project("p1", "24h");
     expect(project.totals).toEqual(expectedProject.totals);
     expect(project.usage.window).toEqual(expectedProject.usage.window);
@@ -2311,7 +2316,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     const invalidated = writes[writes.length - 1];
     expect(invalidated?.home["24h"]).toBeUndefined();
 
-    const fresh = createUsageAnalytics(datasetOf(db)).home("24h", NOW + 2 * HOUR);
+    const fresh = analytics(datasetOf(db)).home("24h", NOW + 2 * HOUR);
     const rebuilt = await second.home("24h");
     expect(rebuilt.usage.totals.input).toBe(fresh.usage.totals.input);
     expect(rebuilt.usage.window).toEqual(fresh.usage.window);
@@ -2371,7 +2376,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
   it("serves a warm session immediately while the scoped catchup is blocked", async () => {
     const db = baseDb();
     const calls: ReaderCall[] = [];
-    const warmSession = createUsageAnalytics(datasetOf(db)).session("ses_root");
+    const warmSession = analytics(datasetOf(db)).session("ses_root");
     const fake = createFakeReader(db, calls);
     let release: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {
@@ -2486,7 +2491,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     const oldSavedAt = NOW - 60_000;
     const calls: ReaderCall[] = [];
     const savedAts: number[] = [];
-    const warmSession = createUsageAnalytics(datasetOf(db)).session("ses_root");
+    const warmSession = analytics(datasetOf(db)).session("ses_root");
     const engine = createAnalyticsEngine({
       reader: createFakeReader(db, calls),
       now: () => NOW,
@@ -2517,7 +2522,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
 
   it("preserves the sidecar source identity in pre-index writes", async () => {
     const db = baseDb();
-    const warmSession = createUsageAnalytics(datasetOf(db)).session("ses_root");
+    const warmSession = analytics(datasetOf(db)).session("ses_root");
     const decodedWrites: WarmAnalyticsPresentation[] = [];
     const engine = createAnalyticsEngine({
       reader: createFakeReader(db, []),
@@ -3326,9 +3331,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     const last = savedStates[savedStates.length - 1];
     if (!last) throw new Error("expected saved state");
     expect(last.fingerprints.length).toBeLessThanOrEqual(last.occurrences.size + 32);
-    expect(await engine.session("ses_root")).toEqual(
-      createUsageAnalytics(datasetOf(db)).session("ses_root"),
-    );
+    expect(await engine.session("ses_root")).toEqual(analytics(datasetOf(db)).session("ses_root"));
     await engine.close();
   });
 });

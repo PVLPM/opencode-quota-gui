@@ -68,6 +68,7 @@ function homeSnapshot(range: "24h" | "7d" | "30d" | "lifetime"): HomeSnapshot {
       range,
       window: { untilMs: NOW },
       bucketUnit: "hour",
+      timeZone: "UTC",
       buckets: [],
       totals: {
         input: 0,

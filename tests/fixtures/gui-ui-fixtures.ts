@@ -71,6 +71,7 @@ export function usage(
     range,
     window,
     bucketUnit: range === "24h" ? "hour" : "day",
+    timeZone: "UTC",
     buckets,
     totals,
     stepCount: buckets.length,
@@ -188,6 +189,7 @@ export function projectSnapshot(overrides: Partial<ProjectSnapshot> = {}): Proje
 export function sessionSnapshot(overrides: Partial<SessionSnapshot> = {}): SessionSnapshot {
   return {
     focusSessionId: "session-root-1",
+    timeZone: "UTC",
     projectId: "project-alpha",
     projectName: "Alpha",
     breadcrumbs: [

@@ -54,6 +54,7 @@ function usageFor(range: RangeKey): HomeSnapshot["usage"] {
     range,
     window: rangeWindow(range, NOW),
     bucketUnit: rangeBucketUnit(range),
+    timeZone: "UTC",
     buckets: planRangeBuckets(range, NOW).map((bucket) => ({ ...bucket, tokens: costed(0) })),
     totals: costed(0),
     stepCount: 0,
