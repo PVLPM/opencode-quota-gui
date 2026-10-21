@@ -11,6 +11,7 @@ import type {
   SettingsWriteResult,
   Usage,
 } from "../src/contracts/dashboard";
+import { DASHBOARD_CONTRACT_VERSION } from "../src/contracts/dashboard";
 import { buildRowKey, composeRowId } from "../src/contracts/identity";
 import type { RangeKey } from "../src/contracts/ranges";
 import {
@@ -470,13 +471,19 @@ describe("section state machine", () => {
     });
   });
 
-  it("never renders a raw exception, and asks for a reload on a contract mismatch", () => {
+  it("rejects a stale server contract before treating it as compatible", () => {
     expect(describeError(new Error("ENOENT: C:\\Users\\local\\secret.json"))).toBe(
       "The dashboard server did not answer. Check that the local dashboard is still running.",
     );
-    expect(contractMismatchMessage(1)).toBeUndefined();
-    const mismatch = contractMismatchMessage(2);
-    expect(mismatch).toContain("Reload the page");
+    expect(contractMismatchMessage(DASHBOARD_CONTRACT_VERSION)).toBeUndefined();
+    // A newly rebuilt UI can meet an older, still-running server: same /api/v1
+    // path, older payload revision. It must be rejected before any payload is
+    // treated as compatible, and a browser refresh alone cannot repair it.
+    const oldServer = DASHBOARD_CONTRACT_VERSION - 1;
+    const mismatch = contractMismatchMessage(oldServer);
+    expect(mismatch).toContain("Restart the dashboard/OpenCode");
+    expect(mismatch).toContain("reload the page");
+    expect(mismatch).not.toContain("Reload the page to get a matching build");
     expect(resolveLoadState<number>({ data: 1, loading: false }, mismatch)).toEqual({
       kind: "reload-required",
       message: mismatch,
@@ -1048,7 +1055,9 @@ describe("usage chart", () => {
         .filter((node) => node.props.class === "qg-chart__segment");
     const buttons = renderGraph.elementsNamed(root, "button");
     const hit = buttons.find((node) => node.props.class === "qg-chart__hit");
-    const legend = buttons.find((node) => node.props["aria-label"] === "Highlight Reasoning");
+    const legend = renderGraph
+      .elementsNamed(root, "li")
+      .find((node) => node.props["aria-label"] === "Highlight Reasoning");
     expect(hit).toBeDefined();
     expect(legend).toBeDefined();
     if (!hit || !legend) {
@@ -1102,8 +1111,9 @@ describe("usage chart", () => {
         .filter((node) => node.props.class === "qg-chart__segment");
     const highlighted = () =>
       segments().filter((node) => node.props["data-highlighted"] === "true");
-    const buttons = renderGraph.elementsNamed(root, "button");
-    const legend = buttons.find((node) => node.props["aria-label"] === "Highlight Input");
+    const legend = renderGraph
+      .elementsNamed(root, "li")
+      .find((node) => node.props["aria-label"] === "Highlight Input");
     expect(legend).toBeDefined();
     if (!legend) {
       dispose();
@@ -1112,15 +1122,19 @@ describe("usage chart", () => {
     const baseline = segments().map((node) => node.props.d);
     expect(segments()).toHaveLength(5);
 
-    // A legend entry is never a toggle: there is no click handler, no pressed
-    // state, and no keyboard release step that could strand persistent emphasis.
+    // The legend entry is a focusable, non-actionable list item: it has no
+    // button activation semantics, no click handler, and no pressed state.
+    expect(legend.tag).toBe("li");
+    expect(legend.props.tabIndex).toBe(0);
     expect(renderGraph.listenerOf(legend, "onClick")).toBeUndefined();
     expect(renderGraph.listenerOf(legend, "onKeyDown")).toBeUndefined();
     expect(legend.props["aria-pressed"]).toBeUndefined();
     expect(legend.props["data-pressed"]).toBeUndefined();
 
-    // Hover emphasises exactly one series while all five remain present.
+    // Pointer activation natively focuses the entry. Emphasis may appear while
+    // hovered, but pointer leave must ALWAYS clear it even when no blur fires.
     renderGraph.listenerOf(legend, "onPointerEnter")?.({});
+    renderGraph.listenerOf(legend, "onFocus")?.({});
     expect(highlighted()).toHaveLength(1);
     expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
     expect(segments()).toHaveLength(5);
@@ -1129,8 +1143,6 @@ describe("usage chart", () => {
         "data-highlight"
       ],
     ).toBe("true");
-
-    // Clicking during hover cannot pin the highlight; leaving restores normal.
     renderGraph.listenerOf(legend, "onClick")?.({});
     renderGraph.listenerOf(legend, "onPointerLeave")?.({});
     expect(highlighted()).toHaveLength(5);
@@ -1140,11 +1152,9 @@ describe("usage chart", () => {
       ],
     ).toBeUndefined();
 
-    // Keyboard focus emphasises one series and losing focus restores normal,
-    // even when the entry is activated while focused.
+    // Keyboard focus emphasises one series; losing focus restores normal.
     renderGraph.listenerOf(legend, "onFocus")?.({});
     expect(highlighted()).toHaveLength(1);
-    renderGraph.listenerOf(legend, "onClick")?.({});
     renderGraph.listenerOf(legend, "onBlur")?.({});
     expect(highlighted()).toHaveLength(5);
 
@@ -1418,6 +1428,8 @@ describe("session view composition", () => {
     // Totals stay in the chart summary, not as a prose sentence in the header.
     expect(text(html)).toContain("Tree total tokens");
     expect(text(html)).toContain("This session");
+    // The chart headline has no valueless "Completed steps" subtitle.
+    expect(html).not.toContain('qg-section__meta">Completed steps');
     // Explicit columns replace the old secondary own/subtree sentence.
     expect(html).toContain('class="qg-nodes__head"');
     expect(text(html)).toContain("Name");
@@ -1496,6 +1508,39 @@ describe("session view composition", () => {
       stepIndex: 1,
       sessionId: "session-root-1",
     });
+  });
+
+  it("places compaction ticks only at a subsequent focus step", () => {
+    const between = buildSessionChartGeometry(
+      sessionSnapshot({
+        compactionMarkers: [
+          { sessionId: "session-root-1", atMs: NOW - 2.5 * HOUR_MS, messageId: "msg-between" },
+        ],
+      }),
+    );
+    expect(between.compaction).toEqual([
+      expect.objectContaining({ sessionId: "session-root-1", stepIndex: 1 }),
+    ]);
+
+    // No focus step at or after the marker: the step-index axis has no truthful
+    // position, so the tick is omitted instead of snapping to the first step.
+    const afterFinal = buildSessionChartGeometry(
+      sessionSnapshot({
+        compactionMarkers: [
+          { sessionId: "session-root-1", atMs: NOW - 30 * 60_000, messageId: "msg-late" },
+        ],
+      }),
+    );
+    expect(afterFinal.compaction).toEqual([]);
+
+    const descendant = buildSessionChartGeometry(
+      sessionSnapshot({
+        compactionMarkers: [
+          { sessionId: "session-child-1", atMs: NOW - 90 * 60_000, messageId: "msg-child" },
+        ],
+      }),
+    );
+    expect(descendant.compaction).toEqual([]);
   });
 
   it("keeps the cumulative total monotonic across branches and compactions", () => {
@@ -2051,7 +2096,7 @@ describe("cached visibility catalog", () => {
           onEvent = undefined;
         };
       },
-      health: async () => ({ app: "opencode-quota-gui", contractVersion: 1 }),
+      health: async () => ({ app: "opencode-quota-gui", contractVersion: 2 }),
       quota: async () =>
         homeSnapshot({
           providers: {
@@ -2372,6 +2417,7 @@ describe("range transitions name the range still on screen", () => {
     hash: string;
     home?: DashboardClient["home"];
     project?: DashboardClient["project"];
+    health?: DashboardClient["health"];
   }): AppHarness {
     let hashChange: (() => void) | undefined;
     const browser = {
@@ -2390,7 +2436,7 @@ describe("range transitions name the range still on screen", () => {
       connection: () => "live",
       onConnectionChange: () => () => {},
       subscribe: () => () => {},
-      health: async () => ({ app: "opencode-quota-gui", contractVersion: 1 }),
+      health: options.health ?? (async () => ({ app: "opencode-quota-gui", contractVersion: 2 })),
       home: options.home ?? (async () => homeSnapshot()),
       quota: async () => homeSnapshot(),
       project: options.project ?? (async () => projectSnapshot()),
@@ -2433,6 +2479,25 @@ describe("range transitions name the range still on screen", () => {
       },
     };
   }
+
+  it("blocks an older server contract before treating its payload as ready", async () => {
+    const app = mountApp({
+      hash: "#/analytics?range=7d",
+      health: async () => ({
+        app: "opencode-quota-gui",
+        contractVersion: DASHBOARD_CONTRACT_VERSION - 1,
+      }),
+    });
+    try {
+      await settle();
+      const body = app.text();
+      expect(body).toContain("Restart the dashboard/OpenCode");
+      expect(body).toContain("reload the page");
+      expect(body).not.toContain("Total tokens");
+    } finally {
+      app.dispose();
+    }
+  });
 
   it("keeps the old range on screen without adding an inline transition row", async () => {
     const oldPayload = analyticsPayload("7d", "alpha-7d", 960);
@@ -3695,7 +3760,7 @@ describe("styles and dependency boundaries", () => {
           onEvent = undefined;
         };
       },
-      health: async () => ({ app: "opencode-quota-gui", contractVersion: 1 }),
+      health: async () => ({ app: "opencode-quota-gui", contractVersion: 2 }),
       quota: async () => {
         quotaReads += 1;
         if (failQuota) throw new Error("synthetic failure");
@@ -3890,7 +3955,7 @@ describe("styles and dependency boundaries", () => {
       connection: () => "connecting" as const,
       onConnectionChange: () => () => {},
       subscribe: () => () => {},
-      health: async () => ({ app: "opencode-quota-gui" as const, contractVersion: 1 }),
+      health: async () => ({ app: "opencode-quota-gui" as const, contractVersion: 2 }),
       home: async () => homeSnapshot(),
       quota: async () => homeSnapshot(),
       project: async () => projectSnapshot(),

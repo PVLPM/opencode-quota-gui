@@ -193,7 +193,7 @@ describe("synthetic GUI smoke", () => {
 
     const health = await requestJson<{ app: string; contractVersion: number }>(apiUrl("/health"));
     expect(health.status).toBe(200);
-    expect(health.body).toEqual({ app: "opencode-quota-gui", contractVersion: 1 });
+    expect(health.body).toEqual({ app: "opencode-quota-gui", contractVersion: 2 });
   });
 
   it("changes every token metric across ranges and keeps project rows latest-first", async () => {

@@ -471,12 +471,13 @@ export function buildSessionChartGeometry(
       // no scoped focus step cannot be placed truthfully and is skipped rather
       // than snapped onto an unrelated descendant step.
       if (marker.sessionId !== snapshot.focusSessionId) continue;
-      const firstAtOrAfter = source.findIndex(
+      const index = source.findIndex(
         (step) => step.sessionId === marker.sessionId && step.atMs >= marker.atMs,
       );
-      const fallback = source.findIndex((step) => step.sessionId === marker.sessionId);
-      if (firstAtOrAfter < 0 && fallback < 0) continue;
-      const index = firstAtOrAfter >= 0 ? firstAtOrAfter : fallback;
+      // A marker after the final focus step has no truthful step-index position:
+      // the axis is step based, so snapping it backward would draw the drop at
+      // the beginning of the graph. Leave it out instead.
+      if (index < 0) continue;
       compaction.push({
         x: stepX(index),
         atMs: marker.atMs,

@@ -34,7 +34,7 @@ export type LoadState<T> =
  */
 export function contractMismatchMessage(serverVersion: number): string | undefined {
   if (serverVersion === DASHBOARD_CONTRACT_VERSION) return undefined;
-  return `This dashboard speaks contract version ${DASHBOARD_CONTRACT_VERSION}, the server offers version ${serverVersion}. Reload the page to get a matching build.`;
+  return `This dashboard speaks contract version ${DASHBOARD_CONTRACT_VERSION}, the server offers version ${serverVersion}. Restart the dashboard/OpenCode, then reload the page to get a matching build.`;
 }
 
 /**

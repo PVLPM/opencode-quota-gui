@@ -916,6 +916,9 @@ body {
   flex-direction: row;
   flex-wrap: wrap;
   gap: 4px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .qg-legend__item {
@@ -930,7 +933,6 @@ body {
   background: transparent;
   color: var(--qg-text-secondary);
   font-size: var(--font-size-small);
-  cursor: pointer;
   text-align: left;
   transition:
     background var(--qg-transition),

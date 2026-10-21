@@ -58,7 +58,6 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
           <span class="qg-summary-label">This session · own tokens</span>
           <span class="qg-summary-cost">{formatExactCount(own().total)}</span>
         </div>
-        <span class="qg-section__meta">Completed steps</span>
       </header>
       <div ref={ref} class="qg-chart">
         <Show

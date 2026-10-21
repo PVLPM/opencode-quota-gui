@@ -202,8 +202,8 @@ describe("GUI contract guards", () => {
     expect(isDashboardEvent(null)).toBe(false);
   });
 
-  it("freezes contract version 1", () => {
-    expect(DASHBOARD_CONTRACT_VERSION).toBe(1);
+  it("freezes contract version 2 for the required timeZone payload fields", () => {
+    expect(DASHBOARD_CONTRACT_VERSION).toBe(2);
   });
 });
 

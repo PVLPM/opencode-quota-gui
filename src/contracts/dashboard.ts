@@ -10,7 +10,7 @@ import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
  */
 
 /** Contract revision advertised by `DashboardDataSource.health()`. */
-export const DASHBOARD_CONTRACT_VERSION = 1;
+export const DASHBOARD_CONTRACT_VERSION = 2;
 
 /** Values a settings payload may carry across the JSON boundary (`null` clears). */
 export type JsonValue =

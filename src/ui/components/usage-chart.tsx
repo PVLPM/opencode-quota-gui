@@ -262,7 +262,10 @@ export function UsageChart(props: {
                   width: `${(Math.max(geometry().slot, 1) / geometry().plot.width) * 100}%`,
                 }}
                 onPointerEnter={() => setHoveredBucket(index())}
-                onPointerLeave={() => setHoveredBucket(undefined)}
+                onPointerLeave={() => {
+                  setHoveredBucket(undefined);
+                  setFocusedBucket(undefined);
+                }}
                 onFocus={() => setFocusedBucket(index())}
                 onBlur={() => setFocusedBucket(undefined)}
               />
@@ -310,16 +313,20 @@ export function UsageChart(props: {
       </div>
 
       <aside class="qg-usage__aside">
-        <div class="qg-legend">
+        <ul class="qg-legend">
           <For each={TOKEN_CATEGORIES}>
             {(category) => (
-              <button
-                type="button"
+              <li
                 class="qg-legend__item"
+                // biome-ignore lint/a11y/noNoninteractiveTabindex: the legend entry is a keyboard focus target for series emphasis, not an activation action.
+                tabIndex={0}
                 aria-label={`Highlight ${category.label}`}
                 style={{ "--qg-swatch": `var(${category.colorVar})` }}
                 onPointerEnter={() => setHoveredCategory(category.key)}
-                onPointerLeave={() => setHoveredCategory(undefined)}
+                onPointerLeave={() => {
+                  setHoveredCategory(undefined);
+                  setFocusedCategory(undefined);
+                }}
                 onFocus={() => setFocusedCategory(category.key)}
                 onBlur={() => setFocusedCategory(undefined)}
               >
@@ -328,15 +335,15 @@ export function UsageChart(props: {
                 <span class="qg-legend__value">
                   {formatTokenCount(props.usage.totals[category.key])}
                 </span>
-              </button>
+              </li>
             )}
           </For>
-          <div class="qg-legend__item qg-legend__item--overlay" aria-hidden="true">
+          <li class="qg-legend__item qg-legend__item--overlay" aria-hidden="true">
             <span class="qg-legend__swatch qg-legend__swatch--line" aria-hidden="true" />
             <span class="qg-legend__label">Cache hit rate</span>
             <span class="qg-legend__value">right axis</span>
-          </div>
-        </div>
+          </li>
+        </ul>
       </aside>
 
       <div class="sr-only">
