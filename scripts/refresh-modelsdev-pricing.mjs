@@ -1,6 +1,6 @@
-import { mkdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname, resolve } from "path";
-import { fileURLToPath } from "url";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const SOURCE_URL = "https://models.dev/api.json";
 const DEFAULT_PROVIDERS = ["anthropic", "google", "moonshotai", "openai", "xai", "zai"];

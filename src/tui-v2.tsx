@@ -1,5 +1,3 @@
-/** @jsxImportSource @opentui/solid */
-
 import { Plugin } from "@opencode/plugin/tui";
 import { type RGBA, type ScrollBoxRenderable, TextAttributes } from "@opentui/core";
 import { type JSX, useTerminalDimensions } from "@opentui/solid";

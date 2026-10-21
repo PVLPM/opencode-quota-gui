@@ -1,7 +1,7 @@
-import { spawn } from "child_process";
-import { readFile } from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
+import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const DEFAULT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 
