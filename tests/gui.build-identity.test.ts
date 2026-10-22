@@ -1,11 +1,15 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHttpDashboardClient } from "../src/ui/dashboard-client.js";
 import * as viewModel from "../src/ui/view-model.js";
+import { isolatedGitEnv } from "./helpers/isolated-git-env.js";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 const roots: string[] = [];
 afterEach(() => {
@@ -18,29 +22,185 @@ async function generator() {
   );
 }
 
-function fixture(git = true) {
+/** Fixture git must never inherit hook-exported GIT_* variables (GIT_DIR, GIT_INDEX_FILE, ...). */
+function git(cwd: string, args: readonly string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8", env: isolatedGitEnv() }).trim();
+}
+
+function fixture(gitRepo = true) {
   const root = mkdtempSync(join(tmpdir(), "quota-build-"));
   roots.push(root);
   writeFileSync(join(root, "package.json"), JSON.stringify({ version: "1.0.0", type: "module" }));
-  if (git) {
-    execFileSync("git", ["init", "--quiet"], { cwd: root });
-    execFileSync("git", ["add", "."], { cwd: root });
-    execFileSync(
-      "git",
-      [
-        "-c",
-        "user.name=Synthetic",
-        "-c",
-        "user.email=synthetic@example.invalid",
-        "commit",
-        "--quiet",
-        "-m",
-        "fixture",
-      ],
-      { cwd: root },
-    );
+  if (gitRepo) {
+    git(root, ["init", "--quiet"]);
+    git(root, ["add", "."]);
+    git(root, [
+      "-c",
+      "user.name=Synthetic",
+      "-c",
+      "user.email=synthetic@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "fixture",
+    ]);
   }
   return root;
+}
+
+/** HEAD plus a digest of the index bytes, used to prove a repository was not touched. */
+function headAndIndex(root: string): { head: string; index: string } {
+  const gitDir = git(root, ["rev-parse", "--absolute-git-dir"]);
+  return {
+    head: git(root, ["rev-parse", "HEAD"]),
+    index: createHash("sha256")
+      .update(readFileSync(join(gitDir, "index")))
+      .digest("hex"),
+  };
+}
+
+type HostileCasing = {
+  label: string;
+  keys: (parent: string) => Record<string, string>;
+};
+
+// Git on Windows reads environment names case-insensitively, so a hook variable can arrive as
+// git_dir, Git_Dir, and so on. Every casing must be isolated, not just uppercase.
+const HOSTILE_CASINGS: HostileCasing[] = [
+  {
+    label: "uppercase",
+    keys: (parent) => ({
+      GIT_DIR: join(parent, ".git"),
+      GIT_WORK_TREE: parent,
+      GIT_INDEX_FILE: join(parent, ".git", "index"),
+      GIT_COMMON_DIR: join(parent, ".git"),
+      GIT_OBJECT_DIRECTORY: join(parent, ".git", "objects"),
+      GIT_NAMESPACE: "hostile-hook",
+    }),
+  },
+  {
+    label: "lowercase",
+    keys: (parent) => ({
+      git_dir: join(parent, ".git"),
+      git_work_tree: parent,
+      git_index_file: join(parent, ".git", "index"),
+      git_common_dir: join(parent, ".git"),
+      git_object_directory: join(parent, ".git", "objects"),
+      git_namespace: "hostile-hook",
+    }),
+  },
+  {
+    label: "mixed-case",
+    keys: (parent) => ({
+      Git_Dir: join(parent, ".git"),
+      git_WORK_TREE: parent,
+      Git_Index_File: join(parent, ".git", "index"),
+      GIT_Common_Dir: join(parent, ".git"),
+      gIt_ObJeCt_DiReCtOrY: join(parent, ".git", "objects"),
+      Git_Namespace: "hostile-hook",
+    }),
+  },
+];
+
+/**
+ * Install exactly one GIT_* casing variant, then restore the inherited environment.
+ * process.env aliases names case-insensitively on Windows, so clearing first prevents a
+ * differently-cased inherited key from masking the variant under test.
+ */
+function withHostileGitEnv<T>(hostile: Record<string, string>, run: () => T): T {
+  const inherited = Object.entries(process.env).filter(([key]) =>
+    key.toUpperCase().startsWith("GIT_"),
+  );
+  for (const key of Object.keys(process.env)) {
+    if (key.toUpperCase().startsWith("GIT_")) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(hostile)) process.env[key] = value;
+  try {
+    return run();
+  } finally {
+    for (const key of Object.keys(process.env)) {
+      if (key.toUpperCase().startsWith("GIT_")) delete process.env[key];
+    }
+    for (const [key, value] of inherited) {
+      if (value !== undefined) process.env[key] = value;
+    }
+  }
+}
+
+/** Spawn the shipped generator with an explicit env object so Windows keeps the exact key casing. */
+function resolveInSpawnedEnv(root: string, hostile: Record<string, string>) {
+  const directory = mkdtempSync(join(tmpdir(), "quota-build-harness-"));
+  roots.push(directory);
+  const harness = join(directory, "resolve.mjs");
+  const moduleUrl = JSON.stringify(
+    pathToFileURL(join(repoRoot, "scripts/build-identity.mjs")).href,
+  );
+  writeFileSync(
+    harness,
+    [
+      `import { resolveBuildIdentity } from ${moduleUrl};`,
+      "try {",
+      "  console.log(JSON.stringify(resolveBuildIdentity(process.argv[2], {})));",
+      "} catch (error) {",
+      "  console.error(error instanceof Error ? error.message : String(error));",
+      "  process.exitCode = 1;",
+      "}",
+      "",
+    ].join("\n"),
+  );
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")),
+  );
+  return spawnSync(process.execPath, [harness, root], {
+    encoding: "utf8",
+    env: { ...env, ...hostile },
+  });
+}
+
+async function assertHostileCasingIsolated(casing: HostileCasing): Promise<void> {
+  const { resolveBuildIdentity } = await generator();
+  const parent = fixture();
+  const child = fixture();
+  const archive = fixture(false);
+  const parentBefore = headAndIndex(parent);
+  // Guard: nothing in this test may write to the real product repository.
+  const productBefore = headAndIndex(repoRoot);
+  const childHead = git(child, ["rev-parse", "HEAD"]);
+  const childBuild = git(child, ["rev-parse", "--short=12", "HEAD"]);
+  let failure: unknown;
+  try {
+    withHostileGitEnv(casing.keys(parent), () => {
+      // Spawned env object: the casing survives the Windows env block; the shipped helper
+      // must still resolve the child, not the parent named by the hostile GIT_* values.
+      const spawned = resolveInSpawnedEnv(child, casing.keys(parent));
+      expect(spawned.status, spawned.stderr).toBe(0);
+      expect(JSON.parse(spawned.stdout)).toEqual({ version: "1.0.0", build: childBuild });
+
+      // Fixture command env path: commits stay in the child while the inherited env is hostile.
+      const stubbedChild = fixture();
+      expect(git(stubbedChild, ["rev-parse", "--show-toplevel"]).replaceAll("\\", "/")).toBe(
+        stubbedChild.replaceAll("\\", "/"),
+      );
+      expect(resolveBuildIdentity(stubbedChild, {})).toEqual({
+        version: "1.0.0",
+        build: git(stubbedChild, ["rev-parse", "--short=12", "HEAD"]),
+      });
+
+      // No git in the source archive: fail closed instead of borrowing the parent HEAD.
+      expect(() => resolveBuildIdentity(archive, {})).toThrow(/identity/);
+      expect(resolveBuildIdentity(archive, { CI_COMMIT_SHA: "b".repeat(40) })).toEqual({
+        version: "1.0.0",
+        build: "b".repeat(12),
+      });
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(childHead).toMatch(/^[a-f0-9]{40}$/);
+  expect(headAndIndex(parent)).toEqual(parentBefore);
+  expect(headAndIndex(repoRoot)).toEqual(productBefore);
+  if (failure) throw failure;
 }
 
 describe("build identity generation", () => {
@@ -95,10 +255,7 @@ describe("build identity generation", () => {
   it("uses package version and current short HEAD; dirty includes untracked files", async () => {
     const { resolveBuildIdentity } = await generator();
     const root = fixture();
-    const sha = execFileSync("git", ["rev-parse", "--short=12", "HEAD"], {
-      cwd: root,
-      encoding: "utf8",
-    }).trim();
+    const sha = git(root, ["rev-parse", "--short=12", "HEAD"]);
     expect(resolveBuildIdentity(root, {})).toEqual({ version: "1.0.0", build: sha });
     writeFileSync(join(root, "change.txt"), "synthetic");
     expect(resolveBuildIdentity(root, {})).toEqual({ version: "1.0.0", build: `${sha}-dirty` });
@@ -129,6 +286,12 @@ describe("build identity generation", () => {
     expect(resolveBuildIdentity(root, { CI_COMMIT_SHA: "a".repeat(40) }).build).toBe(
       "a".repeat(12),
     );
+  });
+
+  it.each(
+    HOSTILE_CASINGS,
+  )("ignores $label hook GIT_* variables instead of borrowing a parent repository", async (casing) => {
+    await assertHostileCasingIsolated(casing);
   });
 
   it("writes a packed browser-safe literal that survives losing git and package.json", async () => {

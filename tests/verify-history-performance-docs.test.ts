@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { isolatedGitEnv } from "./helpers/isolated-git-env.js";
+
 /**
  * Disposable-history coverage for the public docs/performance allowlist.
  *
@@ -24,19 +26,7 @@ afterEach(() => {
 
 /** Never let CI git overrides redirect fixture commands at the real repository. */
 function fixtureEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
-  for (const key of [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_NAMESPACE",
-  ]) {
-    delete env[key];
-  }
-  return env;
+  return { ...isolatedGitEnv(), ...extra };
 }
 
 function git(repo: string, args: readonly string[]): string {

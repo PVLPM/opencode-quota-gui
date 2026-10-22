@@ -3,8 +3,10 @@ import { vi } from "vitest";
 // Git hooks (for example the lefthook pre-push `pnpm verify`) export GIT_DIR,
 // GIT_INDEX_FILE, and similar variables. A child git process that inherits them
 // ignores its cwd and writes to the real repository instead of the temp folder.
+// Git reads environment names case-insensitively on Windows, so git_dir or Git_Dir
+// must be stripped too.
 function isGitEnvKey(key: string): boolean {
-  return key.startsWith("GIT_");
+  return key.toUpperCase().startsWith("GIT_");
 }
 
 /** process.env for a git child process that must only touch the repo in its cwd. */

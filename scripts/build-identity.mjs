@@ -8,10 +8,17 @@ const BUILD_PATTERN = /^[a-f0-9]{7,40}(?:-dirty)?$/;
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 function git(root, args) {
+  // Git hooks export GIT_DIR/GIT_INDEX_FILE/GIT_CONFIG_PARAMETERS and friends.
+  // A child git that inherits them ignores `root` and can read or write the
+  // hook's repository, so resolve the identity with a clean git context.
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")),
+  );
   return execFileSync("git", args, {
     cwd: root,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    env,
   }).trim();
 }
 
