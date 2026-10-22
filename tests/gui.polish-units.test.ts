@@ -30,6 +30,8 @@ import type {
   ProjectActivityRow,
   ProjectRootRow,
   SessionNode,
+  SessionSnapshot,
+  StepPoint,
   TokenStack,
 } from "../src/contracts/dashboard.js";
 import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/aggregation.js";
@@ -39,7 +41,11 @@ import type {
   OpenCodeRawAssistantRow,
   OpenCodeSessionInfo,
 } from "../src/lib/opencode-storage.js";
-import { buildUsageGeometry, cacheHitRate } from "../src/ui/chart-geometry.js";
+import {
+  buildSessionChartGeometry,
+  buildUsageGeometry,
+  cacheHitRate,
+} from "../src/ui/chart-geometry.js";
 import { BUSY_DELAY_MS, createBusyIndicator } from "../src/ui/components/busy.js";
 import { estimateExplanation } from "../src/ui/components/estimate.js";
 import { sortProjectRows, sortRootRows, sortSessionTree } from "../src/ui/sorting.js";
@@ -68,6 +74,61 @@ function costed(overrides: Partial<TokenStack> = {}): CostedTokens {
 
 function bucketOf(overrides: Partial<TokenStack> = {}): Bucket {
   return { startMs: 0, endMs: 1, tokens: costed(overrides) };
+}
+
+function sessionNode(sessionId: string, parentId?: string, depth = 0): SessionNode {
+  return {
+    sessionId,
+    parentId,
+    title: sessionId,
+    depth,
+    childIds: [],
+    ownTokens: costed(),
+    subtreeTokens: costed(),
+    stepCount: 0,
+    subtreeNodeCount: 1,
+    latestActivityAtMs: 0,
+  };
+}
+
+function sessionStep(
+  sessionId: string,
+  index: number,
+  contextTokens: number,
+  totalTokens: number,
+): StepPoint {
+  return {
+    sessionId,
+    messageId: `msg-${sessionId}-${index}`,
+    atMs: 1000 + index * 1000,
+    branch: 0,
+    stack: tokensOf(),
+    contextTokens,
+    totalTokens,
+  };
+}
+
+function sessionOf(
+  focusSessionId: string,
+  nodes: SessionNode[],
+  steps: StepPoint[],
+): SessionSnapshot {
+  return {
+    focusSessionId,
+    timeZone: "UTC",
+    projectId: "project",
+    projectName: "Project",
+    breadcrumbs: [{ sessionId: focusSessionId, title: focusSessionId, isFocus: true }],
+    nodes,
+    steps,
+    compactionMarkers: [],
+    ownSummary: {
+      ...costed(),
+      stepCount: steps.filter((step) => step.sessionId === focusSessionId).length,
+    },
+    treeTotals: costed(),
+    stepSemantics: "Synthetic completed assistant steps.",
+  };
 }
 
 type RawTokenCounts = OpenCodeRawAssistantRow["tokens"];
@@ -301,6 +362,128 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
       10,
     );
     expect(geometry.cacheRateTicks.at(-1)?.y).toBeCloseTo(geometry.plot.top, 10);
+  });
+});
+
+describe("buildSessionChartGeometry own, tree and context carry", () => {
+  it("carries focus context through children while own cumulative stays flat on the shared scale", () => {
+    const focus = "session-focus";
+    const child = "session-child";
+    const rootNode = sessionNode(focus);
+    rootNode.childIds = [child];
+    const geometry = buildSessionChartGeometry(
+      sessionOf(
+        focus,
+        [rootNode, sessionNode(child, focus, 1)],
+        [
+          sessionStep(focus, 0, 500, 500),
+          sessionStep(child, 1, 1200, 700),
+          sessionStep(focus, 2, 300, 400),
+          sessionStep(child, 3, 999, 50),
+        ],
+      ),
+    );
+
+    expect(geometry.hasDescendants).toBe(true);
+    expect(geometry.focusStepCount).toBe(2);
+    // The child context is never borrowed; the last focus value carries.
+    expect(geometry.contextValues).toEqual([500, 500, 300, 300]);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1, 2, 3]);
+    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 500, 300, 300]);
+    expect(geometry.ownCumulativeValues).toEqual([500, 500, 900, 900]);
+    expect(geometry.treeCumulativeValues).toEqual([500, 1200, 1600, 1650]);
+    expect(geometry.own.points.map((point) => point.value)).toEqual([500, 500, 900, 900]);
+    expect(geometry.tree.points.map((point) => point.value)).toEqual([500, 1200, 1600, 1650]);
+    for (let index = 0; index < geometry.own.points.length; index += 1) {
+      expect(geometry.ownCumulativeValues[index]).toBeLessThanOrEqual(
+        geometry.treeCumulativeValues[index] as number,
+      );
+    }
+    expect(geometry.own.domainMax).toBe(1650);
+    expect(geometry.tree.domainMax).toBe(1650);
+    expect(geometry.cumulativeTicks).toEqual(geometry.tree.ticks);
+    expect(geometry.own.points[0]?.y).toBeCloseTo(geometry.tree.points[0]?.y as number, 10);
+  });
+
+  it("retains unknown context before the first focus sample and starts own cumulative at zero", () => {
+    const focus = "session-focus";
+    const child = "session-child";
+    const geometry = buildSessionChartGeometry(
+      sessionOf(
+        focus,
+        [sessionNode(focus), sessionNode(child, focus, 1)],
+        [
+          sessionStep(child, 0, 999, 100),
+          sessionStep(focus, 1, 500, 200),
+          sessionStep(child, 2, 999, 50),
+        ],
+      ),
+    );
+
+    expect(geometry.hasDescendants).toBe(true);
+    expect(geometry.contextValues).toEqual([undefined, 500, 500]);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([1, 2]);
+    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 500]);
+    expect(geometry.focusStepCount).toBe(1);
+    expect(geometry.ownCumulativeValues).toEqual([0, 200, 200]);
+    expect(geometry.treeCumulativeValues).toEqual([100, 300, 350]);
+    expect(geometry.own.domainMax).toBe(350);
+    expect(geometry.tree.domainMax).toBe(350);
+  });
+
+  it("shows own and tree for a subsession with descendants and only own for a leaf", () => {
+    const focus = "session-child";
+    const grandchild = "session-grandchild";
+    const leaf = buildSessionChartGeometry(
+      sessionOf(focus, [sessionNode(focus)], [sessionStep(focus, 0, 1200, 1400)]),
+    );
+    expect(leaf.hasDescendants).toBe(false);
+    expect(leaf.contextValues).toEqual([1200]);
+    expect(leaf.ownCumulativeValues).toEqual([1400]);
+    expect(leaf.treeCumulativeValues).toEqual([1400]);
+    expect(leaf.own.domainMax).toBe(1400);
+    expect(leaf.tree.domainMax).toBe(1400);
+
+    // Actual node membership, not parentId or a root-only assumption.
+    const withDescendant = buildSessionChartGeometry(
+      sessionOf(
+        focus,
+        [sessionNode(focus), sessionNode(grandchild, undefined, 2)],
+        [sessionStep(focus, 0, 1200, 1400), sessionStep(grandchild, 1, 999, 100)],
+      ),
+    );
+    expect(withDescendant.hasDescendants).toBe(true);
+    expect(withDescendant.focusStepCount).toBe(1);
+    expect(withDescendant.contextValues).toEqual([1200, 1200]);
+    expect(withDescendant.ownCumulativeValues).toEqual([1400, 1400]);
+    expect(withDescendant.treeCumulativeValues).toEqual([1400, 1500]);
+    expect(withDescendant.own.domainMax).toBe(1500);
+    expect(withDescendant.tree.domainMax).toBe(1500);
+  });
+
+  it("does not reset own or tree prefixes at compaction and does not count carried context as focus steps", () => {
+    const focus = "session-focus";
+    const child = "session-child";
+    const snapshot = sessionOf(
+      focus,
+      [sessionNode(focus), sessionNode(child, focus, 1)],
+      [
+        sessionStep(focus, 0, 500, 500),
+        sessionStep(focus, 1, 300, 400),
+        sessionStep(child, 2, 999, 100),
+      ],
+    );
+    snapshot.compactionMarkers = [{ sessionId: focus, atMs: 1500, messageId: "msg-compaction" }];
+    const geometry = buildSessionChartGeometry(snapshot);
+
+    expect(geometry.focusStepCount).toBe(2);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1, 2]);
+    expect(geometry.contextValues).toEqual([500, 300, 300]);
+    expect(geometry.ownCumulativeValues).toEqual([500, 900, 900]);
+    expect(geometry.treeCumulativeValues).toEqual([500, 900, 1000]);
+    expect(geometry.compaction).toEqual([
+      expect.objectContaining({ sessionId: focus, stepIndex: 1 }),
+    ]);
   });
 });
 

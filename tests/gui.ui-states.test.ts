@@ -1578,21 +1578,30 @@ describe("session view composition", () => {
     expect(text(html)).toContain("999,999");
   });
 
-  it("plots focus-session context separately from a cumulative tree total", () => {
+  it("carries focus context through descendants and separates own from tree cumulative totals", () => {
     const snapshot = sessionSnapshot();
     const geometry = buildSessionChartGeometry(snapshot);
 
     expect(geometry.stepCount).toBe(3);
     expect(geometry.focusStepCount).toBe(2);
-    // Context comes from the two root steps only: the child's 1,200-token
-    // context is never stitched into the focus line.
-    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1]);
-    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 800]);
-    // The total runs over the whole scope, branch change included.
-    expect(geometry.total.points.map((point) => point.value)).toEqual([500, 1500, 2900]);
-    // Separate domains: one shared scale would flatten the context line.
+    expect(geometry.hasDescendants).toBe(true);
+    // The child's 1,200-token context is never borrowed: the last focus value
+    // carries through the child step, but it does not become a focus step.
+    expect(geometry.contextValues).toEqual([500, 800, 800]);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1, 2]);
+    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 800, 800]);
+    // Own holds on the child; tree follows every scoped step.
+    expect(geometry.ownCumulativeValues).toEqual([500, 1500, 1500]);
+    expect(geometry.treeCumulativeValues).toEqual([500, 1500, 2900]);
+    expect(geometry.own.points.map((point) => point.value)).toEqual([500, 1500, 1500]);
+    expect(geometry.tree.points.map((point) => point.value)).toEqual([500, 1500, 2900]);
+    // Context remains independently scaled on the left; both cumulative
+    // series share the right scale.
     expect(geometry.context.domainMax).toBe(800);
-    expect(geometry.total.domainMax).toBe(2900);
+    expect(geometry.own.domainMax).toBe(2900);
+    expect(geometry.tree.domainMax).toBe(2900);
+    expect(geometry.cumulativeTicks).toEqual(geometry.tree.ticks);
+    expect(geometry.own.ticks).toEqual(geometry.tree.ticks);
     expect(geometry.compaction).toHaveLength(1);
     expect(geometry.compaction[0]).toMatchObject({
       stepIndex: 1,
@@ -1633,23 +1642,32 @@ describe("session view composition", () => {
     expect(descendant.compaction).toEqual([]);
   });
 
-  it("keeps the cumulative total monotonic across branches and compactions", () => {
+  it("keeps both cumulative totals monotonic across branches and compactions", () => {
     const snapshot = sessionSnapshot();
     const geometry = buildSessionChartGeometry(snapshot);
 
-    for (let index = 1; index < geometry.total.points.length; index += 1) {
-      const previous = geometry.total.points[index - 1];
-      const current = geometry.total.points[index];
-      expect(current?.value).toBeGreaterThanOrEqual(previous?.value as number);
-      // Value grows, so its pixel y must fall (or stay flat), never rise.
-      expect(current?.y).toBeLessThanOrEqual((previous?.y as number) + 1e-9);
+    for (const series of [geometry.own, geometry.tree]) {
+      for (let index = 1; index < series.points.length; index += 1) {
+        const previous = series.points[index - 1];
+        const current = series.points[index];
+        expect(current?.value).toBeGreaterThanOrEqual(previous?.value as number);
+        // Value grows, so its pixel y must fall (or stay flat), never rise.
+        expect(current?.y).toBeLessThanOrEqual((previous?.y as number) + 1e-9);
+      }
+      expect(series.linePath).toContain(" C ");
+      expect(series.linePath).not.toMatch(/NaN|Infinity|undefined/);
     }
     const markerIndex = geometry.compaction[0]?.stepIndex as number;
-    expect(geometry.total.points[markerIndex]?.value).toBeGreaterThanOrEqual(
-      geometry.total.points[markerIndex - 1]?.value as number,
-    );
-    expect(geometry.total.linePath).toContain(" C ");
-    expect(geometry.total.linePath).not.toMatch(/NaN|Infinity|undefined/);
+    for (const series of [geometry.own, geometry.tree]) {
+      expect(series.points[markerIndex]?.value).toBeGreaterThanOrEqual(
+        series.points[markerIndex - 1]?.value as number,
+      );
+    }
+    for (let index = 0; index < geometry.stepCount; index += 1) {
+      expect(geometry.ownCumulativeValues[index]).toBeLessThanOrEqual(
+        geometry.treeCumulativeValues[index] as number,
+      );
+    }
   });
 
   it("renders labelled dual axes from the same chart on root and subsession pages", async () => {
@@ -1686,7 +1704,7 @@ describe("session view composition", () => {
     for (const html of [root, subsession]) {
       expect(html).toContain('class="qg-usage qg-usage--session"');
       expect(html).toContain("Context · focus session");
-      expect(html).toContain("Total consumption · this session tree");
+      expect(html).toContain("Cumulative · this session");
       expect(html).not.toContain("(left)");
       expect(html).not.toContain("(right)");
       expect(html).toContain("qg-chart__axis-title--context");
@@ -1694,15 +1712,23 @@ describe("session view composition", () => {
       expect(html).toContain("qg-chart__axis-label--context");
       expect(html).toContain("qg-chart__axis-label--total");
       expect(html).toContain("qg-chart__line--context");
-      expect(html).toContain("qg-chart__line--total");
+      expect(html).toContain("qg-chart__line--own");
       expect(html).not.toMatch(/NaN|Infinity/);
     }
+    // Root with descendants adds the orange tree series; the leaf subsession
+    // keeps only the yellow own series.
+    expect(root).toContain("Cumulative · session tree");
+    expect(root).toContain("qg-chart__line--total");
+    expect(subsession).not.toContain("Cumulative · session tree");
+    expect(subsession).not.toContain("qg-chart__line--total");
     // Multi-point areas fill under each line; the one-step subsession keeps
     // single-point dots instead of an invented area.
     expect(root).toContain("qg-chart__area--context");
+    expect(root).toContain("qg-chart__area--own");
     expect(root).toContain("qg-chart__area--total");
     expect(subsession).toContain("qg-chart__point--context");
-    expect(subsession).toContain("qg-chart__point--total");
+    expect(subsession).toContain("qg-chart__point--own");
+    expect(subsession).not.toContain("qg-chart__point--total");
   });
 
   it("keeps both session scales finite for zero, tiny, single-point, and focus-less data", () => {
@@ -1721,7 +1747,7 @@ describe("session view composition", () => {
 
     for (const snapshot of [empty, zero, tiny, noFocusSnapshot]) {
       const geometry = buildSessionChartGeometry(snapshot);
-      for (const series of [geometry.context, geometry.total]) {
+      for (const series of [geometry.context, geometry.own, geometry.tree]) {
         expect(Number.isFinite(series.domainMax)).toBe(true);
         expect(series.domainMax).toBeGreaterThanOrEqual(0);
         expect(series.linePath).not.toMatch(/NaN|Infinity|undefined/);
@@ -1741,15 +1767,17 @@ describe("session view composition", () => {
       steps: base.steps.slice(0, 1),
     });
     expect(single.context.points).toHaveLength(1);
-    expect(single.total.points).toHaveLength(1);
+    expect(single.own.points).toHaveLength(1);
+    expect(single.tree.points).toHaveLength(1);
     expect(single.context.linePath).toMatch(/^M /);
     expect(single.context.areaPath).toBe("");
 
     const noFocus = buildSessionChartGeometry(noFocusSnapshot);
     expect(noFocus.focusStepCount).toBe(0);
     expect(noFocus.context.points).toHaveLength(0);
-    expect(noFocus.total.points).toHaveLength(3);
-    expect(noFocus.total.areaPath).toContain(" C ");
+    expect(noFocus.own.points).toHaveLength(3);
+    expect(noFocus.tree.points).toHaveLength(3);
+    expect(noFocus.tree.areaPath).toContain(" C ");
   });
 
   it("explains a focus-less chart while keeping the tree total visible", async () => {
@@ -1759,6 +1787,7 @@ describe("session view composition", () => {
       range: "7d",
     });
     expect(text(html)).toContain("No completed steps in the focus session yet");
+    expect(html).toContain("qg-chart__line--own");
     expect(html).toContain("qg-chart__line--total");
     expect(html).not.toContain("qg-chart__line--context");
   });
@@ -4308,6 +4337,9 @@ describe("styles and dependency boundaries", () => {
     expect(styles).toContain("--qg-token-reasoning: #7c85fe");
     expect(styles).toContain("--qg-token-output: #51a1fe");
     expect(styles).toContain("--qg-token-cache-write: #00d2f1");
+    expect(styles).toContain("--qg-chart-context: #51a2ff");
+    expect(styles).toContain("--qg-chart-own: #ffb900");
+    expect(styles).toContain("--qg-chart-total: #ff8904");
     // Session keeps a white crosshair; usage has no crosshair or boundary overlay.
     expect(styles).toContain("stroke: #ffffff");
     expect(styles).toContain(".qg-chart__cursor");

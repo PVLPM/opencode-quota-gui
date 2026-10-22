@@ -40,6 +40,7 @@
   /* Chart-specific hues stay separate from the token stack. */
   --qg-chart-rate: #ffb900;
   --qg-chart-context: #51a2ff;
+  --qg-chart-own: #ffb900;
   --qg-chart-total: #ff8904;
 
   --qg-radius: 8px;
@@ -799,7 +800,7 @@ body {
   stroke-dasharray: 3 3;
 }
 
-/* Session chart: blue focus context (left) and orange cumulative tree (right). */
+/* Session chart: blue focus context (left); yellow own and orange tree cumulatives share the right axis. */
 .qg-chart__axis-title {
   fill: var(--qg-text-muted);
   font-size: 10px;
@@ -815,7 +816,8 @@ body {
 
 .qg-chart__axis-title--total,
 .qg-chart__axis-label--total {
-  fill: var(--qg-chart-total);
+  /* Both cumulative series share this axis, so its text stays neutral. */
+  fill: var(--qg-text-muted);
 }
 
 .qg-chart__axis-title--steps {
@@ -835,6 +837,13 @@ body {
   stroke: none;
 }
 
+.qg-chart__area--own {
+  fill: var(--qg-chart-own);
+  /* The own area sits inside the tree area; keep it light so both hues read. */
+  fill-opacity: 0.07;
+  stroke: none;
+}
+
 .qg-chart__area--total {
   fill: var(--qg-chart-total);
   fill-opacity: 0.1;
@@ -844,6 +853,14 @@ body {
 .qg-chart__line--context {
   fill: none;
   stroke: var(--qg-chart-context);
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.qg-chart__line--own {
+  fill: none;
+  stroke: var(--qg-chart-own);
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -859,6 +876,10 @@ body {
 
 .qg-chart__point--context {
   fill: var(--qg-chart-context);
+}
+
+.qg-chart__point--own {
+  fill: var(--qg-chart-own);
 }
 
 .qg-chart__point--total {

@@ -15,10 +15,12 @@ import { createChartTooltipLayout } from "../tooltip-layout";
  * Session graphs (design spec §3; owner 13–17).
  *
  * One shared chart for root sessions and subsessions. The blue context series
- * is the focus session only — never a zig-zag of child contexts — while the
- * orange cumulative series covers the whole scoped tree. The two have separate
- * y axes; compaction markers annotate the tree scope without resetting either
- * series.
+ * is measured in the focus session — never borrowed from child context — and
+ * carries the last focus value through descendants. The yellow own cumulative
+ * series adds focus-session steps only and stays flat through descendants; the
+ * orange tree series adds every scoped step. Both cumulative series share one
+ * right-axis scale, while context keeps its own left axis. Compaction markers
+ * annotate the tree scope without resetting either cumulative series.
  *
  * The x axis is the 1-based chronological rendered step sequence: plain
  * numbers, no dates and no fabricated zero. Pointer movement selects the
@@ -39,6 +41,16 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
     geometry().compaction.filter((marker) => marker.stepIndex === index);
 
   const contextValue = (index: number) => geometry().contextValues[index];
+  const contextIsCarried = (index: number): boolean => {
+    const step = props.snapshot.steps[index];
+    return (
+      step !== undefined &&
+      step.sessionId !== props.snapshot.focusSessionId &&
+      contextValue(index) !== undefined
+    );
+  };
+  const contextLabel = (index: number): string =>
+    contextIsCarried(index) ? "Context · last known focus" : "Context · focus session";
   const activeStep = () => {
     const index = active();
     return index === undefined ? undefined : props.snapshot.steps[index];
@@ -57,12 +69,24 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
     const step = props.snapshot.steps[index];
     if (!step) return `Step ${index + 1}`;
     const context = contextValue(index);
-    return [
+    const contextText =
+      context === undefined
+        ? "Context —"
+        : contextIsCarried(index)
+          ? `Context last known focus ${formatExactCount(context)}`
+          : `Context ${formatExactCount(context)}`;
+    const parts = [
       `Step ${index + 1}`,
       formatTimestamp(step.atMs, timeZone()),
-      `Context ${context === undefined ? "—" : formatExactCount(context)}`,
-      `Cumulative ${formatExactCount(geometry().cumulativeValues[index] ?? 0)}`,
-    ].join(", ");
+      contextText,
+      `Cumulative this session ${formatExactCount(geometry().ownCumulativeValues[index] ?? 0)}`,
+    ];
+    if (geometry().hasDescendants) {
+      parts.push(
+        `Cumulative session tree ${formatExactCount(geometry().treeCumulativeValues[index] ?? 0)}`,
+      );
+    }
+    return parts.join(", ");
   };
 
   const pointerAt = (event: PointerEvent) => {
@@ -114,14 +138,24 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
   return (
     <div class="qg-usage qg-usage--session">
       <header class="qg-usage__headline">
-        <div>
-          <span class="qg-summary-label">Tree total tokens</span>
-          <strong class="qg-summary-number">{formatExactCount(tree().total)}</strong>
-        </div>
-        <div>
-          <span class="qg-summary-label">This session · own tokens</span>
-          <span class="qg-summary-cost">{formatExactCount(own().total)}</span>
-        </div>
+        <Show
+          when={geometry().hasDescendants}
+          fallback={
+            <div>
+              <span class="qg-summary-label">Total tokens · this session</span>
+              <strong class="qg-summary-number">{formatExactCount(own().total)}</strong>
+            </div>
+          }
+        >
+          <div>
+            <span class="qg-summary-label">Tree total tokens</span>
+            <strong class="qg-summary-number">{formatExactCount(tree().total)}</strong>
+          </div>
+          <div>
+            <span class="qg-summary-label">This session · own tokens</span>
+            <span class="qg-summary-cost">{formatExactCount(own().total)}</span>
+          </div>
+        </Show>
       </header>
       <div
         ref={(element) => {
@@ -132,12 +166,23 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
       >
         <Show
           when={geometry().stepCount > 0}
-          fallback={<p class="qg-empty">No completed steps in this session tree yet.</p>}
+          fallback={
+            <p class="qg-empty">
+              No completed steps in this {geometry().hasDescendants ? "session tree" : "session"}{" "}
+              yet.
+            </p>
+          }
         >
           <svg
             viewBox={`0 0 ${size.width} ${size.height}`}
             role="img"
-            aria-label={`Step series for ${props.snapshot.focusSessionId}: focus-session context on the left axis and cumulative tree consumption on the right axis over ${geometry().stepCount} completed steps.`}
+            aria-label={`Step series for ${props.snapshot.focusSessionId}: focus-session context on the left axis and cumulative consumption ${
+              geometry().hasDescendants
+                ? "for this session and its session tree"
+                : "for this session"
+            } on the right axis over ${geometry().stepCount} completed ${
+              geometry().stepCount === 1 ? "step" : "steps"
+            }.`}
           >
             <text
               class="qg-chart__axis-title qg-chart__axis-title--context"
@@ -153,7 +198,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
               y={geometry().plot.top - 12}
               text-anchor="end"
             >
-              Total consumption
+              Cumulative tokens
             </text>
 
             <For each={geometry().context.ticks}>
@@ -178,7 +223,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
               )}
             </For>
 
-            <For each={geometry().total.ticks}>
+            <For each={geometry().cumulativeTicks}>
               {(tick) => (
                 <>
                   <line
@@ -212,8 +257,11 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
               )}
             </For>
 
-            <Show when={geometry().total.areaPath}>
-              <path class="qg-chart__area qg-chart__area--total" d={geometry().total.areaPath} />
+            <Show when={geometry().hasDescendants && geometry().tree.areaPath}>
+              <path class="qg-chart__area qg-chart__area--total" d={geometry().tree.areaPath} />
+            </Show>
+            <Show when={geometry().own.areaPath}>
+              <path class="qg-chart__area qg-chart__area--own" d={geometry().own.areaPath} />
             </Show>
             <Show when={geometry().context.areaPath}>
               <path
@@ -222,8 +270,11 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
               />
             </Show>
 
-            <Show when={geometry().total.points.length > 0}>
-              <path class="qg-chart__line qg-chart__line--total" d={geometry().total.linePath} />
+            <Show when={geometry().hasDescendants && geometry().tree.points.length > 0}>
+              <path class="qg-chart__line qg-chart__line--total" d={geometry().tree.linePath} />
+            </Show>
+            <Show when={geometry().own.points.length > 0}>
+              <path class="qg-chart__line qg-chart__line--own" d={geometry().own.linePath} />
             </Show>
             <Show when={geometry().context.points.length > 0}>
               <path
@@ -233,14 +284,18 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
             </Show>
 
             <Show
-              when={geometry().total.points.length === 1 ? geometry().total.points[0] : undefined}
+              when={
+                geometry().hasDescendants && geometry().tree.points.length === 1
+                  ? geometry().tree.points[0]
+                  : undefined
+              }
             >
               {(point) => (
                 <circle
                   class="qg-chart__point qg-chart__point--total"
                   cx={point().x}
                   cy={point().y}
-                  r="2.5"
+                  r="4.5"
                 />
               )}
             </Show>
@@ -252,6 +307,16 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
               {(point) => (
                 <circle
                   class="qg-chart__point qg-chart__point--context"
+                  cx={point().x}
+                  cy={point().y}
+                  r="3.5"
+                />
+              )}
+            </Show>
+            <Show when={geometry().own.points.length === 1 ? geometry().own.points[0] : undefined}>
+              {(point) => (
+                <circle
+                  class="qg-chart__point qg-chart__point--own"
                   cx={point().x}
                   cy={point().y}
                   r="2.5"
@@ -342,7 +407,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
                     aria-hidden="true"
                     style={{ "--qg-swatch": "var(--qg-chart-context)" }}
                   />
-                  <span class="qg-totals__label">Context · focus session</span>
+                  <span class="qg-totals__label">{contextLabel(active() ?? 0)}</span>
                   <span class="qg-totals__value">
                     {contextValue(active() ?? 0) === undefined
                       ? "—"
@@ -353,13 +418,26 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
                   <span
                     class="qg-tooltip__swatch"
                     aria-hidden="true"
-                    style={{ "--qg-swatch": "var(--qg-chart-total)" }}
+                    style={{ "--qg-swatch": "var(--qg-chart-own)" }}
                   />
-                  <span class="qg-totals__label">Cumulative · session tree</span>
+                  <span class="qg-totals__label">Cumulative · this session</span>
                   <span class="qg-totals__value">
-                    {formatExactCount(geometry().cumulativeValues[active() ?? 0] ?? 0)}
+                    {formatExactCount(geometry().ownCumulativeValues[active() ?? 0] ?? 0)}
                   </span>
                 </div>
+                <Show when={geometry().hasDescendants}>
+                  <div class="qg-totals__row qg-tooltip__row">
+                    <span
+                      class="qg-tooltip__swatch"
+                      aria-hidden="true"
+                      style={{ "--qg-swatch": "var(--qg-chart-total)" }}
+                    />
+                    <span class="qg-totals__label">Cumulative · session tree</span>
+                    <span class="qg-totals__value">
+                      {formatExactCount(geometry().treeCumulativeValues[active() ?? 0] ?? 0)}
+                    </span>
+                  </div>
+                </Show>
                 <Show when={activeCompactions().length > 0}>
                   <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--note">
                     <span class="qg-totals__label">Compaction</span>
@@ -378,8 +456,8 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
 
       <Show when={geometry().stepCount > 0 && geometry().focusStepCount === 0}>
         <p class="qg-chart__note">
-          No completed steps in the focus session yet; the orange line still covers this session
-          tree.
+          No completed steps in the focus session yet; the yellow own line stays at zero while the
+          orange tree line still covers descendant steps.
         </p>
       </Show>
 
@@ -406,18 +484,25 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
             <span class="qg-legend__swatch" aria-hidden="true" />
             <span class="qg-legend__label">Context · focus session</span>
           </div>
-          <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-total)" }}>
+          <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-own)" }}>
             <span class="qg-legend__swatch" aria-hidden="true" />
-            <span class="qg-legend__label">Total consumption · this session tree</span>
+            <span class="qg-legend__label">Cumulative · this session</span>
           </div>
+          <Show when={geometry().hasDescendants}>
+            <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-total)" }}>
+              <span class="qg-legend__swatch" aria-hidden="true" />
+              <span class="qg-legend__label">Cumulative · session tree</span>
+            </div>
+          </Show>
         </div>
       </aside>
 
       <div class="sr-only">
         <table>
           <caption>
-            Completed steps in this session tree. Context is the focus session only; cumulative
-            total covers this session tree.
+            {geometry().hasDescendants
+              ? "Completed steps in this session tree. Context is the focus session only; carried values are last known. Cumulative totals show this session and the session tree."
+              : "Completed steps in this session. Context is the focus session only; the cumulative total covers this session."}
           </caption>
           <thead>
             <tr>
@@ -425,8 +510,15 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
               <th scope="col">Session</th>
               <th scope="col">Branch</th>
               <th scope="col">At</th>
-              <th scope="col">Context tokens (focus)</th>
-              <th scope="col">Cumulative total tokens (tree)</th>
+              <th scope="col">
+                {geometry().hasDescendants
+                  ? "Context tokens (focus; last known on descendants)"
+                  : "Context tokens (focus)"}
+              </th>
+              <th scope="col">Cumulative tokens (this session)</th>
+              <Show when={geometry().hasDescendants}>
+                <th scope="col">Cumulative tokens (session tree)</th>
+              </Show>
               <th scope="col">Compaction</th>
             </tr>
           </thead>
@@ -443,7 +535,10 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
                       ? "—"
                       : formatExactCount(contextValue(index()) as number)}
                   </td>
-                  <td>{formatExactCount(geometry().cumulativeValues[index()] ?? 0)}</td>
+                  <td>{formatExactCount(geometry().ownCumulativeValues[index()] ?? 0)}</td>
+                  <Show when={geometry().hasDescendants}>
+                    <td>{formatExactCount(geometry().treeCumulativeValues[index()] ?? 0)}</td>
+                  </Show>
                   <td>
                     {compactionAt(index()).length === 0
                       ? "—"

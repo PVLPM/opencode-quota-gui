@@ -287,9 +287,9 @@ export interface SessionSeriesPoint {
 }
 
 /**
- * One measured series against its own y domain. `linePath` and `areaPath` are
- * pre-computed monotone curves so both the renderer and tests see the exact
- * geometry that ships.
+ * One session series against its own or a supplied shared y domain. `linePath`
+ * and `areaPath` are pre-computed monotone curves so both the renderer and
+ * tests see the exact geometry that ships.
  */
 export interface SessionSeries {
   points: SessionSeriesPoint[];
@@ -309,15 +309,27 @@ export interface SessionCompactionTick {
 export interface SessionChartGeometry {
   plot: PlotRect;
   stepCount: number;
+  /** Real focus-session steps; carried context on descendants does not add here. */
   focusStepCount: number;
-  /** Focus-session context only, on the left axis. May rise and fall. */
+  /** True when the scoped tree has any node or step outside the focus session. */
+  hasDescendants: boolean;
+  /** Focus-session context on the left axis, carried through descendants. */
   context: SessionSeries;
-  /** Running consumption over every scoped step, on the right axis. */
-  total: SessionSeries;
-  /** Context per step index; `undefined` outside the focus session. */
+  /** Prefix sum for the focused session only, on the shared right axis. */
+  own: SessionSeries;
+  /** Prefix sum for every scoped step, on the shared right axis. */
+  tree: SessionSeries;
+  /**
+   * Context per step index. Carried focus values are defined on descendant
+   * steps; values before the first focus sample remain undefined.
+   */
   contextValues: (number | undefined)[];
-  /** Cumulative consumption at every step index; never decreases. */
-  cumulativeValues: number[];
+  /** Own-session cumulative value at every step index; flat on descendants. */
+  ownCumulativeValues: number[];
+  /** Tree cumulative value at every step index; never decreases. */
+  treeCumulativeValues: number[];
+  /** One shared right-axis scale for both cumulative series. */
+  cumulativeTicks: AxisTick[];
   compaction: SessionCompactionTick[];
   stepX: (index: number) => number;
   labelIndexes: number[];
@@ -420,8 +432,10 @@ function toAreaPath(
 function buildSessionSeries(
   values: { stepIndex: number; x: number; value: number }[],
   plot: PlotRect,
+  domainMaxOverride?: number,
 ): SessionSeries {
-  const domainMax = values.reduce((max, point) => Math.max(max, point.value), 0);
+  const measuredMax = values.reduce((max, point) => Math.max(max, point.value), 0);
+  const domainMax = domainMaxOverride ?? measuredMax;
   const scaleMax = domainMax > 0 ? domainMax : 1;
   const points: SessionSeriesPoint[] = values.map((point) => ({
     ...point,
@@ -438,14 +452,21 @@ function buildSessionSeries(
 }
 
 /**
- * The session chart has two independent honesty rules:
+ * Context and cumulative consumption answer different questions:
  *
- * - Context is the focus session's own `input + cache read + cache write` at
- *   each of its completed steps. Child-session context is never stitched into
- *   this line, so compaction drops stay visible and meaningful.
- * - Total consumption is a running prefix sum over every scoped step (the
+ * - Context is the focus session's own `input + cache read + cache write` on
+ *   its completed steps. On descendant steps the most recent focus value is
+ *   carried forward, never borrowed from the child context. Values before the
+ *   first focus sample stay unknown, and compaction drops remain visible at
+ *   the next real focus measurement.
+ * - Own cumulative consumption is a prefix sum over focus-session steps only.
+ *   It holds flat through descendant steps and never resets at compaction.
+ * - Tree cumulative consumption is a prefix sum over every scoped step (the
  *   focus session plus its descendants, in chronological order). Compaction
  *   and branch changes never reset or subtract it.
+ *
+ * Own and tree share one right-axis domain so the gap between them is honest.
+ * Context keeps its independent left-axis domain.
  */
 export function buildSessionChartGeometry(
   snapshot: SessionSnapshot,
@@ -461,21 +482,45 @@ export function buildSessionChartGeometry(
   };
 
   const contextValues = new Array<number | undefined>(count);
-  const cumulativeValues: number[] = [];
+  const ownCumulativeValues: number[] = [];
+  const treeCumulativeValues: number[] = [];
   const contextRaw: { stepIndex: number; x: number; value: number }[] = [];
-  const totalRaw: { stepIndex: number; x: number; value: number }[] = [];
-  let cumulative = 0;
+  const ownRaw: { stepIndex: number; x: number; value: number }[] = [];
+  const treeRaw: { stepIndex: number; x: number; value: number }[] = [];
+  let lastFocusContext: number | undefined;
+  let focusStepCount = 0;
+  let ownCumulative = 0;
+  let treeCumulative = 0;
 
   source.forEach((step, index) => {
-    cumulative += nonNegative(step.totalTokens);
-    cumulativeValues.push(cumulative);
-    totalRaw.push({ stepIndex: index, x: stepX(index), value: cumulative });
-    if (step.sessionId === snapshot.focusSessionId) {
-      const context = nonNegative(step.contextTokens);
-      contextValues[index] = context;
-      contextRaw.push({ stepIndex: index, x: stepX(index), value: context });
+    const x = stepX(index);
+    const isFocus = step.sessionId === snapshot.focusSessionId;
+    if (isFocus) {
+      lastFocusContext = nonNegative(step.contextTokens);
+      contextValues[index] = lastFocusContext;
+      contextRaw.push({ stepIndex: index, x, value: lastFocusContext });
+      focusStepCount += 1;
+    } else if (lastFocusContext !== undefined) {
+      // Carry the last real focus measurement; never borrow child context.
+      contextValues[index] = lastFocusContext;
+      contextRaw.push({ stepIndex: index, x, value: lastFocusContext });
     }
+
+    const total = nonNegative(step.totalTokens);
+    treeCumulative += total;
+    if (isFocus) ownCumulative += total;
+    ownCumulativeValues.push(ownCumulative);
+    treeCumulativeValues.push(treeCumulative);
+    ownRaw.push({ stepIndex: index, x, value: ownCumulative });
+    treeRaw.push({ stepIndex: index, x, value: treeCumulative });
   });
+
+  const hasDescendants =
+    snapshot.nodes.some((node) => node.sessionId !== snapshot.focusSessionId) ||
+    source.some((step) => step.sessionId !== snapshot.focusSessionId);
+  const cumulativeMax = Math.max(ownCumulative, treeCumulative);
+  const own = buildSessionSeries(ownRaw, plot, cumulativeMax);
+  const tree = buildSessionSeries(treeRaw, plot, cumulativeMax);
 
   const compaction: SessionCompactionTick[] = [];
   if (count > 0) {
@@ -503,11 +548,15 @@ export function buildSessionChartGeometry(
   return {
     plot,
     stepCount: count,
-    focusStepCount: contextRaw.length,
+    focusStepCount,
+    hasDescendants,
     context: buildSessionSeries(contextRaw, plot),
-    total: buildSessionSeries(totalRaw, plot),
+    own,
+    tree,
     contextValues,
-    cumulativeValues,
+    ownCumulativeValues,
+    treeCumulativeValues,
+    cumulativeTicks: tree.ticks,
     compaction,
     stepX,
     labelIndexes: pickLabelIndexes(count, Math.max(2, Math.min(6, Math.floor(plot.width / 64)))),

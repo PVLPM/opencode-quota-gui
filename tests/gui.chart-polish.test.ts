@@ -544,8 +544,16 @@ describe("session chart and tree presentation", () => {
       expect(stepLabels).not.toContain(dayLabel);
       expect(byClass(root, "text", "qg-chart__axis-title--steps")).toHaveLength(1);
       expect(byClass(root, "path", "qg-chart__area--context")).toHaveLength(1);
+      expect(byClass(root, "path", "qg-chart__area--own")).toHaveLength(1);
       expect(byClass(root, "path", "qg-chart__area--total")).toHaveLength(1);
+      expect(byClass(root, "path", "qg-chart__line--own")).toHaveLength(1);
+      expect(byClass(root, "path", "qg-chart__line--total")).toHaveLength(1);
       expect(byClass(root, "line", "qg-chart__marker")).toHaveLength(1);
+      const legend = byClass(root, "div", "qg-legend__item");
+      expect(legend).toHaveLength(3);
+      expect(
+        legend.map((item) => (item.props.style as Record<string, string>)["--qg-swatch"]),
+      ).toEqual(["var(--qg-chart-context)", "var(--qg-chart-own)", "var(--qg-chart-total)"]);
       expect(graph.elementsNamed(root, "title")).toHaveLength(0);
     } finally {
       dispose();
@@ -571,6 +579,7 @@ describe("session chart and tree presentation", () => {
       );
       expect(graph.textOf(tooltip as TestNode)).toContain("Context · focus session");
       expect(graph.textOf(tooltip as TestNode)).toContain("800");
+      expect(graph.textOf(tooltip as TestNode)).toContain("Cumulative · this session");
       expect(graph.textOf(tooltip as TestNode)).toContain("Cumulative · session tree");
       expect(graph.textOf(tooltip as TestNode)).toContain("1,500");
       let cursor = byClass(root, "line", "qg-chart__cursor")[0];
@@ -580,8 +589,20 @@ describe("session chart and tree presentation", () => {
       await Promise.resolve();
       tooltip = graph.elementsNamed(root, "output")[0];
       expect(graph.textOf(tooltip as TestNode)).toContain("Step 3");
-      expect(graph.textOf(tooltip as TestNode)).toContain("—");
+      expect(graph.textOf(tooltip as TestNode)).toContain("Context · last known focus");
+      expect(graph.textOf(tooltip as TestNode)).toContain("800");
+      expect(graph.textOf(tooltip as TestNode)).toContain("Cumulative · this session");
+      expect(graph.textOf(tooltip as TestNode)).toContain("1,500");
+      expect(graph.textOf(tooltip as TestNode)).toContain("Cumulative · session tree");
       expect(graph.textOf(tooltip as TestNode)).toContain("2,900");
+      expect(
+        byClass(tooltip as TestNode, "span", "qg-tooltip__swatch").map(
+          (swatch) => (swatch.props.style as Record<string, string>)["--qg-swatch"],
+        ),
+      ).toEqual(["var(--qg-chart-context)", "var(--qg-chart-own)", "var(--qg-chart-total)"]);
+      expect(surface?.props["aria-valuetext"]).toContain("Context last known focus 800");
+      expect(surface?.props["aria-valuetext"]).toContain("Cumulative this session 1,500");
+      expect(surface?.props["aria-valuetext"]).toContain("Cumulative session tree 2,900");
       cursor = byClass(root, "line", "qg-chart__cursor")[0];
       expect(cursor?.props.x1).toBeCloseTo(geometry.stepX(2), 10);
 
@@ -617,11 +638,101 @@ describe("session chart and tree presentation", () => {
       expect(tooltip).toBeDefined();
       expect(graph.textOf(tooltip)).not.toContain("Cache rate");
       expect(byClass(tooltip, "span", "qg-tooltip__swatch--line")).toHaveLength(0);
-      // The two real series still use ordinary square swatches.
-      expect(byClass(tooltip, "span", "qg-tooltip__swatch")).toHaveLength(2);
+      // Context, own-session and session-tree series use ordinary square swatches.
+      expect(byClass(tooltip, "span", "qg-tooltip__swatch")).toHaveLength(3);
       expect(graph.textOf(root)).not.toContain("Cache rate");
     } finally {
       dispose();
+    }
+  });
+
+  it("shows own only for a leaf and both cumulative series for a subsession with descendants", async () => {
+    const base = sessionSnapshot();
+    const childNode = base.nodes[1] as SessionSnapshot["nodes"][number];
+    const childStep = base.steps[2] as SessionSnapshot["steps"][number];
+
+    const leafSnapshot = sessionSnapshot({
+      focusSessionId: childNode.sessionId,
+      nodes: [{ ...childNode, childIds: [] }],
+      steps: [childStep],
+      compactionMarkers: [],
+      ownSummary: { ...costed({ input: 1200, output: 200 }), stepCount: 1 },
+      treeTotals: costed({ input: 1200, output: 200 }),
+    });
+    const leaf = mountSession(leafSnapshot);
+    try {
+      expect(byClass(leaf.root, "path", "qg-chart__line--own")).toHaveLength(1);
+      expect(byClass(leaf.root, "path", "qg-chart__line--total")).toHaveLength(0);
+      expect(byClass(leaf.root, "path", "qg-chart__area--total")).toHaveLength(0);
+      expect(byClass(leaf.root, "circle", "qg-chart__point--own")).toHaveLength(1);
+      expect(byClass(leaf.root, "circle", "qg-chart__point--total")).toHaveLength(0);
+      expect(byClass(leaf.root, "div", "qg-legend__item")).toHaveLength(2);
+      expect(graph.textOf(leaf.root)).toContain("Cumulative · this session");
+      expect(graph.textOf(leaf.root)).toContain("Total tokens · this session");
+      expect(graph.textOf(leaf.root)).not.toContain("Tree total tokens");
+      expect(graph.textOf(leaf.root)).not.toContain("Cumulative · session tree");
+      expect(graph.textOf(leaf.root)).not.toContain("Cumulative tokens (session tree)");
+
+      const surface = byClass(leaf.root, "div", "qg-chart__surface")[0];
+      listener(surface as TestNode, "onFocus")?.({});
+      await Promise.resolve();
+      const tooltip = graph.elementsNamed(leaf.root, "output")[0] as TestNode;
+      expect(graph.textOf(tooltip)).toContain("Context · focus session");
+      expect(graph.textOf(tooltip)).toContain("Cumulative · this session");
+      expect(graph.textOf(tooltip)).not.toContain("Cumulative · session tree");
+    } finally {
+      leaf.dispose();
+    }
+
+    const grandchildId = "session-grandchild";
+    const grandchildNode = {
+      ...childNode,
+      sessionId: grandchildId,
+      parentId: childNode.sessionId,
+      title: "Grandchild",
+      depth: 2,
+      childIds: [],
+      ownTokens: costed({ input: 10 }),
+      subtreeTokens: costed({ input: 10 }),
+    };
+    const grandchildStep = {
+      ...childStep,
+      sessionId: grandchildId,
+      messageId: "msg-grandchild",
+      atMs: childStep.atMs + 30 * 60_000,
+      contextTokens: 999,
+      totalTokens: 100,
+    };
+    const withDescendant = sessionSnapshot({
+      focusSessionId: childNode.sessionId,
+      nodes: [{ ...childNode, childIds: [grandchildId] }, grandchildNode],
+      steps: [childStep, grandchildStep],
+      compactionMarkers: [],
+      ownSummary: { ...costed({ input: 1200, output: 200 }), stepCount: 1 },
+      treeTotals: costed({ input: 1210, output: 200 }),
+    });
+    const subsession = mountSession(withDescendant);
+    try {
+      expect(byClass(subsession.root, "path", "qg-chart__line--own")).toHaveLength(1);
+      expect(byClass(subsession.root, "path", "qg-chart__line--total")).toHaveLength(1);
+      expect(byClass(subsession.root, "path", "qg-chart__area--own")).toHaveLength(1);
+      expect(byClass(subsession.root, "path", "qg-chart__area--total")).toHaveLength(1);
+      expect(byClass(subsession.root, "div", "qg-legend__item")).toHaveLength(3);
+      const surface = byClass(subsession.root, "div", "qg-chart__surface")[0];
+      listener(surface as TestNode, "onFocus")?.({});
+      listener(surface as TestNode, "onKeyDown")?.({ key: "End", preventDefault: () => {} });
+      await Promise.resolve();
+      const tooltip = graph.elementsNamed(subsession.root, "output")[0] as TestNode;
+      expect(graph.textOf(tooltip)).toContain("Step 2");
+      expect(graph.textOf(tooltip)).toContain("Context · last known focus");
+      expect(graph.textOf(tooltip)).toContain("1,200");
+      expect(graph.textOf(tooltip)).toContain("Cumulative · this session");
+      expect(graph.textOf(tooltip)).toContain("1,400");
+      expect(graph.textOf(tooltip)).toContain("Cumulative · session tree");
+      expect(graph.textOf(tooltip)).toContain("1,500");
+      expect(surface?.props["aria-valuetext"]).toContain("Context last known focus 1,200");
+    } finally {
+      subsession.dispose();
     }
   });
 
@@ -818,6 +929,7 @@ describe("session chart and tree presentation", () => {
     expect(styles).toContain("--qg-token-cache-write: #00d2f1");
     expect(styles).toContain("--qg-chart-rate: #ffb900");
     expect(styles).toContain("--qg-chart-context: #51a2ff");
+    expect(styles).toContain("--qg-chart-own: #ffb900");
     expect(styles).toContain("--qg-chart-total: #ff8904");
     expect(styles).toContain(".qg-chart__segment");
     expect(styles).not.toContain(".qg-chart__separator");
