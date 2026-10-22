@@ -160,6 +160,13 @@ function collectValueEdits(
       return;
     }
 
+    if (current.length === desired.length) {
+      for (let index = 0; index < current.length; index++) {
+        collectValueEdits(current[index], desired[index], [...path, index], edits);
+      }
+      return;
+    }
+
     if (desired.length < current.length) {
       let desiredIndex = 0;
       const removedIndexes: number[] = [];
@@ -329,7 +336,7 @@ export function editConfigDocument(params: {
     }
   }
 
-  if (!updated.endsWith(eol)) {
+  if (updated !== params.raw && !updated.endsWith(eol)) {
     updated += eol;
   }
 

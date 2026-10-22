@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   type ConfigFileFormat,
   findGitWorktreeRoot,
+  isVerifiedQuotaPluginSpec,
   resolveExistingConfigPath,
 } from "./config-file-utils.js";
 import {
@@ -57,6 +58,7 @@ export interface ScopedUpdateConfigEdit {
   updated: string;
   replacements: number;
   displayMigrations: number;
+  pluginChanges?: string[];
 }
 
 export interface ScopedUpdateConfigSnapshot {
@@ -171,14 +173,16 @@ function quotaUpdateTarget(
   openCodeMajor: OpenCodeMajor | undefined,
   env: NodeJS.ProcessEnv,
 ): QuotaUpdateTarget {
+  const explicit = resolveExplicitQuotaPluginSpec({ env });
   return {
-    keptSpecs: QUOTA_MOVING_SPECS,
-    replacementSpec:
-      openCodeMajor === 1 ? null : (resolveExplicitQuotaPluginSpec({ env }) ?? QUOTA_LATEST_SPEC),
+    keptSpecs: explicit && openCodeMajor !== 1 ? new Set([explicit]) : QUOTA_MOVING_SPECS,
+    explicit: explicit !== null,
+    replacementSpec: openCodeMajor === 1 ? null : (explicit ?? QUOTA_LATEST_SPEC),
   };
 }
 
 interface QuotaUpdateTarget {
+  explicit: boolean;
   keptSpecs: ReadonlySet<string>;
   replacementSpec: string | null;
 }
@@ -216,27 +220,103 @@ function collectQuotaUpdateSpecs(raw: string, path: string): string[] {
   return specs;
 }
 
-function updateConfig(
+async function updateConfig(
   raw: string,
   path: string,
   target: QuotaUpdateTarget,
   openCodeMajor: OpenCodeMajor | undefined,
-): {
+): Promise<{
   updated: string;
   replacements: number;
   specs: string[];
-} {
+  pluginChanges: string[];
+}> {
   const format: ConfigFileFormat = path.endsWith(".jsonc") ? "jsonc" : "json";
   const parsed = parseUpdateConfig(raw, path);
 
   const edits: Array<{ path: (string | number)[]; value: unknown }> = [];
   let replacements = 0;
   const specs: string[] = [];
+  const pluginChanges: string[] = [];
+  if (target.explicit && target.replacementSpec !== null) {
+    const candidates: Array<{ entry: unknown; spec: string; path: (string | number)[] }> = [];
+    for (const array of pluginArrays(parsed)) {
+      for (let index = 0; index < array.entries.length; index++) {
+        const entry = array.entries[index];
+        const spec = quotaUpdateSpecFromEntry(entry);
+        if (
+          spec !== null &&
+          (spec === target.replacementSpec ||
+            (await isVerifiedQuotaPluginSpec(spec, dirname(path))))
+        ) {
+          candidates.push({ entry, spec, path: [...array.path, index] });
+        }
+      }
+    }
+    const options = new Set(
+      candidates.map(({ entry }) =>
+        JSON.stringify(
+          typeof entry === "string"
+            ? null
+            : Array.isArray(entry)
+              ? entry.slice(1)
+              : Object.fromEntries(
+                  Object.entries(entry as Record<string, unknown>).filter(
+                    ([key]) => key !== "package",
+                  ),
+                ),
+        ),
+      ),
+    );
+    if (options.size > 1) {
+      throw new ScopedUpdateError(
+        "Multiple quota plugin entries have different options; review them manually before replacing the plugin spec.",
+        { path },
+      );
+    }
+    const retained =
+      candidates.find(({ spec }) => spec === target.replacementSpec) ?? candidates[0];
+    for (const candidate of candidates.reverse()) {
+      specs.push(candidate.spec);
+      if (candidate !== retained) {
+        edits.push({ path: candidate.path, value: undefined });
+        pluginChanges.push(
+          `remove duplicate quota plugin ${JSON.stringify(candidate.spec)}; keep ${JSON.stringify(target.replacementSpec)}`,
+        );
+        replacements++;
+      } else if (candidate.spec !== target.replacementSpec) {
+        const specPath =
+          typeof candidate.entry === "string"
+            ? candidate.path
+            : [...candidate.path, Array.isArray(candidate.entry) ? 0 : "package"];
+        edits.push({ path: specPath, value: target.replacementSpec });
+        pluginChanges.push(
+          `${JSON.stringify(candidate.spec)} -> ${JSON.stringify(target.replacementSpec)}`,
+        );
+        replacements++;
+      }
+    }
+    return {
+      updated: editConfigDocumentPaths({ raw, format, path, edits }),
+      replacements,
+      specs,
+      pluginChanges,
+    };
+  }
   for (const array of pluginArrays(parsed)) {
     for (let index = array.entries.length - 1; index >= 0; index--) {
       const entry = array.entries[index];
       const spec = quotaUpdateSpecFromEntry(entry);
-      if (spec === null || !isCanonicalQuotaUpdateSpec(spec)) continue;
+      if (
+        spec === null ||
+        !(
+          isCanonicalQuotaUpdateSpec(spec) ||
+          (target.explicit &&
+            (spec === target.replacementSpec ||
+              (await isVerifiedQuotaPluginSpec(spec, dirname(path)))))
+        )
+      )
+        continue;
       specs.push(spec);
       if (target.keptSpecs.has(spec)) continue;
       if (target.replacementSpec === null) {
@@ -250,11 +330,12 @@ function updateConfig(
             ? [...array.path, index, 0]
             : [...array.path, index, "package"];
       edits.push({ path: targetPath, value: target.replacementSpec });
+      pluginChanges.push(`${JSON.stringify(spec)} -> ${JSON.stringify(target.replacementSpec)}`);
       replacements++;
     }
   }
   const updated = editConfigDocumentPaths({ raw, format, path, edits });
-  return { updated, replacements, specs };
+  return { updated, replacements, specs, pluginChanges };
 }
 
 interface ScopedUpdateWorkingDocument {
@@ -264,6 +345,7 @@ interface ScopedUpdateWorkingDocument {
   updated: string;
   replacements: number;
   displayMigrations: number;
+  pluginChanges?: string[];
   roles: Set<ScopedUpdateConfigRole>;
   migrationBoundary?: ScopedUpdateMigrationBoundary;
 }
@@ -302,7 +384,7 @@ export async function planScopedUpdate(
     const canonicalPath = await realpath(path);
     const originalBytes = await readFile(path);
     const original = originalBytes.toString("utf8");
-    const planned = updateConfig(original, path, updateTarget, params.openCodeMajor);
+    const planned = await updateConfig(original, path, updateTarget, params.openCodeMajor);
     foundSpecs.push(...planned.specs);
     const roles = new Set<ScopedUpdateConfigRole>(["package-authority"]);
     if (planned.replacements > 0) {
@@ -319,6 +401,7 @@ export async function planScopedUpdate(
       originalBytes,
       updated: planned.updated,
       replacements: planned.replacements,
+      pluginChanges: planned.pluginChanges,
       displayMigrations: 0,
       roles,
     });
@@ -422,12 +505,15 @@ export async function planScopedUpdate(
         updated: document.updated,
         replacements: document.replacements,
         displayMigrations: document.displayMigrations,
+        pluginChanges: document.pluginChanges,
       });
     }
   }
 
   const uniqueSpecs = [...new Set(foundSpecs)];
-  const cacheSpecs = [...new Set([...uniqueSpecs, QUOTA_LATEST_SPEC])];
+  const cacheSpecs = [
+    ...new Set([...uniqueSpecs.filter(isCanonicalQuotaUpdateSpec), QUOTA_LATEST_SPEC]),
+  ];
   const cacheCandidates = cacheSpecs.map((spec) =>
     join(runtime.cacheDir, "packages", sanitizeOpenCodePackageSpec(spec, params.platform)),
   );
@@ -575,6 +661,25 @@ export function formatScopedUpdatePreview(plan: ScopedUpdatePlan): string[] {
   if (plan.safeActions.length > 0) {
     lines.push("", "Safe changes this command can make:");
     lines.push(...plan.safeActions.map(formatSafeAction));
+    for (const edit of plan.configEdits) {
+      if (edit.replacements === 0) continue;
+      if (edit.pluginChanges) {
+        lines.push(...edit.pluginChanges.map((change) => `  ${change}`));
+        continue;
+      }
+      const before = pluginArrays(parseUpdateConfig(edit.original, edit.path));
+      const after = pluginArrays(parseUpdateConfig(edit.updated, edit.path));
+      for (const array of before) {
+        const updated = after.find((candidate) => candidate.path[0] === array.path[0]);
+        for (let index = 0; index < array.entries.length; index++) {
+          const oldSpec = quotaUpdateSpecFromEntry(array.entries[index]);
+          const newSpec = quotaUpdateSpecFromEntry(updated?.entries[index]);
+          if (oldSpec !== null && newSpec !== null && oldSpec !== newSpec) {
+            lines.push(`  ${JSON.stringify(oldSpec)} -> ${JSON.stringify(newSpec)}`);
+          }
+        }
+      }
+    }
   }
 
   if (plan.manualFindings.length > 0) {

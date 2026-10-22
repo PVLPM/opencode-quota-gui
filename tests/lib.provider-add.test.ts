@@ -33,6 +33,33 @@ afterEach(async () => {
 });
 
 describe("provider add global config workflow", () => {
+  it("fully replaces a same-ID provider and removes obsolete providerId and apiKeyEnv", async () => {
+    const dir = await configDir();
+    const initial = await planProviderAdd({
+      definition: remote({ providerId: "synthetic-old-provider" }),
+      configDir: dir,
+    });
+    await applyProviderAddPlan(initial);
+    const replacement = await planProviderAdd({
+      definition: {
+        id: "private-gateway",
+        mode: "remote-api",
+        url: "https://gateway.example/accounting",
+        format: "quota-v1",
+        modelIds: ["model-a"],
+      },
+      configDir: dir,
+    });
+    const parsed = parseConfigDocument(replacement.updated, replacement.format, replacement.path);
+    const definitions = (
+      (parsed.experimental as Record<string, unknown>).quotaToast as Record<string, unknown>
+    ).quotaProviders as Array<Record<string, unknown>>;
+    expect(definitions).toHaveLength(1);
+    expect(definitions[0]).not.toHaveProperty("providerId");
+    expect(definitions[0]).not.toHaveProperty("apiKeyEnv");
+    await applyProviderAddPlan(replacement);
+    expect(await readFile(replacement.path, "utf8")).toBe(replacement.updated);
+  });
   it("previews exact JSONC with comments for every generated section", async () => {
     const dir = await configDir();
     const plan = await planProviderAdd({ definition: remote(), configDir: dir });

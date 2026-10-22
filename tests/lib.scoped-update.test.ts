@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { parseJsonOrJsonc } from "../src/lib/jsonc.js";
 import {
   applyScopedUpdatePlan,
   formatScopedUpdatePreview,
@@ -145,11 +146,21 @@ describe("scoped update specs and paths", () => {
 });
 
 describe("scoped update config planning", () => {
-  it("prefers JSONC, preserves comments/format/options, and leaves custom specs untouched", async () => {
+  it.each([
+    { entry: "@slkiser/opencode-quota@3.11.1", expected: EXPLICIT_UPDATE_SPEC },
+    {
+      entry: ["@slkiser/opencode-quota", { setting: true }],
+      expected: [EXPLICIT_UPDATE_SPEC, { setting: true }],
+    },
+    { entry: "@slkiser/opencode-quota@next", expected: EXPLICIT_UPDATE_SPEC },
+  ])("prefers JSONC, preserves comments/format/options, and leaves custom specs untouched ($entry)", async ({
+    entry,
+    expected,
+  }) => {
     const f = fixture();
     const jsonc = join(f.project, "opencode.jsonc");
     const ignoredJson = join(f.project, "opencode.json");
-    const original = `{\n  // keep this comment\n  "plugin": [\n    "@slkiser/opencode-quota@3.11.1",\n    ["@slkiser/opencode-quota", { "setting": true }],\n    "@slkiser/opencode-quota@next",\n    "other-plugin",\n  ],\n  "unrelated": { "keep": true },\n}\n`;
+    const original = `{\n  // keep this comment\n  "plugin": [\n    ${JSON.stringify(entry)},\n    "other-plugin",\n  ],\n  "unrelated": { "keep": true },\n}\n`;
     write(jsonc, original);
     write(ignoredJson, `{"plugin":["@slkiser/opencode-quota@1.0.0"]}`);
     const plan = await planScopedUpdate({
@@ -161,34 +172,36 @@ describe("scoped update config planning", () => {
     expect(plan.configPaths).toEqual([jsonc]);
     const updated = plan.configEdits[0]!.updated;
     expect(updated).toContain("// keep this comment");
-    expect(updated).toContain(`["${EXPLICIT_UPDATE_SPEC}", { "setting": true }]`);
-    expect(updated).toContain('"@slkiser/opencode-quota@next"');
+    expect(parseJsonOrJsonc(updated, true).plugin).toEqual([expected, "other-plugin"]);
+    expect(updated).not.toContain("@slkiser/opencode-quota");
     expect(updated).toContain('"other-plugin"');
     expect(updated).toContain('"unrelated": { "keep": true }');
     expect(readFileSync(ignoredJson, "utf8")).toContain("@1.0.0");
   });
 
-  it("updates OpenCode 2 native plugins entries and keeps their options", async () => {
+  it.each([
+    { entry: "@slkiser/opencode-quota@3.11.1", expected: EXPLICIT_UPDATE_SPEC },
+    {
+      entry: { package: "@slkiser/opencode-quota@3.11.1", options: { setting: true } },
+      expected: { package: EXPLICIT_UPDATE_SPEC, options: { setting: true } },
+    },
+    {
+      entry: { package: "@slkiser/opencode-quota@next" },
+      expected: { package: EXPLICIT_UPDATE_SPEC },
+    },
+  ])("updates OpenCode 2 native plugins entries and keeps their options ($entry)", async ({
+    entry,
+    expected,
+  }) => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
-    write(
-      config,
-      `{"plugins":["@slkiser/opencode-quota@3.11.1",{"package":"@slkiser/opencode-quota@3.11.1","options":{"setting":true}},{"package":"@slkiser/opencode-quota@next"},"other"]}`,
-    );
+    write(config, JSON.stringify({ plugins: [entry, "other"] }));
     const params = { cwd: f.project, env: withUpdateSpec(f.env), homeDir: join(f.root, "home") };
     const plan = await planScopedUpdate(params);
-    expect(plan.foundSpecs).toEqual([
-      "@slkiser/opencode-quota@next",
-      "@slkiser/opencode-quota@3.11.1",
-    ]);
+    expect(plan.foundSpecs).toEqual([typeof entry === "string" ? entry : entry.package]);
     await applyScopedUpdatePlan(plan);
     expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({
-      plugins: [
-        EXPLICIT_UPDATE_SPEC,
-        { package: EXPLICIT_UPDATE_SPEC, options: { setting: true } },
-        { package: "@slkiser/opencode-quota@next" },
-        "other",
-      ],
+      plugins: [expected, "other"],
     });
   });
 
@@ -894,7 +907,7 @@ describe("scoped update application safety", () => {
     const result = await applyScopedUpdatePlan(
       await planScopedUpdate({
         cwd: f.project,
-        env: withUpdateSpec(f.env),
+        env: f.env,
         homeDir: join(f.root, "home"),
       }),
     );
@@ -920,7 +933,7 @@ describe("scoped update application safety", () => {
     const result = await applyScopedUpdatePlan(
       await planScopedUpdate({
         cwd: f.project,
-        env: withUpdateSpec(f.env),
+        env: f.env,
         homeDir: join(f.root, "home"),
       }),
     );

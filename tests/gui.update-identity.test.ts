@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { QUOTA_PLUGIN_SPEC_ENV } from "../src/lib/init-installer.js";
 import {
   applyScopedUpdatePlan,
+  formatScopedUpdatePreview,
   isCanonicalQuotaUpdateSpec,
   LEGACY_QUOTA_PACKAGE_NAME,
   planScopedUpdate,
@@ -70,6 +71,96 @@ afterEach(() => {
 });
 
 describe("GUI update identity safety", () => {
+  it("does not replace or remove a nonexistent archive merely because its filename matches", async () => {
+    const f = fixture();
+    const config = join(f.project, "opencode.jsonc");
+    const old = "file:./definitely-absent/opencode-quota-gui-1.2.3.tgz";
+    const original = `${JSON.stringify({ plugins: [old, LOCAL_PACK_SPEC] })}\n`;
+    write(config, original);
+    const plan = await planScopedUpdate({
+      ...planParams(f),
+      env: { ...f.env, [QUOTA_PLUGIN_SPEC_ENV]: LOCAL_PACK_SPEC },
+    });
+    expect(plan.configEdits).toEqual([]);
+    await applyScopedUpdatePlan(plan);
+    expect(readFileSync(config, "utf8")).toBe(original);
+  });
+  it("explicit desired spec replaces moving npm specs and verified local dist, leaving lookalikes alone", async () => {
+    const f = fixture();
+    const config = join(f.project, "opencode.jsonc");
+    write(join(f.project, "checkout", "package.json"), '{"name":"opencode-quota-gui"}');
+    write(
+      config,
+      JSON.stringify({
+        plugins: [
+          "opencode-quota-gui@latest",
+          "./checkout/dist/index.js",
+          "some-quota-helper",
+          "./other-quota/dist/index.js",
+        ],
+      }),
+    );
+    const plan = await planScopedUpdate({
+      ...planParams(f),
+      env: { ...f.env, [QUOTA_PLUGIN_SPEC_ENV]: LOCAL_PACK_SPEC },
+    });
+    expect(plan.configEdits).toHaveLength(1);
+    const preview = formatScopedUpdatePreview(plan).join("\n");
+    expect(preview).toContain('"opencode-quota-gui@latest" ->');
+    expect(preview).toContain(LOCAL_PACK_SPEC);
+    await applyScopedUpdatePlan(plan);
+    expect(JSON.parse(readFileSync(config, "utf8")).plugins).toEqual([
+      LOCAL_PACK_SPEC,
+      "some-quota-helper",
+      "./other-quota/dist/index.js",
+    ]);
+    const second = await planScopedUpdate({
+      ...planParams(f),
+      env: { ...f.env, [QUOTA_PLUGIN_SPEC_ENV]: LOCAL_PACK_SPEC },
+    });
+    expect(second.configEdits).toEqual([]);
+  });
+  it("refuses explicit replacement when quota entries have conflicting options without writing", async () => {
+    const f = fixture();
+    const config = join(f.project, "opencode.jsonc");
+    const original = JSON.stringify({
+      plugins: [
+        { package: "opencode-quota-gui@latest", options: { one: true } },
+        { package: LOCAL_PACK_SPEC, options: { two: true } },
+      ],
+    });
+    write(config, original);
+    await expect(
+      planScopedUpdate({
+        ...planParams(f),
+        env: { ...f.env, [QUOTA_PLUGIN_SPEC_ENV]: LOCAL_PACK_SPEC },
+      }),
+    ).rejects.toThrow("different options");
+    expect(readFileSync(config, "utf8")).toBe(original);
+  });
+  it("deduplicates identical option-bearing entries across both plugin arrays", async () => {
+    const f = fixture();
+    const config = join(f.project, "opencode.jsonc");
+    write(
+      config,
+      JSON.stringify({
+        plugin: [{ package: "opencode-quota-gui@latest", options: { keep: true } }],
+        plugins: ["before", { package: LOCAL_PACK_SPEC, options: { keep: true } }, "after"],
+      }),
+    );
+    const plan = await planScopedUpdate({
+      ...planParams(f),
+      env: { ...f.env, [QUOTA_PLUGIN_SPEC_ENV]: LOCAL_PACK_SPEC },
+    });
+    await applyScopedUpdatePlan(plan);
+    const result = JSON.parse(readFileSync(config, "utf8"));
+    expect(result.plugin).toEqual([]);
+    expect(result.plugins).toEqual([
+      "before",
+      { package: LOCAL_PACK_SPEC, options: { keep: true } },
+      "after",
+    ]);
+  });
   it("uses the independent package identity and still recognizes legacy specs", () => {
     expect(QUOTA_PACKAGE_NAME).toBe("opencode-quota-gui");
     expect(LEGACY_QUOTA_PACKAGE_NAME).toBe("@slkiser/opencode-quota");
@@ -124,13 +215,19 @@ describe("GUI update identity safety", () => {
     expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ plugin: [QUOTA_LATEST_SPEC] });
   });
 
-  it("rewrites recognized non-moving specs to the explicit package spec, never upstream", async () => {
+  it.each([
+    { entry: "@slkiser/opencode-quota@3.11.1", expected: LOCAL_PACK_SPEC },
+    {
+      entry: { package: "opencode-quota-gui@5.0.0", options: { keep: true } },
+      expected: { package: LOCAL_PACK_SPEC, options: { keep: true } },
+    },
+  ])("rewrites recognized non-moving specs to the explicit package spec, never upstream ($entry)", async ({
+    entry,
+    expected,
+  }) => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
-    write(
-      config,
-      `{"plugins":["@slkiser/opencode-quota@3.11.1",{"package":"opencode-quota-gui@5.0.0","options":{"keep":true}},"other-plugin"]}`,
-    );
+    write(config, JSON.stringify({ plugins: [entry, "other-plugin"] }));
 
     const plan = await planScopedUpdate({
       ...planParams(f),
@@ -143,11 +240,7 @@ describe("GUI update identity safety", () => {
 
     await applyScopedUpdatePlan(plan);
     expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({
-      plugins: [
-        LOCAL_PACK_SPEC,
-        { package: LOCAL_PACK_SPEC, options: { keep: true } },
-        "other-plugin",
-      ],
+      plugins: [expected, "other-plugin"],
     });
   });
 

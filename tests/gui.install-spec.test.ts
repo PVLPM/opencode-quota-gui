@@ -46,17 +46,7 @@ function readJson(path: string): any {
 }
 
 function createPromptStub() {
-  const selectValues: unknown[] = [
-    "tui",
-    "project",
-    "jsonc",
-    "inline",
-    "auto",
-    "singleWindow",
-    "remaining",
-    "yes",
-    "current",
-  ];
+  const selectValues: unknown[] = ["project", "auto", "remaining"];
   const multiselectValues: unknown[] = [["toast"], ["toast"]];
   const confirmValues: unknown[] = [true, true, true, true, true, true];
   const outroCalls: string[] = [];
@@ -105,7 +95,7 @@ describe("GUI install spec safety", () => {
     await applyInitInstallerPlan(plan);
 
     const raw = readFileSync(join(tempDir, "opencode.jsonc"), "utf8");
-    expect(readJson(join(tempDir, "opencode.jsonc")).plugin).toEqual([LOCAL_PACK_SPEC]);
+    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([LOCAL_PACK_SPEC]);
     expect(raw).not.toContain("@slkiser/opencode-quota");
   });
 
@@ -117,7 +107,9 @@ describe("GUI install spec safety", () => {
     await applyInitInstallerPlan(plan);
 
     const raw = readFileSync(join(tempDir, "opencode.jsonc"), "utf8");
-    expect(readJson(join(tempDir, "opencode.jsonc")).plugin).toEqual(["opencode-quota-gui@latest"]);
+    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([
+      "opencode-quota-gui@latest",
+    ]);
     expect(raw).not.toContain("@slkiser/opencode-quota");
   });
 
@@ -127,7 +119,7 @@ describe("GUI install spec safety", () => {
     const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
     await applyInitInstallerPlan(plan);
 
-    expect(readJson(join(tempDir, "opencode.jsonc")).plugin).toEqual([LOCAL_PACK_SPEC]);
+    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([LOCAL_PACK_SPEC]);
   });
 
   it("refuses an explicit spec that points at the upstream package", async () => {
@@ -155,7 +147,7 @@ describe("GUI install spec safety", () => {
     expect(opencodeEdit?.addedPlugins).toEqual([]);
 
     await applyInitInstallerPlan(plan);
-    expect(readJson(join(tempDir, "opencode.jsonc")).plugin).toEqual([
+    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([
       "@slkiser/opencode-quota@latest",
     ]);
   });
@@ -201,7 +193,9 @@ describe("GUI install spec safety", () => {
 
     expect(code).toBe(0);
     expect(prompts.errorCalls).toEqual([]);
-    expect(readJson(join(tempDir, "opencode.jsonc")).plugin).toEqual(["opencode-quota-gui@latest"]);
+    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([
+      "opencode-quota-gui@latest",
+    ]);
   });
 
   it("installs the explicit pack through runInitInstaller", async () => {
@@ -216,6 +210,6 @@ describe("GUI install spec safety", () => {
     });
 
     expect(code).toBe(0);
-    expect(readJson(join(tempDir, "opencode.jsonc")).plugin).toEqual([LOCAL_PACK_SPEC]);
+    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([LOCAL_PACK_SPEC]);
   });
 });

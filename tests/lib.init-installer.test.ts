@@ -52,17 +52,7 @@ function installerSelections(
   };
 }
 
-const DEFAULT_PROMPT_SELECT_VALUES = [
-  "tui",
-  "project",
-  "jsonc",
-  "inline",
-  "auto",
-  "singleWindow",
-  "remaining",
-  "yes",
-  "current",
-] as const;
+const DEFAULT_PROMPT_SELECT_VALUES = ["project", "auto", "remaining"] as const;
 
 function createPromptStub(params: {
   selectValues?: unknown[];
@@ -152,7 +142,7 @@ describe("init installer planning and merge behavior", () => {
       "You're on OpenCode 1. OpenCode Quota 5 needs OpenCode 2.",
     ]);
     expect(prompts.outroCalls).toEqual([
-      "For OpenCode 1, run: npx @slkiser/opencode-quota@4 init — no files changed.",
+      "OpenCode Quota GUI requires OpenCode 2 — no files changed.",
     ]);
     expect(readdirSync(tempDir)).toEqual([]);
   });
@@ -170,7 +160,7 @@ describe("init installer planning and merge behavior", () => {
       initialValue: "2",
     });
     expect(prompts.outroCalls).toEqual([
-      "For OpenCode 1, run: npx @slkiser/opencode-quota@4 init — no files changed.",
+      "OpenCode Quota GUI requires OpenCode 2 — no files changed.",
     ]);
     expect(readdirSync(tempDir)).toEqual([]);
   });
@@ -186,7 +176,7 @@ describe("init installer planning and merge behavior", () => {
     const code = await runInitInstaller({ cwd: tempDir, prompts: prompts as any });
 
     expect(code).toBe(0);
-    expect(readJson(join(tempDir, "opencode.jsonc")).plugin).toEqual([EXPLICIT_PACK_SPEC]);
+    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([EXPLICIT_PACK_SPEC]);
   });
 
   it("creates recommended project opencode.jsonc at the worktree root for toast mode", async () => {
@@ -229,7 +219,7 @@ describe("init installer planning and merge behavior", () => {
     const config = readJson(join(projectDir, "opencode.jsonc"));
     expect(config).toMatchObject({
       $schema: "https://opencode.ai/config.json",
-      plugin: [EXPLICIT_PACK_SPEC],
+      plugins: [EXPLICIT_PACK_SPEC],
     });
     expect(config.experimental).toBeUndefined();
 
@@ -374,11 +364,9 @@ describe("init installer planning and merge behavior", () => {
 
     const opencodeEdit = plan.edits.find((edit) => edit.kind === "opencode");
     expect(opencodeEdit?.warnings).toEqual([]);
-    expect(opencodeEdit?.addedPlugins).toEqual([]);
+    expect(opencodeEdit?.addedPlugins).toEqual([`plugins: ${EXPLICIT_PACK_SPEC}`]);
     expect(opencodeEdit?.addedKeys).toEqual([]);
-    expect(opencodeEdit?.skippedValues).toEqual(
-      expect.arrayContaining(["plugin already includes a quota plugin entry"]),
-    );
+    expect(opencodeEdit?.skippedValues).toEqual([]);
     const quotaEdit = plan.edits.find((edit) => edit.kind === "quota");
     expect(quotaEdit?.addedKeys).toEqual(
       expect.arrayContaining([
@@ -400,7 +388,10 @@ describe("init installer planning and merge behavior", () => {
     expect(opencodeRaw.match(/OpenCode Quota: loads the server plugin/g)).toHaveLength(1);
     const opencode = readJson(join(projectDir, "opencode.jsonc"));
     expect(opencode.other).toEqual({ keep: true });
-    expect(opencode.plugin).toHaveLength(1);
+    expect(opencode.plugin).toEqual([
+      "file:///Users/test/Downloads/GitHub/opencode-quota/dist/index.js",
+    ]);
+    expect(opencode.plugins).toEqual([EXPLICIT_PACK_SPEC]);
     expect(opencode.experimental.quotaToast).toMatchObject({
       toastStyle: "grouped",
       enableToast: true,
@@ -434,15 +425,15 @@ describe("init installer planning and merge behavior", () => {
     const plan = await planSelections({}, projectDir);
 
     const opencodeEdit = plan.edits.find((edit) => edit.kind === "opencode");
-    expect(opencodeEdit?.addedPlugins).toEqual([`plugin: ${EXPLICIT_PACK_SPEC}`]);
+    expect(opencodeEdit?.addedPlugins).toEqual([`plugins: ${EXPLICIT_PACK_SPEC}`]);
 
     await applyInitInstallerPlan(plan);
 
     const opencode = readJson(join(projectDir, "opencode.jsonc"));
     expect(opencode.plugin).toEqual([
       "file:///Users/test/Downloads/GitHub/opencode-quota/dist/tui.js",
-      EXPLICIT_PACK_SPEC,
     ]);
+    expect(opencode.plugins).toEqual([EXPLICIT_PACK_SPEC]);
   });
 
   it("does not add a legacy plugin entry when OpenCode 2 native plugins already load quota", async () => {
@@ -461,15 +452,13 @@ describe("init installer planning and merge behavior", () => {
 
     const opencodeEdit = plan.edits.find((edit) => edit.kind === "opencode");
     expect(opencodeEdit?.addedPlugins).toEqual([]);
-    expect(opencodeEdit?.skippedValues).toContain("plugins already includes a quota plugin entry");
+    expect(opencodeEdit?.valueChanges.join("\n")).toContain(EXPLICIT_PACK_SPEC);
 
     await applyInitInstallerPlan(plan);
 
     const opencode = readJson(join(projectDir, "opencode.jsonc"));
     expect(opencode.plugin).toBeUndefined();
-    expect(opencode.plugins).toEqual([
-      { package: "@slkiser/opencode-quota@latest", options: { keep: true } },
-    ]);
+    expect(opencode.plugins).toEqual([{ package: EXPLICIT_PACK_SPEC, options: { keep: true } }]);
   });
 
   it("leaves an existing tui.json untouched and writes sidebar disabled when sidebar is not selected", async () => {
@@ -510,7 +499,7 @@ describe("init installer planning and merge behavior", () => {
 
     const opencode = readJson(join(projectDir, "opencode.jsonc"));
 
-    expect(opencode.plugin).toEqual([EXPLICIT_PACK_SPEC]);
+    expect(opencode.plugins).toEqual([EXPLICIT_PACK_SPEC]);
     expect(opencode.experimental).toBeUndefined();
     const quotaConfig = readJson(join(projectDir, "opencode-quota", "quota-toast.json"));
     expect(quotaConfig).toMatchObject({
@@ -843,7 +832,7 @@ describe("init installer planning and merge behavior", () => {
     });
   });
 
-  it("prompts for quota UI as a multiselect and does not ask a separate compact status question", async () => {
+  it("prompts only for GUI choices and keeps TUI compatibility configuration opt-in", async () => {
     const prompts = createPromptStub({
       selectValues: DEFAULT_PROMPT_SELECT_VALUES,
       multiselectValues: [["sidebar", "compact_status"]],
@@ -860,58 +849,14 @@ describe("init installer planning and merge behavior", () => {
       prompts.outroCalls.some((message) => message.startsWith("OpenCode Quota setup complete.")),
     ).toBe(true);
     expect(prompts.selectCalls[0]).toMatchObject({
-      message: "Which OpenCode interfaces do you use?",
-      options: [
-        { label: "TUI", value: "tui", hint: "terminal interface" },
-        { label: "Web", value: "web", hint: "browser interface" },
-        {
-          label: "Both",
-          value: "both",
-          hint: "configure terminal and browser interfaces",
-        },
-      ],
-    });
-    expect(prompts.selectCalls[1]).toMatchObject({
-      message: "Where should OpenCode Quota be configured?",
+      message: "Where should OpenCode Quota GUI be configured?",
       initialValue: "global",
       options: [
         expect.objectContaining({ label: "Global OpenCode config (recommended)", value: "global" }),
-        expect.objectContaining({ label: "Project config", value: "project" }),
+        expect.objectContaining({ label: "Current project", value: "project" }),
       ],
     });
-    expect(prompts.selectCalls[2]).toMatchObject({
-      message: "OpenCode config format",
-    });
-    expect(prompts.multiselectCalls[0]).toMatchObject({
-      message: "Which automatic quota displays do you want?",
-      required: true,
-      initialValues: ["sidebar"],
-    });
-    expect(prompts.multiselectCalls[0]?.options).toEqual([
-      expect.objectContaining({ label: "Sidebar panel (TUI)", value: "sidebar" }),
-      expect.objectContaining({ label: "Toast (TUI)", value: "toast" }),
-      expect.objectContaining({ label: "Compact status line (TUI)", value: "compact_status" }),
-      expect.objectContaining({ label: "Manual commands only", value: "none" }),
-    ]);
-    expect(
-      prompts.selectCalls.find(
-        (call) => call.message === "Where should slash commands (e.g. /quota) appear?",
-      ),
-    ).toMatchObject({
-      initialValue: "dialog",
-      options: [
-        {
-          label: "Inline with messages",
-          value: "inline",
-          hint: "persist output in the message transcript",
-        },
-        {
-          label: "Popup dialog",
-          value: "dialog",
-          hint: "show output in a temporary TUI popup",
-        },
-      ],
-    });
+    expect(prompts.multiselectCalls).toEqual([]);
     expect(
       prompts.selectCalls.find(
         (call) => call.message === "How should pre-configured providers be selected?",
@@ -928,55 +873,19 @@ describe("init installer planning and merge behavior", () => {
         hint: "track only the pre-configured providers you select",
       },
     ]);
-    const resetPeriodsPrompt = prompts.selectCalls.find(
-      (call) => call.message === "Quota reset periods",
-    );
-    expect(resetPeriodsPrompt).toMatchObject({ initialValue: "allWindows" });
-    expect(resetPeriodsPrompt?.options).toEqual([
-      {
-        label: "All reset periods",
-        value: "allWindows",
-        hint: "show every available quota window",
-      },
-      {
-        label: "One reset period (expiring soonest)",
-        value: "singleWindow",
-        hint: "show only the next quota window to expire",
-      },
-    ]);
     expect(
       prompts.selectCalls.find((call) => call.message === "What should quota percentages show?"),
     ).toBeDefined();
-    expect(
-      prompts.selectCalls.find((call) => call.message === "Session input/output tokens")?.options,
-    ).toEqual([
-      { label: "Hide", value: "no", hint: "keep output shorter" },
-      {
-        label: "Show",
-        value: "yes",
-        hint: "include current-session input and output totals",
-      },
-    ]);
-    expect(
-      prompts.selectCalls.find((call) => call.message === "Session token scope"),
-    ).toMatchObject({
-      initialValue: "current",
-      options: [
-        expect.objectContaining({ value: "current" }),
-        expect.objectContaining({ value: "tree" }),
-      ],
-    });
+    expect(prompts.selectCalls).toHaveLength(3);
     expect(prompts.confirmCalls[0]).toEqual({
-      message: "Show maintainer announcements on the TUI Home screen when available?",
+      message: "Apply changes?",
       initialValue: true,
     });
     const quotaConfig = readJson(join(tempDir, "opencode-quota", "quota-toast.json"));
     expect(quotaConfig.sessionTokenScope).toBe("current");
-    expect(quotaConfig.tuiSidebarPanel).toEqual({ enabled: true });
+    expect(quotaConfig.tuiSidebarPanel).toEqual({ enabled: false });
     expect(quotaConfig.tuiCompactStatus).toMatchObject({
-      enabled: true,
-      homeBottom: true,
-      sessionPrompt: true,
+      enabled: false,
     });
   });
 
@@ -999,50 +908,29 @@ describe("init installer planning and merge behavior", () => {
       "utf8",
     );
     const prompts = createPromptStub({
-      selectValues: [
-        "tui",
-        "project",
-        "jsonc",
-        "dialog",
-        "manual",
-        "allWindows",
-        "used",
-        "yes",
-        "tree",
-      ],
-      multiselectValues: [["toast"], ["anthropic"]],
+      selectValues: ["project", "manual", "used"],
+      multiselectValues: [["anthropic"]],
       confirmValues: [false, false],
     });
 
     const code = await runInitInstaller({ cwd: tempDir, prompts: prompts as any });
 
     expect(code).toBe(0);
-    expect(prompts.multiselectCalls[0]).toMatchObject({ initialValues: ["sidebar"] });
-    expect(prompts.multiselectCalls[1]).toMatchObject({ initialValues: ["openai"] });
-    expect(
-      prompts.selectCalls.find(
-        (call) => call.message === "Where should slash commands (e.g. /quota) appear?",
-      ),
-    ).toMatchObject({ initialValue: "inline" });
+    expect(prompts.multiselectCalls[0]).toMatchObject({ initialValues: ["openai"] });
     expect(
       prompts.selectCalls.find(
         (call) => call.message === "How should pre-configured providers be selected?",
       ),
     ).toMatchObject({ initialValue: "manual" });
-    expect(
-      prompts.selectCalls.find((call) => call.message === "Quota reset periods"),
-    ).toMatchObject({ initialValue: "singleWindow" });
-    expect(
-      prompts.selectCalls.find((call) => call.message === "Session token scope"),
-    ).toMatchObject({ initialValue: "tree" });
+    expect(prompts.selectCalls).toHaveLength(3);
     expect(prompts.outroCalls).toContain("OpenCode Quota setup cancelled — no files changed.");
   });
 
-  it("prompt No for maintainer announcements writes opt-out and does not install TUI only for notices", async () => {
+  it("GUI setup writes announcement opt-out without a separate prompt", async () => {
     const prompts = createPromptStub({
       selectValues: DEFAULT_PROMPT_SELECT_VALUES,
       multiselectValues: [["none"]],
-      confirmValues: [false, true],
+      confirmValues: [true],
     });
 
     const code = await runInitInstaller({
@@ -1058,18 +946,8 @@ describe("init installer planning and merge behavior", () => {
 
   it("prints manual quick-setup reminders that link to the providers guide", async () => {
     const prompts = createPromptStub({
-      selectValues: [
-        "tui",
-        "project",
-        "jsonc",
-        "inline",
-        "manual",
-        "singleWindow",
-        "remaining",
-        "yes",
-        "current",
-      ],
-      multiselectValues: [["toast"], ["cursor"]],
+      selectValues: ["project", "manual", "remaining"],
+      multiselectValues: [["cursor"]],
       confirmValues: [true, true],
     });
 
@@ -1137,7 +1015,7 @@ describe("init installer planning and merge behavior", () => {
 
     const opencode = readJson(join(projectDir, "opencode.jsonc"));
 
-    expect(opencode.plugin).toEqual([EXPLICIT_PACK_SPEC]);
+    expect(opencode.plugins).toEqual([EXPLICIT_PACK_SPEC]);
     expect(opencode.experimental).toBeUndefined();
     const quotaConfig = readJson(join(projectDir, "opencode-quota", "quota-toast.json"));
     expect(quotaConfig).toMatchObject({
@@ -1163,7 +1041,7 @@ describe("init installer planning and merge behavior", () => {
 
     expect(existsSync(join(projectDir, "tui.json"))).toBe(false);
     const opencode = readJson(join(projectDir, "opencode.jsonc"));
-    expect(opencode.plugin).toEqual([EXPLICIT_PACK_SPEC]);
+    expect(opencode.plugins).toEqual([EXPLICIT_PACK_SPEC]);
     expect(opencode.experimental).toBeUndefined();
     const quotaConfig = readJson(join(projectDir, "opencode-quota", "quota-toast.json"));
     expect(quotaConfig.enableToast).toBe(false);
@@ -1174,7 +1052,7 @@ describe("init installer planning and merge behavior", () => {
     const prompts = createPromptStub({
       selectValues: DEFAULT_PROMPT_SELECT_VALUES,
       multiselectValues: [["toast"]],
-      confirmValues: [true, false],
+      confirmValues: [false],
     });
 
     const code = await runInitInstaller({
@@ -1248,7 +1126,7 @@ describe("init installer planning and merge behavior", () => {
 
     const firstPlan = await planInitInstaller({ cwd: projectDir, selections });
     await applyInitInstallerPlan(firstPlan);
-    expect(readJson(join(projectDir, "opencode.jsonc")).plugin).toEqual([EXPLICIT_PACK_SPEC]);
+    expect(readJson(join(projectDir, "opencode.jsonc")).plugins).toEqual([EXPLICIT_PACK_SPEC]);
 
     const secondPlan = await planInitInstaller({ cwd: projectDir, selections });
     expect(secondPlan.edits.find((edit) => edit.kind === "opencode")?.changed).toBe(false);
@@ -1260,7 +1138,7 @@ describe("init installer planning and merge behavior", () => {
 
     const plan = await planInitInstaller({ cwd: projectDir, selections: installerSelections() });
     await applyInitInstallerPlan(plan);
-    expect(readJson(join(projectDir, "opencode.jsonc")).plugin).toEqual([EXPLICIT_PACK_SPEC]);
+    expect(readJson(join(projectDir, "opencode.jsonc")).plugins).toEqual([EXPLICIT_PACK_SPEC]);
 
     const prompts = createPromptStub({
       selectValues: DEFAULT_PROMPT_SELECT_VALUES,
@@ -1290,23 +1168,25 @@ describe("init installer planning and merge behavior", () => {
     );
 
     const selections = installerSelections();
-    const firstPlan = await planInitInstaller({ cwd: projectDir, selections });
+    const firstPlan = await planInitInstaller({ cwd: projectDir, selections, env: {} });
     await applyInitInstallerPlan(firstPlan);
-    expect(readJson(join(projectDir, "opencode.jsonc")).plugin).toEqual(existingPlugins);
+    expect(readJson(join(projectDir, "opencode.jsonc")).plugin).toEqual(["file:../opencode-quota"]);
+    expect(readJson(join(projectDir, "opencode.jsonc")).plugins).toEqual(
+      existingPlugins.slice(0, 3),
+    );
 
-    const secondPlan = await planInitInstaller({ cwd: projectDir, selections });
+    const secondPlan = await planInitInstaller({ cwd: projectDir, selections, env: {} });
     expect(secondPlan.edits.find((edit) => edit.kind === "opencode")?.changed).toBe(false);
   });
 
-  it("tells Web users what Web and Desktop show", async () => {
-    const prompts = createPromptStub({ selectValues: ["web", Symbol.for("cancel")] });
+  it("cancels before selecting scope without offering interface choices", async () => {
+    const prompts = createPromptStub({ selectValues: [Symbol.for("cancel")] });
 
     const code = await runInitInstaller({ cwd: tempDir, prompts: prompts as any });
 
     expect(code).toBe(0);
-    expect(prompts.infoCalls).toContain(
-      "Web and Desktop have quota slash commands but no toasts or panels. A command posts its report in the chat as your message; the AI never answers it.",
-    );
+    expect(prompts.selectCalls).toHaveLength(1);
+    expect(prompts.selectCalls[0]?.message).toBe("Where should OpenCode Quota GUI be configured?");
   });
 
   it("installs Web server-only and leaves an existing tui.jsonc untouched", async () => {
@@ -1335,7 +1215,7 @@ describe("init installer planning and merge behavior", () => {
     await applyInitInstallerPlan(plan);
 
     expect(readFileSync(join(projectDir, "tui.jsonc"), "utf8")).toBe(tuiRaw);
-    expect(readJson(join(projectDir, "opencode.jsonc")).plugin).toEqual([EXPLICIT_PACK_SPEC]);
+    expect(readJson(join(projectDir, "opencode.jsonc")).plugins).toEqual([EXPLICIT_PACK_SPEC]);
     const quotaConfig = readJson(join(projectDir, "opencode-quota", "quota-toast.jsonc"));
     expect(quotaConfig.enableToast).toBe(false);
     expect(quotaConfig.tuiCommandDisplay).toBeUndefined();

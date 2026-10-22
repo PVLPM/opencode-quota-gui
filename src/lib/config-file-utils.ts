@@ -1,5 +1,7 @@
-import { existsSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export type ConfigFileKind = "opencode";
 export type ConfigFileFormat = "json" | "jsonc";
@@ -221,4 +223,34 @@ export function isQuotaPluginSpec(spec: string): boolean {
   }
 
   return normalized.includes("opencode-quota/dist/index.js");
+}
+
+/** Installer/update identity checks must not infer ownership from a path containing “quota”. */
+export async function isVerifiedQuotaPluginSpec(spec: string, configDir: string): Promise<boolean> {
+  if (/^(?:opencode-quota-gui|@slkiser\/opencode-quota)(?:@[^/\\\s]+)?$/.test(spec)) {
+    return true;
+  }
+  if (!/^(?:file:|\.{1,2}[/\\]|[/\\]|[A-Za-z]:[/\\])/.test(spec)) return false;
+  let path: string;
+  try {
+    path = spec.startsWith("file://")
+      ? fileURLToPath(spec)
+      : resolve(configDir, spec.replace(/^file:/, ""));
+  } catch {
+    return false;
+  }
+  const normalized = path.replace(/\\/g, "/");
+  if (/\/dist\//.test(normalized) && !normalized.endsWith("/dist/index.js")) return false;
+  const packageDir = normalized.endsWith("/dist/index.js") ? dirname(dirname(path)) : path;
+  try {
+    const manifest: unknown = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
+    return (
+      !!manifest &&
+      typeof manifest === "object" &&
+      "name" in manifest &&
+      (manifest.name === "opencode-quota-gui" || manifest.name === "@slkiser/opencode-quota")
+    );
+  } catch {
+    return false;
+  }
 }

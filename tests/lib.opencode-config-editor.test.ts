@@ -25,6 +25,32 @@ afterEach(() => {
 });
 
 describe("OpenCode JSON/JSONC config editor", () => {
+  it("removes obsolete properties when replacing an equal-length same-ID provider definition", async () => {
+    const dir = makeTempDir();
+    const path = join(dir, "opencode.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        quotaProviders: [
+          {
+            id: "fixture-provider",
+            mode: "remote-api",
+            providerId: "obsolete-provider",
+            apiKeyEnv: "SYNTHETIC_OLD_KEY",
+          },
+        ],
+      }),
+    );
+    const desiredData = { quotaProviders: [{ id: "fixture-provider", mode: "remote-api" }] };
+    const plan = await planConfigDocumentEdit({
+      target: resolveEditableConfigPath({ dir, kind: "opencode", preferredFormat: "json" }),
+      desiredData,
+    });
+    expect(plan.changed).toBe(true);
+    expect(JSON.parse(plan.updated)).toEqual(desiredData);
+    await applyConfigDocumentEdit(plan);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(desiredData);
+  });
   it("previews JSON to JSONC conversion, preserves settings, and removes JSON only after success", async () => {
     const dir = makeTempDir();
     const jsonPath = join(dir, "opencode.json");
