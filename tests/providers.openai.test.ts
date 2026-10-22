@@ -1,10 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  OPENAI_CREDITS_INFO,
-  OPENAI_CREDITS_ROW_KEY,
-  OPENAI_RESETS_INFO,
-  OPENAI_RESETS_ROW_KEY,
-} from "../src/contracts/openai-quota.js";
+import { OPENAI_CREDITS_ROW_KEY, OPENAI_RESETS_ROW_KEY } from "../src/contracts/openai-quota.js";
 import { projectQuotaProviderResults } from "../src/lib/quota-accounting-projection.js";
 import { formatQuotaCommand } from "../src/lib/quota-command-format.js";
 import { formatQuotaRowsGrouped } from "../src/lib/toast-format-grouped.js";
@@ -898,7 +893,6 @@ describe("openai provider", () => {
       kind: "value",
       label: "Resets:",
       value: "3 available",
-      info: OPENAI_RESETS_INFO,
       accounting: { sourceId: "work-id", resultType: "status" },
       bankedResets: {
         availableCount: 3,
@@ -908,14 +902,15 @@ describe("openai provider", () => {
         ],
       },
     });
+    expect(workResets).not.toHaveProperty("info");
     const workCredits = out.entries.find((entry) => entry.rowKey === OPENAI_CREDITS_ROW_KEY);
     expect(workCredits).toMatchObject({
       kind: "value",
       label: "Credits:",
       value: "12.34",
-      info: OPENAI_CREDITS_INFO,
       accounting: { sourceId: "work-id", resultType: "balance" },
     });
+    expect(workCredits).not.toHaveProperty("info");
     expect(out.entries.filter((entry) => entry.accounting.sourceId === "home-id")).toHaveLength(1);
     expect(JSON.stringify(out.entries)).not.toMatch(/work-token|home-token|raw-reset/u);
   });

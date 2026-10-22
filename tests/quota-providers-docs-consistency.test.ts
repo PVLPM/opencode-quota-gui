@@ -257,6 +257,67 @@ describe("quota provider Phase 7 documentation consistency", () => {
     expect(updating).not.toContain("https://opencode.ai/docs/");
   });
 
+  it("documents the installer and updater package-identity policy without contradiction", () => {
+    const readme = read("README.md");
+    const manualInstall = read("docs/readme/manual-install.md");
+    const updating = read("docs/readme/updating.md");
+    const flat = (document: string) => document.replace(/\s+/g, " ");
+
+    // The old blanket claims that contradicted each other are gone.
+    for (const document of [readme, manualInstall, updating]) {
+      expect(document).not.toContain("never rewired silently");
+    }
+    expect(manualInstall).not.toContain("legacy upstream paths stay untouched");
+    expect(updating).not.toContain("legacy `@slkiser/opencode-quota` entries are migrated");
+    expect(
+      /Replace or remove the old entry yourself/i.test(readme) &&
+        /legacy `@slkiser\/opencode-quota` entries are migrated/i.test(updating),
+    ).toBe(false);
+
+    // Plain init retains an existing recognized spec (including upstream) without duplicating it.
+    expect(flat(readme)).toContain("recognizes an existing quota entry");
+    expect(flat(manualInstall)).toContain("Plain `init` recognizes that entry");
+    for (const document of [readme, manualInstall]) {
+      expect(flat(document)).toContain(
+        "does not add a second `opencode-quota-gui` entry beside it",
+      );
+    }
+
+    // Switching identity is explicit and previewed, not silent.
+    expect(flat(readme)).toMatch(
+      /To switch identity, run `init` or `update` with an explicit `OPENCODE_QUOTA_PLUGIN_SPEC` \(previewed before writing\)/,
+    );
+
+    // Update keeps moving specs as written and rewrites only non-moving specs; an explicit spec overrides both.
+    const updateRules = flat(updating);
+    expect(updateRules).toMatch(/non-moving\*\* quota specs to `opencode-quota-gui@latest`/);
+    expect(updateRules).toContain("**Moving** specs stay exactly as written");
+    expect(updateRules).toContain(
+      "`opencode-quota-gui@latest`, `opencode-quota-gui@next`, `@slkiser/opencode-quota@latest`, `@slkiser/opencode-quota@next`, and `@slkiser/opencode-quota@4`",
+    );
+    expect(updateRules).toContain(
+      "A moving upstream spec is therefore not silently renamed to `opencode-quota-gui`",
+    );
+    expect(updateRules).toContain(
+      "With `OPENCODE_QUOTA_PLUGIN_SPEC` set, that exact spec is the target for recognized entries instead",
+    );
+    expect(updateRules).toContain("differing options stop the run before any write");
+
+    // 1.0.0 is this package; 5.0.0 references are qualified upstream history.
+    expect(flat(readme)).toContain(
+      "This independent `opencode-quota-gui` package is version `1.0.0`",
+    );
+    expect(readme).toContain("### Breaking changes in upstream OpenCode Quota 5.0.0 (history)");
+    expect(flat(readme)).toContain("inherited upstream OpenCode Quota 5.0.0 history");
+    expect(flat(updating)).toContain(
+      "This independent package, `opencode-quota-gui` `1.0.0`, runs only on OpenCode `2.0.16` or newer",
+    );
+    expect(flat(updating)).toContain(
+      "What changed in the upstream OpenCode Quota `5.0.0` line (inherited history)",
+    );
+    expect(flat(readme)).not.toMatch(/`opencode-quota-gui` is `5\.0\.0`/);
+  });
+
   it("keeps Dashboard settings, import, and precedence copy specific", () => {
     const readme = read("README.md");
     const manualInstall = read("docs/readme/manual-install.md");

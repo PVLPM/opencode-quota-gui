@@ -105,7 +105,7 @@ For a pre-release tarball, use its absolute `file:` URL instead — the same val
 }
 ```
 
-**Replacing an existing entry.** Older installs used `@slkiser/opencode-quota` (or another quota package spec). `init` and `update` recognize legacy entries, config, and cache files for an explicit migration only — nothing is rewired silently, and legacy upstream paths stay untouched until you migrate. To run this build, replace that entry in `plugins` with `opencode-quota-gui` (or the local tarball URL) yourself — or remove it before running `init` — then restart OpenCode. Removing the entry uninstalls only the old plugin reference; your quota settings files are untouched.
+**Replacing an existing entry.** Older installs used `@slkiser/opencode-quota` (or another quota package spec). Plain `init` recognizes that entry, retains its existing package spec as written, and moves a recognized legacy singular entry into the plural `plugins` list; it does not add a second `opencode-quota-gui` entry beside it. To switch identity, run `init` or `update` with an explicit `OPENCODE_QUOTA_PLUGIN_SPEC` (previewed before writing), or replace the entry in `plugins` with `opencode-quota-gui` (or the local tarball URL) yourself, then restart OpenCode. Removing the old entry uninstalls only the old plugin reference; your quota settings files are untouched.
 
 ## 2. Add quota settings
 

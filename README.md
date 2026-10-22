@@ -23,7 +23,7 @@
 
 ## Quick start
 
-This project is not published on npm yet. Once the first public version is released, one command installs it:
+This independent `opencode-quota-gui` package is version `1.0.0` and is not published on npm yet. Once the first public release lands, one command installs it:
 
 ```bash
 npx opencode-quota-gui init
@@ -61,12 +61,12 @@ node dist/bin/opencode-quota-gui.js init
 
 Keep that override absolute, as in the two forms above: a relative spec would resolve from the OpenCode config folder, not your checkout. `init` asks before writing, prints the exact file it changed, and never installs the upstream `@slkiser/opencode-quota` package.
 
-**Already on an upstream install?** `init` and `update` recognize legacy `@slkiser/opencode-quota` entries, config, and cache files for an explicit migration only — they are never rewired silently. Replace or remove the old entry yourself when you switch to this build (see [Manual install](docs/readme/manual-install.md)).
+**Already on an upstream install?** Plain `init` recognizes an existing quota entry — including `@slkiser/opencode-quota` — retains its package spec as written, and does not add a second `opencode-quota-gui` entry beside it. To switch identity, run `init` or `update` with an explicit `OPENCODE_QUOTA_PLUGIN_SPEC` (previewed before writing), or replace the entry yourself. See [Manual install](docs/readme/manual-install.md) and [Updating safely](docs/readme/updating.md#what-can-change-automatically).
 
 > [!IMPORTANT]
 > You need OpenCode `2.0.16+` and Node.js `22.13+` or `23.4+`. This build does not support OpenCode 1; its last supported plugin line is the upstream `npx @slkiser/opencode-quota@4 init` (historical upstream package, not this one).
 
-Upgrading from 4.x? Read [what changed in 5.0](#breaking-changes-in-500).
+Upgrading from the upstream 4.x line? Read the [inherited upstream OpenCode Quota 5.0.0 history](#breaking-changes-in-upstream-opencode-quota-500-history); it is not this package's version history.
 
 > Maintainers: releases are manual. Dispatch the **Publish to npm (manual tag dispatch)** workflow with an existing release tag and leave `publish` at its `false` default for a publish-free rehearsal; publishing additionally requires the `NPM_PUBLISH_ENABLED` repository variable. The workflow packs once on Node 24, smoke-tests Node 22/24, and publishes that exact tarball with provenance — no version sync, retag, or branch write. For a local Node 24 rehearsal, `pnpm run verify:release-package` packs once (`pack:release-package`) and smoke-tests that exact tarball (`smoke:package`). See [Releasing](docs/readme/release.md).
 
@@ -121,7 +121,9 @@ npx opencode-quota-gui update
 
 For a pre-release local tarball, build and pack the new version first and point the optional `OPENCODE_QUOTA_PLUGIN_SPEC` override at it (absolute spec, as in [Quick start](#quick-start)); `update` then targets that tarball instead of the npm package. Restart OpenCode. The updater never moves or deletes secrets. See [Updating safely](docs/readme/updating.md).
 
-### Breaking changes in 5.0.0
+### Breaking changes in upstream OpenCode Quota 5.0.0 (history)
+
+> This section records inherited upstream OpenCode Quota 5.0.0 history. It is not the version of this package: `opencode-quota-gui` is `1.0.0`.
 
 > [!WARNING]
 > - This package does not support OpenCode 1. The upstream 4.x line (`@slkiser/opencode-quota@4`) is a historical compatibility reference, not an installation or update target of this package.

@@ -4,11 +4,9 @@
 
 import {
   type BankedResetAvailability,
-  OPENAI_CREDITS_INFO,
   OPENAI_CREDITS_ROW_KEY,
   OPENAI_CREDITS_ROW_LABEL,
   OPENAI_CREDITS_ROW_RESULT_TYPE,
-  OPENAI_RESETS_INFO,
   OPENAI_RESETS_ROW_KEY,
   OPENAI_RESETS_ROW_LABEL,
   OPENAI_RESETS_ROW_RESULT_TYPE,
@@ -112,7 +110,6 @@ function openAiOptionalValueEntries(params: {
       name: `${params.group} ${OPENAI_RESETS_ROW_LABEL}`,
       group: params.group,
       label: `${OPENAI_RESETS_ROW_LABEL}:`,
-      info: OPENAI_RESETS_INFO,
       rowKey: OPENAI_RESETS_ROW_KEY,
       value: `${resets.availableCount} available`,
       bankedResets: {
@@ -134,7 +131,6 @@ function openAiOptionalValueEntries(params: {
       name: `${params.group} ${OPENAI_CREDITS_ROW_LABEL}`,
       group: params.group,
       label: `${OPENAI_CREDITS_ROW_LABEL}:`,
-      info: OPENAI_CREDITS_INFO,
       rowKey: OPENAI_CREDITS_ROW_KEY,
       value: credits.unlimited ? "Unlimited" : (credits.balance ?? ""),
     });

@@ -2415,6 +2415,69 @@ describe("OpenAI reset and credit rows", () => {
     }
   });
 
+  it("keeps Settings-only visibility help off runtime Resets and Credits rows", async () => {
+    vi.useFakeTimers({ now: NOW });
+    try {
+      const nearest = new Date(NOW + 2 * DAY_MS + 4 * HOUR_MS + 18 * 60_000).toISOString();
+      const html = await renderQuota([
+        optionalRow({
+          bankedResets: {
+            availableCount: 3,
+            credits: [
+              { title: "Nearest reset", expiresAtIso: nearest },
+              { expiresAtIso: null },
+              { title: "Unknown detail" },
+            ],
+          },
+          value: "3 available",
+        }),
+        creditsRow({ value: "12.34" }),
+      ]);
+
+      expect(html).not.toContain('class="qg-row__info"');
+      expect(text(html)).not.toContain("More information about Resets");
+      expect(text(html)).not.toContain("More information about Credits");
+
+      expect(text(html)).toContain("3 available");
+      expect(text(html)).toContain("12.34");
+      expect(html.match(/class="qg-reset__segment"/g)).toHaveLength(3);
+      expect(html).toContain('aria-label="Available reset expiries"');
+      expect(text(html)).toContain("Expires in 2d 4h 18m");
+      expect(text(html)).toContain(
+        "Reset 1 of 3. Nearest reset. Expires 20/10/2026, 16:18:00. In 2d 4h 18m",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still renders generic row help for rows that carry it", async () => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({
+        providerId: "anthropic",
+        providerLabel: "Anthropic",
+        accountLabel: "Main account",
+        rows: [
+          {
+            rowId: "anthropic#account#window:week" as never,
+            label: "Weekly",
+            kind: "value",
+            resultType: "quota",
+            value: "62% remaining",
+            info: "Counts every model.",
+          },
+        ],
+      }),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+      timeZone: "UTC",
+    });
+
+    expect(html.match(/class="qg-row__info"/g)).toHaveLength(1);
+    expect(text(html)).toContain("More information about Weekly");
+  });
+
   it("places optional-row info beside the label, before the row eye", async () => {
     const snapshot = settingsSnapshot();
     const html = await renderView("/views/settings.tsx", "SettingsView", {

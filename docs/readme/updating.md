@@ -26,17 +26,17 @@ Good to know:
 
 - `npx` runs the published CLI without a global install; if you installed the package, `opencode-quota-gui update ...` runs the same commands. For a pre-release local tarball, build and pack it and set the optional `OPENCODE_QUOTA_PLUGIN_SPEC` override to its absolute `file:` URL first (see the [README quick start](../../README.md#quick-start)); `update` then targets that tarball instead of the npm package. The "preview first" promise covers what the updater changes: OpenCode config files and OpenCode Quota package caches.
 - The updater builds one plan, prints all of it, then either stops or applies that same plan.
-- Recognized quota plugin specs follow the independent `opencode-quota-gui` package identity. Legacy `@slkiser/opencode-quota` entries, config, and package caches are migration sources only: the preview shows exactly what would move, and nothing is rewired silently.
+- Recognized quota plugin specs are tracked under both identities: this package's `opencode-quota-gui` and the legacy `@slkiser/opencode-quota`. Legacy entries, config, and package caches remain migration sources. No package spec changes without appearing in the preview, and a run without an explicit spec never renames a moving legacy spec to this package's identity.
 
 ## Moving to OpenCode 2
 
-`5.0.0` runs only on OpenCode `2.0.16` or newer.
+This independent package, `opencode-quota-gui` `1.0.0`, runs only on OpenCode `2.0.16` or newer.
 
 1. Install OpenCode 2 ([OpenCode v2 docs](https://opencode.ai/v2/docs/)) and start it once. On first start it copies your old `auth.json` logins into its database, `opencode.db`. It does this only once.
 2. Run the update steps above.
 3. Run `/quota_status`. If a provider is missing, log in to it again in OpenCode 2 (`/connect`, or `opencode auth login <provider>`).
 
-What changed in `5.0.0`:
+What changed in the upstream OpenCode Quota `5.0.0` line (inherited history):
 
 - **OpenCode 1 is no longer supported.** `init` detects it and stops without changing anything (upstream 4.x is the historical line for OpenCode 1). See [OpenCode 1](#opencode-1).
 - **Logins come only from OpenCode 2.** Inside OpenCode, logins come through OpenCode 2's plugin API; the terminal command reads `opencode.db` read-only. Neither reads `auth.json`.
@@ -72,7 +72,8 @@ Exit codes:
 
 ## What can change automatically
 
-- Recognized quota plugin specs are updated to the independent `opencode-quota-gui` package identity; legacy `@slkiser/opencode-quota` entries are migrated through this explicit, previewed run. With `OPENCODE_QUOTA_PLUGIN_SPEC` set, that explicit spec is used instead (local tarball verification).
+- On OpenCode 2 without an explicit spec, `update` rewrites recognized **non-moving** quota specs to `opencode-quota-gui@latest`: bare package names and exact versions of either package, such as `opencode-quota-gui@1.0.0`, `@slkiser/opencode-quota`, or `@slkiser/opencode-quota@3.11.1`. Each entry keeps its plugin options. **Moving** specs stay exactly as written so OpenCode re-resolves them: `opencode-quota-gui@latest`, `opencode-quota-gui@next`, `@slkiser/opencode-quota@latest`, `@slkiser/opencode-quota@next`, and `@slkiser/opencode-quota@4`. A moving upstream spec is therefore not silently renamed to `opencode-quota-gui`.
+- With `OPENCODE_QUOTA_PLUGIN_SPEC` set, that exact spec is the target for recognized entries instead; the preview lists every rewrite, and plugin options are kept. Duplicate quota entries with identical options are collapsed to one, and differing options stop the run before any write. `update` never adds a quota plugin entry that was not already configured.
 - Package-cache folders are removed only if they pass path, symlink, containment, and exact package-manifest checks.
 - The removed `opencodeZenDisplay` setting is migrated in known config files: `"default"` becomes root `accountingDetail: "summary"`, and `"detailed"` becomes `accountingDetail: "detailed"`. If a valid `accountingDetail` already exists, it wins and the old key is removed.
 

@@ -241,6 +241,31 @@ function jsonEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function stableJsonStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJsonStringify).join(",")}]`;
+  }
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJsonStringify(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function getPluginEntryOptionPayload(entry: unknown): unknown {
+  if (typeof entry === "string") return null;
+  if (Array.isArray(entry)) return entry.length > 1 ? entry.slice(1) : null;
+  if (!isPlainObject(entry)) return null;
+
+  const payload = Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "package"));
+  const keys = Object.keys(payload);
+  if (keys.length === 0) return null;
+  if (keys.length === 1 && keys[0] === "options") return [payload.options];
+  return payload;
+}
+
 const QUOTA_UI_CHOICE_ORDER: InitQuotaUiChoice[] = ["sidebar", "toast", "compact_status", "none"];
 
 function normalizeQuotaUiIntent(selections: InitInstallerSelections): NormalizedQuotaUiIntent {
@@ -383,52 +408,29 @@ async function planPluginEntries(
   const key = (await detectOpenCodeMajor()) === 1 ? "plugin" : "plugins";
   const native = (root[key] as unknown[] | undefined) ?? [];
   const legacy = key === "plugins" ? ((root.plugin as unknown[] | undefined) ?? []) : [];
-  const verified = async (entry: unknown) => {
-    const spec = getPluginSpecFromEntry(entry);
-    return (
-      spec !== null &&
-      (spec === params.pluginSpec || (await isVerifiedQuotaPluginSpec(spec, params.baseDir)))
-    );
-  };
-  let found = false;
-  for (const entry of [...native, ...legacy]) {
-    if (await verified(entry)) found = true;
-  }
-  if (found && !params.explicit) {
-    if (legacy.length > 0) {
-      const remaining: unknown[] = [];
-      const migrated: unknown[] = [];
-      for (const entry of legacy) {
-        if (await verified(entry)) migrated.push(entry);
-        else remaining.push(entry);
-      }
-      if (migrated.length > 0) {
-        root.plugin = remaining;
-        root[key] = [...native, ...migrated];
-        params.edit.updatedKeys.push("plugin -> plugins");
-        params.edit.valueChanges.push(
-          `plugin -> plugins: ${JSON.stringify(migrated.map(getPluginSpecFromEntry))}`,
-        );
-      }
-    }
-    params.edit.skippedValues.push(`${key} already includes a quota plugin entry`);
-    return;
-  }
-  let installed = false;
-  const next: unknown[] = [];
-  const entries = [...native, ...legacy];
+  const beforeArrays = JSON.stringify([root.plugin, root.plugins]);
+  const entries = [
+    ...native.map((entry) => ({ entry, inNative: true })),
+    ...legacy.map((entry) => ({ entry, inNative: false })),
+  ];
+  const inspectedEntries: Array<{
+    entry: unknown;
+    inNative: boolean;
+    spec: string | null;
+  }> = [];
   const options = new Set<string>();
-  for (const entry of entries) {
-    if (await verified(entry)) {
-      const payload =
-        typeof entry === "string"
-          ? null
-          : Array.isArray(entry)
-            ? entry.slice(1)
-            : Object.fromEntries(
-                Object.entries(entry as JsonObject).filter(([key]) => key !== "package"),
-              );
-      options.add(JSON.stringify(payload));
+  for (const item of entries) {
+    const spec = getPluginSpecFromEntry(item.entry);
+    const isQuotaPlugin =
+      spec !== null &&
+      (spec === params.pluginSpec || (await isVerifiedQuotaPluginSpec(spec, params.baseDir)));
+    inspectedEntries.push({
+      entry: item.entry,
+      inNative: item.inNative,
+      spec: isQuotaPlugin ? spec : null,
+    });
+    if (isQuotaPlugin) {
+      options.add(stableJsonStringify(getPluginEntryOptionPayload(item.entry)));
     }
   }
   if (options.size > 1) {
@@ -437,43 +439,63 @@ async function planPluginEntries(
       { path: params.edit.path },
     );
   }
-  for (let index = 0; index < entries.length; index++) {
-    const entry = entries[index];
-    const inNative = index < native.length;
-    if (!(await verified(entry))) {
+
+  const next: unknown[] = [];
+  const remainingLegacy: unknown[] = [];
+  let retainedSpec: string | null = null;
+  let migratedLegacySpec: string | null = null;
+  let foundLegacyQuotaPlugin = false;
+  for (const { entry, inNative, spec } of inspectedEntries) {
+    if (spec === null) {
       // Legacy unrelated entries stay in their original array.
       if (inNative) next.push(entry);
+      else remainingLegacy.push(entry);
       continue;
     }
-    const old = getPluginSpecFromEntry(entry);
-    if (installed) {
+
+    if (!inNative) foundLegacyQuotaPlugin = true;
+    if (retainedSpec !== null) {
       params.edit.updatedKeys.push(key);
+      const removalLocation = inNative ? key : `plugin -> ${key}`;
       params.edit.valueChanges.push(
-        `${key}: remove duplicate quota plugin ${JSON.stringify(old)}; keep ${JSON.stringify(params.pluginSpec)}`,
+        `${removalLocation}: remove duplicate quota plugin ${JSON.stringify(spec)}; keep ${JSON.stringify(retainedSpec)}`,
       );
       continue;
     }
-    installed = true;
-    next.push(withPluginSpec(entry, params.pluginSpec));
-    if (old !== params.pluginSpec) {
+
+    const retainedEntry = params.explicit ? withPluginSpec(entry, params.pluginSpec) : entry;
+    retainedSpec = getPluginSpecFromEntry(retainedEntry) ?? spec;
+    next.push(retainedEntry);
+    if (!inNative) migratedLegacySpec = retainedSpec;
+    if (params.explicit && spec !== retainedSpec) {
       params.edit.updatedKeys.push(key);
       params.edit.valueChanges.push(
-        `${key}: ${JSON.stringify(old)} -> ${JSON.stringify(params.pluginSpec)}`,
+        `${key}: ${JSON.stringify(spec)} -> ${JSON.stringify(retainedSpec)}`,
       );
     }
   }
-  if (!installed) {
+
+  if (retainedSpec === null) {
     next.push(params.pluginSpec);
     params.edit.addedPlugins.push(`${key}: ${params.pluginSpec}`);
   }
-  if (legacy.length > 0) {
-    const remaining: unknown[] = [];
-    for (const entry of legacy) {
-      if (!(await verified(entry))) remaining.push(entry);
+
+  if (legacy.length > 0) root.plugin = remainingLegacy;
+  if (foundLegacyQuotaPlugin) {
+    params.edit.updatedKeys.push("plugin -> plugins");
+    if (migratedLegacySpec !== null) {
+      params.edit.valueChanges.push(`plugin -> plugins: ${JSON.stringify([migratedLegacySpec])}`);
     }
-    root.plugin = remaining;
   }
   root[key] = next;
+
+  if (
+    !params.explicit &&
+    retainedSpec !== null &&
+    JSON.stringify([root.plugin, root.plugins]) === beforeArrays
+  ) {
+    params.edit.skippedValues.push(`${key} already includes a quota plugin entry`);
+  }
 }
 
 function addSettingIfMissing(

@@ -89,7 +89,6 @@ function valueEntry(params: {
   rowKey: string;
   value: string;
   resultType: AccountingResultType;
-  info?: string;
   bankedResets?: BankedResetAvailability;
 }): QuotaToastEntry {
   const accounting: QuotaToastEntry["accounting"] = {
@@ -105,7 +104,6 @@ function valueEntry(params: {
     rowKey: params.rowKey,
     value: params.value,
     accounting,
-    ...(params.info !== undefined ? { info: params.info } : {}),
     ...(params.bankedResets !== undefined ? { bankedResets: params.bankedResets } : {}),
   } as QuotaToastEntry;
 }
@@ -963,7 +961,6 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
               rowKey: OPENAI_RESETS_ROW_KEY,
               value: "3 available",
               resultType: "status",
-              info: OPENAI_RESETS_INFO,
               bankedResets: { availableCount: 3, credits: [{ expiresAtIso: null }] },
             }),
             valueEntry({
@@ -973,7 +970,6 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
               rowKey: OPENAI_CREDITS_ROW_KEY,
               value: "12.34",
               resultType: "balance",
-              info: OPENAI_CREDITS_INFO,
             }),
           ],
         }),
@@ -991,16 +987,18 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
       kind: "value",
       resultType: "status",
       value: "3 available",
-      info: OPENAI_RESETS_INFO,
       bankedResets: { availableCount: 3, credits: [{ expiresAtIso: null }] },
     });
+    expect(card.rows[0]).not.toHaveProperty("info");
     expect(card.rows[1]).toMatchObject({
       label: "Credits",
       kind: "value",
       resultType: "balance",
       value: "12.34",
-      info: OPENAI_CREDITS_INFO,
     });
+    expect(card.rows[1]).not.toHaveProperty("info");
+    expect(resetsVisibility?.info).toBe(OPENAI_RESETS_INFO);
+    expect(creditsVisibility?.info).toBe(OPENAI_CREDITS_INFO);
   });
 
   it("keeps account-specific ids separate and adds no optional rows to other providers", () => {

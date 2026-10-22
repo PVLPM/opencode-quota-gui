@@ -152,6 +152,338 @@ describe("GUI install spec safety", () => {
     ]);
   });
 
+  it("deduplicates native GUI and upstream entries without reordering unrelated plugins", async () => {
+    writeFileSync(
+      join(tempDir, "opencode.jsonc"),
+      JSON.stringify({
+        plugins: [
+          "before",
+          "opencode-quota-gui@latest",
+          "between",
+          UPSTREAM_PACKAGE_SPEC,
+          { package: "unrelated-plugin", options: { keep: true } },
+          "after",
+        ],
+      }),
+      "utf8",
+    );
+
+    const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(plan);
+
+    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([
+      "before",
+      "opencode-quota-gui@latest",
+      "between",
+      { package: "unrelated-plugin", options: { keep: true } },
+      "after",
+    ]);
+  });
+
+  it("deduplicates the same GUI plugin found in both singular and plural arrays", async () => {
+    writeFileSync(
+      join(tempDir, "opencode.jsonc"),
+      JSON.stringify({
+        plugin: ["legacy-before", "opencode-quota-gui@latest", "legacy-after"],
+        plugins: ["native-before", "opencode-quota-gui@latest", "native-after"],
+      }),
+      "utf8",
+    );
+
+    const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(plan);
+
+    expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
+      plugin: ["legacy-before", "legacy-after"],
+      plugins: ["native-before", "opencode-quota-gui@latest", "native-after"],
+    });
+  });
+
+  it("deduplicates a native GUI entry against an upstream entry in the legacy array", async () => {
+    writeFileSync(
+      join(tempDir, "opencode.jsonc"),
+      JSON.stringify({
+        plugins: ["before", "opencode-quota-gui@latest", "after"],
+        plugin: ["legacy-before", UPSTREAM_PACKAGE_SPEC, "legacy-after"],
+      }),
+      "utf8",
+    );
+
+    const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(plan);
+
+    expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
+      plugin: ["legacy-before", "legacy-after"],
+      plugins: ["before", "opencode-quota-gui@latest", "after"],
+    });
+    expect(plan.summaryLines.join("\n")).toContain(
+      `remove duplicate quota plugin ${JSON.stringify(UPSTREAM_PACKAGE_SPEC)}; keep ${JSON.stringify("opencode-quota-gui@latest")}`,
+    );
+  });
+
+  it("deduplicates a verified local checkout against an upstream legacy entry", async () => {
+    writeFileSync(
+      join(tempDir, "package.json"),
+      JSON.stringify({ name: "opencode-quota-gui" }),
+      "utf8",
+    );
+    writeFileSync(join(tempDir, "server.ts"), "export {};", "utf8");
+    writeFileSync(
+      join(tempDir, "opencode.jsonc"),
+      JSON.stringify({
+        plugins: ["before", "./server.ts", "after"],
+        plugin: ["legacy-before", UPSTREAM_PACKAGE_SPEC, "legacy-after"],
+      }),
+      "utf8",
+    );
+
+    const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(plan);
+
+    expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
+      plugin: ["legacy-before", "legacy-after"],
+      plugins: ["before", "./server.ts", "after"],
+    });
+  });
+
+  it("keeps a legacy-only plugin spec and options while migrating it to the plural array", async () => {
+    writeFileSync(
+      join(tempDir, "opencode.jsonc"),
+      JSON.stringify({
+        plugin: [
+          "legacy-before",
+          [UPSTREAM_PACKAGE_SPEC, { enabled: true, label: "preserve me" }],
+          "legacy-after",
+        ],
+      }),
+      "utf8",
+    );
+
+    const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(plan);
+
+    expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
+      plugin: ["legacy-before", "legacy-after"],
+      plugins: [[UPSTREAM_PACKAGE_SPEC, { enabled: true, label: "preserve me" }]],
+    });
+  });
+
+  it("treats object and tuple options with reordered keys as equivalent duplicates", async () => {
+    writeFileSync(
+      join(tempDir, "opencode.jsonc"),
+      JSON.stringify({
+        plugin: [[UPSTREAM_PACKAGE_SPEC, { beta: 2, alpha: 1 }]],
+        plugins: [{ package: "opencode-quota-gui@latest", options: { alpha: 1, beta: 2 } }],
+      }),
+      "utf8",
+    );
+
+    const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(plan);
+
+    expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
+      plugin: [],
+      plugins: [{ package: "opencode-quota-gui@latest", options: { alpha: 1, beta: 2 } }],
+    });
+  });
+
+  it("refuses conflicting plugin options across arrays without writing the config", async () => {
+    const path = join(tempDir, "opencode.jsonc");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        plugin: [{ package: UPSTREAM_PACKAGE_SPEC, options: { enabled: false } }],
+        plugins: [{ package: "opencode-quota-gui@latest", options: { enabled: true } }],
+      }),
+      "utf8",
+    );
+    const before = readFileSync(path, "utf8");
+
+    await expect(
+      planInitInstaller({ cwd: tempDir, selections: installerSelections() }),
+    ).rejects.toThrow("different options");
+
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readdirSync(tempDir)).toEqual(["opencode.jsonc"]);
+  });
+
+  it("preserves unknown object metadata when an explicit spec deduplicates across arrays", async () => {
+    writeFileSync(
+      join(tempDir, "opencode.jsonc"),
+      JSON.stringify({
+        plugin: [
+          "legacy-before",
+          {
+            package: UPSTREAM_PACKAGE_SPEC,
+            options: { enabled: true },
+            customMetadata: { owner: "kept" },
+          },
+          "legacy-after",
+        ],
+        plugins: [
+          "native-before",
+          {
+            package: "opencode-quota-gui@latest",
+            options: { enabled: true },
+            customMetadata: { owner: "kept" },
+          },
+          "native-after",
+        ],
+      }),
+      "utf8",
+    );
+
+    const plan = await planInitInstaller({
+      cwd: tempDir,
+      selections: installerSelections(),
+      pluginSpec: LOCAL_PACK_SPEC,
+    });
+    await applyInitInstallerPlan(plan);
+
+    expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
+      plugin: ["legacy-before", "legacy-after"],
+      plugins: [
+        "native-before",
+        {
+          package: LOCAL_PACK_SPEC,
+          options: { enabled: true },
+          customMetadata: { owner: "kept" },
+        },
+        "native-after",
+      ],
+    });
+  });
+
+  it("preserves tuple tails when the environment spec deduplicates across arrays", async () => {
+    process.env[QUOTA_PLUGIN_SPEC_ENV] = LOCAL_PACK_SPEC;
+    writeFileSync(
+      join(tempDir, "opencode.jsonc"),
+      JSON.stringify({
+        plugin: [
+          "legacy-before",
+          [UPSTREAM_PACKAGE_SPEC, { beta: 2, alpha: 1 }, "preserve tuple tail"],
+          "legacy-after",
+        ],
+        plugins: [
+          "native-before",
+          ["opencode-quota-gui@latest", { alpha: 1, beta: 2 }, "preserve tuple tail"],
+          "native-after",
+        ],
+      }),
+      "utf8",
+    );
+
+    const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(plan);
+
+    expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
+      plugin: ["legacy-before", "legacy-after"],
+      plugins: [
+        "native-before",
+        [LOCAL_PACK_SPEC, { alpha: 1, beta: 2 }, "preserve tuple tail"],
+        "native-after",
+      ],
+    });
+  });
+
+  it("refuses to discard differing unknown object metadata across arrays", async () => {
+    const path = join(tempDir, "opencode.jsonc");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        plugin: [
+          {
+            package: UPSTREAM_PACKAGE_SPEC,
+            options: { enabled: true },
+            metadata: { owner: "legacy" },
+          },
+        ],
+        plugins: [
+          {
+            package: "opencode-quota-gui@latest",
+            options: { enabled: true },
+            metadata: { owner: "native" },
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const before = readFileSync(path, "utf8");
+
+    await expect(
+      planInitInstaller({ cwd: tempDir, selections: installerSelections() }),
+    ).rejects.toThrow("different options");
+
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readdirSync(tempDir)).toEqual(["opencode.jsonc"]);
+  });
+
+  it("refuses to discard a differing tuple tail across arrays", async () => {
+    const path = join(tempDir, "opencode.jsonc");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        plugin: [[UPSTREAM_PACKAGE_SPEC, { enabled: true }, "legacy tail"]],
+        plugins: [["opencode-quota-gui@latest", { enabled: true }, "native tail"]],
+      }),
+      "utf8",
+    );
+    const before = readFileSync(path, "utf8");
+
+    await expect(
+      planInitInstaller({ cwd: tempDir, selections: installerSelections() }),
+    ).rejects.toThrow("different options");
+
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readdirSync(tempDir)).toEqual(["opencode.jsonc"]);
+  });
+
+  it("is byte-idempotent after cross-array duplicate cleanup", async () => {
+    const path = join(tempDir, "opencode.jsonc");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        plugins: ["before", "opencode-quota-gui@latest", "after"],
+        plugin: ["legacy-before", UPSTREAM_PACKAGE_SPEC, "legacy-after"],
+      }),
+      "utf8",
+    );
+
+    const firstPlan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(firstPlan);
+    const afterCleanup = readFileSync(path, "utf8");
+    expect(readJson(path)).toEqual({
+      plugin: ["legacy-before", "legacy-after"],
+      plugins: ["before", "opencode-quota-gui@latest", "after"],
+    });
+
+    const secondPlan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    expect(secondPlan.edits.find((edit) => edit.kind === "opencode")?.changed).toBe(false);
+    await applyInitInstallerPlan(secondPlan);
+    expect(readFileSync(path, "utf8")).toBe(afterCleanup);
+  });
+
+  it("is byte-idempotent after implicit duplicate cleanup", async () => {
+    const path = join(tempDir, "opencode.jsonc");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        plugins: ["before", "opencode-quota-gui@latest", UPSTREAM_PACKAGE_SPEC, "after"],
+      }),
+      "utf8",
+    );
+
+    const firstPlan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    await applyInitInstallerPlan(firstPlan);
+    expect(readJson(path).plugins).toEqual(["before", "opencode-quota-gui@latest", "after"]);
+    const afterCleanup = readFileSync(path, "utf8");
+
+    const secondPlan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
+    expect(secondPlan.edits.find((edit) => edit.kind === "opencode")?.changed).toBe(false);
+    await applyInitInstallerPlan(secondPlan);
+    expect(readFileSync(path, "utf8")).toBe(afterCleanup);
+  });
+
   it("stays idempotent for an install that used the explicit local pack", async () => {
     const firstPlan = await planInitInstaller({
       cwd: tempDir,

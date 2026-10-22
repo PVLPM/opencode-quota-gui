@@ -1152,13 +1152,13 @@ describe("init installer planning and merge behavior", () => {
     );
   });
 
-  it("preserves existing exact, range, tag, tuple, and local specs", async () => {
+  it("retains the first legacy spec, removes equivalent duplicates, and keeps an unverified local spec", async () => {
     const projectDir = join(tempDir, "project");
     mkdirSync(projectDir, { recursive: true });
     const existingPlugins = [
-      "@slkiser/opencode-quota@3.11.1",
+      ["@slkiser/opencode-quota@3.11.1", { keep: true }],
       ["@slkiser/opencode-quota@next", { keep: true }],
-      "@slkiser/opencode-quota@^3.0.0",
+      ["@slkiser/opencode-quota@^3.0.0", { keep: true }],
       "file:../opencode-quota",
     ];
     writeFileSync(
@@ -1171,9 +1171,9 @@ describe("init installer planning and merge behavior", () => {
     const firstPlan = await planInitInstaller({ cwd: projectDir, selections, env: {} });
     await applyInitInstallerPlan(firstPlan);
     expect(readJson(join(projectDir, "opencode.jsonc")).plugin).toEqual(["file:../opencode-quota"]);
-    expect(readJson(join(projectDir, "opencode.jsonc")).plugins).toEqual(
-      existingPlugins.slice(0, 3),
-    );
+    expect(readJson(join(projectDir, "opencode.jsonc")).plugins).toEqual([
+      ["@slkiser/opencode-quota@3.11.1", { keep: true }],
+    ]);
 
     const secondPlan = await planInitInstaller({ cwd: projectDir, selections, env: {} });
     expect(secondPlan.edits.find((edit) => edit.kind === "opencode")?.changed).toBe(false);
