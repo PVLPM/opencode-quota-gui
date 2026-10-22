@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
+import { resolveBuildIdentity, validateBuildIdentity } from "./scripts/build-identity.mjs";
 import {
   normalizeModuleId,
   UI_GRAPH_METADATA_PATH,
@@ -13,8 +14,9 @@ import {
 /**
  * Browser-only UI build (design spec §11.1).
  *
- * The backend chain (`clean-dist` → `tsc` → `copy-data` → `prepare-tui-dist`)
- * is untouched and `pnpm run build:ui` is appended to it. The build is separate
+ * The build runner preserves the backend chain (`clean-dist` → `tsc` →
+ * `copy-data` → `prepare-tui-dist`) and stamps identity after compilation.
+ * The browser build is separate
  * because `@opencode/ui` ships TSX source that the Solid compiler must process,
  * and because `tsconfig.json` compiles the backend with the OpenTUI JSX pragma.
  *
@@ -24,6 +26,10 @@ import {
  */
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
+const buildIdentity =
+  process.env.OPENCODE_QUOTA_BUILD_IDENTITY === undefined
+    ? resolveBuildIdentity(rootDir)
+    : validateBuildIdentity(JSON.parse(process.env.OPENCODE_QUOTA_BUILD_IDENTITY));
 
 /**
  * Solid JSX shipped as source: our own UI plus the public library and the
@@ -100,6 +106,7 @@ function uiGraphMetadataPlugin() {
 }
 
 export default defineConfig({
+  define: { __OPENCODE_QUOTA_BUILD_IDENTITY__: JSON.stringify(buildIdentity) },
   root: path.resolve(rootDir, "src/ui"),
   base: "/",
   publicDir: false,

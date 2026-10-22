@@ -1,7 +1,19 @@
+import { BUILD_IDENTITY, type BuildIdentity } from "../contracts/build-identity";
 import type { Bucket, ProviderCard, QuotaCardRow, Usage } from "../contracts/dashboard";
 import { DASHBOARD_CONTRACT_VERSION } from "../contracts/dashboard";
 import type { ConnectionState } from "./dashboard-client";
 import { DashboardError } from "./dashboard-client";
+
+/** Diagnostic only: never pass this warning to the contract/load-state gate. */
+export function buildMismatchMessage(
+  server: { contractVersion: number; version?: string; build?: string } | undefined,
+  browser: BuildIdentity = BUILD_IDENTITY,
+): string | undefined {
+  if (!server || server.contractVersion !== DASHBOARD_CONTRACT_VERSION) return undefined;
+  if (!browser.build || browser.build === "unknown") return undefined;
+  if (server.build === browser.build && server.version === browser.version) return undefined;
+  return "Build mismatch · restart OpenCode";
+}
 
 /**
  * Section state machine (design spec §10 "States", R33).

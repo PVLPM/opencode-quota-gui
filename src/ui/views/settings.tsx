@@ -6,6 +6,7 @@ import type {
   JsonValue,
   SettingsSnapshot,
 } from "../../contracts/dashboard";
+import { BuildAbout } from "../components/build-info";
 import { EyeToggle } from "../components/eye-toggle";
 import { GripDotsIcon } from "../components/icons";
 import type { Toaster } from "../components/toast";
@@ -795,6 +796,8 @@ export function SettingsView(props: {
             </div>
           </Show>
         </section>
+
+        <BuildAbout />
       </div>
       <div class="qg-savebar">
         <span class="qg-savebar__status" aria-live="polite">

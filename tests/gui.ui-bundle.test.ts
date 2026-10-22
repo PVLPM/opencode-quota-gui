@@ -142,6 +142,31 @@ describe("bundle verifier is not vacuous", () => {
 });
 
 describe("the real emitted bundle", () => {
+  it("embeds the same public version and build in browser and packed backend", () => {
+    const identity = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "--eval",
+          'import { BUILD_IDENTITY } from "./dist/contracts/build-identity.js"; console.log(JSON.stringify(BUILD_IDENTITY));',
+        ],
+        { cwd: repoRoot, encoding: "utf8" },
+      ),
+    ) as { version: string; build: string };
+    const pkg = JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+      version: string;
+    };
+    expect(identity.version).toBe(pkg.version);
+    expect(identity.build).toMatch(/^[a-f0-9]{7,12}(?:-dirty)?$/);
+    const scripts = realMetadata()
+      .emittedFiles.filter((file) => file.endsWith(".js"))
+      .map((file) => readFileSync(path.join(outDir, file), "utf8"))
+      .join("\n");
+    expect(scripts).toContain(identity.version);
+    expect(scripts).toContain(identity.build);
+    expect(scripts).not.toContain("__OPENCODE_QUOTA_BUILD_IDENTITY__");
+  });
   it("records a graph and a file list that satisfy every rule", () => {
     const metadata = realMetadata();
     expect(checkGraphMetadata(metadata)).toEqual([]);

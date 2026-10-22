@@ -10,6 +10,7 @@ import {
   Switch,
 } from "solid-js";
 import type {
+  DashboardHealth,
   HomeSnapshot,
   ProjectSnapshot,
   QuotaSnapshot,
@@ -17,6 +18,7 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
+import { BuildMismatchStatus } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
 import { inlineAccountLabel } from "./components/quota-card";
@@ -36,6 +38,7 @@ import {
 } from "./routing";
 import { displayPreferencesFromValues } from "./settings-model";
 import {
+  buildMismatchMessage,
   contractMismatchMessage,
   isStaleAfterReconnect,
   resolveLoadState,
@@ -198,6 +201,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const [location, setLocation] = createSignal<Location>(initialLocation());
   const [connection, setConnection] = createSignal<ConnectionState>(props.client.connection());
   const [navTooltip, setNavTooltip] = createSignal<"home" | "analytics" | "settings" | undefined>();
+  const [health, setHealth] = createSignal<DashboardHealth | undefined>(undefined);
   const [contractMismatch, setContractMismatch] = createSignal<string | undefined>(undefined);
   const [reloadToken, setReloadToken] = createSignal(0);
   const [quotaReloadToken, setQuotaReloadToken] = createSignal(0);
@@ -210,6 +214,8 @@ export function App(props: { client: DashboardClient }): JSX.Element {
 
   const range = () => location().range;
   const route = () => location().route;
+  // Diagnostic only: never the argument to the contract/load-state gate below.
+  const buildWarning = createMemo(() => buildMismatchMessage(health()));
   const activeScope = createMemo<ActiveViewScope>(() => {
     const name = route().name;
     return name === "analytics" || name === "project" || name === "session" ? "analytics" : "quota";
@@ -360,8 +366,9 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     });
     void (async () => {
       try {
-        const health = await props.client.health();
-        setContractMismatch(contractMismatchMessage(health.contractVersion));
+        const currentHealth = await props.client.health();
+        setHealth(currentHealth);
+        setContractMismatch(contractMismatchMessage(currentHealth.contractVersion));
       } catch {
         // A missing health endpoint is not fatal; route queries report failures.
       }
@@ -423,6 +430,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
           </Tooltip>
         </nav>
         <div class="qg-topbar__actions">
+          <BuildMismatchStatus message={buildWarning()} />
           <Show
             when={
               connection() !== "live" ||

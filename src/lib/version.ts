@@ -1,11 +1,13 @@
 import { readFile } from "fs/promises";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { BUILD_IDENTITY } from "../contracts/build-identity.js";
 
 let cachedVersion: string | undefined;
 let cachedPromise: Promise<string | undefined> | null = null;
 
 export async function getPackageVersion(): Promise<string | undefined> {
+  if (BUILD_IDENTITY.version !== "unknown") return BUILD_IDENTITY.version;
   if (cachedVersion) return cachedVersion;
   if (cachedPromise) return cachedPromise;
 

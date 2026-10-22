@@ -9,6 +9,14 @@ import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
  * core `src/lib/entries.ts` definitions so the browser never imports core.
  */
 
+/** Additive identity fields are absent on older, otherwise compatible servers. */
+export interface DashboardHealth {
+  app: "opencode-quota-gui";
+  contractVersion: number;
+  version?: string;
+  build?: string;
+}
+
 /** Contract revision advertised by `DashboardDataSource.health()`. */
 export const DASHBOARD_CONTRACT_VERSION = 2;
 
@@ -298,7 +306,7 @@ export interface DashboardEvent {
 
 /** Transport-neutral browser seam (spec §5.1); every member has a producer. */
 export interface DashboardDataSource {
-  health(): Promise<{ app: "opencode-quota-gui"; contractVersion: number }>;
+  health(): Promise<DashboardHealth>;
   home(input: { range: RangeKey }): Promise<HomeSnapshot>;
   quota(): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;

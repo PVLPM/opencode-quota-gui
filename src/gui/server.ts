@@ -14,6 +14,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BUILD_IDENTITY } from "../contracts/build-identity.js";
 
 import {
   DASHBOARD_CONTRACT_VERSION,
@@ -619,6 +620,8 @@ export function createDashboardServer(
       if (!requireMethods(req, res, ["GET", "HEAD"])) return;
       sendJson(res, 200, {
         app: "opencode-quota-gui",
+        version: BUILD_IDENTITY.version,
+        build: BUILD_IDENTITY.build,
         contractVersion: DASHBOARD_CONTRACT_VERSION,
       });
       return;

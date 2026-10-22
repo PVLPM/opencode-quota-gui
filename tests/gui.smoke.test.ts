@@ -1,5 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -193,7 +193,12 @@ describe("synthetic GUI smoke", () => {
 
     const health = await requestJson<{ app: string; contractVersion: number }>(apiUrl("/health"));
     expect(health.status).toBe(200);
-    expect(health.body).toEqual({ app: "opencode-quota-gui", contractVersion: 2 });
+    expect(health.body).toEqual({
+      app: "opencode-quota-gui",
+      contractVersion: 2,
+      version: expect.any(String),
+      build: expect.any(String),
+    });
   });
 
   it("changes every token metric across ranges and keeps project rows latest-first", async () => {
@@ -313,15 +318,46 @@ describe("synthetic GUI smoke", () => {
   });
 
   it("writes settings and visibility to the canonical file and imports the legacy sidecar", async () => {
+    // The smoke process owns this synthetic config root. Migration only accepts
+    // eligible global legacy concepts, never hidden fields or project overrides.
+    const configDir = process.env.OPENCODE_CONFIG_DIR;
+    if (!configDir) throw new Error("synthetic config directory is not set");
+    const legacyPath = join(configDir, "opencode-quota", "quota-toast.jsonc");
+    const projectPath = join(
+      configDir,
+      "..",
+      "workspace",
+      "alpha",
+      "opencode-quota",
+      "quota-toast.jsonc",
+    );
+    const canonicalPath = join(configDir, "opencode-quota-gui", "config.jsonc");
+    const legacyBytes = '{ "waitForQuotaReset": true, "resetTimeDecimals": 1 }\n';
+    await mkdir(join(configDir, "opencode-quota"), { recursive: true });
+    await writeFile(legacyPath, legacyBytes);
+    const projectBytes = await readFile(projectPath, "utf8");
     const initial = await requestJson<SettingsPayload>(apiUrl("/settings"));
     expect(initial.status).toBe(200);
     expect(initial.body.values.resetTimeDecimals).toBe(2);
     expect(initial.body.sources.resetTimeDecimals).toBe("project opencode-quota/quota-toast.jsonc");
+    expect(initial.body.values.waitForQuotaReset).toBe(true);
+    expect(initial.body.sources.waitForQuotaReset).toBe("global opencode-quota/quota-toast.jsonc");
+
+    const withoutPreview = await requestJson<ErrorPayload>(apiUrl("/settings/import"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expectedRevision: initial.body.revision }),
+    });
+    expect(withoutPreview.status).toBe(409);
+    expect(withoutPreview.body.error.code).toBe("config-changed");
 
     const preview = await requestJson<ImportPreviewPayload>(apiUrl("/settings/import"));
     expect(preview.status).toBe(200);
-    expect(preview.body.keys).toEqual([{ key: "resetTimeDecimals", value: 2 }]);
+    expect(preview.body.keys).toEqual([{ key: "waitForQuotaReset", value: true }]);
+    expect(preview.body.keys.some(({ key }) => key === "resetTimeDecimals")).toBe(false);
+    expect(preview.body.from).toBe("global opencode-quota/quota-toast.jsonc");
     expect(preview.body.expectedRevision).toBe(initial.body.revision);
+    await expect(readFile(canonicalPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
 
     const imported = await requestJson<WriteResultPayload>(apiUrl("/settings/import"), {
       method: "POST",
@@ -329,9 +365,13 @@ describe("synthetic GUI smoke", () => {
       body: JSON.stringify({ expectedRevision: preview.body.expectedRevision }),
     });
     expect(imported.status).toBe(200);
-    expect(imported.body.applied.resetTimeDecimals).toBe(2);
+    expect(imported.body.applied).toEqual({ waitForQuotaReset: true });
+    expect(imported.body.revision).not.toBe(initial.body.revision);
+    expect(await readFile(canonicalPath, "utf8")).toMatch(/"waitForQuotaReset"\s*:\s*true/);
 
     const afterImport = await requestJson<SettingsPayload>(apiUrl("/settings"));
+    expect(afterImport.body.values.waitForQuotaReset).toBe(true);
+    expect(afterImport.body.sources.waitForQuotaReset).toBe("opencode-quota-gui/config.jsonc");
     // The project sidecar still overrides the canonical file for this key.
     expect(afterImport.body.sources.resetTimeDecimals).toBe(
       "project opencode-quota/quota-toast.jsonc",
@@ -368,6 +408,9 @@ describe("synthetic GUI smoke", () => {
       hiddenCards: ["synthetic-card"],
       hiddenRows: [],
     });
+    expect(afterVisibility.body.values.waitForQuotaReset).toBe(true);
+    expect(await readFile(legacyPath, "utf8")).toBe(legacyBytes);
+    expect(await readFile(projectPath, "utf8")).toBe(projectBytes);
   });
 
   it("fails cleanly on an occupied port with no fallback and restores the environment", async () => {

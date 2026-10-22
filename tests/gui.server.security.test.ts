@@ -249,6 +249,8 @@ describe("GUI server security", () => {
       expect(JSON.parse(localhost.body)).toEqual({
         app: "opencode-quota-gui",
         contractVersion: 2,
+        version: expect.any(String),
+        build: expect.any(String),
       });
     } finally {
       await handle.close();

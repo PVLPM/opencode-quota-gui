@@ -379,7 +379,12 @@ describe("GUI server privacy", () => {
 
       const response = await fetch(`${base(port)}/api/v1/health`);
       const body = await response.text();
-      expect(JSON.parse(body)).toEqual({ app: "opencode-quota-gui", contractVersion: 2 });
+      expect(JSON.parse(body)).toEqual({
+        app: "opencode-quota-gui",
+        contractVersion: 2,
+        version: expect.any(String),
+        build: expect.any(String),
+      });
       expectNoMarkers(body);
 
       const settings = await fetch(`${base(port)}/api/v1/settings`);

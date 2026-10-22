@@ -867,9 +867,13 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
     async health() {
       const endpoint = "/api/v1/health";
       const root = readRecord(await request(endpoint), endpoint, "not an object");
+      const version = readOptionalText(root.version, endpoint, "version");
+      const build = readOptionalText(root.build, endpoint, "build");
       return {
         app: "opencode-quota-gui",
         contractVersion: readNumber(root.contractVersion, endpoint, "contractVersion"),
+        ...(version === undefined ? {} : { version }),
+        ...(build === undefined ? {} : { build }),
       };
     },
 

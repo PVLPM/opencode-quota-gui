@@ -291,7 +291,7 @@ describe("package manifest compatibility", () => {
   });
 
   it("defines one ordered canonical repository gate and a release-only compatibility check", () => {
-    expect(pkg.scripts?.build).toContain("node scripts/clean-dist.mjs && tsc");
+    expect(pkg.scripts?.build).toBe("node scripts/build-identity.mjs");
     expect(pkg.scripts?.verify).toBe(VERIFY_COMMAND);
     expect(pkg.scripts?.verify).not.toContain("lint:oxlint");
     expect(pkg.scripts?.verify).not.toContain("knip");
@@ -304,11 +304,29 @@ describe("package manifest compatibility", () => {
     }
   });
 
-  it("appends the browser UI build and covers both TypeScript projects", () => {
-    // The backend chain is unchanged except for the appended UI step (spec §11.1, R39).
-    expect(pkg.scripts?.build).toBe(
-      "node scripts/clean-dist.mjs && tsc && node scripts/copy-data.mjs && node scripts/prepare-tui-dist.mjs && pnpm run build:ui",
+  it("appends the browser UI build and covers both TypeScript projects", async () => {
+    // Identity is captured once; the runner retains the backend order and appends Vite.
+    // gui.build-identity.test.ts additionally executes this order with synthetic tools.
+    expect(pkg.scripts?.build).toBe("node scripts/build-identity.mjs");
+    const runner = await readFile(
+      new URL("../scripts/build-identity.mjs", import.meta.url),
+      "utf8",
     );
+    const steps = [
+      "const identity = resolveBuildIdentity(root, env)",
+      'run("scripts/clean-dist.mjs")',
+      'run("node_modules/typescript/bin/tsc")',
+      "writeBuildIdentity(root, identity)",
+      'run("scripts/copy-data.mjs")',
+      'run("scripts/prepare-tui-dist.mjs")',
+      'run("node_modules/vite/bin/vite.js", "build", "--config", "vite.ui.config.mjs")',
+    ];
+    let previous = -1;
+    for (const step of steps) {
+      const position = runner.indexOf(step, previous + 1);
+      expect(position, `build step must follow its predecessor: ${step}`).toBeGreaterThan(previous);
+      previous = position;
+    }
     expect(pkg.scripts?.["build:ui"]).toBe("vite build --config vite.ui.config.mjs");
     expect(pkg.scripts?.["verify:ui-bundle"]).toBe("node scripts/verify-ui-bundle.mjs");
     // Typecheck runs the backend project and the browser-only UI project.

@@ -386,7 +386,12 @@ describe("GUI HTTP routes", () => {
     try {
       const response = await get(handle.port, "/api/v1/health");
       expect(response.status).toBe(200);
-      expect(response.body).toEqual({ app: "opencode-quota-gui", contractVersion: 2 });
+      expect(response.body).toEqual({
+        app: "opencode-quota-gui",
+        contractVersion: 2,
+        version: expect.any(String),
+        build: expect.any(String),
+      });
       expect(response.headers.get("cache-control")).toBe("no-store");
     } finally {
       await handle.close();

@@ -326,7 +326,12 @@ describe("dashboard production lifecycle", () => {
 
     const health = await fetch(`${lease.url}/api/v1/health`);
     expect(health.status).toBe(200);
-    expect(await health.json()).toEqual({ app: "opencode-quota-gui", contractVersion: 2 });
+    expect(await health.json()).toEqual({
+      app: "opencode-quota-gui",
+      contractVersion: 2,
+      version: expect.any(String),
+      build: expect.any(String),
+    });
 
     const home = await fetch(`${lease.url}/api/v1/home?range=7d`);
     expect(home.status).toBe(200);
