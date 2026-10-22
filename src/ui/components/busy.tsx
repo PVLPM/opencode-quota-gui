@@ -5,9 +5,9 @@ import { createSignal, Show } from "solid-js";
  * Foreground loading state (Session B §21).
  *
  * Fast loads must not flash anything, so a foreground wait becomes visible only
- * after a full second. The indicator is rendered as a fixed overlay, never as a
- * row in the document flow, and it is hidden the instant the request settles —
- * success, handled failure, or a supersede that changes what is on screen.
+ * after a full second. The compact fixed panel is hidden the instant the request
+ * settles — success, handled failure, or a supersede that changes what is on
+ * screen. It carries no spinner: only the border fades while work continues.
  */
 export interface BusyState {
   /** A foreground request whose requested scope is not on screen yet. */
@@ -62,12 +62,11 @@ export function createBusyIndicator(delayMs: number = BUSY_DELAY_MS): BusyIndica
 
 export function BusyOverlay(props: { indicator: BusyIndicator; label: string }): JSX.Element {
   const copy = (): string =>
-    props.indicator.hasData() ? `Updating ${props.label}…` : `Loading ${props.label}…`;
+    `${props.indicator.hasData() ? "Updating" : "Loading"} ${props.label}…`;
   return (
     <Show when={props.indicator.visible()}>
       <output class="qg-busy" aria-live="polite">
-        <span class="qg-busy__dot" aria-hidden="true" />
-        <span>{copy()}</span>
+        {copy()}
       </output>
     </Show>
   );

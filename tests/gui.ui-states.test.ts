@@ -640,7 +640,7 @@ describe("home view composition", () => {
     expect(html).toContain('max="100"');
     expect(html).toContain(`value="${used}"`);
     expect(html).toContain(`aria-valuetext="${used}% used"`);
-    expect(html).toContain(`--qg-fill-position:${used}%`);
+    expect(html).toContain(`--qg-used-position:${used}%`);
     expect(html).not.toContain("qg-row__bar-gap");
   });
 
@@ -654,7 +654,7 @@ describe("home view composition", () => {
     });
     expect(html).toContain(`value="${remaining}"`);
     expect(html).toContain(`aria-valuetext="${remaining}% remaining"`);
-    expect(html).toContain(`--qg-fill-position:${remaining}%`);
+    expect(html).toContain(`--qg-used-position:${remaining}%`);
   });
 
   it("keeps the bar on the displayed quota while severity uses true used quota", async () => {
@@ -665,11 +665,11 @@ describe("home view composition", () => {
       stale: false,
       timeZone: "UTC",
     });
-    // Remaining mode shows 75% and paints 75% inside the track.
+    // Remaining mode shows 75% and fills 75% of the independent segment pair.
     expect(text(html)).toContain("75% remaining");
     expect(html).toContain('value="75"');
     expect(html).toContain('data-mode="remaining"');
-    expect(html).toContain("--qg-fill-position:75%");
+    expect(html).toContain("--qg-used-position:75%");
     // 25% used is healthy even though the painted fraction is large.
     expect(html).toContain('data-severity="healthy"');
   });
@@ -4283,8 +4283,9 @@ describe("styles and dependency boundaries", () => {
     expect(styles).not.toContain('.qg-chart__segment[data-thin="true"]');
     // Loading motion loops continuously: linear timing, no paused restart.
     expect(styles).toContain("qg-shimmer 1.4s linear infinite");
-    expect(styles).toContain("qg-busy-pulse 1.2s ease-in-out infinite");
+    expect(styles).toContain("qg-busy-border 2.4s ease-in-out infinite");
     expect(styles).toContain(".qg-busy");
+    expect(styles).not.toContain(".qg-busy__dot");
     expect(styles).not.toContain("qg-progress");
     expect(styles).toContain("1056px");
     expect(styles).toContain(".qg-app:has(.qg-form) .qg-toasts");

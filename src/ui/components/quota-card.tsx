@@ -87,7 +87,8 @@ export function rowPercent(row: QuotaCardRow, preferences: DisplayPreferences): 
 }
 
 /**
- * The bar measures used quota even when the badge displays remaining quota.
+ * True used quota for severity; the bar itself paints the displayed percentage,
+ * so the badge's used/remaining direction never moves the exhaustion boundary.
  */
 export function quotaUsedPercent(row: QuotaCardRow): number | undefined {
   if (row.kind !== "percent") return undefined;
@@ -109,6 +110,11 @@ export function quotaSeverity(usedPercent: number | undefined): "healthy" | "war
   return "healthy";
 }
 
+/**
+ * Two independent segments: the displayed percentage fills the accent segment
+ * and the complement is the neutral segment. The boundary gap is the original
+ * 3 px notch capped to half of either side, so tiny values stay visible.
+ */
 export function QuotaBar(props: {
   label: string;
   displayPercent: number;
@@ -119,7 +125,7 @@ export function QuotaBar(props: {
     <span
       class="qg-row__bar"
       data-mode={props.displayMode}
-      style={{ "--qg-fill-position": `${position()}%` }}
+      style={{ "--qg-used-position": `${position()}%` }}
     >
       <meter
         class="sr-only"
@@ -129,7 +135,12 @@ export function QuotaBar(props: {
         value={position()}
         aria-valuetext={`${position()}% ${props.displayMode}`}
       />
-      <span class="qg-row__bar-fill" aria-hidden="true" />
+      <Show when={position() > 0}>
+        <span class="qg-row__bar-fill" aria-hidden="true" />
+      </Show>
+      <Show when={position() < 100}>
+        <span class="qg-row__bar-remaining" aria-hidden="true" />
+      </Show>
     </span>
   );
 }

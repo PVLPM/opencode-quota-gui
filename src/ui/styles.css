@@ -587,23 +587,32 @@ body {
   white-space: nowrap;
 }
 
+/* Original quota geometry: two independent 8px segments, not an outer track. */
 .qg-row__bar {
-  position: relative;
+  --qg-quota-gap: min(
+    3px,
+    calc(var(--qg-used-position) / 2),
+    calc((100% - var(--qg-used-position)) / 2)
+  );
+  display: flex;
   grid-column: 1 / -1;
+  gap: var(--qg-quota-gap);
   height: 8px;
-  padding: 2px;
-  border-radius: 999px;
-  background: #494949;
-  overflow: hidden;
 }
 
 .qg-row__bar-fill {
-  display: block;
-  height: 100%;
-  width: var(--qg-fill-position);
-  border-radius: 999px;
+  flex: 0 0 auto;
+  width: calc(var(--qg-used-position) - var(--qg-quota-gap) / 2);
+  border-radius: 2px;
   background: #72d78c;
   transition: width var(--qg-transition);
+}
+
+.qg-row__bar-remaining {
+  flex: 1 1 0;
+  min-width: 0;
+  border-radius: 2px;
+  background: #494949;
 }
 
 .qg-row__meta {
@@ -1112,7 +1121,7 @@ body {
   font-size: 12px;
 }
 
-/* Delayed foreground loading: fixed overlay, never a document-flow row. */
+/* Delayed foreground loading: fixed rectangular panel, border fade only. */
 .qg-busy {
   position: fixed;
   top: 112px;
@@ -1121,37 +1130,29 @@ body {
   z-index: 40;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
   padding: 6px 12px;
   border: 1px solid var(--qg-border-strong);
-  border-radius: 999px;
+  border-radius: var(--qg-radius);
   background: var(--qg-surface-raised);
   box-shadow: var(--shadow-md);
   color: var(--qg-text-secondary);
   font-size: 12px;
   pointer-events: none;
+  animation: qg-busy-border 2.4s ease-in-out infinite;
 }
 
-.qg-busy__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--qg-accent);
-  animation: qg-busy-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes qg-busy-pulse {
+@keyframes qg-busy-border {
   0%,
   100% {
-    opacity: 0.35;
+    border-color: var(--qg-border-strong);
   }
   50% {
-    opacity: 1;
+    border-color: var(--qg-border);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .qg-busy__dot {
+  .qg-busy {
     animation: none;
   }
 }
