@@ -22,8 +22,9 @@ import { EstimateInfo } from "./estimate";
  * Five additive token categories stack bottom-to-top in a fixed order. Only
  * categories with a nonzero total in the current range render at all, so a
  * zero series leaves no phantom segment, legend row, tooltip row or gap. Every
- * nonzero segment keeps its truthful height; separators are chart-background
- * hairlines, never bright borders or cumulative coloured overlays.
+ * nonzero segment keeps its truthful height and is separated by external
+ * chart-background space, never by a stroke painted over colored ink. The
+ * small corner radius is constrained by each segment's width and height.
  *
  * A derived cache-hit-rate line (right axis, fixed 0–100%) overlays the stack;
  * it is not a token series and a bucket with no input-side traffic is a gap.
@@ -182,22 +183,12 @@ export function UsageChart(props: {
                     y={segment.y}
                     width={segment.width}
                     height={segment.height}
+                    rx={segment.radius}
+                    ry={segment.radius}
                     fill={`var(${segment.colorVar})`}
                   />
                 )}
               </For>
-            )}
-          </For>
-
-          <For each={geometry().separators}>
-            {(separator) => (
-              <line
-                class="qg-chart__separator"
-                x1={separator.x1}
-                x2={separator.x2}
-                y1={separator.y}
-                y2={separator.y}
-              />
             )}
           </For>
 

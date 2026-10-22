@@ -1093,7 +1093,7 @@ describe("usage chart", () => {
     const geometry = buildUsageGeometry(buckets);
     expect(geometry.visibleCategories).toEqual([]);
     expect(geometry.bars[0]?.segments).toEqual([]);
-    expect(geometry.separators).toEqual([]);
+    expect(geometry.bars[0]?.top).toBe(geometry.plot.bottom);
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage(range, buckets),
     });
@@ -1330,7 +1330,7 @@ describe("usage chart", () => {
     expect(text(html)).toContain("About the API-equivalent estimate");
   });
 
-  it("keeps bar stacks continuous and preserves a tiny category truthfully", () => {
+  it("keeps bar stacks externally separated and preserves a tiny category truthfully", () => {
     const geometry = buildUsageGeometry([
       { startMs: 0, endMs: 1, tokens: costed({ input: 1000000, reasoning: 1 }) },
       { startMs: 1, endMs: 2, tokens: costed({ output: 3 }) },
@@ -1351,20 +1351,24 @@ describe("usage chart", () => {
       for (let index = 1; index < bar.segments.length; index += 1) {
         const previous = bar.segments[index - 1];
         const current = bar.segments[index];
-        expect(current?.y + (current?.height ?? 0)).toBeCloseTo(previous?.y as number, 10);
-        for (const segment of bar.segments) {
-          expect(segment.height).toBeGreaterThanOrEqual(0);
-          expect(Number.isFinite(segment.y)).toBe(true);
-          expect(Number.isFinite(segment.height)).toBe(true);
-        }
+        expect(previous?.y).toBeCloseTo(
+          (current?.y as number) + (current?.height as number) + 1,
+          10,
+        );
+      }
+      for (const segment of bar.segments) {
+        expect(segment.height).toBeGreaterThanOrEqual(0);
+        expect(segment.radius).toBeCloseTo(Math.min(2, segment.width / 2, segment.height / 2), 10);
+        expect(Number.isFinite(segment.y)).toBe(true);
+        expect(Number.isFinite(segment.height)).toBe(true);
       }
     }
-    // A one-token category is not inflated to a visible minimum; the
-    // background-coloured separator is the only restrained cue.
+    // A one-token category is not inflated to a visible minimum; the external
+    // background gap and constrained corner radius are the only cues.
     const tiny = geometry.bars[0]?.segments.find((segment) => segment.key === "reasoning");
     expect(tiny?.height).toBeGreaterThan(0);
     expect(tiny?.height).toBeLessThan(0.001);
-    expect(geometry.separators).toHaveLength(1);
+    expect(tiny?.radius).toBeCloseTo((tiny?.height as number) / 2, 12);
   });
 
   it("formats numbers and cost predictably", () => {
@@ -4307,7 +4311,7 @@ describe("styles and dependency boundaries", () => {
     // Session keeps a white crosshair; usage has no crosshair or boundary overlay.
     expect(styles).toContain("stroke: #ffffff");
     expect(styles).toContain(".qg-chart__cursor");
-    expect(styles).toContain(".qg-chart__separator");
+    expect(styles).not.toContain(".qg-chart__separator");
     expect(styles).toContain(".qg-chart__surface");
     expect(styles).not.toContain(".qg-chart__boundary");
     expect(styles).not.toContain('.qg-chart__segment[data-thin="true"]');

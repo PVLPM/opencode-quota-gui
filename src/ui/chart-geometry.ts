@@ -45,20 +45,18 @@ export interface UsageBarSegment {
   y: number;
   width: number;
   height: number;
-}
-
-/** Chart-background hairline between two touching nonzero segments. */
-export interface UsageBarSeparator {
-  bucketIndex: number;
-  x1: number;
-  x2: number;
-  y: number;
+  /** Corner radius in chart units, constrained so thin segments stay visible. */
+  radius: number;
 }
 
 export interface UsageBar {
   bucketIndex: number;
   x: number;
   width: number;
+  /**
+   * Actual top of the rounded stack. External presentation gaps can put this
+   * up to four units above `yFor(total)`; the token total itself is unchanged.
+   */
   top: number;
   bottom: number;
   total: number;
@@ -81,8 +79,6 @@ export interface UsageGeometry {
   bars: UsageBar[];
   /** Only categories with a nonzero total in this exact range. */
   visibleCategories: CategoryDescriptor[];
-  /** Background-coloured separation lines; never a coloured series overlay. */
-  separators: UsageBarSeparator[];
   /** Cache-hit-rate overlay points; a bucket with no input-side traffic is absent. */
   cacheRatePoints: CacheRatePoint[];
   /** One smooth path per contiguous non-null cache-rate run. */
@@ -143,6 +139,14 @@ export function pickLabelIndexes(count: number, max: number): number[] {
   return [...indexes].sort((a, b) => a - b);
 }
 
+/**
+ * External presentation gaps sit between rounded segments, never on top of
+ * them. One chart unit is the smallest deliberate separation at the 900-unit
+ * design width; it scales with the SVG rather than claiming to be a screen px.
+ */
+const USAGE_SEGMENT_GAP = 1;
+const USAGE_SEGMENT_RADIUS = 2;
+
 export function buildUsageGeometry(
   buckets: Bucket[],
   size: ChartSize = DEFAULT_USAGE_SIZE,
@@ -168,10 +172,10 @@ export function buildUsageGeometry(
   const barWidth = slot * 0.72;
 
   const bars: UsageBar[] = [];
-  const separators: UsageBarSeparator[] = [];
   buckets.forEach((bucket, bucketIndex) => {
     const x = slotX(bucketIndex) + (slot - barWidth) / 2;
     let cumulative = 0;
+    let nextBottom = plot.bottom;
     const segments: UsageBarSegment[] = [];
     for (const category of visibleCategories) {
       const value = Math.max(0, bucket.tokens[category.key]);
@@ -179,27 +183,26 @@ export function buildUsageGeometry(
       const lower = yFor(cumulative);
       cumulative += value;
       const upper = yFor(cumulative);
+      const height = lower - upper;
+      const y = nextBottom - height;
       segments.push({
         key: category.key,
         colorVar: category.colorVar,
         bucketIndex,
         value,
         x,
-        y: upper,
+        y,
         width: barWidth,
-        height: lower - upper,
+        height,
+        radius: Math.min(USAGE_SEGMENT_RADIUS, barWidth / 2, height / 2),
       });
-    }
-    for (let index = 1; index < segments.length; index += 1) {
-      const lower = segments[index - 1];
-      if (!lower) continue;
-      separators.push({ bucketIndex, x1: x, x2: x + barWidth, y: lower.y });
+      nextBottom = y - USAGE_SEGMENT_GAP;
     }
     bars.push({
       bucketIndex,
       x,
       width: barWidth,
-      top: yFor(cumulative),
+      top: segments.at(-1)?.y ?? plot.bottom,
       bottom: plot.bottom,
       total: bucket.tokens.total,
       segments,
@@ -247,7 +250,6 @@ export function buildUsageGeometry(
     barWidth,
     bars,
     visibleCategories,
-    separators,
     cacheRatePoints,
     cacheRatePath,
     cacheRateTicks,

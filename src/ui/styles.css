@@ -41,8 +41,6 @@
   --qg-chart-rate: #ffb900;
   --qg-chart-context: #51a2ff;
   --qg-chart-total: #ff8904;
-  --qg-chart-bg: var(--qg-frame);
-  --qg-chart-separator: var(--qg-chart-bg);
 
   --qg-radius: 8px;
   --qg-unit: 4px;
@@ -767,21 +765,13 @@ body {
 }
 
 .qg-chart__segment {
-  /* Fills stay truthful; the chart-background separator is the only divider. */
+  /* Fills stay truthful; external background gaps are the only divider. */
   stroke: none;
   transition: opacity var(--qg-transition);
 }
 
 .qg-chart[data-highlight] .qg-chart__segment:not([data-highlighted="true"]) {
   opacity: 0.42;
-}
-
-/* Subtle separation in the chart's own background, never a bright series line. */
-.qg-chart__separator {
-  stroke: var(--qg-chart-separator);
-  stroke-width: 1;
-  shape-rendering: crispEdges;
-  pointer-events: none;
 }
 
 .qg-chart__rate-line {

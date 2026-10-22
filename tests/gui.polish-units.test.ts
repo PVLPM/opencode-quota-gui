@@ -209,6 +209,101 @@ describe("cacheHitRate", () => {
   });
 });
 
+describe("buildUsageGeometry external gaps and rounded segments", () => {
+  it("keeps a one-unit segment at its true height with a constrained half-unit radius", () => {
+    const bucket = bucketOf({ input: 223, reasoning: 1 });
+    const geometry = buildUsageGeometry([bucket]);
+    const bar = geometry.bars[0];
+    const tiny = bar?.segments.find((segment) => segment.key === "reasoning");
+    expect(tiny).toBeDefined();
+    expect(tiny?.height).toBeCloseTo(1, 10);
+    expect(tiny?.radius).toBeCloseTo(0.5, 10);
+    const lower = bar?.segments.find((segment) => segment.key === "input");
+    expect(lower).toBeDefined();
+    expect((lower?.y as number) - ((tiny?.y as number) + (tiny?.height as number))).toBeCloseTo(
+      1,
+      10,
+    );
+    expect(bar?.top).toBeCloseTo(geometry.plot.top - 1, 10);
+  });
+
+  it("adds one external gap per adjacent pair and caps presentation growth at four units", () => {
+    const bucket = bucketOf({
+      cacheRead: 50,
+      input: 100,
+      reasoning: 24,
+      output: 20,
+      cacheWrite: 30,
+    });
+    const geometry = buildUsageGeometry([bucket]);
+    const bar = geometry.bars[0];
+    expect(bar?.segments).toHaveLength(5);
+    const segments = bar?.segments ?? [];
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index];
+      if (!segment) continue;
+      expect(segment.height).toBeCloseTo(
+        (segment.value / geometry.yMax) * geometry.plot.height,
+        10,
+      );
+      expect(segment.radius).toBeCloseTo(Math.min(2, segment.width / 2, segment.height / 2), 10);
+      if (index === 0) continue;
+      const lower = segments[index - 1];
+      if (!lower) continue;
+      expect(lower.y - (segment.y + segment.height)).toBeCloseTo(1, 10);
+    }
+    const coloredHeight = segments.reduce((sum, segment) => sum + segment.height, 0);
+    expect(coloredHeight).toBeCloseTo(224, 10);
+    expect(geometry.plot.top).toBe(12);
+    expect(bar?.top).toBe(8);
+    expect(bar?.top).toBeCloseTo(geometry.plot.top - 4, 10);
+    expect(bar?.top).toBeCloseTo(geometry.plot.bottom - coloredHeight - 4, 10);
+    expect(bar?.total).toBe(224);
+
+    const rate = cacheHitRate(bucket.tokens);
+    expect(geometry.cacheRatePoints[0]?.y).toBeCloseTo(
+      geometry.plot.bottom - ((rate as number) / 100) * geometry.plot.height,
+      10,
+    );
+    expect(geometry.cacheRateTicks.at(-1)?.y).toBeCloseTo(geometry.plot.top, 10);
+  });
+
+  it("keeps dense narrow stacks finite, bounded, and on the unchanged token and cache scales", () => {
+    const buckets = Array.from({ length: 900 }, () =>
+      bucketOf({ input: 1, cacheRead: 1, cacheWrite: 1, output: 1, reasoning: 1 }),
+    );
+    const geometry = buildUsageGeometry(buckets, {
+      width: 291,
+      height: 220,
+      padding: { top: 12, right: 12, bottom: 24, left: 48 },
+    });
+    expect(geometry.bars).toHaveLength(900);
+    for (const bar of geometry.bars) {
+      expect(bar.segments).toHaveLength(5);
+      expect(bar.top).toBeCloseTo(geometry.plot.top - 4, 10);
+      expect(bar.top).toBeGreaterThanOrEqual(0);
+      for (let index = 0; index < bar.segments.length; index += 1) {
+        const segment = bar.segments[index];
+        if (!segment) continue;
+        expect(Number.isFinite(segment.y)).toBe(true);
+        expect(Number.isFinite(segment.height)).toBe(true);
+        expect(segment.height).toBeGreaterThan(0);
+        expect(segment.radius).toBeCloseTo(Math.min(2, segment.width / 2, segment.height / 2), 10);
+        if (index === 0) continue;
+        const lower = bar.segments[index - 1];
+        if (!lower) continue;
+        expect(lower.y - (segment.y + segment.height)).toBeCloseTo(1, 10);
+      }
+    }
+    const rate = cacheHitRate(buckets[0]?.tokens ?? tokensOf());
+    expect(geometry.cacheRatePoints[0]?.y).toBeCloseTo(
+      geometry.plot.bottom - ((rate as number) / 100) * geometry.plot.height,
+      10,
+    );
+    expect(geometry.cacheRateTicks.at(-1)?.y).toBeCloseTo(geometry.plot.top, 10);
+  });
+});
+
 describe("buildUsageGeometry cache overlay", () => {
   it("plots each bucket's own rate instead of averaging percentages", () => {
     // 10% and 90% individually; a global sum would read 50% in both buckets.

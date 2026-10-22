@@ -264,6 +264,13 @@ describe("shared stacked usage bars", () => {
         "var(--qg-token-output)",
         "var(--qg-token-cache-write)",
       ]);
+      for (const segment of segments) {
+        const width = Number(segment.props.width);
+        const height = Number(segment.props.height);
+        const radius = Math.min(2, width / 2, height / 2);
+        expect(Number(segment.props.rx)).toBeCloseTo(radius, 10);
+        expect(Number(segment.props.ry)).toBeCloseTo(radius, 10);
+      }
       const legend = byClass(root, "li", "qg-legend__item");
       expect(legend.map((item) => graph.textOf(item))).toEqual([
         "Cache Read20",
@@ -339,7 +346,7 @@ describe("shared stacked usage bars", () => {
     }
   });
 
-  it("keeps truthful per-bucket stacks and never creates a phantom separator for a zero series", () => {
+  it("keeps truthful per-bucket stacks with external gaps and never creates a phantom gap for a zero series", () => {
     const buckets = [
       bucketOf(NOW - 3 * DAY_MS, { input: 10, cacheRead: 10 }),
       bucketOf(NOW - 2 * DAY_MS, { input: 10 }),
@@ -347,7 +354,6 @@ describe("shared stacked usage bars", () => {
     ];
     const geometry = buildUsageGeometry(buckets);
     expect(geometry.bars.map((bar) => bar.segments.length)).toEqual([2, 1, 2]);
-    expect(geometry.separators).toHaveLength(2);
     for (const bar of geometry.bars) {
       if (bar.segments.length === 0) continue;
       expect(bar.segments[0]?.y + (bar.segments[0]?.height ?? 0)).toBeCloseTo(
@@ -357,12 +363,17 @@ describe("shared stacked usage bars", () => {
       for (let index = 1; index < bar.segments.length; index += 1) {
         const lower = bar.segments[index - 1];
         const upper = bar.segments[index];
-        expect(upper?.y + (upper?.height ?? 0)).toBeCloseTo(lower?.y as number, 10);
+        expect(lower?.y).toBeCloseTo((upper?.y as number) + (upper?.height as number) + 1, 10);
       }
+      const coloredHeight = bar.segments.reduce((sum, segment) => sum + segment.height, 0);
+      expect(bar.top).toBeCloseTo(
+        geometry.plot.bottom - coloredHeight - (bar.segments.length - 1),
+        10,
+      );
     }
     const { root, dispose } = mountUsage(buckets);
     try {
-      expect(byClass(root, "line", "qg-chart__separator")).toHaveLength(2);
+      expect(byClass(root, "line", "qg-chart__separator")).toHaveLength(0);
     } finally {
       dispose();
     }
@@ -402,7 +413,7 @@ describe("shared stacked usage bars", () => {
     expect(tiny).toBeDefined();
     expect(tiny?.height).toBeGreaterThan(0);
     expect(tiny?.height).toBeLessThan(0.01);
-    expect(geometry.separators).toHaveLength(1);
+    expect(tiny?.radius).toBeCloseTo((tiny?.height as number) / 2, 12);
 
     const { root, dispose } = mountUsage([
       bucketOf(NOW - DAY_MS, { input: 1_000_000, reasoning: 1 }),
@@ -413,7 +424,9 @@ describe("shared stacked usage bars", () => {
       );
       expect(Number(rendered?.props.height)).toBeCloseTo(tiny?.height as number, 10);
       expect(Number(rendered?.props.height)).toBeLessThan(0.01);
-      expect(byClass(root, "line", "qg-chart__separator")).toHaveLength(1);
+      expect(Number(rendered?.props.rx)).toBeCloseTo(tiny?.radius as number, 12);
+      expect(Number(rendered?.props.ry)).toBeCloseTo(tiny?.radius as number, 12);
+      expect(byClass(root, "line", "qg-chart__separator")).toHaveLength(0);
     } finally {
       dispose();
     }
@@ -806,7 +819,8 @@ describe("session chart and tree presentation", () => {
     expect(styles).toContain("--qg-chart-rate: #ffb900");
     expect(styles).toContain("--qg-chart-context: #51a2ff");
     expect(styles).toContain("--qg-chart-total: #ff8904");
-    expect(styles).toContain(".qg-chart__separator");
+    expect(styles).toContain(".qg-chart__segment");
+    expect(styles).not.toContain(".qg-chart__separator");
     expect(styles).toMatch(/\.qg-chart__rate-line\s*\{[^}]*stroke-linecap:\s*round;/s);
     expect(styles).toMatch(/\.qg-chart__rate-line\s*\{[^}]*stroke-linejoin:\s*round;/s);
     // The Session inspection surface must let a phone page scroll vertically.
