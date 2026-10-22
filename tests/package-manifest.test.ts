@@ -166,6 +166,25 @@ function expectCanonicalVerificationOnly(job: WorkflowJob): void {
   }
 }
 
+// Minimal 1.x range check: the repository has no direct semver dependency and the
+// manifest only needs to prove which minor line a fresh install may resolve.
+function allowsVersion(specifier: string, version: string): boolean {
+  const range = specifier.match(/^([~^])(\d+)\.(\d+)\.(\d+)$/u);
+  const candidate = version.match(/^(\d+)\.(\d+)\.(\d+)$/u);
+  if (!range || !candidate) return false;
+
+  const [, operator, major, minor, patch] = range;
+  const [, candidateMajor, candidateMinor, candidatePatch] = candidate;
+  if (candidateMajor !== major) return false;
+  if (operator === "~") {
+    return candidateMinor === minor && Number(candidatePatch) >= Number(patch);
+  }
+  return (
+    Number(candidateMinor) > Number(minor) ||
+    (candidateMinor === minor && Number(candidatePatch) >= Number(patch))
+  );
+}
+
 describe("package manifest compatibility", () => {
   it("requires pnpm 11+ development tooling while requiring Node 22+ at runtime", () => {
     const packageManagerMatch = pkg.packageManager?.match(/^pnpm@(\d+)\.\d+\.\d+(?:[+-].*)?$/);
@@ -265,7 +284,7 @@ describe("package manifest compatibility", () => {
 
   it("ships the OpenTelemetry API while keeping the metrics SDK host-owned", () => {
     expect(pkg).not.toHaveProperty("optionalDependencies");
-    expect(pkg.dependencies?.["@opentelemetry/api"]).toBe("^1.9.1");
+    expect(pkg.dependencies?.["@opentelemetry/api"]).toBe("~1.9.1");
     for (const dependencyType of [pkg.devDependencies, pkg.peerDependencies]) {
       expect(dependencyType).not.toHaveProperty("@opentelemetry/api");
     }
@@ -275,6 +294,18 @@ describe("package manifest compatibility", () => {
     for (const dependencyType of [pkg.dependencies, pkg.peerDependencies]) {
       expect(dependencyType).not.toHaveProperty("@opentelemetry/sdk-metrics");
     }
+  });
+
+  it("keeps the OpenTelemetry API on the host-compatible 1.9 minor for fresh installs", () => {
+    const apiRange = pkg.dependencies?.["@opentelemetry/api"];
+
+    expect(allowsVersion(apiRange ?? "", "1.9.1")).toBe(true);
+    expect(allowsVersion(apiRange ?? "", "1.9.4")).toBe(true);
+    // A 1.10.x package copy rejects a global registered by the 1.9.0 host API,
+    // so the published range must exclude it even when the lock resolves 1.9.1.
+    expect(allowsVersion(apiRange ?? "", "1.10.0")).toBe(false);
+    expect(allowsVersion(apiRange ?? "", "2.0.0")).toBe(false);
+    expect(apiRange).toBe("~1.9.1");
   });
 
   it("hardens pnpm dependency resolution against fresh-package supply-chain attacks", () => {
@@ -507,7 +538,7 @@ describe("package manifest compatibility", () => {
     expect(packedSmoke).toContain('const { metrics } = await import("@opentelemetry/api");');
     expect(packedSmoke).toContain('assert.equal(typeof metrics.getMeter, "function");');
     expect(packedSmoke).toContain(
-      'assert.equal(pkg.dependencies?.["@opentelemetry/api"], "^1.9.1");',
+      'assert.equal(pkg.dependencies?.["@opentelemetry/api"], "~1.9.1");',
     );
     expect(packedSmoke).toContain(
       '["devDependencies", "optionalDependencies", "peerDependencies"]',

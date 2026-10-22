@@ -82,7 +82,7 @@ try {
       await readFile("node_modules/opencode-quota-gui/package.json", "utf8"),
     );
     assert.equal(pkg.engines?.node, "^22.13.0 || >=23.4.0");
-    assert.equal(pkg.dependencies?.["@opentelemetry/api"], "^1.9.1");
+    assert.equal(pkg.dependencies?.["@opentelemetry/api"], "~1.9.1");
     for (const dependencyType of ["devDependencies", "optionalDependencies", "peerDependencies"]) {
       assert.equal(pkg[dependencyType]?.["@opentelemetry/api"], undefined);
     }
