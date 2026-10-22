@@ -32,7 +32,7 @@ Good to know:
 
 `5.0.0` runs only on OpenCode `2.0.16` or newer.
 
-1. Install OpenCode 2 ([OpenCode docs](https://opencode.ai/docs/)) and start it once. On first start it copies your old `auth.json` logins into its database, `opencode.db`. It does this only once.
+1. Install OpenCode 2 ([OpenCode v2 docs](https://opencode.ai/v2/docs/)) and start it once. On first start it copies your old `auth.json` logins into its database, `opencode.db`. It does this only once.
 2. Run the update steps above.
 3. Run `/quota_status`. If a provider is missing, log in to it again in OpenCode 2 (`/connect`, or `opencode auth login <provider>`).
 
@@ -42,7 +42,7 @@ What changed in `5.0.0`:
 - **Logins come only from OpenCode 2.** Inside OpenCode, logins come through OpenCode 2's plugin API; the terminal command reads `opencode.db` read-only. Neither reads `auth.json`.
 - **Quota runs in OpenCode's background service.** Inside OpenCode, `PATH`, environment variables, and the working folder (your home folder) come from the service, not your terminal. See [Service environment](troubleshooting.md#service-environment).
 - **Web and Desktop get slash commands, but no toasts or panels,** because OpenCode 2 gives plugins no Web UI hooks. See [Web and Desktop notes](manual-install.md#web-and-desktop-notes).
-- **One plugin entry.** One `"plugin"` entry in `opencode.json` loads the server, the TUI, and the dashboard; no `tui.json` entry is needed.
+- **One plugin entry.** Add one entry to the `plugins` list in the OpenCode 2 config (`~/.config/opencode/opencode.json` or `opencode.jsonc`, or a project config); it loads the server, the TUI, and the dashboard, so no `tui.json` entry is needed.
 - **TUI reports open in a popup** and leave no chat message. `tuiCommandDisplay` now defaults to `"dialog"`; set `"inline"` to keep them in the chat.
 - **OpenCode Zen uses your OpenCode Console sign-in.** See [OpenCode Zen findings](#opencode-zen-findings).
 - **Removed setting:** `tuiCompactStatus.suppressWhenNativeProviderQuota`. The old key is ignored.
@@ -54,14 +54,14 @@ What changed in `5.0.0`:
 | OpenCode found | What happens |
 | --- | --- |
 | OpenCode 2 | Everything works as described on this page. |
-| OpenCode 1 | This build does not support OpenCode 1. `init` stops without changing anything and tells you to run the upstream `npx @slkiser/opencode-quota@4 init` (historical upstream package, not this one). `update` never migrates an OpenCode 1 setup to this build. |
-| Unknown (for example, `opencode` is not on your `PATH`) | `init` asks which OpenCode you use. `update` assumes OpenCode 2 and prints a note; on OpenCode 1, set `"plugin": ["@slkiser/opencode-quota@4"]` yourself (upstream historical line). |
+| OpenCode 1 | This build does not support OpenCode 1. `init` stops without changing anything. The upstream `npx @slkiser/opencode-quota@4 init` is the historical OpenCode 1 line, not this package. `update` never migrates an OpenCode 1 setup to this build. |
+| Unknown (for example, `opencode` is not on your `PATH`) | `init` asks which OpenCode you use. `update` assumes OpenCode 2 and prints a note; on OpenCode 1, set its historical singular `"plugin": ["@slkiser/opencode-quota@4"]` yourself (upstream historical line). |
 
 ## Read the preview
 
 The preview has up to three sections (empty ones are hidden):
 
-- **Safe changes this command can make:** package-spec edits (in `plugin` and OpenCode 2 `plugins` entries; plugin options are kept) and known display-setting moves.
+- **Safe changes this command can make:** package-spec edits (in the legacy `plugin` and current OpenCode 2 `plugins` entries; plugin options are kept) and known display-setting moves.
 - **Manual actions — this command will not change these sources:** credential findings or config that needs your review.
 - **Package-cache candidates:** folders it may remove, only after current config and the package manifest check out.
 

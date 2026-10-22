@@ -208,15 +208,90 @@ describe("quota provider Phase 7 documentation consistency", () => {
     const referenceSection = readMarkdownSection(read("README.md"), /^Reference$/);
 
     for (const url of [
-      "https://opencode.ai/docs/",
-      "https://opencode.ai/docs/config/",
-      "https://opencode.ai/docs/plugins/",
-      "https://opencode.ai/docs/tui/",
+      "https://opencode.ai/v2/docs/",
+      "https://opencode.ai/v2/docs/config/",
+      "https://opencode.ai/v2/docs/plugins/",
       "https://models.dev/",
       "https://nodejs.org/en/download",
     ]) {
       expect(hasMarkdownLinkTo(referenceSection, url), url).toBe(true);
     }
+    expect(referenceSection).not.toContain("https://opencode.ai/docs/");
+  });
+
+  it("documents the OpenCode 2 plural plugins config and GUI-first install paths", () => {
+    const readme = read("README.md");
+    const manualInstall = read("docs/readme/manual-install.md");
+
+    for (const document of [readme, manualInstall]) {
+      expect(document).toContain("http://localhost:4144/quota");
+      expect(document).toContain("~/.config/opencode/opencode.json");
+      expect(document).not.toContain('"plugin": [');
+    }
+
+    expect(manualInstall).toContain('"plugins": ["opencode-quota-gui"]');
+    expect(manualInstall).toContain("~/.config/opencode/plugins/");
+    expect(manualInstall).toContain(".opencode/plugins/");
+    expect(manualInstall).toContain("Restart OpenCode");
+  });
+
+  it("keeps current-version plugin examples plural while preserving historical OpenCode 1 references", () => {
+    const updating = read("docs/readme/updating.md");
+    const troubleshooting = read("docs/readme/troubleshooting.md");
+    const providers = read("docs/readme/providers.md");
+
+    expect(providers).toContain(
+      '"plugins": ["cursor-opencode-provider/plugin/opencode2", "opencode-quota-gui"]',
+    );
+    expect(providers).not.toContain('"plugin": [');
+    expect(providers).toContain(
+      "the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`",
+    );
+    expect(troubleshooting).toContain("`plugins` list of `~/.config/opencode/opencode.json(c)`");
+    expect(troubleshooting).not.toContain("`plugin` list");
+    expect(updating).toContain("Add one entry to the `plugins` list");
+    expect(updating).not.toContain('One `"plugin"` entry');
+    expect(updating).toContain("legacy `plugin`");
+    expect(updating).toContain('"plugin": ["@slkiser/opencode-quota@4"]');
+    expect(updating).toContain("https://opencode.ai/v2/docs/");
+    expect(updating).not.toContain("https://opencode.ai/docs/");
+  });
+
+  it("keeps Dashboard settings, import, and precedence copy specific", () => {
+    const readme = read("README.md");
+    const manualInstall = read("docs/readme/manual-install.md");
+
+    for (const stale of [
+      "the same keys as the config file",
+      "copy settings from legacy config files (global or project)",
+      "shows the winning source for every key",
+      "it wins even over project files",
+    ]) {
+      expect(readme, stale).not.toContain(stale);
+    }
+
+    expect(readme).toContain("The six legacy/TUI-only controls are hidden");
+    expect(readme).toContain("only the eligible concepts from this seven-key list");
+    expect(readme).toContain(
+      "percent display, percent label, provider selection, poll interval, request timeout, accounting detail, and wait-for-reset",
+    );
+    expect(readme).toContain("Workspace and project overrides are not import sources");
+    expect(readme).toContain("Settings, import, and visibility changes write only");
+    expect(readme).toContain("a workspace/project layer still wins for the same key");
+    expect(readme).toContain("notes only meaningful overriding scopes");
+    expect(readme).toContain("source files stay byte-for-byte untouched");
+    expect(readme).toContain(
+      "in the `plugins` list of your global OpenCode config (by default `~/.config/opencode/opencode.json(c)`)",
+    );
+    expect(readme).not.toContain(
+      "in the `plugins` list of `~/.config/opencode/opencode.json(c)` or your project config",
+    );
+    expect(readme).toContain("embedded in this dashboard page");
+    expect(readme).not.toContain("for the running dashboard");
+    expect(manualInstall).toContain("wins over the global legacy `quota-toast.jsonc`");
+    expect(manualInstall).toContain(
+      "a project/workspace `quota-toast.jsonc` still wins for the same key",
+    );
   });
 
   it("keeps copy-paste integrations independent of entry order", () => {

@@ -29,7 +29,9 @@ This project is not published on npm yet. Once the first public version is relea
 npx opencode-quota-gui init
 ```
 
-Then restart OpenCode and type `/quota`. The plugin also starts the local [dashboard](#dashboard) at http://localhost:4144.
+`init` is GUI-first. It asks for the install scope (global or current project), provider selection (auto-detect or choose manually), and whether quota percentages show used or remaining. It previews the changes and asks before writing. On OpenCode 2 it writes the plural `plugins` list in `~/.config/opencode/opencode.json` or `opencode.jsonc` (or the project's `opencode.json(c)` / `.opencode/opencode.json(c)`), keeps your other plugins and their order, and leaves automatic TUI surfaces off in a fresh config. It never installs the upstream `@slkiser/opencode-quota` package.
+
+Restart OpenCode after `init` — and after any later plugin or config change — then open <http://localhost:4144/quota>. The dashboard is the primary v1 interface; `/quota` and `/quota_status` remain available in the TUI. For local checkout and plugin-directory paths, see [Manual install](docs/readme/manual-install.md).
 
 **Pre-release build (local tarball).** Until that release — or to test a specific checkout — install the same plugin from a tarball you build yourself. The optional `OPENCODE_QUOTA_PLUGIN_SPEC` override points `init` at the local file instead of the npm package:
 
@@ -59,14 +61,14 @@ node dist/bin/opencode-quota-gui.js init
 
 Keep that override absolute, as in the two forms above: a relative spec would resolve from the OpenCode config folder, not your checkout. `init` asks before writing, prints the exact file it changed, and never installs the upstream `@slkiser/opencode-quota` package.
 
-**Coming from an upstream install?** `init` and `update` recognize legacy `@slkiser/opencode-quota` entries, config, and cache files for an explicit migration only — they are never rewired silently. Replace or remove the old entry yourself when you switch to this build (see [Manual install](docs/readme/manual-install.md)).
+**Already on an upstream install?** `init` and `update` recognize legacy `@slkiser/opencode-quota` entries, config, and cache files for an explicit migration only — they are never rewired silently. Replace or remove the old entry yourself when you switch to this build (see [Manual install](docs/readme/manual-install.md)).
 
 > [!IMPORTANT]
 > You need OpenCode `2.0.16+` and Node.js `22.13+` or `23.4+`. This build does not support OpenCode 1; its last supported plugin line is the upstream `npx @slkiser/opencode-quota@4 init` (historical upstream package, not this one).
 
 Upgrading from 4.x? Read [what changed in 5.0](#breaking-changes-in-500).
 
-> Maintainers: releases are manual. Dispatch the **Publish to npm (manual tag dispatch)** workflow with an existing release tag and leave `publish` at its `false` default for a publish-free rehearsal; publishing additionally requires the `NPM_PUBLISH_ENABLED` repository variable. The workflow packs once on Node 24, smoke-tests Node 22/24, and publishes that exact tarball with provenance — no version sync, retag, or branch write. See [Releasing](docs/readme/release.md).
+> Maintainers: releases are manual. Dispatch the **Publish to npm (manual tag dispatch)** workflow with an existing release tag and leave `publish` at its `false` default for a publish-free rehearsal; publishing additionally requires the `NPM_PUBLISH_ENABLED` repository variable. The workflow packs once on Node 24, smoke-tests Node 22/24, and publishes that exact tarball with provenance — no version sync, retag, or branch write. For a local Node 24 rehearsal, `pnpm run verify:release-package` packs once (`pack:release-package`) and smoke-tests that exact tarball (`smoke:package`). See [Releasing](docs/readme/release.md).
 
 ## What you get
 
@@ -83,7 +85,7 @@ Upgrading from 4.x? Read [what changed in 5.0](#breaking-changes-in-500).
 
 Also:
 
-- **Dashboard:** a local web UI at http://localhost:4144 with quota cards, range-scoped usage charts, projects, session trees, and settings. See [Dashboard](#dashboard).
+- **Dashboard:** a local web UI at http://localhost:4144/quota with quota cards, range-scoped usage charts, projects, session trees, and settings. See [Dashboard](#dashboard).
 - **Terminal:** `npx opencode-quota-gui show` works even with OpenCode closed. If you installed the package, the short `opencode-quota-gui show` works too.
 - **Web and Desktop:** slash commands post the report in the chat.
 - **Scripts and status bars:** JSON, an export file, and metrics. See [External integration](docs/readme/external-integration.md).
@@ -95,15 +97,16 @@ Also:
 The plugin also serves a local dashboard. It listens on `127.0.0.1` only — nothing on your network can reach it:
 
 - **Home:** quota cards for every discovered provider account, token usage over the selected range (`24h`, `7d`, `30d`, `lifetime`), then project activity. Tokens are the primary number; the API-equivalent cost is a small secondary figure and is never a provider bill.
+- **Clean routes:** the dashboard opens at <http://localhost:4144/quota>. Home, analytics, project, session, and settings are real URLs (`/analytics?range=7d`, `/project/<id>?range=30d`, `/session/<id>`, `/settings`), so reload and back/forward work.
 - **Projects and sessions:** project activity with root sessions and worktree labels (`title normal | worktree muted | tokens`), then the opened session plus all of its descendants, with compaction markers and per-step context and total tokens. Session detail counts every physical completed step in the opened tree.
-- **Settings:** the same keys as the config file, percent display as `used` or `remaining`, and eye toggles that hide a card or row from the dashboard only — hiding is presentation state and never changes stored data or other surfaces.
-- **Import:** copy settings from legacy config files (global or project) into the canonical dashboard file; the legacy files are left byte-for-byte untouched.
+- **Settings:** the dashboard-facing settings — percent display and label, provider selection, poll interval, request timeout, accounting detail, wait-for-reset, and visibility — plus eye toggles that hide a card or row from the dashboard only. The six legacy/TUI-only controls are hidden, and the port is read-only; hiding is presentation state and never changes stored data or other surfaces. The bottom About block reports Version, Build, and Contract.
+- **Import:** when an actual global legacy OpenCode Quota source exists, preview and copy only the eligible concepts from this seven-key list — percent display, percent label, provider selection, poll interval, request timeout, accounting detail, and wait-for-reset — into the global canonical dashboard file. Workspace and project overrides are not import sources, and source files stay byte-for-byte untouched.
 
 How it starts and where it writes:
 
-- The dashboard starts with the plugin at <http://localhost:4144>. The port is `dashboard.port` in the canonical `~/.config/opencode/opencode-quota-gui/config.jsonc` (`$XDG_CONFIG_HOME/opencode/...` when `XDG_CONFIG_HOME` is set, or the folder named by `OPENCODE_CONFIG_DIR`). Changing the port needs an OpenCode restart, and the port is read-only in the web UI.
+- The dashboard starts with the plugin at <http://localhost:4144/quota>. The port is `dashboard.port` in the canonical `~/.config/opencode/opencode-quota-gui/config.jsonc` (`$XDG_CONFIG_HOME/opencode/...` when `XDG_CONFIG_HOME` is set, or the folder named by `OPENCODE_CONFIG_DIR`). Changing the port needs an OpenCode restart, and the port is read-only in the web UI.
 - If the port is already taken, the dashboard does not try another port: you get one `dashboard server unavailable` log line, and the TUI, slash commands, toasts, and tools keep working.
-- Settings and import write only the global canonical file above. For any key that file sets, it wins even over project files — a deliberate deviation, because dashboard settings are global; the settings page shows the winning source for every key, and legacy config files keep applying to keys the canonical file does not set. `formatStyle` still affects the legacy TUI and terminal surfaces only, never the dashboard.
+- Settings, import, and visibility changes write only the global canonical file above. File-backed loading keeps the existing layers: defaults, global plugin/legacy config, the global canonical file, then workspace/project config. The canonical file overrides global legacy keys it sets, but a workspace/project layer still wins for the same key; legacy layers remain read-compatible. The settings page notes only meaningful overriding scopes (`Workspace override`, `Project override`, `Legacy override`) beside affected fields, never full paths. `formatStyle` still affects the legacy TUI and terminal surfaces only, never the dashboard.
 
 v1 notes: the dashboard ships with the plugin; no dashboard CLI aliases, no durable-resume and no native notifications, and Web/Desktop still get slash commands only. Until the first public npm release, install from the local tarball shown above.
 
@@ -156,7 +159,7 @@ Type these in OpenCode. Add dates after the command, like `/tokens_between 2026-
 
 | Command                               | What it does                      |
 | ------------------------------------- | --------------------------------- |
-| `npx opencode-quota-gui init`         | Set up OpenCode Quota             |
+| `npx opencode-quota-gui init`         | Set up OpenCode Quota (GUI-first) |
 | `npx opencode-quota-gui provider add` | Add or update a custom provider   |
 | `npx opencode-quota-gui show`         | Show current quota                |
 | `npx opencode-quota-gui status`       | Check setup and provider problems |
@@ -266,9 +269,12 @@ It previews the change before saving. See the [custom-provider guide](docs/readm
 
 1. Run `/quota_status` in OpenCode, or `npx opencode-quota-gui status` in a terminal.
 2. Provider missing? Log in to it again in OpenCode 2.
-3. Using a companion plugin (Cursor, Google)? List it **before** the OpenCode Quota plugin entry in `opencode.json`.
+3. Using a companion plugin (Cursor, Google)? List it **before** the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`.
 4. `claude` or `bl` not found? See [Service environment](docs/readme/troubleshooting.md#service-environment).
 5. Token reports empty? Start OpenCode once, then use a model.
+6. Dashboard blank or stale? Open <http://localhost:4144/quota> and reload. If it still fails, check that the `opencode-quota-gui` entry (or your local tarball spec) is in the `plugins` list of your global OpenCode config (by default `~/.config/opencode/opencode.json(c)`) or your project config, then restart OpenCode.
+7. Settings shows `Build mismatch · restart OpenCode`? Restart OpenCode. If it persists, reinstall the same package or tarball so the plugin server and dashboard UI come from one build. A contract mismatch is stronger: do not mix builds.
+8. Need build details? Settings → About reports the Version, Build, and Contract embedded in this dashboard page.
 
 More fixes: [Troubleshooting](docs/readme/troubleshooting.md).
 
@@ -276,7 +282,7 @@ More fixes: [Troubleshooting](docs/readme/troubleshooting.md).
 
 Guides: [Manual install](docs/readme/manual-install.md) · [Configuration](docs/readme/configuration.md) · [Providers](docs/readme/providers.md) · [Troubleshooting](docs/readme/troubleshooting.md) · [External integration](docs/readme/external-integration.md) · [Updating safely](docs/readme/updating.md)
 
-Outside links: [OpenCode docs](https://opencode.ai/docs/) · [OpenCode config](https://opencode.ai/docs/config/) · [OpenCode plugins](https://opencode.ai/docs/plugins/) · [OpenCode TUI](https://opencode.ai/docs/tui/) · [models.dev pricing data](https://models.dev/) · [Node.js downloads](https://nodejs.org/en/download)
+Outside links: [OpenCode v2 docs](https://opencode.ai/v2/docs/) · [OpenCode v2 config](https://opencode.ai/v2/docs/config/) · [OpenCode v2 plugins](https://opencode.ai/v2/docs/plugins/) · [models.dev pricing data](https://models.dev/) · [Node.js downloads](https://nodejs.org/en/download)
 
 ## Contributors
 

@@ -8,7 +8,7 @@
 2. Find the provider or feature that fails, and follow the matching fix below.
 3. Restart OpenCode after changing config or logins.
 
-Every provider missing? Check that the `opencode-quota-gui` entry (or your local tarball spec) is in the `plugin` list of `opencode.jsonc` or `.json`. That one entry also loads the TUI and the dashboard; no `tui.json` entry is needed.
+Every provider missing? Check that the `opencode-quota-gui` entry (or your local tarball spec) is in the `plugins` list of `~/.config/opencode/opencode.json(c)`, or your project's `opencode.json(c)` / `.opencode/opencode.json(c)`. That one entry also loads the TUI and the dashboard; no `tui.json` entry is needed.
 
 ## Logins
 
@@ -125,7 +125,7 @@ Check `copilot_quota_auth`, `deployment`, `api_host`, `enterprise_host_source`, 
 
 | Symptom                                   | Fix |
 | ----------------------------------------- | --- |
-| Cursor not detected                       | Put `cursor-opencode-provider/plugin/opencode2` before the OpenCode Quota plugin entry in `opencode.json`. |
+| Cursor not detected                       | Put `cursor-opencode-provider/plugin/opencode2` before the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`. |
 | Cursor login missing                      | Run `/connect` → **Cursor** in OpenCode, or set `CURSOR_API_KEY`. |
 | Quota shows but no remaining percentage   | Set `cursorPlan` or `cursorIncludedApiUsd`. |
 | Billing cycle looks wrong                 | Set `cursorBillingCycleStartDay` to your billing day. |
@@ -178,7 +178,7 @@ Check the `google_agy` section.
 
 | Symptom                             | Fix |
 | ----------------------------------- | --- |
-| Companion missing                   | Put `@anthonyhaussman/opencode-agy-auth` before the OpenCode Quota plugin entry in `opencode.json`. |
+| Companion missing                   | Put `@anthonyhaussman/opencode-agy-auth` before the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`. |
 | Provider not enabled in manual mode | Include `google-agy` in `enabledProviders`. |
 | Login missing                       | Run `opencode auth login google-agy`. |
 | Project missing                     | Set `OPENCODE_AGY_PROJECT_ID` or `provider.google-agy.options.projectId`. |
@@ -193,7 +193,7 @@ Gemini CLI works only with Gemini Code Assist Standard or Enterprise (organizati
 
 | Symptom                             | Fix |
 | ----------------------------------- | --- |
-| Companion missing                   | Put `opencode-gemini-auth` before the OpenCode Quota plugin entry in `opencode.json`. |
+| Companion missing                   | Put `opencode-gemini-auth` before the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`. |
 | Provider not enabled in manual mode | Include `google-gemini-cli` in `enabledProviders`. |
 | Login missing                       | Run `opencode auth login google`. |
 | Project missing                     | Set `provider.google.options.projectId`, `OPENCODE_GEMINI_PROJECT_ID`, `GOOGLE_CLOUD_PROJECT`, or `GOOGLE_CLOUD_PROJECT_ID`. |

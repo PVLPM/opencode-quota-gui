@@ -392,11 +392,11 @@ claude auth status
 
 ### Cursor
 
-Use companion plugin [`cursor-opencode-provider`](https://github.com/oakimov/cursor-opencode-provider#readme). Add its OpenCode 2 entry **before** the `opencode-quota-gui` entry in `opencode.json`:
+Use companion plugin [`cursor-opencode-provider`](https://github.com/oakimov/cursor-opencode-provider#readme). Add its OpenCode 2 entry **before** the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`:
 
 ```jsonc
 {
-  "plugin": ["cursor-opencode-provider/plugin/opencode2", "opencode-quota-gui"],
+  "plugins": ["cursor-opencode-provider/plugin/opencode2", "opencode-quota-gui"],
 }
 ```
 
@@ -434,7 +434,7 @@ OpenCode Quota's Google integrations use independent community companion plugins
 
 ### Google AGY
 
-Use companion plugin [`@anthonyhaussman/opencode-agy-auth`](https://github.com/anthonyhaussman/opencode-agy-auth). OpenCode 2 needs its OpenCode 2 build, currently the alpha: `@anthonyhaussman/opencode-agy-auth@alpha`. Add it **before** the OpenCode Quota plugin entry in `opencode.json`, then sign in once and choose **Antigravity CLI (OAuth)**:
+Use companion plugin [`@anthonyhaussman/opencode-agy-auth`](https://github.com/anthonyhaussman/opencode-agy-auth). OpenCode 2 needs its OpenCode 2 build, currently the alpha: `@anthonyhaussman/opencode-agy-auth@alpha`. Add it **before** the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`, then sign in once and choose **Antigravity CLI (OAuth)**:
 
 ```bash
 opencode auth login google-agy
@@ -442,7 +442,7 @@ opencode auth login google-agy
 
 - It shows the companion's grouped weekly and five-hour windows for each account. AGY logins copied from OpenCode 1 keep working.
 - With a manual provider list, include `google-agy` in `enabledProviders`.
-- If the login has no project id, set `OPENCODE_AGY_PROJECT_ID`, or `providers.google-agy.settings.projectId` in your user/global `opencode.json` (the OpenCode 1 form `provider.google-agy.options.projectId` also works).
+- If the login has no project id, set `OPENCODE_AGY_PROJECT_ID`, or `providers.google-agy.settings.projectId` in your user/global `opencode.json(c)` (the OpenCode 1 form `provider.google-agy.options.projectId` also works).
 
 <a id="gemini-cli"></a>
 
@@ -450,7 +450,7 @@ opencode auth login google-agy
 
 Gemini CLI works only with Gemini Code Assist Standard or Enterprise (organization) accounts. Google ended personal Gemini Code Assist accounts (individual, AI Pro, and AI Ultra) on 2026-06-18; see [Google's notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals). Personal Google users should use [Google AGY](#google-agy-quick-setup).
 
-Use companion plugin [`opencode-gemini-auth`](https://github.com/jenslys/opencode-gemini-auth#readme) 2.x, which supports OpenCode 2. Add it **before** the OpenCode Quota plugin entry in `opencode.json`, then sign in once and choose **OAuth with Google (Gemini CLI)**:
+Use companion plugin [`opencode-gemini-auth`](https://github.com/jenslys/opencode-gemini-auth#readme) 2.x, which supports OpenCode 2. Add it **before** the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`, then sign in once and choose **OAuth with Google (Gemini CLI)**:
 
 ```bash
 opencode auth login google
