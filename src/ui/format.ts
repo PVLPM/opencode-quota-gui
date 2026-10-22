@@ -15,13 +15,16 @@ export interface CategoryDescriptor {
   colorVar: string;
 }
 
-/** Fixed stack order; the legend always names every category (R31). */
+/**
+ * Fixed bottom-to-top stack order and matching legend order. The frozen v1
+ * palette is carried by the CSS variables; the legend never reorders by totals.
+ */
 export const TOKEN_CATEGORIES: readonly CategoryDescriptor[] = [
+  { key: "cacheRead", label: "Cache Read", colorVar: "--qg-token-cache-read" },
   { key: "input", label: "Input", colorVar: "--qg-token-input" },
-  { key: "cacheRead", label: "Cache read", colorVar: "--qg-token-cache-read" },
-  { key: "cacheWrite", label: "Cache write", colorVar: "--qg-token-cache-write" },
-  { key: "output", label: "Output", colorVar: "--qg-token-output" },
   { key: "reasoning", label: "Reasoning", colorVar: "--qg-token-reasoning" },
+  { key: "output", label: "Output", colorVar: "--qg-token-output" },
+  { key: "cacheWrite", label: "Cache Write", colorVar: "--qg-token-cache-write" },
 ];
 
 const COMPACT_UNITS = [
@@ -57,6 +60,17 @@ export function formatApiEquivalentCost(value: number | null): string {
 export function formatPercent(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "—";
   return `${value.toFixed(value < 10 ? 1 : 0)}%`;
+}
+
+/** Chart inspection always reports two decimals, including exact zeros. */
+export function formatPercentExact(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(2)}%`;
+}
+
+/** Right-axis rate ticks stay whole integers. */
+export function formatPercentTick(value: number): string {
+  return Number.isFinite(value) ? `${Math.round(value)}%` : "—";
 }
 
 /** Formats in the explicit host zone supplied by the payload; never the browser default. */

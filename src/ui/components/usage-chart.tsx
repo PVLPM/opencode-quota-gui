@@ -1,44 +1,34 @@
 import type { JSX } from "solid-js";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { Bucket, Usage } from "../../contracts/dashboard";
-import { buildUsageGeometry, DEFAULT_USAGE_SIZE, toBandPath } from "../chart-geometry";
+import { buildUsageGeometry, cacheHitRate, DEFAULT_USAGE_SIZE } from "../chart-geometry";
+import { createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
 import {
   formatApiEquivalentCost,
   formatBucketTick,
   formatExactCount,
-  formatPercent,
+  formatPercentExact,
+  formatPercentTick,
   formatTokenCount,
-  TOKEN_CATEGORIES,
   usageChartTitle,
 } from "../format";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { EstimateInfo } from "./estimate";
 
 /**
- * A series whose band never leaves its lower boundary carries no visible area;
- * flagging it keeps the hairline stroke from drawing a zero series into
- * existence as a white line.
- */
-function bandIsZeroThickness(
-  band: ReturnType<typeof buildUsageGeometry>["bands"][number],
-): boolean {
-  return band.lower.every((value, index) => Math.abs((band.upper[index] ?? value) - value) < 0.001);
-}
-
-/**
- * Usage — stacked area chart (design spec §6, §10; R31, R32, R48).
+ * Usage — shared stacked vertical bars (design spec §2; owner 6–12).
  *
- * Five additive token categories always stack in a fixed order; a zero
- * category stays a true zero-thickness layer. After the fills, every non-zero
- * category's cumulative boundary is redrawn in that category's colour so a tiny
- * series stays distinguishable beside a huge one without inflating its area.
+ * Five additive token categories stack bottom-to-top in a fixed order. Only
+ * categories with a nonzero total in the current range render at all, so a
+ * zero series leaves no phantom segment, legend row, tooltip row or gap. Every
+ * nonzero segment keeps its truthful height; separators are chart-background
+ * hairlines, never bright borders or cumulative coloured overlays.
  *
  * A derived cache-hit-rate line (right axis, fixed 0–100%) overlays the stack;
- * it is not a sixth token series, and a bucket with no input-side traffic is a
- * gap rather than 0%. Transient hover/focus highlights a segment; no click
- * state is kept. A visually hidden table duplicates the series for screen
- * readers.
+ * it is not a token series and a bucket with no input-side traffic is a gap.
+ * Pointer and keyboard inspection share the immediate custom tooltip with the
+ * Session chart; this chart deliberately has no vertical crosshair.
  */
 export function UsageChart(props: {
   usage: Usage;
@@ -46,17 +36,21 @@ export function UsageChart(props: {
   /** Projects keep their totals in the page-level summary strip, not in this headline. */
   showSummary?: boolean;
 }): JSX.Element {
-  const [hoveredBucket, setHoveredBucket] = createSignal<number | undefined>();
-  const [focusedBucket, setFocusedBucket] = createSignal<number | undefined>();
+  const inspection = createChartInspection();
   const [hoveredCategory, setHoveredCategory] = createSignal<string | undefined>();
   const [focusedCategory, setFocusedCategory] = createSignal<string | undefined>();
-  const active = () => hoveredBucket() ?? focusedBucket();
+  const active = inspection.active;
   const highlight = () => hoveredCategory() ?? focusedCategory();
 
   const { size, ref } = createChartLayout(DEFAULT_USAGE_SIZE);
   const geometry = createMemo(() => buildUsageGeometry(props.usage.buckets, size));
   const tooltipLayout = createChartTooltipLayout(
-    () => (geometry().slotX(active() ?? 0) + geometry().slot / 2) / size.width,
+    () => {
+      const index = active();
+      return index === undefined ? 0 : (geometry().slotX(index) + geometry().slot / 2) / size.width;
+    },
+    // Clear the active bar, not just its centre, before starting the overlay.
+    () => geometry().barWidth / 2 + 12,
   );
   const timeZone = () => props.usage.timeZone;
   const title = () => props.title ?? usageChartTitle(props.usage.bucketUnit);
@@ -64,14 +58,20 @@ export function UsageChart(props: {
     const index = active();
     return index === undefined ? undefined : props.usage.buckets[index];
   };
+  const rateText = (value: number | null | undefined): string => formatPercentExact(value);
   const activeRate = (): number | null | undefined => {
     const bucket = activeBucket();
-    if (bucket === undefined) return undefined;
-    const denominator = bucket.tokens.input + bucket.tokens.cacheRead + bucket.tokens.cacheWrite;
-    return denominator > 0 ? (bucket.tokens.cacheRead / denominator) * 100 : null;
+    return bucket === undefined ? undefined : cacheHitRate(bucket.tokens);
   };
-  const rateText = (value: number | null | undefined): string =>
-    value === undefined || value === null ? "—" : formatPercent(value);
+  const bucketLabel = (bucket: Bucket): string => {
+    const rate = cacheHitRate(bucket.tokens);
+    const categories = geometry()
+      .visibleCategories.map(
+        (category) => `${category.label} ${formatExactCount(bucket.tokens[category.key])}`,
+      )
+      .join(", ");
+    return `${formatBucketTick(bucket.startMs, props.usage.bucketUnit, timeZone())}: total ${formatExactCount(bucket.tokens.total)} tokens${categories.length > 0 ? `, ${categories}` : ""}, cache rate ${rateText(rate)}`;
+  };
 
   return (
     <div class="qg-usage">
@@ -106,7 +106,7 @@ export function UsageChart(props: {
         <svg
           viewBox={`0 0 ${size.width} ${size.height}`}
           role="img"
-          aria-label={`${title()}. Five stacked token categories with a cache hit rate on the right axis.`}
+          aria-label={`${title()}. Stacked token usage with a cache hit rate on the right axis.`}
         >
           <For each={geometry().ticks}>
             {(tick) => (
@@ -131,12 +131,20 @@ export function UsageChart(props: {
           </For>
 
           <text
+            class="qg-chart__axis-title qg-chart__axis-title--tokens"
+            x={geometry().plot.left}
+            y={geometry().plot.top - 6}
+            text-anchor="start"
+          >
+            TOKEN USAGE
+          </text>
+          <text
             class="qg-chart__axis-title qg-chart__axis-title--rate"
             x={geometry().plot.right}
             y={geometry().plot.top - 6}
             text-anchor="end"
           >
-            Cache hit rate
+            CACHE HIT RATE
           </text>
           <For each={geometry().cacheRateTicks}>
             {(tick) => (
@@ -154,39 +162,46 @@ export function UsageChart(props: {
                   y={tick.y + 3}
                   text-anchor="start"
                 >
-                  {formatPercent(tick.value)}
+                  {formatPercentTick(tick.value)}
                 </text>
               </>
             )}
           </For>
 
-          <For each={geometry().bands}>
-            {(band) => (
-              <path
-                class="qg-chart__segment"
-                data-highlighted={
-                  highlight() === undefined || highlight() === band.key ? "true" : undefined
-                }
-                data-thin={bandIsZeroThickness(band) ? "true" : undefined}
-                d={toBandPath(band)}
-                fill={`var(${band.colorVar})`}
-                fill-opacity="0.72"
+          <For each={geometry().bars}>
+            {(bar) => (
+              <For each={bar.segments}>
+                {(segment) => (
+                  <rect
+                    class="qg-chart__segment"
+                    data-category={segment.key}
+                    data-highlighted={
+                      highlight() === undefined || highlight() === segment.key ? "true" : undefined
+                    }
+                    x={segment.x}
+                    y={segment.y}
+                    width={segment.width}
+                    height={segment.height}
+                    fill={`var(${segment.colorVar})`}
+                  />
+                )}
+              </For>
+            )}
+          </For>
+
+          <For each={geometry().separators}>
+            {(separator) => (
+              <line
+                class="qg-chart__separator"
+                x1={separator.x1}
+                x2={separator.x2}
+                y1={separator.y}
+                y2={separator.y}
               />
             )}
           </For>
 
-          <For each={geometry().boundaries}>
-            {(boundary) => (
-              <path
-                class="qg-chart__boundary"
-                data-category={boundary.key}
-                d={boundary.path}
-                stroke={`var(${boundary.colorVar})`}
-              />
-            )}
-          </For>
-
-          <Show when={geometry().cacheRatePath}>
+          <Show when={geometry().cacheRatePath.length > 0}>
             <path class="qg-chart__rate-line" d={geometry().cacheRatePath} />
           </Show>
           <Show when={geometry().cacheRatePoints.length === 1}>
@@ -217,22 +232,12 @@ export function UsageChart(props: {
               );
             }}
           </For>
-
-          <Show when={active() !== undefined}>
-            <line
-              class="qg-chart__cursor"
-              x1={geometry().slotX(active() ?? 0) + geometry().slot / 2}
-              x2={geometry().slotX(active() ?? 0) + geometry().slot / 2}
-              y1={geometry().plot.top}
-              y2={geometry().plot.bottom}
-            />
-          </Show>
         </svg>
 
         {/*
-          Real buttons, one per bucket: keyboard reachable, labelled with all
-          five categories plus the total and the cache rate, and the only
-          interactive layer — the SVG above stays a picture for assistive tech.
+          Real buttons, one per bucket: keyboard reachable, labelled with the
+          visible categories, the total and the exact cache rate. The SVG above
+          stays a picture for assistive tech.
         */}
         <div
           class="qg-chart__hits"
@@ -242,32 +247,21 @@ export function UsageChart(props: {
             left: `${(geometry().plot.left / size.width) * 100}%`,
             right: `${((size.width - geometry().plot.right) / size.width) * 100}%`,
           }}
+          onPointerLeave={inspection.clearPointer}
         >
           <For each={props.usage.buckets}>
             {(bucket, index) => (
               <button
                 type="button"
                 class="qg-chart__hit"
-                aria-label={`${formatBucketTick(bucket.startMs, props.usage.bucketUnit, timeZone())}: total ${formatExactCount(bucket.tokens.total)} tokens, ${TOKEN_CATEGORIES.map((category) => `${category.label} ${formatExactCount(bucket.tokens[category.key])}`).join(", ")}, cache rate ${rateText(
-                  bucket.tokens.input + bucket.tokens.cacheRead + bucket.tokens.cacheWrite > 0
-                    ? (bucket.tokens.cacheRead /
-                        (bucket.tokens.input +
-                          bucket.tokens.cacheRead +
-                          bucket.tokens.cacheWrite)) *
-                        100
-                    : null,
-                )}`}
+                aria-label={bucketLabel(bucket)}
                 style={{
                   left: `${((geometry().slotX(index()) - geometry().plot.left) / geometry().plot.width) * 100}%`,
                   width: `${(Math.max(geometry().slot, 1) / geometry().plot.width) * 100}%`,
                 }}
-                onPointerEnter={() => setHoveredBucket(index())}
-                onPointerLeave={() => {
-                  setHoveredBucket(undefined);
-                  setFocusedBucket(undefined);
-                }}
-                onFocus={() => setFocusedBucket(index())}
-                onBlur={() => setFocusedBucket(undefined)}
+                onPointerEnter={() => inspection.inspectPointer(index())}
+                onFocus={() => inspection.inspectFocus(index())}
+                onBlur={inspection.clearFocus}
               />
             )}
           </For>
@@ -293,13 +287,14 @@ export function UsageChart(props: {
                 </span>
                 <span class="qg-tooltip__total">{formatExactCount(bucket().tokens.total)}</span>
               </p>
-              <div class="qg-totals__row">
-                <span class="qg-totals__label">Cache rate</span>
-                <span class="qg-totals__value">{rateText(activeRate())}</span>
-              </div>
-              <For each={TOKEN_CATEGORIES}>
+              <For each={geometry().visibleCategories}>
                 {(category) => (
-                  <div class="qg-totals__row">
+                  <div class="qg-totals__row qg-tooltip__row">
+                    <span
+                      class="qg-tooltip__swatch"
+                      aria-hidden="true"
+                      style={{ "--qg-swatch": `var(${category.colorVar})` }}
+                    />
                     <span class="qg-totals__label">{category.label}</span>
                     <span class="qg-totals__value">
                       {formatExactCount(bucket().tokens[category.key])}
@@ -307,6 +302,11 @@ export function UsageChart(props: {
                   </div>
                 )}
               </For>
+              <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--rate">
+                <span class="qg-tooltip__swatch qg-tooltip__swatch--line" aria-hidden="true" />
+                <span class="qg-totals__label">Cache rate</span>
+                <span class="qg-totals__value">{rateText(activeRate())}</span>
+              </div>
             </output>
           )}
         </Show>
@@ -314,7 +314,7 @@ export function UsageChart(props: {
 
       <aside class="qg-usage__aside">
         <ul class="qg-legend">
-          <For each={TOKEN_CATEGORIES}>
+          <For each={geometry().visibleCategories}>
             {(category) => (
               <li
                 class="qg-legend__item"
@@ -338,11 +338,6 @@ export function UsageChart(props: {
               </li>
             )}
           </For>
-          <li class="qg-legend__item qg-legend__item--overlay" aria-hidden="true">
-            <span class="qg-legend__swatch qg-legend__swatch--line" aria-hidden="true" />
-            <span class="qg-legend__label">Cache hit rate</span>
-            <span class="qg-legend__value">right axis</span>
-          </li>
         </ul>
       </aside>
 
@@ -354,7 +349,7 @@ export function UsageChart(props: {
           <thead>
             <tr>
               <th scope="col">Bucket</th>
-              <For each={TOKEN_CATEGORIES}>
+              <For each={geometry().visibleCategories}>
                 {(category) => <th scope="col">{category.label}</th>}
               </For>
               <th scope="col">Cache rate</th>
@@ -368,20 +363,10 @@ export function UsageChart(props: {
                   <th scope="row">
                     {formatBucketTick(bucket.startMs, props.usage.bucketUnit, timeZone())}
                   </th>
-                  <For each={TOKEN_CATEGORIES}>
+                  <For each={geometry().visibleCategories}>
                     {(category) => <td>{formatExactCount(bucket.tokens[category.key])}</td>}
                   </For>
-                  <td>
-                    {rateText(
-                      bucket.tokens.input + bucket.tokens.cacheRead + bucket.tokens.cacheWrite > 0
-                        ? (bucket.tokens.cacheRead /
-                            (bucket.tokens.input +
-                              bucket.tokens.cacheRead +
-                              bucket.tokens.cacheWrite)) *
-                            100
-                        : null,
-                    )}
-                  </td>
+                  <td>{rateText(cacheHitRate(bucket.tokens))}</td>
                   <td>{formatExactCount(bucket.tokens.total)}</td>
                 </tr>
               )}

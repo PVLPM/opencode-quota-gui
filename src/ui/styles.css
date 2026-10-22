@@ -30,12 +30,19 @@
   --qg-success: var(--icon-success-base);
 
   /* The five raw additive token categories carry no library token (R31, R48). */
-  --qg-token-input: #618e85;
-  --qg-token-cache-read: #3b5cf6;
-  --qg-token-cache-write: #8b80ab;
-  --qg-token-output: #ad976b;
-  --qg-token-reasoning: #ab7e6c;
+  --qg-token-cache-read: #ec6afe;
+  --qg-token-input: #a583fe;
+  --qg-token-reasoning: #7c85fe;
+  --qg-token-output: #51a1fe;
+  --qg-token-cache-write: #00d2f1;
   --qg-token-total: var(--qg-accent);
+
+  /* Chart-specific hues stay separate from the token stack. */
+  --qg-chart-rate: #ffb900;
+  --qg-chart-context: #51a2ff;
+  --qg-chart-total: #ff8904;
+  --qg-chart-bg: var(--qg-frame);
+  --qg-chart-separator: var(--qg-chart-bg);
 
   --qg-radius: 8px;
   --qg-unit: 4px;
@@ -44,11 +51,11 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --qg-token-input: #618e85;
-    --qg-token-cache-read: #3b5cf6;
-    --qg-token-cache-write: #8b80ab;
-    --qg-token-output: #ad976b;
-    --qg-token-reasoning: #ab7e6c;
+    --qg-token-cache-read: #ec6afe;
+    --qg-token-input: #a583fe;
+    --qg-token-reasoning: #7c85fe;
+    --qg-token-output: #51a1fe;
+    --qg-token-cache-write: #00d2f1;
   }
 }
 
@@ -738,43 +745,39 @@ body {
   transition: background var(--qg-transition);
 }
 
+/* The active bucket is communicated by the tooltip alone, never by a
+   full-height hover column that could read as a crosshair. */
 .qg-chart__hit:hover {
-  background: var(--surface-raised-base-hover);
+  background: transparent;
 }
 
 .qg-chart__hit:focus-visible {
   outline: 2px solid var(--qg-accent-border);
   outline-offset: -2px;
-  background: var(--surface-raised-base-hover);
+  background: transparent;
 }
 
 .qg-chart__segment {
-  /* Fills stay truthful; the coloured boundary overlay below is the separator. */
+  /* Fills stay truthful; the chart-background separator is the only divider. */
   stroke: none;
-  stroke-linejoin: round;
   transition: opacity var(--qg-transition);
-}
-
-.qg-chart__segment[data-thin="true"] {
-  stroke: none;
 }
 
 .qg-chart[data-highlight] .qg-chart__segment:not([data-highlighted="true"]) {
   opacity: 0.42;
 }
 
-/* Cumulative stack boundaries in the owning category's colour, 1.1px. */
-.qg-chart__boundary {
-  fill: none;
-  stroke-width: 1.1;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+/* Subtle separation in the chart's own background, never a bright series line. */
+.qg-chart__separator {
+  stroke: var(--qg-chart-separator);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
   pointer-events: none;
 }
 
 .qg-chart__rate-line {
   fill: none;
-  stroke: var(--qg-token-output);
+  stroke: var(--qg-chart-rate);
   stroke-width: 1.25;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -782,13 +785,13 @@ body {
 }
 
 .qg-chart__rate-point {
-  fill: var(--qg-token-output);
+  fill: var(--qg-chart-rate);
   pointer-events: none;
 }
 
 .qg-chart__axis-title--rate,
 .qg-chart__axis-label--rate {
-  fill: var(--qg-token-output);
+  fill: var(--qg-chart-rate);
 }
 
 .qg-chart__marker {
@@ -797,7 +800,7 @@ body {
   stroke-dasharray: 3 3;
 }
 
-/* Session chart: blue focus context (left) and gold cumulative tree (right). */
+/* Session chart: blue focus context (left) and orange cumulative tree (right). */
 .qg-chart__axis-title {
   fill: var(--qg-text-muted);
   font-size: 10px;
@@ -808,12 +811,18 @@ body {
 
 .qg-chart__axis-title--context,
 .qg-chart__axis-label--context {
-  fill: var(--qg-token-cache-read);
+  fill: var(--qg-chart-context);
 }
 
 .qg-chart__axis-title--total,
 .qg-chart__axis-label--total {
-  fill: var(--qg-token-output);
+  fill: var(--qg-chart-total);
+}
+
+.qg-chart__axis-title--steps {
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  text-transform: none;
 }
 
 .qg-chart__tick-mark {
@@ -822,20 +831,20 @@ body {
 }
 
 .qg-chart__area--context {
-  fill: var(--qg-token-cache-read);
+  fill: var(--qg-chart-context);
   fill-opacity: 0.14;
   stroke: none;
 }
 
 .qg-chart__area--total {
-  fill: var(--qg-token-output);
+  fill: var(--qg-chart-total);
   fill-opacity: 0.1;
   stroke: none;
 }
 
 .qg-chart__line--context {
   fill: none;
-  stroke: var(--qg-token-cache-read);
+  stroke: var(--qg-chart-context);
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -843,23 +852,32 @@ body {
 
 .qg-chart__line--total {
   fill: none;
-  stroke: var(--qg-token-output);
+  stroke: var(--qg-chart-total);
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 .qg-chart__point--context {
-  fill: var(--qg-token-cache-read);
+  fill: var(--qg-chart-context);
 }
 
 .qg-chart__point--total {
-  fill: var(--qg-token-output);
+  fill: var(--qg-chart-total);
 }
 
-.qg-chart__hover {
-  fill: transparent;
-  pointer-events: all;
+/* Invisible pointer/keyboard inspection surface over the Session plot. */
+.qg-chart__surface {
+  position: absolute;
+  cursor: crosshair;
+  outline: none;
+  /* Keep vertical page panning available on narrow touch screens. */
+  touch-action: pan-y;
+}
+
+.qg-chart__surface:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
 }
 
 .qg-chart__note {
@@ -905,10 +923,49 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.qg-tooltip__hint {
+.qg-tooltip__meta {
   color: var(--qg-text-muted);
   font-size: 11px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--qg-border);
+  margin: 0 0 4px;
+}
+
+.qg-tooltip__row {
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+}
+
+.qg-tooltip__row .qg-totals__value {
+  margin-left: auto;
+}
+
+.qg-tooltip__row--note {
+  margin-top: 4px;
   padding-top: 4px;
+  border-top: 1px solid var(--qg-border);
+}
+
+.qg-tooltip__row--note .qg-totals__value {
+  margin-left: 0;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+}
+
+.qg-tooltip__swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--qg-swatch);
+}
+
+.qg-tooltip__swatch--line {
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--qg-chart-rate);
 }
 
 .qg-legend {
@@ -950,21 +1007,6 @@ body {
   height: 10px;
   border-radius: 2px;
   background: var(--qg-swatch);
-}
-
-.qg-legend__swatch--line {
-  width: 14px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--qg-token-output);
-}
-
-.qg-legend__item--overlay {
-  cursor: default;
-}
-
-.qg-legend__item--overlay:hover {
-  border-color: transparent;
 }
 
 .qg-legend__label {
@@ -1269,7 +1311,7 @@ body {
 
 .qg-nodes__head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(80px, 18%) 64px 88px;
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 16%) 64px 88px;
   gap: 12px;
   padding: 8px 16px;
   color: var(--qg-text-muted);
@@ -1285,8 +1327,8 @@ body {
 
 .qg-node {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(80px, 18%) 64px 88px;
-  grid-template-areas: "name worktree steps tokens";
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 16%) 64px 88px;
+  grid-template-areas: "name agent steps tokens";
   align-items: center;
   gap: 4px 12px;
   padding: 8px 16px;
@@ -1320,8 +1362,8 @@ body {
   white-space: nowrap;
 }
 
-.qg-node__worktree {
-  grid-area: worktree;
+.qg-node__agent {
+  grid-area: agent;
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
   overflow: hidden;
@@ -1345,13 +1387,13 @@ body {
 @media (max-width: 640px) {
   .qg-nodes__head,
   .qg-node {
-    grid-template-columns: minmax(0, 1fr) 56px 80px;
-    grid-template-areas: "name steps tokens";
+    grid-template-columns: minmax(0, 1fr) minmax(44px, 14%) 48px 72px;
+    grid-template-areas: "name agent steps tokens";
+    gap: 4px 8px;
   }
 
-  .qg-node__worktree,
-  .qg-nodes__head > :nth-child(2) {
-    display: none;
+  .qg-node {
+    padding-inline: 10px;
   }
 }
 
@@ -1810,6 +1852,20 @@ body {
 .qg-input {
   color-scheme: dark;
 }
+@media (max-width: 600px) {
+  /* Both Session axis headings start/end inside the same narrow plot. */
+  .qg-chart__axis-title {
+    font-size: 9px;
+    letter-spacing: 0.02em;
+  }
+  .qg-usage--session .qg-totals {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .qg-usage--session .qg-totals > :last-child {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 720px) {
   .qg-main {
     padding: 20px 16px;

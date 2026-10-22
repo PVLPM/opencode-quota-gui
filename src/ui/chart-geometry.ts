@@ -1,17 +1,13 @@
 import type { Bucket, SessionSnapshot, TokenStack } from "../contracts/dashboard";
-import { TOKEN_CATEGORIES } from "./format";
+import { type CategoryDescriptor, TOKEN_CATEGORIES } from "./format";
 
 /**
  * Chart geometry (design spec §6, §10; R31, R32, R48).
  *
- * Pure number crunching, no DOM: the five stacked areas and the two session
- * series all come from here, so the
- * chart's honesty rules are unit-testable.
+ * Pure number crunching, no DOM: the shared stacked bars, the cache-rate line
+ * and the two session series all come from here, so the chart's honesty rules
+ * are unit-testable.
  */
-
-export const CATEGORY_KEYS: readonly (keyof TokenStack)[] = TOKEN_CATEGORIES.map(
-  (category) => category.key,
-);
 
 export interface ChartSize {
   width: number;
@@ -39,19 +35,35 @@ export interface AxisTick {
   y: number;
 }
 
-/**
- * Stacked bands as pixel polylines. Every band covers the full plot width: the
- * pixel x axis carries the two slot edges around the bucket centres so the area
- * never floats away from the frame.
- */
-export interface StackBand {
+/** One truthfully scaled segment inside a bucket's vertical stack. */
+export interface UsageBarSegment {
   key: keyof TokenStack;
   colorVar: string;
-  xs: number[];
-  upper: number[];
-  lower: number[];
-  /** Whole-range raw total; zero decides whether an overlay line is truthful. */
+  bucketIndex: number;
+  value: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Chart-background hairline between two touching nonzero segments. */
+export interface UsageBarSeparator {
+  bucketIndex: number;
+  x1: number;
+  x2: number;
+  y: number;
+}
+
+export interface UsageBar {
+  bucketIndex: number;
+  x: number;
+  width: number;
+  top: number;
+  bottom: number;
   total: number;
+  /** Bottom-to-top in the fixed category order; zero categories are absent. */
+  segments: UsageBarSegment[];
 }
 
 export interface CacheRatePoint {
@@ -61,23 +73,19 @@ export interface CacheRatePoint {
   bucketIndex: number;
 }
 
-export interface StackBoundary {
-  key: keyof TokenStack;
-  colorVar: string;
-  path: string;
-}
-
 export interface UsageGeometry {
   plot: PlotRect;
   bucketCount: number;
   slot: number;
-  totalLine: { x: number; y: number }[];
-  bands: StackBand[];
-  /** Cumulative stack boundaries in category colour, drawn above the fills. */
-  boundaries: StackBoundary[];
+  barWidth: number;
+  bars: UsageBar[];
+  /** Only categories with a nonzero total in this exact range. */
+  visibleCategories: CategoryDescriptor[];
+  /** Background-coloured separation lines; never a coloured series overlay. */
+  separators: UsageBarSeparator[];
   /** Cache-hit-rate overlay points; a bucket with no input-side traffic is absent. */
   cacheRatePoints: CacheRatePoint[];
-  /** One path per contiguous non-null cache-rate run. */
+  /** One smooth path per contiguous non-null cache-rate run. */
   cacheRatePath: string;
   /** Fixed 0..100% right-axis ticks. */
   cacheRateTicks: AxisTick[];
@@ -85,10 +93,6 @@ export interface UsageGeometry {
   ticks: AxisTick[];
   pointIndexes: number[];
   labelIndexes: number[];
-  /** Y pixel of the stacked total at a bucket index. */
-  totalY: number[];
-  /** `totalY` padded with the two slot edges, so a fill can reach the frame. */
-  totalEdgeY: number[];
   /** Left edge pixel of a bucket slot; the hit areas use these. */
   slotX: (index: number) => number;
   bucketIndexAt: (x: number) => number;
@@ -153,54 +157,54 @@ export function buildUsageGeometry(
   const bucketIndexAt = (x: number) =>
     count === 0 ? 0 : Math.min(count - 1, Math.max(0, Math.floor((x - plot.left) / slot)));
 
-  const xs = [plot.left, ...buckets.map((_, index) => slotX(index) + slot / 2), plot.right];
-  const bands: StackBand[] = CATEGORY_KEYS.map((key) => {
-    const descriptor = TOKEN_CATEGORIES.find((category) => category.key === key);
-    return {
-      key,
-      colorVar: descriptor?.colorVar ?? "--qg-token-input",
-      xs,
-      upper: [],
-      lower: [],
-      total: buckets.reduce((sum, bucket) => sum + bucket.tokens[key], 0),
-    };
-  });
+  // Range-local eligibility: a category whose total is zero in this exact
+  // range disappears completely, and returns when another range has activity.
+  const visibleCategories = TOKEN_CATEGORIES.filter((category) =>
+    buckets.some((bucket) => bucket.tokens[category.key] > 0),
+  );
+  // A fixed fraction of the slot stays truthful at every density: dense
+  // lifetime ranges keep subpixel, non-overlapping bars, and sparse ranges do
+  // not get an artificial width floor or cap.
+  const barWidth = slot * 0.72;
 
-  const totalY: number[] = [];
+  const bars: UsageBar[] = [];
+  const separators: UsageBarSeparator[] = [];
   buckets.forEach((bucket, bucketIndex) => {
+    const x = slotX(bucketIndex) + (slot - barWidth) / 2;
     let cumulative = 0;
-    for (const band of bands) {
-      const value = bucket.tokens[band.key];
+    const segments: UsageBarSegment[] = [];
+    for (const category of visibleCategories) {
+      const value = Math.max(0, bucket.tokens[category.key]);
+      if (!(value > 0)) continue;
       const lower = yFor(cumulative);
       cumulative += value;
       const upper = yFor(cumulative);
-      band.lower.push(lower);
-      band.upper.push(upper);
-      // The slot edges repeat the first/last bucket so the area reaches the frame.
-      if (bucketIndex === 0) {
-        band.lower.unshift(lower);
-        band.upper.unshift(upper);
-      }
-      if (bucketIndex === buckets.length - 1) {
-        band.lower.push(lower);
-        band.upper.push(upper);
-      }
+      segments.push({
+        key: category.key,
+        colorVar: category.colorVar,
+        bucketIndex,
+        value,
+        x,
+        y: upper,
+        width: barWidth,
+        height: lower - upper,
+      });
     }
-    totalY.push(yFor(bucket.tokens.total));
+    for (let index = 1; index < segments.length; index += 1) {
+      const lower = segments[index - 1];
+      if (!lower) continue;
+      separators.push({ bucketIndex, x1: x, x2: x + barWidth, y: lower.y });
+    }
+    bars.push({
+      bucketIndex,
+      x,
+      width: barWidth,
+      top: yFor(cumulative),
+      bottom: plot.bottom,
+      total: bucket.tokens.total,
+      segments,
+    });
   });
-
-  const firstTotal = totalY[0] ?? plot.bottom;
-  const lastTotal = totalY[totalY.length - 1] ?? plot.bottom;
-  const totalEdgeY = totalY.length > 0 ? [firstTotal, ...totalY, lastTotal] : [];
-  const totalLine = xs.map((x, index) => ({ x, y: totalEdgeY[index] ?? plot.bottom }));
-
-  const boundaries: StackBoundary[] = bands
-    .filter((band) => band.total > 0)
-    .map((band) => ({
-      key: band.key,
-      colorVar: band.colorVar,
-      path: toBandUpperPath(band),
-    }));
 
   const cacheRatePoints: CacheRatePoint[] = [];
   for (let index = 0; index < buckets.length; index += 1) {
@@ -215,14 +219,16 @@ export function buildUsageGeometry(
       bucketIndex: index,
     });
   }
-  let cacheRatePath = "";
-  let previousBucket: number | undefined;
+  const rateRuns: CacheRatePoint[][] = [];
   for (const point of cacheRatePoints) {
-    const move = previousBucket === undefined || point.bucketIndex !== previousBucket + 1;
-    cacheRatePath += `${move ? "M" : "L"} ${coordinate(point.x)} ${coordinate(point.y)} `;
-    previousBucket = point.bucketIndex;
+    const run = rateRuns.at(-1);
+    if (run && point.bucketIndex === (run.at(-1)?.bucketIndex ?? -2) + 1) run.push(point);
+    else rateRuns.push([point]);
   }
-  cacheRatePath = cacheRatePath.trim();
+  const cacheRatePath = rateRuns
+    .map((run) => toMonotoneLinePath(run))
+    .filter((path) => path.length > 0)
+    .join(" ");
   const cacheRateTicks: AxisTick[] = [0, 25, 50, 75, 100].map((value) => ({
     value,
     y: plot.bottom - (value / 100) * plot.height,
@@ -232,9 +238,10 @@ export function buildUsageGeometry(
     plot,
     bucketCount: count,
     slot,
-    totalLine,
-    bands,
-    boundaries,
+    barWidth,
+    bars,
+    visibleCategories,
+    separators,
     cacheRatePoints,
     cacheRatePath,
     cacheRateTicks,
@@ -242,8 +249,6 @@ export function buildUsageGeometry(
     ticks: buildTicks(yMaxRaw, 4, plot),
     pointIndexes: buckets.map((_, index) => index),
     labelIndexes: pickLabelIndexes(count, Math.max(2, Math.min(6, Math.floor(plot.width / 64)))),
-    totalY,
-    totalEdgeY,
     slotX,
     bucketIndexAt,
   };
@@ -263,7 +268,7 @@ export function cacheHitRate(tokens: TokenStack): number | null {
 export const DEFAULT_SESSION_SIZE: ChartSize = {
   width: 900,
   height: 240,
-  padding: { top: 34, right: 56, bottom: 26, left: 52 },
+  padding: { top: 34, right: 56, bottom: 34, left: 52 },
 };
 
 export interface SessionSeriesPoint {
@@ -511,44 +516,4 @@ function toLinePath(points: { x: number; y: number }[]): string {
   return points
     .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
     .join(" ");
-}
-
-/**
- * Shared zero-tangent cubic interpolation. Every boundary uses the same convex
- * smoothstep weights, so adjacent bands share their exact edge and ordered
- * boundaries cannot cross, even when a category is zero beside a sharp spike.
- * Full-precision coordinates preserve tiny categories rather than rounding them
- * to an artificial minimum height (or erasing them at two decimal places).
- */
-function monotoneBoundary(xs: number[], ys: number[], reverse: boolean): string {
-  const indexes = xs.map((_, index) => index);
-  if (reverse) indexes.reverse();
-  let result = "";
-  for (let position = 1; position < indexes.length; position += 1) {
-    const previous = indexes[position - 1] as number;
-    const current = indexes[position] as number;
-    const x0 = xs[previous] as number;
-    const x1 = xs[current] as number;
-    const y0 = ys[previous] ?? 0;
-    const y1 = ys[current] ?? 0;
-    const dx = (x1 - x0) / 3;
-    result += ` C ${x0 + dx} ${y0} ${x1 - dx} ${y1} ${x1} ${y1}`;
-  }
-  return result;
-}
-
-/** Closed monotone SVG area; upper/lower edges are shared cumulative boundaries. */
-export function toBandPath(band: StackBand): string {
-  if (band.upper.length === 0 || band.xs.length === 0) return "";
-  const last = band.xs.length - 1;
-  return `M ${band.xs[0]} ${band.upper[0]}${monotoneBoundary(band.xs, band.upper, false)} L ${band.xs[last]} ${band.lower[last]}${monotoneBoundary(band.xs, band.lower, true)} Z`;
-}
-
-/**
- * Open path tracing the band's upper edge with the exact interpolation the
- * closed area uses, so a boundary overlay can never drift from the fill.
- */
-export function toBandUpperPath(band: StackBand): string {
-  if (band.upper.length === 0 || band.xs.length === 0) return "";
-  return `M ${band.xs[0]} ${band.upper[0]}${monotoneBoundary(band.xs, band.upper, false)}`;
 }

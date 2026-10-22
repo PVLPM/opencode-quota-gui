@@ -55,15 +55,70 @@ describe("chart tooltip collision bounds", () => {
   });
 
   it("caps overlay dimensions within a small resized inner viewport", () => {
+    const chart = { left: 15, top: 100, width: 200, height: 220 };
+    const bounds = { left: 9, top: 95, width: 180, height: 120 };
     const result = placeChartTooltip({
-      chart: { left: 15, top: 100, width: 200, height: 220 },
-      bounds: { left: 9, top: 95, width: 180, height: 120 },
+      chart,
+      bounds,
       tooltip: { width: 240, height: 153 },
       anchor: 1,
     });
-    expect(result.maxWidth).toBe(164);
-    expect(result.maxHeight).toBe(104);
-    expect(15 + result.left).toBe(17);
-    expect(100 + result.top).toBe(103);
+    // The visible chart/card intersection is 174x115; the 8px inset leaves
+    // 158x99 for the overlay.
+    expect(result.maxWidth).toBe(158);
+    expect(result.maxHeight).toBe(99);
+    expect(chart.left + result.left).toBeGreaterThanOrEqual(bounds.left + 8);
+    expect(chart.left + result.left + 158).toBeLessThanOrEqual(bounds.left + bounds.width - 8);
+    expect(chart.top + result.top).toBeGreaterThanOrEqual(bounds.top + 8);
+    expect(chart.top + result.top + 99).toBeLessThanOrEqual(bounds.top + bounds.height - 8);
+  });
+
+  it("places the tooltip on the opposite half of the plot", () => {
+    const chart = { left: 100, top: 100, width: 600, height: 260 };
+    const bounds = { left: 0, top: 0, width: 800, height: 800 };
+    const leftHalf = placeChartTooltip({
+      chart,
+      bounds,
+      tooltip: { width: 240, height: 150 },
+      anchor: 0.25,
+    });
+    const rightHalf = placeChartTooltip({
+      chart,
+      bounds,
+      tooltip: { width: 240, height: 150 },
+      anchor: 0.75,
+    });
+    const anchorLeft = chart.left + chart.width * 0.25;
+    const anchorRight = chart.left + chart.width * 0.75;
+    expect(chart.left + leftHalf.left).toBeGreaterThanOrEqual(anchorLeft);
+    expect(chart.left + rightHalf.left + 240).toBeLessThanOrEqual(anchorRight);
+  });
+
+  it("honours a wider clearance for a wide stacked bar", () => {
+    const chart = { left: 100, top: 100, width: 600, height: 260 };
+    const bounds = { left: 0, top: 0, width: 800, height: 800 };
+    const result = placeChartTooltip({
+      chart,
+      bounds,
+      tooltip: { width: 240, height: 150 },
+      anchor: 0.75,
+      gap: 34,
+    });
+    const anchorRight = chart.left + chart.width * 0.75;
+    expect(chart.left + result.left + 240).toBeLessThanOrEqual(anchorRight - 34 + 0.01);
+  });
+
+  it("clamps a narrow card overlay inside the card, not only the scroller", () => {
+    const chart = { left: 40, top: 80, width: 160, height: 220 };
+    const bounds = { left: 9, top: 60, width: 360, height: 700 };
+    const result = placeChartTooltip({
+      chart,
+      bounds,
+      tooltip: { width: 240, height: 153 },
+      anchor: 0.9,
+    });
+    expect(result.maxWidth).toBe(144);
+    expect(chart.left + result.left).toBeGreaterThanOrEqual(chart.left + 8);
+    expect(chart.left + result.left + 144).toBeLessThanOrEqual(chart.left + chart.width - 8);
   });
 });

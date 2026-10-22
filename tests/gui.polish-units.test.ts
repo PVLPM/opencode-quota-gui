@@ -220,7 +220,8 @@ describe("buildUsageGeometry cache overlay", () => {
     expect(geometry.cacheRatePoints.map((point) => point.bucketIndex)).toEqual([0, 1]);
     expect(geometry.cacheRatePoints[0]?.value).toBeCloseTo(10, 10);
     expect(geometry.cacheRatePoints[1]?.value).toBeCloseTo(90, 10);
-    expect(geometry.cacheRatePath).toContain("L ");
+    // The independent rate line is smoothed monotonically, not a polyline.
+    expect(geometry.cacheRatePath).toContain(" C ");
   });
 
   it("omits a null-rate bucket and starts a new path run after the gap", () => {

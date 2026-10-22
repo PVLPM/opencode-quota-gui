@@ -14,11 +14,7 @@ import type {
 import { DASHBOARD_CONTRACT_VERSION } from "../src/contracts/dashboard";
 import { buildRowKey, composeRowId } from "../src/contracts/identity";
 import type { RangeKey } from "../src/contracts/ranges";
-import {
-  buildSessionChartGeometry,
-  buildUsageGeometry,
-  toBandPath,
-} from "../src/ui/chart-geometry";
+import { buildSessionChartGeometry, buildUsageGeometry } from "../src/ui/chart-geometry";
 import type { Toaster } from "../src/ui/components/toast";
 import {
   type DashboardClient,
@@ -34,6 +30,7 @@ import {
   formatApiEquivalentCost,
   formatBucketTick,
   formatPercent,
+  formatPercentExact,
   formatRunway,
   formatTimestamp,
   formatTokenCount,
@@ -1061,28 +1058,23 @@ describe("usage chart", () => {
     "7d",
     "30d",
     "lifetime",
-  ] as const)("keeps true zero-thickness stacking for an empty %s bucket and keeps all five series", async (range) => {
+  ] as const)("omits an all-zero %s range from bars, legend and tooltip", async (range) => {
     const buckets = [{ startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({}) }];
     const geometry = buildUsageGeometry(buckets);
-    expect(geometry.bands).toHaveLength(5);
-    for (const band of geometry.bands) {
-      expect(band.upper).toEqual(band.lower);
-      expect(band.upper.every((value) => value === geometry.plot.bottom)).toBe(true);
-      expect(toBandPath(band)).not.toMatch(/NaN|Infinity/);
-    }
+    expect(geometry.visibleCategories).toEqual([]);
+    expect(geometry.bars[0]?.segments).toEqual([]);
+    expect(geometry.separators).toEqual([]);
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage(range, buckets),
     });
-    // Five true series, including a zero cache-write layer; no series is hidden.
-    expect(html.match(/qg-chart__segment/g)).toHaveLength(5);
-    // Every series is zero-thickness here; no boundary overlay is invented.
-    expect(html.match(/data-thin="true"/g)).toHaveLength(5);
-    expect(html).not.toContain("qg-chart__boundary");
-    expect(html).toContain(
-      "total 0 tokens, Input 0, Cache read 0, Cache write 0, Output 0, Reasoning 0",
-    );
-    expect(html).toContain("Highlight Cache write");
-    expect(html).toContain("Highlight Cache read");
+    expect(html).not.toContain("qg-chart__segment");
+    expect(html).not.toContain("qg-chart__separator");
+    expect(html).not.toContain("Highlight Cache Write");
+    expect(html).not.toContain("Highlight Cache Read");
+    // The bucket is still inspectable; only the visible categories disappear.
+    expect(html).toContain("total 0 tokens");
+    expect(html).toContain("cache rate —");
+    expect(html).not.toContain("Input 0");
   });
 
   it.each([
@@ -1090,15 +1082,15 @@ describe("usage chart", () => {
     "7d",
     "30d",
     "lifetime",
-  ] as const)("keeps exact zero/tiny inspection transient in %s", async (range) => {
+  ] as const)("keeps the tiny nonzero inspection transient in %s", async (range) => {
     const root = renderGraph.createTestRoot();
     const snapshot = usage(range, [
       { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 1000000, reasoning: 1 }) },
     ]);
     const dispose = renderGraph.mount(() => renderGraph.chart({ usage: snapshot }), root);
-    const paths = () =>
+    const segments = () =>
       renderGraph
-        .elementsNamed(root, "path")
+        .elementsNamed(root, "rect")
         .filter((node) => node.props.class === "qg-chart__segment");
     const buttons = renderGraph.elementsNamed(root, "button");
     const hit = buttons.find((node) => node.props.class === "qg-chart__hit");
@@ -1111,9 +1103,9 @@ describe("usage chart", () => {
       dispose();
       return;
     }
-    const initialPaths = paths().map((node) => node.props.d);
-    // All five layers stay present; cache write is a true zero-thickness layer.
-    expect(initialPaths).toHaveLength(5);
+    const initialSegments = segments().map((node) => node.props.y);
+    // Only the two categories with range activity are drawn; zero series are absent.
+    expect(initialSegments).toHaveLength(2);
     expect(renderGraph.elementsNamed(root, "output")).toHaveLength(0);
     renderGraph.listenerOf(hit, "onFocus")?.({});
     await Promise.resolve();
@@ -1124,25 +1116,25 @@ describe("usage chart", () => {
         .elementsNamed(tooltip, "span")
         .filter((node) => node.props.class === "qg-totals__value")
         .map(renderGraph.textOf);
-      expect(values).toEqual(["0.0%", "1,000,000", "0", "0", "0", "1"]);
+      expect(values).toEqual(["1,000,000", "1", "0.00%"]);
     }
     renderGraph.listenerOf(hit, "onBlur")?.({});
     expect(renderGraph.elementsNamed(root, "output")).toHaveLength(0);
     // Hover emphasis is transient: only while the pointer is over the legend.
     renderGraph.listenerOf(legend, "onPointerEnter")?.({});
-    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
-    expect(paths()).toHaveLength(5);
+    expect(segments().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
+    expect(segments()).toHaveLength(2);
     renderGraph.listenerOf(legend, "onPointerLeave")?.({});
-    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(5);
+    expect(segments().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(2);
     // Focus emphasis is transient too.
     renderGraph.listenerOf(legend, "onFocus")?.({});
-    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
+    expect(segments().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
     renderGraph.listenerOf(legend, "onBlur")?.({});
-    expect(paths().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(5);
+    expect(segments().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(2);
     // There is no click/pin or keyboard-release handler on a legend entry.
     expect(renderGraph.listenerOf(legend, "onClick")).toBeUndefined();
     expect(renderGraph.listenerOf(legend, "onKeyDown")).toBeUndefined();
-    expect(paths().map((node) => node.props.d)).toEqual(initialPaths);
+    expect(segments().map((node) => node.props.y)).toEqual(initialSegments);
     dispose();
   });
 
@@ -1154,7 +1146,7 @@ describe("usage chart", () => {
     const dispose = renderGraph.mount(() => renderGraph.chart({ usage: snapshot }), root);
     const segments = () =>
       renderGraph
-        .elementsNamed(root, "path")
+        .elementsNamed(root, "rect")
         .filter((node) => node.props.class === "qg-chart__segment");
     const highlighted = () =>
       segments().filter((node) => node.props["data-highlighted"] === "true");
@@ -1166,8 +1158,8 @@ describe("usage chart", () => {
       dispose();
       return;
     }
-    const baseline = segments().map((node) => node.props.d);
-    expect(segments()).toHaveLength(5);
+    const baseline = segments().map((node) => [node.props.y, node.props.height]);
+    expect(segments()).toHaveLength(2);
 
     // The legend entry is a focusable, non-actionable list item: it has no
     // button activation semantics, no click handler, and no pressed state.
@@ -1184,7 +1176,7 @@ describe("usage chart", () => {
     renderGraph.listenerOf(legend, "onFocus")?.({});
     expect(highlighted()).toHaveLength(1);
     expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
-    expect(segments()).toHaveLength(5);
+    expect(segments()).toHaveLength(2);
     expect(
       renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-chart")?.props[
         "data-highlight"
@@ -1192,7 +1184,7 @@ describe("usage chart", () => {
     ).toBe("true");
     renderGraph.listenerOf(legend, "onClick")?.({});
     renderGraph.listenerOf(legend, "onPointerLeave")?.({});
-    expect(highlighted()).toHaveLength(5);
+    expect(highlighted()).toHaveLength(2);
     expect(
       renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-chart")?.props[
         "data-highlight"
@@ -1203,7 +1195,7 @@ describe("usage chart", () => {
     renderGraph.listenerOf(legend, "onFocus")?.({});
     expect(highlighted()).toHaveLength(1);
     renderGraph.listenerOf(legend, "onBlur")?.({});
-    expect(highlighted()).toHaveLength(5);
+    expect(highlighted()).toHaveLength(2);
 
     // No series is hidden or toggled at any point, and the stack is unchanged.
     expect(
@@ -1215,8 +1207,8 @@ describe("usage chart", () => {
           node.props.display === undefined,
       ),
     ).toBe(true);
-    expect(segments()).toHaveLength(5);
-    expect(segments().map((node) => node.props.d)).toEqual(baseline);
+    expect(segments()).toHaveLength(2);
+    expect(segments().map((node) => [node.props.y, node.props.height])).toEqual(baseline);
     dispose();
   });
 
@@ -1249,33 +1241,31 @@ describe("usage chart", () => {
     },
   ];
 
-  it("stacks the five categories and never hides one", async () => {
+  it("stacks the five categories in the fixed order and never hides one with activity", async () => {
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage("7d", stackedBuckets),
     });
     expect(html.match(/qg-chart__segment/g)).toHaveLength(5);
-    for (const label of ["Input", "Cache read", "Cache write", "Output", "Reasoning"]) {
+    for (const label of ["Cache Read", "Input", "Reasoning", "Output", "Cache Write"]) {
       expect(html).toContain(label);
     }
-    // All five series carry real thickness here, so none is flagged thin and the
-    // legend keeps every entry including cache write.
-    expect(html).not.toContain('data-thin="true"');
-    expect(html).toContain("Highlight Cache write");
+    expect(html).not.toContain("qg-chart__boundary");
+    expect(html).not.toContain("qg-chart__cursor");
+    expect(html).toContain("Highlight Cache Write");
     expect(html).toContain("9,250");
     expect(html).toContain("API-equivalent");
   });
 
-  it("retains every drawn series with a nonzero total when only one category is used", async () => {
+  it("renders only the one category with activity in the range", async () => {
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage("7d", [{ startMs: NOW - DAY_MS, endMs: NOW, tokens: costed({ input: 1000 }) }]),
     });
-    // Every series stays present even when only one category is non-zero.
-    expect(html.match(/qg-chart__segment/g)).toHaveLength(5);
+    expect(html.match(/qg-chart__segment/g)).toHaveLength(1);
     expect(html).not.toContain("totals series");
-    expect(html).toContain("Reasoning");
+    expect(html).not.toContain("Reasoning");
+    expect(html).not.toContain("Cache Write");
     expect(html).toContain('class="qg-legend__item"');
-    expect(html).toContain("Highlight Reasoning");
-    expect(html).toContain("Highlight Cache write");
+    expect(html).toContain("Highlight Input");
   });
 
   it("duplicates the series in a visually hidden table with five categories plus the total", async () => {
@@ -1310,29 +1300,41 @@ describe("usage chart", () => {
     expect(text(html)).toContain("About the API-equivalent estimate");
   });
 
-  it("preserves shared boundaries, exact zero thickness and tiny categories", () => {
+  it("keeps bar stacks continuous and preserves a tiny category truthfully", () => {
     const geometry = buildUsageGeometry([
       { startMs: 0, endMs: 1, tokens: costed({ input: 1000000, reasoning: 1 }) },
       { startMs: 1, endMs: 2, tokens: costed({ output: 3 }) },
       { startMs: 2, endMs: 3, tokens: costed({ input: 100 }) },
     ]);
-    expect(geometry.bands).toHaveLength(5);
-    for (let index = 0; index < geometry.bands.length; index += 1) {
-      const band = geometry.bands[index];
-      expect(band).toBeDefined();
-      if (!band) continue;
-      const previous = geometry.bands[index - 1];
-      if (previous) expect(band.lower).toEqual(previous.upper);
-      for (let point = 0; point < band.xs.length; point += 1) {
-        expect(band.upper[point]).toBeLessThanOrEqual(band.lower[point] ?? 0);
+    expect(geometry.visibleCategories.map((category) => category.key)).toEqual([
+      "input",
+      "reasoning",
+      "output",
+    ]);
+    expect(geometry.bars).toHaveLength(3);
+    for (const bar of geometry.bars) {
+      if (bar.segments.length === 0) continue;
+      expect(bar.segments[0]?.y + (bar.segments[0]?.height ?? 0)).toBeCloseTo(
+        geometry.plot.bottom,
+        10,
+      );
+      for (let index = 1; index < bar.segments.length; index += 1) {
+        const previous = bar.segments[index - 1];
+        const current = bar.segments[index];
+        expect(current?.y + (current?.height ?? 0)).toBeCloseTo(previous?.y as number, 10);
+        for (const segment of bar.segments) {
+          expect(segment.height).toBeGreaterThanOrEqual(0);
+          expect(Number.isFinite(segment.y)).toBe(true);
+          expect(Number.isFinite(segment.height)).toBe(true);
+        }
       }
-      expect(toBandPath(band)).toContain(" C ");
-      expect(toBandPath(band)).not.toMatch(/NaN|Infinity/);
     }
-    expect(geometry.bands[1]?.upper).toEqual(geometry.bands[1]?.lower);
-    const tiny = geometry.bands[4];
-    expect((tiny?.lower[1] ?? 0) - (tiny?.upper[1] ?? 0)).toBeGreaterThan(0);
-    expect((tiny?.lower[1] ?? 0) - (tiny?.upper[1] ?? 0)).toBeLessThan(0.001);
+    // A one-token category is not inflated to a visible minimum; the
+    // background-coloured separator is the only restrained cue.
+    const tiny = geometry.bars[0]?.segments.find((segment) => segment.key === "reasoning");
+    expect(tiny?.height).toBeGreaterThan(0);
+    expect(tiny?.height).toBeLessThan(0.001);
+    expect(geometry.separators).toHaveLength(1);
   });
 
   it("formats numbers and cost predictably", () => {
@@ -1341,6 +1343,8 @@ describe("usage chart", () => {
     expect(formatApiEquivalentCost(null)).toBe("≈ USD —");
     expect(formatApiEquivalentCost(1.5)).toBe("≈ USD 1.50");
     expect(formatPercent(62)).toBe("62%");
+    expect(formatPercentExact(96.37)).toBe("96.37%");
+    expect(formatPercentExact(null)).toBe("—");
     expect(formatRunway(undefined, "UTC")).toBeUndefined();
     expect(formatRunway({ kind: "lasts_past_reset" }, "UTC")).toBe("Lasts past reset");
     expect(
@@ -1465,7 +1469,7 @@ describe("session view composition", () => {
     expect(crumbs.match(/aria-current="page"/g)).toHaveLength(1);
   });
 
-  it("renders aligned Name | Worktree | Steps | Tokens rows without own/subtree prose", async () => {
+  it("renders aligned Name | Agent | Steps | Tokens rows without own/subtree prose", async () => {
     const html = await renderView("/views/session.tsx", "SessionView", {
       snapshot: sessionSnapshot(),
       range: "7d",
@@ -1480,16 +1484,19 @@ describe("session view composition", () => {
     // Explicit columns replace the old secondary own/subtree sentence.
     expect(html).toContain('class="qg-nodes__head"');
     expect(text(html)).toContain("Name");
-    expect(text(html)).toContain("Worktree");
+    expect(text(html)).toContain("Agent");
     expect(text(html)).toContain("Steps");
     expect(text(html)).toContain("Tokens");
+    expect(text(html)).not.toContain("Worktree");
     expect(html).not.toContain("qg-node__own");
+    expect(html).not.toContain("qg-node__worktree");
     expect(text(html)).not.toContain("own 2,900");
     expect(text(html)).not.toContain("subtree");
     expect(html).toContain('class="qg-node__steps">3</span>');
     expect(html).toContain('class="qg-node__steps">2</span>');
     expect(html).toContain('href="/session/session-child-1"');
-    expect(html).toContain("alpha-feature");
+    // The synthetic fixture has no stored agent, so the cell is an em dash.
+    expect(html.match(/class="qg-node__agent">—<\/span>/g)).toHaveLength(2);
     expect(html).toContain('data-focus="true"');
     expect(html).not.toContain("children:");
     expect(html).not.toContain('class="qg-node__children"');
@@ -1504,7 +1511,9 @@ describe("session view composition", () => {
       range: "7d",
     });
     expect(html).toContain("qg-chart__marker");
-    expect(html).toContain("Compaction in this session");
+    // No native title tooltip; the custom inspection carries compaction metadata.
+    expect(html).not.toContain("<title>");
+    expect(html).not.toContain("qg-chart__hover");
     expect(text(html)).not.toContain("Compaction markers");
     expect(text(html)).not.toContain("msg-compaction");
     expect(html).toContain('class="qg-node__steps">3</span>');
@@ -4259,14 +4268,19 @@ describe("styles and dependency boundaries", () => {
     expect(styles).toContain("--qg-bg: #0a0a0a");
     expect(styles).toContain("--qg-frame: #161616");
     expect(styles).toContain("--qg-surface: #232323");
-    // Cache read is the fixed v1 hue; input keeps the shared console green.
-    expect(styles).toContain("--qg-token-input: #618e85");
-    expect(styles).toContain("--qg-token-cache-read: #3b5cf6");
-    // Neighbouring series carry a 1px white hairline; zero-thickness series never do.
+    // Frozen v1 chart palette.
+    expect(styles).toContain("--qg-token-input: #a583fe");
+    expect(styles).toContain("--qg-token-cache-read: #ec6afe");
+    expect(styles).toContain("--qg-token-reasoning: #7c85fe");
+    expect(styles).toContain("--qg-token-output: #51a1fe");
+    expect(styles).toContain("--qg-token-cache-write: #00d2f1");
+    // Session keeps a white crosshair; usage has no crosshair or boundary overlay.
     expect(styles).toContain("stroke: #ffffff");
     expect(styles).toContain(".qg-chart__cursor");
-    expect(styles).toContain(".qg-chart__boundary");
-    expect(styles).toContain('.qg-chart__segment[data-thin="true"]');
+    expect(styles).toContain(".qg-chart__separator");
+    expect(styles).toContain(".qg-chart__surface");
+    expect(styles).not.toContain(".qg-chart__boundary");
+    expect(styles).not.toContain('.qg-chart__segment[data-thin="true"]');
     // Loading motion loops continuously: linear timing, no paused restart.
     expect(styles).toContain("qg-shimmer 1.4s linear infinite");
     expect(styles).toContain("qg-busy-pulse 1.2s ease-in-out infinite");

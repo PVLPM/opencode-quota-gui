@@ -7,42 +7,55 @@ export interface TooltipRect {
   height: number;
 }
 
-/** Coordinates stay chart-local, but collision bounds are the visible scroller. */
+/**
+ * Places the custom tooltip over the plot, on the half opposite the active
+ * bucket. The collision box is the intersection of the chart/card and the
+ * visible scroller, so a narrow card never lets the overlay escape its border
+ * and a scrolled chart never leaves a floating tooltip behind.
+ */
 export function placeChartTooltip(input: {
   chart: TooltipRect;
   bounds: TooltipRect;
   tooltip: { width: number; height: number };
   anchor: number;
+  /** Optional clearance from the active mark; defaults to a small gap. */
+  gap?: number;
 }) {
   const { chart, bounds, tooltip } = input;
   const inset = 8;
-  const maxWidth = Math.max(0, bounds.width - inset * 2);
-  const maxHeight = Math.max(0, bounds.height - inset * 2);
+  const gap = Math.max(0, input.gap ?? 10);
+  const clipLeft = Math.max(chart.left, bounds.left);
+  const clipTop = Math.max(chart.top, bounds.top);
+  const clipRight = Math.min(chart.left + chart.width, bounds.left + bounds.width);
+  const clipBottom = Math.min(chart.top + chart.height, bounds.top + bounds.height);
+  const maxWidth = Math.max(0, clipRight - clipLeft - inset * 2);
+  const maxHeight = Math.max(0, clipBottom - clipTop - inset * 2);
   const width = Math.min(tooltip.width, maxWidth);
   const height = Math.min(tooltip.height, maxHeight);
   const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(value, high));
+  const anchorX = chart.left + chart.width * input.anchor;
+  const preferredLeft = input.anchor < 0.5 ? anchorX + gap : anchorX - gap - width;
   const left = clamp(
-    chart.left + chart.width * input.anchor - width / 2,
-    bounds.left + inset,
-    bounds.left + bounds.width - inset - width,
+    preferredLeft,
+    clipLeft + inset,
+    Math.max(clipLeft + inset, clipRight - inset - width),
   );
-  const above = chart.top - height - inset;
-  const preferredTop = above >= bounds.top + inset ? above : chart.top + inset;
-  const top = clamp(preferredTop, bounds.top + inset, bounds.top + bounds.height - inset - height);
+  const preferredTop = clipTop + (clipBottom - clipTop - height) / 2;
+  const top = clamp(
+    preferredTop,
+    clipTop + inset,
+    Math.max(clipTop + inset, clipBottom - inset - height),
+  );
   return {
     left: left - chart.left,
     top: top - chart.top,
     maxWidth,
     maxHeight,
-    visible:
-      chart.top + chart.height > bounds.top &&
-      chart.top < bounds.top + bounds.height &&
-      width > 0 &&
-      height > 0,
+    visible: clipRight > clipLeft && clipBottom > clipTop && width > 0 && height > 0,
   };
 }
 
-export function createChartTooltipLayout(anchor: () => number) {
+export function createChartTooltipLayout(anchor: () => number, gap?: () => number) {
   const [position, setPosition] = createSignal({
     left: 0,
     top: 0,
@@ -76,6 +89,7 @@ export function createChartTooltipLayout(anchor: () => number) {
         bounds: { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) },
         tooltip: { width: tooltip.offsetWidth, height: tooltip.offsetHeight },
         anchor: anchor(),
+        gap: gap?.(),
       }),
     );
   }
