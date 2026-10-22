@@ -8,7 +8,7 @@ import { EmptyNotice, Skeleton } from "../components/states";
 import { UsageChart } from "../components/usage-chart";
 import {
   formatExactCount,
-  formatTimestamp,
+  formatTimestampMinutes,
   formatTokenCount,
   pluralize,
   usageChartTitle,
@@ -47,7 +47,8 @@ export function QuotaView(props: {
             Quota
           </h2>
           <span class="qg-section__meta">
-            Polled {formatTimestamp(props.snapshot.providers.polledAtMs, props.snapshot.timeZone)} ·{" "}
+            Polled{" "}
+            {formatTimestampMinutes(props.snapshot.providers.polledAtMs, props.snapshot.timeZone)} ·{" "}
             {props.snapshot.providers.enabledProviders === "auto"
               ? "automatic provider selection"
               : pluralize(props.snapshot.providers.enabledProviders.length, "enabled provider")}

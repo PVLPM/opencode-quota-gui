@@ -33,6 +33,7 @@ import {
   formatPercentExact,
   formatRunway,
   formatTimestamp,
+  formatTimestampMinutes,
   formatTokenCount,
 } from "../src/ui/format";
 import {
@@ -399,6 +400,13 @@ describe("section state machine", () => {
     expect(formatBucketTick(midnight, "hour", "America/New_York")).toBe("20:00");
     expect(formatTimestamp(midnight, "UTC")).toBe("19/10/2026, 00:00:00");
     expect(formatTimestamp(midnight, "UTC")).not.toContain("UTC");
+
+    const polled = Date.UTC(2026, 9, 22, 10, 39, 22);
+    expect(formatTimestampMinutes(polled, "Europe/Istanbul")).toBe("22/10/2026, 13:39");
+    expect(formatTimestampMinutes(polled, "UTC")).toBe("22/10/2026, 10:39");
+    expect(formatTimestampMinutes(midnight, "America/New_York")).toBe("18/10/2026, 20:00");
+    // The detailed formatter used by Session tooltips keeps its seconds.
+    expect(formatTimestamp(polled, "Europe/Istanbul")).toBe("22/10/2026, 13:39:22");
   });
 
   it("wires full and bare percentage labels for both display modes", async () => {
@@ -769,6 +777,28 @@ describe("home view composition", () => {
     expect(quotaHtml).not.toContain('id="qg-home-usage"');
     expect(quotaHtml).not.toContain("Observed");
     expect(quotaHtml).toContain("Polled");
+  });
+
+  it("keeps seconds out of the Quota Polled footer while preserving the host-zone date and minute", async () => {
+    const html = await renderView(
+      "/views/home.tsx",
+      "QuotaView",
+      homeProps({
+        snapshot: {
+          ...homeSnapshot({
+            providers: {
+              cards: [],
+              enabledProviders: "auto",
+              polledAtMs: Date.UTC(2026, 9, 22, 10, 39, 22),
+            },
+          }),
+          timeZone: "UTC",
+        },
+      }),
+    );
+    const rendered = text(html);
+    expect(rendered).toContain("Polled 22/10/2026, 10:39");
+    expect(rendered).not.toContain("10:39:22");
   });
 
   it("keeps a provider failure card-local and names it provider-level when no account is known", async () => {

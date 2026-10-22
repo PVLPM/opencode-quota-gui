@@ -79,6 +79,23 @@ export function formatTimestamp(ms: number | undefined, timeZone: string): strin
   return new Date(ms).toLocaleString("en-GB", { timeZone });
 }
 
+/**
+ * Quota's Polled footer is intentionally minute-precise. Keep the same explicit
+ * host zone and date as formatTimestamp; only the seconds are omitted.
+ */
+export function formatTimestampMinutes(ms: number | undefined, timeZone: string): string {
+  if (ms === undefined || !Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleString("en-GB", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
 export function formatClock(ms: number, timeZone: string): string {
   return new Date(ms).toLocaleTimeString("en-GB", {
     timeZone,
