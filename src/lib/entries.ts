@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import type { BankedResetAvailability } from "../contracts/openai-quota.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
 import type { QuotaTelemetryToken } from "./quota-telemetry.js";
 import type { ResolvedAuthIdentity } from "./resolved-auth-identity.js";
@@ -186,6 +187,8 @@ export type QuotaValueEntry = GroupedQuotaEntryMeta & {
   name: string;
   value: string;
   resetTimeIso?: string;
+  /** Additive OpenAI banked-reset availability; never provider ids/secrets. */
+  bankedResets?: BankedResetAvailability;
 };
 
 export type QuotaQuantityEntry = SemanticGroupedQuotaEntryMeta & {
@@ -250,6 +253,18 @@ export function cloneAccountingPercentageBasis(
   };
 }
 
+export function cloneBankedResetAvailability(
+  bankedResets: BankedResetAvailability,
+): BankedResetAvailability {
+  return {
+    availableCount: bankedResets.availableCount,
+    credits: bankedResets.credits.map((credit) => ({
+      ...(credit.title !== undefined ? { title: credit.title } : {}),
+      ...(credit.expiresAtIso !== undefined ? { expiresAtIso: credit.expiresAtIso } : {}),
+    })),
+  };
+}
+
 export function cloneQuotaToastEntry(entry: QuotaToastEntry): QuotaToastEntry {
   return {
     ...entry,
@@ -263,6 +278,9 @@ export function cloneQuotaToastEntry(entry: QuotaToastEntry): QuotaToastEntry {
       : {}),
     ...(isPercentEntry(entry) && entry.runway ? { runway: { ...entry.runway } } : {}),
     ...(isQuantityEntry(entry) ? { quantity: cloneAccountingQuantity(entry.quantity) } : {}),
+    ...(isValueEntry(entry) && entry.bankedResets
+      ? { bankedResets: cloneBankedResetAvailability(entry.bankedResets) }
+      : {}),
   };
 }
 
@@ -409,6 +427,12 @@ export interface QuotaProviderContext {
     };
   };
   resolveRuntimeProviderIds: RuntimeProviderIdResolver;
+  /**
+   * Dashboard-only optional expansion: whether OpenAI reset-detail rows are
+   * visible for one account. CLI/TUI callers omit it, so no detail request is
+   * made by default.
+   */
+  openaiResetDetailsVisible?: (sourceId?: string) => boolean;
   /**
    * The project folder quota is computed for: the git root of the OpenCode location, or the
    * location itself. The terminal command computes quota for the home folder.

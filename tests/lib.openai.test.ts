@@ -747,6 +747,323 @@ describe("openai auth resolution", () => {
     });
   });
 
+  it("returns the summary reset count without a detail request by default", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 20,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 3_600,
+              },
+            },
+            credits: { has_credits: true, unlimited: false, balance: "12.34" },
+            rate_limit_reset_credits: { available_count: 3 },
+          }),
+          { status: 200 },
+        ),
+    );
+    mocks.readAuthFileCached.mockResolvedValueOnce({
+      openai: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const out = await queryOpenAIQuota();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out && out.success ? out.bankedResets : undefined).toEqual({
+      availableCount: 3,
+      credits: [],
+    });
+    expect(out && out.success ? out.credits : undefined).toEqual({
+      hasCredits: true,
+      unlimited: false,
+      balance: "12.34",
+    });
+  });
+
+  it("never requests reset details for a zero or malformed count", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      openai: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },
+    });
+    for (const availableCount of [0, -2, "3", 1.5]) {
+      const fetchMock = vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              plan_type: "plus",
+              rate_limit: {
+                primary_window: {
+                  used_percent: 20,
+                  limit_window_seconds: 18_000,
+                  reset_after_seconds: 3_600,
+                },
+              },
+              rate_limit_reset_credits: { available_count: availableCount },
+            }),
+            { status: 200 },
+          ),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const out = await queryOpenAIQuota({ includeResetDetails: true });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(out && out.success ? out.bankedResets : undefined).toBeUndefined();
+    }
+  });
+
+  it("fetches available reset details with the same auth and account headers", async () => {
+    const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      requests.push({
+        url: String(url),
+        headers: { ...(init?.headers as Record<string, string>) },
+      });
+      if (String(url).endsWith("/usage")) {
+        return new Response(
+          JSON.stringify({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 20,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 3_600,
+              },
+            },
+            rate_limit_reset_credits: { available_count: 3 },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          available_count: 3,
+          credits: [
+            {
+              id: "raw-reset-one",
+              reset_type: "rate_limit",
+              status: "available",
+              granted_at: "2025-12-31T00:00:00.000Z",
+              expires_at: "2026-01-02T03:04:05Z",
+              title: "Full reset",
+              description: "raw description one",
+            },
+            {
+              id: "raw-reset-two",
+              reset_type: "rate_limit",
+              status: "available",
+              granted_at: "2025-12-31T00:00:00.000Z",
+              expires_at: null,
+              description: "raw description two",
+            },
+            {
+              id: "raw-reset-redeemed",
+              reset_type: "rate_limit",
+              status: "redeemed",
+              granted_at: "2025-12-31T00:00:00.000Z",
+              expires_at: "2026-01-03T00:00:00.000Z",
+              title: "Already used",
+            },
+            {
+              id: "raw-reset-three",
+              reset_type: "rate_limit",
+              status: "available",
+              granted_at: "2025-12-31T00:00:00.000Z",
+            },
+            {
+              id: "raw-reset-four",
+              reset_type: "rate_limit",
+              status: "available",
+              granted_at: "2025-12-31T00:00:00.000Z",
+              expires_at: "not-a-date",
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const auth = {
+      state: "configured" as const,
+      sourceKey: "openai" as const,
+      accessToken: "token-secret",
+      accountId: "account-42",
+    };
+
+    const out = await queryOpenAIQuota({ auth, includeResetDetails: true });
+
+    expect(requests.map((request) => request.url)).toEqual([
+      "https://chatgpt.com/backend-api/wham/usage",
+      "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+    ]);
+    for (const request of requests) {
+      expect(request.headers).toEqual({
+        Authorization: "Bearer token-secret",
+        "User-Agent": "OpenCode-Quota-Toast/1.0",
+        "ChatGPT-Account-Id": "account-42",
+      });
+    }
+    expect(out && out.success ? out.bankedResets : undefined).toEqual({
+      availableCount: 3,
+      credits: [
+        { title: "Full reset", expiresAtIso: "2026-01-02T03:04:05.000Z" },
+        { expiresAtIso: null },
+        {},
+        {},
+      ],
+    });
+    expect(JSON.stringify(out)).not.toMatch(
+      /raw-reset|raw description|token-secret|account-42|Already used/u,
+    );
+  });
+
+  it.each([
+    ["HTTP failure", () => new Response(JSON.stringify({ error: "private" }), { status: 500 })],
+    ["invalid JSON", () => new Response("{not json", { status: 200 })],
+    ["network failure", () => Promise.reject(new Error("socket closed"))],
+  ])("contains reset-detail %s while keeping ordinary data", async (_label, detailResponse) => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/usage")) {
+        return new Response(
+          JSON.stringify({
+            plan_type: "pro",
+            rate_limit: {
+              primary_window: {
+                used_percent: 10,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 3_600,
+              },
+            },
+            credits: { has_credits: true, unlimited: false, balance: "5.00" },
+            rate_limit_reset_credits: { available_count: 2 },
+          }),
+          { status: 200 },
+        );
+      }
+      return detailResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.readAuthFileCached.mockResolvedValueOnce({
+      openai: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },
+    });
+
+    const out = await queryOpenAIQuota({ includeResetDetails: true });
+
+    expect(out && out.success ? out.windows.hourly?.percentRemaining : undefined).toBe(90);
+    expect(out && out.success ? out.credits?.balance : undefined).toBe("5.00");
+    expect(out && out.success ? out.bankedResets : undefined).toEqual({
+      availableCount: 2,
+      credits: [],
+    });
+  });
+
+  it("keeps only explicit available reset details and treats a partial list as partial", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (String(url).endsWith("/usage")) {
+        return new Response(
+          JSON.stringify({
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: {
+                used_percent: 20,
+                limit_window_seconds: 18_000,
+                reset_after_seconds: 3_600,
+              },
+            },
+            rate_limit_reset_credits: { available_count: 4 },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          available_count: 99,
+          credits: [
+            { id: "a", status: "redeeming", title: "Redeeming" },
+            { id: "b", status: "available", title: "One" },
+            { id: "c", status: "unknown", title: "Unknown" },
+          ],
+        }),
+        { status: 200 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.readAuthFileCached.mockResolvedValueOnce({
+      openai: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },
+    });
+
+    const out = await queryOpenAIQuota({ includeResetDetails: true });
+
+    expect(out && out.success ? out.bankedResets : undefined).toEqual({
+      availableCount: 4,
+      credits: [{ title: "One" }],
+    });
+  });
+
+  it("accepts useful credits-only and reset-count-only payloads but not an empty one", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      openai: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              plan_type: "plus",
+              credits: { has_credits: true, unlimited: false, balance: "12.34" },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const creditsOnly = await queryOpenAIQuota();
+    expect(creditsOnly && creditsOnly.success ? creditsOnly.windows : undefined).toEqual({});
+    expect(creditsOnly && creditsOnly.success ? creditsOnly.credits?.balance : undefined).toBe(
+      "12.34",
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              plan_type: "plus",
+              rate_limit_reset_credits: { available_count: 2 },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    const resetsOnly = await queryOpenAIQuota();
+    expect(resetsOnly && resetsOnly.success ? resetsOnly.windows : undefined).toEqual({});
+    expect(resetsOnly && resetsOnly.success ? resetsOnly.bankedResets?.availableCount : 0).toBe(2);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              plan_type: "plus",
+              credits: { has_credits: true, unlimited: false, balance: "0" },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    await expect(queryOpenAIQuota()).resolves.toEqual({
+      success: false,
+      error: "No quota data",
+    });
+  });
+
   it("returns separate hourly and weekly windows", async () => {
     mocks.readAuthFileCached.mockResolvedValueOnce({
       openai: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },

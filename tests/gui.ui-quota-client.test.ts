@@ -107,6 +107,90 @@ describe("independent browser quota transport", () => {
     ).toThrow(DashboardError);
   });
 
+  it("decodes additive banked reset metadata and persistent visibility rows", () => {
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: {
+        enabledProviders: "auto" as const,
+        polledAtMs: NOW,
+        cards: [
+          {
+            cardId: "openai:synthetic",
+            providerId: "openai",
+            providerLabel: "OpenAI",
+            labelSource: "provider" as const,
+            rows: [
+              {
+                rowId: "openai:synthetic#openai:resets|status:value",
+                label: "Resets",
+                kind: "value" as const,
+                resultType: "status" as const,
+                value: "3 available",
+                bankedResets: {
+                  availableCount: 3,
+                  credits: [
+                    { title: "Full reset", expiresAtIso: "2026-10-23T00:00:00.000Z" },
+                    { expiresAtIso: null },
+                    {},
+                  ],
+                },
+              },
+            ],
+            errors: [],
+            visibilityRows: [
+              {
+                rowId: "openai:synthetic#openai:resets|status:value",
+                label: "Resets",
+                info: "Resets info",
+              },
+              {
+                rowId: "openai:synthetic#openai:credits|balance:value",
+                label: "Credits",
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const parsed = parseQuotaSnapshot(payload);
+    expect(parsed.providers.cards[0]?.rows[0]?.bankedResets).toEqual({
+      availableCount: 3,
+      credits: [
+        { title: "Full reset", expiresAtIso: "2026-10-23T00:00:00.000Z" },
+        { expiresAtIso: null },
+        {},
+      ],
+    });
+    expect(parsed.providers.cards[0]?.visibilityRows).toEqual(
+      payload.providers.cards[0]?.visibilityRows,
+    );
+
+    for (const mutate of [
+      (row: { bankedResets: { availableCount: unknown } }) => {
+        row.bankedResets.availableCount = "3";
+      },
+      (row: { bankedResets: { credits: unknown } }) => {
+        row.bankedResets.credits = [{ expiresAtIso: 7 }];
+      },
+      (row: { bankedResets: { credits: unknown } }) => {
+        row.bankedResets.credits = [{ title: 7 }];
+      },
+    ]) {
+      const wrong = JSON.parse(JSON.stringify(payload)) as typeof payload;
+      mutate(wrong.providers.cards[0]!.rows[0] as never);
+      expect(() => parseQuotaSnapshot(wrong)).toThrow(DashboardError);
+    }
+
+    const wrongVisibility = JSON.parse(JSON.stringify(payload)) as typeof payload & {
+      providers: { cards: Array<{ visibilityRows: Array<{ rowId?: unknown }> }> };
+    };
+    wrongVisibility.providers.cards[0]!.visibilityRows[0]!.rowId = 7;
+    expect(() => parseQuotaSnapshot(wrongVisibility)).toThrow(DashboardError);
+  });
+
   it("requests only the range-free quota endpoint", async () => {
     const requests: string[] = [];
     const client = createHttpDashboardClient({

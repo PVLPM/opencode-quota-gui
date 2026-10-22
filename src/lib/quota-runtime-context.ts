@@ -120,6 +120,8 @@ export function createQuotaProviderRuntimeContext(runtime: {
   workspaceRoot: string;
   configMeta?: Pick<LoadConfigMeta, "settingSources">;
   configureTelemetry?: boolean;
+  /** Dashboard-only OpenAI reset-detail visibility callback. */
+  openaiResetDetailsVisible?: (sourceId?: string) => boolean;
 }): QuotaProviderContext {
   const telemetryToken =
     runtime.configureTelemetry === false ? undefined : configureRuntimeTelemetry(runtime);
@@ -127,6 +129,9 @@ export function createQuotaProviderRuntimeContext(runtime: {
   return {
     client: runtime.client,
     resolveRuntimeProviderIds: runtime.resolveRuntimeProviderIds,
+    ...(runtime.openaiResetDetailsVisible
+      ? { openaiResetDetailsVisible: runtime.openaiResetDetailsVisible }
+      : {}),
     workspaceRoot: runtime.workspaceRoot,
     config: {
       anthropicBinaryPath: runtime.config.anthropicBinaryPath,

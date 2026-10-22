@@ -70,6 +70,7 @@ describe("contract layer import rules", () => {
       "src/contracts/dashboard.ts",
       "src/contracts/guards.ts",
       "src/contracts/identity.ts",
+      "src/contracts/openai-quota.ts",
       "src/contracts/ranges.ts",
       "src/contracts/settings.ts",
       "src/contracts/time-zone.ts",

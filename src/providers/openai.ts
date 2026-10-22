@@ -2,7 +2,23 @@
  * OpenAI (Plus/Pro) provider wrapper.
  */
 
-import type { QuotaProvider, QuotaProviderContext, QuotaProviderResult } from "../lib/entries.js";
+import {
+  type BankedResetAvailability,
+  OPENAI_CREDITS_INFO,
+  OPENAI_CREDITS_ROW_KEY,
+  OPENAI_CREDITS_ROW_LABEL,
+  OPENAI_CREDITS_ROW_RESULT_TYPE,
+  OPENAI_RESETS_INFO,
+  OPENAI_RESETS_ROW_KEY,
+  OPENAI_RESETS_ROW_LABEL,
+  OPENAI_RESETS_ROW_RESULT_TYPE,
+} from "../contracts/openai-quota.js";
+import type {
+  QuotaProvider,
+  QuotaProviderContext,
+  QuotaProviderResult,
+  QuotaToastEntry,
+} from "../lib/entries.js";
 import {
   DEFAULT_OPENAI_AUTH_CACHE_MAX_AGE_MS,
   hasOpenAIOAuthCached,
@@ -58,6 +74,73 @@ function withOpenAiWindowRowKeys(
     ...entry,
     rowKey: (entry.label ? OPENAI_WINDOW_ROW_KEYS[entry.label] : undefined) ?? "aggregate",
   }));
+}
+
+const OPENAI_OPTIONAL_ACCOUNTING = {
+  acquisitionMethod: "remote_api",
+  ownership: "maintained",
+  authority: "provider_reported",
+} as const;
+
+function hasPositiveCreditBalance(balance: string | null | undefined): boolean {
+  if (typeof balance !== "string") return false;
+  const parsed = Number(balance);
+  return Number.isFinite(parsed) && parsed > 0;
+}
+
+/**
+ * Existing value-row kind only: positive Resets and positive/unlimited Credits.
+ * Zero, unavailable, malformed, and hidden values emit no row at all.
+ */
+function openAiOptionalValueEntries(params: {
+  group: string;
+  sourceId?: string;
+  credits?: { hasCredits: boolean; unlimited: boolean; balance: string | null };
+  bankedResets?: BankedResetAvailability;
+}): QuotaToastEntry[] {
+  const entries: QuotaToastEntry[] = [];
+  const baseAccounting = {
+    ...OPENAI_OPTIONAL_ACCOUNTING,
+    ...(params.sourceId ? { sourceId: params.sourceId } : {}),
+  };
+
+  const resets = params.bankedResets;
+  if (resets && resets.availableCount > 0) {
+    entries.push({
+      kind: "value",
+      accounting: { ...baseAccounting, resultType: OPENAI_RESETS_ROW_RESULT_TYPE },
+      name: `${params.group} ${OPENAI_RESETS_ROW_LABEL}`,
+      group: params.group,
+      label: `${OPENAI_RESETS_ROW_LABEL}:`,
+      info: OPENAI_RESETS_INFO,
+      rowKey: OPENAI_RESETS_ROW_KEY,
+      value: `${resets.availableCount} available`,
+      bankedResets: {
+        availableCount: resets.availableCount,
+        credits: resets.credits.map((credit) => ({
+          ...(credit.title !== undefined ? { title: credit.title } : {}),
+          ...(credit.expiresAtIso !== undefined ? { expiresAtIso: credit.expiresAtIso } : {}),
+        })),
+      },
+    });
+  }
+
+  const credits = params.credits;
+  const positiveCredits = credits?.unlimited === true || hasPositiveCreditBalance(credits?.balance);
+  if (positiveCredits && credits) {
+    entries.push({
+      kind: "value",
+      accounting: { ...baseAccounting, resultType: OPENAI_CREDITS_ROW_RESULT_TYPE },
+      name: `${params.group} ${OPENAI_CREDITS_ROW_LABEL}`,
+      group: params.group,
+      label: `${OPENAI_CREDITS_ROW_LABEL}:`,
+      info: OPENAI_CREDITS_INFO,
+      rowKey: OPENAI_CREDITS_ROW_KEY,
+      value: credits.unlimited ? "Unlimited" : (credits.balance ?? ""),
+    });
+  }
+
+  return entries;
 }
 
 /** A row that says why a login has no ChatGPT quota number. */
@@ -151,32 +234,38 @@ export const openaiProvider: QuotaProvider = {
         errorLabel: options.group ?? "OpenAI",
         onSuccess: (result) => {
           const group = options.group ?? result.label;
-          return attemptedResult(
-            withOpenAiWindowRowKeys(
-              groupedPercentWindowEntries({
-                group,
-                accounting: {
-                  resultType: "rate_limit",
-                  acquisitionMethod: "remote_api",
-                  ownership: "maintained",
-                  authority: "provider_reported",
-                  ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+          const optionalEntries = openAiOptionalValueEntries({
+            group,
+            ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+            credits: result.credits,
+            bankedResets: result.bankedResets,
+          });
+          const windowEntries = withOpenAiWindowRowKeys(
+            groupedPercentWindowEntries({
+              group,
+              accounting: {
+                resultType: "rate_limit",
+                acquisitionMethod: "remote_api",
+                ownership: "maintained",
+                authority: "provider_reported",
+                ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+              },
+              windows: [
+                { window: result.windows.hourly, suffix: "5h", label: "5h:" },
+                { window: result.windows.weekly, suffix: "Weekly", label: "Weekly:" },
+                { window: result.windows.monthly, suffix: "Monthly", label: "Monthly:" },
+                {
+                  window: result.windows.codeReview,
+                  suffix: "Code Review",
+                  label: "Code Review:",
                 },
-                windows: [
-                  { window: result.windows.hourly, suffix: "5h", label: "5h:" },
-                  { window: result.windows.weekly, suffix: "Weekly", label: "Weekly:" },
-                  { window: result.windows.monthly, suffix: "Monthly", label: "Monthly:" },
-                  {
-                    window: result.windows.codeReview,
-                    suffix: "Code Review",
-                    label: "Code Review:",
-                  },
-                ],
-              }),
-            ),
-            [],
-            { singleWindowDisplayName: group },
+              ],
+              fallbackWhenEmpty: optionalEntries.length === 0,
+            }),
           );
+          return attemptedResult([...windowEntries, ...optionalEntries], [], {
+            singleWindowDisplayName: group,
+          });
         },
       });
     const results = await Promise.all(
@@ -188,6 +277,9 @@ export const openaiProvider: QuotaProvider = {
             requestTimeoutMs: ctx.config?.requestTimeoutMs,
             auth,
             loginLabel: row.label,
+            ...(ctx.openaiResetDetailsVisible?.(row.id) === true
+              ? { includeResetDetails: true }
+              : {}),
           }),
         })),
     );

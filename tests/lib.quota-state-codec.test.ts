@@ -579,4 +579,92 @@ describe("quota-state codec", () => {
     value.result.diagnostics[0].modelIds = new Array(1);
     expectInvalidEnvelope(value);
   });
+
+  it("deep-clones and round-trips nested banked reset metadata with sanitized titles", () => {
+    const input = createValidResult();
+    const entry = input.entries[1] as any;
+    entry.bankedResets = {
+      availableCount: 3,
+      credits: [
+        { title: "Full\u001b[31m reset", expiresAtIso: "2026-09-01T00:00:00.000Z" },
+        { expiresAtIso: null },
+        {},
+      ],
+    };
+
+    const normalized = normalizeQuotaProviderResult(input);
+    expect(normalized?.entries[1]).toMatchObject({
+      bankedResets: {
+        availableCount: 3,
+        credits: [
+          { title: "Full reset", expiresAtIso: "2026-09-01T00:00:00.000Z" },
+          { expiresAtIso: null },
+          {},
+        ],
+      },
+    });
+    expect((normalized?.entries[1] as any).bankedResets).not.toBe(entry.bankedResets);
+    expect((normalized?.entries[1] as any).bankedResets.credits[0]).not.toBe(
+      entry.bankedResets.credits[0],
+    );
+
+    const decoded = decodePersistedQuotaProviderCacheEntry(
+      JSON.parse(JSON.stringify(createEnvelope(input))) as unknown,
+      EXPECTED_IDENTITY,
+    );
+    expect(decoded?.result.entries[1]).toMatchObject({
+      bankedResets: {
+        availableCount: 3,
+        credits: [{ title: "Full reset" }, { expiresAtIso: null }, {}],
+      },
+    });
+  });
+
+  it.each([
+    [
+      "raw reset identifiers",
+      (value: any) =>
+        (value.entries[1].bankedResets = {
+          availableCount: 1,
+          credits: [{ id: "raw-reset", title: "Reset" }],
+        }),
+    ],
+    [
+      "descriptions",
+      (value: any) =>
+        (value.entries[1].bankedResets = {
+          availableCount: 1,
+          credits: [{ description: "private" }],
+        }),
+    ],
+    [
+      "fractional counts",
+      (value: any) => (value.entries[1].bankedResets = { availableCount: 1.5, credits: [] }),
+    ],
+    [
+      "negative counts",
+      (value: any) => (value.entries[1].bankedResets = { availableCount: -1, credits: [] }),
+    ],
+    [
+      "invalid expiries",
+      (value: any) =>
+        (value.entries[1].bankedResets = {
+          availableCount: 1,
+          credits: [{ expiresAtIso: "next week" }],
+        }),
+    ],
+    [
+      "non-string titles",
+      (value: any) =>
+        (value.entries[1].bankedResets = { availableCount: 1, credits: [{ title: 7 }] }),
+    ],
+    [
+      "metadata on a non-value row",
+      (value: any) => (value.entries[0].bankedResets = { availableCount: 1, credits: [] }),
+    ],
+  ])("rejects invalid banked reset metadata: %s", (_name, mutate) => {
+    const value = cloneJson(createValidResult()) as any;
+    mutate(value);
+    expectInvalidResult(value);
+  });
 });

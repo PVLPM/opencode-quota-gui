@@ -12,6 +12,16 @@
 import type { ProviderCard, QuotaCardRow } from "../contracts/dashboard.js";
 import type { CardId } from "../contracts/identity.js";
 import {
+  OPENAI_CREDITS_INFO,
+  OPENAI_CREDITS_ROW_KEY,
+  OPENAI_CREDITS_ROW_LABEL,
+  OPENAI_CREDITS_ROW_RESULT_TYPE,
+  OPENAI_RESETS_INFO,
+  OPENAI_RESETS_ROW_KEY,
+  OPENAI_RESETS_ROW_LABEL,
+  OPENAI_RESETS_ROW_RESULT_TYPE,
+} from "../contracts/openai-quota.js";
+import {
   formatAccountingQuantity,
   interpretAccountingRow,
   isCanonicalAccountingDecimal,
@@ -28,7 +38,13 @@ import type {
   QuotaToastEntry,
   QuotaToastError,
 } from "../lib/entries.js";
-import { isBooleanEntry, isPercentEntry, isQuantityEntry, isValueEntry } from "../lib/entries.js";
+import {
+  cloneBankedResetAvailability,
+  isBooleanEntry,
+  isPercentEntry,
+  isQuantityEntry,
+  isValueEntry,
+} from "../lib/entries.js";
 import { formatResetCountdown, isResetTimeDecimals } from "../lib/format-utils.js";
 import { scrubCredentialErrorText } from "../lib/opencode-auth.js";
 import { getQuotaProviderDisplayLabel } from "../lib/provider-metadata.js";
@@ -212,6 +228,9 @@ function mapEntryRow(params: {
   };
   if (entry.semantic) row.metric = { ...entry.semantic.metric };
   if (entry.info !== undefined) row.info = entry.info;
+  if (isValueEntry(entry) && entry.bankedResets) {
+    row.bankedResets = cloneBankedResetAvailability(entry.bankedResets);
+  }
 
   if (isPercentEntry(entry)) {
     row.kind = "percent";
@@ -267,6 +286,47 @@ function mapEntryRows(params: {
     rows.push(row);
   }
   return rows;
+}
+
+const OPENAI_OPTIONAL_ROW_ACCOUNTING = {
+  acquisitionMethod: "remote_api",
+  ownership: "maintained",
+  authority: "provider_reported",
+} as const;
+
+function optionalValueRowId(
+  cardId: CardId,
+  rowKey: string,
+  resultType: QuotaCardRow["resultType"],
+): QuotaCardRow["rowId"] {
+  return rowIdForEntry(cardId, {
+    kind: "value",
+    name: "",
+    value: "",
+    rowKey,
+    accounting: { ...OPENAI_OPTIONAL_ROW_ACCOUNTING, resultType },
+  });
+}
+
+/**
+ * Persistent Resets/Credits choices for an OpenAI card. These are metadata for
+ * the Settings eyes only; they never create a zero/empty Quota data row.
+ */
+export function openAiOptionalVisibilityRows(
+  cardId: CardId,
+): NonNullable<ProviderCard["visibilityRows"]> {
+  return [
+    {
+      rowId: optionalValueRowId(cardId, OPENAI_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE),
+      label: OPENAI_RESETS_ROW_LABEL,
+      info: OPENAI_RESETS_INFO,
+    },
+    {
+      rowId: optionalValueRowId(cardId, OPENAI_CREDITS_ROW_KEY, OPENAI_CREDITS_ROW_RESULT_TYPE),
+      label: OPENAI_CREDITS_ROW_LABEL,
+      info: OPENAI_CREDITS_INFO,
+    },
+  ];
 }
 
 function latestObservedAtIso(entries: readonly QuotaToastEntry[]): string | undefined {
@@ -327,6 +387,7 @@ function buildProviderCard(params: {
     }),
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
   };
+  if (params.providerId === "openai") card.visibilityRows = openAiOptionalVisibilityRows(cardId);
   const observedAtIso = latestObservedAtIso(params.entries);
   if (observedAtIso) card.observedAtIso = observedAtIso;
   return card;
@@ -364,6 +425,7 @@ function buildAccountCard(params: {
     }),
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
   };
+  if (params.providerId === "openai") card.visibilityRows = openAiOptionalVisibilityRows(cardId);
   const observedAtIso = latestObservedAtIso(params.entries);
   if (observedAtIso) card.observedAtIso = observedAtIso;
   return card;

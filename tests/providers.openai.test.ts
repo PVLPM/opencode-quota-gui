@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  OPENAI_CREDITS_INFO,
+  OPENAI_CREDITS_ROW_KEY,
+  OPENAI_RESETS_INFO,
+  OPENAI_RESETS_ROW_KEY,
+} from "../src/contracts/openai-quota.js";
 import { projectQuotaProviderResults } from "../src/lib/quota-accounting-projection.js";
 import { formatQuotaCommand } from "../src/lib/quota-command-format.js";
 import { formatQuotaRowsGrouped } from "../src/lib/toast-format-grouped.js";
@@ -826,5 +832,143 @@ describe("openai provider", () => {
 
     await expect(openaiProvider.isAvailable(ctx)).resolves.toBe(true);
     expect(hasOpenAIOAuthCached).not.toHaveBeenCalled();
+  });
+
+  it("requests reset details only for the visible account and maps positive rows", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    const { queryOpenAIQuota, resolveOpenAIOAuth } = await import("../src/lib/openai.js");
+    vi.mocked(readCredentialRows).mockResolvedValueOnce([
+      {
+        id: "work-id",
+        integrationId: "openai",
+        label: "Work",
+        active: true,
+        value: { type: "oauth", access: "work-token" },
+      },
+      {
+        id: "home-id",
+        integrationId: "openai",
+        label: "Home",
+        active: false,
+        value: { type: "oauth", access: "home-token" },
+      },
+    ]);
+    vi.mocked(resolveOpenAIOAuth).mockImplementation((auth) => ({
+      state: "configured",
+      sourceKey: "openai",
+      accessToken: auth?.openai?.access ?? "",
+    }));
+    vi.mocked(queryOpenAIQuota).mockImplementation(async (options) => ({
+      success: true,
+      label: "OpenAI (Pro)",
+      windows: { hourly: { percentRemaining: 42 } },
+      ...(options?.auth?.accessToken === "work-token"
+        ? {
+            credits: { hasCredits: true, unlimited: false, balance: "12.34" },
+            bankedResets: {
+              availableCount: 3,
+              credits: [
+                { title: "Full reset", expiresAtIso: "2026-01-02T03:04:05.000Z" },
+                { expiresAtIso: null },
+              ],
+            },
+          }
+        : {}),
+    }));
+    const visibility = vi.fn((sourceId?: string) => sourceId === "work-id");
+
+    const out = await openaiProvider.fetch({
+      config: {},
+      openaiResetDetailsVisible: visibility,
+    } as any);
+
+    expect(visibility).toHaveBeenCalledWith("work-id");
+    expect(visibility).toHaveBeenCalledWith("home-id");
+    const calls = vi.mocked(queryOpenAIQuota).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.[0]).toMatchObject({
+      auth: { accessToken: "work-token" },
+      includeResetDetails: true,
+    });
+    expect(calls[1]?.[0]).not.toHaveProperty("includeResetDetails");
+    expect(calls[1]?.[0]).toMatchObject({ auth: { accessToken: "home-token" } });
+
+    const workResets = out.entries.find((entry) => entry.rowKey === OPENAI_RESETS_ROW_KEY);
+    expect(workResets).toMatchObject({
+      kind: "value",
+      label: "Resets:",
+      value: "3 available",
+      info: OPENAI_RESETS_INFO,
+      accounting: { sourceId: "work-id", resultType: "status" },
+      bankedResets: {
+        availableCount: 3,
+        credits: [
+          { title: "Full reset", expiresAtIso: "2026-01-02T03:04:05.000Z" },
+          { expiresAtIso: null },
+        ],
+      },
+    });
+    const workCredits = out.entries.find((entry) => entry.rowKey === OPENAI_CREDITS_ROW_KEY);
+    expect(workCredits).toMatchObject({
+      kind: "value",
+      label: "Credits:",
+      value: "12.34",
+      info: OPENAI_CREDITS_INFO,
+      accounting: { sourceId: "work-id", resultType: "balance" },
+    });
+    expect(out.entries.filter((entry) => entry.accounting.sourceId === "home-id")).toHaveLength(1);
+    expect(JSON.stringify(out.entries)).not.toMatch(/work-token|home-token|raw-reset/u);
+  });
+
+  it("omits zero, unavailable, and hidden optional values while keeping unlimited credits", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    const { queryOpenAIQuota, resolveOpenAIOAuth } = await import("../src/lib/openai.js");
+    vi.mocked(readCredentialRows).mockResolvedValueOnce([
+      {
+        id: "zero-id",
+        integrationId: "openai",
+        label: "Zero",
+        active: true,
+        value: { type: "oauth", access: "zero-token" },
+      },
+      {
+        id: "unlimited-id",
+        integrationId: "openai",
+        label: "Unlimited",
+        active: false,
+        value: { type: "oauth", access: "unlimited-token" },
+      },
+    ]);
+    vi.mocked(resolveOpenAIOAuth).mockImplementation((auth) => ({
+      state: "configured",
+      sourceKey: "openai",
+      accessToken: auth?.openai?.access ?? "",
+    }));
+    vi.mocked(queryOpenAIQuota).mockImplementation(async (options) => ({
+      success: true,
+      label: "OpenAI (Pro)",
+      windows: { hourly: { percentRemaining: 42 } },
+      ...(options?.auth?.accessToken === "zero-token"
+        ? {
+            credits: { hasCredits: true, unlimited: false, balance: "0.00" },
+            bankedResets: { availableCount: 0, credits: [] },
+          }
+        : {
+            credits: { hasCredits: true, unlimited: true, balance: null },
+          }),
+    }));
+
+    const out = await openaiProvider.fetch({
+      config: {},
+      openaiResetDetailsVisible: () => true,
+    } as any);
+
+    expect(out.entries.filter((entry) => entry.accounting.sourceId === "zero-id")).toHaveLength(1);
+    const unlimitedCredits = out.entries.find(
+      (entry) =>
+        entry.accounting.sourceId === "unlimited-id" && entry.rowKey === OPENAI_CREDITS_ROW_KEY,
+    );
+    expect(unlimitedCredits).toMatchObject({ kind: "value", value: "Unlimited" });
+    expect(out.entries.some((entry) => entry.rowKey === OPENAI_RESETS_ROW_KEY)).toBe(false);
   });
 });

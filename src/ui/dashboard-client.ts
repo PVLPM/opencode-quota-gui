@@ -26,6 +26,7 @@ import type {
 } from "../contracts/dashboard";
 import { isCostedTokens, isDashboardEvent, isTokenStack } from "../contracts/guards";
 import type { CardId, RowId } from "../contracts/identity";
+import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota";
 import { type BucketUnit, isRangeKey, type RangeKey, type RangeWindow } from "../contracts/ranges";
 
 /**
@@ -296,6 +297,30 @@ function readRunway(value: JsonValue, endpoint: string, detail: string): RunwayP
   return { kind };
 }
 
+function readBankedResets(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail: string,
+): BankedResetAvailability {
+  const resets = readRecord(value, endpoint, detail);
+  return {
+    availableCount: readNumber(resets.availableCount, endpoint, `${detail}.availableCount`),
+    credits: readArray(resets.credits, endpoint, `${detail}.credits`).map((entry) => {
+      const credit = readRecord(entry, endpoint, `${detail}.credits[]`);
+      const parsed: BankedResetCredit = {};
+      const title = readOptionalText(credit.title, endpoint, `${detail}.credits[].title`);
+      if (title !== undefined) parsed.title = title;
+      if (credit.expiresAtIso !== undefined) {
+        parsed.expiresAtIso =
+          credit.expiresAtIso === null
+            ? null
+            : readText(credit.expiresAtIso, endpoint, `${detail}.credits[].expiresAtIso`);
+      }
+      return parsed;
+    }),
+  };
+}
+
 function readRow(value: JsonValue, endpoint: string): QuotaCardRow {
   const detail = "providers.cards[].rows[]";
   const row = readRecord(value, endpoint, detail);
@@ -341,6 +366,9 @@ function readRow(value: JsonValue, endpoint: string): QuotaCardRow {
   if (row.detailRows !== undefined) {
     parsed.detailRows = readDetailRows(row.detailRows, endpoint, `${detail}.detailRows`);
   }
+  if (row.bankedResets !== undefined) {
+    parsed.bankedResets = readBankedResets(row.bankedResets, endpoint, `${detail}.bankedResets`);
+  }
   return parsed;
 }
 
@@ -375,6 +403,22 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
   if (observedAtIso !== undefined) parsed.observedAtIso = observedAtIso;
   if (card.details !== undefined) {
     parsed.details = readDetailRows(card.details, endpoint, `${detail}.details`);
+  }
+  if (card.visibilityRows !== undefined) {
+    parsed.visibilityRows = readArray(
+      card.visibilityRows,
+      endpoint,
+      `${detail}.visibilityRows`,
+    ).map((entry) => {
+      const row = readRecord(entry, endpoint, `${detail}.visibilityRows[]`);
+      const parsedRow: NonNullable<ProviderCard["visibilityRows"]>[number] = {
+        rowId: readRowId(row.rowId, endpoint, `${detail}.visibilityRows[].rowId`),
+        label: readText(row.label, endpoint, `${detail}.visibilityRows[].label`),
+      };
+      const info = readOptionalText(row.info, endpoint, `${detail}.visibilityRows[].info`);
+      if (info !== undefined) parsedRow.info = info;
+      return parsedRow;
+    });
   }
   return parsed;
 }

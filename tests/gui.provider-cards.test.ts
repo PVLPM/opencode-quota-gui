@@ -8,6 +8,13 @@
  */
 import { describe, expect, it } from "vitest";
 
+import {
+  type BankedResetAvailability,
+  OPENAI_CREDITS_INFO,
+  OPENAI_CREDITS_ROW_KEY,
+  OPENAI_RESETS_INFO,
+  OPENAI_RESETS_ROW_KEY,
+} from "../src/contracts/openai-quota.js";
 import type { UsageAnalyticsDataset } from "../src/gui/aggregation.js";
 import { buildProviderCards, type ProviderCardPreferences } from "../src/gui/provider-cards.js";
 import { createDashboardReadSource, DashboardSourceError } from "../src/gui/sources.js";
@@ -73,6 +80,34 @@ function percentEntry(params: {
   if (params.fixedWindow !== undefined) entry.fixedWindow = params.fixedWindow;
   if (params.basis !== undefined) entry.basis = params.basis;
   return entry;
+}
+
+function valueEntry(params: {
+  sourceId?: string;
+  name: string;
+  label: string;
+  rowKey: string;
+  value: string;
+  resultType: AccountingResultType;
+  info?: string;
+  bankedResets?: BankedResetAvailability;
+}): QuotaToastEntry {
+  const accounting: QuotaToastEntry["accounting"] = {
+    ...TEST_ACCOUNTING,
+    resultType: params.resultType,
+  };
+  if (params.sourceId !== undefined) accounting.sourceId = params.sourceId;
+  return {
+    kind: "value",
+    name: params.name,
+    group: "OpenAI",
+    label: params.label,
+    rowKey: params.rowKey,
+    value: params.value,
+    accounting,
+    ...(params.info !== undefined ? { info: params.info } : {}),
+    ...(params.bankedResets !== undefined ? { bankedResets: params.bankedResets } : {}),
+  } as QuotaToastEntry;
 }
 
 function result(overrides: Partial<QuotaProviderResult> = {}): QuotaProviderResult {
@@ -889,5 +924,108 @@ describe("gui read source — composition", () => {
       ],
       [{ kind: "window", window: "week" }],
     ]);
+  });
+});
+
+describe("gui provider cards — OpenAI optional visibility rows", () => {
+  it("seeds Resets and Credits visibility independently of zero runtime data", () => {
+    const cards = cardsFor([
+      probe(
+        "openai",
+        result({
+          accounts: [{ sourceId: "raw-openai-one", label: "Work" }],
+          entries: [],
+        }),
+      ),
+    ]);
+
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.rows).toEqual([]);
+    expect(cards[0]?.visibilityRows?.map(({ label, info }) => ({ label, info }))).toEqual([
+      { label: "Resets", info: OPENAI_RESETS_INFO },
+      { label: "Credits", info: OPENAI_CREDITS_INFO },
+    ]);
+    const serialized = JSON.stringify(cards[0]?.visibilityRows);
+    expect(serialized).not.toContain("raw-openai-one");
+  });
+
+  it("uses the same stable row ids the positive runtime rows carry", () => {
+    const cards = cardsFor([
+      probe(
+        "openai",
+        result({
+          accounts: [{ sourceId: "raw-openai-one", label: "Work" }],
+          entries: [
+            valueEntry({
+              sourceId: "raw-openai-one",
+              name: "Resets",
+              label: "Resets:",
+              rowKey: OPENAI_RESETS_ROW_KEY,
+              value: "3 available",
+              resultType: "status",
+              info: OPENAI_RESETS_INFO,
+              bankedResets: { availableCount: 3, credits: [{ expiresAtIso: null }] },
+            }),
+            valueEntry({
+              sourceId: "raw-openai-one",
+              name: "Credits",
+              label: "Credits:",
+              rowKey: OPENAI_CREDITS_ROW_KEY,
+              value: "12.34",
+              resultType: "balance",
+              info: OPENAI_CREDITS_INFO,
+            }),
+          ],
+        }),
+      ),
+    ]);
+
+    const card = cards[0]!;
+    const [resetsVisibility, creditsVisibility] = card.visibilityRows ?? [];
+    expect(card.rows.map((row) => row.rowId)).toEqual([
+      resetsVisibility?.rowId,
+      creditsVisibility?.rowId,
+    ]);
+    expect(card.rows[0]).toMatchObject({
+      label: "Resets",
+      kind: "value",
+      resultType: "status",
+      value: "3 available",
+      info: OPENAI_RESETS_INFO,
+      bankedResets: { availableCount: 3, credits: [{ expiresAtIso: null }] },
+    });
+    expect(card.rows[1]).toMatchObject({
+      label: "Credits",
+      kind: "value",
+      resultType: "balance",
+      value: "12.34",
+      info: OPENAI_CREDITS_INFO,
+    });
+  });
+
+  it("keeps account-specific ids separate and adds no optional rows to other providers", () => {
+    const cards = cardsFor([
+      probe(
+        "openai",
+        result({
+          accounts: [{ sourceId: "raw-one" }, { sourceId: "raw-two" }],
+        }),
+      ),
+      probe(
+        "anthropic",
+        result({
+          accounts: [{ sourceId: "raw-claude" }],
+          entries: [percentEntry({ sourceId: "raw-claude" })],
+        }),
+      ),
+    ]);
+
+    const openaiCards = cards.filter((card) => card.providerId === "openai");
+    expect(openaiCards).toHaveLength(2);
+    expect(openaiCards[0]?.visibilityRows?.[0]?.rowId).not.toBe(
+      openaiCards[1]?.visibilityRows?.[0]?.rowId,
+    );
+    const anthropicCard = cards.find((card) => card.providerId === "anthropic");
+    expect(anthropicCard?.visibilityRows).toBeUndefined();
   });
 });

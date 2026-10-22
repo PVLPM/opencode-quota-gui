@@ -15,6 +15,7 @@ import {
   hashQuotaCardIdentity,
   PROVIDER_SCOPE_IDENTITY_KEY,
 } from "../src/gui/identity.js";
+import { openAiOptionalVisibilityRows } from "../src/gui/provider-cards.js";
 import {
   createDashboardReadSource,
   type DashboardAnalyticsService,
@@ -622,5 +623,35 @@ describe("quota read source", () => {
       code: "session-not-found",
       message: "Session not found",
     });
+  });
+
+  it("evaluates OpenAI reset details against hidden account cards and rows per source", async () => {
+    const hiddenAccount = buildCardId("openai", "raw-hidden-account");
+    const hiddenRowAccount = buildCardId("openai", "raw-hidden-row");
+    const visibleAccount = buildCardId("openai", "raw-visible-account");
+    const hiddenResetsRow = openAiOptionalVisibilityRows(hiddenRowAccount)[0]!.rowId;
+    let visibility: ((sourceId?: string) => boolean) | undefined;
+    const test = harness({
+      config: baseConfig({
+        dashboard: {
+          ...DEFAULT_CONFIG.dashboard,
+          hiddenCards: [hiddenAccount],
+          hiddenRows: [hiddenResetsRow],
+        },
+      }),
+      collect: async (input) => {
+        visibility = input.openaiResetDetailsVisible;
+        return [];
+      },
+    });
+
+    await test.source.quota();
+
+    expect(visibility).toBeTypeOf("function");
+    expect(visibility!("raw-hidden-account")).toBe(false);
+    expect(visibility!("raw-hidden-row")).toBe(false);
+    expect(visibility!("raw-visible-account")).toBe(true);
+    expect(visibility!(undefined)).toBe(false);
+    expect(visibleAccount).not.toBe(hiddenAccount);
   });
 });

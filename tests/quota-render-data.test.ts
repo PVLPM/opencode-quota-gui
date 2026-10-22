@@ -122,6 +122,25 @@ describe("collectQuotaRenderData shared quota state", () => {
     ]);
   });
 
+  it("passes the OpenAI reset-detail visibility callback into the provider context", async () => {
+    const runtimeProvider = testProvider("custom-runtime");
+    const callback = vi.fn((sourceId?: string) => sourceId === "raw-visible");
+
+    await collectQuotaRenderData({
+      client: TEST_CLIENT,
+      config: renderConfig({ enabledProviders: ["custom-runtime"] }),
+      surfaceExplicitProviderIssues: false,
+      formatStyle: "allWindows",
+      providers: [runtimeProvider],
+      openaiResetDetailsVisible: callback,
+    });
+
+    const ctx = (runtimeProvider.fetch as any).mock.calls[0]?.[0];
+    expect(ctx.openaiResetDetailsVisible).toBe(callback);
+    expect(ctx.openaiResetDetailsVisible("raw-visible")).toBe(true);
+    expect(ctx.openaiResetDetailsVisible("raw-hidden")).toBe(false);
+  });
+
   it("surfaces a failed OpenCode Zen sign-in but keeps auto mode quiet without one", async () => {
     // A failed Console sign-in passes the auto-mode availability gate so
     // fetch() can show its recovery hint.

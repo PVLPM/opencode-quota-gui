@@ -42,11 +42,16 @@ import {
 } from "./aggregation.js";
 import { type AnalyticsReadService, createAnalyticsReadService } from "./analytics-service.js";
 import {
+  buildCardId,
   buildProviderScopeCardId,
   hashQuotaCardIdentity,
   PROVIDER_SCOPE_IDENTITY_KEY,
 } from "./identity.js";
-import { buildProviderCards, type ProviderCardPreferences } from "./provider-cards.js";
+import {
+  buildProviderCards,
+  openAiOptionalVisibilityRows,
+  type ProviderCardPreferences,
+} from "./provider-cards.js";
 import { resolveHostTimeZone } from "./time-zone.js";
 
 /**
@@ -102,6 +107,7 @@ export interface DashboardReadSourceOptions {
     config: QuotaToastConfig;
     nowMs: number;
     providers: QuotaProvider[];
+    openaiResetDetailsVisible: (sourceId?: string) => boolean;
   }) => Promise<QuotaStatusLiveProbe[]>;
   /** Test/embedding seam for the provider registry; defaults to `getProviders()`. */
   providers?: QuotaProvider[];
@@ -160,6 +166,33 @@ function isProviderHidden(providerId: string, hiddenCards: readonly string[]): b
   if (hiddenCards.includes(buildProviderScopeCardId(providerId))) return true;
   const bareScopeHash = hashQuotaCardIdentity(providerId, PROVIDER_SCOPE_IDENTITY_KEY);
   return hiddenCards.includes(bareScopeHash);
+}
+
+/**
+ * Host-side Resets visibility for one OpenAI account. It mirrors the same
+ * hashed card id and stable row id the card projection emits, so a hidden
+ * account/card/row suppresses the optional detail GET before it happens. The
+ * callback never sees raw ids in the browser payload.
+ */
+export function createOpenAiResetDetailsVisibility(
+  config: Pick<QuotaToastConfig, "dashboard">,
+): (sourceId?: string) => boolean {
+  const hiddenCards = new Set(config.dashboard.hiddenCards);
+  const hiddenRows = new Set(config.dashboard.hiddenRows);
+  return (sourceId?: string): boolean => {
+    if (!sourceId) return false;
+    if (
+      hiddenCards.has("openai") ||
+      hiddenCards.has(sourceId) ||
+      hiddenCards.has(hashQuotaCardIdentity("openai", sourceId))
+    ) {
+      return false;
+    }
+    const cardId = buildCardId("openai", sourceId);
+    if (hiddenCards.has(cardId)) return false;
+    const [resetsRow] = openAiOptionalVisibilityRows(cardId);
+    return resetsRow !== undefined && !hiddenRows.has(resetsRow.rowId);
+  };
 }
 
 /**
@@ -312,8 +345,14 @@ export function createDashboardReadSource(
     nowMs: number,
     providers: QuotaProvider[],
   ): Promise<QuotaStatusLiveProbe[]> {
+    const openaiResetDetailsVisible = createOpenAiResetDetailsVisibility(config);
     if (options.collectProviderResults) {
-      return options.collectProviderResults({ config, nowMs, providers });
+      return options.collectProviderResults({
+        config,
+        nowMs,
+        providers,
+        openaiResetDetailsVisible,
+      });
     }
     // Unprojected, all-windows, `onlyCurrentModel` off (P1b seam). The existing
     // quota-state cache/cooldowns are used unchanged (no bypass).
@@ -322,6 +361,7 @@ export function createDashboardReadSource(
       config,
       workspaceRoot: options.workspaceRoot,
       providers,
+      openaiResetDetailsVisible,
     });
   }
 

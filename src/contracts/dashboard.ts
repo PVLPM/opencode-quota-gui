@@ -1,4 +1,5 @@
 import type { CardId, RowId } from "./identity.js";
+import type { BankedResetAvailability } from "./openai-quota.js";
 import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
 
 /**
@@ -143,6 +144,8 @@ export interface QuotaCardRow {
   countdown?: string;
   runway?: RunwayProjection;
   detailRows?: { label: string; value: string }[];
+  /** Additive OpenAI resets metadata; absent for every other row/provider. */
+  bankedResets?: BankedResetAvailability;
 }
 
 export type RunwayProjection =
@@ -160,6 +163,11 @@ export interface ProviderCard {
   /** Explicit safe field list only — never a raw `statusDetails` copy. */
   details?: { label: string; value: string }[];
   observedAtIso?: string;
+  /**
+   * Persistent optional-row choices (additive): stable ids and labels exist
+   * even when runtime values are absent. Never synthetic zero data rows.
+   */
+  visibilityRows?: { rowId: RowId; label: string; info?: string }[];
 }
 
 export interface ProjectActivityRow {

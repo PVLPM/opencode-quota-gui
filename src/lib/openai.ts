@@ -5,7 +5,8 @@
  * https://chatgpt.com/backend-api/wham/usage
  */
 
-import { sanitizeDisplayText } from "./display-sanitize.js";
+import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota.js";
+import { sanitizeDisplayText, sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
@@ -30,6 +31,9 @@ interface OpenAIUsageResponse {
     has_credits: boolean;
     unlimited: boolean;
     balance: string | null;
+  } | null;
+  rate_limit_reset_credits?: {
+    available_count?: unknown;
   } | null;
 }
 
@@ -178,6 +182,7 @@ function derivePlanLabel(planType: string | undefined): string {
 }
 
 const OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const OPENAI_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 export const DEFAULT_OPENAI_AUTH_CACHE_MAX_AGE_MS = 5_000;
 // Not `opencode`: in OpenCode 2 its OAuth entry is the Console login, which
 // authorizes Console APIs, not OpenAI.
@@ -201,6 +206,8 @@ export type OpenAIResult =
         unlimited: boolean;
         balance: string | null;
       };
+      /** Summary count is always authoritative; expiry records are best-effort. */
+      bankedResets?: BankedResetAvailability;
     }
   | QuotaError
   | null;
@@ -317,8 +324,84 @@ async function readOpenAIErrorCode(resp: Response): Promise<string | undefined> 
   }
 }
 
+function parseAvailableResetCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/** `null` is an explicit no-expiry; any invalid/missing value stays unknown. */
+function parseResetCreditExpiry(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const parsedMs = Date.parse(value);
+  return Number.isFinite(parsedMs) ? new Date(parsedMs).toISOString() : undefined;
+}
+
+/**
+ * Only `status === "available"` records establish availability, and every
+ * record is reduced to presentation-safe title/expiry data. Unknown/redeeming/
+ * redeemed statuses and provider ids/descriptions never reach the DTO.
+ */
+function parseAvailableResetCredits(payload: unknown): BankedResetCredit[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const rawCredits = (payload as Record<string, unknown>).credits;
+  if (!Array.isArray(rawCredits)) return [];
+
+  const credits: BankedResetCredit[] = [];
+  for (const raw of rawCredits) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const record = raw as Record<string, unknown>;
+    if (record.status !== "available") continue;
+
+    const credit: BankedResetCredit = {};
+    if (typeof record.title === "string") {
+      const title = sanitizeSingleLineDisplayText(record.title);
+      if (title) credit.title = title;
+    }
+    const expiresAtIso = parseResetCreditExpiry(record.expires_at);
+    if (expiresAtIso !== undefined) credit.expiresAtIso = expiresAtIso;
+    credits.push(credit);
+  }
+
+  const rank = (credit: BankedResetCredit): number =>
+    credit.expiresAtIso === undefined
+      ? Number.POSITIVE_INFINITY
+      : credit.expiresAtIso === null
+        ? Number.MAX_SAFE_INTEGER
+        : Date.parse(credit.expiresAtIso);
+  return credits.sort((left, right) => rank(left) - rank(right));
+}
+
+/** Detail failures degrade to no known expiry metadata; ordinary data stays. */
+async function fetchOpenAIResetCredits(
+  headers: Record<string, string>,
+  timeoutMs: number | undefined,
+): Promise<BankedResetCredit[]> {
+  try {
+    return await fetchWithTimeout(OPENAI_RESET_CREDITS_URL, {
+      request: { headers },
+      timeoutMs,
+      consume: async (resp) => {
+        if (!resp.ok) return [];
+        try {
+          return parseAvailableResetCredits(await resp.json());
+        } catch {
+          return [];
+        }
+      },
+    });
+  } catch {
+    return [];
+  }
+}
+
 export async function queryOpenAIQuota(
-  options: { requestTimeoutMs?: number; auth?: ResolvedOpenAIOAuth; loginLabel?: string } = {},
+  options: {
+    requestTimeoutMs?: number;
+    auth?: ResolvedOpenAIOAuth;
+    loginLabel?: string;
+    /** Dashboard-only: request optional expiry details when visibility is ON. */
+    includeResetDetails?: boolean;
+  } = {},
 ): Promise<OpenAIResult> {
   const resolvedAuth =
     options.auth ??
@@ -359,10 +442,10 @@ export async function queryOpenAIQuota(
       headers["ChatGPT-Account-Id"] = accountId;
     }
 
-    return await fetchWithTimeout(OPENAI_USAGE_URL, {
+    const result = await fetchWithTimeout(OPENAI_USAGE_URL, {
       request: { headers },
       timeoutMs: options.requestTimeoutMs,
-      consume: async (resp) => {
+      consume: async (resp): Promise<OpenAIResult> => {
         if (!resp.ok) {
           const code = await readOpenAIErrorCode(resp);
           return {
@@ -409,7 +492,26 @@ export async function queryOpenAIQuota(
         if (!windows.monthly && individualLimit) windows.monthly = individualLimit;
         if (codeReview) windows.codeReview = codeReview;
 
-        if (Object.keys(windows).length === 0) {
+        const availableResetCount = parseAvailableResetCount(
+          data.rate_limit_reset_credits?.available_count,
+        );
+        const mappedCredits = credits
+          ? {
+              hasCredits: Boolean(credits.has_credits),
+              unlimited: Boolean(credits.unlimited),
+              balance: credits.balance ?? null,
+            }
+          : undefined;
+        const positiveCredits =
+          mappedCredits !== undefined &&
+          (mappedCredits.unlimited ||
+            (typeof mappedCredits.balance === "string" &&
+              Number.isFinite(Number(mappedCredits.balance)) &&
+              Number(mappedCredits.balance) > 0));
+
+        // Empty bodies stay invalid; a useful Credits-only/reset-count-only
+        // payload is a real measurement even without a percent window.
+        if (Object.keys(windows).length === 0 && !positiveCredits && availableResetCount === null) {
           return { success: false, error: "No quota data" };
         }
 
@@ -418,16 +520,19 @@ export async function queryOpenAIQuota(
           label: derivePlanLabel(data.plan_type),
           email: resolvedAuth.email,
           windows,
-          credits: credits
-            ? {
-                hasCredits: Boolean(credits.has_credits),
-                unlimited: Boolean(credits.unlimited),
-                balance: credits.balance ?? null,
-              }
-            : undefined,
+          credits: mappedCredits,
+          ...(availableResetCount !== null
+            ? { bankedResets: { availableCount: availableResetCount, credits: [] } }
+            : {}),
         };
       },
     });
+
+    if (!result || !result.success || !result.bankedResets || !options.includeResetDetails) {
+      return result;
+    }
+    result.bankedResets.credits = await fetchOpenAIResetCredits(headers, options.requestTimeoutMs);
+    return result;
   } catch (err) {
     return {
       success: false,

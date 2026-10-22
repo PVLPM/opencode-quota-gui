@@ -103,6 +103,17 @@ export function sanitizeQuotaToastEntry(entry: QuotaToastEntry): QuotaToastEntry
 
   if (isValueEntry(sanitized)) {
     sanitized.value = sanitizeDisplayText(sanitized.value);
+    if (sanitized.bankedResets) {
+      sanitized.bankedResets = {
+        availableCount: sanitized.bankedResets.availableCount,
+        credits: sanitized.bankedResets.credits.map((credit) => ({
+          ...credit,
+          ...(credit.title !== undefined
+            ? { title: sanitizeSingleLineDisplayText(credit.title) }
+            : {}),
+        })),
+      };
+    }
   } else if (isQuantityEntry(sanitized)) {
     sanitized.quantity = sanitizeAccountingQuantity(sanitized.quantity);
   } else if (isPercentEntry(sanitized) && sanitized.basis) {

@@ -198,6 +198,8 @@ export async function resolveQuotaRenderSelection(params: {
   configMeta?: Pick<LoadConfigMeta, "settingSources">;
   providers?: QuotaProvider[];
   resolveRuntimeProviderIds?: RuntimeProviderIdResolver;
+  /** Dashboard-only OpenAI reset-detail visibility callback. */
+  openaiResetDetailsVisible?: (sourceId?: string) => boolean;
 }): Promise<QuotaRenderSelection | null> {
   const { client, config, request } = params;
   let currentModel: string | undefined;
@@ -214,6 +216,9 @@ export async function resolveQuotaRenderSelection(params: {
     resolveRuntimeProviderIds:
       params.resolveRuntimeProviderIds ?? createRuntimeProviderIdResolver(client),
     workspaceRoot: params.workspaceRoot,
+    ...(params.openaiResetDetailsVisible
+      ? { openaiResetDetailsVisible: params.openaiResetDetailsVisible }
+      : {}),
     session: {
       sessionMeta: {
         modelID: currentModel,
@@ -411,6 +416,8 @@ export async function collectQuotaDashboardProviderResults(params: {
   providers?: QuotaProvider[];
   bypassProviderCache?: boolean;
   resolveRuntimeProviderIds?: RuntimeProviderIdResolver;
+  /** Dashboard-only OpenAI reset-detail visibility callback. */
+  openaiResetDetailsVisible?: (sourceId?: string) => boolean;
 }): Promise<QuotaStatusLiveProbe[]> {
   const result = await collectQuotaRenderData({
     ...params,
@@ -526,6 +533,8 @@ export async function collectQuotaRenderData(params: {
    */
   includeDiscoveredProviders?: boolean;
   resolveRuntimeProviderIds?: RuntimeProviderIdResolver;
+  /** Dashboard-only OpenAI reset-detail visibility callback. */
+  openaiResetDetailsVisible?: (sourceId?: string) => boolean;
 }): Promise<CollectQuotaRenderDataResult> {
   const resolveRuntimeProviderIds =
     params.resolveRuntimeProviderIds ?? createRuntimeProviderIdResolver(params.client);

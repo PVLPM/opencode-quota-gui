@@ -87,6 +87,31 @@ function isOptionalIsoTimestamp(value: unknown): boolean {
   );
 }
 
+function isOptionalNullableIsoTimestamp(value: unknown): boolean {
+  return value === null || isOptionalIsoTimestamp(value);
+}
+
+function isBankedResetCredit(value: unknown, safeText: boolean): boolean {
+  if (!isRecord(value) || !hasOnlyKeys(value, ["title", "expiresAtIso"])) return false;
+  if (value.title !== undefined) {
+    if (typeof value.title !== "string") return false;
+    if (safeText && sanitizeSingleLineDisplayText(value.title) !== value.title) return false;
+  }
+  return isOptionalNullableIsoTimestamp(value.expiresAtIso);
+}
+
+function isBankedResetAvailability(value: unknown, safeText: boolean): boolean {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["availableCount", "credits"]) &&
+    typeof value.availableCount === "number" &&
+    Number.isInteger(value.availableCount) &&
+    value.availableCount >= 0 &&
+    isDenseArray(value.credits) &&
+    value.credits.every((credit) => isBankedResetCredit(credit, safeText))
+  );
+}
+
 function isAccountingMetadata(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
@@ -279,7 +304,11 @@ function isQuotaToastEntry(value: unknown, safeText: boolean): value is QuotaToa
   if (!isRecord(value) || !hasValidEntryBase(value, safeText)) return false;
 
   if (value.kind === "value") {
-    return hasOnlyKeys(value, [...COMMON_ENTRY_KEYS, "value"]) && typeof value.value === "string";
+    return (
+      hasOnlyKeys(value, [...COMMON_ENTRY_KEYS, "value", "bankedResets"]) &&
+      typeof value.value === "string" &&
+      (value.bankedResets === undefined || isBankedResetAvailability(value.bankedResets, safeText))
+    );
   }
   if (value.kind === "quantity") {
     return (
