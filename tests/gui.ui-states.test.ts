@@ -7,12 +7,14 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type {
   HomeSnapshot,
   ProjectSnapshot,
+  QuotaCardRow,
   SettingsSnapshot,
   SettingsWriteResult,
   Usage,
 } from "../src/contracts/dashboard";
 import { DASHBOARD_CONTRACT_VERSION } from "../src/contracts/dashboard";
 import { buildRowKey, composeRowId } from "../src/contracts/identity";
+import { OPENAI_CREDITS_INFO, OPENAI_RESETS_INFO } from "../src/contracts/openai-quota";
 import type { RangeKey } from "../src/contracts/ranges";
 import { buildSessionChartGeometry, buildUsageGeometry } from "../src/ui/chart-geometry";
 import type { Toaster } from "../src/ui/components/toast";
@@ -2209,6 +2211,378 @@ describe("settings page", () => {
   });
 });
 
+describe("OpenAI reset and credit rows", () => {
+  const resetsRowId = "openai#account#openai:resets" as never;
+  const creditsRowId = "openai#account#openai:credits" as never;
+
+  function optionalRow(overrides: Partial<QuotaCardRow> = {}): QuotaCardRow {
+    return {
+      rowId: resetsRowId,
+      label: "Resets",
+      kind: "value",
+      resultType: "quota",
+      value: "0 available",
+      ...overrides,
+    };
+  }
+
+  function creditsRow(overrides: Partial<QuotaCardRow> = {}): QuotaCardRow {
+    return {
+      rowId: creditsRowId,
+      label: "Credits",
+      kind: "value",
+      resultType: "balance",
+      value: "12.34",
+      ...overrides,
+    };
+  }
+
+  async function renderQuota(
+    rows: QuotaCardRow[],
+    hiddenRows: string[] = [],
+    timeZone = "UTC",
+  ): Promise<string> {
+    return renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({
+        providerId: "openai",
+        providerLabel: "OpenAI",
+        accountLabel: "Plus",
+        rows,
+      }),
+      preferences,
+      hiddenRows,
+      stale: false,
+      timeZone,
+    });
+  }
+
+  it("hides zero, negative, and OFF optional rows without hiding positive data", async () => {
+    const html = await renderQuota([
+      optionalRow({
+        bankedResets: { availableCount: 0, credits: [] },
+        value: "1 available",
+      }),
+      optionalRow({
+        rowId: "openai#account#openai:resets:second" as never,
+        bankedResets: { availableCount: 2, credits: [] },
+        value: "99 available",
+      }),
+      creditsRow({ value: "0" }),
+      creditsRow({ rowId: "openai#account#openai:credits:second" as never, value: "9.5" }),
+    ]);
+
+    expect(text(html)).toContain("2 available");
+    expect(text(html)).not.toContain("1 available");
+    expect(text(html)).not.toContain("99 available");
+    expect(html.match(/class="qg-reset__segment"/g)).toHaveLength(2);
+    expect(text(html)).toContain("9.5");
+    expect(text(html)).not.toContain("Credits 0");
+    expect(text(html)).not.toContain("$");
+  });
+
+  it("keeps Resets and Credits visibility independent", async () => {
+    const resets = optionalRow({
+      bankedResets: { availableCount: 3, credits: [] },
+      value: "3 available",
+    });
+    const credits = creditsRow({ value: "12.34" });
+
+    const creditsHidden = await renderQuota([resets, credits], [credits.rowId]);
+    expect(text(creditsHidden)).toContain("3 available");
+    expect(text(creditsHidden)).not.toContain("Credits");
+    expect(creditsHidden.match(/class="qg-reset__segment"/g)).toHaveLength(3);
+
+    const resetsHidden = await renderQuota([resets, credits], [resets.rowId]);
+    expect(text(resetsHidden)).toContain("Credits");
+    expect(text(resetsHidden)).toContain("12.34");
+    expect(resetsHidden).not.toContain('class="qg-reset__segment"');
+  });
+
+  it("renders only a finite positive balance or the exact Unlimited value", async () => {
+    const positive = await renderQuota([creditsRow({ value: "12.34" })]);
+    expect(text(positive)).toContain("Credits");
+    expect(text(positive)).toContain("12.34");
+    expect(positive.replace(/<!--.*?-->/g, "")).not.toContain("$");
+    expect(positive).not.toContain('class="qg-reset__segment"');
+
+    const unlimited = await renderQuota([creditsRow({ value: "Unlimited" })]);
+    expect(text(unlimited)).toContain("Credits");
+    expect(text(unlimited)).toContain("Unlimited");
+
+    for (const value of ["0", "0.00", "-1", "", "not-a-number", "Infinity"]) {
+      const hidden = await renderQuota([creditsRow({ value })]);
+      expect(text(hidden)).not.toContain("Credits");
+      expect(hidden.replace(/<!--.*?-->/g, "")).not.toContain("$");
+    }
+  });
+
+  it.each([1, 3, 20])("renders %i equal reset segments over one shared width", async (count) => {
+    const credits = Array.from({ length: count }, (_value, index) => ({
+      expiresAtIso: new Date(NOW + (index + 1) * DAY_MS).toISOString(),
+    }));
+    const html = await renderQuota([
+      optionalRow({
+        bankedResets: { availableCount: count, credits },
+        value: `${count} available`,
+      }),
+    ]);
+
+    expect(text(html)).toContain(`${count} available`);
+    expect(html).toContain(`--qg-reset-count:${count}`);
+    expect(html.match(/class="qg-reset__segment"/g)).toHaveLength(count);
+    expect(html).toContain('aria-label="Available reset expiries"');
+  });
+
+  it("orders nearest known expiry first and represents null and unknown honestly", async () => {
+    vi.useFakeTimers({ now: NOW });
+    try {
+      const nearest = new Date(NOW + 2 * DAY_MS + 4 * HOUR_MS + 18 * 60_000).toISOString();
+      const later = new Date(NOW + 8 * DAY_MS).toISOString();
+      const html = await renderQuota(
+        [
+          optionalRow({
+            bankedResets: {
+              availableCount: 5,
+              credits: [
+                { title: "Later", expiresAtIso: later },
+                { expiresAtIso: null },
+                { title: "Unknown detail" },
+                { title: "Nearest reset", expiresAtIso: nearest },
+              ],
+            },
+            value: "5 available",
+          }),
+        ],
+        [],
+        "America/New_York",
+      );
+
+      expect(text(html)).toContain("5 available");
+      expect(text(html)).toContain("Expires in 2d 4h 18m");
+      expect(html.match(/data-expiry="known"/g)).toHaveLength(2);
+      expect(html.match(/data-expiry="none"/g)).toHaveLength(1);
+      expect(html.match(/data-expiry="unknown"/g)).toHaveLength(2);
+      expect(html.match(/class="qg-reset__segment"/g)).toHaveLength(5);
+
+      const firstKnown = html.indexOf('data-expiry="known"');
+      const latestKnown = html.indexOf('data-expiry="known"', firstKnown + 1);
+      const noExpiry = html.indexOf('data-expiry="none"');
+      const unknown = html.indexOf('data-expiry="unknown"');
+      expect(firstKnown).toBeGreaterThan(-1);
+      expect(latestKnown).toBeGreaterThan(firstKnown);
+      expect(noExpiry).toBeGreaterThan(latestKnown);
+      expect(unknown).toBeGreaterThan(noExpiry);
+
+      expect(text(html)).toContain("Nearest reset");
+      expect(text(html)).toContain("20/10/2026, 12:18:00");
+      expect(text(html)).toContain("In 2d 4h 18m");
+      expect(text(html)).toContain("No expiry");
+      expect(text(html)).toContain("Expiry unknown");
+      expect(text(html)).toContain("Full reset");
+      expect(text(html)).not.toContain("In reset");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not fabricate a countdown for invalid or past details", async () => {
+    vi.useFakeTimers({ now: NOW });
+    try {
+      const html = await renderQuota([
+        optionalRow({
+          bankedResets: {
+            availableCount: 3,
+            credits: [
+              { title: "Invalid detail", expiresAtIso: "not-a-date" },
+              { title: "No expiry", expiresAtIso: null },
+              { title: "Past detail", expiresAtIso: new Date(NOW - HOUR_MS).toISOString() },
+            ],
+          },
+          value: "3 available",
+        }),
+      ]);
+
+      expect(html.match(/data-expiry="known"/g)).toHaveLength(1);
+      expect(html.match(/data-expiry="none"/g)).toHaveLength(1);
+      expect(html.match(/data-expiry="unknown"/g)).toHaveLength(1);
+      expect(text(html)).toContain("Nearest expiry has passed");
+      expect(text(html)).toContain("Expired");
+      expect(text(html)).toContain("No expiry");
+      expect(text(html)).toContain("Expiry unknown");
+      expect(text(html)).not.toContain("In reset");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("places optional-row info beside the label, before the row eye", async () => {
+    const snapshot = settingsSnapshot();
+    const html = await renderView("/views/settings.tsx", "SettingsView", {
+      snapshot,
+      client: {
+        settings: async () => snapshot,
+        saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+        saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+        importPreview: async () => ({ from: "w", keys: [], issues: [], expectedRevision: "r" }),
+        importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      },
+      toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
+      catalog: {
+        providers: [
+          {
+            providerId: "openai",
+            providerLabel: "OpenAI",
+            accountLabels: [],
+            cardIds: ["openai#account"],
+            rows: [
+              {
+                id: "openai#account#openai:resets",
+                label: "Resets",
+                info: OPENAI_RESETS_INFO,
+              },
+              {
+                id: "openai#account#openai:credits",
+                label: "Credits",
+                info: OPENAI_CREDITS_INFO,
+              },
+            ],
+          },
+        ],
+      },
+      onReload: noop,
+    });
+
+    expect(html.match(/class="qg-row__info"/g)).toHaveLength(2);
+    expect(text(html)).toContain("More information about Resets");
+    expect(text(html)).toContain("More information about Credits");
+    for (const label of ["Resets", "Credits"]) {
+      const labelAt = html.indexOf(`<span>${label}</span>`);
+      const infoAt = html.indexOf('class="qg-row__info"', labelAt);
+      const screenReaderAt = html.indexOf('class="sr-only"', labelAt);
+      const eyeAt = html.indexOf(`aria-label="Hide ${label}"`, labelAt);
+      expect(labelAt).toBeGreaterThan(-1);
+      expect(infoAt).toBeGreaterThan(labelAt);
+      expect(screenReaderAt).toBeGreaterThan(labelAt);
+      expect(infoAt).toBeLessThan(eyeAt);
+      expect(screenReaderAt).toBeLessThan(eyeAt);
+    }
+  });
+});
+
+describe("OpenAI optional semantics stay provider-scoped", () => {
+  async function renderProvider(
+    providerId: string,
+    providerLabel: string,
+    rows: QuotaCardRow[],
+    hiddenRows: string[] = [],
+  ): Promise<string> {
+    return renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard({ providerId, providerLabel, accountLabel: "Main account", rows }),
+      preferences,
+      hiddenRows,
+      stale: false,
+      timeZone: "UTC",
+    });
+  }
+
+  it("keeps Copilot percent and value Credits rows", async () => {
+    const html = await renderProvider("github-copilot", "GitHub Copilot", [
+      percentRow({ rowId: "copilot#credits-percent" as never, label: "Credits" }),
+      {
+        rowId: "copilot#credits-value" as never,
+        label: "Credits",
+        kind: "value",
+        resultType: "balance",
+        value: "Used 12 | Included 10",
+      },
+    ]);
+
+    expect(text(html)).toContain("Credits");
+    expect(html).toContain("qg-row__bar");
+    expect(text(html)).toContain("Used 12 | Included 10");
+  });
+
+  it("keeps Kilo Credits percent rows", async () => {
+    const html = await renderProvider("kilo", "Kilo", [
+      percentRow({
+        rowId: "kilo#credits" as never,
+        label: "Credits",
+        percentRemaining: 42,
+        percentUsed: 58,
+      }),
+    ]);
+
+    expect(text(html)).toContain("Credits");
+    expect(html).toContain("qg-row__bar");
+    expect(text(html)).toContain("42% remaining");
+  });
+
+  it("keeps custom-provider Credits and Resets labels", async () => {
+    const html = await renderProvider("custom-provider", "Custom Provider", [
+      {
+        rowId: "custom#credits" as never,
+        label: "Credits",
+        kind: "value",
+        resultType: "quota",
+        value: "custom credits",
+      },
+      {
+        rowId: "custom#resets" as never,
+        label: "Resets",
+        kind: "value",
+        resultType: "quota",
+        value: "custom resets",
+      },
+    ]);
+
+    expect(text(html)).toContain("Credits");
+    expect(text(html)).toContain("custom credits");
+    expect(text(html)).toContain("Resets");
+    expect(text(html)).toContain("custom resets");
+    expect(html).not.toContain('class="qg-reset__segment"');
+  });
+
+  it("uses OpenAI balance/banked-reset semantics instead of display labels", async () => {
+    const html = await renderProvider("openai", "OpenAI", [
+      {
+        rowId: "openai#balance-zero" as never,
+        label: "Zero balance row",
+        kind: "value",
+        resultType: "balance",
+        value: "0",
+      },
+      percentRow({
+        rowId: "openai#balance-percent" as never,
+        label: "Balance reserve",
+        resultType: "balance",
+      }),
+      {
+        rowId: "openai#credits-renamed" as never,
+        label: "Available credit",
+        kind: "value",
+        resultType: "balance",
+        value: "12.34",
+      },
+      {
+        rowId: "openai#refills" as never,
+        label: "Quota refills",
+        kind: "value",
+        resultType: "quota",
+        bankedResets: { availableCount: 2, credits: [] },
+      },
+    ]);
+
+    expect(text(html)).not.toContain("Balance reserve");
+    expect(text(html)).not.toContain("Zero balance row");
+    expect(text(html)).toContain("Available credit");
+    expect(text(html)).toContain("12.34");
+    expect(text(html)).toContain("Quota refills");
+    expect(text(html)).toContain("2 available");
+    expect(html).toContain('class="qg-reset__segment"');
+    expect(html).not.toContain("qg-row__bar");
+  });
+});
+
 describe("cached visibility catalog", () => {
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -2219,6 +2593,104 @@ describe("cached visibility catalog", () => {
     }
     throw new Error(`probe: ${what} never happened`);
   }
+
+  it("keeps absent OpenAI optional rows account-scoped in Settings", async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+    };
+    const browser = historyBrowser("/settings", storage);
+    vi.stubGlobal("window", browser);
+    const snapshot = settingsSnapshot();
+    const cards = ["Plus", "Team"].map((account, index) =>
+      providerCard({
+        cardId: `openai#account-${index}` as never,
+        providerId: "openai",
+        providerLabel: "OpenAI",
+        accountLabel: account,
+        labelSource: "connection",
+        rows: [],
+        visibilityRows: [
+          {
+            rowId: `openai#account-${index}#openai:resets` as never,
+            label: "Resets",
+            info: OPENAI_RESETS_INFO,
+          },
+          {
+            rowId: `openai#account-${index}#openai:credits` as never,
+            label: "Credits",
+            info: OPENAI_CREDITS_INFO,
+          },
+        ],
+      }),
+    );
+    const client: DashboardClient = {
+      setActiveView: async () => {},
+      connection: () => "live",
+      onConnectionChange: () => () => {},
+      subscribe: () => () => {},
+      health: async () => ({ app: "opencode-quota-gui", contractVersion: 2 }),
+      quota: async () =>
+        homeSnapshot({
+          providers: { cards, enabledProviders: "auto", polledAtMs: NOW },
+        }),
+      home: async () => homeSnapshot(),
+      project: async () => projectSnapshot(),
+      session: async () => sessionSnapshot(),
+      settings: async () => snapshot,
+      saveSettings: async (input) => ({
+        revision: snapshot.revision,
+        applied: input.patch,
+        warnings: [],
+      }),
+      saveVisibility: async () => ({ revision: snapshot.revision, applied: {}, warnings: [] }),
+      importPreview: async () => ({
+        from: "workspace: synthetic",
+        keys: [],
+        issues: [],
+        expectedRevision: snapshot.revision,
+      }),
+      importApply: async () => ({ revision: snapshot.revision, applied: {}, warnings: [] }),
+    };
+
+    const root = renderGraph.createTestRoot();
+    const dispose = renderGraph.mount(() => renderGraph.app({ client }), root);
+    const buttonByLabel = (label: string): TestNode | undefined =>
+      renderGraph.elementsNamed(root, "button").find((node) => node.props["aria-label"] === label);
+    try {
+      await until(
+        () => buttonByLabel("Hide Resets · Plus") !== undefined,
+        "the account-scoped Resets eye",
+      );
+      expect(buttonByLabel("Hide Resets · Team")).toBeDefined();
+      expect(buttonByLabel("Hide Credits · Plus")).toBeDefined();
+      expect(buttonByLabel("Hide Credits · Team")).toBeDefined();
+      expect(renderGraph.textOf(root)).toContain("More information about Resets");
+      expect(
+        renderGraph
+          .elementsNamed(root, "span")
+          .filter((node) => node.props.class === "qg-row__info"),
+      ).toHaveLength(4);
+      expect(renderGraph.textOf(root)).not.toContain("openai:resets");
+      expect(renderGraph.textOf(root)).not.toContain("openai:credits");
+
+      browser.follow("/quota");
+      await settle();
+      browser.follow("/settings");
+      await settle();
+      await until(
+        () => buttonByLabel("Hide Resets · Plus") !== undefined,
+        "the cached Resets eyes after navigation",
+      );
+      expect(buttonByLabel("Hide Credits · Team")).toBeDefined();
+    } finally {
+      dispose();
+      vi.unstubAllGlobals();
+    }
+  });
 
   it("keeps a hidden provider configurable across filtered quota cycles, navigation and reload", async () => {
     const values = new Map<string, string>();

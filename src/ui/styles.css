@@ -1808,6 +1808,85 @@ body {
   font-size: 11px;
   text-align: right;
 }
+/* OpenAI reset availability: equal segments share one fixed row width. */
+.qg-row--resets {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+.qg-reset__count {
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.qg-reset__summary {
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.qg-reset__segments {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(var(--qg-reset-count), minmax(0, 1fr));
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  height: 8px;
+  margin: 2px 0 0;
+  padding: 0;
+  border: 0;
+}
+.qg-reset__tip {
+  display: block;
+  min-width: 0;
+  height: 8px;
+  border-radius: 2px;
+  cursor: help;
+}
+.qg-reset__tip:focus-visible {
+  outline: 2px solid #a5b8d6;
+  outline-offset: 2px;
+}
+.qg-reset__segment {
+  display: block;
+  width: 100%;
+  height: 8px;
+  border-radius: 2px;
+  background: #72d78c;
+  transition: background var(--qg-transition);
+}
+.qg-reset__tip:hover .qg-reset__segment,
+.qg-reset__tip:focus-visible .qg-reset__segment {
+  background: #8be0a1;
+}
+.qg-reset__tooltip {
+  max-width: 260px;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  text-wrap: pretty;
+}
+.qg-reset__tooltip-body {
+  display: grid;
+  gap: 2px;
+}
+.qg-reset__tooltip-title {
+  color: var(--qg-text);
+  font-weight: var(--font-weight-medium);
+}
+@media (max-width: 420px) {
+  .qg-row--resets {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .qg-reset__summary {
+    grid-column: 1;
+    justify-self: start;
+    text-align: left;
+  }
+}
 .qg-row:not([data-kind="percent"]) .qg-row__value {
   color: var(--qg-text);
   background: transparent;

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { OPENAI_CREDITS_INFO, OPENAI_RESETS_INFO } from "../src/contracts/openai-quota";
 import {
   mergeVisibilityCatalog,
   readVisibilityCatalog,
@@ -261,6 +262,98 @@ describe("visibility catalog cache", () => {
     expect(readVisibilityCatalog(storage)).toEqual({ providers: [first] });
   });
 
+  it("round-trips optional row help, including the exact OpenAI copy", () => {
+    const storage = memoryStorage();
+    const catalog: VisibilityCatalog = {
+      providers: [
+        provider({
+          rows: [
+            { id: "openai#account#openai:resets", label: "Resets", info: OPENAI_RESETS_INFO },
+            { id: "openai#account#openai:credits", label: "Credits", info: OPENAI_CREDITS_INFO },
+            { id: "bounded-row", label: "Bounded", info: "I".repeat(400) },
+          ],
+        }),
+      ],
+    };
+
+    writeVisibilityCatalog(storage, catalog);
+    const read = readVisibilityCatalog(storage);
+    expect(read.providers[0]?.rows[0]?.info).toBe(OPENAI_RESETS_INFO);
+    expect(read.providers[0]?.rows[1]?.info).toBe(OPENAI_CREDITS_INFO);
+    expect(read.providers[0]?.rows[2]?.info).toHaveLength(VISIBILITY_CATALOG_LIMITS.textLength);
+  });
+
+  it("retains optional-row help when runtime metadata briefly lacks it", () => {
+    const merged = mergeVisibilityCatalog(
+      {
+        providers: [
+          provider({
+            rows: [
+              { id: "openai#account#openai:resets", label: "Resets" },
+              { id: "openai#account#openai:credits", label: "Credits", info: OPENAI_CREDITS_INFO },
+            ],
+          }),
+        ],
+      },
+      {
+        providers: [
+          provider({
+            rows: [
+              {
+                id: "openai#account#openai:resets",
+                label: "Resets",
+                info: OPENAI_RESETS_INFO,
+              },
+              {
+                id: "openai#account#openai:credits",
+                label: "Credits",
+                info: OPENAI_CREDITS_INFO,
+              },
+            ],
+          }),
+        ],
+      },
+    );
+
+    expect(merged.providers[0]?.rows).toEqual([
+      { id: "openai#account#openai:resets", label: "Resets", info: OPENAI_RESETS_INFO },
+      {
+        id: "openai#account#openai:credits",
+        label: "Credits",
+        info: OPENAI_CREDITS_INFO,
+      },
+    ]);
+  });
+
+  it("keeps cached optional rows with their exact help when today's runtime has none", () => {
+    const merged = mergeVisibilityCatalog(
+      { providers: [provider({ rows: [] })] },
+      {
+        providers: [
+          provider({
+            rows: [
+              {
+                id: "openai#account#openai:resets",
+                label: "Resets",
+                info: OPENAI_RESETS_INFO,
+              },
+              {
+                id: "openai#account#openai:credits",
+                label: "Credits",
+                info: OPENAI_CREDITS_INFO,
+              },
+            ],
+          }),
+        ],
+      },
+    );
+
+    expect(merged.providers[0]?.rows).toEqual([
+      { id: "openai#account#openai:resets", label: "Resets", info: OPENAI_RESETS_INFO },
+      { id: "openai#account#openai:credits", label: "Credits", info: OPENAI_CREDITS_INFO },
+    ]);
+  });
+
   it("compares catalogs structurally so only real changes are persisted", () => {
     const catalog: VisibilityCatalog = { providers: [provider()] };
     const same = JSON.parse(JSON.stringify(catalog)) as VisibilityCatalog;
@@ -274,6 +367,16 @@ describe("visibility catalog cache", () => {
       visibilityCatalogEquals(catalog, {
         providers: [provider({ rows: [{ id: "other", label: "Other" }] })],
       }),
+    ).toBe(false);
+    expect(
+      visibilityCatalogEquals(
+        { providers: [provider({ rows: [{ id: "row", label: "Resets" }] })] },
+        {
+          providers: [
+            provider({ rows: [{ id: "row", label: "Resets", info: OPENAI_RESETS_INFO }] }),
+          ],
+        },
+      ),
     ).toBe(false);
   });
 

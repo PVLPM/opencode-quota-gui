@@ -1,8 +1,10 @@
 import type { JSX } from "solid-js";
-import { For, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import type { AccountingUnit, ProviderCard, QuotaCardRow } from "../../contracts/dashboard";
-import { formatPercent, formatRunway } from "../format";
+import type { BankedResetAvailability, BankedResetCredit } from "../../contracts/openai-quota";
+import { formatPercent, formatRunway, formatTimestamp } from "../format";
 import { Icon, Tooltip } from "../opencode-ui";
+import { formatResetCountdown } from "../reset-format";
 import { visibleRows } from "../view-model";
 
 /**
@@ -155,6 +157,196 @@ export function inlineAccountLabel(provider: string, account: string): string {
   return account;
 }
 
+type ResetSegmentKind = "known" | "none" | "unknown";
+
+interface ResetSegment {
+  kind: ResetSegmentKind;
+  title?: string;
+  expiresAtIso?: string;
+  expiresAtMs?: number;
+}
+
+function resetTitle(segment: ResetSegment): string {
+  return segment.title ?? "Full reset";
+}
+
+function resetExpiryLine(segment: ResetSegment, timeZone: string): string {
+  if (segment.kind === "known" && segment.expiresAtMs !== undefined) {
+    return `Expires ${formatTimestamp(segment.expiresAtMs, timeZone)}`;
+  }
+  return segment.kind === "none" ? "No expiry" : "Expiry unknown";
+}
+
+function resetRelativeLine(segment: ResetSegment): string | undefined {
+  if (segment.kind !== "known" || segment.expiresAtIso === undefined) return undefined;
+  const countdown = formatResetCountdown(segment.expiresAtIso);
+  if (countdown === "reset") return "Expired";
+  return countdown.length > 0 ? `In ${countdown}` : undefined;
+}
+
+function resetSummary(segments: readonly ResetSegment[]): string {
+  const nearest = segments.find((segment) => segment.kind === "known");
+  if (nearest) {
+    const countdown =
+      nearest.expiresAtIso === undefined ? "" : formatResetCountdown(nearest.expiresAtIso);
+    if (countdown === "reset") return "Nearest expiry has passed";
+    if (countdown.length > 0) return `Expires in ${countdown}`;
+  }
+  return segments.some((segment) => segment.kind === "unknown") ? "Expiry unknown" : "No expiry";
+}
+
+function resetAriaLabel(
+  segment: ResetSegment,
+  index: number,
+  total: number,
+  timeZone: string,
+): string {
+  const relative = resetRelativeLine(segment);
+  return [
+    `Reset ${index + 1} of ${total}`,
+    resetTitle(segment),
+    resetExpiryLine(segment, timeZone),
+    ...(relative === undefined ? [] : [relative]),
+  ].join(". ");
+}
+
+function segmentForCredit(credit: BankedResetCredit): ResetSegment {
+  const title = credit.title?.trim();
+  const base = title === undefined || title.length === 0 ? {} : { title };
+  if (credit.expiresAtIso === null) return { kind: "none", ...base };
+  if (credit.expiresAtIso === undefined) return { kind: "unknown", ...base };
+  const expiresAtMs = Date.parse(credit.expiresAtIso);
+  return Number.isFinite(expiresAtMs)
+    ? { kind: "known", expiresAtIso: credit.expiresAtIso, expiresAtMs, ...base }
+    : { kind: "unknown", ...base };
+}
+
+/**
+ * The count is authoritative; detail records only supply expiry metadata. Known
+ * expiries lead nearest-first, explicit no-expiry records follow, and missing or
+ * invalid detail stays unknown rather than becoming an invented countdown.
+ */
+function resetSegments(availability: BankedResetAvailability | undefined): ResetSegment[] {
+  const count = availability?.availableCount;
+  if (typeof count !== "number" || !Number.isFinite(count) || count <= 0) return [];
+  const total = Math.floor(count);
+  const credits = Array.isArray(availability?.credits) ? availability.credits : [];
+  const classified = credits.map(segmentForCredit);
+  const known = classified
+    .filter((segment) => segment.kind === "known")
+    .sort((left, right) => (left.expiresAtMs ?? 0) - (right.expiresAtMs ?? 0));
+  const none = classified.filter((segment) => segment.kind === "none");
+  const unknown = classified.filter((segment) => segment.kind === "unknown");
+  const supplied = [...known, ...none, ...unknown].slice(0, total);
+  const placeholders = Array.from(
+    { length: Math.max(0, total - supplied.length) },
+    (): ResetSegment => ({ kind: "unknown" }),
+  );
+  return [...supplied, ...placeholders];
+}
+
+function isOpenAiProvider(providerId: string): boolean {
+  return providerId === "openai";
+}
+
+/**
+ * OpenAI reset rows carry explicit banked-reset metadata; a display label is
+ * never an identity. Other providers may use the same wording for normal rows.
+ */
+function isOpenAiResetsRow(row: QuotaCardRow): boolean {
+  return row.bankedResets !== undefined;
+}
+
+/**
+ * The backend's balance result type is the stable OpenAI credit identity. A
+ * malformed balance row with a percent/quantity shape is still credits, so it
+ * is suppressed rather than drawing unrelated graphics.
+ */
+function isOpenAiCreditsRow(row: QuotaCardRow): boolean {
+  return row.resultType === "balance";
+}
+
+function hasPositiveCreditsValue(value: string | undefined): boolean {
+  if (value === "Unlimited") return true;
+  if (value === undefined) return false;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0;
+}
+
+function isSuppressedOptionalRow(row: QuotaCardRow, providerId: string): boolean {
+  if (!isOpenAiProvider(providerId)) return false;
+  if (isOpenAiResetsRow(row)) return resetSegments(row.bankedResets).length === 0;
+  if (isOpenAiCreditsRow(row)) return row.kind !== "value" || !hasPositiveCreditsValue(row.value);
+  return false;
+}
+
+function RowInfo(props: { label: string; info: string }): JSX.Element {
+  return (
+    <Tooltip
+      value={props.info}
+      triggerTabIndex={0}
+      appearance="large"
+      contentClass="qg-row__tooltip"
+    >
+      <span class="sr-only">More information about {props.label}</span>
+      <span class="qg-row__info" aria-hidden="true">
+        <Icon name="info" size="small" />
+      </span>
+    </Tooltip>
+  );
+}
+
+function ResetSegmentTooltip(props: { segment: ResetSegment; timeZone: string }): JSX.Element {
+  const relative = () => resetRelativeLine(props.segment);
+  return (
+    <span class="qg-reset__tooltip-body">
+      <span class="qg-reset__tooltip-title">{resetTitle(props.segment)}</span>
+      <span>{resetExpiryLine(props.segment, props.timeZone)}</span>
+      <Show when={relative()}>{(line) => <span>{line()}</span>}</Show>
+    </span>
+  );
+}
+
+function ResetRow(props: { row: QuotaCardRow; timeZone: string }): JSX.Element {
+  const segments = createMemo(() => resetSegments(props.row.bankedResets));
+  const summary = createMemo(() => resetSummary(segments()));
+  return (
+    <div class="qg-row qg-row--resets" data-kind="value">
+      <span class="qg-row__labelgroup">
+        <span class="qg-row__label">{props.row.label}</span>
+        <Show when={props.row.info}>
+          {(info) => <RowInfo label={props.row.label} info={info()} />}
+        </Show>
+        <span class="qg-reset__count">{segments().length} available</span>
+      </span>
+      <span class="qg-reset__summary">{summary()}</span>
+      <fieldset
+        class="qg-reset__segments"
+        aria-label="Available reset expiries"
+        data-count={segments().length}
+        style={{ "--qg-reset-count": segments().length }}
+      >
+        <For each={segments()}>
+          {(segment, index) => (
+            <Tooltip
+              class="qg-reset__tip"
+              value={<ResetSegmentTooltip segment={segment} timeZone={props.timeZone} />}
+              triggerTabIndex={0}
+              appearance="large"
+              contentClass="qg-reset__tooltip"
+            >
+              <span class="sr-only">
+                {resetAriaLabel(segment, index(), segments().length, props.timeZone)}
+              </span>
+              <span class="qg-reset__segment" data-expiry={segment.kind} aria-hidden="true" />
+            </Tooltip>
+          )}
+        </For>
+      </fieldset>
+    </div>
+  );
+}
+
 export function QuotaCardView(props: {
   card: ProviderCard;
   preferences: DisplayPreferences;
@@ -166,6 +358,8 @@ export function QuotaCardView(props: {
    * Visibility is presentation-only and managed in Settings, never on Home.
    */
   const shownRows = () => visibleRows(props.card.rows, props.hiddenRows);
+  const displayRows = () =>
+    shownRows().filter((row) => !isSuppressedOptionalRow(row, props.card.providerId));
 
   return (
     <article class="qg-card" data-error={props.card.errors.length > 0 ? "true" : undefined}>
@@ -199,7 +393,7 @@ export function QuotaCardView(props: {
       </Show>
 
       <Show
-        when={shownRows().length > 0}
+        when={displayRows().length > 0}
         fallback={
           <>
             <Show when={props.card.rows.length === 0}>
@@ -207,88 +401,85 @@ export function QuotaCardView(props: {
                 <p class="qg-muted">No quota rows are reported for this account.</p>
               </Show>
             </Show>
-            <Show when={props.card.rows.length > 0}>
+            <Show when={props.card.rows.length > 0 && shownRows().length === 0}>
               <p class="qg-muted">
                 Every row on this card is hidden — clear them in Settings → Visibility.
               </p>
+            </Show>
+            <Show when={props.card.rows.length > 0 && shownRows().length > 0}>
+              <Show when={props.card.errors.length === 0}>
+                <p class="qg-muted">No quota rows are reported for this account.</p>
+              </Show>
             </Show>
           </>
         }
       >
         <div class="qg-card__rows">
-          <For each={shownRows()}>
-            {(row) => (
-              <div
-                class="qg-row"
-                data-kind={row.kind}
-                data-severity={
-                  row.kind === "percent" ? quotaSeverity(quotaUsedPercent(row)) : undefined
-                }
-              >
-                <span class="qg-row__labelgroup">
-                  <span class="qg-row__label">{row.label}</span>
-                  <Show when={row.info}>
-                    {(info) => (
-                      <Tooltip
-                        value={info()}
-                        triggerTabIndex={0}
-                        appearance="large"
-                        contentClass="qg-row__tooltip"
-                      >
-                        <span class="sr-only">More information about {row.label}</span>
-                        <span class="qg-row__info" aria-hidden="true">
-                          <Icon name="info" size="small" />
-                        </span>
-                      </Tooltip>
-                    )}
-                  </Show>
-                </span>
-                <span class="qg-row__value">{rowValueText(row, props.preferences)}</span>
-                <Show when={row.countdown}>
-                  <span class="qg-row__reset">Resets in {row.countdown}</span>
-                </Show>
-                <Show when={rowPercent(row, props.preferences) !== undefined}>
-                  <QuotaBar
-                    label={row.label}
-                    displayPercent={rowPercent(row, props.preferences) ?? 0}
-                    displayMode={props.preferences.percentMode}
-                  />
-                </Show>
-                <Show
-                  when={
-                    props.preferences.showRunway
-                      ? formatRunway(row.runway, props.timeZone)
-                      : undefined
+          <For each={displayRows()}>
+            {(row) =>
+              isOpenAiProvider(props.card.providerId) && isOpenAiResetsRow(row) ? (
+                <ResetRow row={row} timeZone={props.timeZone} />
+              ) : (
+                <div
+                  class="qg-row"
+                  data-kind={row.kind}
+                  data-severity={
+                    row.kind === "percent" ? quotaSeverity(quotaUsedPercent(row)) : undefined
                   }
                 >
-                  <span class="qg-row__meta">
-                    <Show
-                      when={
-                        props.preferences.showRunway
-                          ? formatRunway(row.runway, props.timeZone)
-                          : undefined
-                      }
-                    >
-                      {(runway) => <span>{runway()}</span>}
+                  <span class="qg-row__labelgroup">
+                    <span class="qg-row__label">{row.label}</span>
+                    <Show when={row.info}>
+                      {(info) => <RowInfo label={row.label} info={info()} />}
                     </Show>
                   </span>
-                </Show>
-                <Show when={props.preferences.detailed && (row.detailRows?.length ?? 0) > 0}>
-                  <table class="qg-detail-rows">
-                    <tbody>
-                      <For each={row.detailRows ?? []}>
-                        {(detail) => (
-                          <tr>
-                            <th scope="row">{detail.label}</th>
-                            <td>{detail.value}</td>
-                          </tr>
-                        )}
-                      </For>
-                    </tbody>
-                  </table>
-                </Show>
-              </div>
-            )}
+                  <span class="qg-row__value">{rowValueText(row, props.preferences)}</span>
+                  <Show when={row.countdown}>
+                    <span class="qg-row__reset">Resets in {row.countdown}</span>
+                  </Show>
+                  <Show when={rowPercent(row, props.preferences) !== undefined}>
+                    <QuotaBar
+                      label={row.label}
+                      displayPercent={rowPercent(row, props.preferences) ?? 0}
+                      displayMode={props.preferences.percentMode}
+                    />
+                  </Show>
+                  <Show
+                    when={
+                      props.preferences.showRunway
+                        ? formatRunway(row.runway, props.timeZone)
+                        : undefined
+                    }
+                  >
+                    <span class="qg-row__meta">
+                      <Show
+                        when={
+                          props.preferences.showRunway
+                            ? formatRunway(row.runway, props.timeZone)
+                            : undefined
+                        }
+                      >
+                        {(runway) => <span>{runway()}</span>}
+                      </Show>
+                    </span>
+                  </Show>
+                  <Show when={props.preferences.detailed && (row.detailRows?.length ?? 0) > 0}>
+                    <table class="qg-detail-rows">
+                      <tbody>
+                        <For each={row.detailRows ?? []}>
+                          {(detail) => (
+                            <tr>
+                              <th scope="row">{detail.label}</th>
+                              <td>{detail.value}</td>
+                            </tr>
+                          )}
+                        </For>
+                      </tbody>
+                    </table>
+                  </Show>
+                </div>
+              )
+            }
           </For>
         </div>
       </Show>

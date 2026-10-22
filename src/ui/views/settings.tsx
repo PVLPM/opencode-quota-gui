@@ -11,7 +11,15 @@ import { EyeToggle } from "../components/eye-toggle";
 import { GripDotsIcon } from "../components/icons";
 import type { Toaster } from "../components/toast";
 import { DashboardError } from "../dashboard-client";
-import { Button, SegmentedControl, SegmentedControlItem, Switch, TextInput } from "../opencode-ui";
+import {
+  Button,
+  Icon,
+  SegmentedControl,
+  SegmentedControlItem,
+  Switch,
+  TextInput,
+  Tooltip,
+} from "../opencode-ui";
 import {
   applyConflict,
   applyWriteResult,
@@ -439,7 +447,26 @@ export function SettingsView(props: {
                         return (
                           <div class="qg-vis-row">
                             <span class="qg-vis-row__label">
-                              {row.label}
+                              <span class="qg-row__labelgroup">
+                                <span>{row.label}</span>
+                                <Show when={row.info}>
+                                  {(info) => (
+                                    <Tooltip
+                                      value={info()}
+                                      triggerTabIndex={0}
+                                      appearance="large"
+                                      contentClass="qg-row__tooltip"
+                                    >
+                                      <span class="sr-only">
+                                        More information about {rowName()}
+                                      </span>
+                                      <span class="qg-row__info" aria-hidden="true">
+                                        <Icon name="info" size="small" />
+                                      </span>
+                                    </Tooltip>
+                                  )}
+                                </Show>
+                              </span>
                               <Show when={rowAccount()}>
                                 {(account) => (
                                   <span class="qg-vis-row__account"> · {account()}</span>

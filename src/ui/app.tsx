@@ -189,10 +189,21 @@ function catalogFromSnapshot(snapshot: QuotaSnapshot | undefined): VisibilityCat
     if (account !== undefined && !provider.accountLabels.includes(account)) {
       provider.accountLabels.push(account);
     }
-    for (const row of card.rows) {
-      if (provider.rows.some((existing) => existing.id === row.rowId)) continue;
-      provider.rows.push({ id: row.rowId, label: row.label, accountLabel: account });
-    }
+    const addRow = (id: string, label: string, info?: string): void => {
+      const existing = provider.rows.find((row) => row.id === id);
+      if (existing) {
+        if (existing.info === undefined && info !== undefined) existing.info = info;
+        return;
+      }
+      provider.rows.push({
+        id,
+        label,
+        ...(info === undefined ? {} : { info }),
+        ...(account === undefined ? {} : { accountLabel: account }),
+      });
+    };
+    for (const row of card.rows) addRow(row.rowId, row.label, row.info);
+    for (const row of card.visibilityRows ?? []) addRow(row.rowId, row.label, row.info);
   }
   return { providers: [...providers.values()] };
 }

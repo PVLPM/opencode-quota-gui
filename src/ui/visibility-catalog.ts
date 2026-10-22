@@ -16,6 +16,8 @@
 export interface VisibilityRow {
   id: string;
   label: string;
+  /** Optional short help text shown next to the label. */
+  info?: string;
   accountLabel?: string;
 }
 
@@ -98,7 +100,13 @@ function sanitizeRow(value: unknown, budget: Budget): VisibilityRow | undefined 
   if (id === undefined || label === undefined) return undefined;
   budget.remaining -= 1;
   const accountLabel = boundedAccountLabel(value.accountLabel);
-  return accountLabel === undefined ? { id, label } : { id, label, accountLabel };
+  const info = boundedText(value.info);
+  return {
+    id,
+    label,
+    ...(info === undefined ? {} : { info }),
+    ...(accountLabel === undefined ? {} : { accountLabel }),
+  };
 }
 
 function sanitizeProvider(
@@ -211,6 +219,7 @@ function sameRows(left: readonly VisibilityRow[], right: readonly VisibilityRow[
         other !== undefined &&
         row.id === other.id &&
         row.label === other.label &&
+        row.info === other.info &&
         row.accountLabel === other.accountLabel
       );
     })
@@ -248,8 +257,15 @@ function mergeRows(
   const cachedById = new Map(cached.map((row) => [row.id, row]));
   const rows = current.map((row) => {
     const cachedRow = cachedById.get(row.id);
-    if (row.accountLabel !== undefined || cachedRow?.accountLabel === undefined) return row;
-    return { id: row.id, label: row.label, accountLabel: cachedRow.accountLabel };
+    const info = row.info ?? cachedRow?.info;
+    const accountLabel = row.accountLabel ?? cachedRow?.accountLabel;
+    if (info === row.info && accountLabel === row.accountLabel) return row;
+    return {
+      id: row.id,
+      label: row.label,
+      ...(info === undefined ? {} : { info }),
+      ...(accountLabel === undefined ? {} : { accountLabel }),
+    };
   });
   const seen = new Set(current.map((row) => row.id));
   for (const row of cached) {
