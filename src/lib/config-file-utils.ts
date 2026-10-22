@@ -241,7 +241,11 @@ export async function isVerifiedQuotaPluginSpec(spec: string, configDir: string)
   }
   const normalized = path.replace(/\\/g, "/");
   if (/\/dist\//.test(normalized) && !normalized.endsWith("/dist/index.js")) return false;
-  const packageDir = normalized.endsWith("/dist/index.js") ? dirname(dirname(path)) : path;
+  const packageDir = normalized.endsWith("/dist/index.js")
+    ? dirname(dirname(path))
+    : normalized.endsWith("/server.ts")
+      ? dirname(path)
+      : path;
   try {
     const manifest: unknown = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
     return (

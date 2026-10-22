@@ -234,7 +234,23 @@ describe("buildUsageGeometry cache overlay", () => {
     expect(geometry.cacheRatePoints.map((point) => point.bucketIndex)).toEqual([0, 2]);
     expect(geometry.cacheRatePoints.map((point) => point.value)).toEqual([0, 50]);
     expect(geometry.cacheRatePath.match(/M /g)).toHaveLength(2);
-    expect(geometry.cacheRatePath.match(/L /g)).toBeNull();
+    expect(geometry.cacheRatePath.match(/L /g)).toHaveLength(2);
+    expect(geometry.cacheRatePath.match(/M ([-\d.]+) ([-\d.]+) L \1 \2/g)).toHaveLength(2);
+  });
+
+  it("keeps a contiguous monotone curve and paints an isolated rate without bridging the gap", () => {
+    const geometry = buildUsageGeometry([
+      bucketOf({ input: 90, cacheRead: 10 }),
+      bucketOf({ input: 10, cacheRead: 90 }),
+      bucketOf(),
+      bucketOf({ input: 20, cacheRead: 10 }),
+    ]);
+    expect(geometry.cacheRatePoints.map((point) => point.bucketIndex)).toEqual([0, 1, 3]);
+    expect(geometry.cacheRatePoints[2]?.value).toBeCloseTo(100 / 3, 10);
+    expect(geometry.cacheRatePath).toContain(" C ");
+    expect(geometry.cacheRatePath.match(/M /g)).toHaveLength(2);
+    expect(geometry.cacheRatePath.match(/L /g)).toHaveLength(1);
+    expect(geometry.cacheRatePath.match(/M ([-\d.]+) ([-\d.]+) L \1 \2/g)).toHaveLength(1);
   });
 
   it("draws one fixed 0/25/50/75/100 tick scale with monotone pixel y", () => {

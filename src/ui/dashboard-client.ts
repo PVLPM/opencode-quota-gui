@@ -568,6 +568,10 @@ function readSessionNode(value: JsonValue, endpoint: string): SessionNode {
   };
   const worktreeLabel = readOptionalText(node.worktreeLabel, endpoint, `${detail}.worktreeLabel`);
   if (worktreeLabel !== undefined) parsed.worktreeLabel = worktreeLabel;
+  const agent = readOptionalText(node.agent, endpoint, `${detail}.agent`);
+  if (agent !== undefined) parsed.agent = agent;
+  const parentId = readOptionalText(node.parentId, endpoint, `${detail}.parentId`);
+  if (parentId !== undefined) parsed.parentId = parentId;
   return parsed;
 }
 

@@ -71,6 +71,46 @@ afterEach(() => {
 });
 
 describe("GUI update identity safety", () => {
+  it.each([
+    "./checkout/server.ts",
+    "file:./checkout/server.ts",
+  ])("replaces verified root entry %s with a single desired entry and preserves lookalikes", async (old) => {
+    const f = fixture();
+    const config = join(f.project, "opencode.jsonc");
+    write(join(f.project, "checkout", "package.json"), '{"name":"opencode-quota-gui"}');
+    write(join(f.project, "checkout", "server.ts"), "export {};");
+    write(join(f.project, "wrong", "package.json"), '{"name":"other-plugin"}');
+    write(join(f.project, "wrong", "server.ts"), "export {};");
+    write(join(f.project, "missing", "server.ts"), "export {};");
+    write(join(f.project, "checkout", "other.ts"), "export {};");
+    const unrelated = [
+      "./wrong/server.ts",
+      "./missing/server.ts",
+      "./checkout/other.ts",
+      "file:./opencode-quota-gui-unknown.tgz",
+    ];
+    const original = JSON.stringify({
+      plugins: ["before", { package: old, options: { keep: true } }, ...unrelated, "after"],
+    });
+    write(config, original);
+    const params = {
+      ...planParams(f),
+      env: { ...f.env, [QUOTA_PLUGIN_SPEC_ENV]: LOCAL_PACK_SPEC },
+    };
+    const plan = await planScopedUpdate(params);
+    expect(readFileSync(config, "utf8")).toBe(original);
+    expect(formatScopedUpdatePreview(plan).join("\n")).toContain(
+      `${JSON.stringify(old)} -> ${JSON.stringify(LOCAL_PACK_SPEC)}`,
+    );
+    await applyScopedUpdatePlan(plan);
+    expect(JSON.parse(readFileSync(config, "utf8")).plugins).toEqual([
+      "before",
+      { package: LOCAL_PACK_SPEC, options: { keep: true } },
+      ...unrelated,
+      "after",
+    ]);
+    expect((await planScopedUpdate(params)).configEdits).toEqual([]);
+  });
   it("does not replace or remove a nonexistent archive merely because its filename matches", async () => {
     const f = fixture();
     const config = join(f.project, "opencode.jsonc");

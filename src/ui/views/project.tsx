@@ -103,7 +103,7 @@ export function ProjectView(props: {
         >
           <div class="qg-list qg-list--roots">
             <div class="qg-list__head" aria-hidden="true">
-              <span>Session</span>
+              <span>Name</span>
               <span>Worktree</span>
               <span>Tokens</span>
             </div>

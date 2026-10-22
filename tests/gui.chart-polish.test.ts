@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { SessionSnapshot, TokenStack } from "../src/contracts/dashboard";
 import { buildSessionChartGeometry, buildUsageGeometry } from "../src/ui/chart-geometry";
 import { chartIndexAt, createChartInspection } from "../src/ui/chart-inspection";
+import { parseSessionSnapshot } from "../src/ui/dashboard-client";
 import { formatDay, formatTimestamp } from "../src/ui/format";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { TestEvent, TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
@@ -151,9 +152,17 @@ function mountSession(snapshot: SessionSnapshot): { root: TestNode; dispose: () 
 }
 
 function renderSessionView(snapshot: SessionSnapshot): { root: TestNode; dispose: () => void } {
+  const decoded = parseSessionSnapshot(
+    JSON.parse(JSON.stringify(snapshot)),
+    "/api/v1/session/test",
+  );
+  expect(decoded.nodes).toEqual(snapshot.nodes);
+  expect(decoded.ownSummary).toEqual(snapshot.ownSummary);
+  expect(decoded.treeTotals).toEqual(snapshot.treeTotals);
+  expect(decoded.steps).toEqual(snapshot.steps);
   const root = graph.createTestRoot();
   const dispose = graph.mount(
-    () => graph.createComponent(sessionViewModule.SessionView, { snapshot, range: "7d" }),
+    () => graph.createComponent(sessionViewModule.SessionView, { snapshot: decoded, range: "7d" }),
     root,
   );
   return { root, dispose };
@@ -668,10 +677,7 @@ describe("session chart and tree presentation", () => {
     const rootNode = base.nodes[0] as SessionSnapshot["nodes"][number];
     const childNode = base.nodes[1] as SessionSnapshot["nodes"][number];
     const snapshot = sessionSnapshot({
-      nodes: [
-        { ...rootNode, agent: "build" },
-        { ...childNode, agent: undefined },
-      ],
+      nodes: [{ ...rootNode, agent: "build" }, { ...childNode }],
     });
     const { root, dispose } = renderSessionView(snapshot);
     try {
@@ -692,7 +698,7 @@ describe("session chart and tree presentation", () => {
     }
   });
 
-  it("hides the tree only for a focused child with no other nodes", () => {
+  it("preserves HTTP JSON metadata and hides the tree only for a focused leaf child", () => {
     const base = sessionSnapshot();
     const rootNode = base.nodes[0] as SessionSnapshot["nodes"][number];
     const childNode = base.nodes[1] as SessionSnapshot["nodes"][number];
@@ -758,6 +764,14 @@ describe("session chart and tree presentation", () => {
     }
   });
 
+  it.each(["agent", "parentId"])("rejects invalid optional HTTP node %s types", (field) => {
+    for (const invalid of [null, 42, true, [], {}]) {
+      const wire = JSON.parse(JSON.stringify(sessionSnapshot()));
+      wire.nodes[0][field] = invalid;
+      expect(() => parseSessionSnapshot(wire, "/api/v1/session/test")).toThrow(`nodes[].${field}`);
+    }
+  });
+
   it("keeps the Project one-root list visible", () => {
     const project = projectSnapshot();
     const root = graph.createTestRoot();
@@ -774,6 +788,9 @@ describe("session chart and tree presentation", () => {
     try {
       expect(byClass(root, "div", "qg-list--roots")).toHaveLength(1);
       expect(byClass(root, "a", "qg-list__row")).toHaveLength(1);
+      expect(byClass(root, "div", "qg-list__head").map((node) => graph.textOf(node))).toEqual([
+        "NameWorktreeTokens",
+      ]);
     } finally {
       dispose();
     }

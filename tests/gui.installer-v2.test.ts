@@ -62,6 +62,46 @@ function syntheticPackageTarball(name: string): Buffer {
 }
 describe("current v2 installer desired plugin safety", () => {
   it.each([
+    "./checkout/server.ts",
+    "file:./checkout/server.ts",
+  ])("replaces verified root entry %s, preserving options, unrelated entries and preview bytes", async (old) => {
+    const unrelated = [
+      "./wrong/server.ts",
+      "./missing/server.ts",
+      "./checkout/other.ts",
+      "file:./opencode-quota-gui-unknown.tgz",
+    ];
+    const dir = fixture({
+      plugins: ["before", { package: old, options: { keep: true } }, ...unrelated, "after"],
+    });
+    for (const [folder, name] of [
+      ["checkout", "opencode-quota-gui"],
+      ["wrong", "other-plugin"],
+    ] as const) {
+      mkdirSync(join(dir, folder), { recursive: true });
+      writeFileSync(join(dir, folder, "package.json"), JSON.stringify({ name }));
+      writeFileSync(join(dir, folder, "server.ts"), "export {};");
+    }
+    mkdirSync(join(dir, "missing"));
+    writeFileSync(join(dir, "missing", "server.ts"), "export {};");
+    writeFileSync(join(dir, "checkout", "other.ts"), "export {};");
+    const before = readFileSync(join(dir, "opencode.jsonc"), "utf8");
+    const plan = await planInitInstaller({ cwd: dir, selections, pluginSpec: desired });
+    expect(readFileSync(join(dir, "opencode.jsonc"), "utf8")).toBe(before);
+    expect(plan.summaryLines.join("\n")).toContain(
+      `${JSON.stringify(old)} -> ${JSON.stringify(desired)}`,
+    );
+    await applyInitInstallerPlan(plan);
+    expect(host(dir).plugins).toEqual([
+      "before",
+      { package: desired, options: { keep: true } },
+      ...unrelated,
+      "after",
+    ]);
+    const second = await planInitInstaller({ cwd: dir, selections, pluginSpec: desired });
+    expect(second.edits[0]?.changed).toBe(false);
+  });
+  it.each([
     "nonexistent",
     "wrong-manifest",
   ])("preserves an unverified %s archive despite a matching package filename", async (kind) => {

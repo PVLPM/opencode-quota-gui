@@ -226,7 +226,13 @@ export function buildUsageGeometry(
     else rateRuns.push([point]);
   }
   const cacheRatePath = rateRuns
-    .map((run) => toMonotoneLinePath(run))
+    .map((run) => {
+      const path = toMonotoneLinePath(run);
+      const point = run[0];
+      return run.length === 1 && point
+        ? `${path} L ${coordinate(point.x)} ${coordinate(point.y)}`
+        : path;
+    })
     .filter((path) => path.length > 0)
     .join(" ");
   const cacheRateTicks: AxisTick[] = [0, 25, 50, 75, 100].map((value) => ({
