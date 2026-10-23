@@ -46,8 +46,6 @@ import { getPackageVersion } from "./version.js";
 const OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json";
 const GITHUB_REPO_URL = "https://github.com/PVLPM/opencode-quota-gui";
 const GITHUB_STAR_NOTE = `if this helps, stars are appreciated: ${GITHUB_REPO_URL}`;
-const TUI_COMMAND_DISPLAY_COMMENT =
-  "// OpenCode Quota: tuiCommandDisplay chooses whether native TUI command output appears in the session transcript or a local popup dialog.";
 
 export type InitInstallerInterface = "tui" | "web" | "both";
 export type InitInstallerScope = "project" | "global";
@@ -785,10 +783,6 @@ async function planOpencodeEdit(params: {
       ? [
           {
             path: ["plugins"],
-            text: TUI_COMMAND_DISPLAY_COMMENT,
-          },
-          {
-            path: ["plugins"],
             text: "// OpenCode Quota GUI: loads the server plugin for the local dashboard.",
           },
         ]
@@ -947,10 +941,6 @@ async function planQuotaConfigEdit(params: {
       {
         path: ["sessionTokenScope"],
         text: '// Session token totals: "current" session only, or "tree" including descendants.',
-      },
-      {
-        path: ["tuiSidebarPanel"],
-        text: "// TUI-only surfaces.",
       },
       {
         path: ["maintainerAnnouncements"],

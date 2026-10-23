@@ -190,6 +190,25 @@ describe("init installer planning and merge behavior", () => {
     expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([EXPLICIT_PACK_SPEC]);
   });
 
+  it("does not write stale TUI guidance into the GUI-managed configs", async () => {
+    const prompts = createPromptStub({
+      selectValues: DEFAULT_PROMPT_SELECT_VALUES,
+      confirmValues: [true],
+    });
+
+    const code = await runInitInstaller({ cwd: tempDir, prompts: prompts as any });
+
+    expect(code).toBe(0);
+    const hostRaw = readFileSync(join(tempDir, "opencode.jsonc"), "utf8");
+    expect(hostRaw).toContain(
+      "// OpenCode Quota GUI: loads the server plugin for the local dashboard.",
+    );
+    expect(hostRaw).not.toMatch(/TUI|toast/i);
+
+    const guiRaw = readFileSync(join(globalGuiDir, "config.jsonc"), "utf8");
+    expect(guiRaw).not.toContain("TUI-only surfaces");
+  });
+
   it("creates recommended project opencode.jsonc at the worktree root for toast mode", async () => {
     const projectDir = join(tempDir, "project");
     const nestedDir = join(projectDir, "packages", "feature");
@@ -245,9 +264,11 @@ describe("init installer planning and merge behavior", () => {
       tuiCommandDisplay: "dialog",
     });
     expect(quotaConfig).not.toHaveProperty("tuiQuotaCommandDisplay");
-    expect(readFileSync(join(projectDir, "opencode.jsonc"), "utf8")).toContain(
-      "// OpenCode Quota: tuiCommandDisplay chooses whether native TUI command output appears in the session transcript or a local popup dialog.",
+    const hostRaw = readFileSync(join(projectDir, "opencode.jsonc"), "utf8");
+    expect(hostRaw).toContain(
+      "// OpenCode Quota GUI: loads the server plugin for the local dashboard.",
     );
+    expect(hostRaw).not.toContain("tuiCommandDisplay");
   });
 
   it("keeps the host JSON strict while the dashboard config stays canonical JSONC", async () => {
@@ -298,8 +319,9 @@ describe("init installer planning and merge behavior", () => {
 
     const hostRaw = readFileSync(join(projectDir, "opencode.jsonc"), "utf8");
     expect(hostRaw).toContain(
-      "// OpenCode Quota: tuiCommandDisplay chooses whether native TUI command output appears in the session transcript or a local popup dialog.",
+      "// OpenCode Quota GUI: loads the server plugin for the local dashboard.",
     );
+    expect(hostRaw).not.toContain("tuiCommandDisplay");
     expect(() => parseJsonOrJsonc(hostRaw, true)).not.toThrow();
     expect(existsSync(join(projectDir, "tui.jsonc"))).toBe(false);
   });
