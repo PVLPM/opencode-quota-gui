@@ -12,9 +12,14 @@ A local dashboard for your OpenCode quota, token usage, projects, and sessions. 
 
 ## What you get
 
-| Quota | Analytics | Session |
-| --- | --- | --- |
-| ![Quota dashboard](images/opencode-quota-gui_quota.png) | ![Usage analytics](images/opencode-quota-gui_analytics.png) | ![Session detail](images/opencode-quota-gui_session.png) |
+| Screenshots |
+| --- |
+| **Quota** |
+| ![Quota dashboard](images/opencode-quota-gui_quota.png) |
+| **Analytics** |
+| ![Usage analytics](images/opencode-quota-gui_analytics.png) |
+| **Session** |
+| ![Session detail](images/opencode-quota-gui_session.png) |
 
 ## Features
 
