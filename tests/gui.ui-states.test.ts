@@ -2564,6 +2564,44 @@ describe("OpenAI reset and credit rows", () => {
   });
 });
 
+describe("Quota card row geometry", () => {
+  const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+
+  function cssRule(selector: string): string {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "s").exec(styles)?.[1] ?? "";
+  }
+
+  it("gives every quota row type the same first-line and strip grid tracks", () => {
+    const row = cssRule(".qg-row");
+    expect(row).toContain("grid-template-rows: minmax(23px, auto) minmax(8px, auto)");
+    expect(row).toContain("gap: 8px");
+    expect(row).toContain("padding: 12px 16px");
+
+    // Reset rows change columns only; the shared row tracks still apply.
+    expect(cssRule(".qg-row--resets")).not.toContain("grid-template-rows");
+
+    const strip = cssRule(".qg-reset__segments");
+    expect(strip).toContain("height: 8px");
+    expect(strip).toContain("margin: 0;");
+    expect(strip).toContain("grid-column: 1 / -1");
+    expect(cssRule(".qg-row__bar")).toContain("height: 8px");
+  });
+
+  it("keeps the generic 1px divider footprint on the first row", () => {
+    expect(cssRule(".qg-row")).toContain("border-top: 1px solid var(--qg-border)");
+    const first = cssRule(".qg-row:first-child");
+    expect(first).toContain("border-top-color: transparent");
+    expect(first).not.toMatch(/border-top:\s*0(?:;|\s)/u);
+  });
+
+  it("keeps reset summary stacking below 420px", () => {
+    expect(styles).toContain("@media (max-width: 420px)");
+    expect(styles).toContain(".qg-row--resets {\n    grid-template-columns: minmax(0, 1fr);");
+    expect(styles).toContain(".qg-reset__summary {\n    grid-column: 1;");
+  });
+});
+
 describe("OpenAI optional semantics stay provider-scoped", () => {
   async function renderProvider(
     providerId: string,

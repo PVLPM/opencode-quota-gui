@@ -524,6 +524,9 @@ body {
 .qg-row {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
+  /* Every row type reserves the badge-height line and an 8px detail strip, so
+     value/balance rows match quota and reset rows without clipping content. */
+  grid-template-rows: minmax(23px, auto) minmax(8px, auto);
   gap: 8px;
   align-items: baseline;
   padding: 12px 16px;
@@ -1804,7 +1807,9 @@ body {
   margin-top: 8px;
 }
 .qg-row:first-child {
-  border-top: 0;
+  /* Keep the shared 1px border footprint without drawing a second divider
+     under the card header. */
+  border-top-color: transparent;
 }
 .qg-row__reset {
   justify-self: end;
@@ -1833,7 +1838,7 @@ body {
   width: 100%;
   min-width: 0;
   height: 8px;
-  margin: 2px 0 0;
+  margin: 0;
   padding: 0;
   border: 0;
 }
