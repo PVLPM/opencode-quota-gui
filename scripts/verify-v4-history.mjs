@@ -43,6 +43,7 @@ const publicImageFiles = new Set([
   "images/opencode-quota-gui_analytics.png",
   "images/opencode-quota-gui_quota.png",
   "images/opencode-quota-gui_session.png",
+  "images/opencode-quota-gui-logo.webp",
   "images/opencode-quota-logo-dark.svg",
   "images/opencode-quota-logo-light.svg",
   "images/opencode-quota_opencode-quota-sidebar.webp",

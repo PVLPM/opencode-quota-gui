@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/opencode-quota-gui-logo.webp" alt="OpenCode Quota GUI" width="480" />
+</p>
+
 # OpenCode Quota GUI
 
 A local dashboard for your OpenCode quota, token usage, projects, and sessions. It runs beside OpenCode, listens only on loopback, and keeps its settings and cached data in this product's own namespace.
