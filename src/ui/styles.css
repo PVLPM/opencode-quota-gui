@@ -574,7 +574,11 @@ body {
   text-wrap: pretty;
 }
 
-.qg-row__value {
+/* Quota values and the resets count share one badge design. Availability is
+   informational, so its count stays green at any value, including zero, and
+   never inherits warning/critical quota severity. */
+.qg-row__value,
+.qg-reset__count {
   color: #6bd586;
   background: #14361d;
   border: 1px solid #6bd586;
@@ -1812,12 +1816,6 @@ body {
 .qg-row--resets {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-}
-.qg-reset__count {
-  color: var(--qg-text-muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 .qg-reset__summary {
   color: var(--qg-text-muted);

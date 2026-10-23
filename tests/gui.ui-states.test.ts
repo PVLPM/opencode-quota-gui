@@ -2333,6 +2333,38 @@ describe("OpenAI reset and credit rows", () => {
     expect(html).toContain('aria-label="Available reset expiries"');
   });
 
+  it("styles the available count as the shared badge, always green and never severity-tinted", async () => {
+    const html = await renderQuota([
+      optionalRow({
+        bankedResets: { availableCount: 2, credits: [] },
+        value: "2 available",
+      }),
+    ]);
+    expect(html).toContain('<span class="qg-reset__count">');
+    expect(text(html)).toContain("2 available");
+    expect(html).not.toContain("data-severity");
+
+    const zero = await renderQuota([
+      optionalRow({
+        bankedResets: { availableCount: 0, credits: [] },
+        value: "0 available",
+      }),
+    ]);
+    // Zero availability stays hidden; a visible count never turns warning/critical.
+    expect(text(zero)).not.toContain("0 available");
+
+    const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+    const badge = /\.qg-row__value,\s*\.qg-reset__count\s*\{([^}]*)\}/su.exec(styles)?.[1] ?? "";
+    expect(badge).toContain("color: #6bd586");
+    expect(badge).toContain("background: #14361d");
+    expect(badge).toContain("border: 1px solid #6bd586");
+    expect(badge).toContain("border-radius: 4px");
+    expect(badge).toContain("padding: 0 5px");
+    expect(badge).toContain("font-size: 11px");
+    // Only percent values carry quota severity; the availability count has no tint path.
+    expect(styles).not.toMatch(/\.qg-row\[data-severity="[^"]+"\][^{]*\.qg-reset__count/su);
+  });
+
   it("orders nearest known expiry first and represents null and unknown honestly", async () => {
     vi.useFakeTimers({ now: NOW });
     try {
