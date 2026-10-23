@@ -267,7 +267,7 @@ describe("shared stacked usage bars", () => {
       for (const segment of segments) {
         const width = Number(segment.props.width);
         const height = Number(segment.props.height);
-        const radius = Math.min(2, width / 2, height / 2);
+        const radius = Math.min(1, width / 2, height / 2);
         expect(Number(segment.props.rx)).toBeCloseTo(radius, 10);
         expect(Number(segment.props.ry)).toBeCloseTo(radius, 10);
       }

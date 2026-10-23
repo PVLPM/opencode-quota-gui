@@ -1360,7 +1360,7 @@ describe("usage chart", () => {
       }
       for (const segment of bar.segments) {
         expect(segment.height).toBeGreaterThanOrEqual(0);
-        expect(segment.radius).toBeCloseTo(Math.min(2, segment.width / 2, segment.height / 2), 10);
+        expect(segment.radius).toBeCloseTo(Math.min(1, segment.width / 2, segment.height / 2), 10);
         expect(Number.isFinite(segment.y)).toBe(true);
         expect(Number.isFinite(segment.height)).toBe(true);
       }

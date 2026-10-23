@@ -307,7 +307,7 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
         (segment.value / geometry.yMax) * geometry.plot.height,
         10,
       );
-      expect(segment.radius).toBeCloseTo(Math.min(2, segment.width / 2, segment.height / 2), 10);
+      expect(segment.radius).toBeCloseTo(Math.min(1, segment.width / 2, segment.height / 2), 10);
       if (index === 0) continue;
       const lower = segments[index - 1];
       if (!lower) continue;
@@ -349,7 +349,7 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
         expect(Number.isFinite(segment.y)).toBe(true);
         expect(Number.isFinite(segment.height)).toBe(true);
         expect(segment.height).toBeGreaterThan(0);
-        expect(segment.radius).toBeCloseTo(Math.min(2, segment.width / 2, segment.height / 2), 10);
+        expect(segment.radius).toBeCloseTo(Math.min(1, segment.width / 2, segment.height / 2), 10);
         if (index === 0) continue;
         const lower = bar.segments[index - 1];
         if (!lower) continue;
