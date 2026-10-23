@@ -69,18 +69,18 @@ try {
     const { metrics } = await import("@opentelemetry/api");
     assert.equal(typeof metrics.getMeter, "function");
 
-    const tuiExportUrl = import.meta.resolve("opencode-quota-gui/tui");
-    const tuiExportPath = fileURLToPath(tuiExportUrl);
-    assert.match(tuiExportPath.replace(/\\\\/g, "/"), /node_modules\\/opencode-quota-gui\\/dist\\/tui\\.js$/);
-    const tuiSource = await readFile(tuiExportPath, "utf8");
-    assert.ok(tuiSource.includes("opencode-quota-gui.tui"));
-    assert.ok(tuiSource.includes("Plugin.define"));
-    assert.ok(tuiSource.includes("prompt.footer"));
-    assert.ok(!tuiSource.includes("jsx-dev-runtime"));
+    let tuiError;
+    try {
+      await import("opencode-quota-gui/tui");
+    } catch (error) {
+      tuiError = error;
+    }
+    assert.equal(tuiError?.code, "ERR_PACKAGE_PATH_NOT_EXPORTED");
 
     const pkg = JSON.parse(
       await readFile("node_modules/opencode-quota-gui/package.json", "utf8"),
     );
+    assert.equal(pkg.exports?.["./tui"], undefined);
     assert.equal(pkg.engines?.node, "^22.13.0 || >=23.4.0");
     assert.equal(pkg.dependencies?.["@opentelemetry/api"], "~1.9.1");
     for (const dependencyType of ["devDependencies", "optionalDependencies", "peerDependencies"]) {
@@ -92,6 +92,14 @@ try {
     }
 
     const packageRoot = path.resolve(path.dirname(fileURLToPath(rootExportUrl)), "..");
+    let tuiEntryError;
+    try {
+      await readFile(path.join(packageRoot, "dist", "tui.js"), "utf8");
+    } catch (error) {
+      tuiEntryError = error;
+    }
+    assert.equal(tuiEntryError?.code, "ENOENT");
+
     const telemetry = await import(
       pathToFileURL(path.join(packageRoot, "dist", "lib", "quota-telemetry.js"))
     );
@@ -146,39 +154,34 @@ try {
   for (const expected of [
     "Usage:",
     "opencode-quota-gui init",
-    "opencode-quota-gui show",
     "opencode-quota-gui update",
+    "opencode-quota-gui --help",
+    "opencode-quota-gui --version",
   ]) {
     if (!cliOutput.includes(expected)) {
       throw new Error(`Packed CLI help is missing: ${expected}`);
     }
   }
-
-  const cachedOpenRouterOutput = run(
-    process.execPath,
-    [cliPath, "show", "--json", "--provider", "openrouter"],
-    workdir,
-    { env: openRouterEnv },
-  );
-  const cachedOpenRouter = JSON.parse(cachedOpenRouterOutput);
-  assert.equal(cachedOpenRouter.fromCache, true);
-  if (process.platform === "win32") {
-    // Protected resolved-auth identity storage is POSIX-only (src/lib/resolved-auth-identity.ts),
-    // so resolved-auth provider caches cannot persist across processes on Windows and the
-    // cache-only CLI reports the provider as unavailable. The in-process seed scenario above
-    // still proves the writer, and Linux CI keeps the strong cross-process cache assertion.
-    assert.equal(cachedOpenRouter.providers.openrouter.status, "unavailable");
-    console.log(
-      "Packed CLI cache note: Windows has no protected resolved-auth identity storage, so the cache-only openrouter report is unavailable; POSIX CI asserts the cached ok result.",
-    );
-  } else {
-    assert.equal(cachedOpenRouter.providers.openrouter.status, "ok");
-    assert.equal(
-      cachedOpenRouter.providers.openrouter.entries[0].name,
-      "Packed production OpenRouter",
-    );
-    assert.equal(cachedOpenRouter.providers.openrouter.entries[0].percentRemaining, 67);
+  for (const removed of [
+    "opencode-quota-gui show",
+    "opencode-quota-gui status",
+    "provider add",
+    "--sync-legacy-config",
+  ]) {
+    if (cliOutput.includes(removed)) {
+      throw new Error(`Packed CLI help advertises a removed command: ${removed}`);
+    }
   }
+  const versionOutput = run(process.execPath, [cliPath, "--version"], workdir).trim();
+  if (versionOutput !== rootPackage.version) {
+    throw new Error(
+      `Packed CLI version mismatch: expected ${rootPackage.version}, received ${versionOutput}`,
+    );
+  }
+
+  run(process.execPath, [realOtelFixture, "read-production-openrouter-cache"], workdir, {
+    env: openRouterEnv,
+  });
 
   const readTree = async (directory) => {
     const chunks = [];
@@ -189,10 +192,7 @@ try {
     }
     return chunks;
   };
-  const privateArtifacts = [
-    cachedOpenRouterOutput,
-    ...(await readTree(path.join(workdir, "runtime"))),
-  ].join("\n");
+  const privateArtifacts = [...(await readTree(path.join(workdir, "runtime")))].join("\n");
   assert.ok(!privateArtifacts.includes(openRouterSecret));
   assert.ok(!privateArtifacts.includes("resolvedAuthIdentity"));
   assert.ok(!privateArtifacts.includes("rai1_"));

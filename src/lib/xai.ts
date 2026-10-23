@@ -25,7 +25,7 @@ const CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const SUBSCRIPTIONS_URL = "https://grok.com/rest/subscriptions";
 const SUBSCRIPTIONS_TIMEOUT_MS = 2_000;
 const HEAVY_OFFER_ID_RE = /^heavy-p\d+m-\d{1,2}-[a-z]{3}\d{4}$/i;
-const USER_AGENT = "OpenCode-Quota-Toast/1.0";
+const USER_AGENT = "opencode-quota-gui/1.0";
 
 export type XaiPeriodKind = "weekly" | "monthly" | "daily" | "period";
 export type XaiSubscriptionTier = "Lite" | "SuperGrok" | "Heavy";

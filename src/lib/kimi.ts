@@ -4,7 +4,7 @@ import { fetchWithTimeout } from "./http.js";
 import { getKimiQuotaEndpoint, type KimiQuotaEndpointId } from "./kimi-endpoints.js";
 import type { KimiQuotaWindow, QuotaError } from "./types.js";
 
-const USER_AGENT = "OpenCode-Quota-Toast/1.0";
+const USER_AGENT = "opencode-quota-gui/1.0";
 
 /**
  * The root `usage` slot of the Kimi usage payload is the plan's weekly window and

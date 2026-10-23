@@ -86,7 +86,7 @@ interface NanoGptBalanceResponse {
   nano_balance?: string;
 }
 
-const USER_AGENT = "OpenCode-Quota-Toast/1.0";
+const USER_AGENT = "opencode-quota-gui/1.0";
 const NANOGPT_USAGE_URL = "https://nano-gpt.com/api/subscription/v1/usage";
 const NANOGPT_BALANCE_URL = "https://nano-gpt.com/api/check-balance";
 

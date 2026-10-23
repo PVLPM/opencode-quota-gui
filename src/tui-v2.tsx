@@ -256,7 +256,7 @@ function QuotaFooter(props: {
       void quotaRpc(props.context)
         .writeExport({}, quotaRpcOptions(props.context))
         .catch((error: unknown) => {
-          console.warn(`[opencode-quota] quota export write failed: ${rpcErrorMessage(error)}`);
+          console.warn(`[opencode-quota-gui] quota export write failed: ${rpcErrorMessage(error)}`);
         });
     },
   );
@@ -288,9 +288,9 @@ function reportFailure(error: unknown): void {
     error !== null &&
     "type" in error &&
     error.type === "rpc.unavailable"
-      ? " (OpenCode Quota's server plugin is not loaded for this folder)"
+      ? " (OpenCode Quota GUI's server plugin is not loaded for this folder)"
       : "";
-  console.warn(`[opencode-quota] failed to load quota: ${rpcErrorMessage(error)}${hint}`);
+  console.warn(`[opencode-quota-gui] failed to load quota: ${rpcErrorMessage(error)}${hint}`);
 }
 
 /** OpenCode's dialog widths (dialogWidth in its ui/dialog.tsx). */
@@ -609,7 +609,7 @@ async function runQuotaCommand(
   } catch (error) {
     context.ui.toast.show({
       variant: "error",
-      title: "OpenCode Quota",
+      title: "OpenCode Quota GUI",
       message: sanitizeDisplayText(rpcErrorMessage(error)),
     });
   }
@@ -646,7 +646,9 @@ async function showPostedQuotaReport(context: TuiContext, event: TuiEvent): Prom
   // request the TUI sends when the user deletes a pending prompt.
   void context.client.session.inbox.cancel({ sessionID, inboxID }).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[opencode-quota] failed to remove the quota report from the chat: ${message}`);
+    console.warn(
+      `[opencode-quota-gui] failed to remove the quota report from the chat: ${message}`,
+    );
   });
   void showQuotaOutputDialog(context, {
     title: report.title,
@@ -666,7 +668,7 @@ function registerQuotaCommands(context: TuiContext): void {
     commands: QUOTA_DIALOG_COMMANDS.map((spec) => ({
       id: `quota.${spec.id}`,
       title: spec.title,
-      group: "OpenCode Quota",
+      group: "OpenCode Quota GUI",
       // No slash entry: the server plugin registers the "/" commands, so each is listed once.
       palette: true,
       run: () => runQuotaCommand(context, spec.id, getRouteSessionID(context)),
@@ -805,7 +807,7 @@ const plugin = Plugin.define({
               if (!quota) return;
               api.ui.toast.show({
                 variant: "info",
-                title: "OpenCode Quota",
+                title: "OpenCode Quota GUI",
                 message: quota.message,
                 duration: quota.duration,
               });

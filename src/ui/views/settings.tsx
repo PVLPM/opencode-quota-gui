@@ -152,10 +152,7 @@ export function SettingsView(props: {
         expectedRevision: draft().revision,
       });
       setDraft(applyWriteResult(result));
-      props.toaster.push(
-        "success",
-        "Global defaults saved. Project and workspace overrides still apply.",
-      );
+      props.toaster.push("success", "Global settings saved.");
       await props.onReload();
     } catch (error) {
       if (isConfigChanged(error)) {
@@ -218,10 +215,7 @@ export function SettingsView(props: {
       const result = await props.client.importApply({ expectedRevision: current.expectedRevision });
       setPreview(undefined);
       setDraft(applyWriteResult(result));
-      props.toaster.push(
-        "success",
-        "Copied to global defaults. Project and workspace overrides still apply.",
-      );
+      props.toaster.push("success", "Copied to the global settings file.");
       await props.onReload();
     } catch (error) {
       props.toaster.push(
@@ -650,9 +644,9 @@ export function SettingsView(props: {
           <span class="qg-section__meta">Display, visibility and preferences</span>
         </header>
         <p class="qg-group__note">
-          Changes on this page are saved as global defaults. Project and workspace overrides remain
-          effective; saving here does not edit them. Meaningful overriding sources are noted beside
-          affected fields.
+          Changes on this page are saved to the global GUI config file. Legacy settings are
+          import-only; workspace settings are never live overrides. Meaningful legacy sources are
+          noted in the import section.
         </p>
         <Show when={props.snapshot.import.available}>
           <section class="qg-group" aria-labelledby="qg-settings-import">

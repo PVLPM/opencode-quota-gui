@@ -434,7 +434,7 @@ export async function queryOpenAIQuota(
   try {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${resolvedAuth.accessToken}`,
-      "User-Agent": "OpenCode-Quota-Toast/1.0",
+      "User-Agent": "opencode-quota-gui/1.0",
     };
 
     const accountId = resolvedAuth.accountId;

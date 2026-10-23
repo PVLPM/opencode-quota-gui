@@ -37,6 +37,14 @@ const rpc = vi.hoisted(() => ({ command: vi.fn() }));
 
 type Node = { type: string; props: Record<string, any> };
 
+/** Writes the canonical GUI config, the only config the runtime reads. */
+function writeTuiCommandDisplay(projectDir: string, value: string) {
+  writeFileSync(
+    join(projectDir, "global", "opencode-quota-gui", "config.jsonc"),
+    JSON.stringify({ tuiCommandDisplay: value }),
+  );
+}
+
 function findNodes(node: unknown, type: string): Node[] {
   if (Array.isArray(node)) return node.flatMap((child) => findNodes(child, type));
   if (!node || typeof node !== "object") return [];
@@ -265,7 +273,7 @@ describe("V2 quota TUI commands", () => {
   describe("quota reports posted by slash commands", () => {
     const document = messageDocument("openai 42%");
     const metadata = {
-      opencodeQuota: { command: "quota", title: "OpenCode Quota", at: 1, document },
+      opencodeQuotaGui: { command: "quota", title: "OpenCode Quota GUI", at: 1, document },
     };
     const report = formatQuotaReportMessage("openai 42%");
     const item = (text: string, meta?: Record<string, unknown>, type = "user") => ({
@@ -277,8 +285,7 @@ describe("V2 quota TUI commands", () => {
 
     beforeEach(() => {
       projectDir = realpathSync(mkdtempSync(join(tmpdir(), "opencode-quota-tui-report-")));
-      mkdirSync(join(projectDir, "global"));
-      mkdirSync(join(projectDir, "opencode-quota"));
+      mkdirSync(join(projectDir, "global", "opencode-quota-gui"), { recursive: true });
       vi.stubEnv("OPENCODE_CONFIG_DIR", join(projectDir, "global"));
       vi.stubGlobal("React", {
         createElement: (type: unknown, props: Record<string, unknown> | null) => ({ type, props }),
@@ -287,10 +294,7 @@ describe("V2 quota TUI commands", () => {
     });
 
     function writeCommandDisplay(value: string) {
-      writeFileSync(
-        join(projectDir, "opencode-quota", "quota-toast.json"),
-        JSON.stringify({ tuiCommandDisplay: value }),
-      );
+      writeTuiCommandDisplay(projectDir, value);
     }
 
     /** Waits for the listener to read tuiCommandDisplay and act on it. */
@@ -334,7 +338,9 @@ describe("V2 quota TUI commands", () => {
       emit("session.inbox.enqueued", {
         sessionID: "ses_open",
         inboxID: "msg_6",
-        item: item(report, { opencodeQuota: { command: "quota", title: "OpenCode Quota", at: 1 } }),
+        item: item(report, {
+          opencodeQuotaGui: { command: "quota", title: "OpenCode Quota GUI", at: 1 },
+        }),
       });
       await settle();
 
@@ -366,7 +372,7 @@ describe("V2 quota TUI commands", () => {
       const render = context.ui.dialog.show.mock.calls[0][0] as () => {
         props: Record<string, unknown>;
       };
-      expect(render().props).toMatchObject({ title: "OpenCode Quota", document });
+      expect(render().props).toMatchObject({ title: "OpenCode Quota GUI", document });
       expect(rpc.command).not.toHaveBeenCalled();
     });
 
@@ -418,8 +424,7 @@ describe("V2 quota TUI commands", () => {
 
     beforeEach(() => {
       projectDir = realpathSync(mkdtempSync(join(tmpdir(), "opencode-quota-tui-typed-")));
-      mkdirSync(join(projectDir, "global"));
-      mkdirSync(join(projectDir, "opencode-quota"));
+      mkdirSync(join(projectDir, "global", "opencode-quota-gui"), { recursive: true });
       vi.stubEnv("OPENCODE_CONFIG_DIR", join(projectDir, "global"));
       return () => rmSync(projectDir, { recursive: true, force: true });
     });
@@ -429,10 +434,7 @@ describe("V2 quota TUI commands", () => {
       display: "dialog" | "inline",
       route: { type: "home" } | { type: "session"; sessionID: string } = { type: "home" },
     ) {
-      writeFileSync(
-        join(projectDir, "opencode-quota", "quota-toast.json"),
-        JSON.stringify({ tuiCommandDisplay: display }),
-      );
+      writeTuiCommandDisplay(projectDir, display);
       const tui = startTui({ directory: projectDir }, route);
       await loadConfig.mock.results.at(-1)?.value;
       const enter = tui.layers().find((layer) => layer.priority === 1)!;
@@ -524,10 +526,7 @@ describe("V2 quota TUI commands", () => {
     });
 
     it("opens the dialog, the default, before the first read of tuiCommandDisplay finishes", async () => {
-      writeFileSync(
-        join(projectDir, "opencode-quota", "quota-toast.json"),
-        JSON.stringify({ tuiCommandDisplay: "inline" }),
-      );
+      writeTuiCommandDisplay(projectDir, "inline");
       const { context, editor, layers } = startTui({ directory: projectDir });
       const enter = layers().find((layer) => layer.priority === 1)!.commands[0];
       editor.plainText = "/quota";
@@ -545,10 +544,7 @@ describe("V2 quota TUI commands", () => {
 
     it("reads tuiCommandDisplay again after each typed command", async () => {
       const { editor, enter } = await startTyped("inline");
-      writeFileSync(
-        join(projectDir, "opencode-quota", "quota-toast.json"),
-        JSON.stringify({ tuiCommandDisplay: "dialog" }),
-      );
+      writeTuiCommandDisplay(projectDir, "dialog");
       editor.plainText = "/quota";
 
       // The setting read at start still applies; the new one applies to the next command.
@@ -577,9 +573,9 @@ describe("V2 quota TUI commands", () => {
           payload: {
             text: formatQuotaReportMessage("openai 42%"),
             metadata: {
-              opencodeQuota: {
+              opencodeQuotaGui: {
                 command: "quota",
-                title: "OpenCode Quota",
+                title: "OpenCode Quota GUI",
                 at: 1,
                 document: messageDocument("openai 42%"),
               },
@@ -631,7 +627,7 @@ describe("V2 quota TUI commands", () => {
 
     expect(context.ui.toast.show).toHaveBeenCalledExactlyOnceWith({
       variant: "error",
-      title: "OpenCode Quota",
+      title: "OpenCode Quota GUI",
       message: "server broke",
     });
     expect(context.ui.dialog.show).not.toHaveBeenCalled();
@@ -982,13 +978,13 @@ describe("V2 quota TUI commands", () => {
         {
           document: {
             heading: commandHeading({
-              title: "Quota Status (opencode-quota v5.0.0) (/quota_status)",
-              detail: "opencode-quota v5.0.0",
+              title: "Quota Status (opencode-quota-gui v5.0.0) (/quota_status)",
+              detail: "opencode-quota-gui v5.0.0",
               generatedAtMs,
             }),
             sections: [{ id: "toast", title: "toast:", blocks: [{ kind: "lines", lines: ["-"] }] }],
           },
-          subtitle: `opencode-quota v5.0.0 · ${time}`,
+          subtitle: `opencode-quota-gui v5.0.0 · ${time}`,
         },
       ],
       [

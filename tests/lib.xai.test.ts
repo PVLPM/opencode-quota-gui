@@ -213,7 +213,7 @@ describe("queryXaiQuota", () => {
         headers: {
           Authorization: "Bearer token-1",
           Accept: "application/json",
-          "User-Agent": "OpenCode-Quota-Toast/1.0",
+          "User-Agent": "opencode-quota-gui/1.0",
           "x-grok-client-surface": "grok-build",
           "x-grok-client-version": "1.0.0",
         },

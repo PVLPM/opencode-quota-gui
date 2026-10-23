@@ -21,7 +21,7 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => runtimeDirs.value,
 }));
 
-import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
+import { createLoadConfigMeta, loadConfigLayered } from "../src/lib/config.js";
 
 describe("loadConfig layered precedence", () => {
   const originalEnv = process.env;
@@ -97,7 +97,7 @@ describe("loadConfig layered precedence", () => {
       "utf-8",
     );
 
-    const cfg = await loadConfig({
+    const cfg = await loadConfigLayered({
       config: {
         get: async () => ({
           data: {
@@ -147,7 +147,7 @@ describe("loadConfig layered precedence", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: altWorkspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: altWorkspaceDir });
 
     expect(cfg.enabledProviders).toEqual(["nanogpt"]);
     expect(cfg.formatStyle).toBe("allWindows");
@@ -194,7 +194,7 @@ describe("loadConfig layered precedence", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: workspaceDir });
 
     expect(cfg.pricingSnapshot).toEqual({ source: "bundled", autoRefresh: 2 });
     expect(meta.settingSources["pricingSnapshot.source"]).toBe(
@@ -231,7 +231,7 @@ describe("loadConfig layered precedence", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: workspaceDir });
 
     expect(cfg.layout).toEqual({ maxWidth: 72, narrowAt: 36, tinyAt: 24 });
     expect(meta.settingSources["layout.maxWidth"]).toBe(
@@ -266,7 +266,7 @@ describe("loadConfig layered precedence", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: workspaceDir });
 
     expect(cfg.telemetry).toEqual({ enabled: true });
     expect(meta.settingSources["telemetry.enabled"]).toBe(
@@ -306,7 +306,7 @@ describe("loadConfig layered precedence", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: workspaceDir });
 
     expect(cfg.maintainerAnnouncements).toEqual({
       enabled: false,
@@ -357,7 +357,7 @@ describe("loadConfig layered precedence", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: workspaceDir });
 
     expect(cfg.tuiSidebarPanel).toEqual({
       enabled: false,
@@ -404,7 +404,7 @@ describe("loadConfig layered precedence", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: workspaceDir });
 
     expect(cfg.tuiCompactStatus).toEqual({
       enabled: true,
@@ -464,7 +464,7 @@ describe("loadConfig layered precedence", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: workspaceDir });
 
     expect(cfg.enabledProviders).toEqual(["openai"]);
     expect(cfg.anthropicBinaryPath).toBe("/usr/local/bin/claude");
@@ -501,7 +501,7 @@ describe("loadConfig layered precedence", () => {
       "utf-8",
     );
 
-    let cfg = await loadConfig(undefined, undefined, { cwd: legacyWorkspaceDir });
+    let cfg = await loadConfigLayered(undefined, undefined, { cwd: legacyWorkspaceDir });
     expect(cfg.formatStyle).toBe("allWindows");
 
     writeFileSync(
@@ -517,7 +517,7 @@ describe("loadConfig layered precedence", () => {
       "utf-8",
     );
 
-    cfg = await loadConfig(undefined, undefined, { cwd: legacyWorkspaceDir });
+    cfg = await loadConfigLayered(undefined, undefined, { cwd: legacyWorkspaceDir });
     expect(cfg.formatStyle).toBe("allWindows");
   });
 
@@ -549,7 +549,7 @@ describe("loadConfig layered precedence", () => {
       "utf-8",
     );
 
-    const cfg = await loadConfig(undefined, undefined, { cwd: mixedWorkspaceDir });
+    const cfg = await loadConfigLayered(undefined, undefined, { cwd: mixedWorkspaceDir });
     expect(cfg.formatStyle).toBe("singleWindow");
   });
 });

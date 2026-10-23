@@ -470,13 +470,46 @@ async function runSeedProductionOpenRouter() {
   assert.ok(!JSON.stringify(exported).includes(secret));
 }
 
+async function runReadProductionOpenRouterCache() {
+  const { createCliQuotaClient, resolveCliRoots } = await packageImport("cli-show.js");
+  const { createExportProviderContext } = await packageImport("quota-export.js");
+  const { resolveQuotaRuntimeContext } = await packageImport("quota-runtime-context.js");
+
+  const roots = resolveCliRoots(process.cwd());
+  const client = createCliQuotaClient({ configRootDir: roots.configRoot });
+  const runtime = await resolveQuotaRuntimeContext({
+    client,
+    roots,
+    includeSessionMeta: false,
+  });
+  const ctx = createExportProviderContext(runtime);
+  const provider = runtime.providers.find(({ id }) => id === "openrouter");
+  assert.ok(provider);
+
+  const cached = await quotaState.readCachedProviderResult({ provider, ctx, ttlMs: 60_000 });
+  if (process.platform === "win32") {
+    // Protected resolved-auth identity storage is POSIX-only, so a resolved-auth cache
+    // cannot be reopened from another process on Windows.
+    assert.equal(cached.hit, false);
+    console.log("Packed cache note: Windows cannot reopen the POSIX-only resolved-auth cache.");
+    return;
+  }
+
+  assert.equal(cached.hit, true);
+  assert.equal(cached.result.entries[0].name, "Packed production OpenRouter");
+  assert.equal(cached.result.entries[0].percentRemaining, 67);
+  assert.ok(!JSON.stringify(cached).includes(process.env.OPENROUTER_API_KEY));
+}
+
 try {
   if (scenario === "happy") await runHappyPath();
   else if (scenario === "disabled") await runDisabled();
   else if (scenario === "no-global-provider") await runNoGlobalProvider();
   else if (scenario === "failing-infrastructure") await runFailingInfrastructure();
   else if (scenario === "seed-production-openrouter") await runSeedProductionOpenRouter();
-  else throw new Error(`Unknown packed real OpenTelemetry scenario: ${scenario}`);
+  else if (scenario === "read-production-openrouter-cache") {
+    await runReadProductionOpenRouterCache();
+  } else throw new Error(`Unknown packed real OpenTelemetry scenario: ${scenario}`);
   console.log(`Packed real OpenTelemetry scenario passed: ${scenario}`);
 } finally {
   telemetry.__resetQuotaTelemetryForTests();

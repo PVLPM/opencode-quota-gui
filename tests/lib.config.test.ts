@@ -21,7 +21,7 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => runtimeDirs.value,
 }));
 
-import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
+import { createLoadConfigMeta, loadConfigLayered } from "../src/lib/config.js";
 import { DEFAULT_CONFIG } from "../src/lib/types.js";
 
 describe("loadConfig", () => {
@@ -44,7 +44,7 @@ describe("loadConfig", () => {
   });
 
   async function loadSdkConfig(quotaToast: Record<string, unknown>, meta = createLoadConfigMeta()) {
-    const config = await loadConfig(
+    const config = await loadConfigLayered(
       {
         config: {
           get: async () => ({
@@ -483,7 +483,7 @@ describe("loadConfig", () => {
 
   it("deep-clones default config when no config source exists", async () => {
     const meta = createLoadConfigMeta();
-    const first = await loadConfig(undefined, meta, { cwd: isolatedCwd });
+    const first = await loadConfigLayered(undefined, meta, { cwd: isolatedCwd });
     first.tuiSidebarPanel.enabled = false;
     first.tuiCompactStatus.enabled = true;
     first.tuiCompactStatus.maxWidth = 1;
@@ -491,7 +491,7 @@ describe("loadConfig", () => {
     first.maintainerAnnouncements.enabled = false;
     first.maintainerAnnouncements.home = false;
 
-    const second = await loadConfig(undefined, undefined, { cwd: isolatedCwd });
+    const second = await loadConfigLayered(undefined, undefined, { cwd: isolatedCwd });
     expect(second.tuiSidebarPanel).toEqual(DEFAULT_CONFIG.tuiSidebarPanel);
     expect(second.tuiCompactStatus).toEqual(DEFAULT_CONFIG.tuiCompactStatus);
     expect(second.tuiPromptBar).toEqual(DEFAULT_CONFIG.tuiPromptBar);
@@ -587,7 +587,7 @@ describe("loadConfig", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, { cwd: isolatedCwd });
+    const config = await loadConfigLayered(undefined, meta, { cwd: isolatedCwd });
 
     expect(config.enabled).toBe(true);
     expect(config.minIntervalMs).toBe(12_345);
@@ -622,7 +622,7 @@ describe("loadConfig", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, { cwd: isolatedCwd });
+    const config = await loadConfigLayered(undefined, meta, { cwd: isolatedCwd });
 
     expect(config.opencodeGoWindows).toEqual(["weekly", "monthly"]);
     expect(meta.source).toBe("files");
@@ -652,7 +652,7 @@ describe("loadConfig", () => {
     );
 
     const firstMeta = createLoadConfigMeta();
-    const firstConfig = await loadConfig(undefined, firstMeta, { cwd: isolatedCwd });
+    const firstConfig = await loadConfigLayered(undefined, firstMeta, { cwd: isolatedCwd });
 
     expect(firstConfig.enabledProviders).toEqual(["openai"]);
     expect(firstConfig.formatStyle).toBe("allWindows");
@@ -690,7 +690,7 @@ describe("loadConfig", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, { cwd: isolatedCwd });
+    const config = await loadConfigLayered(undefined, meta, { cwd: isolatedCwd });
 
     expect(config.enabledProviders).toEqual(["nanogpt"]);
     expect(config.formatStyle).toBe("allWindows");
@@ -722,7 +722,7 @@ describe("loadConfig", () => {
     writeFileSync(quotaConfigPath, "[]", "utf8");
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(
+    const config = await loadConfigLayered(
       {
         config: {
           get: async () => ({
@@ -793,7 +793,7 @@ describe("loadConfig", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, { cwd: isolatedCwd });
+    const config = await loadConfigLayered(undefined, meta, { cwd: isolatedCwd });
 
     expect(config.enabledProviders).toEqual(["openai"]);
     expect(config.pricingSnapshot).toEqual({ source: "bundled", autoRefresh: 2 });
@@ -1050,7 +1050,7 @@ describe("loadConfig", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(
+    const config = await loadConfigLayered(
       {
         config: {
           get: async () => ({

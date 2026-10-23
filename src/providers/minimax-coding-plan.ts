@@ -55,7 +55,7 @@ import {
 
 const MINIMAX_PROVIDER_LABEL = "MiniMax Token Plan";
 const MINIMAX_CHINA_PROVIDER_LABEL = "MiniMax Token Plan (CN)";
-const USER_AGENT = "OpenCode-Quota-Toast/1.0";
+const USER_AGENT = "opencode-quota-gui/1.0";
 
 const MINIMAX_TOKEN_PLAN_ACCOUNTING: AccountingMetadata = {
   resultType: "quota",

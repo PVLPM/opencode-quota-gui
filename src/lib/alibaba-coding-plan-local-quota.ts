@@ -1,10 +1,8 @@
-import { join } from "path";
-
 import { writeJsonAtomic } from "./atomic-json.js";
 import { clampPercent } from "./format-utils.js";
-import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import type { OpenCodeMessage } from "./opencode-storage.js";
 import { iterCompletedAssistantMessages } from "./opencode-storage.js";
+import { getGuiPrivateStatePath } from "./private-state-paths.js";
 import type { AlibabaCodingPlanTier } from "./types.js";
 
 export const ALIBABA_CODING_PLAN_STATE_VERSION = 1 as const;
@@ -109,8 +107,7 @@ function computeRollingWindow(params: {
 }
 
 export function getAlibabaCodingPlanQuotaPath(): string {
-  const { stateDir } = getOpencodeRuntimeDirs();
-  return join(stateDir, "opencode-quota", "alibaba-coding-plan-local-quota.json");
+  return getGuiPrivateStatePath("alibaba-coding-plan-local-quota.json");
 }
 
 interface MaintainedLocalQuotaDependencies {

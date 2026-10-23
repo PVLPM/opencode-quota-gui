@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -36,6 +37,7 @@ const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url
   name?: string;
   version?: string;
   description?: string;
+  keywords?: string[];
   homepage?: string;
   bugs?: { url?: string };
   repository?: { type?: string; url?: string };
@@ -390,7 +392,7 @@ describe("package manifest compatibility", () => {
     expect(readme).toContain("https://github.com/slkiser/opencode-quota");
   });
 
-  it("ships explicit server, tui, and init bin entrypoints for OpenCode", () => {
+  it("ships only the server/dashboard and init bin entrypoints for OpenCode", () => {
     expect(pkg.main).toBe("./dist/index.js");
     expect(pkg.bin).toEqual({
       "opencode-quota-gui": "./dist/bin/opencode-quota-gui.js",
@@ -405,10 +407,63 @@ describe("package manifest compatibility", () => {
       default: "./dist/index.js",
       types: "./dist/index.d.ts",
     });
-    expect(pkg.exports?.["./tui"]).toEqual({
-      default: "./dist/tui.js",
-      types: "./dist/tui.d.ts",
-    });
+    expect(pkg.exports).not.toHaveProperty("./tui");
+  });
+
+  it("describes a GUI-only product and advertises no terminal surfaces", () => {
+    expect(pkg.description).toContain("opencode-quota-gui");
+    expect(pkg.description?.toLowerCase()).toContain("dashboard");
+    expect(pkg.description).not.toMatch(/independent|continuation/i);
+    expect(pkg.keywords).toEqual(expect.arrayContaining(["opencode", "quota", "gui", "dashboard"]));
+    expect(pkg.keywords).not.toContain("toast");
+    for (const keyword of ["tui", "terminal", "sidebar", "statusline"]) {
+      expect(pkg.keywords).not.toContain(keyword);
+    }
+  });
+
+  it("packs no TUI artifact and rejects the removed public TUI subpath", async () => {
+    const pnpmCli = [
+      process.env.npm_execpath,
+      join(dirname(process.execPath), "node_modules", "pnpm", "bin", "pnpm.cjs"),
+      process.env.APPDATA
+        ? join(process.env.APPDATA, "npm", "node_modules", "pnpm", "bin", "pnpm.cjs")
+        : undefined,
+    ].find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
+    expect(pnpmCli, "the pnpm CLI must be resolvable for the pack check").toBeDefined();
+    const raw = execFileSync(
+      process.execPath,
+      [pnpmCli as string, "--config.ignore-scripts=true", "pack", "--json", "--dry-run"],
+      {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        encoding: "utf8",
+        maxBuffer: 32 * 1024 * 1024,
+      },
+    );
+    const manifest = JSON.parse(raw.slice(raw.indexOf("{"))) as {
+      files: Array<{ path: string }>;
+    };
+    const packedPaths = manifest.files.map(({ path }) => path);
+
+    expect(packedPaths).toContain("dist/index.js");
+    expect(packedPaths).not.toContain("dist/tui.js");
+    expect(packedPaths).not.toContain("dist/tui.d.ts");
+    expect(packedPaths).not.toContain("dist/tui.d.ts.map");
+    expect(packedPaths.some((path) => /^dist\/tui(?:-|\.)/u.test(path))).toBe(false);
+
+    const subpathProbe = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        'import("opencode-quota-gui/tui").then(() => console.log("resolved"), (error) => console.log(error.code));',
+      ],
+      {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        encoding: "utf8",
+      },
+    );
+    expect(subpathProbe.stderr).toBe("");
+    expect(subpathProbe.stdout.trim()).toBe("ERR_PACKAGE_PATH_NOT_EXPORTED");
   });
 
   it("keeps the legacy MiniMax result types in generated public declarations", async () => {
@@ -515,8 +570,20 @@ describe("package manifest compatibility", () => {
     ).toBe("node scripts/smoke-packed-package.mjs package-artifacts");
   });
 
-  it("keeps npm publication on a strict root allowlist", () => {
-    expect(pkg.files).toEqual(["dist", "README.md", "LICENSE"]);
+  it("keeps npm publication on a strict root allowlist and excludes the dormant TUI entry", () => {
+    expect(pkg.files).toEqual([
+      "dist",
+      "!dist/tui.js",
+      "!dist/tui.js.map",
+      "!dist/tui.d.ts",
+      "!dist/tui.d.ts.map",
+      "!dist/tui-v2.jsx",
+      "!dist/tui-v2.jsx.map",
+      "!dist/tui-v2.d.ts",
+      "!dist/tui-v2.d.ts.map",
+      "README.md",
+      "LICENSE",
+    ]);
     expect(pkg.scripts?.["verify:package-contents"]).toBe(
       "node scripts/verify-package-contents.mjs",
     );
@@ -524,17 +591,18 @@ describe("package manifest compatibility", () => {
     expect(pkg.scripts?.["verify:release-package"]).toBe("node scripts/verify-release-package.mjs");
   });
 
-  it("smoke-tests public imports, CLI commands, and the compiled TUI export", () => {
+  it("smoke-tests public imports, GUI-only CLI commands, and the absent TUI export", () => {
     expect(packedSmoke).toContain('await import("opencode-quota-gui");');
     expect(packedSmoke).toContain('await import("opencode-quota-gui/server");');
     expect(packedSmoke).toContain('"opencode-quota-gui init"');
-    expect(packedSmoke).toContain('"opencode-quota-gui show"');
     expect(packedSmoke).toContain('"opencode-quota-gui update"');
-    expect(packedSmoke).toContain("opencode-quota-gui/tui");
-    expect(packedSmoke).toContain('import.meta.resolve("opencode-quota-gui/tui")');
-    expect(packedSmoke).toContain('readFile(tuiExportPath, "utf8")');
-    expect(packedSmoke).toContain("dist\\\\/tui\\\\.js");
-    expect(packedSmoke).not.toContain('await import("opencode-quota-gui/tui")');
+    expect(packedSmoke).toContain('"opencode-quota-gui --version"');
+    expect(packedSmoke).toContain('import("opencode-quota-gui/tui")');
+    expect(packedSmoke).toContain("ERR_PACKAGE_PATH_NOT_EXPORTED");
+    expect(packedSmoke).toContain('"dist", "tui.js"');
+    expect(packedSmoke).not.toContain('[cliPath, "show"');
+    expect(packedSmoke).not.toContain('[cliPath, "status"');
+    expect(packedSmoke).not.toContain('["show", "--json"');
     expect(packedSmoke).toContain('const { metrics } = await import("@opentelemetry/api");');
     expect(packedSmoke).toContain('assert.equal(typeof metrics.getMeter, "function");');
     expect(packedSmoke).toContain(
@@ -555,6 +623,7 @@ describe("package manifest compatibility", () => {
     expect(packedSmoke).toContain('"disabled"');
     expect(packedSmoke).toContain('"no-global-provider"');
     expect(packedSmoke).toContain('"failing-infrastructure"');
+    expect(packedSmoke).toContain('"read-production-openrouter-cache"');
     expect(packedSmoke).toContain('identity: "packed-runtime-dependency"');
 
     const tarballInstallIndex = packedSmoke.indexOf(

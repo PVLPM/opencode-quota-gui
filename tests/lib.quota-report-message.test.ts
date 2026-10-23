@@ -13,7 +13,7 @@ describe("quota report messages", () => {
     const message = formatQuotaReportMessage("# Quota\nopenai  ███░░ 42%");
 
     expect(message).toBe(
-      "[OpenCode Quota report]\n# Quota\nopenai  ███░░ 42%\n[End of OpenCode Quota report]",
+      "[OpenCode Quota GUI report]\n# Quota\nopenai  ███░░ 42%\n[End of OpenCode Quota GUI report]",
     );
     expect(containsQuotaReport(message)).toBe(true);
   });
@@ -24,8 +24,8 @@ describe("quota report messages", () => {
     const text = `[User]: hi\n\n[User]: ${first}\n\n[Assistant]: ok\n\n[User]: ${second}`;
 
     expect(removeQuotaReports(text)).toBe("[User]: hi\n\n[User]: \n\n[Assistant]: ok\n\n[User]: ");
-    expect(removeQuotaReports("[OpenCode Quota report] without an end line")).toBe(
-      "[OpenCode Quota report] without an end line",
+    expect(removeQuotaReports("[OpenCode Quota GUI report] without an end line")).toBe(
+      "[OpenCode Quota GUI report] without an end line",
     );
     expect(removeQuotaReports("no report")).toBe("no report");
   });
@@ -33,22 +33,22 @@ describe("quota report messages", () => {
   it("reads only well-formed report metadata", () => {
     const metadata = {
       command: "quota",
-      title: "OpenCode Quota",
+      title: "OpenCode Quota GUI",
       at: 1,
       document: messageDocument("openai 42%"),
     };
 
-    expect(readQuotaReportMetadata({ opencodeQuota: metadata })).toEqual(metadata);
+    expect(readQuotaReportMetadata({ opencodeQuotaGui: metadata })).toEqual(metadata);
     // No report document, or a malformed one: the TUI has nothing to draw.
     expect(
-      readQuotaReportMetadata({ opencodeQuota: { ...metadata, document: undefined } }),
+      readQuotaReportMetadata({ opencodeQuotaGui: { ...metadata, document: undefined } }),
     ).toBeUndefined();
     expect(
-      readQuotaReportMetadata({ opencodeQuota: { ...metadata, document: "openai 42%" } }),
+      readQuotaReportMetadata({ opencodeQuotaGui: { ...metadata, document: "openai 42%" } }),
     ).toBeUndefined();
     expect(readQuotaReportMetadata(undefined)).toBeUndefined();
     expect(readQuotaReportMetadata({ displayText: "hi" })).toBeUndefined();
-    expect(readQuotaReportMetadata({ opencodeQuota: "quota" })).toBeUndefined();
-    expect(readQuotaReportMetadata({ opencodeQuota: { command: "quota" } })).toBeUndefined();
+    expect(readQuotaReportMetadata({ opencodeQuotaGui: "quota" })).toBeUndefined();
+    expect(readQuotaReportMetadata({ opencodeQuotaGui: { command: "quota" } })).toBeUndefined();
   });
 });

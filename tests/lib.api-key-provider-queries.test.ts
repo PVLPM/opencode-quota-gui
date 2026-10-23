@@ -722,7 +722,7 @@ describe("simple API-key provider queries", () => {
           method: "GET",
           headers: expect.objectContaining({
             Authorization: "Bearer test-key",
-            "User-Agent": "OpenCode-Quota-Toast/1.0",
+            "User-Agent": "opencode-quota-gui/1.0",
           }),
           signal: expect.any(AbortSignal),
         }),

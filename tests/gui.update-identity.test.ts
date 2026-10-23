@@ -201,7 +201,7 @@ describe("GUI update identity safety", () => {
       "after",
     ]);
   });
-  it("uses the independent package identity and still recognizes legacy specs", () => {
+  it("uses the independent package identity and no longer manages legacy specs", () => {
     expect(QUOTA_PACKAGE_NAME).toBe("opencode-quota-gui");
     expect(LEGACY_QUOTA_PACKAGE_NAME).toBe("@slkiser/opencode-quota");
     expect(QUOTA_LATEST_SPEC).toBe("opencode-quota-gui@latest");
@@ -212,12 +212,6 @@ describe("GUI update identity safety", () => {
       QUOTA_LATEST_SPEC,
       "opencode-quota-gui@next",
       "opencode-quota-gui@5.0.0",
-      LEGACY_QUOTA_PACKAGE_NAME,
-      "@slkiser/opencode-quota@latest",
-      "@slkiser/opencode-quota@next",
-      QUOTA_V4_SPEC,
-      "@slkiser/opencode-quota@3.11.1",
-      "@slkiser/opencode-quota@3.11.2-beta.1+build.2",
     ]) {
       expect(isCanonicalQuotaUpdateSpec(spec), spec).toBe(true);
     }
@@ -225,6 +219,12 @@ describe("GUI update identity safety", () => {
       "opencode-quota-gui@beta",
       "opencode-quota-gui@5",
       "opencode-quota-gui@^5.0.0",
+      LEGACY_QUOTA_PACKAGE_NAME,
+      "@slkiser/opencode-quota@latest",
+      "@slkiser/opencode-quota@next",
+      QUOTA_V4_SPEC,
+      "@slkiser/opencode-quota@3.11.1",
+      "@slkiser/opencode-quota@3.11.2-beta.1+build.2",
       "@slkiser/opencode-quota@beta",
       "@slkiser/opencode-quota@^3.11.1",
       "file:../opencode-quota",
@@ -238,6 +238,22 @@ describe("GUI update identity safety", () => {
   it.each([
     ["@slkiser/opencode-quota"],
     ["@slkiser/opencode-quota@3.11.1"],
+    ["@slkiser/opencode-quota@latest"],
+  ])("preserves the upstream spec %s without rewriting it", async (spec) => {
+    const f = fixture();
+    const config = join(f.project, "opencode.json");
+    const original = `{"plugin":["${spec}"]}`;
+    write(config, original);
+
+    const plan = await planScopedUpdate(planParams(f));
+
+    expect(plan.configEdits).toEqual([]);
+    expect(plan.foundSpecs).toEqual([]);
+    await applyScopedUpdatePlan(plan);
+    expect(readFileSync(config, "utf8")).toBe(original);
+  });
+
+  it.each([
     ["opencode-quota-gui"],
     ["opencode-quota-gui@5.0.0"],
   ])("migrates %s to the canonical package spec without an explicit pack", async (spec) => {
@@ -255,18 +271,11 @@ describe("GUI update identity safety", () => {
     expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ plugin: [QUOTA_LATEST_SPEC] });
   });
 
-  it.each([
-    { entry: "@slkiser/opencode-quota@3.11.1", expected: LOCAL_PACK_SPEC },
-    {
-      entry: { package: "opencode-quota-gui@5.0.0", options: { keep: true } },
-      expected: { package: LOCAL_PACK_SPEC, options: { keep: true } },
-    },
-  ])("rewrites recognized non-moving specs to the explicit package spec, never upstream ($entry)", async ({
-    entry,
-    expected,
-  }) => {
+  it("rewrites a recognized non-moving GUI spec to the explicit package spec, never upstream", async () => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
+    const entry = { package: "opencode-quota-gui@5.0.0", options: { keep: true } };
+    const expected = { package: LOCAL_PACK_SPEC, options: { keep: true } };
     write(config, JSON.stringify({ plugins: [entry, "other-plugin"] }));
 
     const plan = await planScopedUpdate({
@@ -301,7 +310,7 @@ describe("GUI update identity safety", () => {
     expect(readFileSync(config, "utf8")).toBe(original);
   });
 
-  it("keeps both identities' moving specs as written and refreshes their verified caches", async () => {
+  it("keeps GUI moving specs as written and refreshes only GUI-owned caches", async () => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
     const original = `{"plugin":["@slkiser/opencode-quota@latest","opencode-quota-gui@latest","other-plugin"]}`;
@@ -319,16 +328,20 @@ describe("GUI update identity safety", () => {
 
     const plan = await planScopedUpdate(planParams(f));
     expect(plan.configEdits).toEqual([]);
-    expect(plan.foundSpecs).toEqual(
-      expect.arrayContaining(["@slkiser/opencode-quota@latest", "opencode-quota-gui@latest"]),
-    );
-    expect(plan.cacheCandidates).toEqual(expect.arrayContaining([legacyCache, independentCache]));
+    expect(plan.foundSpecs).toEqual(["opencode-quota-gui@latest"]);
+    expect(plan.cacheCandidates).toEqual([independentCache]);
+    expect(plan.cacheCandidates).not.toContain(legacyCache);
 
     const result = await applyScopedUpdatePlan(plan);
-    expect(result.removedCachePaths).toEqual(
-      expect.arrayContaining([legacyCache, independentCache]),
-    );
+    expect(result.removedCachePaths).toEqual([independentCache]);
+    expect(result.removedCachePaths).not.toContain(legacyCache);
     expect(readFileSync(config, "utf8")).toBe(original);
+    expect(
+      readFileSync(
+        join(legacyCache, "node_modules", "@slkiser", "opencode-quota", "package.json"),
+        "utf8",
+      ),
+    ).toBe(`{"name":"@slkiser/opencode-quota"}`);
   });
 
   it("skips an unverified independent cache directory instead of deleting it", async () => {
@@ -346,29 +359,36 @@ describe("GUI update identity safety", () => {
     expect(result.skippedCachePaths).toEqual(expect.arrayContaining([tamperedCache]));
   });
 
-  it("previews with --dry-run and migrates with --yes without writing an upstream spec", async () => {
+  it("previews with --dry-run and migrates only the GUI spec with --yes", async () => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
-    const original = `{"plugin":["@slkiser/opencode-quota@3.11.1"]}`;
+    const original = `{"plugin":["@slkiser/opencode-quota@3.11.1","opencode-quota-gui@5.0.0"]}`;
     write(config, original);
 
     const dryRunParams = cliParams(f, f.env);
     expect(await runScopedUpdateCommand({ ...dryRunParams, argv: ["--dry-run"] })).toBe(0);
     const dryRunOutput = dryRunParams.log.mock.calls.flat().join("\n");
     expect(dryRunOutput).toContain("Responsible update preview complete");
+    expect(dryRunOutput).toContain("opencode-quota-gui@5.0.0");
+    expect(dryRunOutput).not.toContain("@slkiser/opencode-quota@3.11.1 ->");
     expect(readFileSync(config, "utf8")).toBe(original);
 
     const yesParams = cliParams(f, f.env);
     expect(await runScopedUpdateCommand({ ...yesParams, argv: ["--yes"] })).toBe(0);
     const yesOutput = yesParams.log.mock.calls.flat().join("\n");
     expect(yesOutput).toContain("OpenCode Quota update complete.");
-    expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({ plugin: [QUOTA_LATEST_SPEC] });
+    expect(JSON.parse(readFileSync(config, "utf8"))).toEqual({
+      plugin: ["@slkiser/opencode-quota@3.11.1", QUOTA_LATEST_SPEC],
+    });
   });
 
-  it("applies an explicit-spec migration through update --yes without adding upstream specs", async () => {
+  it("applies an explicit-spec migration through update --yes without removing upstream specs", async () => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
-    write(config, `{"plugin":["@slkiser/opencode-quota@3.11.1"],"unrelated":{"keep":true}}`);
+    write(
+      config,
+      `{"plugin":["@slkiser/opencode-quota@3.11.1","opencode-quota-gui@5.0.0"],"unrelated":{"keep":true}}`,
+    );
     const params = {
       ...planParams(f),
       env: { ...f.env, [QUOTA_PLUGIN_SPEC_ENV]: LOCAL_PACK_SPEC },
@@ -379,16 +399,26 @@ describe("GUI update identity safety", () => {
 
     const updated = readFileSync(config, "utf8");
     expect(JSON.parse(updated)).toEqual({
-      plugin: [LOCAL_PACK_SPEC],
+      plugin: ["@slkiser/opencode-quota@3.11.1", LOCAL_PACK_SPEC],
       unrelated: { keep: true },
     });
-    expect(updated).not.toContain(LEGACY_QUOTA_PACKAGE_NAME);
   });
 
-  it("on OpenCode 1 refuses to pin plugin specs to the upstream package", async () => {
+  it("on OpenCode 1 leaves upstream specs as written", async () => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
     const original = `{"plugin":["@slkiser/opencode-quota@5.0.0"]}`;
+    write(config, original);
+
+    const plan = await planScopedUpdate({ ...planParams(f), openCodeMajor: 1 });
+    expect(plan.configEdits).toEqual([]);
+    expect(readFileSync(config, "utf8")).toBe(original);
+  });
+
+  it("on OpenCode 1 refuses to pin a non-moving GUI spec", async () => {
+    const f = fixture();
+    const config = join(f.project, "opencode.json");
+    const original = `{"plugin":["@slkiser/opencode-quota@5.0.0","opencode-quota-gui@5.0.0"]}`;
     write(config, original);
 
     const error = await planScopedUpdate({ ...planParams(f), openCodeMajor: 1 }).catch(
@@ -397,15 +427,15 @@ describe("GUI update identity safety", () => {
     expect(error).toBeInstanceOf(Error);
     if (!(error instanceof Error)) throw new Error("expected an Error");
     expect(error.message).toMatch(/OpenCode 1/i);
-    expect(error.message).toMatch(/upstream @slkiser\/opencode-quota/i);
-    expect(error.message).not.toMatch(/npx @slkiser/);
+    expect(error.message).toMatch(/GUI plugin spec/i);
+    expect(error.message).not.toMatch(/upstream @slkiser/);
     expect(readFileSync(config, "utf8")).toBe(original);
   });
 
-  it("on OpenCode 1 keeps recognized moving specs as written", async () => {
+  it("on OpenCode 1 keeps recognized GUI moving specs as written", async () => {
     const f = fixture();
     const config = join(f.project, "opencode.json");
-    const original = `{"plugin":["${QUOTA_V4_SPEC}","@slkiser/opencode-quota@latest"]}`;
+    const original = `{"plugin":["${QUOTA_LATEST_SPEC}","@slkiser/opencode-quota@latest"]}`;
     write(config, original);
 
     const plan = await planScopedUpdate({ ...planParams(f), openCodeMajor: 1 });

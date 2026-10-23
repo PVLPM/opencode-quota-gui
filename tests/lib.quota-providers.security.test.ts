@@ -22,7 +22,7 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => runtimeDirs.value,
 }));
 
-import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
+import { createLoadConfigMeta, loadConfigLayered } from "../src/lib/config.js";
 
 describe("quotaProviders global-only security", () => {
   let workspace: ConfigLoaderWorkspace;
@@ -40,7 +40,7 @@ describe("quotaProviders global-only security", () => {
       quotaProviders: [quotaProvider({ id: "workspace-endpoint" })],
     });
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: workspace.workspaceDir,
     });
     expect(config.enableToast).toBe(false);
@@ -57,7 +57,7 @@ describe("quotaProviders global-only security", () => {
       quotaProviders: [quotaProvider({ id: "workspace-endpoint" })],
     });
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: workspace.workspaceDir,
     });
     expect(config.quotaProviders).toEqual([]);
@@ -70,7 +70,7 @@ describe("quotaProviders global-only security", () => {
 
   it("rejects SDK quotaProviders because file provenance is unknown", async () => {
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(
+    const config = await loadConfigLayered(
       {
         config: {
           get: async () => ({
@@ -105,7 +105,7 @@ describe("quotaProviders global-only security", () => {
         }),
       ],
     });
-    const config = await loadConfig(undefined, undefined, {
+    const config = await loadConfigLayered(undefined, undefined, {
       configRootDir: workspace.workspaceDir,
     });
     expect(config.quotaProviders[0]).toMatchObject({
@@ -123,7 +123,7 @@ describe("quotaProviders global-only security", () => {
       customSources: [quotaProvider({ id: "old-workspace" })],
     });
     const meta = createLoadConfigMeta();
-    await loadConfig(undefined, meta, { configRootDir: workspace.workspaceDir });
+    await loadConfigLayered(undefined, meta, { configRootDir: workspace.workspaceDir });
     expect(meta.configIssues.filter((issue) => issue.key === "customSources")).toHaveLength(2);
   });
 });

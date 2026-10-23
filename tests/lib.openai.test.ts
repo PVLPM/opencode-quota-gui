@@ -903,7 +903,7 @@ describe("openai auth resolution", () => {
     for (const request of requests) {
       expect(request.headers).toEqual({
         Authorization: "Bearer token-secret",
-        "User-Agent": "OpenCode-Quota-Toast/1.0",
+        "User-Agent": "opencode-quota-gui/1.0",
         "ChatGPT-Account-Id": "account-42",
       });
     }

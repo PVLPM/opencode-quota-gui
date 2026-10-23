@@ -44,6 +44,9 @@ function adapter(manual = false, apply = true) {
   };
   return { prompts, transcript };
 }
+function installerEnv(dir: string) {
+  return { OPENCODE_CONFIG_DIR: join(dir, "global-config") };
+}
 describe("GUI-first onboarding", () => {
   it.each([
     4144, 4251,
@@ -90,7 +93,7 @@ describe("GUI-first onboarding", () => {
     const source = '{"plugins":["./checkout/dist/index.js"]}\n';
     writeFileSync(join(dir, "opencode.jsonc"), source);
     const { prompts } = adapter();
-    expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
+    expect(await runInitInstaller({ cwd: dir, env: installerEnv(dir), prompts })).toBe(0);
     expect(readFileSync(join(dir, "opencode.jsonc"), "utf8")).toBe(source);
   });
   it.each([
@@ -110,14 +113,14 @@ describe("GUI-first onboarding", () => {
     writeFileSync(source, "{}\n");
     writeFileSync(other, "{}\n");
     const { prompts } = adapter();
-    expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
+    expect(await runInitInstaller({ cwd: dir, env: installerEnv(dir), prompts })).toBe(0);
     expect(existsSync(source)).toBe(true);
     expect(existsSync(`${source}c`)).toBe(false);
   });
   it("asks only scope, providers, percentages and apply, with GUI-first opt-outs", async () => {
     const dir = fixture();
     const { prompts, transcript } = adapter();
-    expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
+    expect(await runInitInstaller({ cwd: dir, env: installerEnv(dir), prompts })).toBe(0);
     expect(transcript[0]).toBe("Configure OpenCode Quota GUI");
     const questions = transcript.filter((line) => line.endsWith("?"));
     expect(questions).toEqual([
@@ -130,7 +133,10 @@ describe("GUI-first onboarding", () => {
       /@slkiser|legacy|Which OpenCode interfaces|TUI surfaces|Maintainer announcements/i,
     );
     expect(transcript).toContain("Preview changes");
-    const raw = readFileSync(join(dir, "opencode-quota", "quota-toast.jsonc"), "utf8");
+    const raw = readFileSync(
+      join(dir, "global-config", "opencode-quota-gui", "config.jsonc"),
+      "utf8",
+    );
     expect(parseJsonOrJsonc(raw, true)).toMatchObject({
       enableToast: false,
       tuiSidebarPanel: { enabled: false },
@@ -145,39 +151,36 @@ describe("GUI-first onboarding", () => {
     expect(transcript).toContain("Which pre-configured providers should be tracked?");
     expect(existsSync(join(dir, "opencode.jsonc"))).toBe(false);
   });
-  it("preserves explicitly configured TUI subtrees byte-for-byte", async () => {
+  it("preserves an upstream quota-toast source byte-for-byte", async () => {
     const dir = fixture();
     mkdirSync(join(dir, "opencode-quota"));
-    const subtree =
-      '"tuiCompactStatus": { "enabled": true, "sessionPrompt": false, "maxWidth": 40 }';
-    writeFileSync(
-      join(dir, "opencode-quota", "quota-toast.jsonc"),
-      `{\n "enableToast": true,\n "tuiSidebarPanel": { "enabled": true, "custom": 7 },\n ${subtree},\n "tuiCommandDisplay": "inline",\n "maintainerAnnouncements": { "enabled": true, "home": false }\n}\n`,
-    );
+    const source =
+      '{\n "enableToast": true,\n "tuiSidebarPanel": { "enabled": true, "custom": 7 },\n "tuiCompactStatus": { "enabled": true, "sessionPrompt": false, "maxWidth": 40 },\n "tuiCommandDisplay": "inline",\n "maintainerAnnouncements": { "enabled": true, "home": false }\n}\n';
+    writeFileSync(join(dir, "opencode-quota", "quota-toast.jsonc"), source);
     const { prompts } = adapter();
-    expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
-    const raw = readFileSync(join(dir, "opencode-quota", "quota-toast.jsonc"), "utf8");
-    expect(raw).toContain(subtree);
-    expect(parseJsonOrJsonc(raw, true)).toMatchObject({
-      enableToast: true,
-      tuiSidebarPanel: { enabled: true, custom: 7 },
-      tuiCommandDisplay: "inline",
-      maintainerAnnouncements: { enabled: true, home: false },
-    });
+    expect(await runInitInstaller({ cwd: dir, env: installerEnv(dir), prompts })).toBe(0);
+    expect(readFileSync(join(dir, "opencode-quota", "quota-toast.jsonc"), "utf8")).toBe(source);
+    expect(existsSync(join(dir, "global-config", "opencode-quota-gui", "config.jsonc"))).toBe(true);
   });
-  it("detects actual legacy config, previews migration and keeps the source", async () => {
+  it("detects actual legacy config, previews migration and preserves both entries", async () => {
     const dir = fixture();
     const source =
       '{"plugin":["@slkiser/opencode-quota@latest"],"experimental":{"quotaToast":{"enableToast":true}}}\n';
     writeFileSync(join(dir, "opencode.json"), source);
     const { prompts, transcript } = adapter();
     expect(
-      await runInitInstaller({ cwd: dir, env: {}, prompts, pluginSpec: "opencode-quota-gui@next" }),
+      await runInitInstaller({
+        cwd: dir,
+        env: installerEnv(dir),
+        prompts,
+        pluginSpec: "opencode-quota-gui@next",
+      }),
     ).toBe(0);
     expect(transcript.join("\n")).toContain("Legacy quota configuration detected");
-    expect(transcript.join("\n")).toContain("@slkiser/opencode-quota@latest");
+    expect(transcript.join("\n")).not.toContain("@slkiser/opencode-quota@latest");
     const host = JSON.parse(readFileSync(join(dir, "opencode.json"), "utf8"));
     expect(host.experimental).toEqual(JSON.parse(source).experimental);
+    expect(host.plugin).toEqual(["@slkiser/opencode-quota@latest"]);
     expect(host.plugins).toEqual(["opencode-quota-gui@next"]);
     expect(existsSync(join(dir, "opencode.jsonc"))).toBe(false);
   });

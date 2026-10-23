@@ -8,7 +8,7 @@ import type {
   QuotaProviderContext,
   QuotaProviderResult,
 } from "./entries.js";
-import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
+import { getGuiPrivateCacheDir } from "./private-state-paths.js";
 import { getQuotaProviderDisplayLabel, isLiveLocalUsageProviderId } from "./provider-metadata.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
 import {
@@ -80,7 +80,7 @@ export function buildQuotaProviderStateCacheKey(
 }
 
 function getQuotaProviderCacheDir(): string {
-  return join(getOpencodeRuntimeDirs().cacheDir, QUOTA_PROVIDER_CACHE_DIRNAME);
+  return join(getGuiPrivateCacheDir(), QUOTA_PROVIDER_CACHE_DIRNAME);
 }
 
 function getQuotaProviderStateCacheLocator(key: string): string {

@@ -338,10 +338,13 @@ describe("synthetic GUI smoke", () => {
     const projectBytes = await readFile(projectPath, "utf8");
     const initial = await requestJson<SettingsPayload>(apiUrl("/settings"));
     expect(initial.status).toBe(200);
-    expect(initial.body.values.resetTimeDecimals).toBe(2);
-    expect(initial.body.sources.resetTimeDecimals).toBe("project opencode-quota/quota-toast.jsonc");
+    // Canonical runtime only: the project sidecar and global legacy sidecar are
+    // import candidates, never live settings. resetTimeDecimals is not an
+    // importable legacy key, so it stays at its default (null).
+    expect(initial.body.values.resetTimeDecimals).toBeNull();
+    expect(initial.body.sources.resetTimeDecimals).toBe("defaults");
     expect(initial.body.values.waitForQuotaReset).toBe(true);
-    expect(initial.body.sources.waitForQuotaReset).toBe("global opencode-quota/quota-toast.jsonc");
+    expect(initial.body.sources.waitForQuotaReset).toBe("defaults");
 
     const withoutPreview = await requestJson<ErrorPayload>(apiUrl("/settings/import"), {
       method: "POST",
@@ -372,10 +375,9 @@ describe("synthetic GUI smoke", () => {
     const afterImport = await requestJson<SettingsPayload>(apiUrl("/settings"));
     expect(afterImport.body.values.waitForQuotaReset).toBe(true);
     expect(afterImport.body.sources.waitForQuotaReset).toBe("opencode-quota-gui/config.jsonc");
-    // The project sidecar still overrides the canonical file for this key.
-    expect(afterImport.body.sources.resetTimeDecimals).toBe(
-      "project opencode-quota/quota-toast.jsonc",
-    );
+    // The project sidecar and non-importable legacy keys still never become live.
+    expect(afterImport.body.values.resetTimeDecimals).toBeNull();
+    expect(afterImport.body.sources.resetTimeDecimals).toBe("defaults");
 
     const saved = await putJson<WriteResultPayload>(apiUrl("/settings"), {
       patch: { resetTimeDecimals: 1 },
@@ -383,6 +385,12 @@ describe("synthetic GUI smoke", () => {
     });
     expect(saved.status).toBe(200);
     expect(saved.body.applied.resetTimeDecimals).toBe(1);
+
+    const afterSave = await requestJson<SettingsPayload>(apiUrl("/settings"));
+    expect(afterSave.body.values.resetTimeDecimals).toBe(1);
+    expect(afterSave.body.sources.resetTimeDecimals).toBe("opencode-quota-gui/config.jsonc");
+    expect(afterSave.body.values.waitForQuotaReset).toBe(true);
+    expect(afterSave.body.sources.waitForQuotaReset).toBe("opencode-quota-gui/config.jsonc");
 
     const stale = await putJson<ErrorPayload>(apiUrl("/settings"), {
       patch: { resetTimeDecimals: 3 },
@@ -399,11 +407,9 @@ describe("synthetic GUI smoke", () => {
     expect(visibility.status).toBe(200);
 
     const afterVisibility = await requestJson<SettingsPayload>(apiUrl("/settings"));
-    // The canonical write is stored but the project sidecar still wins.
-    expect(afterVisibility.body.values.resetTimeDecimals).toBe(2);
-    expect(afterVisibility.body.sources.resetTimeDecimals).toBe(
-      "project opencode-quota/quota-toast.jsonc",
-    );
+    // The saved canonical value stays effective; the project sidecar never wins.
+    expect(afterVisibility.body.values.resetTimeDecimals).toBe(1);
+    expect(afterVisibility.body.sources.resetTimeDecimals).toBe("opencode-quota-gui/config.jsonc");
     expect(afterVisibility.body.visibility).toEqual({
       hiddenCards: ["synthetic-card"],
       hiddenRows: [],

@@ -754,7 +754,9 @@ describe("dashboard production lifecycle", () => {
       createServer: interval.createServer,
       logger: silent,
     });
-    expect(interval.read()).toBe(90000);
+    // Runtime settings are canonical-only: legacy values stay importable but do not
+    // affect the effective poll interval until the user applies the import.
+    expect(interval.read()).toBe(60_000);
 
     // Config is read per call, so editing the legacy file changes the import source.
     writeQuotaSidecarConfig(workspace.configDir, { minIntervalMs: 30000 });

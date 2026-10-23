@@ -96,6 +96,28 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+// The shipped product is dashboard-only: inherited TUI source and build support stay in
+// the repository, but no public TUI export or compiled TUI entry may reach the artifact.
+const forbiddenFiles = [
+  "dist/tui.js",
+  "dist/tui.js.map",
+  "dist/tui.d.ts",
+  "dist/tui.d.ts.map",
+  "dist/tui-v2.jsx",
+  "dist/tui-v2.jsx.map",
+  "dist/tui-v2.d.ts",
+  "dist/tui-v2.d.ts.map",
+];
+const shippedForbidden = forbiddenFiles.filter((file) => files.includes(file));
+if (Object.hasOwn(packageJson.exports ?? {}, "./tui")) {
+  shippedForbidden.push('exports["./tui"]');
+}
+if (shippedForbidden.length > 0) {
+  console.error("npm package exposes a disabled terminal/TUI surface:");
+  for (const file of shippedForbidden) console.error(`- ${file}`);
+  process.exit(1);
+}
+
 // The browser bundle ships inside dist/ui under the local packaged-asset
 // allowlist (spec §9): the entry point, a script and a stylesheet are required,
 // and every UI file must be a served asset type — including any packaged font.

@@ -1,7 +1,7 @@
 /**
- * The plugin RPC between OpenCode Quota's server plugin and its clients. The server
- * registers it in its setup and computes quota there; clients call it by this definition.
- * Imports from `@opencode/*` stay type-only, so loading this file loads no OpenCode package.
+ * The plugin RPC between OpenCode Quota GUI's server plugin and its clients. The inherited
+ * TUI implementation keeps calling it, but the GUI-only server plugin no longer registers
+ * it. Imports from `@opencode/*` stay type-only, so loading this file loads no OpenCode package.
  */
 import type { Rpc } from "@opencode/plugin";
 import {
@@ -46,7 +46,7 @@ function schema<T>(check: (value: unknown) => string | null): QuotaRpcSchema<T> 
   return {
     "~standard": {
       version: 1,
-      vendor: "opencode-quota",
+      vendor: "opencode-quota-gui",
       validate: (value) => {
         const issue = check(value);
         return issue ? { issues: [{ message: issue }] } : { value: value as T };

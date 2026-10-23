@@ -118,7 +118,7 @@ describe("GLM coding plan quota contract", () => {
         expect.objectContaining({
           headers: {
             Authorization: provider.key,
-            "User-Agent": "OpenCode-Quota-Toast/1.0",
+            "User-Agent": "opencode-quota-gui/1.0",
             "Content-Type": "application/json",
           },
           signal: expect.any(AbortSignal),

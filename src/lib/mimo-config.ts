@@ -35,7 +35,7 @@ const RETAINED_COOKIE_NAME_SET = new Set<string>(RETAINED_COOKIE_NAMES);
 const REQUIRED_COOKIE_NAMES = ["api-platform_serviceToken", "userId"] as const;
 
 function getConfigCandidatePaths(): string[] {
-  return [join(getOpencodeRuntimeDirs().configDir, "opencode-quota", "mimo.json")];
+  return [join(getOpencodeRuntimeDirs().configDir, "opencode-quota-gui", "mimo.json")];
 }
 
 export function normalizeMimoCookieHeader(raw: string): string | null {

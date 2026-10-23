@@ -94,8 +94,8 @@ export function renderableSections(document: ReportDocument): ReportSection[] {
 
 /**
  * A command report's heading: "# <title> <time>" in text, "<detail> · <time>" in the dialog.
- * The title echoes the command, e.g. "Quota Status (opencode-quota v5.0.0) (/quota_status)";
- * the detail repeats the facts in it that the dialog title lacks, e.g. "opencode-quota v5.0.0".
+ * The title echoes the command, e.g. "Quota Status (opencode-quota-gui v5.0.0) (/quota_status)";
+ * the detail repeats the facts in it that the dialog title lacks, e.g. "opencode-quota-gui v5.0.0".
  */
 export function commandHeading(params: {
   title: string;

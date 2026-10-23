@@ -43,7 +43,7 @@ export type DeepSeekResult =
   | null;
 
 const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
-const USER_AGENT = "OpenCode-Quota-Toast/1.0";
+const USER_AGENT = "opencode-quota-gui/1.0";
 const MAX_PARSE_ISSUES = 6;
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -44,7 +44,7 @@ describe("quota RPC definition", () => {
     for (const method of Object.values(methods)) {
       for (const schema of [method.input, method.output]) {
         expect(schema["~standard"]).toEqual(
-          expect.objectContaining({ version: 1, vendor: "opencode-quota" }),
+          expect.objectContaining({ version: 1, vendor: "opencode-quota-gui" }),
         );
         expect(schema["~standard"]).not.toHaveProperty("types");
       }

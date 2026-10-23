@@ -89,7 +89,7 @@ describe("local quota provider state", () => {
     const def = definition();
     const path = getLocalQuotaProviderStatePath(def.id, dirs);
     expect(path).toBe(
-      join(dirs.stateDir, "opencode-quota", "quota-providers", "private-gateway.json"),
+      join(dirs.stateDir, "opencode-quota-gui", "quota-providers", "private-gateway.json"),
     );
 
     await syncLocalQuotaProviderState(def, {

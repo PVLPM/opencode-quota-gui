@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGuiSettingsStore, getGuiDashboardPort } from "../src/gui/config.js";
-import { createLoadConfigMeta, getGuiConfigPath, loadConfig } from "../src/lib/config.js";
+import { createLoadConfigMeta, getGuiConfigPath, loadConfigLayered } from "../src/lib/config.js";
 import {
   createGuiConfigWorkspace,
   type GuiConfigWorkspace,
@@ -36,7 +36,7 @@ function makeStore(workspace: GuiConfigWorkspace) {
 
 async function load(workspace: GuiConfigWorkspace) {
   const meta = createLoadConfigMeta();
-  const config = await loadConfig(undefined, meta, {
+  const config = await loadConfigLayered(undefined, meta, {
     configRootDir: workspace.workspaceRoot,
     globalConfigDir: workspace.configDir,
   });
@@ -44,7 +44,7 @@ async function load(workspace: GuiConfigWorkspace) {
 }
 
 describe("legacy config compatibility beside the canonical layer", () => {
-  it("keeps the full legacy configuration working", async () => {
+  it("keeps the full legacy configuration available to the import loader", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.configDir, {
       enabled: false,
@@ -72,7 +72,7 @@ describe("legacy config compatibility beside the canonical layer", () => {
     expect(meta.configIssues).toEqual([]);
   });
 
-  it("reports the winning layer per key with symbolic labels", async () => {
+  it("reports canonical runtime values and keeps legacy layers for import", async () => {
     const workspace = makeWorkspace();
     writeQuotaToastConfig(workspace.configDir, {
       minIntervalMs: 1111,
@@ -84,19 +84,26 @@ describe("legacy config compatibility beside the canonical layer", () => {
     });
     writeGuiCanonicalConfig(workspace, { minIntervalMs: 3333, waitForQuotaReset: false });
 
-    const snapshot = await makeStore(workspace).settings();
+    const store = makeStore(workspace);
+    const snapshot = await store.settings();
 
-    expect(snapshot.values.minIntervalMs).toBe(2222);
-    expect(snapshot.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
-    expect(snapshot.sources.percentDisplayMode).toBe(
-      "global opencode.json (experimental.quotaToast)",
-    );
-    expect(snapshot.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
+    expect(snapshot.values.minIntervalMs).toBe(3333);
+    expect(snapshot.values.percentDisplayMode).toBe("remaining");
+    expect(snapshot.values.accountingDetail).toBe("summary");
+    expect(snapshot.values.waitForQuotaReset).toBe(false);
+    expect(snapshot.sources.minIntervalMs).toBe("opencode-quota-gui/config.jsonc");
+    expect(snapshot.sources.percentDisplayMode).toBe("defaults");
+    expect(snapshot.sources.accountingDetail).toBe("defaults");
     expect(snapshot.sources.waitForQuotaReset).toBe("opencode-quota-gui/config.jsonc");
     expect(snapshot.sources.percentLabelStyle).toBe("defaults");
+
+    const preview = await store.importPreview();
+    expect(Object.fromEntries(preview.keys.map((entry) => [entry.key, entry.value]))).toEqual({
+      percentDisplayMode: "used",
+    });
   });
 
-  it("writes the global canonical file without defeating a project override", async () => {
+  it("writes the global canonical file and leaves project legacy layers inactive", async () => {
     const workspace = makeWorkspace();
     const sidecar = writeQuotaSidecarConfig(workspace.workspaceRoot, {
       minIntervalMs: 2222,
@@ -107,8 +114,10 @@ describe("legacy config compatibility beside the canonical layer", () => {
     const store = makeStore(workspace);
 
     const before = await store.settings();
-    expect(before.values.minIntervalMs).toBe(2222);
-    expect(before.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
+    expect(before.values.minIntervalMs).toBe(1111);
+    expect(before.values.accountingDetail).toBe("summary");
+    expect(before.sources.minIntervalMs).toBe("opencode-quota-gui/config.jsonc");
+    expect(before.sources.accountingDetail).toBe("defaults");
 
     await store.saveSettings({
       patch: { minIntervalMs: 1000, accountingDetail: "summary" },
@@ -116,11 +125,11 @@ describe("legacy config compatibility beside the canonical layer", () => {
     });
 
     const after = await store.settings();
-    expect(after.values.minIntervalMs).toBe(2222);
-    expect(after.values.accountingDetail).toBe("detailed");
+    expect(after.values.minIntervalMs).toBe(1000);
+    expect(after.values.accountingDetail).toBe("summary");
     expect(after.values.waitForQuotaReset).toBe(false);
-    expect(after.sources.minIntervalMs).toBe("project opencode-quota/quota-toast.json");
-    expect(after.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
+    expect(after.sources.minIntervalMs).toBe("opencode-quota-gui/config.jsonc");
+    expect(after.sources.accountingDetail).toBe("opencode-quota-gui/config.jsonc");
     expect(after.sources.waitForQuotaReset).toBe("opencode-quota-gui/config.jsonc");
     expect(readFileSync(sidecar, "utf8")).toBe(sidecarBytes);
     const canonical = JSON.parse(readFileSync(workspace.guiConfigPath, "utf8"));
@@ -128,18 +137,20 @@ describe("legacy config compatibility beside the canonical layer", () => {
     expect(canonical.accountingDetail).toBe("summary");
   });
 
-  it("never writes a project legacy sidecar and never denies its values", async () => {
+  it("never writes a project legacy sidecar and ignores its runtime values", async () => {
     const workspace = makeWorkspace();
     const sidecar = writeQuotaSidecarConfig(workspace.workspaceRoot, {
       dashboard: { hiddenCards: ["card-a"] },
-      waitForQuotaReset: true,
+      waitForQuotaReset: false,
     });
     const sidecarBytes = readFileSync(sidecar, "utf8");
     const store = makeStore(workspace);
 
     const before = await store.settings();
-    expect(before.visibility.hiddenCards).toEqual(["card-a"]);
-    expect(before.sources["dashboard.hiddenCards"]).toBe("project opencode-quota/quota-toast.json");
+    expect(before.visibility.hiddenCards).toEqual([]);
+    expect(before.sources["dashboard.hiddenCards"]).toBe("defaults");
+    expect(before.values.waitForQuotaReset).toBe(true);
+    expect(before.sources.waitForQuotaReset).toBe("defaults");
 
     await store.saveVisibility({
       hiddenCards: ["card-b"],
@@ -149,7 +160,7 @@ describe("legacy config compatibility beside the canonical layer", () => {
 
     expect(readFileSync(sidecar, "utf8")).toBe(sidecarBytes);
     const after = await store.settings();
-    expect(after.visibility).toEqual({ hiddenCards: ["card-a"], hiddenRows: ["row-b"] });
+    expect(after.visibility).toEqual({ hiddenCards: ["card-b"], hiddenRows: ["row-b"] });
     expect(after.values.waitForQuotaReset).toBe(true);
     const canonical = JSON.parse(readFileSync(workspace.guiConfigPath, "utf8"));
     expect(canonical.dashboard.hiddenCards).toEqual(["card-b"]);

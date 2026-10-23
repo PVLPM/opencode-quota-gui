@@ -686,7 +686,7 @@ describe("integration credential source", () => {
       unboundReader.readAuthFileCached({ maxAgeMs: 0, integrationIds: ["openai"] }),
     ).resolves.toBeNull();
 
-    expect(warn.mock.calls).toEqual([["[opencode-quota] credential source is not bound"]]);
+    expect(warn.mock.calls).toEqual([["[opencode-quota-gui] credential source is not bound"]]);
     expect(unboundReader.getCredentialSourceDiagnostics()).toEqual({
       state: "unbound",
       failures: [],

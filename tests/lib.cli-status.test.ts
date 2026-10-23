@@ -136,14 +136,14 @@ describe("runCliStatusCommand", () => {
     mockProviders.length = 0;
     statusData.value = null;
     vi.mocked(buildStatusReportData).mockClear();
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: { quotaToast: { enabledProviders: ["synthetic"] } },
-      }),
-      "utf8",
-    );
+    writeQuotaConfig({ enabledProviders: ["synthetic"] });
   });
+
+  function writeQuotaConfig(quotaToast: Record<string, unknown>): void {
+    const dir = join(globalConfigDir, "opencode-quota-gui");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.jsonc"), JSON.stringify(quotaToast), "utf8");
+  }
 
   afterEach(() => {
     if (savedConfigDir !== undefined) process.env.OPENCODE_CONFIG_DIR = savedConfigDir;
@@ -291,11 +291,7 @@ describe("runCliStatusCommand", () => {
   });
 
   it("returns non-zero when quota is disabled in config", async () => {
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({ experimental: { quotaToast: { enabled: false } } }),
-      "utf8",
-    );
+    writeQuotaConfig({ enabled: false });
     const result = await runStatus([]);
 
     expect(result.code).toBe(1);

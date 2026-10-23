@@ -34,7 +34,7 @@ export async function queryGlmCodingPlanQuota(
       request: {
         headers: {
           Authorization: auth.apiKey,
-          "User-Agent": "OpenCode-Quota-Toast/1.0",
+          "User-Agent": "opencode-quota-gui/1.0",
           "Content-Type": "application/json",
         },
       },

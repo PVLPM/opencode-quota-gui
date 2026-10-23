@@ -116,7 +116,7 @@ export interface AccountingMetadata {
   resultType: AccountingResultType;
   /** How the accounting value was acquired. */
   acquisitionMethod: AccountingAcquisitionMethod;
-  /** Whether opencode-quota or the user owns the source definition. */
+  /** Whether opencode-quota-gui or the user owns the source definition. */
   ownership: AccountingOwnership;
   /** Whether the value came from the provider or was derived locally. */
   authority: AccountingAuthority;

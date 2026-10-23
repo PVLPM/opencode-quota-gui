@@ -288,10 +288,10 @@ describe("opencode config provider discovery", () => {
     const globalAfter = readFileSync(globalPath, "utf8");
     expect(globalAfter).toContain("// Keep this global setting and comment.");
     expect(globalAfter).toContain(
-      "// Detected deepseek authentication; opencode-quota added this global provider declaration.",
+      "// Detected deepseek authentication; opencode-quota-gui added this global provider declaration.",
     );
     expect(
-      globalAfter.match(/opencode-quota added this global provider declaration/g),
+      globalAfter.match(/opencode-quota-gui added this global provider declaration/g),
     ).toHaveLength(1);
     expect(
       JSON.parse(

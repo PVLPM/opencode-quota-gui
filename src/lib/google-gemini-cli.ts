@@ -42,7 +42,7 @@ const GEMINI_QUOTA_API_URL = "https://cloudcode-pa.googleapis.com/v1internal:ret
 const GEMINI_TOKEN_TIMEOUT_MS = 8_000;
 const GEMINI_QUOTA_TIMEOUT_MS = 6_000;
 const GEMINI_ACCOUNTS_CONCURRENCY = 3;
-const GEMINI_CLI_USER_AGENT = `GeminiCLI/opencode-quota (${process.platform}; ${process.arch})`;
+const GEMINI_CLI_USER_AGENT = `GeminiCLI/opencode-quota-gui (${process.platform}; ${process.arch})`;
 
 type RefreshParts = {
   refreshToken: string;

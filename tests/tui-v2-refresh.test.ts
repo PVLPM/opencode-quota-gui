@@ -230,9 +230,9 @@ describe("V2 footer refresh timer", () => {
     await flushPromises();
 
     expect(warn.mock.calls).toEqual([
-      ["[opencode-quota] failed to load quota: server broke"],
+      ["[opencode-quota-gui] failed to load quota: server broke"],
       [
-        "[opencode-quota] failed to load quota: no rpc (OpenCode Quota's server plugin is not loaded for this folder)",
+        "[opencode-quota-gui] failed to load quota: no rpc (OpenCode Quota GUI's server plugin is not loaded for this folder)",
       ],
     ]);
     expect(rpc.writeExport).not.toHaveBeenCalled();

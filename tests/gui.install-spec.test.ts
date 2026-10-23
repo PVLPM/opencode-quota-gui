@@ -75,13 +75,18 @@ function createPromptStub() {
 
 describe("GUI install spec safety", () => {
   let tempDir: string;
+  let savedConfigDir: string | undefined;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "opencode-quota-gui-install-"));
+    savedConfigDir = process.env.OPENCODE_CONFIG_DIR;
+    process.env.OPENCODE_CONFIG_DIR = join(tempDir, "global-config");
     delete process.env[QUOTA_PLUGIN_SPEC_ENV];
   });
 
   afterEach(() => {
+    if (savedConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+    else process.env.OPENCODE_CONFIG_DIR = savedConfigDir;
     rmSync(tempDir, { recursive: true, force: true });
     delete process.env[QUOTA_PLUGIN_SPEC_ENV];
   });
@@ -135,7 +140,7 @@ describe("GUI install spec safety", () => {
     expect(readdirSync(tempDir)).toEqual([]);
   });
 
-  it("still recognizes existing legacy installs without requiring a spec", async () => {
+  it("preserves an existing legacy install and adds the GUI entry without requiring a spec", async () => {
     writeFileSync(
       join(tempDir, "opencode.json"),
       JSON.stringify({ plugin: ["@slkiser/opencode-quota@latest"] }),
@@ -144,15 +149,16 @@ describe("GUI install spec safety", () => {
 
     const plan = await planInitInstaller({ cwd: tempDir, selections: installerSelections() });
     const opencodeEdit = plan.edits.find((edit) => edit.kind === "opencode");
-    expect(opencodeEdit?.addedPlugins).toEqual([]);
+    expect(opencodeEdit?.addedPlugins).toEqual(["plugins: opencode-quota-gui@latest"]);
 
     await applyInitInstallerPlan(plan);
-    expect(readJson(join(tempDir, "opencode.jsonc")).plugins).toEqual([
-      "@slkiser/opencode-quota@latest",
-    ]);
+    expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
+      plugin: ["@slkiser/opencode-quota@latest"],
+      plugins: ["opencode-quota-gui@latest"],
+    });
   });
 
-  it("deduplicates native GUI and upstream entries without reordering unrelated plugins", async () => {
+  it("deduplicates GUI entries while preserving upstream entries and unrelated plugins", async () => {
     writeFileSync(
       join(tempDir, "opencode.jsonc"),
       JSON.stringify({
@@ -175,6 +181,7 @@ describe("GUI install spec safety", () => {
       "before",
       "opencode-quota-gui@latest",
       "between",
+      UPSTREAM_PACKAGE_SPEC,
       { package: "unrelated-plugin", options: { keep: true } },
       "after",
     ]);
@@ -199,7 +206,7 @@ describe("GUI install spec safety", () => {
     });
   });
 
-  it("deduplicates a native GUI entry against an upstream entry in the legacy array", async () => {
+  it("preserves upstream entries in the legacy array beside a native GUI entry", async () => {
     writeFileSync(
       join(tempDir, "opencode.jsonc"),
       JSON.stringify({
@@ -213,15 +220,13 @@ describe("GUI install spec safety", () => {
     await applyInitInstallerPlan(plan);
 
     expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
-      plugin: ["legacy-before", "legacy-after"],
+      plugin: ["legacy-before", UPSTREAM_PACKAGE_SPEC, "legacy-after"],
       plugins: ["before", "opencode-quota-gui@latest", "after"],
     });
-    expect(plan.summaryLines.join("\n")).toContain(
-      `remove duplicate quota plugin ${JSON.stringify(UPSTREAM_PACKAGE_SPEC)}; keep ${JSON.stringify("opencode-quota-gui@latest")}`,
-    );
+    expect(plan.summaryLines.join("\n")).not.toContain("remove duplicate quota plugin");
   });
 
-  it("deduplicates a verified local checkout against an upstream legacy entry", async () => {
+  it("preserves an upstream legacy entry beside a verified local checkout", async () => {
     writeFileSync(
       join(tempDir, "package.json"),
       JSON.stringify({ name: "opencode-quota-gui" }),
@@ -241,12 +246,12 @@ describe("GUI install spec safety", () => {
     await applyInitInstallerPlan(plan);
 
     expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
-      plugin: ["legacy-before", "legacy-after"],
+      plugin: ["legacy-before", UPSTREAM_PACKAGE_SPEC, "legacy-after"],
       plugins: ["before", "./server.ts", "after"],
     });
   });
 
-  it("keeps a legacy-only plugin spec and options while migrating it to the plural array", async () => {
+  it("preserves a legacy-only upstream plugin spec and options while adding the GUI entry", async () => {
     writeFileSync(
       join(tempDir, "opencode.jsonc"),
       JSON.stringify({
@@ -263,8 +268,12 @@ describe("GUI install spec safety", () => {
     await applyInitInstallerPlan(plan);
 
     expect(readJson(join(tempDir, "opencode.jsonc"))).toEqual({
-      plugin: ["legacy-before", "legacy-after"],
-      plugins: [[UPSTREAM_PACKAGE_SPEC, { enabled: true, label: "preserve me" }]],
+      plugin: [
+        "legacy-before",
+        [UPSTREAM_PACKAGE_SPEC, { enabled: true, label: "preserve me" }],
+        "legacy-after",
+      ],
+      plugins: ["opencode-quota-gui@latest"],
     });
   });
 
@@ -272,7 +281,7 @@ describe("GUI install spec safety", () => {
     writeFileSync(
       join(tempDir, "opencode.jsonc"),
       JSON.stringify({
-        plugin: [[UPSTREAM_PACKAGE_SPEC, { beta: 2, alpha: 1 }]],
+        plugin: [["opencode-quota-gui@latest", { beta: 2, alpha: 1 }]],
         plugins: [{ package: "opencode-quota-gui@latest", options: { alpha: 1, beta: 2 } }],
       }),
       "utf8",
@@ -292,7 +301,7 @@ describe("GUI install spec safety", () => {
     writeFileSync(
       path,
       JSON.stringify({
-        plugin: [{ package: UPSTREAM_PACKAGE_SPEC, options: { enabled: false } }],
+        plugin: [{ package: "opencode-quota-gui@latest", options: { enabled: false } }],
         plugins: [{ package: "opencode-quota-gui@latest", options: { enabled: true } }],
       }),
       "utf8",
@@ -314,7 +323,7 @@ describe("GUI install spec safety", () => {
         plugin: [
           "legacy-before",
           {
-            package: UPSTREAM_PACKAGE_SPEC,
+            package: "opencode-quota-gui@latest",
             options: { enabled: true },
             customMetadata: { owner: "kept" },
           },
@@ -361,7 +370,7 @@ describe("GUI install spec safety", () => {
       JSON.stringify({
         plugin: [
           "legacy-before",
-          [UPSTREAM_PACKAGE_SPEC, { beta: 2, alpha: 1 }, "preserve tuple tail"],
+          ["opencode-quota-gui@latest", { beta: 2, alpha: 1 }, "preserve tuple tail"],
           "legacy-after",
         ],
         plugins: [
@@ -393,7 +402,7 @@ describe("GUI install spec safety", () => {
       JSON.stringify({
         plugin: [
           {
-            package: UPSTREAM_PACKAGE_SPEC,
+            package: "opencode-quota-gui@latest",
             options: { enabled: true },
             metadata: { owner: "legacy" },
           },
@@ -423,7 +432,7 @@ describe("GUI install spec safety", () => {
     writeFileSync(
       path,
       JSON.stringify({
-        plugin: [[UPSTREAM_PACKAGE_SPEC, { enabled: true }, "legacy tail"]],
+        plugin: [["opencode-quota-gui@latest", { enabled: true }, "legacy tail"]],
         plugins: [["opencode-quota-gui@latest", { enabled: true }, "native tail"]],
       }),
       "utf8",
@@ -444,7 +453,7 @@ describe("GUI install spec safety", () => {
       path,
       JSON.stringify({
         plugins: ["before", "opencode-quota-gui@latest", "after"],
-        plugin: ["legacy-before", UPSTREAM_PACKAGE_SPEC, "legacy-after"],
+        plugin: ["legacy-before", "opencode-quota-gui@latest", "legacy-after"],
       }),
       "utf8",
     );
@@ -468,7 +477,7 @@ describe("GUI install spec safety", () => {
     writeFileSync(
       path,
       JSON.stringify({
-        plugins: ["before", "opencode-quota-gui@latest", UPSTREAM_PACKAGE_SPEC, "after"],
+        plugins: ["before", "opencode-quota-gui@latest", "opencode-quota-gui@latest", "after"],
       }),
       "utf8",
     );

@@ -63,12 +63,37 @@ const symlinkProbe = (() => {
 
 const symlinkIt = it.runIf(symlinkProbe.ok);
 
+/** Directory junctions work without Developer Mode on Windows; plain dir links do not. */
+const dirLinkProbe = (() => {
+  const dir = mkdtempSync(join(tmpdir(), "opencode-quota-gui-dirlink-probe-"));
+  try {
+    const target = join(dir, "target");
+    const link = join(dir, "link");
+    mkdirSync(target);
+    symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+    return { ok: true, reason: "" };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
+const dirLinkIt = it.runIf(dirLinkProbe.ok);
+
 if (!symlinkProbe.ok) {
   console.warn(
     `[gui.config-write-safety] symlink cases SKIPPED: this host cannot create symlinks ` +
       `(${symlinkProbe.reason}). Required re-run environment: linux/macOS (POSIX) or Windows ` +
       `with Developer Mode enabled. Skipped cases: dangling link, symlink loop, >40-hop chain, ` +
-      `symlink write-through.`,
+      `symlink write-through, upstream file aliases.`,
+  );
+}
+
+if (!dirLinkProbe.ok) {
+  console.warn(
+    `[gui.config-write-safety] directory-alias case SKIPPED: this host cannot create directory links ` +
+      `(${dirLinkProbe.reason}).`,
   );
 }
 
@@ -168,14 +193,14 @@ describe("canonical config write safety", () => {
     expect(readFileSync(workspace.guiConfigPath, "utf8")).toContain('"trailingMarker": true');
   });
 
-  it("refuses writes on a malformed file and never overwrites it", async () => {
+  it("refuses writes on a malformed canonical file and never overwrites it", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, { accountingDetail: "detailed" });
     writeGuiCanonicalConfig(workspace, "{ broken");
     const store = makeStore(workspace);
 
     const snapshot = await store.settings();
-    expect(snapshot.values.accountingDetail).toBe("detailed");
+    expect(snapshot.values.accountingDetail).toBe("summary");
     expect(snapshot.issues.some((issue) => issue.key === "$root")).toBe(true);
 
     const error = await expectGuiError(
@@ -318,5 +343,81 @@ describe("canonical config write safety", () => {
       { reason: "depth" },
     );
     expect(readFileSync(real, "utf8")).toBe("{}\n");
+  });
+
+  symlinkIt("refuses a canonical file alias of an upstream quota-toast file", async () => {
+    const workspace = makeWorkspace();
+    const upstream = writeQuotaSidecarConfig(workspace.configDir, {
+      percentDisplayMode: "used",
+      minIntervalMs: 1000,
+    });
+    const upstreamBytes = readFileSync(upstream, "utf8");
+    mkdirSync(workspace.guiConfigDir, { recursive: true });
+    symlinkSync(upstream, workspace.guiConfigPath, "file");
+    const store = makeStore(workspace);
+    const before = await store.settings();
+
+    const error = await expectGuiError(
+      store.saveSettings({
+        patch: { minIntervalMs: 2000 },
+        expectedRevision: before.revision,
+      }),
+      "config-target-error",
+    );
+    expect(error.message).not.toContain(workspace.tempDir);
+    expect(error.message).not.toContain(workspace.configDir);
+    expect(readFileSync(upstream, "utf8")).toBe(upstreamBytes);
+    expect(lstatSync(workspace.guiConfigPath).isSymbolicLink()).toBe(true);
+  });
+
+  dirLinkIt("refuses a canonical directory alias of the upstream quota directory", async () => {
+    const workspace = makeWorkspace();
+    const upstreamDir = join(workspace.configDir, "opencode-quota");
+    mkdirSync(upstreamDir, { recursive: true });
+    const upstreamTarget = join(upstreamDir, "config.jsonc");
+    writeFileSync(upstreamTarget, '{"minIntervalMs":1000}\n', "utf8");
+    const upstreamToast = writeQuotaSidecarConfig(workspace.configDir, {
+      percentDisplayMode: "used",
+    });
+    const targetBytes = readFileSync(upstreamTarget, "utf8");
+    const toastBytes = readFileSync(upstreamToast, "utf8");
+    symlinkSync(
+      upstreamDir,
+      workspace.guiConfigDir,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const store = makeStore(workspace);
+    const before = await store.settings();
+
+    await expectGuiError(
+      store.saveVisibility({
+        hiddenCards: ["card-b"],
+        hiddenRows: [],
+        expectedRevision: before.revision,
+      }),
+      "config-target-error",
+    );
+    expect(readFileSync(upstreamTarget, "utf8")).toBe(targetBytes);
+    expect(readFileSync(upstreamToast, "utf8")).toBe(toastBytes);
+  });
+
+  symlinkIt("refuses an import apply through a canonical alias of an upstream file", async () => {
+    const workspace = makeWorkspace();
+    const upstreamDir = join(workspace.configDir, "opencode-quota");
+    mkdirSync(upstreamDir, { recursive: true });
+    const upstreamTarget = join(upstreamDir, "config.jsonc");
+    writeFileSync(upstreamTarget, "{}\n", "utf8");
+    const targetBytes = readFileSync(upstreamTarget, "utf8");
+    writeQuotaSidecarConfig(workspace.configDir, { percentDisplayMode: "used" });
+    symlinkSync(upstreamTarget, workspace.guiConfigPath, "file");
+    const store = makeStore(workspace);
+    const preview = await store.importPreview();
+    expect(preview.keys).toEqual([{ key: "percentDisplayMode", value: "used" }]);
+
+    await expectGuiError(
+      store.importApply({ expectedRevision: preview.expectedRevision }),
+      "config-target-error",
+    );
+    expect(readFileSync(upstreamTarget, "utf8")).toBe(targetBytes);
   });
 });

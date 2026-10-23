@@ -12,9 +12,6 @@ import {
 } from "./helpers/plugin-test-harness.js";
 import { createProviderAvailabilityContext } from "./helpers/provider-test-harness.js";
 
-/** Live plugin setups are released after each test (dashboard lease included). */
-const pluginCleanups: Array<() => Promise<void> | void> = [];
-
 const TEST_RUNTIME_ROOT = "/tmp/opencode-quota-opencode-go-surfaces";
 const TEST_TOKEN = "distinctive-opencode-go-surface-token";
 
@@ -113,37 +110,41 @@ function successfulResult() {
   };
 }
 
+/** The retained diagnostics builder needs the same credential binding the plugin used. */
+let unbindAuth: (() => void) | undefined;
+
+/** Runs the retained diagnostics report builder directly; the plugin registers no tool. */
 async function runQuotaStatus(
   sessionID: string,
   integration = createFakeIntegration([]),
 ): Promise<string> {
-  let quotaTool:
-    | { execute: (input: unknown, context: { sessionID: string }) => Promise<{ content: string }> }
-    | undefined;
-  const { default: plugin } = await import("../src/plugin.js");
-  const cleanup = await plugin.setup({
-    location: { directory: process.cwd() },
-    provider: { list: vi.fn().mockResolvedValue({ data: [{ id: "opencode-go" }] }) },
-    session: {
-      get: vi.fn().mockResolvedValue({ model: { id: "model", providerID: "opencode-go" } }),
-      hook: vi.fn(),
-    },
-    command: { transform: vi.fn() },
-    rpc: { register: vi.fn(async () => ({ dispose: async () => {}, events: { emit: vi.fn() } })) },
-    integration,
-    event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
-    tool: {
-      transform: async (callback: (editor: { add: (tool: typeof quotaTool) => void }) => void) =>
-        callback({
-          add: (tool) => {
-            quotaTool = tool;
-          },
-        }),
-    },
-  } as never);
-  if (typeof cleanup === "function") pluginCleanups.push(cleanup);
-  if (!quotaTool) throw new Error("V2 quota_status tool was not registered");
-  return (await quotaTool.execute({}, { sessionID })).content;
+  const [
+    { buildQuotaDialogCommandOutput },
+    { sanitizeDisplayText },
+    { resolveOpenCodeLocationRoots },
+    auth,
+  ] = await Promise.all([
+    import("../src/lib/quota-dialog-commands.js"),
+    import("../src/lib/display-sanitize.js"),
+    import("../src/lib/config-file-utils.js"),
+    import("../src/lib/opencode-auth.js"),
+  ]);
+  unbindAuth?.();
+  unbindAuth = auth.bindCredentialSource(auth.createIntegrationCredentialSource(integration));
+  const result = await buildQuotaDialogCommandOutput({
+    command: "quota_status",
+    client: {
+      config: {
+        get: async () => ({ data: {} }),
+        providers: async () => ({ data: { providers: [{ id: "opencode-go" }] } }),
+      },
+    } as never,
+    roots: resolveOpenCodeLocationRoots(process.cwd()),
+    sessionID,
+    resolveSessionMeta: async () => ({ modelID: "model", providerID: "opencode-go" }),
+  });
+  if (result.state !== "output") throw new Error("quota_status produced no output");
+  return sanitizeDisplayText(result.output);
 }
 
 async function collectQuotaProjection(): Promise<string> {
@@ -204,15 +205,20 @@ describe("OpenCode Go shared projections", () => {
     });
     mocks.queryOpenCodeGoQuota.mockResolvedValue(successfulResult());
 
+    const auth = await import("../src/lib/opencode-auth.js");
+    unbindAuth?.();
+    unbindAuth = auth.bindCredentialSource(
+      auth.createIntegrationCredentialSource(createFakeIntegration([])),
+    );
+
     await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });
     const { __resetQuotaStateForTests } = await import("../src/lib/quota-state.js");
     __resetQuotaStateForTests();
   });
 
   afterEach(async () => {
-    for (const cleanup of pluginCleanups.splice(0).reverse()) {
-      await cleanup();
-    }
+    unbindAuth?.();
+    unbindAuth = undefined;
     const { __resetQuotaStateForTests } = await import("../src/lib/quota-state.js");
     __resetQuotaStateForTests();
     await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });

@@ -1,12 +1,13 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isVerifiedQuotaPluginSpec } from "../src/lib/config-file-utils.js";
 import {
   applyInitInstallerPlan,
   type InitInstallerSelections,
+  isVerifiedGuiQuotaPluginSpec,
   planInitInstaller,
 } from "../src/lib/init-installer.js";
 import { parseJsonOrJsonc } from "../src/lib/jsonc.js";
@@ -19,7 +20,16 @@ vi.mock("../src/lib/opencode-version.js", async (importOriginal) => {
   };
 });
 const dirs: string[] = [];
+let savedConfigDir: string | undefined;
+beforeEach(() => {
+  savedConfigDir = process.env.OPENCODE_CONFIG_DIR;
+  const globalConfigDir = mkdtempSync(join(tmpdir(), "quota-v2-global-"));
+  dirs.push(globalConfigDir);
+  process.env.OPENCODE_CONFIG_DIR = globalConfigDir;
+});
 afterEach(() => {
+  if (savedConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+  else process.env.OPENCODE_CONFIG_DIR = savedConfigDir;
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 const selections: InitInstallerSelections = {
@@ -44,6 +54,10 @@ function host(dir: string) {
     string,
     unknown
   >;
+}
+function write(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
 }
 function syntheticPackageTarball(name: string): Buffer {
   const manifest = Buffer.from(JSON.stringify({ name, version: "1.2.3" }));
@@ -118,6 +132,31 @@ describe("current v2 installer desired plugin safety", () => {
     await applyInitInstallerPlan(plan);
     expect(host(dir).plugins).toEqual(["before", old, desired, "after"]);
   });
+  it("accepts only GUI-owned root server and dist/index entry shapes", async () => {
+    const dir = fixture();
+    write(join(dir, "checkout", "package.json"), '{"name":"opencode-quota-gui"}');
+    for (const file of ["server.ts", "nested/other.ts", "dist/index.js", "dist/other.js"]) {
+      write(join(dir, "checkout", file), "export {};");
+    }
+
+    expect(await isVerifiedGuiQuotaPluginSpec("./checkout/server.ts", dir)).toBe(true);
+    expect(await isVerifiedGuiQuotaPluginSpec("file:./checkout/server.ts", dir)).toBe(true);
+    expect(await isVerifiedGuiQuotaPluginSpec("./checkout/dist/index.js", dir)).toBe(true);
+    expect(await isVerifiedGuiQuotaPluginSpec("./checkout/nested/other.ts", dir)).toBe(false);
+    expect(await isVerifiedGuiQuotaPluginSpec("./checkout/dist/other.js", dir)).toBe(false);
+    expect(await isVerifiedGuiQuotaPluginSpec("./checkout/other.ts", dir)).toBe(false);
+  });
+  it("does not verify upstream or foreign manifests as GUI roots", async () => {
+    const dir = fixture();
+    write(join(dir, "upstream", "package.json"), '{"name":"@slkiser/opencode-quota"}');
+    write(join(dir, "upstream", "server.ts"), "export {};");
+    write(join(dir, "foreign", "package.json"), '{"name":"other-plugin"}');
+    write(join(dir, "foreign", "server.ts"), "export {};");
+
+    expect(await isVerifiedGuiQuotaPluginSpec("./upstream/server.ts", dir)).toBe(false);
+    expect(await isVerifiedGuiQuotaPluginSpec("./foreign/server.ts", dir)).toBe(false);
+    expect(await isVerifiedGuiQuotaPluginSpec("@slkiser/opencode-quota@latest", dir)).toBe(false);
+  });
   it("writes plural plugins for detected 2.1.2", async () => {
     const dir = fixture();
     await applyInitInstallerPlan(
@@ -187,10 +226,8 @@ describe("current v2 installer desired plugin safety", () => {
     expect(raw).toContain(`// preserve sibling\n  ${sibling},`);
     expect(raw).toContain('// first plugin\n  "before",');
   });
-  it.each([
-    "opencode-quota-gui@latest",
-    "@slkiser/opencode-quota@latest",
-  ])("replaces %s in place with the exact desired spec and previews both", async (old) => {
+  it("replaces opencode-quota-gui@latest in place with the exact desired spec and previews both", async () => {
+    const old = "opencode-quota-gui@latest";
     const other = { package: "other-plugin", options: { keep: true } };
     const dir = fixture({
       plugins: ["before", { package: old, options: { keep: true } }, other, "after"],
@@ -204,6 +241,25 @@ describe("current v2 installer desired plugin safety", () => {
       { package: desired, options: { keep: true } },
       other,
       "after",
+    ]);
+    expect(host(dir).plugin).toBeUndefined();
+  });
+  it("preserves an upstream entry and appends the desired GUI entry", async () => {
+    const old = "@slkiser/opencode-quota@latest";
+    const other = { package: "other-plugin", options: { keep: true } };
+    const dir = fixture({
+      plugins: ["before", { package: old, options: { keep: true } }, other, "after"],
+    });
+    const plan = await planInitInstaller({ cwd: dir, selections, pluginSpec: desired });
+    expect(plan.summaryLines.join("\n")).not.toContain(old);
+    expect(plan.summaryLines.join("\n")).toContain(desired);
+    await applyInitInstallerPlan(plan);
+    expect(host(dir).plugins).toEqual([
+      "before",
+      { package: old, options: { keep: true } },
+      other,
+      "after",
+      desired,
     ]);
     expect(host(dir).plugin).toBeUndefined();
   });
@@ -227,7 +283,7 @@ describe("current v2 installer desired plugin safety", () => {
       "file:./opencode-quota-gui-unknown.tgz",
     ]);
   });
-  it("migrates only recognized singular entries and retains unrelated singular entries", async () => {
+  it("preserves an upstream singular entry while adding the desired GUI entry", async () => {
     const dir = fixture({
       plugin: ["before", ["@slkiser/opencode-quota@latest", { keep: true }], "after"],
       plugins: ["native"],
@@ -236,8 +292,8 @@ describe("current v2 installer desired plugin safety", () => {
       await planInitInstaller({ cwd: dir, selections, pluginSpec: desired }),
     );
     expect(host(dir)).toEqual({
-      plugin: ["before", "after"],
-      plugins: ["native", [desired, { keep: true }]],
+      plugin: ["before", ["@slkiser/opencode-quota@latest", { keep: true }], "after"],
+      plugins: ["native", desired],
     });
   });
   it("is byte-idempotent when the exact desired spec is already present", async () => {

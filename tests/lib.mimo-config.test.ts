@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -22,12 +22,14 @@ async function createConfigDirs(): Promise<[string, string]> {
   const primary = join(root, "primary");
   const fallback = join(root, "fallback");
   await mkdir(join(primary, "opencode-quota"), { recursive: true });
+  await mkdir(join(primary, "opencode-quota-gui"), { recursive: true });
   await mkdir(join(fallback, "opencode-quota"), { recursive: true });
+  await mkdir(join(fallback, "opencode-quota-gui"), { recursive: true });
   return [primary, fallback];
 }
 
 function configPath(configDir: string): string {
-  return join(configDir, "opencode-quota", "mimo.json");
+  return join(configDir, "opencode-quota-gui", "mimo.json");
 }
 
 describe("MiMo config resolution", () => {
@@ -194,6 +196,47 @@ describe("MiMo config resolution", () => {
     );
 
     await expect(resolveMimoConfigCached({ maxAgeMs: 5_000 })).resolves.toEqual(first);
+  });
+
+  it("ignores an upstream-only mimo.json and never mutates either private file", async () => {
+    const [primary] = await createConfigDirs();
+    const upstreamPath = join(primary, "opencode-quota", "mimo.json");
+    const upstreamBody = JSON.stringify({ cookie: requiredCookie });
+    await writeFile(upstreamPath, upstreamBody);
+    runtimePathMocks.getOpencodeRuntimeDirs.mockReturnValue({ configDir: primary });
+
+    const { resolveMimoConfig } = await import("../src/lib/mimo-config.js");
+
+    await expect(resolveMimoConfig()).resolves.toEqual({ state: "none" });
+    await expect(readFile(upstreamPath, "utf8")).resolves.toBe(upstreamBody);
+    await expect(readFile(configPath(primary), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("uses only the GUI mimo.json when both files exist and leaves both bytes unchanged", async () => {
+    const [primary] = await createConfigDirs();
+    const upstreamPath = join(primary, "opencode-quota", "mimo.json");
+    const guiPath = configPath(primary);
+    const upstreamBody = JSON.stringify({
+      cookie: "api-platform_serviceToken=upstream-service; userId=upstream-user",
+    });
+    const guiBody = JSON.stringify({
+      cookie: "api-platform_serviceToken=gui-service; userId=gui-user",
+    });
+    await writeFile(upstreamPath, upstreamBody);
+    await writeFile(guiPath, guiBody);
+    runtimePathMocks.getOpencodeRuntimeDirs.mockReturnValue({ configDir: primary });
+
+    const { resolveMimoConfig } = await import("../src/lib/mimo-config.js");
+
+    await expect(resolveMimoConfig()).resolves.toEqual({
+      state: "configured",
+      source: guiPath,
+      config: {
+        cookie: "api-platform_serviceToken=gui-service; userId=gui-user",
+      },
+    });
+    await expect(readFile(upstreamPath, "utf8")).resolves.toBe(upstreamBody);
+    await expect(readFile(guiPath, "utf8")).resolves.toBe(guiBody);
   });
 
   it("reports trusted checked paths without exposing cookie names or values", async () => {

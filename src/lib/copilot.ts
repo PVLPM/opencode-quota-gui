@@ -31,7 +31,7 @@ import type {
 const GITHUB_API_BASE_URL = "https://api.github.com";
 const GITHUB_API_VERSION = "2026-03-10";
 const COPILOT_QUOTA_CONFIG_FILENAME = "copilot-quota-token.json";
-const USER_AGENT = "opencode-quota/copilot-billing";
+const USER_AGENT = "opencode-quota-gui/copilot-billing";
 const COPILOT_INTERNAL_USER_PATH = "/copilot_internal/user";
 
 /** Integration ids that can hold the Copilot OAuth login, in precedence order. */

@@ -5,6 +5,7 @@ import { join } from "path";
 import { writeJsonAtomic } from "./atomic-json.js";
 import { fetchWithTimeout } from "./http.js";
 import { getOpencodeRuntimeDirs, type OpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
+import { getGuiPrivateCacheDir } from "./private-state-paths.js";
 import type { PricingSnapshotSource } from "./types.js";
 
 const SOURCE_URL = "https://models.dev/api.json";
@@ -213,13 +214,17 @@ function loadBundledSnapshotSync(override?: PricingSnapshot): PricingSnapshot {
 }
 
 export function getRuntimePricingSnapshotPath(runtimeDirs?: OpencodeRuntimeDirs): string {
-  const dirs = runtimeDirs ?? getOpencodeRuntimeDirs();
-  return join(dirs.cacheDir, "opencode-quota", RUNTIME_SNAPSHOT_FILENAME);
+  return join(
+    getGuiPrivateCacheDir(runtimeDirs ?? getOpencodeRuntimeDirs()),
+    RUNTIME_SNAPSHOT_FILENAME,
+  );
 }
 
 export function getRuntimePricingRefreshStatePath(runtimeDirs?: OpencodeRuntimeDirs): string {
-  const dirs = runtimeDirs ?? getOpencodeRuntimeDirs();
-  return join(dirs.cacheDir, "opencode-quota", RUNTIME_REFRESH_STATE_FILENAME);
+  return join(
+    getGuiPrivateCacheDir(runtimeDirs ?? getOpencodeRuntimeDirs()),
+    RUNTIME_REFRESH_STATE_FILENAME,
+  );
 }
 
 function loadRuntimeSnapshotSync(runtimeDirs?: OpencodeRuntimeDirs): PricingSnapshot | null {

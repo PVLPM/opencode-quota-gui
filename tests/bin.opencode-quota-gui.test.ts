@@ -1,8 +1,7 @@
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -13,6 +12,7 @@ const commandMocks = vi.hoisted(() => ({
   runCliShowCommand: vi.fn(),
   runCliStatusCommand: vi.fn(),
   runScopedUpdateCommand: vi.fn(),
+  getPackageVersion: vi.fn(),
 }));
 
 vi.mock("../src/lib/init-installer.js", () => ({
@@ -31,6 +31,10 @@ vi.mock("../src/lib/scoped-update.js", () => ({
   runScopedUpdateCommand: commandMocks.runScopedUpdateCommand,
 }));
 
+vi.mock("../src/lib/version.js", () => ({
+  getPackageVersion: commandMocks.getPackageVersion,
+}));
+
 describe("opencode-quota-gui bin", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -38,6 +42,7 @@ describe("opencode-quota-gui bin", () => {
     commandMocks.runCliShowCommand.mockResolvedValue(0);
     commandMocks.runCliStatusCommand.mockResolvedValue(0);
     commandMocks.runScopedUpdateCommand.mockResolvedValue(0);
+    commandMocks.getPackageVersion.mockResolvedValue("9.8.7");
   });
 
   it("dispatches init to the interactive installer", async () => {
@@ -46,54 +51,47 @@ describe("opencode-quota-gui bin", () => {
     const code = await main(["init"]);
 
     expect(code).toBe(0);
-    expect(commandMocks.runInitInstaller).toHaveBeenCalledOnce();
+    expect(commandMocks.runInitInstaller).toHaveBeenCalledWith({});
     expect(commandMocks.runCliShowCommand).not.toHaveBeenCalled();
   });
 
-  it("passes the legacy config sync option to init", async () => {
+  it("passes only init dry-run to the installer and never syncs upstream legacy config", async () => {
     const { main } = await import("../src/bin/opencode-quota-gui.js");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
-    const code = await main(["init", "--sync-legacy-config"]);
+    expect(await main(["init", "--dry-run"])).toBe(0);
+    expect(commandMocks.runInitInstaller).toHaveBeenCalledWith({ dryRun: true });
 
-    expect(code).toBe(0);
-    expect(commandMocks.runInitInstaller).toHaveBeenCalledWith({ syncLegacyConfig: true });
-    expect(commandMocks.runCliShowCommand).not.toHaveBeenCalled();
-  });
-
-  it("passes init dry-run and legacy sync flags in either order", async () => {
-    const { main } = await import("../src/bin/opencode-quota-gui.js");
-
-    const code = await main(["init", "--sync-legacy-config", "--dry-run"]);
-
-    expect(code).toBe(0);
-    expect(commandMocks.runInitInstaller).toHaveBeenCalledWith({
-      dryRun: true,
-      syncLegacyConfig: true,
-    });
-  });
-
-  it("dispatches show to the quota CLI command", async () => {
-    const { main } = await import("../src/bin/opencode-quota-gui.js");
-
-    const code = await main(["show"]);
-
-    expect(code).toBe(0);
-    expect(commandMocks.runCliShowCommand).toHaveBeenCalledWith({ argv: [] });
+    commandMocks.runInitInstaller.mockClear();
+    expect(await main(["init", "--sync-legacy-config"])).toBe(1);
     expect(commandMocks.runInitInstaller).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
+    log.mockRestore();
   });
 
-  it("passes show provider args through to the quota CLI command", async () => {
+  it("rejects removed show, status, and provider-add commands without dispatch or prompts", async () => {
     const { main } = await import("../src/bin/opencode-quota-gui.js");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
-    const code = await main(["show", "--provider", "copilot"]);
+    for (const argv of [
+      ["show"],
+      ["show", "--json", "--provider", "copilot"],
+      ["status"],
+      ["status", "--provider", "copilot", "--json"],
+      ["provider", "add", "--dry-run"],
+    ]) {
+      expect(await main(argv)).toBe(1);
+    }
 
-    expect(code).toBe(0);
-    expect(commandMocks.runCliShowCommand).toHaveBeenCalledWith({
-      argv: ["--provider", "copilot"],
-    });
+    expect(commandMocks.runCliShowCommand).not.toHaveBeenCalled();
+    expect(commandMocks.runCliStatusCommand).not.toHaveBeenCalled();
+    expect(commandMocks.runInitInstaller).not.toHaveBeenCalled();
+    expect(commandMocks.runScopedUpdateCommand).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
+    log.mockRestore();
   });
 
-  it("dispatches update args to the scoped updater", async () => {
+  it("dispatches update args to the scoped maintenance updater", async () => {
     const { main } = await import("../src/bin/opencode-quota-gui.js");
 
     const code = await main(["update", "--dry-run", "--yes"]);
@@ -104,48 +102,37 @@ describe("opencode-quota-gui bin", () => {
     });
   });
 
-  it("dispatches status to the quota status CLI command", async () => {
-    const { main } = await import("../src/bin/opencode-quota-gui.js");
-
-    const code = await main(["status"]);
-
-    expect(code).toBe(0);
-    expect(commandMocks.runCliStatusCommand).toHaveBeenCalledWith({ argv: [] });
-    expect(commandMocks.runCliShowCommand).not.toHaveBeenCalled();
-  });
-
-  it("passes status provider args through to the status CLI command", async () => {
-    const { main } = await import("../src/bin/opencode-quota-gui.js");
-
-    const code = await main(["status", "--provider", "copilot", "--json"]);
-
-    expect(code).toBe(0);
-    expect(commandMocks.runCliStatusCommand).toHaveBeenCalledWith({
-      argv: ["--provider", "copilot", "--json"],
-    });
-  });
-
-  it("prints help and exits zero for --help", async () => {
+  it("prints GUI-only help and exits zero for --help", async () => {
     const { main } = await import("../src/bin/opencode-quota-gui.js");
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
     const code = await main(["--help"]);
 
     expect(code).toBe(0);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota-gui show"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota-gui status"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("responsible preview"));
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining("Credential-specific audit sources and values are not read"),
+    const help = log.mock.calls.map(([line]) => String(line)).join("\n");
+    expect(help).toContain("Usage:");
+    expect(help).toContain("opencode-quota-gui init");
+    expect(help).toContain("opencode-quota-gui update");
+    expect(help).toContain("opencode-quota-gui --help");
+    expect(help).toContain("opencode-quota-gui --version");
+    expect(help).not.toContain("opencode-quota-gui show");
+    expect(help).not.toContain("opencode-quota-gui status");
+    expect(help).not.toContain("provider add");
+    expect(help).not.toContain("sync-legacy-config");
+    expect(help).toContain("Credential-specific audit sources and values are not read");
+    expect(help).toContain(
+      "Values encountered in normal config parsing are never printed, copied, or modified",
     );
-    expect(log).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "Values encountered in normal config parsing are never printed, copied, or modified",
-      ),
-    );
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("safe setting/package-cache changes"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("Apply only safe setting/cache work"));
+    log.mockRestore();
+  });
+
+  it("prints the package version for --version and version", async () => {
+    const { main } = await import("../src/bin/opencode-quota-gui.js");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    expect(await main(["--version"])).toBe(0);
+    expect(await main(["version"])).toBe(0);
+    expect(log.mock.calls).toEqual([["9.8.7"], ["9.8.7"]]);
     log.mockRestore();
   });
 
@@ -156,8 +143,11 @@ describe("opencode-quota-gui bin", () => {
     const code = await main([]);
 
     expect(code).toBe(1);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota-gui status"));
+    const usage = log.mock.calls.map(([line]) => String(line)).join("\n");
+    expect(usage).toContain("Usage:");
+    expect(usage).toContain("opencode-quota-gui update");
+    expect(usage).not.toContain("opencode-quota-gui show");
+    expect(usage).not.toContain("opencode-quota-gui status");
     log.mockRestore();
   });
 
@@ -168,8 +158,9 @@ describe("opencode-quota-gui bin", () => {
     const code = await main(["wat"]);
 
     expect(code).toBe(1);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
-    expect(log).toHaveBeenCalledWith(expect.stringContaining("opencode-quota-gui status"));
+    const usage = log.mock.calls.map(([line]) => String(line)).join("\n");
+    expect(usage).toContain("Usage:");
+    expect(usage).not.toContain("opencode-quota-gui show");
     log.mockRestore();
   });
 
@@ -201,49 +192,5 @@ describe("opencode-quota-gui bin", () => {
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
-  });
-
-  it("hides only Node's experimental SQLite warning", async () => {
-    const { hideSqliteExperimentalWarning } = await import("../src/bin/opencode-quota-gui.js");
-    const originalEmitWarning = process.emitWarning;
-    const emitWarning = vi.fn();
-    process.emitWarning = emitWarning as unknown as typeof process.emitWarning;
-    try {
-      hideSqliteExperimentalWarning();
-
-      process.emitWarning(
-        "SQLite is an experimental feature and might change at any time",
-        "ExperimentalWarning",
-      );
-      process.emitWarning("Some other feature is experimental", "ExperimentalWarning");
-      process.emitWarning("SQLite is an experimental feature and might change at any time");
-
-      expect(emitWarning.mock.calls).toEqual([
-        ["Some other feature is experimental", "ExperimentalWarning"],
-        ["SQLite is an experimental feature and might change at any time"],
-      ]);
-    } finally {
-      process.emitWarning = originalEmitWarning;
-    }
-  });
-
-  // Run after `pnpm build`: loads node:sqlite in a real Node process.
-  it("keeps the SQLite warning off stderr when the built CLI loads node:sqlite", () => {
-    const bin = fileURLToPath(new URL("../dist/bin/opencode-quota-gui.js", import.meta.url));
-    expect(existsSync(bin)).toBe(true);
-    const script = [
-      `const { hideSqliteExperimentalWarning } = await import(${JSON.stringify(pathToFileURL(bin).href)});`,
-      "hideSqliteExperimentalWarning();",
-      'await import("node:sqlite");',
-      'process.emitWarning("Some other feature is experimental", "ExperimentalWarning");',
-    ].join("\n");
-
-    const { status, stderr } = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-      encoding: "utf8",
-    });
-
-    expect(status).toBe(0);
-    expect(stderr).not.toContain("SQLite");
-    expect(stderr).toContain("ExperimentalWarning: Some other feature is experimental");
   });
 });

@@ -41,7 +41,7 @@ describe("MiMo credential security boundary", () => {
 
     await expect(resolveMimoConfig()).resolves.toEqual({ state: "none" });
     expect(mocks.readFile.mock.calls.map((call) => call[0])).toEqual([
-      join(primaryConfigDir, "opencode-quota", "mimo.json"),
+      join(primaryConfigDir, "opencode-quota-gui", "mimo.json"),
     ]);
 
     const checked = JSON.stringify(mocks.readFile.mock.calls);

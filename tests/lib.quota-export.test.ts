@@ -15,7 +15,7 @@ const testPaths = vi.hoisted(() => {
     configDir: join(root, "config"),
     cacheDir,
     stateDir: join(root, "state"),
-    defaultExport: join(cacheDir, "quota-export.json"),
+    defaultExport: join(cacheDir, "opencode-quota-gui", "quota-export.json"),
     explicitExport: join(root, "export.json"),
   };
 });

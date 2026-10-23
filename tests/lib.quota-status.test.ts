@@ -181,12 +181,12 @@ describe("buildQuotaStatusReport", () => {
     const document = await buildQuotaStatusReportDocument(makeQuotaStatusReportParams());
 
     expect(report.split("\n").slice(0, 2)).toEqual([
-      `# Quota Status (opencode-quota v1.2.3) (/quota_status) ${time}`,
+      `# Quota Status (opencode-quota-gui v1.2.3) (/quota_status) ${time}`,
       "",
     ]);
     expect(document.heading).toEqual({
-      line: `# Quota Status (opencode-quota v1.2.3) (/quota_status) ${time}`,
-      subtitle: `opencode-quota v1.2.3 · ${time}`,
+      line: `# Quota Status (opencode-quota-gui v1.2.3) (/quota_status) ${time}`,
+      subtitle: `opencode-quota-gui v1.2.3 · ${time}`,
     });
   });
 
@@ -562,7 +562,7 @@ describe("buildQuotaStatusReport", () => {
     });
 
     expect(report).toMatch(
-      /^# Quota Status \(opencode-quota v1\.2\.3\) \(\/quota_status\) \d{2}:\d{2} \d{2}\/\d{2}\/\d{4}\n\n/,
+      /^# Quota Status \(opencode-quota-gui v1\.2\.3\) \(\/quota_status\) \d{2}:\d{2} \d{2}\/\d{2}\/\d{4}\n\n/,
     );
     expect(report).toContain(
       "- opencode_dirs: data=/tmp/data config=/tmp/config cache=/tmp/cache state=/tmp/state",
@@ -1391,7 +1391,7 @@ describe("buildQuotaStatusReport", () => {
             statusDetails: makeStatusDetails({
               config_state: "configured",
               config_source: "env:MIMO_USAGE_COOKIE",
-              config_checked_paths: "/tmp/config/opencode-quota/mimo.json",
+              config_checked_paths: "/tmp/config/opencode-quota-gui/mimo.json",
             }),
             entries: [
               {
@@ -1430,7 +1430,7 @@ describe("buildQuotaStatusReport", () => {
     const section = getReportSection(report, "xiaomi:");
     expect(section).toContain("- config_state: configured");
     expect(section).toContain("- config_source: env:MIMO_USAGE_COOKIE");
-    expect(section).toContain("- config_checked_paths: /tmp/config/opencode-quota/mimo.json");
+    expect(section).toContain("- config_checked_paths: /tmp/config/opencode-quota-gui/mimo.json");
     expect(section).toContain("- live_probe: partial");
     expect(section).toContain("percent_remaining=75");
     expect(section).toContain("Total: value=$12.50");
@@ -1642,7 +1642,7 @@ describe("buildQuotaStatusReport", () => {
 
     const [heading, blank, ...body] = report.split("\n");
     expect(heading).toMatch(
-      /^# Quota Status \(opencode-quota v1\.2\.3\) \(\/quota_status\) \d{2}:\d{2} \d{2}\/\d{2}\/\d{4}$/,
+      /^# Quota Status \(opencode-quota-gui v1\.2\.3\) \(\/quota_status\) \d{2}:\d{2} \d{2}\/\d{2}\/\d{4}$/,
     );
     expect(blank).toBe("");
 

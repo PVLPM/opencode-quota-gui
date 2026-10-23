@@ -222,7 +222,7 @@ export async function reconcileDetectedProvidersInGlobalConfig(
     desiredData: { ...root, provider },
     managedComments: addedProviderIds.map((providerId) => ({
       path: ["provider", providerId],
-      text: `// Detected ${providerId} authentication; opencode-quota added this global provider declaration.`,
+      text: `// Detected ${providerId} authentication; opencode-quota-gui added this global provider declaration.`,
     })),
   });
   await applyConfigDocumentEdit(edit, { writeText: options.writeText });

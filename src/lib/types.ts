@@ -1,5 +1,5 @@
 /**
- * Type definitions for opencode-quota plugin
+ * Type definitions for the opencode-quota-gui product.
  */
 
 import type { QuotaFormatStyle } from "./quota-format-style.js";
@@ -65,7 +65,7 @@ export interface QuotaExportConfig {
   /**
    * Absolute path or ~/… path for the export file.
    * Empty string means use the XDG default:
-   *   $XDG_CACHE_HOME/opencode/quota-export.json
+   *   $XDG_CACHE_HOME/opencode/opencode-quota-gui/quota-export.json
    */
   path: string;
 }
@@ -117,7 +117,11 @@ export type TuiCommandDisplay = "inline" | "dialog";
 /** Request timeout in milliseconds */
 export const REQUEST_TIMEOUT_MS = 5000;
 
-/** Plugin configuration from opencode-quota/quota-toast.json or legacy experimental.quotaToast. */
+/**
+ * GUI configuration. Runtime reads only the canonical
+ * `opencode-quota-gui/config.jsonc`; `opencode-quota/quota-toast.*` and legacy
+ * `experimental.quotaToast` are explicit-import sources.
+ */
 export interface QuotaToastConfig {
   enabled: boolean;
 

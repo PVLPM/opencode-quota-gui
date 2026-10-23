@@ -1,23 +1,19 @@
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
-import { basename, join } from "path";
+import { basename, dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 
-import {
-  getQuotaToastConfigPath,
-  loadConfig,
-  QUOTA_TOAST_CONFIG_RELATIVE_PATH,
-  QUOTA_TOAST_CONFIG_RELATIVE_PATHS,
-} from "./config.js";
+import { getGuiConfigPath, getGuiConfigSiblingJsonPath, loadConfig } from "./config.js";
 import {
   type ConfigFileFormat,
   dedupeNonEmptyStrings,
   type EditableConfigPath,
   findGitWorktreeRoot,
   getPluginSpecFromEntry,
-  isVerifiedQuotaPluginSpec,
   resolveEditableConfigPath,
 } from "./config-file-utils.js";
 import { writeConfiguredJsonAtomic } from "./config-write-target.js";
+import { assertGuiConfigTargetIsIndependent } from "./gui-config-target.js";
 import { parseJsonOrJsonc } from "./jsonc.js";
 import {
   applyConfigDocumentEdit,
@@ -99,7 +95,10 @@ export interface PlannedConfigEdit {
 
 export interface InitInstallerPlan {
   selections: InitInstallerSelections;
+  /** Scope root for the OpenCode plugin entry (project worktree or global config). */
   baseDir: string;
+  /** Global OpenCode config dir that owns the canonical dashboard config. */
+  guiConfigDir: string;
   edits: PlannedConfigEdit[];
   warnings: string[];
   quickSetupNotes: InitInstallerQuickSetupNote[];
@@ -145,6 +144,48 @@ function normalizePluginSpecText(spec: string): string {
 
 function isUpstreamQuotaPackageSpec(spec: string): boolean {
   return normalizePluginSpecText(spec).includes("@slkiser/opencode-quota");
+}
+
+/**
+ * True only for this package's own OpenCode plugin entry. Upstream
+ * `@slkiser/opencode-quota` entries are deliberately excluded so both products can be
+ * configured at once and GUI maintenance never rewrites the upstream entry.
+ */
+export async function isVerifiedGuiQuotaPluginSpec(
+  spec: string,
+  configDir: string,
+): Promise<boolean> {
+  if (isUpstreamQuotaPackageSpec(spec)) return false;
+  if (/^opencode-quota-gui(?:@[^/\\\s]+)?$/.test(spec)) return true;
+  if (!/^(?:file:|\.{1,2}[/\\]|[/\\]|[A-Za-z]:[/\\])/.test(spec)) return false;
+
+  let path: string;
+  try {
+    path = spec.startsWith("file://")
+      ? fileURLToPath(spec)
+      : resolve(configDir, spec.replace(/^file:/, ""));
+  } catch {
+    return false;
+  }
+
+  const normalized = path.replace(/\\/g, "/");
+  if (/\/dist\//.test(normalized) && !normalized.endsWith("/dist/index.js")) return false;
+  const packageDir = normalized.endsWith("/dist/index.js")
+    ? dirname(dirname(path))
+    : normalized.endsWith("/server.ts")
+      ? dirname(path)
+      : path;
+  try {
+    const manifest: unknown = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
+    return Boolean(
+      manifest &&
+        typeof manifest === "object" &&
+        "name" in manifest &&
+        manifest.name === QUOTA_PLUGIN_PACKAGE_NAME,
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -312,16 +353,6 @@ function normalizeQuotaUiIntent(selections: InitInstallerSelections): Normalized
   };
 }
 
-function getUiLabel(choices: readonly InitQuotaUiChoice[]): string {
-  const labels = choices.map((choice) => {
-    if (choice === "toast") return "Toast";
-    if (choice === "sidebar") return "Sidebar";
-    if (choice === "compact_status") return "Compact status";
-    return "Manual commands only";
-  });
-  return labels.join(" + ");
-}
-
 function getProviderModeLabel(mode: InitProviderMode): string {
   return mode === "manual" ? "Manual" : "Auto-detect";
 }
@@ -423,7 +454,7 @@ async function planPluginEntries(
     const spec = getPluginSpecFromEntry(item.entry);
     const isQuotaPlugin =
       spec !== null &&
-      (spec === params.pluginSpec || (await isVerifiedQuotaPluginSpec(spec, params.baseDir)));
+      (spec === params.pluginSpec || (await isVerifiedGuiQuotaPluginSpec(spec, params.baseDir)));
     inspectedEntries.push({
       entry: item.entry,
       inNative: item.inNative,
@@ -683,30 +714,6 @@ async function readExistingConfig(params: {
   }
 }
 
-function cloneJsonValue<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function cloneJsonObject(value: JsonObject): JsonObject {
-  return cloneJsonValue(value);
-}
-
-async function readLegacyQuotaToastSeed(baseDir: string): Promise<JsonObject | null> {
-  const target = resolveEditableConfigPath({ dir: baseDir, kind: "opencode" });
-  if (!target.existed) {
-    return null;
-  }
-
-  const root = await readExistingConfig({
-    path: target.sourcePath,
-    format: target.sourcePath.endsWith(".jsonc") ? "jsonc" : "json",
-  });
-  const experimental = isPlainObject(root.experimental) ? root.experimental : null;
-  const quotaToast =
-    experimental && isPlainObject(experimental.quotaToast) ? experimental.quotaToast : null;
-  return quotaToast ? cloneJsonObject(quotaToast) : null;
-}
-
 function buildQuickSetupNotes(selections: InitInstallerSelections): InitInstallerQuickSetupNote[] {
   if (selections.providerMode !== "manual") {
     return [];
@@ -729,64 +736,12 @@ function buildQuickSetupNotes(selections: InitInstallerSelections): InitInstalle
     }));
 }
 
-function syncLegacyQuotaToast(params: {
-  root: JsonObject;
-  quotaToast: JsonObject;
-  edit: PlannedConfigEdit;
-}): void {
-  if (Object.keys(params.quotaToast).length === 0) {
-    return;
-  }
-
-  let experimental: JsonObject;
-  if (!hasOwnKey(params.root, "experimental")) {
-    experimental = {};
-    params.root.experimental = experimental;
-  } else if (isPlainObject(params.root.experimental)) {
-    experimental = params.root.experimental;
-  } else {
-    throw new InitInstallerError(
-      "Cannot sync legacy config because experimental is not an object.",
-      { path: params.edit.path },
-    );
-  }
-
-  let legacyQuotaToast: JsonObject;
-  if (!hasOwnKey(experimental, "quotaToast")) {
-    legacyQuotaToast = {};
-    experimental.quotaToast = legacyQuotaToast;
-  } else if (isPlainObject(experimental.quotaToast)) {
-    legacyQuotaToast = experimental.quotaToast;
-  } else {
-    throw new InitInstallerError(
-      "Cannot sync legacy config because experimental.quotaToast is not an object.",
-      { path: params.edit.path },
-    );
-  }
-
-  let changed = false;
-  for (const [key, value] of Object.entries(params.quotaToast)) {
-    if (!jsonEqual(legacyQuotaToast[key], value)) {
-      legacyQuotaToast[key] = cloneJsonValue(value);
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    params.edit.changed = true;
-    params.edit.addedKeys.push(
-      "experimental.quotaToast (synced from opencode-quota/quota-toast.json)",
-    );
-  }
-}
-
 async function planOpencodeEdit(params: {
   selections: InitInstallerSelections;
   baseDir: string;
   pluginSpec: string;
   explicit: boolean;
   guiFirst?: boolean;
-  legacyQuotaToastToSync?: JsonObject;
 }): Promise<PlannedConfigEdit> {
   const target = resolveEditableConfigPath({
     dir: params.baseDir,
@@ -823,14 +778,6 @@ async function planOpencodeEdit(params: {
   await planPluginEntries(root, { ...params, edit });
   const pluginsChanged = beforePlugins !== JSON.stringify(root);
 
-  if (params.legacyQuotaToastToSync) {
-    syncLegacyQuotaToast({
-      root,
-      quotaToast: params.legacyQuotaToastToSync,
-      edit,
-    });
-  }
-
   const documentEdit = await planConfigDocumentEdit({
     target,
     desiredData: root,
@@ -842,7 +789,7 @@ async function planOpencodeEdit(params: {
           },
           {
             path: ["plugins"],
-            text: "// OpenCode Quota: loads the server plugin for slash commands and quota checks.",
+            text: "// OpenCode Quota GUI: loads the server plugin for the local dashboard.",
           },
         ]
       : [],
@@ -853,60 +800,29 @@ async function planOpencodeEdit(params: {
   return edit;
 }
 
-function resolveQuotaConfigTarget(
-  baseDir: string,
-  preferredFormat: ConfigFileFormat,
-  preserveExistingFormat = false,
-): EditableConfigPath {
-  const jsoncPath = getQuotaToastConfigPath(baseDir, "jsonc");
-  if (existsSync(jsoncPath)) {
-    return {
-      path: jsoncPath,
-      sourcePath: jsoncPath,
-      format: "jsonc",
-      existed: true,
-    };
-  }
-
-  const jsonPath = getQuotaToastConfigPath(baseDir, "json");
-  if (existsSync(jsonPath)) {
-    if (preferredFormat === "jsonc" && !preserveExistingFormat) {
-      return {
-        path: jsoncPath,
-        sourcePath: jsonPath,
-        removeSourcePath: jsonPath,
-        format: "jsonc",
-        existed: true,
-      };
-    }
-    return {
-      path: jsonPath,
-      sourcePath: jsonPath,
-      format: "json",
-      existed: true,
-    };
-  }
-
-  const path = getQuotaToastConfigPath(baseDir, preferredFormat);
+/**
+ * The dashboard only reads the canonical `opencode-quota-gui/config.jsonc`. Keep the
+ * target independent of the host OpenCode format and never touch/convert the dormant
+ * sibling `config.json`.
+ */
+function resolveQuotaConfigTarget(configDir: string): EditableConfigPath {
+  const path = getGuiConfigPath(configDir);
   return {
     path,
     sourcePath: path,
-    format: preferredFormat,
-    existed: false,
+    format: "jsonc",
+    existed: existsSync(path),
   };
 }
 
 async function planQuotaConfigEdit(params: {
   selections: InitInstallerSelections;
   quotaUiIntent: NormalizedQuotaUiIntent;
-  baseDir: string;
+  configDir: string;
   guiFirst?: boolean;
 }): Promise<PlannedConfigEdit> {
-  const target = resolveQuotaConfigTarget(
-    params.baseDir,
-    params.selections.configFormat ?? "jsonc",
-    params.guiFirst,
-  );
+  const target = resolveQuotaConfigTarget(params.configDir);
+  await assertGuiConfigTargetIsIndependent(target.path, params.configDir);
   const edit: PlannedConfigEdit = {
     kind: "quota",
     path: target.path,
@@ -920,33 +836,23 @@ async function planQuotaConfigEdit(params: {
     skippedValues: [],
     warnings: [],
   };
-  if (
-    target.path.endsWith(".jsonc") &&
-    existsSync(getQuotaToastConfigPath(params.baseDir, "json"))
-  ) {
+  if (existsSync(getGuiConfigSiblingJsonPath(params.configDir))) {
     edit.warnings.push(
-      "Both quota-toast.jsonc and quota-toast.json exist; using JSONC and preserving the JSON file.",
+      target.existed
+        ? "Both opencode-quota-gui/config.jsonc and config.json exist; using JSONC and preserving the JSON file."
+        : "Existing opencode-quota-gui/config.json is preserved unchanged; the dashboard reads only config.jsonc.",
     );
   }
 
-  const legacyQuotaToast = target.existed ? null : await readLegacyQuotaToastSeed(params.baseDir);
   const quotaToast = target.existed
     ? await readExistingConfig({
         path: target.sourcePath,
-        format: target.sourcePath.endsWith(".jsonc") ? "jsonc" : "json",
+        format: "jsonc",
       })
-    : legacyQuotaToast
-      ? cloneJsonObject(legacyQuotaToast)
-      : {};
+    : {};
 
   if (!target.existed) {
-    edit.addedKeys.push(
-      legacyQuotaToast
-        ? `${target.path.endsWith(".jsonc") ? QUOTA_TOAST_CONFIG_RELATIVE_PATHS[0] : QUOTA_TOAST_CONFIG_RELATIVE_PATH} (seeded from experimental.quotaToast)`
-        : target.path.endsWith(".jsonc")
-          ? QUOTA_TOAST_CONFIG_RELATIVE_PATHS[0]
-          : QUOTA_TOAST_CONFIG_RELATIVE_PATH,
-    );
+    edit.addedKeys.push("opencode-quota-gui/config.jsonc");
   }
 
   const setUnaskedSetting = params.guiFirst ? addSettingIfMissing : setInstallerOwnedSetting;
@@ -1024,7 +930,7 @@ async function planQuotaConfigEdit(params: {
     managedComments: [
       {
         path: ["enableToast"],
-        text: "// Automatic quota surfaces. Slash commands remain available when these are disabled.",
+        text: "// Automatic quota surfaces. Dashboard settings remain separate when these are disabled.",
       },
       {
         path: ["enabledProviders"],
@@ -1060,23 +966,16 @@ async function planQuotaConfigEdit(params: {
 }
 
 function buildPlanSummary(plan: InitInstallerPlan): string[] {
-  const quotaUiIntent = normalizeQuotaUiIntent(plan.selections);
   const opencodeFormat =
     plan.edits.find((edit) => edit.kind === "opencode")?.format ??
     plan.selections.configFormat ??
     "jsonc";
   const lines: string[] = [
-    `Interface: ${plan.selections.interfaces === "tui" ? "TUI" : plan.selections.interfaces === "web" ? "Web" : "Both"}`,
-    `Scope: ${plan.selections.scope} (${plan.baseDir})`,
-    `Config format: ${opencodeFormat.toUpperCase()}`,
+    "Interface: GUI dashboard",
+    `OpenCode plugin scope: ${plan.selections.scope} (${plan.baseDir})`,
+    `Dashboard config (global): ${getGuiConfigPath(plan.guiConfigDir)}`,
+    `OpenCode config format: ${opencodeFormat.toUpperCase()}`,
   ];
-
-  if (plan.selections.interfaces !== "web") {
-    lines.push(`TUI surfaces: ${getUiLabel(quotaUiIntent.choices)}`);
-    lines.push(
-      `Command display: ${plan.selections.tuiCommandDisplay === "inline" ? "Inline with messages" : "Popup dialog"}`,
-    );
-  }
 
   lines.push(
     `Provider mode: ${getProviderModeLabel(plan.selections.providerMode)}`,
@@ -1090,10 +989,6 @@ function buildPlanSummary(plan: InitInstallerPlan): string[] {
     lines.push(
       `Maintainer announcements: ${plan.selections.maintainerAnnouncements ? "Enabled" : "Disabled"}`,
     );
-  }
-
-  if (quotaUiIntent.enableCompactStatus) {
-    lines.push("Compact status mode: Home bottom + session prompt");
   }
 
   const requestedProviders = resolveRequestedProviders(plan.selections);
@@ -1182,7 +1077,6 @@ export async function planInitInstaller(params: {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
-  syncLegacyConfig?: boolean;
   pluginSpec?: string;
   guiFirst?: boolean;
 }): Promise<InitInstallerPlan> {
@@ -1211,10 +1105,17 @@ export async function planInitInstaller(params: {
     env: params.env,
     homeDir: params.homeDir,
   });
+  // Dashboard behavior always lives in the global canonical config, even when the
+  // plugin entry is installed for the current project only.
+  const guiConfigDir = resolveInitInstallerBaseDir({
+    scope: "global",
+    env: params.env,
+    homeDir: params.homeDir,
+  });
   const quotaEdit = await planQuotaConfigEdit({
     selections,
     quotaUiIntent,
-    baseDir,
+    configDir: guiConfigDir,
     guiFirst: params.guiFirst,
   });
   const pluginSpec = await resolveQuotaPluginSpec({
@@ -1228,7 +1129,6 @@ export async function planInitInstaller(params: {
       pluginSpec,
       explicit: resolveExplicitQuotaPluginSpec(params) !== null,
       guiFirst: params.guiFirst,
-      legacyQuotaToastToSync: params.syncLegacyConfig ? quotaEdit.plannedData : undefined,
     }),
     quotaEdit,
   ];
@@ -1239,6 +1139,7 @@ export async function planInitInstaller(params: {
   const plan: InitInstallerPlan = {
     selections,
     baseDir,
+    guiConfigDir,
     edits,
     warnings,
     quickSetupNotes,
@@ -1253,6 +1154,14 @@ export async function applyInitInstallerPlan(
 ): Promise<ApplyInitInstallerPlanResult> {
   const writtenPaths: string[] = [];
   const unchangedPaths: string[] = [];
+
+  // Re-check the canonical target immediately before apply so a symlink retarget cannot
+  // redirect this write into upstream quota sources after planning.
+  await Promise.all(
+    plan.edits
+      .filter((edit) => edit.kind === "quota")
+      .map((edit) => assertGuiConfigTargetIsIndependent(edit.path, plan.guiConfigDir)),
+  );
 
   try {
     await Promise.all(
@@ -1311,26 +1220,28 @@ type ExistingInstallerAnswers = {
   maintainerAnnouncements?: boolean;
 };
 
-async function readExistingInstallerAnswers(baseDir: string): Promise<ExistingInstallerAnswers> {
-  const existingQuotaPath = QUOTA_TOAST_CONFIG_RELATIVE_PATHS.map((relativePath) =>
-    join(baseDir, relativePath),
-  ).find((path) => existsSync(path));
+async function readExistingInstallerAnswers(params: {
+  hostBaseDir: string;
+  guiConfigDir: string;
+}): Promise<ExistingInstallerAnswers> {
   const existingHostPath = ["opencode.jsonc", "opencode.json"]
-    .map((name) => join(baseDir, name))
+    .map((name) => join(params.hostBaseDir, name))
     .find((path) => existsSync(path));
   const answers: ExistingInstallerAnswers = {
-    configFormat:
-      existingQuotaPath?.endsWith(".jsonc") || existingHostPath?.endsWith(".jsonc")
-        ? "jsonc"
-        : existingQuotaPath || existingHostPath
-          ? "json"
-          : undefined,
+    // Host format only; the dashboard target is always canonical JSONC and the
+    // dormant GUI sibling config.json is never a defaults source.
+    configFormat: existingHostPath?.endsWith(".jsonc")
+      ? "jsonc"
+      : existingHostPath
+        ? "json"
+        : undefined,
   };
-  if (!existingQuotaPath) return answers;
+  const existingQuotaPath = getGuiConfigPath(params.guiConfigDir);
+  if (!existsSync(existingQuotaPath)) return answers;
 
   const quotaToast = await readExistingConfig({
     path: existingQuotaPath,
-    format: existingQuotaPath.endsWith(".jsonc") ? "jsonc" : "json",
+    format: "jsonc",
   });
   const quotaUi: InitQuotaUiChoice[] = [];
   if (isPlainObject(quotaToast.tuiSidebarPanel) && quotaToast.tuiSidebarPanel.enabled === true) {
@@ -1400,13 +1311,18 @@ async function promptForSelections(
   });
   if (prompts.isCancel(scope)) return null;
 
-  const baseDir = resolveInitInstallerBaseDir({
+  const hostBaseDir = resolveInitInstallerBaseDir({
     scope: scope as InitInstallerScope,
     cwd: context.cwd,
     env: context.env,
     homeDir: context.homeDir,
   });
-  const existing = await readExistingInstallerAnswers(baseDir);
+  const guiConfigDir = resolveInitInstallerBaseDir({
+    scope: "global",
+    env: context.env,
+    homeDir: context.homeDir,
+  });
+  const existing = await readExistingInstallerAnswers({ hostBaseDir, guiConfigDir });
 
   const providerMode = await prompts.select({
     message: "How should pre-configured providers be selected?",
@@ -1441,7 +1357,6 @@ async function promptForSelections(
     manualProviders = selected.filter((value): value is string => typeof value === "string");
   }
   prompts.log.info("Custom providers are configured after installation.");
-  prompts.log.info(`npx ${context.pluginSpec} provider add`);
 
   const percentDisplayMode = await prompts.select({
     message: "What should quota percentages show?",
@@ -1472,7 +1387,6 @@ export async function runInitInstaller(params?: {
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
   prompts?: PromptAdapter;
-  syncLegacyConfig?: boolean;
   dryRun?: boolean;
   pluginSpec?: string;
 }): Promise<number> {
@@ -1523,7 +1437,6 @@ export async function runInitInstaller(params?: {
       cwd: params?.cwd,
       env: params?.env,
       homeDir: params?.homeDir,
-      syncLegacyConfig: params?.syncLegacyConfig,
       pluginSpec: params?.pluginSpec,
       guiFirst: true,
     });

@@ -7,7 +7,7 @@ import type { QuotaDialogCommandId } from "./quota-dialog-command-specs.js";
 import { isReportDocument, type ReportDocument } from "./report-document.js";
 
 /** Metadata key on every quota report message. OpenCode stores message metadata with the message. */
-export const QUOTA_REPORT_METADATA_KEY = "opencodeQuota";
+export const QUOTA_REPORT_METADATA_KEY = "opencodeQuotaGui";
 
 export type QuotaReportMetadata = {
   command: QuotaDialogCommandId;
@@ -23,9 +23,10 @@ export type QuotaReportMetadata = {
  * before plugin hooks run, so the metadata is lost there. These lines let the plugin cut
  * the report back out of that text.
  */
-const QUOTA_REPORT_START = "[OpenCode Quota report]";
-const QUOTA_REPORT_END = "[End of OpenCode Quota report]";
-const QUOTA_REPORT_BLOCKS = /\[OpenCode Quota report\][\s\S]*?\[End of OpenCode Quota report\]/g;
+const QUOTA_REPORT_START = "[OpenCode Quota GUI report]";
+const QUOTA_REPORT_END = "[End of OpenCode Quota GUI report]";
+const QUOTA_REPORT_BLOCKS =
+  /\[OpenCode Quota GUI report\][\s\S]*?\[End of OpenCode Quota GUI report\]/g;
 
 export function formatQuotaReportMessage(report: string): string {
   return `${QUOTA_REPORT_START}\n${report}\n${QUOTA_REPORT_END}`;

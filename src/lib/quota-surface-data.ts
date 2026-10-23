@@ -1,10 +1,9 @@
 /**
- * Computes the text of the TUI quota surfaces: the sidebar panel, the toasts, the
- * session prompt line and the Home footer, plus the optional export file. The server
- * plugin serves these to the TUI over its RPC.
+ * Computes the text of the inherited TUI quota surfaces: the sidebar panel, the toasts,
+ * the session prompt line and the Home footer, plus the optional export file. The TUI
+ * implementation is retained but not registered by this GUI-only product.
  */
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { writeJsonAtomic } from "./atomic-json.js";
 import type { RuntimeContextRootHints } from "./config-file-utils.js";
 import { sanitizeDisplayText } from "./display-sanitize.js";
@@ -15,7 +14,7 @@ import {
   getMaintainerAnnouncementsSummary,
   getMaintainerAnnouncementTargetProviderIds,
 } from "./maintainer-announcements.js";
-import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
+import { getMaintainerAnnouncementsHomeStatePath } from "./private-state-paths.js";
 import { getQuotaProviderShape, normalizeQuotaProviderId } from "./provider-metadata.js";
 import {
   buildQuotaExport,
@@ -137,7 +136,7 @@ export async function getQuotaMessage(
       resetNotification = formatQuotaResetNotification(notices) ?? undefined;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      console.warn(`[opencode-quota] failed to observe quota reset transitions: ${reason}`);
+      console.warn(`[opencode-quota-gui] failed to observe quota reset transitions: ${reason}`);
     }
   }
   const data = result.data;
@@ -238,7 +237,7 @@ function formatQuotaToastDebugInfo(params: {
   const paths = params.configMeta.paths.length > 0 ? params.configMeta.paths.join(" | ") : "(none)";
 
   return [
-    "Quota Toast Debug (opencode-quota)",
+    "Quota Toast Debug (opencode-quota-gui)",
     `trigger=${params.trigger} reason=${params.reason}`,
     `configSource=${params.configMeta.source} paths=${paths}`,
     `enabled=${params.config.enabled} providers=${providers}${modelPart}`,
@@ -260,11 +259,7 @@ let unsavedDailyHomeNoticeClaim: DailyHomeNoticeClaim | undefined;
  * starts that day's window and records it in the state dir.
  */
 async function claimDailyHomeNotice(nowMs: number): Promise<boolean> {
-  const statePath = join(
-    getOpencodeRuntimeDirs().stateDir,
-    "opencode-quota",
-    "maintainer-announcements-home.json",
-  );
+  const statePath = getMaintainerAnnouncementsHomeStatePath();
   const now = new Date(nowMs);
   const day = [
     now.getFullYear(),

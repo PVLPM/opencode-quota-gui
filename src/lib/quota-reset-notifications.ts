@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 
 import { writeJsonAtomic } from "./atomic-json.js";
 import { isPercentEntry, type QuotaProviderResult, type QuotaToastEntry } from "./entries.js";
-import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
+import { getQuotaResetNotificationsStatePath } from "./private-state-paths.js";
 import { getQuotaProviderDisplayLabel } from "./provider-metadata.js";
 import { classifyQuotaWindowText, type QuotaWindowKind } from "./quota-entry-display.js";
 import type { QuotaResetWindow } from "./types.js";
@@ -64,11 +64,7 @@ export type QuotaResetNotice = {
 };
 
 function getStatePath(): string {
-  return join(
-    getOpencodeRuntimeDirs().stateDir,
-    "opencode-quota",
-    "quota-reset-notifications.json",
-  );
+  return getQuotaResetNotificationsStatePath();
 }
 
 function getWindow(entry: QuotaToastEntry): QuotaWindowKind | null {

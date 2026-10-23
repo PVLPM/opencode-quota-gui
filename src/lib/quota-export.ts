@@ -10,7 +10,7 @@ import type {
   QuotaProviderResult,
   QuotaToastEntry,
 } from "./entries.js";
-import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
+import { getGuiPrivateCacheDir } from "./private-state-paths.js";
 import { classifyQuotaWindowText } from "./quota-entry-display.js";
 import type {
   QuotaExport,
@@ -68,14 +68,14 @@ export function createExportProviderContext(runtime: QuotaRuntimeContext): Quota
 /**
  * Resolves the export file path from a configured value.
  *
- * - Empty string → XDG cache default: `$XDG_CACHE_HOME/opencode/quota-export.json`
+ * - Empty string → XDG cache default: `$XDG_CACHE_HOME/opencode/opencode-quota-gui/quota-export.json`
  * - Starts with `~/` → expands `~` to `homedir()`
  * - Starts with `~\` → expands `~` and treats backslashes as path separators
  * - Otherwise → returns as-is (caller is responsible for absolute paths)
  */
 export function resolveExportPath(configured: string): string {
   if (configured === "") {
-    return join(getOpencodeRuntimeDirs().cacheDir, "quota-export.json");
+    return join(getGuiPrivateCacheDir(), "quota-export.json");
   }
   if (configured.startsWith("~/")) {
     return join(homedir(), configured.slice(2));

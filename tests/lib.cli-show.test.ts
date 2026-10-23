@@ -107,6 +107,12 @@ describe("runCliShowCommand", () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  function writeQuotaConfig(quotaToast: Record<string, unknown>): void {
+    const dir = join(globalConfigDir, "opencode-quota-gui");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.jsonc"), JSON.stringify(quotaToast), "utf8");
+  }
+
   it("synthesizes offline Kimi runtime ids independently by region", async () => {
     writeFileSync(join(workspaceDir, "opencode.json"), "{}", "utf8");
 
@@ -145,18 +151,7 @@ describe("runCliShowCommand", () => {
       }),
     };
     mockProviders.push(provider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({
-        experimental: {
-          quotaToast: {
-            enabledProviders: ["synthetic"],
-            showSessionTokens: true,
-          },
-        },
-      }),
-      "utf8",
-    );
+    writeQuotaConfig({ enabledProviders: ["synthetic"], showSessionTokens: true });
 
     const stdout = createCaptureStream();
     const stderr = createCaptureStream();
@@ -206,11 +201,7 @@ describe("runCliShowCommand", () => {
       }),
     };
     mockProviders.push(provider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({ experimental: { quotaToast: { enabledProviders: ["synthetic"] } } }),
-      "utf8",
-    );
+    writeQuotaConfig({ enabledProviders: ["synthetic"] });
     const stdout = createCaptureStream();
     const stderr = createCaptureStream();
 
@@ -254,11 +245,7 @@ describe("runCliShowCommand", () => {
       fetch: vi.fn().mockResolvedValue({ attempted: true, entries: [], errors: [] }),
     };
     mockProviders.push(openAiProvider, copilotProvider);
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({ experimental: { quotaToast: { enabledProviders: ["openai"] } } }),
-      "utf8",
-    );
+    writeQuotaConfig({ enabledProviders: ["openai"] });
 
     const stdout = createCaptureStream();
     const stderr = createCaptureStream();
@@ -320,11 +307,7 @@ describe("runCliShowCommand", () => {
   });
 
   it("returns non-zero when quota is disabled in config", async () => {
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({ experimental: { quotaToast: { enabled: false } } }),
-      "utf8",
-    );
+    writeQuotaConfig({ enabled: false });
     const stdout = createCaptureStream();
     const stderr = createCaptureStream();
 
@@ -340,13 +323,14 @@ describe("runCliShowCommand", () => {
     expect(stderr.output).toContain("Quota disabled in config");
   });
 
-  it("prefers the git worktree root over a nested cwd for config loading", async () => {
+  it("uses canonical GUI config instead of legacy workspace quotaToast settings", async () => {
     const nestedDir = join(workspaceDir, "packages", "app");
     mkdirSync(nestedDir, { recursive: true });
     mkdirSync(join(workspaceDir, ".git"));
+    writeQuotaConfig({ enabled: false });
     writeFileSync(
       join(workspaceDir, "opencode.json"),
-      JSON.stringify({ experimental: { quotaToast: { enabled: false } } }),
+      JSON.stringify({ experimental: { quotaToast: { enabled: true } } }),
       "utf8",
     );
     writeFileSync(
@@ -369,7 +353,7 @@ describe("runCliShowCommand", () => {
     expect(stderr.output).toContain("Quota disabled in config");
   });
 
-  it("reads worktree root config even when OPENCODE_CONFIG_DIR is set", async () => {
+  it("reads canonical GUI config even when OPENCODE_CONFIG_DIR is set", async () => {
     const nestedDir = join(workspaceDir, "packages", "app");
     const provider = {
       id: "synthetic",
@@ -381,9 +365,10 @@ describe("runCliShowCommand", () => {
     mkdirSync(nestedDir, { recursive: true });
     mkdirSync(join(workspaceDir, ".git"));
     process.env.OPENCODE_CONFIG_DIR = ".opencode";
+    writeQuotaConfig({ enabled: false });
     writeFileSync(
       join(workspaceDir, "opencode.json"),
-      JSON.stringify({ experimental: { quotaToast: { enabled: false } } }),
+      JSON.stringify({ experimental: { quotaToast: { enabled: true } } }),
       "utf8",
     );
     const stdout = createCaptureStream();

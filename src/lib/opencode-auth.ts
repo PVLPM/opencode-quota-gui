@@ -541,7 +541,7 @@ export async function readCredentialRows(
   if (!source) {
     if (!unboundWarningShown) {
       unboundWarningShown = true;
-      console.warn("[opencode-quota] credential source is not bound");
+      console.warn("[opencode-quota-gui] credential source is not bound");
     }
     return [];
   }

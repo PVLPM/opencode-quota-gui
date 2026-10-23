@@ -162,7 +162,7 @@ describe("settings import preview and apply", () => {
     });
   });
 
-  it("never migrates project overrides even when the canonical file also sets them", async () => {
+  it("never migrates project overrides and never lets them become runtime settings", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, {
       minIntervalMs: 1000,
@@ -170,6 +170,8 @@ describe("settings import preview and apply", () => {
     });
     const store = makeStore(workspace);
     const before = await store.settings();
+    expect(before.values.accountingDetail).toBe("summary");
+    expect(before.sources.accountingDetail).toBe("defaults");
     await store.saveSettings({
       patch: { accountingDetail: "summary" },
       expectedRevision: before.revision,
@@ -181,8 +183,8 @@ describe("settings import preview and apply", () => {
     const result = await store.importApply({ expectedRevision: preview.expectedRevision });
     expect(result.applied).toEqual({});
     const after = await store.settings();
-    expect(after.values.accountingDetail).toBe("detailed");
-    expect(after.sources.accountingDetail).toBe("project opencode-quota/quota-toast.json");
+    expect(after.values.accountingDetail).toBe("summary");
+    expect(after.sources.accountingDetail).toBe("opencode-quota-gui/config.jsonc");
   });
 
   it("reports inherited-layer issues in the preview and keeps canonical issues out of it", async () => {

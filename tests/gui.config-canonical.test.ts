@@ -9,7 +9,7 @@ import {
   createLoadConfigMeta,
   GUI_CONFIG_RELATIVE_PATH,
   getGuiConfigPath,
-  loadConfig,
+  loadConfigLayered,
 } from "../src/lib/config.js";
 import {
   createGuiConfigWorkspace,
@@ -38,7 +38,7 @@ afterEach(() => {
 
 async function load(workspace: GuiConfigWorkspace) {
   const meta = createLoadConfigMeta();
-  const config = await loadConfig(undefined, meta, {
+  const config = await loadConfigLayered(undefined, meta, {
     configRootDir: workspace.workspaceRoot,
     globalConfigDir: workspace.configDir,
   });
@@ -152,7 +152,7 @@ describe("canonical dashboard config layer", () => {
     expect(candidates.filter((candidate) => candidate.kind === "canonical")).toHaveLength(1);
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: workspace.configDir,
       globalConfigDir: workspace.configDir,
     });
@@ -379,7 +379,7 @@ async function expectAliasResolvesAsGlobal(
   writeGuiCanonicalConfig(workspace, { minIntervalMs: 2000 });
 
   const meta = createLoadConfigMeta();
-  const config = await loadConfig(undefined, meta, {
+  const config = await loadConfigLayered(undefined, meta, {
     configRootDir: aliasRoot,
     globalConfigDir: workspace.configDir,
   });
@@ -427,7 +427,7 @@ describe("same-root layer identity", () => {
     writeQuotaSidecarConfig(distinctRoot, { minIntervalMs: 3000 });
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: distinctRoot,
       globalConfigDir: workspace.configDir,
     });

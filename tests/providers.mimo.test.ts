@@ -116,7 +116,7 @@ describe("Xiaomi MiMo provider", () => {
   it("projects invalid configuration as a safe attempted error", async () => {
     mocks.resolveMimoConfigCached.mockResolvedValueOnce({
       state: "invalid",
-      source: "/tmp/config/opencode-quota/mimo.json",
+      source: "/tmp/config/opencode-quota-gui/mimo.json",
       error: "Invalid cookie header",
     });
 
@@ -124,7 +124,7 @@ describe("Xiaomi MiMo provider", () => {
 
     expectAttemptedWithErrorLabel(result, "Xiaomi MiMo");
     expect(result.errors[0]?.message).toBe(
-      "Invalid config (/tmp/config/opencode-quota/mimo.json): Invalid cookie header",
+      "Invalid config (/tmp/config/opencode-quota-gui/mimo.json): Invalid cookie header",
     );
     expect(JSON.stringify(result)).not.toContain("api-platform_serviceToken");
     expect(JSON.stringify(result)).not.toContain("userId");

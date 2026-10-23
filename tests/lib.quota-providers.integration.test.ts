@@ -26,7 +26,7 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => runtimeDirs.value,
 }));
 
-import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
+import { createLoadConfigMeta, loadConfigLayered } from "../src/lib/config.js";
 import { DEFAULT_CONFIG } from "../src/lib/types.js";
 
 describe("quotaProviders config integration", () => {
@@ -45,7 +45,7 @@ describe("quotaProviders config integration", () => {
     });
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: workspace.workspaceDir,
     });
 
@@ -66,7 +66,7 @@ describe("quotaProviders config integration", () => {
       quotaProviders: VALID_QUOTA_PROVIDER_INPUTS,
     });
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: workspace.workspaceDir,
     });
     expect(config.quotaProviders).toEqual(VALID_QUOTA_PROVIDERS);
@@ -89,7 +89,7 @@ describe("quotaProviders config integration", () => {
     });
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: workspace.workspaceDir,
     });
 
@@ -107,13 +107,13 @@ describe("quotaProviders config integration", () => {
       quotaProviders: VALID_QUOTA_PROVIDER_INPUTS,
     });
 
-    const first = await loadConfig(undefined, undefined, {
+    const first = await loadConfigLayered(undefined, undefined, {
       configRootDir: workspace.workspaceDir,
     });
     first.quotaProviders[0]!.label = "Changed";
     first.quotaProviders[0]!.modelIds![0] = "changed-model";
 
-    const second = await loadConfig(undefined, undefined, {
+    const second = await loadConfigLayered(undefined, undefined, {
       configRootDir: workspace.workspaceDir,
     });
     expect(second.quotaProviders).toEqual(VALID_QUOTA_PROVIDERS);
@@ -132,7 +132,7 @@ describe("quotaProviders config integration", () => {
     });
 
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: workspace.workspaceDir,
     });
 
@@ -150,7 +150,7 @@ describe("quotaProviders config integration", () => {
       customSources: [quotaProvider()],
     });
     const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
+    const config = await loadConfigLayered(undefined, meta, {
       configRootDir: workspace.workspaceDir,
     });
     expect(config.quotaProviders).toEqual([]);

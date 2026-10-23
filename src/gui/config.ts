@@ -1,11 +1,13 @@
 /**
  * GUI settings store over the canonical dashboard config layer (spec §5.4, §7).
  *
- * Reads the effective configuration through the shared core loader
- * (defaults → global legacy → global canonical → project layers) and writes
- * only the global canonical `<configDir>/opencode-quota-gui/config.jsonc`
- * through the upstream comment-preserving, symlink-guarded atomic write
- * helpers. Project-scope files are read and reported, never written.
+ * Runtime reads are canonical-only: the global
+ * `<configDir>/opencode-quota-gui/config.jsonc` plus defaults. Legacy global and
+ * workspace layers are loaded separately, only to offer the explicit import
+ * preview/apply and to report its issues; they never feed settings values,
+ * provenance, dashboard port/visibility, or writes. Writes go only to the
+ * canonical file through the upstream comment-preserving, symlink-guarded atomic
+ * write helpers.
  */
 
 import { createHash } from "node:crypto";
@@ -32,6 +34,7 @@ import {
   isPositiveNumber,
   isValidOpenCodeGoWindows,
   loadConfig,
+  loadConfigLayered,
   normalizeEnabledProviders,
 } from "../lib/config.js";
 import type { EditableConfigPath } from "../lib/config-file-utils.js";
@@ -40,6 +43,7 @@ import {
   type ConfigWriteTargetReason,
 } from "../lib/config-write-target.js";
 import { isResetTimeDecimals } from "../lib/format-utils.js";
+import { assertGuiConfigTargetIsIndependent } from "../lib/gui-config-target.js";
 import {
   applyConfigDocumentEdit,
   type ConfigDocumentEdit,
@@ -172,8 +176,12 @@ interface CanonicalDocument {
 }
 
 interface SettingsState {
-  config: QuotaToastConfig;
-  meta: ReturnType<typeof createLoadConfigMeta>;
+  /** Canonical GUI config plus defaults: the only state settings/writes expose. */
+  runtimeConfig: QuotaToastConfig;
+  runtimeMeta: ReturnType<typeof createLoadConfigMeta>;
+  /** Isolated layered legacy state, used only for import detection/preview/apply. */
+  importConfig: QuotaToastConfig;
+  importMeta: ReturnType<typeof createLoadConfigMeta>;
   candidates: ConfigLayerCandidate[];
   canonical: CanonicalDocument;
   revision: string;
@@ -396,20 +404,38 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
   }
 
   async function readState(): Promise<SettingsState> {
-    const meta = createLoadConfigMeta();
     const candidates = buildConfigLayerCandidates(configDir, workspaceRoot);
-    const config = await loadConfig(undefined, meta, {
+    const runtimeMeta = createLoadConfigMeta();
+    const runtimeConfig = await loadConfig(undefined, runtimeMeta, {
+      configRootDir: workspaceRoot,
+      globalConfigDir: configDir,
+    });
+    // The legacy/workspace layers are an isolated import candidate snapshot: they
+    // are never the effective settings state and never feed writes.
+    const importMeta = createLoadConfigMeta();
+    const importConfig = await loadConfigLayered(undefined, importMeta, {
       configRootDir: workspaceRoot,
       globalConfigDir: configDir,
     });
     const canonical = await readCanonicalDocument();
     const revision = await computeRevision(candidates);
-    return { config, meta, candidates, canonical, revision };
+    return {
+      runtimeConfig,
+      runtimeMeta,
+      importConfig,
+      importMeta,
+      candidates,
+      canonical,
+      revision,
+    };
   }
 
-  function collectIssues(state: SettingsState): SettingsSnapshot["issues"] {
-    const issues = state.meta.configIssues.map((issue) => ({
-      label: sourceLabelFor(issue.path, state.candidates),
+  function collectIssues(
+    meta: ReturnType<typeof createLoadConfigMeta>,
+    candidates: ConfigLayerCandidate[],
+  ): SettingsSnapshot["issues"] {
+    const issues = meta.configIssues.map((issue) => ({
+      label: sourceLabelFor(issue.path, candidates),
       key: issue.key,
       message: issue.message,
     }));
@@ -425,24 +451,27 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     return issues;
   }
 
-  function deriveImportPlan(state: SettingsState): ImportPlan {
+  function deriveImportPlan(
+    config: QuotaToastConfig,
+    meta: ReturnType<typeof createLoadConfigMeta>,
+    candidates: ConfigLayerCandidate[],
+  ): ImportPlan {
     const keys: ImportPlan["keys"] = [];
     const origins: string[] = [];
 
     for (const key of LEGACY_IMPORT_KEYS) {
-      const layer = state.meta.settingSourceLayers[key];
+      const layer = meta.settingSourceLayers[key];
       if (!layer || layer.scope !== "global" || layer.kind === "canonical") continue;
-      const label = sourceLabelFor(state.meta.settingSources[key], state.candidates);
-      keys.push({ key, value: settingValue(state.config, key) });
+      const label = sourceLabelFor(meta.settingSources[key], candidates);
+      keys.push({ key, value: settingValue(config, key) });
       if (!origins.includes(label)) {
         origins.push(label);
       }
     }
 
-    const issues = state.meta.configIssues
+    const issues = meta.configIssues
       .filter(
-        (issue) =>
-          state.meta.globalConfigPaths.includes(issue.path) && issue.path !== canonicalPath,
+        (issue) => meta.globalConfigPaths.includes(issue.path) && issue.path !== canonicalPath,
       )
       .map((issue) => ({ key: issue.key, message: issue.message }));
 
@@ -663,6 +692,19 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     return new GuiSettingsError("config-write-error", "Config write failed");
   }
 
+  async function assertCanonicalTargetIsIndependent(): Promise<void> {
+    try {
+      await assertGuiConfigTargetIsIndependent(canonicalPath, configDir);
+    } catch {
+      // The guard's own message names absolute paths; the HTTP boundary gets a
+      // controlled code and a generic message instead.
+      throw new GuiSettingsError(
+        "config-target-error",
+        "The dashboard config path must not resolve into the upstream quota configuration",
+      );
+    }
+  }
+
   async function writeCanonicalDocument(
     desired: Record<string, unknown>,
     managedComments?: ManagedConfigComment[],
@@ -673,6 +715,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       format: "jsonc",
       existed: existsSync(canonicalPath),
     };
+
+    await assertCanonicalTargetIsIndependent();
 
     let planned: ConfigDocumentEdit;
     try {
@@ -685,6 +729,9 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       return;
     }
 
+    // Re-check immediately before apply so a retargeted link cannot turn a GUI
+    // write into an upstream-source write.
+    await assertCanonicalTargetIsIndependent();
     try {
       await applyConfigDocumentEdit(planned);
     } catch (error) {
@@ -726,14 +773,14 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     const state = await readState();
     const values: Record<string, JsonValue> = {};
     for (const key of GUI_SETTINGS_KEYS) {
-      values[key] = settingValue(state.config, key);
+      values[key] = settingValue(state.runtimeConfig, key);
     }
 
     const sources: Record<string, string> = {};
     const provenance: NonNullable<SettingsSnapshot["provenance"]> = {};
     for (const key of GUI_SETTINGS_KEYS) {
-      sources[key] = sourceLabelFor(state.meta.settingSources[key], state.candidates);
-      const layer = state.meta.settingSourceLayers[key];
+      sources[key] = sourceLabelFor(state.runtimeMeta.settingSources[key], state.candidates);
+      const layer = state.runtimeMeta.settingSourceLayers[key];
       provenance[key] = {
         scope: !layer
           ? "defaults"
@@ -745,9 +792,9 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       };
     }
 
-    const importPlan = deriveImportPlan(state);
-    const issues = collectIssues(state);
-    const port = getGuiDashboardPort(state.config);
+    const importPlan = deriveImportPlan(state.importConfig, state.importMeta, state.candidates);
+    const issues = collectIssues(state.runtimeMeta, state.candidates);
+    const port = getGuiDashboardPort(state.runtimeConfig);
     const importSection: SettingsSnapshot["import"] = {
       available: importPlan.keys.length > 0,
       issues: importPlan.issues,
@@ -766,8 +813,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       writable: [...GUI_SETTINGS_WRITABLE_KEYS],
       dashboard: { port, url: resolveGuiDashboardUrl(port) },
       visibility: {
-        hiddenCards: [...state.config.dashboard.hiddenCards],
-        hiddenRows: [...state.config.dashboard.hiddenRows],
+        hiddenCards: [...state.runtimeConfig.dashboard.hiddenCards],
+        hiddenRows: [...state.runtimeConfig.dashboard.hiddenRows],
       },
       import: importSection,
       issues,
@@ -799,7 +846,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
   async function importPreview(): Promise<ImportPreview> {
     const state = await readState();
-    const plan = deriveImportPlan(state);
+    const plan = deriveImportPlan(state.importConfig, state.importMeta, state.candidates);
     previewedRevision = state.revision;
     return {
       from: plan.from,
@@ -824,7 +871,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         );
       }
 
-      const plan = deriveImportPlan(state);
+      const plan = deriveImportPlan(state.importConfig, state.importMeta, state.candidates);
       if (plan.keys.length === 0) {
         return { revision: state.revision, applied: {}, warnings: [] };
       }

@@ -1,7 +1,9 @@
 /**
- * Configuration loader for opencode-quota plugin.
+ * Configuration loader for the opencode-quota-gui product.
  *
- * Precedence model:
+ * `loadConfig` is the runtime loader: canonical GUI config plus defaults only.
+ * `loadConfigLayered` retains the full precedence below for the explicit
+ * legacy settings import/preview:
  * - Global/user config provides defaults.
  * - Workspace config at the resolved config root overrides ordinary settings.
  * - SDK config is used only as a fallback when no file-backed config exists.
@@ -1429,13 +1431,25 @@ function getConfigLayerSourceLabel(candidate: ConfigLayerCandidate): string {
   return `${candidate.path} (${suffix})`;
 }
 
+async function readConfigJsonFile(path: string): Promise<unknown | null> {
+  const result = await readOpenCodeConfigCandidate({
+    path,
+    format: path.endsWith(".jsonc") ? "jsonc" : "json",
+  });
+  return result.state === "parsed" ? result.value : null;
+}
+
 /**
  * Load plugin configuration from OpenCode config
+ *
+ * Legacy-compatible layered read (`defaults → global legacy → global canonical
+ * → project layers → SDK fallback`). Reserved for the explicit settings import
+ * and its preview; runtime callers use the canonical-only `loadConfig`.
  *
  * @param client - Optional OpenCode SDK client fallback
  * @returns Merged configuration with defaults
  */
-export async function loadConfig(
+export async function loadConfigLayered(
   client:
     | {
         config: {
@@ -1449,11 +1463,7 @@ export async function loadConfig(
   options?: LoadConfigOptions,
 ): Promise<QuotaToastConfig> {
   async function readJson(path: string): Promise<unknown | null> {
-    const result = await readOpenCodeConfigCandidate({
-      path,
-      format: path.endsWith(".jsonc") ? "jsonc" : "json",
-    });
-    return result.state === "parsed" ? result.value : null;
+    return readConfigJsonFile(path);
   }
 
   async function loadFromFiles(): Promise<{
@@ -1710,4 +1720,109 @@ export async function loadConfig(
     meta.configIssues = [];
   }
   return cloneDefaultConfig();
+}
+
+/**
+ * Effective runtime configuration: canonical GUI config plus defaults only.
+ *
+ * OpenCode SDK settings, workspace layers and legacy `experimental.quotaToast` /
+ * `opencode-quota` sidecars are deliberately not read here. They remain available
+ * through `loadConfigLayered` for the explicit settings import, and only become
+ * effective once the user applies that import to the canonical file. The client
+ * parameter stays in the signature for runtime callers that share one contract.
+ */
+export async function loadConfig(
+  _client?:
+    | {
+        config: {
+          get: () => Promise<{
+            data?: { experimental?: { quotaToast?: Partial<QuotaToastConfig> } };
+          }>;
+        };
+      }
+    | undefined,
+  meta?: LoadConfigMeta,
+  options?: LoadConfigOptions,
+): Promise<QuotaToastConfig> {
+  const configDir = options?.globalConfigDir ?? getOpencodeRuntimeDirs().configDir;
+  const canonicalPath = getGuiConfigPath(configDir);
+  const config = cloneDefaultConfig();
+  const settingSources: QuotaToastSettingSources = {};
+  const settingSourceLayers: LoadConfigMeta["settingSourceLayers"] = {};
+  const configIssues: LoadConfigIssue[] = [];
+  let usedPaths: string[] = [];
+  let source: LoadConfigMeta["source"] = "defaults";
+
+  if (existsSync(canonicalPath)) {
+    const parsed = await readConfigJsonFile(canonicalPath);
+    if (!isPlainObject(parsed)) {
+      configIssues.push({
+        path: canonicalPath,
+        key: "$root",
+        message: "malformed JSONC; defaults apply",
+      });
+    } else {
+      source = "files";
+      usedPaths = [canonicalPath];
+
+      applyValidatedQuotaToastPatch(
+        config,
+        extractValidatedQuotaToastPatch(
+          parsed,
+          (key, message) => {
+            configIssues.push({ path: canonicalPath, key, message });
+          },
+          { allowZeroMonthlyLimit: true },
+        ),
+        canonicalPath,
+        settingSources,
+      );
+
+      if (hasOwnKey(parsed, "alibabaCodingPlanTier")) {
+        configIssues.push({
+          path: canonicalPath,
+          key: "alibabaCodingPlanTier",
+          message: 'removed in v4; tune Alibaba through "quotaProviders"',
+        });
+      }
+
+      if (hasOwnKey(parsed, "customSources")) {
+        configIssues.push({
+          path: canonicalPath,
+          key: "customSources",
+          message: 'removed in v4; use the global-only "quotaProviders" property',
+        });
+      }
+
+      if (hasOwnKey(parsed, "quotaProviders")) {
+        const validation = validateQuotaProviders(parsed.quotaProviders);
+        for (const issue of validation.issues) {
+          configIssues.push({ path: canonicalPath, key: issue.key, message: issue.message });
+        }
+        if (validation.value) {
+          config.quotaProviders = cloneQuotaProviders(validation.value);
+          applySettingSource(settingSources, "quotaProviders", canonicalPath);
+        }
+      }
+
+      // Only keys actually applied from the canonical layer acquire its structured scope.
+      for (const key of QUOTA_TOAST_SETTING_SOURCE_KEYS) {
+        if (settingSources[key] === canonicalPath) {
+          settingSourceLayers[key] = { scope: "global", kind: "canonical" };
+        }
+      }
+    }
+  }
+
+  if (meta) {
+    meta.source = source;
+    meta.paths = usedPaths;
+    meta.globalConfigPaths = usedPaths;
+    meta.workspaceConfigPaths = [];
+    meta.settingSources = settingSources;
+    meta.settingSourceLayers = settingSourceLayers;
+    meta.networkSettingSources = projectNetworkSettingSources(settingSources);
+    meta.configIssues = configIssues;
+  }
+  return config;
 }

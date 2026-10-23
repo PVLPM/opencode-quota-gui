@@ -363,13 +363,15 @@ describe("quota-state shared cache", () => {
     expect(provider.fetch).toHaveBeenCalledTimes(POSIX_IDENTITY_STORAGE ? 2 : 3);
     if (!POSIX_IDENTITY_STORAGE) return;
 
-    const cacheFiles = await readdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`);
+    const cacheFiles = await readdir(
+      `${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`,
+    );
     expect(cacheFiles).toHaveLength(2);
     expect(cacheFiles.join("\n")).not.toContain("account-one-credential");
     expect(cacheFiles.join("\n")).not.toContain("account-two-credential");
     for (const file of cacheFiles) {
       const persisted = await readFile(
-        `${TEST_RUNTIME_ROOT}/cache/quota-provider-state/${file}`,
+        `${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state/${file}`,
         "utf8",
       );
       expect(persisted).not.toContain("account-one-credential");
@@ -1307,7 +1309,9 @@ describe("quota-state shared cache", () => {
     const { getPackageVersion } = await import("../src/lib/version.js");
     const packageVersion = (await getPackageVersion()) ?? "unknown";
 
-    await mkdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`, { recursive: true });
+    await mkdir(`${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`, {
+      recursive: true,
+    });
     await writeFile(
       path,
       JSON.stringify({
@@ -1772,7 +1776,9 @@ describe("quota-state shared cache", () => {
     const { getPackageVersion } = await import("../src/lib/version.js");
     const packageVersion = (await getPackageVersion()) ?? "unknown";
 
-    await mkdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`, { recursive: true });
+    await mkdir(`${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`, {
+      recursive: true,
+    });
     await writeFile(
       path,
       JSON.stringify({
@@ -1843,7 +1849,9 @@ describe("quota-state shared cache", () => {
       ttlMs: 60_000,
     });
 
-    await expect(readdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`)).rejects.toThrow();
+    await expect(
+      readdir(`${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`),
+    ).rejects.toThrow();
     expect(provider.fetch).toHaveBeenCalledTimes(2);
   });
 
@@ -1867,7 +1875,9 @@ describe("quota-state shared cache", () => {
     const { getPackageVersion } = await import("../src/lib/version.js");
     const packageVersion = (await getPackageVersion()) ?? "unknown";
 
-    await mkdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`, { recursive: true });
+    await mkdir(`${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`, {
+      recursive: true,
+    });
     await writeFile(
       path,
       JSON.stringify({
@@ -1914,7 +1924,9 @@ describe("quota-state shared cache", () => {
     const { getPackageVersion } = await import("../src/lib/version.js");
     const packageVersion = (await getPackageVersion()) ?? "unknown";
 
-    await mkdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`, { recursive: true });
+    await mkdir(`${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`, {
+      recursive: true,
+    });
     await writeFile(
       path,
       JSON.stringify({
@@ -2216,7 +2228,9 @@ describe("quota-state shared cache", () => {
     const { getPackageVersion } = await import("../src/lib/version.js");
     const packageVersion = (await getPackageVersion()) ?? "unknown";
 
-    await mkdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`, { recursive: true });
+    await mkdir(`${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`, {
+      recursive: true,
+    });
     await writeFile(
       path,
       JSON.stringify({
@@ -2340,7 +2354,9 @@ describe("readCachedProviderResult", () => {
     const { getPackageVersion } = await import("../src/lib/version.js");
     const packageVersion = (await getPackageVersion()) ?? "unknown";
 
-    await mkdir(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`, { recursive: true });
+    await mkdir(`${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`, {
+      recursive: true,
+    });
     await writeFile(
       path,
       JSON.stringify({

@@ -1168,8 +1168,8 @@ export async function buildQuotaStatusReportDocument(
   return replaceHomeDirWithTildeInDocument(
     {
       heading: commandHeading({
-        title: `Quota Status (opencode-quota v${v}) (/quota_status)`,
-        detail: `opencode-quota v${v}`,
+        title: `Quota Status (opencode-quota-gui v${v}) (/quota_status)`,
+        detail: `opencode-quota-gui v${v}`,
         generatedAtMs: params.generatedAtMs,
       }),
       sections,

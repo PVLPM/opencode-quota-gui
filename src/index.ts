@@ -1,7 +1,8 @@
 /**
- * OpenCode Quota Plugin
+ * OpenCode Quota GUI dashboard
  *
- * Shows quota status in OpenCode without LLM invocation.
+ * Starts the local quota dashboard without LLM invocation. The plugin registers
+ * no commands, tools, RPC, or quota-report hooks.
  *
  * @packageDocumentation
  */

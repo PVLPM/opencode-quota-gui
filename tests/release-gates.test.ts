@@ -294,7 +294,7 @@ describe("v4 release gates", () => {
       manifestPath,
       JSON.stringify({
         files: requiredPackageFiles()
-          .filter((entry) => entry !== "dist/tui.js")
+          .filter((entry) => entry !== "dist/index.js")
           .map((entry) => ({ path: entry })),
       }),
       "utf8",
@@ -302,7 +302,32 @@ describe("v4 release gates", () => {
 
     const result = run(packageScript, [manifestPath]);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("dist/tui.js");
+    expect(result.stderr).toContain("dist/index.js");
+  });
+
+  it("rejects a dormant TUI entry or public TUI subpath in the packed manifest", async () => {
+    const forbiddenFiles = [
+      "dist/tui.js",
+      "dist/tui.js.map",
+      "dist/tui.d.ts",
+      "dist/tui.d.ts.map",
+      "dist/tui-v2.jsx",
+      "dist/tui-v2.jsx.map",
+      "dist/tui-v2.d.ts",
+      "dist/tui-v2.d.ts.map",
+    ];
+    const manifestPath = path.join(tempDir, "tui.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        files: [...requiredPackageFiles(), ...forbiddenFiles].map((entry) => ({ path: entry })),
+      }),
+      "utf8",
+    );
+
+    const result = run(packageScript, [manifestPath]);
+    expect(result.status).toBe(1);
+    for (const file of forbiddenFiles) expect(result.stderr).toContain(file);
   });
 
   it("verifies one exact release tarball and rejects content tampering", async () => {

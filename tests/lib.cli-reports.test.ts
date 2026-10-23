@@ -100,8 +100,8 @@ describe("CLI reports", () => {
   let workspaceDir: string;
   let savedConfigDir: string | undefined;
 
-  // A minimal configuration client: the given provider ids, no SDK config. Quota settings
-  // come from the files in the workspace folder.
+  // A minimal configuration client: the given provider ids, no SDK config. GUI settings
+  // come from the canonical global config in runtimeDirs.configDir.
   async function runtimeFor(providerIds: string[] = []) {
     return resolveQuotaRuntimeContext({
       client: {
@@ -116,11 +116,9 @@ describe("CLI reports", () => {
   }
 
   function writeQuotaConfig(quotaToast: Record<string, unknown>): void {
-    writeFileSync(
-      join(workspaceDir, "opencode.json"),
-      JSON.stringify({ experimental: { quotaToast } }),
-      "utf8",
-    );
+    const dir = join(globalConfigDir, "opencode-quota-gui");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config.jsonc"), JSON.stringify(quotaToast), "utf8");
   }
 
   beforeEach(() => {

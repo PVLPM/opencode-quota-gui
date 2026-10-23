@@ -2063,8 +2063,8 @@ describe("settings page", () => {
     expect(html.match(/qg-field__label">Address</g)).toHaveLength(1);
     expect(html).toContain("Bound to loopback only");
     expect(html).toContain("No unsaved changes.");
-    expect(text(html)).toContain("saved as global defaults");
-    expect(text(html)).toContain("saving here does not edit them");
+    expect(text(html)).toContain("saved to the global GUI config file");
+    expect(text(html)).toContain("workspace settings are never live overrides");
     expect(html).toContain("Legacy OpenCode Quota settings detected");
     expect(html).toContain("Legacy override");
     expect(html).not.toContain("effective value inherited from");

@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VALID_QUOTA_PROVIDER_INPUTS, VALID_QUOTA_PROVIDERS } from "./fixtures/quota-providers.js";
 import {
@@ -24,11 +24,58 @@ vi.mock("os", async (importOriginal) => {
   };
 });
 
-import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
-import { applyInitInstallerPlan, planInitInstaller } from "../src/lib/init-installer.js";
+vi.mock("../src/lib/opencode-version.js", () => ({
+  detectOpenCodeMajor: async () => 2,
+}));
+
+import { createGuiSettingsStore } from "../src/gui/config.js";
+import { createLoadConfigMeta, loadConfig, loadConfigLayered } from "../src/lib/config.js";
+import {
+  applyInitInstallerPlan,
+  planInitInstaller,
+  runInitInstaller,
+} from "../src/lib/init-installer.js";
+import { parseJsonOrJsonc } from "../src/lib/jsonc.js";
 import { getOpencodeRuntimeDirs } from "../src/lib/opencode-runtime-paths.js";
-import { applyProviderAddPlan, planProviderAdd } from "../src/lib/provider-add.js";
 import { applyScopedUpdatePlan, planScopedUpdate } from "../src/lib/scoped-update.js";
+
+type InstallerChoices = {
+  scope?: "project" | "global";
+  providerMode?: "auto" | "manual";
+  providers?: string[];
+  percentDisplayMode?: "remaining" | "used";
+};
+
+function createInstallerPrompts(choices: InstallerChoices = {}) {
+  const transcript: string[] = [];
+  const prompts = {
+    intro: (message: string) => transcript.push(message),
+    outro: (message: string) => transcript.push(message),
+    select: async ({ message, initialValue }: { message: string; initialValue?: string }) => {
+      transcript.push(message);
+      if (/Where should/.test(message)) return choices.scope ?? "global";
+      if (/providers be selected/.test(message)) return choices.providerMode ?? "auto";
+      if (/quota percentages show/.test(message)) return choices.percentDisplayMode ?? "remaining";
+      if (/OpenCode version/.test(message)) return "2";
+      return initialValue;
+    },
+    multiselect: async ({ message }: { message: string }) => {
+      transcript.push(message);
+      return choices.providers ?? [];
+    },
+    confirm: async ({ message }: { message: string }) => {
+      transcript.push(message);
+      return true;
+    },
+    isCancel: () => false,
+    log: {
+      info: (message: string) => transcript.push(message),
+      success: (message: string) => transcript.push(message),
+      error: (message: string) => transcript.push(`ERROR: ${message}`),
+    },
+  };
+  return { prompts, transcript };
+}
 
 describe("loadConfig integration runtime-path resolution", () => {
   const originalEnv = process.env;
@@ -91,7 +138,7 @@ describe("loadConfig integration runtime-path resolution", () => {
     });
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { cwd: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { cwd: workspaceDir });
 
     expect(cfg.enabled).toBe(true);
     expect(cfg.enabledProviders).toEqual(["nanogpt"]);
@@ -129,7 +176,7 @@ describe("loadConfig integration runtime-path resolution", () => {
       expect(workspace.xdgConfigHome).not.toBe(join(tempDir, ".config"));
 
       const meta = createLoadConfigMeta();
-      const cfg = await loadConfig(undefined, meta, { configRootDir: workspaceDir });
+      const cfg = await loadConfigLayered(undefined, meta, { configRootDir: workspaceDir });
 
       expect(cfg.enabled).toBe(true);
       expect(cfg.minIntervalMs).not.toBe(12_345);
@@ -146,7 +193,7 @@ describe("loadConfig integration runtime-path resolution", () => {
     });
 
     const sidecarMeta = createLoadConfigMeta();
-    const sidecarConfig = await loadConfig(undefined, sidecarMeta, {
+    const sidecarConfig = await loadConfigLayered(undefined, sidecarMeta, {
       configRootDir: workspaceDir,
     });
     expect(sidecarConfig.accountingDetail).toBe("summary");
@@ -163,7 +210,9 @@ describe("loadConfig integration runtime-path resolution", () => {
     });
 
     const legacyMeta = createLoadConfigMeta();
-    const legacyConfig = await loadConfig(undefined, legacyMeta, { configRootDir: nestedDir });
+    const legacyConfig = await loadConfigLayered(undefined, legacyMeta, {
+      configRootDir: nestedDir,
+    });
     expect(legacyConfig.accountingDetail).toBe("detailed");
     expect(legacyMeta.settingSources.accountingDetail).toBe(quotaConfigSource(nestedDir));
     expect(legacyMeta.configIssues).toContainEqual({
@@ -173,32 +222,37 @@ describe("loadConfig integration runtime-path resolution", () => {
     });
   });
 
-  it("loads updater-migrated accounting detail with file provenance", async () => {
-    const migratedPath = writeQuotaSidecarConfig(workspaceDir, {
+  it("never edits the upstream accounting-detail sidecar and leaves its diagnosis to the runtime", async () => {
+    const upstreamPath = writeQuotaSidecarConfig(workspaceDir, {
       opencodeZenDisplay: "default",
     });
+    const original = readFileSync(upstreamPath, "utf8");
     const env = {
       ...process.env,
       ...createConfigLoaderEnv(workspace, { home: tempDir }),
     } as NodeJS.ProcessEnv;
 
     const plan = await planScopedUpdate({ cwd: workspaceDir, env, homeDir: tempDir });
-    expect(plan.configEdits).toEqual([
-      expect.objectContaining({ path: migratedPath, displayMigrations: 1 }),
-    ]);
+    expect(plan.configEdits).toEqual([]);
+    expect(plan.safeActions).not.toContainEqual(
+      expect.objectContaining({ kind: "accounting-detail-migration" }),
+    );
     await applyScopedUpdatePlan(plan);
+    expect(readFileSync(upstreamPath, "utf8")).toBe(original);
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { configRootDir: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { configRootDir: workspaceDir });
     expect(cfg.accountingDetail).toBe("summary");
-    expect(meta.settingSources.accountingDetail).toBe(quotaSidecarConfigSource(workspaceDir));
-    expect(meta.configIssues).not.toContainEqual(
-      expect.objectContaining({ key: "opencodeZenDisplay" }),
-    );
-    expect(readFileSync(migratedPath, "utf8")).not.toContain("opencodeZenDisplay");
+    expect(meta.settingSources.accountingDetail).toBeUndefined();
+    expect(meta.configIssues).toContainEqual({
+      path: quotaSidecarConfigSource(workspaceDir),
+      key: "opencodeZenDisplay",
+      message: 'removed; use root "accountingDetail" ("summary" or "detailed")',
+    });
+    expect(readFileSync(upstreamPath, "utf8")).toContain("opencodeZenDisplay");
   });
 
-  it("keeps unsupported updater display values unchanged and diagnostic-only at runtime", async () => {
+  it("leaves unsupported legacy display values to runtime diagnostics without updater edits", async () => {
     const hostPath = writeQuotaToastConfig(workspaceDir, {
       opencodeZenDisplay: "expanded",
     });
@@ -210,17 +264,14 @@ describe("loadConfig integration runtime-path resolution", () => {
 
     const plan = await planScopedUpdate({ cwd: workspaceDir, env, homeDir: tempDir });
     expect(plan.configEdits).toEqual([]);
-    expect(plan.manualFindings).toContainEqual({
-      kind: "display-migration-manual",
-      path: hostPath,
-      container: "experimental.quotaToast",
-      reason: "unsupported-legacy-value",
-    });
+    expect(plan.manualFindings).not.toContainEqual(
+      expect.objectContaining({ kind: "display-migration-manual" }),
+    );
     await applyScopedUpdatePlan(plan);
     expect(readFileSync(hostPath, "utf8")).toBe(original);
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { configRootDir: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { configRootDir: workspaceDir });
     expect(cfg.accountingDetail).toBe("summary");
     expect(meta.settingSources.accountingDetail).toBeUndefined();
     expect(meta.configIssues).toContainEqual({
@@ -241,14 +292,14 @@ describe("loadConfig integration runtime-path resolution", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { configRootDir: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { configRootDir: workspaceDir });
 
     expect(cfg.enabled).toBe(false);
     expect(cfg.enabledProviders).toEqual(["openai"]);
     expect(meta.workspaceConfigPaths.some((path) => path.includes("quota-toast.jsonc"))).toBe(true);
   });
 
-  it("loads a custom provider after init creates a manual-mode JSONC sidecar", async () => {
+  it("loads a custom provider from the canonical GUI config that init creates in manual mode", async () => {
     const env = process.env as NodeJS.ProcessEnv;
     const { configDir } = getOpencodeRuntimeDirs({ env, homeDir: tempDir });
     const initPlan = await planInitInstaller({
@@ -270,26 +321,179 @@ describe("loadConfig integration runtime-path resolution", () => {
     });
     await applyInitInstallerPlan(initPlan);
 
-    const providerPlan = await planProviderAdd({
-      configDir,
-      definition: {
-        id: "private-gateway",
-        mode: "remote-api",
-        url: "https://gateway.example/accounting",
-        format: "quota-v1",
-        apiKeyEnv: "PRIVATE_GATEWAY_KEY",
-      },
-    });
-    expect(providerPlan.path).toBe(join(configDir, "opencode-quota", "quota-toast.jsonc"));
-    await applyProviderAddPlan(providerPlan);
+    const guiPath = join(configDir, "opencode-quota-gui", "config.jsonc");
+    expect(existsSync(guiPath)).toBe(true);
+    const initial = parseJsonOrJsonc(readFileSync(guiPath, "utf8"), true) as Record<
+      string,
+      unknown
+    >;
+    expect(initial.enabledProviders).toEqual(["openai"]);
+
+    // The GUI Settings surface owns custom providers; the legacy provider-add helper is
+    // no longer part of the installation flow.
+    writeFileSync(
+      guiPath,
+      `${JSON.stringify(
+        {
+          ...initial,
+          enabledProviders: ["openai", "quota-providers"],
+          quotaProviders: [
+            {
+              id: "private-gateway",
+              mode: "remote-api",
+              url: "https://gateway.example/accounting",
+              format: "quota-v1",
+              apiKeyEnv: "PRIVATE_GATEWAY_KEY",
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { configRootDir: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { configRootDir: workspaceDir });
     expect(cfg.enabledProviders).toEqual(["openai", "quota-providers"]);
     expect(cfg.quotaProviders).toEqual([
       expect.objectContaining({ id: "private-gateway", mode: "remote-api" }),
     ]);
-    expect(meta.settingSources.quotaProviders).toContain("quota-toast.jsonc");
+    expect(meta.globalConfigPaths).toContain(guiPath);
+  });
+
+  it("installs the canonical GUI JSONC from a global JSON host without importing the dormant sibling JSON", async () => {
+    const configDir = workspace.opencodeConfigDir;
+    const guiDir = join(configDir, "opencode-quota-gui");
+    mkdirSync(guiDir, { recursive: true });
+    const siblingRaw = `${JSON.stringify(
+      {
+        enableToast: true,
+        enabledProviders: ["openai"],
+        percentDisplayMode: "remaining",
+        sentinel: "dormant sibling",
+      },
+      null,
+      2,
+    )}\n`;
+    writeFileSync(join(guiDir, "config.json"), siblingRaw, "utf8");
+    writeFileSync(
+      join(configDir, "opencode.json"),
+      `${JSON.stringify({ plugins: [] }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const { prompts } = createInstallerPrompts({
+      scope: "global",
+      providerMode: "manual",
+      providers: ["anthropic"],
+      percentDisplayMode: "used",
+    });
+    expect(
+      await runInitInstaller({
+        cwd: workspaceDir,
+        env: process.env,
+        homeDir: tempDir,
+        prompts,
+        pluginSpec: "opencode-quota-gui@latest",
+      }),
+    ).toBe(0);
+
+    const canonicalPath = join(guiDir, "config.jsonc");
+    expect(existsSync(canonicalPath)).toBe(true);
+    expect(readFileSync(join(guiDir, "config.json"), "utf8")).toBe(siblingRaw);
+    expect(existsSync(join(configDir, "opencode.jsonc"))).toBe(false);
+    expect(existsSync(join(workspaceDir, "opencode-quota-gui"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(configDir, "opencode.json"), "utf8")).plugins).toEqual([
+      "opencode-quota-gui@latest",
+    ]);
+
+    const meta = createLoadConfigMeta();
+    const cfg = await loadConfig(undefined, meta, { globalConfigDir: configDir });
+    expect(cfg.enabledProviders).toEqual(["anthropic"]);
+    expect(cfg.percentDisplayMode).toBe("used");
+    expect(cfg.enableToast).toBe(false);
+    expect(meta.globalConfigPaths).toContain(canonicalPath);
+
+    const snapshot = await createGuiSettingsStore({
+      configDir,
+      workspaceRoot: workspaceDir,
+    }).settings();
+    expect(snapshot.pathLabel).toBe(canonicalPath);
+    expect(snapshot.values.enabledProviders).toEqual(["anthropic"]);
+    expect(snapshot.values.percentDisplayMode).toBe("used");
+    expect(snapshot.issues.some((issue) => issue.message.includes("config.json"))).toBe(true);
+  });
+
+  it("keeps a project plugin entry while installing dashboard behavior at the global canonical root", async () => {
+    const configDir = workspace.opencodeConfigDir;
+    const guiDir = join(configDir, "opencode-quota-gui");
+    mkdirSync(guiDir, { recursive: true });
+    const siblingRaw = `${JSON.stringify({
+      enableToast: true,
+      enabledProviders: ["openai"],
+    })}\n`;
+    writeFileSync(join(guiDir, "config.json"), siblingRaw, "utf8");
+    const globalHostRaw = `${JSON.stringify({ plugins: ["existing-global-plugin"] }, null, 2)}\n`;
+    writeFileSync(join(configDir, "opencode.json"), globalHostRaw, "utf8");
+    const upstreamDir = join(workspaceDir, "opencode-quota");
+    mkdirSync(upstreamDir, { recursive: true });
+    const upstreamRaw = `{
+  // upstream sentinel
+  "upstreamSentinel": "keep"
+}
+`;
+    writeFileSync(join(upstreamDir, "quota-toast.jsonc"), upstreamRaw, "utf8");
+
+    const { prompts, transcript } = createInstallerPrompts({
+      scope: "project",
+      providerMode: "manual",
+      providers: ["anthropic"],
+      percentDisplayMode: "used",
+    });
+    expect(
+      await runInitInstaller({
+        cwd: workspaceDir,
+        env: process.env,
+        homeDir: tempDir,
+        prompts,
+        pluginSpec: "opencode-quota-gui@latest",
+      }),
+    ).toBe(0);
+
+    const canonicalPath = join(guiDir, "config.jsonc");
+    expect(
+      (
+        parseJsonOrJsonc(
+          readFileSync(join(workspaceDir, "opencode.jsonc"), "utf8"),
+          true,
+        ) as Record<string, unknown>
+      ).plugins,
+    ).toEqual(["opencode-quota-gui@latest"]);
+    expect(existsSync(join(workspaceDir, "opencode-quota-gui"))).toBe(false);
+    expect(existsSync(canonicalPath)).toBe(true);
+    expect(readFileSync(join(guiDir, "config.json"), "utf8")).toBe(siblingRaw);
+    expect(readFileSync(join(configDir, "opencode.json"), "utf8")).toBe(globalHostRaw);
+    expect(readFileSync(join(upstreamDir, "quota-toast.jsonc"), "utf8")).toBe(upstreamRaw);
+
+    const preview = transcript.join("\n");
+    expect(preview).toContain(`OpenCode plugin scope: project (${workspaceDir})`);
+    expect(preview).toContain(`Dashboard config (global): ${canonicalPath}`);
+
+    const meta = createLoadConfigMeta();
+    const cfg = await loadConfig(undefined, meta, { globalConfigDir: configDir });
+    expect(cfg.enabledProviders).toEqual(["anthropic"]);
+    expect(cfg.percentDisplayMode).toBe("used");
+    expect(cfg.enableToast).toBe(false);
+    expect(meta.globalConfigPaths).toContain(canonicalPath);
+
+    const snapshot = await createGuiSettingsStore({
+      configDir,
+      workspaceRoot: workspaceDir,
+    }).settings();
+    expect(snapshot.pathLabel).toBe(canonicalPath);
+    expect(snapshot.values.enabledProviders).toEqual(["anthropic"]);
+    expect(snapshot.values.percentDisplayMode).toBe("used");
   });
 
   it("prefers valid JSONC when both sidecars exist and reports the conflict", async () => {
@@ -307,7 +511,7 @@ describe("loadConfig integration runtime-path resolution", () => {
     );
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { configRootDir: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { configRootDir: workspaceDir });
 
     expect(cfg.enabledProviders).toEqual(["openai"]);
     expect(meta.settingSources.enabledProviders).toContain("quota-toast.jsonc");
@@ -329,7 +533,7 @@ describe("loadConfig integration runtime-path resolution", () => {
     });
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta, { configRootDir: workspaceDir });
+    const cfg = await loadConfigLayered(undefined, meta, { configRootDir: workspaceDir });
 
     expect(cfg.enabled).toBe(false);
     expect(cfg.enabledProviders).toEqual(["chutes"]);
@@ -353,7 +557,7 @@ describe("loadConfig integration runtime-path resolution", () => {
     });
 
     const meta = createLoadConfigMeta();
-    const cfg = await loadConfig(undefined, meta);
+    const cfg = await loadConfigLayered(undefined, meta);
 
     expect(cfg.enabled).toBe(false);
     expect(cfg.minIntervalMs).toBe(12_345);
@@ -396,12 +600,12 @@ describe("loadConfig integration runtime-path resolution", () => {
     });
 
     const workspaceMeta = createLoadConfigMeta();
-    const workspaceCfg = await loadConfig(undefined, workspaceMeta, {
+    const workspaceCfg = await loadConfigLayered(undefined, workspaceMeta, {
       configRootDir: workspaceDir,
     });
 
     const nestedMeta = createLoadConfigMeta();
-    const nestedCfg = await loadConfig(undefined, nestedMeta, { configRootDir: nestedDir });
+    const nestedCfg = await loadConfigLayered(undefined, nestedMeta, { configRootDir: nestedDir });
 
     expect(workspaceCfg.enabled).toBe(true);
     expect(nestedCfg.enabled).toBe(true);

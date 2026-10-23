@@ -150,7 +150,7 @@ export const QUOTA_DIALOG_COMMANDS: readonly QuotaDialogCommandSpec[] = [
   {
     id: "quota",
     slashName: "quota",
-    title: "OpenCode Quota",
+    title: "OpenCode Quota GUI",
     description: "Show deterministic quota output.",
     dialogSize: "xlarge",
     requiresSession: true,
@@ -158,7 +158,7 @@ export const QUOTA_DIALOG_COMMANDS: readonly QuotaDialogCommandSpec[] = [
   {
     id: "quota_status",
     slashName: "quota_status",
-    title: "OpenCode Quota Status",
+    title: "OpenCode Quota GUI Status",
     description: "Diagnostics for quota, TUI, pricing, and local storage.",
     dialogSize: "xlarge",
     requiresSession: true,
@@ -166,14 +166,14 @@ export const QUOTA_DIALOG_COMMANDS: readonly QuotaDialogCommandSpec[] = [
   {
     id: "quota_announcements",
     slashName: "quota_announcements",
-    title: "OpenCode Quota Announcements",
+    title: "OpenCode Quota GUI Announcements",
     description: "List active bundled maintainer announcements.",
     dialogSize: "xlarge",
   },
   {
     id: "pricing_refresh",
     slashName: "pricing_refresh",
-    title: "OpenCode Quota Pricing Refresh",
+    title: "OpenCode Quota GUI Pricing Refresh",
     description: "Refresh the local runtime pricing snapshot from models.dev.",
     dialogSize: "xlarge",
   },
@@ -181,7 +181,7 @@ export const QUOTA_DIALOG_COMMANDS: readonly QuotaDialogCommandSpec[] = [
     (spec): QuotaDialogCommandSpec => ({
       id: spec.id,
       slashName: spec.id,
-      title: spec.kind === "between" ? "OpenCode Quota Token Report" : spec.metadataTitle,
+      title: spec.kind === "between" ? "OpenCode Quota GUI Token Report" : spec.metadataTitle,
       description: spec.description,
       dialogSize: "xlarge",
       requiresSession: spec.kind === "session" || spec.kind === "session_tree",

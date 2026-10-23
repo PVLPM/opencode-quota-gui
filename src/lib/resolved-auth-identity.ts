@@ -2,10 +2,9 @@ import { createHmac, randomBytes } from "node:crypto";
 import { chmod, link, lstat, mkdir, open, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
+import { getGuiPrivateStateDir } from "./private-state-paths.js";
 
 const RESOLVED_AUTH_IDENTITY_VERSION = "resolved-auth-identity-v1";
-const RESOLVED_AUTH_KEY_DIRNAME = "opencode-quota";
 const RESOLVED_AUTH_KEY_FILENAME = "resolved-auth-key-v1";
 const RESOLVED_AUTH_KEY_PREFIX = "v1:";
 const RESOLVED_AUTH_KEY_BYTES = 32;
@@ -46,11 +45,7 @@ function canProtectIdentityStorage(): boolean {
 }
 
 export function getResolvedAuthIdentityKeyPath(): string {
-  return join(
-    getOpencodeRuntimeDirs().stateDir,
-    RESOLVED_AUTH_KEY_DIRNAME,
-    RESOLVED_AUTH_KEY_FILENAME,
-  );
+  return join(getGuiPrivateStateDir(), RESOLVED_AUTH_KEY_FILENAME);
 }
 
 function decodeIdentityKey(raw: string): Buffer | null {
@@ -128,7 +123,7 @@ async function createOrReadIdentityKey(): Promise<Buffer | null> {
   if (!canProtectIdentityStorage()) return null;
 
   const path = getResolvedAuthIdentityKeyPath();
-  const directory = join(getOpencodeRuntimeDirs().stateDir, RESOLVED_AUTH_KEY_DIRNAME);
+  const directory = getGuiPrivateStateDir();
 
   try {
     await mkdir(directory, { recursive: true, mode: 0o700 });

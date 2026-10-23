@@ -107,13 +107,13 @@ describe("report-document", () => {
 
     expect(
       commandHeading({
-        title: "Quota Status (opencode-quota v5.0.0) (/quota_status)",
-        detail: "opencode-quota v5.0.0",
+        title: "Quota Status (opencode-quota-gui v5.0.0) (/quota_status)",
+        detail: "opencode-quota-gui v5.0.0",
         generatedAtMs,
       }),
     ).toEqual({
-      line: `# Quota Status (opencode-quota v5.0.0) (/quota_status) ${time}`,
-      subtitle: `opencode-quota v5.0.0 · ${time}`,
+      line: `# Quota Status (opencode-quota-gui v5.0.0) (/quota_status) ${time}`,
+      subtitle: `opencode-quota-gui v5.0.0 · ${time}`,
     });
     expect(
       commandHeading({ title: "Tokens used (Last 7 Days) (/tokens_weekly)", generatedAtMs }),

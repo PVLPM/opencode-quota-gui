@@ -7,6 +7,7 @@ import type { OpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import type { OpenCodeMessage } from "./opencode-storage.js";
 import { iterCompletedAssistantMessages } from "./opencode-storage.js";
+import { getGuiPrivateStateDir } from "./private-state-paths.js";
 import type {
   LocalEstimateQuotaProviderDefinition,
   LocalEstimateWindow,
@@ -16,7 +17,6 @@ import { emptyTokenBuckets, type TokenBuckets, tokenBucketsFromMessage } from ".
 import { calculateUsdFromTokenBuckets } from "./token-cost.js";
 
 export const QUOTA_PROVIDER_LOCAL_STATE_VERSION = 1 as const;
-const LOCAL_STATE_DIR = "opencode-quota/quota-providers";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface LocalQuotaProviderMessage {
@@ -174,7 +174,7 @@ export function getLocalQuotaProviderStatePath(
   definitionId: string,
   runtimeDirs: OpencodeRuntimeDirs = getOpencodeRuntimeDirs(),
 ): string {
-  return join(runtimeDirs.stateDir, LOCAL_STATE_DIR, `${definitionId}.json`);
+  return join(getGuiPrivateStateDir(runtimeDirs), "quota-providers", `${definitionId}.json`);
 }
 
 function utcDayStart(nowMs: number): number {

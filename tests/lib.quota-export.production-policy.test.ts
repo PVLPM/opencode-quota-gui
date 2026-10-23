@@ -99,7 +99,7 @@ describe("quota export production cache policy", () => {
         entries: [{ name: `Latest ${id}`, percentRemaining: 73 }],
       });
     }
-    const cacheDir = `${TEST_RUNTIME_ROOT}/cache/quota-provider-state`;
+    const cacheDir = `${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`;
     const cacheFiles = await readdir(cacheDir);
     expect(cacheFiles).toHaveLength(RESOLVED_AUTH_PROVIDER_IDS.length);
     const serialized = (
@@ -153,7 +153,9 @@ describe("quota export production cache policy", () => {
         entries: [{ name: `Latest ${id}`, percentRemaining: 73 }],
       });
     }
-    await expect(access(`${TEST_RUNTIME_ROOT}/cache/quota-provider-state`)).rejects.toMatchObject({
+    await expect(
+      access(`${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`),
+    ).rejects.toMatchObject({
       code: "ENOENT",
     });
   });

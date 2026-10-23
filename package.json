@@ -2,7 +2,7 @@
   "name": "opencode-quota-gui",
   "version": "1.0.0",
   "packageManager": "pnpm@11.0.0",
-  "description": "OpenCode quota & tokens usage with zero context window pollution, plus the opencode-quota-gui local dashboard. Independent continuation of the MIT-licensed opencode-quota project. Supports GitHub Copilot, OpenAI (Plus/Pro), Chutes AI, Synthetic, Google AGY, Z.ai coding plan and more.",
+  "description": "opencode-quota-gui is a local dashboard for OpenCode quota, token usage, sessions, and provider limits. Supports GitHub Copilot, OpenAI (Plus/Pro), Chutes AI, Synthetic, Google AGY, and Z.ai coding plans.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,14 +17,18 @@
     "./server": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./tui": {
-      "types": "./dist/tui.d.ts",
-      "default": "./dist/tui.js"
     }
   },
   "files": [
     "dist",
+    "!dist/tui.js",
+    "!dist/tui.js.map",
+    "!dist/tui.d.ts",
+    "!dist/tui.d.ts.map",
+    "!dist/tui-v2.jsx",
+    "!dist/tui-v2.jsx.map",
+    "!dist/tui-v2.d.ts",
+    "!dist/tui-v2.d.ts.map",
     "README.md",
     "LICENSE"
   ],
@@ -66,8 +70,11 @@
     "opencode",
     "plugin",
     "quota",
-    "toast",
+    "dashboard",
     "gui",
+    "usage",
+    "sessions",
+    "analytics",
     "github",
     "copilot",
     "google",

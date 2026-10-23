@@ -15,7 +15,7 @@ vi.mock("os", async (importOriginal) => {
   };
 });
 
-import { createLoadConfigMeta } from "../src/lib/config.js";
+import { createLoadConfigMeta, getGuiConfigPath } from "../src/lib/config.js";
 import { resolveRuntimeContextRoots } from "../src/lib/config-file-utils.js";
 import {
   createQuotaProviderRuntimeContext,
@@ -27,8 +27,12 @@ import { __resetQuotaTelemetryForTests } from "../src/lib/quota-telemetry.js";
 import { createRuntimeProviderIdResolver } from "../src/lib/runtime-provider-ids.js";
 import { DEFAULT_CONFIG } from "../src/lib/types.js";
 
-function quotaConfigSource(dir: string): string {
-  return join(dir, "opencode.json") + " (experimental.quotaToast)";
+function writeCanonicalConfig(configDir: string, data: Record<string, unknown>): string {
+  const dir = join(configDir, "opencode-quota-gui");
+  mkdirSync(dir, { recursive: true });
+  const path = getGuiConfigPath(configDir);
+  writeFileSync(path, JSON.stringify(data), "utf8");
+  return path;
 }
 
 describe("quota runtime context", () => {
@@ -96,30 +100,19 @@ describe("quota runtime context", () => {
     });
   });
 
-  it("loads config from the resolved shared config root", async () => {
+  it("loads only the canonical GUI config from the global config dir", async () => {
+    // Legacy layers exist but are import-only: they must not reach the runtime config.
     writeFileSync(
       join(worktreeDir, "opencode.json"),
-      JSON.stringify({
-        experimental: {
-          quotaToast: {
-            enabled: false,
-          },
-        },
-      }),
+      JSON.stringify({ experimental: { quotaToast: { enabled: true } } }),
       "utf8",
     );
-
     writeFileSync(
       join(nestedDir, "opencode.json"),
-      JSON.stringify({
-        experimental: {
-          quotaToast: {
-            enabled: true,
-          },
-        },
-      }),
+      JSON.stringify({ experimental: { quotaToast: { enabled: true } } }),
       "utf8",
     );
+    const canonicalPath = writeCanonicalConfig(join(xdgConfigHome, "opencode"), { enabled: false });
 
     const runtime = await resolveQuotaRuntimeContext({
       client: createClient(),
@@ -131,20 +124,16 @@ describe("quota runtime context", () => {
       providers: [],
     });
 
-    const worktreeConfigPath = quotaConfigSource(worktreeDir);
-    const nestedConfigPath = quotaConfigSource(nestedDir);
-
     expect(runtime.roots).toEqual({
       workspaceRoot: worktreeDir,
       configRoot: worktreeDir,
     });
     expect(runtime.config.enabled).toBe(false);
     expect(runtime.configMeta.source).toBe("files");
-    expect(runtime.configMeta.paths).toContain(worktreeConfigPath);
-    expect(runtime.configMeta.paths).not.toContain(nestedConfigPath);
-    expect(runtime.configMeta.globalConfigPaths).toEqual([]);
-    expect(runtime.configMeta.workspaceConfigPaths).toEqual([worktreeConfigPath]);
-    expect(runtime.configMeta.settingSources.enabled).toBe(worktreeConfigPath);
+    expect(runtime.configMeta.paths).toEqual([canonicalPath]);
+    expect(runtime.configMeta.globalConfigPaths).toEqual([canonicalPath]);
+    expect(runtime.configMeta.workspaceConfigPaths).toEqual([]);
+    expect(runtime.configMeta.settingSources.enabled).toBe(canonicalPath);
   });
 
   it("uses OPENCODE_CONFIG_DIR as the global config dir and keeps the worktree config root", async () => {
@@ -153,9 +142,10 @@ describe("quota runtime context", () => {
     mkdirSync(customGlobalDir, { recursive: true });
     writeFileSync(
       join(customGlobalDir, "opencode.json"),
-      JSON.stringify({ experimental: { quotaToast: { enabled: false } } }),
+      JSON.stringify({ experimental: { quotaToast: { enabled: true } } }),
       "utf8",
     );
+    const canonicalPath = writeCanonicalConfig(customGlobalDir, { enabled: false });
     writeFileSync(
       join(xdgConfigHome, "opencode", "opencode.json"),
       JSON.stringify({ experimental: { quotaToast: { minIntervalMs: 12_345 } } }),
@@ -179,10 +169,10 @@ describe("quota runtime context", () => {
 
     expect(runtime.roots).toEqual({ workspaceRoot: worktreeDir, configRoot: worktreeDir });
     expect(runtime.config.enabled).toBe(false);
-    expect(runtime.config.formatStyle).toBe("allWindows");
-    expect(runtime.config.minIntervalMs).not.toBe(12_345);
-    expect(runtime.configMeta.globalConfigPaths).toEqual([quotaConfigSource(customGlobalDir)]);
-    expect(runtime.configMeta.workspaceConfigPaths).toEqual([quotaConfigSource(worktreeDir)]);
+    expect(runtime.config.formatStyle).toBe(DEFAULT_CONFIG.formatStyle);
+    expect(runtime.config.minIntervalMs).toBe(DEFAULT_CONFIG.minIntervalMs);
+    expect(runtime.configMeta.globalConfigPaths).toEqual([canonicalPath]);
+    expect(runtime.configMeta.workspaceConfigPaths).toEqual([]);
   });
 
   it("propagates provider config but keeps accounting detail out of provider and cache context", () => {
@@ -257,19 +247,11 @@ describe("quota runtime context", () => {
     expect(providerContext.config?.requestTimeoutMsConfigured).toBe(false);
   });
 
-  it("resolves session meta only when the shared config requests it", async () => {
-    writeFileSync(
-      join(nestedDir, "opencode.json"),
-      JSON.stringify({
-        experimental: {
-          quotaToast: {
-            enabled: true,
-            onlyCurrentModel: true,
-          },
-        },
-      }),
-      "utf8",
-    );
+  it("resolves session meta only when the canonical shared config requests it", async () => {
+    writeCanonicalConfig(join(xdgConfigHome, "opencode"), {
+      enabled: true,
+      onlyCurrentModel: true,
+    });
 
     const resolveSessionMeta = vi.fn().mockResolvedValue({
       providerID: "copilot",

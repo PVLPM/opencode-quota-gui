@@ -4,7 +4,6 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import {
   type ConfigFileFormat,
   findGitWorktreeRoot,
-  isVerifiedQuotaPluginSpec,
   resolveExistingConfigPath,
 } from "./config-file-utils.js";
 import {
@@ -15,17 +14,13 @@ import {
   writeResolvedConfigText,
 } from "./config-write-target.js";
 import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
-import { resolveExplicitQuotaPluginSpec } from "./init-installer.js";
+import { isVerifiedGuiQuotaPluginSpec, resolveExplicitQuotaPluginSpec } from "./init-installer.js";
 import { editConfigDocumentPaths, parseConfigDocument } from "./opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { detectOpenCodeMajor, type OpenCodeMajor } from "./opencode-version.js";
 import {
   auditObsoleteUpdateSources,
-  discoverExistingScopedUpdateMigrationCandidates,
-  inspectLegacyDisplayDocument,
-  resolveScopedUpdateMigrationBoundary,
   type ScopedUpdateManualFinding,
-  type ScopedUpdateMigrationBoundary,
   type ScopedUpdateSafeAction,
   sortScopedUpdateManualFindings,
   sortScopedUpdateSafeActions,
@@ -36,20 +31,18 @@ export const LEGACY_QUOTA_PACKAGE_NAME = "@slkiser/opencode-quota";
 export const QUOTA_LATEST_SPEC = `${QUOTA_PACKAGE_NAME}@latest`;
 const QUOTA_NEXT_SPEC = `${QUOTA_PACKAGE_NAME}@next`;
 export const QUOTA_V4_SPEC = `${LEGACY_QUOTA_PACKAGE_NAME}@4`;
-/** Moving specs that update keeps as written; OpenCode re-resolves them after the cache cleanup. */
-const QUOTA_MOVING_SPECS: ReadonlySet<string> = new Set([
-  QUOTA_LATEST_SPEC,
-  QUOTA_NEXT_SPEC,
-  QUOTA_V4_SPEC,
-  `${LEGACY_QUOTA_PACKAGE_NAME}@latest`,
-  `${LEGACY_QUOTA_PACKAGE_NAME}@next`,
-]);
+/**
+ * Moving specs that update keeps as written; OpenCode re-resolves them after the cache
+ * cleanup. Upstream `@slkiser/opencode-quota` entries are not managed here: both products
+ * may be configured at once, and GUI maintenance preserves the upstream entry verbatim.
+ */
+const QUOTA_MOVING_SPECS: ReadonlySet<string> = new Set([QUOTA_LATEST_SPEC, QUOTA_NEXT_SPEC]);
 const GITHUB_REPO_URL = "https://github.com/PVLPM/opencode-quota-gui";
 
 const EXACT_SEMVER =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
-export type ScopedUpdateConfigRole = "package-authority" | "package-edit" | "display-migration";
+export type ScopedUpdateConfigRole = "package-authority" | "package-edit";
 
 export interface ScopedUpdateConfigEdit {
   path: string;
@@ -57,7 +50,6 @@ export interface ScopedUpdateConfigEdit {
   originalBytes: Buffer;
   updated: string;
   replacements: number;
-  displayMigrations: number;
   pluginChanges?: string[];
 }
 
@@ -69,7 +61,6 @@ export interface ScopedUpdateConfigSnapshot {
   changed: boolean;
   roles: ScopedUpdateConfigRole[];
   writeTarget: ConfigWriteTargetSnapshot;
-  migrationBoundary?: ScopedUpdateMigrationBoundary;
 }
 
 export interface ScopedUpdatePlan {
@@ -105,14 +96,11 @@ function hasExactSemverSuffix(spec: string, packageName: string): boolean {
   return spec.startsWith(prefix) && EXACT_SEMVER.test(spec.slice(prefix.length));
 }
 
-/** Recognizes both this project's package identity and legacy `@slkiser/opencode-quota` specs. */
+/** Recognizes only this project's package identity; upstream specs belong to the other product. */
 export function isCanonicalQuotaUpdateSpec(spec: string): boolean {
-  if (spec === QUOTA_PACKAGE_NAME || spec === LEGACY_QUOTA_PACKAGE_NAME) return true;
+  if (spec === QUOTA_PACKAGE_NAME) return true;
   if (QUOTA_MOVING_SPECS.has(spec)) return true;
-  return (
-    hasExactSemverSuffix(spec, QUOTA_PACKAGE_NAME) ||
-    hasExactSemverSuffix(spec, LEGACY_QUOTA_PACKAGE_NAME)
-  );
+  return hasExactSemverSuffix(spec, QUOTA_PACKAGE_NAME);
 }
 
 export function sanitizeOpenCodePackageSpec(
@@ -163,11 +151,11 @@ function pluginArrays(config: unknown): Array<{ path: (string | number)[]; entri
 }
 
 /**
- * OpenCode Quota 5 needs OpenCode 2. On OpenCode 2 update rewrites every recognized non-moving
- * spec — this package's bare/exact specs and the legacy `@slkiser/opencode-quota` ones — to the
- * canonical `opencode-quota-gui` release spec, keeps moving specs as written, and honors an
- * explicit package-spec override. On OpenCode 1 it leaves specs as written and never pins them
- * to the upstream package.
+ * OpenCode Quota GUI 5 needs OpenCode 2. On OpenCode 2 update rewrites every recognized
+ * non-moving spec — this package's bare/exact specs only — to the canonical
+ * `opencode-quota-gui` release spec, keeps moving specs as written, and honors an explicit
+ * package-spec override. Upstream `@slkiser/opencode-quota` entries are never rewritten or
+ * removed. On OpenCode 1 it leaves specs as written.
  */
 function quotaUpdateTarget(
   openCodeMajor: OpenCodeMajor | undefined,
@@ -188,7 +176,7 @@ interface QuotaUpdateTarget {
 }
 
 function updateTargetUnavailableMessage(path: string): string {
-  return `Cannot update ${path}: you're on OpenCode 1 and opencode-quota-gui requires OpenCode 2, so update will not pin plugin specs to the upstream @slkiser/opencode-quota package. Keep the existing specs, or move to OpenCode 2 before updating.`;
+  return `Cannot update ${path}: you're on OpenCode 1 and opencode-quota-gui requires OpenCode 2, so update will not pin the GUI plugin spec to a release spec. Keep the existing spec, or move to OpenCode 2 before updating.`;
 }
 
 function quotaUpdateSpecFromEntry(entry: unknown): string | null {
@@ -247,7 +235,7 @@ async function updateConfig(
         if (
           spec !== null &&
           (spec === target.replacementSpec ||
-            (await isVerifiedQuotaPluginSpec(spec, dirname(path))))
+            (await isVerifiedGuiQuotaPluginSpec(spec, dirname(path))))
         ) {
           candidates.push({ entry, spec, path: [...array.path, index] });
         }
@@ -313,7 +301,7 @@ async function updateConfig(
           isCanonicalQuotaUpdateSpec(spec) ||
           (target.explicit &&
             (spec === target.replacementSpec ||
-              (await isVerifiedQuotaPluginSpec(spec, dirname(path)))))
+              (await isVerifiedGuiQuotaPluginSpec(spec, dirname(path)))))
         )
       )
         continue;
@@ -344,17 +332,11 @@ interface ScopedUpdateWorkingDocument {
   originalBytes: Buffer;
   updated: string;
   replacements: number;
-  displayMigrations: number;
   pluginChanges?: string[];
   roles: Set<ScopedUpdateConfigRole>;
-  migrationBoundary?: ScopedUpdateMigrationBoundary;
 }
 
-const CONFIG_ROLE_ORDER: ScopedUpdateConfigRole[] = [
-  "package-authority",
-  "package-edit",
-  "display-migration",
-];
+const CONFIG_ROLE_ORDER: ScopedUpdateConfigRole[] = ["package-authority", "package-edit"];
 
 export async function planScopedUpdate(
   params: {
@@ -402,68 +384,7 @@ export async function planScopedUpdate(
       updated: planned.updated,
       replacements: planned.replacements,
       pluginChanges: planned.pluginChanges,
-      displayMigrations: 0,
       roles,
-    });
-  }
-
-  const migrationDiscovery = await discoverExistingScopedUpdateMigrationCandidates({
-    globalRoot: runtime.configDir,
-    workspaceRoot: projectRoot,
-    selectedPackagePaths: configPaths,
-  });
-  manualFindings.push(...migrationDiscovery.manualFindings);
-
-  for (const candidate of migrationDiscovery.candidates) {
-    const existingDocument = workingDocuments.get(candidate.realPath);
-    if (existingDocument) {
-      existingDocument.roles.add("display-migration");
-      existingDocument.migrationBoundary = candidate;
-      const inspection = inspectLegacyDisplayDocument({
-        path: existingDocument.path,
-        format: existingDocument.path.endsWith(".jsonc") ? "jsonc" : "json",
-        raw: existingDocument.updated,
-        container: candidate.container,
-      });
-      existingDocument.updated = inspection.updated;
-      existingDocument.displayMigrations += inspection.safeActions.length;
-      safeActions.push(...inspection.safeActions);
-      manualFindings.push(...inspection.manualFindings);
-      continue;
-    }
-
-    let originalBytes: Buffer;
-    try {
-      originalBytes = await readFile(candidate.path);
-    } catch {
-      throw new ScopedUpdateError(`Failed reading update migration config: ${candidate.path}`, {
-        path: candidate.path,
-      });
-    }
-    const original = originalBytes.toString("utf8");
-    const inspection = inspectLegacyDisplayDocument({
-      path: candidate.path,
-      format: candidate.format,
-      raw: original,
-      container: candidate.container,
-    });
-    safeActions.push(...inspection.safeActions);
-    manualFindings.push(...inspection.manualFindings);
-    if (
-      inspection.manualFindings.some((finding) => finding.kind === "migration-file-uninspectable")
-    ) {
-      continue;
-    }
-
-    workingDocuments.set(candidate.realPath, {
-      path: candidate.path,
-      original,
-      originalBytes,
-      updated: inspection.updated,
-      replacements: 0,
-      displayMigrations: inspection.safeActions.length,
-      roles: new Set(["display-migration"]),
-      migrationBoundary: candidate,
     });
   }
 
@@ -495,7 +416,6 @@ export async function planScopedUpdate(
       changed,
       roles: CONFIG_ROLE_ORDER.filter((role) => document.roles.has(role)),
       writeTarget,
-      ...(document.migrationBoundary ? { migrationBoundary: document.migrationBoundary } : {}),
     });
     if (changed) {
       configEdits.push({
@@ -504,7 +424,6 @@ export async function planScopedUpdate(
         originalBytes: document.originalBytes,
         updated: document.updated,
         replacements: document.replacements,
-        displayMigrations: document.displayMigrations,
         pluginChanges: document.pluginChanges,
       });
     }
@@ -536,9 +455,8 @@ function containedBy(root: string, candidate: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-/** Package-cache manifests that can verify a cache directory: independent and legacy layouts. */
+/** Package-cache manifests that can verify a GUI cache directory. Upstream caches stay untouched. */
 const VERIFIED_CACHE_MANIFESTS: ReadonlyArray<{ path: readonly string[]; name: string }> = [
-  { path: ["@slkiser", "opencode-quota", "package.json"], name: LEGACY_QUOTA_PACKAGE_NAME },
   { path: ["opencode-quota-gui", "package.json"], name: QUOTA_PACKAGE_NAME },
 ];
 
@@ -602,7 +520,7 @@ const OBSOLETE_GO_GUIDANCE =
   "OpenCode Go no longer uses this workspace/cookie source, and it cannot be converted into the official API key. Configure OPENCODE_API_KEY, trusted global provider.opencode-go.options.apiKey, fallback provider.opencode.options.apiKey, or run opencode auth login opencode-go. This updater will not read, copy, or delete credentials; remove the old variable/file manually after the supported key works.";
 
 const ZEN_CONSOLE_GUIDANCE =
-  "OpenCode Zen now uses the OpenCode Console sign-in: run opencode auth login opencode (and opencode auth switch opencode to pick a saved organization), then verify with opencode-quota-gui status.";
+  "OpenCode Zen now uses the OpenCode Console sign-in: run opencode auth login opencode (and opencode auth switch opencode to pick a saved organization).";
 
 function formatManualFinding(finding: ScopedUpdateManualFinding): string {
   switch (finding.kind) {
@@ -649,7 +567,7 @@ export function formatScopedUpdatePreview(plan: ScopedUpdatePlan): string[] {
   if (plan.openCodeMajor === 1) {
     lines.push(
       "",
-      "You're on OpenCode 1. opencode-quota-gui requires OpenCode 2, so update leaves plugin specs as written and never pins them to the upstream @slkiser/opencode-quota package.",
+      "You're on OpenCode 1. opencode-quota-gui requires OpenCode 2, so update leaves plugin specs as written and never pins the GUI entry to a release spec.",
     );
   } else if (plan.openCodeMajor === undefined) {
     lines.push(
@@ -769,23 +687,6 @@ export async function applyScopedUpdatePlan(
     }
     if (!current.equals(snapshot.originalBytes)) {
       throw failure("Config changed since preview:", snapshot.path);
-    }
-    if (snapshot.migrationBoundary) {
-      let boundary: ScopedUpdateMigrationBoundary | null;
-      try {
-        boundary = await resolveScopedUpdateMigrationBoundary({
-          path: snapshot.migrationBoundary.path,
-          rootDir: snapshot.migrationBoundary.rootDir,
-          expectedRealPath: snapshot.migrationBoundary.realPath,
-          expectedRealRoot: snapshot.migrationBoundary.realRoot,
-          writePath: currentTarget.writePath,
-        });
-      } catch {
-        throw failure("Failed revalidating migration boundary for", snapshot.path);
-      }
-      if (boundary === null) {
-        throw failure("Migration boundary changed before writing", snapshot.path);
-      }
     }
     try {
       if (writeText) {

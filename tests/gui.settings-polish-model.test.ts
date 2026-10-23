@@ -54,7 +54,7 @@ describe("Settings polish model", () => {
     );
   });
 
-  it("exposes structured, path-free provenance through the client and concise model notes", async () => {
+  it("exposes canonical runtime provenance through the client and concise model notes", async () => {
     const { workspace, store } = setup();
     writeQuotaSidecarConfig(workspace.configDir, { percentDisplayMode: "used" });
     writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 1234 });
@@ -62,14 +62,30 @@ describe("Settings polish model", () => {
     const snapshot = parseSettingsSnapshot(
       JSON.parse(JSON.stringify(await store.settings())) as JsonValue,
     );
-    expect(snapshot.provenance?.percentDisplayMode).toEqual({ scope: "legacy" });
-    expect(snapshot.provenance?.minIntervalMs).toEqual({ scope: "workspace" });
+    expect(snapshot.provenance?.percentDisplayMode).toEqual({ scope: "defaults" });
+    expect(snapshot.provenance?.minIntervalMs).toEqual({ scope: "defaults" });
     expect(snapshot.provenance?.accountingDetail).toEqual({ scope: "global" });
     expect(snapshot.provenance?.waitForQuotaReset).toEqual({ scope: "defaults" });
-    expect(model.settingProvenanceNote(snapshot, "percentDisplayMode")).toBe("Legacy override");
-    expect(model.settingProvenanceNote(snapshot, "minIntervalMs")).toBe("Workspace override");
+    expect((await store.importPreview()).keys).toEqual([
+      { key: "percentDisplayMode", value: "used" },
+    ]);
+    expect(model.settingProvenanceNote(snapshot, "percentDisplayMode")).toBeUndefined();
+    expect(model.settingProvenanceNote(snapshot, "minIntervalMs")).toBeUndefined();
     expect(model.settingProvenanceNote(snapshot, "accountingDetail")).toBeUndefined();
     expect(model.settingProvenanceNote(snapshot, "waitForQuotaReset")).toBeUndefined();
+    // Older hosts may still report imported source scopes; the note wording stays stable.
+    expect(
+      model.settingProvenanceNote(
+        { ...snapshot, provenance: { percentDisplayMode: { scope: "legacy" } } },
+        "percentDisplayMode",
+      ),
+    ).toBe("Legacy override");
+    expect(
+      model.settingProvenanceNote(
+        { ...snapshot, provenance: { minIntervalMs: { scope: "workspace" } } },
+        "minIntervalMs",
+      ),
+    ).toBe("Workspace override");
     expect(
       model.settingProvenanceNote({ ...snapshot, provenance: undefined }, "minIntervalMs"),
     ).toBeUndefined();

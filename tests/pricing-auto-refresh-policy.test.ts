@@ -271,7 +271,7 @@ describe("pricing runtime refresh policy", () => {
     Object.assign(runtime.providers.openai, {
       "retired-in-both": { input: 5, output: 6 },
     });
-    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota"), { recursive: true });
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota-gui"), { recursive: true });
     await writeFile(
       pricing.getRuntimePricingSnapshotPath(runtimeDirs),
       JSON.stringify(runtime),
@@ -321,7 +321,7 @@ describe("pricing runtime refresh policy", () => {
     Object.assign(bundled.providers.openai, { "retired-model": { input: 1, output: 2 } });
     const runtime = createRuntimeSnapshot(nowMs - 20 * DAY_MS, 0.5);
     Object.assign(runtime.providers.openai, { "retired-model": { input: 7, output: 8 } });
-    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota"), { recursive: true });
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota-gui"), { recursive: true });
     await writeFile(
       pricing.getRuntimePricingSnapshotPath(runtimeDirs),
       JSON.stringify(runtime),
@@ -360,7 +360,7 @@ describe("pricing runtime refresh policy", () => {
     const bundled = createBootstrapSnapshot(nowMs - 10 * DAY_MS);
     Object.assign(bundled.providers.openai, { "retired-model": { input: 3, output: 4 } });
     // Saved by an older version after models.dev dropped the model, and still fresh.
-    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota"), { recursive: true });
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota-gui"), { recursive: true });
     await writeFile(
       pricing.getRuntimePricingSnapshotPath(runtimeDirs),
       JSON.stringify(createRuntimeSnapshot(nowMs - DAY_MS, 0.5)),
@@ -423,7 +423,7 @@ describe("pricing runtime refresh policy", () => {
 
     const bundled = createBootstrapSnapshot(nowMs - 10 * DAY_MS);
     Object.assign(bundled.providers.openai, { "retired-model": { input: 3, output: 4 } });
-    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota"), { recursive: true });
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota-gui"), { recursive: true });
     await writeFile(
       pricing.getRuntimePricingSnapshotPath(runtimeDirs),
       JSON.stringify(createRuntimeSnapshot(nowMs - 4 * DAY_MS, 0.5)),
@@ -450,7 +450,7 @@ describe("pricing runtime refresh policy", () => {
     const pricing = await loadPricingModule();
     const runtimeDirs = await createTempRuntimeDirs();
     const nowMs = 1_800_000_000_000;
-    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota");
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
     await mkdir(snapshotDir, { recursive: true });
     await writeFile(
       pricing.getRuntimePricingSnapshotPath(runtimeDirs),
@@ -528,7 +528,7 @@ describe("pricing runtime refresh policy", () => {
     const runtimeDirs = await createTempRuntimeDirs();
     const nowMs = 1_800_000_000_000;
     const staleGeneratedAt = nowMs - 4 * DAY_MS;
-    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota");
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
     await mkdir(snapshotDir, { recursive: true });
     await writeFile(
       pricing.getRuntimePricingSnapshotPath(runtimeDirs),
@@ -573,7 +573,7 @@ describe("pricing runtime refresh policy", () => {
     const runtimeDirs = await createTempRuntimeDirs();
     const nowMs = 1_800_000_000_000;
     const runtimeGeneratedAt = nowMs - 60_000;
-    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota");
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
     await mkdir(snapshotDir, { recursive: true });
     await writeFile(
       pricing.getRuntimePricingSnapshotPath(runtimeDirs),

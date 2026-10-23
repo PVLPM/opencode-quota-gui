@@ -49,7 +49,7 @@ export async function queryChutesQuota(
         method: "GET",
         headers: {
           Authorization: `Bearer ${resolved.key}`,
-          "User-Agent": "OpenCode-Quota-Toast/1.0",
+          "User-Agent": "opencode-quota-gui/1.0",
         },
       },
       timeoutMs: options.requestTimeoutMs,
