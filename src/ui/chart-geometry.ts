@@ -145,7 +145,7 @@ export function pickLabelIndexes(count: number, max: number): number[] {
  * design width; it scales with the SVG rather than claiming to be a screen px.
  */
 const USAGE_SEGMENT_GAP = 1;
-const USAGE_SEGMENT_RADIUS = 2;
+const USAGE_SEGMENT_RADIUS = 1;
 
 export function buildUsageGeometry(
   buckets: Bucket[],
