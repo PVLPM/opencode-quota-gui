@@ -922,12 +922,12 @@ describe("session chart and tree presentation", () => {
 
   it("pins the frozen chart palette and Session colours in the stylesheet", () => {
     const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
-    expect(styles).toContain("--qg-token-cache-read: #51a2ff");
-    expect(styles).toContain("--qg-token-input: #a684ff");
-    expect(styles).toContain("--qg-token-reasoning: #ff8904");
-    expect(styles).toContain("--qg-token-output: #ffb900");
+    expect(styles).toContain("--qg-token-cache-read: #a684ff");
+    expect(styles).toContain("--qg-token-input: #51a2ff");
+    expect(styles).toContain("--qg-token-reasoning: #00d5be");
+    expect(styles).toContain("--qg-token-output: #9ae600");
     expect(styles).toContain("--qg-token-cache-write: #00d3f2");
-    expect(styles).toContain("--qg-chart-rate: #9ae600");
+    expect(styles).toContain("--qg-chart-rate: #ffb900");
     expect(styles).toContain("--qg-chart-context: #51a2ff");
     expect(styles).toContain("--qg-chart-own: #ffb900");
     expect(styles).toContain("--qg-chart-total: #ff8904");

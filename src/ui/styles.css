@@ -30,15 +30,15 @@
   --qg-success: var(--icon-success-base);
 
   /* The five raw additive token categories carry no library token (R31, R48). */
-  --qg-token-cache-read: #51a2ff;
-  --qg-token-input: #a684ff;
-  --qg-token-reasoning: #ff8904;
-  --qg-token-output: #ffb900;
+  --qg-token-cache-read: #a684ff;
+  --qg-token-input: #51a2ff;
+  --qg-token-reasoning: #00d5be;
+  --qg-token-output: #9ae600;
   --qg-token-cache-write: #00d3f2;
   --qg-token-total: var(--qg-accent);
 
   /* Chart-specific hues stay separate from the token stack. */
-  --qg-chart-rate: #9ae600;
+  --qg-chart-rate: #ffb900;
   --qg-chart-context: #51a2ff;
   --qg-chart-own: #ffb900;
   --qg-chart-total: #ff8904;
@@ -50,10 +50,10 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --qg-token-cache-read: #51a2ff;
-    --qg-token-input: #a684ff;
-    --qg-token-reasoning: #ff8904;
-    --qg-token-output: #ffb900;
+    --qg-token-cache-read: #a684ff;
+    --qg-token-input: #51a2ff;
+    --qg-token-reasoning: #00d5be;
+    --qg-token-output: #9ae600;
     --qg-token-cache-write: #00d3f2;
   }
 }
