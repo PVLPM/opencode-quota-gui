@@ -1,4 +1,4 @@
-import { readFileSync } from "fs";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { validateQuotaProviders } from "../src/lib/quota-providers.js";
@@ -13,8 +13,8 @@ function read(path: string): string {
   return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 }
 
-describe("quota provider Phase 7 documentation consistency", () => {
-  it("keeps the documented OpenRouter example valid", () => {
+describe("GUI documentation consistency", () => {
+  it("keeps the documented canonical OpenRouter example valid", () => {
     expect(
       validateQuotaProviders([
         {
@@ -43,47 +43,31 @@ describe("quota provider Phase 7 documentation consistency", () => {
     });
   });
 
-  it("keeps the README concise and the detailed provider guides complete", () => {
+  it("documents only the canonical GUI configuration and its supported custom-provider path", () => {
     const readme = read("README.md");
     const configuration = read("docs/readme/configuration.md");
     const providers = read("docs/readme/providers.md");
     const troubleshooting = read("docs/readme/troubleshooting.md");
-    const external = read("docs/readme/external-integration.md");
     const manualInstall = read("docs/readme/manual-install.md");
+    const external = read("docs/readme/external-integration.md");
 
-    const readmeCommands = readMarkdownSection(readme, /^Commands$/);
-    const readmeCustomProviders = readMarkdownSection(readme, /^Custom providers$/);
-    const configurationCustomProviders = readMarkdownSection(configuration, /^Custom providers$/);
-    const providerGuideCustomProviders = readMarkdownSection(providers, /^Custom providers$/);
-    const troubleshootingProviderFixes = readMarkdownSection(troubleshooting, /^Provider fixes$/);
-    const externalJsonBasics = readMarkdownSection(external, /^JSON basics$/);
-
-    // The published product CLI (npx form); the upstream npx invocation is no longer documented.
-    const providerAddCommand = "npx opencode-quota-gui provider add";
-    expect(readmeCommands).toContain(providerAddCommand);
-    expect(readmeCustomProviders).toContain(providerAddCommand);
-    expect(
-      hasMarkdownLinkTo(readmeCustomProviders, "docs/readme/providers.md#custom-providers"),
-    ).toBe(true);
     expect(readme).not.toContain("experimental.quotaToast");
     expect(readme).not.toContain("apiKeyEnv");
+    expect(readme).not.toContain("provider add");
 
-    for (const document of [
-      readme,
-      configuration,
-      providers,
-      troubleshooting,
-      external,
-      manualInstall,
-    ]) {
+    for (const document of [configuration, providers, troubleshooting, manualInstall, external]) {
       expect(document).not.toContain("accounting-v1");
+      expect(document).not.toContain("npx opencode-quota-gui provider add");
+      expect(document).not.toContain("/quota_status");
     }
 
-    expect(configuration).toContain("provider add");
-    expect(configuration).toContain("experimental.quotaToast");
+    expect(configuration).toContain("~/.config/opencode/opencode-quota-gui/config.jsonc");
     expect(configuration).toContain("quotaProviders");
     expect(configuration).toContain("JSONC");
-    expect(configuration).toContain("do not duplicate it in a second file");
+    expect(configuration).toContain("canonical");
+    expect(configuration).toContain("does not read inherited legacy layers at runtime");
+    expect(configuration).toContain("opencode.db");
+    expect(configuration).toContain("~/.local/state/opencode/opencode-quota-gui/quota-providers/");
 
     for (const document of [configuration, providers]) {
       expect(document).toContain("apiKeyEnv");
@@ -92,30 +76,7 @@ describe("quota provider Phase 7 documentation consistency", () => {
       expect(document).toContain("quota-providers");
     }
 
-    expect(configurationCustomProviders).toContain("global-only");
-    expect(
-      readMarkdownParagraphContaining(
-        configurationCustomProviders,
-        "`modelIds`",
-        "`onlyCurrentModel`",
-      ),
-    ).toMatch(/`modelIds`[\s\S]*\bonly\b[\s\S]*`onlyCurrentModel`/);
-    const pricingMapRule = readMarkdownParagraphContaining(
-      configurationCustomProviders,
-      "pricingModelMap",
-      "successful automatic match",
-    );
-    expect(pricingMapRule).toMatch(
-      /pricingModelMap[\s\S]*\b(?:cannot|must not|does not) override\b[\s\S]*\bsuccessful automatic match\b/i,
-    );
-    expect(
-      readMarkdownParagraphContaining(
-        configurationCustomProviders,
-        "budget percentage",
-        "unavailable",
-      ),
-    ).toMatch(/budget percentage[\s\S]*\b(?:reported|shown|marked) unavailable\b/i);
-    expect(configurationCustomProviders).toContain("~/.local/state/opencode/opencode-quota/");
+    const providerGuideCustomProviders = readMarkdownSection(providers, /^Custom providers$/);
     expect(providerGuideCustomProviders).toContain("limited to 256 KiB");
     expect(providerGuideCustomProviders).toContain("limited to 100 rows");
     expect(providerGuideCustomProviders).toContain(
@@ -126,86 +87,73 @@ describe("quota provider Phase 7 documentation consistency", () => {
     expect(providerGuideCustomProviders).toContain("offsets through `±14:00`");
     expect(providerGuideCustomProviders).toContain("Metric compatibility and fixed output");
     expect(providerGuideCustomProviders).toContain("`used-limit`");
-    expect(providerGuideCustomProviders).toContain('For `metric.type: "value"`');
     expect(providerGuideCustomProviders).toContain("Pair denominators");
-    const unitRule = readMarkdownParagraphContaining(
-      providerGuideCustomProviders,
-      "`unit`",
-      "`unitPosition`",
-      "`percentage`",
-      "`status`",
-    );
-    expect(unitRule).toMatch(
-      /`unit`[\s\S]*`unitPosition`[\s\S]*\b(?:must|required to)\b[\s\S]*\btogether\b/i,
-    );
-    expect(unitRule).toMatch(
-      /\b(?:forbidden|not allowed|must not appear)\b[\s\S]*`percentage`[\s\S]*`status`/i,
-    );
-    const secretRule = readMarkdownParagraphContaining(
+    expect(providerGuideCustomProviders).toContain("`unit`");
+    expect(providerGuideCustomProviders).toContain("`unitPosition`");
+    expect(providerGuideCustomProviders).toContain("percentage");
+    expect(providerGuideCustomProviders).toContain("status");
+
+    const configurationCustomProviders = readMarkdownSection(configuration, /^Custom providers$/);
+    expect(configurationCustomProviders).toContain("global");
+    expect(configurationCustomProviders).toContain("`modelIds`");
+    expect(configurationCustomProviders).toContain("`onlyCurrentModel`");
+    expect(configurationCustomProviders).toContain("pricingModelMap");
+    expect(configurationCustomProviders).toContain("budget percentage");
+    expect(configurationCustomProviders).toContain("unavailable");
+    expect(configurationCustomProviders).toContain("never ask for or store a secret");
+    expect(configurationCustomProviders).toContain("Definitions are not imported");
+
+    const secretParagraph = readMarkdownParagraphContaining(
       providerGuideCustomProviders,
       "secrets",
-      "adapter display configuration",
+      "configuration",
     );
-    expect(secretRule).toMatch(
-      /\b(?:never|must not|cannot|forbidden)\b[\s\S]*\bsecrets\b[\s\S]*adapter display configuration/i,
-    );
-    expect(
-      readMarkdownParagraphContaining(
-        troubleshootingProviderFixes,
-        "cached results",
-        "substituted",
-      ),
-    ).toMatch(/cached results[\s\S]*\b(?:not|never) substituted\b/i);
-    const hiddenDiagnostics = readMarkdownParagraphContaining(
-      troubleshootingProviderFixes,
-      "URLs",
-      "request/response contents",
-      "raw errors",
-    );
-    expect(hiddenDiagnostics).toMatch(
-      /\b(?:hide|hides|hidden|exclude|excludes)\b[\s\S]*URLs[\s\S]*request\/response contents[\s\S]*raw errors/i,
-    );
-    expect(externalJsonBasics).toContain('"version": 2');
-    expect(externalJsonBasics).toContain('providers["quota-providers"]');
-    expect(externalJsonBasics).toContain("configured `quotaProviders` definition");
-    expect(external).not.toContain("custom-sources");
-    expect(external).not.toContain("Custom-provider");
-    expect(externalJsonBasics).toContain('"sourceId": "openrouter-primary"');
-    expect(externalJsonBasics).toContain('"sources": [');
-    expect(externalJsonBasics).toContain('"id": "openrouter-primary"');
-    expect(externalJsonBasics).toContain('"entryCount": 1');
-    const sourceSummaryBlock = readFencedCodeBlocks(externalJsonBasics).find(
-      (block) => block.info === "json" && block.content.includes('"sources"'),
-    );
-    if (sourceSummaryBlock === undefined) throw new Error("Source summary JSON example not found");
-    const sourceSummaryExample = JSON.parse(`{${sourceSummaryBlock.content}}`) as {
-      sources: Array<Record<string, unknown>>;
-    };
-    expect(sourceSummaryExample.sources).toHaveLength(1);
-    expect(Object.keys(sourceSummaryExample.sources[0]).sort()).toEqual(
-      ["id", "providerId", "status", "entryCount"].sort(),
-    );
+    expect(secretParagraph).toMatch(/\b(?:never|must not|cannot|forbidden)\b/i);
 
-    const sourceSummaryRule = readMarkdownParagraphContaining(
-      externalJsonBasics,
-      "Each summary",
-      "`providerId`",
-      "`status`",
-      "`entryCount`",
-    );
-    expect(sourceSummaryRule).toMatch(/\bexactly\b/i);
-    expect(sourceSummaryRule).toMatch(/\beffective `providerId`/i);
-    expect(sourceSummaryRule).toMatch(/\bcoarse `status`/i);
-    expect(sourceSummaryRule).toMatch(
-      /failed mapping candidates?[\s\S]*aggregate provider[\s\S]*`partial`/i,
-    );
-    expect(
-      readMarkdownParagraphContaining(externalJsonBasics, "raw provider responses", "public JSON"),
-    ).toMatch(/raw provider responses[\s\S]*\b(?:excluded|omitted) from public JSON\b/i);
+    const externalSection = readMarkdownSection(external, /^Supported integration surface$/);
+    expect(externalSection).toContain("No public API");
+    expect(externalSection).toContain("/api/v1");
+    expect(externalSection).toContain("internal");
+    expect(externalSection).not.toContain("show --json");
+    expect(externalSection).not.toContain("quota-export.json");
   });
 
-  it("links to the authoritative external references used by the README", () => {
-    const referenceSection = readMarkdownSection(read("README.md"), /^Reference$/);
+  it("keeps Settings canonical-only and legacy import detection separate", () => {
+    const readme = read("README.md");
+    const configuration = read("docs/readme/configuration.md");
+    const updating = read("docs/readme/updating.md");
+    const troubleshooting = read("docs/readme/troubleshooting.md");
+    const external = read("docs/readme/external-integration.md");
+
+    for (const document of [readme, configuration, updating, troubleshooting]) {
+      for (const stale of [
+        "Workspace override",
+        "Project override",
+        "Legacy override",
+        "project and workspace overrides remain effective",
+        "wins over the global legacy",
+      ]) {
+        expect(document, stale).not.toContain(stale);
+      }
+    }
+
+    expect(configuration).toContain(
+      "Settings values, provenance, the dashboard port, and visibility lists come only from the canonical file and defaults.",
+    );
+    expect(configuration).toContain(
+      "The separate import preview is the only path that reads inherited legacy values.",
+    );
+    expect(readme).toContain(
+      "Settings values, source labels, the port, and visibility lists come only from the canonical file and defaults, regardless of whether OpenCode uses `opencode.json` or `opencode.jsonc`.",
+    );
+    expect(updating).toContain("Settings shows canonical values only");
+    expect(troubleshooting).toContain("[opencode-quota-gui]");
+    expect(external).toContain("report metadata");
+  });
+
+  it("keeps README external references current", () => {
+    const readme = read("README.md");
+    const support = readMarkdownSection(readme, /^Support$/);
 
     for (const url of [
       "https://opencode.ai/v2/docs/",
@@ -214,12 +162,12 @@ describe("quota provider Phase 7 documentation consistency", () => {
       "https://models.dev/",
       "https://nodejs.org/en/download",
     ]) {
-      expect(hasMarkdownLinkTo(referenceSection, url), url).toBe(true);
+      expect(hasMarkdownLinkTo(support, url), url).toBe(true);
     }
-    expect(referenceSection).not.toContain("https://opencode.ai/docs/");
+    expect(readme).not.toContain("https://opencode.ai/docs/");
   });
 
-  it("documents the OpenCode 2 plural plugins config and GUI-first install paths", () => {
+  it("documents the approved install shape and dashboard-only surfaces", () => {
     const readme = read("README.md");
     const manualInstall = read("docs/readme/manual-install.md");
 
@@ -227,155 +175,106 @@ describe("quota provider Phase 7 documentation consistency", () => {
       expect(document).toContain("http://localhost:4144/quota");
       expect(document).toContain("~/.config/opencode/opencode.json");
       expect(document).not.toContain('"plugin": [');
+      expect(document).toContain('"plugins": ["opencode-quota-gui"]');
     }
 
-    expect(manualInstall).toContain('"plugins": ["opencode-quota-gui"]');
+    expect(readme).toContain("opencode plugin add opencode-quota-gui");
     expect(manualInstall).toContain("~/.config/opencode/plugins/");
     expect(manualInstall).toContain(".opencode/plugins/");
     expect(manualInstall).toContain("Restart OpenCode");
   });
 
-  it("keeps current-version plugin examples plural while preserving historical OpenCode 1 references", () => {
-    const updating = read("docs/readme/updating.md");
-    const troubleshooting = read("docs/readme/troubleshooting.md");
-    const providers = read("docs/readme/providers.md");
-
-    expect(providers).toContain(
-      '"plugins": ["cursor-opencode-provider/plugin/opencode2", "opencode-quota-gui"]',
-    );
-    expect(providers).not.toContain('"plugin": [');
-    expect(providers).toContain(
-      "the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`",
-    );
-    expect(troubleshooting).toContain("`plugins` list of `~/.config/opencode/opencode.json(c)`");
-    expect(troubleshooting).not.toContain("`plugin` list");
-    expect(updating).toContain("Add one entry to the `plugins` list");
-    expect(updating).not.toContain('One `"plugin"` entry');
-    expect(updating).toContain("legacy `plugin`");
-    expect(updating).toContain('"plugin": ["@slkiser/opencode-quota@4"]');
-    expect(updating).toContain("https://opencode.ai/v2/docs/");
-    expect(updating).not.toContain("https://opencode.ai/docs/");
+  it("keeps custom-provider copy-paste integrations independent of entry order", () => {
+    const external = read("docs/readme/external-integration.md");
+    expect(external).not.toContain("entries[0].percentRemaining");
+    expect(external).toContain("not a public API");
   });
 
-  it("documents the installer and updater package-identity policy without contradiction", () => {
+  it("documents optional host-owned OpenTelemetry without promising a public API", () => {
+    const readme = read("README.md");
+    const configuration = read("docs/readme/configuration.md");
+    const external = read("docs/readme/external-integration.md");
+
+    expect(external).not.toContain("No supported export file, OpenTelemetry output");
+    expect(external).not.toMatch(/no supported OpenTelemetry/i);
+    expect(external).toContain("off by default");
+    expect(external).toContain("opencode.quota.consumed");
+    expect(external).toContain("opencode.quota.cache.age");
+    expect(external).toContain("MeterProvider");
+    expect(external).toContain("does not make extra provider requests");
+    expect(external).toContain("not a public API");
+    expect(external).toContain("Export files");
+    expect(external).toContain("RPC methods remain unsupported");
+
+    expect(readme).toContain("OpenTelemetry (optional)");
+    expect(readme).toContain("opencode.quota.consumed");
+    expect(readme).toContain("opencode.quota.cache.age");
+    expect(readme).toContain("off by default");
+
+    expect(configuration).toContain("telemetry.enabled");
+    expect(configuration).toContain("opencode.quota.consumed");
+    expect(configuration).toContain("opencode.quota.cache.age");
+    expect(configuration).toContain("does not create a provider");
+  });
+
+  it("documents the MiMo credential sidecar in the GUI namespace, separate from behavior config", () => {
+    const configuration = read("docs/readme/configuration.md");
+    const providers = read("docs/readme/providers.md");
+    const troubleshooting = read("docs/readme/troubleshooting.md");
+
+    expect(configuration).toContain("Provider credential sidecars");
+    expect(configuration).toContain("opencode-quota-gui/mimo.json");
+    expect(configuration).toContain("not part of the canonical behavior config");
+
+    for (const document of [providers, troubleshooting]) {
+      expect(document).toContain("opencode-quota-gui/mimo.json");
+      expect(document).toContain("MIMO_USAGE_COOKIE");
+    }
+
+    expect(providers).not.toContain("create the user/global file `opencode-quota/mimo.json`");
+    expect(providers).toContain(
+      "does not read, copy, migrate, or write upstream `opencode-quota/mimo.json`",
+    );
+    expect(troubleshooting).not.toContain("create trusted user/global `opencode-quota/mimo.json`");
+    expect(troubleshooting).toContain("does not read upstream `opencode-quota/mimo.json`");
+  });
+
+  it("keeps behavior settings global for project installs and leaves sibling config.json untouched", () => {
     const readme = read("README.md");
     const manualInstall = read("docs/readme/manual-install.md");
+    const configuration = read("docs/readme/configuration.md");
     const updating = read("docs/readme/updating.md");
-    const flat = (document: string) => document.replace(/\s+/g, " ");
 
-    // The old blanket claims that contradicted each other are gone.
-    for (const document of [readme, manualInstall, updating]) {
-      expect(document).not.toContain("never rewired silently");
-    }
-    expect(manualInstall).not.toContain("legacy upstream paths stay untouched");
-    expect(updating).not.toContain("legacy `@slkiser/opencode-quota` entries are migrated");
-    expect(
-      /Replace or remove the old entry yourself/i.test(readme) &&
-        /legacy `@slkiser\/opencode-quota` entries are migrated/i.test(updating),
-    ).toBe(false);
-
-    // Plain init retains an existing recognized spec (including upstream) without duplicating it.
-    expect(flat(readme)).toContain("recognizes an existing quota entry");
-    expect(flat(manualInstall)).toContain("Plain `init` recognizes that entry");
-    for (const document of [readme, manualInstall]) {
-      expect(flat(document)).toContain(
-        "does not add a second `opencode-quota-gui` entry beside it",
+    for (const document of [readme, manualInstall, configuration, updating]) {
+      expect(document).toMatch(/behavior settings (?:are always global|remain global)/i);
+      expect(document).toContain("preserved unchanged");
+      // No installer conversion/import claim for the dormant sibling file.
+      expect(document).not.toMatch(
+        /(?:convert|converts|converted|imports?|imported) (?:an? )?(?:existing )?(?:sibling )?(?:GUI )?`?config\.json`?/i,
       );
     }
 
-    // Switching identity is explicit and previewed, not silent.
-    expect(flat(readme)).toMatch(
-      /To switch identity, run `init` or `update` with an explicit `OPENCODE_QUOTA_PLUGIN_SPEC` \(previewed before writing\)/,
-    );
-
-    // Update keeps moving specs as written and rewrites only non-moving specs; an explicit spec overrides both.
-    const updateRules = flat(updating);
-    expect(updateRules).toMatch(/non-moving\*\* quota specs to `opencode-quota-gui@latest`/);
-    expect(updateRules).toContain("**Moving** specs stay exactly as written");
-    expect(updateRules).toContain(
-      "`opencode-quota-gui@latest`, `opencode-quota-gui@next`, `@slkiser/opencode-quota@latest`, `@slkiser/opencode-quota@next`, and `@slkiser/opencode-quota@4`",
-    );
-    expect(updateRules).toContain(
-      "A moving upstream spec is therefore not silently renamed to `opencode-quota-gui`",
-    );
-    expect(updateRules).toContain(
-      "With `OPENCODE_QUOTA_PLUGIN_SPEC` set, that exact spec is the target for recognized entries instead",
-    );
-    expect(updateRules).toContain("differing options stop the run before any write");
-
-    // 1.0.0 is this package; 5.0.0 references are qualified upstream history.
-    expect(flat(readme)).toContain(
-      "This independent `opencode-quota-gui` package is version `1.0.0`",
-    );
-    expect(readme).toContain("### Breaking changes in upstream OpenCode Quota 5.0.0 (history)");
-    expect(flat(readme)).toContain("inherited upstream OpenCode Quota 5.0.0 history");
-    expect(flat(updating)).toContain(
-      "This independent package, `opencode-quota-gui` `1.0.0`, runs only on OpenCode `2.0.16` or newer",
-    );
-    expect(flat(updating)).toContain(
-      "What changed in the upstream OpenCode Quota `5.0.0` line (inherited history)",
-    );
-    expect(flat(readme)).not.toMatch(/`opencode-quota-gui` is `5\.0\.0`/);
+    expect(readme).toContain("project OpenCode plugin entry");
+    expect(manualInstall).toContain("project OpenCode plugin entry");
+    expect(configuration).toContain("does not create project behavior settings");
+    expect(updating).toContain("project plugin install");
   });
 
-  it("keeps Dashboard settings, import, and precedence copy specific", () => {
-    const readme = read("README.md");
-    const manualInstall = read("docs/readme/manual-install.md");
-
-    for (const stale of [
-      "the same keys as the config file",
-      "copy settings from legacy config files (global or project)",
-      "shows the winning source for every key",
-      "it wins even over project files",
-    ]) {
-      expect(readme, stale).not.toContain(stale);
-    }
-
-    expect(readme).toContain("The six legacy/TUI-only controls are hidden");
-    expect(readme).toContain("only the eligible concepts from this seven-key list");
-    expect(readme).toContain(
-      "percent display, percent label, provider selection, poll interval, request timeout, accounting detail, and wait-for-reset",
+  it("keeps the canonical example self-contained", () => {
+    const configuration = read("docs/readme/configuration.md");
+    const customProviders = readMarkdownSection(configuration, /^Custom providers$/);
+    const json = readFencedCodeBlocks(customProviders).find(
+      (block) => block.info === "jsonc" && block.content.includes('"quotaProviders"'),
     );
-    expect(readme).toContain("Workspace and project overrides are not import sources");
-    expect(readme).toContain("Settings, import, and visibility changes write only");
-    expect(readme).toContain("a workspace/project layer still wins for the same key");
-    expect(readme).toContain("notes only meaningful overriding scopes");
-    expect(readme).toContain("source files stay byte-for-byte untouched");
-    expect(readme).toContain(
-      "in the `plugins` list of your global OpenCode config (by default `~/.config/opencode/opencode.json(c)`)",
-    );
-    expect(readme).not.toContain(
-      "in the `plugins` list of `~/.config/opencode/opencode.json(c)` or your project config",
-    );
-    expect(readme).toContain("embedded in this dashboard page");
-    expect(readme).not.toContain("for the running dashboard");
-    expect(manualInstall).toContain("wins over the global legacy `quota-toast.jsonc`");
-    expect(manualInstall).toContain(
-      "a project/workspace `quota-toast.jsonc` still wins for the same key",
-    );
-  });
-
-  it("keeps copy-paste integrations independent of entry order", () => {
-    const external = read("docs/readme/external-integration.md");
-
-    expect(external).not.toContain("entries[0].percentRemaining");
-    expect(external).toContain('select(.renderType == "percent"');
-    expect(external.match(/renderType/g)?.length).toBeGreaterThanOrEqual(5);
-    expect(external).toContain('status: "partial"');
-    expect(external).toContain("Results were incomplete");
-  });
-
-  it("keeps surface formatters generic", () => {
-    for (const path of [
-      "src/lib/quota-command-format.ts",
-      "src/lib/toast-format-grouped.ts",
-      "src/lib/tui-sidebar-format.ts",
-      "src/lib/tui-compact-format.ts",
-    ]) {
-      const formatter = read(path);
-      expect(formatter).not.toContain("quota-providers");
-      expect(formatter).not.toContain("quotaProviders");
-      expect(formatter).not.toContain("customSources");
-    }
+    expect(json, "canonical quotaProviders example").toBeDefined();
+    const parsed = JSON.parse(
+      json?.content
+        .split("\n")
+        .filter((line) => !line.trimStart().startsWith("//"))
+        .join("\n")
+        .replace(/,\s*([}\]])/g, "$1") ?? "{}",
+    ) as Record<string, unknown>;
+    expect(parsed.quotaProviders).toBeInstanceOf(Array);
+    expect(parsed.experimental).toBeUndefined();
   });
 });

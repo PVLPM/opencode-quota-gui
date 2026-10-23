@@ -1,180 +1,69 @@
-<p align="center">
-  <a href="https://github.com/PVLPM/opencode-quota-gui">
-    <picture>
-      <source srcset="https://shawnkiser.com/opencode-quota/opencode-quota-logo-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="https://shawnkiser.com/opencode-quota/opencode-quota-logo-light.svg" media="(prefers-color-scheme: light)">
-      <img src="https://shawnkiser.com/opencode-quota/opencode-quota-logo-light.svg" alt="OpenCode Quota logo">
-    </picture>
-  </a>
-</p>
-<p align="center">Quota, usage, and token visibility in OpenCode and your terminal.</p>
-<p align="center"><code>opencode-quota-gui</code> — an independent continuation of <a href="https://github.com/slkiser/opencode-quota">slkiser/opencode-quota</a> (MIT). Not published to npm yet; once the first public version is released, install it with <code>npx opencode-quota-gui init</code> (see <a href="#quick-start">Quick start</a>).</p>
+# OpenCode Quota GUI
+
+A local dashboard for your OpenCode quota, token usage, projects, and sessions. It runs beside OpenCode, listens only on loopback, and keeps its settings and cached data in this product's own namespace.
+
 <p align="center">
   <a href="https://www.npmjs.com/package/opencode-quota-gui"><img alt="npm" src="https://img.shields.io/npm/v/opencode-quota-gui?style=flat-square" /></a>
   <a href="https://www.npmjs.com/package/opencode-quota-gui"><img alt="npm downloads" src="https://img.shields.io/npm/dm/opencode-quota-gui?style=flat-square" /></a>
-  <a href="https://github.com/PVLPM/opencode-quota-gui/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PVLPM/opencode-quota-gui/ci.yml?style=flat-square&branch=main&label=CI" /></a>
+  <a href="https://github.com/PVLPM/opencode-quota-gui/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PVLPM/opencode-quota-gui/ci.yml?style=flat-square&label=CI" /></a>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" /></a>
   <a href="https://github.com/anomalyco/opencode/issues/38281"><img alt="Help us get listed: opencode#38281" src="https://img.shields.io/badge/%F0%9F%91%8D_help_us_get_listed-opencode%2338281-blue?style=flat-square" /></a>
 </p>
 
-[![OpenCode Quota sidebar](https://shawnkiser.com/opencode-quota/opencode-quota-sidebar.webp)](https://github.com/PVLPM/opencode-quota-gui)
+## Features
 
----
+- **Quota dashboard:** one card per provider account, with quota and rate-limit windows, reset countdowns, balance or spend where the provider reports it, and OpenAI banked resets and credits when available.
+- **Usage analytics:** token usage over `24h`, `7d`, `30d`, or `lifetime`, plus project activity and root-session drill-down.
+- **Session detail:** the opened session tree, every physical completed step, and separate own-context and cumulative tree totals.
+- **Local settings:** display preferences, provider selection, refresh and timeout controls, and presentation-only visibility toggles.
+- **Reset-aware retries:** when a request hits a provider limit and that provider's quota shows a used-up window, OpenCode can retry after the window resets. Turn this off with `waitForQuotaReset: false`.
+- **Local-first operation:** the dashboard binds to `127.0.0.1`, has no cloud account or hosted sync, and reads OpenCode data on the same machine.
 
 ## Quick start
 
-This independent `opencode-quota-gui` package is version `1.0.0` and is not published on npm yet. Once the first public release lands, one command installs it:
+Install the plugin through OpenCode:
 
 ```bash
-npx opencode-quota-gui init
+opencode plugin add opencode-quota-gui
 ```
 
-`init` is GUI-first. It asks for the install scope (global or current project), provider selection (auto-detect or choose manually), and whether quota percentages show used or remaining. It previews the changes and asks before writing. On OpenCode 2 it writes the plural `plugins` list in `~/.config/opencode/opencode.json` or `opencode.jsonc` (or the project's `opencode.json(c)` / `.opencode/opencode.json(c)`), keeps your other plugins and their order, and leaves automatic TUI surfaces off in a fresh config. It never installs the upstream `@slkiser/opencode-quota` package.
+That adds this entry to your OpenCode configuration, keeping the other plugins that are already there:
 
-Restart OpenCode after `init` — and after any later plugin or config change — then open <http://localhost:4144/quota>. The dashboard is the primary v1 interface; `/quota` and `/quota_status` remain available in the TUI. For local checkout and plugin-directory paths, see [Manual install](docs/readme/manual-install.md).
-
-**Pre-release build (local tarball).** Until that release — or to test a specific checkout — install the same plugin from a tarball you build yourself. The optional `OPENCODE_QUOTA_PLUGIN_SPEC` override points `init` at the local file instead of the npm package:
-
-POSIX (macOS, Linux, Git Bash):
-
-```bash
-git clone https://github.com/PVLPM/opencode-quota-gui.git
-cd opencode-quota-gui
-pnpm install
-pnpm run build
-pnpm pack
-export OPENCODE_QUOTA_PLUGIN_SPEC="$(node -e "console.log(require('url').pathToFileURL(require('path').resolve('opencode-quota-gui-<version>.tgz')).href)")"
-node dist/bin/opencode-quota-gui.js init
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-quota-gui"],
+}
 ```
 
-PowerShell:
+OpenCode installs the configured npm plugin itself; you do not need a separate `npm install`. If you prefer to edit the config manually, add the same `opencode-quota-gui` entry to the plural `plugins` array in `~/.config/opencode/opencode.json(c)` or a project `opencode.json(c)`.
 
-```powershell
-git clone https://github.com/PVLPM/opencode-quota-gui.git
-cd opencode-quota-gui
-pnpm install
-pnpm run build
-pnpm pack
-$env:OPENCODE_QUOTA_PLUGIN_SPEC = node -e "console.log(require('url').pathToFileURL(require('path').resolve('opencode-quota-gui-<version>.tgz')).href)"
-node dist/bin/opencode-quota-gui.js init
-```
+Restart OpenCode, then open <http://localhost:4144/quota>. The first page may show an empty dashboard until OpenCode has loaded the plugin and discovered a provider account.
 
-Keep that override absolute, as in the two forms above: a relative spec would resolve from the OpenCode config folder, not your checkout. `init` asks before writing, prints the exact file it changed, and never installs the upstream `@slkiser/opencode-quota` package.
-
-**Already on an upstream install?** Plain `init` recognizes an existing quota entry — including `@slkiser/opencode-quota` — retains its package spec as written, and does not add a second `opencode-quota-gui` entry beside it. To switch identity, run `init` or `update` with an explicit `OPENCODE_QUOTA_PLUGIN_SPEC` (previewed before writing), or replace the entry yourself. See [Manual install](docs/readme/manual-install.md) and [Updating safely](docs/readme/updating.md#what-can-change-automatically).
-
-> [!IMPORTANT]
-> You need OpenCode `2.0.16+` and Node.js `22.13+` or `23.4+`. This build does not support OpenCode 1; its last supported plugin line is the upstream `npx @slkiser/opencode-quota@4 init` (historical upstream package, not this one).
-
-Upgrading from the upstream 4.x line? Read the [inherited upstream OpenCode Quota 5.0.0 history](#breaking-changes-in-upstream-opencode-quota-500-history); it is not this package's version history.
-
-> Maintainers: releases are manual. Dispatch the **Publish to npm (manual tag dispatch)** workflow with an existing release tag and leave `publish` at its `false` default for a publish-free rehearsal; publishing additionally requires the `NPM_PUBLISH_ENABLED` repository variable. The workflow packs once on Node 24, smoke-tests Node 22/24, and publishes that exact tarball with provenance — no version sync, retag, or branch write. For a local Node 24 rehearsal, `pnpm run verify:release-package` packs once (`pack:release-package`) and smoke-tests that exact tarball (`smoke:package`). See [Releasing](docs/readme/release.md).
-
-## What you get
-
-<table>
-  <tr>
-    <td width="50%" align="center"><img src="https://shawnkiser.com/opencode-quota/opencode-quota-sidebar.webp" alt="OpenCode Quota TUI sidebar panel" /><br /><strong>Sidebar panel</strong></td>
-    <td width="50%" align="center"><img src="https://shawnkiser.com/opencode-quota/opencode-quota-toast.webp" alt="OpenCode Quota popup toast" /><br /><strong>Popup toast</strong></td>
-  </tr>
-  <tr>
-    <td width="50%" align="center"><img src="https://shawnkiser.com/opencode-quota/opencode-quota-statusbar.webp" alt="OpenCode Quota TUI status line" /><br /><strong>Status line</strong></td>
-    <td width="50%" align="center"><img src="https://shawnkiser.com/opencode-quota/opencode-quota-tokens-command.webp" alt="OpenCode Quota token report" /><br /><strong>Token reports</strong></td>
-  </tr>
-</table>
-
-Also:
-
-- **Dashboard:** a local web UI at http://localhost:4144/quota with quota cards, range-scoped usage charts, projects, session trees, and settings. See [Dashboard](#dashboard).
-- **Terminal:** `npx opencode-quota-gui show` works even with OpenCode closed. If you installed the package, the short `opencode-quota-gui show` works too.
-- **Web and Desktop:** slash commands post the report in the chat.
-- **Scripts and status bars:** JSON, an export file, and metrics. See [External integration](docs/readme/external-integration.md).
-- **Your look:** used or left, reset style, a runs-out estimate, and more. See [Configuration](docs/readme/configuration.md).
-- **Retry at the reset:** when a request hits a limit and that provider's quota shows a used-up window, OpenCode retries after it resets. Turn off with `waitForQuotaReset: false`.
+Requirements: OpenCode `2.0.16` or newer and Node.js `22.13+` or `23.4+`. This package does not support OpenCode 1.
 
 ## Dashboard
 
-The plugin also serves a local dashboard. It listens on `127.0.0.1` only — nothing on your network can reach it:
+The dashboard starts with the plugin and is served on `127.0.0.1` only. It does not listen on network interfaces, and there is no cloud component. Local port forwarding, proxy configuration, or another process running on the same machine is outside this guarantee.
 
-- **Home:** quota cards for every discovered provider account, token usage over the selected range (`24h`, `7d`, `30d`, `lifetime`), then project activity. Tokens are the primary number; the API-equivalent cost is a small secondary figure and is never a provider bill.
-- **Clean routes:** the dashboard opens at <http://localhost:4144/quota>. Home, analytics, project, session, and settings are real URLs (`/analytics?range=7d`, `/project/<id>?range=30d`, `/session/<id>`, `/settings`), so reload and back/forward work.
-- **Projects and sessions:** project activity with root sessions and worktree labels (`title normal | worktree muted | tokens`), then the opened session plus all of its descendants, with compaction markers and per-step context and total tokens. Session detail counts every physical completed step in the opened tree.
-- **Settings:** the dashboard-facing settings — percent display and label, provider selection, poll interval, request timeout, accounting detail, wait-for-reset, and visibility — plus eye toggles that hide a card or row from the dashboard only. The six legacy/TUI-only controls are hidden, and the port is read-only; hiding is presentation state and never changes stored data or other surfaces. The bottom About block reports Version, Build, and Contract.
-- **Import:** when an actual global legacy OpenCode Quota source exists, preview and copy only the eligible concepts from this seven-key list — percent display, percent label, provider selection, poll interval, request timeout, accounting detail, and wait-for-reset — into the global canonical dashboard file. Workspace and project overrides are not import sources, and source files stay byte-for-byte untouched.
+- **Quota:** cards for discovered provider accounts, ordered and grouped by provider. Each card shows the rows that provider reports, a compact percentage bar for percentage rows, reset countdowns, and card-local errors. OpenAI cards can include banked resets and credits.
+- **Analytics:** token usage over the selected range, projects ordered by activity or tokens, and a project page with root sessions and worktree labels.
+- **Session:** the opened session and its descendants, with per-step detail and compaction markers. Own-context and cumulative tree consumption are shown separately.
+- **Settings:** display, provider, request, and visibility controls, plus the canonical settings file, any reported configuration issues, and build information.
 
-How it starts and where it writes:
+The routes are real URLs, so reload and browser back/forward work:
 
-- The dashboard starts with the plugin at <http://localhost:4144/quota>. The port is `dashboard.port` in the canonical `~/.config/opencode/opencode-quota-gui/config.jsonc` (`$XDG_CONFIG_HOME/opencode/...` when `XDG_CONFIG_HOME` is set, or the folder named by `OPENCODE_CONFIG_DIR`). Changing the port needs an OpenCode restart, and the port is read-only in the web UI.
-- If the port is already taken, the dashboard does not try another port: you get one `dashboard server unavailable` log line, and the TUI, slash commands, toasts, and tools keep working.
-- Settings, import, and visibility changes write only the global canonical file above. File-backed loading keeps the existing layers: defaults, global plugin/legacy config, the global canonical file, then workspace/project config. The canonical file overrides global legacy keys it sets, but a workspace/project layer still wins for the same key; legacy layers remain read-compatible. The settings page notes only meaningful overriding scopes (`Workspace override`, `Project override`, `Legacy override`) beside affected fields, never full paths. `formatStyle` still affects the legacy TUI and terminal surfaces only, never the dashboard.
+- `/quota` — provider cards
+- `/analytics?range=7d` — usage and projects
+- `/project/<id>?range=30d` — one project
+- `/session/<id>` — one session tree
+- `/settings` — dashboard settings
 
-v1 notes: the dashboard ships with the plugin; no dashboard CLI aliases, no durable-resume and no native notifications, and Web/Desktop still get slash commands only. Until the first public npm release, install from the local tarball shown above.
-
-## Updating
-
-Once the package is published, update it as usual:
-
-```bash
-npx opencode-quota-gui update --dry-run
-npx opencode-quota-gui update
-```
-
-For a pre-release local tarball, build and pack the new version first and point the optional `OPENCODE_QUOTA_PLUGIN_SPEC` override at it (absolute spec, as in [Quick start](#quick-start)); `update` then targets that tarball instead of the npm package. Restart OpenCode. The updater never moves or deletes secrets. See [Updating safely](docs/readme/updating.md).
-
-### Breaking changes in upstream OpenCode Quota 5.0.0 (history)
-
-> This section records inherited upstream OpenCode Quota 5.0.0 history. It is not the version of this package: `opencode-quota-gui` is `1.0.0`.
-
-> [!WARNING]
-> - This package does not support OpenCode 1. The upstream 4.x line (`@slkiser/opencode-quota@4`) is a historical compatibility reference, not an installation or update target of this package.
-> - Logins come from OpenCode 2, never from `auth.json`. If a provider is missing, log in again.
-> - Web and Desktop get the slash commands, but no toasts or panels.
-> - TUI reports open in a popup. To keep them in the chat, set `tuiCommandDisplay: "inline"`.
-> - OpenCode Zen uses your OpenCode Console sign-in: `opencode auth login opencode`.
-
-Full list: [Moving to OpenCode 2](docs/readme/updating.md#moving-to-opencode-2).
-
-## Commands
-
-### Slash commands
-
-Type these in OpenCode. Add dates after the command, like `/tokens_between 2026-09-01 2026-09-25`.
-
-| Command                                 | What it shows                                        |
-| --------------------------------------- | ---------------------------------------------------- |
-| `/quota`                                | Current quota                                        |
-| `/quota_status`                         | Setup check: logins, providers, pricing, and notices |
-| `/quota_announcements`                  | Maintainer notices                                   |
-| `/pricing_refresh`                      | Refreshes token pricing from `models.dev`            |
-| `/tokens_today`                         | Tokens used today                                    |
-| `/tokens_daily`                         | Tokens used in the last 24 hours                     |
-| `/tokens_weekly`                        | Tokens used in the last 7 days                       |
-| `/tokens_monthly`                       | Tokens used in the last 30 days, with pricing        |
-| `/tokens_all`                           | Tokens used across all local history                 |
-| `/tokens_session`                       | Tokens used in this session                          |
-| `/tokens_session_all`                   | This session plus its subagent sessions              |
-| `/tokens_between YYYY-MM-DD YYYY-MM-DD` | Tokens used between two dates                        |
-
-### CLI commands
-
-`npx` runs the published CLI without installing it globally:
-
-| Command                               | What it does                      |
-| ------------------------------------- | --------------------------------- |
-| `npx opencode-quota-gui init`         | Set up OpenCode Quota (GUI-first) |
-| `npx opencode-quota-gui provider add` | Add or update a custom provider   |
-| `npx opencode-quota-gui show`         | Show current quota                |
-| `npx opencode-quota-gui status`       | Check setup and provider problems |
-| `npx opencode-quota-gui update`       | Update to the newest release      |
-
-If you installed the package, the short `opencode-quota-gui <command>` form runs the same commands; from a checkout (pre-release), use `node dist/bin/opencode-quota-gui.js <command>`.
-
-`show` and `status` work with OpenCode closed ([how they differ](docs/readme/troubleshooting.md#terminal-commands)). Add `--help` to see all options.
+OpenCode 2 currently has no stable native frontend extension surface suitable for rendering this dashboard inside the host UI. It therefore runs in your browser, and the plugin exposes only the local HTTP and event stream needed by that page. If a stable host extension API emerges, this integration may evolve; no such API or timeline is announced.
 
 ## Providers
 
-Most providers work automatically once you log in through OpenCode. **Needs setup** links show the extra step.
-OpenAI ChatGPT quota needs a Codex login (`/connect` → OpenAI → **Codex browser (legacy)** or **Codex device code (legacy)**). OpenAI doesn't share ChatGPT usage with **Sign in with ChatGPT** logins or API keys, so those show a "ChatGPT quota unavailable" row without a ChatGPT request.
+Most providers work automatically once you log in through OpenCode. A **Needs setup** link points to the extra step. Provider data is collected by the plugin inside the OpenCode host; the dashboard does not run a separate polling service.
 
 ### Pre-configured American providers
 
@@ -259,45 +148,85 @@ These show only your own member API key's usage, not the whole organization's.
 
 ### Custom providers
 
-Track a provider that is not listed, from its quota API or from a local estimate:
+A custom provider can read a supported quota API or estimate usage from your local OpenCode history. Define it in the global canonical settings file under `quotaProviders`; see the [custom-provider guide](docs/readme/providers.md#custom-providers) for the complete schema, adapter rules, and security limits. The dashboard Settings page does not create provider definitions.
 
-```bash
-npx opencode-quota-gui provider add
+## Settings and privacy
+
+The dashboard reads only the canonical file at runtime:
+
+```text
+~/.config/opencode/opencode-quota-gui/config.jsonc
 ```
 
-It previews the change before saving. See the [custom-provider guide](docs/readme/providers.md#custom-providers).
+`$XDG_CONFIG_HOME/opencode` replaces `~/.config/opencode` when `XDG_CONFIG_HOME` is set, and `OPENCODE_CONFIG_DIR` replaces the global OpenCode config folder. The sibling `config.json` is not read, converted, or imported; it is preserved unchanged. Changes made in `Settings` write to this canonical file. Settings values, source labels, the port, and visibility lists come only from the canonical file and defaults, regardless of whether OpenCode uses `opencode.json` or `opencode.jsonc`. Selecting a project install in `init` adds only the project OpenCode plugin entry; behavior settings remain global. Inherited legacy values are available only through the separate import preview.
 
-## Troubleshooting
+- **Legacy import:** when a global legacy OpenCode Quota source exists, Settings can preview and copy seven compatible keys: `percentDisplayMode`, `percentLabelStyle`, `enabledProviders`, `minIntervalMs`, `requestTimeoutMs`, `accountingDetail`, and `waitForQuotaReset`. The import is read-only for the source; files stay byte-for-byte untouched. Custom provider definitions are not imported, so copy `quotaProviders` into the canonical file yourself.
+- **Visibility:** hiding a provider or row is presentation only and never changes polling or provider data. Opaque card and row IDs in `dashboard.hiddenCards` and `dashboard.hiddenRows` are internal identifiers: use **Settings → Visibility** to manage them instead of editing or deriving IDs by hand.
+- **Port:** `dashboard.port` is read-only in the web UI. Edit the canonical file and restart OpenCode to change it; the default is `4144`.
+- **Browser storage:** the dashboard uses browser-local storage for display state such as the selected range and a visibility-catalog cache. It does not use cross-site cookies.
+- **Local data:** the plugin reads OpenCode's local configuration and login data through OpenCode, plus OpenCode's local session database for usage and session views. Provider quota checks use the provider's API or the documented local CLI or companion plugin. Token pricing can come from the bundled snapshot or `models.dev` at runtime.
+- **OpenTelemetry (optional):** off by default. Set `"telemetry": { "enabled": true }` in the canonical file to publish two gauges, `opencode.quota.consumed` and `opencode.quota.cache.age`, through the `@opentelemetry/api` global `MeterProvider` that your host process configures. The plugin does not create a `MeterProvider`, exporter, collector, or metrics endpoint, sends no metrics by itself, and makes no extra provider requests for telemetry. Metric names and attributes are not a public API. See [External integration](docs/readme/external-integration.md#optional-opentelemetry-advanced-host-owned).
+- **No hosted service:** this project has no cloud account, hosted dashboard, or remote usage store. The local server permits only loopback hosts and origins and sends no CORS headers.
+- **Build details:** Settings → About reports the embedded Version, Build, and Contract. A build or contract mismatch means the browser page and server plugin are from different builds; restart and reinstall the same package if it persists.
 
-1. Run `/quota_status` in OpenCode, or `npx opencode-quota-gui status` in a terminal.
-2. Provider missing? Log in to it again in OpenCode 2.
-3. Using a companion plugin (Cursor, Google)? List it **before** the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`.
-4. `claude` or `bl` not found? See [Service environment](docs/readme/troubleshooting.md#service-environment).
-5. Token reports empty? Start OpenCode once, then use a model.
-6. Dashboard blank or stale? Open <http://localhost:4144/quota> and reload. If it still fails, check that the `opencode-quota-gui` entry (or your local tarball spec) is in the `plugins` list of your global OpenCode config (by default `~/.config/opencode/opencode.json(c)`) or your project config, then restart OpenCode.
-7. Settings shows `Build mismatch · restart OpenCode`? Restart OpenCode. If it persists, reinstall the same package or tarball so the plugin server and dashboard UI come from one build. A contract mismatch is stronger: do not mix builds.
-8. Need build details? Settings → About reports the Version, Build, and Contract embedded in this dashboard page.
+See [Configuration](docs/readme/configuration.md) for every supported settings key and the custom-provider rules.
 
-More fixes: [Troubleshooting](docs/readme/troubleshooting.md).
+## Installing and updating
 
-## Reference
+The normal install is the [Quick start](#quick-start) plugin entry. To update, let OpenCode resolve the same `opencode-quota-gui` entry again, then restart OpenCode. If you pin a version in `plugins`, update that version explicitly.
 
-Guides: [Manual install](docs/readme/manual-install.md) · [Configuration](docs/readme/configuration.md) · [Providers](docs/readme/providers.md) · [Troubleshooting](docs/readme/troubleshooting.md) · [External integration](docs/readme/external-integration.md) · [Updating safely](docs/readme/updating.md)
+Optional maintenance commands are available for people who want a previewed config or cache cleanup:
 
-Outside links: [OpenCode v2 docs](https://opencode.ai/v2/docs/) · [OpenCode v2 config](https://opencode.ai/v2/docs/config/) · [OpenCode v2 plugins](https://opencode.ai/v2/docs/plugins/) · [models.dev pricing data](https://models.dev/) · [Node.js downloads](https://nodejs.org/en/download)
+```bash
+npx opencode-quota-gui init --dry-run
+npx opencode-quota-gui update --dry-run
+npx opencode-quota-gui update --yes
+```
+
+`init` and `update` are maintenance only: `init` is a guided setup for the plugin entry, canonical GUI settings, and the OpenCode config location, and it is not required. `update` previews safe plugin-entry and package-cache maintenance; it does not install or upgrade the npm package for you. Neither command queries providers, displays quota, or produces a report, and neither reads or prints credential values.
+
+For a local build or release candidate, build the checkout and point the optional `OPENCODE_QUOTA_PLUGIN_SPEC` override at the absolute `file:` URL of the packed artifact before running `init`. Local plugin entries and release tarballs are documented in [Manual install](docs/readme/manual-install.md). Update behavior and rollback notes are in [Updating safely](docs/readme/updating.md).
+
+## OpenCode and upstream compatibility
+
+This release is GUI-only: it has no TUI. It does not register or provide a TUI panel, terminal quota interface or reports, slash command, tool, RPC method, report hook, toast, or status line, and it produces no report message, marker, or metadata contract. The `init` and `update` commands described above are maintenance only, not a quota interface. The only product activation is the OpenCode server plugin that starts the dashboard and keeps the credential and reset-retry lifecycle working.
+
+It is independent of the upstream `@slkiser/opencode-quota` package. The two packages may be configured at the same time, and there is no dependency or conflict guard between them. Each owns its configuration and private state; this package writes under the `opencode-quota-gui` namespace and does not migrate, rewrite, or delete upstream configuration, cache, or credential files.
+
+Use the upstream project if you want its terminal surfaces. Use this project if you want the local dashboard. See [Updating safely](docs/readme/updating.md) for migration and coexistence details.
+
+## Support
+
+- [Manual install](docs/readme/manual-install.md)
+- [Configuration](docs/readme/configuration.md)
+- [Providers](docs/readme/providers.md)
+- [Troubleshooting](docs/readme/troubleshooting.md)
+- [External integration](docs/readme/external-integration.md)
+- [Updating safely](docs/readme/updating.md)
+- [Open a bug or feature request](https://github.com/PVLPM/opencode-quota-gui/issues)
+
+When reporting a problem, include your OpenCode version and the Version, Build, and Contract shown in Settings → About. Do not paste credentials, tokens, private paths, or raw provider responses.
+
+Outside references: [OpenCode v2 docs](https://opencode.ai/v2/docs/) · [OpenCode v2 config](https://opencode.ai/v2/docs/config/) · [OpenCode v2 plugins](https://opencode.ai/v2/docs/plugins/) · [models.dev pricing data](https://models.dev/) · [Node.js downloads](https://nodejs.org/en/download)
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull request. In short: open an issue first, run `pnpm verify`, keep the fix focused, and include before-and-after dashboard screenshots for any visible change. Credentials, account identifiers, and private paths must be redacted.
+
+## Acknowledgements and license
+
+This project is MIT-licensed and is derived from the upstream [opencode-quota](https://github.com/slkiser/opencode-quota) project (MIT). Upstream history, copyright, and license notices are preserved. It is not built by the OpenCode team and is not affiliated with OpenCode or any provider listed above.
+
+Provider names and plan names belong to their owners. Pricing data is provided by [models.dev](https://models.dev/). See [LICENSE](LICENSE) for the full text.
 
 ## Contributors
 
-Thanks to everyone who has contributed to OpenCode Quota.
+Thanks to everyone who has contributed to this repository.
 
-<a href="https://github.com/slkiser/opencode-quota/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=slkiser/opencode-quota" />
+<a href="https://github.com/PVLPM/opencode-quota-gui/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=PVLPM/opencode-quota-gui" alt="Contributors to PVLPM/opencode-quota-gui" />
 </a>
 
-## License
+## Star history
 
-MIT. OpenCode Quota is not built by the OpenCode team and is not affiliated with OpenCode or any provider listed above.
-
-`opencode-quota-gui` is derived from the upstream [opencode-quota](https://github.com/slkiser/opencode-quota) project (MIT); upstream history, copyright, and license are preserved.
-
-[![Star History Chart](https://api.star-history.com/svg?repos=slkiser/opencode-quota&type=date&legend=top-left)](https://www.star-history.com/#slkiser/opencode-quota&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=PVLPM/opencode-quota-gui&type=date&legend=top-left)](https://www.star-history.com/#PVLPM/opencode-quota-gui&Date)

@@ -2,78 +2,75 @@
 
 # Providers
 
-Jump to: [Pre-configured providers](#pre-configured-providers) · [Custom providers](#custom-providers) · [API keys](#api-keys) · [Setup notes](#provider-setup-notes)
+Most providers work automatically once you log in through OpenCode. **Automatic** means the dashboard reuses the login saved in OpenCode. **Needs setup** means the provider needs a companion plugin, a CLI, a token, or another local source.
+
+The dashboard reads provider results through the same OpenCode host process that runs the plugin. It does not run a second provider poller outside OpenCode.
 
 ## Pre-configured providers
 
-Most providers work automatically. `Automatic` means OpenCode Quota reuses the login you saved with OpenCode's `/connect`, read through OpenCode 2's plugin API. Open a **Needs setup** link only if you use that provider.
-
-- Several logins for one provider? Each gets its own rows, and `(active)` marks the one OpenCode uses.
-- A provider can appear in both audience tables when the vendor sells both.
-
-### American providers
+### Pre-configured American providers
 
 <details open>
 <summary><strong>Personal</strong></summary>
 
-| Provider           | Auth/setup                             | Data from          | Reports            |
-| ------------------ | -------------------------------------- | ------------------ | ------------------ |
-| Anthropic (Claude) | [Needs setup](#anthropic-claude)       | Local CLI/OAuth    | Quota              |
-| Chutes AI          | Automatic                              | Remote API         | Quota              |
-| Cursor             | [Needs setup](#cursor)                 | Local estimate     | Budget and spend   |
-| GitHub Copilot     | Automatic                              | Remote API         | Budget and usage   |
-| Google AGY         | [Needs setup](#google-agy-quick-setup) | Remote API         | Quota              |
-| Kilo Gateway       | Automatic                              | Remote API         | Quota and balance  |
-| NanoGPT            | Automatic                              | Remote API         | Quota and balance  |
-| Ollama Cloud       | Automatic                              | Remote API         | Quota and balance  |
-| OpenAI             | Automatic                              | Remote API         | Quota              |
-| OpenCode Go        | Automatic                              | Remote API         | Quota              |
-| OpenCode Zen       | Automatic                              | Remote API         | Budget and balance |
-| OpenRouter         | Automatic                              | Remote API         | Budget and spend   |
-| Synthetic          | Automatic                              | Remote API         | Quota              |
-| xAI                | Automatic                              | Remote API         | Quota              |
+| Provider           | Auth/setup                                                     | Data from          | Reports            |
+| ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
+| Anthropic (Claude) | [Needs setup](#anthropic-claude)                               | Local CLI/OAuth    | Quota              |
+| Chutes AI          | Automatic                                                      | Remote API         | Quota              |
+| Cursor             | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
+| GitHub Copilot     | Automatic                                                      | Remote API         | Budget and usage   |
+| Google AGY         | [Needs setup](#google-agy-quick-setup)                         | Remote API         | Quota              |
+| Kilo Gateway       | Automatic                                                      | Remote API         | Quota and balance  |
+| NanoGPT            | Automatic                                                      | Remote API         | Quota and balance  |
+| Ollama Cloud       | Automatic                                                      | Remote API         | Quota and balance  |
+| OpenAI             | Automatic                                                      | Remote API         | Quota              |
+| OpenCode Go        | Automatic                                                      | Remote API         | Quota              |
+| OpenCode Zen       | Automatic                                                      | Remote API         | Budget and balance |
+| OpenRouter         | Automatic                                                      | Remote API         | Budget and spend   |
+| Synthetic          | Automatic                                                      | Remote API         | Quota              |
+| xAI SuperGrok      | Automatic                                                      | Remote API         | Quota              |
 
 </details>
 
 <details>
 <summary><strong>Business / Enterprise</strong></summary>
 
-| Provider                | Auth/setup                             | Data from          | Reports            |
-| ----------------------- | -------------------------------------- | ------------------ | ------------------ |
-| Anthropic (Claude)      | [Needs setup](#anthropic-claude)       | Local CLI/OAuth    | Quota              |
-| Chutes AI               | Automatic                              | Remote API         | Quota              |
-| Cursor                  | [Needs setup](#cursor)                 | Local estimate     | Budget and spend   |
-| Gemini CLI              | [Needs setup](#gemini-cli)             | Remote API         | Quota              |
-| GitHub Copilot          | [Needs setup](#github-copilot)         | Remote API         | Budget and usage   |
-| Google AGY              | [Needs setup](#google-agy-quick-setup) | Remote API         | Quota              |
-| NanoGPT                 | Automatic                              | Remote API         | Quota and balance  |
-| OpenAI                  | Automatic                              | Remote API         | Quota              |
-| OpenCode Zen            | Automatic                              | Remote API         | Budget and balance |
-| OpenRouter              | Automatic                              | Remote API         | Budget and spend   |
-| Synthetic               | Automatic                              | Remote API         | Quota              |
-| xAI                     | Automatic                              | Remote API         | Quota              |
+| Provider                | Auth/setup                                                     | Data from          | Reports            |
+| ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
+| Anthropic (Claude)      | [Needs setup](#anthropic-claude)                               | Local CLI/OAuth    | Quota              |
+| Chutes AI               | Automatic                                                      | Remote API         | Quota              |
+| Cursor                  | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
+| Gemini CLI              | [Needs setup](#gemini-cli)                                     | Remote API         | Quota              |
+| GitHub Copilot          | [Needs setup](#github-copilot)                                 | Remote API         | Budget and usage   |
+| Google AGY              | [Needs setup](#google-agy-quick-setup)                         | Remote API         | Quota              |
+| NanoGPT                 | Automatic                                                      | Remote API         | Quota and balance  |
+| OpenAI                  | Automatic                                                      | Remote API         | Quota              |
+| OpenCode Zen            | Automatic                                                      | Remote API         | Budget and balance |
+| OpenRouter              | Automatic                                                      | Remote API         | Budget and spend   |
+| Synthetic               | Automatic                                                      | Remote API         | Quota              |
+| xAI SuperGrok           | Automatic                                                      | Remote API         | Quota              |
 
-These tables show which plans a vendor sells. Except for Copilot organization/enterprise billing, each integration reports one signed-in account, seat, API key, or workspace.
+Gemini CLI works only with Gemini Code Assist Standard or Enterprise (organization) accounts. Personal Google users should use Google AGY.
 
 </details>
 
-### Chinese providers
+### Pre-configured Chinese providers
 
 <details open>
 <summary><strong>Personal</strong></summary>
 
-| Provider                      | Auth/setup                                                          | Data from      | Reports            |
-| ----------------------------- | ------------------------------------------------------------------- | -------------- | ------------------ |
-| Alibaba Coding Plan           | Automatic                                                           | Local estimate | Quota              |
-| Alibaba Personal Token Plan   | [Needs setup](#alibaba-personal-token-plan)                         | Official CLI   | Quota              |
-| DeepSeek                      | Automatic                                                           | Remote API     | Balance and status |
-| Kimi Code                     | Automatic                                                           | Remote API     | Quota              |
-| Kimi Code (CN)                | Automatic                                                           | Remote API     | Quota              |
-| MiniMax Token Plan            | Automatic                                                           | Remote API     | Quota              |
-| MiniMax Token Plan (CN)       | Automatic                                                           | Remote API     | Quota              |
-| Xiaomi MiMo                   | [Needs setup](#xiaomi-mimo)                                         | Dashboard API  | Quota and balance  |
-| Z.ai Coding Plan              | Automatic                                                           | Remote API     | Quota              |
-| Zhipu Coding Plan             | Automatic                                                           | Remote API     | Quota              |
+| Provider                      | Auth/setup                                                                   | Data from      | Reports            |
+| ----------------------------- | ---------------------------------------------------------------------------- | -------------- | ------------------ |
+| Alibaba Coding Plan           | Automatic                                                                    | Local estimate | Quota              |
+| Alibaba Personal Token Plan   | [Needs setup](#alibaba-personal-token-plan)                                  | Official CLI   | Quota              |
+| DeepSeek                      | Automatic                                                                    | Remote API     | Balance and status |
+| Kimi Code                     | Automatic                                                                    | Remote API     | Quota              |
+| Kimi Code (CN)                | Automatic                                                                    | Remote API     | Quota              |
+| MiniMax Token Plan            | Automatic                                                                    | Remote API     | Quota              |
+| MiniMax Token Plan (CN)       | Automatic                                                                    | Remote API     | Quota              |
+| Xiaomi MiMo                   | [Needs setup](#xiaomi-mimo)                                                  | Dashboard API  | Quota and balance  |
+| Z.ai Coding Plan              | Automatic                                                                    | Remote API     | Quota              |
+| Zhipu Coding Plan             | Automatic                                                                    | Remote API     | Quota              |
 
 </details>
 
@@ -92,44 +89,38 @@ These show only your own member API key's usage, not the whole organization's.
 
 </details>
 
-### How rows are shown
+Except for Copilot organization and enterprise billing, each integration reports one signed-in account, seat, API key, or workspace. Several logins for one provider get their own cards, and the active one is marked `(active)`.
 
-- `Quota` covers quota and rate-limit windows; JSON tells them apart.
+## How the dashboard shows rows
+
+- `Quota` covers quota and rate-limit windows. The row metadata distinguishes the two.
 - OpenCode Zen, NanoGPT, Xiaomi MiMo, Kilo Gateway, DeepSeek, and Cursor keep quota, rate limit, budget, usage, spend, credits, and balance as separate rows. A balance is not remaining allowance, and spend is not a budget percentage.
-- Money uses uppercase currency codes such as `USD 12.50` or `CNY 8.25`. OpenCode Quota never converts, combines, or picks a preferred currency.
-- `accountingDetail: "detailed"` adds supplementary balance, status, and spend rows. See [Show accounting detail](configuration.md#show-accounting-detail).
-- Which rows can show a **Runs out** estimate: see [Estimate when fixed quota runs out](configuration.md#estimate-when-fixed-quota-runs-out).
+- Money uses uppercase currency codes such as `USD 12.50` or `CNY 8.25`. Values are never converted, combined, or shown in a preferred currency.
+- `accountingDetail: "detailed"` adds supplementary balance, status, spend, and detail rows.
+- Provider failures stay on the affected card. One failing provider does not hide the other cards.
+- The dashboard can hide a card or row for presentation, but hidden items are still fetched. See [Visibility](configuration.md#visibility-identifiers).
 
 ## Custom providers
 
-Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Run the guided setup:
+Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Define them in the global canonical file from [Configuration](configuration.md#custom-providers). There is no provider-definition command in the dashboard-only release, and Settings never asks for or stores a credential.
 
-```bash
-npx opencode-quota-gui provider add
-```
-
-It asks how the provider works, previews the exact global config change, and asks before writing. It never asks for a response body, credential, or secret value.
-
-- **Remote API:** real quota data from a supported endpoint (formats below).
+- **Remote API:** real quota data from a supported endpoint.
 - **Local estimate:** counts matching completed OpenCode requests in 1–16 windows, with optional spend estimates. `utc-day` resets at UTC midnight; `rolling` uses `durationMinutes` (up to 366 days). Every window needs `requestLimit`; `usdBudget` is optional.
 - **Credentials:** the variable named by `apiKeyEnv`, then trusted global `provider.<providerId>.options.apiKey`, then an API-key login saved in OpenCode 2 (`opencode.db`) for that provider id. Project secrets are never read.
 - With `enabledProviders: "auto"`, definitions run automatically. A manual list must include `quota-providers` plus every built-in provider you still want.
-- A custom model provider still needs its normal OpenCode provider/model config. `/connect` → **Other** stores its credential, not its model setup.
+- A custom model provider still needs its normal OpenCode provider/model config.
 - OpenRouter is built in. A custom OpenRouter definition only helps if you need a different endpoint or label.
 - Alibaba Personal Token Plan uses the reserved `alibaba-token-plan` ID and stays a separate official-CLI provider; it is not a local-estimate tuning target.
-
-See [Configuration](configuration.md#custom-providers) for a complete example and the other rules (pricing, state files, what is not allowed).
 
 <details>
 <summary><strong>Recipes: Vercel AI Gateway, Moonshot, Poe</strong></summary>
 
-Add the providers you use to `quotaProviders` in `quota-toast.jsonc`, then set the key variable (or use an API-key login saved in OpenCode):
+Add the providers you use to `quotaProviders` in the canonical config file, then set the key variable (or use an API-key login saved in OpenCode). The full canonical path is in [Configuration](configuration.md#where-the-dashboard-reads-settings).
 
 ```jsonc
 {
   "quotaProviders": [
     {
-      // Vercel AI Gateway: team credit balance and total spend, in USD.
       "id": "vercel-credits",
       "providerId": "vercel",
       "label": "Vercel AI Gateway",
@@ -145,7 +136,6 @@ Add the providers you use to `quotaProviders` in `quota-toast.jsonc`, then set t
       }
     },
     {
-      // Moonshot / Kimi API platform (not Kimi Code, which is built in): available balance, in USD.
       "id": "moonshot-balance",
       "providerId": "moonshotai",
       "label": "Moonshot",
@@ -160,7 +150,6 @@ Add the providers you use to `quotaProviders` in `quota-toast.jsonc`, then set t
       }
     },
     {
-      // Poe: point balance (points, not money).
       "id": "poe-points",
       "providerId": "poe",
       "label": "Poe",
@@ -180,7 +169,7 @@ Add the providers you use to `quotaProviders` in `quota-toast.jsonc`, then set t
 
 - Provider docs: [Vercel AI Gateway credits](https://vercel.com/docs/ai-gateway/sdks-and-apis/rest-api#check-credit-balance), [Moonshot balance](https://platform.kimi.ai/docs/api/balance), [Poe usage API](https://creator.poe.com/docs/resources/usage-api).
 - Poe: a Poe sign-in made through OpenCode's OAuth can't be used here. Create a key at [poe.com/api/keys](https://poe.com/api/keys) and set `POE_API_KEY`.
-- These recipes follow the providers' docs and weren't tested with a real key; open an issue if one doesn't work.
+- These recipes follow the providers' docs and were not tested with a real key. Open an issue if one does not work.
 
 </details>
 
@@ -205,7 +194,7 @@ A `quota-v1` response looks like this:
 }
 ```
 
-For `json-v1`, the guided command builds the adapter one field at a time: literal property segments, compatible metric sources, and optional units and timestamps. This saved-config example maps `remaining`, `limit`, and `status` from one response object:
+For `json-v1`, the adapter is a list of literal property paths, compatible metric sources, and optional units and timestamps. This saved-config example maps `remaining`, `limit`, and `status` from one response object:
 
 ```json
 {
@@ -260,19 +249,19 @@ Pair denominators (`limit` and pair-form `budget`) must be greater than zero. Re
 
 `unit` and `unitPosition` must appear together. Units are forbidden for `percentage` and `status`; prefix units render like `$2/$10`, while suffix units render like `2/10 tokens`.
 
-**Never put secrets in adapter display configuration.** Static `name`, `label`, and `unit` fields and every `literal` can appear in the provider-add preview, written configuration, cache identity, rendered quota rows, or exports.
+**Never put secrets in adapter display configuration.** Static `name`, `label`, and `unit` fields and every `literal` can appear in the written configuration, cache identity, and rendered quota rows.
 
-OpenCode Quota sends a fixed authenticated `GET`. The URL must use HTTPS, except for loopback testing. Redirects and URLs containing credentials, queries, or fragments are rejected. Responses must be JSON and are limited to 256 KiB. Standard envelopes and selected `json-v1` row arrays are limited to 100 rows.
+The plugin sends a fixed authenticated `GET`. The URL must use HTTPS, except for loopback testing. Redirects and URLs containing credentials, queries, or fragments are rejected. Responses must be JSON and are limited to 256 KiB. Standard envelopes and selected `json-v1` row arrays are limited to 100 rows.
 
 </details>
 
 ## API keys
 
-These providers read an API key from, in order: an environment variable, then trusted user/global OpenCode config (`provider.<id>.options.apiKey`), then an API-key login saved in OpenCode 2 (`opencode.db`).
+These providers read an API key from, in order: an environment variable, then trusted user/global OpenCode config (`provider.<providerId>.options.apiKey`), then an API-key login saved in OpenCode 2 (`opencode.db`).
 
 - Project-local `opencode.json` / `opencode.jsonc` is never read for secrets.
 - An OpenCode login used as a fallback must be an API-key login, not an OAuth sign-in.
-- `provider.<id>.options.apiKey` can also be written in OpenCode 2's native form, `providers.<id>.settings.apiKey`. Like OpenCode 2, a native `providers.<id>` entry replaces the `provider.<id>` entry with the same id.
+- `provider.<providerId>.options.apiKey` can also be written in OpenCode 2's native form, `providers.<providerId>.settings.apiKey`. Like OpenCode 2, a native `providers.<providerId>` entry replaces the `provider.<providerId>` entry with the same id.
 
 | Provider                | Environment variables (first match wins)              | Notes |
 | ----------------------- | ----------------------------------------------------- | ----- |
@@ -293,7 +282,7 @@ These providers read an API key from, in order: an environment variable, then tr
 
 ## Provider setup notes
 
-If something below does not work, see [Provider fixes](troubleshooting.md#provider-fixes).
+If a provider still does not work after these steps, see [Provider fixes](troubleshooting.md#provider-fixes).
 
 <a id="github-copilot"></a>
 
@@ -301,9 +290,9 @@ If something below does not work, see [Provider fixes](troubleshooting.md#provid
 
 **Personal quota** works automatically from your OpenCode Copilot login. GitHub.com uses `api.github.com`; a GHE.com login uses the `enterpriseUrl` saved with that login and calls `api.<enterprise-host>`.
 
-If Quota shows `<plan> | usage needs billing token`, GitHub reported your plan but no usage for your login. This is normal for Business and Enterprise seats (usage comes from the organization's pool), and it does not mean you are out of credits. Add the token below to see real numbers.
+If the card says `<plan> | usage needs billing token`, GitHub reported your plan but no usage for your login. This is normal for Business and Enterprise seats (usage comes from the organization's pool), and it does not mean you are out of credits. Add the token below to see real numbers.
 
-**Organization and enterprise billing** need a separate token with billing access. Create `copilot-quota-token.json` in the OpenCode config folder shown by `opencode debug paths`. Example for a personal Copilot Max plan:
+**Organization and enterprise billing** need a separate token with billing access. Create `copilot-quota-token.json` in the OpenCode config folder:
 
 ```json
 {
@@ -346,7 +335,7 @@ Organization example (for an enterprise, use `"tier": "enterprise"`, add `"enter
 <summary><strong>What Copilot reports</strong></summary>
 
 - **OpenCode login:** GitHub's undocumented internal `premium_interactions` snapshot, normally labeled **Copilot Premium Interactions** (not assumed to match public AI Credit billing). GitHub supplies the entitlement, remaining amount, optional percentage, unlimited state, and reset. For in-range snapshots, used is derived from entitlement minus remaining; a percentage is calculated only when GitHub omits one. Token-based placeholder responses show the plan only.
-- **Token-based billing over limit:** once token-based billing usage passes the entitlement, GitHub reports a negative remaining amount plus a GitHub-reported `credits_used` AI-credit usage total. OpenCode shows that reported total; if it is missing or invalid, usage falls back to entitlement minus remaining and is marked locally derived. The remaining percentage stays provider-reported and does not exceed 100% when over limit.
+- **Token-based billing over limit:** once token-based billing usage passes the entitlement, GitHub reports a negative remaining amount plus a GitHub-reported `credits_used` AI-credit usage total. The dashboard shows that reported total; if it is missing or invalid, usage falls back to entitlement minus remaining and is marked locally derived. The remaining percentage stays provider-reported and does not exceed 100% when over limit.
 - **Personal token:** GitHub's public billing report for the current UTC calendar month. It is usage only, for example `Used 100 | Included 80 | Billed 20 ($0.20)`, with no allowance, remaining percentage, or reset. A missing percentage is expected.
 - **Organization and enterprise tokens:** the same used/included/billed fields for that payer. If GitHub returns an additional-usage budget, it shows as a separate **Copilot Additional Usage** row comparing billed spend with that budget.
 
@@ -383,8 +372,8 @@ claude auth login
 claude auth status
 ```
 
-- OpenCode Quota runs `claude` from OpenCode's `PATH`, or else the first working one of `~/.claude/local/claude`, `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, and `/usr/local/bin/claude` (not on Windows). If Claude lives elsewhere, or on Windows when `claude` is not on OpenCode's `PATH`, set `anthropicBinaryPath`. `/quota_status` shows the one it ran as `binary_path`.
-- When Claude Code does not expose quota windows itself, quota comes from Anthropic's OAuth usage endpoint, using the first usable token: OpenCode's own `anthropic` login, then Claude Code's credentials. `/quota_status` shows which one as `oauth_credential_source`.
+- The plugin runs `claude` from OpenCode's `PATH`, or else the first working one of `~/.claude/local/claude`, `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, and `/usr/local/bin/claude` (not on Windows). If Claude lives elsewhere, or on Windows when `claude` is not on OpenCode's `PATH`, set `anthropicBinaryPath`.
+- When Claude Code does not expose quota windows itself, quota comes from Anthropic's OAuth usage endpoint, using the first usable token: OpenCode's own `anthropic` login, then Claude Code's credentials.
 - **Claude Usage Credits:** a separate monthly group when that response includes enabled Usage Credits with numeric utilization. Missing or invalid credit data never changes the regular 5-hour and weekly rows.
 - **Fable:** a separate weekly row when Anthropic returns that model-scoped window. It is never guessed from your plan name. See [Claude Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
 
@@ -392,7 +381,7 @@ claude auth status
 
 ### Cursor
 
-Use companion plugin [`cursor-opencode-provider`](https://github.com/oakimov/cursor-opencode-provider#readme). Add its OpenCode 2 entry **before** the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`:
+Use companion plugin [`cursor-opencode-provider`](https://github.com/oakimov/cursor-opencode-provider#readme). Add its OpenCode 2 entry **before** the OpenCode Quota GUI plugin entry in the `plugins` list of `opencode.json(c)`:
 
 ```jsonc
 {
@@ -407,7 +396,7 @@ Cursor estimates the current billing cycle from your local OpenCode history:
 - With all models known and an allowance (`cursorPlan` or `cursorIncludedApiUsd`), it shows an **API budget** percentage with used, limit, and remaining USD.
 - Without an allowance, it shows **API spend**.
 - If any Cursor model is unknown, it shows only **Known API spend** plus a partial-data issue, never a percentage or a total.
-- **Auto+Composer spend** is a supplementary row shown in detailed output when there is room.
+- **Auto+Composer spend** is a supplementary row shown in detailed mode when there is room.
 - Set `cursorBillingCycleStartDay` to your billing day; otherwise the cycle is the local calendar month.
 
 <a id="alibaba-personal-token-plan"></a>
@@ -421,20 +410,20 @@ npm install -g bailian-cli
 bl auth login --console
 ```
 
-- OpenCode Quota runs only `bl usage token-plan --output json`. It never installs `bl`, opens a login, reads console cookies, or runs a custom command.
+- The plugin runs only `bl usage token-plan --output json`. It never installs `bl`, opens a login, reads console cookies, or runs a custom command.
 - On macOS and Linux, `bl` must be in an absolute folder on the `PATH` (the OpenCode service's inside OpenCode, your shell's in the terminal). Relative entries are ignored, and so is anything inside the project folder, including a `bl` that links into it. Your home folder is not a project, so `~/.local/bin` and nvm folders work.
 - On Windows, use WSL. Native `bl.exe` and `.cmd` shims are not supported in this release.
 - Team plans, China-only `alibaba-token-plan-cn` runtimes, and cookie-based console scraping are not supported.
 - After switching the CLI's console account, restart OpenCode or wait for the next live check.
 - With a manual provider list, include `alibaba-token-plan` in `enabledProviders`.
 
-OpenCode Quota's Google integrations use independent community companion plugins. They are not endorsed by Google.
+The Google integrations use independent community companion plugins. They are not endorsed by Google.
 
 <a id="google-agy-quick-setup"></a>
 
 ### Google AGY
 
-Use companion plugin [`@anthonyhaussman/opencode-agy-auth`](https://github.com/anthonyhaussman/opencode-agy-auth). OpenCode 2 needs its OpenCode 2 build, currently the alpha: `@anthonyhaussman/opencode-agy-auth@alpha`. Add it **before** the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`, then sign in once and choose **Antigravity CLI (OAuth)**:
+Use companion plugin [`@anthonyhaussman/opencode-agy-auth`](https://github.com/anthonyhaussman/opencode-agy-auth). OpenCode 2 needs its OpenCode 2 build, currently the alpha: `@anthonyhaussman/opencode-agy-auth@alpha`. Add it **before** the OpenCode Quota GUI plugin entry in the `plugins` list of `opencode.json(c)`, then sign in once and choose **Antigravity CLI (OAuth)**:
 
 ```bash
 opencode auth login google-agy
@@ -450,7 +439,7 @@ opencode auth login google-agy
 
 Gemini CLI works only with Gemini Code Assist Standard or Enterprise (organization) accounts. Google ended personal Gemini Code Assist accounts (individual, AI Pro, and AI Ultra) on 2026-06-18; see [Google's notice](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals). Personal Google users should use [Google AGY](#google-agy-quick-setup).
 
-Use companion plugin [`opencode-gemini-auth`](https://github.com/jenslys/opencode-gemini-auth#readme) 2.x, which supports OpenCode 2. Add it **before** the OpenCode Quota plugin entry in the `plugins` list of `opencode.json(c)`, then sign in once and choose **OAuth with Google (Gemini CLI)**:
+Use companion plugin [`opencode-gemini-auth`](https://github.com/jenslys/opencode-gemini-auth#readme) 2.x, which supports OpenCode 2. Add it **before** the OpenCode Quota GUI plugin entry in the `plugins` list of `opencode.json(c)`, then sign in once and choose **OAuth with Google (Gemini CLI)**:
 
 ```bash
 opencode auth login google
@@ -464,7 +453,7 @@ If you use manual provider selection, include `google-gemini-cli` in `enabledPro
 
 Shows your on-demand account balance from `GET https://api.deepseek.com/user/balance`. DeepSeek has no quota reset window, so there is no quota percentage.
 
-- Each valid **Total balance** is its own currency row. Detailed output can add **Granted balance** and **Topped-up balance**. Currencies are never added up or converted.
+- Each valid **Total balance** is its own currency row. Detailed mode can add **Granted balance** and **Topped-up balance**. Currencies are never added up or converted.
 - With no valid total balance, it shows the API's availability status. A malformed number becomes a partial-data issue, not zero.
 - Key: `DEEPSEEK_API_KEY`, or `provider.deepseek.options.apiKey` in trusted user/global config (for example `"{env:DEEPSEEK_API_KEY}"`). See [API keys](#api-keys).
 - With a manual provider list, include `deepseek` in `enabledProviders`.
@@ -488,7 +477,6 @@ It checks the `kiloPass.getState` endpoint first, then shows:
 - **Active Kilo Pass with credits:** one **Credits** percentage with used, limit, and remaining USD, plus the reset when available.
 - **Active pass with zero credits:** one **Remaining credits** USD value, with the reset.
 - **No active pass:** one **Total balance** USD row, with no invented usage, percentage, or reset.
-- Base, usage, bonus, remaining, overage, and reset source values stay in `/quota_status` and JSON `rawDetails`.
 
 <a id="kimi-code"></a>
 
@@ -503,7 +491,7 @@ Each regional plan has its own key and host. A key is sent only to its own host,
 
 ### Xiaomi MiMo
 
-Reads the signed-in dashboard API: one **Monthly quota** with used/limit tokens, plus optional **Total balance** (primary), **Cash balance**, and **Gift balance** (detailed output). A valid currency code is kept; with none, amounts are credits.
+Reads the signed-in dashboard API: one **Monthly quota** with used/limit tokens, plus optional **Total balance** (primary), **Cash balance**, and **Gift balance** (detailed mode). A valid currency code is kept; with none, amounts are credits.
 
 Use exactly one trusted credential source. The environment variable wins:
 
@@ -511,13 +499,15 @@ Use exactly one trusted credential source. The environment variable wins:
 export MIMO_USAGE_COOKIE='api-platform_serviceToken=...; userId=...'
 ```
 
-Or create the user/global file `opencode-quota/mimo.json` (usually `~/.config/opencode/opencode-quota/mimo.json`), never in a repository:
+Or create the user/global file `opencode-quota-gui/mimo.json` (usually `~/.config/opencode/opencode-quota-gui/mimo.json`), never in a repository. This is a supplemental provider credential file in the GUI namespace; it is separate from the canonical GUI behavior config (`opencode-quota-gui/config.jsonc`) and from any upstream `opencode-quota` file:
 
 ```json
 {
   "cookie": "api-platform_serviceToken=...; userId=..."
 }
 ```
+
+The plugin reads only the GUI-namespaced path. It does not read, copy, migrate, or write upstream `opencode-quota/mimo.json`.
 
 To copy the cookie:
 
@@ -547,14 +537,15 @@ Create an Ollama API key, then set `OLLAMA_API_KEY` (or use trusted user/global 
 
 ### OpenAI and xAI
 
-- **OpenAI:** ChatGPT quota needs a Codex login: `/connect` → OpenAI → **Codex browser (legacy)** or **Codex device code (legacy)**. OpenAI rejects **Sign in with ChatGPT** logins on ChatGPT's usage endpoint (HTTP 401 `no_matching_rule`), so they show "ChatGPT quota unavailable for Sign in with ChatGPT", and stored API keys show "ChatGPT quota unavailable for API key", both without a ChatGPT request. `/quota_status` shows the active login's method as `auth_method` (`chatgpt-token-sharing` is Sign in with ChatGPT).
+- **OpenAI:** ChatGPT quota needs a Codex login: `/connect` → OpenAI → **Codex browser (legacy)** or **Codex device code (legacy)**. OpenAI rejects **Sign in with ChatGPT** logins on ChatGPT's usage endpoint (HTTP 401 `no_matching_rule`), so they show "ChatGPT quota unavailable for Sign in with ChatGPT", and stored API keys show "ChatGPT quota unavailable for API key", both without a ChatGPT request.
+- **OpenAI resets and credits:** read-only rows when the provider returns banked resets or credit balance. They never redeem a reset or spend credits.
 - **xAI:** reads OpenCode's xAI login and shows its single Weekly window. The credits endpoint sets the quota; a best-effort subscription lookup labels the plan as xAI Lite, xAI SuperGrok, or xAI Heavy. If the plan is unknown, the quota still shows under the xAI SuperGrok label.
 
 <a id="openrouter"></a>
 
 ### OpenRouter
 
-Reads your OpenCode API key and calls OpenRouter's current-key endpoint. Limited keys show used budget and remaining percentage; unlimited keys show spend. No reset time is invented. `/quota_status` has an `openrouter:` section with the key source and the live check result.
+Reads your OpenCode API key and calls OpenRouter's current-key endpoint. Limited keys show used budget and remaining percentage; unlimited keys show spend. No reset time is invented.
 
 <a id="opencode-go"></a>
 
@@ -573,8 +564,8 @@ API key order:
 - Without an API key: a sign-in OpenCode cannot return shows as an error, and a failed Console call (including HTTP 403) shows no Go quota.
 - If the Console reports no Go subscription (for example HTTP 404), no Go rows appear.
 - A window with API status `rate-limited` is shown as used up (0% left) with its reset time. Other windows stay visible.
-- `opencodeGoWindows` picks which of **Five-hour**, **Weekly**, and **Monthly** appear everywhere. `tuiSidebarPanel.opencodeGoPreferredWindow` (`rolling`, `weekly`, or `monthly`) picks the row shown while the sidebar is collapsed; if unset or unavailable, the lowest remaining window is used.
-- Old workspace/cookie setups cannot be converted to an API key. See [OpenCode Go findings](updating.md#opencode-go-findings).
+- `opencodeGoWindows` picks which of **Five-hour**, **Weekly**, and **Monthly** appear.
+- Old workspace/cookie setups cannot be converted to an API key.
 
 <a id="opencode-zen"></a>
 
@@ -584,14 +575,13 @@ Zen uses your OpenCode Console sign-in from OpenCode 2; no cookie or workspace I
 
 1. Run `opencode auth login opencode`, sign in to the Console in your browser, and pick the organization to track.
 2. To track another organization, sign in again and pick it. With several saved sign-ins, `opencode auth switch opencode` picks the active one.
-3. Check it with `/quota_status` in OpenCode, or `npx opencode-quota-gui status` in a terminal.
+3. Restart OpenCode and check the Zen card.
 
-- Inside OpenCode, an expired token is refreshed; the terminal command does not refresh it.
 - An OpenCode API key alone is not a Console sign-in. Without a sign-in, auto mode skips Zen; include `opencode` in `enabledProviders` to see a sign-in hint instead.
 - Zen reads unofficial Console routes (`/api/billing/status`, `/api/billing/account`, `/api/billing/auto-recharge`, `/api/policies/members/{account id}`, and `/api/usage/cost-by-day`), so OpenCode may change them.
-- **Monthly budget:** a percentage with used, limit, and remaining USD. It queries the member detail route for the signed-in account and only trusts it when the returned `userID` matches the sign-in's account id. A budget rule counts only when both its `policyID` and `ruleID` match into the response's policies with a verified rule shape (`kind: "budget"`, `period: "month"`, aligned `scope`/`per`). Among the applicable rules it shows the one with the smallest remaining USD, so a personal `each` cap wins over the workspace `combined` cap whenever it leaves less. Budget scopes differ: `each` is a per-member budget, `combined` is shared accounting across the rule's audience — not necessarily the whole organization. A member with no personal budget gets the workspace budget this way. A $0 limit counts as a real blocking budget. A rule whose `selector` restricts models (`models`, `vendors`, or `inputPriceAtLeast`; `includeUnknownPrice` alone does not) is only usable when it proves to cover every model, and non-zero `per: "model"` budgets have no per-model spend here — both are skipped instead of guessed. A member budget resets at 00:00 UTC on the 1st of the next month. If any budget candidate is skipped (model-restricted, non-zero `per: "model"`, unmatched rule, missing amounts), Zen uses no member budget at all (the skipped one could be the binding cap, so the selected one is not trusted), and `/quota_status` shows `member_budget_note`. Without a usable member budget (no budget candidates, a skipped one, or a missing, forbidden, or unusable member route), Zen falls back to the Console credit limit (`/api/billing/account`) plus this month's usage costs (`/api/usage/cost-by-day`). `opencodeMonthlyLimit` in `quota-toast.json` overrides the budget from either source.
+- **Monthly budget:** a percentage with used, limit, and remaining USD. It queries the member detail route for the signed-in account and only trusts it when the returned `userID` matches the sign-in's account id. A budget rule counts only when both its `policyID` and `ruleID` match into the response's policies with a verified rule shape (`kind: "budget"`, `period: "month"`, aligned `scope`/`per`). Among the applicable rules it shows the one with the smallest remaining USD, so a personal `each` cap wins over the workspace `combined` cap whenever it leaves less. Budget scopes differ: `each` is a per-member budget, `combined` is shared accounting across the rule's audience — not necessarily the whole organization. A member with no personal budget gets the workspace budget this way. A $0 limit counts as a real blocking budget. A rule whose `selector` restricts models (`models`, `vendors`, or `inputPriceAtLeast`; `includeUnknownPrice` alone does not) is only usable when it proves to cover every model, and non-zero `per: "model"` budgets have no per-model spend here — both are skipped instead of guessed. A member budget resets at 00:00 UTC on the 1st of the next month. If any budget candidate is skipped (model-restricted, non-zero `per: "model"`, unmatched rule, missing amounts), Zen uses no member budget at all (the skipped one could be the binding cap, so the selected one is not trusted). Without a usable member budget (no budget candidates, a skipped one, or a missing, forbidden, or unusable member route), Zen falls back to the Console credit limit (`/api/billing/account`) plus this month's usage costs (`/api/usage/cost-by-day`). `opencodeMonthlyLimit` in the canonical config overrides the budget from either source.
 - **Balance:** always required. It is supplementary when a budget percentage exists, and primary otherwise (next to a **Monthly spend** row when this month's usage is known).
 - **Auto-reload:** a supplementary enabled/disabled row. Its amount and trigger stay in diagnostics.
 - If a non-balance route fails, Zen still shows the balance, hides only the rows that need the failed data, and lists the failed route as an error.
-- `accountingDetail: "detailed"` shows the supplementary balance and auto-reload rows. The old `opencodeZenDisplay` setting is gone; see [What can change automatically](updating.md#what-can-change-automatically).
-- The old `opencode-quota/opencode.json` file and `OPENCODE_WORKSPACE_ID` / `OPENCODE_AUTH_COOKIE` variables are no longer read. See [OpenCode Zen findings](updating.md#opencode-zen-findings).
+- `accountingDetail: "detailed"` shows the supplementary balance and auto-reload rows.
+- The old `opencode-quota/opencode.json` file and `OPENCODE_WORKSPACE_ID` / `OPENCODE_AUTH_COOKIE` variables are no longer read.

@@ -1,6 +1,6 @@
-# Contributing to opencode-quota
+# Contributing to OpenCode Quota GUI
 
-Thanks for contributing! Please read this before you open an issue or PR.
+Thanks for contributing. Please read this before you open an issue or pull request.
 
 ## Issues first
 
@@ -23,19 +23,21 @@ pnpm install
 
 ## Checks
 
-Run `pnpm verify` before opening a PR. It runs lint and formatting, typecheck, build, all tests, the four-surface test, and package checks. CI runs the same command, then installs the packed package on Node 22 and 24 as a smoke test.
+Run `pnpm verify` before opening a PR. It runs lint and formatting, typecheck, build, all tests, the supported cross-surface contract test, and package checks. CI runs the same command, then installs the packed package on Node 22 and 24 as a smoke test.
 
 For quick iteration: `pnpm run test:watch`.
 
 ## Rules the code must keep
 
-- **No AI calls.** Never send a request to an AI model to produce anything the plugin shows (quota rows, toasts, command output); it would spend the user's tokens. Calling a provider's quota or billing API is fine.
+- **No AI calls.** Never send a request to an AI model to produce anything the plugin shows. Calling a provider's quota or billing API is fine.
 - **OpenCode 2 only.** No OpenCode 1 code, APIs, or tables.
-- **Server vs. TUI.** The server plugin (`src/plugin.ts`) computes all text and registers the `quota_status` tool, the slash commands, and the `slkiser.opencode-quota` RPC. The TUI plugin (`src/tui-v2.tsx`) only draws what the RPC returns and never imports provider or credential code. Web and Desktop get slash commands only; OpenCode 2 has no plugin UI hooks there.
-- **One command path.** Every slash command, the `quota_status` tool, and the RPC `command` method go through `buildQuotaDialogCommandOutput()`.
-- **Credentials.** Read OpenCode logins only through `ctx.integration` in `src/lib/opencode-auth.ts`. The only exception is the terminal command (`src/lib/cli-show.ts`), which uses `src/lib/opencode-auth-sqlite.ts`; the plugins must never reach that file.
+- **Dashboard-only activation.** The server plugin starts the dashboard and keeps the credential and reset-retry lifecycle working. It does not register slash commands, tools, RPC methods, report hooks, TUI surfaces, toasts, terminal quota interfaces, or terminal reports. The separate `init` and `update` CLI commands are maintenance only, not a quota surface. This release has no TUI entry or artifact, and no TUI surface is a supported product path.
+- **Canonical settings.** Runtime code reads the global canonical GUI config plus defaults. Legacy settings are available only through the explicit read-only import preview. Do not add a runtime fallback to upstream private state.
+- **Private namespace.** GUI caches, state, locks, and reset observations stay under the GUI-owned `opencode-quota-gui` namespace. Never read, copy, overwrite, or delete upstream `opencode-quota` private state.
+- **Credentials.** Read OpenCode logins only through `ctx.integration` in `src/lib/opencode-auth.ts`. Do not read `auth.json`, a project secret, or an upstream credential cache.
 - **Money.** Show amounts with the provider's ISO code through the shared formatter (e.g. `USD 12.50`). No symbols, conversions, or adding up different currencies.
-- Keep these boundary tests passing and up to date: `tests/plugin.command-handled-boundary.test.ts`, `tests/tui-dist-import-graph.test.ts`, `tests/plugin.question-hook.test.ts`, `tests/quota-provider-boundary.test.ts`.
+- **Visibility IDs.** Opaque card, row, and provider IDs are a persistence contract. Do not rename, re-derive, or migrate them; hiding is presentation state only.
+- Keep these boundary tests passing and up to date: `tests/plugin.gui-only.test.ts`, `tests/gui.config-canonical.test.ts`, `tests/lib.config.runtime-canonical.test.ts`, `tests/lib.private-state-namespace.test.ts`, `tests/package-manifest.test.ts`, and `tests/quota-provider-boundary.test.ts`.
 
 ## Provider changes
 
@@ -53,7 +55,7 @@ Even then, it needs a reasonable maintenance cost.
 | You want to… | Use |
 | --- | --- |
 | Use an OpenAI-compatible model service OpenCode doesn't include | an OpenCode custom provider |
-| Track quota for a provider OpenCode already exposes (request estimates or one fixed quota endpoint) | an OpenCode Quota custom provider (`provider add`); its `providerId` must match OpenCode's |
+| Track quota for a provider OpenCode already exposes (request estimates or one fixed quota endpoint) | a `quotaProviders` definition in the canonical GUI config; its `providerId` must match OpenCode's |
 | Anything the custom path can't do, and the policy above is met | a built-in provider |
 
 **Building one:** for API-key or token providers, start from `contributing/provider-template/` (see its README), replace every example name, and add tests for every auth source. Use the README setup label that matches reality: `Automatic` or `Needs setup`.
@@ -76,14 +78,14 @@ Make the smallest safe fix for the root cause. Match current OpenCode behavior i
 
 ## Before-and-after screenshots (required)
 
-Every PR that changes what users see must include before-and-after screenshots taken with the same config, model, theme, and window size, with credentials, account identifiers, and private paths hidden. For quota changes, report each surface: Web, TUI sidebar, toast, and the compact line under the message input (plus the prompt bar or command dialog if relevant). Say which ones you didn't test. Tests don't replace screenshots, and screenshots don't replace tests. No visible change? Write `Not applicable` and why.
+Every PR that changes the dashboard must include before-and-after screenshots taken with the same config, model, theme, and window size. Cover the affected Quota, Analytics, and Settings routes and say which routes you didn't test. Keep credentials, account identifiers, and private paths hidden. Tests don't replace screenshots, and screenshots don't replace tests. No visible change? Write `Not applicable` and explain why.
 
 ## PR checklist
 
 - [ ] Linked issue, or a short reason there is none
 - [ ] `pnpm verify` passes
 - [ ] Tested on the current released OpenCode; version noted
-- [ ] Before-and-after screenshots and surface results, or `Not applicable`
+- [ ] Before-and-after dashboard screenshots and route results, or `Not applicable`
 - [ ] Docs updated if commands, config, or workflow changed (usually `README.md`)
 - [ ] New built-in provider: models.dev link, two independent requests, why custom isn't enough
 - [ ] New API-key/token provider: started from the provider template, or explained why not

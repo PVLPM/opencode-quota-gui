@@ -14,21 +14,21 @@ If no issue exists, include a short rationale/scope summary.
 
 ## Before-and-after evidence
 
-Does this change affect visible UI or human-readable output? If yes, attach matching before-and-after screenshots for each affected surface, using the same configuration, model/provider, theme, and window size.
+Does this change affect the dashboard UI or human-readable output? If yes, attach matching before-and-after screenshots for each affected dashboard surface, using the same configuration, model/provider, theme, and window size.
 
-For quota changes, report the result for Web output, TUI sidebar, toast, and the compact line below the message input. Identify unchanged or untested surfaces explicitly. Include the prompt bar or command dialog when relevant.
+For dashboard changes, report Quota, Analytics, and Settings. Identify unchanged or untested routes explicitly.
 
-Redact credentials, account identifiers, private paths, and other sensitive information. For text-formatting changes, include the relevant text output as well as screenshots.
+Redact credentials, account identifiers, private paths, and other sensitive information. For text-formatting changes, include the relevant output as well as screenshots.
 
-Formatter tests do not count as screenshot evidence.
+Tests do not replace screenshot evidence.
 
-If a surface could not be tested, identify it and explain why. If there is no visible effect, write `Not applicable` and explain briefly.
+If a route could not be tested, identify it and explain briefly. If there is no visible effect, write `Not applicable` and explain briefly.
 
 Before:
 
 After:
 
-Surface checks:
+Route checks:
 
 ## Quality Checklist
 

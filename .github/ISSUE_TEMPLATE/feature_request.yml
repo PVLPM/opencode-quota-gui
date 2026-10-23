@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Ideas that change what you see on screen go to [#293](https://github.com/slkiser/opencode-quota/issues/293).
+        Ideas that change what you see on screen are welcome in this repository's issues.
 
         Something broken? Use **Bug report**.
 
@@ -16,7 +16,7 @@ body:
     id: display_change
     attributes:
       label: Does this change what you see on screen?
-      description: For example a new row, color, or layout in the sidebar, pop-ups, or the line under the message box.
+      description: For example a new row, color, or layout on the dashboard, or a change to the local settings page.
       options:
         - "No"
         - "Yes"
@@ -37,8 +37,8 @@ body:
     id: plugin_version
     attributes:
       label: Your plugin version
-      description: Run `/quota_status` in OpenCode. The version is in the first line. If it has `beta` in it, update first, because it may already work.
-      placeholder: 5.0.1
+      description: Open dashboard Settings → About and copy the Version. If it has `beta` in it, update first, because it may already work.
+      placeholder: 1.0.0
     validations:
       required: true
 

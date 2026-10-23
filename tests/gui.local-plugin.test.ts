@@ -13,10 +13,12 @@ const serverEntry = join(repoRoot, "server.ts");
 const distEntry = join(repoRoot, "dist", "index.js");
 
 describe("local OpenCode plugin entry", () => {
-  it("resolves the repository directory to the root server entry", () => {
+  it("resolves the repository directory to both root entries, so it is not server-only", () => {
     const entrypoints = Host.resolve({ directory: repoRoot });
 
     expect(entrypoints.server).toBe(pathToFileURL(serverEntry).href);
+    // Keep the inherited TUI source honest: directory resolution finds it too.
+    expect(entrypoints.tui).toBe(pathToFileURL(join(repoRoot, "tui.ts")).href);
     expect(entrypoints.rpc).toBeUndefined();
   });
 
@@ -35,7 +37,27 @@ describe("local OpenCode plugin entry", () => {
     expect(source).not.toContain("export *");
   });
 
-  it("loads the built plugin default through the entry after a build", async (context) => {
+  it("documents the explicit server file as the GUI-only local entry", () => {
+    const manualInstall = readFileSync(
+      join(repoRoot, "docs", "readme", "manual-install.md"),
+      "utf8",
+    );
+    const localCheckout = manualInstall.slice(
+      manualInstall.indexOf("## Local checkout (development)"),
+      manualInstall.indexOf("## Pre-release tarball"),
+    );
+
+    expect(localCheckout).toContain(
+      '"plugins": ["file:///absolute/path/to/opencode-quota-gui/server.ts"]',
+    );
+    expect(localCheckout).not.toContain(
+      '"plugins": ["file:///absolute/path/to/opencode-quota-gui"]',
+    );
+    expect(localCheckout).toContain("retained root `tui.ts`");
+    expect(localCheckout.toLowerCase()).toContain("not recommended");
+  });
+
+  it("loads the built plugin default through the explicit server file after a build", async (context) => {
     if (!existsSync(distEntry)) {
       context.skip("dist/index.js is missing; run `pnpm run build` before this loader check");
       return;

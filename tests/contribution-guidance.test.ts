@@ -7,7 +7,7 @@ function read(path: string): string {
 }
 
 function headingIndex(document: string, heading: string): number {
-  const index = document.split("\n").findIndex((line) => line === `## ${heading}`);
+  const index = document.split("\n").indexOf(`## ${heading}`);
   expect(index).toBeGreaterThanOrEqual(0);
   return index;
 }
@@ -16,7 +16,7 @@ describe("contribution guidance", () => {
   const prTemplate = read(".github/pull_request_template.md");
   const contributing = read("CONTRIBUTING.md");
 
-  it("places Before-and-after evidence after OpenCode Validation and before Quality Checklist", () => {
+  it("places dashboard evidence after OpenCode Validation and before Quality Checklist", () => {
     const openCodeValidation = headingIndex(prTemplate, "OpenCode Validation");
     const evidence = headingIndex(prTemplate, "Before-and-after evidence");
     const quality = headingIndex(prTemplate, "Quality Checklist");
@@ -27,33 +27,29 @@ describe("contribution guidance", () => {
     );
   });
 
-  it("requires matching screenshots, four-surface reports, redaction, and justified Not applicable", () => {
+  it("requires matching dashboard screenshots, redaction, and justified Not applicable", () => {
     const templateEvidence = readMarkdownSection(prTemplate, /^Before-and-after evidence$/);
     expect(templateEvidence).toContain("matching before-and-after screenshots");
-    expect(templateEvidence).toContain("Web output");
-    expect(templateEvidence).toContain("TUI sidebar");
-    expect(templateEvidence).toContain("toast");
-    expect(templateEvidence).toContain("compact line below the message input");
-    expect(templateEvidence).toContain("prompt bar or command dialog when relevant");
-    expect(templateEvidence).toContain("unchanged or untested");
+    expect(templateEvidence).toContain("dashboard");
+    expect(templateEvidence).toContain("Quota, Analytics, and Settings");
+    expect(templateEvidence).toContain(
+      "same configuration, model/provider, theme, and window size",
+    );
     expect(templateEvidence).toMatch(
       /redact credentials, account identifiers, private paths, and other sensitive information/i,
     );
     expect(templateEvidence).toContain("`Not applicable`");
     expect(templateEvidence).toContain("explain briefly");
-    expect(templateEvidence).toContain("Formatter tests do not count as screenshot evidence");
+    expect(templateEvidence).toContain("Tests do not replace screenshot evidence");
 
     const contributingEvidence = readMarkdownSection(
       contributing,
       /^Before-and-after screenshots \(required\)$/,
     );
     expect(contributingEvidence).toContain("must include before-and-after screenshots");
+    expect(contributingEvidence).toContain("dashboard");
     expect(contributingEvidence).toContain("same config, model, theme, and window size");
-    expect(contributingEvidence).toContain(
-      "Web, TUI sidebar, toast, and the compact line under the message input",
-    );
-    expect(contributingEvidence).toContain("prompt bar or command dialog if relevant");
-    expect(contributingEvidence).toContain("Say which ones you didn't test");
+    expect(contributingEvidence).toContain("Quota, Analytics, and Settings");
     expect(contributingEvidence).toContain(
       "credentials, account identifiers, and private paths hidden",
     );
@@ -61,7 +57,7 @@ describe("contribution guidance", () => {
     expect(contributingEvidence).toContain("Tests don't replace screenshots");
 
     expect(readMarkdownSection(contributing, /^PR checklist$/)).toContain(
-      "Before-and-after screenshots and surface results, or `Not applicable`",
+      "Before-and-after dashboard screenshots and route results, or `Not applicable`",
     );
   });
 
@@ -75,5 +71,17 @@ describe("contribution guidance", () => {
     expect(contributing).toContain("`pnpm verify` passes");
     expect(contributing).toContain("Tested on the current released OpenCode");
     expect(contributing).toContain("smallest safe fix");
+  });
+
+  it("keeps contribution boundaries aligned with the GUI-only product", () => {
+    const rules = readMarkdownSection(contributing, /^Rules the code must keep$/);
+    expect(rules).toContain("dashboard");
+    expect(rules).toContain("does not register slash commands");
+    expect(rules).toContain("no TUI");
+    expect(rules).toContain("ctx.integration");
+    expect(rules).toContain("tests/plugin.gui-only.test.ts");
+    expect(rules).toContain("tests/gui.config-canonical.test.ts");
+    expect(contributing).not.toContain("/quota_status");
+    expect(contributing).not.toContain("four-surface");
   });
 });

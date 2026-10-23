@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        You can probably track this provider yourself today. [Here's how](https://github.com/PVLPM/opencode-quota-gui/blob/main/docs/readme/providers.md#custom-providers).
+        You can probably track this provider yourself today with a canonical `quotaProviders` definition. [Here's how](https://github.com/PVLPM/opencode-quota-gui/blob/main/docs/readme/providers.md#custom-providers).
         To be built in, a provider needs all of these: a listing on models.dev (the site OpenCode uses to list providers), requests from 2 different people, and public docs showing how to check usage.
 
   - type: input
