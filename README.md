@@ -10,6 +10,12 @@ A local dashboard for your OpenCode quota, token usage, projects, and sessions. 
   <a href="https://github.com/anomalyco/opencode/issues/38281"><img alt="Help us get listed: opencode#38281" src="https://img.shields.io/badge/%F0%9F%91%8D_help_us_get_listed-opencode%2338281-blue?style=flat-square" /></a>
 </p>
 
+## What you get
+
+| Quota | Analytics | Session |
+| --- | --- | --- |
+| ![Quota dashboard](images/opencode-quota-gui_quota.png) | ![Usage analytics](images/opencode-quota-gui_analytics.png) | ![Session detail](images/opencode-quota-gui_session.png) |
+
 ## Features
 
 - **Quota dashboard:** one card per provider account, with quota and rate-limit windows, reset countdowns, balance or spend where the provider reports it, and OpenAI banked resets and credits when available.
