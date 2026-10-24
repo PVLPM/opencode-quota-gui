@@ -19,12 +19,12 @@ vi.mock("../src/providers/registry.js", () => ({
 }));
 
 const consoleAuthMocks = vi.hoisted(() => ({
-  resolveOpenCodeConsoleAuth: vi.fn(),
+  resolveOpenCodeConsoleAuthAccounts: vi.fn(),
 }));
 
 vi.mock("../src/lib/opencode-console-auth.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/lib/opencode-console-auth.js")>()),
-  resolveOpenCodeConsoleAuth: consoleAuthMocks.resolveOpenCodeConsoleAuth,
+  resolveOpenCodeConsoleAuthAccounts: consoleAuthMocks.resolveOpenCodeConsoleAuthAccounts,
 }));
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
@@ -144,10 +144,15 @@ describe("collectQuotaRenderData shared quota state", () => {
   it("surfaces a failed OpenCode Zen sign-in but keeps auto mode quiet without one", async () => {
     // A failed Console sign-in passes the auto-mode availability gate so
     // fetch() can show its recovery hint.
-    consoleAuthMocks.resolveOpenCodeConsoleAuth.mockResolvedValue({
-      state: "invalid",
-      error: "refresh_failed: boom",
-    });
+    consoleAuthMocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      {
+        state: "invalid",
+        sourceId: "cred_console",
+        label: "Account 1",
+        active: true,
+        error: "refresh_failed: boom",
+      },
+    ]);
 
     const failed = await collectQuotaRenderData({
       client: TEST_CLIENT,
@@ -158,14 +163,15 @@ describe("collectQuotaRenderData shared quota state", () => {
     });
     expect(failed.active).toEqual([opencodeZenProvider]);
     expect(failed.data?.errors).toContainEqual({
-      label: "OpenCode Zen",
+      label: "Account 1",
       message:
         "OpenCode Console sign-in failed: refresh_failed: boom. Run `opencode auth login opencode`.",
+      sourceId: "cred_console",
     });
 
     // Without a Console sign-in, auto mode stays silent, but an explicit
     // opencode entry keeps Zen actionable.
-    consoleAuthMocks.resolveOpenCodeConsoleAuth.mockResolvedValue({ state: "none" });
+    consoleAuthMocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([]);
 
     const autoNone = await collectQuotaRenderData({
       client: TEST_CLIENT,

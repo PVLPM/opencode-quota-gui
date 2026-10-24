@@ -381,7 +381,11 @@ describe("v1 supported backend release evidence", () => {
     expect(collected.data).not.toBeNull();
     const entries = collected.data?.entries ?? [];
     expect(entries.map((entry) => entry.name)).toEqual(
-      expect.arrayContaining(["Team Accounting Monthly", "OpenRouter Primary budget"]),
+      expect.arrayContaining([
+        "Team Accounting Monthly",
+        "OpenRouter Primary key limit",
+        "OpenRouter Primary spend",
+      ]),
     );
     expect(entries.some((entry) => entry.percentRemaining === 64)).toBe(true);
     expect(
@@ -414,7 +418,7 @@ describe("v1 supported backend release evidence", () => {
     }
     expect(provider.sources).toEqual([
       { id: "team-accounting", providerId: "team-gateway", status: "ok", entryCount: 2 },
-      { id: "openrouter-primary", providerId: "openrouter", status: "ok", entryCount: 1 },
+      { id: "openrouter-primary", providerId: "openrouter", status: "ok", entryCount: 2 },
       {
         id: "failing-accounting",
         providerId: "failing-gateway",
@@ -426,7 +430,7 @@ describe("v1 supported backend release evidence", () => {
       provider.entries.map((entry) =>
         entry.renderType === "percent" ? entry.percentRemaining : entry.value,
       ),
-    ).toEqual([64, "$12.34", 80]);
+    ).toEqual([64, "$12.34", 80, "$2.00"]);
 
     const { __flushQuotaTelemetryInitializationForTests } = await import(
       "../src/lib/quota-telemetry.js"
