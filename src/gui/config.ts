@@ -42,6 +42,7 @@ import {
   ConfigWriteTargetError,
   type ConfigWriteTargetReason,
 } from "../lib/config-write-target.js";
+import { DASHBOARD_HIDDEN_CARDS_VERSION } from "../lib/dashboard-visibility.js";
 import { isResetTimeDecimals } from "../lib/format-utils.js";
 import { assertGuiConfigTargetIsIndependent } from "../lib/gui-config-target.js";
 import {
@@ -82,10 +83,17 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "dashboard.hiddenCards",
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
+  "dashboard.cardOrder",
 ] as const;
 
-/** Read-only GUI settings keys: the port needs a restart and has no fallback. */
-export const GUI_SETTINGS_READ_ONLY_KEYS = ["dashboard.port"] as const;
+/**
+ * Read-only GUI settings keys: the port needs a restart, and the hidden-card
+ * semantics marker is server-managed after an automatic write stamp.
+ */
+export const GUI_SETTINGS_READ_ONLY_KEYS = [
+  "dashboard.port",
+  "dashboard.hiddenCardsVersion",
+] as const;
 
 /** Every GUI-exposed settings key (spec §5.4), in table order. */
 export const GUI_SETTINGS_KEYS = [
@@ -349,10 +357,14 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return config.opencodeMonthlyLimit ?? null;
       case "dashboard.hiddenCards":
         return [...config.dashboard.hiddenCards];
+      case "dashboard.hiddenCardsVersion":
+        return config.dashboard.hiddenCardsVersion;
       case "dashboard.hiddenRows":
         return [...config.dashboard.hiddenRows];
       case "dashboard.providerOrder":
         return [...config.dashboard.providerOrder];
+      case "dashboard.cardOrder":
+        return [...config.dashboard.cardOrder];
       case "dashboard.port":
         return config.dashboard.port;
     }
@@ -557,7 +569,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return value;
       case "dashboard.hiddenCards":
       case "dashboard.hiddenRows":
-      case "dashboard.providerOrder": {
+      case "dashboard.providerOrder":
+      case "dashboard.cardOrder": {
         if (!Array.isArray(value)) {
           throw invalidSetting(key, "expected a list of id strings");
         }
@@ -575,6 +588,11 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       }
       case "dashboard.port":
         throw invalidSetting(key, "this setting is read-only; edit the canonical file and restart");
+      case "dashboard.hiddenCardsVersion":
+        throw invalidSetting(
+          key,
+          "this setting is read-only; hidden-card semantics are managed automatically",
+        );
     }
   }
 
@@ -605,6 +623,14 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       const value = normalizeSettingValue(key, rawValue, warnings);
       changes.set(rawKey, value);
       applied[rawKey] = value;
+    }
+
+    // Any GUI write of the hidden-card list upgrades the persisted semantics in
+    // the same atomic document edit. The GUI reads effective (already normalized)
+    // ids, so legacy provider-wide hides stay provider ids instead of being
+    // re-persisted as exact v2 scope-card ids.
+    if (changes.has("dashboard.hiddenCards")) {
+      changes.set("dashboard.hiddenCardsVersion", DASHBOARD_HIDDEN_CARDS_VERSION);
     }
 
     return { applied, warnings, changes };

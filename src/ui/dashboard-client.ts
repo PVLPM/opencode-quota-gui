@@ -401,6 +401,19 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
   if (accountLabel !== undefined) parsed.accountLabel = accountLabel;
   const planLabel = readOptionalText(card.planLabel, endpoint, `${detail}.planLabel`);
   if (planLabel !== undefined) parsed.planLabel = planLabel;
+  if (card.providerScopeId !== undefined) {
+    parsed.providerScopeId = readCardId(
+      card.providerScopeId,
+      endpoint,
+      `${detail}.providerScopeId`,
+    );
+  }
+  const providerScopeHash = readOptionalText(
+    card.providerScopeHash,
+    endpoint,
+    `${detail}.providerScopeHash`,
+  );
+  if (providerScopeHash !== undefined) parsed.providerScopeHash = providerScopeHash;
   const observedAtIso = readOptionalText(card.observedAtIso, endpoint, `${detail}.observedAtIso`);
   if (observedAtIso !== undefined) parsed.observedAtIso = observedAtIso;
   if (card.details !== undefined) {

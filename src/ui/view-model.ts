@@ -83,14 +83,37 @@ export function resolveLoadState<T>(
 
 /**
  * A card is visible unless the hidden-card list contains its `cardId` or its
- * `providerId`: the Settings provider-level eye stores the provider id, so a
- * provider key hides that provider's whole card group on Home. Row hiding is
- * separate (`visibleRows`) and is never affected by this list.
+ * `providerId`, or its authoritative bare provider-scope hash. Effective server
+ * settings normalize legacy full scope ids to providerId; every full cardId is
+ * now an exact hide. Row hiding is separate and unaffected by this list.
  */
 export function visibleCards(cards: ProviderCard[], hiddenCards: string[]): ProviderCard[] {
   if (hiddenCards.length === 0) return cards;
   const hidden = new Set(hiddenCards);
-  return cards.filter((card) => !hidden.has(card.cardId) && !hidden.has(card.providerId));
+  return cards.filter((card) => !isCardHidden(card, hidden));
+}
+
+interface ProviderVisibilityIdentity {
+  providerId: string;
+  providerScopeHash?: string;
+}
+
+/** Consume normalized settings; never guess old semantics from the current catalog. */
+export function isLegacyProviderHidden(
+  card: ProviderVisibilityIdentity,
+  hidden: ReadonlySet<string>,
+): boolean {
+  return (
+    hidden.has(card.providerId) ||
+    (card.providerScopeHash !== undefined && hidden.has(card.providerScopeHash))
+  );
+}
+
+export function isCardHidden(
+  card: ProviderVisibilityIdentity & { cardId: string },
+  hidden: ReadonlySet<string>,
+): boolean {
+  return hidden.has(card.cardId) || isLegacyProviderHidden(card, hidden);
 }
 
 /**

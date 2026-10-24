@@ -218,6 +218,7 @@ describe("runtime settings vs legacy import candidates", () => {
     const canonical = JSON.parse(readFileSync(getGuiConfigPath(workspace.configDir), "utf8"));
     expect(canonical.dashboard).toEqual({
       hiddenCards: ["new-card"],
+      hiddenCardsVersion: 2,
       hiddenRows: ["new-row"],
     });
   });

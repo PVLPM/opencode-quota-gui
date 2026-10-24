@@ -11,6 +11,7 @@ import {
   type GuiSettingsErrorCode,
   type GuiSettingsErrorDetails,
 } from "../src/gui/config.js";
+import { buildCardId, buildProviderScopeCardId } from "../src/gui/identity.js";
 import { getGuiConfigPath } from "../src/lib/config.js";
 import {
   createGuiConfigWorkspace,
@@ -88,7 +89,9 @@ const EXPECTED_KEYS = [
   "dashboard.hiddenCards",
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
+  "dashboard.cardOrder",
   "dashboard.port",
+  "dashboard.hiddenCardsVersion",
 ] as const;
 
 const LEGACY_ONLY_KEYS = [
@@ -106,10 +109,12 @@ const LEGACY_ONLY_KEYS = [
 ] as const;
 
 describe("GUI settings keys", () => {
-  it("exposes exactly the spec 5.4 table, with the port read-only", () => {
+  it("exposes exactly the spec 5.4 table, with the port and semantics version read-only", () => {
     expect([...GUI_SETTINGS_KEYS]).toEqual([...EXPECTED_KEYS]);
     expect([...GUI_SETTINGS_WRITABLE_KEYS]).toEqual(
-      EXPECTED_KEYS.filter((key) => key !== "dashboard.port"),
+      EXPECTED_KEYS.filter(
+        (key) => key !== "dashboard.port" && key !== "dashboard.hiddenCardsVersion",
+      ),
     );
     for (const legacyOnly of LEGACY_ONLY_KEYS) {
       expect(GUI_SETTINGS_KEYS).not.toContain(legacyOnly);
@@ -138,7 +143,9 @@ describe("GUI settings keys", () => {
       "dashboard.hiddenCards": [],
       "dashboard.hiddenRows": [],
       "dashboard.providerOrder": [],
+      "dashboard.cardOrder": [],
       "dashboard.port": 4144,
+      "dashboard.hiddenCardsVersion": 2,
     });
     expect(snapshot.sources).toEqual(
       Object.fromEntries(EXPECTED_KEYS.map((key) => [key, "defaults"])),
@@ -180,6 +187,136 @@ describe("GUI settings keys", () => {
     expect(snapshot.issues.some((issue) => issue.key === "dashboard.port")).toBe(true);
   });
 
+  it("normalizes legacy scope ids and stamps version 2 on a generic hidden-card save", async () => {
+    const workspace = makeWorkspace();
+    const scope = buildProviderScopeCardId("openai");
+    const account = buildCardId("openai", "account-1");
+    const bareScopeHash = scope.slice(scope.indexOf(":") + 1);
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: {
+        hiddenCards: [scope, account, "unknown-hidden-card", bareScopeHash],
+        providerOrder: ["openai", "cursor"],
+      },
+    });
+    const store = makeStore(workspace);
+    const before = await store.settings();
+    const hiddenCards = before.values["dashboard.hiddenCards"];
+
+    expect(hiddenCards).toEqual(["openai", account, "unknown-hidden-card", bareScopeHash]);
+    expect(before.values["dashboard.hiddenCardsVersion"]).toBe(2);
+
+    await store.saveSettings({
+      patch: { "dashboard.hiddenCards": hiddenCards as JsonValue },
+      expectedRevision: before.revision,
+    });
+
+    expect(readDotted(workspace, "dashboard.hiddenCards")).toEqual([
+      "openai",
+      account,
+      "unknown-hidden-card",
+      bareScopeHash,
+    ]);
+    expect(readDotted(workspace, "dashboard.hiddenCardsVersion")).toBe(2);
+    expect(readDotted(workspace, "dashboard.providerOrder")).toEqual(["openai", "cursor"]);
+    expect(readFileSync(workspace.guiConfigPath, "utf8")).not.toContain(scope);
+  });
+
+  it("keeps an exact provider-scope card id under version 2 and stamps saveVisibility", async () => {
+    const workspace = makeWorkspace();
+    const scope = buildProviderScopeCardId("openai");
+    const sibling = buildCardId("openai", "account-1");
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { hiddenCardsVersion: 2, hiddenCards: [scope] },
+    });
+    const store = makeStore(workspace);
+    const before = await store.settings();
+
+    expect(before.values["dashboard.hiddenCards"]).toEqual([scope]);
+    expect(before.values["dashboard.hiddenCardsVersion"]).toBe(2);
+
+    await store.saveVisibility({
+      hiddenCards: [scope],
+      hiddenRows: [],
+      expectedRevision: before.revision,
+    });
+
+    expect(readDotted(workspace, "dashboard.hiddenCards")).toEqual([scope]);
+    expect(readDotted(workspace, "dashboard.hiddenCards")).not.toContain(sibling);
+    expect(readDotted(workspace, "dashboard.hiddenCardsVersion")).toBe(2);
+    expect(readFileSync(workspace.guiConfigPath, "utf8")).toContain(scope);
+  });
+
+  it("round-trips the version marker through canonical JSONC", async () => {
+    const workspace = makeWorkspace();
+    const scope = buildProviderScopeCardId("openai");
+    writeGuiCanonicalConfig(
+      workspace,
+      `{
+  // keep the hidden choice
+  "dashboard": {
+    "hiddenCardsVersion": 2,
+    "hiddenCards": ["${scope}"]
+  }
+}
+`,
+    );
+    const store = makeStore(workspace);
+    const before = await store.settings();
+
+    expect(before.values["dashboard.hiddenCards"]).toEqual([scope]);
+    expect(before.values["dashboard.hiddenCardsVersion"]).toBe(2);
+
+    await store.saveVisibility({
+      hiddenCards: [scope],
+      hiddenRows: [],
+      expectedRevision: before.revision,
+    });
+
+    const raw = readFileSync(workspace.guiConfigPath, "utf8");
+    expect(raw).toContain("// keep the hidden choice");
+    expect(raw).toMatch(/"hiddenCardsVersion":\s*2/u);
+    expect(raw).toContain(scope);
+  });
+
+  it("does not erase the semantics marker when hiddenCards is cleared generically", async () => {
+    const workspace = makeWorkspace();
+    const scope = buildProviderScopeCardId("opencode-go");
+    writeGuiCanonicalConfig(workspace, { dashboard: { hiddenCards: [scope] } });
+    const store = makeStore(workspace);
+    const before = await store.settings();
+
+    expect(before.values["dashboard.hiddenCards"]).toEqual(["opencode-go"]);
+
+    await store.saveSettings({
+      patch: { "dashboard.hiddenCards": null },
+      expectedRevision: before.revision,
+    });
+
+    expect(readDotted(workspace, "dashboard.hiddenCards")).toBeUndefined();
+    expect(readDotted(workspace, "dashboard.hiddenCardsVersion")).toBe(2);
+
+    const after = await store.settings();
+    expect(after.values["dashboard.hiddenCards"]).toEqual([]);
+    expect(after.values["dashboard.hiddenCardsVersion"]).toBe(2);
+  });
+
+  it("rejects direct writes to the read-only hiddenCardsVersion marker", async () => {
+    const workspace = makeWorkspace();
+    const store = makeStore(workspace);
+    const before = await store.settings();
+
+    for (const value of [1, 2, null] as const) {
+      await expectGuiError(
+        store.saveSettings({
+          patch: { "dashboard.hiddenCardsVersion": value as JsonValue },
+          expectedRevision: before.revision,
+        }),
+        "invalid-setting",
+      );
+    }
+    expect(existsSync(workspace.guiConfigPath)).toBe(false);
+  });
+
   const writeCases: Array<[string, JsonValue, JsonValue]> = [
     ["formatStyle", "allWindows", "allWindows"],
     ["percentDisplayMode", "used", "used"],
@@ -201,6 +338,7 @@ describe("GUI settings keys", () => {
     ["dashboard.hiddenCards", ["card-1"], ["card-1"]],
     ["dashboard.hiddenRows", ["card-1#row-1"], ["card-1#row-1"]],
     ["dashboard.providerOrder", ["provider-1", "provider-2"], ["provider-1", "provider-2"]],
+    ["dashboard.cardOrder", ["card-2", "card-1"], ["card-2", "card-1"]],
   ];
 
   it.each(writeCases)("writes %s = %j for real", async (key, value, expected) => {
@@ -294,6 +432,7 @@ describe("GUI settings keys", () => {
         opencodeGoWindows: ["weekly", "weekly", "monthly"],
         "dashboard.hiddenCards": ["a", "a", "b"],
         "dashboard.providerOrder": ["second", "first", "second"],
+        "dashboard.cardOrder": ["card-b", "card-a", "card-b"],
       },
       expectedRevision: before.revision,
     });
@@ -301,6 +440,7 @@ describe("GUI settings keys", () => {
     expect(readDotted(workspace, "opencodeGoWindows")).toEqual(["weekly", "monthly"]);
     expect(readDotted(workspace, "dashboard.hiddenCards")).toEqual(["a", "b"]);
     expect(readDotted(workspace, "dashboard.providerOrder")).toEqual(["second", "first"]);
+    expect(readDotted(workspace, "dashboard.cardOrder")).toEqual(["card-b", "card-a"]);
   });
 
   it("rejects unknown keys with unknown-setting and writes nothing", async () => {
@@ -346,11 +486,15 @@ describe("GUI settings keys", () => {
     ["dashboard.providerOrder", "x"],
     ["dashboard.providerOrder", [""]],
     ["dashboard.providerOrder", ["ok", 1]],
+    ["dashboard.cardOrder", "x"],
+    ["dashboard.cardOrder", [""]],
+    ["dashboard.cardOrder", ["ok", 1]],
     ["dashboard.hiddenCards", Array.from({ length: 501 }, (_value, index) => `card-${index}`)],
     [
       "dashboard.providerOrder",
       Array.from({ length: 501 }, (_value, index) => `provider-${index}`),
     ],
+    ["dashboard.cardOrder", Array.from({ length: 501 }, (_value, index) => `card-${index}`)],
   ];
 
   it.each(invalidCases)("rejects invalid %s = %j with invalid-setting", async (key, value) => {

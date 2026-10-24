@@ -11,6 +11,10 @@
 
 import { existsSync, realpathSync } from "fs";
 import { join } from "path";
+import {
+  DASHBOARD_HIDDEN_CARDS_VERSION,
+  normalizeLegacyDashboardHiddenCards,
+} from "./dashboard-visibility.js";
 import { isResetTimeDecimals } from "./format-utils.js";
 import {
   buildOpenCodeConfigCandidates,
@@ -111,8 +115,10 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "telemetry.enabled",
   "dashboard.port",
   "dashboard.hiddenCards",
+  "dashboard.hiddenCardsVersion",
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
+  "dashboard.cardOrder",
 ] as const;
 
 export type QuotaToastSettingSourceKey = (typeof QUOTA_TOAST_SETTING_SOURCE_KEYS)[number];
@@ -401,8 +407,10 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
     dashboard: {
       port: config.dashboard.port,
       hiddenCards: [...config.dashboard.hiddenCards],
+      hiddenCardsVersion: config.dashboard.hiddenCardsVersion,
       hiddenRows: [...config.dashboard.hiddenRows],
       providerOrder: [...config.dashboard.providerOrder],
+      cardOrder: [...config.dashboard.cardOrder],
     },
   };
 }
@@ -709,16 +717,29 @@ function extractDashboardPatch(
     }
   }
 
-  for (const key of ["hiddenCards", "hiddenRows", "providerOrder"] as const) {
+  if (hasOwnKey(value, "hiddenCardsVersion")) {
+    if (value.hiddenCardsVersion === DASHBOARD_HIDDEN_CARDS_VERSION) {
+      patch.hiddenCardsVersion = DASHBOARD_HIDDEN_CARDS_VERSION;
+    } else if (value.hiddenCardsVersion !== 1) {
+      reportIssue?.("dashboard.hiddenCardsVersion", "expected 2");
+    }
+  }
+
+  for (const key of ["hiddenCards", "hiddenRows", "providerOrder", "cardOrder"] as const) {
     if (!hasOwnKey(value, key)) {
       continue;
     }
     const ids = normalizeHiddenIdList(value[key]);
-    if (ids) {
-      patch[key] = ids;
-    } else {
+    if (!ids) {
       reportIssue?.(`dashboard.${key}`, "expected an array of id strings");
+      continue;
     }
+    // A layer without a v2 marker owns legacy semantics: a full provider-scope
+    // card id meant the whole provider group. Version 2 preserves exact ids.
+    patch[key] =
+      key === "hiddenCards" && value.hiddenCardsVersion !== DASHBOARD_HIDDEN_CARDS_VERSION
+        ? normalizeLegacyDashboardHiddenCards(ids)
+        : ids;
   }
 
   return Object.keys(patch).length > 0 ? patch : undefined;
@@ -1321,6 +1342,11 @@ function applyValidatedQuotaToastPatch(
       applySettingSource(settingSources, "dashboard.hiddenCards", sourcePath);
     }
 
+    if (hasOwnKey(patch.dashboard, "hiddenCardsVersion")) {
+      config.dashboard.hiddenCardsVersion = patch.dashboard.hiddenCardsVersion!;
+      applySettingSource(settingSources, "dashboard.hiddenCardsVersion", sourcePath);
+    }
+
     if (hasOwnKey(patch.dashboard, "hiddenRows")) {
       config.dashboard.hiddenRows = [...patch.dashboard.hiddenRows!];
       applySettingSource(settingSources, "dashboard.hiddenRows", sourcePath);
@@ -1329,6 +1355,11 @@ function applyValidatedQuotaToastPatch(
     if (patch.dashboard.providerOrder) {
       config.dashboard.providerOrder = [...patch.dashboard.providerOrder];
       applySettingSource(settingSources, "dashboard.providerOrder", sourcePath);
+    }
+
+    if (patch.dashboard.cardOrder) {
+      config.dashboard.cardOrder = [...patch.dashboard.cardOrder];
+      applySettingSource(settingSources, "dashboard.cardOrder", sourcePath);
     }
   }
 }

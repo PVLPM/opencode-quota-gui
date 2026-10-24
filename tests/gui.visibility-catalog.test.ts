@@ -1,400 +1,207 @@
 import { describe, expect, it } from "vitest";
-import { OPENAI_CREDITS_INFO, OPENAI_RESETS_INFO } from "../src/contracts/openai-quota";
 import {
   mergeVisibilityCatalog,
   readVisibilityCatalog,
   VISIBILITY_CATALOG_LIMITS,
   VISIBILITY_CATALOG_STORAGE_KEY,
-  type VisibilityCatalog,
-  type VisibilityProvider,
+  type VisibilityCard,
   visibilityCatalogEquals,
   writeVisibilityCatalog,
 } from "../src/ui/visibility-catalog";
 
-function provider(overrides: Partial<VisibilityProvider> = {}): VisibilityProvider {
+const ACCOUNT_A = `anthropic:${"a".repeat(64)}`;
+const ACCOUNT_B = `anthropic:${"b".repeat(64)}`;
+const PROVIDER_SCOPE = `anthropic:${"c".repeat(64)}`;
+
+function card(overrides: Partial<VisibilityCard> = {}): VisibilityCard {
+  const cardId = overrides.cardId ?? ACCOUNT_A;
   return {
-    providerId: "provider-1",
-    providerLabel: "Provider One",
-    accountLabels: ["Plus"],
-    cardIds: ["provider-1#cardhash"],
-    rows: [{ id: "provider-1#cardhash#window:weekly", label: "Weekly", accountLabel: "Plus" }],
+    cardId,
+    providerId: "anthropic",
+    providerLabel: "Anthropic",
+    planLabel: "Pro",
+    accountLabel: "Personal",
+    providerScopeId: PROVIDER_SCOPE,
+    providerScopeHash: "c".repeat(64),
+    rows: [{ id: `${cardId}#weekly`, label: "Weekly", info: "Quota help" }],
     ...overrides,
   };
 }
 
-function memoryStorage(initial?: string) {
-  const values = new Map<string, string>();
-  if (initial !== undefined) values.set(VISIBILITY_CATALOG_STORAGE_KEY, initial);
+function storage(initial?: string) {
+  let value = initial ?? null;
   return {
-    values,
-    getItem: (key: string) => values.get(key) ?? null,
-    setItem: (key: string, value: string) => {
-      values.set(key, value);
+    getItem: (_key: string) => value,
+    setItem: (_key: string, next: string) => {
+      value = next;
     },
   };
 }
 
-function decoded(storage: ReturnType<typeof memoryStorage>): unknown {
-  return JSON.parse(storage.values.get(VISIBILITY_CATALOG_STORAGE_KEY) ?? "null");
-}
+describe("card-centric visibility catalog v2", () => {
+  it("round-trips separate card identities and owns rows without account suffixes", () => {
+    const store = storage();
+    const catalog = {
+      cards: [card(), card({ cardId: ACCOUNT_B, accountLabel: "Work" })],
+    };
+    writeVisibilityCatalog(store, catalog);
+    expect(VISIBILITY_CATALOG_STORAGE_KEY).toMatch(/\.v2$/u);
+    expect(JSON.parse(store.getItem("") ?? "null").version).toBe(2);
+    expect(readVisibilityCatalog(store)).toEqual(catalog);
+    expect(readVisibilityCatalog(store).cards[0]?.rows[0]).not.toHaveProperty("accountLabel");
+  });
 
-describe("visibility catalog cache", () => {
-  it("round-trips a valid catalog through storage", () => {
-    const storage = memoryStorage();
-    const catalog: VisibilityCatalog = {
-      providers: [
-        provider(),
-        provider({
-          providerId: "provider-2",
-          providerLabel: "Provider Two",
-          accountLabels: ["Team"],
-          cardIds: ["provider-2#cardhash"],
-          rows: [{ id: "provider-2#cardhash#window:monthly", label: "Monthly" }],
+  it("discards the old provider schema, even stored under the new key", () => {
+    for (const value of [
+      { version: 1, providers: [{ providerId: "anthropic", cardIds: ["a", "b"] }] },
+      { version: 1, cards: [card()] },
+      { version: 2, providers: [{ providerId: "anthropic" }] },
+      { version: 3, cards: [card()] },
+      null,
+    ])
+      expect(readVisibilityCatalog(storage(JSON.stringify(value)))).toEqual({ cards: [] });
+    expect(readVisibilityCatalog(storage("{bad"))).toEqual({ cards: [] });
+    expect(readVisibilityCatalog(undefined)).toEqual({ cards: [] });
+    expect(
+      readVisibilityCatalog({
+        getItem: () => {
+          throw new Error("Blocked");
+        },
+      }),
+    ).toEqual({ cards: [] });
+  });
+
+  it("rejects malformed namespaces, hashes and foreign rows rather than inventing ids from labels", () => {
+    const valid = card({
+      rows: [
+        { id: `${ACCOUNT_A}#weekly`, label: "Owned" },
+        { id: `${ACCOUNT_B}#weekly`, label: "Foreign sibling" },
+        { id: `openrouter:${"a".repeat(64)}#balance`, label: "Foreign provider" },
+        { id: `${ACCOUNT_A}#`, label: "Empty key" },
+        { id: `${ACCOUNT_A}#${"r".repeat(300)}`, label: "Oversized key" },
+      ],
+    });
+    const malformed = [
+      "Anthropic · Pro · Personal",
+      "anthropic:account-a",
+      `openrouter:${"a".repeat(64)}`,
+      `anthropic:${"a".repeat(63)}`,
+      `anthropic:${"g".repeat(64)}`,
+      `${ACCOUNT_B}extra`,
+      ` ${ACCOUNT_B}`,
+      undefined,
+    ].map((cardId) => ({ ...card(), cardId }));
+    const store = storage(JSON.stringify({ version: 2, cards: [...malformed, valid] }));
+    const expected = { cards: [{ ...valid, rows: [valid.rows[0]] }] };
+    expect(readVisibilityCatalog(store)).toEqual(expected);
+    writeVisibilityCatalog(store, { cards: [...malformed, valid] } as never);
+    expect(readVisibilityCatalog(store)).toEqual(expected);
+    expect(mergeVisibilityCatalog({ cards: [valid] }, { cards: malformed } as never)).toEqual(
+      expected,
+    );
+  });
+
+  it("merges only the same card and keeps cached siblings when a read is filtered", () => {
+    const sibling = card({
+      cardId: ACCOUNT_B,
+      accountLabel: "Work",
+      rows: [{ id: `${ACCOUNT_B}#weekly`, label: "Weekly" }],
+    });
+    const current = card({
+      planLabel: "Max",
+      accountLabel: "Renamed",
+      rows: [{ id: `${ACCOUNT_A}#weekly`, label: "Current weekly" }],
+    });
+    const merged = mergeVisibilityCatalog({ cards: [current] }, { cards: [card(), sibling] });
+    expect(merged.cards).toEqual([
+      {
+        ...current,
+        rows: [{ id: `${ACCOUNT_A}#weekly`, label: "Current weekly", info: "Quota help" }],
+      },
+      sibling,
+    ]);
+    expect(merged.cards[0]?.rows).not.toContainEqual(sibling.rows[0]);
+    expect(mergeVisibilityCatalog({ cards: [] }, merged)).toEqual(merged);
+    expect(
+      mergeVisibilityCatalog(
+        { cards: [card({ planLabel: undefined, accountLabel: undefined })] },
+        { cards: [card()] },
+      ).cards[0],
+    ).not.toHaveProperty("planLabel");
+  });
+
+  it("validates and bounds untrusted cards, rows, labels and duplicate identities", () => {
+    const input = {
+      version: 2,
+      cards: [
+        null,
+        { ...card(), cardId: 7 },
+        card({
+          providerLabel: "P".repeat(400),
+          planLabel: 7 as never,
+          accountLabel: "A".repeat(400),
+          rows: [
+            {
+              id: `${ACCOUNT_A}#valid`,
+              label: "Weekly",
+              info: "I".repeat(400),
+              accountLabel: "not copied",
+            } as never,
+            { id: `${ACCOUNT_A}#valid`, label: "Duplicate" },
+            { id: 7, label: "Bad" } as never,
+          ],
         }),
+        card({ accountLabel: "Duplicate" }),
       ],
     };
-
-    writeVisibilityCatalog(storage, catalog);
-    expect(readVisibilityCatalog(storage)).toEqual(catalog);
-  });
-
-  it("reads malformed JSON, wrong versions, and wrong root shapes as an empty catalog", () => {
-    for (const raw of [
-      "{not json",
-      "null",
-      "[]",
-      JSON.stringify({ version: 2, providers: [provider()] }),
-      JSON.stringify({ version: 1, providers: "nope" }),
-      JSON.stringify({ version: 1, providers: [null, 7, "x"] }),
-    ]) {
-      expect(readVisibilityCatalog(memoryStorage(raw))).toEqual({ providers: [] });
-    }
-    expect(readVisibilityCatalog(undefined)).toEqual({ providers: [] });
-  });
-
-  it("skips non-string ids and labels, and drops malformed optional account labels", () => {
-    const storage = memoryStorage(
-      JSON.stringify({
-        version: 1,
-        providers: [
-          { providerId: 7, providerLabel: "Bad provider" },
-          {
-            providerId: "valid",
-            providerLabel: "Valid Provider",
-            accountLabels: ["Plus", 5],
-            cardIds: ["valid#card", null],
-            rows: [
-              { id: "valid#row-1", label: "Weekly", accountLabel: 42 },
-              { id: 8, label: "Bad row" },
-              { id: "valid#row-2", label: "Monthly" },
-            ],
-          },
-        ],
-      }),
-    );
-
-    expect(readVisibilityCatalog(storage)).toEqual({
-      providers: [
-        {
-          providerId: "valid",
-          providerLabel: "Valid Provider",
-          accountLabels: ["Plus"],
-          cardIds: ["valid#card"],
-          rows: [
-            { id: "valid#row-1", label: "Weekly" },
-            { id: "valid#row-2", label: "Monthly" },
-          ],
-        },
-      ],
-    });
-  });
-
-  it("clamps oversized stored arrays, text and duplicate ids", () => {
-    const storage = memoryStorage(
-      JSON.stringify({
-        version: 1,
-        providers: Array.from({ length: 250 }, (_value, index) => ({
-          providerId: `provider-${index}`,
-          providerLabel: `${"P".repeat(300)}-${index}`,
-          accountLabels: [`account-${index}`, `account-${index}`],
-          cardIds: Array.from({ length: 20 }, (_card, card) => `card-${index}-${card}`),
-          rows: Array.from({ length: 10 }, (_row, row) => ({
-            id: `row-${index}-${row}`,
-            label: "L".repeat(300),
-            accountLabel: "A".repeat(300),
-          })),
-        })),
-      }),
-    );
-
-    const catalog = readVisibilityCatalog(storage);
-    expect(catalog.providers).toHaveLength(VISIBILITY_CATALOG_LIMITS.providers);
-    const rows = catalog.providers.reduce((count, entry) => count + entry.rows.length, 0);
-    const cardIds = catalog.providers.reduce((count, entry) => count + entry.cardIds.length, 0);
-    expect(rows).toBe(VISIBILITY_CATALOG_LIMITS.rows);
-    expect(cardIds).toBe(VISIBILITY_CATALOG_LIMITS.cardIds);
-    for (const entry of catalog.providers) {
-      expect(entry.providerLabel.length).toBeLessThanOrEqual(VISIBILITY_CATALOG_LIMITS.textLength);
-      expect(entry.accountLabels).toHaveLength(1);
-      for (const row of entry.rows) {
-        expect(row.label.length).toBeLessThanOrEqual(VISIBILITY_CATALOG_LIMITS.textLength);
-        expect(row.accountLabel?.length).toBeLessThanOrEqual(VISIBILITY_CATALOG_LIMITS.textLength);
-      }
-    }
-  });
-
-  it("bounds the catalog it writes as well as the one it reads", () => {
-    const storage = memoryStorage();
-    writeVisibilityCatalog(storage, {
-      providers: Array.from({ length: 250 }, (_value, index) => ({
-        providerId: `provider-${index}`,
-        providerLabel: "P".repeat(300),
-        accountLabels: ["account"],
-        cardIds: Array.from({ length: 20 }, (_card, card) => `card-${index}-${card}`),
-        rows: Array.from({ length: 10 }, (_row, row) => ({
-          id: `row-${index}-${row}`,
-          label: "L".repeat(300),
-        })),
-      })),
-    });
-
-    const stored = decoded(storage) as { providers: VisibilityProvider[] };
-    expect(stored.providers).toHaveLength(VISIBILITY_CATALOG_LIMITS.providers);
-    expect(stored.providers.reduce((count, entry) => count + entry.rows.length, 0)).toBe(
+    const read = readVisibilityCatalog(storage(JSON.stringify(input)));
+    expect(read.cards).toHaveLength(1);
+    expect(read.cards[0]?.providerLabel).toHaveLength(VISIBILITY_CATALOG_LIMITS.textLength);
+    expect(read.cards[0]?.accountLabel).toHaveLength(VISIBILITY_CATALOG_LIMITS.textLength);
+    expect(read.cards[0]).not.toHaveProperty("planLabel");
+    expect(read.cards[0]?.rows).toEqual([
+      {
+        id: `${ACCOUNT_A}#valid`,
+        label: "Weekly",
+        info: "I".repeat(VISIBILITY_CATALOG_LIMITS.textLength),
+      },
+    ]);
+    const many = {
+      cards: Array.from({ length: 4_100 }, (_, index) =>
+        card({
+          cardId: `anthropic:${index.toString(16).padStart(64, "0")}`,
+          rows: [{ id: `anthropic:${index.toString(16).padStart(64, "0")}#quota`, label: "Quota" }],
+        }),
+      ),
+    };
+    const store = storage();
+    writeVisibilityCatalog(store, many);
+    const bounded = readVisibilityCatalog(store);
+    expect(bounded.cards).toHaveLength(VISIBILITY_CATALOG_LIMITS.cards);
+    expect(bounded.cards.reduce((sum, entry) => sum + entry.rows.length, 0)).toBe(
       VISIBILITY_CATALOG_LIMITS.rows,
     );
-    expect(stored.providers[0]?.providerLabel.length).toBe(VISIBILITY_CATALOG_LIMITS.textLength);
-  });
-
-  it("keeps a cached provider that the filtered quota snapshot no longer contains", () => {
-    const visible = provider();
-    const hidden = provider({
-      providerId: "hidden-provider",
-      providerLabel: "Hidden Provider",
-      accountLabels: ["Team"],
-      cardIds: ["hidden-provider#cardhash"],
-      rows: [
-        { id: "hidden-provider#cardhash#window:weekly", label: "Weekly", accountLabel: "Team" },
-      ],
-    });
-
-    expect(mergeVisibilityCatalog({ providers: [visible] }, { providers: [hidden] })).toEqual({
-      providers: [visible, hidden],
-    });
-    // An empty current result is the normal state while the optional quota read
-    // is unavailable: the cache alone still has to keep Settings configurable.
-    expect(mergeVisibilityCatalog({ providers: [] }, { providers: [hidden] })).toEqual({
-      providers: [hidden],
-    });
-  });
-
-  it("lets current fields win while retaining cached ids, rows and account labels", () => {
-    const merged = mergeVisibilityCatalog(
-      {
-        providers: [
-          provider({
-            providerLabel: "Current Name",
-            accountLabels: ["Plus"],
-            cardIds: ["current-card"],
-            rows: [
-              { id: "shared-row", label: "Current Weekly", accountLabel: "Plus" },
-              { id: "current-row", label: "Current Monthly", accountLabel: "Plus" },
-              { id: "accountless-row", label: "Current Accountless" },
-            ],
-          }),
-        ],
-      },
-      {
-        providers: [
-          provider({
-            providerLabel: "Cached Name",
-            accountLabels: ["Plus", "Team"],
-            cardIds: ["cached-card", "current-card"],
-            rows: [
-              { id: "shared-row", label: "Cached Weekly", accountLabel: "Team" },
-              { id: "cached-row", label: "Cached Monthly", accountLabel: "Team" },
-              { id: "accountless-row", label: "Cached Accountless", accountLabel: "Team" },
-            ],
-          }),
-        ],
-      },
-    );
-
-    expect(merged).toEqual({
-      providers: [
+    expect(() =>
+      writeVisibilityCatalog(
         {
-          providerId: "provider-1",
-          providerLabel: "Current Name",
-          accountLabels: ["Plus", "Team"],
-          cardIds: ["current-card", "cached-card"],
-          rows: [
-            { id: "shared-row", label: "Current Weekly", accountLabel: "Plus" },
-            { id: "current-row", label: "Current Monthly", accountLabel: "Plus" },
-            { id: "accountless-row", label: "Current Accountless", accountLabel: "Team" },
-            { id: "cached-row", label: "Cached Monthly", accountLabel: "Team" },
-          ],
-        },
-      ],
-    });
-  });
-
-  it("dedupes duplicate providers and repeated ids when reading", () => {
-    const first = provider();
-    const storage = memoryStorage(
-      JSON.stringify({
-        version: 1,
-        providers: [
-          first,
-          {
-            ...first,
-            providerLabel: "Duplicate Provider",
-            accountLabels: ["Plus", "Plus"],
-            cardIds: ["provider-1#cardhash", "provider-1#cardhash"],
-            rows: [
-              { id: "provider-1#cardhash#window:weekly", label: "Weekly", accountLabel: "Plus" },
-              { id: "provider-1#cardhash#window:weekly", label: "Duplicate Weekly" },
-            ],
+          setItem: () => {
+            throw new Error("Full");
           },
-        ],
-      }),
-    );
-
-    expect(readVisibilityCatalog(storage)).toEqual({ providers: [first] });
-  });
-
-  it("round-trips optional row help, including the exact OpenAI copy", () => {
-    const storage = memoryStorage();
-    const catalog: VisibilityCatalog = {
-      providers: [
-        provider({
-          rows: [
-            { id: "openai#account#openai:resets", label: "Resets", info: OPENAI_RESETS_INFO },
-            { id: "openai#account#openai:credits", label: "Credits", info: OPENAI_CREDITS_INFO },
-            { id: "bounded-row", label: "Bounded", info: "I".repeat(400) },
-          ],
-        }),
-      ],
-    };
-
-    writeVisibilityCatalog(storage, catalog);
-    const read = readVisibilityCatalog(storage);
-    expect(read.providers[0]?.rows[0]?.info).toBe(OPENAI_RESETS_INFO);
-    expect(read.providers[0]?.rows[1]?.info).toBe(OPENAI_CREDITS_INFO);
-    expect(read.providers[0]?.rows[2]?.info).toHaveLength(VISIBILITY_CATALOG_LIMITS.textLength);
-  });
-
-  it("retains optional-row help when runtime metadata briefly lacks it", () => {
-    const merged = mergeVisibilityCatalog(
-      {
-        providers: [
-          provider({
-            rows: [
-              { id: "openai#account#openai:resets", label: "Resets" },
-              { id: "openai#account#openai:credits", label: "Credits", info: OPENAI_CREDITS_INFO },
-            ],
-          }),
-        ],
-      },
-      {
-        providers: [
-          provider({
-            rows: [
-              {
-                id: "openai#account#openai:resets",
-                label: "Resets",
-                info: OPENAI_RESETS_INFO,
-              },
-              {
-                id: "openai#account#openai:credits",
-                label: "Credits",
-                info: OPENAI_CREDITS_INFO,
-              },
-            ],
-          }),
-        ],
-      },
-    );
-
-    expect(merged.providers[0]?.rows).toEqual([
-      { id: "openai#account#openai:resets", label: "Resets", info: OPENAI_RESETS_INFO },
-      {
-        id: "openai#account#openai:credits",
-        label: "Credits",
-        info: OPENAI_CREDITS_INFO,
-      },
-    ]);
-  });
-
-  it("keeps cached optional rows with their exact help when today's runtime has none", () => {
-    const merged = mergeVisibilityCatalog(
-      { providers: [provider({ rows: [] })] },
-      {
-        providers: [
-          provider({
-            rows: [
-              {
-                id: "openai#account#openai:resets",
-                label: "Resets",
-                info: OPENAI_RESETS_INFO,
-              },
-              {
-                id: "openai#account#openai:credits",
-                label: "Credits",
-                info: OPENAI_CREDITS_INFO,
-              },
-            ],
-          }),
-        ],
-      },
-    );
-
-    expect(merged.providers[0]?.rows).toEqual([
-      { id: "openai#account#openai:resets", label: "Resets", info: OPENAI_RESETS_INFO },
-      { id: "openai#account#openai:credits", label: "Credits", info: OPENAI_CREDITS_INFO },
-    ]);
-  });
-
-  it("compares catalogs structurally so only real changes are persisted", () => {
-    const catalog: VisibilityCatalog = { providers: [provider()] };
-    const same = JSON.parse(JSON.stringify(catalog)) as VisibilityCatalog;
-    expect(visibilityCatalogEquals(catalog, same)).toBe(true);
-    expect(
-      visibilityCatalogEquals(catalog, {
-        providers: [{ ...provider(), providerLabel: "Renamed" }],
-      }),
-    ).toBe(false);
-    expect(
-      visibilityCatalogEquals(catalog, {
-        providers: [provider({ rows: [{ id: "other", label: "Other" }] })],
-      }),
-    ).toBe(false);
-    expect(
-      visibilityCatalogEquals(
-        { providers: [provider({ rows: [{ id: "row", label: "Resets" }] })] },
-        {
-          providers: [
-            provider({ rows: [{ id: "row", label: "Resets", info: OPENAI_RESETS_INFO }] }),
-          ],
         },
+        many,
       ),
-    ).toBe(false);
+    ).not.toThrow();
   });
 
-  it("never throws when storage is unavailable or blocked", () => {
-    const throwingReader = {
-      getItem: () => {
-        throw new Error("storage blocked");
-      },
-    };
-    const throwingWriter = {
-      setItem: () => {
-        throw new Error("storage full");
-      },
-    };
-
-    expect(readVisibilityCatalog(throwingReader)).toEqual({ providers: [] });
-    expect(readVisibilityCatalog(undefined)).toEqual({ providers: [] });
-    expect(() => writeVisibilityCatalog(throwingWriter, { providers: [provider()] })).not.toThrow();
-    expect(() => writeVisibilityCatalog(undefined, { providers: [provider()] })).not.toThrow();
+  it("compares labels, card identity, row help and order before persisting", () => {
+    const original = { cards: [card()] };
+    expect(visibilityCatalogEquals(original, { cards: [card()] })).toBe(true);
+    for (const changed of [
+      card({ planLabel: "Max" }),
+      card({ accountLabel: "Work" }),
+      card({ cardId: "b" }),
+      card({ rows: [{ id: `${ACCOUNT_A}#weekly`, label: "Weekly", info: "New" }] }),
+    ])
+      expect(visibilityCatalogEquals(original, { cards: [changed] })).toBe(false);
   });
 });

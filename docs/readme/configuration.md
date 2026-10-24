@@ -29,14 +29,18 @@ Open <http://localhost:4144/settings>. The page groups the supported controls:
 | Wait for quota reset | `waitForQuotaReset`; holds a request when a used-up quota window has a known reset. |
 | Display | `percentDisplayMode` (remaining or used) and `percentLabelStyle` (full or bare). |
 | Advanced | Provider selection, minimum refresh interval, request timeout, and accounting detail. |
-| Visibility | Shows or hides provider cards and rows, and reorders provider cards. Presentation only. |
+| Visibility | Shows or hides cards and rows, and reorders cards. Presentation only. |
 | Dashboard | Read-only address, the canonical file path, configuration issues, and build details. |
 
 Saving Settings writes to the canonical file atomically. If the file changed elsewhere, the save returns a conflict and keeps your draft.
 
 ### Visibility identifiers
 
-`dashboard.hiddenCards`, `dashboard.hiddenRows`, and `dashboard.providerOrder` contain opaque internal identifiers. Do not construct, derive, rename, or copy them between accounts. Use **Settings → Visibility**, where each provider card and row has an eye toggle and each provider has a drag or keyboard reorder handle. Hiding a provider or row never disables polling or deletes data.
+Use **Settings → Visibility** to hide individual cards and rows, and drag a card's grip or press Alt+Up/Down from it to reorder. Each Visibility card represents one Home card, including separate accounts under the same provider. Hiding cards or rows never disables quota polling or deletes data.
+
+New card-eye actions store exact opaque card ids in `dashboard.hiddenCards`; row eyes use `dashboard.hiddenRows`. Reordering writes opaque card ids to `dashboard.cardOrder`. Do not construct these ids from labels or copy them between accounts. A non-empty card order lists preferred cards first; new or unlisted cards append in backend order. The legacy `dashboard.providerOrder` still contains provider ids, is preserved unchanged, and applies when card order is absent or empty.
+
+Older `dashboard.hiddenCards` lists had no semantics marker, so a full provider-scope card id there meant a provider-wide hide. On read, those ids are automatically normalized to the plain provider id, and the next hidden-card save records `dashboard.hiddenCardsVersion: 2`. That marker is read-only metadata; version 2 lists keep exact card ids, so hiding a provider-scope card no longer hides its sibling account cards. Plain provider ids and legacy bare provider-scope hashes remain provider-wide group hides; their inherited card eyes stay disabled with an explanation until the legacy entry is cleared in the settings file. Row eyes remain independent.
 
 ### Port
 

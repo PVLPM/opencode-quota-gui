@@ -9,6 +9,7 @@
  * become the generic controlled string. Raw `statusDetails`/`rawDetails`/
  * diagnostics are never copied into a payload.
  */
+import { orderCardsByPreference } from "../contracts/card-order.js";
 import type { ProviderCard, QuotaCardRow } from "../contracts/dashboard.js";
 import type { CardId } from "../contracts/identity.js";
 import {
@@ -51,7 +52,13 @@ import { getQuotaProviderDisplayLabel } from "../lib/provider-metadata.js";
 import { projectQuotaRunway } from "../lib/quota-exhaustion-projection.js";
 import type { QuotaStatusLiveProbe } from "../lib/quota-render-data.js";
 import type { QuotaToastConfig } from "../lib/types.js";
-import { buildCardId, buildProviderScopeCardId, rowIdForEntry } from "./identity.js";
+import {
+  buildCardId,
+  buildProviderScopeCardId,
+  hashQuotaCardIdentity,
+  PROVIDER_SCOPE_IDENTITY_KEY,
+  rowIdForEntry,
+} from "./identity.js";
 
 /** Controlled fallback for unknown/unsafe provider errors (spec §9 R38). */
 export const PROVIDER_ERROR_GENERIC_MESSAGE =
@@ -71,12 +78,19 @@ export interface ProviderCardPreferences {
   resetTimeDecimals?: QuotaToastConfig["resetTimeDecimals"];
   resetTimeSpaced?: QuotaToastConfig["resetTimeSpaced"];
   /**
-   * Preferred provider card display order (`dashboard.providerOrder`). Affects
-   * only the sequence of provider cards: listed providers come first in saved
-   * order, unlisted providers keep probe order afterward. Data, rows, and
-   * visibility are untouched.
+   * Preferred provider card display order (`dashboard.providerOrder`, legacy).
+   * Affects only the sequence of provider cards: listed providers come first in
+   * saved order, unlisted providers keep probe order afterward. Ignored while a
+   * non-empty `cardOrder` exists. Data, rows, and visibility are untouched.
    */
   providerOrder?: readonly string[];
+  /**
+   * Preferred card display order (`dashboard.cardOrder`). Non-empty is
+   * authoritative: known listed cards come first in saved order and every
+   * unlisted/new card keeps backend order, so same-provider siblings stay
+   * independent. Affects presentation only.
+   */
+  cardOrder?: readonly string[];
 }
 
 export interface BuildProviderCardsInput {
@@ -367,6 +381,8 @@ function pushInto<T>(map: Map<string, T[]>, key: string, value: T): void {
 function buildProviderCard(params: {
   providerId: string;
   providerLabel: string;
+  providerScopeId: CardId;
+  providerScopeHash: string;
   entries: readonly QuotaToastEntry[];
   errors: readonly QuotaToastError[];
   secrets: readonly string[];
@@ -378,6 +394,8 @@ function buildProviderCard(params: {
     cardId,
     providerId: params.providerId,
     providerLabel: params.providerLabel,
+    providerScopeId: params.providerScopeId,
+    providerScopeHash: params.providerScopeHash,
     labelSource: "provider",
     rows: mapEntryRows({
       entries: params.entries,
@@ -396,6 +414,8 @@ function buildProviderCard(params: {
 function buildAccountCard(params: {
   providerId: string;
   providerLabel: string;
+  providerScopeId: CardId;
+  providerScopeHash: string;
   account: QuotaProviderAccount;
   accountIndex: number;
   entries: readonly QuotaToastEntry[];
@@ -417,6 +437,8 @@ function buildAccountCard(params: {
     cardId,
     providerId: params.providerId,
     providerLabel: params.providerLabel,
+    providerScopeId: params.providerScopeId,
+    providerScopeHash: params.providerScopeHash,
     // Display-only fallback numbering; never an identity input.
     accountLabel: sanitizedLabel || `Account ${params.accountIndex + 1}`,
     ...(planLabel ? { planLabel } : {}),
@@ -436,45 +458,23 @@ function buildAccountCard(params: {
 }
 
 /**
- * Stable probe ordering by saved provider preference: listed providers first
- * in saved order, unlisted providers after them in original probe order.
- * Original probe index is the tie-breaker (duplicate ids and unlisted ids).
- */
-function orderProbesByProviderPreference(
-  probes: readonly QuotaStatusLiveProbe[],
-  providerOrder: readonly string[] | undefined,
-): readonly QuotaStatusLiveProbe[] {
-  if (providerOrder === undefined || providerOrder.length === 0) return probes;
-  const rankByProviderId = new Map<string, number>();
-  for (const [rank, providerId] of providerOrder.entries()) {
-    if (!rankByProviderId.has(providerId)) rankByProviderId.set(providerId, rank);
-  }
-  return probes
-    .map((probe, originalIndex) => ({
-      probe,
-      originalIndex,
-      rank: rankByProviderId.get(probe.providerId) ?? Number.POSITIVE_INFINITY,
-    }))
-    .sort((a, b) => (a.rank === b.rank ? a.originalIndex - b.originalIndex : a.rank - b.rank))
-    .map(({ probe }) => probe);
-}
-
-/**
  * One card per discovered account (zero-entry and failed ones included) plus a
  * provider-scope card for unscoped content or when no account was discovered.
- * Cards keep probe (provider-registration) order, optionally reordered by the
- * saved provider preference; a provider-scope card precedes its account cards.
- * Provider-level failures never invent an account.
+ * Cards are assembled in probe (provider-registration) order, then ordered for
+ * display after assembly: a non-empty cardOrder is authoritative, otherwise the
+ * legacy providerOrder keeps provider groups stable. Provider-level failures
+ * never invent an account.
  */
 export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard[] {
   const labelFor = input.providerLabel ?? getQuotaProviderDisplayLabel;
   const cards: ProviderCard[] = [];
   const seenCardIds = new Set<CardId>();
-  const probes = orderProbesByProviderPreference(input.probes, input.preferences.providerOrder);
 
-  for (const probe of probes) {
+  for (const probe of input.probes) {
     const providerId = probe.providerId;
     const providerLabel = sanitizeSingleLineDisplayText(labelFor(providerId));
+    const providerScopeId = buildProviderScopeCardId(providerId);
+    const providerScopeHash = hashQuotaCardIdentity(providerId, PROVIDER_SCOPE_IDENTITY_KEY);
     const accounts = dedupeAccounts(probe.result.accounts ?? []);
     const accountSourceIds = new Set(accounts.map((account) => account.sourceId));
     const secrets = collectRawIdentities(probe);
@@ -508,6 +508,8 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
       const card = buildProviderCard({
         providerId,
         providerLabel,
+        providerScopeId,
+        providerScopeHash,
         entries: unscopedEntries,
         errors: unscopedErrors,
         secrets,
@@ -524,6 +526,8 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
       const card = buildAccountCard({
         providerId,
         providerLabel,
+        providerScopeId,
+        providerScopeHash,
         account,
         accountIndex,
         entries: entriesBySource.get(account.sourceId) ?? [],
@@ -538,5 +542,9 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
     }
   }
 
-  return cards;
+  return orderCardsByPreference(
+    cards,
+    input.preferences.cardOrder,
+    input.preferences.providerOrder,
+  );
 }

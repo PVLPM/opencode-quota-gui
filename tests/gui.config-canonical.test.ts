@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createGuiSettingsStore } from "../src/gui/config.js";
+import { buildCardId, buildProviderScopeCardId } from "../src/gui/identity.js";
 import {
   buildConfigLayerCandidates,
   createLoadConfigMeta,
@@ -11,6 +12,7 @@ import {
   getGuiConfigPath,
   loadConfigLayered,
 } from "../src/lib/config.js";
+import { dashboardProviderScopeHash } from "../src/lib/dashboard-visibility.js";
 import {
   createGuiConfigWorkspace,
   type GuiConfigWorkspace,
@@ -306,6 +308,156 @@ describe("canonical dashboard config layer", () => {
     expect(capped.config.dashboard.providerOrder).toHaveLength(500);
     expect(capped.config.dashboard.providerOrder[0]).toBe("provider-0");
     expect(capped.config.dashboard.providerOrder[499]).toBe("provider-499");
+  });
+
+  it("defaults dashboard.cardOrder to an empty list when the key is absent", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, { minIntervalMs: 500 });
+
+    const { config, meta } = await load(workspace);
+
+    expect(config.dashboard.cardOrder).toEqual([]);
+    expect(meta.settingSources).not.toHaveProperty("dashboard.cardOrder");
+    expect(meta.configIssues).toEqual([]);
+  });
+
+  it("reads, dedupes, and retains unknown dashboard.cardOrder ids across layers", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { cardOrder: ["card-b", "unknown-card", "card-b"] },
+    });
+
+    const global = await load(workspace);
+    expect(global.config.dashboard.cardOrder).toEqual(["card-b", "unknown-card"]);
+    expect(global.meta.settingSources["dashboard.cardOrder"]).toBe(workspace.guiConfigPath);
+
+    writeQuotaSidecarConfig(workspace.workspaceRoot, {
+      dashboard: { cardOrder: ["project-card", "card-b"] },
+    });
+
+    const merged = await load(workspace);
+    expect(merged.config.dashboard.cardOrder).toEqual(["project-card", "card-b"]);
+    expect(merged.meta.settingSources["dashboard.cardOrder"]).toBe(
+      quotaSidecarConfigSource(workspace.workspaceRoot),
+    );
+  });
+
+  it("rejects a null or invalid dashboard.cardOrder and caps the list", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, { dashboard: { cardOrder: null } });
+
+    const nullValue = await load(workspace);
+    expect(nullValue.config.dashboard.cardOrder).toEqual([]);
+    expect(nullValue.meta.configIssues.some((entry) => entry.key === "dashboard.cardOrder")).toBe(
+      true,
+    );
+
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { cardOrder: ["card-a", 7] },
+    });
+
+    const invalid = await load(workspace);
+    expect(invalid.config.dashboard.cardOrder).toEqual([]);
+    const issue = invalid.meta.configIssues.find((entry) => entry.key === "dashboard.cardOrder");
+    expect(issue?.message).toMatch(/array of id strings/);
+
+    const oversized = Array.from({ length: 501 }, (_value, index) => `card-${index}`);
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { cardOrder: oversized },
+    });
+
+    const capped = await load(workspace);
+    expect(capped.config.dashboard.cardOrder).toHaveLength(500);
+    expect(capped.config.dashboard.cardOrder[0]).toBe("card-0");
+    expect(capped.config.dashboard.cardOrder[499]).toBe("card-499");
+  });
+
+  it("normalizes a markerless legacy scope card id to a provider group hide", async () => {
+    const workspace = makeWorkspace();
+    const scope = buildProviderScopeCardId("openai");
+    const account = buildCardId("openai", "account-1");
+    const bareScopeHash = dashboardProviderScopeHash("openai");
+    const rawHiddenCards = [scope, account, "unknown-hidden-card", bareScopeHash];
+
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { hiddenCards: rawHiddenCards },
+    });
+    const before = readFileSync(workspace.guiConfigPath, "utf8");
+
+    const { config, meta } = await load(workspace);
+
+    expect(config.dashboard.hiddenCards).toEqual([
+      "openai",
+      account,
+      "unknown-hidden-card",
+      bareScopeHash,
+    ]);
+    expect(config.dashboard.hiddenCardsVersion).toBe(2);
+    expect(meta.settingSources["dashboard.hiddenCards"]).toBe(workspace.guiConfigPath);
+    expect(meta.settingSources).not.toHaveProperty("dashboard.hiddenCardsVersion");
+    // Reading only normalizes the effective config; the file stays untouched.
+    expect(readFileSync(workspace.guiConfigPath, "utf8")).toBe(before);
+  });
+
+  it("preserves an exact provider-scope card id under hiddenCardsVersion 2", async () => {
+    const workspace = makeWorkspace();
+    const scope = buildProviderScopeCardId("openai");
+    const sibling = buildCardId("openai", "account-1");
+
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: {
+        hiddenCardsVersion: 2,
+        hiddenCards: [scope],
+      },
+    });
+
+    const { config, meta } = await load(workspace);
+
+    expect(config.dashboard.hiddenCards).toEqual([scope]);
+    expect(config.dashboard.hiddenCards).not.toContain(sibling);
+    expect(config.dashboard.hiddenCardsVersion).toBe(2);
+    expect(meta.settingSources["dashboard.hiddenCardsVersion"]).toBe(workspace.guiConfigPath);
+  });
+
+  it("treats explicit version 1 as legacy and an unknown version as a reported issue", async () => {
+    const workspace = makeWorkspace();
+    const scope = buildProviderScopeCardId("opencode-go");
+
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { hiddenCardsVersion: 1, hiddenCards: [scope] },
+    });
+    const legacy = await load(workspace);
+    expect(legacy.config.dashboard.hiddenCards).toEqual(["opencode-go"]);
+    expect(legacy.config.dashboard.hiddenCardsVersion).toBe(2);
+    expect(legacy.meta.configIssues).toEqual([]);
+
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { hiddenCardsVersion: 3, hiddenCards: [scope] },
+    });
+    const invalid = await load(workspace);
+    expect(invalid.config.dashboard.hiddenCards).toEqual(["opencode-go"]);
+    expect(
+      invalid.meta.configIssues.some((entry) => entry.key === "dashboard.hiddenCardsVersion"),
+    ).toBe(true);
+  });
+
+  it("normalizes each dashboard layer by its own hiddenCardsVersion marker", async () => {
+    const workspace = makeWorkspace();
+    const scope = buildProviderScopeCardId("openai");
+
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { hiddenCardsVersion: 2, hiddenCards: [scope] },
+    });
+    writeQuotaSidecarConfig(workspace.workspaceRoot, {
+      dashboard: { hiddenCards: [scope] },
+    });
+
+    const merged = await load(workspace);
+
+    expect(merged.config.dashboard.hiddenCards).toEqual(["openai"]);
+    expect(merged.meta.settingSources["dashboard.hiddenCards"]).toBe(
+      quotaSidecarConfigSource(workspace.workspaceRoot),
+    );
   });
 
   it("ignores a sibling config.json and raises an unread issue for it", async () => {

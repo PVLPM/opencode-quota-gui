@@ -7,6 +7,33 @@ import {
 import { homeSnapshot, NOW } from "./fixtures/gui-ui-fixtures";
 
 describe("independent browser quota transport", () => {
+  it("decodes authoritative legacy provider hide metadata and rejects wrong types", () => {
+    const source = homeSnapshot();
+    const card = {
+      ...source.providers.cards[0],
+      rows: [],
+      providerScopeId: "anthropic:scope",
+      providerScopeHash: "bare-scope",
+    };
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: { ...source.providers, cards: [card] },
+    };
+    expect(parseQuotaSnapshot(payload).providers.cards[0]).toMatchObject({
+      providerScopeId: card.providerScopeId,
+      providerScopeHash: card.providerScopeHash,
+    });
+    for (const field of ["providerScopeId", "providerScopeHash"]) {
+      expect(() =>
+        parseQuotaSnapshot({
+          ...payload,
+          providers: { ...payload.providers, cards: [{ ...card, [field]: 7 }] },
+        }),
+      ).toThrow(DashboardError);
+    }
+  });
   it.each([
     { planLabel: "Plus", accountLabel: "Personal" },
     { accountLabel: "Personal" },

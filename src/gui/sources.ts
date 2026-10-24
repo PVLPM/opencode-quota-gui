@@ -9,10 +9,12 @@
  *   database read, config read, or provider probe happens until the first
  *   analytics request, and the transport never loads a lifetime dataset by
  *   default. A quota viewer therefore never starts the analytics worker.
- * - `quota` loads config, filters the configured enabled/visible provider set,
- *   and runs one existing `collectQuotaDashboardProviderResults` cycle over the
- *   selected providers (existing quota-state cache/cooldowns). Per-provider
- *   last-good results survive a slow/empty/error cycle.
+ * - `quota` loads config, selects the configured enabled provider set, and runs
+ *   one existing `collectQuotaDashboardProviderResults` cycle over it (existing
+ *   quota-state cache/cooldowns). Visibility is presentation-only: every
+ *   selected provider is polled and its cards remain in the snapshot; the
+ *   browser filters hidden cards. Per-provider last-good results survive a
+ *   slow/empty/error cycle.
  *
  * `loadDataset`/`createAnalytics`/`collectProviderResults` remain plain
  * callback seams for synthetic tests; production uses the analytics service
@@ -41,12 +43,7 @@ import {
   type UsageAnalyticsDataset,
 } from "./aggregation.js";
 import { type AnalyticsReadService, createAnalyticsReadService } from "./analytics-service.js";
-import {
-  buildCardId,
-  buildProviderScopeCardId,
-  hashQuotaCardIdentity,
-  PROVIDER_SCOPE_IDENTITY_KEY,
-} from "./identity.js";
+import { buildCardId, hashQuotaCardIdentity } from "./identity.js";
 import {
   buildProviderCards,
   openAiOptionalVisibilityRows,
@@ -170,24 +167,13 @@ function hasRevokedOpenCodeGoEntitlement(probe: QuotaStatusLiveProbe): boolean {
 }
 
 /**
- * A provider is hidden before probing only by a provider-level id: its plain
- * id, its provider-scope card id, or the bare provider-scope hash. Account-level
- * card ids/hashes and hidden rows never remove the whole provider from the
- * probe set.
- */
-function isProviderHidden(providerId: string, hiddenCards: readonly string[]): boolean {
-  if (hiddenCards.length === 0) return false;
-  if (hiddenCards.includes(providerId)) return true;
-  if (hiddenCards.includes(buildProviderScopeCardId(providerId))) return true;
-  const bareScopeHash = hashQuotaCardIdentity(providerId, PROVIDER_SCOPE_IDENTITY_KEY);
-  return hiddenCards.includes(bareScopeHash);
-}
-
-/**
  * Host-side Resets visibility for one OpenAI account. It mirrors the same
  * hashed card id and stable row id the card projection emits, so a hidden
  * account/card/row suppresses the optional detail GET before it happens. The
  * callback never sees raw ids in the browser payload.
+ *
+ * This is a separate optional-metadata gate: quota polling and the collected
+ * snapshot are unaffected by it.
  */
 export function createOpenAiResetDetailsVisibility(
   config: Pick<QuotaToastConfig, "dashboard">,
@@ -211,26 +197,23 @@ export function createOpenAiResetDetailsVisibility(
 }
 
 /**
- * Configured enabled set and provider-level visibility, applied before any
- * `isAvailable`/`isDiscovered` probe. Account-level hidden entries are left for
- * the UI; they cannot be resolved to a provider without probing first.
+ * Configured enabled set, applied before any `isAvailable`/`isDiscovered`
+ * probe. Hidden cards are presentation-only: no hidden-card id removes a
+ * provider from polling or from the collected snapshot.
  */
 export function selectQuotaProviders(
-  config: Pick<QuotaToastConfig, "enabledProviders" | "dashboard">,
+  config: Pick<QuotaToastConfig, "enabledProviders">,
   providers: readonly QuotaProvider[],
 ): QuotaProvider[] {
   const enabled = config.enabledProviders === "auto" ? undefined : new Set(config.enabledProviders);
-  return providers.filter(
-    (provider) =>
-      (enabled === undefined || enabled.has(provider.id)) &&
-      !isProviderHidden(provider.id, config.dashboard.hiddenCards),
-  );
+  return providers.filter((provider) => enabled === undefined || enabled.has(provider.id));
 }
 
 function cardPreferences(config: QuotaToastConfig): ProviderCardPreferences {
   const preferences: ProviderCardPreferences = {
     accountingDetail: config.accountingDetail,
     providerOrder: config.dashboard.providerOrder,
+    cardOrder: config.dashboard.cardOrder,
   };
   if (config.quotaProjection !== undefined) preferences.quotaProjection = config.quotaProjection;
   if (config.resetTimeDecimals !== undefined) {
@@ -456,6 +439,8 @@ export function createDashboardReadSource(
       const selected = selectQuotaProviders(config, allProviders);
       const probes = await collect(config, nowMs, selected);
       const merged = mergeProviderResults(probes, selected);
+      // No hidden-card id filters this list: hidden cards remain collected and
+      // are hidden by the browser. Ordering is still applied to assembled cards.
       const cards = buildProviderCards({
         probes: merged.probes,
         preferences: cardPreferences(config),

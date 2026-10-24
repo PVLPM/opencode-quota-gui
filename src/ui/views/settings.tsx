@@ -1,5 +1,6 @@
 import type { JSX } from "solid-js";
-import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { orderCardsByPreference } from "../../contracts/card-order";
 import type {
   DashboardDataSource,
   ImportPreview,
@@ -23,30 +24,32 @@ import {
 import {
   applyConflict,
   applyWriteResult,
+  cardIdentityLabel,
   dirtyKeys,
   fieldErrors,
   initialDraft,
-  keyboardMovedProviderOrder,
+  keyboardMovedCardOrder,
   OPENCODE_GO_WINDOWS,
-  orderedProviderIds,
   parseIntegerInput,
   parseNumberInput,
   parseProviderIds,
   providerSelection,
-  reorderedProviderOrder,
   SETTINGS_FIELDS,
   SETTINGS_GROUPS,
   type SettingsDraft,
   type SettingsField,
   settingProvenanceNote,
   stringList,
+  toggleHiddenCard,
   toPatch,
+  visibilityAccountLabel,
   windowSelection,
 } from "../settings-model";
-import { describeError } from "../view-model";
-import type { VisibilityCatalog, VisibilityProvider, VisibilityRow } from "../visibility-catalog";
+import { createCardSorter, type SortableCardNodes } from "../sortable-cards";
+import { describeError, isLegacyProviderHidden } from "../view-model";
+import type { VisibilityCard, VisibilityCatalog, VisibilityRow } from "../visibility-catalog";
 
-export type { VisibilityCatalog, VisibilityProvider, VisibilityRow } from "../visibility-catalog";
+export type { VisibilityCard, VisibilityCatalog, VisibilityRow } from "../visibility-catalog";
 
 /**
  * Settings (design spec §5.4, §7, §10; R14, R15).
@@ -229,64 +232,42 @@ export function SettingsView(props: {
     }
   }
 
-  /**
-   * Visibility (provider-grouped redesign).
-   *
-   * Ids live in the draft only and are never rendered: the provider cards hold
-   * hidden-card semantics (provider eye: hide adds the provider id; show
-   * removes the provider id and all its known card ids so a legacy card entry
-   * cannot keep it hidden), the row eyes keep working while a provider is
-   * hidden, and a reorder writes the complete current provider-id order to the
-   * draft for the normal revision-checked save. Unknown retained ids in either
-   * list survive every toggle and still never surface.
-   */
-  const [draggingProviderId, setDraggingProviderId] = createSignal<string | undefined>();
-  const [dropTargetProviderId, setDropTargetProviderId] = createSignal<string | undefined>();
-  const [providerOrderAnnouncement, setProviderOrderAnnouncement] = createSignal("");
+  /** Individual card identity is shared with Quota; all changes remain drafts. */
+  const [draggingCardId, setDraggingCardId] = createSignal<string | undefined>();
+  const [provisionalOrder, setProvisionalOrder] = createSignal<string[] | undefined>();
+  const [cardOrderAnnouncement, setCardOrderAnnouncement] = createSignal("");
+  let visibilityList: HTMLFieldSetElement | undefined;
+  const cardNodes = new Map<string, Partial<SortableCardNodes>>();
 
   const valueForKey = (key: string): JsonValue | undefined =>
     key in draft().edits ? draft().edits[key] : props.snapshot.values[key];
   const hiddenCardIds = () => stringList(valueForKey("dashboard.hiddenCards"));
+  const hiddenCardSet = createMemo(() => new Set(hiddenCardIds()));
   const hiddenRowIds = () => stringList(valueForKey("dashboard.hiddenRows"));
-  const providerOrderWritable = () => props.snapshot.writable.includes("dashboard.providerOrder");
+  const cardOrderWritable = () => props.snapshot.writable.includes("dashboard.cardOrder");
   const hiddenCardsWritable = () => props.snapshot.writable.includes("dashboard.hiddenCards");
   const hiddenRowsWritable = () => props.snapshot.writable.includes("dashboard.hiddenRows");
 
-  const orderedProviders = createMemo(() => {
-    const catalogProviders = props.catalog.providers;
-    const byId = new Map(catalogProviders.map((provider) => [provider.providerId, provider]));
-    return orderedProviderIds(
+  const orderedCards = createMemo(() =>
+    orderCardsByPreference(
+      props.catalog.cards,
+      stringList(valueForKey("dashboard.cardOrder")),
       stringList(valueForKey("dashboard.providerOrder")),
-      catalogProviders.map((provider) => provider.providerId),
-    ).flatMap((id) => {
-      const provider = byId.get(id);
-      return provider === undefined ? [] : [provider];
-    });
-  });
+    ),
+  );
+  const displayCards = createMemo(() =>
+    provisionalOrder()
+      ? orderCardsByPreference(orderedCards(), provisionalOrder())
+      : orderedCards(),
+  );
 
-  /** Hidden when the provider id is listed, or every known card of it is listed. */
-  function providerEyeHidden(provider: VisibilityProvider): boolean {
-    const hidden = hiddenCardIds();
-    return (
-      hidden.includes(provider.providerId) ||
-      (provider.cardIds.length > 0 && provider.cardIds.every((cardId) => hidden.includes(cardId)))
-    );
+  function inheritedHidden(card: VisibilityCard): boolean {
+    return isLegacyProviderHidden(card, hiddenCardSet());
   }
 
-  function toggleProviderEye(provider: VisibilityProvider): void {
-    if (!hiddenCardsWritable() || busy()) return;
-    const hidden = hiddenCardIds();
-    if (providerEyeHidden(provider)) {
-      edit(
-        "dashboard.hiddenCards",
-        hidden.filter((id) => id !== provider.providerId && !provider.cardIds.includes(id)),
-      );
-      return;
-    }
-    edit(
-      "dashboard.hiddenCards",
-      hidden.includes(provider.providerId) ? hidden : [...hidden, provider.providerId],
-    );
+  function toggleCardEye(card: VisibilityCard): void {
+    if (!hiddenCardsWritable() || busy() || inheritedHidden(card)) return;
+    edit("dashboard.hiddenCards", toggleHiddenCard(hiddenCardIds(), card.cardId));
   }
 
   /** Row state is independent of the provider eye and never cleared by it. */
@@ -299,195 +280,207 @@ export function SettingsView(props: {
     );
   }
 
-  function writeProviderOrder(next: string[], movedId: string, direction: string): void {
-    const current = orderedProviders().map((provider) => provider.providerId);
+  function writeCardOrder(next: string[], movedId: string): void {
+    const current = orderedCards().map((card) => card.cardId);
     if (JSON.stringify(next) === JSON.stringify(current)) return;
-    edit("dashboard.providerOrder", next);
-    const label =
-      props.catalog.providers.find((provider) => provider.providerId === movedId)?.providerLabel ??
-      "";
-    setProviderOrderAnnouncement(`${label} ${direction}.`);
-  }
-
-  function moveProvider(dragedId: string, toIndex: number): void {
-    if (!providerOrderWritable()) return;
-    const current = orderedProviders().map((provider) => provider.providerId);
-    writeProviderOrder(reorderedProviderOrder(current, dragedId, toIndex), dragedId, "moved");
-  }
-
-  function moveProviderByKeyboard(providerId: string, step: -1 | 1): void {
-    if (!providerOrderWritable()) return;
-    const current = orderedProviders().map((provider) => provider.providerId);
-    writeProviderOrder(
-      keyboardMovedProviderOrder(current, providerId, step),
-      providerId,
-      step === -1 ? "moved up" : "moved down",
+    const unknown = stringList(valueForKey("dashboard.cardOrder")).filter(
+      (id) => !current.includes(id),
     );
-  }
-
-  function clearProviderDrag(): void {
-    setDraggingProviderId(undefined);
-    setDropTargetProviderId(undefined);
-  }
-
-  function onProviderDragStart(event: DragEvent, provider: VisibilityProvider): void {
-    if (!providerOrderWritable()) return;
-    event.dataTransfer?.setData("text/plain", provider.providerId);
-    if (event.dataTransfer !== null) event.dataTransfer.effectAllowed = "move";
-    setDraggingProviderId(provider.providerId);
-  }
-
-  function onProviderDragOver(event: DragEvent, provider: VisibilityProvider): void {
-    const dragged = draggingProviderId();
-    if (dragged === undefined || dragged === provider.providerId) return;
-    // Marks the target and allows the drop; the visual is a subtle border only.
-    event.preventDefault?.();
-    if (event.dataTransfer !== null) event.dataTransfer.dropEffect = "move";
-    setDropTargetProviderId(provider.providerId);
-  }
-
-  function onProviderDrop(event: DragEvent, provider: VisibilityProvider): void {
-    event.preventDefault?.();
-    const dragged = draggingProviderId() ?? event.dataTransfer?.getData("text/plain");
-    if (dragged !== undefined && dragged !== provider.providerId) {
-      const index = orderedProviders().findIndex(
-        (entry) => entry.providerId === provider.providerId,
+    edit("dashboard.cardOrder", [...next, ...new Set(unknown)]);
+    const card = props.catalog.cards.find((entry) => entry.cardId === movedId);
+    if (card)
+      setCardOrderAnnouncement(
+        `${cardIdentityLabel(card)} moved to position ${next.indexOf(movedId) + 1} of ${next.length}.`,
       );
-      if (index >= 0) moveProvider(dragged, index);
-    }
-    clearProviderDrag();
+  }
+  const sorter = createCardSorter({
+    ids: () => orderedCards().map((card) => card.cardId),
+    container: () => visibilityList,
+    nodes: (id) => {
+      const nodes = cardNodes.get(id);
+      return nodes?.slot && nodes.card && nodes.grip
+        ? { slot: nodes.slot, card: nodes.card, grip: nodes.grip }
+        : undefined;
+    },
+    enabled: () => cardOrderWritable() && !busy(),
+    preview: setProvisionalOrder,
+    active: setDraggingCardId,
+    commit: writeCardOrder,
+  });
+  onCleanup(() => sorter.dispose());
+  createEffect(() => {
+    orderedCards();
+    busy();
+    sorter.cancel();
+  });
+
+  function registerNode<K extends keyof SortableCardNodes>(
+    id: string,
+    key: K,
+    node: SortableCardNodes[K],
+  ): void {
+    const nodes = cardNodes.get(id) ?? {};
+    nodes[key] = node;
+    cardNodes.set(id, nodes);
   }
 
-  function onProviderDragEnd(): void {
-    clearProviderDrag();
-  }
-
-  function onProviderGrabKey(event: KeyboardEvent, provider: VisibilityProvider): void {
-    if (event.altKey !== true) return;
-    if (event.key === "ArrowUp") {
-      event.preventDefault?.();
-      moveProviderByKeyboard(provider.providerId, -1);
+  function onCardGrabKey(event: KeyboardEvent, card: VisibilityCard): void {
+    if (event.key === "Escape") {
+      sorter.cancel();
       return;
     }
-    if (event.key === "ArrowDown") {
+    if (!cardOrderWritable() || busy() || draggingCardId()) return;
+    if (event.altKey !== true) return;
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault?.();
-      moveProviderByKeyboard(provider.providerId, 1);
+      const current = orderedCards().map((entry) => entry.cardId);
+      writeCardOrder(
+        keyboardMovedCardOrder(current, card.cardId, event.key === "ArrowUp" ? -1 : 1),
+        card.cardId,
+      );
+      // Solid applies keyed DOM moves after the event batch; restore focus afterward.
+      queueMicrotask(() => cardNodes.get(card.cardId)?.grip?.focus({ preventScroll: true }));
     }
   }
 
-  /** One dark card per provider: name, inline accounts, grip, eyes — no live values. */
+  /** One card per Quota card, with the same identity hierarchy and its own rows. */
   function renderVisibilitySection(): JSX.Element {
     return (
       <>
-        <fieldset class="qg-vis-list" aria-label="Provider visibility">
+        <fieldset
+          ref={visibilityList}
+          class="qg-vis-list"
+          data-sorting={draggingCardId() !== undefined ? "true" : undefined}
+          aria-label="Card visibility"
+          onPointerMove={(event) => sorter.move(event)}
+          onPointerUp={(event) => sorter.up(event)}
+          onPointerCancel={(event) => sorter.lost(event)}
+          onLostPointerCapture={(event) => sorter.lost(event)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") sorter.cancel();
+          }}
+        >
           <Show
-            when={orderedProviders().length > 0}
+            when={displayCards().length > 0}
             fallback={
               <p class="qg-inherited">No provider accounts are available to configure yet.</p>
             }
           >
-            <For each={orderedProviders()}>
-              {(provider) => {
-                const providerHidden = () => providerEyeHidden(provider);
+            <For each={displayCards()}>
+              {(card) => {
+                const inherited = () => inheritedHidden(card);
+                const cardHidden = () => inherited() || hiddenCardIds().includes(card.cardId);
+                const lifted = () => draggingCardId() === card.cardId;
                 return (
-                  <article
-                    class="qg-vis-provider"
-                    data-hidden={providerHidden() ? "true" : undefined}
-                    data-dragging={
-                      draggingProviderId() === provider.providerId ? "true" : undefined
-                    }
-                    data-drop={dropTargetProviderId() === provider.providerId ? "true" : undefined}
-                    onDragOver={(event) => onProviderDragOver(event, provider)}
-                    onDrop={(event) => onProviderDrop(event, provider)}
-                    onDragEnd={onProviderDragEnd}
+                  <div
+                    class="qg-vis-slot"
+                    data-lifted={lifted() ? "true" : undefined}
+                    ref={(node) => registerNode(card.cardId, "slot", node)}
                   >
-                    <header class="qg-vis-provider__head">
-                      <button
-                        type="button"
-                        class="qg-vis-grip"
-                        title="Drag to reorder; Alt plus arrow keys move it too"
-                        aria-label={`Reorder ${provider.providerLabel}`}
-                        draggable={providerOrderWritable()}
-                        onDragStart={(event) => onProviderDragStart(event, provider)}
-                        onDragEnd={onProviderDragEnd}
-                        onKeyDown={(event) => onProviderGrabKey(event, provider)}
-                      >
-                        <GripDotsIcon />
-                      </button>
-                      <div class="qg-vis-provider__identity">
-                        <span class="qg-vis-provider__name">{provider.providerLabel}</span>
-                        <Show when={provider.accountLabels.length > 0}>
-                          <span class="qg-vis-provider__account">
-                            {provider.accountLabels.join(" · ")}
-                          </span>
-                        </Show>
-                      </div>
-                      <EyeToggle
-                        variant="provider"
-                        disabled={!hiddenCardsWritable() || busy()}
-                        pressed={providerHidden()}
-                        label={`${providerHidden() ? "Show" : "Hide"} ${provider.providerLabel}`}
-                        title={providerHidden() ? "Show provider" : "Hide provider"}
-                        onToggle={async () => toggleProviderEye(provider)}
-                      />
-                    </header>
-                    <For each={provider.rows}>
-                      {(row) => {
-                        const rowHidden = () => hiddenRowIds().includes(row.id);
-                        const rowAccount = () =>
-                          needsAccountLabels(provider) ? row.accountLabel : undefined;
-                        const rowName = () =>
-                          rowAccount() === undefined ? row.label : `${row.label} · ${rowAccount()}`;
-                        return (
-                          <div class="qg-vis-row">
-                            <span class="qg-vis-row__label">
-                              <span class="qg-row__labelgroup">
-                                <span>{row.label}</span>
-                                <Show when={row.info}>
-                                  {(info) => (
-                                    <Tooltip
-                                      value={info()}
-                                      triggerTabIndex={0}
-                                      appearance="large"
-                                      contentClass="qg-row__tooltip"
-                                    >
-                                      <span class="sr-only">
-                                        More information about {rowName()}
-                                      </span>
-                                      <span class="qg-row__info" aria-hidden="true">
-                                        <Icon name="info" size="small" />
-                                      </span>
-                                    </Tooltip>
-                                  )}
-                                </Show>
+                    <article
+                      class="qg-vis-provider"
+                      ref={(node) => registerNode(card.cardId, "card", node)}
+                      aria-label={cardIdentityLabel(card)}
+                      data-hidden={cardHidden() ? "true" : undefined}
+                      data-dragging={lifted() ? "true" : undefined}
+                    >
+                      <header class="qg-vis-provider__head">
+                        <button
+                          type="button"
+                          class="qg-vis-grip"
+                          title="Drag to reorder; Alt plus arrow keys move it too"
+                          ref={(node) => registerNode(card.cardId, "grip", node)}
+                          aria-label={`Reorder ${cardIdentityLabel(card)}`}
+                          disabled={!cardOrderWritable() || busy()}
+                          onPointerDown={(event) => sorter.down(card.cardId, event)}
+                          onKeyDown={(event) => onCardGrabKey(event, card)}
+                        >
+                          <GripDotsIcon />
+                        </button>
+                        <div class="qg-vis-provider__identity">
+                          <span class="qg-vis-provider__name">{card.providerLabel}</span>
+                          <Show when={card.planLabel}>
+                            {(plan) => <span class="qg-vis-provider__account">· {plan()}</span>}
+                          </Show>
+                          <Show when={card.accountLabel}>
+                            {(account) => (
+                              <span class="qg-vis-provider__account">
+                                · {visibilityAccountLabel(card.providerLabel, account())}
                               </span>
-                              <Show when={rowAccount()}>
-                                {(account) => (
-                                  <span class="qg-vis-row__account"> · {account()}</span>
-                                )}
-                              </Show>
-                            </span>
-                            <EyeToggle
-                              variant="row"
-                              disabled={!hiddenRowsWritable() || busy()}
-                              pressed={rowHidden()}
-                              label={`${rowHidden() ? "Show" : "Hide"} ${rowName()}`}
-                              title={rowHidden() ? "Show" : "Hide"}
-                              onToggle={async () => toggleRowEye(row)}
-                            />
-                          </div>
-                        );
-                      }}
-                    </For>
-                  </article>
+                            )}
+                          </Show>
+                        </div>
+                        <EyeToggle
+                          variant="provider"
+                          disabled={
+                            !hiddenCardsWritable() ||
+                            busy() ||
+                            inherited() ||
+                            draggingCardId() !== undefined
+                          }
+                          pressed={cardHidden()}
+                          label={`${cardHidden() ? "Show" : "Hide"} ${cardIdentityLabel(card)}`}
+                          title={cardHidden() ? "Show card" : "Hide card"}
+                          onToggle={async () => toggleCardEye(card)}
+                        />
+                      </header>
+                      <Show when={inherited()}>
+                        <p class="qg-vis-legacy">
+                          Hidden by a legacy provider setting. Clear it in the settings file to
+                          control cards separately.
+                        </p>
+                      </Show>
+                      <For each={card.rows}>
+                        {(row) => {
+                          const rowHidden = () => hiddenRowIds().includes(row.id);
+                          return (
+                            <div class="qg-vis-row">
+                              <span class="qg-vis-row__label">
+                                <span class="qg-row__labelgroup">
+                                  <span>{row.label}</span>
+                                  <Show when={row.info}>
+                                    {(info) => (
+                                      <Tooltip
+                                        value={info()}
+                                        triggerTabIndex={0}
+                                        appearance="large"
+                                        contentClass="qg-row__tooltip"
+                                      >
+                                        <span class="sr-only">
+                                          More information about {row.label}
+                                        </span>
+                                        <span class="qg-row__info" aria-hidden="true">
+                                          <Icon name="info" size="small" />
+                                        </span>
+                                      </Tooltip>
+                                    )}
+                                  </Show>
+                                </span>
+                              </span>
+                              <EyeToggle
+                                variant="row"
+                                disabled={
+                                  !hiddenRowsWritable() || busy() || draggingCardId() !== undefined
+                                }
+                                pressed={rowHidden()}
+                                label={`${rowHidden() ? "Show" : "Hide"} ${row.label}`}
+                                title={rowHidden() ? "Show" : "Hide"}
+                                onToggle={async () => toggleRowEye(row)}
+                              />
+                            </div>
+                          );
+                        }}
+                      </For>
+                    </article>
+                  </div>
                 );
               }}
             </For>
           </Show>
         </fieldset>
-        <span class="qg-inherited" aria-live="polite">
-          {providerOrderAnnouncement()}
-        </span>
+        <output class="qg-inherited" aria-live="polite">
+          {cardOrderAnnouncement()}
+        </output>
       </>
     );
   }
@@ -833,7 +826,7 @@ export function SettingsView(props: {
           <Button
             variant="ghost-muted"
             size="small"
-            disabled={dirty().length === 0 || busy()}
+            disabled={dirty().length === 0 || busy() || draggingCardId() !== undefined}
             onClick={discard}
           >
             Discard
@@ -841,7 +834,12 @@ export function SettingsView(props: {
           <Button
             variant="contrast"
             size="small"
-            disabled={dirty().length === 0 || errors().length > 0 || busy()}
+            disabled={
+              dirty().length === 0 ||
+              errors().length > 0 ||
+              busy() ||
+              draggingCardId() !== undefined
+            }
             onClick={() => void save()}
           >
             Save
@@ -850,16 +848,6 @@ export function SettingsView(props: {
       </div>
     </div>
   );
-}
-
-function needsAccountLabels(provider: VisibilityProvider): boolean {
-  if (provider.accountLabels.length > 1) return true;
-  const labels = new Set<string>();
-  for (const row of provider.rows) {
-    if (labels.has(row.label)) return true;
-    labels.add(row.label);
-  }
-  return false;
 }
 
 function isConfigChanged(error: unknown): boolean {

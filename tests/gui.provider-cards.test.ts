@@ -16,6 +16,12 @@ import {
   OPENAI_RESETS_ROW_KEY,
 } from "../src/contracts/openai-quota.js";
 import type { UsageAnalyticsDataset } from "../src/gui/aggregation.js";
+import {
+  buildCardId,
+  buildProviderScopeCardId,
+  hashQuotaCardIdentity,
+  PROVIDER_SCOPE_IDENTITY_KEY,
+} from "../src/gui/identity.js";
 import { buildProviderCards, type ProviderCardPreferences } from "../src/gui/provider-cards.js";
 import { createDashboardReadSource, DashboardSourceError } from "../src/gui/sources.js";
 import type {
@@ -788,6 +794,121 @@ describe("gui provider cards — provider order", () => {
   });
 });
 
+describe("gui provider cards — card order", () => {
+  const goScope = buildProviderScopeCardId("opencode-go");
+  const goA = buildCardId("opencode-go", "go-a");
+  const goB = buildCardId("opencode-go", "go-b");
+  const openAiA = buildCardId("openai", "openai-a");
+  const syntheticA = buildCardId("synthetic-provider", "synthetic-a");
+
+  const mixedProbes = [
+    probe(
+      "opencode-go",
+      result({
+        accounts: [
+          { sourceId: "go-a", label: "Go A" },
+          { sourceId: "go-b", label: "Go B" },
+        ],
+        entries: [
+          percentEntry({ window: "month" }),
+          percentEntry({ sourceId: "go-a", window: "week" }),
+          percentEntry({ sourceId: "go-b", window: "five_hour" }),
+        ],
+      }),
+    ),
+    probe(
+      "openai",
+      result({
+        accounts: [{ sourceId: "openai-a", label: "OpenAI A" }],
+        entries: [percentEntry({ sourceId: "openai-a", window: "week" })],
+      }),
+    ),
+    probe(
+      "synthetic-provider",
+      result({
+        accounts: [{ sourceId: "synthetic-a", label: "Synthetic A" }],
+        entries: [percentEntry({ sourceId: "synthetic-a", window: "month" })],
+      }),
+    ),
+  ];
+
+  function cardsWithOrder(
+    probes: readonly QuotaStatusLiveProbe[],
+    cardOrder?: readonly string[],
+    providerOrder?: readonly string[],
+  ): ReturnType<typeof buildProviderCards> {
+    const preferences: ProviderCardPreferences = { accountingDetail: "summary" };
+    if (cardOrder !== undefined) preferences.cardOrder = cardOrder;
+    if (providerOrder !== undefined) preferences.providerOrder = providerOrder;
+    return buildProviderCards({ probes, preferences, nowMs: NOW });
+  }
+
+  it("orders Go, OpenAI, and Go account cards independently and appends unseen cards", () => {
+    const cards = cardsWithOrder(
+      mixedProbes,
+      [goB, openAiA, goA, buildCardId("opencode-go", "not-discovered"), goB],
+      // Legacy provider order must not decide appended cards while cardOrder is non-empty.
+      ["synthetic-provider", "opencode-go"],
+    );
+
+    expect(cards.map((card) => card.cardId)).toEqual([goB, openAiA, goA, goScope, syntheticA]);
+    expect(cards.map((card) => card.accountLabel)).toEqual([
+      "Go B",
+      "OpenAI A",
+      "Go A",
+      undefined,
+      "Synthetic A",
+    ]);
+    expect(cards.find((card) => card.cardId === goB)?.rows.map((row) => row.metric)).toEqual([
+      { kind: "window", window: "five_hour" },
+    ]);
+  });
+
+  it("appends new and unlisted cards in stable input order", () => {
+    const probes = [
+      probe("alpha", result({ entries: [percentEntry({ window: "week" })] })),
+      probe("beta", result({ entries: [percentEntry({ window: "month" })] })),
+      probe("gamma", result({ entries: [percentEntry({ window: "five_hour" })] })),
+    ];
+
+    const cards = cardsWithOrder(probes, [buildProviderScopeCardId("gamma")], ["beta", "alpha"]);
+
+    expect(cards.map((card) => card.providerId)).toEqual(["gamma", "alpha", "beta"]);
+  });
+
+  it("keeps the legacy provider order when cardOrder is absent or empty", () => {
+    for (const cardOrder of [undefined, []]) {
+      const cards = cardsWithOrder(mixedProbes, cardOrder, ["synthetic-provider", "openai"]);
+      expect(cards.map((card) => card.providerId)).toEqual([
+        "synthetic-provider",
+        "openai",
+        "opencode-go",
+        "opencode-go",
+        "opencode-go",
+      ]);
+    }
+  });
+
+  it("carries authoritative provider-scope metadata for legacy hide detection", () => {
+    const cards = cardsWithOrder(mixedProbes);
+
+    for (const card of cards) {
+      expect(card.providerScopeId).toBe(buildProviderScopeCardId(card.providerId));
+      expect(card.providerScopeHash).toBe(
+        hashQuotaCardIdentity(card.providerId, PROVIDER_SCOPE_IDENTITY_KEY),
+      );
+    }
+
+    const goCards = cards.filter((card) => card.providerId === "opencode-go");
+    expect(goCards.every((card) => card.providerScopeId === goScope)).toBe(true);
+    expect(new Set(goCards.map((card) => card.providerScopeHash)).size).toBe(1);
+    expect(cards.find((card) => card.cardId === goScope)?.providerScopeId).toBe(goScope);
+    expect(cards.find((card) => card.cardId === syntheticA)?.providerScopeHash).toBe(
+      hashQuotaCardIdentity("synthetic-provider", PROVIDER_SCOPE_IDENTITY_KEY),
+    );
+  });
+});
+
 describe("gui read source — composition", () => {
   it("keeps every window and card under singleWindow/onlyCurrentModel and hidden lists", async () => {
     const config = baseConfig({
@@ -947,6 +1068,48 @@ describe("gui read source — composition", () => {
       ],
       [{ kind: "window", window: "week" }],
     ]);
+  });
+
+  it("applies dashboard.cardOrder across same-provider siblings ahead of providerOrder", async () => {
+    const goA = buildCardId("opencode-go", "go-a");
+    const goB = buildCardId("opencode-go", "go-b");
+    const openAiA = buildCardId("openai", "openai-a");
+    const config = baseConfig({
+      dashboard: {
+        ...DEFAULT_CONFIG.dashboard,
+        cardOrder: [goB, openAiA],
+        providerOrder: ["openai", "opencode-go"],
+      },
+    });
+    const harness = createHarness({
+      config,
+      probes: [
+        probe(
+          "opencode-go",
+          result({
+            accounts: [
+              { sourceId: "go-a", label: "Go A" },
+              { sourceId: "go-b", label: "Go B" },
+            ],
+            entries: [
+              percentEntry({ sourceId: "go-a", window: "week" }),
+              percentEntry({ sourceId: "go-b", window: "five_hour" }),
+            ],
+          }),
+        ),
+        probe(
+          "openai",
+          result({
+            accounts: [{ sourceId: "openai-a", label: "OpenAI A" }],
+            entries: [percentEntry({ sourceId: "openai-a", window: "month" })],
+          }),
+        ),
+      ],
+    });
+
+    const snapshot = await harness.source.quota();
+
+    expect(snapshot.providers.cards.map((card) => card.cardId)).toEqual([goB, openAiA, goA]);
   });
 });
 

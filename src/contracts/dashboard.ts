@@ -160,6 +160,14 @@ export interface ProviderCard {
   planLabel?: string;
   accountLabel?: string;
   labelSource: "connection" | "org" | "account" | "provider";
+  /**
+   * Additive presentation metadata (optional for backwards compatibility): the
+   * provider-scope card id for this card's provider and its bare hash form.
+   * Settings uses these authoritative opaque values to recognize legacy
+   * provider-wide hides without hashing or reconstructing identities.
+   */
+  providerScopeId?: CardId;
+  providerScopeHash?: string;
   rows: QuotaCardRow[];
   errors: { label: string; message: string; retryable?: boolean }[];
   /** Explicit safe field list only — never a raw `statusDetails` copy. */

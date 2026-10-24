@@ -87,6 +87,13 @@ export interface QuotaDashboardConfig {
   port: number;
   /** Hidden provider card ids (opaque ids; at most `DASHBOARD_HIDDEN_ID_LIMIT`). */
   hiddenCards: string[];
+  /**
+   * Persisted `hiddenCards` semantics. Version 2 treats every list entry as an
+   * exact card id; the legacy full provider-scope card id is normalized to its
+   * provider id on read when an older layer has no marker. The effective value
+   * is always the current version.
+   */
+  hiddenCardsVersion: 2;
   /** Hidden quota row ids (opaque ids; at most `DASHBOARD_HIDDEN_ID_LIMIT`). */
   hiddenRows: string[];
   /**
@@ -95,12 +102,19 @@ export interface QuotaDashboardConfig {
    * this list keep their backend order.
    */
   providerOrder: string[];
+  /**
+   * Preferred card display order (opaque card ids; at most
+   * `DASHBOARD_HIDDEN_ID_LIMIT`). Non-empty means listed cards come first in
+   * saved order and every unlisted/new card keeps backend order. Display order
+   * only; providerOrder remains the legacy fallback when this is empty.
+   */
+  cardOrder: string[];
 }
 
 /** Default dashboard port (spec §5.4); never falls back to another port. */
 export const DEFAULT_DASHBOARD_PORT = 4144;
 
-/** Cap for `dashboard.hiddenCards` / `dashboard.hiddenRows` entries. */
+/** Cap for opaque dashboard id-list settings (`hiddenCards`, `hiddenRows`, order lists). */
 export const DASHBOARD_HIDDEN_ID_LIMIT = 500;
 
 /** How often Home shows the notice: on the first Home screen of each day, or every time. */
@@ -335,8 +349,10 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   dashboard: {
     port: DEFAULT_DASHBOARD_PORT,
     hiddenCards: [],
+    hiddenCardsVersion: 2,
     hiddenRows: [],
     providerOrder: [],
+    cardOrder: [],
   },
   layout: {
     maxWidth: 50,

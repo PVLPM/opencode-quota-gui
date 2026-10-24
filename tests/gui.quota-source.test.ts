@@ -149,31 +149,47 @@ function harness(
 }
 
 describe("quota read source", () => {
-  it("selects only configured and provider-visible providers before probing", async () => {
+  it("queries every enabled provider even when a provider-level card is hidden and keeps its cards for the browser", async () => {
+    const hiddenAccount = buildCardId("anthropic", "acct-1");
     const config = baseConfig({
       enabledProviders: ["anthropic", "copilot", "cursor"],
       dashboard: {
         ...DEFAULT_CONFIG.dashboard,
-        // Account-level card ids and bare account hashes must never remove the
-        // whole provider; the provider-scope id/hash do.
+        // Account-level card ids must never remove the whole provider. No
+        // hidden-card id filters the collected snapshot: the browser hides it.
         hiddenCards: [
-          buildCardId("anthropic", "acct-1"),
+          hiddenAccount,
           hashQuotaCardIdentity("copilot", PROVIDER_SCOPE_IDENTITY_KEY),
+          "cursor",
+          "unknown-hidden-card",
         ],
       },
     });
-    const test = harness({ config, collect: async () => [] });
-    await test.source.quota();
+    const test = harness({
+      config,
+      collect: async ({ providers }) =>
+        providers.map((provider) => probe(provider.id, result({ entries: [percentEntry(50)] }))),
+    });
+    const snapshot = await test.source.quota();
 
     expect(test.collectorCalls).toHaveLength(1);
     const selected = test.collectorCalls[0]?.providers.map((provider) => provider.id);
-    expect(selected).toContain("anthropic");
-    expect(selected).toContain("cursor");
-    expect(selected).not.toContain("copilot");
+    expect(selected).toEqual(expect.arrayContaining(["anthropic", "copilot", "cursor"]));
     expect(selected).not.toContain("openai");
+
+    const cardProviders = snapshot.providers.cards.map((card) => card.providerId);
+    // Hidden cards remain in the collected snapshot; the browser applies visibility.
+    expect(cardProviders).toEqual(expect.arrayContaining(["anthropic", "copilot", "cursor"]));
+    // Unknown hidden ids are retained untouched and never affect polling.
+    expect(config.dashboard.hiddenCards).toEqual([
+      hiddenAccount,
+      hashQuotaCardIdentity("copilot", PROVIDER_SCOPE_IDENTITY_KEY),
+      "cursor",
+      "unknown-hidden-card",
+    ]);
   });
 
-  it("hides a provider by its provider-scope card id as well", async () => {
+  it("polls a provider hidden by its provider-scope card id and keeps its cards", async () => {
     const config = baseConfig({
       enabledProviders: ["anthropic", "copilot"],
       dashboard: {
@@ -181,9 +197,18 @@ describe("quota read source", () => {
         hiddenCards: [buildProviderScopeCardId("copilot")],
       },
     });
-    const test = harness({ config, collect: async () => [] });
-    await test.source.quota();
-    expect(test.collectorCalls[0]?.providers.map((provider) => provider.id)).toEqual(["anthropic"]);
+    const test = harness({
+      config,
+      collect: async ({ providers }) =>
+        providers.map((provider) => probe(provider.id, result({ entries: [percentEntry(50)] }))),
+    });
+    const snapshot = await test.source.quota();
+    expect(test.collectorCalls[0]?.providers.map((provider) => provider.id)).toEqual(
+      expect.arrayContaining(["anthropic", "copilot"]),
+    );
+    expect(snapshot.providers.cards.map((card) => card.providerId)).toEqual(
+      expect.arrayContaining(["anthropic", "copilot"]),
+    );
   });
 
   it("uses the current selected set on the next cycle after a settings change", async () => {

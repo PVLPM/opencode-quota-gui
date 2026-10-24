@@ -31,7 +31,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDescriptor[] = [
   {
     id: "visibility",
     title: "Visibility",
-    note: "Presentation only: hiding a provider or a row never changes what the dashboard polls or fetches.",
+    note: "Choose which cards and rows appear, and drag the grips to arrange your cards.",
   },
   { id: "dashboard", title: "Dashboard" },
 ];
@@ -214,6 +214,13 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     label: "Hidden rows",
   },
   {
+    key: "dashboard.cardOrder",
+    group: "visibility",
+    control: "list",
+    label: "Card order",
+    hidden: true,
+  },
+  {
     key: "dashboard.providerOrder",
     group: "visibility",
     control: "list",
@@ -380,50 +387,56 @@ export function stringList(value: JsonValue | undefined): string[] {
   return value.filter((entry): entry is string => typeof entry === "string");
 }
 
-/**
- * Display order for the visibility catalog: provider ids named in the stored
- * `dashboard.providerOrder` keep their stored relative order first, and every
- * remaining catalog provider follows in catalog order. Stored ids that the
- * catalog no longer knows are ignored, so unknown or new providers append.
- */
-export function orderedProviderIds(
-  providerOrder: readonly string[],
-  catalogIds: readonly string[],
-): string[] {
-  const catalog = catalogIds.filter((id, index) => catalogIds.indexOf(id) === index);
-  const head: string[] = [];
-  for (const id of providerOrder) {
-    if (catalog.includes(id) && !head.includes(id)) head.push(id);
-  }
-  return [...head, ...catalog.filter((id) => !head.includes(id))];
+/** Labels are presentation only; ordering and toggles always use cardId. */
+export function cardIdentityLabel(card: {
+  providerLabel: string;
+  planLabel?: string;
+  accountLabel?: string;
+}): string {
+  return [
+    card.providerLabel,
+    card.planLabel,
+    card.accountLabel ? visibilityAccountLabel(card.providerLabel, card.accountLabel) : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
-/**
- * A drag or keyboard move is remove-then-insert: the moved provider is placed
- * at the target displayed index (clamped to the ends) and the complete
- * resulting order is the next `dashboard.providerOrder` value, so the stored
- * list never carries stale gaps or depends on a partial compare.
- */
-export function reorderedProviderOrder(
+export function toggleHiddenCard(hidden: readonly string[], cardId: string): string[] {
+  return hidden.includes(cardId) ? hidden.filter((id) => id !== cardId) : [...hidden, cardId];
+}
+
+/** Match Quota's exact generated-label cleanup; never infer a plan from free text. */
+export function visibilityAccountLabel(provider: string, account: string): string {
+  const prefix = `[${provider}] (`;
+  if (account.startsWith(prefix) && account.endsWith(")")) {
+    const label = account.slice(prefix.length, -1);
+    if (label.length > 0 && !/[()[\]\r\n]/.test(label)) return label;
+  }
+  return account;
+}
+
+export function reorderedCardOrder(
   ids: readonly string[],
   fromId: string,
   toIndex: number,
 ): string[] {
+  if (!ids.includes(fromId)) return [...ids];
   const without = ids.filter((id) => id !== fromId);
   without.splice(Math.max(0, Math.min(Math.trunc(toIndex), without.length)), 0, fromId);
   return without;
 }
 
-/** One keyboard step: `step` −1 is up, +1 is down, clamped at the list ends. */
-export function keyboardMovedProviderOrder(
+export function keyboardMovedCardOrder(
   ids: readonly string[],
   fromId: string,
   step: -1 | 1,
 ): string[] {
-  const index = ids.indexOf(fromId);
-  if (index === -1) return [...ids];
-  const target = Math.max(0, Math.min(index + step, ids.length - 1));
-  return reorderedProviderOrder(ids, fromId, target);
+  return reorderedCardOrder(
+    ids,
+    fromId,
+    Math.max(0, Math.min(ids.indexOf(fromId) + step, ids.length - 1)),
+  );
 }
 
 /** Display preferences the Home and Project views read from the settings snapshot. */

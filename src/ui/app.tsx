@@ -21,7 +21,6 @@ import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
 import { BuildMismatchStatus } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
-import { inlineAccountLabel } from "./components/quota-card";
 import { QueryState, ReloadRequired } from "./components/states";
 import { createToaster, type Toaster, ToastRegion } from "./components/toast";
 import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashboard-client";
@@ -51,8 +50,8 @@ import { SettingsView } from "./views/settings";
 import {
   mergeVisibilityCatalog,
   readVisibilityCatalog,
+  type VisibilityCard,
   type VisibilityCatalog,
-  type VisibilityProvider,
   visibilityCatalogEquals,
   writeVisibilityCatalog,
 } from "./visibility-catalog";
@@ -166,46 +165,41 @@ function browserStorage(): Storage | undefined {
   }
 }
 
-/** Groups one quota snapshot's cards exactly as the Settings visibility section expects. */
+/** Keep the same individual identities and row ownership as Quota. */
 function catalogFromSnapshot(snapshot: QuotaSnapshot | undefined): VisibilityCatalog {
-  if (snapshot === undefined) return { providers: [] };
-  const providers = new Map<string, VisibilityProvider>();
+  if (snapshot === undefined) return { cards: [] };
+  const cards: VisibilityCard[] = [];
   for (const card of snapshot.providers.cards) {
-    let provider = providers.get(card.providerId);
-    if (provider === undefined) {
-      provider = {
-        providerId: card.providerId,
-        providerLabel: card.providerLabel,
-        accountLabels: [],
-        cardIds: [],
-        rows: [],
-      };
-      providers.set(card.providerId, provider);
-    }
-    if (!provider.cardIds.includes(card.cardId)) provider.cardIds.push(card.cardId);
-    const account = card.accountLabel
-      ? inlineAccountLabel(card.providerLabel, card.accountLabel)
-      : undefined;
-    if (account !== undefined && !provider.accountLabels.includes(account)) {
-      provider.accountLabels.push(account);
-    }
+    if (cards.some((entry) => entry.cardId === card.cardId)) continue;
+    const visibility: VisibilityCard = {
+      cardId: card.cardId,
+      providerId: card.providerId,
+      providerLabel: card.providerLabel,
+      ...(card.planLabel === undefined ? {} : { planLabel: card.planLabel }),
+      ...(card.accountLabel === undefined ? {} : { accountLabel: card.accountLabel }),
+      ...(card.providerScopeId === undefined ? {} : { providerScopeId: card.providerScopeId }),
+      ...(card.providerScopeHash === undefined
+        ? {}
+        : { providerScopeHash: card.providerScopeHash }),
+      rows: [],
+    };
     const addRow = (id: string, label: string, info?: string): void => {
-      const existing = provider.rows.find((row) => row.id === id);
+      const existing = visibility.rows.find((row) => row.id === id);
       if (existing) {
         if (existing.info === undefined && info !== undefined) existing.info = info;
         return;
       }
-      provider.rows.push({
+      visibility.rows.push({
         id,
         label,
         ...(info === undefined ? {} : { info }),
-        ...(account === undefined ? {} : { accountLabel: account }),
       });
     };
     for (const row of card.rows) addRow(row.rowId, row.label, row.info);
     for (const row of card.visibilityRows ?? []) addRow(row.rowId, row.label, row.info);
+    cards.push(visibility);
   }
-  return { providers: [...providers.values()] };
+  return { cards };
 }
 
 export function App(props: { client: DashboardClient }): JSX.Element {
@@ -264,12 +258,10 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   });
 
   /**
-   * The visibility section names what it hides. The catalog is grouped by
-   * provider: ids are stored for stable configuration but never rendered. The
-   * browser-local cache keeps providers the server has filtered out of quota
-   * probes, so a hidden provider keeps its Settings card and can be shown again
-   * after navigation or a reload; the section shows a plain empty state only
-   * until either source has something to show.
+   * The visibility section names individual cards, including cards hidden on
+   * Quota. The bounded cache also remembers absent cards through failed or
+   * incomplete reads, navigation and reload. Ids are configuration keys only,
+   * never display labels; the empty state lasts until either source has cards.
    */
   const [catalogCache, setCatalogCache] = createSignal<VisibilityCatalog>(
     readVisibilityCatalog(browserStorage()),

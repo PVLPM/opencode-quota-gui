@@ -24,7 +24,20 @@ export interface TestNode {
   offsetLeft: number;
   offsetWidth: number;
   offsetParent: TestNode | null;
-  getBoundingClientRect: () => { left: number };
+  getBoundingClientRect: () => {
+    left: number;
+    top: number;
+    bottom: number;
+    width: number;
+    height: number;
+  };
+  style: { setProperty(name: string, value: string): void; removeProperty(name: string): void };
+  setPointerCapture(id: number): void;
+  hasPointerCapture(id: number): boolean;
+  releasePointerCapture(id: number): void;
+  focus(): void;
+  closest(selector: string): TestNode | null;
+  scrollTop: number;
 }
 
 function elementNode(tag: string): TestNode {
@@ -41,7 +54,8 @@ function elementNode(tag: string): TestNode {
     offsetLeft: 0,
     offsetWidth: 0,
     offsetParent: null,
-    getBoundingClientRect: () => ({ left: 0 }),
+    getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 90, width: 400, height: 90 }),
+    ...domMechanics(),
   };
 }
 
@@ -59,7 +73,34 @@ function textNode(value: string): TestNode {
     offsetLeft: 0,
     offsetWidth: 0,
     offsetParent: null,
-    getBoundingClientRect: () => ({ left: 0 }),
+    getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 90, width: 400, height: 90 }),
+    ...domMechanics(),
+  };
+}
+
+/** Only the narrow DOM surface used by Settings' pointer sorter. */
+function domMechanics() {
+  const pointers = new Set<number>();
+  const styles = new Map<string, string>();
+  return {
+    style: {
+      setProperty: (name: string, value: string) => {
+        styles.set(name, value);
+      },
+      removeProperty: (name: string) => {
+        styles.delete(name);
+      },
+    },
+    setPointerCapture: (id: number) => {
+      pointers.add(id);
+    },
+    hasPointerCapture: (id: number) => pointers.has(id),
+    releasePointerCapture: (id: number) => {
+      pointers.delete(id);
+    },
+    focus: () => {},
+    closest: (_selector: string): TestNode | null => null,
+    scrollTop: 0,
   };
 }
 
@@ -71,6 +112,10 @@ const renderer = createRenderer<TestNode>({
     node.text = value;
   },
   insertNode: (parent, node, anchor) => {
+    if (node.parent) {
+      const previous = node.parent.children.indexOf(node);
+      if (previous >= 0) node.parent.children.splice(previous, 1);
+    }
     node.parent = parent;
     const index = anchor === undefined ? -1 : parent.children.indexOf(anchor);
     if (index < 0) parent.children.push(node);
@@ -144,6 +189,11 @@ export interface TestEvent {
   /** Keyboard events: the grip's Alt+Arrow reorder reads `key` and `altKey`. */
   readonly key?: string;
   readonly altKey?: boolean;
+  readonly pointerId?: number;
+  readonly button?: number;
+  readonly isPrimary?: boolean;
+  readonly clientX?: number;
+  readonly clientY?: number;
   /** Drag events: `dataTransfer` may be a stub; `preventDefault` is a no-op. */
   readonly preventDefault?: () => void;
   readonly dataTransfer?: {

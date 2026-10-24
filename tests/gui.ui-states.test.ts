@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { orderCardsByPreference } from "../src/contracts/card-order";
 import type {
   HomeSnapshot,
   ProjectSnapshot,
@@ -54,10 +55,9 @@ import {
   displayPreferencesFromValues,
   fieldErrors,
   initialDraft,
-  keyboardMovedProviderOrder,
-  orderedProviderIds,
+  keyboardMovedCardOrder,
   providerSelection,
-  reorderedProviderOrder,
+  reorderedCardOrder,
   SETTINGS_FIELDS,
   SETTINGS_GROUPS,
   type SettingsField,
@@ -587,6 +587,35 @@ describe("section state machine", () => {
 });
 
 describe("home view composition", () => {
+  it("treats normalized full scope card ids as exact hides and legacy provider ids or bare hashes as group hides", () => {
+    const scopeId = `anthropic:${"a".repeat(64)}`;
+    const cards = [
+      providerCard({
+        cardId: scopeId as never,
+        providerId: "anthropic",
+        providerScopeId: scopeId as never,
+        providerScopeHash: "a".repeat(64),
+        accountLabel: undefined,
+      }),
+      providerCard({
+        cardId: `anthropic:${"b".repeat(64)}` as never,
+        providerId: "anthropic",
+        providerScopeId: scopeId as never,
+        providerScopeHash: "a".repeat(64),
+      }),
+      providerCard({
+        cardId: `anthropic:${"c".repeat(64)}` as never,
+        providerId: "anthropic",
+        providerScopeId: scopeId as never,
+        providerScopeHash: "a".repeat(64),
+      }),
+      providerCard({ cardId: "openrouter:a" as never, providerId: "openrouter" }),
+    ];
+    for (const id of ["anthropic", "a".repeat(64)])
+      expect(visibleCards(cards, [id])).toEqual([cards[3]]);
+    expect(visibleCards(cards, [scopeId])).toEqual([cards[1], cards[2], cards[3]]);
+    expect(visibleCards(cards, [cards[1].cardId])).toEqual([cards[0], cards[2], cards[3]]);
+  });
   it.each([
     { planLabel: "Plus", accountLabel: "Personal", expected: "Synthetic Provider· Plus· Personal" },
     { planLabel: undefined, accountLabel: "Personal", expected: "Synthetic Provider· Personal" },
@@ -1832,6 +1861,7 @@ describe("settings page", () => {
     expect(SETTINGS_FIELDS.map((field) => field.key).sort()).toEqual(
       [
         "accountingDetail",
+        "dashboard.cardOrder",
         "dashboard.hiddenCards",
         "dashboard.hiddenRows",
         "dashboard.port",
@@ -1853,8 +1883,8 @@ describe("settings page", () => {
     expect(fieldFor("dashboard.port")?.control).toBe("readonly");
   });
 
-  it("keeps provider order as a hidden string-list field in the visibility group", () => {
-    const order = fieldFor("dashboard.providerOrder");
+  it("keeps card order as a hidden string-list field in the visibility group", () => {
+    const order = fieldFor("dashboard.cardOrder");
     expect(order.group).toBe("visibility");
     expect(order.hidden).toBe(true);
     expect(validateValue(order, [])).toBeUndefined();
@@ -1975,36 +2005,49 @@ describe("settings page", () => {
     expect(stringList(undefined)).toEqual([]);
   });
 
-  it("orders visibility providers by the stored order first, appending unknown or new ones", () => {
-    expect(orderedProviderIds([], ["a", "b", "c"])).toEqual(["a", "b", "c"]);
-    expect(orderedProviderIds(["c", "a"], ["a", "b", "c"])).toEqual(["c", "a", "b"]);
-    expect(orderedProviderIds(["a", "a"], ["a", "b"])).toEqual(["a", "b"]);
-    // A stored id the catalog no longer knows is ignored; new providers append.
-    expect(orderedProviderIds(["d", "a"], ["a", "b", "d"])).toEqual(["d", "a", "b"]);
+  it("shares card ordering with Quota, with provider ordering as a legacy fallback only", () => {
+    const cards = [
+      { cardId: "a", providerId: "one" },
+      { cardId: "b", providerId: "two" },
+      { cardId: "c", providerId: "one" },
+    ];
+    expect(orderCardsByPreference(cards, [], ["two"]).map((card) => card.cardId)).toEqual([
+      "b",
+      "a",
+      "c",
+    ]);
+    expect(orderCardsByPreference(cards, ["c", "a"], ["two"]).map((card) => card.cardId)).toEqual([
+      "c",
+      "a",
+      "b",
+    ]);
+    expect(orderCardsByPreference(cards, ["unknown", "a", "a"]).map((card) => card.cardId)).toEqual(
+      ["a", "b", "c"],
+    );
   });
 
   it("computes a remove-then-insert full order for drag and keyboard moves", () => {
-    expect(reorderedProviderOrder(["a", "b", "c"], "b", 0)).toEqual(["b", "a", "c"]);
-    expect(reorderedProviderOrder(["a", "b", "c"], "a", 2)).toEqual(["b", "c", "a"]);
-    expect(reorderedProviderOrder(["a", "b", "c"], "a", 99)).toEqual(["b", "c", "a"]);
-    expect(keyboardMovedProviderOrder(["a", "b", "c"], "a", 1)).toEqual(["b", "a", "c"]);
-    expect(keyboardMovedProviderOrder(["a", "b", "c"], "c", -1)).toEqual(["a", "c", "b"]);
+    expect(reorderedCardOrder(["a", "b", "c"], "b", 0)).toEqual(["b", "a", "c"]);
+    expect(reorderedCardOrder(["a", "b", "c"], "a", 2)).toEqual(["b", "c", "a"]);
+    expect(reorderedCardOrder(["a", "b", "c"], "a", 99)).toEqual(["b", "c", "a"]);
+    expect(keyboardMovedCardOrder(["a", "b", "c"], "a", 1)).toEqual(["b", "a", "c"]);
+    expect(keyboardMovedCardOrder(["a", "b", "c"], "c", -1)).toEqual(["a", "c", "b"]);
     // The ends clamp instead of wrapping.
-    expect(keyboardMovedProviderOrder(["a", "b"], "a", -1)).toEqual(["a", "b"]);
-    expect(keyboardMovedProviderOrder(["a", "b"], "b", 1)).toEqual(["a", "b"]);
+    expect(keyboardMovedCardOrder(["a", "b"], "a", -1)).toEqual(["a", "b"]);
+    expect(keyboardMovedCardOrder(["a", "b"], "b", 1)).toEqual(["a", "b"]);
   });
 
-  it("drafts a provider-order edit and saves it through the revision-checked patch", () => {
-    const values = { "dashboard.providerOrder": [] };
-    const writable = ["dashboard.providerOrder"];
-    const draft = { ...initialDraft("r1"), edits: { "dashboard.providerOrder": ["b", "a"] } };
-    expect(dirtyKeys(draft, values, writable)).toEqual(["dashboard.providerOrder"]);
+  it("drafts a card-order edit and saves it through the revision-checked patch", () => {
+    const values = { "dashboard.cardOrder": [] };
+    const writable = ["dashboard.cardOrder"];
+    const draft = { ...initialDraft("r1"), edits: { "dashboard.cardOrder": ["b", "a"] } };
+    expect(dirtyKeys(draft, values, writable)).toEqual(["dashboard.cardOrder"]);
     expect(toPatch(draft, dirtyKeys(draft, values, writable))).toEqual({
-      "dashboard.providerOrder": ["b", "a"],
+      "dashboard.cardOrder": ["b", "a"],
     });
   });
 
-  it("renders provider-grouped visibility cards with named eyes and unknown retained ids", async () => {
+  it("renders individual visibility cards with named eyes and unknown retained ids", async () => {
     const snapshot = settingsSnapshot({
       provenance: { percentDisplayMode: { scope: "legacy" } },
     });
@@ -2025,19 +2068,20 @@ describe("settings page", () => {
       },
       toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
       catalog: {
-        providers: [
+        cards: [
           {
             providerId: "visible-provider",
             providerLabel: "Visible Provider",
-            accountLabels: ["Plus"],
-            cardIds: ["visible-provider#cardhash"],
+            accountLabel: "Plus",
+            cardId: "visible-provider#cardhash",
             rows: [{ id: "visible-provider#cardhash#window:five_hour", label: "5h" }],
           },
           {
             providerId: "hidden-provider",
             providerLabel: "Hidden Provider",
-            accountLabels: ["Legacy", "Team"],
-            cardIds: ["hidden-provider#cardhash"],
+            planLabel: "Legacy",
+            accountLabel: "Team",
+            cardId: "hidden-provider#cardhash",
             rows: [{ id: "hidden-provider#cardhash#component:current_balance", label: "Balance" }],
           },
         ],
@@ -2054,14 +2098,14 @@ describe("settings page", () => {
       expect(html).toContain(title);
     }
     expect(html).toContain("4144");
-    // One dark card per provider, with inline account identification.
+    // One dark card per card identity, with inline account identification.
     expect(html.match(/class="qg-vis-provider"/g)).toHaveLength(2);
     expect(html).toContain('class="qg-vis-provider__name">Visible Provider</span>');
-    expect(html).toContain('class="qg-vis-provider__account">Plus</span>');
-    expect(html).toContain("Legacy · Team");
-    // The provider eye hides/shows all of a provider's cards, not the row list.
-    expect(html).toContain('aria-label="Hide Visible Provider"');
-    expect(html).toContain('aria-label="Show Hidden Provider"');
+    expect(text(html)).toContain('class="qg-vis-provider__account">· Plus</span>');
+    expect(text(html)).toContain("· Legacy");
+    // A card eye changes that card, not its siblings or row list.
+    expect(html).toContain('aria-label="Hide Visible Provider · Plus"');
+    expect(html).toContain('aria-label="Show Hidden Provider · Legacy · Team"');
     // Row eyes keep working while the provider is hidden; labels only, no ids.
     expect(html).toContain('aria-label="Hide 5h"');
     expect(html).toContain('aria-label="Hide Balance"');
@@ -2119,7 +2163,7 @@ describe("settings page", () => {
       }),
       client: {},
       toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
-      catalog: { providers: [] },
+      catalog: { cards: [] },
       onReload: noop,
     });
     expect(html).not.toContain("synthetic/raw/source.json");
@@ -2148,14 +2192,46 @@ describe("settings page", () => {
       }),
       client: {},
       toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
-      catalog: { providers: [] },
+      catalog: { cards: [] },
       onReload: noop,
     });
     expect(html).not.toContain("effective value inherited from");
     expect(html).not.toMatch(/(?:Workspace|Project|Legacy) override/);
   });
 
-  it("names the account inline on every row when a provider has multiple accounts", async () => {
+  it.each([
+    { planLabel: "Plus", accountLabel: "Personal", label: "OpenAI · Plus · Personal" },
+    { planLabel: undefined, accountLabel: "[OpenAI] (Plus)", label: "OpenAI · Plus" },
+    { planLabel: "Plus", accountLabel: undefined, label: "OpenAI · Plus" },
+    { planLabel: undefined, accountLabel: undefined, label: "OpenAI" },
+  ])("keeps Settings identity inline with Quota: $label", async ({ label, ...identity }) => {
+    const html = await renderView("/views/settings.tsx", "SettingsView", {
+      snapshot: settingsSnapshot(),
+      client: {},
+      toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
+      onReload: noop,
+      catalog: {
+        cards: [
+          {
+            cardId: `openai:${"a".repeat(64)}`,
+            providerId: "openai",
+            providerLabel: "OpenAI",
+            ...identity,
+            providerScopeId: `openai:${"c".repeat(64)}`,
+            providerScopeHash: "c".repeat(64),
+            rows: [{ id: `openai:${"a".repeat(64)}#weekly`, label: "Weekly" }],
+          },
+        ],
+      },
+    });
+    expect(html).toContain(`aria-label="Reorder ${label}"`);
+    expect(html).toContain(`aria-label="Hide ${label}"`);
+    expect(html).toContain('aria-label="Hide Weekly"');
+    expect(html).not.toContain("Weekly ·");
+    expect(html).not.toMatch(/[a-f0-9]{64}/u);
+  });
+
+  it("keeps same-provider accounts in separate cards with no account suffix on rows", async () => {
     const snapshot = settingsSnapshot();
     const html = await renderView("/views/settings.tsx", "SettingsView", {
       snapshot,
@@ -2168,22 +2244,28 @@ describe("settings page", () => {
       },
       toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
       catalog: {
-        providers: [
+        cards: [
           {
             providerId: "multi-provider",
             providerLabel: "Multi Provider",
-            accountLabels: ["Plus", "Team"],
-            cardIds: ["multi-provider#plus", "multi-provider#team"],
+            accountLabel: "Plus",
+            cardId: "multi-provider#plus",
             rows: [
               {
                 id: "multi-provider#plus#window:weekly",
                 label: "Weekly",
-                accountLabel: "Plus",
               },
+            ],
+          },
+          {
+            providerId: "multi-provider",
+            providerLabel: "Multi Provider",
+            accountLabel: "Team",
+            cardId: "multi-provider#team",
+            rows: [
               {
                 id: "multi-provider#team#window:weekly",
                 label: "Weekly",
-                accountLabel: "Team",
               },
             ],
           },
@@ -2192,10 +2274,10 @@ describe("settings page", () => {
       onReload: noop,
     });
 
-    expect(text(html)).toContain("Weekly · Plus");
-    expect(text(html)).toContain("Weekly · Team");
-    expect(html).toContain('aria-label="Hide Weekly · Plus"');
-    expect(html).toContain('aria-label="Hide Weekly · Team"');
+    expect(text(html)).not.toContain("Weekly · Plus");
+    expect(text(html)).not.toContain("Weekly · Team");
+    expect(html.match(/aria-label="Hide Weekly"/gu)).toHaveLength(2);
+    expect(html.match(/class="qg-vis-provider"/gu)).toHaveLength(2);
     expect(html).not.toContain("multi-provider");
     expect(html).not.toContain("#window");
   });
@@ -2213,7 +2295,7 @@ describe("settings page", () => {
         importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
       },
       toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
-      catalog: { providers: [] },
+      catalog: { cards: [] },
       onReload: noop,
     });
     expect(html).toContain("No provider accounts are available to configure yet.");
@@ -2549,12 +2631,11 @@ describe("OpenAI reset and credit rows", () => {
       },
       toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
       catalog: {
-        providers: [
+        cards: [
           {
             providerId: "openai",
             providerLabel: "OpenAI",
-            accountLabels: [],
-            cardIds: ["openai#account"],
+            cardId: "openai#account",
             rows: [
               {
                 id: "openai#account#openai:resets",
@@ -2767,7 +2848,7 @@ describe("cached visibility catalog", () => {
     const snapshot = settingsSnapshot();
     const cards = ["Plus", "Team"].map((account, index) =>
       providerCard({
-        cardId: `openai#account-${index}` as never,
+        cardId: `openai:${String(index + 1).repeat(64)}` as never,
         providerId: "openai",
         providerLabel: "OpenAI",
         accountLabel: account,
@@ -2776,12 +2857,12 @@ describe("cached visibility catalog", () => {
         rows: [],
         visibilityRows: [
           {
-            rowId: `openai#account-${index}#openai:resets` as never,
+            rowId: `openai:${String(index + 1).repeat(64)}#openai:resets` as never,
             label: "Resets",
             info: OPENAI_RESETS_INFO,
           },
           {
-            rowId: `openai#account-${index}#openai:credits` as never,
+            rowId: `openai:${String(index + 1).repeat(64)}#openai:credits` as never,
             label: "Credits",
             info: OPENAI_CREDITS_INFO,
           },
@@ -2823,22 +2904,20 @@ describe("cached visibility catalog", () => {
       renderGraph.elementsNamed(root, "button").find((node) => node.props["aria-label"] === label);
     try {
       await until(
-        () => buttonByLabel("Hide Resets · Plus") !== undefined,
+        () => buttonByLabel("Hide Resets") !== undefined,
         "the account-scoped Resets eye",
       );
-      expect(buttonByLabel("Hide Resets · Team")).toBeDefined();
-      expect(buttonByLabel("Hide Credits · Plus")).toBeDefined();
-      expect(buttonByLabel("Hide Credits · Team")).toBeDefined();
-      expect(renderGraph.textOf(root)).not.toContain(planLabel);
+      expect(buttonByLabel("Hide OpenAI · Separate plan · Plus")).toBeDefined();
+      expect(buttonByLabel("Hide OpenAI · Separate plan · Team")).toBeDefined();
+      expect(buttonByLabel("Hide Credits")).toBeDefined();
+      expect(renderGraph.textOf(root)).toContain(planLabel);
       const catalog = readVisibilityCatalog(storage);
-      expect(catalog.providers[0]?.accountLabels).toEqual(["Plus", "Team"]);
-      expect(catalog.providers[0]?.rows.map((row) => row.accountLabel)).toEqual([
-        "Plus",
-        "Plus",
-        "Team",
-        "Team",
+      expect(catalog.cards.map((card) => card.accountLabel)).toEqual(["Plus", "Team"]);
+      expect(catalog.cards.map((card) => card.rows.map((row) => row.label))).toEqual([
+        ["Resets", "Credits"],
+        ["Resets", "Credits"],
       ]);
-      expect(JSON.stringify(catalog)).not.toContain(planLabel);
+      expect(catalog.cards.map((card) => card.planLabel)).toEqual([planLabel, planLabel]);
       expect(renderGraph.textOf(root)).toContain("More information about Resets");
       expect(
         renderGraph
@@ -2853,10 +2932,10 @@ describe("cached visibility catalog", () => {
       browser.follow("/settings");
       await settle();
       await until(
-        () => buttonByLabel("Hide Resets · Plus") !== undefined,
+        () => buttonByLabel("Hide Resets") !== undefined,
         "the cached Resets eyes after navigation",
       );
-      expect(buttonByLabel("Hide Credits · Team")).toBeDefined();
+      expect(buttonByLabel("Hide OpenAI · Separate plan · Team")).toBeDefined();
     } finally {
       dispose();
       vi.unstubAllGlobals();
@@ -2874,15 +2953,20 @@ describe("cached visibility catalog", () => {
     const browser = historyBrowser("/quota", storage);
     vi.stubGlobal("window", browser);
 
-    const visibleCard = providerCard();
+    const visibleCardId = `synthetic-provider:${"a".repeat(64)}`;
+    const hiddenCardId = `hidden-provider:${"b".repeat(64)}`;
+    const visibleCard = providerCard({
+      cardId: visibleCardId as never,
+      rows: [percentRow({ rowId: `${visibleCardId}#window:five_hour` as never })],
+    });
     const hiddenCard = providerCard({
-      cardId: "hidden-provider#cardhash" as never,
+      cardId: hiddenCardId as never,
       providerId: "hidden-provider",
       providerLabel: "Hidden Provider",
       accountLabel: "Team",
       rows: [
         percentRow({
-          rowId: "hidden-provider#cardhash#window:weekly" as never,
+          rowId: `${hiddenCardId}#window:weekly` as never,
           label: "Weekly",
         }),
       ],
@@ -2947,7 +3031,7 @@ describe("cached visibility catalog", () => {
       // The first unfiltered snapshot reaches the browser-local cache.
       await until(
         () =>
-          readVisibilityCatalog(storage).providers.some(
+          readVisibilityCatalog(storage).cards.some(
             (entry) => entry.providerId === "hidden-provider",
           ),
         "the cache to learn both providers",
@@ -2955,18 +3039,18 @@ describe("cached visibility catalog", () => {
 
       await navigate("/settings");
       expect(renderGraph.textOf(root)).toContain("Hidden Provider");
-      renderGraph.listenerOf(buttonByLabel(root, "Hide Hidden Provider"), "onClick")?.({});
+      renderGraph.listenerOf(buttonByLabel(root, "Hide Hidden Provider · Team"), "onClick")?.({});
       await settle();
       // Persist the hidden provider id before the filtered cycle arrives.
-      snapshot.values["dashboard.hiddenCards"] = ["hidden-provider"];
-      snapshot.visibility.hiddenCards = ["hidden-provider"];
+      snapshot.values["dashboard.hiddenCards"] = [hiddenCardId];
+      snapshot.visibility.hiddenCards = [hiddenCardId];
       const saveButton = renderGraph
         .elementsNamed(root, "button")
         .find((node) => renderGraph.textOf(node) === "Save");
       if (saveButton === undefined) throw new Error("probe: no Save button");
       renderGraph.listenerOf(saveButton, "onClick")?.({});
       await until(() => saves.length === 1, "the visibility save");
-      expect(saves[0]?.patch["dashboard.hiddenCards"]).toEqual(["hidden-provider"]);
+      expect(saves[0]?.patch["dashboard.hiddenCards"]).toEqual([hiddenCardId]);
 
       // The server now excludes the hidden provider from quota probes. The
       // filtered snapshot must not erase its Settings card.
@@ -2976,20 +3060,20 @@ describe("cached visibility catalog", () => {
       onEvent?.({ topic: "quota.changed", at: NOW });
       await settle();
       expect(renderGraph.textOf(root)).not.toContain("Hidden Provider");
-      expect(readVisibilityCatalog(storage).providers.map((entry) => entry.providerId)).toContain(
+      expect(readVisibilityCatalog(storage).cards.map((entry) => entry.providerId)).toContain(
         "hidden-provider",
       );
 
       await navigate("/settings");
       expect(renderGraph.textOf(root)).toContain("Hidden Provider");
-      expect(buttonByLabel(root, "Show Hidden Provider").props["aria-pressed"]).toBe("true");
+      expect(buttonByLabel(root, "Show Hidden Provider · Team").props["aria-pressed"]).toBe("true");
       expect(buttonByLabel(root, "Hide Weekly")).toBeDefined();
 
       // Leaving and returning still finds the cached provider.
       await navigate("/quota");
       await navigate("/settings");
       expect(renderGraph.textOf(root)).toContain("Hidden Provider");
-      expect(buttonByLabel(root, "Show Hidden Provider")).toBeDefined();
+      expect(buttonByLabel(root, "Show Hidden Provider · Team")).toBeDefined();
 
       // A reload starts from storage alone; the quota snapshot stays filtered.
       dispose();
@@ -3000,7 +3084,7 @@ describe("cached visibility catalog", () => {
         () => renderGraph.textOf(reloaded).includes("Hidden Provider"),
         "the cached provider after reload",
       );
-      expect(buttonByLabel(reloaded, "Show Hidden Provider")).toBeDefined();
+      expect(buttonByLabel(reloaded, "Show Hidden Provider · Team")).toBeDefined();
       expect(buttonByLabel(reloaded, "Hide Weekly")).toBeDefined();
     } finally {
       reloadedDispose?.();
@@ -3536,7 +3620,7 @@ describe("the settings editor keeps its draft across refetches", () => {
         renderGraph.liveSettings({
           client,
           query: server.query,
-          catalog: () => options.catalog ?? { providers: [] },
+          catalog: () => options.catalog ?? { cards: [] },
           toaster: {
             toasts: () => [],
             push: (tone, message) => toasts.push({ tone, message }),
@@ -3552,19 +3636,18 @@ describe("the settings editor keeps its draft across refetches", () => {
   /** Two providers with one card each; Beta carries no account identification. */
   function visibilityCatalog(): VisibilityCatalog {
     return {
-      providers: [
+      cards: [
         {
           providerId: "prov-alpha",
           providerLabel: "Alpha Provider",
-          accountLabels: ["Plus"],
-          cardIds: ["prov-alpha#cardhash"],
+          accountLabel: "Plus",
+          cardId: "prov-alpha#cardhash",
           rows: [{ id: "prov-alpha#cardhash#window:five_hour", label: "5h" }],
         },
         {
           providerId: "prov-beta",
           providerLabel: "Beta Provider",
-          accountLabels: [],
-          cardIds: ["prov-beta#cardhash"],
+          cardId: "prov-beta#cardhash",
           rows: [{ id: "prov-beta#cardhash#window:weekly", label: "Weekly" }],
         },
       ],
@@ -3756,7 +3839,11 @@ describe("the settings editor keeps its draft across refetches", () => {
 
     mounted.server.setData(settingsSnapshot());
     await settle();
-    expect(renderGraph.elementsNamed(mounted.root, "output")).toHaveLength(0);
+    expect(
+      renderGraph
+        .elementsNamed(mounted.root, "output")
+        .some((node) => node.props["aria-label"] === "Loading settings"),
+    ).toBe(false);
     expect(renderGraph.textOf(mounted.root)).toContain("No unsaved changes.");
     mounted.dispose();
   });
@@ -3788,7 +3875,7 @@ describe("the settings editor keeps its draft across refetches", () => {
     mounted.dispose();
   });
 
-  it("the provider eye stores a provider id, leaves row ids alone, and surfaces no ids", async () => {
+  it("the card eye leaves row ids alone and surfaces no ids", async () => {
     const mounted = mountSettings({
       initial: settingsSnapshot(),
       catalog: visibilityCatalog(),
@@ -3800,21 +3887,21 @@ describe("the settings editor keeps its draft across refetches", () => {
         `eye ${label}`,
       );
 
-    expect(eyeByLabel("Hide Alpha Provider").props["aria-pressed"]).toBe("false");
+    expect(eyeByLabel("Hide Alpha Provider · Plus").props["aria-pressed"]).toBe("false");
     expect(eyeByLabel("Hide Weekly").props["aria-pressed"]).toBe("false");
 
-    // Hiding the provider names its id only; row eyes keep working underneath.
-    click(eyeByLabel("Hide Alpha Provider"));
+    // Card hiding is independent of its row eyes.
+    click(eyeByLabel("Hide Alpha Provider · Plus"));
     await settle();
-    expect(eyeByLabel("Show Alpha Provider").props["aria-pressed"]).toBe("true");
+    expect(eyeByLabel("Show Alpha Provider · Plus").props["aria-pressed"]).toBe("true");
     click(eyeByLabel("Hide 5h"));
     await settle();
     expect(eyeByLabel("Show 5h").props["aria-pressed"]).toBe("true");
 
-    // Showing the provider clears its card entries; the hidden row id survives.
-    click(eyeByLabel("Show Alpha Provider"));
+    // Showing the card clears only its entry; the hidden row id survives.
+    click(eyeByLabel("Show Alpha Provider · Plus"));
     await settle();
-    expect(eyeByLabel("Hide Alpha Provider").props["aria-pressed"]).toBe("false");
+    expect(eyeByLabel("Hide Alpha Provider · Plus").props["aria-pressed"]).toBe("false");
     expect(eyeByLabel("Show 5h").props["aria-pressed"]).toBe("true");
 
     // Stable ids never display anywhere, retained or drafted.
@@ -3830,7 +3917,7 @@ describe("the settings editor keeps its draft across refetches", () => {
     mounted.dispose();
   });
 
-  it("Alt+Arrow reorders a provider and the save carries the complete provider order", async () => {
+  it("Alt+Arrow reorders a card and the save carries the complete card order", async () => {
     const mounted = mountSettings({
       initial: settingsSnapshot(),
       catalog: visibilityCatalog(),
@@ -3840,14 +3927,17 @@ describe("the settings editor keeps its draft across refetches", () => {
       (node) => node.props["aria-label"] === "Reorder Beta Provider",
       "the Beta grip",
     );
-    expect(betaGrip.props.draggable).toBe(true);
+    expect(betaGrip.props.disabled).toBe(false);
     const keyDown = renderGraph.listenerOf(betaGrip, "onKeyDown");
     expect(keyDown).toBeDefined();
+    const focus = vi.fn();
+    betaGrip.focus = focus;
 
     // A move writes the full current order, not a partial compare.
     keyDown?.({ altKey: true, key: "ArrowUp", preventDefault: () => {} });
     await settle();
-    expect(renderGraph.textOf(mounted.root)).toContain("Beta Provider moved up.");
+    expect(renderGraph.textOf(mounted.root)).toContain("Beta Provider moved to position 1 of 2.");
+    expect(focus).toHaveBeenCalled();
     expect(
       renderGraph
         .elementsNamed(mounted.root, "article")
@@ -3856,54 +3946,396 @@ describe("the settings editor keeps its draft across refetches", () => {
 
     click(buttonByText(mounted.root, "Save"));
     await until(() => mounted.saves.length === 1, "the save");
-    expect(mounted.saves[0]?.patch["dashboard.providerOrder"]).toEqual(["prov-beta", "prov-alpha"]);
+    expect(mounted.saves[0]?.patch["dashboard.cardOrder"]).toEqual([
+      "prov-beta#cardhash",
+      "prov-alpha#cardhash",
+    ]);
     expect(mounted.saves[0]?.expectedRevision).toBe("revision-1");
     mounted.dispose();
   });
 
-  it("dragging one provider card onto another writes the remove-then-insert order", async () => {
+  it("keeps Anthropic and OpenRouter sibling eyes, rows, and keyboard order independent", async () => {
+    const catalog: VisibilityCatalog = {
+      cards: [
+        {
+          cardId: "anthropic:a",
+          providerId: "anthropic",
+          providerLabel: "Anthropic",
+          planLabel: "Pro",
+          accountLabel: "Personal",
+          rows: [{ id: "anthropic:a#weekly", label: "Weekly" }],
+        },
+        {
+          cardId: "anthropic:b",
+          providerId: "anthropic",
+          providerLabel: "Anthropic",
+          planLabel: "Max",
+          accountLabel: "Work",
+          rows: [{ id: "anthropic:b#weekly", label: "Weekly" }],
+        },
+        {
+          cardId: "openrouter:a",
+          providerId: "openrouter",
+          providerLabel: "OpenRouter",
+          accountLabel: "Personal",
+          rows: [{ id: "openrouter:a#balance", label: "Balance" }],
+        },
+        {
+          cardId: "openrouter:b",
+          providerId: "openrouter",
+          providerLabel: "OpenRouter",
+          accountLabel: "Work",
+          rows: [{ id: "openrouter:b#balance", label: "Balance" }],
+        },
+      ],
+    };
+    const snapshot = settingsSnapshot();
+    snapshot.values["dashboard.hiddenCards"] = ["retained-unknown"];
+    snapshot.values["dashboard.cardOrder"] = ["unseen-card"];
+    const mounted = mountSettings({ initial: snapshot, catalog });
+    const button = (label: string) =>
+      findNode(
+        renderGraph.elementsNamed(mounted.root, "button"),
+        (node) => node.props["aria-label"] === label,
+        label,
+      );
+    try {
+      click(button("Hide Anthropic · Pro · Personal"));
+      click(button("Hide OpenRouter · Personal"));
+      await settle();
+      expect(button("Hide Anthropic · Max · Work").props["aria-pressed"]).toBe("false");
+      expect(button("Hide OpenRouter · Work").props["aria-pressed"]).toBe("false");
+      const workCard = renderGraph
+        .elementsNamed(mounted.root, "article")
+        .find((node) => node.props["aria-label"] === "Anthropic · Max · Work");
+      if (!workCard) throw new Error("No Work card");
+      const weekly = findNode(
+        renderGraph.elementsNamed(workCard, "button"),
+        (node) => node.props["aria-label"] === "Hide Weekly",
+        "Work Weekly eye",
+      );
+      click(weekly);
+      fire(button("Reorder OpenRouter · Work"), "onKeyDown", {
+        altKey: true,
+        key: "ArrowUp",
+        preventDefault: () => {},
+      });
+      await settle();
+      expect(renderGraph.textOf(mounted.root)).toContain(
+        "OpenRouter · Work moved to position 3 of 4.",
+      );
+      expect(renderGraph.textOf(mounted.root)).not.toContain("Weekly · Work");
+      expect(mounted.saves).toEqual([]);
+      click(buttonByText(mounted.root, "Save"));
+      await until(() => mounted.saves.length === 1, "the sibling save");
+      expect(mounted.saves[0]?.patch).toEqual({
+        "dashboard.hiddenCards": ["retained-unknown", "anthropic:a", "openrouter:a"],
+        "dashboard.hiddenRows": ["anthropic:b#weekly"],
+        "dashboard.cardOrder": [
+          "anthropic:a",
+          "anthropic:b",
+          "openrouter:b",
+          "openrouter:a",
+          "unseen-card",
+        ],
+      });
+      expect(renderGraph.textOf(mounted.root)).not.toContain("retained-unknown");
+    } finally {
+      mounted.dispose();
+    }
+  });
+
+  it("lets a provider-scope card hide and show itself without disabling its own eye", async () => {
+    const cardId = `chutes:${"d".repeat(64)}`;
+    const mounted = mountSettings({
+      initial: settingsSnapshot(),
+      catalog: {
+        cards: [
+          {
+            cardId,
+            providerId: "chutes",
+            providerLabel: "Chutes",
+            providerScopeId: cardId,
+            providerScopeHash: "d".repeat(64),
+            rows: [{ id: `${cardId}#balance`, label: "Balance" }],
+          },
+        ],
+      },
+    });
+    const eye = (label: string) =>
+      findNode(
+        renderGraph.elementsNamed(mounted.root, "button"),
+        (node) => node.props["aria-label"] === label,
+        label,
+      );
+    try {
+      click(eye("Hide Chutes"));
+      await settle();
+      expect(eye("Show Chutes").props.disabled).toBe(false);
+      expect(eye("Show Chutes").props["aria-pressed"]).toBe("true");
+      expect(renderGraph.textOf(mounted.root)).not.toContain(
+        "Hidden by a legacy provider setting.",
+      );
+      click(eye("Show Chutes"));
+      await settle();
+      expect(eye("Hide Chutes").props.disabled).toBe(false);
+      expect(buttonByText(mounted.root, "Save").props.disabled).toBe(true);
+      expect(mounted.saves).toEqual([]);
+    } finally {
+      mounted.dispose();
+    }
+  });
+
+  it("keeps a mixed provider-scope card, Personal and Work accounts independent on Settings and Home", async () => {
+    const scopeId = `anthropic:${"a".repeat(64)}`;
+    const catalog: VisibilityCatalog = {
+      cards: [
+        {
+          cardId: scopeId,
+          providerId: "anthropic",
+          providerLabel: "Anthropic",
+          providerScopeId: scopeId,
+          providerScopeHash: "a".repeat(64),
+          rows: [{ id: `${scopeId}#balance`, label: "Balance" }],
+        },
+        ...["Personal", "Work"].map((accountLabel, index) => {
+          const cardId = `anthropic:${(index === 0 ? "b" : "c").repeat(64)}`;
+          return {
+            cardId,
+            providerId: "anthropic",
+            providerLabel: "Anthropic",
+            accountLabel,
+            providerScopeId: scopeId,
+            providerScopeHash: "a".repeat(64),
+            rows: [{ id: `${cardId}#weekly`, label: "Weekly" }],
+          };
+        }),
+      ],
+    };
+    const snapshot = settingsSnapshot();
+    snapshot.values["dashboard.hiddenCardsVersion"] = 2; // Read-only effective backend semantics.
+    const mounted = mountSettings({ initial: snapshot, catalog });
+    const eye = (label: string) =>
+      findNode(
+        renderGraph.elementsNamed(mounted.root, "button"),
+        (node) => node.props["aria-label"] === label,
+        label,
+      );
+    const quotaCards = catalog.cards.map((card) =>
+      providerCard({
+        cardId: card.cardId as never,
+        providerId: card.providerId,
+        providerLabel: card.providerLabel,
+        accountLabel: card.accountLabel,
+        providerScopeId: card.providerScopeId as never,
+        providerScopeHash: card.providerScopeHash,
+        rows: [percentRow({ rowId: `${card.cardId}#weekly` as never })],
+      }),
+    );
+    const home = (hiddenCards: string[]) =>
+      renderView(
+        "/views/home.tsx",
+        "QuotaView",
+        homeProps({
+          hiddenCards,
+          snapshot: homeSnapshot({
+            providers: { cards: quotaCards, enabledProviders: "auto", polledAtMs: NOW },
+          }),
+        }),
+      );
+    try {
+      click(eye("Hide Anthropic"));
+      await settle();
+      expect(eye("Show Anthropic").props.disabled).toBe(false);
+      for (const account of ["Personal", "Work"]) {
+        expect(eye(`Hide Anthropic · ${account}`).props.disabled).toBe(false);
+        expect(eye(`Hide Anthropic · ${account}`).props["aria-pressed"]).toBe("false");
+      }
+      const hiddenHome = await home([scopeId]);
+      expect(hiddenHome.match(/class="qg-card"/gu)).toHaveLength(2);
+      expect(text(hiddenHome)).toContain("Personal");
+      expect(text(hiddenHome)).toContain("Work");
+      expect(renderGraph.textOf(mounted.root)).not.toContain(
+        "Hidden by a legacy provider setting.",
+      );
+      click(eye("Show Anthropic"));
+      await settle();
+      expect(buttonByText(mounted.root, "Save").props.disabled).toBe(true);
+      expect((await home([])).match(/class="qg-card"/gu)).toHaveLength(3);
+      for (const account of ["Personal", "Work"])
+        expect(eye(`Hide Anthropic · ${account}`).props["aria-pressed"]).toBe("false");
+      click(eye("Hide Anthropic"));
+      click(buttonByText(mounted.root, "Save"));
+      await until(() => mounted.saves.length === 1, "the exact scope-card hide save");
+      expect(mounted.saves[0]?.patch).toEqual({ "dashboard.hiddenCards": [scopeId] });
+    } finally {
+      mounted.dispose();
+    }
+  });
+
+  it.each([
+    "anthropic",
+    "a".repeat(64),
+  ])("explains normalized inherited legacy hide %s without changing siblings", async (legacyId) => {
+    const snapshot = settingsSnapshot();
+    snapshot.values["dashboard.hiddenCardsVersion"] = 2;
+    snapshot.values["dashboard.hiddenCards"] = [legacyId, "unknown-id"];
+    const scopeId = `anthropic:${"a".repeat(64)}`;
+    const catalog: VisibilityCatalog = {
+      cards: [
+        {
+          cardId: scopeId,
+          providerId: "anthropic",
+          providerLabel: "Anthropic",
+          providerScopeId: scopeId,
+          providerScopeHash: "a".repeat(64),
+          rows: [{ id: `${scopeId}#weekly`, label: "Weekly" }],
+        },
+        ...["Personal", "Work"].map((accountLabel, index) => ({
+          cardId: `anthropic:${(index === 0 ? "b" : "c").repeat(64)}`,
+          providerId: "anthropic",
+          providerLabel: "Anthropic",
+          accountLabel,
+          providerScopeId: scopeId,
+          providerScopeHash: "a".repeat(64),
+          rows: [
+            { id: `anthropic:${(index === 0 ? "b" : "c").repeat(64)}#weekly`, label: "Weekly" },
+          ],
+        })),
+      ],
+    };
+    const mounted = mountSettings({ initial: snapshot, catalog });
+    try {
+      const cards = renderGraph
+        .elementsNamed(mounted.root, "article")
+        .filter((node) => node.props.class === "qg-vis-provider");
+      for (const card of cards) {
+        expect(card.props["data-hidden"]).toBe("true");
+        const buttons = renderGraph.elementsNamed(card, "button");
+        expect(
+          buttons.find((node) => String(node.props["aria-label"]).startsWith("Show Anthropic"))
+            ?.props.disabled,
+        ).toBe(true);
+        const rowEye = buttons.find((node) => node.props["aria-label"] === "Hide Weekly");
+        expect(rowEye?.props.disabled).toBe(false);
+      }
+      expect(renderGraph.textOf(mounted.root)).toContain(
+        "Hidden by a legacy provider setting. Clear it in the settings file to control cards separately.",
+      );
+      const row = renderGraph
+        .elementsNamed(cards[0], "button")
+        .find((node) => node.props["aria-label"] === "Hide Weekly");
+      if (!row) throw new Error("No row eye");
+      click(row);
+      click(buttonByText(mounted.root, "Save"));
+      await until(() => mounted.saves.length === 1, "the inherited row save");
+      expect(mounted.saves[0]?.patch).toEqual({ "dashboard.hiddenRows": [`${scopeId}#weekly`] });
+      expect(renderGraph.textOf(mounted.root)).not.toContain("a".repeat(64));
+    } finally {
+      mounted.dispose();
+    }
+  });
+
+  it.each([
+    "drop",
+    "escape",
+    "cancel",
+    "lost",
+  ])("pointer %s reflows whole cards but only a completed drop drafts order", async (ending) => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let frame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++frame, callback);
+      return frame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      frames.delete(id);
+    });
     const mounted = mountSettings({
       initial: settingsSnapshot(),
       catalog: visibilityCatalog(),
     });
-    const cardOf = (label: string): TestNode =>
-      findNode(
-        renderGraph.elementsNamed(mounted.root, "article"),
-        (node) => renderGraph.textOf(node).includes(label),
-        `the ${label} card`,
-      );
+    const cards = () =>
+      renderGraph
+        .elementsNamed(mounted.root, "article")
+        .filter((node) => node.props.class === "qg-vis-provider");
+    const slots = () =>
+      renderGraph
+        .elementsNamed(mounted.root, "div")
+        .filter((node) => node.props.class === "qg-vis-slot");
+    const list = renderGraph
+      .elementsNamed(mounted.root, "fieldset")
+      .find((node) => node.props.class === "qg-vis-list");
+    if (!list) throw new Error("No visibility list");
+    for (const slot of slots())
+      slot.getBoundingClientRect = () => {
+        const top = slots().indexOf(slot) * 100;
+        return { top, bottom: top + 90, left: 0, width: 400, height: 90 };
+      };
+    for (const card of cards())
+      card.getBoundingClientRect = () =>
+        card.parent?.getBoundingClientRect() ?? {
+          top: 0,
+          bottom: 90,
+          left: 0,
+          width: 400,
+          height: 90,
+        };
     const betaGrip = findNode(
       renderGraph.elementsNamed(mounted.root, "button"),
       (node) => node.props["aria-label"] === "Reorder Beta Provider",
       "the Beta grip",
     );
-    const transfer = {
-      setData: () => {},
-      getData: () => "prov-beta",
-      dropEffect: "",
-      effectAllowed: "",
-    };
-
-    // The grip — never the eye — is the drag handle, and it carries the id.
-    fire(betaGrip, "onDragStart", { dataTransfer: transfer });
-    await settle();
-    expect(cardOf("Beta Provider").props["data-dragging"]).toBe("true");
-    fire(cardOf("Alpha Provider"), "onDragOver", {
+    const point = (y: number) => ({
+      pointerId: 1,
+      button: 0,
+      isPrimary: true,
+      clientX: 10,
+      clientY: y,
       preventDefault: () => {},
-      dataTransfer: transfer,
     });
-    await settle();
-    expect(cardOf("Alpha Provider").props["data-drop"]).toBe("true");
-
-    fire(cardOf("Alpha Provider"), "onDrop", { preventDefault: () => {}, dataTransfer: transfer });
-    await settle();
-    expect(cardOf("Beta Provider").props["data-dragging"]).toBeUndefined();
-    expect(cardOf("Alpha Provider").props["data-drop"]).toBeUndefined();
-
-    click(buttonByText(mounted.root, "Save"));
-    await until(() => mounted.saves.length === 1, "the save");
-    expect(mounted.saves[0]?.patch["dashboard.providerOrder"]).toEqual(["prov-beta", "prov-alpha"]);
-    mounted.dispose();
+    try {
+      fire(betaGrip, "onPointerDown", point(120));
+      expect(list.hasPointerCapture(1)).toBe(true);
+      fire(list, "onPointerMove", point(10));
+      for (const callback of [...frames.values()]) callback(16);
+      frames.clear();
+      await settle();
+      expect(cards().map((node) => node.props["aria-label"])).toEqual([
+        "Beta Provider",
+        "Alpha Provider · Plus",
+      ]);
+      expect(cards()[0]?.props["data-dragging"]).toBe("true");
+      expect(list.props["data-sorting"]).toBe("true");
+      expect(buttonByText(mounted.root, "Save").props.disabled).toBe(true);
+      expect(mounted.saves).toEqual([]);
+      if (ending === "drop") fire(list, "onPointerUp", point(10));
+      if (ending === "escape") fire(list, "onKeyDown", { key: "Escape" });
+      if (ending === "cancel") fire(list, "onPointerCancel", point(10));
+      if (ending === "lost") fire(list, "onLostPointerCapture", point(10));
+      await settle();
+      expect(list.hasPointerCapture(1)).toBe(false);
+      expect(list.props["data-sorting"]).toBeUndefined();
+      expect(cards().every((node) => node.props["data-dragging"] === undefined)).toBe(true);
+      expect(mounted.saves).toEqual([]);
+      if (ending === "drop") {
+        click(buttonByText(mounted.root, "Save"));
+        await until(() => mounted.saves.length === 1, "the save");
+        expect(mounted.saves[0]?.patch["dashboard.cardOrder"]).toEqual([
+          "prov-beta#cardhash",
+          "prov-alpha#cardhash",
+        ]);
+      } else {
+        expect(cards().map((node) => node.props["aria-label"])).toEqual([
+          "Alpha Provider · Plus",
+          "Beta Provider",
+        ]);
+        expect(buttonByText(mounted.root, "Save").props.disabled).toBe(true);
+      }
+    } finally {
+      mounted.dispose();
+      vi.unstubAllGlobals();
+    }
   });
 
   it("adopts a fresh revision on a clean refresh so the next save carries it", async () => {
