@@ -14,7 +14,12 @@ import {
   scrubCredentialErrorText,
   selectConnectionCredentialRows,
 } from "../lib/opencode-auth.js";
-import { consoleBaseUrl, resolveOpenCodeConsoleAuth } from "../lib/opencode-console-auth.js";
+import {
+  consoleBaseUrl,
+  consoleUnexpectedErrorText,
+  type OpenCodeConsoleAuthAccount,
+  resolveOpenCodeConsoleAuthAccounts,
+} from "../lib/opencode-console-auth.js";
 import { queryOpenCodeGoConsoleStatus, queryOpenCodeGoQuota } from "../lib/opencode-go.js";
 import {
   DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
@@ -102,26 +107,224 @@ function buildOpenCodeGoEntries(
       label: labels.label,
       rowKey: OPENCODE_GO_WINDOW_ROW_KEYS[window],
       percentRemaining: usage.percentRemaining,
-      resetTimeIso: usage.resetTimeIso,
+      ...(usage.resetTimeIso !== undefined ? { resetTimeIso: usage.resetTimeIso } : {}),
     });
   }
 
   return entries;
 }
 
+function consoleAccountDescriptor(account: OpenCodeConsoleAuthAccount): {
+  sourceId: string;
+  label: string;
+  active: boolean;
+} {
+  return { sourceId: account.sourceId, label: account.label, active: account.active };
+}
+
+function consoleSignInFailure(account: OpenCodeConsoleAuthAccount): string {
+  const detail =
+    account.state === "invalid" ? scrubCredentialErrorText(account.error) : "the sign-in expired";
+  return `OpenCode Console sign-in failed: ${detail}. ${CONSOLE_LOGIN_HINT}`;
+}
+
+/**
+ * Query one workspace. The API client reports expected failures as a result,
+ * but an unexpected throw must stay local to this workspace.
+ */
+async function queryConsoleStatus(
+  account: Extract<OpenCodeConsoleAuthAccount, { state: "configured" }>,
+  ctx: QuotaProviderContext,
+): Promise<OpenCodeGoResult> {
+  try {
+    return await queryOpenCodeGoConsoleStatus(account.credential, {
+      requestTimeoutMs: ctx.config.requestTimeoutMs,
+    });
+  } catch (error) {
+    return {
+      success: false,
+      error: `OpenCode Console request failed: ${consoleUnexpectedErrorText(error, account.credential)}`,
+      retryable: true,
+    };
+  }
+}
+
+function consoleAccountsState(accounts: readonly OpenCodeConsoleAuthAccount[]): string {
+  const states = new Set(accounts.map((account) => account.state));
+  if (states.size === 1) return [...states][0] ?? "none";
+  return states.has("configured") ? "mixed" : "invalid";
+}
+
+/**
+ * Safe diagnostics for the Console workspace set. The first workspace keeps
+ * the old single-account keys; every workspace is also represented by a
+ * source-id-keyed detail when it has a failure.
+ */
+function consoleAccountsStatusDetails(
+  accounts: readonly OpenCodeConsoleAuthAccount[],
+  errorsBySourceId: ReadonlyMap<string, string> = new Map(),
+): QuotaProviderStatusDetail[] {
+  const details: QuotaProviderStatusDetail[] = [
+    { key: "console_accounts", value: String(accounts.length) },
+    { key: "console_auth_state", value: consoleAccountsState(accounts) },
+  ];
+  const failureMessages: string[] = [];
+  const first = accounts.find((account) => "credential" in account) ?? accounts[0];
+  if (first && "credential" in first) {
+    details.push(
+      { key: "console_server", value: consoleBaseUrl(first.credential) },
+      {
+        key: "console_org",
+        value: first.credential.orgName ?? first.credential.orgId ?? "(none)",
+      },
+    );
+  }
+  for (const account of accounts) {
+    if (account.state === "invalid") {
+      const message = scrubCredentialErrorText(account.error);
+      failureMessages.push(message);
+      details.push({
+        key: `console_account_error:${account.sourceId}`,
+        value: `${account.label}: ${message}`,
+      });
+    } else if (account.state === "expired") {
+      failureMessages.push("the sign-in expired");
+      details.push({
+        key: `console_account_error:${account.sourceId}`,
+        value: `${account.label}: the sign-in expired`,
+      });
+    }
+    const fetchError = errorsBySourceId.get(account.sourceId);
+    if (fetchError) {
+      failureMessages.push(fetchError);
+      details.push({
+        key: `console_account_error:${account.sourceId}`,
+        value: `${account.label}: ${fetchError}`,
+      });
+    }
+  }
+  // Keep the old single-account key when there is exactly one failure.
+  if (failureMessages.length === 1) {
+    details.push({ key: "console_error", value: failureMessages[0] ?? "(unknown)" });
+  }
+  return details;
+}
+
+/**
+ * Query each stored Console workspace with its own credential. Entitled
+ * workspaces produce entries and account descriptors; a workspace without Go
+ * produces neither, and a failed workspace keeps its own error row.
+ */
+async function fetchOpenCodeGoConsoleAccounts(
+  ctx: QuotaProviderContext,
+  windows: OpenCodeGoWindowKey[],
+  consoleAccounts: readonly OpenCodeConsoleAuthAccount[],
+): Promise<QuotaProviderResult> {
+  const outcomes = await Promise.all(
+    consoleAccounts.map(async (account) => {
+      if (account.state !== "configured") return { account, result: null };
+      return { account, result: await queryConsoleStatus(account, ctx) };
+    }),
+  );
+
+  const entries: QuotaToastEntry[] = [];
+  const errors: QuotaProviderResult["errors"] = [];
+  const accounts: Array<{ sourceId: string; label: string; active: boolean }> = [];
+  const fetchErrorsBySourceId = new Map<string, string>();
+  let notSubscribedCount = 0;
+
+  for (const { account, result } of outcomes) {
+    if (account.state !== "configured") {
+      errors.push({
+        label: account.label,
+        message: consoleSignInFailure(account),
+        sourceId: account.sourceId,
+      });
+      accounts.push(consoleAccountDescriptor(account));
+      continue;
+    }
+    if (!result) continue;
+    if (result.success) {
+      entries.push(
+        ...buildOpenCodeGoEntries(result, windows, OPENCODE_GO_PROVIDER_LABEL, account.sourceId),
+      );
+      accounts.push(consoleAccountDescriptor(account));
+      continue;
+    }
+    if (result.notSubscribed === true) {
+      // The sign-in works but this workspace has no Go entitlement: no card.
+      notSubscribedCount += 1;
+      continue;
+    }
+    errors.push({
+      label: account.label,
+      message: result.error,
+      retryable: result.retryable,
+      sourceId: account.sourceId,
+    });
+    fetchErrorsBySourceId.set(account.sourceId, result.error);
+    accounts.push(consoleAccountDescriptor(account));
+  }
+
+  const statusDetails = consoleAccountsStatusDetails(consoleAccounts, fetchErrorsBySourceId);
+  if (entries.length > 0) {
+    return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, [
+      ...statusDetails,
+      { key: "go_source", value: "console" },
+      { key: "selected_windows", value: windows.join(",") },
+    ]);
+  }
+
+  if (errors.length === 0) {
+    // No workspace produced rows. Report the attempt only in diagnostics: a
+    // non-attempted result keeps an all-not-entitled workspace set from
+    // becoming an empty provider card.
+    const noGoDetails: QuotaProviderStatusDetail[] = [
+      ...statusDetails,
+      ...(notSubscribedCount > 0 ? [{ key: "opencode_go_state", value: "not_subscribed" }] : []),
+      { key: "selected_windows", value: windows.join(",") },
+    ];
+    return withStatusDetails(notAttemptedResult(), noGoDetails);
+  }
+
+  // The Console sign-in is readable but its request failed. Keep the legacy
+  // API-key path available, and keep each failed workspace visible.
+  const diagnostics = await getOpenCodeGoAuthDiagnostics({
+    maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
+  });
+  const legacy = await fetchOpenCodeGoLegacy(ctx, diagnostics, [
+    ...authStatusDetails(diagnostics),
+    ...statusDetails,
+    { key: "go_source", value: "legacy_key" },
+    { key: "selected_windows", value: windows.join(",") },
+  ]);
+  if (!legacy.attempted) {
+    return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, [
+      ...statusDetails,
+      { key: "selected_windows", value: windows.join(",") },
+    ]);
+  }
+  return withStatusDetails(
+    {
+      ...legacy,
+      errors: [...legacy.errors, ...errors],
+      accounts: [...(legacy.accounts ?? []), ...accounts],
+    },
+    legacy.statusDetails ?? statusDetails,
+  );
+}
+
 export const opencodeGoProvider: QuotaProvider = {
   id: "opencode-go",
 
   async isAvailable(_ctx: QuotaProviderContext): Promise<boolean> {
-    const consoleAuth = await resolveOpenCodeConsoleAuth();
-    // A failed sign-in stays available so fetch() can show its error when there is no API key.
-    if (
-      consoleAuth.state === "configured" ||
-      consoleAuth.state === "expired" ||
-      consoleAuth.state === "invalid"
-    ) {
-      return true;
-    }
+    const consoleAccounts = await resolveOpenCodeConsoleAuthAccounts({
+      fallbackLabel: OPENCODE_GO_PROVIDER_LABEL,
+    });
+    if (consoleAccounts.length > 0) return true;
+
+    // So far no Go entitlement is known; a configured workspace API key is the
+    // legacy path that can still answer.
     const auth = await resolveOpenCodeGoAuthCached({
       maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
     });
@@ -139,90 +342,14 @@ export const opencodeGoProvider: QuotaProvider = {
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
     const windows = ctx.config.opencodeGoWindows ?? OPENCODE_GO_WINDOW_ORDER;
-    const consoleAuth = await resolveOpenCodeConsoleAuth();
-
-    if (consoleAuth.state === "configured") {
-      const consoleResult = await queryOpenCodeGoConsoleStatus(consoleAuth.credential, {
-        requestTimeoutMs: ctx.config.requestTimeoutMs,
-      });
-      if (consoleResult.success) {
-        return withStatusDetails(
-          attemptedResult(
-            buildOpenCodeGoEntries(
-              consoleResult,
-              windows,
-              OPENCODE_GO_PROVIDER_LABEL,
-              "console:go",
-            ),
-          ),
-          [
-            { key: "console_auth_state", value: "configured" },
-            {
-              key: "console_server",
-              value: consoleBaseUrl(consoleAuth.credential),
-            },
-            { key: "go_source", value: "console" },
-            { key: "selected_windows", value: windows.join(",") },
-          ],
-        );
-      }
-      if (consoleResult.notSubscribed === true) {
-        return withStatusDetails(attemptedResult([]), [
-          { key: "console_auth_state", value: "configured" },
-          { key: "opencode_go_state", value: "not_subscribed" },
-          { key: "selected_windows", value: windows.join(",") },
-        ]);
-      }
-      // Console request failed; fall back to the legacy API-key path below
-      // and surface the console error in diagnostics. Without an API key Go
-      // stays quiet: the sign-in works, only this request failed.
-      const diagnostics = await getOpenCodeGoAuthDiagnostics({
-        maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
-      });
-      const legacyStatusDetails = [
-        ...authStatusDetails(diagnostics),
-        { key: "console_auth_state", value: "configured" },
-        { key: "console_error", value: consoleResult.error },
-        { key: "go_source", value: "legacy_key" },
-        { key: "selected_windows", value: windows.join(",") },
-      ];
-      return await fetchOpenCodeGoLegacy(ctx, diagnostics, legacyStatusDetails);
+    const consoleAccounts = await resolveOpenCodeConsoleAuthAccounts({
+      fallbackLabel: OPENCODE_GO_PROVIDER_LABEL,
+    });
+    if (consoleAccounts.length > 0) {
+      return await fetchOpenCodeGoConsoleAccounts(ctx, windows, consoleAccounts);
     }
 
-    if (consoleAuth.state === "expired") {
-      // OpenCode refreshes the console token when it is read, so this is rare;
-      // fall back to the legacy path, which also still accepts workspace API keys.
-      const diagnostics = await getOpenCodeGoAuthDiagnostics({
-        maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
-      });
-      return await fetchOpenCodeGoLegacy(ctx, diagnostics, [
-        { key: "console_auth_state", value: "expired" },
-        { key: "go_source", value: "legacy_key" },
-      ]);
-    }
-
-    if (consoleAuth.state === "invalid") {
-      // OpenCode could not return the console sign-in (for example its refresh
-      // failed); fall back to the legacy API-key path and surface the console
-      // error in diagnostics.
-      const diagnostics = await getOpenCodeGoAuthDiagnostics({
-        maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
-      });
-      const consoleError = scrubCredentialErrorText(consoleAuth.error);
-      return await fetchOpenCodeGoLegacy(
-        ctx,
-        diagnostics,
-        [
-          ...authStatusDetails(diagnostics),
-          { key: "console_auth_state", value: "invalid" },
-          { key: "console_error", value: consoleError },
-          { key: "go_source", value: "legacy_key" },
-          { key: "selected_windows", value: windows.join(",") },
-        ],
-        `OpenCode Console sign-in failed: ${consoleError}. ${CONSOLE_LOGIN_HINT}`,
-      );
-    }
-
+    // No Console login: the legacy workspace API key is the only Go path left.
     const diagnostics = await getOpenCodeGoAuthDiagnostics({
       maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
     });
@@ -234,14 +361,14 @@ export const opencodeGoProvider: QuotaProvider = {
 };
 
 /**
- * The API-key path. `consoleSignInFailure` is set when OpenCode could not return
- * the Console sign-in; without an API key it becomes Go's one error row.
+ * The legacy workspace API-key path. Without any key it stays not attempted;
+ * a failed Console sign-in is already represented by its account descriptor
+ * and error row in the caller.
  */
 async function fetchOpenCodeGoLegacy(
   ctx: QuotaProviderContext,
   diagnostics: OpenCodeGoAuthDiagnostics,
   statusDetails?: QuotaProviderResult["statusDetails"],
-  consoleSignInFailure?: string,
 ): Promise<QuotaProviderResult> {
   const windows = ctx.config.opencodeGoWindows ?? OPENCODE_GO_WINDOW_ORDER;
   const baseStatusDetails = statusDetails ?? [];
@@ -251,12 +378,6 @@ async function fetchOpenCodeGoLegacy(
 
   if (auth.state === "none") {
     notSubscribedCredentialFingerprints.clear();
-    if (consoleSignInFailure) {
-      return withStatusDetails(
-        attemptedErrorResult(OPENCODE_GO_PROVIDER_LABEL, consoleSignInFailure),
-        baseStatusDetails,
-      );
-    }
     return withStatusDetails(notAttemptedResult(), baseStatusDetails);
   }
 
@@ -292,11 +413,6 @@ async function fetchOpenCodeGoLegacy(
       return rowAuth.state === "configured" ? [{ row, auth: rowAuth }] : [];
     });
     if (credentials.length > 0 || invalidErrors.length > 0) {
-      const accounts = credentialRows.map((row) => ({
-        sourceId: row.id,
-        label: displayNamesByRowId.get(row.id) ?? OPENCODE_GO_PROVIDER_LABEL,
-        active: row.active,
-      }));
       const credentialFingerprints = new Set(
         credentials.map(({ auth: rowAuth }) => fingerprintCredential(rowAuth.apiKey)),
       );
@@ -331,6 +447,19 @@ async function fetchOpenCodeGoLegacy(
             sourceId: row.id,
           });
       }
+      const attemptedSourceIds = new Set([
+        ...errors.flatMap((error) => (error.sourceId ? [error.sourceId] : [])),
+        ...entries.flatMap((entry) =>
+          entry.accounting.sourceId ? [entry.accounting.sourceId] : [],
+        ),
+      ]);
+      const accounts = credentialRows
+        .filter((row) => attemptedSourceIds.has(row.id))
+        .map((row) => ({
+          sourceId: row.id,
+          label: displayNamesByRowId.get(row.id) ?? OPENCODE_GO_PROVIDER_LABEL,
+          active: row.active,
+        }));
       return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, [
         ...baseStatusDetails,
         ...(entries.length === 0 && errors.length === 0 && credentials.length > 0
@@ -382,7 +511,7 @@ async function fetchOpenCodeGoLegacy(
     const usage = result[window];
     return {
       key: `${window}_usage`,
-      value: `status=${usage.status} percent_used=${usage.usagePercent} percent_remaining=${usage.percentRemaining} reset_at=${usage.resetTimeIso}`,
+      value: `status=${usage.status} percent_used=${usage.usagePercent} percent_remaining=${usage.percentRemaining} reset_at=${usage.resetTimeIso ?? "(none)"}`,
     };
   });
 

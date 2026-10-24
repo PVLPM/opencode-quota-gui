@@ -906,8 +906,8 @@ export interface OpenCodeGoWindow {
   usagePercent: number;
   /** Remaining percentage [0..100]. */
   percentRemaining: number;
-  /** Canonical ISO reset timestamp. */
-  resetTimeIso: string;
+  /** Canonical ISO reset timestamp; absent for a window that has no own reset. */
+  resetTimeIso?: string;
 }
 
 /** Strictly validated result from the OpenCode Go usage API. */

@@ -8,7 +8,7 @@ import {
 
 const mocks = vi.hoisted(() => ({
   queryOpenCodeZenQuota: vi.fn(),
-  resolveOpenCodeConsoleAuth: vi.fn(),
+  resolveOpenCodeConsoleAuthAccounts: vi.fn(),
   fetchResponse: vi.fn(),
   realQueryOpenCodeZenQuota: null as
     | null
@@ -36,16 +36,18 @@ vi.mock("../src/lib/opencode-zen.js", async (importOriginal) => {
 
 vi.mock("../src/lib/opencode-console-auth.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/lib/opencode-console-auth.js")>()),
-  resolveOpenCodeConsoleAuth: mocks.resolveOpenCodeConsoleAuth,
+  resolveOpenCodeConsoleAuthAccounts: mocks.resolveOpenCodeConsoleAuthAccounts,
 }));
 
 import { opencodeZenProvider } from "../src/providers/opencode-zen.js";
 
+const consoleSourceId = "cred_zen";
 const balanceAccounting = {
   resultType: "balance",
   acquisitionMethod: "remote_api",
   ownership: "maintained",
   authority: "provider_reported",
+  sourceId: consoleSourceId,
 } as const;
 const budgetAccounting = {
   ...balanceAccounting,
@@ -140,7 +142,33 @@ function budgetEntry(
 const LOGIN_HINT = "Run `opencode auth login opencode`.";
 
 function configured(credential: Record<string, unknown> = consoleCredential): void {
-  mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({ state: "configured", credential });
+  mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValueOnce([
+    {
+      state: "configured",
+      sourceId: consoleSourceId,
+      label: "Acme",
+      active: true,
+      credential,
+    },
+  ]);
+}
+
+function consoleAccountState(state: "configured" | "expired" | "invalid") {
+  return state === "invalid"
+    ? {
+        state,
+        sourceId: consoleSourceId,
+        label: "Acme",
+        active: true,
+        error: "refresh_failed: boom",
+      }
+    : {
+        state,
+        sourceId: consoleSourceId,
+        label: "Acme",
+        active: true,
+        credential: consoleCredential,
+      };
 }
 
 function success(overrides: Record<string, unknown> = {}, errors: string[] = []): void {
@@ -170,6 +198,7 @@ function context(config: Record<string, unknown> = {}): any {
 describe("opencode Zen provider", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -181,19 +210,17 @@ describe("opencode Zen provider", () => {
   });
 
   it.each([
-    [{ state: "configured", credential: consoleCredential }, "auto", true],
-    [{ state: "configured", credential: consoleCredential }, ["opencode"], true],
-    [{ state: "expired", credential: consoleCredential }, "auto", true],
-    [{ state: "expired", credential: consoleCredential }, ["opencode"], true],
-    [{ state: "invalid", error: "refresh_failed: boom" }, "auto", true],
-    [{ state: "invalid", error: "refresh_failed: boom" }, ["opencode"], true],
-    [{ state: "none" }, "auto", false],
-    [{ state: "none" }, ["opencode"], true],
-    [{ state: "none" }, ["openai"], false],
-    [{ state: "none", reason: "not_oauth" }, "auto", false],
-    [{ state: "none", reason: "not_oauth" }, ["opencode"], true],
-  ])("reports availability for %j with enabledProviders %j -> %j", async (resolution, enabledProviders, expected) => {
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce(resolution);
+    [[consoleAccountState("configured")], "auto", true],
+    [[consoleAccountState("configured")], ["opencode"], true],
+    [[consoleAccountState("expired")], "auto", true],
+    [[consoleAccountState("expired")], ["opencode"], true],
+    [[consoleAccountState("invalid")], "auto", true],
+    [[consoleAccountState("invalid")], ["opencode"], true],
+    [[], "auto", false],
+    [[], ["opencode"], true],
+    [[], ["openai"], false],
+  ])("reports availability for Console accounts %j with enabledProviders %j -> %j", async (accounts, enabledProviders, expected) => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValueOnce(accounts);
     await expect(opencodeZenProvider.isAvailable(context({ enabledProviders }))).resolves.toBe(
       expected,
     );
@@ -209,11 +236,8 @@ describe("opencode Zen provider", () => {
     expect(opencodeZenProvider.matchesCurrentModel?.(model)).toBe(expected);
   });
 
-  it.each([
-    { state: "none" },
-    { state: "none", reason: "not_oauth" },
-  ])("returns attempted:false in auto mode without a Console sign-in (%j)", async (resolution) => {
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce(resolution);
+  it("returns attempted:false in auto mode without a Console sign-in", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValueOnce([]);
 
     const result = await opencodeZenProvider.fetch(context({ enabledProviders: "auto" }));
 
@@ -223,8 +247,6 @@ describe("opencode Zen provider", () => {
   });
 
   it("shows the sign-in hint when Zen is explicitly enabled without a Console sign-in", async () => {
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({ state: "none", reason: "not_oauth" });
-
     const result = await opencodeZenProvider.fetch(context({ enabledProviders: ["opencode"] }));
 
     expectAttemptedWithErrorLabel(result, "OpenCode Zen");
@@ -235,43 +257,55 @@ describe("opencode Zen provider", () => {
     expect(mocks.queryOpenCodeZenQuota).not.toHaveBeenCalled();
   });
 
-  it("shows a failed Console sign-in as an attempted error with the scrubbed reason", async () => {
+  it("shows a failed Console sign-in as an attempted workspace error with the scrubbed reason", async () => {
     const leakedToken = "a".repeat(40);
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
-      state: "invalid",
-      error: `refresh_failed: token ${leakedToken} was rejected`,
-    });
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValueOnce([
+      {
+        state: "invalid",
+        sourceId: consoleSourceId,
+        label: "Acme",
+        active: true,
+        error: `refresh_failed: token ${leakedToken} was rejected`,
+      },
+    ]);
 
     const result = await opencodeZenProvider.fetch(context());
 
-    expectAttemptedWithErrorLabel(result, "OpenCode Zen");
+    expect(result.attempted).toBe(true);
+    expect(result.entries).toEqual([]);
     expect(result.errors).toEqual([
       {
-        label: "OpenCode Zen",
+        label: "Acme",
         message: `OpenCode Console sign-in failed: refresh_failed: token [redacted] was rejected. ${LOGIN_HINT}`,
+        sourceId: consoleSourceId,
       },
     ]);
-    expect(result.statusDetails).toEqual([{ key: "console_auth_state", value: "invalid" }]);
+    expect(result.statusDetails).toEqual(
+      expect.arrayContaining([{ key: "console_auth_state", value: "invalid" }]),
+    );
     expect(JSON.stringify(result)).not.toContain(leakedToken);
     expect(mocks.queryOpenCodeZenQuota).not.toHaveBeenCalled();
   });
 
-  it("shows an expired Console sign-in as an attempted error", async () => {
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
-      state: "expired",
-      credential: consoleCredential,
-    });
+  it("shows an expired Console sign-in as an attempted workspace error", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValueOnce([
+      consoleAccountState("expired"),
+    ]);
 
     const result = await opencodeZenProvider.fetch(context());
 
-    expectAttemptedWithErrorLabel(result, "OpenCode Zen");
+    expect(result.attempted).toBe(true);
+    expect(result.entries).toEqual([]);
     expect(result.errors).toEqual([
       {
-        label: "OpenCode Zen",
+        label: "Acme",
         message: `OpenCode Console sign-in failed: the sign-in expired. ${LOGIN_HINT}`,
+        sourceId: consoleSourceId,
       },
     ]);
-    expect(result.statusDetails).toEqual([{ key: "console_auth_state", value: "expired" }]);
+    expect(result.statusDetails).toEqual(
+      expect.arrayContaining([{ key: "console_auth_state", value: "expired" }]),
+    );
     expect(JSON.stringify(result)).not.toContain("st_secret-token");
     expect(mocks.queryOpenCodeZenQuota).not.toHaveBeenCalled();
   });
@@ -286,8 +320,21 @@ describe("opencode Zen provider", () => {
 
     const result = await opencodeZenProvider.fetch(context());
 
-    expectAttemptedWithErrorLabel(result, "OpenCode Zen");
-    expect(result.errors[0]?.message).toContain("opencode auth login opencode");
+    expect(result.attempted).toBe(true);
+    expect(result.entries).toEqual([]);
+    expect(result.errors).toEqual([
+      {
+        label: "Acme",
+        message:
+          "OpenCode Console session expired or invalid. Run `opencode auth login opencode` to sign in again.",
+        sourceId: consoleSourceId,
+      },
+    ]);
+    expect(result.statusDetails).toContainEqual({
+      key: `live_fetch_error:${consoleSourceId}`,
+      value:
+        "OpenCode Console session expired or invalid. Run `opencode auth login opencode` to sign in again.",
+    });
   });
 
   it("reports the Console server and org but never the token", async () => {
@@ -297,7 +344,8 @@ describe("opencode Zen provider", () => {
     const result = await opencodeZenProvider.fetch(context());
 
     expectAttemptedWithNoErrors(result);
-    expect(result.statusDetails.slice(0, 3)).toEqual([
+    expect(result.statusDetails.slice(0, 4)).toEqual([
+      { key: "console_accounts", value: "1" },
       { key: "console_auth_state", value: "configured" },
       { key: "console_server", value: "https://console.self-hosted.example" },
       { key: "console_org", value: "(none)" },
@@ -340,7 +388,7 @@ describe("opencode Zen provider", () => {
       autoReloadEntry(),
     ]);
     expect(result.statusDetails).toContainEqual({
-      key: "monthly_usage_usd",
+      key: `monthly_usage_usd:${consoleSourceId}`,
       value: "USD 11.8202",
     });
   });
@@ -358,16 +406,17 @@ describe("opencode Zen provider", () => {
       autoReloadEntry(),
     ]);
     expect(result.statusDetails).toEqual([
+      { key: "console_accounts", value: "1" },
       { key: "console_auth_state", value: "configured" },
       { key: "console_server", value: "https://opencode.ai/console" },
       { key: "console_org", value: "Acme" },
-      { key: "balance_usd", value: "USD 42.5" },
-      { key: "monthly_limit_usd", value: "USD 100" },
-      { key: "monthly_usage_usd", value: "USD 5.75" },
-      { key: "budget_source", value: "credit_limit" },
-      { key: "auto_reload", value: "false" },
-      { key: "auto_reload_amount_raw", value: "(none)" },
-      { key: "auto_reload_trigger_raw", value: "(none)" },
+      { key: `balance_usd:${consoleSourceId}`, value: "USD 42.5" },
+      { key: `monthly_limit_usd:${consoleSourceId}`, value: "USD 100" },
+      { key: `monthly_usage_usd:${consoleSourceId}`, value: "USD 5.75" },
+      { key: `budget_source:${consoleSourceId}`, value: "credit_limit" },
+      { key: `auto_reload:${consoleSourceId}`, value: "false" },
+      { key: `auto_reload_amount_raw:${consoleSourceId}`, value: "(none)" },
+      { key: `auto_reload_trigger_raw:${consoleSourceId}`, value: "(none)" },
     ]);
   });
 
@@ -408,8 +457,14 @@ describe("opencode Zen provider", () => {
             entry.semantic.metric.component === "auto_reload_trigger"),
       ),
     ).toBe(false);
-    expect(result.statusDetails).toContainEqual({ key: "auto_reload_amount_raw", value: "20" });
-    expect(result.statusDetails).toContainEqual({ key: "auto_reload_trigger_raw", value: "5" });
+    expect(result.statusDetails).toContainEqual({
+      key: `auto_reload_amount_raw:${consoleSourceId}`,
+      value: "20",
+    });
+    expect(result.statusDetails).toContainEqual({
+      key: `auto_reload_trigger_raw:${consoleSourceId}`,
+      value: "5",
+    });
     expect(result.presentation).toBeUndefined();
   });
 
@@ -436,7 +491,10 @@ describe("opencode Zen provider", () => {
       balanceEntry("supplementary"),
       autoReloadEntry(),
     ]);
-    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "member_budget" });
+    expect(result.statusDetails).toContainEqual({
+      key: `budget_source:${consoleSourceId}`,
+      value: "member_budget",
+    });
     expect(result.statusDetails.some((d) => d.key === "member_budget_note")).toBe(false);
   });
 
@@ -452,9 +510,12 @@ describe("opencode Zen provider", () => {
       balanceEntry("supplementary"),
       autoReloadEntry(),
     ]);
-    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "credit_limit" });
     expect(result.statusDetails).toContainEqual({
-      key: "member_budget_note",
+      key: `budget_source:${consoleSourceId}`,
+      value: "credit_limit",
+    });
+    expect(result.statusDetails).toContainEqual({
+      key: `member_budget_note:${consoleSourceId}`,
       value:
         "member budgets found, but not all can be evaluated (model filters, per-model limits, or missing amounts); using the credit limit",
     });
@@ -479,10 +540,13 @@ describe("opencode Zen provider", () => {
     ]);
     expect(JSON.stringify(result)).not.toContain("NaN");
     expect(result.statusDetails).toContainEqual({
-      key: "monthly_limit_usd",
+      key: `monthly_limit_usd:${consoleSourceId}`,
       value: "USD 0",
     });
-    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "member_budget" });
+    expect(result.statusDetails).toContainEqual({
+      key: `budget_source:${consoleSourceId}`,
+      value: "member_budget",
+    });
   });
 
   it("parses the policies/members shape in the real query pipeline", async () => {
@@ -560,7 +624,10 @@ describe("opencode Zen provider", () => {
     });
     // Console monthly budgets reset at the start of the next UTC month.
     expect(result.entries[0].resetTimeIso).toBe("2026-10-01T00:00:00.000Z");
-    expect(result.statusDetails).toContainEqual({ key: "budget_source", value: "member_budget" });
+    expect(result.statusDetails).toContainEqual({
+      key: `budget_source:${consoleSourceId}`,
+      value: "member_budget",
+    });
   });
 
   it("prefers the positive plugin monthly-limit override", async () => {
@@ -594,12 +661,23 @@ describe("opencode Zen provider", () => {
     expect(result.attempted).toBe(true);
     expect(result.entries).toEqual([balanceEntry("primary")]);
     expect(result.errors).toEqual([
-      { label: "OpenCode Zen", message: "OpenCode Console billing/auto-recharge error 500" },
-      { label: "OpenCode Zen", message: "OpenCode Console usage/cost-by-day error 500" },
+      {
+        label: "Acme",
+        message: "OpenCode Console billing/auto-recharge error 500",
+        sourceId: consoleSourceId,
+      },
+      {
+        label: "Acme",
+        message: "OpenCode Console usage/cost-by-day error 500",
+        sourceId: consoleSourceId,
+      },
     ]);
-    expect(result.statusDetails).toContainEqual({ key: "auto_reload", value: "(unknown)" });
     expect(result.statusDetails).toContainEqual({
-      key: "live_fetch_error",
+      key: `auto_reload:${consoleSourceId}`,
+      value: "(unknown)",
+    });
+    expect(result.statusDetails).toContainEqual({
+      key: `live_fetch_error:${consoleSourceId}`,
       value:
         "OpenCode Console billing/auto-recharge error 500 | OpenCode Console usage/cost-by-day error 500",
     });
@@ -624,7 +702,11 @@ describe("opencode Zen provider", () => {
       autoReloadEntry(),
     ]);
     expect(result.errors).toEqual([
-      { label: "OpenCode Zen", message: "OpenCode Console billing/account error 500" },
+      {
+        label: "Acme",
+        message: "OpenCode Console billing/account error 500",
+        sourceId: consoleSourceId,
+      },
     ]);
   });
 
@@ -689,5 +771,182 @@ describe("opencode Zen provider", () => {
     expect(mocks.queryOpenCodeZenQuota).toHaveBeenLastCalledWith(consoleCredential, {
       requestTimeoutMs: undefined,
     });
+  });
+});
+
+describe("opencode Zen multi-workspace credentials", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([]);
+  });
+
+  function account(
+    sourceId: string,
+    label: string,
+    accessToken: string,
+    orgId: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      state: "configured" as const,
+      sourceId,
+      label,
+      active: false,
+      credential: { accessToken, orgId },
+      ...overrides,
+    };
+  }
+
+  function zenSuccess(overrides: Record<string, unknown> = {}) {
+    return {
+      success: true as const,
+      errors: [],
+      data: {
+        balance: 4_250_000_000,
+        monthlyLimit: null,
+        monthlyUsage: null,
+        lastPayment: null,
+        reload: false,
+        reloadAmount: null,
+        reloadTrigger: null,
+        budgetResetIso: null,
+        budgetSource: "credit_limit",
+        memberBudgetsSkipped: false,
+        ...overrides,
+      },
+    };
+  }
+
+  it("queries each workspace with its own credential and scopes entries to its source id", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_work", "Acme", "work-access", "wrk_work", { active: true }),
+      account("cred_personal", "Personal", "personal-access", "wrk_personal"),
+    ]);
+    mocks.queryOpenCodeZenQuota.mockImplementation(async (credential) =>
+      zenSuccess({
+        balance: credential.accessToken === "work-access" ? 4_250_000_000 : 1_000_000_000,
+      }),
+    );
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expect(mocks.queryOpenCodeZenQuota).toHaveBeenCalledTimes(2);
+    expect(mocks.queryOpenCodeZenQuota.mock.calls.map(([credential]) => credential)).toEqual([
+      { accessToken: "work-access", orgId: "wrk_work" },
+      { accessToken: "personal-access", orgId: "wrk_personal" },
+    ]);
+    expect(result.accounts).toEqual([
+      { sourceId: "cred_work", label: "Acme", active: true },
+      { sourceId: "cred_personal", label: "Personal", active: false },
+    ]);
+    expect(result.accounts?.[0]).not.toHaveProperty("planLabel");
+    expect(result.entries.map((entry) => entry.accounting.sourceId)).toEqual([
+      "cred_work",
+      "cred_work",
+      "cred_personal",
+      "cred_personal",
+    ]);
+    expect(result.statusDetails).toContainEqual({ key: "console_accounts", value: "2" });
+  });
+
+  it("keeps a failed workspace visible next to a successful workspace", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_ok", "Healthy", "ok-access", "wrk_ok"),
+      account("cred_bad", "Broken", "bad-access", "wrk_bad"),
+    ]);
+    mocks.queryOpenCodeZenQuota.mockImplementation(async (credential) =>
+      credential.accessToken === "bad-access"
+        ? { success: false, error: "OpenCode Console billing/status error 503" }
+        : zenSuccess(),
+    );
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expect(result.entries.map((entry) => entry.accounting.sourceId)).toEqual([
+      "cred_ok",
+      "cred_ok",
+    ]);
+    expect(result.errors).toEqual([
+      {
+        label: "Broken",
+        message: "OpenCode Console billing/status error 503",
+        sourceId: "cred_bad",
+      },
+    ]);
+    expect(result.accounts?.map(({ sourceId }) => sourceId)).toEqual(["cred_ok", "cred_bad"]);
+  });
+
+  it("keeps sibling workspaces when one workspace request throws", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_ok", "Healthy", "ok-access", "wrk_ok"),
+      account("cred_bad", "Broken", "bad-access", "wrk_bad"),
+    ]);
+    mocks.queryOpenCodeZenQuota.mockImplementation(async (credential) => {
+      if (credential.accessToken === "bad-access") throw new Error("socket hang up");
+      return zenSuccess();
+    });
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expect(mocks.queryOpenCodeZenQuota).toHaveBeenCalledTimes(2);
+    expect(result.entries.map((entry) => entry.accounting.sourceId)).toEqual([
+      "cred_ok",
+      "cred_ok",
+    ]);
+    expect(result.errors).toEqual([
+      {
+        label: "Broken",
+        message: "OpenCode Console request failed: socket hang up",
+        sourceId: "cred_bad",
+      },
+    ]);
+    expect(result.accounts?.map(({ sourceId }) => sourceId)).toEqual(["cred_ok", "cred_bad"]);
+  });
+
+  it("keeps each expired sign-in as its own workspace failure", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_live", "Live", "live-access", "wrk_live"),
+      {
+        state: "expired",
+        sourceId: "cred_expired",
+        label: "Expired",
+        active: false,
+        credential: { accessToken: "expired-access", orgId: "wrk_expired" },
+      },
+    ]);
+    mocks.queryOpenCodeZenQuota.mockResolvedValue(zenSuccess());
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expect(mocks.queryOpenCodeZenQuota).toHaveBeenCalledOnce();
+    expect(result.errors).toEqual([
+      {
+        label: "Expired",
+        message: `OpenCode Console sign-in failed: the sign-in expired. ${LOGIN_HINT}`,
+        sourceId: "cred_expired",
+      },
+    ]);
+    expect(result.accounts?.map(({ sourceId }) => sourceId)).toEqual(["cred_live", "cred_expired"]);
+  });
+
+  it("derives each workspace budget from that workspace's own billing response", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_work", "Acme", "work-access", "wrk_work"),
+      account("cred_personal", "Personal", "personal-access", "wrk_personal"),
+    ]);
+    mocks.queryOpenCodeZenQuota.mockImplementation(async (credential) =>
+      credential.accessToken === "work-access"
+        ? zenSuccess({ monthlyLimit: 100, monthlyUsage: 575_000_000 })
+        : zenSuccess({ monthlyLimit: 10, monthlyUsage: 950_000_000 }),
+    );
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    const budgets = result.entries.filter((entry) => entry.name === "zen-monthly-budget");
+    expect(budgets.map((entry) => entry.accounting.sourceId)).toEqual([
+      "cred_work",
+      "cred_personal",
+    ]);
+    expect(budgets.map((entry) => entry.percentRemaining)).toEqual([94.25, 5]);
   });
 });

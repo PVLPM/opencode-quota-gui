@@ -155,6 +155,21 @@ function hasMeasurements(probe: QuotaStatusLiveProbe): boolean {
 }
 
 /**
+ * A readable Console login whose workspace has no Go entitlement is a valid
+ * current result, not a transient failure. Keeping the previous measurement in
+ * that case would leave a revoked subscription visible as a stale Go card.
+ */
+function hasRevokedOpenCodeGoEntitlement(probe: QuotaStatusLiveProbe): boolean {
+  return (
+    probe.providerId === "opencode-go" &&
+    probe.result.errors.length === 0 &&
+    (probe.result.statusDetails ?? []).some(
+      (detail) => detail.key === "opencode_go_state" && detail.value === "not_subscribed",
+    )
+  );
+}
+
+/**
  * A provider is hidden before probing only by a provider-level id: its plain
  * id, its provider-scope card id, or the bare provider-scope hash. Account-level
  * card ids/hashes and hidden rows never remove the whole provider from the
@@ -400,6 +415,13 @@ export function createDashboardReadSource(
       seen.add(probe.providerId);
       if (hasMeasurements(probe)) {
         lastGoodProbes.set(probe.providerId, probe);
+        merged.push(probe);
+        continue;
+      }
+      if (hasRevokedOpenCodeGoEntitlement(probe)) {
+        // A revoked entitlement replaces the measurement instead of falling
+        // back to it; the current result (possibly descriptor-only) is fresh.
+        lastGoodProbes.delete(probe.providerId);
         merged.push(probe);
         continue;
       }

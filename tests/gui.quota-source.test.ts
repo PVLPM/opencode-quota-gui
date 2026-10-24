@@ -298,6 +298,83 @@ describe("quota read source", () => {
     expect(healthy?.errors).toEqual([]);
   });
 
+  it("keeps OpenCode Go last-good through a failure but clears it when entitlement is revoked", async () => {
+    let cycle = 0;
+    let clock = NOW;
+    const account = { sourceId: "go-account", label: "Account 1", active: true };
+    const test = harness({
+      config: baseConfig({ enabledProviders: ["opencode-go"] }),
+      now: () => clock,
+      collect: async () => {
+        cycle += 1;
+        if (cycle === 1) {
+          return [
+            probe(
+              "opencode-go",
+              result({
+                entries: [percentEntry(63, "OpenCode Go 5h", "go-account")],
+                accounts: [account],
+                statusDetails: [{ key: "go_source", value: "console" }],
+              }),
+            ),
+          ];
+        }
+        if (cycle === 2) {
+          return [
+            probe(
+              "opencode-go",
+              result({
+                accounts: [account],
+                errors: [
+                  { label: "Account 1", message: "temporary failure", sourceId: "go-account" },
+                ],
+                statusDetails: [{ key: "go_source", value: "console" }],
+              }),
+            ),
+          ];
+        }
+        return [
+          probe(
+            "opencode-go",
+            result({
+              attempted: false,
+              accounts: [account],
+              statusDetails: [{ key: "opencode_go_state", value: "not_subscribed" }],
+            }),
+          ),
+        ];
+      },
+    });
+
+    const first = await test.source.quota();
+    expect(first.stale).toBe(false);
+    expect(
+      first.providers.cards.find((card) => card.providerId === "opencode-go")?.rows[0]
+        ?.percentRemaining,
+    ).toBe(63);
+
+    // A real request failure still preserves the last good Go measurement.
+    clock = NOW + 60_000;
+    const second = await test.source.quota();
+    expect(second.stale).toBe(true);
+    expect(second.providers.polledAtMs).toBe(NOW);
+    const failed = second.providers.cards.find((card) => card.providerId === "opencode-go");
+    expect(failed?.rows[0]?.percentRemaining).toBe(63);
+    expect(failed?.errors.map((error) => error.label)).toEqual(["Account 1"]);
+
+    // Revoked entitlement is a fresh current result, not a transient failure:
+    // the old Go rows must not survive as a stale card.
+    clock = NOW + 120_000;
+    const third = await test.source.quota();
+    expect(third.stale).toBe(false);
+    expect(third.providers.polledAtMs).toBe(NOW + 120_000);
+    const goCards = third.providers.cards.filter((card) => card.providerId === "opencode-go");
+    expect(goCards.every((card) => card.rows.length === 0)).toBe(true);
+    expect(
+      third.providers.cards.flatMap((card) => card.rows.map((row) => row.percentRemaining)),
+    ).not.toContain(63);
+  });
+
   it("treats a partially measured account set as fresh and surfaces the failed account error", async () => {
     let cycle = 0;
     let clock = NOW;

@@ -27,7 +27,10 @@ import {
 import { resolveNanoGptApiKey } from "../lib/nanogpt-config.js";
 import { resolveOllamaCloudApiKey } from "../lib/ollama-cloud-config.js";
 import { resolveOpenAIAuthIdentity } from "../lib/openai.js";
-import { consoleBaseUrl, resolveOpenCodeConsoleAuth } from "../lib/opencode-console-auth.js";
+import {
+  consoleBaseUrl,
+  resolveOpenCodeConsoleAuthAccounts,
+} from "../lib/opencode-console-auth.js";
 import {
   DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
   resolveOpenCodeGoAuthCached,
@@ -43,6 +46,7 @@ import {
   composeResolvedAuthIdentities,
   deriveResolvedAuthIdentity,
   type ResolvedAuthIdentity,
+  type ResolvedAuthPrincipal,
 } from "../lib/resolved-auth-identity.js";
 import { resolveSyntheticApiKey } from "../lib/synthetic-config.js";
 import { resolveXaiAuthIdentity } from "../lib/xai.js";
@@ -76,6 +80,64 @@ function resolvedCredentialPolicy(
       });
     },
   };
+}
+
+async function consoleAccountIdentities(
+  providerId: CanonicalQuotaProviderId,
+  accounts: Awaited<ReturnType<typeof resolveOpenCodeConsoleAuthAccounts>>,
+): Promise<ResolvedAuthIdentity[]> {
+  const identities: ResolvedAuthIdentity[] = [];
+  for (const account of accounts) {
+    if (account.state !== "configured") continue;
+    const { credential } = account;
+    // Distinguish accounts within the same org (member budgets are queried per
+    // account): org + member, else the account, else the token. A login with an
+    // org but no account id proves its member by its token, so two members are
+    // never collapsed. The Console URL qualifies it because org ids can collide
+    // across Console URLs.
+    const member = credential.accountId ?? credential.accessToken;
+    const principal: ResolvedAuthPrincipal = credential.orgId
+      ? { kind: "stable-id", value: JSON.stringify([credential.orgId, member]) }
+      : credential.accountId
+        ? { kind: "stable-id", value: credential.accountId }
+        : { kind: "credential", value: credential.accessToken };
+    const identity = await deriveResolvedAuthIdentity({
+      providerId,
+      principal,
+      qualifiers: [consoleBaseUrl(credential)],
+    });
+    if (identity) identities.push(identity);
+  }
+  return identities;
+}
+
+/**
+ * Every account descriptor, including failed and expired rows, contributes to
+ * the Console cache identity. `sourceId`, label, active mark, and state are all
+ * display/selection inputs, so a change to any of them must not reuse a cached
+ * result built from the previous account set.
+ */
+function consoleAccountCacheQualifiers(
+  accounts: Awaited<ReturnType<typeof resolveOpenCodeConsoleAuthAccounts>>,
+): string[] {
+  return accounts.map((account) =>
+    JSON.stringify({
+      active: account.active,
+      label: account.label,
+      sourceId: account.sourceId,
+      state: account.state,
+    }),
+  );
+}
+
+async function composeAuthIdentities(
+  providerId: CanonicalQuotaProviderId,
+  identities: readonly ResolvedAuthIdentity[],
+  qualifiers: readonly string[] = [],
+): Promise<ResolvedAuthIdentity | null> {
+  if (identities.length === 0) return null;
+  if (identities.length === 1 && qualifiers.length === 0) return identities[0] ?? null;
+  return composeResolvedAuthIdentities({ providerId, identities, qualifiers });
 }
 
 export async function resolveQuotaProviderDefinitionAuthIdentity(
@@ -224,29 +286,41 @@ export const PROVIDER_CACHE_POLICIES = {
     });
     return resolved.state === "configured" ? { credential: resolved.config.cookie } : null;
   }),
-  "opencode-go": resolvedCredentialPolicy("opencode-go", async () => {
-    const resolved = await resolveOpenCodeGoAuthCached({
-      maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
-    });
-    return resolved.state === "configured" ? { credential: resolved.apiKey } : null;
-  }),
-  opencode: resolvedCredentialPolicy("opencode", async () => {
-    const resolved = await resolveOpenCodeConsoleAuth();
-    if (resolved.state !== "configured") return null;
-    const { credential } = resolved;
-    // The identity distinguishes accounts within the same org (member budgets
-    // are queried per account): org + account, else the account, else the
-    // token. The Console URL qualifies it because org ids can collide across
-    // self-hosted Console URLs.
-    return {
-      credential:
-        credential.orgId && credential.accountId
-          ? JSON.stringify([credential.orgId, credential.accountId])
-          : (credential.orgId ?? credential.accountId ?? credential.accessToken),
-      principalKind: credential.orgId || credential.accountId ? "stable-id" : "credential",
-      qualifiers: [consoleBaseUrl(credential)],
-    };
-  }),
+  "opencode-go": {
+    kind: "resolved-auth",
+    async resolveIdentity() {
+      const [consoleAccounts, legacy] = await Promise.all([
+        resolveOpenCodeConsoleAuthAccounts(),
+        resolveOpenCodeGoAuthCached({
+          maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
+        }),
+      ]);
+      const identities = await consoleAccountIdentities("opencode-go", consoleAccounts);
+      if (legacy.state === "configured") {
+        const legacyIdentity = await deriveResolvedAuthIdentity({
+          providerId: "opencode-go",
+          principal: { kind: "credential", value: legacy.apiKey },
+        });
+        if (legacyIdentity) identities.push(legacyIdentity);
+      }
+      return composeAuthIdentities(
+        "opencode-go",
+        identities,
+        consoleAccountCacheQualifiers(consoleAccounts),
+      );
+    },
+  },
+  opencode: {
+    kind: "resolved-auth",
+    async resolveIdentity() {
+      const accounts = await resolveOpenCodeConsoleAuthAccounts();
+      return composeAuthIdentities(
+        "opencode",
+        await consoleAccountIdentities("opencode", accounts),
+        consoleAccountCacheQualifiers(accounts),
+      );
+    },
+  },
   "ollama-cloud": resolvedCredentialPolicy("ollama-cloud", async () => {
     const resolved = await resolveOllamaCloudApiKey();
     return resolved ? { credential: resolved.key } : null;

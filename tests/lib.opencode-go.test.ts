@@ -511,6 +511,100 @@ describe("queryOpenCodeGoConsoleStatus", () => {
     );
   });
 
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+  ] as const)("treats a %s meter reset as optional without using access.endsAt", async (_name, resetsAt) => {
+    const meter = (usedMicroCents: number) => ({
+      limitMicroCents: 1_000,
+      usedMicroCents,
+      ...(resetsAt === undefined ? {} : { resetsAt }),
+    });
+    mocks.fetchResponse.mockResolvedValueOnce({
+      ok: true,
+      text: vi.fn().mockResolvedValue(
+        JSON.stringify({
+          access: {
+            endsAt: "2026-10-01T00:00:00Z",
+            meters: { fiveHour: meter(0), week: meter(0), month: meter(0) },
+          },
+        }),
+      ),
+    });
+
+    await expect(queryOpenCodeGoConsoleStatus({ accessToken: "console-access" })).resolves.toEqual({
+      success: true,
+      rolling: { status: "ok", usagePercent: 0, percentRemaining: 100 },
+      weekly: { status: "ok", usagePercent: 0, percentRemaining: 100 },
+      monthly: { status: "ok", usagePercent: 0, percentRemaining: 100 },
+    });
+  });
+
+  it.each([
+    "",
+    "not-a-date",
+    "2026-13-01T00:00:00Z",
+    42,
+  ])("rejects an explicit invalid meter reset %j", async (resetsAt) => {
+    mocks.fetchResponse.mockResolvedValueOnce({
+      ok: true,
+      text: vi.fn().mockResolvedValue(
+        JSON.stringify({
+          access: {
+            meters: {
+              fiveHour: { limitMicroCents: 1_000, usedMicroCents: 0, resetsAt },
+              week: { limitMicroCents: 1_000, usedMicroCents: 250 },
+              month: { limitMicroCents: 1_000, usedMicroCents: 500 },
+            },
+          },
+        }),
+      ),
+    });
+
+    await expect(queryOpenCodeGoConsoleStatus({ accessToken: "console-access" })).resolves.toEqual({
+      success: false,
+      error: "Invalid OpenCode Go API response: console rolling resetsAt is missing or invalid",
+    });
+  });
+
+  it("keeps unknown product metadata out of the result without inventing a plan", async () => {
+    mocks.fetchResponse.mockResolvedValueOnce({
+      ok: true,
+      text: vi.fn().mockResolvedValue(
+        JSON.stringify({
+          access: {
+            plan: "go_plus",
+            product: { name: "OpenCode Go Plus", tier: "unknown" },
+            meters: {
+              fiveHour: {
+                limitMicroCents: 1_000,
+                usedMicroCents: 0,
+                resetsAt: "2026-10-01T00:00:00Z",
+              },
+              week: {
+                limitMicroCents: 1_000,
+                usedMicroCents: 250,
+                resetsAt: "2026-10-01T00:00:00Z",
+              },
+              month: {
+                limitMicroCents: 1_000,
+                usedMicroCents: 500,
+                resetsAt: "2026-10-01T00:00:00Z",
+              },
+            },
+          },
+        }),
+      ),
+    });
+
+    const result = await queryOpenCodeGoConsoleStatus({ accessToken: "console-access" });
+
+    expect(result).toMatchObject({ success: true });
+    expect(Object.keys(result).sort()).toEqual(["monthly", "rolling", "success", "weekly"]);
+    expect(JSON.stringify(result)).not.toContain("Go Plus");
+    expect(JSON.stringify(result)).not.toContain("go_plus");
+  });
+
   it("reads HTTP 404 as no Go subscription", async () => {
     mocks.fetchResponse.mockResolvedValueOnce({ ok: false, status: 404 });
 

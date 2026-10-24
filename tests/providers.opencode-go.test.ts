@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   getOpenCodeGoAuthDiagnostics: vi.fn(),
   queryOpenCodeGoQuota: vi.fn(),
   queryOpenCodeGoConsoleStatus: vi.fn(),
-  resolveOpenCodeConsoleAuth: vi.fn(),
+  resolveOpenCodeConsoleAuthAccounts: vi.fn(),
 }));
 
 vi.mock("../src/lib/opencode-go-auth.js", () => ({
@@ -36,7 +36,7 @@ vi.mock("../src/lib/opencode-go.js", async (importOriginal) => {
 
 vi.mock("../src/lib/opencode-console-auth.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/lib/opencode-console-auth.js")>()),
-  resolveOpenCodeConsoleAuth: mocks.resolveOpenCodeConsoleAuth,
+  resolveOpenCodeConsoleAuthAccounts: mocks.resolveOpenCodeConsoleAuthAccounts,
 }));
 
 vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
@@ -44,6 +44,7 @@ vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
   readCredentialRows: vi.fn().mockResolvedValue([]),
 }));
 
+import { buildProviderCards } from "../src/gui/provider-cards.js";
 import {
   __resetOpenCodeGoNotSubscribedForTests,
   opencodeGoProvider,
@@ -107,14 +108,36 @@ describe("opencode-go provider", () => {
     });
     mocks.queryOpenCodeGoQuota.mockResolvedValue(successfulResult());
     mocks.resolveOpenCodeGoAuth.mockReturnValue({ state: "configured", apiKey: "row-token" });
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValue({ state: "none" });
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([]);
   });
 
-  function consoleConfigured(): void {
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
-      state: "configured",
-      credential: { accessToken: "console-access", orgId: "wrk_1" },
-    });
+  function consoleAccount(
+    credential: Record<string, unknown> = { accessToken: "console-access", orgId: "wrk_1" },
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      state: "configured" as const,
+      sourceId: "cred_console",
+      label: "Console workspace",
+      active: true,
+      credential,
+      ...overrides,
+    };
+  }
+
+  function consoleConfigured(
+    credential: Record<string, unknown> = { accessToken: "console-access", orgId: "wrk_1" },
+  ): void {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValueOnce([consoleAccount(credential)]);
+  }
+
+  function consoleInvalid(error: string): void {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValueOnce([
+      consoleAccount(
+        { accessToken: "console-access", orgId: "wrk_1" },
+        { state: "invalid", error },
+      ),
+    ]);
   }
 
   function consoleSuccess(): void {
@@ -176,7 +199,7 @@ describe("opencode-go provider", () => {
 
     const out = await runFetch();
 
-    expectAttemptedWithNoErrors(out);
+    expectNotAttempted(out);
     expect(out.entries).toEqual([]);
     expect(out.statusDetails).toEqual(
       expect.arrayContaining([{ key: "opencode_go_state", value: "not_subscribed" }]),
@@ -215,8 +238,16 @@ describe("opencode-go provider", () => {
     const out = await runFetch();
 
     expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
-    expectAttemptedWithNoErrors(out);
+    expect(out.attempted).toBe(true);
     expect(visibleEntries(out.entries, "opencode-go")).toHaveLength(3);
+    expect(out.errors).toEqual([
+      {
+        label: "Console workspace",
+        message: "OpenCode Console API error 403 (/api/go/status)",
+        retryable: false,
+        sourceId: "cred_console",
+      },
+    ]);
     expect(out.statusDetails).toEqual(
       expect.arrayContaining([
         { key: "go_source", value: "legacy_key" },
@@ -229,7 +260,7 @@ describe("opencode-go provider", () => {
     });
   });
 
-  it("stays quiet after a Console 403 when there is no API key", async () => {
+  it("keeps a failed Console 403 visible when there is no API key", async () => {
     consoleConfigured();
     mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
       success: false,
@@ -242,7 +273,16 @@ describe("opencode-go provider", () => {
     const out = await runFetch();
 
     expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
-    expectNotAttempted(out);
+    expect(out.attempted).toBe(true);
+    expect(out.entries).toEqual([]);
+    expect(out.errors).toEqual([
+      {
+        label: "Console workspace",
+        message: "OpenCode Console API error 403 (/api/go/status)",
+        retryable: false,
+        sourceId: "cred_console",
+      },
+    ]);
     expect(out.statusDetails).toEqual(
       expect.arrayContaining([
         { key: "console_auth_state", value: "configured" },
@@ -252,10 +292,7 @@ describe("opencode-go provider", () => {
   });
 
   it("reports the console server the sign-in belongs to", async () => {
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
-      state: "configured",
-      credential: { accessToken: "console-access", server: "https://console.example.test" },
-    });
+    consoleConfigured({ accessToken: "console-access", server: "https://console.example.test" });
     consoleSuccess();
 
     const out = await runFetch();
@@ -268,16 +305,21 @@ describe("opencode-go provider", () => {
 
   it("uses the legacy key path with the console error when the sign-in cannot be read", async () => {
     const jwt = `eyJ${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
-      state: "invalid",
-      error: `refresh_failed: HTTP 401 ${jwt}`,
-    });
+    consoleInvalid(`refresh_failed: HTTP 401 ${jwt}`);
 
     const out = await runFetch();
 
     expect(mocks.queryOpenCodeGoConsoleStatus).not.toHaveBeenCalled();
     expect(mocks.queryOpenCodeGoQuota).toHaveBeenCalledOnce();
-    expectAttemptedWithNoErrors(out);
+    expect(out.attempted).toBe(true);
+    expect(out.errors).toEqual([
+      {
+        label: "Console workspace",
+        message:
+          "OpenCode Console sign-in failed: refresh_failed: HTTP 401 [redacted]. Run `opencode auth login opencode`.",
+        sourceId: "cred_console",
+      },
+    ]);
     expect(out.statusDetails).toEqual(
       expect.arrayContaining([
         { key: "auth_state", value: "configured" },
@@ -292,10 +334,7 @@ describe("opencode-go provider", () => {
 
   it("shows the failed Console sign-in as Go's error when there is no API key", async () => {
     const jwt = `eyJ${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
-      state: "invalid",
-      error: `refresh_failed: HTTP 401 ${jwt}`,
-    });
+    consoleInvalid(`refresh_failed: HTTP 401 ${jwt}`);
     mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValueOnce(diagnostics("none"));
     mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "none" });
 
@@ -306,16 +345,14 @@ describe("opencode-go provider", () => {
     expect(out.entries).toEqual([]);
     expect(out.errors).toEqual([
       {
-        label: "OpenCode Go",
+        label: "Console workspace",
         message:
           "OpenCode Console sign-in failed: refresh_failed: HTTP 401 [redacted]. Run `opencode auth login opencode`.",
+        sourceId: "cred_console",
       },
     ]);
     expect(out.statusDetails).toEqual(
-      expect.arrayContaining([
-        { key: "console_auth_state", value: "invalid" },
-        { key: "go_source", value: "legacy_key" },
-      ]),
+      expect.arrayContaining([{ key: "console_auth_state", value: "invalid" }]),
     );
     expect(JSON.stringify(out)).not.toContain(jwt);
   });
@@ -324,7 +361,7 @@ describe("opencode-go provider", () => {
     ["a 5xx answer", "OpenCode Console API error 500 (/api/go/status)"],
     ["a network failure", "fetch failed"],
     ["a timeout", "Request timeout after 5s"],
-  ])("stays quiet after %s from the Console when there is no API key", async (_case, error) => {
+  ])("keeps %s from the Console visible when there is no API key", async (_case, error) => {
     consoleConfigured();
     mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
       success: false,
@@ -337,8 +374,16 @@ describe("opencode-go provider", () => {
     const out = await runFetch();
 
     expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
-    expectNotAttempted(out);
-    expect(out.errors).toEqual([]);
+    expect(out.attempted).toBe(true);
+    expect(out.entries).toEqual([]);
+    expect(out.errors).toEqual([
+      {
+        label: "Console workspace",
+        message: error,
+        retryable: true,
+        sourceId: "cred_console",
+      },
+    ]);
     expect(out.statusDetails).toEqual(
       expect.arrayContaining([
         { key: "console_auth_state", value: "configured" },
@@ -358,8 +403,6 @@ describe("opencode-go provider", () => {
   });
 
   it("keeps the plain key path when the opencode login is an API key", async () => {
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({ state: "none", reason: "not_oauth" });
-
     const out = await runFetch();
 
     expect(mocks.queryOpenCodeGoConsoleStatus).not.toHaveBeenCalled();
@@ -610,6 +653,10 @@ describe("opencode-go provider", () => {
     expect(second.entries).toEqual([
       expect.objectContaining({ accounting: expect.objectContaining({ sourceId: "subscribed" }) }),
     ]);
+    // Only the entitled login gets an account card; the suppressed login must
+    // not leave an empty card behind.
+    expect(first.accounts).toEqual([expect.objectContaining({ sourceId: "subscribed" })]);
+    expect(second.accounts).toEqual([expect.objectContaining({ sourceId: "subscribed" })]);
   });
 
   it("falls back to legacy alias rows when no native opencode-go row exists", async () => {
@@ -948,10 +995,233 @@ describe("opencode-go provider", () => {
   });
 });
 
+describe("opencode-go multi-workspace Console accounts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    __resetOpenCodeGoNotSubscribedForTests();
+    mocks.getOpenCodeGoAuthDiagnostics.mockResolvedValue(diagnostics());
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValue({
+      state: "configured",
+      apiKey: "provider-test-token",
+    });
+    mocks.queryOpenCodeGoQuota.mockResolvedValue(successfulResult());
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValue(successfulResult());
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([]);
+  });
+
+  function account(
+    sourceId: string,
+    label: string,
+    accessToken: string,
+    orgId: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    return {
+      state: "configured" as const,
+      sourceId,
+      label,
+      active: false,
+      credential: { accessToken, orgId },
+      ...overrides,
+    };
+  }
+
+  it("queries every Console workspace and scopes rows to stable source ids", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_work", "Acme", "work-access", "wrk_work", { active: true }),
+      account("cred_personal", "Personal", "personal-access", "wrk_personal"),
+    ]);
+
+    const out = await runFetch(["rolling", "weekly"]);
+
+    expect(mocks.queryOpenCodeGoConsoleStatus).toHaveBeenCalledTimes(2);
+    expect(mocks.queryOpenCodeGoConsoleStatus.mock.calls.map(([credential]) => credential)).toEqual(
+      [
+        { accessToken: "work-access", orgId: "wrk_work" },
+        { accessToken: "personal-access", orgId: "wrk_personal" },
+      ],
+    );
+    expect(out.accounts).toEqual([
+      { sourceId: "cred_work", label: "Acme", active: true },
+      { sourceId: "cred_personal", label: "Personal", active: false },
+    ]);
+    expect(out.accounts?.[0]).not.toHaveProperty("planLabel");
+    expect(out.entries).toHaveLength(4);
+    expect(out.entries.map((entry) => entry.accounting.sourceId)).toEqual([
+      "cred_work",
+      "cred_work",
+      "cred_personal",
+      "cred_personal",
+    ]);
+    expect(out.errors).toEqual([]);
+    expect(out.statusDetails).toContainEqual({ key: "console_accounts", value: "2" });
+  });
+
+  it("keeps Console quota rows without a reset and leaves GUI rows without reset text", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_no_reset", "Account 1", "no-reset-access", "wrk_no_reset", { active: true }),
+    ]);
+    const noReset = { status: "ok" as const, usagePercent: 0, percentRemaining: 100 };
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce({
+      success: true,
+      rolling: noReset,
+      weekly: noReset,
+      monthly: noReset,
+    });
+
+    const out = await runFetch();
+
+    expectAttemptedWithNoErrors(out);
+    expect(out.entries).toHaveLength(3);
+    for (const entry of out.entries) {
+      expect(entry).not.toHaveProperty("resetTimeIso");
+    }
+
+    const cards = buildProviderCards({
+      probes: [{ providerId: "opencode-go", result: out }],
+      preferences: { accountingDetail: "summary" },
+      nowMs: Date.now(),
+    });
+    const rows = cards.flatMap((card) => card.rows);
+    expect(rows).toHaveLength(3);
+    expect(rows.some((row) => "resetAtIso" in row)).toBe(false);
+  });
+
+  it("omits a workspace without Go instead of emitting an empty account card", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_go", "Subscribed", "go-access", "wrk_go"),
+      account("cred_free", "Free", "free-access", "wrk_free"),
+    ]);
+    mocks.queryOpenCodeGoConsoleStatus.mockImplementation(async (credential) =>
+      credential.accessToken === "free-access"
+        ? {
+            success: false,
+            error: "OpenCode Go subscription not found for this console account (404)",
+            notSubscribed: true,
+          }
+        : successfulResult(),
+    );
+
+    const out = await runFetch(["rolling"]);
+
+    expect(out.accounts).toEqual([{ sourceId: "cred_go", label: "Subscribed", active: false }]);
+    expect(out.entries).toEqual([
+      expect.objectContaining({ accounting: expect.objectContaining({ sourceId: "cred_go" }) }),
+    ]);
+    expect(out.errors).toEqual([]);
+    expect(out.statusDetails).not.toContainEqual({
+      key: "opencode_go_state",
+      value: "not_subscribed",
+    });
+  });
+
+  it("preserves a failed workspace next to successful workspaces", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_ok", "Healthy", "ok-access", "wrk_ok"),
+      account("cred_bad", "Broken", "bad-access", "wrk_bad"),
+    ]);
+    mocks.queryOpenCodeGoConsoleStatus.mockImplementation(async (credential) =>
+      credential.accessToken === "bad-access"
+        ? {
+            success: false,
+            error: "OpenCode Console API error 503 (/api/go/status)",
+            retryable: true,
+          }
+        : successfulResult(),
+    );
+
+    const out = await runFetch(["rolling"]);
+
+    expect(out.entries.map((entry) => entry.accounting.sourceId)).toEqual(["cred_ok"]);
+    expect(out.errors).toEqual([
+      {
+        label: "Broken",
+        message: "OpenCode Console API error 503 (/api/go/status)",
+        retryable: true,
+        sourceId: "cred_bad",
+      },
+    ]);
+    expect(out.accounts?.map(({ sourceId }) => sourceId)).toEqual(["cred_ok", "cred_bad"]);
+  });
+
+  it("does not add a redundant plan label to a normal Go account", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_unknown", "Unknown plan", "unknown-access", "wrk_unknown"),
+    ]);
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValueOnce(successfulResult());
+
+    const out = await runFetch(["rolling"]);
+
+    expect(out.accounts).toEqual([
+      { sourceId: "cred_unknown", label: "Unknown plan", active: false },
+    ]);
+    expect(out.accounts?.[0]).not.toHaveProperty("planLabel");
+    expect(JSON.stringify(out)).not.toContain("Go Plus");
+  });
+
+  it("emits no account or provider card when every Console workspace lacks Go", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_free_a", "Free A", "free-a", "wrk_a"),
+      account("cred_free_b", "Free B", "free-b", "wrk_b"),
+    ]);
+    mocks.queryOpenCodeGoConsoleStatus.mockResolvedValue({
+      success: false,
+      error: "OpenCode Go subscription not found for this console account (404)",
+      notSubscribed: true,
+    });
+
+    const out = await runFetch();
+
+    expect(out.attempted).toBe(false);
+    expect(out.entries).toEqual([]);
+    expect(out.errors).toEqual([]);
+    expect(out.accounts).toBeUndefined();
+    expect(out.statusDetails).toContainEqual({
+      key: "opencode_go_state",
+      value: "not_subscribed",
+    });
+
+    // The actual GUI mapper must not turn the all-not-entitled probe into an
+    // empty provider-scope card.
+    const cards = buildProviderCards({
+      probes: [{ providerId: "opencode-go", result: out }],
+      preferences: { accountingDetail: "summary" },
+      nowMs: Date.now(),
+    });
+    expect(cards).toEqual([]);
+  });
+
+  it("keeps sibling workspaces when one workspace request throws", async () => {
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_ok", "Healthy", "ok-access", "wrk_ok"),
+      account("cred_bad", "Broken", "bad-access", "wrk_bad"),
+    ]);
+    mocks.queryOpenCodeGoConsoleStatus.mockImplementation(async (credential) => {
+      if (credential.accessToken === "bad-access") throw new Error("socket hang up");
+      return successfulResult();
+    });
+
+    const out = await runFetch(["rolling"]);
+
+    expect(mocks.queryOpenCodeGoConsoleStatus).toHaveBeenCalledTimes(2);
+    expect(out.entries.map((entry) => entry.accounting.sourceId)).toEqual(["cred_ok"]);
+    expect(out.errors).toEqual([
+      {
+        label: "Broken",
+        message: "OpenCode Console request failed: socket hang up",
+        retryable: true,
+        sourceId: "cred_bad",
+      },
+    ]);
+    expect(out.accounts?.map(({ sourceId }) => sourceId)).toEqual(["cred_ok", "cred_bad"]);
+  });
+});
+
 describe("opencode-go availability and model matching", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     __resetOpenCodeGoNotSubscribedForTests();
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([]);
   });
 
   it.each([
@@ -968,10 +1238,15 @@ describe("opencode-go availability and model matching", () => {
   });
 
   it("stays available for a failed Console sign-in without an API key", async () => {
-    mocks.resolveOpenCodeConsoleAuth.mockResolvedValueOnce({
-      state: "invalid",
-      error: "refresh_failed: HTTP 401",
-    });
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValueOnce([
+      {
+        state: "invalid",
+        sourceId: "cred_console",
+        label: "Console workspace",
+        active: true,
+        error: "refresh_failed: HTTP 401",
+      },
+    ]);
     mocks.resolveOpenCodeGoAuthCached.mockResolvedValueOnce({ state: "none" });
 
     await expect(opencodeGoProvider.isAvailable(createProviderAvailabilityContext())).resolves.toBe(

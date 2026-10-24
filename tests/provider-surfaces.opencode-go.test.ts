@@ -310,7 +310,7 @@ describe("OpenCode Go shared projections", () => {
     const message =
       "OpenCode Console sign-in failed: refresh_failed: HTTP 401. Run `opencode auth login opencode`.";
 
-    expect(status).toContain(`- live_error_1: ${message}`);
+    expect(status).toContain(`- live_error_1: Account 1: ${message}`);
     expect(output).toContain(message);
     expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
     for (const secret of ["distinctive-console-access", "distinctive-console-refresh"]) {

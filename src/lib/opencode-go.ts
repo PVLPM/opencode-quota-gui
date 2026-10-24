@@ -214,7 +214,6 @@ function asMicroCents(value: unknown): number | null {
 function normalizeConsoleMeter(
   windowKey: OpenCodeGoWindowKey,
   meter: Record<string, unknown>,
-  fallbackResetsAtIso: string | null,
 ): OpenCodeGoWindow | OpenCodeGoResult {
   const limit = asMicroCents(meter.limitMicroCents);
   const used = asMicroCents(meter.usedMicroCents);
@@ -228,17 +227,23 @@ function normalizeConsoleMeter(
         ? 100
         : 0
       : Math.min(100, Math.max(0, Math.round((used / limit) * 100)));
-  const resetsAt =
-    typeof meter.resetsAt === "string" && meter.resetsAt ? meter.resetsAt : fallbackResetsAtIso;
-  if (!resetsAt || !Number.isFinite(Date.parse(resetsAt))) {
-    return contractError(`console ${windowKey} resetsAt is missing or invalid`);
+  // Each meter owns its reset time. `access.endsAt` is the subscription end,
+  // not a window reset, so it is never used as a fallback. A meter may have no
+  // own reset at all; an explicit value must still be a valid timestamp.
+  const resetsAt = meter.resetsAt;
+  let resetTimeIso: string | undefined;
+  if (resetsAt !== undefined && resetsAt !== null) {
+    if (typeof resetsAt !== "string" || !resetsAt || !Number.isFinite(Date.parse(resetsAt))) {
+      return contractError(`console ${windowKey} resetsAt is missing or invalid`);
+    }
+    resetTimeIso = new Date(Date.parse(resetsAt)).toISOString();
   }
 
   return {
     status: percent >= 100 ? "rate-limited" : "ok",
     usagePercent: percent,
     percentRemaining: 100 - percent,
-    resetTimeIso: new Date(Date.parse(resetsAt)).toISOString(),
+    ...(resetTimeIso ? { resetTimeIso } : {}),
   };
 }
 
@@ -302,7 +307,6 @@ export async function queryOpenCodeGoConsoleStatus(
         const meters = asRecord(access.meters);
         if (!meters) return contractError("console access meters are missing");
 
-        const endsAt = typeof access.endsAt === "string" ? access.endsAt : null;
         const normalized = {} as Record<OpenCodeGoWindowKey, OpenCodeGoWindow>;
         const meterByKey: Array<[OpenCodeGoWindowKey, string]> = [
           ["rolling", "fiveHour"],
@@ -313,7 +317,7 @@ export async function queryOpenCodeGoConsoleStatus(
           const meter = meters[meterKey];
           const meterRecord = asRecord(meter);
           if (!meterRecord) return contractError(`console ${meterKey} meter is missing`);
-          const window = normalizeConsoleMeter(windowKey, meterRecord, endsAt);
+          const window = normalizeConsoleMeter(windowKey, meterRecord);
           if ("success" in window) return window;
           normalized[windowKey] = window;
         }
