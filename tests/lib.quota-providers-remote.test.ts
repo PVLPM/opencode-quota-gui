@@ -299,6 +299,31 @@ describe("quota provider remote runtime", () => {
     });
   });
 
+  it("uses numeric remaining capacity for a BYOK key limit instead of the period counter", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          data: {
+            usage: 42,
+            usage_monthly: 7,
+            limit: 20,
+            limit_remaining: 10,
+            limit_reset: "monthly",
+            include_byok_in_limit: true,
+          },
+        }),
+      ),
+    );
+
+    await expect(
+      fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
+    ).resolves.toEqual({
+      success: true,
+      entries: [openRouterKeyLimitPercent(50, "$10.00/$20.00"), openRouterSpend("$42.00")],
+    });
+  });
+
   it("shows period usage in the key limit while lifetime spend stays separate", async () => {
     vi.stubGlobal(
       "fetch",
@@ -335,7 +360,7 @@ describe("quota provider remote runtime", () => {
     ["daily", "usage_daily", 30],
     ["weekly", "usage_weekly", 40],
     ["monthly", "usage_monthly", 50],
-  ] as const)("uses the %s OpenRouter usage window for a resetting key limit", async (period, counter, expectedUsed) => {
+  ] as const)("falls back to the %s OpenRouter usage window when remaining capacity is absent", async (period, counter, expectedUsed) => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -346,7 +371,6 @@ describe("quota provider remote runtime", () => {
             usage_weekly: 40,
             usage_monthly: 50,
             limit: 100,
-            limit_remaining: 100 - expectedUsed,
             limit_reset: period,
             [counter]: expectedUsed,
           },

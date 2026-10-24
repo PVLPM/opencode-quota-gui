@@ -796,9 +796,9 @@ function parseOpenRouterKeyV1(
 
   if (limit !== null) {
     const windowUsage = openRouterWindowUsage(data, reset);
-    // Use the usage that matches the key's reset period. When that counter is
-    // absent, derive consumed capacity from `limit_remaining`; never pair a
-    // lifetime total with a daily/weekly/monthly cap.
+    // `limit_remaining` is authoritative for a capped key. Use the reset-period
+    // counter only when remaining capacity is absent; never pair a lifetime
+    // total with a daily/weekly/monthly cap.
     const remainingValue =
       remaining !== null ? remaining : windowUsage !== null ? limit - windowUsage : null;
 
@@ -810,7 +810,7 @@ function parseOpenRouterKeyV1(
       if (!Number.isFinite(percentRemaining)) {
         return { success: false, error: "Invalid openrouter-key-v1 response" };
       }
-      const usedUsd = windowUsage !== null ? windowUsage : limit - remainingValue;
+      const usedUsd = limit - remainingValue;
       return {
         success: true,
         entries: [
