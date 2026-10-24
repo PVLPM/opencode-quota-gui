@@ -405,7 +405,7 @@ describe("buildQuotaExport", () => {
               ownership: "maintained",
               authority: "provider_reported",
             },
-            name: "OpenRouter budget",
+            name: "OpenRouter key limit",
             percentRemaining: 80,
           },
         ],
@@ -430,7 +430,7 @@ describe("buildQuotaExport", () => {
 
     expect(actual.providers.openrouter).toMatchObject({
       status: "ok",
-      entries: [{ name: "OpenRouter budget", percentRemaining: 80 }],
+      entries: [{ name: "OpenRouter key limit", percentRemaining: 80 }],
     });
     const serialized = JSON.stringify(actual);
     expect(serialized).not.toContain("api_key_");

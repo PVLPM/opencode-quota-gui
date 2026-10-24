@@ -97,7 +97,7 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 | OpenAI             | Automatic                                                      | Remote API         | Quota              |
 | OpenCode Go        | Automatic                                                      | Remote API         | Quota              |
 | OpenCode Zen       | Automatic                                                      | Remote API         | Budget and balance |
-| OpenRouter         | Automatic                                                      | Remote API         | Budget and spend   |
+| OpenRouter         | Automatic                                                      | Remote API         | Key limit + spend  |
 | Synthetic          | Automatic                                                      | Remote API         | Quota              |
 | xAI SuperGrok      | Automatic                                                      | Remote API         | Quota              |
 
@@ -117,7 +117,7 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 | NanoGPT                 | Automatic                                                      | Remote API         | Quota and balance  |
 | OpenAI                  | Automatic                                                      | Remote API         | Quota              |
 | OpenCode Zen            | Automatic                                                      | Remote API         | Budget and balance |
-| OpenRouter              | Automatic                                                      | Remote API         | Budget and spend   |
+| OpenRouter              | Automatic                                                      | Remote API         | Key limit + spend  |
 | Synthetic               | Automatic                                                      | Remote API         | Quota              |
 | xAI SuperGrok           | Automatic                                                      | Remote API         | Quota              |
 

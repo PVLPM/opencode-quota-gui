@@ -44,6 +44,48 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), { ...init, headers });
 }
 
+const OPENROUTER_ACCOUNTING = {
+  acquisitionMethod: "remote_api",
+  ownership: "user_configured",
+  authority: "provider_reported",
+} as const;
+
+function openRouterKeyLimitPercent(percentRemaining: number, right: string) {
+  return {
+    accounting: { resultType: "budget", ...OPENROUTER_ACCOUNTING },
+    kind: "percent",
+    name: "Source One key limit",
+    group: "Source One",
+    label: "Key limit:",
+    metricLabel: "Key limit",
+    right,
+    percentRemaining,
+  };
+}
+
+function openRouterKeyLimitValue(value: string) {
+  return {
+    accounting: { resultType: "budget", ...OPENROUTER_ACCOUNTING },
+    kind: "value",
+    name: "Source One key limit",
+    group: "Source One",
+    label: "Key limit:",
+    metricLabel: "Key limit",
+    value,
+  };
+}
+
+function openRouterSpend(value: string) {
+  return {
+    accounting: { resultType: "spend", ...OPENROUTER_ACCOUNTING },
+    kind: "value",
+    name: "Source One spend",
+    group: "Source One",
+    label: "Spend:",
+    value,
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -241,7 +283,7 @@ describe("quota provider remote runtime", () => {
     }
   });
 
-  it("maps OpenRouter to budget percent only for a positive limit", async () => {
+  it("maps a positive OpenRouter key limit with lifetime spend separately", async () => {
     vi.stubGlobal(
       "fetch",
       vi
@@ -253,31 +295,22 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: true,
-      entries: [
-        {
-          accounting: {
-            resultType: "budget",
-            acquisitionMethod: "remote_api",
-            ownership: "user_configured",
-            authority: "provider_reported",
-          },
-          kind: "percent",
-          name: "Source One budget",
-          group: "Source One",
-          label: "Budget:",
-          right: "$2.00/$10.00",
-          percentRemaining: 80,
-        },
-      ],
+      entries: [openRouterKeyLimitPercent(80, "$2.00/$10.00"), openRouterSpend("$2.00")],
     });
   });
 
-  it("shows limit-window usage in the OpenRouter budget row when the key's lifetime usage exceeds it", async () => {
+  it("shows period usage in the key limit while lifetime spend stays separate", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
         jsonResponse({
-          data: { usage: 140.7, limit: 100, limit_remaining: 87.459170905 },
+          data: {
+            usage: 140.7,
+            usage_monthly: 12.540829095,
+            limit: 100,
+            limit_remaining: 87.459170905,
+            limit_reset: "monthly",
+          },
         }),
       ),
     );
@@ -289,14 +322,212 @@ describe("quota provider remote runtime", () => {
       entries: [
         expect.objectContaining({
           kind: "percent",
+          label: "Key limit:",
           right: "$12.54/$100.00",
           percentRemaining: 87.459170905,
         }),
+        openRouterSpend("$140.70"),
       ],
     });
   });
 
-  it("falls back to the OpenRouter usage field for the budget row when no limit window is reported", async () => {
+  it.each([
+    ["daily", "usage_daily", 30],
+    ["weekly", "usage_weekly", 40],
+    ["monthly", "usage_monthly", 50],
+  ] as const)("uses the %s OpenRouter usage window for a resetting key limit", async (period, counter, expectedUsed) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          data: {
+            usage: 500,
+            usage_daily: 30,
+            usage_weekly: 40,
+            usage_monthly: 50,
+            limit: 100,
+            limit_remaining: 100 - expectedUsed,
+            limit_reset: period,
+            [counter]: expectedUsed,
+          },
+        }),
+      ),
+    );
+
+    const result = await fetchRemoteQuotaProvider(
+      source({ format: "openrouter-key-v1" }),
+      "secret",
+    );
+    expect(result).toEqual({
+      success: true,
+      entries: [
+        openRouterKeyLimitPercent(100 - expectedUsed, `$${expectedUsed}.00/$100.00`),
+        openRouterSpend("$500.00"),
+      ],
+    });
+    expect(JSON.stringify(result.entries[0])).not.toContain("500");
+    expect(result.entries[0]?.resetTimeIso).toBeUndefined();
+    expect(result.entries[1]).toEqual(openRouterSpend("$500.00"));
+    expect(JSON.stringify(result).toLowerCase()).not.toContain("balance");
+  });
+
+  it("uses lifetime OpenRouter usage for a key with no reset period", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          data: {
+            usage: 12.5,
+            usage_daily: 1,
+            usage_weekly: 2,
+            usage_monthly: 3,
+            limit: 100,
+            limit_remaining: 87.5,
+            limit_reset: null,
+          },
+        }),
+      ),
+    );
+
+    await expect(
+      fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
+    ).resolves.toEqual({
+      success: true,
+      entries: [
+        expect.objectContaining({
+          kind: "percent",
+          label: "Key limit:",
+          right: "$12.50/$100.00",
+          percentRemaining: 87.5,
+        }),
+        openRouterSpend("$12.50"),
+      ],
+    });
+  });
+
+  it("does not pair lifetime usage with a missing resetting-window counter", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          data: {
+            usage: 500,
+            limit: 100,
+            limit_remaining: 60,
+            limit_reset: "daily",
+          },
+        }),
+      ),
+    );
+
+    const result = await fetchRemoteQuotaProvider(
+      source({ format: "openrouter-key-v1" }),
+      "secret",
+    );
+    expect(result).toEqual({
+      success: true,
+      entries: [
+        expect.objectContaining({
+          kind: "percent",
+          label: "Key limit:",
+          right: "$40.00/$100.00",
+          percentRemaining: 60,
+        }),
+        openRouterSpend("$500.00"),
+      ],
+    });
+    expect(JSON.stringify(result.entries[0])).not.toContain("500");
+  });
+
+  it("shows the key limit and lifetime spend when a resetting-window counter and capacity are missing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          data: {
+            usage: 500,
+            limit: 100,
+            limit_reset: "daily",
+          },
+        }),
+      ),
+    );
+
+    const result = await fetchRemoteQuotaProvider(
+      source({ format: "openrouter-key-v1" }),
+      "secret",
+    );
+    expect(result).toEqual({
+      success: true,
+      entries: [openRouterKeyLimitValue("$100.00"), openRouterSpend("$500.00")],
+    });
+    expect(result.entries[0]).not.toHaveProperty("percentRemaining");
+    expect(result.entries[1]).toEqual(openRouterSpend("$500.00"));
+  });
+
+  it("does not pair lifetime usage with an unsupported reset period", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          data: {
+            usage: 500,
+            limit: 100,
+            limit_remaining: 90,
+            limit_reset: "hourly",
+          },
+        }),
+      ),
+    );
+
+    const result = await fetchRemoteQuotaProvider(
+      source({ format: "openrouter-key-v1" }),
+      "secret",
+    );
+    expect(result).toEqual({
+      success: true,
+      entries: [
+        expect.objectContaining({
+          kind: "percent",
+          label: "Key limit:",
+          right: "$10.00/$100.00",
+          percentRemaining: 90,
+        }),
+        openRouterSpend("$500.00"),
+      ],
+    });
+    expect(JSON.stringify(result.entries[0])).not.toContain("500");
+  });
+
+  it("shows the key limit and lifetime spend for an unsupported reset period without capacity", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          data: {
+            usage: 500,
+            limit: 100,
+            limit_reset: "hourly",
+          },
+        }),
+      ),
+    );
+
+    const result = await fetchRemoteQuotaProvider(
+      source({ format: "openrouter-key-v1" }),
+      "secret",
+    );
+    expect(result).toEqual({
+      success: true,
+      entries: [openRouterKeyLimitValue("$100.00"), openRouterSpend("$500.00")],
+    });
+    expect(result.entries[0]).not.toHaveProperty("percentRemaining");
+    expect(result.entries[0]).toEqual(
+      expect.objectContaining({ label: "Key limit:", name: "Source One key limit" }),
+    );
+  });
+
+  it("falls back to the OpenRouter usage field for the key limit when no limit window is reported", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(jsonResponse({ data: { usage: 13, limit: 100 } })),
@@ -306,7 +537,14 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: true,
-      entries: [expect.objectContaining({ kind: "percent", right: "$13.00/$100.00" })],
+      entries: [
+        expect.objectContaining({
+          kind: "percent",
+          label: "Key limit:",
+          right: "$13.00/$100.00",
+        }),
+        openRouterSpend("$13.00"),
+      ],
     });
   });
 
@@ -411,6 +649,40 @@ describe("quota provider remote runtime", () => {
     });
   });
 
+  it.each([
+    ["reset type", { data: { usage: 2, limit: 10, limit_remaining: 8, limit_reset: 1 } }],
+    [
+      "daily usage type",
+      { data: { usage: 2, limit: 10, limit_remaining: 8, limit_reset: "daily", usage_daily: "2" } },
+    ],
+    [
+      "weekly usage negative",
+      {
+        data: { usage: 2, limit: 10, limit_remaining: 8, limit_reset: "weekly", usage_weekly: -1 },
+      },
+    ],
+    [
+      "monthly usage type",
+      {
+        data: {
+          usage: 2,
+          limit: 10,
+          limit_remaining: 8,
+          limit_reset: "monthly",
+          usage_monthly: true,
+        },
+      },
+    ],
+  ])("rejects invalid OpenRouter %s", async (_name, body) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(body)));
+    await expect(
+      fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
+    ).resolves.toEqual({
+      success: false,
+      error: "Invalid openrouter-key-v1 response",
+    });
+  });
+
   it("rejects numeric strings in the OpenRouter preset", async () => {
     vi.stubGlobal(
       "fetch",
@@ -463,7 +735,10 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: true,
-      entries: [expect.objectContaining({ kind: "percent", percentRemaining: 80 })],
+      entries: [
+        expect.objectContaining({ kind: "percent", percentRemaining: 80 }),
+        openRouterSpend("$2.00"),
+      ],
     });
   });
 

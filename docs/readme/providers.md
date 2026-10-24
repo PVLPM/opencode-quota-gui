@@ -26,7 +26,7 @@ The dashboard reads provider results through the same OpenCode host process that
 | OpenAI             | Automatic                                                      | Remote API         | Quota              |
 | OpenCode Go        | Automatic                                                      | Remote API         | Quota              |
 | OpenCode Zen       | Automatic                                                      | Remote API         | Budget and balance |
-| OpenRouter         | Automatic                                                      | Remote API         | Budget and spend   |
+| OpenRouter         | Automatic                                                      | Remote API         | Key limit + spend  |
 | Synthetic          | Automatic                                                      | Remote API         | Quota              |
 | xAI SuperGrok      | Automatic                                                      | Remote API         | Quota              |
 
@@ -46,7 +46,7 @@ The dashboard reads provider results through the same OpenCode host process that
 | NanoGPT                 | Automatic                                                      | Remote API         | Quota and balance  |
 | OpenAI                  | Automatic                                                      | Remote API         | Quota              |
 | OpenCode Zen            | Automatic                                                      | Remote API         | Budget and balance |
-| OpenRouter              | Automatic                                                      | Remote API         | Budget and spend   |
+| OpenRouter              | Automatic                                                      | Remote API         | Key limit + spend  |
 | Synthetic               | Automatic                                                      | Remote API         | Quota              |
 | xAI SuperGrok           | Automatic                                                      | Remote API         | Quota              |
 
@@ -545,7 +545,7 @@ Create an Ollama API key, then set `OLLAMA_API_KEY` (or use trusted user/global 
 
 ### OpenRouter
 
-Reads your OpenCode API key and calls OpenRouter's current-key endpoint. Limited keys show used budget and remaining percentage; unlimited keys show spend. No reset time is invented.
+Reads each saved OpenCode OpenRouter API key independently and calls OpenRouter's current-key endpoint. A key with a positive limit shows its key limit (using the usage window matching its daily, weekly, or monthly reset) and lifetime spend as separate rows; keys without a limit show lifetime spend only. The percentage is the key's remaining capacity, not an account balance. No reset countdown is invented.
 
 <a id="opencode-go"></a>
 

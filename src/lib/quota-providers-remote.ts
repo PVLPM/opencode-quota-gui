@@ -667,6 +667,73 @@ function parseJsonV1(
   };
 }
 
+type OpenRouterLimitReset = "daily" | "weekly" | "monthly";
+
+const OPENROUTER_LIMIT_RESETS: ReadonlySet<string> = new Set([
+  "daily",
+  "weekly",
+  "monthly",
+] satisfies OpenRouterLimitReset[]);
+
+const OPENROUTER_USAGE_WINDOW_KEYS = {
+  daily: "usage_daily",
+  weekly: "usage_weekly",
+  monthly: "usage_monthly",
+} as const satisfies Record<OpenRouterLimitReset, string>;
+
+function openRouterWindowUsage(
+  data: Record<string, unknown>,
+  reset: OpenRouterLimitReset | "unknown" | null,
+): number | null {
+  if (reset === null) {
+    return typeof data.usage === "number" ? data.usage : null;
+  }
+  if (reset === "unknown") return null;
+  const value = data[OPENROUTER_USAGE_WINDOW_KEYS[reset]];
+  return typeof value === "number" ? value : null;
+}
+
+function openRouterSpendEntry(
+  source: RemoteApiQuotaProviderDefinition,
+  usage: number,
+): QuotaToastEntry {
+  return {
+    accounting: accountingMetadata("spend"),
+    kind: "value",
+    name: `${source.label} spend`,
+    group: source.label,
+    label: "Spend:",
+    value: formatUsd(usage),
+  };
+}
+
+function openRouterKeyLimitEntry(
+  source: RemoteApiQuotaProviderDefinition,
+  limit: number,
+  percentRemaining: number | null,
+  usedUsd: number | null,
+): QuotaToastEntry {
+  const common = {
+    accounting: accountingMetadata("budget"),
+    name: `${source.label} key limit`,
+    group: source.label,
+    label: "Key limit:",
+    metricLabel: "Key limit",
+  };
+  return percentRemaining !== null
+    ? {
+        ...common,
+        kind: "percent",
+        right: `${formatUsd(usedUsd ?? 0)}/${formatUsd(limit)}`,
+        percentRemaining,
+      }
+    : {
+        ...common,
+        kind: "value",
+        value: formatUsd(limit),
+      };
+}
+
 function parseOpenRouterKeyV1(
   source: RemoteApiQuotaProviderDefinition,
   body: unknown,
@@ -677,61 +744,96 @@ function parseOpenRouterKeyV1(
 
   const data = body.data;
   const usage = data.usage;
-  const limit = data.limit;
-  const remaining = data.limit_remaining;
-  if (
-    typeof usage !== "number" ||
-    !Number.isFinite(usage) ||
-    usage < 0 ||
-    (limit !== null &&
-      limit !== undefined &&
-      (typeof limit !== "number" || !Number.isFinite(limit) || limit < 0)) ||
-    (remaining === null && limit !== null) ||
-    (remaining !== null &&
-      remaining !== undefined &&
-      (typeof remaining !== "number" || !Number.isFinite(remaining)))
-  ) {
+  if (typeof usage !== "number" || !Number.isFinite(usage) || usage < 0) {
     return { success: false, error: "Invalid openrouter-key-v1 response" };
   }
 
-  if (typeof limit === "number" && limit > 0) {
-    const remainingValue = typeof remaining === "number" ? remaining : limit - usage;
-    if (remainingValue > limit) {
+  const rawLimit = data.limit;
+  if (
+    rawLimit !== null &&
+    rawLimit !== undefined &&
+    (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit < 0)
+  ) {
+    return { success: false, error: "Invalid openrouter-key-v1 response" };
+  }
+  // A key limit is a cap only when it is positive. Zero and null mean unlimited.
+  const limit = typeof rawLimit === "number" && rawLimit > 0 ? rawLimit : null;
+
+  const rawRemaining = data.limit_remaining;
+  if (
+    rawRemaining !== null &&
+    rawRemaining !== undefined &&
+    (typeof rawRemaining !== "number" || !Number.isFinite(rawRemaining))
+  ) {
+    return { success: false, error: "Invalid openrouter-key-v1 response" };
+  }
+  // `limit_remaining` is capacity left on the key, never an account balance.
+  if (rawRemaining === null && limit !== null) {
+    return { success: false, error: "Invalid openrouter-key-v1 response" };
+  }
+  const remaining = typeof rawRemaining === "number" ? rawRemaining : null;
+  if (limit !== null && remaining !== null && remaining > limit) {
+    return { success: false, error: "Invalid openrouter-key-v1 response" };
+  }
+
+  const rawReset = data.limit_reset;
+  let reset: OpenRouterLimitReset | "unknown" | null;
+  if (rawReset === null || rawReset === undefined) {
+    reset = null;
+  } else if (typeof rawReset !== "string") {
+    return { success: false, error: "Invalid openrouter-key-v1 response" };
+  } else {
+    reset = OPENROUTER_LIMIT_RESETS.has(rawReset) ? (rawReset as OpenRouterLimitReset) : "unknown";
+  }
+
+  for (const key of Object.values(OPENROUTER_USAGE_WINDOW_KEYS)) {
+    const value = data[key];
+    if (value === null || value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      return { success: false, error: "Invalid openrouter-key-v1 response" };
+    }
+  }
+
+  if (limit !== null) {
+    const windowUsage = openRouterWindowUsage(data, reset);
+    // Use the usage that matches the key's reset period. When that counter is
+    // absent, derive consumed capacity from `limit_remaining`; never pair a
+    // lifetime total with a daily/weekly/monthly cap.
+    const remainingValue =
+      remaining !== null ? remaining : windowUsage !== null ? limit - windowUsage : null;
+
+    if (remainingValue !== null) {
+      if (remainingValue > limit) {
+        return { success: false, error: "Invalid openrouter-key-v1 response" };
+      }
+      const percentRemaining = (remainingValue / limit) * 100;
+      if (!Number.isFinite(percentRemaining)) {
+        return { success: false, error: "Invalid openrouter-key-v1 response" };
+      }
+      const usedUsd = windowUsage !== null ? windowUsage : limit - remainingValue;
       return {
-        success: false,
-        error: "Invalid openrouter-key-v1 response",
+        success: true,
+        entries: [
+          openRouterKeyLimitEntry(source, limit, percentRemaining, usedUsd),
+          openRouterSpendEntry(source, usage),
+        ],
       };
     }
-    const percentRemaining = (remainingValue / limit) * 100;
-    const usedUsd = typeof remaining === "number" ? limit - remainingValue : usage;
+
+    // A positive limit with no usable window usage or remaining capacity keeps
+    // the key limit visible without inventing a percentage or reset countdown.
     return {
       success: true,
       entries: [
-        {
-          accounting: accountingMetadata("budget"),
-          kind: "percent",
-          name: `${source.label} budget`,
-          group: source.label,
-          label: "Budget:",
-          right: `${formatUsd(usedUsd)}/${formatUsd(limit)}`,
-          percentRemaining,
-        },
+        openRouterKeyLimitEntry(source, limit, null, null),
+        openRouterSpendEntry(source, usage),
       ],
     };
   }
 
   return {
     success: true,
-    entries: [
-      {
-        accounting: accountingMetadata("spend"),
-        kind: "value",
-        name: `${source.label} spend`,
-        group: source.label,
-        label: "Spend:",
-        value: formatUsd(usage),
-      },
-    ],
+    entries: [openRouterSpendEntry(source, usage)],
   };
 }
 
