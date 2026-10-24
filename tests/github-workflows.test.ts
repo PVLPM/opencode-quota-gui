@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -11,9 +11,6 @@ interface WorkflowStep {
 }
 
 interface Workflow {
-  concurrency?: {
-    "cancel-in-progress"?: boolean;
-  };
   jobs: Record<
     string,
     {
@@ -246,33 +243,46 @@ describe("GitHub workflows", () => {
     }
   });
 
-  it("keeps upstream issue reconciliation on Node 22 with minimal permissions", async () => {
-    const source = await readFile(".github/workflows/upstream-plugin-update-check.yml", "utf8");
-    const workflow = parse(source) as Workflow;
-    const checkJob = workflow.jobs.check;
-    const setupNode = checkJob?.steps?.find((step) => step.name === "Setup Node.js");
-    const reconcile = checkJob?.steps?.find(
-      (step) => step.name === "Reconcile upstream plugin issues",
-    );
-
-    expect(workflow.concurrency?.["cancel-in-progress"]).toBe(false);
-    expect(checkJob?.permissions).toEqual({
-      contents: "read",
-      issues: "write",
-    });
-    expect(setupNode?.with?.["node-version"]).toBe(22);
-    expect(reconcile?.run).toBe("node scripts/check-upstream-plugin-updates.mjs --write-issues");
-
+  it("removes the scheduled upstream issue generator while keeping manual review tooling", async () => {
     const workflowFiles = (await readdir(".github/workflows")).filter((file) =>
       /\.ya?ml$/u.test(file),
     );
-    const writeIssueWorkflows: string[] = [];
+    expect(workflowFiles).not.toContain("upstream-plugin-update-check.yml");
+
     for (const file of workflowFiles) {
       const workflowSource = await readFile(`.github/workflows/${file}`, "utf8");
-      if (workflowSource.includes("--write-issues")) {
-        writeIssueWorkflows.push(file);
-      }
+      expect(workflowSource, file).not.toContain("--write-issues");
+      expect(workflowSource, file).not.toContain("check-upstream-plugin-updates.mjs");
     }
-    expect(writeIssueWorkflows).toEqual(["upstream-plugin-update-check.yml"]);
+
+    const manifest = JSON.parse(await readFile("package.json", "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    expect(manifest.scripts?.["upstream:check"]).toBe(
+      "node scripts/check-upstream-plugin-updates.mjs",
+    );
+    expect(manifest.scripts?.["upstream:prepare-review"]).toBe(
+      "node scripts/prepare-upstream-plugin-review.mjs",
+    );
+    expect(manifest.scripts?.["upstream:sync"]).toBe(
+      "node scripts/sync-upstream-plugin-references.mjs",
+    );
+
+    for (const script of [
+      "scripts/check-upstream-plugin-updates.mjs",
+      "scripts/prepare-upstream-plugin-review.mjs",
+      "scripts/sync-upstream-plugin-references.mjs",
+    ]) {
+      await expect(access(script), script).resolves.toBeUndefined();
+    }
+
+    const lock = JSON.parse(await readFile("references/upstream-plugins/lock.json", "utf8")) as {
+      plugins?: Record<string, unknown>;
+    };
+    expect(Object.keys(lock.plugins ?? {}).sort()).toEqual([
+      "cursor-opencode-provider",
+      "opencode-agy-auth",
+      "opencode-gemini-auth",
+    ]);
   });
 });
