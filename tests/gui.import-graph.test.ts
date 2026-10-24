@@ -67,6 +67,7 @@ describe("contract layer import rules", () => {
   it("has contract sources to check", () => {
     expect(contracts.map((entry) => entry.file).sort()).toEqual([
       "src/contracts/build-identity.ts",
+      "src/contracts/card-order.ts",
       "src/contracts/dashboard.ts",
       "src/contracts/guards.ts",
       "src/contracts/identity.ts",
