@@ -410,12 +410,16 @@ function buildAccountCard(params: {
   const cardId = buildCardId(params.providerId, identityKey);
   const rawLabel = params.account.label?.trim();
   const sanitizedLabel = rawLabel ? sanitizeSingleLineDisplayText(rawLabel) : "";
+  const planLabel = params.account.planLabel
+    ? sanitizeSingleLineDisplayText(params.account.planLabel).trim()
+    : "";
   const card: ProviderCard = {
     cardId,
     providerId: params.providerId,
     providerLabel: params.providerLabel,
     // Display-only fallback numbering; never an identity input.
     accountLabel: sanitizedLabel || `Account ${params.accountIndex + 1}`,
+    ...(planLabel ? { planLabel } : {}),
     labelSource: sanitizedLabel ? "connection" : "account",
     rows: mapEntryRows({
       entries: params.entries,

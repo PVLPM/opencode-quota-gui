@@ -350,10 +350,11 @@ function isQuotaToastError(value: unknown): boolean {
 function isQuotaProviderAccount(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(value, ["sourceId", "identityKey", "label", "active"]) &&
+    hasOnlyKeys(value, ["sourceId", "identityKey", "label", "planLabel", "active"]) &&
     typeof value.sourceId === "string" &&
     (value.identityKey === undefined || typeof value.identityKey === "string") &&
     (value.label === undefined || typeof value.label === "string") &&
+    (value.planLabel === undefined || typeof value.planLabel === "string") &&
     (value.active === undefined || typeof value.active === "boolean")
   );
 }
@@ -516,6 +517,9 @@ export function normalizeQuotaProviderResult(value: unknown): QuotaProviderResul
             ...account,
             ...(account.label !== undefined
               ? { label: sanitizeSingleLineDisplayText(account.label) }
+              : {}),
+            ...(account.planLabel !== undefined
+              ? { planLabel: sanitizeSingleLineDisplayText(account.planLabel) }
               : {}),
           })),
         }

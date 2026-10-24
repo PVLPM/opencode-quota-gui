@@ -7,6 +7,29 @@ import {
 import { homeSnapshot, NOW } from "./fixtures/gui-ui-fixtures";
 
 describe("independent browser quota transport", () => {
+  it.each([
+    { planLabel: "Plus", accountLabel: "Personal" },
+    { accountLabel: "Personal" },
+    { planLabel: "Plus" },
+    {},
+  ])("decodes independent optional plan and account labels: %j", (identity) => {
+    const snapshot = homeSnapshot();
+    const { accountLabel: _account, ...base } = snapshot.providers.cards[0];
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: { ...snapshot.providers, cards: [{ ...base, rows: [], ...identity }] },
+    };
+    expect(parseQuotaSnapshot(payload).providers.cards[0]).toEqual(payload.providers.cards[0]);
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        providers: { ...payload.providers, cards: [{ ...base, planLabel: 7 }] },
+      }),
+    ).toThrow(DashboardError);
+  });
+
   it("sends an explicit active surface without requesting analytics or quota", async () => {
     const requests: {
       url: string;

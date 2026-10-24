@@ -195,6 +195,31 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe("gui provider cards — account mapping", () => {
+  it("maps a sanitized plan separately without changing account, card, or row identity", () => {
+    const mapped = (label: string, planLabel?: string) =>
+      cardsFor([
+        probe(
+          "copilot",
+          result({
+            accounts: [{ sourceId: "raw-plan", label, planLabel }],
+            entries: [percentEntry({ sourceId: "raw-plan" })],
+          }),
+        ),
+      ])[0];
+    const original = mapped("Personal");
+    const planned = mapped("Personal", "  Plus\n\u001b[31m plan\u001b[0m  ");
+    expect(planned?.planLabel).toBe("Plus plan");
+    expect(planned?.accountLabel).toBe("Personal");
+    expect(planned?.labelSource).toBe(original?.labelSource);
+    const renamed = mapped("Work", "Enterprise");
+    for (const card of [planned, renamed]) {
+      expect(card?.cardId).toBe(original?.cardId);
+      expect(card?.rows.map((row) => row.rowId)).toEqual(original?.rows.map((row) => row.rowId));
+    }
+    expect(original).not.toHaveProperty("planLabel");
+    expect(mapped("Personal", " \n\u001b[0m ")).not.toHaveProperty("planLabel");
+  });
+
   it("maps every discovered account to its own card with opaque ids and no aliases", () => {
     const cards = cardsFor([
       probe(

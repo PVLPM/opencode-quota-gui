@@ -156,6 +156,8 @@ export interface ProviderCard {
   cardId: CardId;
   providerId: string;
   providerLabel: string;
+  /** Display-only plan shown before the account; never an identity input. */
+  planLabel?: string;
   accountLabel?: string;
   labelSource: "connection" | "org" | "account" | "provider";
   rows: QuotaCardRow[];

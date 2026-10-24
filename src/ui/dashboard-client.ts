@@ -399,6 +399,8 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
 
   const accountLabel = readOptionalText(card.accountLabel, endpoint, `${detail}.accountLabel`);
   if (accountLabel !== undefined) parsed.accountLabel = accountLabel;
+  const planLabel = readOptionalText(card.planLabel, endpoint, `${detail}.planLabel`);
+  if (planLabel !== undefined) parsed.planLabel = planLabel;
   const observedAtIso = readOptionalText(card.observedAtIso, endpoint, `${detail}.observedAtIso`);
   if (observedAtIso !== undefined) parsed.observedAtIso = observedAtIso;
   if (card.details !== undefined) {

@@ -272,6 +272,69 @@ describe("quota-state codec", () => {
     expect(normalized?.presentation).toEqual({ singleWindowDisplayName: "Synthetic" });
   });
 
+  it("normalizes and cache-round-trips plan labels without changing account identity", () => {
+    const input = createValidResult();
+    input.accounts = [
+      {
+        sourceId: "connection-1",
+        identityKey: "connection-1:plus",
+        label: "Personal\u001b[31m",
+        planLabel: "  Plus\nplan\u001b[31m  ",
+        active: true,
+      },
+    ];
+
+    const normalized = normalizeQuotaProviderResult(input);
+    expect(normalized?.accounts).toEqual([
+      {
+        sourceId: "connection-1",
+        identityKey: "connection-1:plus",
+        label: "Personal",
+        planLabel: "Plus plan",
+        active: true,
+      },
+    ]);
+
+    const decoded = decodePersistedQuotaProviderCacheEntry(
+      cloneJson(createEnvelope(input)),
+      EXPECTED_IDENTITY,
+    );
+    expect(decoded?.result.accounts).toEqual(normalized?.accounts);
+  });
+
+  it("rejects a nonstring plan label but keeps identity-only accounts valid", () => {
+    const invalid = createValidResult() as any;
+    invalid.accounts = [
+      {
+        sourceId: "connection-1",
+        identityKey: "connection-1:plus",
+        label: "Personal",
+        planLabel: 7,
+        active: true,
+      },
+    ];
+    expectInvalidResult(invalid);
+    expectInvalidEnvelope(cloneJson(createEnvelope(invalid)));
+
+    const identityOnly = createValidResult() as any;
+    identityOnly.accounts = [
+      {
+        sourceId: "connection-1",
+        identityKey: "connection-1:plus",
+        label: "Personal",
+        active: true,
+      },
+    ];
+    const normalized = normalizeQuotaProviderResult(identityOnly);
+    expect(normalized?.accounts?.[0]).toMatchObject({
+      sourceId: "connection-1",
+      identityKey: "connection-1:plus",
+      label: "Personal",
+      active: true,
+    });
+    expect(normalized?.accounts?.[0]).not.toHaveProperty("planLabel");
+  });
+
   it("accepts and sanitizes optional info text on quantity and percent entries", () => {
     const input = createValidResult();
     const quantity = input.entries[2] as any;

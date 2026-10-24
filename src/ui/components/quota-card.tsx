@@ -366,6 +366,14 @@ export function QuotaCardView(props: {
       <header class="qg-card__head">
         <div class="qg-card__identity">
           <span class="qg-card__provider">{props.card.providerLabel}</span>
+          <Show when={props.card.planLabel}>
+            {(plan) => (
+              <span class="qg-card__account">
+                <span aria-hidden="true">· </span>
+                {plan()}
+              </span>
+            )}
+          </Show>
           <Show when={props.card.accountLabel}>
             {(account) => (
               <span class="qg-card__account">

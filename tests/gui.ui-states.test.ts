@@ -587,6 +587,32 @@ describe("section state machine", () => {
 });
 
 describe("home view composition", () => {
+  it.each([
+    { planLabel: "Plus", accountLabel: "Personal", expected: "Synthetic Provider· Plus· Personal" },
+    { planLabel: undefined, accountLabel: "Personal", expected: "Synthetic Provider· Personal" },
+    { planLabel: "Plus", accountLabel: undefined, expected: "Synthetic Provider· Plus" },
+    { planLabel: undefined, accountLabel: undefined, expected: "Synthetic Provider" },
+  ])("keeps the inline provider-plan-account hierarchy: $expected", async ({
+    expected,
+    ...identity
+  }) => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: providerCard(identity),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+      timeZone: "UTC",
+    });
+    const header = text(
+      html.slice(html.indexOf('<div class="qg-card__identity">'), html.indexOf("</header>")),
+    );
+    expect(header.replace(/<[^>]*>/gu, "").trim()).toBe(expected);
+    expect(header.match(/class="qg-card__account"/gu) ?? []).toHaveLength(
+      Number(Boolean(identity.planLabel)) + Number(Boolean(identity.accountLabel)),
+    );
+    expect(header).not.toMatch(/<br|badge/);
+  });
+
   it("does not collapse separate accounts when their provider names match", async () => {
     // Card ids are opaque server-side hashes (`provider#hash`); two accounts
     // under the same provider name must keep distinct ids and distinct cards.
@@ -2728,6 +2754,7 @@ describe("cached visibility catalog", () => {
   }
 
   it("keeps absent OpenAI optional rows account-scoped in Settings", async () => {
+    const planLabel = "Separate plan";
     const values = new Map<string, string>();
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
@@ -2744,6 +2771,7 @@ describe("cached visibility catalog", () => {
         providerId: "openai",
         providerLabel: "OpenAI",
         accountLabel: account,
+        planLabel,
         labelSource: "connection",
         rows: [],
         visibilityRows: [
@@ -2801,6 +2829,16 @@ describe("cached visibility catalog", () => {
       expect(buttonByLabel("Hide Resets · Team")).toBeDefined();
       expect(buttonByLabel("Hide Credits · Plus")).toBeDefined();
       expect(buttonByLabel("Hide Credits · Team")).toBeDefined();
+      expect(renderGraph.textOf(root)).not.toContain(planLabel);
+      const catalog = readVisibilityCatalog(storage);
+      expect(catalog.providers[0]?.accountLabels).toEqual(["Plus", "Team"]);
+      expect(catalog.providers[0]?.rows.map((row) => row.accountLabel)).toEqual([
+        "Plus",
+        "Plus",
+        "Team",
+        "Team",
+      ]);
+      expect(JSON.stringify(catalog)).not.toContain(planLabel);
       expect(renderGraph.textOf(root)).toContain("More information about Resets");
       expect(
         renderGraph

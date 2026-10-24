@@ -390,6 +390,8 @@ export interface QuotaProviderAccount {
   identityKey?: string;
   /** Existing display label (e.g. `formatCredentialDisplayNames`); never an identity. */
   label?: string;
+  /** Optional display-only plan; kept separate from the account label and identity. */
+  planLabel?: string;
   /** Whether OpenCode marks this login as the active one. */
   active?: boolean;
 }
