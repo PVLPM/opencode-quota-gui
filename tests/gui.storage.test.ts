@@ -15,6 +15,7 @@ import {
   readProjectsIndex,
   withOpenCodeStorageSnapshot,
 } from "../src/lib/opencode-storage.js";
+import { SCOPED_QUERY_ARG_BUDGET } from "../src/lib/scoped-query-chunks.js";
 import {
   createGuiDatabaseRoot,
   type GuiDatabaseSchema,
@@ -564,7 +565,8 @@ describe("scoped completed assistant reader", () => {
   });
 
   it("keeps combined exact-time scoped chunks under the bind bound", async () => {
-    const messages = Array.from({ length: 1_000 }, (_, index) => ({
+    // One more id than one chunk, so the planner must split and the reader merge.
+    const messages = Array.from({ length: SCOPED_QUERY_ARG_BUDGET + 1 }, (_, index) => ({
       id: `msg_${String(index).padStart(4, "0")}`,
       sessionID: index % 2 === 0 ? "ses_a" : "ses_b",
       createdMs: 1,
@@ -577,22 +579,22 @@ describe("scoped completed assistant reader", () => {
       ],
       messages,
     });
-    const exactTimes = messages
-      .filter((_, index) => index % 2 === 0)
-      .map((message) => message.completedMs);
+    const expectedRows = messages.filter((_, index) => index % 2 === 0);
 
     const rows = await readCompletedAssistantRows({
       sessionIDs: ["ses_a", "ses_b"],
       messageIDs: messages.map((message) => message.id),
-      completedAtTimes: exactTimes,
+      completedAtTimes: expectedRows.map((message) => message.completedMs),
       completedSinceMs: 10_000,
       completedUntilMs: 20_000,
     });
 
-    expect(rows).toHaveLength(500);
-    expect(rows.every((row) => exactTimes.includes(row.completedAtMs))).toBe(true);
+    expect(rows).toHaveLength(expectedRows.length);
+    expect(rows.map((row) => row.completedAtMs)).toEqual(
+      expectedRows.map((message) => message.completedMs),
+    );
     for (const params of sqliteTrace.params) {
-      expect(params.length).toBeLessThanOrEqual(900);
+      expect(params.length).toBeLessThanOrEqual(SCOPED_QUERY_ARG_BUDGET);
     }
   });
 
@@ -633,7 +635,8 @@ describe("scoped completed assistant reader", () => {
   });
 
   it("chunks large message scopes under the bind bound and merges completion order", async () => {
-    const messages = Array.from({ length: 1_000 }, (_, index) => ({
+    // One more id than one chunk; completion order is reversed across chunks.
+    const messages = Array.from({ length: SCOPED_QUERY_ARG_BUDGET + 1 }, (_, index) => ({
       id: `msg_${String(index).padStart(4, "0")}`,
       sessionID: "ses_a",
       createdMs: 1,
@@ -647,11 +650,11 @@ describe("scoped completed assistant reader", () => {
       completedSinceMs: 0,
     });
 
-    expect(rows).toHaveLength(1_000);
-    expect(rows[0]?.messageID).toBe("msg_0999");
-    expect(rows[999]?.messageID).toBe("msg_0000");
+    expect(rows).toHaveLength(SCOPED_QUERY_ARG_BUDGET + 1);
+    expect(rows[0]?.messageID).toBe(`msg_${String(SCOPED_QUERY_ARG_BUDGET).padStart(4, "0")}`);
+    expect(rows[rows.length - 1]?.messageID).toBe("msg_0000");
     for (const params of sqliteTrace.params) {
-      expect(params.length).toBeLessThanOrEqual(900);
+      expect(params.length).toBeLessThanOrEqual(SCOPED_QUERY_ARG_BUDGET);
     }
   });
 });
@@ -735,7 +738,8 @@ describe("message revision snapshot", () => {
   });
 
   it("chunks combined session and message scopes under the bind bound", async () => {
-    const messages = Array.from({ length: 1_000 }, (_, index) => ({
+    // One more id than one chunk, with three sessions sharing the remaining args.
+    const messages = Array.from({ length: SCOPED_QUERY_ARG_BUDGET + 1 }, (_, index) => ({
       id: `msg_${String(index).padStart(4, "0")}`,
       sessionID: `ses_${index % 2}`,
       createdMs: 1,
@@ -755,9 +759,9 @@ describe("message revision snapshot", () => {
       messageIDs: messages.map((message) => message.id),
     });
 
-    expect(snapshot.revisions).toHaveLength(1_000);
+    expect(snapshot.revisions).toHaveLength(SCOPED_QUERY_ARG_BUDGET + 1);
     for (const params of sqliteTrace.params) {
-      expect(params.length).toBeLessThanOrEqual(900);
+      expect(params.length).toBeLessThanOrEqual(SCOPED_QUERY_ARG_BUDGET);
     }
   });
 
@@ -1051,6 +1055,40 @@ describe("source identity", () => {
         { ...base, device: "1", inode: "2", schemaToken: "b" },
       ),
     ).toBe("changed");
+  });
+
+  it("treats birthtime as replacement evidence when device and inode are reused", () => {
+    const file = {
+      dbPath: "/x/opencode.db",
+      exists: true,
+      status: "ok" as const,
+      device: "1",
+      inode: "2",
+      birthtimeMs: 100,
+      schemaToken: "a",
+    };
+
+    expect(compareOpenCodeSourceIdentity(file, { ...file })).toBe("same");
+    expect(compareOpenCodeSourceIdentity(file, { ...file, birthtimeMs: 200 })).toBe("changed");
+    expect(compareOpenCodeSourceIdentity(file, { ...file, schemaToken: "b" })).toBe("changed");
+
+    // Without a birthtime the device/inode pair is still the stable key.
+    const noBirthtime = {
+      dbPath: "/x/opencode.db",
+      exists: true,
+      status: "ok" as const,
+      device: "1",
+      inode: "2",
+      schemaToken: "a",
+    };
+    expect(compareOpenCodeSourceIdentity(noBirthtime, { ...noBirthtime })).toBe("same");
+    expect(compareOpenCodeSourceIdentity(noBirthtime, { ...noBirthtime, inode: "3" })).toBe(
+      "changed",
+    );
+    // A non-positive birthtime is not replacement evidence.
+    expect(compareOpenCodeSourceIdentity(noBirthtime, { ...noBirthtime, birthtimeMs: 0 })).toBe(
+      "same",
+    );
   });
 
   it("treats a file that is not a database as unreadable, not empty", async () => {

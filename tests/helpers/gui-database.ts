@@ -136,7 +136,12 @@ function buildMessageData(row: GuiDatabaseMessageRow): Record<string, unknown> {
 export function writeGuiDatabase(root: string, schema: GuiDatabaseSchema = {}): string {
   const dbPath = join(root, "opencode.db");
   const database = new DatabaseSync(dbPath);
+  let inTransaction = false;
   try {
+    // One transaction for the whole fixture: autocommit inserts pay a journal
+    // sync per row, which dominates the Windows test runtime.
+    database.exec("BEGIN");
+    inTransaction = true;
     const sessionProjectColumns = schema.sessionProjectColumns ?? true;
     database.exec(`
       CREATE TABLE "session_v2" (
@@ -255,7 +260,11 @@ export function writeGuiDatabase(root: string, schema: GuiDatabaseSchema = {}): 
         }
       }
     }
+    database.exec("COMMIT");
+    inTransaction = false;
   } finally {
+    if (inTransaction) database.exec("ROLLBACK");
+    // Outside the transaction: journal_mode cannot change inside one.
     if (schema.journalMode) {
       database.exec(`PRAGMA journal_mode=${schema.journalMode};`);
     }
