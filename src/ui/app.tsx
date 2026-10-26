@@ -24,7 +24,6 @@ import { AnalyticsIcon, QuotaIcon } from "./components/icons";
 import { QueryState, ReloadRequired } from "./components/states";
 import { createToaster, type Toaster, ToastRegion } from "./components/toast";
 import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashboard-client";
-import { createDashboardRestart, type DashboardRestartState } from "./dashboard-restart";
 import { RANGE_LABELS } from "./format";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
 import {
@@ -204,16 +203,6 @@ function catalogFromSnapshot(snapshot: QuotaSnapshot | undefined): VisibilityCat
 }
 
 export function App(props: { client: DashboardClient }): JSX.Element {
-  const [restartState, setRestartState] = createSignal<DashboardRestartState>("idle");
-  const restart = createDashboardRestart(
-    async (signal) => {
-      if (!props.client.restartDashboard) throw new Error("Dashboard restart unavailable.");
-      await props.client.restartDashboard(signal);
-    },
-    () => window.location.reload(),
-    setRestartState,
-  );
-  onCleanup(() => restart.dispose());
   const [location, setLocation] = createSignal<Location>(initialLocation());
   const [connection, setConnection] = createSignal<ConnectionState>(props.client.connection());
   const [navTooltip, setNavTooltip] = createSignal<"home" | "analytics" | "settings" | undefined>();
@@ -444,11 +433,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
           </Tooltip>
         </nav>
         <div class="qg-topbar__actions">
-          <BuildMismatchStatus
-            message={buildWarning()}
-            restartState={restartState()}
-            onRestart={() => void restart.run()}
-          />
+          <BuildMismatchStatus message={buildWarning()} />
           <Show
             when={
               connection() !== "live" ||
@@ -520,13 +505,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
         <main class="qg-main" data-settings={route().name === "settings" ? "true" : undefined}>
           <Show
             when={contractMismatch() === undefined}
-            fallback={
-              <ReloadRequired
-                message={contractMismatch() ?? ""}
-                restartState={restartState()}
-                onRestart={() => void restart.run()}
-              />
-            }
+            fallback={<ReloadRequired message={contractMismatch() ?? ""} />}
           >
             <Switch>
               <Match when={route().name === "home"}>

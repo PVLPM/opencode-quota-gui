@@ -2,32 +2,6 @@ import type { JSX } from "solid-js";
 import { Show } from "solid-js";
 import { BUILD_IDENTITY } from "../../contracts/build-identity";
 import { DASHBOARD_CONTRACT_VERSION } from "../../contracts/dashboard";
-import type { DashboardRestartState } from "../dashboard-restart";
-
-export interface RestartDashboardProps {
-  restartState: DashboardRestartState;
-  onRestart: () => void;
-}
-
-export function RestartDashboardAction(props: RestartDashboardProps): JSX.Element {
-  return (
-    <>
-      <button
-        type="button"
-        class="qg-input"
-        disabled={props.restartState === "restarting"}
-        onClick={() => props.onRestart()}
-      >
-        {props.restartState === "restarting" ? "Restarting dashboard…" : "Restart dashboard"}
-      </button>
-      <output>
-        {props.restartState === "failed"
-          ? "Couldn’t restart the dashboard. Try again, or restart OpenCode once."
-          : ""}
-      </output>
-    </>
-  );
-}
 
 /**
  * Build identity presentation (design spec §7).
@@ -39,25 +13,18 @@ export function RestartDashboardAction(props: RestartDashboardProps): JSX.Elemen
  */
 
 /** Compact, non-blocking restart hint. Quota stays usable underneath. */
-export function BuildMismatchStatus(
-  props: { message: string | undefined } & RestartDashboardProps,
-): JSX.Element {
+export function BuildMismatchStatus(props: { message: string | undefined }): JSX.Element {
   return (
-    <>
-      <Show when={props.message}>
-        {(message) => (
-          <output
-            class="qg-badge"
-            title="This page and the running dashboard come from different builds. Restart the dashboard to reconnect. If the mismatch remains, restart OpenCode once to load the installed build. Quota data still works."
-          >
-            {message()}
-          </output>
-        )}
-      </Show>
-      <Show when={props.message}>
-        <RestartDashboardAction restartState={props.restartState} onRestart={props.onRestart} />
-      </Show>
-    </>
+    <Show when={props.message}>
+      {(message) => (
+        <output
+          class="qg-badge"
+          title="This page and the running dashboard come from different builds. Restart OpenCode so both use the same build. Quota data still works."
+        >
+          {message()}
+        </output>
+      )}
+    </Show>
   );
 }
 

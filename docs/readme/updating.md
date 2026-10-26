@@ -65,7 +65,7 @@ If a maintenance command changed a config file and you need to undo it, restore 
 ## Troubleshooting an update
 
 - **The plugin does not load:** confirm the `plugins` entry and restart OpenCode. Check that the package spec resolves to the version you intended.
-- **The dashboard shows a build or contract mismatch:** use **Restart dashboard** to restart the local listener and reload the current route on the same port. It does not reload backend code already loaded by OpenCode. A pre-feature server, or a mismatch requiring updated backend code, needs an OpenCode restart. If the mismatch persists, check the package installation/version and reinstall or update the same package or tarball. Dashboard restart cannot repair installation problems.
+- **The dashboard shows a build or contract mismatch:** the server and browser page are from different builds. Restart OpenCode, then reload the dashboard. Reinstall the same package or tarball if it persists.
 - **Your old settings disappeared:** they may still be in a legacy file. Use the explicit import in Settings; runtime loading intentionally ignores those layers.
 - **The canonical file is malformed:** lower layers do not silently replace it in the dashboard. Fix the file or restore a backup, then reload Settings.
 

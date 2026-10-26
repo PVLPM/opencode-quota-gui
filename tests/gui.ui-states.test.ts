@@ -535,8 +535,8 @@ describe("section state machine", () => {
     // treated as compatible, and a browser refresh alone cannot repair it.
     const oldServer = DASHBOARD_CONTRACT_VERSION - 1;
     const mismatch = contractMismatchMessage(oldServer);
-    expect(mismatch).toContain("Restart the dashboard to reconnect");
-    expect(mismatch).toContain("If the mismatch remains, restart OpenCode once");
+    expect(mismatch).toContain("Restart OpenCode");
+    expect(mismatch).toContain("reload the page");
     expect(mismatch).not.toContain("Reload the page to get a matching build");
     expect(resolveLoadState<number>({ data: 1, loading: false }, mismatch)).toEqual({
       kind: "reload-required",
@@ -3368,8 +3368,8 @@ describe("range transitions name the range still on screen", () => {
     try {
       await settle();
       const body = app.text();
-      expect(body).toContain("Restart dashboard");
-      expect(body).toContain("If the mismatch remains, restart OpenCode once");
+      expect(body).toContain("Restart OpenCode");
+      expect(body).toContain("reload the page");
       expect(body).not.toContain("Total tokens");
     } finally {
       app.dispose();

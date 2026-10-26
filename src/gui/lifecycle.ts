@@ -22,7 +22,6 @@
  * untouched.
  */
 
-import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
 import type {
@@ -38,7 +37,6 @@ import { createGuiSettingsStore, getGuiDashboardPort } from "./config.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 import {
   createDashboardServer,
-  type DashboardRestartController,
   type DashboardServerHandle,
   type DashboardServerOptions,
 } from "./server.js";
@@ -116,8 +114,6 @@ interface DashboardOwner {
   sourceOptions: DashboardSourceOptions | undefined;
   source?: DashboardReadSource;
   creating?: Promise<DashboardReadSource>;
-  /** Bumped by every release so an in-flight creation cannot publish again. */
-  sourceVersion: number;
   disposed: boolean;
 }
 
@@ -127,40 +123,14 @@ interface OwnerDelegation {
   activeOwner?: DashboardOwner;
 }
 
-/**
- * Host-scoped pieces needed to build a replacement transport. They survive
- * owner disposal because they are not a setup's client/workspace; the source is
- * the stable delegate whose per-owner factories are recreated lazily.
- */
-interface HostTransport {
-  readonly source: DashboardReadSource;
-  readonly settings: GuiSettingsStore;
-  readonly createServer: (options: DashboardServerOptions) => Promise<DashboardServerHandle>;
-  readonly minIntervalMs: () => number;
-}
-
-/** One acknowledged restart reservation, kept until its replacement settles. */
-interface PendingRestart {
-  readonly id: string;
-  phase: "pending" | "running";
-  readonly done: Promise<void>;
-  resolveDone(): void;
-}
-
 interface DashboardHost {
   readonly port: number;
   readonly logger: GuiLogger;
   readonly delegation: OwnerDelegation;
   refs: number;
-  /** Resolves with the initial handle, or rejects with the contained failure. */
+  /** Resolves with the handle, or rejects with the contained failure. */
   readonly start: Promise<DashboardServerHandle>;
-  transport?: HostTransport;
-  /** The live listener; mutable so every lease disposes the current generation. */
-  handle?: DashboardServerHandle;
   failure?: DashboardUnavailableReason;
-  /** Set by the last lease before it stops the host: never resurrect. */
-  retired: boolean;
-  restart?: PendingRestart;
 }
 
 interface HostContext {
@@ -201,7 +171,6 @@ function createOwner(options: StartDashboardOptions, configDir: string): Dashboa
       workspaceRoot: options.workspaceRoot,
       configDir,
     },
-    sourceVersion: 0,
     disposed: false,
   };
 }
@@ -223,13 +192,10 @@ function ownerSource(owner: DashboardOwner, logger: GuiLogger): Promise<Dashboar
     return Promise.reject(error);
   }
 
-  const version = owner.sourceVersion;
   const attempt = created.then(async (source) => {
-    if (owner.disposed || owner.sourceVersion !== version) {
-      // A release invalidated this creation while it was in flight (dispose or
-      // restart handoff). Close it here and reject; the release continuation
-      // observes the rejection and cannot close it again. Never publish it as
-      // reusable state.
+    if (owner.disposed) {
+      // The lease ended while the source was being built: release it here so a
+      // late resolution never becomes a leak.
       await closeSource(source, logger);
       throw new DashboardLifecycleError("source-unavailable");
     }
@@ -261,18 +227,10 @@ function releaseOwnerSource(owner: DashboardOwner, logger: GuiLogger): Promise<v
   const creating = owner.creating;
   owner.source = undefined;
   owner.creating = undefined;
-  // Invalidate the creation before its continuation can run. If it already
-  // published `source`, the branch below closes that exact object once.
-  owner.sourceVersion += 1;
   if (source) return closeSource(source, logger);
   if (creating) {
     return creating.then(
-      (created) => {
-        // Defensive: if a published source somehow raced the capture, clear the
-        // reusable slot before closing it.
-        if (owner.source === created) owner.source = undefined;
-        return closeSource(created, logger);
-      },
+      (created) => closeSource(created, logger),
       () => undefined,
     );
   }
@@ -444,143 +402,14 @@ async function createProductionSource(
 }
 
 /**
- * Reserves one restart. The reservation exists before the transport writes its
- * 202, so a concurrent request is rejected instead of racing a second stop.
- */
-function createRestartController(host: DashboardHost): DashboardRestartController {
-  return {
-    begin() {
-      if (host.restart) return { ok: false, code: "restart-in-progress" };
-      if (host.retired || host.refs <= 0 || !host.transport || !host.handle) {
-        return { ok: false, code: "restart-unavailable" };
-      }
-
-      let resolveDone!: () => void;
-      const done = new Promise<void>((resolve) => {
-        resolveDone = resolve;
-      });
-      const pending: PendingRestart = {
-        id: randomUUID(),
-        phase: "pending",
-        done,
-        resolveDone,
-      };
-      host.restart = pending;
-      return {
-        ok: true,
-        ticket: {
-          restartId: pending.id,
-          run: () => runRestart(host, pending),
-          cancel: () => cancelRestart(host, pending),
-        },
-      };
-    },
-  };
-}
-
-function cancelRestart(host: DashboardHost, pending: PendingRestart): void {
-  // Only a reservation whose response never finished can be cancelled. Once the
-  // replacement is running, the host's retired/refcount checks own the outcome.
-  if (host.restart !== pending || pending.phase !== "pending") return;
-  host.restart = undefined;
-  pending.resolveDone();
-}
-
-/**
- * Stops the current listener and binds its replacement on the same actual port.
- * The source/SSE state belongs to the stopped transport, so the replacement
- * builds new snapshot state over the host's stable delegating source; owner
- * factories recreate their per-lease source on the next request.
- */
-async function runRestart(host: DashboardHost, pending: PendingRestart): Promise<void> {
-  if (host.restart !== pending || pending.phase !== "pending") {
-    pending.resolveDone();
-    return;
-  }
-  pending.phase = "running";
-
-  try {
-    const current = host.handle;
-    const transport = host.transport;
-    if (host.retired || host.refs <= 0 || !current || !transport) return;
-    // Bind the port the old listener actually took, never the configured value
-    // (they differ when the configured port is 0 in transport tests).
-    const actualPort = current.port;
-
-    // From here on the host temporarily has no current handle; every reader
-    // (dispose, duplicate begin) observes the reservation or `retired`.
-    host.handle = undefined;
-    try {
-      await current.close();
-    } catch (error) {
-      // The old listener was not proven stopped. Keep it current so a retry can
-      // target it again instead of claiming a replacement exists.
-      host.handle = current;
-      host.logger.warn("dashboard restart failed", failureLabel(error));
-      return;
-    }
-    if (host.retired || host.refs <= 0) return;
-
-    try {
-      const next = await transport.createServer({
-        port: actualPort,
-        source: transport.source,
-        settings: transport.settings,
-        minIntervalMs: transport.minIntervalMs,
-        logger: host.logger,
-        restart: createRestartController(host),
-        restartId: pending.id,
-      });
-      if (host.retired || host.refs <= 0) {
-        // The last lease ended while the replacement was binding: close it so a
-        // stopped host can never resurrect a listener.
-        try {
-          await next.close();
-        } catch (error) {
-          host.logger.warn("dashboard restart failed", failureLabel(error));
-        }
-        return;
-      }
-      host.handle = next;
-    } catch (error) {
-      // The listener is already gone, so this is terminal for the current host:
-      // a browser cannot retry through an absent socket. Log the controlled code
-      // only; a later setup starts a fresh host.
-      host.failure = "server-unavailable";
-      host.logger.warn("dashboard restart failed", failureLabel(error));
-    }
-  } finally {
-    if (host.restart === pending) host.restart = undefined;
-    pending.resolveDone();
-  }
-}
-
-/** One started host promise that can be handed to `attachLease`. */
-interface StartDeferred {
-  readonly promise: Promise<DashboardServerHandle>;
-  resolve(handle: DashboardServerHandle): void;
-  reject(error: unknown): void;
-}
-
-function deferredStart(): StartDeferred {
-  let resolve!: (handle: DashboardServerHandle) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<DashboardServerHandle>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-/**
  * Settings store, first owner's eager source and transport, in that order; each
  * failure is contained. The source passed to the transport is the host's stable
  * delegating source, so later owner handoffs keep the same snapshot service.
  */
 async function startHost(
-  host: DashboardHost,
   options: StartDashboardOptions,
   context: HostContext,
+  delegation: OwnerDelegation,
 ): Promise<DashboardServerHandle> {
   const createSettingsStore = options.createSettingsStore ?? createGuiSettingsStore;
   let settings: GuiSettingsStore;
@@ -593,7 +422,7 @@ async function startHost(
     throw new DashboardLifecycleError("settings-unavailable");
   }
 
-  const firstOwner = host.delegation.activeOwner;
+  const firstOwner = delegation.activeOwner;
   if (!firstOwner) throw new DashboardLifecycleError("source-unavailable");
   try {
     // Eager for the first owner only: a broken factory still fails setup with
@@ -603,35 +432,29 @@ async function startHost(
     throw new DashboardLifecycleError("source-unavailable");
   }
 
-  const source = createDelegatingSource(host.delegation, context.logger);
-  const transport: HostTransport = {
-    source,
-    settings,
-    createServer: options.createServer ?? createDashboardServer,
-    minIntervalMs: minIntervalGetter(context),
-  };
-  host.transport = transport;
+  const source = createDelegatingSource(delegation, context.logger);
+  const createServer = options.createServer ?? createDashboardServer;
   try {
-    const handle = await transport.createServer({
+    return await createServer({
       port: context.port,
       source,
       settings,
-      minIntervalMs: transport.minIntervalMs,
-      logger: host.logger,
-      restart: createRestartController(host),
+      minIntervalMs: minIntervalGetter(context),
+      logger: context.logger,
     });
-    host.handle = handle;
-    return handle;
   } catch (error) {
     // A bind failure already logged its one controlled line inside the transport
     // and keeps its `port-unavailable` reason; every other server failure is
     // reported as `server-unavailable`.
-    host.transport = undefined;
     throw new DashboardLifecycleError(unavailableReason(error));
   }
 }
 
-function makeDispose(host: DashboardHost, owner: DashboardOwner): () => Promise<void> {
+function makeDispose(
+  host: DashboardHost,
+  owner: DashboardOwner,
+  handle: DashboardServerHandle | undefined,
+): () => Promise<void> {
   let disposed = false;
   return async () => {
     if (disposed) return;
@@ -644,31 +467,8 @@ function makeDispose(host: DashboardHost, owner: DashboardOwner): () => Promise<
       await closing;
       return;
     }
-
-    // Last lease: remove the host first, then make sure a reserved/in-flight
-    // restart cannot rebind the socket after this disposal.
-    host.retired = true;
     const hosts = hostRegistry().hosts;
     if (hosts.get(host.port) === host) hosts.delete(host.port);
-
-    const restart = host.restart;
-    if (restart) {
-      if (restart.phase === "pending") {
-        // The response has not finished scheduling the shutdown yet; cancel the
-        // reservation so it can never run after the host is gone.
-        host.restart = undefined;
-        restart.resolveDone();
-      } else {
-        // A replacement is mid-close or mid-bind. It observes `retired` and
-        // closes anything it created before settling.
-        await restart.done;
-      }
-    }
-
-    // Read the current generation, not the handle captured when this lease
-    // attached: a restart may have replaced it.
-    const handle = host.handle;
-    host.handle = undefined;
     if (handle) {
       try {
         await handle.close();
@@ -681,17 +481,9 @@ function makeDispose(host: DashboardHost, owner: DashboardOwner): () => Promise<
 }
 
 async function attachLease(host: DashboardHost, owner: DashboardOwner): Promise<DashboardLease> {
-  if (host.failure !== undefined) {
-    return {
-      port: host.port,
-      state: "unavailable",
-      reason: host.failure,
-      dispose: makeDispose(host, owner),
-    };
-  }
-
+  let handle: DashboardServerHandle;
   try {
-    await host.start;
+    handle = await host.start;
   } catch (error) {
     // One controlled line per failed host, however many leases attach to it.
     // Structural classification keeps this correct when the rejecting promise
@@ -707,31 +499,14 @@ async function attachLease(host: DashboardHost, owner: DashboardOwner): Promise<
       port: host.port,
       state: "unavailable",
       reason: host.failure,
-      dispose: makeDispose(host, owner),
-    };
-  }
-  // A restart may already be replacing the initial handle, leaving it
-  // transiently absent. Wait for the replacement (including one that started
-  // between two checks) and classify against the current generation, not the
-  // initial handle resolved by `host.start`.
-  while (host.restart) {
-    await host.restart.done;
-  }
-
-  const current = host.handle;
-  if (host.failure !== undefined || host.retired || current === undefined) {
-    return {
-      port: host.port,
-      state: "unavailable",
-      reason: host.failure ?? "server-unavailable",
-      dispose: makeDispose(host, owner),
+      dispose: makeDispose(host, owner, undefined),
     };
   }
   return {
     port: host.port,
     state: "running",
-    url: current.url,
-    dispose: makeDispose(host, owner),
+    url: handle.url,
+    dispose: makeDispose(host, owner, handle),
   };
 }
 
@@ -759,21 +534,13 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
 
   const owner = createOwner(options, configDir);
   const delegation: OwnerDelegation = { owners: [owner], activeOwner: owner };
-  const started = deferredStart();
   const host: DashboardHost = {
     port,
     logger,
     delegation,
     refs: 1,
-    start: started.promise,
-    retired: false,
+    start: startHost(options, { configDir, port, minIntervalMs, logger }, delegation),
   };
-  // The host record exists before startup resolves so the restart controller can
-  // refer to the mutable handle, while leases still await one start promise.
-  void startHost(host, options, { configDir, port, minIntervalMs, logger }).then(
-    started.resolve,
-    started.reject,
-  );
   hosts.set(port, host);
   return attachLease(host, owner);
 }

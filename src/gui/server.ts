@@ -18,7 +18,6 @@ import { BUILD_IDENTITY } from "../contracts/build-identity.js";
 
 import {
   DASHBOARD_CONTRACT_VERSION,
-  type DashboardHealth,
   type GuiSettingsStore,
   type JsonValue,
 } from "../contracts/dashboard.js";
@@ -47,44 +46,12 @@ export interface DashboardServerOptions {
   /** SSE heartbeat override (test seam; default 20 s). */
   heartbeatMs?: number;
   logger?: GuiLogger;
-  /**
-   * Lifecycle-owned restart coordinator. Absent for a transport that is not
-   * part of a managed host, in which case the restart route answers 503.
-   */
-  restart?: DashboardRestartController;
-  /** Generation token advertised by a replacement listener. */
-  restartId?: string;
 }
 
 export interface DashboardServerHandle {
   port: number;
   url: string;
   close(): Promise<void>;
-}
-
-/** One acknowledged restart's reserved generation. */
-export interface DashboardRestartTicket {
-  readonly restartId: string;
-  /** Runs only after the 202 response finished; the coordinator owns failures. */
-  run(): Promise<void> | void;
-  /** Releases the reservation if the response never finished. */
-  cancel(): void;
-}
-
-export type DashboardRestartBegin =
-  | { readonly ok: true; readonly ticket: DashboardRestartTicket }
-  | {
-      readonly ok: false;
-      readonly code: "restart-in-progress" | "restart-unavailable";
-    };
-
-/**
- * The lifecycle host's restart seam. `begin` is synchronous so a reservation
- * exists before the acknowledgement is serialized; duplicate requests while a
- * restart is in flight are rejected instead of starting a second replacement.
- */
-export interface DashboardRestartController {
-  begin(): DashboardRestartBegin;
 }
 
 export type DashboardErrorCode =
@@ -103,8 +70,6 @@ export type DashboardErrorCode =
   | "invalid-setting"
   | "project-not-found"
   | "session-not-found"
-  | "restart-in-progress"
-  | "restart-unavailable"
   | "internal";
 
 export interface DashboardErrorDetails {
@@ -129,8 +94,6 @@ export const DASHBOARD_ERROR_STATUS: Readonly<Record<DashboardErrorCode, number>
   "invalid-setting": 422,
   "project-not-found": 404,
   "session-not-found": 404,
-  "restart-in-progress": 409,
-  "restart-unavailable": 503,
   internal: 500,
 };
 
@@ -150,8 +113,6 @@ const DASHBOARD_ERROR_MESSAGES: Readonly<Record<DashboardErrorCode, string>> = {
   "invalid-setting": "Invalid setting",
   "project-not-found": "Project not found",
   "session-not-found": "Session not found",
-  "restart-in-progress": "A dashboard restart is already in progress",
-  "restart-unavailable": "Dashboard restart is not available",
   internal: "Internal dashboard error",
 };
 
@@ -335,28 +296,6 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 function sendError(res: ServerResponse, code: DashboardErrorCode): void {
   const mapped = envelope(code);
   sendJson(res, mapped.status, mapped.body);
-}
-
-/**
- * Sends the restart acknowledgement first, then schedules the reserved
- * replacement from the response `finish` event. A client that disappears before
- * the response finishes releases the reservation so a later request can retry.
- */
-function sendRestartAccepted(res: ServerResponse, ticket: DashboardRestartTicket): void {
-  let settled = false;
-  res.once("finish", () => {
-    if (settled) return;
-    settled = true;
-    // The coordinator contains and logs every restart failure; never leave an
-    // unhandled rejection behind the already-sent 202.
-    void Promise.resolve(ticket.run()).catch(() => undefined);
-  });
-  res.once("close", () => {
-    if (settled || res.writableFinished) return;
-    settled = true;
-    ticket.cancel();
-  });
-  sendJson(res, 202, { restartId: ticket.restartId });
 }
 
 function applyCommonHeaders(res: ServerResponse): void {
@@ -679,36 +618,12 @@ export function createDashboardServer(
 
     if (rest.length === 1 && rest[0] === "health") {
       if (!requireMethods(req, res, ["GET", "HEAD"])) return;
-      const health: DashboardHealth = {
+      sendJson(res, 200, {
         app: "opencode-quota-gui",
         version: BUILD_IDENTITY.version,
         build: BUILD_IDENTITY.build,
         contractVersion: DASHBOARD_CONTRACT_VERSION,
-        ...(options.restartId === undefined ? {} : { restartId: options.restartId }),
-      };
-      sendJson(res, 200, health);
-      return;
-    }
-
-    if (rest.length === 2 && rest[0] === "dashboard" && rest[1] === "restart") {
-      if (!requireMethods(req, res, ["POST"])) return;
-      const parsed = await readWriteJson(req, res);
-      if (!parsed.ok) return;
-      if (!isRecord(parsed.value) || !hasExactKeys(parsed.value, [])) {
-        sendError(res, "bad-request");
-        return;
-      }
-      const restart = options.restart;
-      if (!restart) {
-        sendError(res, "restart-unavailable");
-        return;
-      }
-      const begun = restart.begin();
-      if (!begun.ok) {
-        sendError(res, begun.code);
-        return;
-      }
-      sendRestartAccepted(res, begun.ticket);
+      });
       return;
     }
 
