@@ -4174,13 +4174,19 @@ describe("the settings editor keeps its draft across refetches", () => {
   });
 
   it.each([
-    "anthropic",
-    "a".repeat(64),
-  ])("explains normalized inherited legacy hide %s without changing siblings", async (legacyId) => {
+    ["provider id", "anthropic"],
+    ["bare scope hash", "a".repeat(64)],
+  ])("enables Show for an inherited %s hide and saves exact hides for every known sibling", async (_marker, legacyId) => {
     const snapshot = settingsSnapshot();
     snapshot.values["dashboard.hiddenCardsVersion"] = 2;
-    snapshot.values["dashboard.hiddenCards"] = [legacyId, "unknown-id"];
+    snapshot.values["dashboard.hiddenCards"] = [
+      legacyId,
+      `anthropic:${"a".repeat(64)}`,
+      "unknown-id",
+      "openrouter",
+    ];
     const scopeId = `anthropic:${"a".repeat(64)}`;
+    const siblingIds = ["b", "c"].map((letter) => `anthropic:${letter.repeat(64)}`);
     const catalog: VisibilityCatalog = {
       cards: [
         {
@@ -4192,45 +4198,61 @@ describe("the settings editor keeps its draft across refetches", () => {
           rows: [{ id: `${scopeId}#weekly`, label: "Weekly" }],
         },
         ...["Personal", "Work"].map((accountLabel, index) => ({
-          cardId: `anthropic:${(index === 0 ? "b" : "c").repeat(64)}`,
+          cardId: siblingIds[index] ?? "",
           providerId: "anthropic",
           providerLabel: "Anthropic",
           accountLabel,
           providerScopeId: scopeId,
           providerScopeHash: "a".repeat(64),
-          rows: [
-            { id: `anthropic:${(index === 0 ? "b" : "c").repeat(64)}#weekly`, label: "Weekly" },
-          ],
+          rows: [{ id: `${siblingIds[index]}#weekly`, label: "Weekly" }],
         })),
+        {
+          cardId: `openrouter:${"d".repeat(64)}`,
+          providerId: "openrouter",
+          providerLabel: "OpenRouter",
+          providerScopeHash: "d".repeat(64),
+          rows: [{ id: `openrouter:${"d".repeat(64)}#balance`, label: "Balance" }],
+        },
       ],
     };
     const mounted = mountSettings({ initial: snapshot, catalog });
+    const eye = (label: string) =>
+      findNode(
+        renderGraph.elementsNamed(mounted.root, "button"),
+        (node) => node.props["aria-label"] === label,
+        label,
+      );
     try {
       const cards = renderGraph
         .elementsNamed(mounted.root, "article")
         .filter((node) => node.props.class === "qg-vis-provider");
-      for (const card of cards) {
-        expect(card.props["data-hidden"]).toBe("true");
-        const buttons = renderGraph.elementsNamed(card, "button");
-        expect(
-          buttons.find((node) => String(node.props["aria-label"]).startsWith("Show Anthropic"))
-            ?.props.disabled,
-        ).toBe(true);
-        const rowEye = buttons.find((node) => node.props["aria-label"] === "Hide Weekly");
-        expect(rowEye?.props.disabled).toBe(false);
-      }
+      for (const card of cards) expect(card.props["data-hidden"]).toBe("true");
+      // An inherited group hide no longer disables the eye.
+      expect(eye("Show Anthropic").props.disabled).toBe(false);
+      expect(eye("Show Anthropic").props["aria-pressed"]).toBe("true");
       expect(renderGraph.textOf(mounted.root)).toContain(
-        "Hidden by a legacy provider setting. Clear it in the settings file to control cards separately.",
+        "Showing this card keeps its known sibling cards hidden.",
       );
-      const row = renderGraph
-        .elementsNamed(cards[0], "button")
-        .find((node) => node.props["aria-label"] === "Hide Weekly");
-      if (!row) throw new Error("No row eye");
-      click(row);
+      expect(renderGraph.textOf(mounted.root)).not.toContain("Clear it in the settings file");
+
+      click(eye("Show Anthropic"));
+      await settle();
+      expect(mounted.saves).toEqual([]);
+      expect(renderGraph.textOf(mounted.root)).toContain("1 unsaved change(s)");
+      expect(eye("Hide Anthropic").props["aria-pressed"]).toBe("false");
+      for (const account of ["Personal", "Work"]) {
+        expect(eye(`Show Anthropic · ${account}`).props.disabled).toBe(false);
+        expect(eye(`Show Anthropic · ${account}`).props["aria-pressed"]).toBe("true");
+      }
+      // Another provider's inherited group marker is untouched.
+      expect(eye("Show OpenRouter").props["aria-pressed"]).toBe("true");
+
       click(buttonByText(mounted.root, "Save"));
-      await until(() => mounted.saves.length === 1, "the inherited row save");
-      expect(mounted.saves[0]?.patch).toEqual({ "dashboard.hiddenRows": [`${scopeId}#weekly`] });
-      expect(renderGraph.textOf(mounted.root)).not.toContain("a".repeat(64));
+      await until(() => mounted.saves.length === 1, "the inherited visibility save");
+      expect(mounted.saves[0]?.patch).toEqual({
+        "dashboard.hiddenCards": ["unknown-id", "openrouter", ...siblingIds],
+      });
+      expect(mounted.saves[0]?.patch["dashboard.hiddenCardsVersion"]).toBeUndefined();
     } finally {
       mounted.dispose();
     }

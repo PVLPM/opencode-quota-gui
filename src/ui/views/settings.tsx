@@ -28,6 +28,7 @@ import {
   dirtyKeys,
   fieldErrors,
   initialDraft,
+  isInheritedProviderHidden,
   keyboardMovedCardOrder,
   OPENCODE_GO_WINDOWS,
   parseIntegerInput,
@@ -39,6 +40,7 @@ import {
   type SettingsDraft,
   type SettingsField,
   settingProvenanceNote,
+  showCardKeepingKnownSiblingsHidden,
   stringList,
   toggleHiddenCard,
   toPatch,
@@ -46,7 +48,7 @@ import {
   windowSelection,
 } from "../settings-model";
 import { createCardSorter, type SortableCardNodes } from "../sortable-cards";
-import { describeError, isLegacyProviderHidden } from "../view-model";
+import { describeError } from "../view-model";
 import type { VisibilityCard, VisibilityCatalog, VisibilityRow } from "../visibility-catalog";
 
 export type { VisibilityCard, VisibilityCatalog, VisibilityRow } from "../visibility-catalog";
@@ -262,12 +264,18 @@ export function SettingsView(props: {
   );
 
   function inheritedHidden(card: VisibilityCard): boolean {
-    return isLegacyProviderHidden(card, hiddenCardSet());
+    return isInheritedProviderHidden(card, hiddenCardSet(), props.catalog.cards);
   }
 
   function toggleCardEye(card: VisibilityCard): void {
-    if (!hiddenCardsWritable() || busy() || inheritedHidden(card)) return;
-    edit("dashboard.hiddenCards", toggleHiddenCard(hiddenCardIds(), card.cardId));
+    if (!hiddenCardsWritable() || busy()) return;
+    const hidden = hiddenCardIds();
+    edit(
+      "dashboard.hiddenCards",
+      inheritedHidden(card) || hidden.includes(card.cardId)
+        ? showCardKeepingKnownSiblingsHidden(hidden, card, props.catalog.cards)
+        : toggleHiddenCard(hidden, card.cardId),
+    );
   }
 
   /** Row state is independent of the provider eye and never cleared by it. */
@@ -413,10 +421,7 @@ export function SettingsView(props: {
                         <EyeToggle
                           variant="provider"
                           disabled={
-                            !hiddenCardsWritable() ||
-                            busy() ||
-                            inherited() ||
-                            draggingCardId() !== undefined
+                            !hiddenCardsWritable() || busy() || draggingCardId() !== undefined
                           }
                           pressed={cardHidden()}
                           label={`${cardHidden() ? "Show" : "Hide"} ${cardIdentityLabel(card)}`}
@@ -426,8 +431,8 @@ export function SettingsView(props: {
                       </header>
                       <Show when={inherited()}>
                         <p class="qg-vis-legacy">
-                          Hidden by a legacy provider setting. Clear it in the settings file to
-                          control cards separately.
+                          This provider group is hidden by a legacy setting. Showing this card keeps
+                          its known sibling cards hidden.
                         </p>
                       </Show>
                       <For each={card.rows}>

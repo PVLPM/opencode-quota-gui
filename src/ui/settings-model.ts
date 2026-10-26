@@ -406,6 +406,65 @@ export function toggleHiddenCard(hidden: readonly string[], cardId: string): str
   return hidden.includes(cardId) ? hidden.filter((id) => id !== cardId) : [...hidden, cardId];
 }
 
+/** The identity metadata every Show needs; labels are never consulted. */
+export interface HiddenCardIdentity {
+  cardId: string;
+  providerId: string;
+  providerScopeHash?: string;
+}
+
+/** A provider group's markers, using catalog metadata and never labels. */
+function providerGroupMarkers(
+  selected: HiddenCardIdentity,
+  catalog: readonly HiddenCardIdentity[],
+): { sameProvider: HiddenCardIdentity[]; markers: Set<string> } {
+  const sameProvider = catalog.filter((card) => card.providerId === selected.providerId);
+  const markers = new Set<string>([selected.providerId]);
+  for (const hash of [
+    selected.providerScopeHash,
+    ...sameProvider.map((card) => card.providerScopeHash),
+  ]) {
+    if (hash !== undefined) markers.add(hash);
+  }
+  return { sameProvider, markers };
+}
+
+/** True when a provider id or a catalog-authoritative bare scope hash hides the card. */
+export function isInheritedProviderHidden(
+  card: HiddenCardIdentity,
+  hidden: ReadonlySet<string>,
+  catalog: readonly HiddenCardIdentity[],
+): boolean {
+  const { markers } = providerGroupMarkers(card, catalog);
+  return [...markers].some((marker) => hidden.has(marker));
+}
+
+/**
+ * Shows one card. An exact version 2 hide is a plain removal. An inherited
+ * provider-group hide (the provider id or an authoritative bare scope hash) is
+ * converted to exact hides for every sibling the current catalog knows about.
+ * Unrelated ids and other providers stay untouched; an account absent from the
+ * catalog has no id to hide.
+ */
+export function showCardKeepingKnownSiblingsHidden(
+  hidden: readonly string[],
+  selected: HiddenCardIdentity,
+  catalog: readonly HiddenCardIdentity[],
+): string[] {
+  const { sameProvider, markers } = providerGroupMarkers(selected, catalog);
+  const inherited = hidden.some((id) => id !== selected.cardId && markers.has(id));
+  const result = hidden.filter((id) => id !== selected.cardId && (!inherited || !markers.has(id)));
+  if (!inherited) return result;
+
+  const seen = new Set(result);
+  for (const card of sameProvider) {
+    if (card.cardId === selected.cardId || seen.has(card.cardId)) continue;
+    seen.add(card.cardId);
+    result.push(card.cardId);
+  }
+  return result;
+}
+
 /** Match Quota's exact generated-label cleanup; never infer a plan from free text. */
 export function visibilityAccountLabel(provider: string, account: string): string {
   const prefix = `[${provider}] (`;
