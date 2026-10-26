@@ -62,6 +62,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.ui.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:windows-platform": "vitest run tests/gui.build-identity.test.ts tests/gui.config-write-safety.test.ts tests/gui.storage.test.ts tests/gui.server.security.test.ts tests/lib.config-symlink-write.test.ts tests/lib.scoped-update.test.ts",
     "verify": "pnpm run check && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents",
     "prepublishOnly": "pnpm run release:check",
     "prepare": "lefthook install"

@@ -54,7 +54,7 @@ jobs:
           path: package-artifacts/*
           if-no-files-found: error
 
-  windows-verify:
+  windows-platform:
     runs-on: windows-latest
 
     steps:
@@ -75,24 +75,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run canonical verification
-        run: pnpm verify
+      # Only Windows-sensitive filesystem, storage, updater and loopback coverage.
+      # Lint, typecheck, build, history and package-content gates are OS-independent
+      # and already run once in pnpm-quality.
+      - name: Windows platform-specific tests
+        run: pnpm run test:windows-platform
 
   runtime-smoke:
     runs-on: ubuntu-latest
     needs: pnpm-quality
 
-    strategy:
-      matrix:
-        node-version: [22.x, 24.x]
-
     steps:
       - uses: actions/checkout@v6
-
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ matrix.node-version }}
 
       - name: Download exact npm artifact
         uses: actions/download-artifact@v8
@@ -100,5 +94,18 @@ jobs:
           name: package-tarball
           path: package-artifacts
 
-      - name: Smoke exact npm artifact on Node ${{ matrix.node-version }}
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+
+      - name: Smoke exact npm artifact on Node 22.x
+        run: node scripts/smoke-packed-package.mjs package-artifacts
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+
+      - name: Smoke exact npm artifact on Node 24.x
         run: node scripts/smoke-packed-package.mjs package-artifacts

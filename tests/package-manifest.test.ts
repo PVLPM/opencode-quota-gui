@@ -152,8 +152,8 @@ function stepIndex(job: WorkflowJob, name: string): number {
   return job.steps?.findIndex((candidate) => candidate.name === name) ?? -1;
 }
 
-function expectCanonicalVerificationOnly(job: WorkflowJob): void {
-  const runLines =
+function runLines(job: WorkflowJob): string[] {
+  return (
     job.steps?.flatMap((step) =>
       step.run
         ? step.run
@@ -161,10 +161,15 @@ function expectCanonicalVerificationOnly(job: WorkflowJob): void {
             .map((line) => line.trim())
             .filter(Boolean)
         : [],
-    ) ?? [];
-  expect(runLines.filter((line) => line === "pnpm verify")).toEqual(["pnpm verify"]);
+    ) ?? []
+  );
+}
+
+function expectCanonicalVerificationOnly(job: WorkflowJob): void {
+  const lines = runLines(job);
+  expect(lines.filter((line) => line === "pnpm verify")).toEqual(["pnpm verify"]);
   for (const component of VERIFY_COMPONENT_COMMANDS) {
-    expect(runLines).not.toContain(component);
+    expect(lines).not.toContain(component);
   }
 }
 
@@ -502,11 +507,11 @@ describe("package manifest compatibility", () => {
     );
   });
 
-  it("runs canonical verification on Ubuntu and Windows before exact-artifact smoke", () => {
+  it("runs canonical verification once on Ubuntu, only Windows-specific tests on Windows, and reuses the artifact for smoke", () => {
     expect(Object.keys(ciWorkflow.jobs).sort()).toEqual([
       "pnpm-quality",
       "runtime-smoke",
-      "windows-verify",
+      "windows-platform",
     ]);
 
     const quality = ciWorkflow.jobs["pnpm-quality"];
@@ -535,7 +540,7 @@ describe("package manifest compatibility", () => {
       quality.steps?.filter((step) => step.run?.includes("pnpm run pack:release-package")),
     ).toHaveLength(1);
 
-    const windows = ciWorkflow.jobs["windows-verify"];
+    const windows = ciWorkflow.jobs["windows-platform"];
     expect(windows["runs-on"]).toBe("windows-latest");
     expect(
       windows.steps?.find((step) => step.uses === "actions/checkout@v6")?.with?.["fetch-depth"],
@@ -544,8 +549,16 @@ describe("package manifest compatibility", () => {
       windows.steps?.find((step) => step.uses === "actions/setup-node@v6")?.with?.["node-version"],
     ).toBe("24.x");
     expect(namedStep(windows, "Install dependencies").run).toBe("pnpm install --frozen-lockfile");
-    expect(namedStep(windows, "Run canonical verification").run).toBe("pnpm verify");
-    expectCanonicalVerificationOnly(windows);
+    expect(namedStep(windows, "Windows platform-specific tests").run).toBe(
+      "pnpm run test:windows-platform",
+    );
+    // The Windows lane adds platform-specific signal only; the canonical gate
+    // runs exactly once, on Ubuntu.
+    const windowsRunLines = runLines(windows);
+    expect(windowsRunLines).not.toContain("pnpm verify");
+    for (const component of VERIFY_COMPONENT_COMMANDS) {
+      expect(windowsRunLines).not.toContain(component);
+    }
 
     expect(namedStep(quality, "Upload exact npm artifact")).toEqual(
       expect.objectContaining({
@@ -560,14 +573,25 @@ describe("package manifest compatibility", () => {
 
     const smoke = ciWorkflow.jobs["runtime-smoke"];
     expect(smoke.needs).toBe("pnpm-quality");
-    expect(smoke.strategy?.matrix?.["node-version"]).toEqual(["22.x", "24.x"]);
+    // One runner smokes the single uploaded artifact on both supported Node lines.
+    expect(smoke.strategy).toBeUndefined();
+    expect(
+      smoke.steps
+        ?.filter((step) => step.uses === "actions/setup-node@v6")
+        .map((step) => step.with?.["node-version"]),
+    ).toEqual(["22.x", "24.x"]);
     expect(namedStep(smoke, "Download exact npm artifact").with).toEqual({
       name: "package-tarball",
       path: "package-artifacts",
     });
-    expect(
-      namedStep(smoke, "Smoke exact npm artifact on Node ${{ matrix.node-version }}").run,
-    ).toBe("node scripts/smoke-packed-package.mjs package-artifacts");
+    for (const version of ["22.x", "24.x"]) {
+      expect(namedStep(smoke, `Smoke exact npm artifact on Node ${version}`).run).toBe(
+        "node scripts/smoke-packed-package.mjs package-artifacts",
+      );
+    }
+    // Never rebuild or repack the prerequisite artifact once per Node version.
+    expect(runLines(smoke).filter((line) => line.startsWith("pnpm "))).toEqual([]);
+    expect(smoke.steps?.filter((step) => step.run?.includes("pack:release-package"))).toEqual([]);
   });
 
   it("keeps npm publication on a strict root allowlist and excludes the dormant TUI entry", () => {
