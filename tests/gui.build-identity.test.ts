@@ -322,7 +322,7 @@ describe("identity comparison and health decoding", () => {
       { ...browser, version: "0.9.0" },
     ]) {
       expect(viewModel.buildMismatchMessage({ ...server, contractVersion: 2 }, browser)).toBe(
-        "Build mismatch · restart OpenCode",
+        "Build mismatch",
       );
     }
     expect(

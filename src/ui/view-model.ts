@@ -12,7 +12,7 @@ export function buildMismatchMessage(
   if (!server || server.contractVersion !== DASHBOARD_CONTRACT_VERSION) return undefined;
   if (!browser.build || browser.build === "unknown") return undefined;
   if (server.build === browser.build && server.version === browser.version) return undefined;
-  return "Build mismatch · restart OpenCode";
+  return "Build mismatch";
 }
 
 /**
@@ -46,7 +46,7 @@ export type LoadState<T> =
  */
 export function contractMismatchMessage(serverVersion: number): string | undefined {
   if (serverVersion === DASHBOARD_CONTRACT_VERSION) return undefined;
-  return `This dashboard speaks contract version ${DASHBOARD_CONTRACT_VERSION}, the server offers version ${serverVersion}. Restart the dashboard/OpenCode, then reload the page to get a matching build.`;
+  return `This page uses contract version ${DASHBOARD_CONTRACT_VERSION}; the running dashboard uses version ${serverVersion}. Restart the dashboard to reconnect. If the mismatch remains, restart OpenCode once to load the installed build.`;
 }
 
 /**

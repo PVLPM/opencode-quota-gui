@@ -20,7 +20,7 @@ If every provider is missing, check the plugin entry first. The plugin must load
 | `dashboard server unavailable` in the log | Another process owns the port. Stop it, or change `dashboard.port` in the canonical file and restart OpenCode. |
 | Page says `Data may be stale` or `Reconnecting…` | The browser lost the local event stream. Reload the page; if it persists, restart OpenCode. |
 | Settings will not save | The canonical file changed elsewhere, or the file is malformed. Reopen Settings, review the reported issue, and save again. |
-| `Build mismatch` or contract mismatch | The server and browser page came from different builds. Restart OpenCode, then reinstall the same package or tarball if it persists. |
+| `Build mismatch` or contract mismatch | Use **Restart dashboard** to restart the local listener and reload the current route on the same port. It does not reload backend code already loaded by OpenCode. A pre-feature server, or a mismatch requiring updated backend code, needs an OpenCode restart. If the mismatch persists, check the package installation/version and reinstall or update the same package or tarball. Dashboard restart cannot repair installation problems. |
 | Settings changed but the dashboard did not | Settings writes the global canonical file. A legacy or project config does not take effect until it is imported or copied into the canonical file. Restart OpenCode after editing the file by hand. |
 | No sessions or token history | Start OpenCode once so it creates `opencode.db`, then use a model so completed steps are recorded. |
 | Pricing looks old | Restart OpenCode. The bundled pricing snapshot updates with the package; a runtime snapshot follows `pricingSnapshot.autoRefresh`. |

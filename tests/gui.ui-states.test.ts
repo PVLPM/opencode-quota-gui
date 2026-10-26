@@ -535,8 +535,8 @@ describe("section state machine", () => {
     // treated as compatible, and a browser refresh alone cannot repair it.
     const oldServer = DASHBOARD_CONTRACT_VERSION - 1;
     const mismatch = contractMismatchMessage(oldServer);
-    expect(mismatch).toContain("Restart the dashboard/OpenCode");
-    expect(mismatch).toContain("reload the page");
+    expect(mismatch).toContain("Restart the dashboard to reconnect");
+    expect(mismatch).toContain("If the mismatch remains, restart OpenCode once");
     expect(mismatch).not.toContain("Reload the page to get a matching build");
     expect(resolveLoadState<number>({ data: 1, loading: false }, mismatch)).toEqual({
       kind: "reload-required",
@@ -3368,8 +3368,8 @@ describe("range transitions name the range still on screen", () => {
     try {
       await settle();
       const body = app.text();
-      expect(body).toContain("Restart the dashboard/OpenCode");
-      expect(body).toContain("reload the page");
+      expect(body).toContain("Restart dashboard");
+      expect(body).toContain("If the mismatch remains, restart OpenCode once");
       expect(body).not.toContain("Total tokens");
     } finally {
       app.dispose();
@@ -4230,8 +4230,11 @@ describe("the settings editor keeps its draft across refetches", () => {
       // An inherited group hide no longer disables the eye.
       expect(eye("Show Anthropic").props.disabled).toBe(false);
       expect(eye("Show Anthropic").props["aria-pressed"]).toBe("true");
-      expect(renderGraph.textOf(mounted.root)).toContain(
+      expect(renderGraph.textOf(mounted.root)).not.toContain(
         "Showing this card keeps its known sibling cards hidden.",
+      );
+      expect(renderGraph.textOf(mounted.root)).not.toContain(
+        "This provider group is hidden by a legacy setting.",
       );
       expect(renderGraph.textOf(mounted.root)).not.toContain("Clear it in the settings file");
 

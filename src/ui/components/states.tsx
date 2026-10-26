@@ -1,6 +1,7 @@
 import type { JSX } from "solid-js";
 import { Match, Show, Switch } from "solid-js";
 import type { LoadState } from "../view-model";
+import { RestartDashboardAction, type RestartDashboardProps } from "./build-info";
 
 /**
  * Shared state primitives (design spec §10 "States").
@@ -97,11 +98,12 @@ export function StaleNotice(props: { message: string }): JSX.Element {
   );
 }
 
-export function ReloadRequired(props: { message: string }): JSX.Element {
+export function ReloadRequired(props: { message: string } & RestartDashboardProps): JSX.Element {
   return (
     <div class="qg-reload" role="alert">
       <strong>This dashboard build is out of date</strong>
       <span>{props.message}</span>
+      <RestartDashboardAction restartState={props.restartState} onRestart={props.onRestart} />
     </div>
   );
 }

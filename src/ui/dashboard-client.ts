@@ -851,6 +851,8 @@ async function toDashboardError(response: Response, endpoint: string): Promise<D
 export type ActiveViewScope = "quota" | "analytics";
 
 export interface DashboardClient extends DashboardDataSource {
+  /** Resolves only when the acknowledged replacement listener is healthy. */
+  restartDashboard?(signal: AbortSignal): Promise<void>;
   /** Optional for older injected clients; failure must not block the read UI. */
   setActiveView?(scope: ActiveViewScope): Promise<void>;
   /** SSE transport state; `live` means the stream is open. */
@@ -912,7 +914,63 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
     return request(endpoint, { method, body: JSON.stringify(body) });
   }
 
+  async function restartRequest(endpoint: string, signal: AbortSignal, post = false) {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), 1_000);
+    try {
+      return await request(endpoint, {
+        signal: AbortSignal.any([signal, timeout.signal]),
+        ...(post ? { method: "POST", body: "{}" } : {}),
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function restartDelay(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+        reject(new Error("Dashboard restart cancelled."));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      }, 500);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    });
+  }
+
   return {
+    async restartDashboard(signal) {
+      const endpoint = "/api/v1/dashboard/restart";
+      const ack = readRecord(
+        await restartRequest(endpoint, signal, true),
+        endpoint,
+        "not an object",
+      );
+      const restartId = readText(ack.restartId, endpoint, "restartId");
+      if (!restartId) throw faulty(endpoint, "empty restartId");
+      // At most 24.5 seconds including the acknowledgement, even if each
+      // request uses its full timeout. Old listeners can still answer 200.
+      for (let attempt = 0; attempt < 16; attempt++) {
+        if (signal.aborted) throw new Error("Dashboard restart cancelled.");
+        try {
+          const health = readRecord(
+            await restartRequest("/api/v1/health", signal),
+            "/api/v1/health",
+            "not an object",
+          );
+          if (health.restartId === restartId) return;
+        } catch {
+          if (signal.aborted) throw new Error("Dashboard restart cancelled.");
+        }
+        if (attempt < 15) await restartDelay(signal);
+      }
+      throw new Error("Dashboard restart timed out.");
+    },
     async setActiveView(scope) {
       const endpoint = "/api/v1/view";
       const root = readRecord(await write(endpoint, { scope }, "PUT"), endpoint, "not an object");

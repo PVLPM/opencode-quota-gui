@@ -33,7 +33,7 @@ const solidWebShimPath = fileURLToPath(new URL("./fixtures/gui-solid-web.ts", im
 
 /** The build-time value Vite substitutes in both the product build and this rig. */
 const BROWSER_IDENTITY = { version: "1.0.0", build: "a1b2c3d4e5f6-dirty" } as const;
-const MISMATCH = "Build mismatch · restart OpenCode";
+const MISMATCH = "Build mismatch";
 
 interface RenderGraph {
   app: (props: { client: DashboardClient }) => TestNode;
@@ -179,10 +179,17 @@ function makeClient(health: DashboardClient["health"]): DashboardClient {
   };
 }
 
-function mountApp(health: DashboardClient["health"], initialPath = "/quota") {
+function mountApp(
+  health: DashboardClient["health"],
+  initialPath = "/quota",
+  restartDashboard?: DashboardClient["restartDashboard"],
+) {
   vi.stubGlobal("window", browserStub(initialPath));
   const root = graph.createTestRoot();
-  const stop = graph.mount(() => graph.app({ client: makeClient(health) }), root);
+  const stop = graph.mount(
+    () => graph.app({ client: { ...makeClient(health), restartDashboard } }),
+    root,
+  );
   return {
     root,
     text: () => graph.textOf(root),
@@ -208,6 +215,53 @@ function statusNodes(root: TestNode): TestNode[] {
 }
 
 describe("build mismatch status", () => {
+  it("disables duplicate restarts, shows controlled failure, and retries with a current-location reload", async () => {
+    let finish!: () => void;
+    let fail!: (error: Error) => void;
+    const operation = vi.fn(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          finish = resolve;
+          fail = reject;
+        }),
+    );
+    const app = mountApp(
+      async () => ({ ...matchingHealth(), build: "other" }),
+      "/projects/project-a?range=7d",
+      operation,
+    );
+    const reload = vi.fn();
+    Object.assign(window.location, { reload });
+    const button = () =>
+      graph
+        .elementsNamed(app.root, "button")
+        .find((node) => graph.textOf(node).includes("dashboard"))!;
+    const click = () => (button().props.onClick as () => void)();
+    try {
+      await settle();
+      const currentLocation = window.location.href;
+      click();
+      click();
+      expect(operation).toHaveBeenCalledTimes(1);
+      expect(button().props.disabled).toBe(true);
+      expect(graph.textOf(button())).toBe("Restarting dashboard…");
+      fail(new Error("C:/private/internal secret"));
+      await settle();
+      expect(button().props.disabled).toBe(false);
+      expect(app.text()).toContain(
+        "Couldn’t restart the dashboard. Try again, or restart OpenCode once.",
+      );
+      expect(app.text()).not.toContain("private");
+      click();
+      finish();
+      await settle();
+      expect(reload).toHaveBeenCalledTimes(1);
+      expect(window.location.href).toBe(currentLocation);
+    } finally {
+      app.dispose();
+    }
+  });
+
   it("reads the same build-time identity the bundle was stamped with", () => {
     expect(graph.identity()).toEqual(BROWSER_IDENTITY);
   });
@@ -230,7 +284,8 @@ describe("build mismatch status", () => {
       const status = statusNodes(app.root);
       expect(status).toHaveLength(1);
       expect(graph.textOf(status[0] as TestNode)).toBe(MISMATCH);
-      expect(status[0]?.props.title).toContain("Restart OpenCode");
+      expect(status[0]?.props.title).toContain("different builds");
+      expect(app.text()).toContain("Restart dashboard");
       expect(app.text()).toContain("Five hour window");
     } finally {
       app.dispose();
@@ -283,7 +338,7 @@ describe("build mismatch status", () => {
     try {
       await settle();
       const body = app.text();
-      expect(body).toContain("Restart the dashboard/OpenCode");
+      expect(body).toContain("Restart dashboard");
       expect(body).not.toContain(MISMATCH);
       expect(body).not.toContain("Five hour window");
     } finally {

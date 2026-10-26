@@ -8,8 +8,6 @@ A local dashboard for your OpenCode quota, token usage, projects, and sessions. 
 
 <p align="center">
   <a href="https://www.npmjs.com/package/opencode-quota-gui"><img alt="npm" src="https://img.shields.io/npm/v/opencode-quota-gui?style=flat-square" /></a>
-  <a href="https://www.npmjs.com/package/opencode-quota-gui"><img alt="npm downloads" src="https://img.shields.io/npm/dm/opencode-quota-gui?style=flat-square" /></a>
-  <a href="https://github.com/PVLPM/opencode-quota-gui/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PVLPM/opencode-quota-gui/ci.yml?style=flat-square&label=CI" /></a>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" /></a>
 </p>
 
@@ -181,7 +179,7 @@ The dashboard reads only the canonical file at runtime:
 - **Local data:** the plugin reads OpenCode's local configuration and login data through OpenCode, plus OpenCode's local session database for usage and session views. Provider quota checks use the provider's API or the documented local CLI or companion plugin. Token pricing can come from the bundled snapshot or `models.dev` at runtime.
 - **OpenTelemetry (optional):** off by default. Set `"telemetry": { "enabled": true }` in the canonical file to publish two gauges, `opencode.quota.consumed` and `opencode.quota.cache.age`, through the `@opentelemetry/api` global `MeterProvider` that your host process configures. The plugin does not create a `MeterProvider`, exporter, collector, or metrics endpoint, sends no metrics by itself, and makes no extra provider requests for telemetry. Metric names and attributes are not a public API. See [External integration](docs/readme/external-integration.md#optional-opentelemetry-advanced-host-owned).
 - **No hosted service:** this project has no cloud account, hosted dashboard, or remote usage store. The local server permits only loopback hosts and origins and sends no CORS headers.
-- **Build details:** Settings → About reports the embedded Version, Build, and Contract. A build or contract mismatch means the browser page and server plugin are from different builds; restart and reinstall the same package if it persists.
+- **Build details:** Settings → About reports the embedded Version, Build, and Contract. For a build mismatch, use **Restart dashboard** to restart the local listener and reload the same route on the same port. This does not reload backend code already loaded by OpenCode. A pre-feature server, or a mismatch that requires loading updated backend code, needs an OpenCode restart. If the mismatch persists, check the package installation/version and reinstall or update; dashboard restart cannot repair installation problems.
 
 See [Configuration](docs/readme/configuration.md) for every supported settings key and the custom-provider rules.
 

@@ -429,12 +429,6 @@ export function SettingsView(props: {
                           onToggle={async () => toggleCardEye(card)}
                         />
                       </header>
-                      <Show when={inherited()}>
-                        <p class="qg-vis-legacy">
-                          This provider group is hidden by a legacy setting. Showing this card keeps
-                          its known sibling cards hidden.
-                        </p>
-                      </Show>
                       <For each={card.rows}>
                         {(row) => {
                           const rowHidden = () => hiddenRowIds().includes(row.id);

@@ -16,6 +16,11 @@ export interface DashboardHealth {
   contractVersion: number;
   version?: string;
   build?: string;
+  /**
+   * Additive restart generation token. Present only on the replacement
+   * listener that fulfilled an acknowledged restart request.
+   */
+  restartId?: string;
 }
 
 /** Contract revision advertised by `DashboardDataSource.health()`. */

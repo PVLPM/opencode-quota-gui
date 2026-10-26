@@ -197,12 +197,11 @@ describe("dashboard-first public documentation", () => {
     expect(compatibility).toContain("no dependency or conflict guard");
   });
 
-  it("uses the repository default branch in the CI badge", () => {
-    expect(readme).not.toContain("branch=main");
-    expect(readme).toContain("github.com/PVLPM/opencode-quota-gui/actions/workflows/ci.yml");
-    expect(readme).toContain(
-      "img.shields.io/github/actions/workflow/status/PVLPM/opencode-quota-gui/ci.yml",
-    );
+  it("keeps the npm version and license badges and omits download and CI badges", () => {
+    expect(readme).toContain("img.shields.io/npm/v/opencode-quota-gui");
+    expect(readme).toContain("img.shields.io/badge/License-MIT-yellow.svg");
+    expect(readme).not.toContain("img.shields.io/npm/dm/opencode-quota-gui");
+    expect(readme).not.toContain("actions/workflows/ci.yml");
   });
 
   it("contains no removed terminal-product instructions", () => {
