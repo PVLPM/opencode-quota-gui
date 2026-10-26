@@ -41,6 +41,40 @@ export const UI_PACKAGED_ASSET_EXTENSIONS = [
 const FOREIGN_RUNTIMES = ["react", "react-dom", "preact", "vue", "svelte", "angular"];
 
 /**
+ * Path universes a module id can come from. A build may run on Windows or on a
+ * POSIX host, and the evidence file is compared across machines, so the shape is
+ * detected from the id itself instead of asking the host `node:path` module
+ * (`path.isAbsolute("C:/x")` is false on POSIX and vice versa). Detection is
+ * therefore host-independent: the same id normalizes the same way everywhere.
+ */
+function pathShape(slashed) {
+  if (/^[A-Za-z]:\//.test(slashed)) return "windows";
+  // UNC roots (`\\server\share` or `//server/share`); checked before POSIX
+  // because a normalized UNC path also starts with `/`.
+  if (slashed.startsWith("//")) return "windows";
+  if (slashed.startsWith("/")) return "posix";
+  return "relative";
+}
+
+/**
+ * Resolves an id against the repository root and returns the repo-relative path
+ * in the same path universe as the root, or `undefined` when the two live in
+ * different universes (a Windows id cannot be inside a POSIX checkout, or vice
+ * versa), which the caller treats as "outside the repository".
+ */
+function repoRelativePath(slashed, slashedRoot) {
+  const rootShape = pathShape(slashedRoot) === "windows" ? "windows" : "posix";
+  const universe = rootShape === "windows" ? path.win32 : path.posix;
+  const idShape = pathShape(slashed);
+
+  if (idShape === "relative") {
+    return universe.relative(slashedRoot, universe.resolve(slashedRoot, slashed));
+  }
+  if (idShape !== rootShape) return undefined;
+  return universe.relative(slashedRoot, slashed);
+}
+
+/**
  * Normalizes a module id to a machine-independent, privacy-safe identifier.
  *
  * Three things are removed or replaced, so no emitted evidence can carry a
@@ -53,13 +87,23 @@ const FOREIGN_RUNTIMES = ["react", "react-dom", "preact", "vue", "svelte", "angu
  *   directory — collapses to a package-relative identifier (or, if no package
  *   directory can be found, to a bare `external/<file>`), never to an absolute
  *   path, a drive-letter root, or a user-home segment.
+ *
+ * The shape detection is host-independent: separators are normalized first and
+ * the relative computation runs in the id's/root's own path universe, so a
+ * Windows-shaped id normalizes identically on a POSIX machine (and vice versa).
  */
 export function normalizeModuleId(id, repoRoot) {
   const slashed = String(id).split("?")[0].split("\\").join("/");
-  const absolute = path.isAbsolute(slashed) ? slashed : path.resolve(repoRoot, slashed);
-  const relative = path.relative(repoRoot, absolute).split(path.sep).join("/");
-  const inRepository = relative !== "" && !relative.startsWith("../") && !path.isAbsolute(relative);
-  if (inRepository) return stripStorePrefix(relative);
+  const slashedRoot = String(repoRoot).split("\\").join("/");
+  const relative = repoRelativePath(slashed, slashedRoot);
+  const normalizedRelative = relative === undefined ? undefined : relative.split("\\").join("/");
+  const inRepository =
+    normalizedRelative !== undefined &&
+    normalizedRelative !== "" &&
+    normalizedRelative !== ".." &&
+    !normalizedRelative.startsWith("../") &&
+    pathShape(normalizedRelative) === "relative";
+  if (inRepository) return stripStorePrefix(normalizedRelative);
 
   // Outside the repository: keep only the trailing `@scope/name/...` (or the
   // file itself), so the evidence still names the package without naming a
