@@ -643,7 +643,7 @@ describe("scoped update application safety", () => {
     const result = await applyScopedUpdatePlan(
       await planScopedUpdate({
         cwd: f.project,
-        env: withUpdateSpec(f.env),
+        env: f.env,
         homeDir: join(f.root, "home"),
       }),
     );

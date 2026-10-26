@@ -409,6 +409,7 @@ describe("canonical config write safety", () => {
     writeFileSync(upstreamTarget, "{}\n", "utf8");
     const targetBytes = readFileSync(upstreamTarget, "utf8");
     writeQuotaSidecarConfig(workspace.configDir, { percentDisplayMode: "used" });
+    mkdirSync(workspace.guiConfigDir, { recursive: true });
     symlinkSync(upstreamTarget, workspace.guiConfigPath, "file");
     const store = makeStore(workspace);
     const preview = await store.importPreview();
