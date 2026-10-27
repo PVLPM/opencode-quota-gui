@@ -29,6 +29,12 @@ const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url
 const providerLogoManifest = JSON.parse(
   await readFile(new URL("../src/ui/assets/provider-logos/manifest.json", import.meta.url), "utf8"),
 ) as { logos: Record<string, unknown> };
+const localProviderLogos = JSON.parse(
+  await readFile(
+    new URL("../src/ui/assets/provider-logos/local-overrides.json", import.meta.url),
+    "utf8",
+  ),
+) as { logos: Record<string, unknown> };
 
 function run(script: string, args: string[] = [], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [script, ...args], {
@@ -55,13 +61,19 @@ function requiredPackageFiles(): string[] {
     "dist/ui/index.html",
     "dist/ui/assets/dashboard.js",
     "dist/ui/assets/dashboard.css",
-    // verify-package-contents.mjs requires the vendored provider-logo notices
-    // and every logo in the shipped manifest plus the generic fallback.
+    // verify-package-contents.mjs requires the vendored provider-logo notices,
+    // every logo in the shipped manifest plus the generic fallback, and the
+    // local source-declared override mark plus OpenCode attribution files.
     "dist/provider-logos/NOTICE.md",
     "dist/provider-logos/UPSTREAM-MIT.txt",
+    "dist/provider-logos/OPENCODE-MIT.txt",
+    "dist/provider-logos/OPENCODE-NOTICE.md",
     "dist/ui/assets/providers/generic.svg",
   ]);
   for (const id of Object.keys(providerLogoManifest.logos)) {
+    paths.add(`dist/ui/assets/providers/${id}.svg`);
+  }
+  for (const id of Object.keys(localProviderLogos.logos)) {
     paths.add(`dist/ui/assets/providers/${id}.svg`);
   }
   const add = (value: string) => paths.add(value.replace(/^\.\//, ""));
@@ -260,6 +272,29 @@ describe("v4 release gates", () => {
     const result = run(packageScript, [manifestPath]);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("npm contents verified");
+  });
+
+  it("rejects a package that omits the local OpenCode Go mark and its attribution files", async () => {
+    const omitted = [
+      "dist/ui/assets/providers/opencode-go-g.svg",
+      "dist/provider-logos/OPENCODE-MIT.txt",
+      "dist/provider-logos/OPENCODE-NOTICE.md",
+    ];
+    const manifestPath = path.join(tempDir, "missing-local-provider-artifacts.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        files: requiredPackageFiles()
+          .filter((entry) => !omitted.includes(entry))
+          .map((entry) => ({ path: entry })),
+      }),
+      "utf8",
+    );
+
+    const result = run(packageScript, [manifestPath]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("npm package provider logo assets are incomplete");
+    for (const file of omitted) expect(result.stderr).toContain(file);
   });
 
   it("rejects all nonessential, repository, agent, local, documentation, and logo files", async () => {

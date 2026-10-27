@@ -66,6 +66,9 @@ const packageJson = JSON.parse(await readFile(path.join(repoRoot, "package.json"
 const providerManifest = JSON.parse(
   await readFile(path.join(repoRoot, "src/ui/assets/provider-logos/manifest.json"), "utf8"),
 );
+const localOverrides = JSON.parse(
+  await readFile(path.join(repoRoot, "src/ui/assets/provider-logos/local-overrides.json"), "utf8"),
+);
 const requiredFiles = new Set([
   "LICENSE",
   "README.md",
@@ -158,11 +161,22 @@ if (uiProblems.length > 0) {
 const providerLogos = uiFiles.filter(
   (file) => file.startsWith("dist/ui/assets/providers/") && file.endsWith(".svg"),
 );
+const localLogoFiles = Object.keys(localOverrides.logos ?? {}).map(
+  (id) => `dist/ui/assets/providers/${id}.svg`,
+);
+const opencodeNoticeFiles = [
+  "dist/provider-logos/OPENCODE-MIT.txt",
+  "dist/provider-logos/OPENCODE-NOTICE.md",
+];
+const shippedUpstreamLogos = providerLogos.filter((file) => !localLogoFiles.includes(file));
 const expectedProviderLogos = providerManifest.logoCount + 1;
 const providerProblems = [];
-if (providerLogos.length !== expectedProviderLogos) {
+if (localLogoFiles.length === 0) {
+  providerProblems.push("the source local override manifest declares no provider logos");
+}
+if (shippedUpstreamLogos.length !== expectedProviderLogos) {
   providerProblems.push(
-    `expected ${expectedProviderLogos} provider logos, found ${providerLogos.length}`,
+    `expected ${expectedProviderLogos} upstream provider logos, found ${shippedUpstreamLogos.length}`,
   );
 }
 if (!providerLogos.includes("dist/ui/assets/providers/generic.svg")) {
@@ -171,6 +185,12 @@ if (!providerLogos.includes("dist/ui/assets/providers/generic.svg")) {
 for (const id of Object.keys(providerManifest.logos)) {
   const file = `dist/ui/assets/providers/${id}.svg`;
   if (!providerLogos.includes(file)) providerProblems.push(`${file} is missing`);
+}
+for (const file of localLogoFiles) {
+  if (!providerLogos.includes(file)) providerProblems.push(`${file} is missing`);
+}
+for (const file of opencodeNoticeFiles) {
+  if (!files.includes(file)) providerProblems.push(`${file} is missing`);
 }
 if (providerProblems.length > 0) {
   console.error("npm package provider logo assets are incomplete:");

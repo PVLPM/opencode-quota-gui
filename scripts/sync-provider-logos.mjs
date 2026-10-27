@@ -36,6 +36,17 @@ export const PROVIDER_LOGO_DIR = "src/ui/assets/provider-logos";
 export const GENERATED_CATALOG_PATH = "src/ui/provider-logos.generated.json";
 export const GENERIC_LOGO_FILE = "generic.svg";
 export const MAX_LOGO_BYTES = 128 * 1024;
+export const LOCAL_OVERRIDES_FILE = "local-overrides.json";
+export const OPENCODE_REPOSITORY = "https://github.com/anomalyco/opencode";
+export const OPENCODE_COMMIT = "86976449c40d48f2731553a024f74552593d1764";
+export const OPENCODE_SOURCE_PATH = "packages/ui/src/components/provider-icons/sprite.svg";
+export const OPENCODE_LICENSE_FILE = "OPENCODE-MIT.txt";
+export const OPENCODE_NOTICE_FILE = "OPENCODE-NOTICE.md";
+export const OPENCODE_SPRITE_SHA256 =
+  "90c22219a2aeff3ea489625156530ea0fa8a072a1b934a52a9192074d39237df";
+export const OPENCODE_LICENSE_SHA256 =
+  "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b";
+export const EXPECTED_LOCAL_LOGO_COUNT = 1;
 
 const SAFE_PROVIDER_ID = /^[a-z0-9][a-z0-9.-]*$/u;
 const SAFE_LOGO_URL = /^\/assets\/providers\/[a-z0-9][a-z0-9.-]*\.svg$/u;
@@ -479,8 +490,8 @@ Provider logo assets in this directory are vendored from [models.dev](${MODELS_D
 - **Upstream license:** MIT. The copyright and permission notice is preserved verbatim in \`UPSTREAM-MIT.txt\`.
 - **Source path:** \`providers/<provider-id>/logo.svg\` in the pinned models.dev archive.
 - **Normalization:** each SVG is stored as UTF-8 with XML/DTD declarations removed, trailing horizontal whitespace outside whitespace-sensitive text content stripped, and a final newline added; the artwork itself is unchanged.
-- **Local use:** ${logoCount} upstream provider logos plus the local neutral \`${GENERIC_LOGO_FILE}\` fallback are copied into the package at build time and served from same-origin \`/assets/providers/\`. The dashboard never hotlinks a remote logo.
-- **OpenCode aliases:** the upstream \`opencode\` and \`opencode-go\` provider entries are distinct identities that use the same logo artwork. The presentation catalog also maps the internal \`opencode-zen\` id to the OpenCode artwork; raw analytics identities are never rewritten.
+- **Local use:** ${logoCount} upstream provider logos, the local neutral \`${GENERIC_LOGO_FILE}\` fallback and the local OpenCode Go G mark are copied into the package at build time and served from same-origin \`/assets/providers/\`. The dashboard never hotlinks a remote logo.
+- **OpenCode identities:** the upstream \`opencode\` and \`opencode-go\` entries in models.dev both contain the O artwork and remain vendored unchanged. Presentation overrides only \`opencode-go\` with a dedicated G mark extracted from [OpenCode](${OPENCODE_REPOSITORY}) at \`${OPENCODE_COMMIT}\`; see \`${OPENCODE_NOTICE_FILE}\` and \`${OPENCODE_LICENSE_FILE}\`. \`opencode\` and OpenCode Zen keep the O mark. Raw analytics identities are never rewritten.
 - **Brand rights:** the MIT license covers the models.dev repository and the assets as distributed there. It does not establish or grant rights in any provider's name, logo, or other trademark, and individual brand-use terms may still apply. The logos identify the corresponding providers in a local dashboard; no affiliation or endorsement is implied.
 - **Mask-incompatible marks:** a small number of upstream marks use an opaque raster or full-bleed background and would collapse to a solid block under a one-colour mask. The catalog shows the local neutral fallback for those while keeping the vendored file and attribution.
 - **Fallback:** providers with no specific upstream logo or no catalog entry use the local neutral fallback, not an upstream placeholder mark.
@@ -610,6 +621,71 @@ export async function removeStaleLogoFiles(assetDir, expectedFiles) {
   }
 }
 
+/**
+ * Validates the explicitly authored local marks (currently the OpenCode Go G
+ * artwork). They are not regenerated from models.dev; provenance, byte count,
+ * hash and SVG safety are pinned here so a drift fails `--check`.
+ */
+function validateLocalOverrides(assetDir) {
+  const overridesPath = join(assetDir, LOCAL_OVERRIDES_FILE);
+  if (!existsSync(overridesPath)) throw new Error(`Missing local overrides ${overridesPath}`);
+  const metadata = JSON.parse(readFileSync(overridesPath, "utf8"));
+  if (metadata.repository !== OPENCODE_REPOSITORY) {
+    throw new Error("The local OpenCode artwork repository is not pinned");
+  }
+  if (metadata.commit !== OPENCODE_COMMIT) {
+    throw new Error("The local OpenCode artwork commit is not pinned");
+  }
+  if (metadata.license !== "MIT") throw new Error("The local OpenCode artwork license is not MIT");
+  if (metadata.sourceSpriteSha256 !== OPENCODE_SPRITE_SHA256) {
+    throw new Error("The local OpenCode sprite hash is not pinned");
+  }
+
+  const logos = new Map();
+  for (const [id, entry] of Object.entries(metadata.logos ?? {})) {
+    if (!SAFE_PROVIDER_ID.test(id) || id.includes("..") || id === GENERIC_LOGO_FILE) {
+      throw new Error(`Unsafe local provider logo id: ${id}`);
+    }
+    if (entry.url !== `/assets/providers/${id}.svg` || !SAFE_LOGO_URL.test(entry.url)) {
+      throw new Error(`${id}: local logo URL is not the allowlisted local path`);
+    }
+    if (entry.sourcePath !== OPENCODE_SOURCE_PATH || entry.sourceSymbol !== "opencode-go") {
+      throw new Error(`${id}: local artwork provenance is not the pinned OpenCode symbol`);
+    }
+    if (!Number.isInteger(entry.bytes) || entry.bytes <= 0) {
+      throw new Error(`${id}: local logo byte count is invalid`);
+    }
+    if (typeof entry.label !== "string" || entry.label.trim() === "") {
+      throw new Error(`${id}: local logo label is empty`);
+    }
+    const file = join(assetDir, `${id}.svg`);
+    if (!existsSync(file)) throw new Error(`${id}: local logo is missing`);
+    const bytes = readFileSync(file);
+    if (bytes.length !== entry.bytes) throw new Error(`${id}: local logo byte count changed`);
+    if (sha256(bytes) !== entry.sha256) throw new Error(`${id}: local logo hash changed`);
+    inspectSvgSafety(bytes.toString("utf8"), id);
+    logos.set(id, entry);
+  }
+
+  if (logos.size !== EXPECTED_LOCAL_LOGO_COUNT || !logos.has("opencode-go-g")) {
+    throw new Error(`Expected the local OpenCode Go mark, found ${logos.size} local logos`);
+  }
+
+  const licensePath = join(assetDir, OPENCODE_LICENSE_FILE);
+  if (!existsSync(licensePath)) throw new Error(`Missing OpenCode license ${licensePath}`);
+  const license = readFileSync(licensePath);
+  if (sha256(license) !== OPENCODE_LICENSE_SHA256) {
+    throw new Error("The OpenCode MIT license text is missing or altered");
+  }
+  const noticePath = join(assetDir, OPENCODE_NOTICE_FILE);
+  if (!existsSync(noticePath)) throw new Error(`Missing OpenCode artwork notice ${noticePath}`);
+  const notice = readFileSync(noticePath, "utf8");
+  if (!notice.includes(OPENCODE_COMMIT) || !notice.includes(OPENCODE_SOURCE_PATH)) {
+    throw new Error("The OpenCode artwork notice is missing its pinned provenance");
+  }
+  return { logos, metadata };
+}
+
 async function writeIfChanged(file, value) {
   const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
   if (existsSync(file) && readFileSync(file).equals(bytes)) return false;
@@ -637,6 +713,12 @@ async function sync(archivePath) {
 
   const assetDir = join(scriptRoot, PROVIDER_LOGO_DIR);
   await mkdir(assetDir, { recursive: true });
+  const localOverrides = validateLocalOverrides(assetDir);
+  for (const id of localOverrides.logos.keys()) {
+    if (logos.has(id) || id === GENERIC_LOGO_FILE) {
+      throw new Error(`Local provider logo collides with upstream/generic id: ${id}`);
+    }
+  }
   const entries = new Map();
   let logoBytes = 0;
   for (const [id, bytes] of [...logos].sort(([left], [right]) => left.localeCompare(right))) {
@@ -661,6 +743,7 @@ async function sync(archivePath) {
 
   const expectedFiles = new Set([...entries.keys()].map((id) => `${id}.svg`));
   expectedFiles.add(GENERIC_LOGO_FILE);
+  for (const id of localOverrides.logos.keys()) expectedFiles.add(`${id}.svg`);
   await removeStaleLogoFiles(assetDir, expectedFiles);
 
   const runtimeCatalog = buildRuntimeCatalog(entries);
@@ -674,7 +757,7 @@ async function sync(archivePath) {
   await writeIfChanged(join(assetDir, "NOTICE.md"), buildNotice(entries.size));
 
   console.log(
-    `Provider logos synced: ${entries.size} SVGs (${logoBytes} vendored bytes; ${upstreamBytes} upstream bytes) from models.dev@${MODELS_DEV_REVISION}, plus ${GENERIC_LOGO_FILE}, MIT notice and brand notice.`,
+    `Provider logos synced: ${entries.size} SVGs (${logoBytes} vendored bytes; ${upstreamBytes} upstream bytes) from models.dev@${MODELS_DEV_REVISION}, plus ${GENERIC_LOGO_FILE}, ${localOverrides.logos.size} local override(s), MIT notice and brand notice.`,
   );
 }
 
@@ -704,6 +787,12 @@ async function check() {
   if (JSON.stringify(ids) !== JSON.stringify(runtimeIds)) {
     throw new Error("The runtime catalog and the integrity manifest list different providers");
   }
+  const localOverrides = validateLocalOverrides(assetDir);
+  for (const id of localOverrides.logos.keys()) {
+    if (manifest.logos[id] !== undefined || runtimeCatalog.logos[id] !== undefined) {
+      throw new Error(`Local provider logo collides with upstream id: ${id}`);
+    }
+  }
 
   let logoBytes = 0;
   for (const id of ids) {
@@ -732,7 +821,11 @@ async function check() {
 
   const files = readdirSync(assetDir);
   const actualSvg = files.filter((file) => file.endsWith(".svg")).sort();
-  const expectedSvg = [...ids.map((id) => `${id}.svg`), GENERIC_LOGO_FILE].sort();
+  const expectedSvg = [
+    ...ids.map((id) => `${id}.svg`),
+    ...localOverrides.logos.keys().map((id) => `${id}.svg`),
+    GENERIC_LOGO_FILE,
+  ].sort();
   if (JSON.stringify(actualSvg) !== JSON.stringify(expectedSvg)) {
     throw new Error("The provider logo directory has missing or stale SVG files");
   }
@@ -763,7 +856,7 @@ async function check() {
     throw new Error("The generated runtime catalog is not the deterministic output of the sync");
   }
   console.log(
-    `Provider logos verified: ${ids.length} upstream SVGs (${logoBytes} vendored bytes) plus ${GENERIC_LOGO_FILE}; safe SVG checks, local URLs, MIT notice and brand notice all match models.dev@${MODELS_DEV_REVISION}.`,
+    `Provider logos verified: ${ids.length} upstream SVGs (${logoBytes} vendored bytes) plus ${GENERIC_LOGO_FILE} and ${localOverrides.logos.size} local override(s); safe SVG checks, local URLs, MIT notice and brand notice all match models.dev@${MODELS_DEV_REVISION}.`,
   );
 }
 

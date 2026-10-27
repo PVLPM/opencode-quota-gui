@@ -191,8 +191,9 @@ describe("provider presentation catalog", () => {
     expect(manifest.upstreamBytes).toBe(623_957);
     expect(manifest.logoBytes).toBeGreaterThan(600_000);
     expect(manifest.logoBytes).toBeLessThan(650_000);
-    expect(providerLogoFiles).toHaveLength(223);
+    expect(providerLogoFiles).toHaveLength(224);
     expect(providerLogoFiles).toContain("generic.svg");
+    expect(providerLogoFiles).toContain("opencode-go-g.svg");
 
     for (const [id, entry] of Object.entries(runtimeCatalog.logos)) {
       expect(id).toMatch(/^[a-z0-9][a-z0-9.-]*$/u);
@@ -214,7 +215,7 @@ describe("provider presentation catalog", () => {
     expect(verified).toContain("Provider logos verified");
   });
 
-  it("keeps OpenCode and OpenCode Go distinct identities with the same upstream artwork", () => {
+  it("keeps OpenCode and OpenCode Go distinct identities with dedicated artwork", () => {
     const opencode = resolveProviderPresentation("opencode");
     const opencodeGo = resolveProviderPresentation("opencode-go");
     const opencodeZen = resolveProviderPresentation("opencode-zen");
@@ -228,12 +229,68 @@ describe("provider presentation catalog", () => {
     expect(opencode.hasSpecificLogo).toBe(true);
     expect(opencodeGo.hasSpecificLogo).toBe(true);
     expect(opencode.logoSrc).toBe("/assets/providers/opencode.svg");
-    expect(opencodeGo.logoSrc).toBe("/assets/providers/opencode-go.svg");
+    expect(opencodeGo.logoKey).toBe("opencode-go-g");
+    expect(opencodeGo.logoSrc).toBe("/assets/providers/opencode-go-g.svg");
     expect(opencodeZen.logoSrc).toBe(opencode.logoSrc);
 
     const opencodeHash = sha256(readFileSync(path.join(logoDir, "opencode.svg")));
-    const opencodeGoHash = sha256(readFileSync(path.join(logoDir, "opencode-go.svg")));
-    expect(opencodeGoHash).toBe(opencodeHash);
+    const upstreamGoHash = sha256(readFileSync(path.join(logoDir, "opencode-go.svg")));
+    const goGHash = sha256(readFileSync(path.join(logoDir, "opencode-go-g.svg")));
+    expect(upstreamGoHash).toBe(opencodeHash);
+    expect(goGHash).not.toBe(opencodeHash);
+  });
+
+  it("pins the local OpenCode Go artwork provenance and extracts only the G symbol", () => {
+    const overrides = readJson<{
+      repository: string;
+      commit: string;
+      license: string;
+      sourceSpriteSha256: string;
+      logos: Record<
+        string,
+        {
+          label: string;
+          url: string;
+          bytes: number;
+          sha256: string;
+          sourcePath: string;
+          sourceSymbol: string;
+        }
+      >;
+    }>(path.join(logoDir, "local-overrides.json"));
+    expect(overrides.repository).toBe("https://github.com/anomalyco/opencode");
+    expect(overrides.commit).toBe("86976449c40d48f2731553a024f74552593d1764");
+    expect(overrides.license).toBe("MIT");
+    expect(overrides.sourceSpriteSha256).toBe(
+      "90c22219a2aeff3ea489625156530ea0fa8a072a1b934a52a9192074d39237df",
+    );
+
+    const entry = overrides.logos["opencode-go-g"];
+    expect(entry?.label).toBe("OpenCode Go");
+    expect(entry?.url).toBe("/assets/providers/opencode-go-g.svg");
+    expect(entry?.sourcePath).toBe("packages/ui/src/components/provider-icons/sprite.svg");
+    expect(entry?.sourceSymbol).toBe("opencode-go");
+    expect(entry?.bytes).toBe(206);
+    expect(entry?.sha256).toBe("60f3be46aa4b540c24212d12db462a74a5147ed48a3d8116689bfad20598d1e0");
+
+    const file = path.join(logoDir, "opencode-go-g.svg");
+    const bytes = readFileSync(file);
+    expect(bytes.length).toBe(entry?.bytes);
+    expect(sha256(bytes)).toBe(entry?.sha256);
+    const svg = bytes.toString("utf8");
+    expect(svg.match(/<path\b/gu)).toHaveLength(1);
+    expect(svg).toContain('viewBox="0 0 24 24"');
+    expect(svg).toContain('fill="currentColor"');
+    expect(svg).toContain('d="M19.4004 21H5V3H19.4004V6.59961H8.59961');
+    expect(() => inspectSvgSafety(svg, file)).not.toThrow();
+
+    const license = readFileSync(path.join(logoDir, "OPENCODE-MIT.txt"), "utf8");
+    expect(license).toContain("MIT License");
+    expect(license).toContain("Copyright (c) 2025 opencode");
+    const notice = readFileSync(path.join(logoDir, "OPENCODE-NOTICE.md"), "utf8");
+    expect(notice).toContain("86976449c40d48f2731553a024f74552593d1764");
+    expect(notice).toContain("packages/ui/src/components/provider-icons/sprite.svg");
+    expect(notice).toContain("opencode-go");
   });
 
   it.each([
@@ -245,7 +302,7 @@ describe("provider presentation catalog", () => {
     ["kimi", "Kimi Code (CN)", "/assets/providers/kimi-code-plan-cn.svg"],
     ["glm", "Z.ai", "/assets/providers/zai.svg"],
     ["zhipu", "Zhipu", "/assets/providers/zhipuai.svg"],
-    ["opencode-go-subscription", "OpenCode Go", "/assets/providers/opencode-go.svg"],
+    ["opencode-go-subscription", "OpenCode Go", "/assets/providers/opencode-go-g.svg"],
   ])("resolves the explicit internal alias %s", (rawId, label, logoSrc) => {
     const presentation = resolveProviderPresentation(rawId);
     expect(presentation.providerId).toBe(rawId);
@@ -605,8 +662,8 @@ describe("quota card provider logos", () => {
     expect(identity).toContain('class="qg-card__account"');
     expect(identity).toContain("Plus");
     expect(identity).toContain("Work");
-    expect(identity).toContain('data-provider-logo="opencode-go"');
-    expect(identity).toContain("/assets/providers/opencode-go.svg");
+    expect(identity).toContain('data-provider-logo="opencode-go-g"');
+    expect(identity).toContain("/assets/providers/opencode-go-g.svg");
     expect(identity).not.toContain("<svg");
     expect(html).not.toMatch(REMOTE_URL);
     expect(html.indexOf("Five hour window")).toBeLessThan(html.indexOf("Weekly window"));
@@ -620,6 +677,24 @@ describe("quota card provider logos", () => {
     });
     expect(hidden).toContain("Five hour window");
     expect(hidden).not.toContain("Weekly window");
+  });
+
+  it("renders the shared ProviderLogo with the G mark for OpenCode Go and the O mark for OpenCode", async () => {
+    const go = await renderView("/components/provider-logo.tsx", "ProviderLogo", {
+      providerId: "opencode-go",
+    });
+    expect(go).toContain('data-provider-logo="opencode-go-g"');
+    expect(go).toContain("/assets/providers/opencode-go-g.svg");
+    expect(go).not.toContain('/assets/providers/opencode.svg"');
+
+    for (const rawId of ["opencode", "opencode-zen"]) {
+      const open = await renderView("/components/provider-logo.tsx", "ProviderLogo", {
+        providerId: rawId,
+      });
+      expect(open).toContain('data-provider-logo="opencode"');
+      expect(open).toContain("/assets/providers/opencode.svg");
+      expect(open).not.toContain("/assets/providers/opencode-go-g.svg");
+    }
   });
 
   it("keeps card order and hidden-card visibility unchanged", async () => {

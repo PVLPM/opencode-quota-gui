@@ -1,3 +1,4 @@
+import localOverrides from "./assets/provider-logos/local-overrides.json";
 import generatedCatalog from "./provider-logos.generated.json";
 
 /**
@@ -6,8 +7,8 @@ import generatedCatalog from "./provider-logos.generated.json";
  * The catalog is presentation only. It resolves an exact raw provider id to a
  * human label and a local logo URL, while returning the raw id unchanged so
  * analytics identity, route tokens and grouping keys never move. The logo URLs
- * are generated literals from the pinned models.dev sync; this module never
- * builds a path from an id.
+ * are exact literals from the pinned models.dev catalog or the pinned local
+ * override file; this module never builds a path from an id.
  */
 
 export const PROVIDER_LOGO_FALLBACK_KEY = "generic";
@@ -27,6 +28,17 @@ interface ProviderAlias {
 }
 
 const UPSTREAM_LOGOS: Readonly<Record<string, GeneratedLogo>> = generatedCatalog.logos;
+
+/**
+ * Local presentation artwork that replaces an upstream mark by **logo key**,
+ * never by raw provider identity. The upstream file stays vendored so the
+ * models.dev sync and its manifest remain reproducible.
+ */
+const PROVIDER_LOGO_OVERRIDES: Readonly<Record<string, string>> = {
+  "opencode-go": "opencode-go-g",
+};
+
+const LOCAL_LOGOS: Readonly<Record<string, GeneratedLogo>> = localOverrides.logos;
 
 /**
  * Product labels for upstream ids whose internal name differs. These are still
@@ -132,6 +144,16 @@ function fallbackLabel(rawId: string): string {
   return rawId.trim().length === 0 ? "Unknown provider" : rawId;
 }
 
+/** Resolve an upstream logo key through the explicit local override map. */
+function resolveLogo(
+  logoKey: string | undefined,
+): { key: string; logo: GeneratedLogo } | undefined {
+  if (logoKey === undefined) return undefined;
+  const key = ownValue(PROVIDER_LOGO_OVERRIDES, logoKey) ?? logoKey;
+  const logo = ownValue(UPSTREAM_LOGOS, key) ?? ownValue(LOCAL_LOGOS, key);
+  return logo === undefined ? undefined : { key, logo };
+}
+
 /**
  * Resolve presentation for an arbitrary raw provider id. Unknown and empty ids
  * keep their raw identity in `providerId` and use the local neutral fallback.
@@ -139,12 +161,14 @@ function fallbackLabel(rawId: string): string {
 export function resolveProviderPresentation(rawId: string): ProviderPresentation {
   const direct = ownValue(UPSTREAM_LOGOS, rawId);
   if (direct !== undefined) {
-    const logoSrc = safeLogoUrl(direct.url);
+    const target = resolveLogo(rawId);
+    const logoSrc = safeLogoUrl(target?.logo.url);
+    const logoKey = target?.key ?? rawId;
     if (logoSrc !== undefined && !MASK_UNSUITABLE_LOGO_IDS.has(rawId)) {
       return {
         providerId: rawId,
         label: ownValue(PROVIDER_LABEL_OVERRIDES, rawId) ?? direct.label,
-        logoKey: rawId,
+        logoKey,
         logoSrc,
         hasSpecificLogo: true,
       };
@@ -160,14 +184,13 @@ export function resolveProviderPresentation(rawId: string): ProviderPresentation
 
   const alias = ownValue(PROVIDER_ALIASES, rawId);
   if (alias !== undefined) {
-    const target =
-      alias.logoKey === undefined ? undefined : ownValue(UPSTREAM_LOGOS, alias.logoKey);
-    const logoSrc = safeLogoUrl(target?.url);
+    const target = resolveLogo(alias.logoKey);
+    const logoSrc = safeLogoUrl(target?.logo.url);
     if (target !== undefined && logoSrc !== undefined) {
       return {
         providerId: rawId,
         label: alias.label,
-        logoKey: alias.logoKey ?? PROVIDER_LOGO_FALLBACK_KEY,
+        logoKey: target.key,
         logoSrc,
         hasSpecificLogo: true,
       };

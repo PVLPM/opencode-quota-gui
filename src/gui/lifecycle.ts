@@ -50,7 +50,10 @@ import { createDashboardReadSource } from "./sources.js";
 export type DashboardClient = QuotaProviderContext["client"];
 
 /** The read side of the dashboard source this lifecycle needs (P3 producer). */
-export type DashboardReadSource = Pick<DashboardDataSource, "home" | "project" | "session"> & {
+export type DashboardReadSource = Pick<
+  DashboardDataSource,
+  "home" | "project" | "session" | "groups"
+> & {
   quota?(): Promise<QuotaSnapshot>;
   /** One shared analytics refresh per transport tick, when the owner loaded analytics. */
   refreshAnalytics?(): Promise<void>;
@@ -274,6 +277,7 @@ function createDelegatingSource(
     home: async (input) => (await requireSource()).home(input),
     project: async (input) => (await requireSource()).project(input),
     session: async (input) => (await requireSource()).session(input),
+    groups: async (query) => (await requireSource()).groups(query),
     quota: async () => {
       const source = await requireSource();
       // Mirrors `SnapshotService`: a source without quota answers as unavailable.

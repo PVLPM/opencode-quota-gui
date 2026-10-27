@@ -53,7 +53,12 @@ export const SOLID_JSX_SOURCES = [
 const PROVIDER_LOGO_SOURCE_DIR = path.resolve(rootDir, "src/ui/assets/provider-logos");
 const PROVIDER_LOGO_OUT_DIR = path.resolve(rootDir, "dist/ui/assets/providers");
 const PROVIDER_NOTICE_OUT_DIR = path.resolve(rootDir, "dist/provider-logos");
-const PROVIDER_NOTICE_FILES = ["UPSTREAM-MIT.txt", "NOTICE.md"];
+const PROVIDER_NOTICE_FILES = [
+  "UPSTREAM-MIT.txt",
+  "NOTICE.md",
+  "OPENCODE-MIT.txt",
+  "OPENCODE-NOTICE.md",
+];
 const PROVIDER_LOGO_FILE_PATTERN = /^[a-z0-9][a-z0-9.-]*\.svg$/u;
 
 function providerLogoFiles() {

@@ -2,6 +2,8 @@ import { createServer as createNetServer, type Server as NetServer } from "node:
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
   CostedTokens,
   HomeSnapshot,
   ProjectSnapshot,
@@ -99,9 +101,27 @@ function sessionSnapshot(sessionId: string): SessionSnapshot {
   };
 }
 
+function groupSnapshot(query: AnalyticsGroupQuery): AnalyticsGroupSnapshot {
+  return {
+    dimension: query.dimension,
+    range: query.range,
+    window: rangeWindow(query.range, NOW),
+    bucketUnit: rangeBucketUnit(query.range),
+    timeZone: "UTC",
+    ...(query.filter ? { filter: query.filter } : {}),
+    buckets: planRangeBuckets(query.range, NOW).map(({ startMs, endMs }) => ({ startMs, endMs })),
+    totals: costed(0),
+    sessionCount: 0,
+    stepCount: 0,
+    rows: [],
+    series: [],
+    stale: false,
+  };
+}
+
 interface SourceFixture {
   source: SnapshotSource;
-  calls: { home: number; project: number; session: number };
+  calls: { home: number; project: number; session: number; groups: number };
   readonly closes: number;
 }
 
@@ -110,7 +130,7 @@ interface SourceFixture {
  * client dies together with its dashboard lease.
  */
 function buildSource(stopOnClose = false): SourceFixture {
-  const calls = { home: 0, project: 0, session: 0 };
+  const calls = { home: 0, project: 0, session: 0, groups: 0 };
   const state = { closes: 0 };
   const guard = () => {
     if (stopOnClose && state.closes > 0) throw new Error("owner source closed");
@@ -130,6 +150,11 @@ function buildSource(stopOnClose = false): SourceFixture {
       calls.session += 1;
       guard();
       return sessionSnapshot(sessionId);
+    },
+    groups: async (query) => {
+      calls.groups += 1;
+      guard();
+      return groupSnapshot(query);
     },
     close: async () => {
       state.closes += 1;
@@ -263,7 +288,7 @@ describe("dashboard lifecycle across separately loaded module graphs", () => {
     expect(leaseB.port).toBe(port);
     // Graph B attached to A's host instead of racing it for the port.
     expect(serverStarts).toBe(1);
-    expect(sourceB.calls).toEqual({ home: 0, project: 0, session: 0 });
+    expect(sourceB.calls).toEqual({ home: 0, project: 0, session: 0, groups: 0 });
 
     const url = runningUrl(leaseA);
     expect((await fetch(`${url}/api/v1/health`)).status).toBe(200);
@@ -278,7 +303,7 @@ describe("dashboard lifecycle across separately loaded module graphs", () => {
     expect(await tryBind(port)).toBe(false);
     expect((await fetch(`${url}/api/v1/health`)).status).toBe(200);
     expect(sourceA.closes).toBe(1);
-    expect(sourceB.calls).toEqual({ home: 0, project: 0, session: 0 });
+    expect(sourceB.calls).toEqual({ home: 0, project: 0, session: 0, groups: 0 });
     expect(bCreates).toBe(0);
     // A new range bypasses the snapshot cache and proves B's source serves now.
     expect((await fetch(`${url}/api/v1/home?range=30d`)).status).toBe(200);
