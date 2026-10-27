@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -157,7 +157,7 @@ function resolveInSpawnedEnv(root: string, hostile: Record<string, string>) {
   });
 }
 
-async function assertHostileCasingIsolated(casing: HostileCasing): Promise<void> {
+async function assertHostileCasingsIsolated(): Promise<void> {
   const { resolveBuildIdentity } = await generator();
   const parent = fixture();
   const child = fixture();
@@ -167,40 +167,48 @@ async function assertHostileCasingIsolated(casing: HostileCasing): Promise<void>
   const productBefore = headAndIndex(repoRoot);
   const childHead = git(child, ["rev-parse", "HEAD"]);
   const childBuild = git(child, ["rev-parse", "--short=12", "HEAD"]);
-  let failure: unknown;
-  try {
-    withHostileGitEnv(casing.keys(parent), () => {
-      // Spawned env object: the casing survives the Windows env block; the shipped helper
-      // must still resolve the child, not the parent named by the hostile GIT_* values.
-      const spawned = resolveInSpawnedEnv(child, casing.keys(parent));
-      expect(spawned.status, spawned.stderr).toBe(0);
-      expect(JSON.parse(spawned.stdout)).toEqual({ version: "1.0.0", build: childBuild });
+  const failures: { label: string; error: unknown }[] = [];
 
-      // Fixture command env path: commits stay in the child while the inherited env is hostile.
-      const stubbedChild = fixture();
-      expect(git(stubbedChild, ["rev-parse", "--show-toplevel"]).replaceAll("\\", "/")).toBe(
-        stubbedChild.replaceAll("\\", "/"),
-      );
-      expect(resolveBuildIdentity(stubbedChild, {})).toEqual({
-        version: "1.0.0",
-        build: git(stubbedChild, ["rev-parse", "--short=12", "HEAD"]),
-      });
+  // Every casing isolates the same environment variables, so one set of fixtures covers all
+  // three; only the env spelling differs and that is what each iteration exercises.
+  for (const casing of HOSTILE_CASINGS) {
+    try {
+      withHostileGitEnv(casing.keys(parent), () => {
+        // Spawned env object: the casing survives the Windows env block; the shipped helper
+        // must still resolve the child, not the parent named by the hostile GIT_* values.
+        const spawned = resolveInSpawnedEnv(child, casing.keys(parent));
+        expect(spawned.status, spawned.stderr).toBe(0);
+        expect(JSON.parse(spawned.stdout)).toEqual({ version: "1.0.0", build: childBuild });
 
-      // No git in the source archive: fail closed instead of borrowing the parent HEAD.
-      expect(() => resolveBuildIdentity(archive, {})).toThrow(/identity/);
-      expect(resolveBuildIdentity(archive, { CI_COMMIT_SHA: "b".repeat(40) })).toEqual({
-        version: "1.0.0",
-        build: "b".repeat(12),
+        // Fixture command env path: commits stay in the child while the inherited env is hostile.
+        // realpath collapses the 8.3 temp root and git's long, forward-slash toplevel to one spelling.
+        expect(realpathSync.native(git(child, ["rev-parse", "--show-toplevel"]))).toBe(
+          realpathSync.native(child),
+        );
+        expect(resolveBuildIdentity(child, {})).toEqual({ version: "1.0.0", build: childBuild });
+
+        // No git in the source archive: fail closed instead of borrowing the parent HEAD.
+        expect(() => resolveBuildIdentity(archive, {})).toThrow(/identity/);
+        expect(resolveBuildIdentity(archive, { CI_COMMIT_SHA: "b".repeat(40) })).toEqual({
+          version: "1.0.0",
+          build: "b".repeat(12),
+        });
       });
-    });
-  } catch (error) {
-    failure = error;
+    } catch (error) {
+      failures.push({ label: casing.label, error });
+    }
   }
 
   expect(childHead).toMatch(/^[a-f0-9]{40}$/);
   expect(headAndIndex(parent)).toEqual(parentBefore);
   expect(headAndIndex(repoRoot)).toEqual(productBefore);
-  if (failure) throw failure;
+  if (failures.length > 0) {
+    const [{ label, error }] = failures;
+    throw new Error(
+      `${label} GIT_* casing failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 describe("build identity generation", () => {
@@ -288,10 +296,8 @@ describe("build identity generation", () => {
     );
   });
 
-  it.each(
-    HOSTILE_CASINGS,
-  )("ignores $label hook GIT_* variables instead of borrowing a parent repository", async (casing) => {
-    await assertHostileCasingIsolated(casing);
+  it("ignores hook GIT_* variables in uppercase, lowercase, and mixed case", async () => {
+    await assertHostileCasingsIsolated();
   });
 
   it("writes a packed browser-safe literal that survives losing git and package.json", async () => {

@@ -255,6 +255,37 @@ describe("privacy of the build evidence", () => {
     );
   });
 
+  it("normalizes each id against the repo root's own path universe on any host", () => {
+    const posixRoot = "/home/someone/opencode-projects/opencode-quota-gui";
+    // A POSIX build's ids stay repo-relative even when the tests run on Windows.
+    expect(normalizeModuleId(`${posixRoot}/src/ui/main.tsx`, posixRoot)).toBe("src/ui/main.tsx");
+    expect(
+      normalizeModuleId(
+        `${posixRoot}/node_modules/.pnpm/@kobalte+core@0.13.13_solid-js@1.9.12/node_modules/@kobalte/core/dist/chunk/X.jsx`,
+        posixRoot,
+      ),
+    ).toBe("node_modules/@kobalte/core/dist/chunk/X.jsx");
+    expect(normalizeModuleId("src/ui/app.tsx?v=1", posixRoot)).toBe("src/ui/app.tsx");
+
+    // A Windows id cannot be inside a POSIX checkout: it collapses instead of
+    // leaking a drive letter or a home directory segment.
+    expect(normalizeModuleId(`${windowsRoot}\\src\\ui\\main.tsx`, posixRoot)).toBe(
+      "external/ui/main.tsx",
+    );
+    for (const id of [
+      `${windowsRoot}\\src\\ui\\main.tsx`,
+      "D:\\builds\\cache\\node_modules\\@kobalte\\utils\\dist\\x.js",
+      "C:\\Users\\someone\\.pnpm-store\\v3\\files\\aa\\@opencode\\ui\\src\\index.tsx",
+    ]) {
+      const normalized = normalizeModuleId(id, posixRoot);
+      expect(checkPrivatePaths([{ fileName: "module-id", text: normalized }])).toEqual([]);
+      expect(normalized.startsWith("external/")).toBe(true);
+      expect(normalized).not.toMatch(/^[A-Za-z]:[\\/]/);
+      expect(normalized).not.toContain("/Users/");
+      expect(normalized).not.toContain("/home/");
+    }
+  });
+
   it("recognizes the private paths that must never ship, and ignores URL schemes", () => {
     const find = (text: string) => checkPrivatePaths([{ fileName: "asset.js", text }]);
     expect(find("const a = 1;")).toEqual([]);

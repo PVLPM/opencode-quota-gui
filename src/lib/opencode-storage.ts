@@ -2,6 +2,12 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 
 import { getOpenCodeDbPath } from "./opencode-db-path.js";
 import { openOpenCodeSqliteReadOnly, type SqliteConn } from "./opencode-sqlite.js";
+import {
+  chunkArray,
+  SCOPED_QUERY_ARG_BUDGET,
+  type StorageIdScope,
+  scopedIdQueries,
+} from "./scoped-query-chunks.js";
 import { type ForkOwnerCandidate, selectForkOwners } from "./usage-ownership.js";
 
 /**
@@ -106,10 +112,6 @@ type SessionRow = {
 /** Row shape of `PRAGMA table_info(...)`, used for R46 feature detection. */
 type TableInfoRow = { name: unknown };
 
-// Stay comfortably below SQLite's default host-parameter cap once optional
-// time filters are included in the query.
-const SQLITE_MAX_MESSAGE_QUERY_ARGS = 900;
-
 function normalizeNumber(n: unknown): number | undefined {
   return typeof n === "number" && Number.isFinite(n) ? n : undefined;
 }
@@ -186,14 +188,6 @@ function normalizeSessionIdsOrThrow(sessionIDs: readonly string[]): string[] {
   }
 
   return unique;
-}
-
-function chunkArray<T>(items: readonly T[], chunkSize: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize));
-  }
-  return chunks;
 }
 
 function guardedJsonScalar(path: string): string {
@@ -434,13 +428,6 @@ function dedupeStrings(values: readonly string[]): string[] {
   return out;
 }
 
-/** One session/message id scope shared by all scoped readers. */
-interface StorageIdScope {
-  sessionID?: string;
-  sessionIDs?: string[];
-  messageIDs?: string[];
-}
-
 type StorageScope = { kind: "all" } | { kind: "scope"; ids: StorageIdScope } | { kind: "empty" };
 
 /**
@@ -470,50 +457,6 @@ function normalizeStorageScope(params: {
     return { kind: "all" };
   }
   return { kind: "scope", ids };
-}
-
-/**
- * Chunk one scope into queries under a bind-argument budget. `messageIDs` and
- * session ids combine with AND semantics; when both lists are present they are
- * chunked together so every emitted query stays within the budget.
- */
-function scopedIdQueries<T>(
-  ids: StorageIdScope,
-  budget: number,
-  build: (clause: StorageIdScope) => T,
-): T[] {
-  const queries: T[] = [];
-  const { sessionID, sessionIDs, messageIDs } = ids;
-
-  if (messageIDs === undefined) {
-    if (sessionID !== undefined) return [build({ sessionID })];
-    if (sessionIDs !== undefined) {
-      for (const chunk of chunkArray(sessionIDs, budget)) {
-        queries.push(build({ sessionIDs: chunk }));
-      }
-    }
-    return queries;
-  }
-
-  if (sessionID !== undefined) {
-    for (const chunk of chunkArray(messageIDs, Math.max(1, budget - 1))) {
-      queries.push(build({ sessionID, messageIDs: chunk }));
-    }
-    return queries;
-  }
-
-  if (sessionIDs === undefined) {
-    for (const chunk of chunkArray(messageIDs, budget)) queries.push(build({ messageIDs: chunk }));
-    return queries;
-  }
-
-  for (const messageChunk of chunkArray(messageIDs, Math.max(1, budget - 1))) {
-    const remaining = Math.max(1, budget - messageChunk.length);
-    for (const sessionChunk of chunkArray(sessionIDs, remaining)) {
-      queries.push(build({ sessionIDs: sessionChunk, messageIDs: messageChunk }));
-    }
-  }
-  return queries;
 }
 
 function countDefined(values: readonly unknown[]): number {
@@ -739,7 +682,7 @@ export async function iterAssistantMessagesForSessions(params: {
     if (!(await hasJsonExtract(conn))) return [];
     const reservedArgs =
       (typeof params.sinceMs === "number" ? 1 : 0) + (typeof params.untilMs === "number" ? 1 : 0);
-    const maxSessionIdsPerQuery = Math.max(1, SQLITE_MAX_MESSAGE_QUERY_ARGS - reservedArgs);
+    const maxSessionIdsPerQuery = Math.max(1, SCOPED_QUERY_ARG_BUDGET - reservedArgs);
     const messages: OpenCodeMessage[] = [];
 
     for (const sessionIdChunk of chunkArray(sessionIDs, maxSessionIdsPerQuery)) {
@@ -936,7 +879,7 @@ function readCompletedAssistantRowsFrom(
     params.completedUntilMs,
     params.completedAtTimes,
   ]);
-  const maxIdsPerQuery = Math.max(1, SQLITE_MAX_MESSAGE_QUERY_ARGS - reservedArgs);
+  const maxIdsPerQuery = Math.max(1, SCOPED_QUERY_ARG_BUDGET - reservedArgs);
   const out: OpenCodeRawAssistantRow[] = [];
 
   const collect = (query: { sql: string; args: unknown[] }): void => {
@@ -1095,7 +1038,7 @@ function readCompactionMarkersFrom(
   const markers: OpenCodeCompactionMarker[] = [];
   const maxIdsPerQuery = Math.max(
     1,
-    SQLITE_MAX_MESSAGE_QUERY_ARGS - countDefined([params.sinceMs, params.untilMs]),
+    SCOPED_QUERY_ARG_BUDGET - countDefined([params.sinceMs, params.untilMs]),
   );
 
   const collect = (query: { sql: string; args: unknown[] }): void => {
@@ -1281,7 +1224,7 @@ function readMessageRevisionsFrom(
       : undefined;
   const maxIdsPerQuery = Math.max(
     1,
-    SQLITE_MAX_MESSAGE_QUERY_ARGS - (updatedDelta === undefined ? 0 : 1),
+    SCOPED_QUERY_ARG_BUDGET - (updatedDelta === undefined ? 0 : 1),
   );
 
   const build = (scopeClause?: StorageIdScope): { sql: string; args: unknown[] } => {
@@ -1399,11 +1342,14 @@ export async function readMessageRevisions(
 /**
  * Local-only source identity for worker cache invalidation; never browser data.
  *
- * The stable comparison key is the file identity (`device` + `inode`, falling
- * back to `realPath` + `birthtimeMs`) plus the readable schema layout token —
- * never `sizeBytes`/`mtimeMs`, which change on ordinary writes and WAL
- * checkpoints and must not trigger a rebuild. `sizeBytes`/`mtimeMs` are kept
- * as informational metadata for existing consumers.
+ * The stable comparison key is the file identity plus the readable schema
+ * layout token — never `sizeBytes`/`mtimeMs`, which change on ordinary writes
+ * and WAL checkpoints and must not trigger a rebuild. `device` + `inode`
+ * identify the file; `birthtimeMs` distinguishes a recreated file that reused
+ * the same inode (common when a database is deleted and immediately rewritten
+ * on Linux filesystems). When device/inode are unavailable the key falls back
+ * to `realPath` + `birthtimeMs`. `sizeBytes`/`mtimeMs` are kept as
+ * informational metadata for existing consumers.
  */
 export type OpenCodeSourceIdentityStatus = "ok" | "missing" | "unreadable";
 
@@ -1423,7 +1369,10 @@ export interface OpenCodeSourceIdentity {
   device?: string;
   /** Stable `stat.ino` (file id), decimal string, when available and non-zero. */
   inode?: string;
-  /** Creation time in ms; stable fallback key when device/inode are unavailable. */
+  /**
+   * Creation time in ms; replacement evidence when device/inode are present,
+   * or the fallback key when they are not.
+   */
   birthtimeMs?: number;
   /** Sorted column layout of the OpenCode tables, read from the database. */
   schemaToken?: string;
@@ -1432,8 +1381,19 @@ export interface OpenCodeSourceIdentity {
 /** Explicit comparison outcome for `compareOpenCodeSourceIdentity`. */
 export type OpenCodeSourceIdentityComparison = "same" | "changed" | "unavailable" | "unknown";
 
+/**
+ * Stable file key. `device` + `inode` identify the file; a positive finite
+ * `birthtimeMs` additionally distinguishes a recreated file that reused the
+ * same inode, which Linux ext4/overlayfs does after delete + recreate. The
+ * `realPath` + `birthtimeMs` fallback is used only when device/inode are
+ * unavailable. `undefined` means the platform exposed no stable file key.
+ */
 function fileIdentityKey(identity: OpenCodeSourceIdentity): string | undefined {
   if (identity.device !== undefined && identity.inode !== undefined && identity.inode !== "0") {
+    const birthtimeMs = identity.birthtimeMs;
+    if (birthtimeMs !== undefined && Number.isFinite(birthtimeMs) && birthtimeMs > 0) {
+      return `d:${identity.device}:${identity.inode}:${birthtimeMs}`;
+    }
     return `d:${identity.device}:${identity.inode}`;
   }
   if (identity.birthtimeMs !== undefined) {
@@ -1447,11 +1407,13 @@ function fileIdentityKey(identity: OpenCodeSourceIdentity): string | undefined {
  *
  * - `unavailable`: the latest read could not reach a readable file. Keep the
  *   current good state (and the last good identity) untouched.
- * - `changed`: stable file identity or schema layout changed (reset,
- *   replacement, deletion+recreate). Rebuild from scratch.
- * - `unknown`: the platform did not expose a stable file key. Callers should
- *   treat this as unchanged to avoid rebuild churn on content writes.
- * - `same`: content may have changed; reconcile through the revision diff.
+ * - `changed`: the file identity (device, inode, and birthtime when exposed)
+ *   or the schema layout changed — including a delete+recreate that reused an
+ *   inode. Rebuild from scratch.
+ * - `unknown`: the platform exposed no stable file key. Callers should treat
+ *   this as unchanged to avoid rebuild churn on content writes.
+ * - `same`: same file and schema; content may have changed, so reconcile
+ *   through the revision diff rather than rebuilding.
  */
 export function compareOpenCodeSourceIdentity(
   previous: OpenCodeSourceIdentity | undefined,

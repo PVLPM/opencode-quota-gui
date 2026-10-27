@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -20,6 +20,29 @@ function git(root, args) {
     stdio: ["ignore", "pipe", "pipe"],
     env,
   }).trim();
+}
+
+/**
+ * Windows hands out 8.3 paths (`C:\Users\RUNNER~1\...`) from tmpdir() while git prints the long
+ * canonical form, so compare the real on-disk path when it exists. Nonexistent paths (a source
+ * archive's parent) fall back to the plain resolution for the caller's comparison.
+ */
+function canonicalPath(value) {
+  const resolved = resolve(value);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function samePath(a, b) {
+  const left = canonicalPath(a);
+  const right = canonicalPath(b);
+  // Windows paths are case-insensitive and drive-letter casing varies between short and long forms.
+  if (process.platform === "win32")
+    return left.replaceAll("\\", "/").toLowerCase() === right.replaceAll("\\", "/").toLowerCase();
+  return left === right;
 }
 
 /** Only public, bounded literals are allowed across the build/browser seam. */
@@ -46,7 +69,7 @@ export function resolveBuildIdentity(root, env = process.env) {
   let dirty = false;
   try {
     // Do not borrow a parent repository's HEAD for a source archive.
-    if (resolve(git(root, ["rev-parse", "--show-toplevel"])) !== resolve(root)) {
+    if (!samePath(git(root, ["rev-parse", "--show-toplevel"]), root)) {
       throw new Error("Not the build repository");
     }
     sha ??= git(root, ["rev-parse", "--short=12", "HEAD"]);

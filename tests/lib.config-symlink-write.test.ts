@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -19,12 +20,13 @@ import {
   applyConfigDocumentEdit,
   planConfigDocumentEdit,
 } from "../src/lib/opencode-config-editor.js";
-import { applyScopedUpdatePlan, planScopedUpdate } from "../src/lib/scoped-update.js";
+import {
+  applyScopedUpdatePlan,
+  planScopedUpdate,
+  QUOTA_LATEST_SPEC,
+} from "../src/lib/scoped-update.js";
 
 import { symlinkOrSkip } from "./helpers/symlink-capability.js";
-
-// These tests pin the explicit spec override; without one, update uses the canonical release tag.
-const EXPLICIT_UPDATE_SPEC = "file:./opencode-quota-gui-5.0.0.tgz";
 
 const tempDirs: string[] = [];
 
@@ -231,24 +233,20 @@ describe("scoped update symlink writes", () => {
     const root = makeTempDir();
     const project = join(root, "project");
     const real = join(root, "dotfiles", "opencode.json");
-    const cache = join(root, "cache", "opencode", "packages", "@slkiser", "opencode-quota@latest");
+    const cache = join(root, "cache", "opencode", "packages", "opencode-quota-gui@latest");
     mkdirSync(join(project, ".git"), { recursive: true });
     mkdirSync(join(root, "dotfiles"), { recursive: true });
-    writeFileSync(
-      real,
-      '{"plugin":["@slkiser/opencode-quota@latest","@slkiser/opencode-quota@3.11.1"]}\n',
-    );
+    writeFileSync(real, '{"plugin":["opencode-quota-gui@latest","opencode-quota-gui@3.11.1"]}\n');
     if (!symlinkOrSkip(context, real, join(project, "opencode.json"))) return;
-    const manifest = join(cache, "node_modules", "@slkiser", "opencode-quota", "package.json");
+    const manifest = join(cache, "node_modules", "opencode-quota-gui", "package.json");
     mkdirSync(join(manifest, ".."), { recursive: true });
-    writeFileSync(manifest, '{"name":"@slkiser/opencode-quota"}\n');
+    writeFileSync(manifest, '{"name":"opencode-quota-gui"}\n');
 
     const env = {
       XDG_CONFIG_HOME: join(root, "config"),
       XDG_CACHE_HOME: join(root, "cache"),
       XDG_DATA_HOME: join(root, "data"),
       XDG_STATE_HOME: join(root, "state"),
-      OPENCODE_QUOTA_PLUGIN_SPEC: EXPLICIT_UPDATE_SPEC,
     } satisfies NodeJS.ProcessEnv;
     const plan = await planScopedUpdate({
       cwd: project,
@@ -261,7 +259,7 @@ describe("scoped update symlink writes", () => {
     const result = await applyScopedUpdatePlan(plan);
     expect(result.writtenPaths).toEqual([join(project, "opencode.json")]);
     expect(lstatSync(join(project, "opencode.json")).isSymbolicLink()).toBe(true);
-    expect(readFileSync(real, "utf8")).toContain(EXPLICIT_UPDATE_SPEC);
+    expect(readFileSync(real, "utf8")).toContain(QUOTA_LATEST_SPEC);
     expect(result.removedCachePaths).toContain(cache);
     expect(existsSync(cache)).toBe(false);
   });
@@ -271,23 +269,22 @@ describe("scoped update symlink writes", () => {
     const project = join(root, "project");
     const real = join(root, "dotfiles", "opencode.json");
     const other = join(root, "other.json");
-    const cache = join(root, "cache", "opencode", "packages", "@slkiser", "opencode-quota@latest");
+    const cache = join(root, "cache", "opencode", "packages", "opencode-quota-gui@latest");
     mkdirSync(join(project, ".git"), { recursive: true });
     mkdirSync(join(root, "dotfiles"), { recursive: true });
-    writeFileSync(real, '{"plugin":["@slkiser/opencode-quota@3.11.1"]}\n');
-    writeFileSync(other, '{"plugin":["@slkiser/opencode-quota@3.11.1"]}\n');
+    writeFileSync(real, '{"plugin":["opencode-quota-gui@3.11.1"]}\n');
+    writeFileSync(other, '{"plugin":["opencode-quota-gui@3.11.1"]}\n');
     const link = join(project, "opencode.json");
     if (!symlinkOrSkip(context, real, link)) return;
-    const manifest = join(cache, "node_modules", "@slkiser", "opencode-quota", "package.json");
+    const manifest = join(cache, "node_modules", "opencode-quota-gui", "package.json");
     mkdirSync(join(manifest, ".."), { recursive: true });
-    writeFileSync(manifest, '{"name":"@slkiser/opencode-quota"}\n');
+    writeFileSync(manifest, '{"name":"opencode-quota-gui"}\n');
 
     const env = {
       XDG_CONFIG_HOME: join(root, "config"),
       XDG_CACHE_HOME: join(root, "cache"),
       XDG_DATA_HOME: join(root, "data"),
       XDG_STATE_HOME: join(root, "state"),
-      OPENCODE_QUOTA_PLUGIN_SPEC: EXPLICIT_UPDATE_SPEC,
     } satisfies NodeJS.ProcessEnv;
     const plan = await planScopedUpdate({
       cwd: project,
@@ -301,6 +298,8 @@ describe("scoped update symlink writes", () => {
     await expect(applyScopedUpdatePlan(plan)).rejects.toThrow(/write target changed/);
     expect(existsSync(manifest)).toBe(true);
     expect(readFileSync(real, "utf8")).toContain("@3.11.1");
+    expect(readFileSync(other, "utf8")).toContain("@3.11.1");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(realpathSync(other));
   });
 });
