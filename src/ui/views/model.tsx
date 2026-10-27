@@ -11,7 +11,7 @@ import { AnalyticsBreakdown } from "../components/analytics-breakdown";
 import { ChartSummary, type ChartSummaryItem } from "../components/chart-shell";
 import { CostInfo, EstimateNote } from "../components/cost-estimate";
 import { ModelUsageChart } from "../components/model-usage-chart";
-import { formatApiEquivalentCost, formatExactCount, formatPercentExact } from "../format";
+import { formatApiEquivalentCostText, formatExactCount, formatPercentExact } from "../format";
 import {
   type BreakdownSort,
   identityLabel,
@@ -51,7 +51,10 @@ export function ModelDetailView(props: {
       },
       {
         label: "API-equivalent estimate",
-        value: formatApiEquivalentCost(props.snapshot.totals.apiEquivalentCostUsd),
+        value: formatApiEquivalentCostText(
+          props.snapshot.totals.apiEquivalentCostUsd,
+          props.snapshot.totals.total,
+        ),
         info: <CostInfo />,
         note: <EstimateNote totals={props.snapshot.totals} />,
         title:
@@ -101,8 +104,11 @@ export function ModelDetailView(props: {
         headingId="qg-model-usage"
         summary={<ChartSummary items={summaryItems()} />}
         activeSeries={inspection.active()}
+        pinnedSeries={inspection.pinned()}
         onPointerSeries={inspection.inspectPointer}
         onFocusSeries={inspection.inspectFocus}
+        onTogglePinnedSeries={inspection.togglePinned}
+        onClearPinnedSeries={inspection.clearPinned}
       />
       <AnalyticsBreakdown
         headingId="qg-model-breakdown"

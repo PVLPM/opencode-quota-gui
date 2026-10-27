@@ -785,6 +785,19 @@ export interface OpenCodeRawAssistantRow {
   agent?: string;
 }
 
+/**
+ * True when a completed assistant row carries at least one non-zero additive
+ * token category. Zero-token rows are metadata/activity, not usage: analytics
+ * excludes them from ownership, pricing, groups, and activity extents while
+ * retaining their session/project metadata.
+ */
+export function rawAssistantRowHasTokenUsage(
+  row: Pick<OpenCodeRawAssistantRow, "tokens">,
+): boolean {
+  const { input, output, reasoning, cacheRead, cacheWrite } = row.tokens;
+  return input !== 0 || output !== 0 || reasoning !== 0 || cacheRead !== 0 || cacheWrite !== 0;
+}
+
 /** `project` + `project_directory` + `worktree` metadata (R46). */
 export interface OpenCodeProjectInfo {
   id: string;

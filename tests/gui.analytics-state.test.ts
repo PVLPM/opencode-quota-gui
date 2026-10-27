@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { HomeSnapshot, SessionSnapshot } from "../src/contracts/dashboard.js";
 import {
   ANALYTICS_PRESENTATION_SESSION_LIMIT,
+  ANALYTICS_PRESENTATION_VERSION,
   ANALYTICS_SNAPSHOT_SCHEMA,
   ANALYTICS_SNAPSHOT_VERSION,
   type AnalyticsState,
@@ -382,6 +383,23 @@ describe("analytics snapshot codec v3", () => {
       "ses_8",
       "ses_9",
     ]);
+  });
+
+  it("rejects legacy warm DTO sidecars written before zero-token semantics", () => {
+    const state = withRows();
+    state.presentation = { home: { "24h": homeSnapshot("24h") }, project: [] };
+    const encoded = encodeAnalyticsPresentation(state, NOW);
+    expect(encoded.presentationVersion).toBe(ANALYTICS_PRESENTATION_VERSION);
+
+    const legacy = JSON.parse(JSON.stringify(encoded)) as Record<string, unknown>;
+    delete legacy.presentationVersion;
+    expect(decodeAnalyticsPresentation(legacy)).toBeUndefined();
+    expect(
+      decodeAnalyticsPresentation({
+        ...legacy,
+        presentationVersion: ANALYTICS_PRESENTATION_VERSION - 1,
+      }),
+    ).toBeUndefined();
   });
 
   it("reads legacy tokenless presentations but rejects invalid identity tokens", () => {

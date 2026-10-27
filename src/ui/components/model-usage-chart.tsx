@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { createMemo, For, Show } from "solid-js";
+import { createMemo, For, onCleanup, onMount, Show } from "solid-js";
 import type {
   AnalyticsDimension,
   AnalyticsGroupSnapshot,
@@ -10,7 +10,8 @@ import { createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
 import {
   axisRangeCaption,
-  formatApiEquivalentCost,
+  formatApiEquivalentCostText,
+  formatApiEquivalentCostTick,
   formatBucketEnd,
   formatBucketRange,
   formatBucketTick,
@@ -20,12 +21,22 @@ import {
 import {
   combineEstimates,
   disambiguatedIdentityLabel,
+  entityKey,
   estimateNote,
+  estimateNoteTitle,
+  exactCostTitle,
+  oppositeDimension,
   rankSeries,
   seriesColorVar,
   seriesKey,
 } from "../model-analytics";
+import {
+  buildChildCompositionSlices,
+  type ChildCompositionSlice,
+} from "../model-chart-composition";
 import { buildModelChartGeometry, DEFAULT_MODEL_USAGE_SIZE } from "../model-chart-geometry";
+import { buildModelCostOverlayGeometry } from "../model-cost-overlay";
+import type { SeriesChildSelection } from "../series-inspection";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell } from "./chart-shell";
 import { EstimateNote } from "./cost-estimate";
@@ -37,9 +48,15 @@ import { EmptyNotice, ErrorCard, Skeleton } from "./states";
  *
  * One stacked bar per range bucket; each segment is one ranked series. The
  * series order is token-only and always independent of the breakdown's sort.
- * The legend sits below the plot, is reachable with Tab, and highlights its
- * matching bars and breakdown rows while focused. Emphasis uses opacity and a
- * border/underline change, so it never depends on colour alone.
+ * A thin API-equivalent cost line shares the bucket slots on a right axis, with
+ * unpriced buckets left as gaps. The line is always the bucket total across all
+ * visible series; legend hover/focus emphasizes the bars and rows and quiets
+ * the line's stroke so a small highlighted bar stays legible. While a parent
+ * series is active, its buckets subdivide into opposite-dimension children in
+ * the parent's own colour; the parent envelope never moves. The
+ * legend reuses the daily token-usage legend: native toggle buttons with a
+ * swatch, label and metric, and a visible focus ring. Emphasis uses opacity
+ * so it never depends on colour alone.
  */
 export function ModelUsageChart(props: {
   snapshot?: AnalyticsGroupSnapshot;
@@ -51,8 +68,14 @@ export function ModelUsageChart(props: {
   error?: string;
   onRetry?: () => void;
   activeSeries?: string;
+  /** Transient child emphasis that follows the active parent series. */
+  activeChild?: SeriesChildSelection;
+  /** Legend entry pinned by click; hover/focus still take precedence. */
+  pinnedSeries?: string;
   onPointerSeries?: (key: string | undefined) => void;
   onFocusSeries?: (key: string | undefined) => void;
+  onTogglePinnedSeries?: (key: string) => void;
+  onClearPinnedSeries?: () => void;
 }): JSX.Element {
   const ranked = createMemo(() => {
     const snapshot = props.snapshot;
@@ -64,6 +87,11 @@ export function ModelUsageChart(props: {
   const activeBucket = inspection.active;
   const { size, ref } = createChartLayout(DEFAULT_MODEL_USAGE_SIZE);
   const geometry = createMemo(() => buildModelChartGeometry(ranked(), buckets(), size));
+  // The cost line is always the visible bucket total, never narrowed by legend
+  // hover/focus; the popup remains the place to inspect per-series cost.
+  const costOverlay = createMemo(() =>
+    buildModelCostOverlayGeometry(ranked(), buckets(), geometry()),
+  );
   const tooltipLayout = createChartTooltipLayout(
     () => {
       const index = activeBucket();
@@ -76,6 +104,18 @@ export function ModelUsageChart(props: {
   const activatePointer = (key: string | undefined): void => props.onPointerSeries?.(key);
   const activateFocus = (key: string | undefined): void => props.onFocusSeries?.(key);
   const activeKey = () => props.activeSeries;
+  let legendElement: HTMLUListElement | undefined;
+  onMount(() => {
+    if (typeof document === "undefined") return;
+    const onDocumentClick = (event: MouseEvent) => {
+      if (props.pinnedSeries === undefined) return;
+      const target = event.target;
+      if (target instanceof Node && legendElement?.contains(target)) return;
+      props.onClearPinnedSeries?.();
+    };
+    document.addEventListener("click", onDocumentClick);
+    onCleanup(() => document.removeEventListener("click", onDocumentClick));
+  });
   const errorMessage = () => (props.loading === true ? undefined : props.error);
   const highlighted = (key: string): string | undefined =>
     activeKey() === undefined ? undefined : activeKey() === key ? "true" : "false";
@@ -97,16 +137,46 @@ export function ModelUsageChart(props: {
       ? "Other"
       : disambiguatedIdentityLabel(entry.identity, dimension(), entityPeers());
 
+  const seriesFill = (seriesIndex: number, kind: AnalyticsSeries["kind"]): string =>
+    `var(${seriesColorVar(seriesIndex, kind)})`;
+  const activeChildSelection = createMemo((): SeriesChildSelection | undefined => {
+    const key = activeKey();
+    const selection = props.activeChild;
+    if (key === undefined || selection?.seriesKey !== key) return undefined;
+    const entry = ranked().find((candidate) => seriesKey(candidate, dimension()) === key);
+    const childDimension = oppositeDimension(dimension());
+    const exists = entry?.childBuckets?.some((bucket) =>
+      bucket.some((child) => entityKey(childDimension, child.identity) === selection.childKey),
+    );
+    return exists === true ? selection : undefined;
+  });
+  const childEmphasis = (): string | undefined =>
+    activeChildSelection() === undefined ? undefined : "true";
+
   const bucketEntries = (index: number) =>
     ranked()
-      .map((entry, seriesIndex) => ({
-        entry,
-        seriesIndex,
-        key: seriesKey(entry, dimension()),
-        label: labelFor(entry),
-        tokens: entry.buckets[index],
-        total: entry.buckets[index]?.total ?? 0,
-      }))
+      .map((entry, seriesIndex) => {
+        const tokens = entry.buckets[index];
+        const partial = tokens !== undefined && estimateNote(tokens) === "Partial estimate";
+        return {
+          entry,
+          seriesIndex,
+          key: seriesKey(entry, dimension()),
+          label: labelFor(entry),
+          tokens,
+          total: tokens?.total ?? 0,
+          cost: tokens?.apiEquivalentCostUsd ?? null,
+          partial,
+          costTitle:
+            tokens === undefined
+              ? "No usage in this bucket."
+              : tokens.apiEquivalentCostUsd === null
+                ? estimateNoteTitle(tokens)
+                : partial
+                  ? estimateNoteTitle(tokens)
+                  : exactCostTitle(tokens),
+        };
+      })
       .filter((row) => row.total > 0);
 
   const bucketEstimate = (index: number) => {
@@ -121,22 +191,29 @@ export function ModelUsageChart(props: {
     return index === undefined ? undefined : buckets()[index];
   };
 
-  const bucketLabel = (index: number): string => {
+  const bucketRange = (index: number): string => {
     const boundary = buckets()[index];
+    return formatBucketRange(
+      boundary?.startMs ?? 0,
+      boundary?.endMs ?? 0,
+      bucketUnit(),
+      timeZone(),
+      " to ",
+    );
+  };
+
+  const bucketLabel = (index: number): string => {
     const estimate = bucketEstimate(index);
-    const parts = bucketEntries(index).map((row) => `${row.label} ${formatExactCount(row.total)}`);
+    const parts = bucketEntries(index).map(
+      (row) =>
+        `${row.label} ${formatExactCount(row.total)} tokens, ${formatApiEquivalentCostText(row.cost, row.total)}`,
+    );
     return [
-      formatBucketRange(
-        boundary?.startMs ?? 0,
-        boundary?.endMs ?? 0,
-        bucketUnit(),
-        timeZone(),
-        " to ",
-      ),
+      bucketRange(index),
       `total ${formatExactCount(estimate.total)} tokens`,
       ...parts,
-      `API-equivalent ${formatApiEquivalentCost(estimate.apiEquivalentCostUsd)}`,
-      estimateNote(estimate) ?? "",
+      `API-equivalent total ${formatApiEquivalentCostText(estimate.apiEquivalentCostUsd, estimate.total)}`,
+      estimateNote(estimate) === "Partial estimate" ? "Partial estimate" : "",
     ]
       .filter((part) => part.length > 0)
       .join(", ");
@@ -161,40 +238,55 @@ export function ModelUsageChart(props: {
       bodyClass="qg-usage qg-model-chart"
       aside={
         <Show when={ranked().length > 0}>
-          <ul class="qg-legend qg-model-legend" aria-label={`${dimension()} series`}>
+          <ul
+            class="qg-legend"
+            aria-label={`${dimension()} series`}
+            ref={(element) => {
+              legendElement = element;
+            }}
+          >
             <For each={ranked()}>
               {(entry, index) => {
                 const key = () => seriesKey(entry, dimension());
                 const label = () => labelFor(entry);
                 return (
-                  <li
-                    class="qg-legend__item qg-legend__item--series"
-                    data-series-key={key()}
-                    data-active={activeKey() === key() ? "true" : undefined}
-                    aria-label={`Highlight ${label()}, ${formatExactCount(entry.tokens.total)} tokens`}
-                    // biome-ignore lint/a11y/noNoninteractiveTabindex: the legend entry is a keyboard focus target for series emphasis, not an activation action.
-                    tabIndex={0}
-                    onPointerEnter={() => activatePointer(key())}
-                    onPointerLeave={() => activatePointer(undefined)}
-                    onFocus={() => activateFocus(key())}
-                    onBlur={() => activateFocus(undefined)}
-                  >
-                    <span
-                      class="qg-legend__swatch"
-                      aria-hidden="true"
+                  <li class="qg-legend__entry">
+                    <button
+                      type="button"
+                      class="qg-legend__item"
+                      data-series-key={key()}
+                      data-active={activeKey() === key() ? "true" : undefined}
+                      data-pinned={props.pinnedSeries === key() ? "true" : undefined}
+                      data-pinnable="true"
+                      aria-label={`Highlight ${label()}, ${formatExactCount(entry.tokens.total)} tokens`}
+                      aria-pressed={props.pinnedSeries === key() ? "true" : "false"}
                       style={{ "--qg-swatch": `var(${seriesColorVar(index(), entry.kind)})` }}
-                    />
-                    <Show when={dimension() === "provider" && providerMarkId(entry) !== undefined}>
-                      <ProviderLogo
-                        providerId={providerMarkId(entry) ?? ""}
-                        class="qg-legend__logo"
-                      />
-                    </Show>
-                    <Show when={dimension() === "provider" && entry.kind === "other"}>
-                      <span class="qg-legend__logo qg-legend__logo--empty" aria-hidden="true" />
-                    </Show>
-                    <span class="qg-legend__label qg-breakable">{label()}</span>
-                    <span class="qg-legend__value">{formatTokenCount(entry.tokens.total)}</span>
+                      title={
+                        entry.kind === "other"
+                          ? "Every entity outside the top five, combined exactly; usage and known cost are never dropped."
+                          : undefined
+                      }
+                      onPointerEnter={() => activatePointer(key())}
+                      onPointerLeave={() => activatePointer(undefined)}
+                      onFocus={() => activateFocus(key())}
+                      onBlur={() => activateFocus(undefined)}
+                      onClick={() => props.onTogglePinnedSeries?.(key())}
+                    >
+                      <span class="qg-legend__swatch" aria-hidden="true" />
+                      <Show
+                        when={dimension() === "provider" && providerMarkId(entry) !== undefined}
+                      >
+                        <ProviderLogo
+                          providerId={providerMarkId(entry) ?? ""}
+                          class="qg-legend__logo"
+                        />
+                      </Show>
+                      <Show when={dimension() === "provider" && entry.kind === "other"}>
+                        <span class="qg-legend__logo qg-legend__logo--empty" aria-hidden="true" />
+                      </Show>
+                      <span class="qg-legend__label qg-breakable">{label()}</span>
+                      <span class="qg-legend__value">{formatTokenCount(entry.tokens.total)}</span>
+                    </button>
                   </li>
                 );
               }}
@@ -220,6 +312,8 @@ export function ModelUsageChart(props: {
           when={ranked().length > 0 && buckets().length > 0}
           fallback={<EmptyNotice message="No activity in this range." />}
         >
+          {/* biome-ignore lint/a11y/noStaticElementInteractions: the plot click only dismisses a pinned legend selection; contained controls carry the actions. */}
+          {/* biome-ignore lint/a11y/useKeyWithClickEvents: dismissal is pointer-only; keyboard users can clear the pin from the legend. */}
           <div
             ref={(element) => {
               ref(element);
@@ -227,11 +321,13 @@ export function ModelUsageChart(props: {
             }}
             class="qg-chart qg-model-chart__plot"
             data-highlight={activeKey() === undefined ? undefined : "true"}
+            data-child-highlight={childEmphasis()}
+            onClick={() => props.onClearPinnedSeries?.()}
           >
             <svg
               viewBox={`0 0 ${size.width} ${size.height}`}
               role="img"
-              aria-label={`${props.title}. Stacked token usage by ${dimension()}.`}
+              aria-label={`${props.title}. Stacked token usage by ${dimension()}, with API-equivalent cost on the right axis.`}
             >
               <For each={geometry().ticks}>
                 {(tick) => (
@@ -263,6 +359,38 @@ export function ModelUsageChart(props: {
                 TOKEN USAGE
               </text>
 
+              <Show when={costOverlay().hasNumeric}>
+                <text
+                  class="qg-chart__axis-title qg-chart__axis-title--cost"
+                  x={geometry().plot.right}
+                  y={geometry().plot.top - 6}
+                  text-anchor="end"
+                >
+                  API-EQUIVALENT (USD)
+                </text>
+                <For each={costOverlay().ticks}>
+                  {(tick) => (
+                    <>
+                      <line
+                        class="qg-chart__tick-mark"
+                        x1={geometry().plot.right}
+                        x2={geometry().plot.right + 4}
+                        y1={tick.y}
+                        y2={tick.y}
+                      />
+                      <text
+                        class="qg-chart__axis-label qg-chart__axis-label--cost"
+                        x={geometry().plot.right + 8}
+                        y={tick.y + 3}
+                        text-anchor="start"
+                      >
+                        {formatApiEquivalentCostTick(tick.value, costOverlay().tickStep)}
+                      </text>
+                    </>
+                  )}
+                </For>
+              </Show>
+
               <For each={geometry().bars}>
                 {(bar) => (
                   <For each={bar.segments}>
@@ -273,22 +401,88 @@ export function ModelUsageChart(props: {
                         entry() === undefined
                           ? "other"
                           : seriesKey(entry() as AnalyticsSeries, dimension());
+                      const slices = (): ChildCompositionSlice[] => {
+                        if (activeKey() !== key()) return [];
+                        const parent = entry();
+                        return buildChildCompositionSlices({
+                          segment,
+                          parentTokens: parent?.buckets[segment.bucketIndex],
+                          children: parent?.childBuckets?.[segment.bucketIndex],
+                          dimension: dimension(),
+                        });
+                      };
+                      const selectedChildKey = (): string | undefined => {
+                        const selection = activeChildSelection();
+                        return selection !== undefined && selection.seriesKey === key()
+                          ? selection.childKey
+                          : undefined;
+                      };
                       return (
-                        <rect
-                          class="qg-chart__segment"
-                          data-series-key={key()}
-                          data-highlighted={highlighted(key())}
-                          x={segment.x}
-                          y={segment.y}
-                          width={segment.width}
-                          height={segment.height}
-                          rx={segment.radius}
-                          ry={segment.radius}
-                          fill={`var(${seriesColorVar(segment.seriesIndex, entry()?.kind ?? "other")})`}
-                        />
+                        <>
+                          <rect
+                            class="qg-chart__segment"
+                            data-series-key={key()}
+                            data-bucket-index={segment.bucketIndex}
+                            data-highlighted={highlighted(key())}
+                            x={segment.x}
+                            y={segment.y}
+                            width={segment.width}
+                            height={segment.height}
+                            rx={segment.radius}
+                            ry={segment.radius}
+                            fill={seriesFill(segment.seriesIndex, entry()?.kind ?? "other")}
+                            fill-opacity={slices().length > 0 ? "0.32" : undefined}
+                          />
+                          <For each={slices()}>
+                            {(slice) => (
+                              <rect
+                                class="qg-chart__child-slice"
+                                data-series-key={key()}
+                                data-bucket-index={segment.bucketIndex}
+                                data-child-key={slice.key}
+                                data-highlighted={
+                                  selectedChildKey() === undefined
+                                    ? undefined
+                                    : selectedChildKey() === slice.key
+                                      ? "true"
+                                      : "false"
+                                }
+                                x={slice.x}
+                                y={slice.y}
+                                width={slice.width}
+                                height={slice.height}
+                                fill={seriesFill(segment.seriesIndex, entry()?.kind ?? "other")}
+                                fill-opacity={slice.fillOpacity}
+                              />
+                            )}
+                          </For>
+                        </>
                       );
                     }}
                   </For>
+                )}
+              </For>
+
+              <For each={costOverlay().runs}>
+                {(run) => (
+                  <path
+                    class="qg-chart__cost-line"
+                    data-partial={run.partial ? "true" : undefined}
+                    d={run.path}
+                  />
+                )}
+              </For>
+              <For each={costOverlay().isolated}>
+                {(point) => (
+                  <line
+                    class="qg-chart__cost-line qg-chart__cost-isolated"
+                    data-status={point.status}
+                    data-bucket-index={point.bucketIndex}
+                    x1={point.x - 3}
+                    x2={point.x + 3}
+                    y1={point.y ?? geometry().plot.bottom}
+                    y2={point.y ?? geometry().plot.bottom}
+                  />
                 )}
               </For>
 
@@ -380,14 +574,34 @@ export function ModelUsageChart(props: {
                             }}
                           />
                           <span class="qg-totals__label">{row.label}</span>
-                          <span class="qg-totals__value" title={formatExactCount(row.total)}>
+                          <span
+                            class="qg-model-tooltip__tokens"
+                            title={`${formatExactCount(row.total)} tokens`}
+                          >
                             {formatExactCount(row.total)}
+                          </span>
+                          <span
+                            class="qg-model-tooltip__cost"
+                            data-cost-status={
+                              row.cost === null && row.total > 0 ? "unpriced" : undefined
+                            }
+                            title={row.costTitle}
+                          >
+                            {formatApiEquivalentCostText(row.cost, row.total)}
+                            <Show when={row.partial}>
+                              <span class="qg-model-tooltip__qualifier">partial</span>
+                            </Show>
                           </span>
                         </div>
                       )}
                     </For>
                     <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--note qg-model-tooltip__footer">
-                      <span class="qg-totals__label">API-equivalent</span>
+                      <span class="qg-totals__label">
+                        <span class="qg-model-tooltip__total-long">API-equivalent total</span>
+                        <span class="qg-model-tooltip__total-short" aria-hidden="true">
+                          Total
+                        </span>
+                      </span>
                       <span
                         class="qg-totals__value"
                         title={
@@ -396,7 +610,10 @@ export function ModelUsageChart(props: {
                             : `API-equivalent estimate: USD ${(estimate().apiEquivalentCostUsd ?? 0).toFixed(6)}.`
                         }
                       >
-                        {formatApiEquivalentCost(estimate().apiEquivalentCostUsd)}
+                        {formatApiEquivalentCostText(
+                          estimate().apiEquivalentCostUsd,
+                          estimate().total,
+                        )}
                       </span>
                       <EstimateNote totals={estimate()} />
                     </div>
@@ -438,8 +655,13 @@ export function ModelUsageChart(props: {
                           )}
                         </For>
                         <td>
-                          {formatApiEquivalentCost(estimate().apiEquivalentCostUsd)}
-                          <Show when={estimateNote(estimate())}>{(note) => <> {note()}</>}</Show>
+                          {formatApiEquivalentCostText(
+                            estimate().apiEquivalentCostUsd,
+                            estimate().total,
+                          )}
+                          <Show when={estimateNote(estimate()) === "Partial estimate"}>
+                            {" Partial estimate"}
+                          </Show>
                         </td>
                         <td>{formatExactCount(estimate().total)}</td>
                       </tr>

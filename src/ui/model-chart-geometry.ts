@@ -19,7 +19,7 @@ import {
 export const DEFAULT_MODEL_USAGE_SIZE: ChartSize = {
   width: 900,
   height: 260,
-  padding: { top: 12, right: 20, bottom: 24, left: 48 },
+  padding: { top: 12, right: 58, bottom: 24, left: 48 },
 };
 
 const SEGMENT_GAP = 1;

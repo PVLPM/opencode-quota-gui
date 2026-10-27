@@ -3,16 +3,20 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SOURCE_URL = "https://models.dev/api.json";
-const DEFAULT_PROVIDERS = ["anthropic", "google", "moonshotai", "openai", "xai", "zai"];
-const COST_KEYS = ["input", "output", "cache_read", "cache_write"];
+const COST_KEYS = ["input", "output", "cache_read", "cache_write", "reasoning"];
 const FETCH_TIMEOUT_MS = 15_000;
 
+/**
+ * `--providers=` is an optional explicit dynamic scope. Without it the
+ * centralized snapshot refreshes every provider models.dev returns, so no
+ * source catalogue is omitted by a hardcoded allowlist.
+ */
 function parseProviderArgs(argv) {
   const providerArg = argv.find((arg) => arg.startsWith("--providers="));
-  if (!providerArg) return DEFAULT_PROVIDERS;
+  if (!providerArg) return undefined;
 
   const raw = providerArg.slice("--providers=".length).trim();
-  if (!raw) return DEFAULT_PROVIDERS;
+  if (!raw) return undefined;
 
   return raw
     .split(",")
@@ -20,7 +24,7 @@ function parseProviderArgs(argv) {
     .filter(Boolean);
 }
 
-function pickCostBuckets(rawCost) {
+function pickRateBuckets(rawCost) {
   if (!rawCost || typeof rawCost !== "object") return null;
   const picked = {};
 
@@ -31,7 +35,60 @@ function pickCostBuckets(rawCost) {
     }
   }
 
-  return Object.keys(picked).length > 0 ? picked : null;
+  return hasRates(picked) ? picked : null;
+}
+
+function hasRates(rates) {
+  return COST_KEYS.some((key) => Object.hasOwn(rates, key));
+}
+
+function pickContextTiers(rawCost) {
+  if (!rawCost || typeof rawCost !== "object" || !Array.isArray(rawCost.tiers)) {
+    return undefined;
+  }
+
+  const tiers = [];
+  for (const rawTier of rawCost.tiers) {
+    if (!rawTier || typeof rawTier !== "object") continue;
+    const meta = rawTier.tier;
+    if (!meta || typeof meta !== "object" || meta.type !== "context") continue;
+
+    const size = Number(meta.size);
+    if (!Number.isFinite(size) || size <= 0) continue;
+
+    const rates = pickRateBuckets(rawTier);
+    if (!rates || typeof rates.input !== "number" || typeof rates.output !== "number") continue;
+
+    tiers.push({
+      ...rates,
+      tier: { type: "context", size: Math.trunc(size) },
+    });
+  }
+
+  if (tiers.length === 0) return undefined;
+
+  // Deterministic regardless of upstream order, then one tier per size.
+  tiers.sort(
+    (a, b) => a.tier.size - b.tier.size || JSON.stringify(a).localeCompare(JSON.stringify(b)),
+  );
+
+  const unique = [];
+  const sizes = new Set();
+  for (const tier of tiers) {
+    if (sizes.has(tier.tier.size)) continue;
+    sizes.add(tier.tier.size);
+    unique.push(tier);
+  }
+  return unique;
+}
+
+function pickCostBuckets(rawCost) {
+  if (!rawCost || typeof rawCost !== "object") return null;
+  const picked = pickRateBuckets(rawCost);
+  if (!picked) return null;
+
+  const tiers = pickContextTiers(rawCost);
+  return tiers ? { ...picked, tiers } : picked;
 }
 
 function sortObjectByKeys(obj) {
@@ -93,8 +150,11 @@ async function writeFileAtomic(path, content) {
 
 function buildSnapshot(api, providerIDs) {
   const providers = {};
+  const scopedProviderIDs = (providerIDs ?? Object.keys(api ?? {}))
+    .slice()
+    .sort((a, b) => a.localeCompare(b));
 
-  for (const providerID of providerIDs) {
+  for (const providerID of scopedProviderIDs) {
     const models = api?.[providerID]?.models;
     if (!models || typeof models !== "object") continue;
 
@@ -109,7 +169,8 @@ function buildSnapshot(api, providerIDs) {
     }
   }
 
-  const providerList = Object.keys(providers).sort((a, b) => a.localeCompare(b));
+  const sortedProviders = sortObjectByKeys(providers);
+  const providerList = Object.keys(sortedProviders).sort((a, b) => a.localeCompare(b));
 
   return {
     _meta: {
@@ -118,7 +179,7 @@ function buildSnapshot(api, providerIDs) {
       source: SOURCE_URL,
       units: "USD per 1M tokens",
     },
-    providers,
+    providers: sortedProviders,
   };
 }
 
@@ -156,13 +217,19 @@ export function keepRetiredModels(snapshot, previous, providerIDs) {
 }
 
 export function buildRefreshedSnapshot(api, previous, providerIDs) {
-  const snapshot = buildSnapshot(api, providerIDs);
+  // Without an explicit dynamic scope, refresh and retain every provider the
+  // central catalog returned plus every provider already in the previous
+  // snapshot, so a dropped provider is not lost on the next refresh.
+  const scope = providerIDs ?? [
+    ...new Set([...Object.keys(api ?? {}), ...Object.keys(previous?.providers ?? {})]),
+  ];
+  const snapshot = buildSnapshot(api, scope);
   if (Object.keys(snapshot.providers).length === 0) {
     throw new Error(
       `Refusing to write a pricing snapshot: ${SOURCE_URL} returned no priced models.`,
     );
   }
-  const keptModelIDs = keepRetiredModels(snapshot, previous, providerIDs);
+  const keptModelIDs = keepRetiredModels(snapshot, previous, scope);
   return { snapshot, keptModelIDs };
 }
 
@@ -173,7 +240,9 @@ async function main() {
   const api = await fetchModelsDevJson();
   const { snapshot, keptModelIDs } = buildRefreshedSnapshot(api, previous, providerIDs);
 
-  await writeFileAtomic(outPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+  // The catalog is intentionally stored compact: all-provider coverage is
+  // ~675 KB here versus ~1 MB pretty-printed, with identical parsed content.
+  await writeFileAtomic(outPath, `${JSON.stringify(snapshot)}\n`);
 
   console.log(
     `Wrote ${outPath} with ${snapshot._meta.providers.length} providers and ${Object.values(snapshot.providers).reduce((sum, models) => sum + Object.keys(models).length, 0)} priced models.`,

@@ -37,6 +37,7 @@ import {
   providerSnapshot,
   sameDayModelSnapshot,
   unknownIdentity,
+  withChildBuckets,
   withRange,
   zeroSnapshot,
 } from "./fixtures/model-analytics-fixtures";
@@ -279,8 +280,12 @@ function chartSegments(root: TestNode): TestNode[] {
   return byClass(root, "rect", "qg-chart__segment");
 }
 
+function childSlices(root: TestNode): TestNode[] {
+  return byClass(root, "rect", "qg-chart__child-slice");
+}
+
 function legendItems(root: TestNode): TestNode[] {
-  return byClass(root, "li", "qg-legend__item--series");
+  return byClass(root, "button", "qg-legend__item");
 }
 
 function legendItem(root: TestNode, label: string): TestNode | undefined {
@@ -492,6 +497,7 @@ describe("Models view", () => {
         "model:known:model-epsilon",
         "other",
       ]);
+      expect((legendItem(root, "Other") as TestNode).props.title).toContain("combined exactly");
       const labelNodes = legend.map((button) =>
         graph.elementsNamed(button, "span").find((node) => hasClass(node, "qg-legend__label")),
       );
@@ -499,12 +505,14 @@ describe("Models view", () => {
         true,
       );
       const swatchStyles = legend.map(
-        (button) =>
-          (
-            graph.elementsNamed(button, "span").find((node) => hasClass(node, "qg-legend__swatch"))
-              ?.props.style as Record<string, string>
-          )["--qg-swatch"],
+        (item) => (item.props.style as Record<string, string>)["--qg-swatch"],
       );
+      // The variable lives on the item, exactly as in the daily usage legend;
+      // the swatch itself stays unstyled apart from its shared class.
+      const swatchNodes = legend.map((item) =>
+        graph.elementsNamed(item, "span").find((node) => hasClass(node, "qg-legend__swatch")),
+      );
+      expect(swatchNodes.every((node) => node?.props.style === undefined)).toBe(true);
       expect(swatchStyles).toEqual([
         "var(--qg-rank-1)",
         "var(--qg-rank-2)",
@@ -614,11 +622,26 @@ describe("Models view", () => {
       focus(hit);
       await settle();
       const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      const row = byClass(tooltip, "div", "qg-model-tooltip__row")[0] as TestNode;
+      expect(graph.textOf(row)).toContain("model-alpha");
+      expect(graph.textOf(row)).toContain("100");
+      expect(graph.textOf(row)).toContain("≈ USD 0.02");
+      expect(graph.textOf(row)).toContain("partial");
       const footer = byClass(tooltip, "div", "qg-model-tooltip__footer")[0] as TestNode;
       expect(footer).toBeDefined();
-      expect(graph.textOf(footer)).toContain("API-equivalent");
+      expect(graph.textOf(footer)).toContain("API-equivalent total");
       expect(graph.textOf(footer)).toContain("≈ USD 0.02");
       expect(graph.textOf(footer)).toContain("Partial estimate");
+      const fullLabel = graph
+        .elementsNamed(footer, "span")
+        .find((node) => hasClass(node, "qg-model-tooltip__total-long")) as TestNode;
+      const shortLabel = graph
+        .elementsNamed(footer, "span")
+        .find((node) => hasClass(node, "qg-model-tooltip__total-short")) as TestNode;
+      expect(graph.textOf(fullLabel)).toBe("API-equivalent total");
+      expect(graph.textOf(shortLabel)).toBe("Total");
+      expect(fullLabel.props["aria-hidden"]).toBeUndefined();
+      expect(shortLabel.props["aria-hidden"]).toBe("true");
     } finally {
       dispose();
     }
@@ -702,8 +725,8 @@ describe("Models view", () => {
       const delta = rowByLabel(root, "model-delta") as TestNode;
       expect(graph.textOf(delta)).toContain("Partial estimate");
       const beta = rowByLabel(root, "model-beta") as TestNode;
-      expect(graph.textOf(beta)).toContain("≈ USD —");
       expect(graph.textOf(beta)).toContain("Unpriced");
+      expect(graph.textOf(beta)).not.toContain("≈ USD —");
       const gammaRow = rowByLabel(root, "model-gamma") as TestNode;
       expect(graph.textOf(gammaRow)).toContain("≈ USD 0.00");
       expect(graph.textOf(gammaRow)).not.toContain("Partial estimate");
@@ -723,7 +746,34 @@ describe("Models view", () => {
     }
   });
 
-  it("shows the parent series swatch and provider mark on provider rows in both groupings", async () => {
+  it("shows selected-dimension colour on every parent and no colour on any child", async () => {
+    const { root, dispose } = mountModels(true);
+    try {
+      const check = (parents: readonly TestNode[], children: readonly TestNode[]) => {
+        expect(parents.length).toBeGreaterThan(0);
+        expect(parents.every((row) => rowSwatch(row) !== undefined)).toBe(true);
+        expect(children.length).toBeGreaterThan(0);
+        expect(children.every((row) => rowSwatch(row) === undefined)).toBe(true);
+      };
+
+      // Model grouping: the parent rows are the chart's model series.
+      check(breakdownRows(root, true), byClass(root, "a", "qg-breakdown__row--child"));
+      expect(swatchVar(rowByLabel(root, "model-alpha") as TestNode)).toBe("var(--qg-rank-1)");
+
+      clickSegmented(root, "Group usage by", "Provider");
+      await settle();
+
+      // Provider grouping applies the same rule; model children never inherit
+      // the provider's colour, so opposite-dimension colours cannot leak in.
+      check(breakdownRows(root, true), byClass(root, "a", "qg-breakdown__row--child"));
+      expect(swatchVar(rowByLabel(root, "OpenAI") as TestNode)).toBe("var(--qg-rank-1)");
+      expect(swatchVar(rowByLabel(root, "Mistral") as TestNode)).toBe("var(--qg-rank-5)");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps provider colour on the parent row and leaves provider-grouped model children unmarked", async () => {
     const { root, dispose } = mountModels(true);
     try {
       clickSegmented(root, "Group usage by", "Provider");
@@ -750,22 +800,46 @@ describe("Models view", () => {
         "qg-breakdown__label",
       ]);
 
-      clickSegmented(root, "Group usage by", "Model");
-      await settle();
+      // Models are parts of the provider bar, not chart series of their own.
+      // Their children keep the indent but no model swatch or provider mark.
+      for (const label of ["model-alpha", "model-gamma", "model-zeta"]) {
+        const child = childRow(root, "OpenAI", label) as TestNode;
+        expect(rowSwatch(child)).toBeUndefined();
+        expect(rowLogo(child)).toBeUndefined();
+        expect(hasClass(child, "qg-breakdown__row--plain")).toBe(true);
+        const childNameClasses = (
+          byClass(child, "span", "qg-breakdown__name")[0] as TestNode
+        ).children
+          .filter((node) => node.kind === "element")
+          .map((node) => node.props.class);
+        expect(childNameClasses).toEqual(["qg-breakdown__label"]);
+      }
+    } finally {
+      dispose();
+    }
+  });
 
+  it("shows chart colour on model parents and no colour swatch on provider leaves", async () => {
+    const { root, dispose } = mountModels(true);
+    try {
       const alpha = rowByLabel(root, "model-alpha") as TestNode;
-      expect(rowSwatch(alpha)).toBeUndefined();
+      expect(swatchVar(alpha)).toBe("var(--qg-rank-1)");
       expect(rowLogo(alpha)).toBeUndefined();
+      expect(swatchVar(rowByLabel(root, "model-epsilon") as TestNode)).toBe("var(--qg-rank-5)");
+      expect(swatchVar(rowByLabel(root, "model-zeta") as TestNode)).toBe("var(--qg-rank-other)");
 
-      expect(swatchVar(childRow(root, "model-alpha", "OpenAI") as TestNode)).toBe(
-        "var(--qg-rank-1)",
-      );
-      expect(swatchVar(childRow(root, "model-gamma", "OpenAI") as TestNode)).toBe(
-        "var(--qg-rank-3)",
-      );
-      expect(swatchVar(childRow(root, "model-zeta", "OpenAI") as TestNode)).toBe(
-        "var(--qg-rank-other)",
-      );
+      // Provider leaves under a model are identity marks only: no series
+      // swatch, even when the same provider appears under several parents.
+      for (const [parent, child] of [
+        ["model-alpha", "OpenAI"],
+        ["model-gamma", "OpenAI"],
+        ["model-zeta", "OpenAI"],
+      ] as const) {
+        const leaf = childRow(root, parent, child) as TestNode;
+        expect(leaf).toBeDefined();
+        expect(rowSwatch(leaf)).toBeUndefined();
+        expect(rowLogo(leaf)?.props["data-provider-logo"]).toBe("openai");
+      }
     } finally {
       dispose();
     }
@@ -852,6 +926,391 @@ describe("Models view", () => {
       blur(row);
     } finally {
       dispose();
+    }
+  });
+
+  it("pins a clicked legend series until the same badge or an outside click clears it", async () => {
+    const { root, dispose } = mountModels();
+    try {
+      const gamma = legendItem(root, "model-gamma") as TestNode;
+      const alpha = legendItem(root, "model-alpha") as TestNode;
+      const plot = byClass(root, "div", "qg-model-chart__plot")[0] as TestNode;
+      const gammaSegments = () =>
+        chartSegments(root).filter(
+          (segment) => segment.props["data-series-key"] === "model:known:model-gamma",
+        );
+      const alphaSegments = () =>
+        chartSegments(root).filter(
+          (segment) => segment.props["data-series-key"] === "model:known:model-alpha",
+        );
+      const gammaRow = rowByLabel(root, "model-gamma") as TestNode;
+      const alphaRow = rowByLabel(root, "model-alpha") as TestNode;
+      expect(plot).toBeDefined();
+
+      click(gamma);
+      await settle();
+      expect(gamma.props["data-pinned"]).toBe("true");
+      expect(gamma.props["aria-pressed"]).toBe("true");
+      expect(gamma.props["data-active"]).toBe("true");
+      expect(gammaSegments().every((segment) => segment.props["data-highlighted"] === "true")).toBe(
+        true,
+      );
+      expect(
+        alphaSegments().every((segment) => segment.props["data-highlighted"] === "false"),
+      ).toBe(true);
+      expect(gammaRow.props["data-highlighted"]).toBe("true");
+      expect(alphaRow.props["data-dimmed"]).toBe("true");
+
+      // Pointer emphasis wins; leaving restores the pinned fallback.
+      pointerEnter(alpha);
+      await settle();
+      expect(alphaSegments().every((segment) => segment.props["data-highlighted"] === "true")).toBe(
+        true,
+      );
+      expect(
+        gammaSegments().every((segment) => segment.props["data-highlighted"] === "false"),
+      ).toBe(true);
+      pointerLeave(alpha);
+      await settle();
+      expect(gammaSegments().every((segment) => segment.props["data-highlighted"] === "true")).toBe(
+        true,
+      );
+
+      // Keyboard focus wins; blur restores the pinned fallback.
+      focus(alpha);
+      await settle();
+      expect(alphaSegments().every((segment) => segment.props["data-highlighted"] === "true")).toBe(
+        true,
+      );
+      blur(alpha);
+      await settle();
+      expect(gammaSegments().every((segment) => segment.props["data-highlighted"] === "true")).toBe(
+        true,
+      );
+
+      // Clicking another badge switches the pin.
+      click(alpha);
+      await settle();
+      expect(alpha.props["data-pinned"]).toBe("true");
+      expect(alpha.props["aria-pressed"]).toBe("true");
+      expect(gamma.props["data-pinned"]).toBeUndefined();
+      expect(gamma.props["aria-pressed"]).toBe("false");
+      expect(alphaSegments().every((segment) => segment.props["data-highlighted"] === "true")).toBe(
+        true,
+      );
+      expect(
+        gammaSegments().every((segment) => segment.props["data-highlighted"] === "false"),
+      ).toBe(true);
+
+      // Clicking the pinned badge again clears the pin and its transient
+      // emphasis, so the reset is immediate even while hovered/focused.
+      pointerEnter(alpha);
+      focus(alpha);
+      click(alpha);
+      await settle();
+      expect(alpha.props["data-pinned"]).toBeUndefined();
+      expect(alpha.props["aria-pressed"]).toBe("false");
+      expect(
+        chartSegments(root).every((segment) => segment.props["data-highlighted"] === undefined),
+      ).toBe(true);
+      expect(alphaRow.props["data-highlighted"]).toBeUndefined();
+      expect(gammaRow.props["data-dimmed"]).toBeUndefined();
+
+      // Any click outside the legend clears a re-pinned badge.
+      click(gamma);
+      await settle();
+      expect(gamma.props["data-pinned"]).toBe("true");
+      click(plot);
+      await settle();
+      expect(gamma.props["data-pinned"]).toBeUndefined();
+      expect(gamma.props["aria-pressed"]).toBe("false");
+      expect(
+        chartSegments(root).every((segment) => segment.props["data-highlighted"] === undefined),
+      ).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps leaf emphasis local while its parent chart stays active", async () => {
+    const { root, dispose } = mountSnapshot(providerSnapshot());
+    try {
+      const parent = rowByLabel(root, "OpenAI") as TestNode;
+      const leaf = childRow(root, "OpenAI", "model-alpha") as TestNode;
+      const sibling = childRow(root, "OpenAI", "model-beta") as TestNode;
+      const otherParent = rowByLabel(root, "Google") as TestNode;
+      const openaiSegments = () =>
+        chartSegments(root).filter(
+          (segment) => segment.props["data-series-key"] === "provider:known:openai",
+        );
+
+      // A leaf is never its own chart series: focusing or hovering it activates
+      // the parent series for the chart, but highlights only that leaf row.
+      focus(leaf);
+      await settle();
+      expect(leaf.props["data-highlighted"]).toBe("true");
+      expect(parent.props["data-highlighted"]).toBeUndefined();
+      expect(sibling.props["data-highlighted"]).toBeUndefined();
+      expect((legendItem(root, "OpenAI") as TestNode).props["data-active"]).toBe("true");
+      expect(
+        openaiSegments().every((segment) => segment.props["data-highlighted"] === "true"),
+      ).toBe(true);
+      expect(
+        chartSegments(root)
+          .filter((segment) => segment.props["data-series-key"] !== "provider:known:openai")
+          .every((segment) => segment.props["data-highlighted"] === "false"),
+      ).toBe(true);
+      blur(leaf);
+      await settle();
+      expect(leaf.props["data-highlighted"]).toBeUndefined();
+
+      pointerEnter(leaf);
+      await settle();
+      expect(leaf.props["data-highlighted"]).toBe("true");
+      expect(parent.props["data-highlighted"]).toBeUndefined();
+      pointerLeave(leaf);
+      await settle();
+      expect(leaf.props["data-highlighted"]).toBeUndefined();
+
+      // The parent activates its whole section, including every child row.
+      focus(parent);
+      await settle();
+      expect(parent.props["data-highlighted"]).toBe("true");
+      expect(leaf.props["data-highlighted"]).toBe("true");
+      expect(sibling.props["data-highlighted"]).toBe("true");
+      expect(otherParent.props["data-dimmed"]).toBe("true");
+      expect((legendItem(root, "OpenAI") as TestNode).props["data-active"]).toBe("true");
+      expect(
+        openaiSegments().every((segment) => segment.props["data-highlighted"] === "true"),
+      ).toBe(true);
+      blur(parent);
+      await settle();
+      expect(parent.props["data-highlighted"]).toBeUndefined();
+      expect(leaf.props["data-highlighted"]).toBeUndefined();
+      expect(sibling.props["data-highlighted"]).toBeUndefined();
+
+      // The same whole-section emphasis applies on pointer hover.
+      pointerEnter(parent);
+      await settle();
+      expect(parent.props["data-highlighted"]).toBe("true");
+      expect(leaf.props["data-highlighted"]).toBe("true");
+      expect(sibling.props["data-highlighted"]).toBe("true");
+      pointerLeave(parent);
+      await settle();
+      expect(parent.props["data-highlighted"]).toBeUndefined();
+      expect(leaf.props["data-highlighted"]).toBeUndefined();
+    } finally {
+      dispose();
+    }
+  });
+
+  it("highlights a model parent's whole section while a leaf keeps chart emphasis on its parent", async () => {
+    const { root, dispose } = mountModels(true);
+    try {
+      const parent = rowByLabel(root, "model-alpha") as TestNode;
+      const children = childRows(root, "model-alpha");
+      const leaf = childRow(root, "model-alpha", "OpenAI") as TestNode;
+
+      focus(parent);
+      await settle();
+      expect(parent.props["data-highlighted"]).toBe("true");
+      expect(children.length).toBeGreaterThan(0);
+      expect(children.every((row) => row.props["data-highlighted"] === "true")).toBe(true);
+      expect((rowByLabel(root, "model-beta") as TestNode).props["data-dimmed"]).toBe("true");
+      blur(parent);
+      await settle();
+
+      focus(leaf);
+      await settle();
+      expect(leaf.props["data-highlighted"]).toBe("true");
+      expect(parent.props["data-highlighted"]).toBeUndefined();
+      expect((legendItem(root, "model-alpha") as TestNode).props["data-active"]).toBe("true");
+      expect(
+        chartSegments(root)
+          .filter((segment) => segment.props["data-series-key"] === "model:known:model-alpha")
+          .every((segment) => segment.props["data-highlighted"] === "true"),
+      ).toBe(true);
+      expect(
+        chartSegments(root)
+          .filter((segment) => segment.props["data-series-key"] !== "model:known:model-alpha")
+          .every((segment) => segment.props["data-highlighted"] === "false"),
+      ).toBe(true);
+      blur(leaf);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("subdivides only the active parent, in that parent's own colour", async () => {
+    const { root, dispose } = mountSnapshot(withChildBuckets(modelSnapshot()));
+    try {
+      const plot = byClass(root, "div", "qg-model-chart__plot")[0] as TestNode;
+      expect(childSlices(root)).toHaveLength(0);
+
+      const alpha = legendItem(root, "model-alpha") as TestNode;
+      pointerEnter(alpha);
+      await settle();
+      const alphaParent = chartSegments(root).find(
+        (segment) => segment.props["data-series-key"] === "model:known:model-alpha",
+      ) as TestNode;
+      const alphaSlices = childSlices(root).filter(
+        (slice) => slice.props["data-series-key"] === "model:known:model-alpha",
+      );
+      expect(alphaSlices.length).toBeGreaterThan(0);
+      expect(alphaSlices.every((slice) => slice.props.fill === alphaParent.props.fill)).toBe(true);
+      expect(
+        alphaSlices.every((slice) => {
+          const opacity = Number(slice.props["fill-opacity"]);
+          return opacity > 0 && opacity < 1;
+        }),
+      ).toBe(true);
+      expect(new Set(alphaSlices.map((slice) => slice.props["data-child-key"]))).toEqual(
+        new Set([
+          "provider:known:openai",
+          "provider:known:anthropic",
+          "provider:known:google",
+          "provider:known:mistral",
+          "provider:known:deepseek",
+          "provider:known:openrouter",
+        ]),
+      );
+      expect(alphaSlices.every((slice) => slice.props["data-highlighted"] === undefined)).toBe(
+        true,
+      );
+
+      // A sibling parent with one child stays solid even while active.
+      const beta = legendItem(root, "model-beta") as TestNode;
+      pointerEnter(beta);
+      await settle();
+      expect(
+        childSlices(root).filter(
+          (slice) => slice.props["data-series-key"] === "model:known:model-beta",
+        ),
+      ).toHaveLength(0);
+
+      pointerLeave(beta);
+      await settle();
+      expect(childSlices(root)).toHaveLength(0);
+      expect(plot.props["data-child-highlight"]).toBeUndefined();
+
+      // Keyboard focus on the parent legend behaves like hover.
+      focus(alpha);
+      await settle();
+      expect(childSlices(root).length).toBeGreaterThan(0);
+      blur(alpha);
+      await settle();
+      expect(childSlices(root)).toHaveLength(0);
+
+      // Pinning keeps the subdivision after the pointer leaves.
+      click(alpha);
+      await settle();
+      expect(childSlices(root).length).toBeGreaterThan(0);
+      expect(alpha.props["data-pinned"]).toBe("true");
+      click(plot);
+      await settle();
+      expect(childSlices(root)).toHaveLength(0);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps child-row emphasis on one scope and the matching slice only", async () => {
+    const { root, dispose } = mountSnapshot(withChildBuckets(modelSnapshot()));
+    try {
+      const parent = rowByLabel(root, "model-alpha") as TestNode;
+      const leaf = childRow(root, "model-alpha", "OpenAI") as TestNode;
+      const sibling = childRow(root, "model-alpha", "Anthropic") as TestNode;
+      const plot = byClass(root, "div", "qg-model-chart__plot")[0] as TestNode;
+
+      focus(leaf);
+      await settle();
+      expect(leaf.props["data-highlighted"]).toBe("true");
+      expect(parent.props["data-highlighted"]).toBeUndefined();
+      expect(sibling.props["data-dimmed"]).toBe("true");
+      expect(plot.props["data-child-highlight"]).toBe("true");
+      const openaiSlices = childSlices(root).filter(
+        (slice) => slice.props["data-child-key"] === "provider:known:openai",
+      );
+      expect(openaiSlices.length).toBeGreaterThan(0);
+      expect(openaiSlices.every((slice) => slice.props["data-highlighted"] === "true")).toBe(true);
+      expect(
+        childSlices(root)
+          .filter((slice) => slice.props["data-child-key"] !== "provider:known:openai")
+          .every((slice) => slice.props["data-highlighted"] === "false"),
+      ).toBe(true);
+
+      blur(leaf);
+      await settle();
+      expect(childSlices(root)).toHaveLength(0);
+
+      // The parent row still highlights the whole section, without a child
+      // selection narrowing it to one slice.
+      pointerEnter(parent);
+      await settle();
+      expect(parent.props["data-highlighted"]).toBe("true");
+      expect(leaf.props["data-highlighted"]).toBe("true");
+      expect(sibling.props["data-highlighted"]).toBe("true");
+      expect(sibling.props["data-dimmed"]).toBeUndefined();
+      expect(plot.props["data-child-highlight"]).toBeUndefined();
+      expect(
+        childSlices(root).every((slice) => slice.props["data-highlighted"] === undefined),
+      ).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("uses the provider parent palette and keeps Other composition truthful", async () => {
+    const providers = mountSnapshot(withChildBuckets(providerSnapshot()));
+    try {
+      const openai = legendItem(providers.root, "OpenAI") as TestNode;
+      pointerEnter(openai);
+      await settle();
+      const parent = chartSegments(providers.root).find(
+        (segment) => segment.props["data-series-key"] === "provider:known:openai",
+      ) as TestNode;
+      const slices = childSlices(providers.root);
+      expect(slices.length).toBeGreaterThan(0);
+      expect(slices.every((slice) => slice.props.fill === parent.props.fill)).toBe(true);
+      expect(new Set(slices.map((slice) => slice.props["data-child-key"]))).toEqual(
+        new Set([
+          "model:known:model-alpha",
+          "model:known:model-beta",
+          "model:known:model-gamma",
+          "model:known:model-epsilon",
+          "model:known:model-zeta",
+        ]),
+      );
+    } finally {
+      providers.dispose();
+    }
+
+    const models = mountSnapshot(withChildBuckets(modelSnapshot()));
+    try {
+      const other = legendItem(models.root, "Other") as TestNode;
+      pointerEnter(other);
+      await settle();
+      const otherSlices = childSlices(models.root).filter(
+        (slice) => slice.props["data-series-key"] === "other",
+      );
+      expect(new Set(otherSlices.map((slice) => slice.props["data-child-key"]))).toEqual(
+        new Set(["provider:known:openai", "provider:unknown", "provider:known:"]),
+      );
+      expect(otherSlices.every((slice) => slice.props.fill === "var(--qg-rank-other)")).toBe(true);
+      pointerLeave(other);
+      await settle();
+
+      // A child under an Other-mapped parent is a subset of the aggregate, so
+      // its emphasis stays local instead of pointing at an aggregate slice.
+      const zeta = rowByLabel(models.root, "model-zeta") as TestNode;
+      const zetaChild = childRow(models.root, "model-zeta", "OpenAI") as TestNode;
+      focus(zetaChild);
+      await settle();
+      expect(zetaChild.props["data-highlighted"]).toBe("true");
+      expect(zeta.props["data-highlighted"]).toBeUndefined();
+      expect(childSlices(models.root)).toHaveLength(0);
+    } finally {
+      models.dispose();
     }
   });
 
@@ -998,20 +1457,32 @@ describe("Models view", () => {
     }
   });
 
-  it("uses focus-only, non-button semantics for legend and bucket inspection", async () => {
+  it("exposes keyboard-operable legend pinning as native toggle buttons", async () => {
     const { root, dispose } = mountModels();
     try {
       const legend = legendItems(root);
       expect(legend.length).toBeGreaterThan(0);
-      expect(legend.every((item) => item.props.tabIndex === 0)).toBe(true);
-      expect(byClass(root, "button", "qg-legend__item--series")).toHaveLength(0);
-      expect(legend.every((item) => item.props["aria-pressed"] === undefined)).toBe(true);
+      expect(legend.every((item) => item.tag === "button")).toBe(true);
+      expect(legend.every((item) => item.props.type === "button")).toBe(true);
+      expect(legend.every((item) => item.props.tabIndex === undefined)).toBe(true);
+      expect(legend.every((item) => listener(item, "onClick") !== undefined)).toBe(true);
+      expect(legend.every((item) => item.props["aria-pressed"] === "false")).toBe(true);
+      expect(byClass(root, "button", "qg-chart__hit")).toHaveLength(0);
 
-      focus(legend[0] as TestNode);
+      const first = legend[0] as TestNode;
+      click(first);
       await settle();
-      expect((legend[0] as TestNode).props["data-active"]).toBe("true");
-      expect((legend[0] as TestNode).props["aria-pressed"]).toBeUndefined();
-      blur(legend[0] as TestNode);
+      expect(first.props["aria-pressed"]).toBe("true");
+      expect(first.props["data-pinned"]).toBe("true");
+      click(first);
+      await settle();
+      expect(first.props["aria-pressed"]).toBe("false");
+      expect(first.props["data-pinned"]).toBeUndefined();
+
+      focus(first);
+      await settle();
+      expect(first.props["data-active"]).toBe("true");
+      blur(first);
 
       const hits = bucketHits(root);
       expect(hits.length).toBeGreaterThan(0);
@@ -1072,7 +1543,214 @@ describe("Models view", () => {
         .filter((row) => graph.elementsNamed(row, "td").length > 0);
       const apiCell = (row: TestNode) => graph.elementsNamed(row, "td")[1] as TestNode;
       expect(graph.textOf(apiCell(rows[0] as TestNode))).toContain("Unpriced");
+      expect(graph.textOf(apiCell(rows[0] as TestNode))).not.toContain("≈ USD —");
       expect(graph.textOf(apiCell(rows[1] as TestNode))).toContain("Partial estimate");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps Unpriced in the summary and omits the currency dash", () => {
+    const tokens = costed({ input: 90 }, { apiEquivalentCostUsd: null, unpricedTokens: 90 });
+    const snapshot: AnalyticsGroupSnapshot = {
+      ...zeroSnapshot("model", undefined),
+      totals: tokens,
+      rows: [
+        {
+          identity: known("model-alpha"),
+          tokens,
+          sessionCount: 1,
+          stepCount: 1,
+          children: [],
+        },
+      ],
+      series: [
+        {
+          kind: "entity",
+          identity: known("model-alpha"),
+          tokens,
+          buckets: [tokens],
+        },
+      ],
+    };
+    const { root, dispose } = mountSnapshot(snapshot);
+    try {
+      const summary = summaryText(root, "API-equivalent estimate");
+      expect(summary).toContain("Unpriced");
+      expect(summary).not.toContain("≈ USD —");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps the API-equivalent cost overlay on the visible bucket total", async () => {
+    const { root, dispose } = mountModels();
+    try {
+      const combined = byClass(root, "path", "qg-chart__cost-line")[0] as TestNode;
+      expect(combined).toBeDefined();
+      const combinedPath = combined.props.d;
+      const combinedTicks = byClass(root, "text", "qg-chart__axis-label--cost");
+      expect(graph.textOf(combinedTicks.at(-1) as TestNode)).toBe("8");
+      expect(combined.props["data-partial"]).toBe("true");
+
+      const legend = legendItem(root, "model-alpha") as TestNode;
+      pointerEnter(legend);
+      await settle();
+      expect((byClass(root, "path", "qg-chart__cost-line")[0] as TestNode).props.d).toBe(
+        combinedPath,
+      );
+      expect(
+        graph.textOf(byClass(root, "text", "qg-chart__axis-label--cost").at(-1) as TestNode),
+      ).toBe("8");
+      pointerLeave(legend);
+      await settle();
+
+      focus(legend);
+      await settle();
+      expect((byClass(root, "path", "qg-chart__cost-line")[0] as TestNode).props.d).toBe(
+        combinedPath,
+      );
+      expect(
+        graph.textOf(byClass(root, "text", "qg-chart__axis-label--cost").at(-1) as TestNode),
+      ).toBe("8");
+      expect(
+        (byClass(root, "path", "qg-chart__cost-line")[0] as TestNode).props["data-partial"],
+      ).toBe("true");
+
+      blur(legend);
+      await settle();
+      expect((byClass(root, "path", "qg-chart__cost-line")[0] as TestNode).props.d).toBe(
+        combinedPath,
+      );
+    } finally {
+      dispose();
+    }
+  });
+
+  it("quiets the total cost line during emphasis and never makes Other its owner", async () => {
+    const { root, dispose } = mountModels();
+    try {
+      const plot = byClass(root, "div", "qg-model-chart__plot")[0] as TestNode;
+      const costLine = () => byClass(root, "path", "qg-chart__cost-line")[0] as TestNode;
+      const costPath = costLine().props.d;
+      expect(costPath).toBeDefined();
+
+      expect(plot.props["data-highlight"]).toBeUndefined();
+      expect(costLine().props["data-highlighted"]).toBeUndefined();
+      expect(costLine().props["data-series-key"]).toBeUndefined();
+
+      const alpha = legendItem(root, "model-alpha") as TestNode;
+      focus(alpha);
+      await settle();
+      expect(plot.props["data-highlight"]).toBe("true");
+      // The grey hook is CSS-only: the line keeps its true path and never
+      // receives a highlighted state of its own.
+      expect(costLine().props.d).toBe(costPath);
+      expect(costLine().props["data-highlighted"]).toBeUndefined();
+      blur(alpha);
+      await settle();
+      expect(plot.props["data-highlight"]).toBeUndefined();
+
+      const other = legendItem(root, "Other") as TestNode;
+      focus(other);
+      await settle();
+      expect(plot.props["data-highlight"]).toBe("true");
+      expect(costLine().props.d).toBe(costPath);
+      expect(costLine().props["data-highlighted"]).toBeUndefined();
+      expect(costLine().props["data-series-key"]).toBeUndefined();
+      blur(other);
+      await settle();
+      expect(plot.props["data-highlight"]).toBeUndefined();
+    } finally {
+      dispose();
+    }
+  });
+
+  it("omits the old range composition section and keeps the token chart primary", () => {
+    const { root, dispose } = mountModels();
+    try {
+      expect(byClass(root, "section", "qg-composition")).toHaveLength(0);
+      expect(graph.textOf(root)).not.toContain("Range composition");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("overlays cost with unpriced gaps and a true-zero point", async () => {
+    const tokens = costed({ input: 50 }, { apiEquivalentCostUsd: 3, unpricedTokens: 15 });
+    const snapshot: AnalyticsGroupSnapshot = {
+      ...zeroSnapshot("model", undefined),
+      totals: tokens,
+      buckets: [
+        { startMs: NOW - 5 * DAY_MS, endMs: NOW - 4 * DAY_MS },
+        { startMs: NOW - 4 * DAY_MS, endMs: NOW - 3 * DAY_MS },
+        { startMs: NOW - 3 * DAY_MS, endMs: NOW - 2 * DAY_MS },
+        { startMs: NOW - 2 * DAY_MS, endMs: NOW - DAY_MS },
+        { startMs: NOW - DAY_MS, endMs: NOW },
+      ],
+      rows: [
+        {
+          identity: known("model-alpha"),
+          tokens,
+          sessionCount: 1,
+          stepCount: 1,
+          children: [],
+        },
+      ],
+      series: [
+        {
+          kind: "entity",
+          identity: known("model-alpha"),
+          tokens,
+          buckets: [
+            costed({ input: 10 }, { apiEquivalentCostUsd: 2 }),
+            costed({ input: 10 }, { apiEquivalentCostUsd: 1, unpricedTokens: 5 }),
+            costed({ input: 10 }, { apiEquivalentCostUsd: null, unpricedTokens: 10 }),
+            costed({ input: 10 }, { apiEquivalentCostUsd: 0 }),
+            costed({}, { apiEquivalentCostUsd: null }),
+          ],
+        },
+      ],
+    };
+    const { root, dispose } = mountSnapshot(snapshot);
+    try {
+      const lines = byClass(root, "path", "qg-chart__cost-line");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.props["data-partial"]).toBe("true");
+      expect(String(lines[0]?.props.d)).toContain("M");
+      expect(byClass(root, "p", "qg-cost-trend__caption")).toHaveLength(0);
+
+      // The true zero is numeric but isolated, so it keeps a short line mark.
+      const points = byClass(root, "line", "qg-chart__cost-isolated");
+      expect(points).toHaveLength(1);
+      expect(points[0]?.props["data-status"]).toBe("zero");
+      expect(points[0]?.props["data-bucket-index"]).toBe(3);
+      const baseline = (byClass(root, "line", "qg-chart__grid-line")[0] as TestNode).props.y1;
+      expect(points[0]?.props.y1).toBe(baseline);
+      expect(points[0]?.props.y2).toBe(baseline);
+
+      const costTicks = byClass(root, "text", "qg-chart__axis-label--cost");
+      expect(costTicks.map((tick) => graph.textOf(tick))).toEqual([
+        "0",
+        "0.5",
+        "1.0",
+        "1.5",
+        "2.0",
+      ]);
+
+      focus(bucketHits(root)[1] as TestNode);
+      await settle();
+      const partialTooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      expect(graph.textOf(partialTooltip)).toContain("API-equivalent total");
+      expect(graph.textOf(partialTooltip)).toContain("partial");
+      blur(bucketHits(root)[1] as TestNode);
+
+      focus(bucketHits(root)[2] as TestNode);
+      await settle();
+      const unpricedTooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      expect(graph.textOf(unpricedTooltip)).toContain("Unpriced");
+      expect(graph.textOf(unpricedTooltip)).not.toContain("≈ USD —");
+      blur(bucketHits(root)[2] as TestNode);
     } finally {
       dispose();
     }
@@ -1226,6 +1904,57 @@ describe("model and provider detail", () => {
       expect(byClass(root, "h2", "qg-page-title")).toHaveLength(1);
     } finally {
       dispose();
+    }
+  });
+
+  it("wires pinned legend state on both detail pages", async () => {
+    const cases = [
+      {
+        module: modelDetailModule,
+        name: "ModelDetailView",
+        snapshot: modelAlphaSnapshot(),
+        identity: known("model-alpha"),
+      },
+      {
+        module: providerDetailModule,
+        name: "ProviderDetailView",
+        snapshot: providerOpenAISnapshot(),
+        identity: known("openai"),
+      },
+    ] as const;
+
+    for (const detail of cases) {
+      const { root, dispose } = mountDetail(
+        detail.module,
+        detail.name,
+        detail.snapshot,
+        detail.identity,
+      );
+      try {
+        const legend = legendItems(root);
+        expect(legend.length).toBeGreaterThan(0);
+        const first = legend[0] as TestNode;
+        expect(first.tag).toBe("button");
+        expect(first.props["aria-pressed"]).toBe("false");
+
+        focus(first);
+        await settle();
+        expect(first.props["data-active"]).toBe("true");
+
+        click(first);
+        await settle();
+        expect(first.props["data-pinned"]).toBe("true");
+        expect(first.props["aria-pressed"]).toBe("true");
+
+        const plot = byClass(root, "div", "qg-model-chart__plot")[0] as TestNode;
+        expect(plot).toBeDefined();
+        click(plot);
+        await settle();
+        expect(first.props["data-pinned"]).toBeUndefined();
+        expect(first.props["aria-pressed"]).toBe("false");
+      } finally {
+        dispose();
+      }
     }
   });
 
@@ -1872,13 +2601,23 @@ describe("Models styles", () => {
     expect(styles).toContain("--qg-rank-2: var(--qg-token-input);");
     expect(styles).toContain("--qg-rank-3: var(--qg-token-reasoning);");
     expect(styles).toContain("--qg-rank-4: var(--qg-token-output);");
-    expect(styles).toContain("--qg-rank-5: var(--qg-chart-rate);");
+    expect(styles).toContain("--qg-rank-5: #00bc7d;");
     expect(styles).toContain("--qg-rank-other: var(--qg-text-muted);");
     expect(styles).toContain(".qg-analytics-tabs");
     expect(styles).toContain(".qg-breakdown");
     expect(styles).toContain(".qg-partial");
     expect(styles).toContain(".qg-model-chart");
-    expect(styles).not.toContain(".qg-model-legend .qg-legend__swatch");
+    expect(styles).toContain(".qg-chart__cost-line");
+    expect(styles).toContain(".qg-chart__cost-isolated");
+    expect(styles).toContain(".qg-chart__axis-title--cost");
+    expect(styles).toContain(".qg-chart__child-slice");
+    expect(styles).toContain(".qg-model-tooltip__cost");
+    expect(styles).not.toContain(".qg-composition");
+    expect(styles).not.toContain(".qg-cost-trend");
+    expect(styles).not.toContain(".qg-model-legend");
+    expect(styles).toMatch(
+      /\.qg-legend__item:hover,\s*\.qg-legend__item:focus-visible \{[^}]*border-color: var\(--qg-border\);/u,
+    );
     expect(styles).toContain(".qg-legend__swatch {");
     expect(styles).toContain("border-radius: 2px;");
     expect(styles).toMatch(
@@ -1889,6 +2628,51 @@ describe("Models styles", () => {
     expect(styles).toContain(".qg-breakable");
     expect(styles).toContain("overflow-wrap: anywhere;");
     expect(styles).toContain("background: var(--qg-surface);");
+  });
+
+  it("paints the cost line amber while the fifth rank stays an independent green", () => {
+    const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+    expect(styles).toContain("--qg-chart-rate: #ffb900;");
+    expect(styles).toContain("--qg-chart-cost-strong: #ffb900;");
+    expect(styles).toContain("--qg-rank-5: #00bc7d;");
+    expect(styles).not.toContain("--qg-rank-5: var(--qg-chart-rate);");
+    expect(styles).toMatch(/\.qg-chart__cost-line \{[^}]*stroke: var\(--qg-chart-cost-strong\);/u);
+  });
+
+  it("greys the cost line only while the chart carries series emphasis", () => {
+    const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+    expect(styles).toMatch(
+      /\.qg-model-chart__plot\[data-highlight\] \.qg-chart__cost-line \{[^}]*stroke: var\(--qg-chart-cost\);/u,
+    );
+  });
+
+  it("uses the shared inactive opacity and keeps the narrow total compact", () => {
+    const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+    expect(styles).toMatch(
+      /\.qg-chart\[data-highlight\] \.qg-chart__segment:not\(\[data-highlighted="true"\]\) \{[^}]*opacity: 0\.42;/u,
+    );
+    expect(styles).not.toMatch(
+      /\.qg-model-chart__plot\[data-highlight\] \.qg-chart__segment\[data-highlighted="false"\]/u,
+    );
+    expect(styles).toMatch(
+      /\.qg-model-chart__plot\[data-child-highlight\] \.qg-chart__child-slice:not\(\[data-highlighted="true"\]\) \{[^}]*opacity: 0\.38;/u,
+    );
+    expect(styles).toMatch(
+      /\.qg-model-tooltip__footer \.qg-totals__label \{[^}]*white-space: normal;[^}]*\}/u,
+    );
+    expect(styles).toMatch(/\.qg-model-tooltip__total-short \{[^}]*display: none;/u);
+    const compactFooter = styles.slice(
+      styles.indexOf("@media (max-width: 700px)"),
+      styles.indexOf("@media (max-width: 380px)"),
+    );
+    expect(compactFooter).toContain(".qg-model-tooltip__total-long");
+    expect(compactFooter).toContain("clip-path: inset(50%);");
+    expect(compactFooter).toContain(".qg-model-tooltip__total-short");
+    expect(compactFooter).toContain("display: inline;");
+    expect(styles).toMatch(/\.qg-legend__item \{[^}]*font: inherit;/u);
+    expect(styles).toMatch(
+      /\.qg-legend__item:focus-visible \{[^}]*outline: 1px solid var\(--qg-accent-border\);/u,
+    );
   });
 });
 

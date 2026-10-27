@@ -222,6 +222,67 @@ export function snapshotOf(
   };
 }
 
+function sameRowIdentity(left: AnalyticsEntityIdentity, right: AnalyticsEntityIdentity): boolean {
+  if (left.kind === "unknown" || right.kind === "unknown") {
+    return left.kind === right.kind;
+  }
+  return left.id === right.id;
+}
+
+/**
+ * Adds the real per-child buckets the backend now emits, using the fixture's
+ * own 60/40 bucket split. The top five entity series receive their children;
+ * Other receives the true children of every row outside that top five,
+ * aggregated by exact child identity rather than an invented remainder.
+ */
+export function withChildBuckets(snapshot: AnalyticsGroupSnapshot): AnalyticsGroupSnapshot {
+  const topIdentities = snapshot.series.flatMap((entry) =>
+    entry.kind === "entity" ? [entry.identity] : [],
+  );
+  const isContributingRow = (
+    row: AnalyticsGroupRow,
+    entry: AnalyticsGroupSnapshot["series"][number],
+  ): boolean =>
+    entry.kind === "entity"
+      ? sameRowIdentity(row.identity, entry.identity)
+      : !topIdentities.some((identity) => sameRowIdentity(row.identity, identity));
+
+  return {
+    ...snapshot,
+    series: snapshot.series.map((entry) => {
+      const childBuckets = snapshot.buckets.map((_, bucketIndex) => {
+        const merged = new Map<
+          string,
+          { identity: AnalyticsEntityIdentity; tokens: CostedTokens }
+        >();
+        for (const row of snapshot.rows.filter((candidate) =>
+          isContributingRow(candidate, entry),
+        )) {
+          for (const child of row.children) {
+            const split = splitCosted(child.tokens);
+            const tokens = split[bucketIndex];
+            if (tokens === undefined || tokens.total <= 0) continue;
+            const key = identityKey(child.identity);
+            const current = merged.get(key);
+            merged.set(
+              key,
+              current === undefined
+                ? { identity: child.identity, tokens }
+                : { identity: current.identity, tokens: addCosted(current.tokens, tokens) },
+            );
+          }
+        }
+        return [...merged.values()].sort((left, right) => {
+          const byTokens = right.tokens.total - left.tokens.total;
+          if (byTokens !== 0) return byTokens;
+          return identityKey(left.identity) < identityKey(right.identity) ? -1 : 1;
+        });
+      });
+      return { ...entry, childBuckets };
+    }),
+  };
+}
+
 const alphaChildren: RowSpec[] = [
   { identity: known("openai"), total: 300, cost: 3 },
   { identity: known("anthropic"), total: 150, cost: 1.5 },

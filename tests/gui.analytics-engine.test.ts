@@ -351,6 +351,7 @@ function harness(
   db: FakeDb,
   overrides: {
     now?: number;
+    reader?: AnalyticsReader;
     loadSnapshot?: () => Promise<AnalyticsState | undefined>;
     saveSnapshot?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
     loadPresentation?: () => Promise<WarmAnalyticsPresentation | undefined>;
@@ -359,7 +360,7 @@ function harness(
   } = {},
 ): Harness {
   const calls: ReaderCall[] = [];
-  const reader = createFakeReader(db, calls);
+  const reader = overrides.reader ?? createFakeReader(db, calls);
   let nowMs = overrides.now ?? NOW;
   const savedStates: AnalyticsState[] = [];
   const savedPresentations: WarmAnalyticsPresentation[] = [];
@@ -3709,6 +3710,381 @@ describe("analytics engine: grouped model/provider transport", () => {
     const after = await engine.groups({ range: "24h", dimension: "model" });
     expect(after.window).toEqual(certifiedWindow);
     expect(after.stale).toBe(false);
+    await engine.close();
+  });
+});
+
+function zeroRow(
+  sessionID: string,
+  messageID: string,
+  atMs: number,
+  extra: Partial<OpenCodeRawAssistantRow> = {},
+): OpenCodeRawAssistantRow {
+  return row(
+    sessionID,
+    messageID,
+    atMs,
+    { input: 0, output: 0, cacheRead: 0 },
+    {
+      cost: 0,
+      providerID: "zero-labs",
+      modelID: "zero-1",
+      ...extra,
+    },
+  );
+}
+
+describe("analytics engine: zero-token usage exclusion", () => {
+  it("excludes zero-token rows from Home, groups, and session detail", async () => {
+    const db = baseDb();
+    const zero = zeroRow("ses_root", "msg_zero", NOW - HOUR);
+    db.rows.push(zero);
+    db.updatedAt.set(rowKey(zero.sessionID, zero.messageID), zero.completedAtMs);
+
+    const { engine } = harness(db);
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(700);
+    expect(home.usage.stepCount).toBe(3);
+    expect(home.usage.sessionCount).toBe(2);
+
+    for (const dimension of ["model", "provider"] as const) {
+      const grouped = await engine.groups({ range: "24h", dimension });
+      expect(grouped.totals).toEqual(home.usage.totals);
+      expect(grouped.stepCount).toBe(3);
+      expect(grouped.sessionCount).toBe(2);
+      expect(
+        grouped.rows.some(
+          (entry) => entry.identity.kind === "known" && entry.identity.id === "zero-1",
+        ),
+      ).toBe(false);
+      expect(
+        grouped.rows.some(
+          (entry) => entry.identity.kind === "known" && entry.identity.id === "zero-labs",
+        ),
+      ).toBe(false);
+      expect(
+        grouped.series.some(
+          (entry) =>
+            entry.kind === "entity" &&
+            entry.identity.kind === "known" &&
+            entry.identity.id === "zero-1",
+        ),
+      ).toBe(false);
+      expect(
+        grouped.series.some(
+          (entry) =>
+            entry.kind === "entity" &&
+            entry.identity.kind === "known" &&
+            entry.identity.id === "zero-labs",
+        ),
+      ).toBe(false);
+    }
+
+    const session = await engine.session("ses_root");
+    expect(session.steps.some((step) => step.messageId === "msg_zero")).toBe(false);
+    expect(session.ownSummary.stepCount).toBe(2);
+    // Metadata survives zero-token exclusion.
+    expect(session.focusSessionId).toBe("ses_root");
+    expect(session.nodes.some((node) => node.sessionId === "ses_root")).toBe(true);
+    await engine.close();
+  });
+
+  it("rebuilds warm Home DTOs written under pre-zero-token presentation semantics", async () => {
+    const db = baseDb();
+    const zero = zeroRow("ses_root", "msg_zero", NOW - HOUR);
+    db.rows.push(zero);
+    db.updatedAt.set(rowKey(zero.sessionID, zero.messageID), zero.completedAtMs);
+
+    // Old semantics counted the zero-token row as a step, so a legacy warm DTO
+    // is observably different from a current rebuild (same tokens, extra step).
+    const legacyHome = homeFromDataset(db, "24h");
+    expect(legacyHome.usage.stepCount).toBe(4);
+    const legacyState: AnalyticsState = {
+      sessions: {},
+      projects: {},
+      fingerprints: [],
+      fingerprintIndex: new Map(),
+      occurrences: new Map(),
+      extent: { sinceMs: NOW - HOUR, untilMs: NOW },
+      sourceIdentity: db.identity,
+      frontierAtMs: NOW,
+      presentation: { home: { "24h": legacyHome }, project: [] },
+    };
+    const legacySidecar = JSON.parse(
+      JSON.stringify(encodeAnalyticsPresentation(legacyState, NOW)),
+    ) as Record<string, unknown>;
+    delete legacySidecar.presentationVersion;
+
+    const warm = harness(db, {
+      loadPresentation: async () => decodeAnalyticsPresentation(legacySidecar),
+    });
+    const home = await warm.engine.home("24h");
+    expect(home.usage.stepCount).toBe(3);
+    expect(home.usage.totals.input).toBe(700);
+    await warm.engine.close();
+  });
+
+  it("reconciles positive→zero and zero→positive deltas without stale usage", async () => {
+    const db = baseDb();
+    const switchRow = row(
+      "ses_root",
+      "msg_switch",
+      NOW - HOUR,
+      { input: 50 },
+      {
+        providerID: "zai",
+        modelID: "glm-4.7",
+      },
+    );
+    db.rows.push(switchRow);
+    db.updatedAt.set(rowKey(switchRow.sessionID, switchRow.messageID), switchRow.completedAtMs);
+    const { engine, setNow } = harness(db);
+
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    expect(before.totals.input).toBe(750);
+    expect(
+      before.rows.some(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+      ),
+    ).toBe(true);
+
+    const index = db.rows.findIndex((entry) => entry.messageID === "msg_switch");
+    const toZero = zeroRow("ses_root", "msg_switch", NOW - HOUR, {
+      createdAtMs: switchRow.createdAtMs,
+      updatedAtMs: NOW + 1,
+    });
+    db.rows[index] = toZero;
+    db.updatedAt.set(rowKey(toZero.sessionID, toZero.messageID), NOW + 1);
+    setNow(NOW + INTERVAL + 1);
+    await engine.refresh();
+
+    const afterZero = await engine.home("24h");
+    expect(afterZero.usage.totals.input).toBe(700);
+    const zeroGroups = await engine.groups({ range: "24h", dimension: "model" });
+    expect(
+      zeroGroups.rows.some(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+      ),
+    ).toBe(false);
+    expect(
+      (await engine.session("ses_root")).steps.some((step) => step.messageId === "msg_switch"),
+    ).toBe(false);
+
+    const backPositive = row(
+      "ses_root",
+      "msg_switch",
+      NOW - HOUR,
+      { input: 70 },
+      {
+        providerID: "zai",
+        modelID: "glm-4.7",
+        updatedAtMs: NOW + 2,
+      },
+    );
+    db.rows[index] = backPositive;
+    db.updatedAt.set(rowKey(backPositive.sessionID, backPositive.messageID), NOW + 2);
+    setNow(NOW + 2 * INTERVAL + 1);
+    await engine.refresh();
+
+    expect((await engine.home("24h")).usage.totals.input).toBe(770);
+    const restored = await engine.groups({ range: "24h", dimension: "model" });
+    const zai = restored.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+    );
+    expect(zai?.tokens.input).toBe(70);
+    expect(
+      (await engine.session("ses_root")).steps.some((step) => step.messageId === "msg_switch"),
+    ).toBe(true);
+    await engine.close();
+  });
+
+  it("reconciles silent positive→zero and zero→positive edits on full repair", async () => {
+    const db = baseDb();
+    const switchRow = row(
+      "ses_root",
+      "msg_silent",
+      NOW - HOUR,
+      { input: 50 },
+      {
+        providerID: "zai",
+        modelID: "glm-4.7",
+      },
+    );
+    db.rows.push(switchRow);
+    db.updatedAt.set(rowKey(switchRow.sessionID, switchRow.messageID), NOW - HOUR);
+    const { engine, setNow } = harness(db, { fullRepairIntervalMs: 0 });
+
+    await engine.home("24h");
+    expect((await engine.home("24h")).usage.totals.input).toBe(750);
+
+    const index = db.rows.findIndex((entry) => entry.messageID === "msg_silent");
+    // Payload changes without a source-timestamp move: only a full repair can
+    // observe this edit. The range read must remain unfiltered so the zero row
+    // is projected and the previously owned positive contribution is removed.
+    db.rows[index] = zeroRow("ses_root", "msg_silent", NOW - HOUR, {
+      createdAtMs: switchRow.createdAtMs,
+    });
+    setNow(NOW + 1);
+    await engine.refresh();
+    expect((await engine.home("24h")).usage.totals.input).toBe(700);
+    const zeroGroups = await engine.groups({ range: "24h", dimension: "model" });
+    expect(
+      zeroGroups.rows.some(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+      ),
+    ).toBe(false);
+
+    db.rows[index] = row(
+      "ses_root",
+      "msg_silent",
+      NOW - HOUR,
+      { input: 70 },
+      {
+        providerID: "zai",
+        modelID: "glm-4.7",
+      },
+    );
+    setNow(NOW + 2);
+    await engine.refresh();
+    expect((await engine.home("24h")).usage.totals.input).toBe(770);
+    const restored = await engine.groups({ range: "24h", dimension: "model" });
+    expect(
+      restored.rows.find(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+      )?.tokens.input,
+    ).toBe(70);
+    await engine.close();
+  });
+
+  it("does not shortcut filtered lifetime when only zero-token rows are indexed", async () => {
+    const db = baseDb();
+    // The initial 24h extent owns membership but no usage.
+    const zero = zeroRow("ses_root", "msg_zero_recent", NOW - HOUR);
+    // Older positive history matches the filter but lies outside the extent.
+    const older = row(
+      "ses_root",
+      "msg_old_match",
+      NOW - 45 * DAY,
+      { input: 900 },
+      { providerID: "zai", modelID: "glm-4.7" },
+    );
+    db.rows = [zero, older];
+    db.updatedAt.clear();
+    db.updatedAt.set(rowKey(zero.sessionID, zero.messageID), zero.completedAtMs);
+    db.updatedAt.set(rowKey(older.sessionID, older.messageID), older.completedAtMs);
+
+    const { engine } = harness(db);
+    await engine.home("24h");
+
+    const result = await engine.groups({
+      range: "lifetime",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "glm-4.7" } },
+    });
+
+    // The zero-only shortcut would return an empty stale snapshot before the
+    // older matching positive history was read.
+    expect(result.stale).toBe(false);
+    expect(result.totals.input).toBe(900);
+    expect(result.stepCount).toBe(1);
+    expect(
+      result.rows.find((entry) => entry.identity.kind === "known" && entry.identity.id === "zai")
+        ?.tokens.input,
+    ).toBe(900);
+    await engine.close();
+  });
+});
+
+describe("analytics engine: scoped provider/model lifetime", () => {
+  it("serves detail lifetime from owned hours without awaiting a raw read", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    const baseReader = createFakeReader(db, calls);
+    let releaseRead: (() => void) | undefined;
+    let gateArmed = false;
+    const reader: AnalyticsReader = {
+      async withSnapshot<T>(
+        read: (snapshot: OpenCodeStorageSnapshot) => T | Promise<T>,
+      ): Promise<OpenCodeStorageSnapshotResult<T>> {
+        if (gateArmed) {
+          gateArmed = false;
+          await new Promise<void>((resolve) => {
+            releaseRead = resolve;
+          });
+        }
+        return baseReader.withSnapshot(read);
+      },
+    };
+    const { engine } = harness(db, { reader });
+
+    const home = await engine.home("24h");
+    const query: AnalyticsGroupQuery = {
+      range: "lifetime",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+    };
+    const baseline = calls.length;
+    gateArmed = true;
+    let resolved = false;
+    const pending = engine.groups(query).then((snapshot) => {
+      resolved = true;
+      return snapshot;
+    });
+    await flushAsync();
+    // The render completes while the background lifetime read is still gated.
+    expect(resolved).toBe(true);
+    const partial = await pending;
+    expect(partial.stale).toBe(true);
+    expect(partial.totals).toEqual(home.usage.totals);
+    expect(partial.window.untilMs).toBe(NOW);
+
+    // A repeat render is served from the same owned data/cache, not another read.
+    const repeated = await engine.groups(query);
+    expect(repeated.totals).toEqual(partial.totals);
+    expect(repeated.stale).toBe(true);
+
+    releaseRead?.();
+    await flushAsync();
+    await flushAsync();
+    const backgroundReads = calls.slice(baseline).filter((call) => call.method === "withSnapshot");
+    expect(backgroundReads).toHaveLength(1);
+
+    // The completed background lifetime read extends the extent; the next
+    // detail render re-derives from owned hours without touching SQLite.
+    const beforeComplete = calls.length;
+    const complete = await engine.groups(query);
+    expect(complete.totals.input).toBe(1_500);
+    expect(complete.stale).toBe(false);
+    expect(calls).toHaveLength(beforeComplete);
+    await engine.close();
+  });
+
+  it("back off repeated scoped lifetime fills while the source is unavailable", async () => {
+    const db = baseDb();
+    const { engine, calls, setNow } = harness(db);
+    const home = await engine.home("24h");
+    db.status = "missing";
+    const baseline = calls.length;
+
+    const query: AnalyticsGroupQuery = {
+      range: "lifetime",
+      dimension: "model",
+      filter: { dimension: "provider", identity: { kind: "known", id: "openai" } },
+    };
+    const first = await engine.groups(query);
+    expect(first.stale).toBe(true);
+    expect(first.totals).toEqual(home.usage.totals);
+    await flushAsync();
+    expect(calls.slice(baseline).filter((call) => call.method === "withSnapshot")).toHaveLength(1);
+
+    // Cached partial data must not force a new source read on every render.
+    setNow(NOW + 1_000);
+    const second = await engine.groups(query);
+    expect(second.stale).toBe(true);
+    expect(second.totals).toEqual(first.totals);
+    await flushAsync();
+    expect(calls.slice(baseline).filter((call) => call.method === "withSnapshot")).toHaveLength(1);
     await engine.close();
   });
 });

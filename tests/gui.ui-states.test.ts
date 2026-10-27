@@ -556,12 +556,13 @@ describe("section state machine", () => {
     ).toBe("1.62481239 token");
   });
 
-  it("labels legend inspection without exposing toggle semantics", async () => {
+  it("labels legend pinning as semantic toggle buttons without navigation", async () => {
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: homeSnapshot().usage,
     });
+    expect(html).toContain('type="button"');
     expect(html).toContain('aria-label="Highlight Input"');
-    expect(html).not.toContain("aria-pressed");
+    expect(html).toContain('aria-pressed="false"');
   });
   it("shows a skeleton only on the first load", () => {
     expect(resolveLoadState<number>({ loading: true })).toEqual({ kind: "skeleton" });
@@ -1258,7 +1259,7 @@ describe("usage chart", () => {
     const buttons = renderGraph.elementsNamed(root, "button");
     const hit = buttons.find((node) => node.props.class === "qg-chart__hit");
     const legend = renderGraph
-      .elementsNamed(root, "li")
+      .elementsNamed(root, "button")
       .find((node) => node.props["aria-label"] === "Highlight Reasoning");
     expect(hit).toBeDefined();
     expect(legend).toBeDefined();
@@ -1294,14 +1295,15 @@ describe("usage chart", () => {
     expect(segments().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
     renderGraph.listenerOf(legend, "onBlur")?.({});
     expect(segments().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(2);
-    // There is no click/pin or keyboard-release handler on a legend entry.
-    expect(renderGraph.listenerOf(legend, "onClick")).toBeUndefined();
+    // A native button handles Enter/Space; focus remains an emphasis source.
+    expect(legend.tag).toBe("button");
+    expect(legend.props.type).toBe("button");
     expect(renderGraph.listenerOf(legend, "onKeyDown")).toBeUndefined();
     expect(segments().map((node) => node.props.y)).toEqual(initialSegments);
     dispose();
   });
 
-  it("keeps legend emphasis transient and never pins a clicked series", () => {
+  it("pins a clicked legend badge until the same badge or an outside click clears it", () => {
     const root = renderGraph.createTestRoot();
     const snapshot = usage("7d", [
       { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 10, cacheRead: 5 }) },
@@ -1313,54 +1315,87 @@ describe("usage chart", () => {
         .filter((node) => node.props.class === "qg-chart__segment");
     const highlighted = () =>
       segments().filter((node) => node.props["data-highlighted"] === "true");
-    const legend = renderGraph
-      .elementsNamed(root, "li")
-      .find((node) => node.props["aria-label"] === "Highlight Input");
-    expect(legend).toBeDefined();
-    if (!legend) {
+    const legend = (label: string) =>
+      renderGraph.elementsNamed(root, "button").find((node) => node.props["aria-label"] === label);
+    const inputBadge = legend("Highlight Input");
+    const cacheBadge = legend("Highlight Cache Read");
+    const chart = renderGraph
+      .elementsNamed(root, "div")
+      .find((node) => node.props.class === "qg-chart");
+    expect(inputBadge).toBeDefined();
+    expect(cacheBadge).toBeDefined();
+    expect(chart).toBeDefined();
+    if (!inputBadge || !cacheBadge || !chart) {
       dispose();
       return;
     }
+    expect(inputBadge.tag).toBe("button");
+    expect(inputBadge.props.type).toBe("button");
+    expect(inputBadge.props["aria-pressed"]).toBe("false");
+    const fire = (node: TestNode, name: string) => renderGraph.listenerOf(node, name)?.({});
     const baseline = segments().map((node) => [node.props.y, node.props.height]);
     expect(segments()).toHaveLength(2);
+    expect(highlighted()).toHaveLength(2);
 
-    // The legend entry is a focusable, non-actionable list item: it has no
-    // button activation semantics, no click handler, and no pressed state.
-    expect(legend.tag).toBe("li");
-    expect(legend.props.tabIndex).toBe(0);
-    expect(renderGraph.listenerOf(legend, "onClick")).toBeUndefined();
-    expect(renderGraph.listenerOf(legend, "onKeyDown")).toBeUndefined();
-    expect(legend.props["aria-pressed"]).toBeUndefined();
-    expect(legend.props["data-pressed"]).toBeUndefined();
-
-    // Pointer activation natively focuses the entry. Emphasis may appear while
-    // hovered, but pointer leave must ALWAYS clear it even when no blur fires.
-    renderGraph.listenerOf(legend, "onPointerEnter")?.({});
-    renderGraph.listenerOf(legend, "onFocus")?.({});
+    // Pin Input by clicking it while hovered and focused.
+    fire(inputBadge, "onPointerEnter");
+    fire(inputBadge, "onFocus");
+    fire(inputBadge, "onClick");
+    expect(inputBadge.props["data-pinned"]).toBe("true");
+    expect(inputBadge.props["aria-pressed"]).toBe("true");
     expect(highlighted()).toHaveLength(1);
     expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
-    expect(segments()).toHaveLength(2);
-    expect(
-      renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-chart")?.props[
-        "data-highlight"
-      ],
-    ).toBe("true");
-    renderGraph.listenerOf(legend, "onClick")?.({});
-    renderGraph.listenerOf(legend, "onPointerLeave")?.({});
-    expect(highlighted()).toHaveLength(2);
-    expect(
-      renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-chart")?.props[
-        "data-highlight"
-      ],
-    ).toBeUndefined();
+    expect(chart.props["data-highlight"]).toBe("true");
 
-    // Keyboard focus emphasises one series; losing focus restores normal.
-    renderGraph.listenerOf(legend, "onFocus")?.({});
+    // Pointer leave clears transient emphasis; the pin survives.
+    fire(inputBadge, "onPointerLeave");
     expect(highlighted()).toHaveLength(1);
-    renderGraph.listenerOf(legend, "onBlur")?.({});
-    expect(highlighted()).toHaveLength(2);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+    expect(chart.props["data-highlight"]).toBe("true");
 
-    // No series is hidden or toggled at any point, and the stack is unchanged.
+    // Hovering another badge wins temporarily; leaving restores the pin.
+    fire(cacheBadge, "onPointerEnter");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-cache-read)");
+    fire(cacheBadge, "onPointerLeave");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+
+    // Keyboard focus wins temporarily; blur restores the pin.
+    fire(cacheBadge, "onFocus");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-cache-read)");
+    fire(cacheBadge, "onBlur");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+
+    // Clicking the pinned badge again clears the pin and that badge's
+    // transient emphasis, so the reset is immediate even while hovered.
+    fire(inputBadge, "onPointerEnter");
+    fire(inputBadge, "onFocus");
+    fire(inputBadge, "onClick");
+    expect(inputBadge.props["data-pinned"]).toBeUndefined();
+    expect(inputBadge.props["aria-pressed"]).toBe("false");
+    expect(highlighted()).toHaveLength(2);
+    expect(chart.props["data-highlight"]).toBeUndefined();
+
+    // Clicking another badge switches the pin.
+    fire(cacheBadge, "onClick");
+    expect(cacheBadge.props["data-pinned"]).toBe("true");
+    expect(cacheBadge.props["aria-pressed"]).toBe("true");
+    expect(inputBadge.props["data-pinned"]).toBeUndefined();
+    expect(inputBadge.props["aria-pressed"]).toBe("false");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-cache-read)");
+
+    // Any click outside the legend clears the pin.
+    fire(chart, "onClick");
+    expect(cacheBadge.props["data-pinned"]).toBeUndefined();
+    expect(cacheBadge.props["aria-pressed"]).toBe("false");
+    expect(highlighted()).toHaveLength(2);
+    expect(chart.props["data-highlight"]).toBeUndefined();
+
+    // No series is hidden or toggled, and the stack is unchanged.
     expect(
       segments().every(
         (node) =>
@@ -1373,6 +1408,105 @@ describe("usage chart", () => {
     expect(segments()).toHaveLength(2);
     expect(segments().map((node) => [node.props.y, node.props.height])).toEqual(baseline);
     dispose();
+  });
+
+  it("keeps focused legend emphasis through pointer leave until blur", () => {
+    const root = renderGraph.createTestRoot();
+    const snapshot = usage("7d", [
+      { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 10, cacheRead: 5 }) },
+    ]);
+    const dispose = renderGraph.mount(() => renderGraph.chart({ usage: snapshot }), root);
+    const segments = () =>
+      renderGraph
+        .elementsNamed(root, "rect")
+        .filter((node) => node.props.class === "qg-chart__segment");
+    const highlighted = () =>
+      segments().filter((node) => node.props["data-highlighted"] === "true");
+    const legend = (label: string) =>
+      renderGraph.elementsNamed(root, "button").find((node) => node.props["aria-label"] === label);
+    const inputBadge = legend("Highlight Input");
+    const cacheBadge = legend("Highlight Cache Read");
+    const chart = renderGraph
+      .elementsNamed(root, "div")
+      .find((node) => node.props.class === "qg-chart");
+    expect(inputBadge).toBeDefined();
+    expect(cacheBadge).toBeDefined();
+    expect(chart).toBeDefined();
+    if (!inputBadge || !cacheBadge || !chart) {
+      dispose();
+      return;
+    }
+    renderGraph.listenerOf(inputBadge, "onFocus")?.({});
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+
+    // Hover wins while the pointer is present, but leaving the other badge
+    // must restore the focused badge rather than clearing all emphasis.
+    renderGraph.listenerOf(cacheBadge, "onPointerEnter")?.({});
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-cache-read)");
+    renderGraph.listenerOf(cacheBadge, "onPointerLeave")?.({});
+    expect(chart.props["data-highlight"]).toBe("true");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+
+    // Focus itself still clears only on blur.
+    renderGraph.listenerOf(inputBadge, "onBlur")?.({});
+    expect(chart.props["data-highlight"]).toBeUndefined();
+    expect(highlighted()).toHaveLength(2);
+    dispose();
+  });
+
+  it("drops a pinned badge when its category leaves the visible range", async () => {
+    const [snapshot, setSnapshot] = renderGraph.createSignal(
+      usage("7d", [
+        { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 10, cacheRead: 5 }) },
+      ]),
+    );
+    const root = renderGraph.createTestRoot();
+    const dispose = renderGraph.mount(
+      () =>
+        renderGraph.chart({
+          get usage() {
+            return snapshot();
+          },
+        }),
+      root,
+    );
+    try {
+      const badges = () =>
+        renderGraph
+          .elementsNamed(root, "button")
+          .filter((node) => node.props.class === "qg-legend__item");
+      const inputBadge = badges().find((node) => node.props["aria-label"] === "Highlight Input");
+      const chart = renderGraph
+        .elementsNamed(root, "div")
+        .find((node) => node.props.class === "qg-chart");
+      expect(inputBadge).toBeDefined();
+      expect(chart).toBeDefined();
+      if (!inputBadge || !chart) {
+        dispose();
+        return;
+      }
+      renderGraph.listenerOf(inputBadge, "onClick")?.({});
+      expect(inputBadge.props["data-pinned"]).toBe("true");
+      expect(chart.props["data-highlight"]).toBe("true");
+
+      // A refetch drops Input entirely; the pin can no longer match a rendered
+      // badge, so it must clear rather than dim the remaining series.
+      setSnapshot(
+        usage("7d", [{ startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ cacheRead: 5 }) }]),
+      );
+      await Promise.resolve();
+      const segments = renderGraph
+        .elementsNamed(root, "rect")
+        .filter((node) => node.props.class === "qg-chart__segment");
+      expect(segments).toHaveLength(1);
+      expect(segments[0]?.props["data-highlighted"]).toBe("true");
+      expect(chart.props["data-highlight"]).toBeUndefined();
+      expect(badges().every((node) => node.props["data-pinned"] === undefined)).toBe(true);
+    } finally {
+      dispose();
+    }
   });
 
   it("uses a constant narrow label stride and omits an unaligned final bucket", () => {

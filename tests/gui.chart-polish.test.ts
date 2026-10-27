@@ -413,7 +413,7 @@ describe("shared stacked usage bars", () => {
         expect(Number(segment.props.rx)).toBeCloseTo(radius, 10);
         expect(Number(segment.props.ry)).toBeCloseTo(radius, 10);
       }
-      const legend = byClass(root, "li", "qg-legend__item");
+      const legend = byClass(root, "button", "qg-legend__item");
       expect(legend.map((item) => graph.textOf(item))).toEqual([
         "Cache Read20",
         "Input10",
@@ -446,7 +446,7 @@ describe("shared stacked usage bars", () => {
     try {
       const categories = () =>
         byClass(root, "rect", "qg-chart__segment").map((segment) => segment.props["data-category"]);
-      const legend = () => byClass(root, "li", "qg-legend__item");
+      const legend = () => byClass(root, "button", "qg-legend__item");
       expect(categories()).toEqual(["input"]);
       expect(legend()).toHaveLength(1);
       expect(graph.textOf(root)).not.toContain("Cache Write");
@@ -976,7 +976,7 @@ describe("shared stacked usage bars", () => {
       );
       expect(rateLabels).toEqual(["0%", "25%", "50%", "75%", "100%"]);
       // Only input and cache read have activity in this range.
-      expect(byClass(root, "li", "qg-legend__item")).toHaveLength(2);
+      expect(byClass(root, "button", "qg-legend__item")).toHaveLength(2);
       expect(graph.textOf(root)).not.toContain("right axis");
     } finally {
       dispose();

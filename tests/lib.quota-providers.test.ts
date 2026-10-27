@@ -12,6 +12,7 @@ import {
   selectEligibleQuotaProviderDefinitions,
   validateQuotaProviders,
 } from "../src/lib/quota-providers.js";
+import { resolvePricingKey } from "../src/lib/quota-stats.js";
 import {
   localQuotaProvider,
   quotaProvider,
@@ -370,7 +371,11 @@ describe("quotaProviders schema", () => {
     const pricedTargetModel = listModelsForProvider(pricedTargetProvider)[0]!;
     const ambiguousModel = providers
       .flatMap((provider) => listModelsForProvider(provider))
-      .find((model) => listProvidersForModelId(model).length > 1);
+      .find(
+        (model) =>
+          listProvidersForModelId(model).length > 1 &&
+          !resolvePricingKey({ providerID: "private-gateway", modelID: model }).ok,
+      );
     const sourceModel = ambiguousModel ?? "private-model-without-modelsdev-match";
 
     const result = validateQuotaProviders([

@@ -33,6 +33,7 @@ import {
   type OpenCodeStorageSnapshot,
   type OpenCodeStorageSnapshotResult,
   type ReadCompletedAssistantRowsParams,
+  rawAssistantRowHasTokenUsage,
 } from "../lib/opencode-storage.js";
 import { createUsageAnalytics, UNKNOWN_PROJECT_ID } from "./aggregation.js";
 import { createAnalyticsIndexes } from "./analytics-indexes.js";
@@ -426,6 +427,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   const detailFreshAt = new Map<string, number>();
   /** Bounded in-memory range-certified grouped DTOs, keyed collision-safely. */
   const groupCache = new Map<string, AnalyticsGroupSnapshot>();
+  /** Last non-blocking scoped-lifetime lifetime read attempt (backoff only). */
+  let scopedLifetimeReadAtMs: number | undefined;
   const closeWriteTimeoutMs =
     options.closeWriteTimeoutMs !== undefined && Number.isFinite(options.closeWriteTimeoutMs)
       ? Math.max(0, options.closeWriteTimeoutMs)
@@ -675,7 +678,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const rows = function* rowsForModel(): Generator<OpenCodeRawAssistantRow> {
         for (const occurrence of state.occurrences.values()) {
           const row = rowOf(occurrence);
-          if (row) yield row;
+          if (!row) continue;
+          // Zero-token rows stay in the membership index for exact delta
+          // reconciliation, but never enter model ownership/rollups.
+          if (!rawAssistantRowHasTokenUsage(row)) continue;
+          yield row;
         }
       };
       model.apply(rows(), []);
@@ -710,6 +717,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (!occurrence) continue;
       const row = rowOf(occurrence);
       if (!row) continue;
+      // Zero-token rows are metadata/activity only; the session DTO is a
+      // usage view, so it must not grow steps, ownership, or pricing work.
+      if (!rawAssistantRowHasTokenUsage(row)) continue;
       messages.push(row);
       includedSessionIds.add(occurrence.sessionID);
     }
@@ -1144,6 +1154,38 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const certified =
       range === "lifetime" ? certifiedLifetimeWindowAtMs(atMs) : homeCertifiedSyncAtMs(range, atMs);
     return certified ?? atMs;
+  }
+
+  /**
+   * Provider/model detail lifetime is a scoped view: as soon as any owned
+   * hourly data exists, it can be derived without blocking on the source. It is
+   * marked stale until a global lifetime extent certifies completeness; the
+   * missing history is filled by one background read per refresh interval.
+   *
+   * Membership alone is not owned usage: zero-token occurrences are retained
+   * for exact delta reconciliation but never enter the model. Using their count
+   * would let a lifetime filtered view return an inaccurate empty result while
+   * older matching positive history has not been read yet.
+   */
+  function canDeriveScopedLifetimeFromOwnedData(query: AnalyticsGroupQuery): boolean {
+    if (
+      query.range !== "lifetime" ||
+      query.filter === undefined ||
+      state.occurrences.size === 0 ||
+      coversSince(undefined, state.extent)
+    ) {
+      return false;
+    }
+    ensureModel();
+    return model.ownedStepCount() > 0;
+  }
+
+  function scheduleScopedLifetimeRefresh(atMs: number): void {
+    if (scopedLifetimeReadAtMs !== undefined && atMs - scopedLifetimeReadAtMs < refreshIntervalMs) {
+      return;
+    }
+    scopedLifetimeReadAtMs = atMs;
+    requestBackground({ globalRange: "lifetime", detailSessionIds: [], projectScopes: [] }, true);
   }
 
   function cachedGroupSnapshot(query: AnalyticsGroupQuery): AnalyticsGroupSnapshot | undefined {
@@ -2151,6 +2193,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       measureSync("modelUpdate", () => model.clear());
       modelHydrated = false;
       modelDirty = true;
+      scopedLifetimeReadAtMs = undefined;
     }
 
     const removals: OpenCodeRawAssistantRow[] = [];
@@ -2322,14 +2365,22 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     if (modelHydrated) {
-      const modelUpserts = agentUpserts.length > 0 ? [...upserts, ...agentUpserts] : upserts;
-      if (removals.length > 0 || modelUpserts.length > 0 || sessionsChanged || projectsChanged) {
+      const modelUpserts = (
+        agentUpserts.length > 0 ? [...upserts, ...agentUpserts] : upserts
+      ).filter(rawAssistantRowHasTokenUsage);
+      const modelRemovals = removals.filter(rawAssistantRowHasTokenUsage);
+      if (
+        modelRemovals.length > 0 ||
+        modelUpserts.length > 0 ||
+        sessionsChanged ||
+        projectsChanged
+      ) {
         measureSync("modelUpdate", () => {
           if (sessionsChanged || projectsChanged) {
             model.setMetadata(candidate.sessions, candidate.projects);
           }
-          if (removals.length > 0 || modelUpserts.length > 0) {
-            model.apply(modelUpserts, removals);
+          if (modelRemovals.length > 0 || modelUpserts.length > 0) {
+            model.apply(modelUpserts, modelRemovals);
           }
         });
       }
@@ -2559,15 +2610,26 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
             missingCoverage ||
             isStale(atMs);
           if (stale) {
+            const scopedLifetime = range === "lifetime" && query.filter !== undefined;
             requestBackground(
               { globalRange: range, detailSessionIds: [], projectScopes: [] },
-              sidecarNewerThanIndex || missingCoverage,
+              scopedLifetime ? sidecarNewerThanIndex : sidecarNewerThanIndex || missingCoverage,
             );
           }
           return { ...current, stale };
         }
       }
       await ensureIndexLoaded();
+      if (canDeriveScopedLifetimeFromOwnedData(query)) {
+        ensureModel();
+        const result: AnalyticsGroupSnapshot = {
+          ...deriveGroupSnapshot(query, groupDerivationAtMs("lifetime", atMs)),
+          stale: true,
+        };
+        storeGroupSnapshot(query, result);
+        scheduleScopedLifetimeRefresh(atMs);
+        return result;
+      }
       if (!coverageTrusted || !coversSince(window.sinceMs, state.extent)) {
         await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
         if (

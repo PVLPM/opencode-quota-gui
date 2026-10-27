@@ -2,14 +2,21 @@ import { createRoot } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import type { AnalyticsBucketBoundary, AnalyticsSeries } from "../src/contracts/dashboard";
 import { createChartLayout } from "../src/ui/chart-layout";
-import { formatTokenCount } from "../src/ui/format";
+import {
+  formatApiEquivalentCostFine,
+  formatApiEquivalentCostText,
+  formatApiEquivalentCostTick,
+  formatTokenCount,
+} from "../src/ui/format";
 import {
   API_EQUIVALENT_TOOLTIP,
+  buildEntityColorMap,
   combineEstimates,
   disambiguatedIdentityLabel,
   estimateNote,
   identityLabel,
   identityTitle,
+  oppositeDimension,
   rankSeries,
   rowSeriesKey,
   seriesColorForKey,
@@ -17,7 +24,9 @@ import {
   seriesKey,
   sortBreakdownRows,
 } from "../src/ui/model-analytics";
+import { buildChildCompositionSlices } from "../src/ui/model-chart-composition";
 import { buildModelChartGeometry, DEFAULT_MODEL_USAGE_SIZE } from "../src/ui/model-chart-geometry";
+import { buildModelCostOverlayGeometry } from "../src/ui/model-cost-overlay";
 import { createSeriesInspection } from "../src/ui/series-inspection";
 import { costed, DAY_MS, NOW } from "./fixtures/gui-ui-fixtures";
 import {
@@ -73,6 +82,67 @@ describe("model analytics presentation", () => {
 
       inspection.reconcile(new Set(["gamma"]));
       expect(inspection.active()).toBeUndefined();
+      stop();
+    });
+  });
+
+  it("falls back to a pinned key and clears it with its transient emphasis", () => {
+    createRoot((stop) => {
+      const inspection = createSeriesInspection();
+      inspection.inspectFocus("alpha");
+      inspection.togglePinned("gamma");
+      expect(inspection.active()).toBe("alpha");
+      inspection.clearFocus();
+      expect(inspection.active()).toBe("gamma");
+      expect(inspection.pinned()).toBe("gamma");
+
+      inspection.inspectPointer("gamma");
+      inspection.togglePinned("gamma");
+      expect(inspection.pinned()).toBeUndefined();
+      expect(inspection.active()).toBeUndefined();
+
+      inspection.inspectFocus("beta");
+      inspection.togglePinned("beta");
+      inspection.reconcile(new Set(["alpha"]));
+      expect(inspection.pinned()).toBeUndefined();
+      stop();
+    });
+  });
+
+  it("keeps a child selection scoped to its parent series", () => {
+    createRoot((stop) => {
+      const inspection = createSeriesInspection();
+      inspection.inspectPointerChild({
+        seriesKey: "model:known:model-alpha",
+        childKey: "provider:known:openai",
+      });
+      expect(inspection.active()).toBe("model:known:model-alpha");
+      expect(inspection.activeChild()).toEqual({
+        seriesKey: "model:known:model-alpha",
+        childKey: "provider:known:openai",
+      });
+
+      // Moving to the parent row clears the child but keeps the parent active.
+      inspection.inspectPointer("model:known:model-alpha");
+      expect(inspection.active()).toBe("model:known:model-alpha");
+      expect(inspection.activeChild()).toBeUndefined();
+
+      inspection.clearPointer();
+      inspection.inspectFocusChild({
+        seriesKey: "model:known:model-alpha",
+        childKey: "provider:known:anthropic",
+      });
+      expect(inspection.activeChild()?.childKey).toBe("provider:known:anthropic");
+      inspection.inspectPointer("model:known:model-beta");
+      expect(inspection.active()).toBe("model:known:model-beta");
+      expect(inspection.activeChild()).toBeUndefined();
+      inspection.clearPointer();
+      expect(inspection.active()).toBe("model:known:model-alpha");
+      expect(inspection.activeChild()?.childKey).toBe("provider:known:anthropic");
+
+      inspection.reconcile(new Set(["model:known:model-beta"]));
+      expect(inspection.active()).toBeUndefined();
+      expect(inspection.activeChild()).toBeUndefined();
       stop();
     });
   });
@@ -212,6 +282,161 @@ describe("model analytics presentation", () => {
       unknownTokens: 0,
     });
     expect(combineEstimates([unpriced, unpriced]).apiEquivalentCostUsd).toBeNull();
+  });
+
+  it("renders an absent priced total as Unpriced, never as a zero-cost estimate", () => {
+    expect(formatApiEquivalentCostText(1.2, 100)).toBe("≈ USD 1.20");
+    expect(formatApiEquivalentCostText(0, 100)).toBe("≈ USD 0.00");
+    expect(formatApiEquivalentCostText(null, 100)).toBe("Unpriced");
+    expect(formatApiEquivalentCostText(null, 0)).toBe("—");
+    expect(formatApiEquivalentCostFine(0.0042)).toBe("≈ USD 0.0042");
+    expect(formatApiEquivalentCostFine(0.42)).toBe("≈ USD 0.42");
+    expect(formatApiEquivalentCostFine(0)).toBe("≈ USD 0.00");
+    expect(formatApiEquivalentCostFine(null)).toBe("≈ USD —");
+  });
+
+  it("gives an opposite-dimension leaf the same stable colour in either grouping", () => {
+    const modelColors = buildEntityColorMap(modelSnapshot().rows, "model");
+    const providerColors = buildEntityColorMap(providerSnapshot().rows, "provider");
+    expect(oppositeDimension("model")).toBe("provider");
+    expect(oppositeDimension("provider")).toBe("model");
+    expect(modelColors.get("provider:known:openai")).toBe("--qg-rank-1");
+    expect(modelColors.get("provider:known:google")).toBe("--qg-rank-2");
+    expect(modelColors.get("provider:unknown")).toBe("--qg-rank-4");
+    expect(modelColors.get("provider:known:deepseek")).toBe("--qg-rank-other");
+    expect(providerColors.get("model:known:model-alpha")).toBe("--qg-rank-1");
+    expect(providerColors.get("model:known:model-gamma")).toBe("--qg-rank-3");
+    expect(providerColors.get("model:known:model-zeta")).toBe("--qg-rank-other");
+    // Reordering rows never re-colours an entity: colours come from the snapshot, not display sort.
+    const shuffled = [...providerSnapshot().rows].reverse();
+    expect([...buildEntityColorMap(shuffled, "provider")]).toEqual([...providerColors]);
+  });
+
+  it("overlays priced, partial, unpriced, true-zero and empty cost buckets", () => {
+    const series: AnalyticsSeries[] = [
+      {
+        kind: "entity",
+        identity: known("cost-series"),
+        tokens: costed({ input: 60 }, { apiEquivalentCostUsd: 3, unpricedTokens: 5 }),
+        buckets: [
+          costed({ input: 10 }, { apiEquivalentCostUsd: 2 }),
+          costed({ input: 10 }, { apiEquivalentCostUsd: 1, unpricedTokens: 5 }),
+          costed({ input: 10 }, { apiEquivalentCostUsd: null, unpricedTokens: 10 }),
+          costed({ input: 10 }, { apiEquivalentCostUsd: 0 }),
+          costed({}, { apiEquivalentCostUsd: null }),
+        ],
+      },
+    ];
+    const boundaries = Array.from({ length: 5 }, (_, index) => ({
+      startMs: index * 1_000,
+      endMs: (index + 1) * 1_000,
+    }));
+    const chart = buildModelChartGeometry(series, boundaries);
+    const overlay = buildModelCostOverlayGeometry(series, boundaries, chart);
+    expect(overlay.points.map((point) => point.status)).toEqual([
+      "priced",
+      "partial",
+      "unpriced",
+      "zero",
+      "empty",
+    ]);
+    expect(overlay.points.map((point) => point.total)).toEqual([10, 10, 10, 10, 0]);
+    expect(overlay.points.map((point) => point.cost)).toEqual([2, 1, null, 0, null]);
+    // The line only connects numeric buckets; unpriced and empty are gaps.
+    expect(overlay.points[2]?.y).toBeNull();
+    expect(overlay.points[4]?.y).toBeNull();
+    expect(overlay.points[0]?.y).toBeLessThan(overlay.points[1]?.y ?? 0);
+    expect(overlay.points[1]?.y).toBeLessThan(chart.plot.bottom);
+    // A true zero is a real point on the baseline, never a missing value.
+    expect(overlay.points[3]?.y).toBe(chart.plot.bottom);
+    expect(overlay.runs).toHaveLength(1);
+    expect(overlay.runs[0]?.pointCount).toBe(2);
+    expect(overlay.runs[0]?.partial).toBe(true);
+    expect(overlay.runs[0]?.path).toContain((overlay.points[0]?.x ?? 0).toFixed(2));
+    expect(overlay.runs[0]?.path).not.toContain((overlay.points[3]?.x ?? 0).toFixed(2));
+    expect(overlay.isolated.map((point) => point.bucketIndex)).toEqual([3]);
+    // The right axis uses a nice 1/2/5 scale above the measured cost.
+    expect(overlay.maxCost).toBe(2);
+    expect(overlay.scaleMax).toBe(2);
+    expect(overlay.tickStep).toBe(0.5);
+    expect(overlay.ticks.map((tick) => tick.value)).toEqual([0, 0.5, 1, 1.5, 2]);
+    expect(overlay.ticks.at(-1)?.y).toBeCloseTo(chart.plot.top, 10);
+    expect(overlay.hasNumeric).toBe(true);
+    expect(overlay.hasPartial).toBe(true);
+    expect(overlay.hasUnpriced).toBe(true);
+    // Points share the token bar's slot centre, so the line reads vertically.
+    overlay.points.forEach((point, index) => {
+      const bar = chart.bars[index];
+      expect(point.x).toBeCloseTo((bar?.x ?? 0) + (bar?.width ?? 0) / 2, 10);
+    });
+  });
+
+  it("totals every visible series into each cost bucket", () => {
+    const alpha = costed({ input: 20 }, { apiEquivalentCostUsd: 3, unpricedTokens: 10 });
+    const beta = costed({ input: 20 }, { apiEquivalentCostUsd: 4 });
+    const series: AnalyticsSeries[] = [
+      {
+        kind: "entity",
+        identity: known("alpha"),
+        tokens: alpha,
+        buckets: [
+          costed({ input: 10 }, { apiEquivalentCostUsd: 2 }),
+          costed({ input: 10 }, { apiEquivalentCostUsd: null, unpricedTokens: 10 }),
+        ],
+      },
+      {
+        kind: "entity",
+        identity: known("beta"),
+        tokens: beta,
+        buckets: [
+          costed({ input: 10 }, { apiEquivalentCostUsd: 1 }),
+          costed({ input: 10 }, { apiEquivalentCostUsd: 3 }),
+        ],
+      },
+    ];
+    const boundaries = [
+      { startMs: 0, endMs: 1_000 },
+      { startMs: 1_000, endMs: 2_000 },
+    ];
+    const chart = buildModelChartGeometry(series, boundaries);
+    const overlay = buildModelCostOverlayGeometry(series, boundaries, chart);
+    // The rule consumes every visible series: 2 + 1, then a priced 3 with
+    // 10 excluded tokens, not just the first series or a focused one.
+    expect(overlay.points.map((point) => point.cost)).toEqual([3, 3]);
+    expect(overlay.points.map((point) => point.status)).toEqual(["priced", "partial"]);
+    expect(overlay.runs).toHaveLength(1);
+    expect(overlay.runs[0]?.partial).toBe(true);
+    expect(overlay.maxCost).toBe(3);
+  });
+
+  it("keeps a zero priced subtotal partial when some tokens are unpriced", () => {
+    const bucket = costed({ input: 10 }, { apiEquivalentCostUsd: 0, unpricedTokens: 5 });
+    const series: AnalyticsSeries[] = [
+      {
+        kind: "entity",
+        identity: known("free-partial"),
+        tokens: bucket,
+        buckets: [bucket],
+      },
+    ];
+    const boundaries = [{ startMs: 0, endMs: 1_000 }];
+    const chart = buildModelChartGeometry(series, boundaries);
+    const overlay = buildModelCostOverlayGeometry(series, boundaries, chart);
+    expect(overlay.points[0]?.status).toBe("partial");
+    expect(overlay.points[0]?.y).toBe(chart.plot.bottom);
+    expect(overlay.runs).toHaveLength(0);
+    expect(overlay.isolated).toHaveLength(1);
+    expect(overlay.isolated[0]?.bucketIndex).toBe(0);
+    expect(overlay.ticks.map((tick) => tick.value)).toEqual([0]);
+  });
+
+  it("formats cost-axis ticks at the scale's precision", () => {
+    expect(formatApiEquivalentCostTick(0, 0.005)).toBe("0");
+    expect(formatApiEquivalentCostTick(0.005, 0.005)).toBe("0.005");
+    expect(formatApiEquivalentCostTick(0.01, 0.005)).toBe("0.010");
+    expect(formatApiEquivalentCostTick(1.5, 0.5)).toBe("1.5");
+    expect(formatApiEquivalentCostTick(12, 2)).toBe("12");
+    expect(formatApiEquivalentCostTick(0.000005, 0.000001)).toBe("0.000005");
   });
 
   it("disambiguates provider aliases by raw id without merging identities", () => {
@@ -377,6 +602,102 @@ describe("model analytics presentation", () => {
       expect(geometry.scaleMax).toBeGreaterThan(total);
       expect(geometry.bars[0]?.top).toBeGreaterThan(geometry.plot.top + 8);
     }
+  });
+
+  it("subdivides a parent segment by same-bucket tokens and preserves its envelope", () => {
+    const segment = { value: 100, x: 10, y: 20, width: 24, height: 50 };
+    const parent = costed({ input: 100 }, { apiEquivalentCostUsd: 3 });
+    const children = [
+      { identity: known("openai"), tokens: costed({ input: 60 }, { apiEquivalentCostUsd: 1.5 }) },
+      {
+        identity: known("anthropic"),
+        tokens: costed({ input: 40 }, { apiEquivalentCostUsd: null, unpricedTokens: 40 }),
+      },
+    ];
+    const slices = buildChildCompositionSlices({
+      segment,
+      parentTokens: parent,
+      children,
+      dimension: "model",
+    });
+    expect(slices.map((slice) => slice.key)).toEqual([
+      "provider:known:openai",
+      "provider:known:anthropic",
+    ]);
+    expect(slices.map((slice) => slice.share)).toEqual([0.6, 0.4]);
+    expect(slices.map((slice) => slice.height)).toEqual([30, 20]);
+    expect(slices.every((slice) => slice.x === segment.x && slice.width === segment.width)).toBe(
+      true,
+    );
+    expect((slices[0]?.y ?? 0) + (slices[0]?.height ?? 0)).toBeCloseTo(segment.y + segment.height);
+    expect(slices[1]?.y).toBe(segment.y);
+    expect(slices[0]?.fillOpacity).toBeGreaterThan(slices[1]?.fillOpacity ?? 0);
+  });
+
+  it("leaves unconserved child tokens in the parent colour and never subdivides one child", () => {
+    const segment = { value: 100, x: 0, y: 0, width: 20, height: 40 };
+    const parent = costed({ input: 100 }, { apiEquivalentCostUsd: 2 });
+    const sparse = buildChildCompositionSlices({
+      segment,
+      parentTokens: parent,
+      children: [
+        { identity: known("openai"), tokens: costed({ input: 30 }, { apiEquivalentCostUsd: 1 }) },
+        { identity: known("google"), tokens: costed({ input: 20 }, { apiEquivalentCostUsd: 1 }) },
+      ],
+      dimension: "model",
+    });
+    expect(sparse.reduce((sum, slice) => sum + slice.share, 0)).toBeCloseTo(0.5);
+    expect(sparse.reduce((sum, slice) => sum + slice.height, 0)).toBeCloseTo(20);
+
+    const single = buildChildCompositionSlices({
+      segment,
+      parentTokens: parent,
+      children: [
+        { identity: known("openai"), tokens: costed({ input: 100 }, { apiEquivalentCostUsd: 2 }) },
+      ],
+      dimension: "model",
+    });
+    expect(single).toEqual([]);
+  });
+
+  it("uses only known numeric costs for cost composition and never invents an unpriced share", () => {
+    const segment = { value: 100, x: 0, y: 0, width: 20, height: 60 };
+    const parent = costed({ input: 100 }, { apiEquivalentCostUsd: 3 });
+    const slices = buildChildCompositionSlices({
+      segment,
+      parentTokens: parent,
+      children: [
+        {
+          identity: known("openai"),
+          tokens: costed({ input: 60 }, { apiEquivalentCostUsd: null, unpricedTokens: 60 }),
+        },
+        { identity: known("google"), tokens: costed({ input: 20 }, { apiEquivalentCostUsd: 1 }) },
+        {
+          identity: known("anthropic"),
+          tokens: costed({ input: 20 }, { apiEquivalentCostUsd: 2 }),
+        },
+      ],
+      dimension: "model",
+      mode: "cost",
+    });
+    expect(slices.map((slice) => slice.key)).toEqual([
+      "provider:known:google",
+      "provider:known:anthropic",
+    ]);
+    expect(slices.map((slice) => slice.share)).toEqual([1 / 3, 2 / 3]);
+    expect(slices.map((slice) => slice.tokens.apiEquivalentCostUsd)).toEqual([1, 2]);
+
+    const unpricedParent = buildChildCompositionSlices({
+      segment,
+      parentTokens: costed({ input: 100 }, { apiEquivalentCostUsd: null, unpricedTokens: 100 }),
+      children: [
+        { identity: known("google"), tokens: costed({ input: 50 }, { apiEquivalentCostUsd: 1 }) },
+        { identity: known("openai"), tokens: costed({ input: 50 }, { apiEquivalentCostUsd: 1 }) },
+      ],
+      dimension: "model",
+      mode: "cost",
+    });
+    expect(unpricedParent).toEqual([]);
   });
 
   it("returns an empty plot when a range has no series", () => {

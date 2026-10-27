@@ -484,7 +484,11 @@ function monotoneTangents(xs: number[], ys: number[]): number[] {
   return tangent;
 }
 
-function toMonotoneLinePath(points: readonly { x: number; y: number }[]): string {
+/**
+ * Fritsch–Carlson monotone cubic path shared by the usage rate and cost
+ * overlays; it never overshoots between measured points.
+ */
+export function toMonotoneLinePath(points: readonly { x: number; y: number }[]): string {
   if (points.length === 0) return "";
   if (points.length === 1) return toLinePath([...points]);
   for (let index = 1; index < points.length; index += 1) {

@@ -57,6 +57,53 @@ export function formatApiEquivalentCost(value: number | null): string {
   return `≈ USD ${value.toFixed(2)}`;
 }
 
+/**
+ * The Models cost display. A total with usage but no priced tokens is
+ * `Unpriced`, not a zero estimate; an empty total carries no currency claim at
+ * all. Partial numeric estimates still use the same `≈ USD x.xx` form and are
+ * qualified separately.
+ */
+export function formatApiEquivalentCostText(value: number | null, total: number): string {
+  if (!(total > 0)) return "—";
+  if (value === null || !Number.isFinite(value)) return "Unpriced";
+  return formatApiEquivalentCost(value);
+}
+
+/**
+ * Inspection-level cost text keeps a sub-cent estimate from reading as zero.
+ * True zero stays `≈ USD 0.00`; a tiny nonzero value grows to four decimals.
+ */
+export function formatApiEquivalentCostFine(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "≈ USD —";
+  if (value === 0) return "≈ USD 0.00";
+  return value < 0.01 ? `≈ USD ${value.toFixed(4)}` : `≈ USD ${value.toFixed(2)}`;
+}
+
+/**
+ * Compact right-axis tick for the cost overlay. The axis title carries `USD`,
+ * so ticks stay bare numerals; the tick step fixes the precision so a tiny
+ * scale never mixes `0.005` with `0.01`.
+ */
+export function formatApiEquivalentCostTick(value: number, step: number): string {
+  if (!Number.isFinite(value)) return "—";
+  if (value === 0) return "0";
+  const decimals =
+    step >= 1
+      ? 0
+      : step >= 0.1
+        ? 1
+        : step >= 0.01
+          ? 2
+          : step >= 0.001
+            ? 3
+            : step >= 0.0001
+              ? 4
+              : step >= 0.00001
+                ? 5
+                : 6;
+  return value.toFixed(decimals);
+}
+
 export function formatPercent(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "—";
   return `${value.toFixed(value < 10 ? 1 : 0)}%`;

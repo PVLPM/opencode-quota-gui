@@ -9,20 +9,38 @@ import { getGuiPrivateCacheDir } from "./private-state-paths.js";
 import type { PricingSnapshotSource } from "./types.js";
 
 const SOURCE_URL = "https://models.dev/api.json";
-const DEFAULT_MODELSDEV_PROVIDERS = ["anthropic", "google", "moonshotai", "openai", "xai", "zai"];
-const COST_KEYS = ["input", "output", "cache_read", "cache_write"] as const;
+const COST_KEYS = ["input", "output", "cache_read", "cache_write", "reasoning"] as const;
 const RUNTIME_SNAPSHOT_FILENAME = "modelsdev-pricing.runtime.min.json";
 const RUNTIME_REFRESH_STATE_FILENAME = "modelsdev-pricing.refresh-state.json";
 const DEFAULT_REFRESH_MIN_ATTEMPT_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 6_000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-export type CostBuckets = {
+export type CostRates = {
   input?: number;
   output?: number;
   cache_read?: number;
   cache_write?: number;
   reasoning?: number;
+};
+
+/**
+ * One models.dev context tier. `size` is the prompt/context token count at
+ * which the tier starts; rates replace the base rates for that request.
+ */
+export type CostTier = CostRates & {
+  tier: {
+    type: "context";
+    size: number;
+  };
+};
+
+export type CostBuckets = CostRates & {
+  /**
+   * Explicit context tiers, ascending by `tier.size`. Present only when
+   * models.dev publishes a supported tier; unsupported tier types are dropped.
+   */
+  tiers?: CostTier[];
 };
 
 export type PricingSnapshot = {
@@ -73,6 +91,7 @@ export interface PricingRefreshOptions {
   runtimeDirs?: OpencodeRuntimeDirs;
   fetchFn?: typeof fetch;
   bootstrapSnapshotOverride?: PricingSnapshot;
+  /** Optional observed-provider scope; omitting refreshes every central provider. */
   providerAllowlist?: string[];
   snapshotSelection?: PricingSnapshotSource;
   allowRefreshWhenSelectionBundled?: boolean;
@@ -155,27 +174,8 @@ function normalizeSnapshot(raw: unknown): PricingSnapshot | null {
 
     const models: Record<string, CostBuckets> = {};
     for (const modelId of Object.keys(modelsRaw)) {
-      const modelRaw = asRecord(modelsRaw[modelId]);
-      if (!modelRaw) continue;
-
-      const buckets: CostBuckets = {};
-      const input = modelRaw.input;
-      const output = modelRaw.output;
-      const cacheRead = modelRaw.cache_read;
-      const cacheWrite = modelRaw.cache_write;
-      const reasoning = modelRaw.reasoning;
-
-      if (typeof input === "number" && Number.isFinite(input)) buckets.input = input;
-      if (typeof output === "number" && Number.isFinite(output)) buckets.output = output;
-      if (typeof cacheRead === "number" && Number.isFinite(cacheRead))
-        buckets.cache_read = cacheRead;
-      if (typeof cacheWrite === "number" && Number.isFinite(cacheWrite)) {
-        buckets.cache_write = cacheWrite;
-      }
-      if (typeof reasoning === "number" && Number.isFinite(reasoning))
-        buckets.reasoning = reasoning;
-
-      if (Object.keys(buckets).length > 0) {
+      const buckets = pickCostBuckets(modelsRaw[modelId]);
+      if (buckets) {
         models[modelId] = buckets;
       }
     }
@@ -241,9 +241,19 @@ function hasSnapshotData(snapshot: PricingSnapshot): boolean {
   return snapshot._meta.generatedAt > 0;
 }
 
-// A runtime snapshot saved by an older version may lack models that models.dev
-// stopped listing. Fill them from the bundled file on every load, so a fresh
-// runtime snapshot doesn't hide them until its next refresh.
+function unionProviderIDs(snapshots: Array<PricingSnapshot | null | undefined>): string[] {
+  const ids = new Set<string>();
+  for (const snapshot of snapshots) {
+    if (!snapshot) continue;
+    for (const providerID of Object.keys(snapshot.providers)) ids.add(providerID);
+  }
+  return [...ids].sort((a, b) => a.localeCompare(b));
+}
+
+// A runtime snapshot saved by an older version may lack providers or models
+// that models.dev stopped listing. Fill them from the bundled file on every
+// load, so a fresh runtime snapshot doesn't hide offline coverage until its
+// next refresh.
 function withBundledRetiredModels(
   runtime: PricingSnapshot,
   bundled: PricingSnapshot,
@@ -251,7 +261,7 @@ function withBundledRetiredModels(
   return keepRetiredModels({
     current: runtime,
     previous: [bundled],
-    providerIDs: DEFAULT_MODELSDEV_PROVIDERS,
+    providerIDs: unionProviderIDs([runtime, bundled]),
   });
 }
 
@@ -398,11 +408,11 @@ function makeDefaultRefreshState(nowMs: number): PricingRefreshStateV1 {
   };
 }
 
-function pickCostBuckets(rawCost: unknown): CostBuckets | null {
+function pickRateBuckets(rawCost: unknown): CostRates | null {
   const obj = asRecord(rawCost);
   if (!obj) return null;
 
-  const picked: CostBuckets = {};
+  const picked: CostRates = {};
   for (const key of COST_KEYS) {
     const value = obj[key];
     if (typeof value === "number" && Number.isFinite(value)) {
@@ -413,15 +423,70 @@ function pickCostBuckets(rawCost: unknown): CostBuckets | null {
   return Object.keys(picked).length > 0 ? picked : null;
 }
 
+/**
+ * Keep only explicit context tiers this code can apply. Unknown tier types,
+ * non-positive sizes, and tiers without numeric input/output are dropped
+ * rather than being presented as an exact published rate.
+ */
+function pickCostTiers(rawCost: unknown): CostTier[] | undefined {
+  const obj = asRecord(rawCost);
+  if (!Array.isArray(obj?.tiers)) return undefined;
+
+  const tiers: CostTier[] = [];
+  for (const rawTier of obj.tiers) {
+    const tierNode = asRecord(rawTier);
+    const tierMeta = asRecord(tierNode?.tier);
+    if (!tierMeta || tierMeta.type !== "context") continue;
+
+    const size = Number(tierMeta.size);
+    if (!Number.isFinite(size) || size <= 0) continue;
+
+    const rates = pickRateBuckets(tierNode);
+    if (typeof rates?.input !== "number" || typeof rates.output !== "number") continue;
+
+    tiers.push({
+      ...rates,
+      tier: { type: "context", size: Math.trunc(size) },
+    });
+  }
+
+  if (tiers.length === 0) return undefined;
+
+  // Deterministic regardless of upstream array order, then one tier per size.
+  tiers.sort(
+    (a, b) => a.tier.size - b.tier.size || JSON.stringify(a).localeCompare(JSON.stringify(b)),
+  );
+
+  const unique: CostTier[] = [];
+  const sizes = new Set<number>();
+  for (const tier of tiers) {
+    if (sizes.has(tier.tier.size)) continue;
+    sizes.add(tier.tier.size);
+    unique.push(tier);
+  }
+  return unique;
+}
+
+function pickCostBuckets(rawCost: unknown): CostBuckets | null {
+  const rates = pickRateBuckets(rawCost);
+  if (!rates) return null;
+
+  const tiers = pickCostTiers(rawCost);
+  return tiers ? { ...rates, tiers } : rates;
+}
+
 function buildSnapshotFromApi(
   apiRaw: unknown,
-  providerIDs: string[],
+  providerIDs: readonly string[] | undefined,
   generatedAt: number,
 ): PricingSnapshot {
   const api = asRecord(apiRaw) ?? {};
+  const scopedProviderIDs = (providerIDs ?? Object.keys(api))
+    .slice()
+    .sort((a, b) => a.localeCompare(b));
   const providers: Record<string, Record<string, CostBuckets>> = {};
 
-  for (const providerID of providerIDs) {
+  for (const providerID of scopedProviderIDs) {
     const providerNode = asRecord(api[providerID]);
     const models = asRecord(providerNode?.models);
     if (!models) continue;
@@ -463,7 +528,7 @@ function buildSnapshotFromApi(
 function keepRetiredModels(params: {
   current: PricingSnapshot;
   previous: Array<PricingSnapshot | null>;
-  providerIDs: string[];
+  providerIDs: readonly string[];
 }): PricingSnapshot {
   const previous = params.previous.filter(
     (snapshot): snapshot is PricingSnapshot => snapshot !== null,
@@ -568,7 +633,7 @@ export async function maybeRefreshPricingSnapshot(
     const selection = opts.snapshotSelection ?? SNAPSHOT_SELECTION;
     const allowRefreshWhenSelectionBundled = opts.allowRefreshWhenSelectionBundled === true;
 
-    const providerIDs = opts.providerAllowlist ?? DEFAULT_MODELSDEV_PROVIDERS;
+    const requestedProviderIDs = opts.providerAllowlist;
     const previousState = (await readRefreshState(statePath)) ?? makeDefaultRefreshState(nowMs);
     const runtimeSnapshotBeforeRefresh = loadRuntimeSnapshotSync(runtimeDirs);
     const bundledSnapshot = loadBundledSnapshotSync(opts.bootstrapSnapshotOverride);
@@ -673,7 +738,7 @@ export async function maybeRefreshPricingSnapshot(
             providers: baseSnapshot.providers,
           },
           previous: [bundledSnapshot],
-          providerIDs,
+          providerIDs: requestedProviderIDs ?? unionProviderIDs([baseSnapshot, bundledSnapshot]),
         });
         await writeJsonAtomic(snapshotPath, refreshedSnapshot, { trailingNewline: true });
         applySnapshotSelection({
@@ -703,14 +768,16 @@ export async function maybeRefreshPricingSnapshot(
         };
       }
 
-      const fetchedSnapshot = buildSnapshotFromApi(fetchResult.api, providerIDs, nowMs);
+      const fetchedSnapshot = buildSnapshotFromApi(fetchResult.api, requestedProviderIDs, nowMs);
       if (countPricedModels(fetchedSnapshot) === 0) {
         throw new Error("Refusing to persist empty pricing snapshot from models.dev");
       }
       const snapshot = keepRetiredModels({
         current: fetchedSnapshot,
         previous: [runtimeSnapshotBeforeRefresh, bundledSnapshot],
-        providerIDs,
+        providerIDs:
+          requestedProviderIDs ??
+          unionProviderIDs([fetchedSnapshot, runtimeSnapshotBeforeRefresh, bundledSnapshot]),
       });
 
       await writeJsonAtomic(snapshotPath, snapshot, { trailingNewline: true });
@@ -846,6 +913,65 @@ export function listModelsForProvider(providerId: string): string[] {
 export function listProvidersForModelId(modelId: string): string[] {
   const providers = ensureModelIndex().get(modelId) ?? [];
   return [...providers].sort((a, b) => a.localeCompare(b));
+}
+
+export type CostAtContext = {
+  /** Base rates, or the selected tier's rates when `basis` is `context_tier`. */
+  rates: CostRates;
+  basis: "base" | "context_tier";
+  /** Explicit tier thresholds published for the model, ascending. */
+  tierSizes: number[];
+  /** Selected threshold when `basis` is `context_tier`. */
+  tierSize?: number;
+};
+
+function withoutTiers(cost: CostBuckets): CostRates {
+  const { tiers: _tiers, ...rates } = cost;
+  return rates;
+}
+
+/**
+ * Select base or context-tier rates from one cost entry. Without a
+ * `contextTokens` value the base rates are returned and no tier is claimed as
+ * applied. A tier is selected only when the caller can prove the request
+ * context reached its threshold; malformed or unsupported tiers never
+ * participate.
+ */
+export function selectCostAtContext(cost: CostBuckets, contextTokens?: number): CostAtContext {
+  const tiers = cost.tiers ?? [];
+  const tierSizes = tiers.map((tier) => tier.tier.size);
+
+  if (
+    tiers.length === 0 ||
+    typeof contextTokens !== "number" ||
+    !Number.isFinite(contextTokens) ||
+    contextTokens < 0
+  ) {
+    return { rates: withoutTiers(cost), basis: "base", tierSizes };
+  }
+
+  let selected: CostTier | undefined;
+  for (const tier of tiers) {
+    if (contextTokens >= tier.tier.size) selected = tier;
+  }
+  if (!selected) return { rates: withoutTiers(cost), basis: "base", tierSizes };
+
+  const { tier: _tier, ...rates } = selected;
+  return {
+    rates,
+    basis: "context_tier",
+    tierSizes,
+    tierSize: selected.tier.size,
+  };
+}
+
+export function lookupCostAtContext(
+  providerId: string,
+  modelId: string,
+  contextTokens?: number,
+): CostAtContext | null {
+  const cost = lookupCost(providerId, modelId);
+  return cost ? selectCostAtContext(cost, contextTokens) : null;
 }
 
 export function lookupCost(providerId: string, modelId: string): CostBuckets | null {

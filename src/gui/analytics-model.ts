@@ -17,6 +17,7 @@ import type {
   AnalyticsGroupRow,
   AnalyticsGroupSnapshot,
   AnalyticsSeries,
+  AnalyticsSeriesChildBucket,
   CostedTokens,
   ProjectActivityRow,
   ProjectRootRow,
@@ -37,6 +38,7 @@ import {
   type OpenCodeRawAssistantRow,
   type OpenCodeSessionInfo,
   rawAssistantRowFingerprint,
+  rawAssistantRowHasTokenUsage,
 } from "../lib/opencode-storage.js";
 import { type PricingResolution, priceTokenBuckets } from "../lib/quota-stats.js";
 import { type ForkOwnerCandidate, selectForkOwners } from "../lib/usage-ownership.js";
@@ -305,16 +307,64 @@ function addStepToBucket(
   addStepToAccumulator(bucket, step);
 }
 
+/** Per-child bucket accumulators for one chart series (exact raw child key). */
+type SeriesChildBuckets = Map<string | undefined, Map<number, Accumulator>>;
+
+function addStepToSeriesChild(
+  childBuckets: SeriesChildBuckets,
+  childRaw: string | undefined,
+  step: OwnedStep,
+  bucketIndex: number,
+): void {
+  if (bucketIndex < 0) return;
+  let bucketTotals = childBuckets.get(childRaw);
+  if (!bucketTotals) {
+    bucketTotals = new Map();
+    childBuckets.set(childRaw, bucketTotals);
+  }
+  addStepToBucket(bucketTotals, step, bucketIndex);
+}
+
+/**
+ * Sparse per-bucket child breakdown aligned with the snapshot boundaries.
+ * Children are ranked by their own bucket tokens, then exact identity with the
+ * unknown identity last, so series order never depends on map insertion.
+ */
+function materializeChildBuckets(
+  childBuckets: SeriesChildBuckets,
+  bucketCount: number,
+): AnalyticsSeriesChildBucket[][] {
+  const buckets: AnalyticsSeriesChildBucket[][] = [];
+  for (let index = 0; index < bucketCount; index += 1) buckets.push([]);
+  for (const [raw, bucketTotals] of childBuckets) {
+    for (const [bucketIndex, accumulator] of bucketTotals) {
+      const bucket = buckets[bucketIndex];
+      if (bucket === undefined) continue;
+      bucket.push({ identity: identityOf(raw), tokens: finalize(accumulator) });
+    }
+  }
+  for (const entries of buckets) {
+    entries.sort((a, b) => {
+      const byTokens = b.tokens.total - a.tokens.total;
+      if (byTokens !== 0) return byTokens;
+      return compareIdentities(a.identity, b.identity);
+    });
+  }
+  return buckets;
+}
+
 interface SeriesSource {
   raw: string | undefined;
   totals: Accumulator;
   bucketTotals: Map<number, Accumulator>;
+  childBuckets: SeriesChildBuckets;
 }
 
 /**
  * Top five entities by selected-range token rank plus one chart-only Other
  * series. Only these sources carry per-bucket accumulators, so the returned
- * bucket arrays are bounded by series × buckets.
+ * bucket arrays are bounded by series × buckets and their child breakdowns by
+ * the opposite dimension's cardinality, never by a parent × child cross-product.
  */
 function buildSeries(
   top: readonly SeriesSource[],
@@ -326,12 +376,14 @@ function buildSeries(
     identity: identityOf(source.raw),
     tokens: finalize(source.totals),
     buckets: materializeBuckets(source.bucketTotals, bucketCount),
+    childBuckets: materializeChildBuckets(source.childBuckets, bucketCount),
   }));
   if (other !== undefined) {
     series.push({
       kind: "other",
       tokens: finalize(other.totals),
       buckets: materializeBuckets(other.bucketTotals, bucketCount),
+      childBuckets: materializeChildBuckets(other.childBuckets, bucketCount),
     });
   }
   return series;
@@ -700,8 +752,44 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     else ownedByFp.set(fingerprint, next);
   }
 
-  function upsertOccurrence(row: OpenCodeRawAssistantRow): void {
+  function removeOccurrenceAt(fingerprint: string, messageID: string): boolean {
+    const occurrences = groups.get(fingerprint);
+    if (!occurrences) return false;
+    const index = occurrences.findIndex((entry) => entry.messageID === messageID);
+    if (index < 0) return false;
+    occurrences.splice(index, 1);
+    if (occurrences.length === 0) groups.delete(fingerprint);
+    return true;
+  }
+
+  /**
+   * Removes one message across fingerprints. Only used for a positive→zero
+   * upsert (rare) or a removal row whose payload no longer matches its owned
+   * fingerprint, never for the steady positive insert path.
+   */
+  function removeOccurrenceByMessage(messageID: string): string | undefined {
+    for (const [fingerprint, occurrences] of groups) {
+      if (!removeOccurrenceAt(fingerprint, messageID)) continue;
+      return fingerprint;
+    }
+    return undefined;
+  }
+
+  /**
+   * Add or replace one physical contribution. Zero-token rows never enter the
+   * ownership groups: they carry metadata/activity but no usage, so they are
+   * excluded from fork ownership, pricing, groups, and activity extents. An
+   * update from positive to zero therefore removes the previously owned copy.
+   */
+  function upsertOccurrence(row: OpenCodeRawAssistantRow): {
+    fingerprint: string;
+    previous?: string;
+  } {
     const fingerprint = rawAssistantRowFingerprint(row);
+    if (!rawAssistantRowHasTokenUsage(row)) {
+      const previous = removeOccurrenceByMessage(row.messageID);
+      return { fingerprint, ...(previous === undefined ? {} : { previous }) };
+    }
     let occurrences = groups.get(fingerprint);
     if (!occurrences) {
       occurrences = [];
@@ -726,15 +814,14 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const index = occurrences.findIndex((entry) => entry.messageID === row.messageID);
     if (index >= 0) occurrences[index] = occurrence;
     else occurrences.push(occurrence);
+    return { fingerprint };
   }
 
   function removeOccurrence(row: OpenCodeRawAssistantRow): void {
     const fingerprint = rawAssistantRowFingerprint(row);
-    const occurrences = groups.get(fingerprint);
-    if (!occurrences) return;
-    const index = occurrences.findIndex((entry) => entry.messageID === row.messageID);
-    if (index >= 0) occurrences.splice(index, 1);
-    if (occurrences.length === 0) groups.delete(fingerprint);
+    if (!removeOccurrenceAt(fingerprint, row.messageID)) {
+      removeOccurrenceByMessage(row.messageID);
+    }
   }
 
   function setMetadata(
@@ -950,8 +1037,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
    * groups are keyed by nested maps of the exact raw id (`undefined` is its own
    * key), so a pair cannot collide across a delimiter and missing ids stay
    * distinct from empty ones. Pass 2 ranks the visible groups, then fills
-   * per-bucket accumulators for just the top five series and Other. Bucket
-   * arrays therefore never scale with parent/child cardinality.
+   * per-bucket accumulators for just the top five series and Other, together
+   * with their opposite-dimension child breakdown. One visit per owned step
+   * feeds both levels, so the breakdown adds no raw scan and no price lookup.
+   * Bucket arrays never scale with parent/child cardinality, and no parent ×
+   * child cross-product or duplicate raw contribution is emitted.
    */
   function groupedSnapshot(query: AnalyticsGroupQuery, nowMs: number): AnalyticsGroupSnapshot {
     const { range, dimension } = query;
@@ -1011,7 +1101,10 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const topEntries = ranked.slice(0, 5);
     const otherEntries = ranked.slice(5);
     const topBucketTotals = topEntries.map(() => new Map<number, Accumulator>());
+    const topChildBuckets: SeriesChildBuckets[] = topEntries.map(() => new Map());
     const otherBucketTotals = otherEntries.length > 0 ? new Map<number, Accumulator>() : undefined;
+    const otherChildBuckets: SeriesChildBuckets | undefined =
+      otherEntries.length > 0 ? new Map() : undefined;
     const seriesIndexByParent = new Map<string | undefined, number>();
     topEntries.forEach((entry, index) => {
       seriesIndexByParent.set(entry.raw, index);
@@ -1021,13 +1114,22 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       eachOwnedStep((step) => {
         if (!matchesFilter(step, filter)) return;
         const bucketIndex = bucketIndexAt(bucketStarts, step.completedAtMs);
+        if (bucketIndex < 0) return;
+        const childRaw = rawIdForDimension(step, childDimension);
         const seriesIndex = seriesIndexByParent.get(rawIdForDimension(step, dimension));
         if (seriesIndex !== undefined) {
           const bucketTotals = topBucketTotals[seriesIndex];
           if (bucketTotals) addStepToBucket(bucketTotals, step, bucketIndex);
+          const childBuckets = topChildBuckets[seriesIndex];
+          if (childBuckets) {
+            addStepToSeriesChild(childBuckets, childRaw, step, bucketIndex);
+          }
           return;
         }
         if (otherBucketTotals) addStepToBucket(otherBucketTotals, step, bucketIndex);
+        if (otherChildBuckets) {
+          addStepToSeriesChild(otherChildBuckets, childRaw, step, bucketIndex);
+        }
       });
     }
 
@@ -1035,6 +1137,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       raw: entry.raw,
       totals: entry.node.totals,
       bucketTotals: topBucketTotals[index] ?? new Map(),
+      childBuckets: topChildBuckets[index] ?? new Map(),
     }));
     let otherSource: SeriesSource | undefined;
     if (otherEntries.length > 0) {
@@ -1044,6 +1147,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         raw: undefined,
         totals: otherTotals,
         bucketTotals: otherBucketTotals ?? new Map(),
+        childBuckets: otherChildBuckets ?? new Map(),
       };
     }
 
@@ -1271,13 +1375,45 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     },
     apply(upserts, removals) {
       const affected = new Set<string>();
+      const applyUpsert = (row: OpenCodeRawAssistantRow): void => {
+        const result = upsertOccurrence(row);
+        affected.add(result.fingerprint);
+        if (result.previous !== undefined) affected.add(result.previous);
+      };
       for (const row of removals) {
         affected.add(rawAssistantRowFingerprint(row));
         removeOccurrence(row);
       }
-      for (const row of upserts) {
-        affected.add(rawAssistantRowFingerprint(row));
-        upsertOccurrence(row);
+      // `upserts` may be a one-shot generator (the engine hydrates the model
+      // this way), so materialize references before the zero-row scan. The
+      // rows themselves are already retained by the caller.
+      const rows = Array.isArray(upserts) ? upserts : [...upserts];
+      let hasZeroRows = false;
+      for (const row of rows) {
+        if (!rawAssistantRowHasTokenUsage(row)) {
+          hasZeroRows = true;
+          break;
+        }
+      }
+      if (!hasZeroRows) {
+        for (const row of rows) applyUpsert(row);
+      } else {
+        // A batch that contains zero-token rows is reconciled in two phases:
+        // last occurrence per message id wins, then zero rows remove prior
+        // ownership before positive rows are inserted. This keeps bulk
+        // hydration linear instead of scanning all groups per zero row.
+        const lastByMessage = new Map<string, OpenCodeRawAssistantRow>();
+        for (const row of rows) lastByMessage.set(row.messageID, row);
+        // With no owned groups there is nothing a zero row can remove. This is
+        // the cold-hydration shape; skipping fingerprint work keeps it linear.
+        if (groups.size > 0) {
+          for (const row of lastByMessage.values()) {
+            if (!rawAssistantRowHasTokenUsage(row)) applyUpsert(row);
+          }
+        }
+        for (const row of lastByMessage.values()) {
+          if (rawAssistantRowHasTokenUsage(row)) applyUpsert(row);
+        }
       }
       for (const fingerprint of affected) recomputeFingerprint(fingerprint);
     },

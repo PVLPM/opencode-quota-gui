@@ -163,6 +163,17 @@ export interface AnalyticsGroupRow {
 }
 
 /**
+ * One opposite-dimension contribution inside a chart series bucket. For a
+ * model-series bucket, `identity` is a provider; for a provider-series bucket
+ * it is a model. The bucket entries are sparse: children with zero usage are
+ * omitted, and each child appears at most once per bucket.
+ */
+export interface AnalyticsSeriesChildBucket {
+  identity: AnalyticsEntityIdentity;
+  tokens: CostedTokens;
+}
+
+/**
  * One chart series for the visible grouping level, ranked by selected-range
  * token volume. The trailing `"other"` series aggregates every entity outside
  * the top five; it is chart-only and never replaces the breakdown rows.
@@ -174,8 +185,26 @@ export type AnalyticsSeries =
       tokens: CostedTokens;
       /** Aligned index-for-index with `AnalyticsGroupSnapshot.buckets`. */
       buckets: CostedTokens[];
+      /**
+       * Additive in-bar subdivision: the opposite-dimension children inside
+       * each bucket, aligned index-for-index with `buckets`. Token categories,
+       * unpriced tokens, and unknown tokens conserve that same-index bucket;
+       * numeric cost also conserves it subject to floating-point rounding.
+       * This host always emits it for a series with
+       * usage; it is optional so older snapshots and readers remain compatible.
+       */
+      childBuckets?: AnalyticsSeriesChildBucket[][];
     }
-  | { kind: "other"; tokens: CostedTokens; buckets: CostedTokens[] };
+  | {
+      kind: "other";
+      tokens: CostedTokens;
+      buckets: CostedTokens[];
+      /**
+       * Real children of every parent outside the top five, aggregated by exact
+       * child identity per bucket — never a remainder derived from a total.
+       */
+      childBuckets?: AnalyticsSeriesChildBucket[][];
+    };
 
 /**
  * Exact entity selector for a grouped query. `dimension` names the entity kind
@@ -217,7 +246,8 @@ export interface AnalyticsGroupSnapshot {
   rows: AnalyticsGroupRow[];
   /**
    * Top five `rows` by selected-range token volume plus Other, for both
-   * filtered and unfiltered queries. Only these series carry bucket arrays.
+   * filtered and unfiltered queries. Only these series carry bucket arrays and
+   * per-bucket child breakdowns.
    */
   series: AnalyticsSeries[];
   stale: boolean;

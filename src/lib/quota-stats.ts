@@ -12,6 +12,7 @@ import {
   isModelsDevProviderId,
   listProvidersForModelId,
   lookupCost,
+  selectCostAtContext,
 } from "./modelsdev-pricing.js";
 import { getOpenCodeDbPath } from "./opencode-db-path.js";
 import type { OpenCodeMessage } from "./opencode-storage.js";
@@ -198,6 +199,8 @@ const SOURCE_PROVIDER_ALIASES: Record<string, string> = {
   "kimi-code-plan-cn": "moonshotai",
   "zai-coding-plan": "zai",
   glm: "zai",
+  // Same actual source provider, different registration synonym.
+  "opencode-go-subscription": "opencode-go",
 };
 
 function normalizeSourceProviderId(raw?: string): string | undefined {
@@ -338,7 +341,51 @@ export function resolvePricingKey(source: {
     };
   }
 
-  const parsed = parseModelIdHint(source.modelID);
+  const rawModelID = source.modelID.trim();
+  const sourceProviderHint = normalizeSourceProviderId(source.providerID);
+
+  // Preserve an exact source-provider route first. This keeps provider-owned
+  // catalogs (for example opencode/big-pickle or openrouter vendor-prefixed
+  // model ids) from being rewritten into a different provider's key.
+  if (sourceProviderHint && rawModelID && hasCost(sourceProviderHint, rawModelID)) {
+    return {
+      ok: true,
+      key: { provider: sourceProviderHint, model: rawModelID },
+      method: "source_provider",
+    };
+  }
+
+  if (sourceProviderHint && rawModelID.startsWith(`${sourceProviderHint}/`)) {
+    const unprefixedModelID = rawModelID.slice(sourceProviderHint.length + 1);
+    if (hasCost(sourceProviderHint, unprefixedModelID)) {
+      return {
+        ok: true,
+        key: { provider: sourceProviderHint, model: unprefixedModelID },
+        method: "source_provider",
+      };
+    }
+  }
+
+  // A non-listed gateway may still pass an explicit provider prefix. Try the
+  // leading segment as a models.dev provider before falling back to the usual
+  // single-slash hint parser, which cannot represent vendor-prefixed model ids
+  // such as openrouter/google/gemini-...
+  if (!sourceProviderHint || !isModelsDevProviderId(sourceProviderHint)) {
+    const firstSlash = rawModelID.indexOf("/");
+    if (firstSlash > 0) {
+      const providerHint = normalizeSourceProviderId(rawModelID.slice(0, firstSlash));
+      const modelPart = rawModelID.slice(firstSlash + 1);
+      if (providerHint && isModelsDevProviderId(providerHint) && hasCost(providerHint, modelPart)) {
+        return {
+          ok: true,
+          key: { provider: providerHint, model: modelPart },
+          method: "model_prefix",
+        };
+      }
+    }
+  }
+
+  const parsed = parseModelIdHint(rawModelID);
   if (!parsed.modelPart) {
     return {
       ok: false,
@@ -350,8 +397,19 @@ export function resolvePricingKey(source: {
     };
   }
 
+  if (
+    sourceProviderHint &&
+    parsed.modelPart &&
+    hasCost(sourceProviderHint, parsed.modelPart.trim())
+  ) {
+    return {
+      ok: true,
+      key: { provider: sourceProviderHint, model: parsed.modelPart.trim() },
+      method: "source_provider",
+    };
+  }
+
   const normalizedModel = normalizeModelId(parsed.modelPart);
-  const sourceProviderHint = normalizeSourceProviderId(source.providerID);
   const modelProviderHint = normalizeSourceProviderId(parsed.providerHint);
 
   const tryProvider = (
@@ -475,18 +533,48 @@ export function resolvePricingKey(source: {
   };
 }
 
+/**
+ * Prompt-side token count: OpenCode stores non-cached input separately from
+ * cache read/write, so their sum is the request context a context tier measures.
+ */
+function promptTokenCount(tokens: TokenBuckets): number {
+  return tokens.input + tokens.cache_read + tokens.cache_write;
+}
+
 /** Existing per-message cost calculation (P3 reuses it unchanged). */
 export function calculateCostUsd(params: {
   provider: string;
   model: string;
   tokens: TokenBuckets;
-}): { ok: true; costUsd: number } | { ok: false } {
-  const cost =
-    params.provider === "cursor"
-      ? lookupCursorLocalCost(params.model)
-      : lookupCost(params.provider, params.model);
+  /**
+   * Optional prompt/context token override. When omitted, prompt-side token
+   * buckets select a published context tier; without tier evidence the base
+   * rates apply and no tier is claimed as applied.
+   */
+  contextTokens?: number;
+}): { ok: true; costUsd: number; contextTierSize?: number } | { ok: false } {
+  if (params.provider === "cursor") {
+    const cursorCost = lookupCursorLocalCost(params.model);
+    if (!cursorCost) return { ok: false };
+    return { ok: true, costUsd: calculateUsdFromTokenBuckets(cursorCost, params.tokens) };
+  }
+
+  const cost = lookupCost(params.provider, params.model);
   if (!cost) return { ok: false };
-  return { ok: true, costUsd: calculateUsdFromTokenBuckets(cost, params.tokens) };
+
+  const hasExplicitContext =
+    typeof params.contextTokens === "number" && Number.isFinite(params.contextTokens);
+  if (!cost.tiers?.length && !hasExplicitContext) {
+    return { ok: true, costUsd: calculateUsdFromTokenBuckets(cost, params.tokens) };
+  }
+
+  const contextTokens = hasExplicitContext ? params.contextTokens : promptTokenCount(params.tokens);
+  const selected = selectCostAtContext(cost, contextTokens);
+  return {
+    ok: true,
+    costUsd: calculateUsdFromTokenBuckets(selected.rates, params.tokens),
+    ...(selected.tierSize !== undefined ? { contextTierSize: selected.tierSize } : {}),
+  };
 }
 
 /** Existing unpriced/unknown classification (P3 reuses it unchanged). */
@@ -517,7 +605,13 @@ export function classifyMissingPricing(params: {
 
 /** One message's pricing outcome: priced cost, unpriced tokens, or an unknown mapping. */
 export type TokenPricingOutcome =
-  | { status: "priced"; key: PricedKey; costUsd: number }
+  | {
+      status: "priced";
+      key: PricedKey;
+      costUsd: number;
+      /** Present only when a context tier applied. */
+      contextTierSize?: number;
+    }
   | { status: "unpriced"; key: PricedKey; reason: string }
   | { status: "unknown"; unknown: UnknownKey };
 
@@ -534,6 +628,8 @@ export function priceTokenBuckets(params: {
   providerID?: string | null;
   modelID?: string | null;
   tokens: TokenBuckets;
+  /** Optional context override; otherwise prompt token buckets select a tier. */
+  contextTokens?: number;
   cache?: Map<string, PricingResolution>;
 }): TokenPricingOutcome {
   const cacheKey = encodeIdentityKey([params.providerID, params.modelID]);
@@ -555,9 +651,15 @@ export function priceTokenBuckets(params: {
     provider: key.provider,
     model: key.model,
     tokens: params.tokens,
+    contextTokens: params.contextTokens,
   });
   if (priced.ok) {
-    return { status: "priced", key, costUsd: priced.costUsd };
+    return {
+      status: "priced",
+      key,
+      costUsd: priced.costUsd,
+      ...(priced.contextTierSize !== undefined ? { contextTierSize: priced.contextTierSize } : {}),
+    };
   }
 
   const classification = classifyMissingPricing({

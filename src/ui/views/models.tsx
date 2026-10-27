@@ -5,7 +5,7 @@ import { AnalyticsBreakdown } from "../components/analytics-breakdown";
 import { ChartSummary, type ChartSummaryItem } from "../components/chart-shell";
 import { CostInfo, EstimateNote } from "../components/cost-estimate";
 import { ModelUsageChart } from "../components/model-usage-chart";
-import { formatApiEquivalentCost, formatExactCount } from "../format";
+import { formatApiEquivalentCostText, formatExactCount } from "../format";
 import { type BreakdownSort, rankSeries, seriesKey, usageTitle } from "../model-analytics";
 import { SegmentedControl, SegmentedControlItem } from "../opencode-ui";
 import { createSeriesInspection } from "../series-inspection";
@@ -38,6 +38,10 @@ export function ModelsView(props: {
     const key = inspection.active();
     return key !== undefined && seriesKeys().includes(key) ? key : undefined;
   };
+  const activeChild = () => {
+    const child = inspection.activeChild();
+    return child !== undefined && activeSeries() === child.seriesKey ? child : undefined;
+  };
   const summaryItems = (): ChartSummaryItem[] | undefined => {
     const snapshot = props.snapshot;
     if (snapshot === undefined) return undefined;
@@ -49,7 +53,10 @@ export function ModelsView(props: {
       },
       {
         label: "API-equivalent estimate",
-        value: formatApiEquivalentCost(snapshot.totals.apiEquivalentCostUsd),
+        value: formatApiEquivalentCostText(
+          snapshot.totals.apiEquivalentCostUsd,
+          snapshot.totals.total,
+        ),
         info: <CostInfo />,
         note: <EstimateNote totals={snapshot.totals} />,
         title:
@@ -65,6 +72,7 @@ export function ModelsView(props: {
     void props.dimension;
     inspection.clearPointer();
     inspection.clearFocus();
+    inspection.clearPinned();
   });
 
   // A refetch can replace the ranked series without changing the dimension. Drop
@@ -97,8 +105,12 @@ export function ModelsView(props: {
           </SegmentedControl>
         }
         activeSeries={activeSeries()}
+        activeChild={activeChild()}
+        pinnedSeries={inspection.pinned()}
         onPointerSeries={inspection.inspectPointer}
         onFocusSeries={inspection.inspectFocus}
+        onTogglePinnedSeries={inspection.togglePinned}
+        onClearPinnedSeries={inspection.clearPinned}
       />
       <Show when={props.snapshot}>
         {(snapshot) => (
@@ -112,8 +124,11 @@ export function ModelsView(props: {
             seriesKeys={seriesKeys()}
             modelsGroup={snapshot().dimension}
             activeSeries={activeSeries()}
+            activeChild={activeChild()}
             onPointerSeries={inspection.inspectPointer}
             onFocusSeries={inspection.inspectFocus}
+            onPointerChild={inspection.inspectPointerChild}
+            onFocusChild={inspection.inspectFocusChild}
           />
         )}
       </Show>

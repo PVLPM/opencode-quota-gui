@@ -167,6 +167,68 @@ describe("pricing runtime refresh policy", () => {
       output: 0.456,
       cache_read: 0.01,
       cache_write: 0.02,
+      reasoning: 999,
+    });
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")?.reasoning).toBe(999);
+  });
+
+  it("preserves explicit reasoning rates for base and context-tier rates", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn: vi.fn(),
+      snapshotSelection: "bundled",
+      bootstrapSnapshotOverride: {
+        _meta: {
+          source: "test-bootstrap",
+          generatedAt: nowMs,
+          providers: ["openai"],
+          units: "USD per 1M tokens",
+        },
+        providers: {
+          openai: {
+            "reasoning-model": {
+              input: 1,
+              output: 4,
+              cache_write: 2,
+              reasoning: 3,
+              tiers: [
+                {
+                  input: 1.5,
+                  output: 5,
+                  reasoning: 4.5,
+                  tier: { type: "context", size: 200_000 },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    expect(result.reason).toBe("selection_bundled");
+    expect(pricing.lookupCost("openai", "reasoning-model")).toEqual({
+      input: 1,
+      output: 4,
+      cache_write: 2,
+      reasoning: 3,
+      tiers: [
+        {
+          input: 1.5,
+          output: 5,
+          reasoning: 4.5,
+          tier: { type: "context", size: 200_000 },
+        },
+      ],
+    });
+    expect(pricing.lookupCostAtContext("openai", "reasoning-model", 200_000)?.rates).toEqual({
+      input: 1.5,
+      output: 5,
+      reasoning: 4.5,
     });
   });
 
@@ -383,6 +445,37 @@ describe("pricing runtime refresh policy", () => {
     expect(pricing.lookupCost("openai", "retired-model")).toEqual({ input: 3, output: 4 });
   });
 
+  it("fills newly bundled providers into an older runtime snapshot without network access", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    const bundled = createBootstrapSnapshot(nowMs - 10 * DAY_MS);
+    Object.assign(bundled.providers, {
+      opencode: { "big-pickle": { input: 3, output: 15 } },
+    });
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota-gui"), { recursive: true });
+    await writeFile(
+      pricing.getRuntimePricingSnapshotPath(runtimeDirs),
+      JSON.stringify(createRuntimeSnapshot(nowMs - DAY_MS, 0.5)),
+      "utf-8",
+    );
+
+    const fetchFn = vi.fn();
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      maxAgeMs: 7 * DAY_MS,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(result.reason).toBe("fresh");
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(pricing.lookupCost("opencode", "big-pickle")).toEqual({ input: 3, output: 15 });
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")?.input).toBe(0.5);
+  });
+
   it("does not save kept models from providers outside the refresh allowlist", async () => {
     const pricing = await loadPricingModule();
     const runtimeDirs = await createTempRuntimeDirs();
@@ -414,6 +507,38 @@ describe("pricing runtime refresh policy", () => {
     );
     expect(persistedSnapshot._meta.providers).toEqual(["openai"]);
     expect(persistedSnapshot.providers.xai).toBeUndefined();
+  });
+
+  it("keeps providers the central API dropped when no explicit allowlist is set", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    const bundled = createBootstrapSnapshot(nowMs - 4 * DAY_MS);
+    Object.assign(bundled.providers, { xai: { "grok-old": { input: 1, output: 2 } } });
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: { models: { "gpt-4o-mini": { cost: { input: 0.123, output: 0.456 } } } },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      maxAgeMs: 3 * DAY_MS,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    const persistedSnapshot = JSON.parse(
+      await readFile(pricing.getRuntimePricingSnapshotPath(runtimeDirs), "utf-8"),
+    );
+    expect(persistedSnapshot._meta.providers).toEqual(["openai", "xai"]);
+    expect(persistedSnapshot.providers.xai["grok-old"]).toEqual({ input: 1, output: 2 });
   });
 
   it("restores bundled models missing from an older runtime snapshot on 304", async () => {

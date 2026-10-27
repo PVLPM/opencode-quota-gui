@@ -19,7 +19,10 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
   const MIXED_UNPRICED_MODEL = "flat-1";
   const ZERO_PROVIDER = "zero-labs";
   const ZERO_MODEL = "zero-1";
+  const FREE_PROVIDER = "free-labs";
+  const FREE_MODEL = "free-1";
   const RATES = { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };
+  const FREE_RATES = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 };
   const PRICEY_RATES = {
     input: 1_000_000_000,
     output: 1_000_000_000,
@@ -32,11 +35,13 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
     EDGE_PROVIDER,
     MIXED_PROVIDER,
     ZERO_PROVIDER,
+    FREE_PROVIDER,
   ]);
   const PRICED_MODELS: ReadonlySet<string> = new Set([
     `${EDGE_PROVIDER}\u0000${EDGE_MODEL}`,
     `${MIXED_PROVIDER}\u0000${MIXED_PRICED_MODEL}`,
     `${ZERO_PROVIDER}\u0000${ZERO_MODEL}`,
+    `${FREE_PROVIDER}\u0000${FREE_MODEL}`,
   ]);
   const KNOWN_MODELS: ReadonlySet<string> = new Set([
     `${FAKE_PROVIDER}\u0000${FAKE_MODEL}`,
@@ -62,6 +67,9 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
       }
       if (providerID === ZERO_PROVIDER) {
         return modelID === ZERO_MODEL ? RATES : null;
+      }
+      if (providerID === FREE_PROVIDER) {
+        return modelID === FREE_MODEL ? FREE_RATES : null;
       }
       if (providerID === FAKE_PROVIDER) return null;
       return actual.lookupCost(providerID, modelID);
@@ -603,6 +611,70 @@ function seriesIdentity(series: GroupSnapshot["series"][number]): GroupIdentity 
   return series.kind === "entity" ? series.identity : null;
 }
 
+function bucketAt(snapshot: GroupSnapshot, completedAtMs: number): number {
+  return snapshot.buckets.findIndex(
+    (bucket) => completedAtMs >= bucket.startMs && completedAtMs < bucket.endMs,
+  );
+}
+
+/**
+ * In-bar subdivision is additive: every category, numeric cost, unpriced count
+ * and unknown count in a bucket equals the sum of its exact child entries.
+ */
+function expectChildBucketsConserve(series: GroupSnapshot["series"][number]): void {
+  expect(series.childBuckets).toHaveLength(series.buckets.length);
+  const childBuckets = series.childBuckets ?? [];
+  series.buckets.forEach((bucket, bucketIndex) => {
+    const children = childBuckets[bucketIndex] ?? [];
+    expect(children.reduce((sum, child) => sum + child.tokens.input, 0)).toBe(bucket.input);
+    expect(children.reduce((sum, child) => sum + child.tokens.cacheRead, 0)).toBe(bucket.cacheRead);
+    expect(children.reduce((sum, child) => sum + child.tokens.cacheWrite, 0)).toBe(
+      bucket.cacheWrite,
+    );
+    expect(children.reduce((sum, child) => sum + child.tokens.output, 0)).toBe(bucket.output);
+    expect(children.reduce((sum, child) => sum + child.tokens.reasoning, 0)).toBe(bucket.reasoning);
+    expect(children.reduce((sum, child) => sum + child.tokens.total, 0)).toBe(bucket.total);
+    expect(children.reduce((sum, child) => sum + child.tokens.unpricedTokens, 0)).toBe(
+      bucket.unpricedTokens,
+    );
+    expect(children.reduce((sum, child) => sum + child.tokens.unknownTokens, 0)).toBe(
+      bucket.unknownTokens,
+    );
+    const childCosts = children.flatMap((child) =>
+      child.tokens.apiEquivalentCostUsd === null ? [] : [child.tokens.apiEquivalentCostUsd],
+    );
+    if (bucket.apiEquivalentCostUsd === null) {
+      expect(childCosts).toEqual([]);
+    } else {
+      expect(childCosts.length).toBeGreaterThan(0);
+      expect(childCosts.reduce((sum, cost) => sum + cost, 0)).toBeCloseTo(
+        bucket.apiEquivalentCostUsd,
+        12,
+      );
+    }
+  });
+
+  const allChildren = childBuckets.flat();
+  expect(allChildren.reduce((sum, child) => sum + child.tokens.total, 0)).toBe(series.tokens.total);
+  expect(allChildren.reduce((sum, child) => sum + child.tokens.unpricedTokens, 0)).toBe(
+    series.tokens.unpricedTokens,
+  );
+  expect(allChildren.reduce((sum, child) => sum + child.tokens.unknownTokens, 0)).toBe(
+    series.tokens.unknownTokens,
+  );
+  const allCosts = allChildren.flatMap((child) =>
+    child.tokens.apiEquivalentCostUsd === null ? [] : [child.tokens.apiEquivalentCostUsd],
+  );
+  if (series.tokens.apiEquivalentCostUsd === null) {
+    expect(allCosts).toEqual([]);
+  } else {
+    expect(allCosts.reduce((sum, cost) => sum + cost, 0)).toBeCloseTo(
+      series.tokens.apiEquivalentCostUsd,
+      12,
+    );
+  }
+}
+
 describe("analytics model: grouped model and provider identities", () => {
   it("keeps colliding provider/model pairs distinct in both insertion orders", () => {
     const sessions = [sessionInfo("ses_a", "p1")];
@@ -697,6 +769,18 @@ describe("analytics model: grouped model and provider identities", () => {
       expect(snapshot.totals.input).toBe(31);
       expect(snapshot.totals).toEqual(model.home("24h", NOW).usage.totals);
       expect(snapshot.sessionCount).toBe(1);
+
+      // Child buckets keep the same exact identities: missing is not empty.
+      for (const series of snapshot.series) expectChildBucketsConserve(series);
+      const bucketIndex = bucketAt(snapshot, completedAtMs);
+      expect(bucketIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        snapshot.series.flatMap((series) => series.childBuckets?.[bucketIndex] ?? []),
+      ).toMatchObject([
+        { identity: known(" "), tokens: { input: 13 } },
+        { identity: known(""), tokens: { input: 11 } },
+        { identity: UNKNOWN_IDENTITY, tokens: { input: 7 } },
+      ]);
     }
 
     const filteredEmpty = model.groups(
@@ -992,6 +1076,7 @@ describe("analytics model: grouped model and provider identities", () => {
           expect(series.buckets.reduce((sum, bucket) => sum + bucket.total, 0)).toBe(
             series.tokens.total,
           );
+          expectChildBucketsConserve(series);
         }
       }
     }
@@ -1147,6 +1232,14 @@ describe("analytics model: grouped model and provider identities", () => {
         providerID: "unpriced-labs",
         modelID: "mystery-1",
       }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_free_priced",
+        completedAtMs,
+        tokens: { input: 5 },
+        providerID: "free-labs",
+        modelID: "free-1",
+      }),
     ]);
 
     const byProvider = model.groups({ range: "24h", dimension: "provider" }, NOW);
@@ -1162,17 +1255,20 @@ describe("analytics model: grouped model and provider identities", () => {
     ).toBeNull();
     expect(findGroupRow(mixed?.children ?? [], known("flat-1"))?.tokens.unpricedTokens).toBe(30);
 
-    expect(findGroupRow(byProvider.rows, known("zero-labs"))?.tokens.apiEquivalentCostUsd).toBe(0);
-    expect(
-      findGroupRow(byProvider.rows, known("unpriced-labs"))?.tokens.apiEquivalentCostUsd,
-    ).toBeNull();
+    // A priced model with zero rates is a valid zero estimate; zero-token rows
+    // never create a group, an estimate, or unpriced/unknown accounting.
+    expect(findGroupRow(byProvider.rows, known("free-labs"))?.tokens.apiEquivalentCostUsd).toBe(0);
+    expect(findGroupRow(byProvider.rows, known("zero-labs"))).toBeUndefined();
+    expect(findGroupRow(byProvider.rows, known("unpriced-labs"))).toBeUndefined();
     expect(byProvider.totals.apiEquivalentCostUsd).not.toBeNull();
     expect(byProvider.totals.unpricedTokens).toBe(30);
     expect(byProvider.totals.unknownTokens).toBe(0);
+    expect(byProvider.totals.input).toBe(45);
 
     const byModel = model.groups({ range: "24h", dimension: "model" }, NOW);
-    expect(findGroupRow(byModel.rows, known("zero-1"))?.tokens.apiEquivalentCostUsd).toBe(0);
-    expect(findGroupRow(byModel.rows, known("mystery-1"))?.tokens.apiEquivalentCostUsd).toBeNull();
+    expect(findGroupRow(byModel.rows, known("free-1"))?.tokens.apiEquivalentCostUsd).toBe(0);
+    expect(findGroupRow(byModel.rows, known("zero-1"))).toBeUndefined();
+    expect(findGroupRow(byModel.rows, known("mystery-1"))).toBeUndefined();
     expect(findGroupRow(byModel.rows, known("flat-1"))?.tokens.apiEquivalentCostUsd).toBeNull();
   });
 
@@ -1269,6 +1365,158 @@ describe("analytics model: grouped model and provider identities", () => {
     ).toBe(snapshot.totals.input);
   });
 
+  it("subdivides a top-series bucket by exact child identity and conserves cost status", () => {
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const completedAtMs = NOW_HOUR - 2 * HOUR;
+    const model = createModel(sessions, [
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_child_priced",
+        completedAtMs,
+        tokens: { input: 10, output: 2 },
+        providerID: "mixed-labs",
+        modelID: "priced-1",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_child_unpriced",
+        completedAtMs,
+        tokens: { input: 30, cacheRead: 3 },
+        providerID: "mixed-labs",
+        modelID: "flat-1",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_child_unknown",
+        completedAtMs,
+        tokens: { input: 40, reasoning: 4 },
+        providerID: "mixed-labs",
+        modelID: "no-such-model",
+      }),
+    ]);
+    const snapshot = model.groups({ range: "24h", dimension: "provider" }, NOW);
+    const series = snapshot.series[0];
+    if (series === undefined) throw new Error("expected the mixed-labs series");
+    expect(series.kind).toBe("entity");
+    expect(seriesIdentity(series)).toEqual(known("mixed-labs"));
+    expectChildBucketsConserve(series);
+
+    const bucketIndex = bucketAt(snapshot, completedAtMs);
+    expect(bucketIndex).toBeGreaterThanOrEqual(0);
+    const children = series.childBuckets?.[bucketIndex] ?? [];
+    // Child rank is token volume, never insertion order or cost.
+    expect(children.map((child) => rawIdentityOf(child.identity))).toEqual([
+      "no-such-model",
+      "flat-1",
+      "priced-1",
+    ]);
+    expect(children.map((child) => child.tokens.input)).toEqual([40, 30, 10]);
+    const unpriced = children.find((child) => rawIdentityOf(child.identity) === "flat-1");
+    expect(unpriced?.tokens.apiEquivalentCostUsd).toBeNull();
+    expect(unpriced?.tokens.unpricedTokens).toBe(33);
+    expect(unpriced?.tokens.unknownTokens).toBe(0);
+    const unknown = children.find((child) => rawIdentityOf(child.identity) === "no-such-model");
+    expect(unknown?.tokens.apiEquivalentCostUsd).toBeNull();
+    expect(unknown?.tokens.unpricedTokens).toBe(0);
+    expect(unknown?.tokens.unknownTokens).toBe(44);
+    const priced = children.find((child) => rawIdentityOf(child.identity) === "priced-1");
+    expect(priced?.tokens.apiEquivalentCostUsd).not.toBeNull();
+    expect(priced?.tokens.unpricedTokens).toBe(0);
+    expect(priced?.tokens.unknownTokens).toBe(0);
+
+    const bucket = series.buckets[bucketIndex];
+    if (bucket === undefined) throw new Error("expected a populated bucket");
+    expect(bucket.unpricedTokens).toBe(33);
+    expect(bucket.unknownTokens).toBe(44);
+    expect(bucket.apiEquivalentCostUsd).not.toBeNull();
+    expect(children.reduce((sum, child) => sum + child.tokens.total, 0)).toBe(bucket.total);
+  });
+
+  it("keeps Other child buckets truthful without top-series or duplicate rows", () => {
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const completedAtMs = NOW_HOUR - 2 * HOUR;
+    const model = createModel(sessions, [
+      ...["m100", "m90", "m80", "m70", "m60"].map((modelID, index) =>
+        row({
+          sessionID: "ses_a",
+          messageID: `msg_top_${index}`,
+          completedAtMs,
+          tokens: { input: 100 - index * 10 },
+          modelID,
+        }),
+      ),
+      // Two Other parents share the mixed-labs child; their tokens aggregate
+      // once per bucket rather than appearing as a parent × child cross-product.
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_other_unpriced",
+        completedAtMs,
+        tokens: { input: 40 },
+        providerID: "mixed-labs",
+        modelID: "flat-1",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_other_priced",
+        completedAtMs,
+        tokens: { input: 10 },
+        providerID: "mixed-labs",
+        modelID: "priced-1",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_other_unknown",
+        completedAtMs,
+        tokens: { input: 5 },
+        providerID: "no-such-provider",
+        modelID: "priced-1",
+      }),
+    ]);
+    const snapshot = model.groups({ range: "24h", dimension: "model" }, NOW);
+
+    expect(snapshot.series.map(seriesIdentity).slice(0, 5)).toEqual([
+      known("m100"),
+      known("m90"),
+      known("m80"),
+      known("m70"),
+      known("m60"),
+    ]);
+    const other = snapshot.series[5];
+    if (other === undefined) throw new Error("expected an Other series");
+    expect(other.kind).toBe("other");
+    expect(other.tokens.input).toBe(55);
+    expectChildBucketsConserve(other);
+    for (const series of snapshot.series) expectChildBucketsConserve(series);
+
+    const bucketIndex = bucketAt(snapshot, completedAtMs);
+    expect(bucketIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      other.childBuckets?.[bucketIndex]?.map((child) => rawIdentityOf(child.identity)),
+    ).toEqual(["mixed-labs", "no-such-provider"]);
+    const otherChildren = other.childBuckets?.[bucketIndex] ?? [];
+    expect(otherChildren.map((child) => child.tokens.input)).toEqual([50, 5]);
+    const mixed = otherChildren[0];
+    expect(mixed?.tokens.apiEquivalentCostUsd).not.toBeNull();
+    expect(mixed?.tokens.unpricedTokens).toBe(40);
+    expect(mixed?.tokens.unknownTokens).toBe(0);
+    const unknown = otherChildren[1];
+    expect(unknown?.tokens.apiEquivalentCostUsd).toBeNull();
+    expect(unknown?.tokens.unknownTokens).toBe(5);
+    expect(other.buckets[bucketIndex]?.unpricedTokens).toBe(40);
+    expect(other.buckets[bucketIndex]?.unknownTokens).toBe(5);
+
+    // A top series keeps only its own child: its 100 tokens stay with openai
+    // and neither the 5 Other unknown tokens nor Other's 55 total leak in.
+    const top = snapshot.series[0];
+    if (top === undefined) throw new Error("expected the m100 series");
+    const topChildren = top.childBuckets?.[bucketIndex] ?? [];
+    expect(topChildren).toHaveLength(1);
+    expect(topChildren[0]?.identity).toEqual(known("openai"));
+    expect(topChildren[0]?.tokens.input).toBe(100);
+    expect(topChildren[0]?.tokens.unknownTokens).toBe(top.buckets[bucketIndex]?.unknownTokens);
+    expect(top.tokens.input).toBe(100);
+  });
+
   it("returns empty ranges and exactly five groups without an Other series", () => {
     const sessions = [sessionInfo("ses_a", "p1")];
     const emptyModel = createModel(sessions, []);
@@ -1361,6 +1609,224 @@ describe("analytics model: grouped model and provider identities", () => {
     expect(other?.kind).toBe("other");
     expect(other?.tokens.input).toBe(100);
     expect(snapshot.series.reduce((sum, series) => sum + series.tokens.input, 0)).toBe(350);
+  });
+});
+
+describe("analytics model: zero-token usage exclusion", () => {
+  it("excludes zero-token rows from ownership, pricing, groups, and activity extents", () => {
+    const sessions = [
+      sessionInfo("ses_a", "p1", {
+        time: { created: NOW - 6 * HOUR, updated: NOW - HOUR },
+      }),
+    ];
+    const zeroAt = NOW - 3 * 24 * HOUR;
+    const zero = row({
+      sessionID: "ses_a",
+      messageID: "msg_zero_priced",
+      completedAtMs: zeroAt,
+      tokens: {},
+      providerID: "zero-labs",
+      modelID: "zero-1",
+    });
+    const positive = row({
+      sessionID: "ses_a",
+      messageID: "msg_positive",
+      completedAtMs: NOW - 2 * HOUR,
+      tokens: { input: 7 },
+    });
+    const model = createModel(sessions, [zero, positive]);
+
+    const lifetime = model.home("lifetime", NOW).usage;
+    expect(lifetime.totals.input).toBe(7);
+    expect(lifetime.totals.total).toBe(7);
+    expect(lifetime.stepCount).toBe(1);
+    expect(lifetime.sessionCount).toBe(1);
+    expect(model.ownedStepCount()).toBe(1);
+
+    // A zero-token row must not extend a user-visible activity extent; the
+    // session metadata timestamp remains authoritative.
+    expect(model.earliestActivityMs()).toBe(NOW - 6 * HOUR);
+
+    for (const dimension of DIMENSIONS) {
+      const snapshot = model.groups({ range: "lifetime", dimension }, NOW);
+      expect(snapshot.totals).toEqual(model.home("lifetime", NOW).usage.totals);
+      expect(snapshot.stepCount).toBe(1);
+      expect(snapshot.sessionCount).toBe(1);
+      expect(flattenGroupRows(snapshot.rows).map((entry) => entry.identity)).not.toContainEqual(
+        known("zero-1"),
+      );
+      expect(flattenGroupRows(snapshot.rows).map((entry) => entry.identity)).not.toContainEqual(
+        known("zero-labs"),
+      );
+    }
+
+    const filtered = model.groups(
+      {
+        range: "lifetime",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known("zero-1") },
+      },
+      NOW,
+    );
+    expect(filtered.rows).toEqual([]);
+    expect(filtered.series).toEqual([]);
+    expect(filtered.stepCount).toBe(0);
+    expect(filtered.sessionCount).toBe(0);
+    expect(filtered.totals.total).toBe(0);
+    expect(filtered.totals.apiEquivalentCostUsd).toBeNull();
+  });
+
+  it("keeps zero-token-only session and project metadata visible", () => {
+    const sessions = [
+      sessionInfo("ses_a", "p1", {
+        time: { created: NOW - 2 * HOUR, updated: NOW - 30 * 60_000 },
+      }),
+    ];
+    const model = createModel(sessions, [
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_zero_only",
+        completedAtMs: NOW - 3 * 24 * HOUR,
+        tokens: {},
+        providerID: "unpriced-labs",
+        modelID: "mystery-1",
+      }),
+    ]);
+
+    expect(model.hasSession("ses_a")).toBe(true);
+    expect(model.hasProject("p1")).toBe(true);
+
+    const home = model.home("24h", NOW);
+    const project = home.projects.find((entry) => entry.projectId === "p1");
+    expect(project?.tokens.total).toBe(0);
+    expect(project?.latestActivityAtMs).toBe(NOW - 30 * 60_000);
+    expect(home.usage.stepCount).toBe(0);
+    expect(home.usage.sessionCount).toBe(0);
+
+    const detail = model.project("p1", "24h", NOW);
+    expect(detail.roots).toHaveLength(1);
+    expect(detail.roots[0]?.tokens.total).toBe(0);
+    expect(detail.totals.total).toBe(0);
+
+    // Lifetime buckets start at session metadata activity, never at the zero
+    // row's completion time.
+    expect(model.earliestActivityMs()).toBe(NOW - 2 * HOUR);
+    const firstLifetimeBucket = model.home("lifetime", NOW).usage.buckets.at(0);
+    expect(firstLifetimeBucket?.startMs).toBeGreaterThan(NOW - 3 * 24 * HOUR);
+    expect(firstLifetimeBucket?.startMs).toBeLessThanOrEqual(NOW - 2 * HOUR);
+    expect(firstLifetimeBucket?.endMs).toBeGreaterThan(NOW - 2 * HOUR);
+  });
+
+  it("applies positive↔zero updates, removals, and full repair without stale usage", () => {
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const completedAtMs = NOW - 2 * HOUR;
+    const positive = row({
+      sessionID: "ses_a",
+      messageID: "msg_switch",
+      completedAtMs,
+      tokens: { input: 12 },
+    });
+    const zero = row({
+      sessionID: "ses_a",
+      messageID: "msg_switch",
+      completedAtMs,
+      tokens: {},
+    });
+    const model = createModel(sessions, [positive]);
+    expect(model.home("24h", NOW).usage.totals.input).toBe(12);
+
+    // A positive→zero update without a separate removal row must drop the
+    // previously owned contribution.
+    model.apply([zero], []);
+    expect(model.ownedStepCount()).toBe(0);
+    expect(model.home("24h", NOW).usage.totals.total).toBe(0);
+    expect(model.groups({ range: "24h", dimension: "model" }, NOW).rows).toEqual([]);
+    expectSameModelOutputs(model, createModel(sessions, [zero]));
+
+    // Zero→positive restores exactly one contribution.
+    model.apply([positive], []);
+    expect(model.ownedStepCount()).toBe(1);
+    expect(model.home("24h", NOW).usage.totals.input).toBe(12);
+    expectSameModelOutputs(model, createModel(sessions, [positive]));
+
+    // Removing the row keeps metadata but removes all usage.
+    model.apply([], [positive]);
+    expect(model.hasSession("ses_a")).toBe(true);
+    expect(model.ownedStepCount()).toBe(0);
+    expect(model.home("24h", NOW).usage.totals.total).toBe(0);
+    expectSameModelOutputs(model, createModel(sessions, []));
+  });
+
+  it("keeps fork dedup exact when zero-token copies share a time window", () => {
+    const sessions = [
+      sessionInfo("ses_a", "p1"),
+      sessionInfo("ses_b", "p1"),
+      sessionInfo("ses_c", "p1"),
+    ];
+    const completedAtMs = NOW - 2 * HOUR;
+    const original = row({
+      sessionID: "ses_a",
+      messageID: "msg_fork_original",
+      completedAtMs,
+      tokens: { input: 25 },
+    });
+    const forkCopy = row({
+      sessionID: "ses_b",
+      messageID: "msg_fork_copy",
+      completedAtMs,
+      tokens: { input: 25 },
+    });
+    const zeroCopy = row({
+      sessionID: "ses_c",
+      messageID: "msg_fork_zero",
+      completedAtMs,
+      tokens: {},
+    });
+    const withZero = createModel(sessions, [original, forkCopy, zeroCopy]);
+    const withoutZero = createModel(sessions, [original, forkCopy]);
+
+    expectSameModelOutputs(withZero, withoutZero);
+    expect(withZero.ownedStepCount()).toBe(1);
+    expect(withZero.home("24h", NOW).usage.totals.input).toBe(25);
+  });
+
+  it("consumes a mixed zero/positive iterable once during hydration", () => {
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const completedAtMs = NOW - 2 * HOUR;
+    const zeros = Array.from({ length: 400 }, (_, index) =>
+      row({
+        sessionID: "ses_a",
+        messageID: `msg_zero_${index}`,
+        completedAtMs,
+        tokens: {},
+      }),
+    );
+    const positives = Array.from({ length: 20 }, (_, index) =>
+      row({
+        sessionID: "ses_a",
+        messageID: `msg_positive_${index}`,
+        completedAtMs,
+        tokens: { input: 2 },
+        modelID: `positive-${index}`,
+      }),
+    );
+    function* batch(): Generator<OpenCodeRawAssistantRow> {
+      yield* zeros;
+      yield* positives;
+    }
+
+    const model = createModel(sessions, []);
+    model.apply(batch(), []);
+
+    expect(model.ownedStepCount()).toBe(20);
+    expect(model.home("24h", NOW).usage.totals.input).toBe(40);
+    const grouped = model.groups({ range: "24h", dimension: "model" }, NOW);
+    expect(grouped.rows).toHaveLength(20);
+    expect(
+      flattenGroupRows(grouped.rows).some(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5",
+      ),
+    ).toBe(false);
   });
 });
 

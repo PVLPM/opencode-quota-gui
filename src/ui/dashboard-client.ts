@@ -9,6 +9,7 @@ import type {
   AnalyticsGroupRow,
   AnalyticsGroupSnapshot,
   AnalyticsSeries,
+  AnalyticsSeriesChildBucket,
   Bucket,
   CostedTokens,
   DashboardDataSource,
@@ -532,6 +533,32 @@ function readGroupRow(value: JsonValue, endpoint: string, detail: string): Analy
   };
 }
 
+function readSeriesChildBuckets(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail: string,
+  bucketCount: number,
+): AnalyticsSeriesChildBucket[][] | undefined {
+  if (value === undefined) return undefined;
+  const buckets = readArray(value, endpoint, detail);
+  if (buckets.length !== bucketCount) throw faulty(endpoint, detail);
+  return buckets.map((bucket, bucketIndex) => {
+    const childDetail = `${detail}[${bucketIndex}]`;
+    const seen = new Set<string>();
+    return readArray(bucket, endpoint, childDetail).map((child) => {
+      const record = readRecord(child, endpoint, `${childDetail}[]`);
+      const identity = readEntityIdentity(record.identity, endpoint, `${childDetail}[].identity`);
+      const key = identity.kind === "unknown" ? "unknown" : `known:${identity.id}`;
+      if (seen.has(key)) throw faulty(endpoint, childDetail);
+      seen.add(key);
+      return {
+        identity,
+        tokens: readCostedTokens(record.tokens, endpoint, `${childDetail}[].tokens`),
+      };
+    });
+  });
+}
+
 function readGroupSeries(value: JsonValue, endpoint: string): AnalyticsSeries {
   const detail = "series[]";
   const series = readRecord(value, endpoint, detail);
@@ -540,13 +567,21 @@ function readGroupSeries(value: JsonValue, endpoint: string): AnalyticsSeries {
   const buckets = readArray(series.buckets, endpoint, `${detail}.buckets`).map((bucket, index) =>
     readCostedTokens(bucket, endpoint, `${detail}.buckets[${index}]`),
   );
-  if (kind === "other") return { kind, tokens, buckets };
-  return {
-    kind,
-    identity: readEntityIdentity(series.identity, endpoint, `${detail}.identity`),
-    tokens,
-    buckets,
-  };
+  const childBuckets = readSeriesChildBuckets(
+    series.childBuckets,
+    endpoint,
+    `${detail}.childBuckets`,
+    buckets.length,
+  );
+  if (kind === "other") {
+    return childBuckets === undefined
+      ? { kind, tokens, buckets }
+      : { kind, tokens, buckets, childBuckets };
+  }
+  const identity = readEntityIdentity(series.identity, endpoint, `${detail}.identity`);
+  return childBuckets === undefined
+    ? { kind, identity, tokens, buckets }
+    : { kind, identity, tokens, buckets, childBuckets };
 }
 
 /** Decodes one range-certified grouped model/provider payload. */

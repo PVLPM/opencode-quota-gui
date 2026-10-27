@@ -27,6 +27,13 @@ import {
 
 export const ANALYTICS_SNAPSHOT_VERSION = 3;
 export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
+/**
+ * Warm DTO aggregation semantics. This is separate from the compact candidate
+ * version because the presentation cache is disposable: a sidecar written
+ * under older semantics (for example before zero-token rows were excluded from
+ * usage rollups) must be rebuilt, not served as if it were current.
+ */
+export const ANALYTICS_PRESENTATION_VERSION = 2;
 
 export interface AnalyticsCoverage {
   /** Inclusive start; absent means the lifetime read reached the beginning. */
@@ -556,6 +563,7 @@ export function defaultAnalyticsPresentationPath(snapshotPath: string): string {
 
 interface PersistedPresentationFile {
   version: typeof ANALYTICS_SNAPSHOT_VERSION;
+  presentationVersion: typeof ANALYTICS_PRESENTATION_VERSION;
   savedAtMs: number;
   frontierAtMs: number;
   sourceIdentity: SourceIdentityTuple | null;
@@ -579,6 +587,7 @@ export function encodeAnalyticsPresentation(
     );
   return {
     version: ANALYTICS_SNAPSHOT_VERSION,
+    presentationVersion: ANALYTICS_PRESENTATION_VERSION,
     savedAtMs,
     frontierAtMs: state.frontierAtMs,
     sourceIdentity: state.sourceIdentity ? identityToTuple(state.sourceIdentity) : null,
@@ -643,6 +652,10 @@ export function decodeAnalyticsPresentation(value: unknown): WarmAnalyticsPresen
   if (typeof value !== "object" || value === null) return undefined;
   const record = value as Record<string, unknown>;
   if (record.version !== ANALYTICS_SNAPSHOT_VERSION) return undefined;
+  // Legacy sidecars predate zero-token usage exclusion; their DTOs cannot be
+  // certified against current aggregation semantics, so rebuild them from the
+  // compact index instead of serving possibly inflated steps/rollups.
+  if (record.presentationVersion !== ANALYTICS_PRESENTATION_VERSION) return undefined;
   if (!isFiniteNumber(record.savedAtMs)) return undefined;
   const identityValue = record.sourceIdentity;
   // Absent/null token is a readable legacy sidecar but cannot be verified.

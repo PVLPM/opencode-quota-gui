@@ -74,6 +74,11 @@ export function dimensionNoun(dimension: AnalyticsDimension): string {
   return dimension === "model" ? "model" : "provider";
 }
 
+/** The child dimension of a grouped snapshot: models contain providers and vice versa. */
+export function oppositeDimension(dimension: AnalyticsDimension): AnalyticsDimension {
+  return dimension === "model" ? "provider" : "model";
+}
+
 export function usageTitle(dimension: AnalyticsDimension): string {
   return `Usage by ${dimensionNoun(dimension)}`;
 }
@@ -168,6 +173,45 @@ export function seriesColorForKey(key: string, seriesKeys?: readonly string[]): 
   if (key === "other" || seriesKeys === undefined) return OTHER_COLOR_VAR;
   const index = seriesKeys.indexOf(key);
   return index === -1 ? OTHER_COLOR_VAR : seriesColorVar(index, "entity");
+}
+
+/**
+ * Stable leaf colours for the opposite dimension.
+ *
+ * The chart ranks only the selected grouping, but a breakdown leaf still has an
+ * identity of its own. Aggregating every child row by its raw identity produces
+ * the same ranking the opposite-dimension chart would show for the same
+ * snapshot, without borrowing the parent's colour. The map is keyed by the
+ * leaf's own `entityKey`, so sorting, hovering and re-rendering cannot recolor
+ * it, and a model/provider seen under several parents keeps one colour.
+ */
+export function buildEntityColorMap(
+  rows: readonly AnalyticsGroupRow[],
+  dimension: AnalyticsDimension,
+): Map<string, string> {
+  const childDimension = oppositeDimension(dimension);
+  const totals = new Map<string, { identity: AnalyticsEntityIdentity; total: number }>();
+  for (const row of rows) {
+    for (const child of row.children) {
+      const key = entityKey(childDimension, child.identity);
+      const current = totals.get(key);
+      if (current === undefined) {
+        totals.set(key, { identity: child.identity, total: child.tokens.total });
+      } else {
+        current.total += child.tokens.total;
+      }
+    }
+  }
+  const ranked = [...totals].sort((left, right) => {
+    const byTokens = right[1].total - left[1].total;
+    if (byTokens !== 0) return byTokens;
+    return compareIdentities(left[1].identity, right[1].identity);
+  });
+  const colors = new Map<string, string>();
+  ranked.forEach(([key], index) => {
+    colors.set(key, seriesColorVar(index, "entity"));
+  });
+  return colors;
 }
 
 function compareBreakdownRows(

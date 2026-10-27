@@ -114,7 +114,10 @@ describe("resolvePricingKey snapshot coverage", () => {
     });
     expect(copilotHaiku.ok).toBe(true);
     if (!copilotHaiku.ok) return;
-    expect(copilotHaiku.key).toEqual({ provider: "anthropic", model: "claude-haiku-4-5" });
+    expect(copilotHaiku).toMatchObject({
+      method: "source_provider",
+      key: { provider: "github-copilot", model: "claude-haiku-4.5" },
+    });
 
     const copilotGrok = resolvePricingKey({
       providerID: "github-copilot",
@@ -138,7 +141,15 @@ describe("resolvePricingKey snapshot coverage", () => {
     });
     expect(kimiFree.ok).toBe(true);
     if (!kimiFree.ok) return;
-    expect(kimiFree.key).toEqual({ provider: "moonshotai", model: "kimi-k2.5" });
+    expect(kimiFree).toMatchObject({
+      method: "source_provider",
+      key: { provider: "opencode", model: "kimi-k2.5-free" },
+    });
+    expect(lookupCost("opencode", "kimi-k2.5-free")).toEqual({
+      input: 0,
+      output: 0,
+      cache_read: 0,
+    });
 
     const openaiFreeKnownProvider = resolvePricingKey({
       providerID: "openai",
@@ -160,6 +171,52 @@ describe("resolvePricingKey snapshot coverage", () => {
     expect(lookupCost("xai", "grok-code-fast-1")).not.toBeNull();
     expect(lookupCost("moonshotai", "kimi-k2.5")).not.toBeNull();
     expect(lookupCost("openai", "gpt-4o-mini")).not.toBeNull();
+  });
+
+  it("preserves exact source provider routes across provider-owned catalogs", () => {
+    const cases = [
+      ["opencode", "big-pickle", "opencode", "big-pickle"],
+      [
+        "openrouter",
+        "google/gemini-3.1-pro-preview",
+        "openrouter",
+        "google/gemini-3.1-pro-preview",
+      ],
+      ["github-copilot", "github-copilot/claude-haiku-4.5", "github-copilot", "claude-haiku-4.5"],
+      ["opencode-go", "deepseek-v4.1-flash", "opencode-go", "deepseek-v4.1-flash"],
+    ] as const;
+
+    for (const [sourceProvider, sourceModel, provider, model] of cases) {
+      expect(resolvePricingKey({ providerID: sourceProvider, modelID: sourceModel })).toEqual({
+        ok: true,
+        method: "source_provider",
+        key: { provider, model },
+      });
+    }
+  });
+
+  it("still resolves an arbitrary non-listed provider from an explicit model prefix", () => {
+    expect(
+      resolvePricingKey({
+        providerID: "arbitrary-private-gateway",
+        modelID: "openai/gpt-6.1-terra",
+      }),
+    ).toEqual({
+      ok: true,
+      method: "model_prefix",
+      key: { provider: "openai", model: "gpt-6.1-terra" },
+    });
+
+    expect(
+      resolvePricingKey({
+        providerID: "arbitrary-private-gateway",
+        modelID: "openrouter/google/gemini-3.1-pro-preview",
+      }),
+    ).toEqual({
+      ok: true,
+      method: "model_prefix",
+      key: { provider: "openrouter", model: "google/gemini-3.1-pro-preview" },
+    });
   });
 
   it("maps documented Kimi Code K3 models to authoritative pricing", () => {

@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { Bucket, Usage } from "../../contracts/dashboard";
 import { buildUsageGeometry, cacheHitRate, DEFAULT_USAGE_SIZE } from "../chart-geometry";
 import { createChartInspection } from "../chart-inspection";
@@ -49,11 +49,50 @@ export function UsageChart(props: {
   const inspection = createChartInspection();
   const [hoveredCategory, setHoveredCategory] = createSignal<string | undefined>();
   const [focusedCategory, setFocusedCategory] = createSignal<string | undefined>();
+  const [pinnedCategory, setPinnedCategory] = createSignal<string | undefined>();
   const active = inspection.active;
-  const highlight = () => hoveredCategory() ?? focusedCategory();
+  const highlight = () => hoveredCategory() ?? focusedCategory() ?? pinnedCategory();
+  const clearPinned = (): void => setPinnedCategory(undefined);
+  const togglePinned = (key: string): void => {
+    if (pinnedCategory() === key) {
+      setPinnedCategory(undefined);
+      // Clear this badge's transient sources too, so clicking it again visibly
+      // resets the bars instead of leaving hover/focus emphasis in place.
+      setHoveredCategory((current) => (current === key ? undefined : current));
+      setFocusedCategory((current) => (current === key ? undefined : current));
+      return;
+    }
+    setPinnedCategory(key);
+  };
+  let legendElement: HTMLUListElement | undefined;
+  onMount(() => {
+    if (typeof document === "undefined") return;
+    const onDocumentClick = (event: MouseEvent) => {
+      if (pinnedCategory() === undefined) return;
+      const target = event.target;
+      if (target instanceof Node && legendElement?.contains(target)) return;
+      setPinnedCategory(undefined);
+    };
+    document.addEventListener("click", onDocumentClick);
+    onCleanup(() => document.removeEventListener("click", onDocumentClick));
+  });
 
   const { size, ref } = createChartLayout(DEFAULT_USAGE_SIZE);
   const geometry = createMemo(() => buildUsageGeometry(props.usage.buckets, size));
+  // A refetch can hide a category. Drop only the emphasis keys that vanished so
+  // a stale pin cannot dim the whole chart with no badge left to click.
+  createEffect(() => {
+    const keys = new Set<string>(geometry().visibleCategories.map((category) => category.key));
+    setHoveredCategory((current) =>
+      current !== undefined && !keys.has(current) ? undefined : current,
+    );
+    setFocusedCategory((current) =>
+      current !== undefined && !keys.has(current) ? undefined : current,
+    );
+    setPinnedCategory((current) =>
+      current !== undefined && !keys.has(current) ? undefined : current,
+    );
+  });
   const tooltipLayout = createChartTooltipLayout(
     () => {
       const index = active();
@@ -111,28 +150,35 @@ export function UsageChart(props: {
       headingId={props.headingId}
       summary={props.summary ?? <ChartSummary items={summaryItems()} />}
       aside={
-        <ul class="qg-legend">
+        <ul
+          class="qg-legend"
+          ref={(element) => {
+            legendElement = element;
+          }}
+        >
           <For each={geometry().visibleCategories}>
             {(category) => (
-              <li
-                class="qg-legend__item"
-                // biome-ignore lint/a11y/noNoninteractiveTabindex: the legend entry is a keyboard focus target for series emphasis, not an activation action.
-                tabIndex={0}
-                aria-label={`Highlight ${category.label}`}
-                style={{ "--qg-swatch": `var(${category.colorVar})` }}
-                onPointerEnter={() => setHoveredCategory(category.key)}
-                onPointerLeave={() => {
-                  setHoveredCategory(undefined);
-                  setFocusedCategory(undefined);
-                }}
-                onFocus={() => setFocusedCategory(category.key)}
-                onBlur={() => setFocusedCategory(undefined)}
-              >
-                <span class="qg-legend__swatch" aria-hidden="true" />
-                <span class="qg-legend__label">{category.label}</span>
-                <span class="qg-legend__value">
-                  {formatTokenCount(props.usage.totals[category.key])}
-                </span>
+              <li class="qg-legend__entry">
+                <button
+                  type="button"
+                  class="qg-legend__item"
+                  aria-label={`Highlight ${category.label}`}
+                  aria-pressed={pinnedCategory() === category.key ? "true" : "false"}
+                  style={{ "--qg-swatch": `var(${category.colorVar})` }}
+                  data-pinned={pinnedCategory() === category.key ? "true" : undefined}
+                  data-pinnable="true"
+                  onPointerEnter={() => setHoveredCategory(category.key)}
+                  onPointerLeave={() => setHoveredCategory(undefined)}
+                  onFocus={() => setFocusedCategory(category.key)}
+                  onBlur={() => setFocusedCategory(undefined)}
+                  onClick={() => togglePinned(category.key)}
+                >
+                  <span class="qg-legend__swatch" aria-hidden="true" />
+                  <span class="qg-legend__label">{category.label}</span>
+                  <span class="qg-legend__value">
+                    {formatTokenCount(props.usage.totals[category.key])}
+                  </span>
+                </button>
               </li>
             )}
           </For>
@@ -143,6 +189,8 @@ export function UsageChart(props: {
         when={props.emptyMessage === undefined || props.usage.buckets.length > 0}
         fallback={<EmptyNotice message={props.emptyMessage ?? ""} />}
       >
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: the plot click only dismisses a pinned legend selection; contained controls carry the actions. */}
+        {/* biome-ignore lint/a11y/useKeyWithClickEvents: dismissal is pointer-only; keyboard users can clear the pin from the legend. */}
         <div
           ref={(element) => {
             ref(element);
@@ -150,6 +198,7 @@ export function UsageChart(props: {
           }}
           class="qg-chart"
           data-highlight={highlight() === undefined ? undefined : "true"}
+          onClick={clearPinned}
         >
           <svg
             viewBox={`0 0 ${size.width} ${size.height}`}

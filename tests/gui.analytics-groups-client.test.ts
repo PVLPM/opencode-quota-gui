@@ -91,6 +91,67 @@ describe("grouped analytics browser transport", () => {
     expect(Object.hasOwn(parsed, "filter")).toBe(false);
   });
 
+  it("parses optional child buckets aligned with each series bucket", () => {
+    const payload = groupPayload();
+    const series = payload.series as Record<string, unknown>[];
+    series[0] = {
+      ...series[0],
+      childBuckets: [
+        [
+          { identity: { kind: "known", id: "openai" }, tokens: costed({ input: 7, output: 3 }) },
+          { identity: { kind: "unknown" }, tokens: costed({ input: 4 }) },
+        ],
+      ],
+    };
+    series[1] = {
+      ...series[1],
+      childBuckets: [
+        [{ identity: { kind: "known", id: "gpt-5" }, tokens: costed({ input: 9, output: 1 }) }],
+      ],
+    };
+
+    const parsed = parseGroupSnapshot(payload as never, "/api/v1/models");
+    expect(parsed.series[0]?.childBuckets).toHaveLength(1);
+    expect(parsed.series[0]?.childBuckets?.[0]?.map((child) => child.identity)).toEqual([
+      { kind: "known", id: "openai" },
+      { kind: "unknown" },
+    ]);
+    expect(parsed.series[0]?.childBuckets?.[0]?.[0]?.tokens.total).toBe(10);
+    expect(parsed.series[1]?.childBuckets?.[0]?.[0]?.identity).toEqual({
+      kind: "known",
+      id: "gpt-5",
+    });
+
+    const plain = parseGroupSnapshot(groupPayload() as never, "/api/v1/models");
+    expect(plain.series[0] === undefined || Object.hasOwn(plain.series[0], "childBuckets")).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ["a misaligned bucket count", [[], []]],
+    ["a non-array bucket", [{}]],
+    ["a malformed child identity", [[{ identity: { kind: "x" }, tokens: costed({ input: 1 }) }]]],
+    [
+      "a malformed child token total",
+      [[{ identity: { kind: "known", id: "openai" }, tokens: {} }]],
+    ],
+    [
+      "a duplicate child identity",
+      [
+        [
+          { identity: { kind: "known", id: "openai" }, tokens: costed({ input: 1 }) },
+          { identity: { kind: "known", id: "openai" }, tokens: costed({ input: 2 }) },
+        ],
+      ],
+    ],
+  ])("rejects child buckets with %s", (_label, childBuckets) => {
+    const payload = groupPayload();
+    const series = payload.series as Record<string, unknown>[];
+    series[0] = { ...series[0], childBuckets };
+    expect(() => parseGroupSnapshot(payload as never, "/api/v1/models")).toThrow(DashboardError);
+  });
+
   it.each([
     [
       "identity kind",
