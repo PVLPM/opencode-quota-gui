@@ -1,0 +1,1343 @@
+{
+  "source": "models.dev",
+  "repository": "https://github.com/anomalyco/models.dev",
+  "revision": "30a8b13a5a5507979ddbf8d339c7746cf7e4f442",
+  "license": "MIT",
+  "logoCount": 222,
+  "logoBytes": 623580,
+  "upstreamBytes": 623957,
+  "logos": {
+    "302ai": {
+      "label": "302.AI",
+      "url": "/assets/providers/302ai.svg",
+      "bytes": 5042,
+      "sha256": "7720c150a79c4fa7b01a2634b4cb8aaeecf51a88100ba67baf6f21fc642675d7"
+    },
+    "abacus": {
+      "label": "Abacus",
+      "url": "/assets/providers/abacus.svg",
+      "bytes": 2878,
+      "sha256": "ff15f2b5aecf31d45b23a877484879a3d6a86b1f6523135a222656e896ba4882"
+    },
+    "abliteration-ai": {
+      "label": "abliteration.ai",
+      "url": "/assets/providers/abliteration-ai.svg",
+      "bytes": 239,
+      "sha256": "b3c16701fe9aa89608f1a7188781c4ca62ceb036dded000a7626967c2e3b935a"
+    },
+    "above": {
+      "label": "above.dev",
+      "url": "/assets/providers/above.svg",
+      "bytes": 148,
+      "sha256": "494ff40f9952794c912ee72863f8ee89ae1bcc254ec470363abcc6dbbc8af609"
+    },
+    "agentrouter": {
+      "label": "AgentRouter",
+      "url": "/assets/providers/agentrouter.svg",
+      "bytes": 370,
+      "sha256": "76478bd98302d4b0ea6bbd3851371e61ab81563a1be44d0fff21d80fdcc5ab07"
+    },
+    "agnes": {
+      "label": "Agnes AI",
+      "url": "/assets/providers/agnes.svg",
+      "bytes": 3397,
+      "sha256": "05d7a109fe6b5e113af8f52822a694d09b4f8cc460a77721e1ee459132e18a9e"
+    },
+    "ai-router": {
+      "label": "AI-ROUTER",
+      "url": "/assets/providers/ai-router.svg",
+      "bytes": 749,
+      "sha256": "d5d1a28e4e95d36ebe865f0bd06d7854c98008389dc88a2d40470c7b22185fda"
+    },
+    "ai21": {
+      "label": "AI21 Labs",
+      "url": "/assets/providers/ai21.svg",
+      "bytes": 249,
+      "sha256": "a2239e127be092089c00cf439f710ec588f73b22c6a7797134b33ed65eb6a6fc"
+    },
+    "aiand": {
+      "label": "ai&",
+      "url": "/assets/providers/aiand.svg",
+      "bytes": 634,
+      "sha256": "a516d5ebc194f286ef62426b68d27937b482ff4995bbb2d9e5b7985820a72d04"
+    },
+    "aihubmix": {
+      "label": "AIHubMix",
+      "url": "/assets/providers/aihubmix.svg",
+      "bytes": 2244,
+      "sha256": "e7d7efd8094a709ce2d5ee1889660aea96299b7dcb8bfc70969427d19dbd4e07"
+    },
+    "aimlapi": {
+      "label": "AI/ML API",
+      "url": "/assets/providers/aimlapi.svg",
+      "bytes": 1061,
+      "sha256": "1baddb25ecf0d4fcb45917a4916bb03d2aa683ba97a3a52f9650d037d3dd9dd4"
+    },
+    "ainetcafe": {
+      "label": "ainetcafe",
+      "url": "/assets/providers/ainetcafe.svg",
+      "bytes": 151,
+      "sha256": "38beb084c129cf89fda9f9a0b591c9b7a74f8b9e3b7f31f3323d06a2d76dc73a"
+    },
+    "aixy": {
+      "label": "Aixy",
+      "url": "/assets/providers/aixy.svg",
+      "bytes": 224,
+      "sha256": "469e07982f676b12465618df68b03eb24efc4ab503a76ce92bb3e3a05e8bf916"
+    },
+    "aki-io": {
+      "label": "AKI.IO",
+      "url": "/assets/providers/aki-io.svg",
+      "bytes": 2466,
+      "sha256": "0e9823ff9504a4525fda031ea37206281c7b8b30f4d1cd86d69196d162e30e1f"
+    },
+    "alibaba": {
+      "label": "Alibaba",
+      "url": "/assets/providers/alibaba.svg",
+      "bytes": 2057,
+      "sha256": "5f4c48b021079424f030d9e960440ee8741fb8113ec63464ee8c22c099671b92"
+    },
+    "alibaba-cn": {
+      "label": "Alibaba (China)",
+      "url": "/assets/providers/alibaba-cn.svg",
+      "bytes": 2049,
+      "sha256": "bf4119a0f34265479d285d646888ed73db4c110fcea66456f9e88cc7085d68db"
+    },
+    "alibaba-coding-plan": {
+      "label": "Alibaba Coding Plan",
+      "url": "/assets/providers/alibaba-coding-plan.svg",
+      "bytes": 2057,
+      "sha256": "5f4c48b021079424f030d9e960440ee8741fb8113ec63464ee8c22c099671b92"
+    },
+    "alibaba-coding-plan-cn": {
+      "label": "Alibaba Coding Plan (China)",
+      "url": "/assets/providers/alibaba-coding-plan-cn.svg",
+      "bytes": 2057,
+      "sha256": "5f4c48b021079424f030d9e960440ee8741fb8113ec63464ee8c22c099671b92"
+    },
+    "alibaba-token-plan": {
+      "label": "Alibaba Token Plan",
+      "url": "/assets/providers/alibaba-token-plan.svg",
+      "bytes": 2057,
+      "sha256": "5f4c48b021079424f030d9e960440ee8741fb8113ec63464ee8c22c099671b92"
+    },
+    "amazon-bedrock": {
+      "label": "Amazon Bedrock",
+      "url": "/assets/providers/amazon-bedrock.svg",
+      "bytes": 5535,
+      "sha256": "28a6d29994e72042e71efb4d31b2ed90861237ce57407e5fe7771622c02a3eac"
+    },
+    "ambient": {
+      "label": "Ambient",
+      "url": "/assets/providers/ambient.svg",
+      "bytes": 6206,
+      "sha256": "1b44fa767cbe69568174c55f3727bd7c9f00aa9e11ad8d2b73cfca221e0da913"
+    },
+    "amd": {
+      "label": "AMD",
+      "url": "/assets/providers/amd.svg",
+      "bytes": 563,
+      "sha256": "b96f101460c7977fd7686c9e6916d492e96d50a896b8a779f10f0a20b2c9144b"
+    },
+    "anthropic": {
+      "label": "Anthropic",
+      "url": "/assets/providers/anthropic.svg",
+      "bytes": 356,
+      "sha256": "d9eb8a1cb32e3dfefea695ca33326168af56caa710b34c94e5d317d28b422ce0"
+    },
+    "anyapi": {
+      "label": "AnyAPI",
+      "url": "/assets/providers/anyapi.svg",
+      "bytes": 374,
+      "sha256": "b5953eeba56ecfd68236434eebd22f17fe122277ee1f6d754cb19caf85a37872"
+    },
+    "arcee": {
+      "label": "Arcee",
+      "url": "/assets/providers/arcee.svg",
+      "bytes": 322,
+      "sha256": "6326d6cecb8a6014208aa5f5d41fd1ec9ef8a2e11eedcda10dcf227058c95bb6"
+    },
+    "atomic-chat": {
+      "label": "Atomic Chat",
+      "url": "/assets/providers/atomic-chat.svg",
+      "bytes": 9650,
+      "sha256": "c22d0edead876d86fe7d8ee048529645154c811e0b49d2a00adaf52577c7fb74"
+    },
+    "auriko": {
+      "label": "Auriko",
+      "url": "/assets/providers/auriko.svg",
+      "bytes": 1361,
+      "sha256": "f2ec3b627b7566e33a2e8b859decedff17604a93e88da298045f09fce43e2a75"
+    },
+    "azure": {
+      "label": "Azure",
+      "url": "/assets/providers/azure.svg",
+      "bytes": 258,
+      "sha256": "b7d9b46b2d1ae74bf7f787c2384349ebea3b619c3d25152c0087c6b16e93c070"
+    },
+    "azure-cognitive-services": {
+      "label": "Azure Cognitive Services",
+      "url": "/assets/providers/azure-cognitive-services.svg",
+      "bytes": 258,
+      "sha256": "b7d9b46b2d1ae74bf7f787c2384349ebea3b619c3d25152c0087c6b16e93c070"
+    },
+    "bailing": {
+      "label": "Bailing",
+      "url": "/assets/providers/bailing.svg",
+      "bytes": 1628,
+      "sha256": "c55740ef341dc5f9be85daf804d9dbf9694a89ce0bde12ae731918f1f514269b"
+    },
+    "baseten": {
+      "label": "Baseten",
+      "url": "/assets/providers/baseten.svg",
+      "bytes": 1630,
+      "sha256": "7715e7fcc9addbdc6cfc14f0669ec08862ed332b8f9115d9ffc52f05d27ddf30"
+    },
+    "bee": {
+      "label": "Bee by HEOSSI",
+      "url": "/assets/providers/bee.svg",
+      "bytes": 9943,
+      "sha256": "eab642ff20a7bd0c44ad8af1dc858676383816d01960e04d42ba3b8862beca6f"
+    },
+    "berget": {
+      "label": "Berget.AI",
+      "url": "/assets/providers/berget.svg",
+      "bytes": 288,
+      "sha256": "958ebeca8d7d623faa68b23083b21ac1df4d7bdf0a2230655919b233e20b5eaf"
+    },
+    "blueclaw": {
+      "label": "Blue Claw",
+      "url": "/assets/providers/blueclaw.svg",
+      "bytes": 309,
+      "sha256": "78e32dec37abd2e710198605d59982c3693c271f40e3f41fd51ad7b791dcacbb"
+    },
+    "bothub": {
+      "label": "Bothub",
+      "url": "/assets/providers/bothub.svg",
+      "bytes": 795,
+      "sha256": "527921fe4bba9403e1c00b0ecb0e7915cf9977f8c1f41e47bf87f4e5e8305c25"
+    },
+    "boundless": {
+      "label": "Boundless",
+      "url": "/assets/providers/boundless.svg",
+      "bytes": 3143,
+      "sha256": "34c428735c921ea050348155eb9a92a4e6c5436955ed1cdcb208b71ce5931709"
+    },
+    "cerebras": {
+      "label": "Cerebras",
+      "url": "/assets/providers/cerebras.svg",
+      "bytes": 3355,
+      "sha256": "d41adb7b437895e13ee22742cf6eab98f7b5e2770aad12fb2103cdf7fa1574c9"
+    },
+    "clarifai": {
+      "label": "Clarifai",
+      "url": "/assets/providers/clarifai.svg",
+      "bytes": 964,
+      "sha256": "6ad900551b3ef49434203e663c94e56515457ab56ef37628502a5b42a7e5fb4f"
+    },
+    "claudinio": {
+      "label": "Claudinio",
+      "url": "/assets/providers/claudinio.svg",
+      "bytes": 17979,
+      "sha256": "d33ef0d873000f1621238a092424e1bf1e1fd30e576954e19ac3a2cc02b2c51a"
+    },
+    "cloudferro-sherlock": {
+      "label": "CloudFerro Sherlock",
+      "url": "/assets/providers/cloudferro-sherlock.svg",
+      "bytes": 409,
+      "sha256": "4792e494bda56bd9bd68b13aa15ba0c5bd51486004170a1481573670e4c9ada2"
+    },
+    "cloudflare-ai-gateway": {
+      "label": "Cloudflare AI Gateway",
+      "url": "/assets/providers/cloudflare-ai-gateway.svg",
+      "bytes": 2230,
+      "sha256": "443a73603930dae2ba3ee64bf03dee2c49e5a53a913d990c6540e94309395b84"
+    },
+    "cloudflare-workers-ai": {
+      "label": "Cloudflare Workers AI",
+      "url": "/assets/providers/cloudflare-workers-ai.svg",
+      "bytes": 2230,
+      "sha256": "443a73603930dae2ba3ee64bf03dee2c49e5a53a913d990c6540e94309395b84"
+    },
+    "cohere": {
+      "label": "Cohere",
+      "url": "/assets/providers/cohere.svg",
+      "bytes": 913,
+      "sha256": "b3894996912078b267595793a2acf3e73bea6b14cc499405f33c151097a0381c"
+    },
+    "commandcode": {
+      "label": "CommandCode",
+      "url": "/assets/providers/commandcode.svg",
+      "bytes": 2268,
+      "sha256": "cb1687d141edca792ca305d174c2f68ad2129044ae977feb61c5675d86eaa987"
+    },
+    "coralbricks": {
+      "label": "CoralBricks",
+      "url": "/assets/providers/coralbricks.svg",
+      "bytes": 4442,
+      "sha256": "d002650244491aca5a5334b9f9ceddb6a3675784358578123cbc65ddf693c31e"
+    },
+    "crossmodel": {
+      "label": "CrossModel",
+      "url": "/assets/providers/crossmodel.svg",
+      "bytes": 410,
+      "sha256": "81ea00e6700d0410ce068537e653d308c06afa05ec2a3399890b1e89bf33ea43"
+    },
+    "crusoe": {
+      "label": "Crusoe",
+      "url": "/assets/providers/crusoe.svg",
+      "bytes": 17286,
+      "sha256": "5fcbe0589befbb993c4a4c9f246211fb148f629fef8216af0b98f3373ae6da90"
+    },
+    "daoxe": {
+      "label": "DaoXE",
+      "url": "/assets/providers/daoxe.svg",
+      "bytes": 1634,
+      "sha256": "c5bbdb71cc325c95dba27ce4bf2675a9ad484d7377c95015308d311c450f414e"
+    },
+    "databricks": {
+      "label": "Databricks",
+      "url": "/assets/providers/databricks.svg",
+      "bytes": 412,
+      "sha256": "7caafae42afc2ef2f149d3ddec059880aee762e1d526563806d7f069efbd7ab2"
+    },
+    "deepinfra": {
+      "label": "Deep Infra",
+      "url": "/assets/providers/deepinfra.svg",
+      "bytes": 14898,
+      "sha256": "92a894969e86e850b4dc274ae4f99bacadf16313945b8280f8194c443019c179"
+    },
+    "deepseek": {
+      "label": "DeepSeek",
+      "url": "/assets/providers/deepseek.svg",
+      "bytes": 3927,
+      "sha256": "fdc7613fa261eab83bccf6a2e087cf4d83b9050e9222a874689447ad901a84d5"
+    },
+    "digitalocean": {
+      "label": "DigitalOcean",
+      "url": "/assets/providers/digitalocean.svg",
+      "bytes": 613,
+      "sha256": "556ab6fd0900757348019d72a7ee9ea1abdb1ea59a10c666a1c0a71a2e5dddbf"
+    },
+    "dinference": {
+      "label": "DInference",
+      "url": "/assets/providers/dinference.svg",
+      "bytes": 253,
+      "sha256": "08eef0681dea8abce9fac49dd1a694e8107ca8cf321011d2d5e4f5731692fff1"
+    },
+    "drun": {
+      "label": "D.Run (China)",
+      "url": "/assets/providers/drun.svg",
+      "bytes": 1626,
+      "sha256": "43dc73a5a4506a8730c75a0d60530542cc8b9d13c95bdcf62bec3be0c17a7447"
+    },
+    "ebcloud": {
+      "label": "EBCloud",
+      "url": "/assets/providers/ebcloud.svg",
+      "bytes": 517,
+      "sha256": "766402f641a3611aa0c3b7dd2b47850136fbfc60fdfcc8a2db7d67ba6e2e2554"
+    },
+    "echo": {
+      "label": "Echo",
+      "url": "/assets/providers/echo.svg",
+      "bytes": 353,
+      "sha256": "bda581083278e860fa4bb4bdf3cf1d17546362850cc22d6a79cc74efdb839915"
+    },
+    "edenai": {
+      "label": "Eden AI",
+      "url": "/assets/providers/edenai.svg",
+      "bytes": 4201,
+      "sha256": "73f5b4ee2ac370448fc147b3df03839019bfb4ef5f5201e25c32b5b561250648"
+    },
+    "empiriolabs": {
+      "label": "EmpirioLabs AI",
+      "url": "/assets/providers/empiriolabs.svg",
+      "bytes": 351,
+      "sha256": "03c448304a957e715aefe025ab31c03197387fc5e2c8cbe3f74b54a8985e8d1d"
+    },
+    "engy": {
+      "label": "engy",
+      "url": "/assets/providers/engy.svg",
+      "bytes": 259,
+      "sha256": "dfbd93d610ef0fcc79fa6bfb3effead7fd03a3203ab091f700623a9a5f3a5da9"
+    },
+    "evroc": {
+      "label": "evroc",
+      "url": "/assets/providers/evroc.svg",
+      "bytes": 1792,
+      "sha256": "e6b1b26c5c96331a1e93257c2383b1ea4d4bb80e0c64fe9b3160c667407b73d6"
+    },
+    "fastrouter": {
+      "label": "FastRouter",
+      "url": "/assets/providers/fastrouter.svg",
+      "bytes": 488,
+      "sha256": "435360e241e963c3f12289abe7d2632d4cb4512ac289b705c2c7ab1bc4340f0b"
+    },
+    "fireworks-ai": {
+      "label": "Fireworks AI",
+      "url": "/assets/providers/fireworks-ai.svg",
+      "bytes": 992,
+      "sha256": "c5d275fc8142a415bd678d50d7b0948a74f829139baf79122fb9e1934e6c05ac"
+    },
+    "fluence": {
+      "label": "Fluence",
+      "url": "/assets/providers/fluence.svg",
+      "bytes": 662,
+      "sha256": "83c03ad0e5ef3f0f8c93a174bbd480d98086d8f75d58ef69ab5e9d9a697f0b3e"
+    },
+    "freemodel": {
+      "label": "FreeModel",
+      "url": "/assets/providers/freemodel.svg",
+      "bytes": 334,
+      "sha256": "428305a95af79b4b3a91f6f188fa7f37ade512ba63069f752e5161b11606559d"
+    },
+    "friendli": {
+      "label": "Friendli",
+      "url": "/assets/providers/friendli.svg",
+      "bytes": 2196,
+      "sha256": "5bc1850aa1bb39cf310cea77d2ea5066bd2e73344cb33b3dc96bc2f3aad882c7"
+    },
+    "frogbot": {
+      "label": "FrogBot",
+      "url": "/assets/providers/frogbot.svg",
+      "bytes": 1697,
+      "sha256": "fe2407117358b0b01d8abb9019a5f249b27340b90cda66b913066cc3d2875751"
+    },
+    "github-copilot": {
+      "label": "GitHub Copilot",
+      "url": "/assets/providers/github-copilot.svg",
+      "bytes": 2870,
+      "sha256": "982c4004ab12c3cc3af34851848754c28bd52f70494330f2f8e0d39d89ad3723"
+    },
+    "gitlab": {
+      "label": "GitLab Duo",
+      "url": "/assets/providers/gitlab.svg",
+      "bytes": 959,
+      "sha256": "9696454235f3559a7f1af762e939c55100318db53dac7f3adebc99b3fab54084"
+    },
+    "google": {
+      "label": "Google",
+      "url": "/assets/providers/google.svg",
+      "bytes": 333,
+      "sha256": "32768e91724a46b8f06c3999b491984ef7974194057cc617658635df4ea65240"
+    },
+    "google-vertex": {
+      "label": "Vertex",
+      "url": "/assets/providers/google-vertex.svg",
+      "bytes": 11243,
+      "sha256": "525156915678d1093b96f4693c03df13cf2830005a544efaee7b42c55edc58ff"
+    },
+    "google-vertex-anthropic": {
+      "label": "Vertex (Anthropic)",
+      "url": "/assets/providers/google-vertex-anthropic.svg",
+      "bytes": 11243,
+      "sha256": "525156915678d1093b96f4693c03df13cf2830005a544efaee7b42c55edc58ff"
+    },
+    "greenpt": {
+      "label": "GreenPT",
+      "url": "/assets/providers/greenpt.svg",
+      "bytes": 1235,
+      "sha256": "81218b359e1ed14c655734103bb56a351629ba9a45ce38a6f1661f515aade47f"
+    },
+    "groq": {
+      "label": "Groq",
+      "url": "/assets/providers/groq.svg",
+      "bytes": 680,
+      "sha256": "40578773086b54d5522c7d22f75664b41ccda03f8fab964882a58037de237c55"
+    },
+    "helicone": {
+      "label": "Helicone",
+      "url": "/assets/providers/helicone.svg",
+      "bytes": 1267,
+      "sha256": "135eff3440255e07e3c9d873997bf6d2beae9d98dd9e43224f443a8666beea9c"
+    },
+    "hetzner": {
+      "label": "Hetzner",
+      "url": "/assets/providers/hetzner.svg",
+      "bytes": 5223,
+      "sha256": "a1bd9d33107a0c69980d394a134377fba1150c2427c9eb1c606ca3fec2ea166f"
+    },
+    "hpc-ai": {
+      "label": "HPC-AI",
+      "url": "/assets/providers/hpc-ai.svg",
+      "bytes": 34315,
+      "sha256": "a3bc10825d537344913312a89df930bdb7cef44eaf966acc82fb9758647ac167"
+    },
+    "huggingface": {
+      "label": "Hugging Face",
+      "url": "/assets/providers/huggingface.svg",
+      "bytes": 8444,
+      "sha256": "678d7de1bc3b085b9fda5d0ab5067f2ef2d68b87a0a0eb728e48da26cd93892e"
+    },
+    "hyper": {
+      "label": "Charm Hyper",
+      "url": "/assets/providers/hyper.svg",
+      "bytes": 6905,
+      "sha256": "e4c4bdd616ecff3cf94f8ff1f1b0a2bc452c8fab234a4f71274ba9060b8f5d90"
+    },
+    "impossibl": {
+      "label": "Impossibl",
+      "url": "/assets/providers/impossibl.svg",
+      "bytes": 138,
+      "sha256": "ad766a52b72e710e99650cb4c33e4e3adf5ba319fd87fce7a4d8666cdbd902fd"
+    },
+    "inception": {
+      "label": "Inception",
+      "url": "/assets/providers/inception.svg",
+      "bytes": 2731,
+      "sha256": "fa52be7a7c27050a37671ec537ceb65a2c9e8a2141379a296a6827ed40f03f21"
+    },
+    "inceptron": {
+      "label": "Inceptron",
+      "url": "/assets/providers/inceptron.svg",
+      "bytes": 889,
+      "sha256": "19e1fcd001320b7cc62e718b80583a0617e843b7132192f384de87403f0dcab2"
+    },
+    "inco": {
+      "label": "Inco",
+      "url": "/assets/providers/inco.svg",
+      "bytes": 1608,
+      "sha256": "0568c8778d715fdfcb8c75e285e7b432f63caaa763cbc4bfc1288a6904ec8f3c"
+    },
+    "infer": {
+      "label": "Infer by Flow7",
+      "url": "/assets/providers/infer.svg",
+      "bytes": 254,
+      "sha256": "08d7e42486009950b5b186e70b2cd7686ca52c6ba57ff597bac595525d872682"
+    },
+    "inference": {
+      "label": "Inference",
+      "url": "/assets/providers/inference.svg",
+      "bytes": 314,
+      "sha256": "dfc3c01df8beb21190bddafc23ff6d39e92c887d3a4a140d8fccb9dbfe9afbf3"
+    },
+    "inferx": {
+      "label": "InferX",
+      "url": "/assets/providers/inferx.svg",
+      "bytes": 2966,
+      "sha256": "2d9cafcc7ddb47d1c1e066ea53dd2cb419dbad1bda021083405972645c1a2bef"
+    },
+    "infomaniak": {
+      "label": "Infomaniak",
+      "url": "/assets/providers/infomaniak.svg",
+      "bytes": 264,
+      "sha256": "21fa67a1e44710718876584c735067ce8f20e188521961ee331c4e80559ad3e8"
+    },
+    "io-net": {
+      "label": "IO.NET",
+      "url": "/assets/providers/io-net.svg",
+      "bytes": 645,
+      "sha256": "c0e762bf720b7dcca3e887cd87a2cc5bad3d99374da67912b9eb51e13dc265d1"
+    },
+    "iteracompute": {
+      "label": "IteraCompute",
+      "url": "/assets/providers/iteracompute.svg",
+      "bytes": 6311,
+      "sha256": "e24c901ef9f6a7e2df7d83549fba4072d444c36398aac764298045803f81a108"
+    },
+    "jalapeno": {
+      "label": "Jalapeno Cloud",
+      "url": "/assets/providers/jalapeno.svg",
+      "bytes": 812,
+      "sha256": "9257e7d271f02005e89fc1a560283ca06d5d9afc3b8eba06f0a66654d11aba46"
+    },
+    "jiekou": {
+      "label": "Jiekou.AI",
+      "url": "/assets/providers/jiekou.svg",
+      "bytes": 285,
+      "sha256": "17f808d7f1814a06ca4314cb2e98f5496a4f580855bfcae5d386796738bfdd92"
+    },
+    "kenari": {
+      "label": "Kenari",
+      "url": "/assets/providers/kenari.svg",
+      "bytes": 361,
+      "sha256": "f07ab5730a4a2537f39b9da92c6b8165cacfceebdf4f6206d1dff39550ddb8a9"
+    },
+    "kilo": {
+      "label": "Kilo Gateway",
+      "url": "/assets/providers/kilo.svg",
+      "bytes": 291,
+      "sha256": "8cbb6d388783dfe829d12e656cb2b15ff26ce42ecb8247bfd4f56c2221b14b11"
+    },
+    "kimi-code-plan-cn": {
+      "label": "Kimi For Coding (kimi.com)",
+      "url": "/assets/providers/kimi-code-plan-cn.svg",
+      "bytes": 6808,
+      "sha256": "8b5bad7786092425839ffc98e0a292e994bcafe1908e5e0bd2dbfb1f43a39982"
+    },
+    "kimi-code-plan-global": {
+      "label": "Kimi For Coding (kimi.ai)",
+      "url": "/assets/providers/kimi-code-plan-global.svg",
+      "bytes": 6785,
+      "sha256": "23a89aaa3ed64f069381203f68967711028a3549026a808c305671f5ad09640b"
+    },
+    "klokintegration": {
+      "label": "klokintegration.se",
+      "url": "/assets/providers/klokintegration.svg",
+      "bytes": 5395,
+      "sha256": "f35103831c6fdece4593f1ebb212f8ed02557947465af136e19980ac439d1255"
+    },
+    "kosmik": {
+      "label": "Kosmik Compute",
+      "url": "/assets/providers/kosmik.svg",
+      "bytes": 50952,
+      "sha256": "8b41d24c61b577b6c4142def1c841e903d33ca9b91169910d1593b268f4e8da2"
+    },
+    "kuae-cloud-coding-plan": {
+      "label": "KUAE Cloud Coding Plan",
+      "url": "/assets/providers/kuae-cloud-coding-plan.svg",
+      "bytes": 279,
+      "sha256": "2d3d79a2915942e386ba92441129c385c5d19790d7b148a055cb1f19bfce978b"
+    },
+    "lilac": {
+      "label": "Lilac",
+      "url": "/assets/providers/lilac.svg",
+      "bytes": 1575,
+      "sha256": "95b700d53273840dcb9c18cafb4f8068a78ae8eb293335e87a07c9513e1c9642"
+    },
+    "liquid": {
+      "label": "Liquid Inference",
+      "url": "/assets/providers/liquid.svg",
+      "bytes": 232,
+      "sha256": "515dd4f0d42e7fd469a99df62e44923692a96c86af6db3ccd14ae36c7dac7f62"
+    },
+    "llmgateway": {
+      "label": "DevPass (LLM Gateway)",
+      "url": "/assets/providers/llmgateway.svg",
+      "bytes": 1497,
+      "sha256": "cc74944856123a150068fb10796f9bd6e6b20d96e6194acf0a2ff1d7e586a884"
+    },
+    "llmgateway-providers": {
+      "label": "LLM Gateway",
+      "url": "/assets/providers/llmgateway-providers.svg",
+      "bytes": 1474,
+      "sha256": "4a0d6855d78ea7f09240cc3da4d4efd903dd2854a5a6144b87a1a442c35db75d"
+    },
+    "llmtech": {
+      "label": "LLM Tech",
+      "url": "/assets/providers/llmtech.svg",
+      "bytes": 300,
+      "sha256": "b7f12d6b3b78f0c84cc3bf406356a93f4a93961db39b5ff536fce15b3727389c"
+    },
+    "llmtr": {
+      "label": "LLMTR",
+      "url": "/assets/providers/llmtr.svg",
+      "bytes": 451,
+      "sha256": "e7c1659086028825fa356ace8041bb340b0a5f847de4943476935f7d372be37a"
+    },
+    "lmstudio": {
+      "label": "LMStudio",
+      "url": "/assets/providers/lmstudio.svg",
+      "bytes": 726,
+      "sha256": "461acdf34bf96cb90b9767b521aefdd04ca7d40b5ccda88f0a0ffc43aaf736d4"
+    },
+    "longcat": {
+      "label": "LongCat",
+      "url": "/assets/providers/longcat.svg",
+      "bytes": 2865,
+      "sha256": "d0475647b306db5576dd5487c6cd8f8d49c384abec8ce24408b88b72b4603dd4"
+    },
+    "lowrouter": {
+      "label": "LowRouter",
+      "url": "/assets/providers/lowrouter.svg",
+      "bytes": 494,
+      "sha256": "1ba5ee1642ae0c7b832e792de72e7cee1a2ba4d9d08e445c7c94e935c510c0cb"
+    },
+    "lucidquery": {
+      "label": "LucidQuery",
+      "url": "/assets/providers/lucidquery.svg",
+      "bytes": 80010,
+      "sha256": "a9d26d97ca51740169c290e00e8a91f31aa4fa61ca879474c730fe38b3eef520"
+    },
+    "lynkr": {
+      "label": "Lynkr",
+      "url": "/assets/providers/lynkr.svg",
+      "bytes": 173,
+      "sha256": "ba07600d7c6bb63c5901f28081858f3f33e3d69578f53649f68096a368dabe7d"
+    },
+    "meganova": {
+      "label": "Meganova",
+      "url": "/assets/providers/meganova.svg",
+      "bytes": 11819,
+      "sha256": "b99696dfe2c6e70b961d3a13e14e49ed3143240eb1b80e2015d7427cdad9fcb5"
+    },
+    "melious": {
+      "label": "Melious",
+      "url": "/assets/providers/melious.svg",
+      "bytes": 507,
+      "sha256": "f7c8c0e3cfa00a84a1587fb40f8ceb2d868ce27dae962e1f77fac77fe9343012"
+    },
+    "merge-gateway": {
+      "label": "Merge Gateway",
+      "url": "/assets/providers/merge-gateway.svg",
+      "bytes": 594,
+      "sha256": "4e460c9c033d7911737f35ec8181443f0ffc6de6b1b56e65b07bff8b268e1586"
+    },
+    "meta": {
+      "label": "Meta",
+      "url": "/assets/providers/meta.svg",
+      "bytes": 1154,
+      "sha256": "3d4af304617cf27cbc26add3f3ab8a911b21f2366fe1325db553233e7c46dfa8"
+    },
+    "minimax": {
+      "label": "MiniMax (minimax.io)",
+      "url": "/assets/providers/minimax.svg",
+      "bytes": 2214,
+      "sha256": "f3200b68c5d7d6a0b25f6c097e6a818808fe8b5aa17b7190ef702ac8a17988de"
+    },
+    "minimax-cn": {
+      "label": "MiniMax (minimax.cn)",
+      "url": "/assets/providers/minimax-cn.svg",
+      "bytes": 2214,
+      "sha256": "f3200b68c5d7d6a0b25f6c097e6a818808fe8b5aa17b7190ef702ac8a17988de"
+    },
+    "minimax-cn-coding-plan": {
+      "label": "MiniMax Token Plan (minimax.cn)",
+      "url": "/assets/providers/minimax-cn-coding-plan.svg",
+      "bytes": 2214,
+      "sha256": "f3200b68c5d7d6a0b25f6c097e6a818808fe8b5aa17b7190ef702ac8a17988de"
+    },
+    "minimax-coding-plan": {
+      "label": "MiniMax Token Plan (minimax.io)",
+      "url": "/assets/providers/minimax-coding-plan.svg",
+      "bytes": 2214,
+      "sha256": "f3200b68c5d7d6a0b25f6c097e6a818808fe8b5aa17b7190ef702ac8a17988de"
+    },
+    "mistral": {
+      "label": "Mistral",
+      "url": "/assets/providers/mistral.svg",
+      "bytes": 397,
+      "sha256": "4d2b60e6e7397b2c6a30954e5ad8d8738c4916760c9dc15ccd779a53cae701f6"
+    },
+    "mixlayer": {
+      "label": "Mixlayer",
+      "url": "/assets/providers/mixlayer.svg",
+      "bytes": 2097,
+      "sha256": "2aaa6f9ef6e985932f16bba8b30f096e18a997a62f37738d4349ec0156a97124"
+    },
+    "moark": {
+      "label": "Moark",
+      "url": "/assets/providers/moark.svg",
+      "bytes": 2307,
+      "sha256": "1e1829edf1cc7cbdc03c05c6e37657a7024abc36fdc535edbb046137d56d50f4"
+    },
+    "modal": {
+      "label": "Modal",
+      "url": "/assets/providers/modal.svg",
+      "bytes": 403,
+      "sha256": "588bff09b055b896c63babc6a6ec68ce93978ef1289aac92b04cb950541f7133"
+    },
+    "model-oracle-ai": {
+      "label": "Model Oracle AI",
+      "url": "/assets/providers/model-oracle-ai.svg",
+      "bytes": 808,
+      "sha256": "49b82672ca31b1919b06d6a8a37d58536da16aca585d8afc3e71b3d4594b0274"
+    },
+    "modelis": {
+      "label": "Modelis",
+      "url": "/assets/providers/modelis.svg",
+      "bytes": 255,
+      "sha256": "26b23cf96b5ef1b5c18addbd08ee74e841e28b7d68faa25e70e12c046696e366"
+    },
+    "modelscope": {
+      "label": "ModelScope",
+      "url": "/assets/providers/modelscope.svg",
+      "bytes": 726,
+      "sha256": "1a5ada767aa3316c457f5a4b44ba98c545848cab4ebf172f5c4bdd70ec4dc3c7"
+    },
+    "moonshotai": {
+      "label": "Moonshot AI",
+      "url": "/assets/providers/moonshotai.svg",
+      "bytes": 6823,
+      "sha256": "fb10fd4231a3b3785f866d3c78ff521a79d614a8cf87c369575cf916078d5141"
+    },
+    "moonshotai-cn": {
+      "label": "Moonshot AI (China)",
+      "url": "/assets/providers/moonshotai-cn.svg",
+      "bytes": 6823,
+      "sha256": "fb10fd4231a3b3785f866d3c78ff521a79d614a8cf87c369575cf916078d5141"
+    },
+    "munito": {
+      "label": "Munito AI",
+      "url": "/assets/providers/munito.svg",
+      "bytes": 868,
+      "sha256": "e3016f704473c41ff3082abefcf60105fc589678ebd5bfc18ec7461a363139a4"
+    },
+    "munito-eu": {
+      "label": "Munito AI (EU)",
+      "url": "/assets/providers/munito-eu.svg",
+      "bytes": 868,
+      "sha256": "e3016f704473c41ff3082abefcf60105fc589678ebd5bfc18ec7461a363139a4"
+    },
+    "nan": {
+      "label": "NaN",
+      "url": "/assets/providers/nan.svg",
+      "bytes": 599,
+      "sha256": "2e0935d9bb0ec0527f30130f851b4e405d2ba63c7023fb94122e9b690e790355"
+    },
+    "nano-gpt": {
+      "label": "NanoGPT",
+      "url": "/assets/providers/nano-gpt.svg",
+      "bytes": 598,
+      "sha256": "2c9942860d9cde2d850c1364bff1dbf632094875d4a3754a5808bdd8dac3c2ea"
+    },
+    "nearai": {
+      "label": "NEAR AI Cloud",
+      "url": "/assets/providers/nearai.svg",
+      "bytes": 889,
+      "sha256": "7bc6c3096f0874afe28af82d999b70de1124885b45fb9b9d0d14dc6b82ea3a0a"
+    },
+    "nebius": {
+      "label": "Nebius Token Factory",
+      "url": "/assets/providers/nebius.svg",
+      "bytes": 660,
+      "sha256": "b676918909f35a9c74eafbff11fe227fc70bb62da3354aa97aca06219e66957c"
+    },
+    "neon": {
+      "label": "Neon",
+      "url": "/assets/providers/neon.svg",
+      "bytes": 271,
+      "sha256": "9a5231bbf42fc0eef479e7020bf3e80c067cf3b526431e1278c5f953795565b0"
+    },
+    "neosmith": {
+      "label": "NeoSmith",
+      "url": "/assets/providers/neosmith.svg",
+      "bytes": 5914,
+      "sha256": "5643f99338476b9cf641653669136d2c34ed4d735fc64b0803f656bac034496c"
+    },
+    "neuralwatt": {
+      "label": "Neuralwatt",
+      "url": "/assets/providers/neuralwatt.svg",
+      "bytes": 6167,
+      "sha256": "17c1f0f0b5d5ac3146533d497cb5246855b756eac6dc1433f81d71c9a2e16d91"
+    },
+    "nova": {
+      "label": "Nova",
+      "url": "/assets/providers/nova.svg",
+      "bytes": 1614,
+      "sha256": "a1ade6bb7c77c87d21bad588876170134b6e552e0e21f4ddc1d7f67cf9c861e7"
+    },
+    "novita-ai": {
+      "label": "Novita AI",
+      "url": "/assets/providers/novita-ai.svg",
+      "bytes": 414,
+      "sha256": "d72d27ef39517af990f25f49bb5b7f7f807336dda775c2fcbbe62c8030893c7e"
+    },
+    "nvidia": {
+      "label": "Nvidia",
+      "url": "/assets/providers/nvidia.svg",
+      "bytes": 1439,
+      "sha256": "9933406684df81e5fdd65e4ef28119c98d7b35f7b90a5ad6f387996c80ed81e6"
+    },
+    "oci": {
+      "label": "OCI Generative AI",
+      "url": "/assets/providers/oci.svg",
+      "bytes": 197,
+      "sha256": "2870a4f9bc6b6390feecb5e846ce282f0740d3aa7ae9d41cd457499e3b48aafc"
+    },
+    "ofox": {
+      "label": "Ofox",
+      "url": "/assets/providers/ofox.svg",
+      "bytes": 1947,
+      "sha256": "99115b2c244c2b1577cc93a8cc0a115540635faf5bdcd3deff555e475c5f616a"
+    },
+    "ollama-cloud": {
+      "label": "Ollama Cloud",
+      "url": "/assets/providers/ollama-cloud.svg",
+      "bytes": 5677,
+      "sha256": "b2e03b786987a1a66a5144f0373d33320a256a6e4dad391593f7b16232d40c43"
+    },
+    "openai": {
+      "label": "OpenAI",
+      "url": "/assets/providers/openai.svg",
+      "bytes": 3695,
+      "sha256": "a495ae1dee53ebf3eab642acb0c6e564ea23ceb7c1565c826f480cb2bf32beda"
+    },
+    "opencode": {
+      "label": "OpenCode",
+      "url": "/assets/providers/opencode.svg",
+      "bytes": 246,
+      "sha256": "d24c25ec9e90d6b0da823a94a64a2ca19398c794ae7e2eaf7d2699b9757d5df3"
+    },
+    "opencode-go": {
+      "label": "OpenCode Go",
+      "url": "/assets/providers/opencode-go.svg",
+      "bytes": 246,
+      "sha256": "d24c25ec9e90d6b0da823a94a64a2ca19398c794ae7e2eaf7d2699b9757d5df3"
+    },
+    "openreason": {
+      "label": "OpenReason",
+      "url": "/assets/providers/openreason.svg",
+      "bytes": 617,
+      "sha256": "1391b646a282ae91ca4b82b3e7b217f072ec3b690c609a67968f5b5658f47fca"
+    },
+    "openrouter": {
+      "label": "OpenRouter",
+      "url": "/assets/providers/openrouter.svg",
+      "bytes": 604,
+      "sha256": "5087a8510fa7e339c0fd9f658e76362d00d39a94a75b90d5fb42b8b28c6b964f"
+    },
+    "opper": {
+      "label": "Opper",
+      "url": "/assets/providers/opper.svg",
+      "bytes": 478,
+      "sha256": "d0d68501145febd9334891476c6106766036d7a422c61fca5c4ff2bb1bd991ee"
+    },
+    "orcarouter": {
+      "label": "OrcaRouter",
+      "url": "/assets/providers/orcarouter.svg",
+      "bytes": 3028,
+      "sha256": "82c5cb3b956a3c2c772a8353b3cdf099bf96f31d9aa6cfa4e2549144740beb9e"
+    },
+    "ovhcloud": {
+      "label": "OVHcloud AI Endpoints",
+      "url": "/assets/providers/ovhcloud.svg",
+      "bytes": 429,
+      "sha256": "d96983d0ed42a95455e9ff68a728b7f4c3ea7d491242b2105d8f797c9542d977"
+    },
+    "pareto": {
+      "label": "Pareto Inference",
+      "url": "/assets/providers/pareto.svg",
+      "bytes": 412,
+      "sha256": "ae829ee1dc51fa27ba31435bf293cd7e9754e04548458096cdaae4eade227302"
+    },
+    "pendra": {
+      "label": "Pendra",
+      "url": "/assets/providers/pendra.svg",
+      "bytes": 548,
+      "sha256": "34117abd8377a5761a4be7d75b5bb3a225c30859cb7d96b243dc10325782d290"
+    },
+    "perplexity": {
+      "label": "Perplexity",
+      "url": "/assets/providers/perplexity.svg",
+      "bytes": 604,
+      "sha256": "2d0eb623b3fb33885f0b02de10c4078b909c7866b70a5a7bd323b7ac1aaa4d0d"
+    },
+    "perplexity-agent": {
+      "label": "Perplexity Agent",
+      "url": "/assets/providers/perplexity-agent.svg",
+      "bytes": 604,
+      "sha256": "2d0eb623b3fb33885f0b02de10c4078b909c7866b70a5a7bd323b7ac1aaa4d0d"
+    },
+    "pioneer": {
+      "label": "Pioneer",
+      "url": "/assets/providers/pioneer.svg",
+      "bytes": 449,
+      "sha256": "9873ec640bc6fb05cc013b1cb46db7779fa1ed2037fb35e0a0aa767914556d7e"
+    },
+    "poe": {
+      "label": "Poe",
+      "url": "/assets/providers/poe.svg",
+      "bytes": 3694,
+      "sha256": "1e669470a01e3616f35bae8278b1aa289ee9abd1df44cb4d22756460148058e3"
+    },
+    "poolside": {
+      "label": "Poolside",
+      "url": "/assets/providers/poolside.svg",
+      "bytes": 1863,
+      "sha256": "132bbf92ec6359757642a81e972388bc83e2fe0d9a42a93ad46d94f418099d09"
+    },
+    "prime": {
+      "label": "Prime Inference",
+      "url": "/assets/providers/prime.svg",
+      "bytes": 4189,
+      "sha256": "179ee822486c6b52176950d1154a513dcf8cff7f93a6cf71aa6304e050307d6b"
+    },
+    "privatemode-ai": {
+      "label": "Privatemode AI",
+      "url": "/assets/providers/privatemode-ai.svg",
+      "bytes": 829,
+      "sha256": "edd35833567889573f4adaae1d47361362ada96a724098d3db18053f2c4bc4e8"
+    },
+    "qihang-ai": {
+      "label": "QiHang",
+      "url": "/assets/providers/qihang-ai.svg",
+      "bytes": 342,
+      "sha256": "7faba9e48a809e190cd94a993e1f874137566555b8959d69024cda028ce926f1"
+    },
+    "qiniu-ai": {
+      "label": "Qiniu",
+      "url": "/assets/providers/qiniu-ai.svg",
+      "bytes": 1527,
+      "sha256": "623672390ca374052d081ac6aaf5b25e28301a5f5a2f2d526cbefea4eb636d37"
+    },
+    "qvac": {
+      "label": "QVAC",
+      "url": "/assets/providers/qvac.svg",
+      "bytes": 1034,
+      "sha256": "1879461e27731865d73fdb6af1a539a5cb0bc6453bb1e5a2ea403c1a89037d3e"
+    },
+    "reflection": {
+      "label": "Reflection",
+      "url": "/assets/providers/reflection.svg",
+      "bytes": 727,
+      "sha256": "0175b1eda5a198954bd0d36f62d620f0308702c46acc24d9faec987b50816213"
+    },
+    "regolo-ai": {
+      "label": "Regolo AI",
+      "url": "/assets/providers/regolo-ai.svg",
+      "bytes": 3246,
+      "sha256": "1bccfdef87c531a67ca0687ccb3a542d8873e5eae581cf2d2c654f9ff7b4b58f"
+    },
+    "routing-run": {
+      "label": "routing.run",
+      "url": "/assets/providers/routing-run.svg",
+      "bytes": 292,
+      "sha256": "618ffad78e1862fd1c89cb4d6ceca802b7ad450ec60e579c6d29168e7ed6364a"
+    },
+    "runinfra": {
+      "label": "RunInfra",
+      "url": "/assets/providers/runinfra.svg",
+      "bytes": 480,
+      "sha256": "727c332e0f9114e36293e623113d867fa6c899f4a4dcb512dc06c15ee9905a68"
+    },
+    "salad-cloud": {
+      "label": "SaladCloud AI Gateway",
+      "url": "/assets/providers/salad-cloud.svg",
+      "bytes": 1550,
+      "sha256": "0de817810a40e45d3f5bbe0fbc011b83063fee3487b1d235184ac6a8710fc83b"
+    },
+    "sambanova": {
+      "label": "SambaNova",
+      "url": "/assets/providers/sambanova.svg",
+      "bytes": 12503,
+      "sha256": "f962a30115db53c0ccd6689b975b058cee3561ad4264fd83645f9a49b987c48e"
+    },
+    "scaleway": {
+      "label": "Scaleway",
+      "url": "/assets/providers/scaleway.svg",
+      "bytes": 1561,
+      "sha256": "6773ed399ec8f9ef420a44008a181d1378ae0e80becded9896eedd1087d3a91f"
+    },
+    "scnet-token-plan": {
+      "label": "SCNet Token Plan",
+      "url": "/assets/providers/scnet-token-plan.svg",
+      "bytes": 2303,
+      "sha256": "eb2d85d2ec72a3dc43dbb9fa34dc531d121b433be28c12049c078f5d5bb0a27d"
+    },
+    "scx-ai": {
+      "label": "SCX.ai",
+      "url": "/assets/providers/scx-ai.svg",
+      "bytes": 4935,
+      "sha256": "390557d548745e6e571d36162700541a4e75882c5cf6e55852f2df48a6e21891"
+    },
+    "sensenova": {
+      "label": "SenseNova (China)",
+      "url": "/assets/providers/sensenova.svg",
+      "bytes": 3367,
+      "sha256": "9e88b1c1eb0c669f0a0649f1bcaf1c90f3c042f58833a7ffab11c25c34fe63b6"
+    },
+    "siliconflow": {
+      "label": "SiliconFlow",
+      "url": "/assets/providers/siliconflow.svg",
+      "bytes": 781,
+      "sha256": "52e21b0870e52e402c9e57a3fec66c740bf5b24c1689a9428f5769d2abe74c69"
+    },
+    "siliconflow-cn": {
+      "label": "SiliconFlow (China)",
+      "url": "/assets/providers/siliconflow-cn.svg",
+      "bytes": 781,
+      "sha256": "52e21b0870e52e402c9e57a3fec66c740bf5b24c1689a9428f5769d2abe74c69"
+    },
+    "snowflake-cortex": {
+      "label": "Snowflake Cortex",
+      "url": "/assets/providers/snowflake-cortex.svg",
+      "bytes": 2266,
+      "sha256": "e69ccf15c9afeddf9c6f081a291bd60bbee80ea6130bffc0211705992ff8ecca"
+    },
+    "stackit": {
+      "label": "STACKIT",
+      "url": "/assets/providers/stackit.svg",
+      "bytes": 381,
+      "sha256": "a1f0867753f277e56077251a2985f1d79b0013a35285b74f520f1099defdbb9e"
+    },
+    "standardcompute": {
+      "label": "Standard Compute",
+      "url": "/assets/providers/standardcompute.svg",
+      "bytes": 310,
+      "sha256": "bfd45022be508be22c2590957aaec7a6c768c9591b33265469cbe3ce8af9ae08"
+    },
+    "stepfun": {
+      "label": "StepFun (China)",
+      "url": "/assets/providers/stepfun.svg",
+      "bytes": 643,
+      "sha256": "9615b38126d8345e4cb70a1b37cb58e2ae556aeb8ed78835ac143a9675b84741"
+    },
+    "stepfun-ai": {
+      "label": "StepFun (Global)",
+      "url": "/assets/providers/stepfun-ai.svg",
+      "bytes": 643,
+      "sha256": "9615b38126d8345e4cb70a1b37cb58e2ae556aeb8ed78835ac143a9675b84741"
+    },
+    "stepfun-ai-step-plan": {
+      "label": "StepFun Step Plan (Global)",
+      "url": "/assets/providers/stepfun-ai-step-plan.svg",
+      "bytes": 643,
+      "sha256": "9615b38126d8345e4cb70a1b37cb58e2ae556aeb8ed78835ac143a9675b84741"
+    },
+    "stepfun-step-plan": {
+      "label": "StepFun Step Plan (China)",
+      "url": "/assets/providers/stepfun-step-plan.svg",
+      "bytes": 643,
+      "sha256": "9615b38126d8345e4cb70a1b37cb58e2ae556aeb8ed78835ac143a9675b84741"
+    },
+    "subconscious": {
+      "label": "Subconscious",
+      "url": "/assets/providers/subconscious.svg",
+      "bytes": 5023,
+      "sha256": "a275aa9f7ad5a425daa360cc8065d6011bf5298149988f08900c2c8a4512f854"
+    },
+    "submodel": {
+      "label": "submodel",
+      "url": "/assets/providers/submodel.svg",
+      "bytes": 839,
+      "sha256": "3d33d13a78826e8884b4e1898a8e6ba120ce45a6a11ffb4c06d8c873b05967bb"
+    },
+    "teamorouter": {
+      "label": "TeamRouter",
+      "url": "/assets/providers/teamorouter.svg",
+      "bytes": 1281,
+      "sha256": "ca749780ae019ec8853cf58258d6a3ddc04dd41e6e99dfc4ac62292012dfb067"
+    },
+    "tempr": {
+      "label": "Tempr Gateway",
+      "url": "/assets/providers/tempr.svg",
+      "bytes": 174,
+      "sha256": "560bf2f86833f22bdce2a6467066f0633e9d4c3adc5bd0a06ebf0c3a4afd0936"
+    },
+    "tencent-coding-plan": {
+      "label": "Tencent Coding Plan (China)",
+      "url": "/assets/providers/tencent-coding-plan.svg",
+      "bytes": 2071,
+      "sha256": "c325e49ac34251e74036363b2324349c9af9fbe1ff27d72a6591e4cb4f6e91bd"
+    },
+    "tencent-token-plan": {
+      "label": "Tencent Token Plan",
+      "url": "/assets/providers/tencent-token-plan.svg",
+      "bytes": 2571,
+      "sha256": "88eb9638dd57e13df225f2b8e8094703abb5924810aa978c8744e635f1b7f2ed"
+    },
+    "tencent-tokenhub": {
+      "label": "Tencent TokenHub",
+      "url": "/assets/providers/tencent-tokenhub.svg",
+      "bytes": 2571,
+      "sha256": "88eb9638dd57e13df225f2b8e8094703abb5924810aa978c8744e635f1b7f2ed"
+    },
+    "tensorx": {
+      "label": "TensorX",
+      "url": "/assets/providers/tensorx.svg",
+      "bytes": 415,
+      "sha256": "f5ddaa061c226ef18b0fe01621912b327e3506654d7e0f4c2a84217fb9cd47ec"
+    },
+    "the-grid-ai": {
+      "label": "The Grid AI",
+      "url": "/assets/providers/the-grid-ai.svg",
+      "bytes": 1060,
+      "sha256": "723be418b1c309d350c69f4a8d351dc6bb2604c14d2903c60355219a0cbcbac7"
+    },
+    "thinkingmachines": {
+      "label": "Thinking Machines",
+      "url": "/assets/providers/thinkingmachines.svg",
+      "bytes": 180,
+      "sha256": "3a12f14d9a3ca25b8b9df9eefcaebb9c1a5cb47604ecb1eda0d6109e2339dd85"
+    },
+    "tinfoil": {
+      "label": "Tinfoil",
+      "url": "/assets/providers/tinfoil.svg",
+      "bytes": 242,
+      "sha256": "731d1fbb296c68342587036dcc6c52ca45a44f14aa3a172c841d936f61c53802"
+    },
+    "togetherai": {
+      "label": "Together AI",
+      "url": "/assets/providers/togetherai.svg",
+      "bytes": 1396,
+      "sha256": "7d492f4a110f6d5dad07782c0abc4b01ea9c68490f3e29120ba1a487f1138919"
+    },
+    "tokengo": {
+      "label": "TokenGo",
+      "url": "/assets/providers/tokengo.svg",
+      "bytes": 196,
+      "sha256": "76a9efce6ccd97456f2628515239020b119da6c8011b520cab6745de23b69323"
+    },
+    "tokenrouter": {
+      "label": "TokenRouter",
+      "url": "/assets/providers/tokenrouter.svg",
+      "bytes": 227,
+      "sha256": "acfe740accf057e43cb345c8e13fa7130a30722b7092dd809179c0791d238a59"
+    },
+    "trustedrouter": {
+      "label": "TrustedRouter",
+      "url": "/assets/providers/trustedrouter.svg",
+      "bytes": 264,
+      "sha256": "27ed84715f0b17ed68b553425b946b11773e0c1961c1014bf3190699d1bbdb73"
+    },
+    "umans-ai": {
+      "label": "Umans AI",
+      "url": "/assets/providers/umans-ai.svg",
+      "bytes": 2387,
+      "sha256": "ebf5fe44f6f761cb14678c90a660bfc0760e89d9fb453eb9f0127c74985ac69f"
+    },
+    "umans-ai-coding-plan": {
+      "label": "Umans AI Coding Plan",
+      "url": "/assets/providers/umans-ai-coding-plan.svg",
+      "bytes": 2387,
+      "sha256": "ebf5fe44f6f761cb14678c90a660bfc0760e89d9fb453eb9f0127c74985ac69f"
+    },
+    "unorouter": {
+      "label": "UnoRouter",
+      "url": "/assets/providers/unorouter.svg",
+      "bytes": 661,
+      "sha256": "8f4586bba3d8dd42991c75a9fb98411a93bcbc840ea24a58edd3123b6433394f"
+    },
+    "vancine": {
+      "label": "Vancine",
+      "url": "/assets/providers/vancine.svg",
+      "bytes": 439,
+      "sha256": "deb2b0cd138d004c2e751598b65661e0e709c16238ad78a9e47578d0cdedc20f"
+    },
+    "venice": {
+      "label": "Venice AI",
+      "url": "/assets/providers/venice.svg",
+      "bytes": 4339,
+      "sha256": "cc81fc540f89be47cf7da53f208ef0ac728b7f54d708282c6de11f3ffec6e596"
+    },
+    "vercel": {
+      "label": "Vercel AI Gateway",
+      "url": "/assets/providers/vercel.svg",
+      "bytes": 166,
+      "sha256": "3b911debccdc0c8f305d2dc4ee11f6241dbf85495aaa3f366456198c36ea21d2"
+    },
+    "vispark": {
+      "label": "Vispark",
+      "url": "/assets/providers/vispark.svg",
+      "bytes": 3184,
+      "sha256": "d9ef47112941ba169e372dce2c49e875837213a63f40295bf595cab209e16ae7"
+    },
+    "vivgrid": {
+      "label": "Vivgrid",
+      "url": "/assets/providers/vivgrid.svg",
+      "bytes": 1359,
+      "sha256": "7277b8df8aaef1787f9f5803641cda40a6cf0843a1cb812f2de3c6c47a805c94"
+    },
+    "volcengine": {
+      "label": "Volcengine Ark",
+      "url": "/assets/providers/volcengine.svg",
+      "bytes": 279,
+      "sha256": "c1e06b7f395d83debe15ac8c692a68f1ea8d4cf80a49eecf8e0211ccb2fcb8d1"
+    },
+    "volcengine-coding-plan": {
+      "label": "Volcengine Ark Coding Plan",
+      "url": "/assets/providers/volcengine-coding-plan.svg",
+      "bytes": 279,
+      "sha256": "c1e06b7f395d83debe15ac8c692a68f1ea8d4cf80a49eecf8e0211ccb2fcb8d1"
+    },
+    "vultr": {
+      "label": "Vultr",
+      "url": "/assets/providers/vultr.svg",
+      "bytes": 2221,
+      "sha256": "21b261d5a514ee2c6a478d7c556a7403d4979b90ff62090a4a2619aa8c4071d4"
+    },
+    "wafer.ai": {
+      "label": "Wafer",
+      "url": "/assets/providers/wafer.ai.svg",
+      "bytes": 2874,
+      "sha256": "cc2284dd7ec54a096f260b96b81eb8d45677bcba92d36e93b183d1f9c32ded56"
+    },
+    "wallaby": {
+      "label": "Wallaby",
+      "url": "/assets/providers/wallaby.svg",
+      "bytes": 7973,
+      "sha256": "a95aba11bd7864ea753022d54161d6309312754ab80e94b0cce9d4a2ff630155"
+    },
+    "wandb": {
+      "label": "CoreWeave",
+      "url": "/assets/providers/wandb.svg",
+      "bytes": 1044,
+      "sha256": "f9a106164c849680e20205948bc9ab5893295014595bd9192b2d21e71a88d006"
+    },
+    "watsonx": {
+      "label": "watsonx.ai",
+      "url": "/assets/providers/watsonx.svg",
+      "bytes": 830,
+      "sha256": "0508d13fa4e91f78102174f92bce9bc75e357a7a146898133ddffffe9da50716"
+    },
+    "xai": {
+      "label": "xAI",
+      "url": "/assets/providers/xai.svg",
+      "bytes": 364,
+      "sha256": "ba49a4f1fa9a013612a184fb0a7c19857cf75eab051e7c03573cb05f02fe5924"
+    },
+    "xiaomi": {
+      "label": "Xiaomi",
+      "url": "/assets/providers/xiaomi.svg",
+      "bytes": 1734,
+      "sha256": "079225d086f52e3e6377c937ae3c6e50298bf7b69efcf9e78742a66696ad42ed"
+    },
+    "xiaomi-token-plan-ams": {
+      "label": "Xiaomi Token Plan (Europe)",
+      "url": "/assets/providers/xiaomi-token-plan-ams.svg",
+      "bytes": 1734,
+      "sha256": "079225d086f52e3e6377c937ae3c6e50298bf7b69efcf9e78742a66696ad42ed"
+    },
+    "xiaomi-token-plan-cn": {
+      "label": "Xiaomi Token Plan (China)",
+      "url": "/assets/providers/xiaomi-token-plan-cn.svg",
+      "bytes": 1734,
+      "sha256": "079225d086f52e3e6377c937ae3c6e50298bf7b69efcf9e78742a66696ad42ed"
+    },
+    "xiaomi-token-plan-sgp": {
+      "label": "Xiaomi Token Plan (Singapore)",
+      "url": "/assets/providers/xiaomi-token-plan-sgp.svg",
+      "bytes": 1734,
+      "sha256": "079225d086f52e3e6377c937ae3c6e50298bf7b69efcf9e78742a66696ad42ed"
+    },
+    "xpersona": {
+      "label": "Xpersona",
+      "url": "/assets/providers/xpersona.svg",
+      "bytes": 2044,
+      "sha256": "7e6b296f922dfa799acc715e82ae62ada3d6b33d04860d5f455fd6391095daae"
+    },
+    "zai": {
+      "label": "Z.AI",
+      "url": "/assets/providers/zai.svg",
+      "bytes": 295,
+      "sha256": "57d355dafab000caa3386066f9df7e179da577729295cb4600d42cec998bc712"
+    },
+    "zai-coding-plan": {
+      "label": "Z.AI Coding Plan",
+      "url": "/assets/providers/zai-coding-plan.svg",
+      "bytes": 295,
+      "sha256": "57d355dafab000caa3386066f9df7e179da577729295cb4600d42cec998bc712"
+    },
+    "zeldoc": {
+      "label": "Zeldoc",
+      "url": "/assets/providers/zeldoc.svg",
+      "bytes": 915,
+      "sha256": "c8beb79fb22b6562585bbce7ef14716b36142e7eb49e049d71d2c2f1e9be524a"
+    },
+    "zenifra": {
+      "label": "Zenifra",
+      "url": "/assets/providers/zenifra.svg",
+      "bytes": 472,
+      "sha256": "fb5bcf026fcb10991f800fe67bfef5f77714f81e7e314f93aa41a4ac303801f1"
+    },
+    "zenmux": {
+      "label": "ZenMux",
+      "url": "/assets/providers/zenmux.svg",
+      "bytes": 2528,
+      "sha256": "0c0af88d670c5a2c15c864efb620739377b249c40208693ec493c804b0a756ea"
+    },
+    "zhipuai": {
+      "label": "Zhipu AI",
+      "url": "/assets/providers/zhipuai.svg",
+      "bytes": 295,
+      "sha256": "57d355dafab000caa3386066f9df7e179da577729295cb4600d42cec998bc712"
+    },
+    "zhipuai-coding-plan": {
+      "label": "Zhipu AI Coding Plan",
+      "url": "/assets/providers/zhipuai-coding-plan.svg",
+      "bytes": 279,
+      "sha256": "2d3d79a2915942e386ba92441129c385c5d19790d7b148a055cb1f19bfce978b"
+    }
+  }
+}

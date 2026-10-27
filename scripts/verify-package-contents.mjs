@@ -63,6 +63,9 @@ if (unexpected.length > 0) {
 }
 
 const packageJson = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
+const providerManifest = JSON.parse(
+  await readFile(path.join(repoRoot, "src/ui/assets/provider-logos/manifest.json"), "utf8"),
+);
 const requiredFiles = new Set([
   "LICENSE",
   "README.md",
@@ -70,6 +73,8 @@ const requiredFiles = new Set([
   "dist/data/modelsdev-pricing.min.json",
   // The dashboard server serves this entry and the assets beside it (spec §5.3, §9).
   "dist/ui/index.html",
+  "dist/provider-logos/UPSTREAM-MIT.txt",
+  "dist/provider-logos/NOTICE.md",
 ]);
 
 function addManifestPath(value) {
@@ -150,7 +155,30 @@ if (uiProblems.length > 0) {
   process.exit(1);
 }
 
+const providerLogos = uiFiles.filter(
+  (file) => file.startsWith("dist/ui/assets/providers/") && file.endsWith(".svg"),
+);
+const expectedProviderLogos = providerManifest.logoCount + 1;
+const providerProblems = [];
+if (providerLogos.length !== expectedProviderLogos) {
+  providerProblems.push(
+    `expected ${expectedProviderLogos} provider logos, found ${providerLogos.length}`,
+  );
+}
+if (!providerLogos.includes("dist/ui/assets/providers/generic.svg")) {
+  providerProblems.push("the local generic provider fallback is missing");
+}
+for (const id of Object.keys(providerManifest.logos)) {
+  const file = `dist/ui/assets/providers/${id}.svg`;
+  if (!providerLogos.includes(file)) providerProblems.push(`${file} is missing`);
+}
+if (providerProblems.length > 0) {
+  console.error("npm package provider logo assets are incomplete:");
+  for (const problem of providerProblems) console.error(`- ${problem}`);
+  process.exit(1);
+}
+
 const distCount = files.filter((file) => file.startsWith("dist/")).length;
 console.log(
-  `npm contents verified: ${files.length} files (${distCount} dist files plus package.json, README.md, and LICENSE), including ${files.filter((file) => file.startsWith("dist/ui/")).length} UI assets, with no build-only graph metadata and no source maps.`,
+  `npm contents verified: ${files.length} files (${distCount} dist files plus package.json, README.md, and LICENSE), including ${files.filter((file) => file.startsWith("dist/ui/")).length} UI assets with ${providerLogos.length} provider logos, with no build-only graph metadata and no source maps.`,
 );

@@ -44,6 +44,8 @@
     "lint:oxlint": "node scripts/run-oxlint-anti-slop.mjs",
     "lint:oxlint:upstream": "node scripts/run-oxlint-anti-slop.mjs --upstream",
     "knip": "knip",
+    "logos:check": "node scripts/sync-provider-logos.mjs --check",
+    "logos:sync": "node scripts/sync-provider-logos.mjs",
     "pack:release-package": "node scripts/pack-release-package.mjs",
     "pricing:refresh": "node scripts/refresh-modelsdev-pricing.mjs",
     "pricing:refresh:if-stale": "node scripts/refresh-modelsdev-pricing-if-stale.mjs",

@@ -504,6 +504,31 @@ body {
   min-width: 0;
 }
 
+/* A local SVG silhouette: the mask inherits color, so every provider mark stays
+   monochrome and legible against the current surface and text color. */
+.qg-provider-logo {
+  display: inline-block;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  opacity: 0.72;
+  -webkit-mask-image: var(--qg-provider-logo);
+  mask-image: var(--qg-provider-logo);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  vertical-align: -0.2em;
+}
+
+.qg-card__logo {
+  align-self: center;
+  color: var(--qg-text-muted);
+}
+
 .qg-card__provider {
   min-width: 0;
   overflow-wrap: anywhere;

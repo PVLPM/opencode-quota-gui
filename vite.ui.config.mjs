@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
@@ -46,6 +46,54 @@ export const SOLID_JSX_SOURCES = [
 ];
 
 /**
+ * Provider marks are packaged as stable, unhashed files under the served
+ * `/assets/providers/` prefix. The browser catalog contains the same literal
+ * URLs, so an analytics id is never interpolated into a path at runtime.
+ */
+const PROVIDER_LOGO_SOURCE_DIR = path.resolve(rootDir, "src/ui/assets/provider-logos");
+const PROVIDER_LOGO_OUT_DIR = path.resolve(rootDir, "dist/ui/assets/providers");
+const PROVIDER_NOTICE_OUT_DIR = path.resolve(rootDir, "dist/provider-logos");
+const PROVIDER_NOTICE_FILES = ["UPSTREAM-MIT.txt", "NOTICE.md"];
+const PROVIDER_LOGO_FILE_PATTERN = /^[a-z0-9][a-z0-9.-]*\.svg$/u;
+
+function providerLogoFiles() {
+  return readdirSync(PROVIDER_LOGO_SOURCE_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && PROVIDER_LOGO_FILE_PATTERN.test(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/** Copies the synced SVGs and the notices next to the other shipped assets. */
+function providerLogoAssetsPlugin() {
+  return {
+    name: "opencode-quota-gui:provider-logo-assets",
+    apply: "build",
+    writeBundle() {
+      const files = providerLogoFiles();
+      if (!files.includes("generic.svg")) {
+        throw new Error("The provider logo directory is missing its generic fallback");
+      }
+      rmSync(PROVIDER_LOGO_OUT_DIR, { recursive: true, force: true });
+      mkdirSync(PROVIDER_LOGO_OUT_DIR, { recursive: true });
+      for (const file of files) {
+        copyFileSync(
+          path.join(PROVIDER_LOGO_SOURCE_DIR, file),
+          path.join(PROVIDER_LOGO_OUT_DIR, file),
+        );
+      }
+      rmSync(PROVIDER_NOTICE_OUT_DIR, { recursive: true, force: true });
+      mkdirSync(PROVIDER_NOTICE_OUT_DIR, { recursive: true });
+      for (const file of PROVIDER_NOTICE_FILES) {
+        copyFileSync(
+          path.join(PROVIDER_LOGO_SOURCE_DIR, file),
+          path.join(PROVIDER_NOTICE_OUT_DIR, file),
+        );
+      }
+    },
+  };
+}
+
+/**
  * The UI build owns `dist/ui` and nothing else in `dist/` (`emptyOutDir: false`
  * leaves the backend output alone, so stale asset hashes would otherwise
  * accumulate between standalone `build:ui` runs and never be cleaned).
@@ -91,7 +139,12 @@ function uiGraphMetadataPlugin() {
         base: "/",
         assetExtensions: UI_PACKAGED_ASSET_EXTENSIONS,
         entryChunks: entryChunks.sort(),
-        emittedFiles: emittedFiles.sort(),
+        emittedFiles: [
+          ...new Set([
+            ...emittedFiles,
+            ...providerLogoFiles().map((file) => `assets/providers/${file}`),
+          ]),
+        ].sort(),
         modules: [...modules].sort(),
       };
 
@@ -110,7 +163,12 @@ export default defineConfig({
   root: path.resolve(rootDir, "src/ui"),
   base: "/",
   publicDir: false,
-  plugins: [cleanUiOutDirPlugin(), solid({ include: SOLID_JSX_SOURCES }), uiGraphMetadataPlugin()],
+  plugins: [
+    cleanUiOutDirPlugin(),
+    providerLogoAssetsPlugin(),
+    solid({ include: SOLID_JSX_SOURCES }),
+    uiGraphMetadataPlugin(),
+  ],
   resolve: {
     dedupe: ["solid-js", "solid-js/web", "solid-js/store", "@solidjs/meta"],
   },
