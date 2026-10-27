@@ -26,6 +26,9 @@ const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url
   bin: Record<string, string>;
   exports: Record<string, Record<string, string>>;
 };
+const providerLogoManifest = JSON.parse(
+  await readFile(new URL("../src/ui/assets/provider-logos/manifest.json", import.meta.url), "utf8"),
+) as { logos: Record<string, unknown> };
 
 function run(script: string, args: string[] = [], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [script, ...args], {
@@ -52,7 +55,15 @@ function requiredPackageFiles(): string[] {
     "dist/ui/index.html",
     "dist/ui/assets/dashboard.js",
     "dist/ui/assets/dashboard.css",
+    // verify-package-contents.mjs requires the vendored provider-logo notices
+    // and every logo in the shipped manifest plus the generic fallback.
+    "dist/provider-logos/NOTICE.md",
+    "dist/provider-logos/UPSTREAM-MIT.txt",
+    "dist/ui/assets/providers/generic.svg",
   ]);
+  for (const id of Object.keys(providerLogoManifest.logos)) {
+    paths.add(`dist/ui/assets/providers/${id}.svg`);
+  }
   const add = (value: string) => paths.add(value.replace(/^\.\//, ""));
 
   add(pkg.main);
