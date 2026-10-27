@@ -5431,9 +5431,9 @@ describe("styles and dependency boundaries", () => {
     expect(styles).toContain("--qg-bg: #0a0a0a");
     expect(styles).toContain("--qg-frame: #161616");
     expect(styles).toContain("--qg-surface: #232323");
-    // Frozen v1 chart palette.
-    expect(styles).toContain("--qg-token-input: #51a2ff");
-    expect(styles).toContain("--qg-token-cache-read: #a684ff");
+    // Frozen v1.1 chart palette.
+    expect(styles).toContain("--qg-token-input: #a684ff");
+    expect(styles).toContain("--qg-token-cache-read: #51a2ff");
     expect(styles).toContain("--qg-token-reasoning: #00d5be");
     expect(styles).toContain("--qg-token-output: #9ae600");
     expect(styles).toContain("--qg-token-cache-write: #00d3f2");

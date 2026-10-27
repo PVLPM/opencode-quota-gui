@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { SessionSnapshot, TokenStack } from "../src/contracts/dashboard";
+import type { ProjectSnapshot, SessionSnapshot, TokenStack } from "../src/contracts/dashboard";
 import { buildSessionChartGeometry, buildUsageGeometry } from "../src/ui/chart-geometry";
 import { chartIndexAt, createChartInspection } from "../src/ui/chart-inspection";
 import { parseSessionSnapshot } from "../src/ui/dashboard-client";
@@ -151,6 +151,15 @@ function mountSession(snapshot: SessionSnapshot): { root: TestNode; dispose: () 
   return { root, dispose };
 }
 
+function mountProject(snapshot: ProjectSnapshot): { root: TestNode; dispose: () => void } {
+  const root = graph.createTestRoot();
+  const dispose = graph.mount(
+    () => graph.createComponent(projectViewModule.ProjectView, { snapshot, range: "7d" }),
+    root,
+  );
+  return { root, dispose };
+}
+
 function renderSessionView(snapshot: SessionSnapshot): { root: TestNode; dispose: () => void } {
   const decoded = parseSessionSnapshot(
     JSON.parse(JSON.stringify(snapshot)),
@@ -180,6 +189,49 @@ function byClass(root: TestNode, tag: string, name: string): TestNode[] {
 
 function listener(node: TestNode, name: string): TestListener | undefined {
   return graph.listenerOf(node, name);
+}
+
+function descendants(node: TestNode): TestNode[] {
+  const found: TestNode[] = [];
+  for (const child of node.children) {
+    if (child.kind === "element") {
+      found.push(child);
+      found.push(...descendants(child));
+    }
+  }
+  return found;
+}
+
+/**
+ * The canonical chart chrome shared by Analytics, Project and Session.
+ * Returns undefined when a surface does not render a complete shell, so one
+ * test can prove all three hierarchies are structurally identical.
+ */
+function chartShellOf(root: TestNode):
+  | {
+      shell: TestNode;
+      head: TestNode;
+      title: TestNode;
+      summary: TestNode;
+      body: TestNode;
+      order: (name: string) => number;
+    }
+  | undefined {
+  const shell = byClass(root, "section", "qg-chart-shell")[0];
+  if (!shell) return undefined;
+  const head = byClass(shell, "header", "qg-chart-shell__head")[0];
+  const title = byClass(shell, "span", "qg-chart__title")[0];
+  const summary = byClass(shell, "div", "qg-summary")[0];
+  const body = byClass(shell, "div", "qg-usage")[0];
+  if (!head || !title || !summary || !body) return undefined;
+  const sequence = descendants(shell);
+  const order = (name: string) =>
+    sequence.findIndex((node) =>
+      String(node.props.class ?? "")
+        .split(" ")
+        .includes(name),
+    );
+  return { shell, head, title, summary, body, order };
 }
 
 function bucketOf(startMs: number, tokens: Partial<TokenStack>) {
@@ -523,6 +575,60 @@ describe("shared stacked usage bars", () => {
       expect(byClass(tooltip, "span", "qg-tooltip__swatch--line")).toHaveLength(1);
       const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
       expect(styles).toMatch(/\.qg-tooltip__swatch\s*\{[^}]*width:\s*8px;[^}]*height:\s*8px;/s);
+    } finally {
+      dispose();
+    }
+  });
+});
+
+describe("canonical chart shell", () => {
+  it("gives Analytics, Project and Session the same head, summary and chart hierarchy", () => {
+    const surfaces = [
+      {
+        name: "Analytics",
+        view: mountUsage([bucketOf(NOW - DAY_MS, { input: 10 })]),
+        title: "Daily token usage",
+      },
+      { name: "Project", view: mountProject(projectSnapshot()), title: "Daily token usage" },
+      { name: "Session", view: mountSession(sessionSnapshot()), title: "Usage by step" },
+    ];
+    try {
+      for (const surface of surfaces) {
+        const shell = chartShellOf(surface.view.root);
+        expect(shell, surface.name).toBeDefined();
+        if (!shell) continue;
+        expect(byClass(shell.shell, "header", "qg-chart-shell__head")).toHaveLength(1);
+        expect(byClass(shell.shell, "div", "qg-chart-shell__stat").length).toBeGreaterThan(0);
+        expect(byClass(shell.shell, "span", "qg-chart-shell__value").length).toBeGreaterThan(0);
+        expect(graph.textOf(shell.title)).toBe(surface.title);
+        expect(shell.order("qg-chart-shell__head")).toBeLessThan(shell.order("qg-summary"));
+        expect(shell.order("qg-summary")).toBeLessThan(shell.order("qg-usage"));
+        expect(byClass(shell.shell, "div", "qg-chart-shell__panel")).toHaveLength(1);
+      }
+    } finally {
+      for (const surface of surfaces) surface.view.dispose();
+    }
+  });
+
+  it("integrates the Project summary and chart while keeping page context and Sessions", () => {
+    const { root, dispose } = mountProject(projectSnapshot());
+    try {
+      const shell = chartShellOf(root);
+      expect(shell).toBeDefined();
+      if (!shell) return;
+      expect(graph.textOf(shell.summary)).toContain("Sessions");
+      expect(graph.textOf(shell.summary)).toContain("4");
+      expect(shell.order("qg-summary")).toBeLessThan(shell.order("qg-usage"));
+      // Breadcrumbs and worktree stay outside the chart shell.
+      expect(byClass(shell.shell, "nav", "qg-breadcrumbs")).toHaveLength(0);
+      expect(byClass(root, "nav", "qg-breadcrumbs")).toHaveLength(1);
+      expect(graph.textOf(root)).toContain("alpha-main");
+      // The chart shell does not take over the Sessions section or its rows.
+      const rootsHeadings = graph
+        .elementsNamed(root, "h2")
+        .filter((node) => node.props.id === "qg-project-roots");
+      expect(rootsHeadings).toHaveLength(1);
+      expect(byClass(root, "a", "qg-list__row")).toHaveLength(2);
     } finally {
       dispose();
     }
@@ -920,13 +1026,16 @@ describe("session chart and tree presentation", () => {
     }
   });
 
-  it("pins the frozen chart palette and Session colours in the stylesheet", () => {
+  it("pins the exact token palette and shared chart chrome in the stylesheet", () => {
     const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
-    expect(styles).toContain("--qg-token-cache-read: #a684ff");
-    expect(styles).toContain("--qg-token-input: #51a2ff");
+    expect(styles).toContain("--qg-token-cache-read: #51a2ff");
+    expect(styles).toContain("--qg-token-input: #a684ff");
     expect(styles).toContain("--qg-token-reasoning: #00d5be");
     expect(styles).toContain("--qg-token-output: #9ae600");
     expect(styles).toContain("--qg-token-cache-write: #00d3f2");
+    // The v1.1 palette intentionally swaps Input and Cache Read.
+    expect(styles).not.toContain("--qg-token-cache-read: #a684ff");
+    expect(styles).not.toContain("--qg-token-input: #51a2ff");
     expect(styles).toContain("--qg-chart-rate: #ffb900");
     expect(styles).toContain("--qg-chart-context: #51a2ff");
     expect(styles).toContain("--qg-chart-own: #ffb900");
@@ -935,6 +1044,10 @@ describe("session chart and tree presentation", () => {
     expect(styles).not.toContain(".qg-chart__separator");
     expect(styles).toMatch(/\.qg-chart__rate-line\s*\{[^}]*stroke-linecap:\s*round;/s);
     expect(styles).toMatch(/\.qg-chart__rate-line\s*\{[^}]*stroke-linejoin:\s*round;/s);
+    // One shared shell owns the heading, summary and chart surface.
+    expect(styles).toMatch(/\.qg-chart-shell__head\s*\{/);
+    expect(styles).toMatch(/\.qg-chart-shell__panel\s*\{/);
+    expect(styles).toMatch(/\.qg-chart-shell__summary|\.qg-chart-shell \.qg-summary/);
     // The Session inspection surface must let a phone page scroll vertically.
     expect(styles).toMatch(/\.qg-chart__surface\s*\{[^}]*touch-action:\s*pan-y;/s);
     expect(styles).not.toMatch(/\.qg-chart__surface\s*\{[^}]*touch-action:\s*none;/s);

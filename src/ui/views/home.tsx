@@ -105,21 +105,21 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
   const projects = createMemo(() => sortProjectRows(props.snapshot.projects, sortMode()));
   return (
     <>
-      <section class="qg-section" aria-labelledby="qg-home-usage">
-        <header class="qg-section__head">
-          <h2 class="qg-section__title" id="qg-home-usage">
-            {usageChartTitle(props.snapshot.usage.bucketUnit)}
-          </h2>
-        </header>
-        <Show
-          when={props.snapshot.usage.buckets.length > 0}
-          fallback={
+      <Show
+        when={props.snapshot.usage.buckets.length > 0}
+        fallback={
+          <section class="qg-section" aria-labelledby="qg-home-usage">
+            <header class="qg-chart-shell__head">
+              <h2 class="qg-section__title" id="qg-home-usage">
+                {usageChartTitle(props.snapshot.usage.bucketUnit)}
+              </h2>
+            </header>
             <EmptyNotice message={describeEmptyActivity(usageHasActivity(props.snapshot.usage))} />
-          }
-        >
-          <UsageChart usage={props.snapshot.usage} />
-        </Show>
-      </section>
+          </section>
+        }
+      >
+        <UsageChart usage={props.snapshot.usage} headingId="qg-home-usage" />
+      </Show>
 
       <section class="qg-section" aria-labelledby="qg-home-projects">
         <header class="qg-section__head">
