@@ -23,24 +23,37 @@ vi.mock("../src/lib/opencode-storage.js", () => {
   };
 });
 
+const PRICED_EDGE_PROVIDER = "pair-labs";
+const PRICED_EDGE_MODEL = "alpha|||beta";
+
 vi.mock("../src/lib/modelsdev-pricing.js", () => ({
   hasCost: vi.fn(
-    (providerID: string, modelID: string) => providerID === "openai" && modelID === "gpt-5",
+    (providerID: string, modelID: string) =>
+      (providerID === "openai" && modelID === "gpt-5") ||
+      (providerID === PRICED_EDGE_PROVIDER && modelID === PRICED_EDGE_MODEL),
   ),
   hasProvider: vi.fn(
-    (providerID: string) => providerID === "openai" || providerID === "unpriced-labs",
+    (providerID: string) =>
+      providerID === "openai" ||
+      providerID === "unpriced-labs" ||
+      providerID === PRICED_EDGE_PROVIDER,
   ),
   hasModel: vi.fn(
     (providerID: string, modelID: string) =>
       (providerID === "openai" && modelID === "gpt-5") ||
-      (providerID === "unpriced-labs" && modelID === "mystery-1"),
+      (providerID === "unpriced-labs" && modelID === "mystery-1") ||
+      (providerID === PRICED_EDGE_PROVIDER && modelID === PRICED_EDGE_MODEL),
   ),
   isModelsDevProviderId: vi.fn(
-    (providerID: string) => providerID === "openai" || providerID === "unpriced-labs",
+    (providerID: string) =>
+      providerID === "openai" ||
+      providerID === "unpriced-labs" ||
+      providerID === PRICED_EDGE_PROVIDER,
   ),
   listProvidersForModelId: vi.fn((modelID: string) => (modelID === "gpt-5" ? ["openai"] : [])),
   lookupCost: vi.fn((providerID: string, modelID: string) =>
-    providerID === "openai" && modelID === "gpt-5"
+    (providerID === "openai" && modelID === "gpt-5") ||
+    (providerID === PRICED_EDGE_PROVIDER && modelID === PRICED_EDGE_MODEL)
       ? { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 }
       : null,
   ),
@@ -134,6 +147,77 @@ describe("shared priceTokenBuckets primitive", () => {
     expect(callsAfterFirst).toBeGreaterThan(callsBefore);
     expect(vi.mocked(modelsdev.isModelsDevProviderId).mock.calls.length).toBe(callsAfterFirst);
     expect(cache.size).toBe(1);
+  });
+
+  it("keeps colliding pair encodings in separate cache entries in both orders", () => {
+    const pricedPair = { providerID: PRICED_EDGE_PROVIDER, modelID: PRICED_EDGE_MODEL };
+    const collidingPair = {
+      providerID: `${PRICED_EDGE_PROVIDER}|||alpha`,
+      modelID: "beta",
+    };
+
+    for (const reverse of [false, true]) {
+      const cache = new Map();
+      const first = priceTokenBuckets({ ...(reverse ? collidingPair : pricedPair), tokens, cache });
+      const second = priceTokenBuckets({
+        ...(reverse ? pricedPair : collidingPair),
+        tokens,
+        cache,
+      });
+      const pricedOutcome = reverse ? second : first;
+      const unknownOutcome = reverse ? first : second;
+
+      expect(pricedOutcome.status).toBe("priced");
+      expect(unknownOutcome.status).toBe("unknown");
+      if (unknownOutcome.status === "unknown") {
+        expect(unknownOutcome.unknown.sourceProviderID).toBe(collidingPair.providerID);
+        expect(unknownOutcome.unknown.sourceModelID).toBe(collidingPair.modelID);
+      }
+      expect(cache.size).toBe(2);
+    }
+  });
+
+  it("distinguishes missing, null, and empty raw ids in the cache", () => {
+    const cache = new Map();
+    const missing = priceTokenBuckets({ providerID: undefined, modelID: "ghost", tokens, cache });
+    const empty = priceTokenBuckets({ providerID: "", modelID: "ghost", tokens, cache });
+    const nulled = priceTokenBuckets({ providerID: null, modelID: "ghost", tokens, cache });
+
+    expect(missing.status).toBe("unknown");
+    expect(empty.status).toBe("unknown");
+    expect(nulled.status).toBe("unknown");
+    if (missing.status === "unknown") {
+      expect(missing.unknown.sourceProviderID).toBe("unknown");
+    }
+    if (empty.status === "unknown") {
+      expect(empty.unknown.sourceProviderID).toBe("");
+    }
+    if (nulled.status === "unknown") {
+      expect(nulled.unknown.sourceProviderID).toBe("unknown");
+    }
+    expect(cache.size).toBe(3);
+
+    const modelCache = new Map();
+    const missingModel = priceTokenBuckets({
+      providerID: "phantom-labs",
+      modelID: undefined,
+      tokens,
+      cache: modelCache,
+    });
+    const emptyModel = priceTokenBuckets({
+      providerID: "phantom-labs",
+      modelID: "",
+      tokens,
+      cache: modelCache,
+    });
+
+    if (missingModel.status === "unknown") {
+      expect(missingModel.unknown.sourceModelID).toBe("unknown");
+    }
+    if (emptyModel.status === "unknown") {
+      expect(emptyModel.unknown.sourceModelID).toBe("");
+    }
+    expect(modelCache.size).toBe(2);
   });
 });
 

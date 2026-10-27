@@ -1,3 +1,4 @@
+import { encodeIdentityKey } from "./collision-safe-key.js";
 import {
   isCursorModelId,
   isCursorProviderId,
@@ -525,19 +526,23 @@ export type TokenPricingOutcome =
  * and the GUI aggregation call this; neither resolves keys, computes cost, or
  * classifies missing pricing on its own.
  *
- * `cache` is optional and keyed exactly `"<providerID>|||<modelID>"`, so a
- * caller can reuse key resolution across many messages of the same source.
+ * `cache` is optional and keyed by a collision-safe tuple of the exact raw
+ * source ids, so a caller can reuse key resolution across many messages of the
+ * same source without conflating delimiter-bearing or missing ids.
  */
 export function priceTokenBuckets(params: {
-  providerID?: string;
-  modelID?: string;
+  providerID?: string | null;
+  modelID?: string | null;
   tokens: TokenBuckets;
   cache?: Map<string, PricingResolution>;
 }): TokenPricingOutcome {
-  const cacheKey = `${params.providerID ?? ""}|||${params.modelID ?? ""}`;
+  const cacheKey = encodeIdentityKey([params.providerID, params.modelID]);
   let resolution = params.cache?.get(cacheKey);
   if (!resolution) {
-    resolution = resolvePricingKey({ providerID: params.providerID, modelID: params.modelID });
+    resolution = resolvePricingKey({
+      providerID: params.providerID ?? undefined,
+      modelID: params.modelID ?? undefined,
+    });
     params.cache?.set(cacheKey, resolution);
   }
 

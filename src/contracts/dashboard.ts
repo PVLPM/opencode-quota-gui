@@ -127,6 +127,102 @@ export interface Usage {
   stale: boolean;
 }
 
+/** Grouping axis for model/provider analytics. */
+export type AnalyticsDimension = "model" | "provider";
+
+/**
+ * Exact raw identity of one analytics group. `unknown` is an explicit missing
+ * identity: it never aliases a known raw id, including the empty string.
+ */
+export type AnalyticsEntityIdentity = { kind: "known"; id: string } | { kind: "unknown" };
+
+/** One range bucket boundary shared by every row and series in a grouped snapshot. */
+export interface AnalyticsBucketBoundary {
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * One grouped model/provider row. A parent groups by the query dimension; its
+ * children group the same owned steps by the opposite dimension and are always
+ * present when the subtree has usage, including a sole child.
+ *
+ * Rows intentionally carry totals only. Bucket series live on
+ * `AnalyticsSeries`, so output stays bounded by series × buckets instead of
+ * (parents + children) × buckets for long lifetimes.
+ */
+export interface AnalyticsGroupRow {
+  identity: AnalyticsEntityIdentity;
+  /** Subtree totals; token categories equal the sum of the children's. */
+  tokens: CostedTokens;
+  /** Distinct owning sessions in this subtree (a set union, not a row count). */
+  sessionCount: number;
+  /** Fork-deduplicated owned steps in this subtree. */
+  stepCount: number;
+  children: AnalyticsGroupRow[];
+}
+
+/**
+ * One chart series for the visible grouping level, ranked by selected-range
+ * token volume. The trailing `"other"` series aggregates every entity outside
+ * the top five; it is chart-only and never replaces the breakdown rows.
+ */
+export type AnalyticsSeries =
+  | {
+      kind: "entity";
+      identity: AnalyticsEntityIdentity;
+      tokens: CostedTokens;
+      /** Aligned index-for-index with `AnalyticsGroupSnapshot.buckets`. */
+      buckets: CostedTokens[];
+    }
+  | { kind: "other"; tokens: CostedTokens; buckets: CostedTokens[] };
+
+/**
+ * Exact entity selector for a grouped query. `dimension` names the entity kind
+ * independently of the query's grouping dimension, so a model detail query can
+ * group by provider while filtering one model (and vice versa).
+ */
+export interface AnalyticsGroupFilter {
+  dimension: AnalyticsDimension;
+  identity: AnalyticsEntityIdentity;
+}
+
+/** Input for one grouped model/provider query. */
+export interface AnalyticsGroupQuery {
+  range: RangeKey;
+  dimension: AnalyticsDimension;
+  /**
+   * Optional exact entity filter, matched by both its entity dimension and its
+   * identity kind + raw id. A known empty/whitespace/delimiter-bearing id never
+   * matches `unknown`. No usage in range yields zero totals and empty
+   * rows/series; the echoed `filter` still identifies the selection.
+   */
+  filter?: AnalyticsGroupFilter;
+}
+
+/** One range-certified grouped model/provider snapshot. */
+export interface AnalyticsGroupSnapshot {
+  dimension: AnalyticsDimension;
+  range: RangeKey;
+  window: RangeWindow;
+  bucketUnit: BucketUnit;
+  timeZone: string;
+  /** Echo of the applied query filter; absent for an unfiltered query. */
+  filter?: AnalyticsGroupFilter;
+  /** Range bucket boundaries; every series bucket aligns by index. */
+  buckets: AnalyticsBucketBoundary[];
+  totals: CostedTokens;
+  sessionCount: number;
+  stepCount: number;
+  rows: AnalyticsGroupRow[];
+  /**
+   * Top five `rows` by selected-range token volume plus Other, for both
+   * filtered and unfiltered queries. Only these series carry bucket arrays.
+   */
+  series: AnalyticsSeries[];
+  stale: boolean;
+}
+
 export interface QuotaCardRow {
   rowId: RowId;
   label: string;
