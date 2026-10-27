@@ -322,6 +322,8 @@ describe("GUI HTTP routes", () => {
   it.each([
     "/assets/../quota",
     "/project/%2e%2e/quota",
+    "/model/../quota",
+    "/provider/%2e%2e/quota",
     "/assets\\..\\quota",
   ])("does not normalize raw traversal %s into a shell request", async (path) => {
     const { handle } = await start();
@@ -376,6 +378,46 @@ describe("GUI HTTP routes", () => {
   });
 
   it.each([
+    ["models overview", "/models"],
+    ["models overview with range", "/models?range=30d"],
+    [
+      "known model detail",
+      `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "gpt-5" })}?range=7d`,
+    ],
+    ["unknown model detail", "/model/u?range=7d"],
+    [
+      "known-empty model detail",
+      `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "" })}?range=24h`,
+    ],
+    [
+      "special-character provider detail",
+      `/provider/${encodeAnalyticsEntityToken({
+        kind: "known",
+        id: "a/b?c#d %\0\uD800\u00e9",
+      })}?range=lifetime`,
+    ],
+  ])("serves the shell for %s without analytics work", async (_label, path) => {
+    const { handle, state } = await start();
+    try {
+      const response = await get(handle.port, path);
+      expect(response.status).toBe(200);
+      expect(response.body).toBe(INDEX_HTML);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+      const head = await fetch(`${base(handle.port)}${path}`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+      const post = await fetch(`${base(handle.port)}${path}`, { method: "POST" });
+      expect(post.status).toBe(405);
+      // Direct navigation serves the shell only; grouped API work is browser-driven.
+      expect(state.groupQueries).toEqual([]);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it.each([
     "/api/analytics",
     "/api/v1/nope",
     "/assets/nope.js",
@@ -411,6 +453,45 @@ describe("GUI HTTP routes", () => {
       expect([400, 404]).toContain(response.status);
       expect(response.headers.get("content-type")).toContain("application/json");
       expect(response.body).not.toBe(INDEX_HTML);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it.each([
+    "/model",
+    "/provider",
+    "/model/",
+    "/provider/",
+    "/model/u.",
+    "/provider/u.",
+    "/model/x",
+    "/provider/not-a-token",
+    "/model/k.!!!",
+    "/model/k.a",
+    "/model/k.ZwBwAHQALQA1AA.js",
+    `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "gpt-5" })}/extra`,
+    `/provider/${encodeAnalyticsEntityToken({ kind: "known", id: "anthropic" })}/assets/app.js`,
+    "/model/%ZZ",
+    "/provider/%ZZ",
+    "/model/%00",
+    "/provider/%00",
+    "/model/%2e%2e%2fquota",
+    "/provider/%2e%2e%2fmodel",
+    "/models/extra",
+    "/models/",
+    "/models.js",
+    "/model/u/",
+    "/provider/u/",
+    "/provider/a.js",
+  ])("does not return the shell for invalid analytics path %s", async (path) => {
+    const { handle, state } = await start();
+    try {
+      const response = await get(handle.port, path);
+      expect([400, 404]).toContain(response.status);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.body).not.toBe(INDEX_HTML);
+      expect(state.groupQueries).toEqual([]);
     } finally {
       await handle.close();
     }

@@ -419,9 +419,24 @@ function parseRange(url: URL): RangeKey | undefined {
   return isRangeKey(raw) ? raw : undefined;
 }
 
+/** `/models` plus exact `/model|provider/<canonical entity token>` direct links. */
+function isAnalyticsUiPath(pathname: string): boolean {
+  if (pathname === "/models") return true;
+  const match = /^\/(?:model|provider)\/([^/]+)$/.exec(pathname);
+  if (!match) return false;
+  let token: string;
+  try {
+    token = decodeURIComponent(match[1] ?? "");
+  } catch {
+    return false;
+  }
+  return decodeAnalyticsEntityToken(token) !== undefined;
+}
+
 /** Known UI paths only: never reinterpret an asset or malformed id as HTML. */
 function isUiPath(pathname: string): boolean {
   if (["/", "/quota", "/analytics", "/settings"].includes(pathname)) return true;
+  if (isAnalyticsUiPath(pathname)) return true;
   const match = /^\/(?:project|session)\/([^/]+)$/.exec(pathname);
   if (!match) return false;
   let id: string;
