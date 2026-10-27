@@ -3,6 +3,8 @@
  * `parentPort` (Node) or `self` (Bun); focused tests drive the same handler
  * without a real thread.
  */
+
+import { isAnalyticsGroupQuery } from "../contracts/analytics-entity.js";
 import { isRangeKey } from "../contracts/ranges.js";
 import { type AnalyticsEngine, createAnalyticsEngine } from "./analytics-engine.js";
 import type {
@@ -81,6 +83,10 @@ export function createAnalyticsWorkerRuntime(
     if (command.kind === "session") {
       if (!command.sessionId) throw new AnalyticsReadError("bad-request");
       return await engine.session(command.sessionId);
+    }
+    if (command.kind === "groups") {
+      if (!isAnalyticsGroupQuery(command.query)) throw new AnalyticsReadError("bad-request");
+      return await engine.groups(command.query);
     }
     if (command.kind === "refresh") {
       await engine.refresh();

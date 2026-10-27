@@ -21,6 +21,8 @@
  * and the real provider collector.
  */
 import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
   DashboardDataSource,
   HomeSnapshot,
   ProjectSnapshot,
@@ -42,6 +44,7 @@ import {
   type UsageAnalytics,
   type UsageAnalyticsDataset,
 } from "./aggregation.js";
+import { createAnalyticsModel } from "./analytics-model.js";
 import { type AnalyticsReadService, createAnalyticsReadService } from "./analytics-service.js";
 import { buildCardId, hashQuotaCardIdentity } from "./identity.js";
 import {
@@ -113,7 +116,7 @@ export interface DashboardReadSourceOptions {
 
 export type DashboardReadSource = Pick<
   DashboardDataSource,
-  "home" | "quota" | "project" | "session"
+  "home" | "quota" | "project" | "session" | "groups"
 > & {
   /** One shared analytics refresh per transport tick, if the service loaded. */
   refreshAnalytics?(): Promise<void>;
@@ -289,6 +292,13 @@ export function createDashboardReadSource(
         } catch (error) {
           throw translateAnalyticsError(error);
         }
+      },
+      async groups(query) {
+        const dataset = await loadDataset();
+        const model = createAnalyticsModel({ timeZone });
+        model.setMetadata(dataset.sessions, dataset.projects);
+        model.apply(dataset.messages, []);
+        return model.groups(query, now());
       },
       // The in-memory dataset is rebuilt per request; there is no worker.
       async refresh() {},
@@ -506,6 +516,10 @@ export function createDashboardReadSource(
     }
   }
 
+  async function groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot> {
+    return (await getAnalyticsService()).groups(query);
+  }
+
   async function refreshAnalytics(): Promise<void> {
     // A quota-only dashboard never loaded analytics, so never start the worker.
     if (!analyticsPromise) return;
@@ -542,5 +556,5 @@ export function createDashboardReadSource(
     await service?.close?.();
   }
 
-  return { home, quota, project, session, refreshAnalytics, subscribeAnalytics, close };
+  return { home, quota, project, session, groups, refreshAnalytics, subscribeAnalytics, close };
 }

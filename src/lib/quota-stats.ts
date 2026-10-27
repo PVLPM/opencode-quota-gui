@@ -1,4 +1,4 @@
-import { encodeIdentityKey } from "./collision-safe-key.js";
+import { encodeIdentityKey } from "../contracts/collision-safe-key.js";
 import {
   isCursorModelId,
   isCursorProviderId,

@@ -1,7 +1,14 @@
+import { encodeAnalyticsEntityToken } from "../contracts/analytics-entity";
 import type {
   AccountingCountUnit,
   AccountingResultType,
   AccountingUnit,
+  AnalyticsDimension,
+  AnalyticsEntityIdentity,
+  AnalyticsGroupFilter,
+  AnalyticsGroupRow,
+  AnalyticsGroupSnapshot,
+  AnalyticsSeries,
   Bucket,
   CostedTokens,
   DashboardDataSource,
@@ -468,12 +475,114 @@ function readProjectActivityRow(value: JsonValue, endpoint: string): ProjectActi
   };
 }
 
-function readRangeWindow(value: JsonValue | undefined, endpoint: string): RangeWindow {
-  const detail = "usage.window";
+function readRangeWindow(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail = "usage.window",
+): RangeWindow {
   const window = readRecord(value, endpoint, detail);
   const sinceMs = readOptionalNumber(window.sinceMs, endpoint, `${detail}.sinceMs`);
   const untilMs = readNumber(window.untilMs, endpoint, `${detail}.untilMs`);
   return sinceMs === undefined ? { untilMs } : { sinceMs, untilMs };
+}
+
+const ANALYTICS_DIMENSIONS = ["model", "provider"] as const satisfies readonly AnalyticsDimension[];
+
+function readAnalyticsDimension(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail: string,
+): AnalyticsDimension {
+  return readEnum(value, ANALYTICS_DIMENSIONS, endpoint, detail);
+}
+
+function readEntityIdentity(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail: string,
+): AnalyticsEntityIdentity {
+  const identity = readRecord(value, endpoint, detail);
+  const kind = readEnum(identity.kind, ["known", "unknown"] as const, endpoint, `${detail}.kind`);
+  if (kind === "unknown") return { kind };
+  return { kind, id: readText(identity.id, endpoint, `${detail}.id`) };
+}
+
+function readGroupFilter(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail: string,
+): AnalyticsGroupFilter {
+  const filter = readRecord(value, endpoint, detail);
+  return {
+    dimension: readAnalyticsDimension(filter.dimension, endpoint, `${detail}.dimension`),
+    identity: readEntityIdentity(filter.identity, endpoint, `${detail}.identity`),
+  };
+}
+
+function readGroupRow(value: JsonValue, endpoint: string, detail: string): AnalyticsGroupRow {
+  const row = readRecord(value, endpoint, detail);
+  return {
+    identity: readEntityIdentity(row.identity, endpoint, `${detail}.identity`),
+    tokens: readCostedTokens(row.tokens, endpoint, `${detail}.tokens`),
+    sessionCount: readNumber(row.sessionCount, endpoint, `${detail}.sessionCount`),
+    stepCount: readNumber(row.stepCount, endpoint, `${detail}.stepCount`),
+    children: readArray(row.children, endpoint, `${detail}.children`).map((child) =>
+      readGroupRow(child, endpoint, `${detail}.children[]`),
+    ),
+  };
+}
+
+function readGroupSeries(value: JsonValue, endpoint: string): AnalyticsSeries {
+  const detail = "series[]";
+  const series = readRecord(value, endpoint, detail);
+  const kind = readEnum(series.kind, ["entity", "other"] as const, endpoint, `${detail}.kind`);
+  const tokens = readCostedTokens(series.tokens, endpoint, `${detail}.tokens`);
+  const buckets = readArray(series.buckets, endpoint, `${detail}.buckets`).map((bucket, index) =>
+    readCostedTokens(bucket, endpoint, `${detail}.buckets[${index}]`),
+  );
+  if (kind === "other") return { kind, tokens, buckets };
+  return {
+    kind,
+    identity: readEntityIdentity(series.identity, endpoint, `${detail}.identity`),
+    tokens,
+    buckets,
+  };
+}
+
+/** Decodes one range-certified grouped model/provider payload. */
+export function parseGroupSnapshot(
+  value: JsonValue,
+  endpoint = "/api/v1/models",
+): AnalyticsGroupSnapshot {
+  const root = readRecord(value, endpoint, "not an object");
+  const parsed: AnalyticsGroupSnapshot = {
+    dimension: readAnalyticsDimension(root.dimension, endpoint, "dimension"),
+    range: readRangeKey(root.range, endpoint, "range"),
+    window: readRangeWindow(root.window, endpoint, "window"),
+    bucketUnit: readEnum(root.bucketUnit, BUCKET_UNITS, endpoint, "bucketUnit"),
+    timeZone: readText(root.timeZone, endpoint, "timeZone"),
+    buckets: readArray(root.buckets, endpoint, "buckets").map((boundary) => {
+      const entry = readRecord(boundary, endpoint, "buckets[]");
+      return {
+        startMs: readNumber(entry.startMs, endpoint, "buckets[].startMs"),
+        endMs: readNumber(entry.endMs, endpoint, "buckets[].endMs"),
+      };
+    }),
+    totals: readCostedTokens(root.totals, endpoint, "totals"),
+    sessionCount: readNumber(root.sessionCount, endpoint, "sessionCount"),
+    stepCount: readNumber(root.stepCount, endpoint, "stepCount"),
+    rows: readArray(root.rows, endpoint, "rows").map((row) =>
+      readGroupRow(row, endpoint, "rows[]"),
+    ),
+    series: readArray(root.series, endpoint, "series").map((series) =>
+      readGroupSeries(series, endpoint),
+    ),
+    stale: readBoolean(root.stale, endpoint, "stale"),
+  };
+  if (root.filter !== undefined) {
+    parsed.filter = readGroupFilter(root.filter, endpoint, "filter");
+  }
+  return parsed;
 }
 
 function readBucket(value: JsonValue, endpoint: string): Bucket {
@@ -957,6 +1066,17 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
     async session(input) {
       const endpoint = `/api/v1/sessions/${encodeURIComponent(input.sessionId)}`;
       return parseSessionSnapshot(await request(endpoint), endpoint);
+    },
+
+    async groups(input) {
+      const entityDimension = input.filter?.dimension ?? input.dimension;
+      const collection = entityDimension === "model" ? "models" : "providers";
+      const token = input.filter ? `/${encodeAnalyticsEntityToken(input.filter.identity)}` : "";
+      const defaultGroup = entityDimension === "model" ? "provider" : "model";
+      const group =
+        input.filter && input.dimension !== defaultGroup ? `&group=${input.dimension}` : "";
+      const endpoint = `/api/v1/${collection}${token}?range=${encodeURIComponent(input.range)}${group}`;
+      return parseGroupSnapshot(await request(endpoint), endpoint);
     },
 
     async openSettingsFile() {

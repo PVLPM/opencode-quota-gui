@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HomeSnapshot, SessionSnapshot } from "../src/contracts/dashboard.js";
+import type {
+  AnalyticsGroupQuery,
+  CostedTokens,
+  HomeSnapshot,
+  SessionSnapshot,
+} from "../src/contracts/dashboard.js";
 import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/aggregation.js";
 import {
   ANALYTICS_FULL_REPAIR_INTERVAL_MS,
@@ -3379,6 +3384,331 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     if (!last) throw new Error("expected saved state");
     expect(last.fingerprints.length).toBeLessThanOrEqual(last.occurrences.size + 32);
     expect(await engine.session("ses_root")).toEqual(analytics(datasetOf(db)).session("ses_root"));
+    await engine.close();
+  });
+});
+
+function sumRows(rows: readonly { tokens: CostedTokens }[]): number {
+  return rows.reduce((total, entry) => total + entry.tokens.total, 0);
+}
+
+const GROUP_RANGES = ["24h", "7d", "30d", "lifetime"] as const;
+
+describe("analytics engine: grouped model/provider transport", () => {
+  it("matches Home totals and windows for every range with full lifetime coverage", async () => {
+    const db = baseDb();
+    const ancient = row("ses_root", "msg_ancient", NOW - 40 * DAY, { input: 9_000 });
+    const missingIds = row("ses_other", "msg_missing_ids", NOW - HOUR, { input: 50 });
+    missingIds.providerID = undefined;
+    missingIds.modelID = undefined;
+    db.rows.push(ancient, missingIds);
+    db.updatedAt.set(rowKey(ancient.sessionID, ancient.messageID), ancient.completedAtMs);
+    db.updatedAt.set(rowKey(missingIds.sessionID, missingIds.messageID), missingIds.completedAtMs);
+    const { engine } = harness(db);
+
+    // A prior finite view must not downgrade the later lifetime certification.
+    await engine.home("30d");
+
+    for (const range of GROUP_RANGES) {
+      const home = await engine.home(range);
+      const grouped = await engine.groups({ range, dimension: "model" });
+      expect(grouped.range).toBe(range);
+      expect(grouped.dimension).toBe("model");
+      expect(grouped.window).toEqual(home.usage.window);
+      expect(grouped.bucketUnit).toBe(home.usage.bucketUnit);
+      expect(grouped.buckets).toHaveLength(home.usage.buckets.length);
+      expect(grouped.totals).toEqual(home.usage.totals);
+      expect(grouped.stepCount).toBe(home.usage.stepCount);
+      expect(grouped.sessionCount).toBe(home.usage.sessionCount);
+      // Every raw identity, including the missing one, stays represented.
+      expect(sumRows(grouped.rows)).toBe(grouped.totals.total);
+      expect(grouped.rows.some((entry) => entry.identity.kind === "unknown")).toBe(true);
+    }
+
+    const lifetime = await engine.groups({ range: "lifetime", dimension: "model" });
+    const ancientRow = lifetime.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5",
+    );
+    expect(ancientRow?.tokens.input).toBeGreaterThanOrEqual(9_000);
+    await engine.close();
+  });
+
+  it("reuses the certified Home epoch and exact window instead of a sampled clock", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    const home = await engine.home("24h");
+    const certifiedWindow = home.usage.window;
+    expect(certifiedWindow.untilMs).toBe(NOW);
+
+    setNow(NOW + 5 * 60_000);
+    const grouped = await engine.groups({ range: "24h", dimension: "provider" });
+    expect(grouped.window).toEqual(certifiedWindow);
+    expect(grouped.stale).toBe(false);
+
+    setNow(NOW + 2 * HOUR);
+    await engine.refresh();
+    const refreshedHome = await engine.home("24h");
+    const refreshedGroup = await engine.groups({ range: "24h", dimension: "provider" });
+    expect(refreshedGroup.window).toEqual(refreshedHome.usage.window);
+    expect(refreshedGroup.totals).toEqual(refreshedHome.usage.totals);
+    expect(refreshedGroup.window.untilMs).toBe(NOW + 2 * HOUR);
+    await engine.close();
+  });
+
+  it("reads no raw payloads for warm grouped and detail queries", async () => {
+    const db = baseDb();
+    const { engine, calls } = harness(db);
+    await engine.home("7d");
+    const baseline = calls.length;
+
+    const modelDetailQuery: AnalyticsGroupQuery = {
+      range: "7d",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+    };
+    const providerDetailQuery: AnalyticsGroupQuery = {
+      range: "7d",
+      dimension: "model",
+      filter: { dimension: "provider", identity: { kind: "known", id: "openai" } },
+    };
+    const queries: AnalyticsGroupQuery[] = [
+      { range: "7d", dimension: "model" },
+      { range: "7d", dimension: "provider" },
+      modelDetailQuery,
+      providerDetailQuery,
+    ];
+
+    for (const query of queries) {
+      const first = await engine.groups(query);
+      expect(first.stepCount).toBeGreaterThan(0);
+      const second = await engine.groups(query);
+      expect(second).toEqual(first);
+    }
+
+    const modelDetail = await engine.groups(modelDetailQuery);
+    expect(modelDetail.rows[0]?.identity).toEqual({ kind: "known", id: "openai" });
+    expect(modelDetail.rows[0]?.children[0]?.identity).toEqual({ kind: "known", id: "gpt-5" });
+    const providerDetail = await engine.groups(providerDetailQuery);
+    expect(providerDetail.rows[0]?.identity).toEqual({ kind: "known", id: "gpt-5" });
+    expect(providerDetail.rows[0]?.children[0]?.identity).toEqual({ kind: "known", id: "openai" });
+
+    expect(calls).toHaveLength(baseline);
+    await engine.close();
+  });
+
+  it("keeps known-empty, literal unknown ids and missing identities distinct", async () => {
+    const db = baseDb();
+    const missingModel = row("ses_other", "msg_missing_ids", NOW - HOUR, { input: 77, output: 0 });
+    missingModel.modelID = undefined;
+    const literalUnknown = row(
+      "ses_root",
+      "msg_literal_unknown",
+      NOW - HOUR,
+      { input: 33, output: 0 },
+      { providerID: "openai", modelID: "unknown" },
+    );
+    db.rows.push(missingModel, literalUnknown);
+    db.updatedAt.set(
+      rowKey(missingModel.sessionID, missingModel.messageID),
+      missingModel.completedAtMs,
+    );
+    db.updatedAt.set(
+      rowKey(literalUnknown.sessionID, literalUnknown.messageID),
+      literalUnknown.completedAtMs,
+    );
+    const { engine } = harness(db);
+    await engine.home("24h");
+
+    const unknownFilter = {
+      range: "24h",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "unknown" } },
+    } satisfies AnalyticsGroupQuery;
+    const unknown = await engine.groups(unknownFilter);
+    expect(unknown.filter).toEqual(unknownFilter.filter);
+    expect(unknown.totals.total).toBe(77);
+
+    const literal = await engine.groups({
+      range: "24h",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "unknown" } },
+    });
+    expect(literal.totals.total).toBe(33);
+
+    const empty = await engine.groups({
+      range: "24h",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "" } },
+    });
+    expect(empty.filter).toEqual({
+      dimension: "model",
+      identity: { kind: "known", id: "" },
+    });
+    expect(empty.totals.total).toBe(0);
+    expect(empty.stepCount).toBe(0);
+    expect(empty.sessionCount).toBe(0);
+    expect(empty.rows).toEqual([]);
+    expect(empty.series).toEqual([]);
+    expect(empty.buckets.every((bucket) => bucket.startMs < bucket.endMs)).toBe(true);
+    expect(empty.stale).toBe(false);
+    await engine.close();
+  });
+
+  it("invalidates grouped snapshots after a scoped contribution edit", async () => {
+    const db = baseDb();
+    const { engine } = harness(db);
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    const beforeTotal = before.totals.total;
+    const beforeGpt = before.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5",
+    );
+    if (!beforeGpt) throw new Error("expected a gpt-5 group");
+
+    const edited = db.rows.find((entry) => entry.messageID === "msg_b");
+    if (!edited) throw new Error("expected msg_b");
+    edited.modelID = "gpt-5-mini";
+    db.updatedAt.set(rowKey(edited.sessionID, edited.messageID), NOW + 1_000);
+    await engine.session("ses_root");
+
+    const after = await engine.groups({ range: "24h", dimension: "model" });
+    expect(after.totals.total).toBe(beforeTotal);
+    const mini = after.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5-mini",
+    );
+    expect(mini?.tokens.input).toBe(200);
+    const gpt = after.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5",
+    );
+    expect(gpt?.tokens.input).toBe(beforeGpt.tokens.input - 200);
+    await engine.close();
+  });
+
+  it("clears grouped snapshots on source replacement and re-reads history", async () => {
+    const db = baseDb();
+    const { engine, calls } = harness(db);
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    expect(before.totals.input).toBe(700);
+
+    db.rows = [row("ses_root", "msg_replaced", NOW - HOUR, { input: 42 })];
+    db.identity = identity({ inode: "999" });
+    const replaceStart = calls.length;
+    await engine.refresh();
+    const after = await engine.groups({ range: "24h", dimension: "model" });
+    expect(after.totals.input).toBe(42);
+    expect(after.rows.map((entry) => entry.identity)).toEqual([{ kind: "known", id: "gpt-5" }]);
+    expect(fullReads(calls, replaceStart).length).toBeGreaterThanOrEqual(1);
+    await engine.close();
+  });
+
+  it("retains last-good grouped data while stale and never fabricates zero from an absent source", async () => {
+    const coldDb = baseDb();
+    coldDb.status = "missing";
+    const cold = harness(coldDb);
+    await expect(cold.engine.groups({ range: "24h", dimension: "model" })).rejects.toMatchObject({
+      code: "unavailable",
+    });
+    await cold.engine.close();
+
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    db.status = "missing";
+    setNow(NOW + INTERVAL + 1);
+    await engine.refresh();
+    const after = await engine.groups({ range: "24h", dimension: "model" });
+    expect(after.stale).toBe(true);
+    expect(after.totals).toEqual(before.totals);
+    expect(after.window).toEqual(before.window);
+    await engine.close();
+  });
+
+  it("keeps the Home lifetime window across a local-day boundary", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    const home = await engine.home("lifetime");
+    const certifiedWindow = home.usage.window;
+    const certifiedBuckets = home.usage.buckets.map(({ startMs, endMs }) => ({ startMs, endMs }));
+
+    // Crossing a daily bucket boundary must not move a first grouped lifetime
+    // read past the window Home already certified.
+    setNow(NOW + 2 * DAY);
+    const grouped = await engine.groups({ range: "lifetime", dimension: "model" });
+    expect(grouped.window).toEqual(certifiedWindow);
+    expect(grouped.buckets).toEqual(certifiedBuckets);
+    expect(grouped.totals).toEqual(home.usage.totals);
+    expect(grouped.stale).toBe(true);
+    await engine.close();
+  });
+
+  it("schedules a stale background refresh for a new grouped query like Home", async () => {
+    const db = baseDb();
+    const { engine, calls, setNow } = harness(db);
+    await engine.home("24h");
+    const baseline = calls.length;
+
+    setNow(NOW + INTERVAL + 1);
+    const grouped = await engine.groups({ range: "24h", dimension: "model" });
+    expect(grouped.stale).toBe(true);
+    await flushAsync();
+
+    const backgroundReads = calls.slice(baseline).filter((call) => call.method === "withSnapshot");
+    expect(backgroundReads).toHaveLength(1);
+    await engine.close();
+  });
+
+  it("attempts one refresh for an uncovered grouped range when the source is unavailable", async () => {
+    const groupDb = baseDb();
+    const grouped = harness(groupDb);
+    await grouped.engine.home("24h");
+    groupDb.status = "missing";
+    const groupBaseline = grouped.calls.length;
+
+    const snapshot = await grouped.engine.groups({ range: "lifetime", dimension: "model" });
+    await flushAsync();
+
+    // The failed foreground attempt already consumed this interval: no forced
+    // second global refresh may bypass due/backoff.
+    expect(
+      grouped.calls.slice(groupBaseline).filter((call) => call.method === "withSnapshot"),
+    ).toHaveLength(1);
+    expect(snapshot.stale).toBe(true);
+
+    // The same unavailable, uncovered request on Home makes one attempt too.
+    const homeDb = baseDb();
+    const home = harness(homeDb);
+    await home.engine.home("24h");
+    homeDb.status = "missing";
+    const homeBaseline = home.calls.length;
+    const homeSnapshot = await home.engine.home("lifetime");
+    await flushAsync();
+    expect(
+      home.calls.slice(homeBaseline).filter((call) => call.method === "withSnapshot"),
+    ).toHaveLength(1);
+    expect(homeSnapshot.stale).toBe(true);
+
+    // Last-good partial lifetime data is served truthfully stale, matching
+    // Home's exact fallback window rather than fabricated complete history.
+    expect(snapshot.totals).toEqual(homeSnapshot.usage.totals);
+    expect(snapshot.window).toEqual(homeSnapshot.usage.window);
+    await grouped.engine.close();
+    await home.engine.close();
+  });
+
+  it("does not let a scoped refresh certify a global grouped window", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    const certifiedWindow = before.window;
+
+    setNow(NOW + INTERVAL - 1);
+    await engine.project("p1", "lifetime");
+    const after = await engine.groups({ range: "24h", dimension: "model" });
+    expect(after.window).toEqual(certifiedWindow);
+    expect(after.stale).toBe(false);
     await engine.close();
   });
 });

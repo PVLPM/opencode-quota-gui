@@ -7,6 +7,8 @@
  * partial edge hours of a request touch the owned step list, so bucket
  * boundaries stay exact without rebuilding a raw model per view.
  */
+
+import { encodeIdentityKey } from "../contracts/collision-safe-key.js";
 import type {
   AnalyticsDimension,
   AnalyticsEntityIdentity,
@@ -30,7 +32,6 @@ import {
   rangeBucketUnit,
   rangeWindow,
 } from "../contracts/ranges.js";
-import { encodeIdentityKey } from "../lib/collision-safe-key.js";
 import {
   type OpenCodeProjectInfo,
   type OpenCodeRawAssistantRow,

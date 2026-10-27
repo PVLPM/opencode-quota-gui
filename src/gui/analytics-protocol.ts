@@ -5,7 +5,13 @@
  * boundary. Raw storage rows, compact fingerprints, coverage windows, and the
  * analytics model stay inside the worker.
  */
-import type { HomeSnapshot, ProjectSnapshot, SessionSnapshot } from "../contracts/dashboard.js";
+import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
+  HomeSnapshot,
+  ProjectSnapshot,
+  SessionSnapshot,
+} from "../contracts/dashboard.js";
 import type { RangeKey } from "../contracts/ranges.js";
 
 export const ANALYTICS_WORKER_PROTOCOL_VERSION = 1;
@@ -62,6 +68,7 @@ export type AnalyticsWorkerCommand =
   | { kind: "home"; range: RangeKey }
   | { kind: "project"; projectId: string; range: RangeKey }
   | { kind: "session"; sessionId: string }
+  | { kind: "groups"; query: AnalyticsGroupQuery }
   | { kind: "refresh" }
   | { kind: "stats" }
   | { kind: "gc" }
@@ -76,6 +83,7 @@ export type AnalyticsWorkerResult =
   | HomeSnapshot
   | ProjectSnapshot
   | SessionSnapshot
+  | AnalyticsGroupSnapshot
   | AnalyticsWorkerMemoryStats
   | boolean
   | undefined;
@@ -99,6 +107,7 @@ export interface AnalyticsTransport {
   home(range: RangeKey): Promise<HomeSnapshot>;
   project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
   session(sessionId: string): Promise<SessionSnapshot>;
+  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
   refresh(): Promise<void>;
   /** Optional diagnostics seam; the real worker implements it. */
   stats?(): Promise<AnalyticsWorkerMemoryStats>;

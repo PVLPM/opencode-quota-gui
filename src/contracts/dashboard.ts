@@ -425,6 +425,8 @@ export interface DashboardDataSource {
   quota(): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
+  /** Range-certified grouped model/provider analytics (one exact query). */
+  groups(input: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
   settings(): Promise<SettingsSnapshot>;
   saveSettings(input: {
     patch: Record<string, JsonValue>;
