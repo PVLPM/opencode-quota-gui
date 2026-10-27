@@ -4,8 +4,10 @@
  *
  * Starts the built dashboard (`dist/gui` server + read source + settings store)
  * over a fully synthetic fixture: an invented SQLite database in this process's
- * own temp root, invented projects/sessions/messages, and two invented provider
- * accounts with a provider-reported currency row. Before any dist module loads,
+ * own temp root, invented projects/sessions/messages, two invented provider
+ * accounts with a provider-reported currency row, and one fabricated
+ * known-brand (`openai`) provider-scope card for quota header presentation.
+ * Before any dist module loads,
  * the process points `OPENCODE_DB`, `OPENCODE_CONFIG_DIR`, and the XDG
  * data/cache/state/config dirs at that fixture root, so no real OpenCode
  * profile, config, database, credential, or provider API is read. The
@@ -23,6 +25,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   buildSyntheticProviderProbes,
+  SYNTHETIC_OPENAI_PROVIDER_ID,
+  SYNTHETIC_OPENAI_PROVIDER_LABEL,
   SYNTHETIC_PROVIDER_ID,
   SYNTHETIC_PROVIDER_LABEL,
   seedSyntheticFixture,
@@ -127,8 +131,11 @@ export async function startSyntheticDashboard(options = {}) {
       configDir: fixture.configDir,
       now: () => nowMs,
       collectProviderResults: () => Promise.resolve(buildSyntheticProviderProbes(nowMs)),
-      providerLabel: (providerId) =>
-        providerId === SYNTHETIC_PROVIDER_ID ? SYNTHETIC_PROVIDER_LABEL : providerId,
+      providerLabel: (providerId) => {
+        if (providerId === SYNTHETIC_PROVIDER_ID) return SYNTHETIC_PROVIDER_LABEL;
+        if (providerId === SYNTHETIC_OPENAI_PROVIDER_ID) return SYNTHETIC_OPENAI_PROVIDER_LABEL;
+        return providerId;
+      },
     });
     const port = options.port ?? modules.types.DEFAULT_DASHBOARD_PORT;
     const handle = await modules.server.createDashboardServer({ port, source, settings });

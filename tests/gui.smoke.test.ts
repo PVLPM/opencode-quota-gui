@@ -49,6 +49,7 @@ interface CardRow {
 interface ProviderCardPayload {
   cardId: string;
   providerId: string;
+  providerLabel: string;
   accountLabel?: string;
   labelSource: string;
   rows: CardRow[];
@@ -277,7 +278,7 @@ describe("synthetic GUI smoke", () => {
     expect(projectOrders[3]).toEqual(["proj_alpha", "proj_beta", "proj_empty"]);
   });
 
-  it("maps two synthetic accounts and a provider amount that is not the API-equivalent cost", async () => {
+  it("maps two synthetic accounts, a known-brand card and a provider amount that is not the API-equivalent cost", async () => {
     // The quota surface is independent; home analytics must not wait on or
     // carry provider cards.
     const home = await requestJson<HomePayload>(apiUrl("/home?range=lifetime"));
@@ -290,10 +291,22 @@ describe("synthetic GUI smoke", () => {
     expect(quota.body.providers.polledAtMs).toBe(FIXED_NOW_MS);
     const cards = quota.body.providers.cards;
 
-    expect(cards).toHaveLength(3);
-    expect(new Set(cards.map((card) => card.cardId)).size).toBe(3);
+    expect(cards).toHaveLength(4);
+    expect(new Set(cards.map((card) => card.cardId)).size).toBe(4);
     expect(cards.filter((card) => card.accountLabel !== undefined)).toHaveLength(2);
-    expect(cards.filter((card) => card.labelSource === "provider")).toHaveLength(1);
+    expect(cards.filter((card) => card.labelSource === "provider")).toHaveLength(2);
+
+    // One card deliberately uses a real public provider id so the known-brand
+    // header label and logo are exercised; every value on it is invented.
+    const branded = cards.find((card) => card.providerId === "openai");
+    expect(branded).toMatchObject({
+      providerLabel: "OpenAI",
+      labelSource: "provider",
+    });
+    expect(branded?.accountLabel).toBeUndefined();
+    expect(branded?.cardId.startsWith("openai:")).toBe(true);
+    expect(branded?.rows).toHaveLength(1);
+    expect(branded?.rows[0]).toMatchObject({ kind: "percent", percentRemaining: 55 });
 
     const quantityRows = cards
       .flatMap((card) => card.rows)

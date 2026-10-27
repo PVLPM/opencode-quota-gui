@@ -1,8 +1,10 @@
 /**
  * Synthetic GUI smoke fixture (P7; spec §12 R51).
  *
- * Every project, session, message, account, and label here is invented in this
- * file. The SQLite schema mirrors the one `tests/helpers/gui-database.ts` seeds
+ * Every project, session, message, account, and value here is invented in this
+ * file. The one real public provider id/label (`openai`/`OpenAI`) exists only to
+ * exercise known-brand quota presentation; all of its data is fabricated. The
+ * SQLite schema mirrors the one `tests/helpers/gui-database.ts` seeds
  * (the columns the real read-only readers feature-detect), and every timestamp
  * is relative to the injected `nowMs` so the same fixture covers the 24h / 7d /
  * 30d / lifetime ranges, a compaction marker, and an empty project. The same
@@ -26,6 +28,14 @@ export const SYNTHETIC_PROVIDER_ID = "synthetic-labs";
 export const SYNTHETIC_PROVIDER_LABEL = "Synthetic Labs";
 /** Fake provider-reported amount; never the dashboard's API-equivalent cost. */
 export const SYNTHETIC_PROVIDER_AMOUNT = "42.50";
+
+/**
+ * A real public provider id used only for quota brand-presentation QA. The card
+ * label and logo resolve through the normal known-brand path; every value on the
+ * card is invented. No OpenAI client, credential, or network path is touched.
+ */
+export const SYNTHETIC_OPENAI_PROVIDER_ID = "openai";
+export const SYNTHETIC_OPENAI_PROVIDER_LABEL = "OpenAI";
 
 /** Stable synthetic ids the smoke test asserts on. */
 export const SYNTHETIC_IDS = {
@@ -526,8 +536,10 @@ export function seedSyntheticFixture(rootDir, nowMs) {
 }
 
 /**
- * One provider with two discovered accounts and a provider-reported currency
- * row. Plain DTOs only: no provider implementation, no credential, no network.
+ * Two providers, both plain DTOs: one wholly synthetic provider with two
+ * discovered accounts and a provider-reported currency row, plus one
+ * provider-scope card under a real public brand id with fake quota data. No
+ * provider implementation, credential, or network is used.
  */
 export function buildSyntheticProviderProbes(nowMs) {
   const observedAtIso = new Date(nowMs).toISOString();
@@ -589,6 +601,30 @@ export function buildSyntheticProviderProbes(nowMs) {
               metric: { kind: "component", component: "remaining_credits" },
               prominence: "primary",
             },
+          },
+        ],
+        errors: [],
+      },
+    },
+    {
+      providerId: SYNTHETIC_OPENAI_PROVIDER_ID,
+      result: {
+        attempted: true,
+        accounts: [],
+        entries: [
+          {
+            kind: "percent",
+            name: "Five hour quota",
+            percentRemaining: 55,
+            resetTimeIso: new Date(nowMs + 4 * HOUR_MS).toISOString(),
+            accounting: {
+              resultType: "quota",
+              acquisitionMethod: "remote_api",
+              ownership: "maintained",
+              authority: "provider_reported",
+              observedAtIso,
+            },
+            semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
           },
         ],
         errors: [],
