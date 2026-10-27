@@ -10,6 +10,9 @@ import {
   Switch,
 } from "solid-js";
 import type {
+  AnalyticsDimension,
+  AnalyticsEntityIdentity,
+  AnalyticsGroupSnapshot,
   DashboardHealth,
   HomeSnapshot,
   ProjectSnapshot,
@@ -18,6 +21,7 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
+import { AnalyticsTabs } from "./components/analytics-tabs";
 import { BuildMismatchStatus } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
@@ -25,6 +29,7 @@ import { QueryState, ReloadRequired } from "./components/states";
 import { createToaster, type Toaster, ToastRegion } from "./components/toast";
 import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashboard-client";
 import { RANGE_LABELS } from "./format";
+import { sameIdentity } from "./model-analytics";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
 import {
   canonicalizeLocation,
@@ -39,12 +44,16 @@ import { displayPreferencesFromValues } from "./settings-model";
 import {
   buildMismatchMessage,
   contractMismatchMessage,
+  describeError,
   isStaleAfterReconnect,
   resolveLoadState,
   shouldRefetchOnReconnect,
 } from "./view-model";
 import { HomeView, QuotaLoading, QuotaView } from "./views/home";
+import { ModelDetailView } from "./views/model";
+import { ModelsView } from "./views/models";
 import { ProjectView } from "./views/project";
+import { ProviderDetailView } from "./views/provider";
 import { SessionView } from "./views/session";
 import { SettingsView } from "./views/settings";
 import {
@@ -221,10 +230,29 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const route = () => location().route;
   // Diagnostic only: never the argument to the contract/load-state gate below.
   const buildWarning = createMemo(() => buildMismatchMessage(health()));
-  const activeScope = createMemo<ActiveViewScope>(() => {
+  const analyticsTab = (): "analytics" | "models" | undefined => {
     const name = route().name;
-    return name === "analytics" || name === "project" || name === "session" ? "analytics" : "quota";
+    if (name === "models" || name === "model" || name === "provider") return "models";
+    if (name === "analytics" || name === "project" || name === "session") return "analytics";
+    return undefined;
+  };
+  const modelsDimension = (): AnalyticsDimension | undefined => {
+    const current = route();
+    if (current.name === "models") return current.dimension;
+    if (current.name === "model" || current.name === "provider") return current.modelsGroup;
+    return undefined;
+  };
+  // Models links elsewhere in the Analytics section return to the last grouping
+  // the user chose, while the URL remains the source of truth on Models itself.
+  const [rememberedModelsDimension, setRememberedModelsDimension] =
+    createSignal<AnalyticsDimension>("model");
+  createEffect(() => {
+    const dimension = modelsDimension();
+    if (dimension !== undefined) setRememberedModelsDimension(dimension);
   });
+  const activeScope = createMemo<ActiveViewScope>(() =>
+    analyticsTab() === undefined ? "quota" : "analytics",
+  );
 
   async function signalActiveView(scope: ActiveViewScope): Promise<void> {
     try {
@@ -289,6 +317,17 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     if (window.location.pathname + window.location.search === canonical) return;
     window.history.pushState(null, "", canonical);
     writeStoredRange(browserStorage(), next.range);
+    setLocation(next);
+  }
+
+  /** Grouping is view state, so it replaces the current history entry, not adds one. */
+  function replaceModelsDimension(dimension: AnalyticsDimension): void {
+    const current = location();
+    if (current.route.name !== "models") return;
+    const next: Location = { ...current, route: { name: "models", dimension } };
+    const path = formatPath(next.route, next.range);
+    if (window.location.pathname + window.location.search === path) return;
+    window.history.replaceState(null, "", path);
     setLocation(next);
   }
 
@@ -411,13 +450,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
             <a
               class="qg-topbar__link qg-nav-icon"
               aria-label="Analytics"
-              aria-current={
-                route().name === "analytics" ||
-                route().name === "project" ||
-                route().name === "session"
-                  ? "page"
-                  : undefined
-              }
+              data-section-active={analyticsTab() === undefined ? undefined : "true"}
               href={formatPath({ name: "analytics" }, range())}
               onFocus={() => setNavTooltip("analytics")}
               onBlur={() => setNavTooltip(undefined)}
@@ -473,19 +506,26 @@ export function App(props: { client: DashboardClient }): JSX.Element {
       </header>
       <div class="qg-frame">
         <header class="qg-topbar">
-          <span class="qg-frame-tab">
-            {route().name === "home"
-              ? "Quota"
-              : route().name === "analytics"
-                ? "Analytics"
-                : route().name === "project"
-                  ? "Project"
-                  : route().name === "session"
-                    ? "Session"
-                    : route().name === "settings"
-                      ? "Settings"
-                      : "Dashboard"}
-          </span>
+          <Show
+            when={analyticsTab()}
+            fallback={
+              <span class="qg-frame-tab">
+                {route().name === "home"
+                  ? "Quota"
+                  : route().name === "settings"
+                    ? "Settings"
+                    : "Dashboard"}
+              </span>
+            }
+          >
+            {(tab) => (
+              <AnalyticsTabs
+                active={tab()}
+                range={range()}
+                modelsDimension={modelsDimension() ?? rememberedModelsDimension()}
+              />
+            )}
+          </Show>
           <Show when={routeShowsRangeSelector(route())}>
             <SegmentedControl
               class="qg-range"
@@ -523,6 +563,47 @@ export function App(props: { client: DashboardClient }): JSX.Element {
               <Match when={route().name === "analytics"}>
                 <AnalyticsRoute
                   client={props.client}
+                  range={range()}
+                  reloadToken={reloadToken()}
+                  reconnectEpoch={reconnectEpoch()}
+                  connection={connection()}
+                  onStale={setRouteStale}
+                />
+              </Match>
+
+              <Match when={route().name === "models"}>
+                <ModelsRoute
+                  client={props.client}
+                  dimension={(route() as { dimension: AnalyticsDimension }).dimension}
+                  onDimensionChange={replaceModelsDimension}
+                  range={range()}
+                  reloadToken={reloadToken()}
+                  reconnectEpoch={reconnectEpoch()}
+                  connection={connection()}
+                  onStale={setRouteStale}
+                />
+              </Match>
+
+              <Match when={route().name === "model"}>
+                <GroupDetailRoute
+                  client={props.client}
+                  entity="model"
+                  identity={(route() as { identity: AnalyticsEntityIdentity }).identity}
+                  modelsGroup={(route() as { modelsGroup?: AnalyticsDimension }).modelsGroup}
+                  range={range()}
+                  reloadToken={reloadToken()}
+                  reconnectEpoch={reconnectEpoch()}
+                  connection={connection()}
+                  onStale={setRouteStale}
+                />
+              </Match>
+
+              <Match when={route().name === "provider"}>
+                <GroupDetailRoute
+                  client={props.client}
+                  entity="provider"
+                  identity={(route() as { identity: AnalyticsEntityIdentity }).identity}
+                  modelsGroup={(route() as { modelsGroup?: AnalyticsDimension }).modelsGroup}
                   range={range()}
                   reloadToken={reloadToken()}
                   reconnectEpoch={reconnectEpoch()}
@@ -703,6 +784,199 @@ function AnalyticsRoute(props: {
         state={state()}
         label="Loading analytics"
         render={(snapshot) => <HomeView snapshot={snapshot} range={snapshot.range} />}
+      />
+    </>
+  );
+}
+
+function ModelsRoute(props: {
+  client: DashboardClient;
+  dimension: AnalyticsDimension;
+  onDimensionChange: (dimension: AnalyticsDimension) => void;
+  range: RangeKey;
+  reloadToken: number;
+  reconnectEpoch: number;
+  connection: ConnectionState;
+  onStale: (stale: boolean) => void;
+}): JSX.Element {
+  const query = createQuery<AnalyticsGroupSnapshot>(() =>
+    props.client.groups({ range: props.range, dimension: props.dimension }),
+  );
+  const [freshEpoch, setFreshEpoch] = createSignal(0);
+
+  createEffect(() => {
+    const epoch = props.reconnectEpoch;
+    const range = props.range;
+    const dimension = props.dimension;
+    const token = props.reloadToken;
+    void range;
+    void dimension;
+    void token;
+    void query.run().then((applied) => {
+      if (applied) setFreshEpoch(epoch);
+    });
+  });
+
+  // A grouping change must never leave the previous dimension's rows under the
+  // new heading. A range change keeps the old payload while it refreshes, as on
+  // Analytics and Project.
+  const displayed = () => {
+    const data = query.data();
+    return data !== undefined && data.dimension === props.dimension ? data : undefined;
+  };
+  const rangeFailure = () =>
+    describeRangeFailure(displayed(), props.range, query.loading(), query.error() !== undefined);
+  const busy = createBusyIndicator();
+  createEffect(() => {
+    const data = query.data();
+    busy.update({
+      active:
+        query.loading() &&
+        (data === undefined || data.dimension !== props.dimension || data.range !== props.range),
+      hasData: displayed() !== undefined,
+    });
+  });
+  onCleanup(() => busy.dispose());
+  createEffect(() => {
+    props.onStale(
+      query.error() !== undefined ||
+        query.data()?.stale === true ||
+        isStaleAfterReconnect(props.reconnectEpoch, freshEpoch()) ||
+        props.connection !== "live",
+    );
+  });
+
+  return (
+    <>
+      <BusyOverlay indicator={busy} label="analytics" />
+      <Show when={rangeFailure()}>
+        {(failure) => <RangeFailureNotice failure={failure()} onRetry={() => void query.run()} />}
+      </Show>
+      <ModelsView
+        snapshot={displayed()}
+        dimension={props.dimension}
+        loading={query.loading()}
+        error={query.error() === undefined ? undefined : describeError(query.error())}
+        onRetry={() => void query.run()}
+        onDimensionChange={props.onDimensionChange}
+      />
+    </>
+  );
+}
+
+function GroupDetailRoute(props: {
+  client: DashboardClient;
+  entity: AnalyticsDimension;
+  identity: AnalyticsEntityIdentity;
+  modelsGroup?: AnalyticsDimension;
+  range: RangeKey;
+  reloadToken: number;
+  reconnectEpoch: number;
+  connection: ConnectionState;
+  onStale: (stale: boolean) => void;
+}): JSX.Element {
+  const grouping = () => (props.entity === "model" ? "provider" : "model");
+  const query = createQuery<AnalyticsGroupSnapshot>(() =>
+    props.client.groups({
+      range: props.range,
+      dimension: grouping(),
+      filter: { dimension: props.entity, identity: props.identity },
+    }),
+  );
+  const [freshEpoch, setFreshEpoch] = createSignal(0);
+
+  createEffect(() => {
+    const epoch = props.reconnectEpoch;
+    const range = props.range;
+    const entity = props.entity;
+    const kind = props.identity.kind;
+    const id = props.identity.kind === "known" ? props.identity.id : "";
+    const token = props.reloadToken;
+    void range;
+    void entity;
+    void kind;
+    void id;
+    void token;
+    void query.run().then((applied) => {
+      if (applied) setFreshEpoch(epoch);
+    });
+  });
+
+  // The echoed filter proves the payload belongs to this exact raw identity.
+  const displayed = () => {
+    const data = query.data();
+    if (data === undefined || data.dimension !== grouping()) return undefined;
+    const filter = data.filter;
+    if (
+      filter === undefined ||
+      filter.dimension !== props.entity ||
+      !sameIdentity(filter.identity, props.identity)
+    )
+      return undefined;
+    return data;
+  };
+  const state = () =>
+    resolveLoadState({
+      data: displayed(),
+      error: query.error(),
+      // A retained payload from another identity is not this route's data.
+      // Keep the first-load skeleton during that hand-off, but once the
+      // hand-off has failed, surface the error instead of spinning forever.
+      loading:
+        query.loading() ||
+        (query.error() === undefined && query.data() !== undefined && displayed() === undefined),
+    });
+  const rangeFailure = () =>
+    describeRangeFailure(displayed(), props.range, query.loading(), query.error() !== undefined);
+  const busy = createBusyIndicator();
+  createEffect(() => {
+    const data = query.data();
+    busy.update({
+      active:
+        query.loading() &&
+        (data === undefined ||
+          data.dimension !== grouping() ||
+          data.filter === undefined ||
+          !sameIdentity(data.filter.identity, props.identity)),
+      hasData: displayed() !== undefined,
+    });
+  });
+  onCleanup(() => busy.dispose());
+  createEffect(() => {
+    props.onStale(
+      query.error() !== undefined ||
+        displayed()?.stale === true ||
+        isStaleAfterReconnect(props.reconnectEpoch, freshEpoch()) ||
+        props.connection !== "live",
+    );
+  });
+
+  return (
+    <>
+      <BusyOverlay indicator={busy} label="analytics" />
+      <Show when={rangeFailure()}>
+        {(failure) => <RangeFailureNotice failure={failure()} onRetry={() => void query.run()} />}
+      </Show>
+      <QueryState
+        state={state()}
+        label={`Loading ${props.entity}`}
+        render={(snapshot) =>
+          props.entity === "model" ? (
+            <ModelDetailView
+              snapshot={snapshot}
+              identity={props.identity}
+              range={snapshot.range}
+              modelsGroup={props.modelsGroup}
+            />
+          ) : (
+            <ProviderDetailView
+              snapshot={snapshot}
+              identity={props.identity}
+              range={snapshot.range}
+              modelsGroup={props.modelsGroup}
+            />
+          )
+        }
       />
     </>
   );

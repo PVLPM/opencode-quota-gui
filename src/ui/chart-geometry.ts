@@ -85,7 +85,10 @@ export interface UsageGeometry {
   cacheRatePath: string;
   /** Fixed 0..100% right-axis ticks. */
   cacheRateTicks: AxisTick[];
+  /** Highest data value; never changed by presentation headroom. */
   yMax: number;
+  /** Nice axis ceiling used to place bars and ticks. */
+  scaleMax: number;
   ticks: AxisTick[];
   pointIndexes: number[];
   labelIndexes: number[];
@@ -117,27 +120,96 @@ export function niceTickStep(span: number, targetTicks: number): number {
   return step * magnitude;
 }
 
-export function buildTicks(yMax: number, ticks: number, plot: PlotRect): AxisTick[] {
+export function buildTicks(
+  yMax: number,
+  ticks: number,
+  plot: PlotRect,
+  stepOverride?: number,
+): AxisTick[] {
   if (yMax <= 0) return [{ value: 0, y: plot.bottom }];
-  const step = niceTickStep(yMax, ticks);
+  const step =
+    stepOverride !== undefined && stepOverride > 0 ? stepOverride : niceTickStep(yMax, ticks);
   const result: AxisTick[] = [];
-  for (let value = 0; value <= yMax; value += step) {
+  for (let value = 0; value <= yMax + 1e-9; value += step) {
     result.push({ value, y: plot.bottom - (value / yMax) * plot.height });
   }
   return result;
 }
 
-/** At most `max` evenly spaced label positions, always including both ends. */
-export function pickLabelIndexes(count: number, max: number): number[] {
-  if (count <= 0) return [];
-  if (count <= max) return Array.from({ length: count }, (_, index) => index);
-  const step = (count - 1) / (max - 1);
-  const indexes = new Set<number>();
-  for (let index = 0; index < max; index += 1) indexes.add(Math.round(index * step));
-  indexes.add(0);
-  indexes.add(count - 1);
-  return [...indexes].sort((a, b) => a - b);
+/** A shared 1/2/5 scale whose top tick always sits above the data. */
+export interface NiceScale {
+  max: number;
+  step: number;
 }
+
+/** Minimum clear band above the tallest bar, in chart units. */
+const MIN_HEADROOM_UNITS = 8;
+/** Very dense stacks still get a sensible ceiling, not a half-empty plot. */
+const MAX_HEADROOM_RATIO = 0.3;
+
+/**
+ * The next 1/2/5 tick ceiling above `value`.
+ *
+ * When `segmentCount` and `plotHeight` are supplied, the extra headroom covers
+ * the external gap between every adjacent segment plus a clear band. By default
+ * an exact multiple still moves to the next tick, so a stacked top tick never
+ * sits on the data; `allowExact` opts a measured line maximum into being the
+ * top tick itself.
+ */
+export function niceScale(
+  value: number,
+  options: {
+    targetTicks?: number;
+    segmentCount?: number;
+    plotHeight?: number;
+    /** Keep an exact measured maximum as the top tick (Session lines). */
+    allowExact?: boolean;
+    /** Token axes stay on whole-token ticks, never duplicate formatted labels. */
+    minStep?: number;
+  } = {},
+): NiceScale {
+  if (!Number.isFinite(value) || value <= 0) return { max: 0, step: 0 };
+  const targetTicks = Math.max(2, Math.floor(options.targetTicks ?? 8));
+  const gaps = Math.max(0, (options.segmentCount ?? 1) - 1);
+  const extraRatio =
+    options.plotHeight === undefined
+      ? 0
+      : Math.min(MAX_HEADROOM_RATIO, (gaps + MIN_HEADROOM_UNITS) / Math.max(options.plotHeight, 1));
+  const target = value * (1 + extraRatio);
+  const step = Math.max(options.minStep ?? 0, niceTickStep(target, targetTicks));
+  let max = Math.ceil(target / step - 1e-9) * step;
+  if (max < value - 1e-9) max += step;
+  if (!options.allowExact && max <= value + 1e-9) max += step;
+  return { max, step };
+}
+
+/** The common ceiling for stacked usage and model bars. */
+export function stackedScale(value: number, plotHeight: number, segmentCount: number): NiceScale {
+  return niceScale(value, { targetTicks: 8, plotHeight, segmentCount, minStep: 1 });
+}
+
+/** How many buckets a label occupies; labels closer than this would collide. */
+export function axisLabelStride(slot: number, labelWidth: number): number {
+  return Math.max(1, Math.ceil(labelWidth / Math.max(slot, 1)));
+}
+
+/**
+ * Constant-stride label indexes anchored on the first bucket.
+ *
+ * The final bucket is labelled only when it lands on the stride. Otherwise it
+ * is omitted rather than printed at a shorter, misleading interval. At desktop
+ * widths the stride is one, so every bucket — including both edges — is shown.
+ */
+export function axisLabelIndexes(count: number, slot: number, labelWidth: number): number[] {
+  if (count <= 0) return [];
+  const stride = axisLabelStride(slot, labelWidth);
+  const indexes: number[] = [];
+  for (let index = 0; index < count; index += stride) indexes.push(index);
+  return indexes;
+}
+
+const DATE_LABEL_WIDTH = 40;
+const STEP_LABEL_WIDTH = 24;
 
 /**
  * External presentation gaps sit between rounded segments, never on top of
@@ -155,17 +227,30 @@ export function buildUsageGeometry(
   const count = buckets.length;
   const slot = count > 0 ? plot.width / count : plot.width;
   const yMaxRaw = buckets.reduce((max, bucket) => Math.max(max, bucket.tokens.total), 0);
-  const yMax = yMaxRaw > 0 ? yMaxRaw : 1;
-  const yFor = (value: number) => plot.bottom - (value / yMax) * plot.height;
-  const slotX = (index: number) => plot.left + index * slot;
-  const bucketIndexAt = (x: number) =>
-    count === 0 ? 0 : Math.min(count - 1, Math.max(0, Math.floor((x - plot.left) / slot)));
 
   // Range-local eligibility: a category whose total is zero in this exact
   // range disappears completely, and returns when another range has activity.
   const visibleCategories = TOKEN_CATEGORIES.filter((category) =>
     buckets.some((bucket) => bucket.tokens[category.key] > 0),
   );
+  const maxBarSegments = buckets.reduce(
+    (max, bucket) =>
+      Math.max(
+        max,
+        visibleCategories.reduce(
+          (segmentCount, category) => segmentCount + (bucket.tokens[category.key] > 0 ? 1 : 0),
+          0,
+        ),
+      ),
+    0,
+  );
+  const scale =
+    yMaxRaw > 0 ? stackedScale(yMaxRaw, plot.height, maxBarSegments) : { max: 0, step: 0 };
+  const scaleMax = scale.max > 0 ? scale.max : 1;
+  const yFor = (value: number) => plot.bottom - (value / scaleMax) * plot.height;
+  const slotX = (index: number) => plot.left + index * slot;
+  const bucketIndexAt = (x: number) =>
+    count === 0 ? 0 : Math.min(count - 1, Math.max(0, Math.floor((x - plot.left) / slot)));
   // A fixed fraction of the slot stays truthful at every density: dense
   // lifetime ranges keep subpixel, non-overlapping bars, and sparse ranges do
   // not get an artificial width floor or cap.
@@ -254,9 +339,10 @@ export function buildUsageGeometry(
     cacheRatePath,
     cacheRateTicks,
     yMax: yMaxRaw,
-    ticks: buildTicks(yMaxRaw, 4, plot),
+    scaleMax,
+    ticks: buildTicks(yMaxRaw > 0 ? scale.max : 0, 8, plot, scale.step),
     pointIndexes: buckets.map((_, index) => index),
-    labelIndexes: pickLabelIndexes(count, Math.max(2, Math.min(6, Math.floor(plot.width / 64)))),
+    labelIndexes: axisLabelIndexes(count, slot, DATE_LABEL_WIDTH),
     slotX,
     bucketIndexAt,
   };
@@ -295,7 +381,10 @@ export interface SessionSeries {
   points: SessionSeriesPoint[];
   linePath: string;
   areaPath: string;
+  /** Highest measured value; never changed by presentation headroom. */
   domainMax: number;
+  /** Nice axis ceiling used to place points and ticks. */
+  scaleMax: number;
   ticks: AxisTick[];
 }
 
@@ -436,7 +525,11 @@ function buildSessionSeries(
 ): SessionSeries {
   const measuredMax = values.reduce((max, point) => Math.max(max, point.value), 0);
   const domainMax = domainMaxOverride ?? measuredMax;
-  const scaleMax = domainMax > 0 ? domainMax : 1;
+  const scale =
+    domainMax > 0
+      ? niceScale(domainMax, { targetTicks: 4, allowExact: true, minStep: 1 })
+      : { max: 0, step: 0 };
+  const scaleMax = scale.max > 0 ? scale.max : 1;
   const points: SessionSeriesPoint[] = values.map((point) => ({
     ...point,
     y: plot.bottom - (point.value / scaleMax) * plot.height,
@@ -447,7 +540,8 @@ function buildSessionSeries(
     linePath,
     areaPath: toAreaPath(points, linePath, plot.bottom),
     domainMax,
-    ticks: buildTicks(domainMax, 4, plot),
+    scaleMax,
+    ticks: buildTicks(scale.max, 4, plot, scale.step),
   };
 }
 
@@ -559,7 +653,11 @@ export function buildSessionChartGeometry(
     cumulativeTicks: tree.ticks,
     compaction,
     stepX,
-    labelIndexes: pickLabelIndexes(count, Math.max(2, Math.min(6, Math.floor(plot.width / 64)))),
+    labelIndexes: axisLabelIndexes(
+      count,
+      count > 1 ? plot.width / (count - 1) : plot.width,
+      STEP_LABEL_WIDTH,
+    ),
   };
 }
 

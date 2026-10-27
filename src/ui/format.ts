@@ -117,6 +117,55 @@ export function formatBucketTick(ms: number, unit: "hour" | "day", timeZone: str
   return unit === "hour" ? formatClock(ms, timeZone) : formatDay(ms, timeZone);
 }
 
+/** The last instant actually included by a non-empty half-open boundary. */
+function lastIncludedMs(startMs: number, endMs: number): number {
+  return endMs > startMs ? endMs - 1 : endMs;
+}
+
+/** The inclusive end label for a half-open bucket, including a 23/25-hour DST day. */
+export function formatBucketEnd(
+  startMs: number,
+  endMs: number,
+  unit: "hour" | "day",
+  timeZone: string,
+): string {
+  return formatBucketTick(lastIncludedMs(startMs, endMs), unit, timeZone);
+}
+
+/**
+ * A bucket is half-open, but its printed label is not a duration claim.
+ *
+ * Day labels compare the exclusive end at `endMs - 1ms`, so a completed local
+ * day prints one date; subtracting one millisecond is DST-aware and still
+ * collapses a 23/25-hour day. Hour labels keep their existing range semantics.
+ * The supplied boundaries are never changed.
+ */
+export function formatBucketRange(
+  startMs: number,
+  endMs: number,
+  unit: "hour" | "day",
+  timeZone: string,
+  separator = " – ",
+): string {
+  const start = formatBucketTick(startMs, unit, timeZone);
+  const endMsForLabel = unit === "day" ? lastIncludedMs(startMs, endMs) : endMs;
+  const end = formatBucketTick(endMsForLabel, unit, timeZone);
+  return start === end ? start : `${start}${separator}${end}`;
+}
+
+/**
+ * A clear caption for an axis whose last bucket is not labelled. It keeps the
+ * range end visible at narrow widths without inventing an irregular tick.
+ */
+export function axisRangeCaption(
+  endText: string,
+  count: number,
+  labelIndexes: readonly number[],
+): string | undefined {
+  if (count <= 0 || labelIndexes.at(-1) === count - 1) return undefined;
+  return `Through ${endText}`;
+}
+
 export function formatRunway(
   runway:
     | { kind: "before_reset"; projectedAtIso: string }

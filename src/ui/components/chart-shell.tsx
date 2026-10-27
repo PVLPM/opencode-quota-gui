@@ -20,6 +20,8 @@ export interface ChartSummaryItem {
   emphasis?: "primary" | "secondary";
   /** Exact unformatted value for a hover title, when one is useful. */
   title?: string;
+  /** Visible qualification below the value, e.g. Partial estimate. */
+  note?: JSX.Element;
 }
 
 export function ChartSummary(props: { items: ChartSummaryItem[] }): JSX.Element {
@@ -39,6 +41,9 @@ export function ChartSummary(props: { items: ChartSummaryItem[] }): JSX.Element 
             >
               {item.value}
             </span>
+            <Show when={item.note}>
+              <span class="qg-chart-shell__note">{item.note}</span>
+            </Show>
           </div>
         )}
       </For>

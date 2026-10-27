@@ -8,14 +8,26 @@ export function createChartLayout(defaults: ChartSize): {
 } {
   const [width, setWidth] = createSignal(defaults.width);
   let container: HTMLDivElement | undefined;
-  onMount(() => {
-    if (!container || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(([entry]) => {
+  let observer: ResizeObserver | undefined;
+
+  function observe(element: HTMLDivElement | undefined): void {
+    observer?.disconnect();
+    observer = undefined;
+    container = element;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    observer = new ResizeObserver(([entry]) => {
       if (entry && entry.contentRect.width > 0) setWidth(entry.contentRect.width);
     });
-    observer.observe(container);
-    onCleanup(() => observer.disconnect());
+    observer.observe(element);
+  }
+
+  // A chart that first renders a skeleton attaches its ref after mount, so the
+  // ref callback owns observation; onMount only covers eager first renders.
+  onMount(() => {
+    observe(container);
+    onCleanup(() => observer?.disconnect());
   });
+
   return {
     size: {
       get width() {
@@ -27,7 +39,7 @@ export function createChartLayout(defaults: ChartSize): {
       padding: defaults.padding,
     },
     ref: (element) => {
-      container = element;
+      if (element !== container) observe(element);
     },
   };
 }

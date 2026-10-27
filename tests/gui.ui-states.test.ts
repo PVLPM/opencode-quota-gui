@@ -16,7 +16,7 @@ import type {
 import { DASHBOARD_CONTRACT_VERSION } from "../src/contracts/dashboard";
 import { buildRowKey, composeRowId } from "../src/contracts/identity";
 import { OPENAI_CREDITS_INFO, OPENAI_RESETS_INFO } from "../src/contracts/openai-quota";
-import type { RangeKey } from "../src/contracts/ranges";
+import { planRangeBuckets, type RangeKey } from "../src/contracts/ranges";
 import { buildSessionChartGeometry, buildUsageGeometry } from "../src/ui/chart-geometry";
 import type { Toaster } from "../src/ui/components/toast";
 import {
@@ -30,7 +30,9 @@ import {
   parseSettingsWriteResult,
 } from "../src/ui/dashboard-client";
 import {
+  axisRangeCaption,
   formatApiEquivalentCost,
+  formatBucketRange,
   formatBucketTick,
   formatPercent,
   formatPercentExact,
@@ -400,6 +402,26 @@ describe("section state machine", () => {
     expect(formatBucketTick(midnight, "hour", "UTC")).toBe("00:00");
     // The same instant in a host zone west of UTC is still the previous evening.
     expect(formatBucketTick(midnight, "hour", "America/New_York")).toBe("20:00");
+    expect(
+      formatBucketRange(
+        Date.UTC(2026, 9, 27),
+        Date.UTC(2026, 9, 27, 23, 59, 59, 999),
+        "day",
+        "UTC",
+      ),
+    ).toBe("27 Oct");
+    expect(formatBucketRange(Date.UTC(2026, 9, 27), Date.UTC(2026, 9, 28), "day", "UTC")).toBe(
+      "27 Oct",
+    );
+    expect(
+      formatBucketRange(Date.UTC(2026, 9, 27, 12), Date.UTC(2026, 9, 28, 12), "day", "UTC"),
+    ).toBe("27 Oct – 28 Oct");
+    expect(
+      formatBucketRange(Date.UTC(2026, 9, 27, 12), Date.UTC(2026, 9, 28, 12), "day", "UTC", " to "),
+    ).toBe("27 Oct to 28 Oct");
+    expect(axisRangeCaption("27 Oct", 8, [0, 2, 4, 6])).toBe("Through 27 Oct");
+    expect(axisRangeCaption("27 Oct", 8, [0, 1, 2, 3, 4, 5, 6, 7])).toBeUndefined();
+    expect(axisRangeCaption("27 Oct", 0, [])).toBeUndefined();
     expect(formatTimestamp(midnight, "UTC")).toBe("19/10/2026, 00:00:00");
     expect(formatTimestamp(midnight, "UTC")).not.toContain("UTC");
 
@@ -409,6 +431,60 @@ describe("section state machine", () => {
     expect(formatTimestampMinutes(midnight, "America/New_York")).toBe("18/10/2026, 20:00");
     // The detailed formatter used by Session tooltips keeps its seconds.
     expect(formatTimestamp(polled, "Europe/Istanbul")).toBe("22/10/2026, 13:39:22");
+  });
+
+  it("collapses planned same-day buckets without shifting the half-open end", () => {
+    const nowMs = Date.UTC(2026, 9, 27, 12, 30);
+    const lifetime = planRangeBuckets("lifetime", nowMs, Date.UTC(2026, 9, 27, 9, 15), {
+      timeZone: "UTC",
+    });
+    expect(lifetime).toEqual([{ startMs: Date.UTC(2026, 9, 27), endMs: nowMs }]);
+    const only = lifetime[0] as (typeof lifetime)[number];
+    expect(formatBucketRange(only.startMs, only.endMs, "day", "UTC")).toBe("27 Oct");
+    // The exclusive end is exactly the clipped window end, not end-of-day.
+    expect(only.endMs).toBe(nowMs);
+    expect(only.endMs).toBeGreaterThan(only.startMs);
+
+    const hourly = planRangeBuckets("24h", nowMs, undefined, { timeZone: "UTC" });
+    expect(hourly).toHaveLength(25);
+    const first = hourly[0] as (typeof hourly)[number];
+    const last = hourly.at(-1) as (typeof hourly)[number];
+    // Planned hour buckets cross an hour boundary, so they stay a range.
+    expect(formatBucketRange(first.startMs, first.endMs, "hour", "UTC")).toBe("12:30 – 13:00");
+    expect(formatBucketRange(last.startMs, last.endMs, "hour", "UTC")).toBe("12:00 – 12:30");
+    expect(first.startMs).toBe(nowMs - DAY_MS);
+    expect(last.endMs).toBe(nowMs);
+    for (let index = 0; index < hourly.length - 1; index += 1) {
+      expect(hourly[index]?.endMs).toBe(hourly[index + 1]?.startMs);
+    }
+
+    const week = planRangeBuckets("7d", nowMs, undefined, { timeZone: "UTC" });
+    const priorDay = week.at(-2) as (typeof week)[number];
+    expect(priorDay.startMs).toBe(Date.UTC(2026, 9, 26));
+    expect(priorDay.endMs).toBe(Date.UTC(2026, 9, 27));
+    // A completed local day prints one date; the exclusive boundary is unchanged.
+    expect(formatBucketRange(priorDay.startMs, priorDay.endMs, "day", "UTC")).toBe("26 Oct");
+    expect(priorDay).toEqual({
+      startMs: Date.UTC(2026, 9, 26),
+      endMs: Date.UTC(2026, 9, 27),
+    });
+  });
+
+  it("uses endMs - 1 for a completed DST day from the real planner", () => {
+    const nowMs = Date.UTC(2026, 10, 3, 12);
+    const buckets = planRangeBuckets("7d", nowMs, undefined, {
+      timeZone: "America/New_York",
+    });
+    const dstDay = buckets.find(
+      (bucket) => formatBucketTick(bucket.startMs, "day", "America/New_York") === "1 Nov",
+    );
+    expect(dstDay).toBeDefined();
+    const day = dstDay as (typeof buckets)[number];
+    // The fall-back local day is 25 hours long; subtracting a fixed 24h would miss.
+    expect(day.endMs - day.startMs).toBe(25 * 3_600_000);
+    const before = { ...day };
+    expect(formatBucketRange(day.startMs, day.endMs, "day", "America/New_York")).toBe("1 Nov");
+    expect(day).toEqual(before);
   });
 
   it("wires full and bare percentage labels for both display modes", async () => {
@@ -1299,7 +1375,7 @@ describe("usage chart", () => {
     dispose();
   });
 
-  it("reduces axis label density at narrow container widths", () => {
+  it("uses a constant narrow label stride and omits an unaligned final bucket", () => {
     const buckets = Array.from({ length: 24 }, (_, index) => ({
       startMs: NOW + index * HOUR_MS,
       endMs: NOW + (index + 1) * HOUR_MS,
@@ -1310,9 +1386,13 @@ describe("usage chart", () => {
       height: 220,
       padding: { top: 12, right: 12, bottom: 24, left: 48 },
     });
-    expect(geometry.labelIndexes.length).toBeLessThanOrEqual(3);
-    expect(geometry.labelIndexes[0]).toBe(0);
-    expect(geometry.labelIndexes.at(-1)).toBe(23);
+    expect(geometry.labelIndexes).toEqual([0, 5, 10, 15, 20]);
+    const gaps = geometry.labelIndexes
+      .slice(1)
+      .map((value, index) => value - (geometry.labelIndexes[index] as number));
+    expect(gaps).toEqual([5, 5, 5, 5]);
+    // The final bucket is three steps away, not a misleading one-step gap.
+    expect(23 - (geometry.labelIndexes.at(-1) as number)).toBeLessThan(gaps[0] as number);
   });
   const stackedBuckets = [
     {
@@ -5308,11 +5388,11 @@ describe("styles and dependency boundaries", () => {
       expect(analyticsReads).toBe(1);
       expect(renderGraph.textOf(root)).toContain("Total tokens");
       expect(renderGraph.textOf(root)).not.toContain("Five hour window");
-      expect(
-        renderGraph
-          .elementsNamed(root, "a")
-          .find((node) => node.props["aria-label"] === "Analytics")?.props["aria-current"],
-      ).toBe("page");
+      const analyticsSection = renderGraph
+        .elementsNamed(root, "a")
+        .find((node) => node.props["aria-label"] === "Analytics");
+      expect(analyticsSection?.props["aria-current"]).toBeUndefined();
+      expect(analyticsSection?.props["data-section-active"]).toBe("true");
       const navigate = async (path: string) => {
         browser.follow(path);
         await settle();

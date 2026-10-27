@@ -5,7 +5,10 @@ import { buildUsageGeometry, cacheHitRate, DEFAULT_USAGE_SIZE } from "../chart-g
 import { createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
 import {
+  axisRangeCaption,
   formatApiEquivalentCost,
+  formatBucketEnd,
+  formatBucketRange,
   formatBucketTick,
   formatExactCount,
   formatPercentExact,
@@ -90,6 +93,16 @@ export function UsageChart(props: {
       )
       .join(", ");
     return `${formatBucketTick(bucket.startMs, props.usage.bucketUnit, timeZone())}: total ${formatExactCount(bucket.tokens.total)} tokens${categories.length > 0 ? `, ${categories}` : ""}, cache rate ${rateText(rate)}`;
+  };
+  const rangeEndCaption = (): string | undefined => {
+    const buckets = props.usage.buckets;
+    const last = buckets.at(-1);
+    if (!last) return undefined;
+    return axisRangeCaption(
+      formatBucketEnd(last.startMs, last.endMs, props.usage.bucketUnit, timeZone()),
+      buckets.length,
+      geometry().labelIndexes,
+    );
   };
 
   return (
@@ -309,8 +322,12 @@ export function UsageChart(props: {
               >
                 <p class="qg-tooltip__head">
                   <span>
-                    {formatBucketTick(bucket().startMs, props.usage.bucketUnit, timeZone())} –{" "}
-                    {formatBucketTick(bucket().endMs, props.usage.bucketUnit, timeZone())}
+                    {formatBucketRange(
+                      bucket().startMs,
+                      bucket().endMs,
+                      props.usage.bucketUnit,
+                      timeZone(),
+                    )}
                   </span>
                   <span class="qg-tooltip__total">{formatExactCount(bucket().tokens.total)}</span>
                 </p>
@@ -338,6 +355,10 @@ export function UsageChart(props: {
             )}
           </Show>
         </div>
+
+        <Show when={rangeEndCaption()}>
+          {(caption) => <p class="qg-chart__axis-caption">{caption()}</p>}
+        </Show>
 
         <div class="sr-only">
           <table>

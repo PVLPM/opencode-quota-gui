@@ -106,7 +106,7 @@ export function SessionView(props: {
                   <span
                     class="qg-node__name"
                     title={node.title}
-                    style={{ "padding-left": `${node.depth * 16}px` }}
+                    style={{ "--qg-node-depth": String(node.depth) }}
                   >
                     {node.title}
                   </span>

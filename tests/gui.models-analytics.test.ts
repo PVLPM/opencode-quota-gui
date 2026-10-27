@@ -1,0 +1,1906 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { createServer, type ViteDevServer } from "vite";
+import solid from "vite-plugin-solid";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { encodeAnalyticsEntityToken } from "../src/contracts/analytics-entity";
+import type {
+  AnalyticsDimension,
+  AnalyticsEntityIdentity,
+  AnalyticsGroupSnapshot,
+  DashboardEvent,
+} from "../src/contracts/dashboard";
+import type { RangeKey } from "../src/contracts/ranges";
+import { API_EQUIVALENT_TOOLTIP, identityLabel } from "../src/ui/model-analytics";
+import { formatPath, parseLocation } from "../src/ui/routing";
+import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
+import type { TestEvent, TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
+import {
+  costed,
+  DAY_MS,
+  homeSnapshot,
+  NOW,
+  projectSnapshot,
+  sessionSnapshot,
+  settingsSnapshot,
+  usage,
+} from "./fixtures/gui-ui-fixtures.js";
+import {
+  known,
+  modelAlphaSnapshot,
+  modelNoRateSnapshot,
+  modelSnapshot,
+  providerAliasSnapshot,
+  providerFallbackSnapshot,
+  providerOpenAISnapshot,
+  providerSnapshot,
+  sameDayModelSnapshot,
+  unknownIdentity,
+  withRange,
+  zeroSnapshot,
+} from "./fixtures/model-analytics-fixtures";
+
+/**
+ * Focused rendered contract for the Models surfaces.
+ *
+ * Real Solid components run on the in-memory renderer, so keyboard focus,
+ * list sorting and the relationship between the chart and the breakdown are
+ * exercised as shipped rather than inferred from string snapshots.
+ */
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const rendererPath = fileURLToPath(new URL("./fixtures/gui-test-renderer.ts", import.meta.url));
+const solidWebShimPath = fileURLToPath(new URL("./fixtures/gui-solid-web.ts", import.meta.url));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+interface RenderGraph {
+  createComponent: (component: unknown, props: unknown) => unknown;
+  createSignal: <T>(value: T) => [() => T, (next: T | ((previous: T) => T)) => T];
+  mount: (code: () => unknown, root: TestNode) => () => void;
+  createTestRoot: () => TestNode;
+  textOf: (node: TestNode) => string;
+  elementsNamed: (node: TestNode, tag: string) => TestNode[];
+  listenerOf: (node: TestNode, name: string) => TestListener | undefined;
+}
+
+let server: ViteDevServer | undefined;
+let graph: RenderGraph;
+let modelsViewModule: Record<string, unknown>;
+let modelDetailModule: Record<string, unknown>;
+let providerDetailModule: Record<string, unknown>;
+let appModule: Record<string, unknown>;
+
+beforeAll(async () => {
+  const rendering = await createServer({
+    configFile: false,
+    root: repoRoot,
+    plugins: [
+      {
+        name: "tooltip-render-boundary",
+        enforce: "pre",
+        transform(_code, id) {
+          if (id.replaceAll("\\", "/").endsWith("/overlays/tooltip/tooltip.tsx"))
+            return "export function Tooltip(props) { return props.children }";
+        },
+      },
+      solid({
+        include: [...SOLID_JSX_SOURCES],
+        solid: { generate: "universal", moduleName: "@gui-test-renderer" },
+      }),
+    ],
+    resolve: {
+      alias: [
+        { find: "@gui-test-renderer", replacement: rendererPath },
+        {
+          find: /^solid-js$/,
+          replacement: path.join(repoRoot, "node_modules", "solid-js", "dist", "solid.js"),
+        },
+        { find: /^solid-js\/web$/, replacement: solidWebShimPath },
+        {
+          find: /^solid-js\/store$/,
+          replacement: path.join(repoRoot, "node_modules", "solid-js", "store", "dist", "store.js"),
+        },
+      ],
+    },
+    ssr: {
+      noExternal: [
+        "solid-js",
+        "solid-js/universal",
+        "@opencode/ui",
+        "@kobalte/core",
+        "@kobalte/utils",
+        "@kitlangton/solid-motion",
+        "@solid-primitives/props",
+        "@solid-primitives/resize-observer",
+      ],
+    },
+    logLevel: "silent",
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  server = rendering;
+  const renderCore = await rendering.ssrLoadModule("solid-js");
+  const renderer = await rendering.ssrLoadModule(rendererPath);
+  modelsViewModule = await rendering.ssrLoadModule(path.join(repoRoot, "src/ui/views/models.tsx"));
+  modelDetailModule = await rendering.ssrLoadModule(path.join(repoRoot, "src/ui/views/model.tsx"));
+  providerDetailModule = await rendering.ssrLoadModule(
+    path.join(repoRoot, "src/ui/views/provider.tsx"),
+  );
+  appModule = await rendering.ssrLoadModule(path.join(repoRoot, "src/ui/app.tsx"));
+  graph = {
+    createComponent: renderCore.createComponent,
+    createSignal: renderCore.createSignal,
+    mount: renderer.mountTestTree,
+    createTestRoot: renderer.createTestRoot,
+    textOf: renderer.textOf,
+    elementsNamed: renderer.elementsNamed,
+    listenerOf: renderer.listenerOf,
+  } satisfies RenderGraph;
+}, 60_000);
+
+afterAll(async () => {
+  await server?.close();
+});
+
+function hasClass(node: TestNode, name: string): boolean {
+  return String(node.props.class ?? "")
+    .split(" ")
+    .includes(name);
+}
+
+function byClass(root: TestNode, tag: string, name: string): TestNode[] {
+  return graph.elementsNamed(root, tag).filter((node) => hasClass(node, name));
+}
+
+function listener(node: TestNode, name: string): TestListener | undefined {
+  return graph.listenerOf(node, name);
+}
+
+function click(node: TestNode): void {
+  listener(node, "onClick")?.({ defaultPrevented: false } as TestEvent);
+}
+
+function findSegmented(root: TestNode, label: string): TestNode | undefined {
+  return graph
+    .elementsNamed(root, "div")
+    .find(
+      (node) =>
+        node.props["data-slot"] === "segmented-control-v2" && node.props["aria-label"] === label,
+    );
+}
+
+function segmentedItems(root: TestNode, label: string): TestNode[] {
+  const control = findSegmented(root, label);
+  if (!control) return [];
+  return graph
+    .elementsNamed(control, "button")
+    .filter((node) => node.props["data-slot"] === "segmented-control-v2-item");
+}
+
+function clickSegmented(root: TestNode, label: string, item: string): void {
+  const button = segmentedItems(root, label).find((node) => graph.textOf(node) === item);
+  if (!button) throw new Error(`segmented control ${label} has no ${item} item`);
+  click(button);
+}
+
+function breakdownRows(root: TestNode, parentOnly = false): TestNode[] {
+  return byClass(root, "a", "qg-breakdown__row").filter(
+    (row) => !parentOnly || !hasClass(row, "qg-breakdown__row--child"),
+  );
+}
+
+function labelOf(row: TestNode): string {
+  const label = graph
+    .elementsNamed(row, "span")
+    .find((node) => hasClass(node, "qg-breakdown__label"));
+  return label ? graph.textOf(label) : "";
+}
+
+function rowLabels(root: TestNode): string[] {
+  return breakdownRows(root, true).map(labelOf);
+}
+
+function rowByLabel(root: TestNode, label: string): TestNode | undefined {
+  return breakdownRows(root, true).find((row) => labelOf(row) === label);
+}
+
+function rowSwatch(row: TestNode): TestNode | undefined {
+  return graph.elementsNamed(row, "span").find((node) => hasClass(node, "qg-breakdown__swatch"));
+}
+
+function swatchVar(row: TestNode): string | undefined {
+  return (rowSwatch(row)?.props.style as Record<string, string> | undefined)?.["--qg-swatch"];
+}
+
+function providerMark(node: TestNode): TestNode | undefined {
+  return graph
+    .elementsNamed(node, "span")
+    .find((entry) => entry.props["data-provider-logo"] !== undefined);
+}
+
+function rowLogo(row: TestNode): TestNode | undefined {
+  return providerMark(row);
+}
+
+function providerMarkVar(node: TestNode): string | undefined {
+  return (providerMark(node)?.props.style as Record<string, string> | undefined)?.[
+    "--qg-provider-logo"
+  ];
+}
+
+function logoVar(row: TestNode): string | undefined {
+  return providerMarkVar(row);
+}
+
+function childRows(root: TestNode, parentLabel: string): TestNode[] {
+  const parent = rowByLabel(root, parentLabel);
+  if (!parent) return [];
+  return graph
+    .elementsNamed(parent.parent as TestNode, "a")
+    .filter((row) => hasClass(row, "qg-breakdown__row--child"));
+}
+
+function childRow(root: TestNode, parentLabel: string, childLabel: string): TestNode | undefined {
+  return childRows(root, parentLabel).find((row) => labelOf(row) === childLabel);
+}
+
+function summaryText(root: TestNode, label: string): string | undefined {
+  const stat = graph
+    .elementsNamed(root, "div")
+    .find((node) => hasClass(node, "qg-chart-shell__stat") && graph.textOf(node).startsWith(label));
+  return stat ? graph.textOf(stat) : undefined;
+}
+
+function chartShell(root: TestNode):
+  | {
+      shell: TestNode;
+      head: TestNode;
+      title: TestNode;
+      summary: TestNode;
+      body: TestNode;
+    }
+  | undefined {
+  const shell = byClass(root, "section", "qg-chart-shell")[0];
+  if (!shell) return undefined;
+  const head = byClass(shell, "header", "qg-chart-shell__head")[0];
+  const title = byClass(shell, "span", "qg-chart__title")[0];
+  const summary = byClass(shell, "div", "qg-summary")[0];
+  const body = byClass(shell, "div", "qg-usage")[0];
+  if (!head || !title || !summary || !body) return undefined;
+  return { shell, head, title, summary, body };
+}
+
+function chartTitle(root: TestNode): TestNode | undefined {
+  return byClass(root, "span", "qg-chart__title")[0];
+}
+
+function chartSegments(root: TestNode): TestNode[] {
+  return byClass(root, "rect", "qg-chart__segment");
+}
+
+function legendItems(root: TestNode): TestNode[] {
+  return byClass(root, "li", "qg-legend__item--series");
+}
+
+function legendItem(root: TestNode, label: string): TestNode | undefined {
+  return legendItems(root).find((item) => graph.textOf(item).includes(label));
+}
+
+function bucketHits(root: TestNode): TestNode[] {
+  return byClass(root, "li", "qg-chart__hit");
+}
+
+function focus(node: TestNode): void {
+  listener(node, "onFocus")?.({} as TestEvent);
+}
+
+function blur(node: TestNode): void {
+  listener(node, "onBlur")?.({} as TestEvent);
+}
+
+function pointerEnter(node: TestNode): void {
+  listener(node, "onPointerEnter")?.({} as TestEvent);
+}
+
+function pointerLeave(node: TestNode): void {
+  listener(node, "onPointerLeave")?.({} as TestEvent);
+}
+
+function tableHeaders(root: TestNode): string[] {
+  return graph
+    .elementsNamed(root, "th")
+    .filter((node) => node.props.scope === "col")
+    .map((node) => graph.textOf(node));
+}
+
+function mountModels(reactiveDimension = false): {
+  root: TestNode;
+  dispose: () => void;
+  setDimension: (dimension: AnalyticsDimension) => void;
+} {
+  const model = modelSnapshot();
+  const provider = providerSnapshot();
+  if (!reactiveDimension) {
+    const root = graph.createTestRoot();
+    const dispose = graph.mount(
+      () =>
+        graph.createComponent(modelsViewModule.ModelsView, {
+          snapshot: model,
+          dimension: "model",
+          onDimensionChange: () => {},
+        }),
+      root,
+    );
+    return { root, dispose, setDimension: () => {} };
+  }
+  const [dimension, setDimension] = graph.createSignal<AnalyticsDimension>("model");
+  const root = graph.createTestRoot();
+  const dispose = graph.mount(
+    () =>
+      graph.createComponent(modelsViewModule.ModelsView, {
+        get snapshot() {
+          return dimension() === "model" ? model : provider;
+        },
+        get dimension() {
+          return dimension();
+        },
+        onDimensionChange: setDimension,
+      }),
+    root,
+  );
+  return { root, dispose, setDimension };
+}
+
+function mountReactiveSnapshot(initial: AnalyticsGroupSnapshot): {
+  root: TestNode;
+  dispose: () => void;
+  setSnapshot: (snapshot: AnalyticsGroupSnapshot) => void;
+} {
+  const [snapshot, setSnapshot] = graph.createSignal(initial);
+  const root = graph.createTestRoot();
+  const dispose = graph.mount(
+    () =>
+      graph.createComponent(modelsViewModule.ModelsView, {
+        get snapshot() {
+          return snapshot();
+        },
+        dimension: "model",
+        onDimensionChange: () => {},
+      }),
+    root,
+  );
+  return { root, dispose, setSnapshot };
+}
+
+function mountSnapshot(snapshot: AnalyticsGroupSnapshot): {
+  root: TestNode;
+  dispose: () => void;
+} {
+  const root = graph.createTestRoot();
+  const dispose = graph.mount(
+    () =>
+      graph.createComponent(modelsViewModule.ModelsView, {
+        snapshot,
+        dimension: snapshot.dimension,
+        onDimensionChange: () => {},
+      }),
+    root,
+  );
+  return { root, dispose };
+}
+
+/** A real five-series Models snapshot whose first bucket peaks at `total`. */
+function peakSnapshot(total: number): AnalyticsGroupSnapshot {
+  const base = modelSnapshot();
+  const parts = [35, 25, 20, 12, 8].map((weight) => Math.floor((total * weight) / 100));
+  const remainder = total - parts.reduce((sum, value) => sum + value, 0);
+  const values = parts.map((value, index) => (index === 0 ? value + remainder : value));
+  return {
+    ...base,
+    totals: costed({ input: total }),
+    buckets: [
+      { startMs: NOW - 2 * DAY_MS, endMs: NOW - DAY_MS },
+      { startMs: NOW - DAY_MS, endMs: NOW },
+    ],
+    rows: values.map((value, index) => ({
+      identity: known(`peak-model-${index}`),
+      tokens: costed({ input: value }),
+      sessionCount: 1,
+      stepCount: 1,
+      children: [],
+    })),
+    series: values.map((value, index) => ({
+      kind: "entity" as const,
+      identity: known(`peak-model-${index}`),
+      tokens: costed({ input: value }),
+      buckets: [costed({ input: value }), costed({})],
+    })),
+  };
+}
+
+function mountDetail(
+  module: Record<string, unknown>,
+  name: string,
+  snapshot: ReturnType<typeof modelAlphaSnapshot>,
+  identity: AnalyticsEntityIdentity,
+): { root: TestNode; dispose: () => void } {
+  const root = graph.createTestRoot();
+  const dispose = graph.mount(
+    () => graph.createComponent(module[name], { snapshot, identity, range: "7d" }),
+    root,
+  );
+  return { root, dispose };
+}
+
+describe("Models view", () => {
+  it("uses the canonical chart shell, token-ranked colours and a compact legend", () => {
+    const { root, dispose } = mountModels();
+    try {
+      const shell = chartShell(root);
+      expect(shell).toBeDefined();
+      expect(graph.textOf(shell?.title as TestNode)).toBe("Usage by model");
+      expect(summaryText(root, "Processed tokens")).toContain("2,190");
+      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ USD 12.00");
+      expect(summaryText(root, "API-equivalent estimate")).toContain("Partial estimate");
+      expect(shell?.body.children.length).toBeGreaterThan(0);
+
+      const segments = chartSegments(root);
+      expect(segments.map((segment) => segment.props.fill)).toEqual([
+        "var(--qg-rank-1)",
+        "var(--qg-rank-2)",
+        "var(--qg-rank-3)",
+        "var(--qg-rank-4)",
+        "var(--qg-rank-5)",
+        "var(--qg-rank-other)",
+        "var(--qg-rank-1)",
+        "var(--qg-rank-2)",
+        "var(--qg-rank-3)",
+        "var(--qg-rank-4)",
+        "var(--qg-rank-5)",
+        "var(--qg-rank-other)",
+      ]);
+      expect(segments.map((segment) => segment.props["data-series-key"])).toEqual([
+        "model:known:model-alpha",
+        "model:known:model-beta",
+        "model:known:model-gamma",
+        "model:known:model-delta",
+        "model:known:model-epsilon",
+        "other",
+        "model:known:model-alpha",
+        "model:known:model-beta",
+        "model:known:model-gamma",
+        "model:known:model-delta",
+        "model:known:model-epsilon",
+        "other",
+      ]);
+
+      const legend = legendItems(root);
+      expect(legend.map((button) => graph.textOf(button))).toEqual([
+        "model-alpha600",
+        "model-beta500",
+        "model-gamma400",
+        "model-delta300",
+        "model-epsilon200",
+        "Other190",
+      ]);
+      expect(legend.map((button) => button.props["data-series-key"])).toEqual([
+        "model:known:model-alpha",
+        "model:known:model-beta",
+        "model:known:model-gamma",
+        "model:known:model-delta",
+        "model:known:model-epsilon",
+        "other",
+      ]);
+      const labelNodes = legend.map((button) =>
+        graph.elementsNamed(button, "span").find((node) => hasClass(node, "qg-legend__label")),
+      );
+      expect(labelNodes.every((node) => node !== undefined && hasClass(node, "qg-breakable"))).toBe(
+        true,
+      );
+      const swatchStyles = legend.map(
+        (button) =>
+          (
+            graph.elementsNamed(button, "span").find((node) => hasClass(node, "qg-legend__swatch"))
+              ?.props.style as Record<string, string>
+          )["--qg-swatch"],
+      );
+      expect(swatchStyles).toEqual([
+        "var(--qg-rank-1)",
+        "var(--qg-rank-2)",
+        "var(--qg-rank-3)",
+        "var(--qg-rank-4)",
+        "var(--qg-rank-5)",
+        "var(--qg-rank-other)",
+      ]);
+      // No cost graph toggle: the chart header control offers only Model | Provider.
+      const actions = byClass(shell?.head as TestNode, "div", "qg-chart-shell__actions")[0];
+      expect(actions).toBeDefined();
+      expect(
+        segmentedItems(actions as TestNode, "Group usage by").map((button) => graph.textOf(button)),
+      ).toEqual(["Model", "Provider"]);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("changes only the heading control when the grouping dimension changes", async () => {
+    const { root, dispose } = mountModels(true);
+    try {
+      expect(graph.textOf(chartShell(root)?.title as TestNode)).toBe("Usage by model");
+      expect(
+        legendItems(root)
+          .map((button) => graph.textOf(button))
+          .join(" "),
+      ).not.toContain("OpenAI");
+      clickSegmented(root, "Group usage by", "Provider");
+      await settle();
+      expect(graph.textOf(chartShell(root)?.title as TestNode)).toBe("Usage by provider");
+      const legend = legendItems(root);
+      expect(legend.map((button) => graph.textOf(button))).toEqual([
+        "OpenAI1.5k",
+        "Google380",
+        "Anthropic150",
+        "Unknown provider50",
+        "Mistral45",
+        "Other65",
+      ]);
+      const providerLogos = legend.flatMap((button) =>
+        graph
+          .elementsNamed(button, "span")
+          .filter((node) => node.props["data-provider-logo"] !== undefined),
+      );
+      expect(providerLogos.length).toBeGreaterThan(0);
+      expect(providerLogos.every((node) => node.props["aria-hidden"] === "true")).toBe(true);
+      const other = legendItem(root, "Other") as TestNode;
+      expect(providerMark(other)).toBeUndefined();
+      expect(
+        graph.elementsNamed(other, "span").some((node) => hasClass(node, "qg-legend__logo--empty")),
+      ).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("puts a real five-series 5,890 Models peak under the shared 7.0k ceiling", () => {
+    const { root, dispose } = mountSnapshot(peakSnapshot(5_890));
+    try {
+      const labels = byClass(root, "text", "qg-chart__axis-label")
+        .map((node) => graph.textOf(node))
+        .filter((label) => /^\d+(?:\.\d+)?k?$/u.test(label));
+      expect(labels.at(-1)).toBe("7.0k");
+      expect(summaryText(root, "Processed tokens")).toContain("5,890");
+      expect(chartSegments(root)).toHaveLength(5);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("shows one date in the same-day model tooltip and bucket label", async () => {
+    const { root, dispose } = mountSnapshot(sameDayModelSnapshot());
+    try {
+      const hit = bucketHits(root)[0] as TestNode;
+      expect(hit).toBeDefined();
+      focus(hit);
+      await settle();
+      const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      expect(graph.textOf(tooltip)).toContain("27 Oct");
+      expect(graph.textOf(tooltip)).not.toContain("27 Oct – 27 Oct");
+      expect(hit.props["aria-label"]).toContain("Inspect 27 Oct");
+      expect(hit.props["aria-label"]).not.toContain("27 Oct to 27 Oct");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps the full API-equivalent footer in a narrow model tooltip", async () => {
+    const tokens = costed({ input: 100 }, { apiEquivalentCostUsd: 0.02, unpricedTokens: 25 });
+    const snapshot: AnalyticsGroupSnapshot = {
+      ...sameDayModelSnapshot(),
+      totals: tokens,
+      series: [
+        {
+          kind: "entity",
+          identity: known("model-alpha"),
+          tokens,
+          buckets: [tokens],
+        },
+      ],
+    };
+    const { root, dispose } = mountSnapshot(snapshot);
+    try {
+      const hit = bucketHits(root)[0] as TestNode;
+      expect(hit).toBeDefined();
+      focus(hit);
+      await settle();
+      const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      const footer = byClass(tooltip, "div", "qg-model-tooltip__footer")[0] as TestNode;
+      expect(footer).toBeDefined();
+      expect(graph.textOf(footer)).toContain("API-equivalent");
+      expect(graph.textOf(footer)).toContain("≈ USD 0.02");
+      expect(graph.textOf(footer)).toContain("Partial estimate");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("marks unknown and empty provider legend series with the shared generic logo, not Other", () => {
+    const { root, dispose } = mountSnapshot(providerFallbackSnapshot());
+    try {
+      for (const label of ["Unknown provider", "Empty provider ID"]) {
+        const item = legendItem(root, label) as TestNode;
+        expect(providerMark(item)?.props["data-provider-logo"]).toBe("generic");
+        expect(providerMarkVar(item)).toContain("/assets/providers/generic.svg");
+      }
+      expect(
+        providerMark(legendItem(root, "OpenAI") as TestNode)?.props["data-provider-logo"],
+      ).toBe("openai");
+      expect(providerMark(legendItem(root, "Other") as TestNode)).toBeUndefined();
+    } finally {
+      dispose();
+    }
+  });
+
+  it("sorts only the three breakdown columns and never re-ranks the chart", async () => {
+    const { root, dispose } = mountModels();
+    try {
+      const head = byClass(root, "div", "qg-breakdown__head")[0] as TestNode;
+      const columns = head.children.filter((child) => child.kind === "element");
+      expect(columns.map((child) => graph.textOf(child))).toEqual([
+        "Name",
+        "CostAbout the API-equivalent estimate",
+        "Tokens",
+      ]);
+      expect(API_EQUIVALENT_TOOLTIP).toBe(
+        "API-equivalent estimate based on model pricing. Not actual billed spend.",
+      );
+      expect(graph.textOf(root)).toContain("About the API-equivalent estimate");
+
+      expect(rowLabels(root)).toEqual([
+        "model-alpha",
+        "model-delta",
+        "model-epsilon",
+        "model-zeta",
+        "model-gamma",
+        "Empty model ID",
+        "model-beta",
+        "Unknown model",
+      ]);
+      const before = chartSegments(root).map((segment) => segment.props["data-series-key"]);
+      clickSegmented(root, "Sort breakdown", "Tokens");
+      await settle();
+      expect(rowLabels(root)).toEqual([
+        "model-alpha",
+        "model-beta",
+        "model-gamma",
+        "model-delta",
+        "model-epsilon",
+        "model-zeta",
+        "Unknown model",
+        "Empty model ID",
+      ]);
+      expect(chartSegments(root).map((segment) => segment.props["data-series-key"])).toEqual(
+        before,
+      );
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps singleton children, raw identity links and null / zero / partial costs distinct", () => {
+    const { root, dispose } = mountModels();
+    try {
+      const childRows = byClass(root, "a", "qg-breakdown__row--child");
+      expect(childRows.length).toBe(13);
+      const gamma = rowByLabel(root, "model-gamma") as TestNode;
+      const gammaGroup = gamma.parent as TestNode;
+      const gammaChildren = graph
+        .elementsNamed(gammaGroup, "a")
+        .filter((row) => hasClass(row, "qg-breakdown__row--child"));
+      expect(gammaChildren.map(labelOf)).toEqual(["OpenAI"]);
+
+      const delta = rowByLabel(root, "model-delta") as TestNode;
+      expect(graph.textOf(delta)).toContain("Partial estimate");
+      const beta = rowByLabel(root, "model-beta") as TestNode;
+      expect(graph.textOf(beta)).toContain("≈ USD —");
+      expect(graph.textOf(beta)).toContain("Unpriced");
+      const gammaRow = rowByLabel(root, "model-gamma") as TestNode;
+      expect(graph.textOf(gammaRow)).toContain("≈ USD 0.00");
+      expect(graph.textOf(gammaRow)).not.toContain("Partial estimate");
+
+      const unknown = rowByLabel(root, "Unknown model") as TestNode;
+      const empty = rowByLabel(root, "Empty model ID") as TestNode;
+      expect(unknown.props.href).toBe("/model/u?range=7d");
+      expect(empty.props.href).toBe(
+        `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "" })}?range=7d`,
+      );
+      expect(unknown.props.href).not.toBe(empty.props.href);
+      expect(gammaChildren[0]?.props.href).toBe(
+        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=7d`,
+      );
+    } finally {
+      dispose();
+    }
+  });
+
+  it("shows the parent series swatch and provider mark on provider rows in both groupings", async () => {
+    const { root, dispose } = mountModels(true);
+    try {
+      clickSegmented(root, "Group usage by", "Provider");
+      await settle();
+
+      const openai = rowByLabel(root, "OpenAI") as TestNode;
+      expect(swatchVar(openai)).toBe("var(--qg-rank-1)");
+      expect(rowLogo(openai)?.props["data-provider-logo"]).toBe("openai");
+      expect(swatchVar(rowByLabel(root, "Google") as TestNode)).toBe("var(--qg-rank-2)");
+      expect(swatchVar(rowByLabel(root, "Empty provider ID") as TestNode)).toBe(
+        "var(--qg-rank-other)",
+      );
+      expect(
+        rowLogo(rowByLabel(root, "Empty provider ID") as TestNode)?.props["data-provider-logo"],
+      ).toBe("generic");
+      expect(rowSwatch(openai)?.props["aria-hidden"]).toBe("true");
+
+      const nameChildren = (byClass(openai, "span", "qg-breakdown__name")[0] as TestNode).children
+        .filter((node) => node.kind === "element")
+        .map((node) => node.props.class);
+      expect(nameChildren).toEqual([
+        "qg-breakdown__swatch",
+        "qg-provider-logo qg-breakdown__logo",
+        "qg-breakdown__label",
+      ]);
+
+      clickSegmented(root, "Group usage by", "Model");
+      await settle();
+
+      const alpha = rowByLabel(root, "model-alpha") as TestNode;
+      expect(rowSwatch(alpha)).toBeUndefined();
+      expect(rowLogo(alpha)).toBeUndefined();
+
+      expect(swatchVar(childRow(root, "model-alpha", "OpenAI") as TestNode)).toBe(
+        "var(--qg-rank-1)",
+      );
+      expect(swatchVar(childRow(root, "model-gamma", "OpenAI") as TestNode)).toBe(
+        "var(--qg-rank-3)",
+      );
+      expect(swatchVar(childRow(root, "model-zeta", "OpenAI") as TestNode)).toBe(
+        "var(--qg-rank-other)",
+      );
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps a generic local mark for unknown and empty provider identities", async () => {
+    const { root, dispose } = mountModels(true);
+    try {
+      clickSegmented(root, "Group usage by", "Provider");
+      await settle();
+
+      const unknownParent = rowByLabel(root, "Unknown provider") as TestNode;
+      const emptyParent = rowByLabel(root, "Empty provider ID") as TestNode;
+      expect(swatchVar(unknownParent)).toBe("var(--qg-rank-4)");
+      expect(swatchVar(emptyParent)).toBe("var(--qg-rank-other)");
+      for (const row of [unknownParent, emptyParent]) {
+        expect(rowLogo(row)?.props["data-provider-logo"]).toBe("generic");
+        expect(logoVar(row)).toContain("/assets/providers/generic.svg");
+      }
+      expect(unknownParent.props.href).toBe("/provider/u?range=7d&group=provider");
+      expect(emptyParent.props.href).not.toBe(unknownParent.props.href);
+      expect(labelOf(unknownParent)).not.toBe(labelOf(emptyParent));
+
+      clickSegmented(root, "Group usage by", "Model");
+      await settle();
+
+      const unknownChild = childRow(root, "Unknown model", "Unknown provider") as TestNode;
+      const emptyChild = childRow(root, "Empty model ID", "Empty provider ID") as TestNode;
+      expect(unknownChild).toBeDefined();
+      expect(emptyChild).toBeDefined();
+      for (const row of [unknownChild, emptyChild]) {
+        expect(rowLogo(row)?.props["data-provider-logo"]).toBe("generic");
+        expect(logoVar(row)).toContain("/assets/providers/generic.svg");
+      }
+      expect(unknownChild.props.href).not.toBe(emptyChild.props.href);
+      const openaiChild = childRow(root, "model-alpha", "OpenAI") as TestNode;
+      expect(rowLogo(openaiChild)?.props["data-provider-logo"]).toBe("openai");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("cross-highlights bars, legend and parent rows from the keyboard without relying on colour", async () => {
+    const { root, dispose } = mountModels();
+    try {
+      const legend = legendItem(root, "model-gamma") as TestNode;
+      expect(legend.props["aria-label"]).toBe("Highlight model-gamma, 400 tokens");
+      focus(legend);
+      await settle();
+      expect(legend.props["data-active"]).toBe("true");
+      const gammaSegments = chartSegments(root).filter(
+        (segment) => segment.props["data-series-key"] === "model:known:model-gamma",
+      );
+      expect(gammaSegments.every((segment) => segment.props["data-highlighted"] === "true")).toBe(
+        true,
+      );
+      const otherSegments = chartSegments(root).filter(
+        (segment) => segment.props["data-series-key"] !== "model:known:model-gamma",
+      );
+      expect(otherSegments.every((segment) => segment.props["data-highlighted"] === "false")).toBe(
+        true,
+      );
+      const gammaRow = rowByLabel(root, "model-gamma") as TestNode;
+      expect(gammaRow.props["data-highlighted"]).toBe("true");
+      expect((rowByLabel(root, "model-alpha") as TestNode).props["data-dimmed"]).toBe("true");
+
+      blur(legend);
+      await settle();
+      expect(legend.props["data-active"]).toBeUndefined();
+      expect(
+        chartSegments(root).every((segment) => segment.props["data-highlighted"] === undefined),
+      ).toBe(true);
+
+      const row = rowByLabel(root, "model-alpha") as TestNode;
+      focus(row);
+      await settle();
+      expect((legendItem(root, "model-alpha") as TestNode).props["data-active"]).toBe("true");
+      expect(row.props["data-highlighted"]).toBe("true");
+      expect(
+        chartSegments(root)
+          .filter((segment) => segment.props["data-series-key"] === "model:known:model-alpha")
+          .every((segment) => segment.props["data-highlighted"] === "true"),
+      ).toBe(true);
+      blur(row);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("routes rows outside the chart's ranked five through the Other series", async () => {
+    const { root, dispose } = mountModels(true);
+    try {
+      const zeta = rowByLabel(root, "model-zeta") as TestNode;
+      focus(zeta);
+      await settle();
+      expect((legendItem(root, "Other") as TestNode).props["data-active"]).toBe("true");
+      expect(zeta.props["data-highlighted"]).toBe("true");
+      expect((rowByLabel(root, "Unknown model") as TestNode).props["data-highlighted"]).toBe(
+        "true",
+      );
+      expect((rowByLabel(root, "Empty model ID") as TestNode).props["data-highlighted"]).toBe(
+        "true",
+      );
+      expect((rowByLabel(root, "model-alpha") as TestNode).props["data-dimmed"]).toBe("true");
+      expect(
+        chartSegments(root)
+          .filter((segment) => segment.props["data-series-key"] === "other")
+          .every((segment) => segment.props["data-highlighted"] === "true"),
+      ).toBe(true);
+      blur(zeta);
+
+      const otherLegend = legendItem(root, "Other") as TestNode;
+      focus(otherLegend);
+      await settle();
+      expect(zeta.props["data-highlighted"]).toBe("true");
+      expect((rowByLabel(root, "model-alpha") as TestNode).props["data-dimmed"]).toBe("true");
+      blur(otherLegend);
+
+      clickSegmented(root, "Group usage by", "Provider");
+      await settle();
+      const deepseek = rowByLabel(root, "DeepSeek") as TestNode;
+      focus(deepseek);
+      await settle();
+      expect((legendItem(root, "Other") as TestNode).props["data-active"]).toBe("true");
+      expect(deepseek.props["data-highlighted"]).toBe("true");
+      expect((rowByLabel(root, "OpenAI") as TestNode).props["data-dimmed"]).toBe("true");
+      blur(deepseek);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps keyboard emphasis when the pointer leaves a legend or row", async () => {
+    const { root, dispose } = mountModels();
+    try {
+      const gamma = legendItem(root, "model-gamma") as TestNode;
+      const alpha = legendItem(root, "model-alpha") as TestNode;
+      focus(gamma);
+      await settle();
+      pointerEnter(alpha);
+      await settle();
+      expect(alpha.props["data-active"]).toBe("true");
+      pointerLeave(alpha);
+      await settle();
+      expect(gamma.props["data-active"]).toBe("true");
+      expect(alpha.props["data-active"]).toBeUndefined();
+      blur(gamma);
+
+      const alphaRow = rowByLabel(root, "model-alpha") as TestNode;
+      const zetaRow = rowByLabel(root, "model-zeta") as TestNode;
+      focus(alphaRow);
+      await settle();
+      pointerEnter(zetaRow);
+      await settle();
+      expect(zetaRow.props["data-highlighted"]).toBe("true");
+      pointerLeave(zetaRow);
+      await settle();
+      expect(alphaRow.props["data-highlighted"]).toBe("true");
+      expect(alphaRow.props["data-dimmed"]).toBeUndefined();
+      blur(alphaRow);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("reconciles stale series emphasis after a snapshot change without clearing a valid series", async () => {
+    const base = modelSnapshot();
+    const mounted = mountReactiveSnapshot(base);
+    try {
+      const gamma = legendItem(mounted.root, "model-gamma") as TestNode;
+      focus(gamma);
+      await settle();
+      expect(gamma.props["data-active"]).toBe("true");
+
+      const withoutGamma: AnalyticsGroupSnapshot = {
+        ...base,
+        rows: base.rows.filter(
+          (row) => row.identity.kind !== "known" || row.identity.id !== "model-gamma",
+        ),
+        series: base.series.filter(
+          (entry) =>
+            entry.kind !== "entity" ||
+            entry.identity.kind !== "known" ||
+            entry.identity.id !== "model-gamma",
+        ),
+      };
+      mounted.setSnapshot(withoutGamma);
+      await settle();
+      expect(legendItem(mounted.root, "model-gamma")).toBeUndefined();
+      expect(
+        byClass(mounted.root, "div", "qg-model-chart__plot")[0]?.props["data-highlight"],
+      ).toBeUndefined();
+      expect(
+        chartSegments(mounted.root).every(
+          (segment) => segment.props["data-highlighted"] === undefined,
+        ),
+      ).toBe(true);
+      expect(
+        breakdownRows(mounted.root).every((row) => row.props["data-dimmed"] === undefined),
+      ).toBe(true);
+
+      const alpha = legendItem(mounted.root, "model-alpha") as TestNode;
+      focus(alpha);
+      await settle();
+      const refreshed: AnalyticsGroupSnapshot = {
+        ...base,
+        range: "30d",
+        rows: base.rows.map((row) => ({
+          ...row,
+          children: row.children.map((child) => ({ ...child })),
+        })),
+        series: base.series.map((entry) => ({
+          ...entry,
+          buckets: entry.buckets.map((bucket) => ({ ...bucket })),
+        })),
+        buckets: base.buckets.map((bucket) => ({ ...bucket })),
+      };
+      mounted.setSnapshot(refreshed);
+      await settle();
+      expect((legendItem(mounted.root, "model-alpha") as TestNode).props["data-active"]).toBe(
+        "true",
+      );
+      expect(
+        chartSegments(mounted.root)
+          .filter((segment) => segment.props["data-series-key"] === "model:known:model-alpha")
+          .every((segment) => segment.props["data-highlighted"] === "true"),
+      ).toBe(true);
+    } finally {
+      mounted.dispose();
+    }
+  });
+
+  it("uses focus-only, non-button semantics for legend and bucket inspection", async () => {
+    const { root, dispose } = mountModels();
+    try {
+      const legend = legendItems(root);
+      expect(legend.length).toBeGreaterThan(0);
+      expect(legend.every((item) => item.props.tabIndex === 0)).toBe(true);
+      expect(byClass(root, "button", "qg-legend__item--series")).toHaveLength(0);
+      expect(legend.every((item) => item.props["aria-pressed"] === undefined)).toBe(true);
+
+      focus(legend[0] as TestNode);
+      await settle();
+      expect((legend[0] as TestNode).props["data-active"]).toBe("true");
+      expect((legend[0] as TestNode).props["aria-pressed"]).toBeUndefined();
+      blur(legend[0] as TestNode);
+
+      const hits = bucketHits(root);
+      expect(hits.length).toBeGreaterThan(0);
+      expect(hits.every((hit) => hit.props.tabIndex === 0)).toBe(true);
+      expect(byClass(root, "button", "qg-chart__hit")).toHaveLength(0);
+      expect(hits.every((hit) => hit.props["aria-pressed"] === undefined)).toBe(true);
+      expect(hits[0]?.props["aria-label"]).toMatch(/^Inspect /);
+
+      focus(hits[0] as TestNode);
+      await settle();
+      const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      expect(tooltip).toBeDefined();
+      expect(graph.textOf(tooltip)).toContain("API-equivalent");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("qualifies partial and unpriced costs in the sr-only bucket table", () => {
+    const unpriced = costed({ input: 10 }, { apiEquivalentCostUsd: null, unpricedTokens: 10 });
+    const partial = costed({ input: 20 }, { apiEquivalentCostUsd: 2, unpricedTokens: 5 });
+    const totals = costed({ input: 30 }, { apiEquivalentCostUsd: 2, unpricedTokens: 15 });
+    const snapshot: AnalyticsGroupSnapshot = {
+      ...zeroSnapshot("model", undefined),
+      totals,
+      rows: [
+        {
+          identity: known("model-alpha"),
+          tokens: totals,
+          sessionCount: 1,
+          stepCount: 1,
+          children: [],
+        },
+      ],
+      series: [
+        {
+          kind: "entity",
+          identity: known("model-alpha"),
+          tokens: totals,
+          buckets: [unpriced, partial],
+        },
+      ],
+    };
+    const root = graph.createTestRoot();
+    const dispose = graph.mount(
+      () =>
+        graph.createComponent(modelsViewModule.ModelsView, {
+          snapshot,
+          dimension: "model",
+          onDimensionChange: () => {},
+        }),
+      root,
+    );
+    try {
+      const table = graph.elementsNamed(root, "table")[0] as TestNode;
+      const rows = graph
+        .elementsNamed(table, "tr")
+        .filter((row) => graph.elementsNamed(row, "td").length > 0);
+      const apiCell = (row: TestNode) => graph.elementsNamed(row, "td")[1] as TestNode;
+      expect(graph.textOf(apiCell(rows[0] as TestNode))).toContain("Unpriced");
+      expect(graph.textOf(apiCell(rows[1] as TestNode))).toContain("Partial estimate");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("disambiguates provider aliases with raw ids in legend, table and breakdown", () => {
+    const root = graph.createTestRoot();
+    const dispose = graph.mount(
+      () =>
+        graph.createComponent(modelsViewModule.ModelsView, {
+          snapshot: providerAliasSnapshot(),
+          dimension: "provider",
+          onDimensionChange: () => {},
+        }),
+      root,
+    );
+    try {
+      expect(
+        legendItems(root)
+          .map((button) => graph.textOf(button))
+          .join(" "),
+      ).toContain("Z.ai (zai)");
+      expect(
+        legendItems(root)
+          .map((button) => graph.textOf(button))
+          .join(" "),
+      ).toContain("Z.ai (glm)");
+      expect(rowLabels(root)).toEqual(["Z.ai (zai)", "Z.ai (glm)", "Zhipu"]);
+      expect(tableHeaders(root)).toContain("Z.ai (zai)");
+      expect(tableHeaders(root)).toContain("Z.ai (glm)");
+      expect((rowByLabel(root, "Z.ai (zai)") as TestNode).props.href).toBe(
+        `/provider/${encodeAnalyticsEntityToken(known("zai"))}?range=7d&group=provider`,
+      );
+    } finally {
+      dispose();
+    }
+  });
+
+  it("shows an honest empty state with no fabricated series", () => {
+    const root = graph.createTestRoot();
+    const dispose = graph.mount(
+      () =>
+        graph.createComponent(modelsViewModule.ModelsView, {
+          snapshot: zeroSnapshot("model", undefined),
+          dimension: "model",
+          onDimensionChange: () => {},
+        }),
+      root,
+    );
+    try {
+      expect(graph.textOf(root)).toContain("No activity in this range.");
+      expect(graph.textOf(root)).toContain("No usage in this range.");
+      expect(legendItems(root)).toHaveLength(0);
+      expect(chartSegments(root)).toHaveLength(0);
+    } finally {
+      dispose();
+    }
+  });
+});
+
+describe("model and provider detail", () => {
+  it("shows symmetric model metrics, a derivable cache rate and provider breakdown", () => {
+    const { root, dispose } = mountDetail(
+      modelDetailModule,
+      "ModelDetailView",
+      modelAlphaSnapshot(),
+      known("model-alpha"),
+    );
+    try {
+      const shell = chartShell(root);
+      expect(shell).toBeDefined();
+      expect(graph.textOf(shell?.title as TestNode)).toBe("Usage by provider");
+      expect(summaryText(root, "Total tokens")).toContain("600");
+      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ USD 6.00");
+      expect(summaryText(root, "Sessions")).toContain("6");
+      expect(summaryText(root, "Cache hit rate")).toContain("33.50%");
+      expect(graph.textOf(root)).toContain("Analytics");
+      expect(graph.textOf(root)).toContain("Models");
+      expect(graph.textOf(root)).toContain("model-alpha");
+      expect(byClass(root, "a", "qg-breakdown__row--child")).toHaveLength(0);
+      expect(rowLabels(root)).toEqual([
+        "OpenAI",
+        "Anthropic",
+        "Google",
+        "Mistral",
+        "DeepSeek",
+        "OpenRouter",
+      ]);
+      const openai = rowByLabel(root, "OpenAI") as TestNode;
+      expect(openai.props.href).toBe(
+        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=7d`,
+      );
+      // Exactly one identity heading, one chart heading and one Breakdown heading.
+      expect(byClass(root, "h2", "qg-page-title")).toHaveLength(1);
+      const pageTitle = byClass(root, "h2", "qg-page-title")[0] as TestNode;
+      expect(hasClass(pageTitle, "qg-breakable")).toBe(true);
+      const crumb = graph
+        .elementsNamed(root, "span")
+        .find((node) => node.props["aria-current"] === "page");
+      expect(crumb && hasClass(crumb, "qg-breakable")).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("omits the cache rate when the existing semantics cannot derive it", () => {
+    const { root, dispose } = mountDetail(
+      modelDetailModule,
+      "ModelDetailView",
+      modelNoRateSnapshot(),
+      known("model-no-rate"),
+    );
+    try {
+      expect(summaryText(root, "Cache hit rate")).toBeUndefined();
+      expect(graph.textOf(root)).not.toContain("Cache hit rate");
+      expect(summaryText(root, "Total tokens")).toContain("120");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("shows provider metrics with a model count and model breakdown", () => {
+    const { root, dispose } = mountDetail(
+      providerDetailModule,
+      "ProviderDetailView",
+      providerOpenAISnapshot(),
+      known("openai"),
+    );
+    try {
+      const shell = chartShell(root);
+      expect(shell).toBeDefined();
+      expect(graph.textOf(shell?.title as TestNode)).toBe("Usage by model");
+      expect(summaryText(root, "Total tokens")).toContain("1,500");
+      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ USD 6.00");
+      expect(summaryText(root, "API-equivalent estimate")).toContain("Partial estimate");
+      expect(summaryText(root, "Sessions")).toContain("5");
+      expect(summaryText(root, "Models")).toContain("5");
+      expect(graph.textOf(root)).not.toContain("Cache hit rate");
+      expect(rowLabels(root)).toEqual([
+        "model-alpha",
+        "model-epsilon",
+        "model-zeta",
+        "model-gamma",
+        "model-beta",
+      ]);
+      const beta = rowByLabel(root, "model-beta") as TestNode;
+      expect(beta.props.href).toBe(
+        `/model/${encodeAnalyticsEntityToken(known("model-beta"))}?range=7d`,
+      );
+      expect(graph.textOf(root)).toContain("openai");
+      expect(byClass(root, "h2", "qg-page-title")).toHaveLength(1);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("shows the generic provider mark for unknown and empty detail headers", () => {
+    const identities: { identity: AnalyticsEntityIdentity; label: string }[] = [
+      { identity: unknownIdentity, label: "Unknown provider" },
+      { identity: { kind: "known", id: "" }, label: "Empty provider ID" },
+    ];
+    for (const { identity, label } of identities) {
+      const { root, dispose } = mountDetail(
+        providerDetailModule,
+        "ProviderDetailView",
+        providerOpenAISnapshot(),
+        identity,
+      );
+      try {
+        const header = byClass(root, "h2", "qg-page-title")[0] as TestNode;
+        const logo = byClass(header, "span", "qg-page-head__logo")[0] as TestNode;
+        expect(logo).toBeDefined();
+        expect(logo.props["data-provider-logo"]).toBe("generic");
+        expect((logo.props.style as Record<string, string>)["--qg-provider-logo"]).toContain(
+          "/assets/providers/generic.svg",
+        );
+        expect(graph.textOf(header)).toContain(label);
+      } finally {
+        dispose();
+      }
+    }
+
+    const knownCase = mountDetail(
+      providerDetailModule,
+      "ProviderDetailView",
+      providerOpenAISnapshot(),
+      known("openai"),
+    );
+    try {
+      const header = byClass(knownCase.root, "h2", "qg-page-title")[0] as TestNode;
+      expect(byClass(header, "span", "qg-page-head__logo")[0]?.props["data-provider-logo"]).toBe(
+        "openai",
+      );
+    } finally {
+      knownCase.dispose();
+    }
+  });
+
+  it("labels unknown and known-empty detail identities without conflating them", () => {
+    const unknown = mountDetail(
+      modelDetailModule,
+      "ModelDetailView",
+      zeroSnapshot("provider", {
+        dimension: "model",
+        identity: unknownIdentity,
+      }),
+      unknownIdentity,
+    );
+    try {
+      expect(graph.textOf(unknown.root)).toContain("Unknown model");
+      expect(graph.textOf(unknown.root)).not.toContain("Empty model ID");
+    } finally {
+      unknown.dispose();
+    }
+    const empty = mountDetail(
+      modelDetailModule,
+      "ModelDetailView",
+      zeroSnapshot("provider", {
+        dimension: "model",
+        identity: { kind: "known", id: "" },
+      }),
+      { kind: "known", id: "" },
+    );
+    try {
+      expect(graph.textOf(empty.root)).toContain("Empty model ID");
+      expect(graph.textOf(empty.root)).not.toContain("Unknown model");
+    } finally {
+      empty.dispose();
+    }
+  });
+});
+
+interface BrowserStub {
+  readonly location: URL;
+  readonly localStorage: Pick<Storage, "getItem" | "setItem">;
+  readonly history: {
+    pushState: (state: unknown, title: string, path: string) => void;
+    replaceState: (state: unknown, title: string, path: string) => void;
+    back: () => void;
+  };
+  addEventListener: (name: string, listener: (event: unknown) => void) => void;
+  removeEventListener: (name: string) => void;
+  follow: (href: string) => void;
+  back: () => void;
+}
+
+function historyBrowser(initialPath: string): BrowserStub {
+  const entries = [initialPath];
+  let index = 0;
+  const current = () => new URL(entries[index] ?? "/", "http://localhost:4144");
+  const listeners = new Map<string, (event: unknown) => void>();
+  return {
+    get location() {
+      return current();
+    },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    history: {
+      pushState: (_state, _title, path) => {
+        entries.splice(index + 1);
+        entries.push(path);
+        index = entries.length - 1;
+      },
+      replaceState: (_state, _title, path) => {
+        entries[index] = path;
+      },
+      back: () => {
+        if (index > 0) index -= 1;
+        listeners.get("popstate")?.({});
+      },
+    },
+    addEventListener: (name, handler) => {
+      listeners.set(name, handler);
+    },
+    removeEventListener: (name) => {
+      listeners.delete(name);
+    },
+    follow: (href) => {
+      const preventDefault = vi.fn();
+      listeners.get("click")?.({
+        button: 0,
+        defaultPrevented: false,
+        target: {
+          closest: () => ({
+            getAttribute: (key: string) => (key === "href" ? href : null),
+            hasAttribute: () => false,
+          }),
+        },
+        preventDefault,
+      });
+      expect(preventDefault).toHaveBeenCalledOnce();
+      expect(current().pathname + current().search).toBe(href);
+    },
+    back: () => {
+      if (index > 0) index -= 1;
+      listeners.get("popstate")?.({});
+    },
+  };
+}
+
+interface AppCall {
+  home: RangeKey[];
+  groups: GroupCall[];
+  session: string[];
+}
+
+interface GroupCall {
+  range: RangeKey;
+  dimension: AnalyticsDimension;
+  filter?: { dimension: AnalyticsDimension; identity: AnalyticsEntityIdentity };
+}
+
+interface MountAppOptions {
+  groups?: (query: GroupCall) => Promise<AnalyticsGroupSnapshot>;
+}
+
+function defaultGroups(query: GroupCall): Promise<AnalyticsGroupSnapshot> {
+  if (query.filter?.dimension === "model" && query.filter.identity.kind === "known") {
+    return Promise.resolve(
+      withRange(
+        query.filter.identity.id === "model-alpha"
+          ? modelAlphaSnapshot()
+          : zeroSnapshot(query.dimension, query.filter),
+        query.range,
+      ),
+    );
+  }
+  if (query.filter?.dimension === "provider" && query.filter.identity.kind === "known") {
+    return Promise.resolve(
+      withRange(
+        query.filter.identity.id === "openai"
+          ? providerOpenAISnapshot()
+          : zeroSnapshot(query.dimension, query.filter),
+        query.range,
+      ),
+    );
+  }
+  return Promise.resolve(
+    withRange(query.dimension === "model" ? modelSnapshot() : providerSnapshot(), query.range),
+  );
+}
+
+function mountApp(
+  initialPath: string,
+  options: MountAppOptions = {},
+): {
+  root: TestNode;
+  browser: BrowserStub;
+  calls: AppCall;
+  follow: (href: string) => Promise<void>;
+  back: () => Promise<void>;
+  emit: (topic: DashboardEvent["topic"]) => void;
+  dispose: () => void;
+} {
+  const browser = historyBrowser(initialPath);
+  vi.stubGlobal("window", browser);
+  const calls: AppCall = { home: [], groups: [], session: [] };
+  let subscription: ((event: DashboardEvent) => void) | undefined;
+  const client = {
+    connection: () => "live",
+    onConnectionChange: () => () => {},
+    subscribe: (onEvent: (event: DashboardEvent) => void) => {
+      subscription = onEvent;
+      return () => {
+        subscription = undefined;
+      };
+    },
+    health: async () => ({ app: "opencode-quota-gui", contractVersion: 2 }),
+    home: async ({ range }: { range: RangeKey }) => {
+      calls.home.push(range);
+      return { ...homeSnapshot({ range }), usage: usage(range, []) };
+    },
+    quota: async () => homeSnapshot(),
+    project: async () => projectSnapshot(),
+    session: async ({ sessionId }: { sessionId: string }) => {
+      calls.session.push(sessionId);
+      return sessionSnapshot();
+    },
+    groups: async (query: GroupCall) => {
+      calls.groups.push(query);
+      return (options.groups ?? defaultGroups)(query);
+    },
+    settings: async () => settingsSnapshot(),
+    saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    importPreview: async () => ({
+      from: "workspace: synthetic",
+      keys: [],
+      issues: [],
+      expectedRevision: "r",
+    }),
+    importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+  };
+  const root = graph.createTestRoot();
+  const stop = graph.mount(() => graph.createComponent(appModule.App, { client }), root);
+  return {
+    root,
+    browser,
+    calls,
+    follow: async (href) => {
+      browser.follow(href);
+      await settle();
+      await settle();
+    },
+    back: async () => {
+      browser.back();
+      await settle();
+      await settle();
+    },
+    emit: (topic) => {
+      subscription?.({ topic, at: Date.now() });
+    },
+    dispose: () => {
+      stop();
+      vi.unstubAllGlobals();
+    },
+  };
+}
+
+function tabsOf(root: TestNode): TestNode | undefined {
+  return graph.elementsNamed(root, "nav").find((node) => hasClass(node, "qg-analytics-tabs"));
+}
+
+function tabLinks(root: TestNode): TestNode[] {
+  const tabs = tabsOf(root);
+  return tabs ? graph.elementsNamed(tabs, "a") : [];
+}
+
+function rangeControl(root: TestNode): TestNode | undefined {
+  return graph
+    .elementsNamed(root, "div")
+    .find(
+      (node) =>
+        node.props["data-slot"] === "segmented-control-v2" &&
+        node.props["aria-label"] === "Time range",
+    );
+}
+
+describe("peer Analytics / Models navigation", () => {
+  it("renders the frame tabs with the preserved range and the Models grouping read", async () => {
+    const app = mountApp("/models?range=24h");
+    try {
+      await settle();
+      await settle();
+      const links = tabLinks(app.root);
+      expect(links.map((link) => link.props.href)).toEqual([
+        "/analytics?range=24h",
+        "/models?range=24h",
+      ]);
+      expect(links.map((link) => link.props["aria-current"])).toEqual([undefined, "page"]);
+      expect(rangeControl(app.root)).toBeDefined();
+      expect(app.calls.groups).toEqual([{ range: "24h", dimension: "model" }]);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("keeps the range across Analytics, Models, model detail and provider detail", async () => {
+    const app = mountApp("/analytics?range=24h");
+    try {
+      await settle();
+      await settle();
+      expect(app.calls.home).toEqual(["24h"]);
+      await app.follow("/models?range=24h");
+      expect(app.calls.groups).toEqual([{ range: "24h", dimension: "model" }]);
+      expect(tabLinks(app.root).map((link) => link.props["aria-current"])).toEqual([
+        undefined,
+        "page",
+      ]);
+
+      await app.follow(formatPath({ name: "model", identity: known("model-alpha") }, "24h"));
+      expect(app.calls.groups.at(-1)).toEqual({
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known("model-alpha") },
+      });
+      expect(graph.textOf(app.root)).toContain("model-alpha");
+      expect(tabLinks(app.root).map((link) => link.props["aria-current"])).toEqual([
+        undefined,
+        "page",
+      ]);
+
+      await app.follow(formatPath({ name: "provider", identity: known("openai") }, "24h"));
+      expect(app.calls.groups.at(-1)).toEqual({
+        range: "24h",
+        dimension: "model",
+        filter: { dimension: "provider", identity: known("openai") },
+      });
+      expect(graph.textOf(app.root)).toContain("OpenAI");
+      expect(rangeControl(app.root)).toBeDefined();
+      await app.follow("/models?range=7d");
+      expect(app.calls.groups.at(-1)).toEqual({ range: "7d", dimension: "model" });
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("shows a failed same-kind model detail transition, then recovers on refresh", async () => {
+    let failBeta = true;
+    const alphaPath = formatPath({ name: "model", identity: known("model-alpha") }, "7d");
+    const betaPath = formatPath({ name: "model", identity: known("model-beta") }, "7d");
+    const app = mountApp(alphaPath, {
+      groups: (query) => {
+        const identity = query.filter?.identity;
+        if (identity?.kind === "known" && identity.id === "model-beta" && failBeta) {
+          return Promise.reject(new Error("model beta unavailable"));
+        }
+        return defaultGroups(query);
+      },
+    });
+    try {
+      await settle();
+      await settle();
+      expect(graph.textOf(app.root)).toContain("model-alpha");
+      expect(byClass(app.root, "div", "qg-error-card")).toHaveLength(0);
+
+      await app.follow(betaPath);
+      expect(byClass(app.root, "div", "qg-error-card")).toHaveLength(1);
+      expect(byClass(app.root, "output", "qg-skeleton")).toHaveLength(0);
+      expect(graph.textOf(app.root)).not.toContain("model-alpha");
+
+      failBeta = false;
+      app.emit("sessions.changed");
+      await settle();
+      await settle();
+      expect(byClass(app.root, "div", "qg-error-card")).toHaveLength(0);
+      expect(graph.textOf(app.root)).toContain("model-beta");
+      expect(graph.textOf(app.root)).not.toContain("model-alpha");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("shows a failed same-kind provider detail transition, then recovers on refresh", async () => {
+    let failAnthropic = true;
+    const openaiPath = formatPath({ name: "provider", identity: known("openai") }, "7d");
+    const anthropicPath = formatPath({ name: "provider", identity: known("anthropic") }, "7d");
+    const app = mountApp(openaiPath, {
+      groups: (query) => {
+        const identity = query.filter?.identity;
+        if (identity?.kind === "known" && identity.id === "anthropic" && failAnthropic) {
+          return Promise.reject(new Error("anthropic unavailable"));
+        }
+        return defaultGroups(query);
+      },
+    });
+    try {
+      await settle();
+      await settle();
+      expect(graph.textOf(app.root)).toContain("OpenAI");
+      expect(byClass(app.root, "div", "qg-error-card")).toHaveLength(0);
+
+      await app.follow(anthropicPath);
+      expect(byClass(app.root, "div", "qg-error-card")).toHaveLength(1);
+      expect(byClass(app.root, "output", "qg-skeleton")).toHaveLength(0);
+      expect(graph.textOf(app.root)).not.toContain("OpenAI");
+
+      failAnthropic = false;
+      app.emit("sessions.changed");
+      await settle();
+      await settle();
+      expect(byClass(app.root, "div", "qg-error-card")).toHaveLength(0);
+      expect(graph.textOf(app.root)).toContain("Anthropic");
+      expect(graph.textOf(app.root)).not.toContain("OpenAI");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("keeps data links on the visible stale range after a range failure", async () => {
+    const app = mountApp("/models?range=7d", {
+      groups: (query) =>
+        query.range === "30d"
+          ? Promise.reject(new Error("range unavailable"))
+          : defaultGroups(query),
+    });
+    try {
+      await settle();
+      await settle();
+      expect(rowByLabel(app.root, "model-alpha")).toBeDefined();
+
+      clickSegmented(app.root, "Time range", "30 days");
+      await settle();
+      await settle();
+
+      expect(app.browser.location.search).toBe("?range=30d");
+      expect(byClass(app.root, "div", "qg-range-failure")).toHaveLength(1);
+      expect(graph.textOf(app.root)).toContain("Showing 7 days. Updating to 30 days failed.");
+      const row = rowByLabel(app.root, "model-alpha") as TestNode;
+      expect(row.props.href).toBe(
+        `/model/${encodeAnalyticsEntityToken(known("model-alpha"))}?range=7d`,
+      );
+      expect(row.props.href).not.toContain("30d");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("keeps Session range-free while the remembered range survives the tabs", async () => {
+    const app = mountApp("/models?range=30d");
+    try {
+      await settle();
+      await settle();
+      await app.follow("/session/session-root-1");
+      expect(app.browser.location.search).toBe("");
+      expect(rangeControl(app.root)).toBeUndefined();
+      expect(app.calls.session).toEqual(["session-root-1"]);
+      const links = tabLinks(app.root);
+      expect(links.map((link) => link.props.href)).toEqual([
+        "/analytics?range=30d",
+        "/models?range=30d",
+      ]);
+      expect(links.map((link) => link.props["aria-current"])).toEqual(["page", undefined]);
+      await app.follow("/analytics?range=30d");
+      expect(app.calls.home.at(-1)).toBe("30d");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("does not expose any route beyond Models and the two symmetric details", () => {
+    expect(parseLocation("/models/foo", "7d").route.name).toBe("not-found");
+    expect(parseLocation("/model-pair/a/b", "7d").route.name).toBe("not-found");
+  });
+
+  it("keeps the dimension control and breakdown sort mounted while a switch is pending", async () => {
+    let resolveProvider: ((snapshot: AnalyticsGroupSnapshot) => void) | undefined;
+    const app = mountApp("/models?range=24h", {
+      groups: (query) => {
+        if (query.dimension === "provider") {
+          return new Promise((resolve) => {
+            resolveProvider = resolve;
+          });
+        }
+        return defaultGroups(query);
+      },
+    });
+    try {
+      await settle();
+      await settle();
+      const tokensSort = () =>
+        segmentedItems(app.root, "Sort breakdown").find((node) => graph.textOf(node) === "Tokens");
+      clickSegmented(app.root, "Sort breakdown", "Tokens");
+      await settle();
+      expect(tokensSort()?.props["aria-pressed"]).toBe(true);
+      const control = findSegmented(app.root, "Group usage by") as TestNode;
+      const providerControl = segmentedItems(app.root, "Group usage by").find(
+        (node) => graph.textOf(node) === "Provider",
+      ) as TestNode;
+      click(providerControl);
+      await settle();
+
+      expect(findSegmented(app.root, "Group usage by")).toBe(control);
+      expect(
+        segmentedItems(app.root, "Group usage by").find(
+          (node) => graph.textOf(node) === "Provider",
+        ),
+      ).toBe(providerControl);
+      expect(graph.textOf(chartTitle(app.root) as TestNode)).toBe("Usage by provider");
+
+      (resolveProvider as (snapshot: AnalyticsGroupSnapshot) => void)(
+        withRange(providerSnapshot(), "24h"),
+      );
+      await settle();
+      await settle();
+      expect(rowLabels(app.root)).toEqual([
+        "OpenAI",
+        "Google",
+        "Anthropic",
+        "Unknown provider",
+        "Mistral",
+        "Empty provider ID",
+        "DeepSeek",
+        "OpenRouter",
+      ]);
+      expect(tokensSort()?.props["aria-pressed"]).toBe(true);
+
+      await app.follow("/models?range=7d&group=provider");
+      expect(app.browser.location.pathname + app.browser.location.search).toBe(
+        "/models?range=7d&group=provider",
+      );
+      expect(tokensSort()?.props["aria-pressed"]).toBe(true);
+      expect(rowLabels(app.root).slice(0, 5)).toEqual([
+        "OpenAI",
+        "Google",
+        "Anthropic",
+        "Unknown provider",
+        "Mistral",
+      ]);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("keeps the dimension control usable after a failed switch", async () => {
+    const app = mountApp("/models?range=24h", {
+      groups: (query) => {
+        if (query.dimension === "provider")
+          return Promise.reject(new Error("provider unavailable"));
+        return defaultGroups(query);
+      },
+    });
+    try {
+      await settle();
+      await settle();
+      clickSegmented(app.root, "Group usage by", "Provider");
+      await settle();
+      await settle();
+
+      expect(findSegmented(app.root, "Group usage by")).toBeDefined();
+      expect(byClass(app.root, "div", "qg-error-card")).toHaveLength(1);
+
+      clickSegmented(app.root, "Group usage by", "Model");
+      await settle();
+      await settle();
+      expect(graph.textOf(chartTitle(app.root) as TestNode)).toBe("Usage by model");
+      expect(rowLabels(app.root)).toContain("model-alpha");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("preserves the Models grouping through a detail, tab link and browser back", async () => {
+    const app = mountApp("/models?range=24h");
+    try {
+      await settle();
+      await settle();
+      clickSegmented(app.root, "Group usage by", "Provider");
+      await settle();
+      await settle();
+      expect(app.browser.location.pathname + app.browser.location.search).toBe(
+        "/models?range=24h&group=provider",
+      );
+
+      const openai = rowByLabel(app.root, "OpenAI") as TestNode;
+      expect(openai.props.href).toBe(
+        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=24h&group=provider`,
+      );
+      await app.follow(openai.props.href as string);
+      const modelsTab = tabLinks(app.root)[1] as TestNode;
+      expect(modelsTab.props.href).toBe("/models?range=24h&group=provider");
+      const breadcrumbs = graph
+        .elementsNamed(app.root, "nav")
+        .find((node) => hasClass(node, "qg-breadcrumbs")) as TestNode;
+      const crumbLinks = graph.elementsNamed(breadcrumbs, "a");
+      expect(crumbLinks[1]?.props.href).toBe("/models?range=24h&group=provider");
+
+      await app.back();
+      expect(app.browser.location.pathname + app.browser.location.search).toBe(
+        "/models?range=24h&group=provider",
+      );
+      expect(app.calls.groups.at(-1)).toEqual({ range: "24h", dimension: "provider" });
+
+      await app.follow("/analytics?range=24h");
+      expect((tabLinks(app.root)[1] as TestNode).props.href).toBe(
+        "/models?range=24h&group=provider",
+      );
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("marks only the visible tab current and indicates the Analytics section separately", async () => {
+    const app = mountApp("/models?range=24h");
+    try {
+      await settle();
+      await settle();
+      const sectionLink = () =>
+        graph
+          .elementsNamed(app.root, "a")
+          .find((node) => node.props["aria-label"] === "Analytics") as TestNode;
+      expect(sectionLink().props["aria-current"]).toBeUndefined();
+      expect(sectionLink().props["data-section-active"]).toBe("true");
+      expect(tabLinks(app.root).map((link) => link.props["aria-current"])).toEqual([
+        undefined,
+        "page",
+      ]);
+      expect(
+        graph.elementsNamed(app.root, "a").filter((link) => link.props["aria-current"] === "page"),
+      ).toHaveLength(1);
+
+      await app.follow("/analytics?range=24h");
+      expect(sectionLink().props["aria-current"]).toBeUndefined();
+      expect(tabLinks(app.root).map((link) => link.props["aria-current"])).toEqual([
+        "page",
+        undefined,
+      ]);
+    } finally {
+      app.dispose();
+    }
+  });
+});
+
+describe("Models styles", () => {
+  it("declares the exact rank palette and the accessible emphasis hooks", () => {
+    const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+    expect(styles).toContain("--qg-rank-1: var(--qg-token-cache-read);");
+    expect(styles).toContain("--qg-rank-2: var(--qg-token-input);");
+    expect(styles).toContain("--qg-rank-3: var(--qg-token-reasoning);");
+    expect(styles).toContain("--qg-rank-4: var(--qg-token-output);");
+    expect(styles).toContain("--qg-rank-5: var(--qg-chart-rate);");
+    expect(styles).toContain("--qg-rank-other: var(--qg-text-muted);");
+    expect(styles).toContain(".qg-analytics-tabs");
+    expect(styles).toContain(".qg-breakdown");
+    expect(styles).toContain(".qg-partial");
+    expect(styles).toContain(".qg-model-chart");
+    expect(styles).not.toContain(".qg-model-legend .qg-legend__swatch");
+    expect(styles).toContain(".qg-legend__swatch {");
+    expect(styles).toContain("border-radius: 2px;");
+    expect(styles).toMatch(
+      /\.qg-breakdown__swatch \{[^}]*width: 10px;[^}]*height: 10px;[^}]*border-radius: 2px;[^}]*background: var\(--qg-swatch\);/u,
+    );
+    expect(styles).toContain('.qg-breakdown__row[data-dimmed="true"]');
+    expect(styles).toContain(".qg-model-chart__plot[data-highlight]");
+    expect(styles).toContain(".qg-breakable");
+    expect(styles).toContain("overflow-wrap: anywhere;");
+    expect(styles).toContain("background: var(--qg-surface);");
+  });
+});
+
+/**
+ * The module's label helpers are exercised through the rendered rows above;
+ * this guard keeps the direct import honest for the identity cases that a
+ * fixture row cannot express cheaply.
+ */
+describe("identity labels used by the rendered surfaces", () => {
+  it("keeps model and provider nouns distinct", () => {
+    expect(identityLabel(unknownIdentity, "model")).toBe("Unknown model");
+    expect(identityLabel(unknownIdentity, "provider")).toBe("Unknown provider");
+    expect(identityLabel(known("openai"), "provider")).toBe("OpenAI");
+  });
+});

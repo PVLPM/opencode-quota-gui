@@ -8,7 +8,7 @@ import {
 } from "../chart-geometry";
 import { chartIndexAt, createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
-import { formatExactCount, formatTimestamp, formatTokenCount } from "../format";
+import { axisRangeCaption, formatExactCount, formatTimestamp, formatTokenCount } from "../format";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
 
@@ -160,6 +160,18 @@ export function SessionChart(props: {
     if (Math.abs(value) < 100) return Number(value.toPrecision(3)).toString();
     return formatTokenCount(value);
   };
+  /**
+   * Both headings share one row above the plot. At the narrow 9px size the
+   * full pair needs about 204 chart units; 210 leaves a clear gap. Below that,
+   * drop the repeated word "tokens" rather than let the two headings collide.
+   * The chart's accessible name still spells out both axes in full.
+   */
+  const compactHeadings = (): boolean => geometry().plot.width < 210;
+  const rangeEndCaption = (): string | undefined => {
+    const count = geometry().stepCount;
+    if (count <= 0) return undefined;
+    return axisRangeCaption(`step ${count}`, count, geometry().labelIndexes);
+  };
 
   return (
     <ChartShell
@@ -197,7 +209,7 @@ export function SessionChart(props: {
             </div>
             <Show when={geometry().hasDescendants}>
               <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-total)" }}>
-                <span class="qg-legend__swatch" aria-hidden="true" />
+                <span class="qg-legend__swatch qg-legend__swatch--dashed" aria-hidden="true" />
                 <span class="qg-legend__label">Cumulative · session tree</span>
               </div>
             </Show>
@@ -238,7 +250,7 @@ export function SessionChart(props: {
               y={geometry().plot.top - 12}
               text-anchor="start"
             >
-              Context tokens
+              {compactHeadings() ? "Context" : "Context tokens"}
             </text>
             <text
               class="qg-chart__axis-title qg-chart__axis-title--total"
@@ -246,7 +258,7 @@ export function SessionChart(props: {
               y={geometry().plot.top - 12}
               text-anchor="end"
             >
-              Cumulative tokens
+              {compactHeadings() ? "Cumulative" : "Cumulative tokens"}
             </text>
 
             <For each={geometry().context.ticks}>
@@ -501,6 +513,10 @@ export function SessionChart(props: {
           </Show>
         </Show>
       </div>
+
+      <Show when={rangeEndCaption()}>
+        {(caption) => <p class="qg-chart__axis-caption">{caption()}</p>}
+      </Show>
 
       <Show when={geometry().stepCount > 0 && geometry().focusStepCount === 0}>
         <p class="qg-chart__note">
