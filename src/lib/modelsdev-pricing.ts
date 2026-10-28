@@ -304,6 +304,17 @@ function unionProviderIDs(snapshots: Array<PricingSnapshot | null | undefined>):
 // that models.dev stopped listing. Fill them from the bundled file on every
 // load, so a fresh runtime snapshot doesn't hide offline coverage until its
 // next refresh.
+//
+// The bundled snapshot intentionally carries two exact retired routes,
+// `opencode/union-alpha` and `opencode-go/union-alpha`, at historical zero
+// rates. models.dev added them with zero input/output/cache_read, labeled them
+// Free, then removed them when the routes expired:
+// - https://github.com/sst/models.dev/commit/e3626b49388e2dbea382b91b81e9d4237c117402
+// - https://github.com/sst/models.dev/commit/75518776b9fb7e51d0de48b83469f6a6b4159415
+// - https://github.com/sst/models.dev/commit/14f892c0a44c0a0bcdf9805e7fd695402b4d4218
+// These entries are exact id/provider pairs; no wildcard or model-name
+// inference is added. If upstream lists either id again, catalog presence from
+// the refresh wins and the historical zero price is not restored.
 function withBundledRetiredModels(
   runtime: PricingSnapshot,
   bundled: PricingSnapshot,

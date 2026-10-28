@@ -453,6 +453,39 @@ describe("home usage token accounting and pricing", () => {
     expect(isAuthoritativelyFree(usage.totals)).toBe(true);
     expect(formatCostText(usage.totals)).toBe("Free");
   });
+
+  it("shows the retired union-alpha routes as Free from positive usage", () => {
+    for (const providerID of ["opencode", "opencode-go"] as const) {
+      const dataset = makeDataset({
+        sessions: [
+          sessionInfo({
+            id: `ses_${providerID}`,
+            projectID: "proj_p",
+            createdMs: NOW - 2 * HOUR_MS,
+          }),
+        ],
+        messages: [
+          assistantRow(
+            `ses_${providerID}`,
+            `msg_${providerID}`,
+            NOW - HOUR_MS,
+            NOW - HOUR_MS + 500,
+            { input: 10, output: 20, reasoning: 30, cacheRead: 40, cacheWrite: 50 },
+            { providerID, modelID: "union-alpha" },
+          ),
+        ],
+      });
+
+      const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+      expect(usage.totals.total).toBe(150);
+      expect(usage.totals.apiEquivalentCostUsd).toBe(0);
+      expect(usage.totals.unpricedTokens).toBe(0);
+      expect(usage.totals.unknownTokens).toBe(0);
+      expect(isAuthoritativelyFree(usage.totals)).toBe(true);
+      expect(formatCostText(usage.totals)).toBe("Free");
+    }
+  });
 });
 
 describe("deterministic owner set (R50)", () => {

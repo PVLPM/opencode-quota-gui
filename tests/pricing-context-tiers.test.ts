@@ -492,6 +492,138 @@ describe("catalog-aware pricing resolution", () => {
   });
 });
 
+describe("retired union-alpha route pricing", () => {
+  // models.dev added these two routes at zero rates and labeled them Free, then
+  // removed them when the routes expired. Exact historical commits:
+  // - https://github.com/sst/models.dev/commit/e3626b49388e2dbea382b91b81e9d4237c117402
+  // - https://github.com/sst/models.dev/commit/75518776b9fb7e51d0de48b83469f6a6b4159415
+  // - https://github.com/sst/models.dev/commit/14f892c0a44c0a0bcdf9805e7fd695402b4d4218
+  const UNION_ALPHA_COST = { input: 0, output: 0, cache_read: 0 };
+  const POSITIVE_TOKENS: TokenBuckets = {
+    input: 1_000_000,
+    output: 1_000_000,
+    reasoning: 1_000_000,
+    cache_read: 1_000_000,
+    cache_write: 1_000_000,
+  };
+
+  it("prices both exact historical routes at zero for positive usage", () => {
+    setPricingSnapshotSelection("bundled");
+
+    for (const providerID of ["opencode", "opencode-go"] as const) {
+      expect(lookupCost(providerID, "union-alpha")).toEqual(UNION_ALPHA_COST);
+      expect(resolvePricingKey({ providerID, modelID: "union-alpha" })).toMatchObject({
+        ok: true,
+        method: "source_provider",
+        key: { provider: providerID, model: "union-alpha" },
+      });
+      expect(
+        calculateCostUsd({ provider: providerID, model: "union-alpha", tokens: POSITIVE_TOKENS }),
+      ).toEqual({ ok: true, costUsd: 0 });
+      expect(
+        priceTokenBuckets({ providerID, modelID: "union-alpha", tokens: POSITIVE_TOKENS }),
+      ).toEqual({
+        status: "priced",
+        key: { provider: providerID, model: "union-alpha" },
+        costUsd: 0,
+      });
+    }
+  });
+
+  it("does not infer the retired route for other providers or ids", () => {
+    setPricingSnapshotSelection("bundled");
+
+    expect(lookupCost("openrouter", "union-alpha")).toBeNull();
+    expect(
+      priceTokenBuckets({
+        providerID: "openrouter",
+        modelID: "union-alpha",
+        tokens: POSITIVE_TOKENS,
+      }),
+    ).toMatchObject({
+      status: "unknown",
+      unknown: {
+        sourceProviderID: "openrouter",
+        sourceModelID: "union-alpha",
+        reason: "ambiguous_model",
+      },
+    });
+
+    for (const providerID of ["opencode", "opencode-go"] as const) {
+      expect(lookupCost(providerID, "union-alpha-old")).toBeNull();
+      expect(resolvePricingKey({ providerID, modelID: "union-alpha-old" }).ok).toBe(false);
+    }
+  });
+
+  it("keeps upstream present-unpriced precedence over the retired bundled route", async () => {
+    const dirs = await tempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const bundled = JSON.parse(readFileSync(SNAPSHOT_URL, "utf8"));
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          opencode: { models: { "union-alpha": { cost: {} } } },
+          "opencode-go": { models: { "union-alpha": { cost: {} } } },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await maybeRefreshPricingSnapshot({
+      nowMs,
+      force: true,
+      runtimeDirs: dirs,
+      fetchFn,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(lookupCost("opencode", "union-alpha")).toBeNull();
+    expect(lookupCost("opencode-go", "union-alpha")).toBeNull();
+  });
+
+  it("retains the retired route after an upstream removal and an offline refresh", async () => {
+    const dirs = await tempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const bundled = JSON.parse(readFileSync(SNAPSHOT_URL, "utf8"));
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          opencode: {
+            models: { "big-pickle": { cost: { input: 0, output: 0, cache_read: 0 } } },
+          },
+          "opencode-go": {
+            models: { "beam-free": { cost: { input: 0, output: 0, cache_read: 0 } } },
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await maybeRefreshPricingSnapshot({
+      nowMs,
+      force: true,
+      runtimeDirs: dirs,
+      fetchFn,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(lookupCost("opencode", "union-alpha")).toEqual(UNION_ALPHA_COST);
+    expect(lookupCost("opencode-go", "union-alpha")).toEqual(UNION_ALPHA_COST);
+
+    const offline = await maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 1,
+      force: true,
+      runtimeDirs: dirs,
+      fetchFn: vi.fn().mockRejectedValue(new Error("offline")),
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(offline).toMatchObject({ attempted: true, updated: false, error: "offline" });
+    expect(lookupCost("opencode", "union-alpha")).toEqual(UNION_ALPHA_COST);
+    expect(lookupCost("opencode-go", "union-alpha")).toEqual(UNION_ALPHA_COST);
+  });
+});
+
 describe("models.dev refresh context tiers", () => {
   it("parses explicit context tiers, drops unsupported tiers, and makes one central request", async () => {
     vi.resetModules();
