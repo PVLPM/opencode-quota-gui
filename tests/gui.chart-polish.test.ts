@@ -213,6 +213,26 @@ function sessionAxisTitle(root: TestNode, axis: "context" | "total"): string {
   return graph.textOf(node);
 }
 
+/** A focused session of `count` ascending steps, for dense-step coverage. */
+function sessionWithSteps(
+  count: number,
+  overrides: Partial<SessionSnapshot> = {},
+): SessionSnapshot {
+  const base = sessionSnapshot();
+  const firstStep = base.steps[0] as (typeof base.steps)[number];
+  const steps = Array.from({ length: count }, (_, index) => ({
+    ...firstStep,
+    messageId: `msg-dense-${index}`,
+    atMs: NOW - (count - index) * 60_000,
+  }));
+  return sessionSnapshot({ steps, ...overrides });
+}
+
+/** The visible 1-based Session step labels, in render order. */
+function sessionStepLabels(root: TestNode): string[] {
+  return byClass(root, "text", "qg-chart__axis-label--step").map((node) => graph.textOf(node));
+}
+
 function listener(node: TestNode, name: string): TestListener | undefined {
   return graph.listenerOf(node, name);
 }
@@ -637,34 +657,131 @@ describe("shared stacked usage bars", () => {
         .slice(1)
         .map((value, index) => value - (hourlyNarrow.labelIndexes[index] as number)),
     ).toEqual([5, 5, 5, 5]);
+  });
 
-    const base = sessionSnapshot();
-    const firstStep = base.steps[0] as (typeof base.steps)[number];
-    const steps = Array.from({ length: 16 }, (_, index) => ({
-      ...firstStep,
-      messageId: `msg-${index}`,
-      atMs: NOW + index * 60_000,
-    }));
-    const session = sessionSnapshot({ steps });
-    const sessionDesktop = buildSessionChartGeometry(session);
-    expect(sessionDesktop.labelIndexes).toEqual(Array.from({ length: 16 }, (_, index) => index));
-
-    for (const width of [375, 357, 342]) {
-      const sessionNarrow = buildSessionChartGeometry(session, {
+  describe("dense session step axis", () => {
+    const narrowSession = (count: number, width: number) =>
+      buildSessionChartGeometry(sessionWithSteps(count), {
         width,
         height: 220,
         padding: { top: 34, right: 56, bottom: 34, left: 52 },
       });
-      expect(sessionNarrow.labelIndexes).toEqual([0, 2, 4, 6, 8, 10, 12, 14]);
-      expect(
-        sessionNarrow.labelIndexes
-          .slice(1)
-          .map((value, index) => value - (sessionNarrow.labelIndexes[index] as number)),
-      ).toEqual([2, 2, 2, 2, 2, 2, 2]);
-      expect(2 * (sessionNarrow.plot.width / (sessionNarrow.stepCount - 1))).toBeGreaterThanOrEqual(
-        24,
-      );
-    }
+    const labelsOf = (count: number, width?: number) =>
+      (width === undefined
+        ? buildSessionChartGeometry(sessionWithSteps(count))
+        : narrowSession(count, width)
+      ).labelIndexes.map((index) => index + 1);
+
+    it("caps dense step labels at twelve and labels the real endpoints", () => {
+      expect(labelsOf(962)).toEqual([1, 100, 200, 300, 400, 500, 600, 700, 800, 900, 962]);
+      expect(labelsOf(9136)).toEqual([1, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9136]);
+
+      for (const count of [962, 9136]) {
+        const labels = labelsOf(count);
+        expect(labels.length).toBeLessThanOrEqual(12);
+        expect(labels[0]).toBe(1);
+        expect(labels.at(-1)).toBe(count);
+        expect(labels).not.toContain(0);
+      }
+    });
+
+    it("uses fewer round labels as the plot narrows", () => {
+      expect(labelsOf(962, 375)).toEqual([1, 100, 200, 300, 400, 500, 600, 700, 800, 962]);
+      expect(labelsOf(962, 342)).toEqual([1, 200, 400, 600, 800, 962]);
+      expect(labelsOf(9136, 375)).toEqual([1, 2000, 4000, 6000, 8000, 9136]);
+
+      expect(labelsOf(962, 375).length).toBeLessThan(labelsOf(962).length);
+      expect(labelsOf(962, 342).length).toBeLessThan(labelsOf(962, 375).length);
+      expect(labelsOf(9136, 375).length).toBeLessThan(labelsOf(9136).length);
+    });
+
+    it("keeps short and medium sessions informative without a synthetic zero", () => {
+      expect(labelsOf(1)).toEqual([1]);
+      expect(labelsOf(3)).toEqual([1, 2, 3]);
+      expect(labelsOf(16)).toEqual([1, 2, 4, 6, 8, 10, 12, 14, 16]);
+      expect(labelsOf(24)).toEqual([1, 5, 10, 15, 20, 24]);
+      expect(labelsOf(52)).toEqual([1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 52]);
+      expect(labelsOf(100)).toEqual([1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+      expect(labelsOf(16, 342)).toEqual([1, 2, 4, 6, 8, 10, 12, 14, 16]);
+    });
+
+    it("drops only a tick that would touch the final endpoint", () => {
+      const desktop962 = labelsOf(962);
+      expect(desktop962.at(-2)).toBe(900);
+      expect(desktop962.at(-1)).toBe(962);
+
+      const narrow962 = labelsOf(962, 375);
+      expect(narrow962).not.toContain(900);
+      expect(narrow962.at(-2)).toBe(800);
+      expect(narrow962.at(-1)).toBe(962);
+
+      const dense9136 = labelsOf(9136);
+      expect(dense9136).not.toContain(9000);
+      expect(dense9136.at(-2)).toBe(8000);
+      expect(dense9136.at(-1)).toBe(9136);
+    });
+
+    it("re-renders dense labels at desktop and narrow widths", async () => {
+      const width = stubChartWidth(342);
+      const { root, dispose } = mountSession(sessionWithSteps(962));
+      try {
+        expect(sessionStepLabels(root)).toEqual([
+          "1",
+          "100",
+          "200",
+          "300",
+          "400",
+          "500",
+          "600",
+          "700",
+          "800",
+          "900",
+          "962",
+        ]);
+        expect(byClass(root, "p", "qg-chart__axis-caption")).toHaveLength(0);
+
+        width.fire();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(sessionStepLabels(root)).toEqual(["1", "200", "400", "600", "800", "962"]);
+        expect(byClass(root, "p", "qg-chart__axis-caption")).toHaveLength(0);
+      } finally {
+        dispose();
+        width.restore();
+      }
+    });
+
+    it("leaves dense series and compaction geometry untouched by label thinning", () => {
+      const base = sessionWithSteps(962);
+      const markerAt = base.steps[700]?.atMs as number;
+      const snapshot = sessionWithSteps(962, {
+        compactionMarkers: [
+          { sessionId: "session-root-1", atMs: markerAt, messageId: "msg-dense-compaction" },
+        ],
+      });
+      const geometry = buildSessionChartGeometry(snapshot);
+
+      expect(geometry.stepCount).toBe(962);
+      expect(geometry.context.points).toHaveLength(962);
+      expect(geometry.own.points).toHaveLength(962);
+      expect(geometry.tree.points).toHaveLength(962);
+      expect(geometry.own.linePath).not.toMatch(/NaN|Infinity|undefined/);
+      expect(geometry.tree.linePath).not.toMatch(/NaN|Infinity|undefined/);
+      expect(geometry.compaction).toHaveLength(1);
+      expect(geometry.compaction[0]).toMatchObject({
+        stepIndex: 700,
+        sessionId: "session-root-1",
+      });
+      expect(geometry.compaction[0]?.x).toBeCloseTo(geometry.stepX(700), 10);
+
+      for (let index = 1; index < geometry.stepCount; index += 1) {
+        expect(geometry.ownCumulativeValues[index]).toBeGreaterThanOrEqual(
+          geometry.ownCumulativeValues[index - 1] as number,
+        );
+        expect(geometry.treeCumulativeValues[index]).toBeGreaterThanOrEqual(
+          geometry.ownCumulativeValues[index] as number,
+        );
+      }
+    });
   });
 
   it("shows a range-end caption when the narrow date endpoint is omitted", async () => {
@@ -699,7 +816,7 @@ describe("shared stacked usage bars", () => {
     }
   });
 
-  it("shows a range-end step caption when the narrow step endpoint is omitted", async () => {
+  it("labels the narrow step endpoint and drops the redundant caption", async () => {
     const base = sessionSnapshot();
     const firstStep = base.steps[0] as (typeof base.steps)[number];
     const steps = Array.from({ length: 16 }, (_, index) => ({
@@ -712,12 +829,8 @@ describe("shared stacked usage bars", () => {
     try {
       width.fire();
       await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(
-        byClass(root, "text", "qg-chart__axis-label--step").map((node) => graph.textOf(node)),
-      ).toEqual(["1", "3", "5", "7", "9", "11", "13", "15"]);
-      const caption = byClass(root, "p", "qg-chart__axis-caption")[0];
-      expect(caption).toBeDefined();
-      expect(graph.textOf(caption as TestNode)).toBe("Through step 16");
+      expect(sessionStepLabels(root)).toEqual(["1", "2", "4", "6", "8", "10", "12", "14", "16"]);
+      expect(byClass(root, "p", "qg-chart__axis-caption")).toHaveLength(0);
     } finally {
       dispose();
       width.restore();

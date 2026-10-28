@@ -209,7 +209,78 @@ export function axisLabelIndexes(count: number, slot: number, labelWidth: number
 }
 
 const DATE_LABEL_WIDTH = 40;
-const STEP_LABEL_WIDTH = 24;
+
+/** Session step labels are 1-based and can reach four or five digits. */
+const STEP_LABEL_DIGIT_WIDTH = 6;
+const STEP_LABEL_GAP = 8;
+const STEP_LABEL_MIN_CLEARANCE = 4;
+const MAX_STEP_LABELS = 12;
+
+function stepLabelWidth(value: number): number {
+  return STEP_LABEL_DIGIT_WIDTH * String(value).length;
+}
+
+/** Labels including both real endpoints for one display-value stride. */
+function stepLabelCount(count: number, step: number): number {
+  if (step <= 1) return count;
+  return 2 + Math.floor((count - 1) / step);
+}
+
+/**
+ * Readable step labels for unbounded Session step counts.
+ *
+ * Regular ticks sit on round step values (1, 100, 200, …) chosen from the
+ * available plot width, never more than `MAX_STEP_LABELS` including both real
+ * endpoints. The previous regular tick is removed only when the final step
+ * would touch it; the first and final steps themselves are always kept.
+ */
+function stepLabelIndexes(count: number, plotWidth: number): number[] {
+  if (count <= 0) return [];
+  if (count === 1) return [0];
+
+  const last = count - 1;
+  const labelWidth = stepLabelWidth(count);
+  const pitch = labelWidth + STEP_LABEL_GAP;
+  const pxPerStep = Math.max(plotWidth, 1) / last;
+  const maxLabels = Math.max(
+    2,
+    Math.min(MAX_STEP_LABELS, Math.floor(Math.max(plotWidth, 0) / pitch) + 1),
+  );
+
+  // The smallest 1/2/5 step that respects both the label cap and the fitted
+  // pixel pitch. For short sessions this stays at one label per step.
+  let step = 1;
+  while (stepLabelCount(count, step) > maxLabels || (step > 1 && step * pxPerStep < pitch)) {
+    step = Math.max(step + 1, niceTickStep(step + 1, 1));
+  }
+
+  const values = new Set<number>([1, count]);
+  for (let value = step; value < count; value += step) values.add(value);
+  const ordered = [...values].sort((left, right) => left - right);
+
+  const touches = (left: number, right: number): boolean =>
+    (right - left) * pxPerStep <
+    Math.max(stepLabelWidth(left), stepLabelWidth(right)) + STEP_LABEL_MIN_CLEARANCE;
+
+  const first = ordered[0];
+  const second = ordered[1];
+  if (ordered.length > 2 && first !== undefined && second !== undefined && touches(first, second)) {
+    ordered.splice(1, 1);
+  }
+
+  const previous = ordered.at(-2);
+  const finalValue = ordered.at(-1);
+  if (
+    ordered.length > 2 &&
+    previous !== undefined &&
+    finalValue !== undefined &&
+    touches(previous, finalValue)
+  ) {
+    ordered.splice(ordered.length - 2, 1);
+  }
+
+  return ordered.map((value) => value - 1);
+}
 
 /**
  * External presentation gaps sit between rounded segments, never on top of
@@ -657,11 +728,7 @@ export function buildSessionChartGeometry(
     cumulativeTicks: tree.ticks,
     compaction,
     stepX,
-    labelIndexes: axisLabelIndexes(
-      count,
-      count > 1 ? plot.width / (count - 1) : plot.width,
-      STEP_LABEL_WIDTH,
-    ),
+    labelIndexes: stepLabelIndexes(count, plot.width),
   };
 }
 
