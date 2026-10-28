@@ -283,6 +283,51 @@ export function withChildBuckets(snapshot: AnalyticsGroupSnapshot): AnalyticsGro
   };
 }
 
+/**
+ * Adds Other's real hidden same-dimension parents, using the same 60/40 bucket
+ * split as `withChildBuckets`. Each parent appears once per bucket and only
+ * rows outside the chart's top five contribute, mirroring the backend DTO.
+ */
+export function withParentBuckets(snapshot: AnalyticsGroupSnapshot): AnalyticsGroupSnapshot {
+  const topIdentities = snapshot.series.flatMap((entry) =>
+    entry.kind === "entity" ? [entry.identity] : [],
+  );
+  const hiddenRows = snapshot.rows.filter(
+    (row) => !topIdentities.some((identity) => sameRowIdentity(row.identity, identity)),
+  );
+
+  return {
+    ...snapshot,
+    series: snapshot.series.map((entry) => {
+      if (entry.kind !== "other") return entry;
+      const parentBuckets = snapshot.buckets.map((_, bucketIndex) => {
+        const merged = new Map<
+          string,
+          { identity: AnalyticsEntityIdentity; tokens: CostedTokens }
+        >();
+        for (const row of hiddenRows) {
+          const tokens = splitCosted(row.tokens)[bucketIndex];
+          if (tokens === undefined || tokens.total <= 0) continue;
+          const key = identityKey(row.identity);
+          const current = merged.get(key);
+          merged.set(
+            key,
+            current === undefined
+              ? { identity: row.identity, tokens }
+              : { identity: current.identity, tokens: addCosted(current.tokens, tokens) },
+          );
+        }
+        return [...merged.values()].sort((left, right) => {
+          const byTokens = right.tokens.total - left.tokens.total;
+          if (byTokens !== 0) return byTokens;
+          return identityKey(left.identity) < identityKey(right.identity) ? -1 : 1;
+        });
+      });
+      return { ...entry, parentBuckets };
+    }),
+  };
+}
+
 const alphaChildren: RowSpec[] = [
   { identity: known("openai"), total: 300, cost: 3 },
   { identity: known("anthropic"), total: 150, cost: 1.5 },

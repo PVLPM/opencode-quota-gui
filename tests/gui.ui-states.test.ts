@@ -501,6 +501,46 @@ describe("section state machine", () => {
     }
   });
 
+  it("rounds fractional percentages in both display modes without changing the raw value", async () => {
+    const module = await graph.load("/components/quota-card.tsx");
+    const valueText = module.rowValueText as (row: unknown, preferences: unknown) => string;
+    const shownPercent = module.rowPercent as (
+      row: unknown,
+      preferences: unknown,
+    ) => number | undefined;
+    const fractional = percentRow({ percentUsed: 8.4, percentRemaining: 91.6 });
+    for (const percentDisplayMode of ["used", "remaining"] as const) {
+      const preferences = displayPreferencesFromValues({
+        percentDisplayMode,
+        percentLabelStyle: "full",
+      });
+      // The raw value still feeds the word and the bar; only the label rounds.
+      expect(shownPercent(fractional, preferences)).toBe(
+        percentDisplayMode === "used" ? 8.4 : 91.6,
+      );
+      expect(valueText(fractional, preferences)).toBe(
+        percentDisplayMode === "used" ? "8% used" : "92% remaining",
+      );
+    }
+
+    const bounds = percentRow({ percentUsed: 0, percentRemaining: 100 });
+    expect(
+      valueText(
+        bounds,
+        displayPreferencesFromValues({ percentDisplayMode: "used", percentLabelStyle: "full" }),
+      ),
+    ).toBe("0% used");
+    expect(
+      valueText(
+        bounds,
+        displayPreferencesFromValues({
+          percentDisplayMode: "remaining",
+          percentLabelStyle: "full",
+        }),
+      ),
+    ).toBe("100% remaining");
+  });
+
   it("complements an opposite-only percentage and leaves absent percentages unlabelled", async () => {
     const module = await graph.load("/components/quota-card.tsx");
     const valueText = module.rowValueText as (row: unknown, preferences: unknown) => string;
@@ -1601,6 +1641,32 @@ describe("usage chart", () => {
     expect(text(html)).toContain("About the API-equivalent estimate");
   });
 
+  it("shows Free in the usage summary only when the whole range is zero-priced", async () => {
+    const free = await renderView("/components/usage-chart.tsx", "UsageChart", {
+      usage: usage("7d", [
+        {
+          startMs: NOW - DAY_MS,
+          endMs: NOW,
+          tokens: costed({ input: 100 }, { apiEquivalentCostUsd: 0 }),
+        },
+      ]),
+    });
+    expect(text(free)).toContain("Free");
+    expect(text(free)).not.toContain("≈ USD 0.00");
+
+    const partial = await renderView("/components/usage-chart.tsx", "UsageChart", {
+      usage: usage("7d", [
+        {
+          startMs: NOW - DAY_MS,
+          endMs: NOW,
+          tokens: costed({ input: 100 }, { apiEquivalentCostUsd: 0, unpricedTokens: 7 }),
+        },
+      ]),
+    });
+    expect(text(partial)).not.toContain("Free");
+    expect(text(partial)).toContain("Partial estimate");
+  });
+
   it("keeps bar stacks externally separated and preserves a tiny category truthfully", () => {
     const geometry = buildUsageGeometry([
       { startMs: 0, endMs: 1, tokens: costed({ input: 1000000, reasoning: 1 }) },
@@ -1648,6 +1714,13 @@ describe("usage chart", () => {
     expect(formatApiEquivalentCost(null)).toBe("≈ USD —");
     expect(formatApiEquivalentCost(1.5)).toBe("≈ USD 1.50");
     expect(formatPercent(62)).toBe("62%");
+    // Quota percentages display as whole numbers, including below 10%.
+    expect(formatPercent(8)).toBe("8%");
+    expect(formatPercent(8.4)).toBe("8%");
+    expect(formatPercent(8.5)).toBe("9%");
+    expect(formatPercent(0)).toBe("0%");
+    expect(formatPercent(100)).toBe("100%");
+    expect(formatPercent(undefined)).toBe("—");
     expect(formatPercentExact(96.37)).toBe("96.37%");
     expect(formatPercentExact(null)).toBe("—");
     expect(formatRunway(undefined, "UTC")).toBeUndefined();
@@ -1722,6 +1795,30 @@ describe("project view composition", () => {
     expect(html.match(/class="qg-summary-number"/g) ?? []).toHaveLength(0);
     expect(html.match(/class="qg-summary-cost"/g) ?? []).toHaveLength(0);
     expect(text(html).match(/≈ USD/g) ?? []).toHaveLength(1);
+  });
+
+  it("shows a visible Partial estimate note in the project summary", async () => {
+    const base = projectSnapshot();
+    const html = await renderView("/views/project.tsx", "ProjectView", {
+      snapshot: {
+        ...base,
+        totals: {
+          ...costed(
+            { input: 3300, output: 700 },
+            { apiEquivalentCostUsd: 0.6, unpricedTokens: 25 },
+          ),
+          sessionCount: base.totals.sessionCount,
+        },
+      },
+      range: "7d",
+    });
+    const summary = html.slice(
+      html.indexOf('class="qg-summary"'),
+      html.indexOf('class="qg-usage"'),
+    );
+    expect(text(summary)).toContain("API-equivalent estimate");
+    expect(text(summary)).toContain("Partial estimate");
+    expect(text(summary)).not.toContain("Free");
   });
 
   it("marks the current page and keeps the server's activity order", async () => {

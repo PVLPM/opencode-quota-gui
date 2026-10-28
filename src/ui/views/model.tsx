@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { createSignal } from "solid-js";
+import { createMemo, createSignal } from "solid-js";
 import type {
   AnalyticsDimension,
   AnalyticsEntityIdentity,
@@ -11,9 +11,12 @@ import { AnalyticsBreakdown } from "../components/analytics-breakdown";
 import { ChartSummary, type ChartSummaryItem } from "../components/chart-shell";
 import { CostInfo, EstimateNote } from "../components/cost-estimate";
 import { ModelUsageChart } from "../components/model-usage-chart";
-import { formatApiEquivalentCostText, formatExactCount, formatPercentExact } from "../format";
+import { formatExactCount, formatPercentExact } from "../format";
 import {
   type BreakdownSort,
+  costValueTitle,
+  entityKey,
+  formatCostText,
   identityLabel,
   rankSeries,
   seriesKey,
@@ -41,6 +44,24 @@ export function ModelDetailView(props: {
   // Match the chart's own rank order, so a row swatch and its bar cannot drift.
   const seriesKeys = () =>
     rankSeries(props.snapshot.series).map((entry) => seriesKey(entry, props.snapshot.dimension));
+  const otherParentKeys = createMemo(() => {
+    const keys = new Set<string>();
+    for (const entry of props.snapshot.series) {
+      if (entry.kind !== "other") continue;
+      for (const bucket of entry.parentBuckets ?? []) {
+        for (const parent of bucket) keys.add(entityKey(props.snapshot.dimension, parent.identity));
+      }
+    }
+    return keys;
+  });
+  const activeParent = () => {
+    const parent = inspection.activeParent();
+    return parent !== undefined &&
+      inspection.active() === parent.seriesKey &&
+      otherParentKeys().has(parent.parentKey)
+      ? parent
+      : undefined;
+  };
   const rate = () => cacheHitRate(props.snapshot.totals);
   const summaryItems = (): ChartSummaryItem[] => {
     const items: ChartSummaryItem[] = [
@@ -51,16 +72,10 @@ export function ModelDetailView(props: {
       },
       {
         label: "API-equivalent estimate",
-        value: formatApiEquivalentCostText(
-          props.snapshot.totals.apiEquivalentCostUsd,
-          props.snapshot.totals.total,
-        ),
+        value: formatCostText(props.snapshot.totals),
         info: <CostInfo />,
         note: <EstimateNote totals={props.snapshot.totals} />,
-        title:
-          props.snapshot.totals.apiEquivalentCostUsd === null
-            ? "No priced tokens in this range."
-            : `API-equivalent estimate: USD ${props.snapshot.totals.apiEquivalentCostUsd.toFixed(6)}.`,
+        title: costValueTitle(props.snapshot.totals),
       },
       {
         label: "Sessions",
@@ -104,6 +119,7 @@ export function ModelDetailView(props: {
         headingId="qg-model-usage"
         summary={<ChartSummary items={summaryItems()} />}
         activeSeries={inspection.active()}
+        activeParent={activeParent()}
         pinnedSeries={inspection.pinned()}
         onPointerSeries={inspection.inspectPointer}
         onFocusSeries={inspection.inspectFocus}
@@ -119,10 +135,14 @@ export function ModelDetailView(props: {
         onSortChange={setSortMode}
         showChildren={false}
         seriesKeys={seriesKeys()}
-        modelsGroup={props.modelsGroup}
+        modelsGroup={props.modelsGroup ?? "model"}
         activeSeries={inspection.active()}
+        otherParentKeys={otherParentKeys()}
+        activeParent={activeParent()}
         onPointerSeries={inspection.inspectPointer}
         onFocusSeries={inspection.inspectFocus}
+        onPointerParent={inspection.inspectPointerParent}
+        onFocusParent={inspection.inspectFocusParent}
       />
     </div>
   );

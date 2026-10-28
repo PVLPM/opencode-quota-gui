@@ -104,9 +104,10 @@ export function formatApiEquivalentCostTick(value: number, step: number): string
   return value.toFixed(decimals);
 }
 
+/** Quota labels show whole percents; raw values stay in the row and bar. */
 export function formatPercent(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "—";
-  return `${value.toFixed(value < 10 ? 1 : 0)}%`;
+  return `${Math.round(value)}%`;
 }
 
 /** Chart inspection always reports two decimals, including exact zeros. */

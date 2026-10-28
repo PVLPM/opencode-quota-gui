@@ -5,6 +5,7 @@ import type {
   AnalyticsSeries,
   CostedTokens,
 } from "../contracts/dashboard";
+import { formatApiEquivalentCostText } from "./format";
 import { resolveProviderPresentation } from "./provider-catalog";
 
 /**
@@ -281,6 +282,48 @@ export function exactCostTitle(tokens: Pick<CostedTokens, "apiEquivalentCostUsd"
   return tokens.apiEquivalentCostUsd === null
     ? "No priced tokens in this total."
     : `API-equivalent estimate: USD ${tokens.apiEquivalentCostUsd.toFixed(6)}. Not actual billed spend.`;
+}
+
+export type CostBearingTokens = Pick<
+  CostedTokens,
+  "total" | "apiEquivalentCostUsd" | "unpricedTokens" | "unknownTokens"
+>;
+
+/**
+ * `Free` is a claim about the whole total, so it needs a positive token count,
+ * an exactly zero numeric price, and no excluded tokens. A rounded sub-cent
+ * estimate or a partially priced total never qualifies.
+ */
+export function isAuthoritativelyFree(tokens: CostBearingTokens): boolean {
+  return (
+    tokens.total > 0 &&
+    tokens.apiEquivalentCostUsd === 0 &&
+    tokens.unpricedTokens === 0 &&
+    tokens.unknownTokens === 0
+  );
+}
+
+/** The visible Models cost text for one total: Free, Unpriced, a value or an em dash. */
+export function formatCostText(tokens: CostBearingTokens): string {
+  if (!(tokens.total > 0)) return "—";
+  if (tokens.apiEquivalentCostUsd === null || !Number.isFinite(tokens.apiEquivalentCostUsd)) {
+    return "Unpriced";
+  }
+  if (isAuthoritativelyFree(tokens)) return "Free";
+  return formatApiEquivalentCostText(tokens.apiEquivalentCostUsd, tokens.total);
+}
+
+/** Explains the same visible word, keeping exclusions visible on hover. */
+export function costValueTitle(tokens: CostBearingTokens): string {
+  if (!(tokens.total > 0)) return "No usage in this total.";
+  if (tokens.apiEquivalentCostUsd === null || !Number.isFinite(tokens.apiEquivalentCostUsd)) {
+    return estimateNoteTitle(tokens);
+  }
+  if (isAuthoritativelyFree(tokens)) {
+    return "Free: every token in this total is priced at zero. Not actual billed spend.";
+  }
+  if (isPartialEstimate(tokens)) return estimateNoteTitle(tokens);
+  return exactCostTitle(tokens);
 }
 
 export interface CombinedEstimate {

@@ -1,12 +1,20 @@
 import type { JSX } from "solid-js";
-import { createEffect, createSignal, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, Show } from "solid-js";
 import type { AnalyticsDimension, AnalyticsGroupSnapshot } from "../../contracts/dashboard";
 import { AnalyticsBreakdown } from "../components/analytics-breakdown";
 import { ChartSummary, type ChartSummaryItem } from "../components/chart-shell";
 import { CostInfo, EstimateNote } from "../components/cost-estimate";
 import { ModelUsageChart } from "../components/model-usage-chart";
-import { formatApiEquivalentCostText, formatExactCount } from "../format";
-import { type BreakdownSort, rankSeries, seriesKey, usageTitle } from "../model-analytics";
+import { formatExactCount } from "../format";
+import {
+  type BreakdownSort,
+  costValueTitle,
+  entityKey,
+  formatCostText,
+  rankSeries,
+  seriesKey,
+  usageTitle,
+} from "../model-analytics";
 import { SegmentedControl, SegmentedControlItem } from "../opencode-ui";
 import { createSeriesInspection } from "../series-inspection";
 
@@ -42,6 +50,25 @@ export function ModelsView(props: {
     const child = inspection.activeChild();
     return child !== undefined && activeSeries() === child.seriesKey ? child : undefined;
   };
+  const otherParentKeys = createMemo(() => {
+    const dimension = props.snapshot?.dimension ?? props.dimension;
+    const keys = new Set<string>();
+    for (const entry of props.snapshot?.series ?? []) {
+      if (entry.kind !== "other") continue;
+      for (const bucket of entry.parentBuckets ?? []) {
+        for (const parent of bucket) keys.add(entityKey(dimension, parent.identity));
+      }
+    }
+    return keys;
+  });
+  const activeParent = () => {
+    const parent = inspection.activeParent();
+    return parent !== undefined &&
+      activeSeries() === parent.seriesKey &&
+      otherParentKeys().has(parent.parentKey)
+      ? parent
+      : undefined;
+  };
   const summaryItems = (): ChartSummaryItem[] | undefined => {
     const snapshot = props.snapshot;
     if (snapshot === undefined) return undefined;
@@ -53,16 +80,10 @@ export function ModelsView(props: {
       },
       {
         label: "API-equivalent estimate",
-        value: formatApiEquivalentCostText(
-          snapshot.totals.apiEquivalentCostUsd,
-          snapshot.totals.total,
-        ),
+        value: formatCostText(snapshot.totals),
         info: <CostInfo />,
         note: <EstimateNote totals={snapshot.totals} />,
-        title:
-          snapshot.totals.apiEquivalentCostUsd === null
-            ? "No priced tokens in this range."
-            : `API-equivalent estimate: USD ${snapshot.totals.apiEquivalentCostUsd.toFixed(6)}.`,
+        title: costValueTitle(snapshot.totals),
       },
     ];
   };
@@ -78,7 +99,7 @@ export function ModelsView(props: {
   // A refetch can replace the ranked series without changing the dimension. Drop
   // only keys that disappeared, so valid keyboard/pointer emphasis survives.
   createEffect(() => {
-    inspection.reconcile(new Set(seriesKeys()));
+    inspection.reconcile(new Set(seriesKeys()), otherParentKeys());
   });
 
   return (
@@ -106,6 +127,7 @@ export function ModelsView(props: {
         }
         activeSeries={activeSeries()}
         activeChild={activeChild()}
+        activeParent={activeParent()}
         pinnedSeries={inspection.pinned()}
         onPointerSeries={inspection.inspectPointer}
         onFocusSeries={inspection.inspectFocus}
@@ -125,10 +147,14 @@ export function ModelsView(props: {
             modelsGroup={snapshot().dimension}
             activeSeries={activeSeries()}
             activeChild={activeChild()}
+            otherParentKeys={otherParentKeys()}
+            activeParent={activeParent()}
             onPointerSeries={inspection.inspectPointer}
             onFocusSeries={inspection.inspectFocus}
             onPointerChild={inspection.inspectPointerChild}
             onFocusChild={inspection.inspectFocusChild}
+            onPointerParent={inspection.inspectPointerParent}
+            onFocusParent={inspection.inspectFocusParent}
           />
         )}
       </Show>

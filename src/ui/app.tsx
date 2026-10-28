@@ -35,6 +35,7 @@ import {
   canonicalizeLocation,
   formatPath,
   type Location,
+  modelsGroupForRoute,
   parseLocation,
   readStoredRange,
   routeShowsRangeSelector,
@@ -237,15 +238,12 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     return undefined;
   };
   const modelsDimension = (): AnalyticsDimension | undefined => {
-    const current = route();
-    if (current.name === "models") return current.dimension;
-    if (current.name === "model" || current.name === "provider") return current.modelsGroup;
-    return undefined;
+    return modelsGroupForRoute(route());
   };
   // Models links elsewhere in the Analytics section return to the last grouping
   // the user chose, while the URL remains the source of truth on Models itself.
   const [rememberedModelsDimension, setRememberedModelsDimension] =
-    createSignal<AnalyticsDimension>("model");
+    createSignal<AnalyticsDimension>("provider");
   createEffect(() => {
     const dimension = modelsDimension();
     if (dimension !== undefined) setRememberedModelsDimension(dimension);

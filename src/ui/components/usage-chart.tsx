@@ -6,7 +6,6 @@ import { createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
 import {
   axisRangeCaption,
-  formatApiEquivalentCost,
   formatBucketEnd,
   formatBucketRange,
   formatBucketTick,
@@ -16,8 +15,10 @@ import {
   formatTokenCount,
   usageChartTitle,
 } from "../format";
+import { formatCostText } from "../model-analytics";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
+import { EstimateNote } from "./cost-estimate";
 import { EstimateInfo } from "./estimate";
 import { EmptyNotice } from "./states";
 
@@ -111,8 +112,9 @@ export function UsageChart(props: {
     },
     {
       label: "API-equivalent estimate",
-      value: formatApiEquivalentCost(props.usage.totals.apiEquivalentCostUsd),
+      value: formatCostText(props.usage.totals),
       info: <EstimateInfo totals={props.usage.totals} />,
+      note: <EstimateNote totals={props.usage.totals} showExclusionTitle={false} />,
     },
   ];
   const activeBucket = (): Bucket | undefined => {

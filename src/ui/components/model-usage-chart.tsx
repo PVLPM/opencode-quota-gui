@@ -10,7 +10,6 @@ import { createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
 import {
   axisRangeCaption,
-  formatApiEquivalentCostText,
   formatApiEquivalentCostTick,
   formatBucketEnd,
   formatBucketRange,
@@ -20,11 +19,12 @@ import {
 } from "../format";
 import {
   combineEstimates,
+  costValueTitle,
   disambiguatedIdentityLabel,
   entityKey,
   estimateNote,
   estimateNoteTitle,
-  exactCostTitle,
+  formatCostText,
   oppositeDimension,
   rankSeries,
   seriesColorVar,
@@ -32,11 +32,12 @@ import {
 } from "../model-analytics";
 import {
   buildChildCompositionSlices,
-  type ChildCompositionSlice,
+  buildParentCompositionSlices,
+  type CompositionSlice,
 } from "../model-chart-composition";
 import { buildModelChartGeometry, DEFAULT_MODEL_USAGE_SIZE } from "../model-chart-geometry";
 import { buildModelCostOverlayGeometry } from "../model-cost-overlay";
-import type { SeriesChildSelection } from "../series-inspection";
+import type { SeriesChildSelection, SeriesParentSelection } from "../series-inspection";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell } from "./chart-shell";
 import { EstimateNote } from "./cost-estimate";
@@ -53,7 +54,9 @@ import { EmptyNotice, ErrorCard, Skeleton } from "./states";
  * visible series; legend hover/focus emphasizes the bars and rows and quiets
  * the line's stroke so a small highlighted bar stays legible. While a parent
  * series is active, its buckets subdivide into opposite-dimension children in
- * the parent's own colour; the parent envelope never moves. The
+ * the parent's own colour; Other instead reveals its exact hidden
+ * same-dimension parents from the server's sparse parent buckets. The parent
+ * envelope never moves. The
  * legend reuses the daily token-usage legend: native toggle buttons with a
  * swatch, label and metric, and a visible focus ring. Emphasis uses opacity
  * so it never depends on colour alone.
@@ -70,6 +73,8 @@ export function ModelUsageChart(props: {
   activeSeries?: string;
   /** Transient child emphasis that follows the active parent series. */
   activeChild?: SeriesChildSelection;
+  /** Exact hidden same-dimension parent inside Other, shared with its rows. */
+  activeParent?: SeriesParentSelection;
   /** Legend entry pinned by click; hover/focus still take precedence. */
   pinnedSeries?: string;
   onPointerSeries?: (key: string | undefined) => void;
@@ -137,8 +142,6 @@ export function ModelUsageChart(props: {
       ? "Other"
       : disambiguatedIdentityLabel(entry.identity, dimension(), entityPeers());
 
-  const seriesFill = (seriesIndex: number, kind: AnalyticsSeries["kind"]): string =>
-    `var(${seriesColorVar(seriesIndex, kind)})`;
   const activeChildSelection = createMemo((): SeriesChildSelection | undefined => {
     const key = activeKey();
     const selection = props.activeChild;
@@ -150,8 +153,21 @@ export function ModelUsageChart(props: {
     );
     return exists === true ? selection : undefined;
   });
+  const activeParentSelection = createMemo((): SeriesParentSelection | undefined => {
+    const key = activeKey();
+    const selection = props.activeParent;
+    if (key === undefined || selection?.seriesKey !== key) return undefined;
+    const entry = ranked().find((candidate) => seriesKey(candidate, dimension()) === key);
+    if (entry?.kind !== "other") return undefined;
+    const exists = entry.parentBuckets?.some((bucket) =>
+      bucket.some((parent) => entityKey(dimension(), parent.identity) === selection.parentKey),
+    );
+    return exists === true ? selection : undefined;
+  });
   const childEmphasis = (): string | undefined =>
     activeChildSelection() === undefined ? undefined : "true";
+  const parentEmphasis = (): string | undefined =>
+    activeParentSelection() === undefined ? undefined : "true";
 
   const bucketEntries = (index: number) =>
     ranked()
@@ -170,11 +186,9 @@ export function ModelUsageChart(props: {
           costTitle:
             tokens === undefined
               ? "No usage in this bucket."
-              : tokens.apiEquivalentCostUsd === null
+              : tokens.apiEquivalentCostUsd === null || partial
                 ? estimateNoteTitle(tokens)
-                : partial
-                  ? estimateNoteTitle(tokens)
-                  : exactCostTitle(tokens),
+                : costValueTitle(tokens),
         };
       })
       .filter((row) => row.total > 0);
@@ -205,14 +219,13 @@ export function ModelUsageChart(props: {
   const bucketLabel = (index: number): string => {
     const estimate = bucketEstimate(index);
     const parts = bucketEntries(index).map(
-      (row) =>
-        `${row.label} ${formatExactCount(row.total)} tokens, ${formatApiEquivalentCostText(row.cost, row.total)}`,
+      (row) => `${row.label} ${formatExactCount(row.total)} tokens, ${formatCostText(row.tokens)}`,
     );
     return [
       bucketRange(index),
       `total ${formatExactCount(estimate.total)} tokens`,
       ...parts,
-      `API-equivalent total ${formatApiEquivalentCostText(estimate.apiEquivalentCostUsd, estimate.total)}`,
+      `API-equivalent total ${formatCostText(estimate)}`,
       estimateNote(estimate) === "Partial estimate" ? "Partial estimate" : "",
     ]
       .filter((part) => part.length > 0)
@@ -322,6 +335,7 @@ export function ModelUsageChart(props: {
             class="qg-chart qg-model-chart__plot"
             data-highlight={activeKey() === undefined ? undefined : "true"}
             data-child-highlight={childEmphasis()}
+            data-parent-highlight={parentEmphasis()}
             onClick={() => props.onClearPinnedSeries?.()}
           >
             <svg
@@ -401,49 +415,107 @@ export function ModelUsageChart(props: {
                         entry() === undefined
                           ? "other"
                           : seriesKey(entry() as AnalyticsSeries, dimension());
-                      const slices = (): ChildCompositionSlice[] => {
-                        if (activeKey() !== key()) return [];
-                        const parent = entry();
-                        return buildChildCompositionSlices({
-                          segment,
-                          parentTokens: parent?.buckets[segment.bucketIndex],
-                          children: parent?.childBuckets?.[segment.bucketIndex],
-                          dimension: dimension(),
-                        });
-                      };
-                      const selectedChildKey = (): string | undefined => {
-                        const selection = activeChildSelection();
-                        return selection !== undefined && selection.seriesKey === key()
-                          ? selection.childKey
-                          : undefined;
-                      };
+                      const composition = createMemo(
+                        (): {
+                          kind: "child" | "parent";
+                          slices: CompositionSlice[];
+                          selectedKey?: string;
+                          envelopeEmphasis?: string;
+                        } => {
+                          const parent = entry();
+                          if (parent === undefined || activeKey() !== key()) {
+                            return { kind: "child", slices: [] };
+                          }
+                          // New snapshots carry exact hidden parents for Other;
+                          // an older snapshot without them keeps the previous
+                          // opposite-dimension child composition.
+                          if (parent.kind === "other" && parent.parentBuckets !== undefined) {
+                            const selection = activeParentSelection();
+                            const parents = parent.parentBuckets[segment.bucketIndex];
+                            const slices = buildParentCompositionSlices({
+                              segment,
+                              parentTokens: parent.buckets[segment.bucketIndex],
+                              parents,
+                              dimension: dimension(),
+                            });
+                            const selectedKey =
+                              selection !== undefined && selection.seriesKey === key()
+                                ? selection.parentKey
+                                : undefined;
+                            // A sole parent cannot be subdivided into slices, so
+                            // emphasize its envelope instead. If several parents
+                            // exist but cannot be sliced, never leave the whole
+                            // aggregate looking like the exact match.
+                            const soleKey =
+                              parents !== undefined &&
+                              parents.length === 1 &&
+                              parents[0] !== undefined
+                                ? entityKey(dimension(), parents[0].identity)
+                                : undefined;
+                            const envelopeEmphasis =
+                              selectedKey !== undefined && slices.length === 0
+                                ? soleKey === selectedKey
+                                  ? "true"
+                                  : "false"
+                                : undefined;
+                            return {
+                              kind: "parent",
+                              slices,
+                              selectedKey,
+                              envelopeEmphasis,
+                            };
+                          }
+                          const selection = activeChildSelection();
+                          return {
+                            kind: "child",
+                            slices: buildChildCompositionSlices({
+                              segment,
+                              parentTokens: parent.buckets[segment.bucketIndex],
+                              children: parent.childBuckets?.[segment.bucketIndex],
+                              dimension: dimension(),
+                            }),
+                            selectedKey:
+                              selection !== undefined && selection.seriesKey === key()
+                                ? selection.childKey
+                                : undefined,
+                          };
+                        },
+                      );
+                      const slices = (): CompositionSlice[] => composition().slices;
+                      const selectedSliceKey = (): string | undefined => composition().selectedKey;
                       return (
                         <>
                           <rect
                             class="qg-chart__segment"
                             data-series-key={key()}
                             data-bucket-index={segment.bucketIndex}
-                            data-highlighted={highlighted(key())}
+                            data-highlighted={composition().envelopeEmphasis ?? highlighted(key())}
                             x={segment.x}
                             y={segment.y}
                             width={segment.width}
                             height={segment.height}
                             rx={segment.radius}
                             ry={segment.radius}
-                            fill={seriesFill(segment.seriesIndex, entry()?.kind ?? "other")}
+                            fill={`var(${seriesColorVar(segment.seriesIndex, entry()?.kind ?? "other")})`}
                             fill-opacity={slices().length > 0 ? "0.32" : undefined}
                           />
                           <For each={slices()}>
                             {(slice) => (
                               <rect
                                 class="qg-chart__child-slice"
+                                data-slice-kind={composition().kind}
                                 data-series-key={key()}
                                 data-bucket-index={segment.bucketIndex}
-                                data-child-key={slice.key}
+                                data-child-key={
+                                  composition().kind === "child" ? slice.key : undefined
+                                }
+                                data-parent-key={
+                                  composition().kind === "parent" ? slice.key : undefined
+                                }
                                 data-highlighted={
-                                  selectedChildKey() === undefined
+                                  selectedSliceKey() === undefined
                                     ? undefined
-                                    : selectedChildKey() === slice.key
+                                    : selectedSliceKey() === slice.key
                                       ? "true"
                                       : "false"
                                 }
@@ -451,7 +523,7 @@ export function ModelUsageChart(props: {
                                 y={slice.y}
                                 width={slice.width}
                                 height={slice.height}
-                                fill={seriesFill(segment.seriesIndex, entry()?.kind ?? "other")}
+                                fill={`var(${seriesColorVar(segment.seriesIndex, entry()?.kind ?? "other")})`}
                                 fill-opacity={slice.fillOpacity}
                               />
                             )}
@@ -587,7 +659,7 @@ export function ModelUsageChart(props: {
                             }
                             title={row.costTitle}
                           >
-                            {formatApiEquivalentCostText(row.cost, row.total)}
+                            {formatCostText(row.tokens)}
                             <Show when={row.partial}>
                               <span class="qg-model-tooltip__qualifier">partial</span>
                             </Show>
@@ -602,18 +674,8 @@ export function ModelUsageChart(props: {
                           Total
                         </span>
                       </span>
-                      <span
-                        class="qg-totals__value"
-                        title={
-                          estimate().apiEquivalentCostUsd === null
-                            ? "No priced tokens in this bucket."
-                            : `API-equivalent estimate: USD ${(estimate().apiEquivalentCostUsd ?? 0).toFixed(6)}.`
-                        }
-                      >
-                        {formatApiEquivalentCostText(
-                          estimate().apiEquivalentCostUsd,
-                          estimate().total,
-                        )}
+                      <span class="qg-totals__value" title={costValueTitle(estimate())}>
+                        {formatCostText(estimate())}
                       </span>
                       <EstimateNote totals={estimate()} />
                     </div>
@@ -655,10 +717,7 @@ export function ModelUsageChart(props: {
                           )}
                         </For>
                         <td>
-                          {formatApiEquivalentCostText(
-                            estimate().apiEquivalentCostUsd,
-                            estimate().total,
-                          )}
+                          {formatCostText(estimate())}
                           <Show when={estimateNote(estimate()) === "Partial estimate"}>
                             {" Partial estimate"}
                           </Show>

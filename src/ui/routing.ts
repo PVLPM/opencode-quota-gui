@@ -60,7 +60,7 @@ function decodeTokenSegment(segment: string): AnalyticsEntityIdentity | undefine
   }
 }
 
-/** An absent or invalid group falls back to the default Models dimension. */
+/** Only an exact group token is explicit; absent or invalid leaves the route default. */
 function readModelsGroup(value: string | null): AnalyticsDimension | undefined {
   return value === "model" || value === "provider" ? value : undefined;
 }
@@ -99,7 +99,7 @@ export function parseLocation(pathWithQuery: string, fallbackRange: RangeKey): L
     return { route: { name: "analytics" }, range };
   }
   if (path === "/models") {
-    return { route: { name: "models", dimension: modelsGroup ?? "model" }, range };
+    return { route: { name: "models", dimension: modelsGroup ?? "provider" }, range };
   }
   if (path === "/settings") {
     return { route: { name: "settings" }, range };
@@ -136,19 +136,25 @@ export function parseLocation(pathWithQuery: string, fallbackRange: RangeKey): L
 /** Builds a clean URL, keeping non-range-scoped routes query-free. */
 export function formatPath(route: Route, range: RangeKey): string {
   const suffix = `?range=${range}`;
-  const groupSuffix = (group: AnalyticsDimension | undefined): string =>
-    group === "provider" ? "&group=provider" : "";
+  // Provider is the canonical Models default, so only an explicit model
+  // grouping needs the parameter. Detail routes keep any explicit origin.
+  const modelsGroupSuffix = (group: AnalyticsDimension | undefined): string =>
+    group === "model" ? "&group=model" : "";
+  // A detail page keeps its explicit origin group, including the model
+  // default, so browser back and the Models breadcrumb return to the same list.
+  const detailGroupSuffix = (group: AnalyticsDimension | undefined): string =>
+    group === undefined ? "" : `&group=${group}`;
   switch (route.name) {
     case "home":
       return "/quota";
     case "analytics":
       return `/analytics${suffix}`;
     case "models":
-      return `/models${suffix}${groupSuffix(route.dimension)}`;
+      return `/models${suffix}${modelsGroupSuffix(route.dimension)}`;
     case "model":
-      return `/model/${encodeAnalyticsEntityToken(route.identity)}${suffix}${groupSuffix(route.modelsGroup)}`;
+      return `/model/${encodeAnalyticsEntityToken(route.identity)}${suffix}${detailGroupSuffix(route.modelsGroup)}`;
     case "provider":
-      return `/provider/${encodeAnalyticsEntityToken(route.identity)}${suffix}${groupSuffix(route.modelsGroup)}`;
+      return `/provider/${encodeAnalyticsEntityToken(route.identity)}${suffix}${detailGroupSuffix(route.modelsGroup)}`;
     case "project":
       return `/project/${encodeURIComponent(route.projectId)}${suffix}`;
     case "session":
@@ -188,6 +194,19 @@ export function routeUsesRange(route: Route): boolean {
     route.name === "provider" ||
     route.name === "project"
   );
+}
+
+/**
+ * The Models grouping a route navigates back to. A detail URL without an
+ * explicit `group` falls back to that entity's own listing, so a direct
+ * provider link opens the provider grouping and never inherits an unrelated
+ * remembered grouping.
+ */
+export function modelsGroupForRoute(route: Route): AnalyticsDimension | undefined {
+  if (route.name === "models") return route.dimension;
+  if (route.name === "model") return route.modelsGroup ?? "model";
+  if (route.name === "provider") return route.modelsGroup ?? "provider";
+  return undefined;
 }
 
 /**

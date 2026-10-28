@@ -12,7 +12,13 @@ import type {
   DashboardEvent,
 } from "../src/contracts/dashboard";
 import type { RangeKey } from "../src/contracts/ranges";
-import { API_EQUIVALENT_TOOLTIP, identityLabel } from "../src/ui/model-analytics";
+import {
+  API_EQUIVALENT_TOOLTIP,
+  identityLabel,
+  OTHER_COLOR_VAR,
+  rankSeries,
+  seriesColorVar,
+} from "../src/ui/model-analytics";
 import { formatPath, parseLocation } from "../src/ui/routing";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { TestEvent, TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
@@ -38,6 +44,7 @@ import {
   sameDayModelSnapshot,
   unknownIdentity,
   withChildBuckets,
+  withParentBuckets,
   withRange,
   zeroSnapshot,
 } from "./fixtures/model-analytics-fixtures";
@@ -424,6 +431,34 @@ function peakSnapshot(total: number): AnalyticsGroupSnapshot {
   };
 }
 
+/** One bucket per hidden parent, so the sole entry cannot be subdivided. */
+function withSoleParentBuckets(snapshot: AnalyticsGroupSnapshot): AnalyticsGroupSnapshot {
+  return {
+    ...snapshot,
+    series: snapshot.series.map((entry) =>
+      entry.kind === "other"
+        ? {
+            ...entry,
+            parentBuckets: [
+              [
+                {
+                  identity: known("model-zeta"),
+                  tokens: costed({ input: 60 }, { apiEquivalentCostUsd: 0.6 }),
+                },
+              ],
+              [
+                {
+                  identity: unknownIdentity,
+                  tokens: costed({ input: 40 }, { apiEquivalentCostUsd: 0.4 }),
+                },
+              ],
+            ],
+          }
+        : entry,
+    ),
+  };
+}
+
 function mountDetail(
   module: Record<string, unknown>,
   name: string,
@@ -450,20 +485,22 @@ describe("Models view", () => {
       expect(summaryText(root, "API-equivalent estimate")).toContain("Partial estimate");
       expect(shell?.body.children.length).toBeGreaterThan(0);
 
+      const ranked = rankSeries(modelSnapshot().series);
+      const expectedFills = ranked.map(
+        (entry, index) => `var(${seriesColorVar(index, entry.kind)})`,
+      );
+      expect(expectedFills).toEqual([
+        "var(--qg-rank-1)",
+        "var(--qg-rank-2)",
+        "var(--qg-rank-3)",
+        "var(--qg-rank-4)",
+        "var(--qg-rank-5)",
+        `var(${OTHER_COLOR_VAR})`,
+      ]);
       const segments = chartSegments(root);
       expect(segments.map((segment) => segment.props.fill)).toEqual([
-        "var(--qg-rank-1)",
-        "var(--qg-rank-2)",
-        "var(--qg-rank-3)",
-        "var(--qg-rank-4)",
-        "var(--qg-rank-5)",
-        "var(--qg-rank-other)",
-        "var(--qg-rank-1)",
-        "var(--qg-rank-2)",
-        "var(--qg-rank-3)",
-        "var(--qg-rank-4)",
-        "var(--qg-rank-5)",
-        "var(--qg-rank-other)",
+        ...expectedFills,
+        ...expectedFills,
       ]);
       expect(segments.map((segment) => segment.props["data-series-key"])).toEqual([
         "model:known:model-alpha",
@@ -513,14 +550,7 @@ describe("Models view", () => {
         graph.elementsNamed(item, "span").find((node) => hasClass(node, "qg-legend__swatch")),
       );
       expect(swatchNodes.every((node) => node?.props.style === undefined)).toBe(true);
-      expect(swatchStyles).toEqual([
-        "var(--qg-rank-1)",
-        "var(--qg-rank-2)",
-        "var(--qg-rank-3)",
-        "var(--qg-rank-4)",
-        "var(--qg-rank-5)",
-        "var(--qg-rank-other)",
-      ]);
+      expect(swatchStyles).toEqual(expectedFills);
       // No cost graph toggle: the chart header control offers only Model | Provider.
       const actions = byClass(shell?.head as TestNode, "div", "qg-chart-shell__actions")[0];
       expect(actions).toBeDefined();
@@ -529,6 +559,34 @@ describe("Models view", () => {
       ).toEqual(["Model", "Provider"]);
     } finally {
       dispose();
+    }
+  });
+
+  it("prints Free in the summary only for a wholly zero-priced total", () => {
+    const free: AnalyticsGroupSnapshot = {
+      ...modelSnapshot(),
+      totals: costed({ input: 100 }, { apiEquivalentCostUsd: 0 }),
+    };
+    const { root, dispose } = mountSnapshot(free);
+    try {
+      expect(summaryText(root, "API-equivalent estimate")).toContain("Free");
+      expect(summaryText(root, "API-equivalent estimate")).not.toContain("≈ USD 0.00");
+    } finally {
+      dispose();
+    }
+
+    const partial: AnalyticsGroupSnapshot = {
+      ...modelSnapshot(),
+      totals: costed({ input: 100 }, { apiEquivalentCostUsd: 0, unpricedTokens: 5 }),
+    };
+    const partialCase = mountSnapshot(partial);
+    try {
+      expect(summaryText(partialCase.root, "API-equivalent estimate")).not.toContain("Free");
+      expect(summaryText(partialCase.root, "API-equivalent estimate")).toContain(
+        "Partial estimate",
+      );
+    } finally {
+      partialCase.dispose();
     }
   });
 
@@ -596,6 +654,24 @@ describe("Models view", () => {
       expect(graph.textOf(tooltip)).not.toContain("27 Oct – 27 Oct");
       expect(hit.props["aria-label"]).toContain("Inspect 27 Oct");
       expect(hit.props["aria-label"]).not.toContain("27 Oct to 27 Oct");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("shows Free in a bucket tooltip only for a wholly zero-priced series", async () => {
+    const { root, dispose } = mountSnapshot(sameDayModelSnapshot());
+    try {
+      const hit = bucketHits(root)[0] as TestNode;
+      focus(hit);
+      await settle();
+      const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      const rows = byClass(tooltip, "div", "qg-model-tooltip__row");
+      const gamma = rows.find((row) => graph.textOf(row).includes("model-gamma")) as TestNode;
+      expect(graph.textOf(gamma)).toContain("Free");
+      expect(graph.textOf(gamma)).not.toContain("≈ USD 0.00");
+      expect(hit.props["aria-label"]).toContain("model-gamma 240 tokens, Free");
+      expect(hit.props["aria-label"]).not.toContain("≈ USD 0.00");
     } finally {
       dispose();
     }
@@ -728,18 +804,19 @@ describe("Models view", () => {
       expect(graph.textOf(beta)).toContain("Unpriced");
       expect(graph.textOf(beta)).not.toContain("≈ USD —");
       const gammaRow = rowByLabel(root, "model-gamma") as TestNode;
-      expect(graph.textOf(gammaRow)).toContain("≈ USD 0.00");
+      expect(graph.textOf(gammaRow)).toContain("Free");
+      expect(graph.textOf(gammaRow)).not.toContain("≈ USD 0.00");
       expect(graph.textOf(gammaRow)).not.toContain("Partial estimate");
 
       const unknown = rowByLabel(root, "Unknown model") as TestNode;
       const empty = rowByLabel(root, "Empty model ID") as TestNode;
-      expect(unknown.props.href).toBe("/model/u?range=7d");
+      expect(unknown.props.href).toBe("/model/u?range=7d&group=model");
       expect(empty.props.href).toBe(
-        `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "" })}?range=7d`,
+        `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "" })}?range=7d&group=model`,
       );
       expect(unknown.props.href).not.toBe(empty.props.href);
       expect(gammaChildren[0]?.props.href).toBe(
-        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=7d`,
+        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=7d&group=model`,
       );
     } finally {
       dispose();
@@ -770,6 +847,52 @@ describe("Models view", () => {
       expect(swatchVar(rowByLabel(root, "Mistral") as TestNode)).toBe("var(--qg-rank-5)");
     } finally {
       dispose();
+    }
+  });
+
+  it("recolours a series with its token rank across the chart, legend and row", async () => {
+    const base = modelSnapshot();
+    // Boost gamma from rank 3 to rank 1; every other entity shifts down one.
+    const boosted: AnalyticsGroupSnapshot = {
+      ...base,
+      series: base.series.map((entry) =>
+        entry.kind === "entity" &&
+        entry.identity.kind === "known" &&
+        entry.identity.id === "model-gamma"
+          ? { ...entry, tokens: { ...entry.tokens, total: 700 } }
+          : entry,
+      ),
+    };
+    const mounted = mountReactiveSnapshot(base);
+    try {
+      const assertGamma = (expected: string) => {
+        const segments = chartSegments(mounted.root).filter(
+          (segment) => segment.props["data-series-key"] === "model:known:model-gamma",
+        );
+        expect(segments.length).toBeGreaterThan(0);
+        expect(segments.every((segment) => segment.props.fill === expected)).toBe(true);
+        expect(
+          (legendItem(mounted.root, "model-gamma") as TestNode).props.style["--qg-swatch"],
+        ).toBe(expected);
+        expect(swatchVar(rowByLabel(mounted.root, "model-gamma") as TestNode)).toBe(expected);
+      };
+
+      assertGamma("var(--qg-rank-3)");
+      mounted.setSnapshot(boosted);
+      await settle();
+      assertGamma("var(--qg-rank-1)");
+      expect(swatchVar(rowByLabel(mounted.root, "model-alpha") as TestNode)).toBe(
+        "var(--qg-rank-2)",
+      );
+      expect(swatchVar(rowByLabel(mounted.root, "model-beta") as TestNode)).toBe(
+        "var(--qg-rank-3)",
+      );
+
+      mounted.setSnapshot(base);
+      await settle();
+      assertGamma("var(--qg-rank-3)");
+    } finally {
+      mounted.dispose();
     }
   });
 
@@ -1314,6 +1437,216 @@ describe("Models view", () => {
     }
   });
 
+  it("singles out one hidden model inside Other on pointer and focus", async () => {
+    const { root, dispose } = mountSnapshot(withParentBuckets(withChildBuckets(modelSnapshot())));
+    try {
+      const plot = byClass(root, "div", "qg-model-chart__plot")[0] as TestNode;
+      const zeta = rowByLabel(root, "model-zeta") as TestNode;
+      const unknown = rowByLabel(root, "Unknown model") as TestNode;
+      const empty = rowByLabel(root, "Empty model ID") as TestNode;
+      const alpha = rowByLabel(root, "model-alpha") as TestNode;
+      const zetaChild = childRow(root, "model-zeta", "OpenAI") as TestNode;
+      const unknownChild = childRow(root, "Unknown model", "Unknown provider") as TestNode;
+      const emptyChild = childRow(root, "Empty model ID", "Empty provider ID") as TestNode;
+      const otherLegend = legendItem(root, "Other") as TestNode;
+
+      pointerEnter(zeta);
+      await settle();
+      expect(otherLegend.props["data-active"]).toBe("true");
+      expect(zeta.props["data-highlighted"]).toBe("true");
+      expect(unknown.props["data-dimmed"]).toBe("true");
+      expect(empty.props["data-dimmed"]).toBe("true");
+      expect(alpha.props["data-dimmed"]).toBe("true");
+      expect(zetaChild.props["data-highlighted"]).toBe("true");
+      expect(zetaChild.props["data-dimmed"]).toBeUndefined();
+      expect(unknownChild.props["data-highlighted"]).toBeUndefined();
+      expect(unknownChild.props["data-dimmed"]).toBe("true");
+      expect(emptyChild.props["data-highlighted"]).toBeUndefined();
+      expect(emptyChild.props["data-dimmed"]).toBe("true");
+      expect(plot.props["data-parent-highlight"]).toBe("true");
+      expect(plot.props["data-child-highlight"]).toBeUndefined();
+      // Every multi-parent bucket is sliced, so none is left as a full Other bar.
+      expect(
+        chartSegments(root)
+          .filter((segment) => segment.props["data-series-key"] === "other")
+          .every((segment) => segment.props["fill-opacity"] === "0.32"),
+      ).toBe(true);
+
+      const parentSlices = childSlices(root).filter(
+        (slice) => slice.props["data-slice-kind"] === "parent",
+      );
+      expect(new Set(parentSlices.map((slice) => slice.props["data-parent-key"]))).toEqual(
+        new Set(["model:known:model-zeta", "model:unknown", "model:known:"]),
+      );
+      expect(parentSlices.every((slice) => slice.props.fill === "var(--qg-rank-other)")).toBe(true);
+      const zetaSlices = parentSlices.filter(
+        (slice) => slice.props["data-parent-key"] === "model:known:model-zeta",
+      );
+      expect(zetaSlices.length).toBeGreaterThan(0);
+      expect(zetaSlices.every((slice) => slice.props["data-highlighted"] === "true")).toBe(true);
+      expect(
+        parentSlices
+          .filter((slice) => slice.props["data-parent-key"] !== "model:known:model-zeta")
+          .every((slice) => slice.props["data-highlighted"] === "false"),
+      ).toBe(true);
+      expect(swatchVar(zeta)).toBe("var(--qg-rank-other)");
+      expect(swatchVar(zeta)).toBe(
+        (otherLegend.props.style as Record<string, string>)["--qg-swatch"],
+      );
+
+      pointerLeave(zeta);
+      await settle();
+      expect(plot.props["data-parent-highlight"]).toBeUndefined();
+      expect(childSlices(root)).toHaveLength(0);
+
+      // Keyboard focus on the same row is equally exact.
+      focus(unknown);
+      await settle();
+      expect(unknown.props["data-highlighted"]).toBe("true");
+      expect(zeta.props["data-dimmed"]).toBe("true");
+      expect(unknownChild.props["data-highlighted"]).toBe("true");
+      expect(unknownChild.props["data-dimmed"]).toBeUndefined();
+      expect(zetaChild.props["data-highlighted"]).toBeUndefined();
+      expect(zetaChild.props["data-dimmed"]).toBe("true");
+      expect(emptyChild.props["data-highlighted"]).toBeUndefined();
+      expect(emptyChild.props["data-dimmed"]).toBe("true");
+      expect(
+        childSlices(root)
+          .filter((slice) => slice.props["data-parent-key"] === "model:unknown")
+          .every((slice) => slice.props["data-highlighted"] === "true"),
+      ).toBe(true);
+      blur(unknown);
+      await settle();
+
+      // The Other legend still represents the whole aggregate: every hidden
+      // parent row stays lit and no single parent slice is singled out.
+      focus(otherLegend);
+      await settle();
+      expect(zeta.props["data-highlighted"]).toBe("true");
+      expect(unknown.props["data-highlighted"]).toBe("true");
+      expect(empty.props["data-highlighted"]).toBe("true");
+      expect(plot.props["data-parent-highlight"]).toBeUndefined();
+      expect(
+        childSlices(root).every((slice) => slice.props["data-highlighted"] === undefined),
+      ).toBe(true);
+      blur(otherLegend);
+      await settle();
+    } finally {
+      dispose();
+    }
+  });
+
+  it("emphasizes a matching sole-parent Other bucket and dims the unrelated one", async () => {
+    const { root, dispose } = mountSnapshot(withSoleParentBuckets(modelSnapshot()));
+    try {
+      const plot = byClass(root, "div", "qg-model-chart__plot")[0] as TestNode;
+      const zeta = rowByLabel(root, "model-zeta") as TestNode;
+      const unknown = rowByLabel(root, "Unknown model") as TestNode;
+      const otherBuckets = () =>
+        chartSegments(root)
+          .filter((segment) => segment.props["data-series-key"] === "other")
+          .sort(
+            (left, right) =>
+              Number(left.props["data-bucket-index"]) - Number(right.props["data-bucket-index"]),
+          );
+      const geometry = () =>
+        otherBuckets().map(
+          (segment) =>
+            [segment.props.x, segment.props.y, segment.props.width, segment.props.height] as const,
+        );
+
+      expect(otherBuckets()).toHaveLength(2);
+      expect(
+        otherBuckets().every((segment) => segment.props["data-highlighted"] === undefined),
+      ).toBe(true);
+      const before = geometry();
+
+      pointerEnter(zeta);
+      await settle();
+      expect(plot.props["data-parent-highlight"]).toBe("true");
+      expect(childSlices(root)).toHaveLength(0);
+      expect(otherBuckets()[0]?.props["data-highlighted"]).toBe("true");
+      expect(otherBuckets()[1]?.props["data-highlighted"]).toBe("false");
+      expect(geometry()).toEqual(before);
+
+      pointerLeave(zeta);
+      await settle();
+      expect(plot.props["data-parent-highlight"]).toBeUndefined();
+      expect(
+        otherBuckets().every((segment) => segment.props["data-highlighted"] === undefined),
+      ).toBe(true);
+
+      focus(unknown);
+      await settle();
+      expect(plot.props["data-parent-highlight"]).toBe("true");
+      expect(childSlices(root)).toHaveLength(0);
+      expect(otherBuckets()[0]?.props["data-highlighted"]).toBe("false");
+      expect(otherBuckets()[1]?.props["data-highlighted"]).toBe("true");
+      expect(geometry()).toEqual(before);
+
+      blur(unknown);
+      await settle();
+      expect(plot.props["data-parent-highlight"]).toBeUndefined();
+      expect(
+        otherBuckets().every((segment) => segment.props["data-highlighted"] === undefined),
+      ).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("singles out one hidden provider inside Other in the provider grouping", async () => {
+    const { root, dispose } = mountSnapshot(
+      withParentBuckets(withChildBuckets(providerSnapshot())),
+    );
+    try {
+      const plot = byClass(root, "div", "qg-model-chart__plot")[0] as TestNode;
+      const deepseek = rowByLabel(root, "DeepSeek") as TestNode;
+      const empty = rowByLabel(root, "Empty provider ID") as TestNode;
+      const openai = rowByLabel(root, "OpenAI") as TestNode;
+      const deepseekChild = childRow(root, "DeepSeek", "model-alpha") as TestNode;
+      const emptyChild = childRow(root, "Empty provider ID", "Empty model ID") as TestNode;
+      const openrouterChild = childRow(root, "OpenRouter", "model-alpha") as TestNode;
+
+      focus(deepseek);
+      await settle();
+      expect((legendItem(root, "Other") as TestNode).props["data-active"]).toBe("true");
+      expect(deepseek.props["data-highlighted"]).toBe("true");
+      expect(deepseek.props["data-dimmed"]).toBeUndefined();
+      expect(empty.props["data-dimmed"]).toBe("true");
+      expect(openai.props["data-dimmed"]).toBe("true");
+      expect(deepseekChild.props["data-highlighted"]).toBe("true");
+      expect(deepseekChild.props["data-dimmed"]).toBeUndefined();
+      expect(emptyChild.props["data-highlighted"]).toBeUndefined();
+      expect(emptyChild.props["data-dimmed"]).toBe("true");
+      expect(openrouterChild.props["data-highlighted"]).toBeUndefined();
+      expect(openrouterChild.props["data-dimmed"]).toBe("true");
+      expect(plot.props["data-parent-highlight"]).toBe("true");
+
+      const parentSlices = childSlices(root).filter(
+        (slice) => slice.props["data-slice-kind"] === "parent",
+      );
+      expect(new Set(parentSlices.map((slice) => slice.props["data-parent-key"]))).toEqual(
+        new Set(["provider:known:", "provider:known:deepseek", "provider:known:openrouter"]),
+      );
+      expect(
+        parentSlices
+          .filter((slice) => slice.props["data-parent-key"] === "provider:known:deepseek")
+          .every((slice) => slice.props["data-highlighted"] === "true"),
+      ).toBe(true);
+      expect(
+        parentSlices
+          .filter((slice) => slice.props["data-parent-key"] !== "provider:known:deepseek")
+          .every((slice) => slice.props["data-highlighted"] === "false"),
+      ).toBe(true);
+      expect(swatchVar(deepseek)).toBe("var(--qg-rank-other)");
+      blur(deepseek);
+      await settle();
+    } finally {
+      dispose();
+    }
+  });
+
   it("routes rows outside the chart's ranked five through the Other series", async () => {
     const { root, dispose } = mountModels(true);
     try {
@@ -1329,6 +1662,16 @@ describe("Models view", () => {
         "true",
       );
       expect((rowByLabel(root, "model-alpha") as TestNode).props["data-dimmed"]).toBe("true");
+      // Aggregate Other still emphasizes every hidden parent's children.
+      for (const [parent, child] of [
+        ["model-zeta", "OpenAI"],
+        ["Unknown model", "Unknown provider"],
+        ["Empty model ID", "Empty provider ID"],
+      ] as const) {
+        const node = childRow(root, parent, child) as TestNode;
+        expect(node.props["data-highlighted"]).toBe("true");
+        expect(node.props["data-dimmed"]).toBeUndefined();
+      }
       expect(
         chartSegments(root)
           .filter((segment) => segment.props["data-series-key"] === "other")
@@ -1841,7 +2184,7 @@ describe("model and provider detail", () => {
       ]);
       const openai = rowByLabel(root, "OpenAI") as TestNode;
       expect(openai.props.href).toBe(
-        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=7d`,
+        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=7d&group=model`,
       );
       // Exactly one identity heading, one chart heading and one Breakdown heading.
       expect(byClass(root, "h2", "qg-page-title")).toHaveLength(1);
@@ -1898,10 +2241,70 @@ describe("model and provider detail", () => {
       ]);
       const beta = rowByLabel(root, "model-beta") as TestNode;
       expect(beta.props.href).toBe(
-        `/model/${encodeAnalyticsEntityToken(known("model-beta"))}?range=7d`,
+        `/model/${encodeAnalyticsEntityToken(known("model-beta"))}?range=7d&group=provider`,
       );
       expect(graph.textOf(root)).toContain("openai");
       expect(byClass(root, "h2", "qg-page-title")).toHaveLength(1);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("uses Free in a detail summary and rows only for wholly zero-priced totals", () => {
+    const freeTotals = costed({ input: 100 }, { apiEquivalentCostUsd: 0 });
+    const { root, dispose } = mountDetail(
+      providerDetailModule,
+      "ProviderDetailView",
+      { ...providerOpenAISnapshot(), totals: freeTotals },
+      known("openai"),
+    );
+    try {
+      expect(summaryText(root, "API-equivalent estimate")).toContain("Free");
+      expect(summaryText(root, "API-equivalent estimate")).not.toContain("≈ USD 0.00");
+      const gamma = rowByLabel(root, "model-gamma") as TestNode;
+      expect(graph.textOf(gamma)).toContain("Free");
+      const beta = rowByLabel(root, "model-beta") as TestNode;
+      expect(graph.textOf(beta)).toContain("Unpriced");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("uses the same rank colour across a detail chart, legend and breakdown", () => {
+    const snapshot = providerOpenAISnapshot();
+    const ranked = rankSeries(snapshot.series);
+    expect(ranked.map((entry) => (entry.kind === "other" ? "Other" : entry.identity))).toEqual([
+      known("model-beta"),
+      known("model-gamma"),
+      known("model-alpha"),
+      known("model-epsilon"),
+      known("model-zeta"),
+    ]);
+
+    const { root, dispose } = mountDetail(
+      providerDetailModule,
+      "ProviderDetailView",
+      snapshot,
+      known("openai"),
+    );
+    try {
+      const expected = "var(--qg-rank-2)";
+      const segments = chartSegments(root).filter(
+        (segment) => segment.props["data-series-key"] === "model:known:model-gamma",
+      );
+      expect(segments.length).toBeGreaterThan(0);
+      expect(segments.every((segment) => segment.props.fill === expected)).toBe(true);
+      expect((legendItem(root, "model-gamma") as TestNode).props.style["--qg-swatch"]).toBe(
+        expected,
+      );
+      expect(swatchVar(rowByLabel(root, "model-gamma") as TestNode)).toBe(expected);
+      // The next rank is the next palette slot, on every detail surface.
+      expect(
+        chartSegments(root)
+          .filter((segment) => segment.props["data-series-key"] === "model:known:model-alpha")
+          .every((segment) => segment.props.fill === "var(--qg-rank-3)"),
+      ).toBe(true);
+      expect(swatchVar(rowByLabel(root, "model-alpha") as TestNode)).toBe("var(--qg-rank-3)");
     } finally {
       dispose();
     }
@@ -2240,7 +2643,7 @@ function rangeControl(root: TestNode): TestNode | undefined {
 }
 
 describe("peer Analytics / Models navigation", () => {
-  it("renders the frame tabs with the preserved range and the Models grouping read", async () => {
+  it("renders the frame tabs with the preserved range and the default provider grouping", async () => {
     const app = mountApp("/models?range=24h");
     try {
       await settle();
@@ -2251,8 +2654,20 @@ describe("peer Analytics / Models navigation", () => {
         "/models?range=24h",
       ]);
       expect(links.map((link) => link.props["aria-current"])).toEqual([undefined, "page"]);
+      expect(graph.textOf(chartTitle(app.root) as TestNode)).toBe("Usage by provider");
       expect(rangeControl(app.root)).toBeDefined();
-      expect(app.calls.groups).toEqual([{ range: "24h", dimension: "model" }]);
+      expect(app.calls.groups).toEqual([{ range: "24h", dimension: "provider" }]);
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("links the Models tab to the canonical provider default from Analytics", async () => {
+    const app = mountApp("/analytics?range=24h");
+    try {
+      await settle();
+      await settle();
+      expect((tabLinks(app.root)[1] as TestNode).props.href).toBe("/models?range=24h");
     } finally {
       app.dispose();
     }
@@ -2264,7 +2679,7 @@ describe("peer Analytics / Models navigation", () => {
       await settle();
       await settle();
       expect(app.calls.home).toEqual(["24h"]);
-      await app.follow("/models?range=24h");
+      await app.follow("/models?range=24h&group=model");
       expect(app.calls.groups).toEqual([{ range: "24h", dimension: "model" }]);
       expect(tabLinks(app.root).map((link) => link.props["aria-current"])).toEqual([
         undefined,
@@ -2292,7 +2707,7 @@ describe("peer Analytics / Models navigation", () => {
       expect(graph.textOf(app.root)).toContain("OpenAI");
       expect(rangeControl(app.root)).toBeDefined();
       await app.follow("/models?range=7d");
-      expect(app.calls.groups.at(-1)).toEqual({ range: "7d", dimension: "model" });
+      expect(app.calls.groups.at(-1)).toEqual({ range: "7d", dimension: "provider" });
     } finally {
       app.dispose();
     }
@@ -2371,7 +2786,7 @@ describe("peer Analytics / Models navigation", () => {
   });
 
   it("keeps data links on the visible stale range after a range failure", async () => {
-    const app = mountApp("/models?range=7d", {
+    const app = mountApp("/models?range=7d&group=model", {
       groups: (query) =>
         query.range === "30d"
           ? Promise.reject(new Error("range unavailable"))
@@ -2386,12 +2801,12 @@ describe("peer Analytics / Models navigation", () => {
       await settle();
       await settle();
 
-      expect(app.browser.location.search).toBe("?range=30d");
+      expect(app.browser.location.search).toBe("?range=30d&group=model");
       expect(byClass(app.root, "div", "qg-range-failure")).toHaveLength(1);
       expect(graph.textOf(app.root)).toContain("Showing 7 days. Updating to 30 days failed.");
       const row = rowByLabel(app.root, "model-alpha") as TestNode;
       expect(row.props.href).toBe(
-        `/model/${encodeAnalyticsEntityToken(known("model-alpha"))}?range=7d`,
+        `/model/${encodeAnalyticsEntityToken(known("model-alpha"))}?range=7d&group=model`,
       );
       expect(row.props.href).not.toContain("30d");
     } finally {
@@ -2428,7 +2843,7 @@ describe("peer Analytics / Models navigation", () => {
 
   it("keeps the dimension control and breakdown sort mounted while a switch is pending", async () => {
     let resolveProvider: ((snapshot: AnalyticsGroupSnapshot) => void) | undefined;
-    const app = mountApp("/models?range=24h", {
+    const app = mountApp("/models?range=24h&group=model", {
       groups: (query) => {
         if (query.dimension === "provider") {
           return new Promise((resolve) => {
@@ -2478,10 +2893,8 @@ describe("peer Analytics / Models navigation", () => {
       ]);
       expect(tokensSort()?.props["aria-pressed"]).toBe(true);
 
-      await app.follow("/models?range=7d&group=provider");
-      expect(app.browser.location.pathname + app.browser.location.search).toBe(
-        "/models?range=7d&group=provider",
-      );
+      await app.follow("/models?range=7d");
+      expect(app.browser.location.pathname + app.browser.location.search).toBe("/models?range=7d");
       expect(tokensSort()?.props["aria-pressed"]).toBe(true);
       expect(rowLabels(app.root).slice(0, 5)).toEqual([
         "OpenAI",
@@ -2496,7 +2909,7 @@ describe("peer Analytics / Models navigation", () => {
   });
 
   it("keeps the dimension control usable after a failed switch", async () => {
-    const app = mountApp("/models?range=24h", {
+    const app = mountApp("/models?range=24h&group=model", {
       groups: (query) => {
         if (query.dimension === "provider")
           return Promise.reject(new Error("provider unavailable"));
@@ -2524,16 +2937,14 @@ describe("peer Analytics / Models navigation", () => {
   });
 
   it("preserves the Models grouping through a detail, tab link and browser back", async () => {
-    const app = mountApp("/models?range=24h");
+    const app = mountApp("/models?range=24h&group=model");
     try {
       await settle();
       await settle();
       clickSegmented(app.root, "Group usage by", "Provider");
       await settle();
       await settle();
-      expect(app.browser.location.pathname + app.browser.location.search).toBe(
-        "/models?range=24h&group=provider",
-      );
+      expect(app.browser.location.pathname + app.browser.location.search).toBe("/models?range=24h");
 
       const openai = rowByLabel(app.root, "OpenAI") as TestNode;
       expect(openai.props.href).toBe(
@@ -2541,23 +2952,105 @@ describe("peer Analytics / Models navigation", () => {
       );
       await app.follow(openai.props.href as string);
       const modelsTab = tabLinks(app.root)[1] as TestNode;
-      expect(modelsTab.props.href).toBe("/models?range=24h&group=provider");
+      expect(modelsTab.props.href).toBe("/models?range=24h");
       const breadcrumbs = graph
         .elementsNamed(app.root, "nav")
         .find((node) => hasClass(node, "qg-breadcrumbs")) as TestNode;
       const crumbLinks = graph.elementsNamed(breadcrumbs, "a");
-      expect(crumbLinks[1]?.props.href).toBe("/models?range=24h&group=provider");
+      expect(crumbLinks[1]?.props.href).toBe("/models?range=24h");
 
       await app.back();
-      expect(app.browser.location.pathname + app.browser.location.search).toBe(
-        "/models?range=24h&group=provider",
-      );
+      expect(app.browser.location.pathname + app.browser.location.search).toBe("/models?range=24h");
       expect(app.calls.groups.at(-1)).toEqual({ range: "24h", dimension: "provider" });
 
       await app.follow("/analytics?range=24h");
-      expect((tabLinks(app.root)[1] as TestNode).props.href).toBe(
-        "/models?range=24h&group=provider",
+      expect((tabLinks(app.root)[1] as TestNode).props.href).toBe("/models?range=24h");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("defaults a direct provider detail to the provider grouping without losing range", async () => {
+    const app = mountApp(formatPath({ name: "provider", identity: known("openai") }, "24h"));
+    try {
+      await settle();
+      await settle();
+      expect(app.calls.groups).toEqual([
+        {
+          range: "24h",
+          dimension: "model",
+          filter: { dimension: "provider", identity: known("openai") },
+        },
+      ]);
+      expect((tabLinks(app.root)[1] as TestNode).props.href).toBe("/models?range=24h");
+      const breadcrumbs = graph
+        .elementsNamed(app.root, "nav")
+        .find((node) => hasClass(node, "qg-breadcrumbs")) as TestNode;
+      expect(graph.elementsNamed(breadcrumbs, "a")[1]?.props.href).toBe("/models?range=24h");
+      expect(rangeControl(app.root)).toBeDefined();
+      expect(app.browser.location.search).toBe("?range=24h");
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("keeps a model-origin provider detail on the model grouping through back and range", async () => {
+    const app = mountApp("/models?range=24h&group=model");
+    try {
+      await settle();
+      await settle();
+      const providerChild = childRow(app.root, "model-alpha", "OpenAI") as TestNode;
+      expect(providerChild.props.href).toBe(
+        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=24h&group=model`,
       );
+      await app.follow(providerChild.props.href as string);
+      expect(app.browser.location.pathname + app.browser.location.search).toBe(
+        `/provider/${encodeAnalyticsEntityToken(known("openai"))}?range=24h&group=model`,
+      );
+      expect((tabLinks(app.root)[1] as TestNode).props.href).toBe("/models?range=24h&group=model");
+      const breadcrumbs = graph
+        .elementsNamed(app.root, "nav")
+        .find((node) => hasClass(node, "qg-breadcrumbs")) as TestNode;
+      expect(graph.elementsNamed(breadcrumbs, "a")[1]?.props.href).toBe(
+        "/models?range=24h&group=model",
+      );
+
+      await app.back();
+      expect(app.browser.location.pathname + app.browser.location.search).toBe(
+        "/models?range=24h&group=model",
+      );
+      expect(app.calls.groups.at(-1)).toEqual({ range: "24h", dimension: "model" });
+    } finally {
+      app.dispose();
+    }
+  });
+
+  it("defaults a provider detail with no group to the provider grouping and preserves back and range", async () => {
+    const app = mountApp("/models?range=24h");
+    try {
+      await settle();
+      await settle();
+      expect(app.browser.location.pathname + app.browser.location.search).toBe("/models?range=24h");
+
+      // A detail URL without an explicit origin group uses the provider
+      // default rather than inheriting the model grouping.
+      await app.follow(formatPath({ name: "provider", identity: known("openai") }, "7d"));
+      expect(app.calls.groups.at(-1)).toEqual({
+        range: "7d",
+        dimension: "model",
+        filter: { dimension: "provider", identity: known("openai") },
+      });
+      expect((tabLinks(app.root)[1] as TestNode).props.href).toBe("/models?range=7d");
+      const breadcrumbs = graph
+        .elementsNamed(app.root, "nav")
+        .find((node) => hasClass(node, "qg-breadcrumbs")) as TestNode;
+      expect(graph.elementsNamed(breadcrumbs, "a")[1]?.props.href).toBe("/models?range=7d");
+      expect(rangeControl(app.root)).toBeDefined();
+      expect(graph.textOf(app.root)).toContain("OpenAI");
+
+      await app.back();
+      expect(app.browser.location.pathname + app.browser.location.search).toBe("/models?range=24h");
+      expect(app.calls.groups.at(-1)).toEqual({ range: "24h", dimension: "provider" });
     } finally {
       app.dispose();
     }
@@ -2637,12 +3130,23 @@ describe("Models styles", () => {
     expect(styles).toContain("--qg-rank-5: #00bc7d;");
     expect(styles).not.toContain("--qg-rank-5: var(--qg-chart-rate);");
     expect(styles).toMatch(/\.qg-chart__cost-line \{[^}]*stroke: var\(--qg-chart-cost-strong\);/u);
+    expect(styles).toMatch(
+      /\.qg-chart__axis-title--cost,\s*\.qg-chart__axis-label--cost \{[^}]*fill: var\(--qg-chart-cost-strong\);/u,
+    );
+    // The generic title rule must come first, or equal specificity mutes it.
+    expect(styles.indexOf(".qg-chart__axis-title {")).toBeGreaterThan(-1);
+    expect(styles.indexOf(".qg-chart__axis-title--cost")).toBeGreaterThan(
+      styles.indexOf(".qg-chart__axis-title {"),
+    );
   });
 
-  it("greys the cost line only while the chart carries series emphasis", () => {
+  it("greys the cost line and its axis text only while the chart carries series emphasis", () => {
     const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
     expect(styles).toMatch(
       /\.qg-model-chart__plot\[data-highlight\] \.qg-chart__cost-line \{[^}]*stroke: var\(--qg-chart-cost\);/u,
+    );
+    expect(styles).toMatch(
+      /\.qg-model-chart__plot\[data-highlight\] \.qg-chart__axis-title--cost,\s*\.qg-model-chart__plot\[data-highlight\] \.qg-chart__axis-label--cost \{[^}]*fill: var\(--qg-chart-cost\);/u,
     );
   });
 
@@ -2656,6 +3160,9 @@ describe("Models styles", () => {
     );
     expect(styles).toMatch(
       /\.qg-model-chart__plot\[data-child-highlight\] \.qg-chart__child-slice:not\(\[data-highlighted="true"\]\) \{[^}]*opacity: 0\.38;/u,
+    );
+    expect(styles).toMatch(
+      /\.qg-model-chart__plot\[data-parent-highlight\] \.qg-chart__child-slice:not\(\[data-highlighted="true"\]\) \{[^}]*opacity: 0\.38;/u,
     );
     expect(styles).toMatch(
       /\.qg-model-tooltip__footer \.qg-totals__label \{[^}]*white-space: normal;[^}]*\}/u,

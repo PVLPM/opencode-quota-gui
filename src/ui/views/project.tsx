@@ -3,16 +3,13 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import type { ProjectSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
 import { ChartSummary, type ChartSummaryItem } from "../components/chart-shell";
+import { EstimateNote } from "../components/cost-estimate";
 import { EstimateInfo } from "../components/estimate";
 import { SortControl } from "../components/sort-control";
 import { EmptyNotice } from "../components/states";
 import { UsageChart } from "../components/usage-chart";
-import {
-  formatApiEquivalentCost,
-  formatExactCount,
-  formatTokenCount,
-  usageChartTitle,
-} from "../format";
+import { formatExactCount, formatTokenCount, usageChartTitle } from "../format";
+import { formatCostText } from "../model-analytics";
 import { formatPath } from "../routing";
 import { sortRootRows } from "../sorting";
 
@@ -47,8 +44,9 @@ export function ProjectView(props: {
     },
     {
       label: "API-equivalent estimate",
-      value: formatApiEquivalentCost(props.snapshot.totals.apiEquivalentCostUsd),
+      value: formatCostText(props.snapshot.totals),
       info: <EstimateInfo totals={props.snapshot.totals} />,
+      note: <EstimateNote totals={props.snapshot.totals} showExclusionTitle={false} />,
     },
     {
       label: "Sessions",

@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { createSignal, Show } from "solid-js";
+import { createMemo, createSignal, Show } from "solid-js";
 import type {
   AnalyticsDimension,
   AnalyticsEntityIdentity,
@@ -11,9 +11,12 @@ import { ChartSummary, type ChartSummaryItem } from "../components/chart-shell";
 import { CostInfo, EstimateNote } from "../components/cost-estimate";
 import { ModelUsageChart } from "../components/model-usage-chart";
 import { ProviderLogo } from "../components/provider-logo";
-import { formatApiEquivalentCostText, formatExactCount } from "../format";
+import { formatExactCount } from "../format";
 import {
   type BreakdownSort,
+  costValueTitle,
+  entityKey,
+  formatCostText,
   identityLabel,
   rankSeries,
   seriesKey,
@@ -39,6 +42,24 @@ export function ProviderDetailView(props: {
   // Match the chart's own rank order, so a row swatch and its bar cannot drift.
   const seriesKeys = () =>
     rankSeries(props.snapshot.series).map((entry) => seriesKey(entry, props.snapshot.dimension));
+  const otherParentKeys = createMemo(() => {
+    const keys = new Set<string>();
+    for (const entry of props.snapshot.series) {
+      if (entry.kind !== "other") continue;
+      for (const bucket of entry.parentBuckets ?? []) {
+        for (const parent of bucket) keys.add(entityKey(props.snapshot.dimension, parent.identity));
+      }
+    }
+    return keys;
+  });
+  const activeParent = () => {
+    const parent = inspection.activeParent();
+    return parent !== undefined &&
+      inspection.active() === parent.seriesKey &&
+      otherParentKeys().has(parent.parentKey)
+      ? parent
+      : undefined;
+  };
   const label = () => identityLabel(props.identity, "provider");
   const rawLabel = () => {
     if (props.identity.kind !== "known" || props.identity.id.trim().length === 0) return undefined;
@@ -52,16 +73,10 @@ export function ProviderDetailView(props: {
     },
     {
       label: "API-equivalent estimate",
-      value: formatApiEquivalentCostText(
-        props.snapshot.totals.apiEquivalentCostUsd,
-        props.snapshot.totals.total,
-      ),
+      value: formatCostText(props.snapshot.totals),
       info: <CostInfo />,
       note: <EstimateNote totals={props.snapshot.totals} />,
-      title:
-        props.snapshot.totals.apiEquivalentCostUsd === null
-          ? "No priced tokens in this range."
-          : `API-equivalent estimate: USD ${props.snapshot.totals.apiEquivalentCostUsd.toFixed(6)}.`,
+      title: costValueTitle(props.snapshot.totals),
     },
     {
       label: "Sessions",
@@ -80,7 +95,7 @@ export function ProviderDetailView(props: {
         <span aria-hidden="true">›</span>
         <a
           href={formatPath(
-            { name: "models", dimension: props.modelsGroup ?? "model" },
+            { name: "models", dimension: props.modelsGroup ?? "provider" },
             props.range,
           )}
         >
@@ -114,6 +129,7 @@ export function ProviderDetailView(props: {
         headingId="qg-provider-usage"
         summary={<ChartSummary items={summaryItems()} />}
         activeSeries={inspection.active()}
+        activeParent={activeParent()}
         pinnedSeries={inspection.pinned()}
         onPointerSeries={inspection.inspectPointer}
         onFocusSeries={inspection.inspectFocus}
@@ -129,10 +145,14 @@ export function ProviderDetailView(props: {
         onSortChange={setSortMode}
         showChildren={false}
         seriesKeys={seriesKeys()}
-        modelsGroup={props.modelsGroup}
+        modelsGroup={props.modelsGroup ?? "provider"}
         activeSeries={inspection.active()}
+        otherParentKeys={otherParentKeys()}
+        activeParent={activeParent()}
         onPointerSeries={inspection.inspectPointer}
         onFocusSeries={inspection.inspectFocus}
+        onPointerParent={inspection.inspectPointerParent}
+        onFocusParent={inspection.inspectFocusParent}
       />
     </div>
   );

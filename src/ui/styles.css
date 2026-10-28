@@ -980,6 +980,12 @@ body {
   opacity: 0.38;
 }
 
+/* Hidden same-dimension parents inside Other use the same slice ladder and
+   dim their siblings while the exact row is inspected. */
+.qg-model-chart__plot[data-parent-highlight] .qg-chart__child-slice:not([data-highlighted="true"]) {
+  opacity: 0.38;
+}
+
 .qg-chart__child-slice[data-highlighted="true"] {
   stroke: var(--qg-text);
   stroke-width: 1;
@@ -1024,14 +1030,6 @@ body {
   stroke-width: 1.5;
 }
 
-.qg-chart__axis-title--cost {
-  fill: var(--qg-text-muted);
-}
-
-.qg-chart__axis-label--cost {
-  fill: var(--qg-text-muted);
-}
-
 .qg-chart__axis-title--rate,
 .qg-chart__axis-label--rate {
   fill: var(--qg-chart-rate);
@@ -1050,6 +1048,13 @@ body {
   font-weight: 550;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+/* Cost-axis text follows its line: amber at rest, grey under emphasis. This
+   rule follows the generic title rule so equal specificity cannot mute it. */
+.qg-chart__axis-title--cost,
+.qg-chart__axis-label--cost {
+  fill: var(--qg-chart-cost-strong);
 }
 
 .qg-chart__axis-title--context,
@@ -1411,6 +1416,11 @@ body {
    amber stroke; Other never gives the line a highlighted state of its own. */
 .qg-model-chart__plot[data-highlight] .qg-chart__cost-line {
   stroke: var(--qg-chart-cost);
+}
+
+.qg-model-chart__plot[data-highlight] .qg-chart__axis-title--cost,
+.qg-model-chart__plot[data-highlight] .qg-chart__axis-label--cost {
+  fill: var(--qg-chart-cost);
 }
 
 .qg-legend__logo {

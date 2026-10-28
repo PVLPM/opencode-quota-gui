@@ -18,7 +18,7 @@ import {
 } from "../model-analytics";
 import { SegmentedControl, SegmentedControlItem } from "../opencode-ui";
 import { formatPath } from "../routing";
-import type { SeriesChildSelection } from "../series-inspection";
+import type { SeriesChildSelection, SeriesParentSelection } from "../series-inspection";
 import { CostInfo, CostValue, EstimateNote } from "./cost-estimate";
 import { ProviderLogo } from "./provider-logo";
 import { EmptyNotice } from "./states";
@@ -34,6 +34,8 @@ function providerIdFor(identity: AnalyticsEntityIdentity): string {
  * Cost | Tokens reorders each hierarchy level only. Parent rows are ranked
  * globally; children are always rendered, including a singleton, sorted within
  * their own parent. Links carry the exact tagged identity and current range.
+ * A row outside the chart's top five maps to Other, but when the server sent
+ * that exact hidden parent it selects only that parent's Other slice.
  */
 export function AnalyticsBreakdown(props: {
   headingId: string;
@@ -50,10 +52,20 @@ export function AnalyticsBreakdown(props: {
   activeSeries?: string;
   /** Child emphasis shared with the chart, scoped to its parent series. */
   activeChild?: SeriesChildSelection;
+  /**
+   * Same-dimension hidden parents that Other actually carries. A row outside
+   * the chart's top five is only singled out when its exact key is present, so
+   * an older snapshot without parent buckets keeps the aggregate behaviour.
+   */
+  otherParentKeys?: ReadonlySet<string>;
+  /** Exact hidden-parent emphasis shared with the chart's Other slices. */
+  activeParent?: SeriesParentSelection;
   onPointerSeries?: (key: string | undefined) => void;
   onFocusSeries?: (key: string | undefined) => void;
   onPointerChild?: (selection: SeriesChildSelection | undefined) => void;
   onFocusChild?: (selection: SeriesChildSelection | undefined) => void;
+  onPointerParent?: (selection: SeriesParentSelection | undefined) => void;
+  onFocusParent?: (selection: SeriesParentSelection | undefined) => void;
   emptyMessage?: string;
 }): JSX.Element {
   const rows = createMemo(() => sortBreakdownRows(props.rows, props.sort));
@@ -114,6 +126,52 @@ export function AnalyticsBreakdown(props: {
               // neutral identity mark, and model leaves under a provider group
               // have no mark at all.
               const childShowsLogo = childDim === "provider";
+              // Other can be subdivided only by the hidden same-dimension
+              // parents the server actually sent. Without those keys it stays
+              // one aggregate series, exactly as before.
+              const canSelectOtherParent = (): boolean =>
+                activationKey() === "other" && props.otherParentKeys?.has(rowKey()) === true;
+              const otherParentSelection = (): SeriesParentSelection | undefined => {
+                if (activationKey() !== "other") return undefined;
+                const selection = props.activeParent;
+                return selection?.seriesKey === "other" &&
+                  props.otherParentKeys?.has(selection.parentKey) === true
+                  ? selection
+                  : undefined;
+              };
+              const selectedOtherParent = (): boolean =>
+                otherParentSelection()?.parentKey === rowKey();
+              const otherParentEmphasis = (): boolean => otherParentSelection() !== undefined;
+              const inspectRowPointer = (): void => {
+                setLocalChild(undefined);
+                if (canSelectOtherParent() && props.onPointerParent !== undefined) {
+                  props.onPointerParent({ seriesKey: "other", parentKey: rowKey() });
+                  return;
+                }
+                props.onPointerSeries?.(activationKey());
+              };
+              const leaveRowPointer = (): void => {
+                if (canSelectOtherParent() && props.onPointerParent !== undefined) {
+                  props.onPointerParent(undefined);
+                  return;
+                }
+                props.onPointerSeries?.(undefined);
+              };
+              const inspectRowFocus = (): void => {
+                setLocalChild(undefined);
+                if (canSelectOtherParent() && props.onFocusParent !== undefined) {
+                  props.onFocusParent({ seriesKey: "other", parentKey: rowKey() });
+                  return;
+                }
+                props.onFocusSeries?.(activationKey());
+              };
+              const leaveRowFocus = (): void => {
+                if (canSelectOtherParent() && props.onFocusParent !== undefined) {
+                  props.onFocusParent(undefined);
+                  return;
+                }
+                props.onFocusSeries?.(undefined);
+              };
               const sharedChild = (): SeriesChildSelection | undefined => {
                 const selection = props.activeChild;
                 if (selection?.seriesKey !== activationKey()) return undefined;
@@ -192,18 +250,28 @@ export function AnalyticsBreakdown(props: {
                       props.range,
                     )}
                     title={identityTitle(row.identity, props.dimension)}
-                    data-highlighted={parentHasActiveChild() ? undefined : active(activationKey())}
-                    data-dimmed={parentHasActiveChild() ? undefined : inactive(activationKey())}
-                    onPointerEnter={() => {
-                      setLocalChild(undefined);
-                      props.onPointerSeries?.(activationKey());
-                    }}
-                    onPointerLeave={() => props.onPointerSeries?.(undefined)}
-                    onFocus={() => {
-                      setLocalChild(undefined);
-                      props.onFocusSeries?.(activationKey());
-                    }}
-                    onBlur={() => props.onFocusSeries?.(undefined)}
+                    data-highlighted={
+                      parentHasActiveChild()
+                        ? undefined
+                        : selectedOtherParent()
+                          ? "true"
+                          : otherParentEmphasis()
+                            ? undefined
+                            : active(activationKey())
+                    }
+                    data-dimmed={
+                      parentHasActiveChild()
+                        ? undefined
+                        : selectedOtherParent()
+                          ? undefined
+                          : otherParentEmphasis()
+                            ? "true"
+                            : inactive(activationKey())
+                    }
+                    onPointerEnter={inspectRowPointer}
+                    onPointerLeave={leaveRowPointer}
+                    onFocus={inspectRowFocus}
+                    onBlur={leaveRowFocus}
                   >
                     <span class="qg-breakdown__name">
                       <span
@@ -266,16 +334,24 @@ export function AnalyticsBreakdown(props: {
                             data-highlighted={
                               childActive(childKey())
                                 ? "true"
-                                : parentHasActiveChild()
-                                  ? undefined
-                                  : active(activationKey())
+                                : selectedOtherParent()
+                                  ? "true"
+                                  : otherParentEmphasis()
+                                    ? undefined
+                                    : parentHasActiveChild()
+                                      ? undefined
+                                      : active(activationKey())
                             }
                             data-dimmed={
                               childActive(childKey())
                                 ? undefined
-                                : parentHasActiveChild()
-                                  ? "true"
-                                  : inactive(activationKey())
+                                : selectedOtherParent()
+                                  ? undefined
+                                  : otherParentEmphasis()
+                                    ? "true"
+                                    : parentHasActiveChild()
+                                      ? "true"
+                                      : inactive(activationKey())
                             }
                             onPointerEnter={() => inspectChildPointer(childSelection())}
                             onPointerLeave={() => leaveChildPointer(childKey())}

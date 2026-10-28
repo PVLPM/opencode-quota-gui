@@ -12,10 +12,14 @@ import {
   API_EQUIVALENT_TOOLTIP,
   buildEntityColorMap,
   combineEstimates,
+  costValueTitle,
   disambiguatedIdentityLabel,
+  entityKey,
   estimateNote,
+  formatCostText,
   identityLabel,
   identityTitle,
+  isAuthoritativelyFree,
   oppositeDimension,
   rankSeries,
   rowSeriesKey,
@@ -24,7 +28,10 @@ import {
   seriesKey,
   sortBreakdownRows,
 } from "../src/ui/model-analytics";
-import { buildChildCompositionSlices } from "../src/ui/model-chart-composition";
+import {
+  buildChildCompositionSlices,
+  buildParentCompositionSlices,
+} from "../src/ui/model-chart-composition";
 import { buildModelChartGeometry, DEFAULT_MODEL_USAGE_SIZE } from "../src/ui/model-chart-geometry";
 import { buildModelCostOverlayGeometry } from "../src/ui/model-cost-overlay";
 import { createSeriesInspection } from "../src/ui/series-inspection";
@@ -147,6 +154,40 @@ describe("model analytics presentation", () => {
     });
   });
 
+  it("keeps a hidden-parent selection scoped to Other and reconciles exact keys", () => {
+    createRoot((stop) => {
+      const inspection = createSeriesInspection();
+      inspection.inspectFocusParent({
+        seriesKey: "other",
+        parentKey: "model:known:model-zeta",
+      });
+      expect(inspection.active()).toBe("other");
+      expect(inspection.activeParent()).toEqual({
+        seriesKey: "other",
+        parentKey: "model:known:model-zeta",
+      });
+      expect(inspection.activeChild()).toBeUndefined();
+
+      // A parent-row selection and a child-row selection never coexist.
+      inspection.inspectPointerChild({
+        seriesKey: "model:known:model-alpha",
+        childKey: "provider:known:openai",
+      });
+      expect(inspection.activeParent()).toBeUndefined();
+      expect(inspection.activeChild()?.childKey).toBe("provider:known:openai");
+      inspection.inspectPointerParent({ seriesKey: "other", parentKey: "model:unknown" });
+      expect(inspection.activeChild()).toBeUndefined();
+      expect(inspection.activeParent()?.parentKey).toBe("model:unknown");
+      expect(inspection.active()).toBe("other");
+
+      // A snapshot change can retire the exact parent while Other remains.
+      inspection.reconcile(new Set(["other"]), new Set(["model:known:model-zeta"]));
+      expect(inspection.activeParent()).toBeUndefined();
+      expect(inspection.active()).toBe("other");
+      stop();
+    });
+  });
+
   it("keeps the approved API-equivalent copy exact", () => {
     expect(API_EQUIVALENT_TOOLTIP).toBe(
       "API-equivalent estimate based on model pricing. Not actual billed spend.",
@@ -194,6 +235,46 @@ describe("model analytics presentation", () => {
     expect(seriesKey(ranked.at(-1) as AnalyticsSeries, "model")).toBe("other");
   });
 
+  it("assigns rank colours in token order and follows a rank change", () => {
+    const snapshot = modelSnapshot();
+    const keys = rankSeries(snapshot.series).map((entry) => seriesKey(entry, "model"));
+    expect(keys).toEqual([
+      "model:known:model-alpha",
+      "model:known:model-beta",
+      "model:known:model-gamma",
+      "model:known:model-delta",
+      "model:known:model-epsilon",
+      "other",
+    ]);
+    expect(seriesColorForKey("model:known:model-alpha", keys)).toBe("--qg-rank-1");
+    expect(seriesColorForKey("model:known:model-beta", keys)).toBe("--qg-rank-2");
+    expect(seriesColorForKey("model:known:model-gamma", keys)).toBe("--qg-rank-3");
+    expect(seriesColorForKey("model:known:model-delta", keys)).toBe("--qg-rank-4");
+    expect(seriesColorForKey("model:known:model-epsilon", keys)).toBe("--qg-rank-5");
+    expect(seriesColorForKey("other", keys)).toBe("--qg-rank-other");
+
+    // A range can move an entity's token rank; its swatch follows that rank.
+    const shifted = {
+      ...snapshot,
+      series: snapshot.series.map((entry) =>
+        entry.kind === "entity" &&
+        entry.identity.kind === "known" &&
+        entry.identity.id === "model-epsilon"
+          ? { ...entry, tokens: { ...entry.tokens, total: 700 } }
+          : entry,
+      ),
+    };
+    const shiftedKeys = rankSeries(shifted.series).map((entry) => seriesKey(entry, "model"));
+    expect(seriesColorForKey("model:known:model-epsilon", keys)).toBe("--qg-rank-5");
+    expect(seriesColorForKey("model:known:model-epsilon", shiftedKeys)).toBe("--qg-rank-1");
+    expect(seriesColorForKey("model:known:model-alpha", shiftedKeys)).toBe("--qg-rank-2");
+    expect(seriesColorForKey("model:known:model-beta", shiftedKeys)).toBe("--qg-rank-3");
+    expect(seriesColorForKey("model:known:model-gamma", shiftedKeys)).toBe("--qg-rank-4");
+    expect(seriesColorForKey("model:known:model-delta", shiftedKeys)).toBe("--qg-rank-5");
+    expect(seriesColorVar(5, "entity")).toBe("--qg-rank-other");
+    expect(seriesColorVar(0, "other")).toBe("--qg-rank-other");
+  });
+
   it("maps rows outside the chart's top five to the Other series", () => {
     const snapshot = modelSnapshot();
     const keys = snapshot.series.map((entry) => seriesKey(entry, "model"));
@@ -205,7 +286,7 @@ describe("model analytics presentation", () => {
   });
 
   it("maps a row series key to its chart rank colour and falls back to Other", () => {
-    const keys = modelSnapshot().series.map((entry) => seriesKey(entry, "model"));
+    const keys = rankSeries(modelSnapshot().series).map((entry) => seriesKey(entry, "model"));
     expect(seriesColorForKey("model:known:model-alpha", keys)).toBe("--qg-rank-1");
     expect(seriesColorForKey("model:known:model-epsilon", keys)).toBe("--qg-rank-5");
     expect(seriesColorForKey("other", keys)).toBe("--qg-rank-other");
@@ -295,7 +376,32 @@ describe("model analytics presentation", () => {
     expect(formatApiEquivalentCostFine(null)).toBe("≈ USD —");
   });
 
-  it("gives an opposite-dimension leaf the same stable colour in either grouping", () => {
+  it("shows Free only when every token is authoritatively priced at exactly zero", () => {
+    const free = costed({ input: 100 }, { apiEquivalentCostUsd: 0 });
+    const rounded = costed({ input: 100 }, { apiEquivalentCostUsd: 0.0000004 });
+    const partialZero = costed({ input: 100 }, { apiEquivalentCostUsd: 0, unpricedTokens: 25 });
+    const unknownZero = costed({ input: 100 }, { apiEquivalentCostUsd: 0, unknownTokens: 1 });
+    const unpriced = costed({ input: 100 }, { apiEquivalentCostUsd: null, unpricedTokens: 100 });
+    const empty = costed({}, { apiEquivalentCostUsd: 0 });
+
+    expect(isAuthoritativelyFree(free)).toBe(true);
+    expect(isAuthoritativelyFree(rounded)).toBe(false);
+    expect(isAuthoritativelyFree(partialZero)).toBe(false);
+    expect(isAuthoritativelyFree(unknownZero)).toBe(false);
+    expect(isAuthoritativelyFree(unpriced)).toBe(false);
+    expect(isAuthoritativelyFree(empty)).toBe(false);
+
+    expect(formatCostText(free)).toBe("Free");
+    expect(costValueTitle(free)).toContain("Free");
+    expect(formatCostText(rounded)).toBe("≈ USD 0.00");
+    expect(formatCostText(partialZero)).toBe("≈ USD 0.00");
+    expect(costValueTitle(partialZero)).not.toContain("Free");
+    expect(formatCostText(unknownZero)).toBe("≈ USD 0.00");
+    expect(formatCostText(unpriced)).toBe("Unpriced");
+    expect(formatCostText(empty)).toBe("—");
+  });
+
+  it("gives an opposite-dimension leaf the same rank colour in either grouping", () => {
     const modelColors = buildEntityColorMap(modelSnapshot().rows, "model");
     const providerColors = buildEntityColorMap(providerSnapshot().rows, "provider");
     expect(oppositeDimension("model")).toBe("provider");
@@ -698,6 +804,90 @@ describe("model analytics presentation", () => {
       mode: "cost",
     });
     expect(unpricedParent).toEqual([]);
+  });
+
+  it("subdivides Other by exact hidden same-dimension parents in either grouping", () => {
+    const segment = { value: 100, x: 4, y: 10, width: 20, height: 50 };
+    const cases = [
+      {
+        dimension: "model" as const,
+        identities: [known("model-zeta"), unknownIdentity, known("")],
+      },
+      {
+        dimension: "provider" as const,
+        identities: [known("deepseek"), known("openrouter"), known("")],
+      },
+    ];
+    for (const testCase of cases) {
+      const parent = costed({ input: 100 }, { apiEquivalentCostUsd: 3 });
+      const parents = [
+        { identity: testCase.identities[0], tokens: costed({ input: 50 }) },
+        { identity: testCase.identities[1], tokens: costed({ input: 30 }) },
+        { identity: testCase.identities[2], tokens: costed({ input: 20 }) },
+      ];
+      const slices = buildParentCompositionSlices({
+        segment,
+        parentTokens: parent,
+        parents,
+        dimension: testCase.dimension,
+      });
+      expect(slices.map((slice) => slice.key)).toEqual(
+        testCase.identities.map((identity) => entityKey(testCase.dimension, identity)),
+      );
+      expect(slices).toHaveLength(3);
+      for (const [index, expectedShare] of [0.5, 0.3, 0.2].entries()) {
+        expect(slices[index]?.share).toBeCloseTo(expectedShare);
+      }
+      expect(slices.every((slice) => slice.x === segment.x && slice.width === segment.width)).toBe(
+        true,
+      );
+      expect((slices[0]?.y ?? 0) + (slices[0]?.height ?? 0)).toBeCloseTo(
+        segment.y + segment.height,
+      );
+      expect(slices[2]?.y).toBeCloseTo(segment.y);
+    }
+
+    // Sparse real parents leave the missing remainder in the Other colour,
+    // and one hidden parent is never a fake full-height distinction.
+    const sparse = buildParentCompositionSlices({
+      segment,
+      parentTokens: costed({ input: 100 }, { apiEquivalentCostUsd: 3 }),
+      parents: [
+        { identity: known("model-zeta"), tokens: costed({ input: 50 }) },
+        { identity: known("model-eta"), tokens: costed({ input: 20 }) },
+      ],
+      dimension: "model",
+    });
+    expect(sparse.map((slice) => slice.share)).toHaveLength(2);
+    expect(sparse[0]?.share).toBeCloseTo(0.5);
+    expect(sparse[1]?.share).toBeCloseTo(0.2);
+    const single = buildParentCompositionSlices({
+      segment,
+      parentTokens: costed({ input: 100 }, { apiEquivalentCostUsd: 3 }),
+      parents: [{ identity: known("model-zeta"), tokens: costed({ input: 100 }) }],
+      dimension: "model",
+    });
+    expect(single).toEqual([]);
+
+    const byCost = buildParentCompositionSlices({
+      segment,
+      parentTokens: costed({ input: 100 }, { apiEquivalentCostUsd: 3 }),
+      parents: [
+        {
+          identity: known("model-zeta"),
+          tokens: costed({ input: 50 }, { apiEquivalentCostUsd: 1 }),
+        },
+        {
+          identity: known("model-eta"),
+          tokens: costed({ input: 50 }, { apiEquivalentCostUsd: 2 }),
+        },
+      ],
+      dimension: "model",
+      mode: "cost",
+    });
+    expect(byCost.map((slice) => slice.share)).toHaveLength(2);
+    expect(byCost[0]?.share).toBeCloseTo(1 / 3);
+    expect(byCost[1]?.share).toBeCloseTo(2 / 3);
   });
 
   it("returns an empty plot when a range has no series", () => {

@@ -2,6 +2,7 @@ import type {
   AnalyticsDimension,
   AnalyticsEntityIdentity,
   AnalyticsSeriesChildBucket,
+  AnalyticsSeriesParentBucket,
   CostedTokens,
 } from "../contracts/dashboard";
 import { entityKey, oppositeDimension } from "./model-analytics";
@@ -10,21 +11,21 @@ import type { ModelChartSegment } from "./model-chart-geometry";
 /**
  * On-demand in-bar composition for one parent segment.
  *
- * A parent segment keeps its exact stacked-bar envelope; children only divide
+ * A parent segment keeps its exact stacked-bar envelope; entries only divide
  * that envelope while the parent is active. Token proportions use the same
- * bucket's parent total, so a sparse or incomplete child list leaves the
- * remainder in the parent colour instead of stretching children to fill it.
- * Known-cost proportions use only numeric child costs and the parent's numeric
- * cost; an unpriced child contributes no invented share.
+ * bucket's parent total, so a sparse or incomplete entry list leaves the
+ * remainder in the parent colour instead of stretching entries to fill it.
+ * Known-cost proportions use only numeric entry costs and the parent's numeric
+ * cost; an unpriced entry contributes no invented share.
  *
- * `children` is sparse and already ordered by the server. One child never
+ * `entries` is sparse and already ordered by the server. One entry never
  * subdivides: a single full-height slice would be a fake distinction.
  */
 
 export type CompositionMode = "tokens" | "cost";
 
-export interface ChildCompositionSlice {
-  /** Opposite-dimension identity key, shared with breakdown child rows. */
+export interface CompositionSlice {
+  /** Entity key for the subdivided dimension, shared with its breakdown row. */
   key: string;
   identity: AnalyticsEntityIdentity;
   tokens: CostedTokens;
@@ -36,24 +37,31 @@ export interface ChildCompositionSlice {
   height: number;
   /**
    * Neutral shade ladder over the parent series colour. It depends only on
-   * slice order, never on the opposite entity's own palette.
+   * slice order, never on the entity's own palette.
    */
   fillOpacity: number;
 }
 
 type CompositionSegment = Pick<ModelChartSegment, "x" | "y" | "width" | "height" | "value">;
 
-export function buildChildCompositionSlices(input: {
-  segment: CompositionSegment;
-  /** The parent series bucket; its numeric cost is the cost-view denominator. */
-  parentTokens?: Pick<CostedTokens, "apiEquivalentCostUsd">;
-  children?: readonly AnalyticsSeriesChildBucket[];
-  dimension: AnalyticsDimension;
-  mode?: CompositionMode;
-}): ChildCompositionSlice[] {
+type CompositionEntry = {
+  identity: AnalyticsEntityIdentity;
+  tokens: CostedTokens;
+};
+
+function buildCompositionSlices(
+  input: {
+    segment: CompositionSegment;
+    /** The parent series bucket; its numeric cost is the cost-view denominator. */
+    parentTokens?: Pick<CostedTokens, "apiEquivalentCostUsd">;
+    dimension: AnalyticsDimension;
+    mode?: CompositionMode;
+  },
+  entries: readonly CompositionEntry[],
+  entryDimension: AnalyticsDimension,
+): CompositionSlice[] {
   const { segment } = input;
-  const children = input.children ?? [];
-  if (children.length < 2) return [];
+  if (entries.length < 2) return [];
 
   const mode = input.mode ?? "tokens";
   const parentTokens = input.parentTokens;
@@ -66,23 +74,23 @@ export function buildChildCompositionSlices(input: {
         : 0;
   if (!(denominator > 0)) return [];
 
-  const weighted = children
-    .map((child) => {
-      const cost = child.tokens.apiEquivalentCostUsd;
+  const weighted = entries
+    .map((entry) => {
+      const cost = entry.tokens.apiEquivalentCostUsd;
       const weight =
         mode === "tokens"
-          ? Math.max(0, child.tokens.total)
+          ? Math.max(0, entry.tokens.total)
           : typeof cost === "number" && Number.isFinite(cost) && cost > 0
             ? cost
             : 0;
-      return { child, weight };
+      return { entry, weight };
     })
-    .filter((entry) => entry.weight > 0);
+    .filter((candidate) => candidate.weight > 0);
   if (weighted.length < 2) return [];
 
-  const slices: Omit<ChildCompositionSlice, "fillOpacity">[] = [];
+  const slices: Omit<CompositionSlice, "fillOpacity">[] = [];
   let cumulative = 0;
-  for (const { child, weight } of weighted) {
+  for (const { entry, weight } of weighted) {
     const remaining = 1 - cumulative;
     if (!(remaining > 0)) break;
     const share = Math.min(weight / denominator, remaining);
@@ -90,9 +98,9 @@ export function buildChildCompositionSlices(input: {
     const lower = segment.y + segment.height - cumulative * segment.height;
     const height = share * segment.height;
     slices.push({
-      key: entityKey(oppositeDimension(input.dimension), child.identity),
-      identity: child.identity,
-      tokens: child.tokens,
+      key: entityKey(entryDimension, entry.identity),
+      identity: entry.identity,
+      tokens: entry.tokens,
       share,
       x: segment.x,
       y: lower - height,
@@ -110,4 +118,32 @@ export function buildChildCompositionSlices(input: {
     fillOpacity:
       topOpacity - (index / Math.max(slices.length - 1, 1)) * (topOpacity - bottomOpacity),
   }));
+}
+
+/** Subdivides a top-five parent by the opposite-dimension children in one bucket. */
+export function buildChildCompositionSlices(input: {
+  segment: CompositionSegment;
+  parentTokens?: Pick<CostedTokens, "apiEquivalentCostUsd">;
+  children?: readonly AnalyticsSeriesChildBucket[];
+  dimension: AnalyticsDimension;
+  mode?: CompositionMode;
+}): CompositionSlice[] {
+  return buildCompositionSlices(input, input.children ?? [], oppositeDimension(input.dimension));
+}
+
+/**
+ * Subdivides Other by the hidden same-dimension parents in one bucket.
+ *
+ * `parents` is sparse and emitted only by the backend for Other. The keys are
+ * the exact same-dimension identities the breakdown rows already use, so a
+ * hovered or focused hidden row can single out one slice without a request.
+ */
+export function buildParentCompositionSlices(input: {
+  segment: CompositionSegment;
+  parentTokens?: Pick<CostedTokens, "apiEquivalentCostUsd">;
+  parents?: readonly AnalyticsSeriesParentBucket[];
+  dimension: AnalyticsDimension;
+  mode?: CompositionMode;
+}): CompositionSlice[] {
+  return buildCompositionSlices(input, input.parents ?? [], input.dimension);
 }

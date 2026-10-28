@@ -6,6 +6,7 @@ import {
 import {
   canonicalizeLocation,
   formatPath,
+  modelsGroupForRoute,
   parseLocation,
   routeShowsRangeSelector,
   routeUsesRange,
@@ -20,13 +21,35 @@ import {
 const IDS = ["", " ", "a/b", "100%", "a#b", "a?b", "a|||b", "unknown", "app.js", "模型/🤖"];
 
 describe("Models and group detail routes", () => {
-  it("parses and formats the peer Models route with its range", () => {
+  it("defaults a bare Models route to the provider grouping", () => {
     expect(parseLocation("/models?range=24h", "7d")).toEqual({
+      route: { name: "models", dimension: "provider" },
+      range: "24h",
+    });
+    expect(parseLocation("/models", "30d")).toEqual({
+      route: { name: "models", dimension: "provider" },
+      range: "30d",
+    });
+    expect(formatPath({ name: "models", dimension: "provider" }, "24h")).toBe("/models?range=24h");
+  });
+
+  it("round-trips an explicit model grouping", () => {
+    expect(parseLocation("/models?range=24h&group=model", "7d")).toEqual({
       route: { name: "models", dimension: "model" },
       range: "24h",
     });
-    expect(formatPath({ name: "models", dimension: "model" }, "24h")).toBe("/models?range=24h");
-    expect(parseLocation("/models", "30d").range).toBe("30d");
+    const path = formatPath({ name: "models", dimension: "model" }, "24h");
+    expect(path).toBe("/models?range=24h&group=model");
+    expect(parseLocation(path, "7d")).toEqual({
+      route: { name: "models", dimension: "model" },
+      range: "24h",
+    });
+    const canonical = canonicalizeLocation(
+      { pathname: "/models", search: "?range=24h&group=model", hash: "" },
+      "7d",
+    );
+    expect(canonical.location.route).toEqual({ name: "models", dimension: "model" });
+    expect(canonical.path).toBe("/models?range=24h&group=model");
   });
 
   it("preserves the Models grouping and detail origin without losing the range", () => {
@@ -34,9 +57,7 @@ describe("Models and group detail routes", () => {
       route: { name: "models", dimension: "provider" },
       range: "24h",
     });
-    expect(formatPath({ name: "models", dimension: "provider" }, "24h")).toBe(
-      "/models?range=24h&group=provider",
-    );
+    expect(formatPath({ name: "models", dimension: "provider" }, "24h")).toBe("/models?range=24h");
 
     const identity = { kind: "known" as const, id: "model-alpha" };
     const token = encodeAnalyticsEntityToken(identity);
@@ -47,6 +68,17 @@ describe("Models and group detail routes", () => {
     expect(formatPath({ name: "model", identity, modelsGroup: "provider" }, "7d")).toBe(
       `/model/${token}?range=7d&group=provider`,
     );
+    expect(formatPath({ name: "provider", identity, modelsGroup: "model" }, "7d")).toBe(
+      `/provider/${token}?range=7d&group=model`,
+    );
+    expect(formatPath({ name: "provider", identity, modelsGroup: "provider" }, "7d")).toBe(
+      `/provider/${token}?range=7d&group=provider`,
+    );
+    expect(parseLocation(`/provider/${token}?range=7d&group=model`, "24h").route).toEqual({
+      name: "provider",
+      identity,
+      modelsGroup: "model",
+    });
     expect(parseLocation(`/model/${token}?range=7d&group=bogus`, "24h").route).toEqual({
       name: "model",
       identity,
@@ -57,7 +89,7 @@ describe("Models and group detail routes", () => {
       "7d",
     );
     expect(grouped.location.route).toEqual({ name: "models", dimension: "provider" });
-    expect(grouped.path).toBe("/models?range=24h&group=provider");
+    expect(grouped.path).toBe("/models?range=24h");
   });
 
   it.each(IDS)("round-trips the exact model identity %j", (id) => {
@@ -111,6 +143,24 @@ describe("Models and group detail routes", () => {
     expect(parseLocation(path, "7d").route.name).toBe("not-found");
   });
 
+  it("defaults detail Models navigation when the route has no explicit group", () => {
+    const identity = { kind: "known" as const, id: "openai" };
+    expect(modelsGroupForRoute({ name: "models", dimension: "model" })).toBe("model");
+    expect(modelsGroupForRoute({ name: "models", dimension: "provider" })).toBe("provider");
+    expect(modelsGroupForRoute({ name: "model", identity })).toBe("model");
+    expect(modelsGroupForRoute({ name: "model", identity, modelsGroup: "provider" })).toBe(
+      "provider",
+    );
+    expect(modelsGroupForRoute({ name: "provider", identity })).toBe("provider");
+    expect(modelsGroupForRoute({ name: "provider", identity, modelsGroup: "provider" })).toBe(
+      "provider",
+    );
+    expect(modelsGroupForRoute({ name: "provider", identity, modelsGroup: "model" })).toBe("model");
+    expect(modelsGroupForRoute({ name: "analytics" })).toBeUndefined();
+    expect(modelsGroupForRoute({ name: "project", projectId: "p" })).toBeUndefined();
+    expect(modelsGroupForRoute({ name: "session", sessionId: "s" })).toBeUndefined();
+  });
+
   it("keeps the range selector on Models and both details while Session stays range-free", () => {
     for (const route of [
       { name: "models" as const, dimension: "model" as const },
@@ -142,5 +192,20 @@ describe("Models and group detail routes", () => {
     );
     expect(session.path).toBe("/session/ses%201");
     expect(session.location.range).toBe("7d");
+
+    const providerToken = encodeAnalyticsEntityToken({ kind: "known", id: "openai" });
+    const providerDetail = canonicalizeLocation(
+      { pathname: `/provider/${providerToken}`, search: "?range=30d&group=model", hash: "" },
+      "7d",
+    );
+    expect(providerDetail.location).toEqual({
+      route: {
+        name: "provider",
+        identity: { kind: "known", id: "openai" },
+        modelsGroup: "model",
+      },
+      range: "30d",
+    });
+    expect(providerDetail.path).toBe(`/provider/${providerToken}?range=30d&group=model`);
   });
 });
