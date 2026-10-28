@@ -197,6 +197,41 @@ describe("v4 release gates", () => {
     expect(git(hookRepo, ["ls-files"])).toBe("");
   });
 
+  it("accepts only the exact approved v1.1.0 release screenshots and rejects look-alikes", async () => {
+    const historyRepo = path.join(tempDir, "release-screenshots");
+    const base = await createHistoryRepo(historyRepo);
+    const approved = [
+      "images/opencode-quota-gui_analytics-1.1.0.png",
+      "images/opencode-quota-gui_providers-1.1.0.png",
+      "images/opencode-quota-gui_quota-1.1.0.png",
+      "images/opencode-quota-gui_session-1.1.0.png",
+    ];
+
+    await writeFiles(historyRepo, approved);
+    git(historyRepo, ["add", "--", ...approved]);
+    git(historyRepo, ["commit", "-qm", "add public release screenshots"]);
+
+    const accepted = run(historyScript, [], {
+      V4_HISTORY_BASE: base,
+      V4_HISTORY_REPO: historyRepo,
+    });
+    expect(accepted.status).toBe(0);
+    expect(accepted.stdout).toContain("V4 history privacy verified");
+
+    const lookAlike = "images/opencode-quota-gui_analytics-1.1.0-copy.png";
+    await writeFiles(historyRepo, [lookAlike]);
+    git(historyRepo, ["add", "-f", "--", lookAlike]);
+    git(historyRepo, ["commit", "-qm", "add unapproved screenshot look-alike"]);
+
+    const rejected = run(historyScript, [], {
+      V4_HISTORY_BASE: base,
+      V4_HISTORY_REPO: historyRepo,
+    });
+    expect(rejected.status).toBe(1);
+    expect(rejected.stderr).toContain("Forbidden local-only files");
+    expect(rejected.stderr).toContain(lookAlike);
+  });
+
   it("rejects every forced-added private path from temporary commit history", async () => {
     const historyRepo = path.join(tempDir, "history");
     const base = await createHistoryRepo(historyRepo);
