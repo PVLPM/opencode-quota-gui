@@ -5,7 +5,10 @@ import {
   keepRetiredModels,
 } from "../scripts/refresh-modelsdev-pricing.mjs";
 
-function snapshot(providers: Record<string, Record<string, Record<string, unknown>>>) {
+function snapshot(
+  providers: Record<string, Record<string, Record<string, unknown>>>,
+  catalog?: Record<string, string[]>,
+) {
   return {
     _meta: {
       generatedAt: 1,
@@ -14,6 +17,7 @@ function snapshot(providers: Record<string, Record<string, Record<string, unknow
       units: "USD per 1M tokens",
     },
     providers,
+    ...(catalog ? { catalog } : {}),
   };
 }
 
@@ -159,7 +163,7 @@ describe("refresh-modelsdev-pricing buildRefreshedSnapshot", () => {
     expect(built.providers.xai["grok-old"]).toEqual({ input: 4, output: 8 });
   });
 
-  it("still honors an explicit dynamic provider scope", () => {
+  it("still refreshes only the explicit dynamic provider scope", () => {
     const api = {
       openai: { models: { "gpt-new": { cost: { input: 1, output: 2 } } } },
       opencode: { models: { "big-pickle": { cost: { input: 3, output: 15 } } } },
@@ -168,20 +172,50 @@ describe("refresh-modelsdev-pricing buildRefreshedSnapshot", () => {
 
     const { snapshot: built } = buildRefreshedSnapshot(api, previous, ["openai"]);
 
-    expect(Object.keys(built.providers)).toEqual(["openai"]);
+    // Only openai was fetched; opencode is neither refreshed nor invented, and
+    // the previous out-of-scope provider survives.
+    expect(Object.keys(built.providers)).toEqual(["openai", "xai"]);
+    expect(built.providers.xai["grok-old"]).toEqual({ input: 4, output: 8 });
   });
 
-  it("refuses a models.dev answer with no priced models instead of keeping everything", () => {
+  it("refuses a scoped response that names none of the requested providers", () => {
     const previous = snapshot({ anthropic: { "claude-old": { input: 3, output: 15 } } });
 
     expect(() => buildRefreshedSnapshot({}, previous, ["anthropic"])).toThrow(
       "returned no priced models",
     );
-    expect(() =>
-      buildRefreshedSnapshot({ anthropic: { models: { x: { cost: {} } } } }, previous, [
-        "anthropic",
-      ]),
-    ).toThrow("returned no priced models");
+  });
+
+  it("accepts an all-unpriced scoped catalog and drops the stale scoped price", () => {
+    const previous = snapshot({
+      anthropic: { "claude-old": { input: 3, output: 15 } },
+      xai: { "grok-old": { input: 4, output: 8 } },
+    });
+
+    const { snapshot: built, keptModelIDs } = buildRefreshedSnapshot(
+      { anthropic: { models: { "claude-old": { cost: {} } } } },
+      previous,
+      ["anthropic"],
+    );
+
+    expect(built.providers.anthropic).toBeUndefined();
+    expect(built.providers.xai).toEqual(previous.providers.xai);
+    expect(built.catalog).toEqual({ anthropic: ["claude-old"] });
+    expect(keptModelIDs).toEqual([]);
+  });
+
+  it("still refuses a full refresh when the response has no priced models", () => {
+    const previous = snapshot({ anthropic: { "claude-old": { input: 3, output: 15 } } });
+
+    for (const api of [
+      {},
+      { anthropic: { models: { "claude-old": { cost: {} } } } },
+      { anthropic: { models: {} } },
+    ]) {
+      expect(() => buildRefreshedSnapshot(api, previous, undefined)).toThrow(
+        "returned no priced models",
+      );
+    }
   });
 
   it("builds the models.dev snapshot and reports kept models", () => {
@@ -301,5 +335,297 @@ describe("refresh-modelsdev-pricing buildRefreshedSnapshot", () => {
         },
       ],
     });
+  });
+});
+
+const UNION_ALPHA_COST = { input: 0, output: 0, cache_read: 0 };
+
+describe("refresh-modelsdev-pricing scoped refresh retention", () => {
+  it("takes current models.dev prices for the scoped provider", () => {
+    const api = {
+      openai: {
+        models: {
+          "gpt-current": { cost: { input: 2, output: 4 } },
+          "gpt-fresh": { cost: { input: 1, output: 2 } },
+        },
+      },
+    };
+    const previous = snapshot({
+      openai: {
+        "gpt-current": { input: 9, output: 9 },
+        "gpt-retired": { input: 3, output: 15 },
+      },
+      xai: { "grok-old": { input: 4, output: 8 } },
+    });
+
+    const { snapshot: built } = buildRefreshedSnapshot(api, previous, ["openai"]);
+
+    expect(built.providers.openai).toEqual({
+      "gpt-current": { input: 2, output: 4 },
+      "gpt-fresh": { input: 1, output: 2 },
+      "gpt-retired": { input: 3, output: 15 },
+    });
+    expect(built.providers.xai).toEqual({ "grok-old": { input: 4, output: 8 } });
+  });
+
+  it("drops stale prices for scoped models the catalog lists as present but unpriced", () => {
+    const api = {
+      openai: {
+        models: {
+          priced: { cost: { input: 1, output: 2 } },
+          "present-unpriced": { cost: {} },
+        },
+      },
+    };
+    const previous = snapshot({
+      openai: {
+        priced: { input: 9, output: 9 },
+        "present-unpriced": { input: 4, output: 8 },
+        retired: { input: 3, output: 15 },
+      },
+    });
+
+    const { snapshot: built, keptModelIDs } = buildRefreshedSnapshot(api, previous, ["openai"]);
+
+    expect(built.providers.openai).toEqual({
+      priced: { input: 1, output: 2 },
+      retired: { input: 3, output: 15 },
+    });
+    expect(built.catalog.openai).toEqual(["present-unpriced", "priced"]);
+    expect(keptModelIDs).toEqual(["openai/retired"]);
+  });
+
+  it("merges previous out-of-scope catalog entries and rebuilds the scoped catalog", () => {
+    const api = {
+      openai: {
+        models: {
+          "gpt-current": { cost: { input: 1, output: 2 } },
+          "present-unpriced": { cost: {} },
+        },
+      },
+      // Present in the response but outside the requested scope: this presence
+      // must not become an authoritative catalog for these providers.
+      opencode: { models: { "union-alpha": { cost: {} } } },
+      "opencode-go": { models: { "union-alpha": { cost: {} } } },
+    };
+    const previous = snapshot(
+      {
+        openai: {
+          "gpt-current": { input: 9, output: 9 },
+          "present-unpriced": { input: 4, output: 8 },
+          "gpt-retired": { input: 3, output: 15 },
+        },
+        opencode: {
+          "union-alpha": UNION_ALPHA_COST,
+          "big-pickle": { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+        },
+        "opencode-go": { "union-alpha": UNION_ALPHA_COST },
+      },
+      {
+        openai: ["gpt-current", "present-unpriced", "gpt-retired"],
+        // Both retired union-alpha routes are absent from the saved catalog.
+        opencode: ["big-pickle"],
+        "opencode-go": [],
+      },
+    );
+
+    const { snapshot: built, keptModelIDs } = buildRefreshedSnapshot(api, previous, ["openai"]);
+
+    expect(built.providers.openai).toEqual({
+      "gpt-current": { input: 1, output: 2 },
+      "gpt-retired": { input: 3, output: 15 },
+    });
+    expect(built.providers.opencode).toEqual(previous.providers.opencode);
+    expect(built.providers["opencode-go"]).toEqual(previous.providers["opencode-go"]);
+    // Scoped catalog is rebuilt from the response; out-of-scope entries are
+    // preserved exactly and the retained retired prices stay uncatalogued.
+    expect(built.catalog).toEqual({
+      openai: ["gpt-current", "present-unpriced"],
+      opencode: ["big-pickle"],
+      "opencode-go": [],
+    });
+    expect(built._meta.providers).toEqual(["openai", "opencode", "opencode-go"]);
+    expect(keptModelIDs).toEqual(["openai/gpt-retired"]);
+  });
+
+  it("copies out-of-scope provider objects without reinterpreting cost shape", () => {
+    const api = {
+      openai: { models: { current: { cost: { input: 1, output: 2 } } } },
+    };
+    const previous = snapshot({
+      openai: { current: { input: 9, output: 9 } },
+      opencode: {
+        "union-alpha": UNION_ALPHA_COST,
+        tiered: {
+          input: 1,
+          output: 2,
+          reasoning: 3,
+          cache_write: 4,
+          tiers: [
+            {
+              input: 2,
+              output: 4,
+              cache_read: 1,
+              cache_write: 2,
+              tier: { type: "context", size: 200_000 },
+            },
+            // A normalization pass would sort and dedupe these tiers by size.
+            {
+              input: 2,
+              output: 4,
+              cache_read: 1,
+              cache_write: 2,
+              tier: { type: "context", size: 200_000 },
+            },
+          ],
+        },
+      },
+    });
+
+    const { snapshot: built } = buildRefreshedSnapshot(api, previous, ["openai"]);
+
+    expect(built.providers.opencode).toEqual(previous.providers.opencode);
+    expect(built.providers.opencode.tiered.tiers).toHaveLength(2);
+  });
+
+  it("replaces a scoped catalog entry with an authoritative empty model list", () => {
+    const previous = snapshot({}, { openai: ["retired-model"] });
+
+    const { snapshot: built, keptModelIDs } = buildRefreshedSnapshot(
+      { openai: { models: {} } },
+      previous,
+      ["openai"],
+    );
+
+    expect(built.providers).toEqual({});
+    expect(built.catalog).toEqual({ openai: [] });
+    expect(keptModelIDs).toEqual([]);
+  });
+
+  it("removes previous catalog entries for scoped providers the response no longer lists", () => {
+    const api = {
+      opencode: { models: { "big-pickle": { cost: { input: 1, output: 2 } } } },
+    };
+    const previous = snapshot(
+      { opencode: { "big-pickle": { input: 9, output: 9 } } },
+      {
+        openai: ["gone"],
+        opencode: ["old-model"],
+        xai: ["grok-old"],
+      },
+    );
+
+    const { snapshot: built } = buildRefreshedSnapshot(api, previous, ["openai", "opencode"]);
+
+    expect(built.catalog).toEqual({
+      opencode: ["big-pickle"],
+      xai: ["grok-old"],
+    });
+  });
+
+  it("rejects malformed model maps for present scoped providers before writing", () => {
+    const previous = snapshot(
+      {
+        openai: { "gpt-old": { input: 9, output: 9 } },
+        anthropic: { "claude-old": { input: 3, output: 15 } },
+      },
+      {
+        openai: ["gpt-old"],
+        anthropic: ["claude-old"],
+        xai: ["grok-old"],
+      },
+    );
+    const before = structuredClone(previous);
+    const validOpenai = {
+      openai: { models: { "gpt-new": { cost: { input: 1, output: 2 } } } },
+    };
+
+    for (const malformedAnthropic of [
+      { models: [] },
+      { models: "not-a-map" },
+      { models: null },
+      {},
+    ]) {
+      expect(() =>
+        buildRefreshedSnapshot({ ...validOpenai, anthropic: malformedAnthropic }, previous, [
+          "openai",
+          "anthropic",
+        ]),
+      ).toThrow(/malformed model map for anthropic/);
+    }
+
+    // The rejected build must not rewrite the previous catalog or prices.
+    expect(previous).toEqual(before);
+  });
+
+  it("accepts a mixed scoped response with priced and authoritative empty model maps", () => {
+    const api = {
+      openai: { models: { "gpt-new": { cost: { input: 1, output: 2 } } } },
+      anthropic: { models: {} },
+    };
+    const previous = snapshot(
+      {},
+      {
+        openai: ["gpt-old"],
+        anthropic: ["claude-old"],
+      },
+    );
+
+    const { snapshot: built } = buildRefreshedSnapshot(api, previous, ["openai", "anthropic"]);
+
+    expect(built.catalog).toEqual({ anthropic: [], openai: ["gpt-new"] });
+    expect(built.providers).toEqual({
+      openai: { "gpt-new": { input: 1, output: 2 } },
+    });
+  });
+
+  it("matches scoped provider ids exactly without splitting raw route ids", () => {
+    const api = {
+      opencode: { models: { "union-alpha": { cost: { input: 1, output: 1 } } } },
+      "opencode-go": { models: { "union-alpha": { cost: { input: 2, output: 2 } } } },
+    };
+    const previous = snapshot({
+      opencode: { "union-alpha": UNION_ALPHA_COST },
+      "opencode-go": { "union-alpha": UNION_ALPHA_COST },
+    });
+
+    const { snapshot: built } = buildRefreshedSnapshot(api, previous, ["opencode-go"]);
+
+    expect(built.providers.opencode).toEqual(previous.providers.opencode);
+    expect(built.providers["opencode-go"]).toEqual({ "union-alpha": { input: 2, output: 2 } });
+  });
+
+  it("keeps the unscoped refresh behavior that retains providers the API dropped", () => {
+    const api = {
+      openai: { models: { "gpt-new": { cost: { input: 1, output: 2 } } } },
+    };
+    const previous = snapshot(
+      {
+        openai: { "gpt-old": { input: 9, output: 9 } },
+        opencode: { "union-alpha": UNION_ALPHA_COST },
+        "opencode-go": { "union-alpha": UNION_ALPHA_COST },
+      },
+      {
+        openai: ["gpt-old"],
+        opencode: ["union-alpha"],
+        "opencode-go": ["union-alpha"],
+      },
+    );
+
+    const { snapshot: built, keptModelIDs } = buildRefreshedSnapshot(api, previous, undefined);
+
+    expect(built.providers.openai).toEqual({
+      "gpt-new": { input: 1, output: 2 },
+      "gpt-old": { input: 9, output: 9 },
+    });
+    expect(built.providers.opencode).toEqual(previous.providers.opencode);
+    expect(built.providers["opencode-go"]).toEqual(previous.providers["opencode-go"]);
+    // An unscoped refresh rebuilds the catalog from the current API only.
+    expect(built.catalog).toEqual({ openai: ["gpt-new"] });
+    expect(keptModelIDs).toEqual([
+      "openai/gpt-old",
+      "opencode/union-alpha",
+      "opencode-go/union-alpha",
+    ]);
   });
 });

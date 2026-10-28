@@ -202,6 +202,52 @@ function buildCatalog(api, providerIDs) {
   return catalog;
 }
 
+// A provider named by an explicit scope is present when its key exists in the
+// response. Its model map must then be a plain object: an array, null, or a
+// missing map is malformed and rejects the whole refresh before a previous
+// catalog entry can be dropped. A provider absent from the response is retired
+// and follows the normal scoped catalog replacement.
+function assertScopedModelMaps(api, providerIDs) {
+  const providerNodes = api && typeof api === "object" ? api : {};
+  for (const providerID of providerIDs) {
+    if (!Object.hasOwn(providerNodes, providerID)) continue;
+    const models = providerNodes[providerID]?.models;
+    if (!models || typeof models !== "object" || Array.isArray(models)) {
+      throw new Error(
+        `Refusing to write a pricing snapshot: ${SOURCE_URL} returned a malformed model map for ${providerID}.`,
+      );
+    }
+  }
+}
+
+// A scoped refresh replaces catalog presence only for the providers it fetched.
+// Providers outside that scope were not fetched, so their previous catalog
+// entry is kept verbatim — including a valid empty model list. A model that was
+// already known to be present-but-unpriced therefore stays blocked from stale
+// price restoration.
+function mergeScopedCatalog(previousCatalog, fetchedCatalog, providerIDs) {
+  const catalog = { ...(previousCatalog ?? {}) };
+  for (const providerID of providerIDs) delete catalog[providerID];
+  Object.assign(catalog, fetchedCatalog);
+  return sortObjectByKeys(catalog);
+}
+
+// Providers outside an explicit scope were not fetched, so their previous entry
+// is presentation data that must move across unchanged: no cost-bucket
+// reinterpretation, tier re-sorting, or deduplication.
+function retainOutOfScopeProviders(snapshot, previous, providerIDs) {
+  const scope = new Set(providerIDs);
+  let copied = false;
+  for (const [providerID, models] of Object.entries(previous?.providers ?? {})) {
+    if (scope.has(providerID)) continue;
+    snapshot.providers[providerID] = { ...models };
+    copied = true;
+  }
+  if (!copied) return;
+  snapshot.providers = sortObjectByKeys(snapshot.providers);
+  snapshot._meta.providers = Object.keys(snapshot.providers);
+}
+
 // models.dev drops retired models from its list. Keep their last known price so
 // older usage still gets a cost. Prices from models.dev always win.
 //
@@ -239,23 +285,35 @@ export function keepRetiredModels(snapshot, previous, providerIDs, catalog) {
 }
 
 export function buildRefreshedSnapshot(api, previous, providerIDs) {
+  const previousProviders = previous?.providers ?? {};
+  const scoped = providerIDs !== undefined;
+  // Validate every present scoped provider before touching prices or catalog
+  // presence, so a malformed model map cannot silently delete previous metadata.
+  if (scoped) assertScopedModelMaps(api, providerIDs);
   // Without an explicit dynamic scope, refresh and retain every provider the
   // central catalog returned plus every provider already in the previous
   // snapshot, so a dropped provider is not lost on the next refresh.
   const scope = providerIDs ?? [
-    ...new Set([...Object.keys(api ?? {}), ...Object.keys(previous?.providers ?? {})]),
+    ...new Set([...Object.keys(api ?? {}), ...Object.keys(previousProviders)]),
   ];
   const snapshot = buildSnapshot(api, scope);
-  if (Object.keys(snapshot.providers).length === 0) {
+  const fetchedCatalog = buildCatalog(api, scope);
+  const hasPricedModels = Object.keys(snapshot.providers).length > 0;
+  const hasRequestedCatalog = Object.keys(fetchedCatalog).length > 0;
+  // A full refresh must still produce prices: an all-unpriced response keeps
+  // failing the bundle. A scoped refresh may legitimately return catalog-only
+  // presence for the requested providers, including an authoritative empty
+  // model list; a response that names none of them is malformed.
+  if (!hasPricedModels && (!scoped || !hasRequestedCatalog)) {
     throw new Error(
       `Refusing to write a pricing snapshot: ${SOURCE_URL} returned no priced models.`,
     );
   }
-  // The bundled file stays compact: catalog presence is applied during
-  // generation and only persisted in runtime snapshots, where offline retention
-  // needs it.
-  const catalog = buildCatalog(api, scope);
-  const keptModelIDs = keepRetiredModels(snapshot, previous, scope, catalog);
+  const keptModelIDs = keepRetiredModels(snapshot, previous, scope, fetchedCatalog);
+  retainOutOfScopeProviders(snapshot, previous, scope);
+  snapshot.catalog = scoped
+    ? mergeScopedCatalog(previous?.catalog, fetchedCatalog, scope)
+    : sortObjectByKeys(fetchedCatalog);
   return { snapshot, keptModelIDs };
 }
 
