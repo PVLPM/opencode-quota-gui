@@ -8,6 +8,8 @@
  * forever. The worker heap limit is optional: by default the runtime manages
  * the heap.
  */
+
+import { encodeAnalyticsGroupQueryKey } from "../contracts/analytics-entity.js";
 import type {
   AnalyticsInitOptions,
   AnalyticsTransport,
@@ -105,6 +107,8 @@ function coalescedCommandKey(command: AnalyticsWorkerRequest["command"]): string
       return `project\u0000${command.projectId}\u0000${command.range}`;
     case "session":
       return `session\u0000${command.sessionId}`;
+    case "groups":
+      return `groups\u0000${encodeAnalyticsGroupQueryKey(command.query)}`;
     case "refresh":
       return "refresh";
     default:
@@ -382,6 +386,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     home: (range) => call({ kind: "home", range }),
     project: (projectId, range) => call({ kind: "project", projectId, range }),
     session: (sessionId) => call({ kind: "session", sessionId }),
+    groups: (query) => call({ kind: "groups", query }),
     refresh: () => call<void>({ kind: "refresh" }),
     stats: () => call({ kind: "stats" }),
     gc: () => call({ kind: "gc" }),

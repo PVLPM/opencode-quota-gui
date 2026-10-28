@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
   CostedTokens,
   DashboardEvent,
   HomeSnapshot,
@@ -172,6 +174,28 @@ function quota(stale = false, percentRemaining = 50): QuotaSnapshot {
   };
 }
 
+function groupSnapshot(
+  query: AnalyticsGroupQuery,
+  variant: { total?: number; stale?: boolean } = {},
+): AnalyticsGroupSnapshot {
+  const total = variant.total ?? 3;
+  return {
+    dimension: query.dimension,
+    range: query.range,
+    window: rangeWindow(query.range, NOW),
+    bucketUnit: rangeBucketUnit(query.range),
+    timeZone: "UTC",
+    ...(query.filter === undefined ? {} : { filter: query.filter }),
+    buckets: planRangeBuckets(query.range, NOW).map((bucket) => ({ ...bucket })),
+    totals: costed(total),
+    sessionCount: 1,
+    stepCount: 1,
+    rows: [],
+    series: [],
+    stale: variant.stale ?? false,
+  };
+}
+
 interface FakeSource {
   calls: { home: number; project: number; session: number; quota: number };
   source: SnapshotSource;
@@ -273,6 +297,105 @@ describe("GUI snapshot service", () => {
     expect(calls.session).toBe(1);
     await service.session({ sessionId: "s2" });
     expect(calls.session).toBe(2);
+  });
+
+  it("keys grouped caches by dimension, range and exact tagged identity", async () => {
+    let calls = 0;
+    const { source } = fakeSource({
+      groups: async (query) => {
+        calls += 1;
+        return groupSnapshot(query);
+      },
+    });
+    const service = makeService(source);
+    const unfiltered: AnalyticsGroupQuery = { range: "7d", dimension: "model" };
+
+    await service.groups(unfiltered);
+    await service.groups({ ...unfiltered });
+    expect(calls).toBe(1);
+
+    await service.groups({ ...unfiltered, dimension: "provider" });
+    await service.groups({ ...unfiltered, range: "24h" });
+    await service.groups({
+      ...unfiltered,
+      filter: { dimension: "model", identity: { kind: "unknown" } },
+    });
+    await service.groups({
+      ...unfiltered,
+      filter: { dimension: "model", identity: { kind: "known", id: "" } },
+    });
+    await service.groups({
+      ...unfiltered,
+      filter: { dimension: "model", identity: { kind: "known", id: "unknown" } },
+    });
+    expect(calls).toBe(6);
+
+    // The exact empty id, the literal `unknown` id and the missing identity
+    // never share a cached group.
+    await expect(
+      service.groups({
+        ...unfiltered,
+        filter: { dimension: "model", identity: { kind: "known", id: "" } },
+      }),
+    ).resolves.toMatchObject({ filter: { identity: { kind: "known", id: "" } } });
+    expect(calls).toBe(6);
+  });
+
+  it("polls grouped views on the analytics tick and broadcasts sessions.changed", async () => {
+    vi.useFakeTimers();
+    let total = 3;
+    let groupCalls = 0;
+    let refreshCalls = 0;
+    const { source } = fakeSource({
+      groups: async (query) => {
+        groupCalls += 1;
+        return groupSnapshot(query, { total });
+      },
+      refreshAnalytics: async () => {
+        refreshCalls += 1;
+      },
+    });
+    const service = makeService(source, { analyticsIntervalMs: 50 });
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+
+    const query: AnalyticsGroupQuery = {
+      range: "7d",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+    };
+    expect((await service.groups(query)).totals.total).toBe(3);
+    const viewer = service.addViewer();
+
+    total = 8;
+    await vi.advanceTimersByTimeAsync(60);
+    expect(refreshCalls).toBe(1);
+    expect(groupCalls).toBe(2);
+    expect((await service.groups(query)).totals.total).toBe(8);
+    expect(groupCalls).toBe(2);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]);
+    viewer();
+  });
+
+  it("revalidates a grouped payload the source reports stale", async () => {
+    let sourceStale = true;
+    let calls = 0;
+    const { source } = fakeSource({
+      groups: async (query) => {
+        calls += 1;
+        return groupSnapshot(query, { stale: sourceStale });
+      },
+    });
+    const service = makeService(source);
+    const query: AnalyticsGroupQuery = { range: "24h", dimension: "model" };
+
+    expect((await service.groups(query)).stale).toBe(true);
+    expect(calls).toBe(1);
+    sourceStale = false;
+    expect((await service.groups(query)).stale).toBe(false);
+    expect(calls).toBe(2);
+    await service.groups(query);
+    expect(calls).toBe(2);
   });
 
   it("revalidates a payload the source reports stale instead of caching it as fresh", async () => {

@@ -41,35 +41,42 @@ export function SessionView(props: {
 
   return (
     <>
-      <nav class="qg-breadcrumbs" aria-label="Breadcrumb">
-        <a href={formatPath({ name: "analytics" }, props.range)}>Analytics</a>
-        <span aria-hidden="true">›</span>
-        <a href={formatPath({ name: "project", projectId: props.snapshot.projectId }, props.range)}>
-          {props.snapshot.projectName}
-        </a>
-        <For each={props.snapshot.breadcrumbs}>
-          {(crumb) => (
-            <>
-              <span aria-hidden="true">›</span>
-              <Show when={!crumb.isFocus} fallback={<span aria-current="page">{crumb.title}</span>}>
-                <a href={formatPath({ name: "session", sessionId: crumb.sessionId }, props.range)}>
-                  {crumb.title}
-                </a>
-              </Show>
-            </>
-          )}
-        </For>
-      </nav>
+      <div class="qg-detail">
+        <nav class="qg-breadcrumbs" aria-label="Breadcrumb">
+          <a href={formatPath({ name: "analytics" }, props.range)}>Analytics</a>
+          <span aria-hidden="true">›</span>
+          <a
+            href={formatPath({ name: "project", projectId: props.snapshot.projectId }, props.range)}
+          >
+            {props.snapshot.projectName}
+          </a>
+          <For each={props.snapshot.breadcrumbs}>
+            {(crumb) => (
+              <>
+                <span aria-hidden="true">›</span>
+                <Show
+                  when={!crumb.isFocus}
+                  fallback={<span aria-current="page">{crumb.title}</span>}
+                >
+                  <a
+                    href={formatPath({ name: "session", sessionId: crumb.sessionId }, props.range)}
+                  >
+                    {crumb.title}
+                  </a>
+                </Show>
+              </>
+            )}
+          </For>
+        </nav>
 
-      <section class="qg-section" aria-labelledby="qg-session-head">
-        <header class="qg-section__head">
-          <h2 class="qg-section__title" id="qg-session-head">
+        <header class="qg-page-head">
+          <h2 class="qg-page-title" id="qg-session-head">
             {props.snapshot.breadcrumbs.find((crumb) => crumb.isFocus)?.title ??
               props.snapshot.focusSessionId}
           </h2>
         </header>
-        <SessionChart snapshot={props.snapshot} />
-      </section>
+        <SessionChart snapshot={props.snapshot} headingId="qg-session-usage" />
+      </div>
 
       <Show when={showTree()}>
         <section class="qg-section" aria-labelledby="qg-session-nodes">
@@ -99,7 +106,7 @@ export function SessionView(props: {
                   <span
                     class="qg-node__name"
                     title={node.title}
-                    style={{ "padding-left": `${node.depth * 16}px` }}
+                    style={{ "--qg-node-depth": String(node.depth) }}
                   >
                     {node.title}
                   </span>

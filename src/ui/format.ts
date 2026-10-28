@@ -57,9 +57,57 @@ export function formatApiEquivalentCost(value: number | null): string {
   return `≈ USD ${value.toFixed(2)}`;
 }
 
+/**
+ * The Models cost display. A total with usage but no priced tokens is
+ * `Unpriced`, not a zero estimate; an empty total carries no currency claim at
+ * all. Partial numeric estimates still use the same `≈ USD x.xx` form and are
+ * qualified separately.
+ */
+export function formatApiEquivalentCostText(value: number | null, total: number): string {
+  if (!(total > 0)) return "—";
+  if (value === null || !Number.isFinite(value)) return "Unpriced";
+  return formatApiEquivalentCost(value);
+}
+
+/**
+ * Inspection-level cost text keeps a sub-cent estimate from reading as zero.
+ * True zero stays `≈ USD 0.00`; a tiny nonzero value grows to four decimals.
+ */
+export function formatApiEquivalentCostFine(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "≈ USD —";
+  if (value === 0) return "≈ USD 0.00";
+  return value < 0.01 ? `≈ USD ${value.toFixed(4)}` : `≈ USD ${value.toFixed(2)}`;
+}
+
+/**
+ * Compact right-axis tick for the cost overlay. The axis title carries `USD`,
+ * so ticks stay bare numerals; the tick step fixes the precision so a tiny
+ * scale never mixes `0.005` with `0.01`.
+ */
+export function formatApiEquivalentCostTick(value: number, step: number): string {
+  if (!Number.isFinite(value)) return "—";
+  if (value === 0) return "0";
+  const decimals =
+    step >= 1
+      ? 0
+      : step >= 0.1
+        ? 1
+        : step >= 0.01
+          ? 2
+          : step >= 0.001
+            ? 3
+            : step >= 0.0001
+              ? 4
+              : step >= 0.00001
+                ? 5
+                : 6;
+  return value.toFixed(decimals);
+}
+
+/** Quota labels show whole percents; raw values stay in the row and bar. */
 export function formatPercent(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "—";
-  return `${value.toFixed(value < 10 ? 1 : 0)}%`;
+  return `${Math.round(value)}%`;
 }
 
 /** Chart inspection always reports two decimals, including exact zeros. */
@@ -115,6 +163,55 @@ export function formatDay(ms: number, timeZone: string): string {
 /** Bucket ticks follow the bucket unit the server reported (R28–R30). */
 export function formatBucketTick(ms: number, unit: "hour" | "day", timeZone: string): string {
   return unit === "hour" ? formatClock(ms, timeZone) : formatDay(ms, timeZone);
+}
+
+/** The last instant actually included by a non-empty half-open boundary. */
+function lastIncludedMs(startMs: number, endMs: number): number {
+  return endMs > startMs ? endMs - 1 : endMs;
+}
+
+/** The inclusive end label for a half-open bucket, including a 23/25-hour DST day. */
+export function formatBucketEnd(
+  startMs: number,
+  endMs: number,
+  unit: "hour" | "day",
+  timeZone: string,
+): string {
+  return formatBucketTick(lastIncludedMs(startMs, endMs), unit, timeZone);
+}
+
+/**
+ * A bucket is half-open, but its printed label is not a duration claim.
+ *
+ * Day labels compare the exclusive end at `endMs - 1ms`, so a completed local
+ * day prints one date; subtracting one millisecond is DST-aware and still
+ * collapses a 23/25-hour day. Hour labels keep their existing range semantics.
+ * The supplied boundaries are never changed.
+ */
+export function formatBucketRange(
+  startMs: number,
+  endMs: number,
+  unit: "hour" | "day",
+  timeZone: string,
+  separator = " – ",
+): string {
+  const start = formatBucketTick(startMs, unit, timeZone);
+  const endMsForLabel = unit === "day" ? lastIncludedMs(startMs, endMs) : endMs;
+  const end = formatBucketTick(endMsForLabel, unit, timeZone);
+  return start === end ? start : `${start}${separator}${end}`;
+}
+
+/**
+ * A clear caption for an axis whose last bucket is not labelled. It keeps the
+ * range end visible at narrow widths without inventing an irregular tick.
+ */
+export function axisRangeCaption(
+  endText: string,
+  count: number,
+  labelIndexes: readonly number[],
+): string | undefined {
+  if (count <= 0 || labelIndexes.at(-1) === count - 1) return undefined;
+  return `Through ${endText}`;
 }
 
 export function formatRunway(

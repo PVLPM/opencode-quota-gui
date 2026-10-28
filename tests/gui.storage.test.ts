@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   compareOpenCodeSourceIdentity,
+  rawAssistantRowHasTokenUsage,
   readAllSessionsIndex,
   readCompactionMarkers,
   readCompletedAssistantRows,
@@ -28,6 +29,28 @@ interface SqliteTrace {
   statements: string[];
   params: unknown[][];
 }
+
+describe("raw assistant token usage predicate", () => {
+  const tokens = (
+    overrides: Partial<
+      Record<"input" | "output" | "reasoning" | "cacheRead" | "cacheWrite", number>
+    > = {},
+  ) => ({
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    ...overrides,
+  });
+
+  it("distinguishes all-zero token rows from any real contribution", () => {
+    expect(rawAssistantRowHasTokenUsage({ tokens: tokens() })).toBe(false);
+    for (const key of ["input", "output", "reasoning", "cacheRead", "cacheWrite"] as const) {
+      expect(rawAssistantRowHasTokenUsage({ tokens: tokens({ [key]: 1 }) })).toBe(true);
+    }
+  });
+});
 
 const sqliteTrace = vi.hoisted((): SqliteTrace => ({ opened: 0, statements: [], params: [] }));
 

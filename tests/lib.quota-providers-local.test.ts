@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OpenCodeMessage } from "../src/lib/opencode-storage.js";
 import type { LocalEstimateQuotaProviderDefinition } from "../src/lib/quota-providers.js";
 import {
@@ -13,6 +13,39 @@ import {
   QUOTA_PROVIDER_LOCAL_STATE_VERSION,
   syncLocalQuotaProviderState,
 } from "../src/lib/quota-providers-local.js";
+
+vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/modelsdev-pricing.js")>();
+  const PARTIAL_PROVIDER = "partial-labs";
+  const PARTIAL_MODEL = "input-only";
+  const FREE_PROVIDER = "free-labs";
+  const FREE_MODEL = "zero-cost";
+
+  return {
+    ...actual,
+    hasCost: (providerID: string, modelID: string) =>
+      (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
+      (providerID === FREE_PROVIDER && modelID === FREE_MODEL) ||
+      actual.hasCost(providerID, modelID),
+    hasModel: (providerID: string, modelID: string) =>
+      (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
+      (providerID === FREE_PROVIDER && modelID === FREE_MODEL) ||
+      actual.hasModel(providerID, modelID),
+    hasProvider: (providerID: string) =>
+      providerID === PARTIAL_PROVIDER ||
+      providerID === FREE_PROVIDER ||
+      actual.hasProvider(providerID),
+    isModelsDevProviderId: (providerID: string) =>
+      providerID === PARTIAL_PROVIDER ||
+      providerID === FREE_PROVIDER ||
+      actual.isModelsDevProviderId(providerID),
+    lookupCost: (providerID: string, modelID: string) => {
+      if (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) return { input: 2 };
+      if (providerID === FREE_PROVIDER && modelID === FREE_MODEL) return { input: 0, output: 0 };
+      return actual.lookupCost(providerID, modelID);
+    },
+  };
+});
 
 const created: string[] = [];
 const NOW = Date.UTC(2026, 6, 16, 12, 0, 0);
@@ -386,5 +419,70 @@ describe("local quota provider state", () => {
         }),
       ]),
     );
+  });
+
+  it("reports a partially rated message as unpriced instead of a complete subtotal", () => {
+    const def = definition({ providerId: "partial-labs" });
+    const state = {
+      version: QUOTA_PROVIDER_LOCAL_STATE_VERSION,
+      definitionId: def.id,
+      providerId: def.providerId,
+      updatedAt: NOW,
+      messages: [
+        {
+          id: "partial",
+          atMs: NOW - 1000,
+          providerId: "partial-labs",
+          modelId: "input-only",
+          tokens: {
+            input: 1_000_000,
+            output: 1_000_000,
+            reasoning: 0,
+            cache_read: 0,
+            cache_write: 0,
+          },
+        },
+      ],
+    } as const;
+
+    const result = computeLocalQuotaProviderEstimate({ definition: def, state, nowMs: NOW });
+    const budget = result.entries.find((entry) => entry.accounting.resultType === "budget");
+
+    expect(budget).toMatchObject({
+      kind: "value",
+      value: "Unavailable (1 unpriced request)",
+    });
+    expect(result.unpricedMessageCount).toBe(1);
+  });
+
+  it("keeps an explicitly zero-rated message fully priced", () => {
+    const def = definition({ providerId: "free-labs" });
+    const state = {
+      version: QUOTA_PROVIDER_LOCAL_STATE_VERSION,
+      definitionId: def.id,
+      providerId: def.providerId,
+      updatedAt: NOW,
+      messages: [
+        {
+          id: "free",
+          atMs: NOW - 1000,
+          providerId: "free-labs",
+          modelId: "zero-cost",
+          tokens: {
+            input: 1_000_000,
+            output: 1_000_000,
+            reasoning: 0,
+            cache_read: 0,
+            cache_write: 0,
+          },
+        },
+      ],
+    } as const;
+
+    const result = computeLocalQuotaProviderEstimate({ definition: def, state, nowMs: NOW });
+    const budget = result.entries.find((entry) => entry.accounting.resultType === "budget");
+
+    expect(budget).toMatchObject({ kind: "percent", right: "$0.00/$5.00" });
+    expect(result.unpricedMessageCount).toBe(0);
   });
 });

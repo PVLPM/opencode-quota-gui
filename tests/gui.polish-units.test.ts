@@ -271,24 +271,25 @@ describe("cacheHitRate", () => {
 });
 
 describe("buildUsageGeometry external gaps and rounded segments", () => {
-  it("keeps a one-unit segment at its true height with a constrained half-unit radius", () => {
+  it("keeps a one-unit segment at its true scaled height with a constrained half-unit radius", () => {
     const bucket = bucketOf({ input: 223, reasoning: 1 });
     const geometry = buildUsageGeometry([bucket]);
     const bar = geometry.bars[0];
     const tiny = bar?.segments.find((segment) => segment.key === "reasoning");
     expect(tiny).toBeDefined();
-    expect(tiny?.height).toBeCloseTo(1, 10);
-    expect(tiny?.radius).toBeCloseTo(0.5, 10);
+    expect(geometry.scaleMax).toBe(250);
+    expect(tiny?.height).toBeCloseTo((1 / geometry.scaleMax) * geometry.plot.height, 10);
+    expect(tiny?.radius).toBeCloseTo((tiny?.height as number) / 2, 10);
     const lower = bar?.segments.find((segment) => segment.key === "input");
     expect(lower).toBeDefined();
     expect((lower?.y as number) - ((tiny?.y as number) + (tiny?.height as number))).toBeCloseTo(
       1,
       10,
     );
-    expect(bar?.top).toBeCloseTo(geometry.plot.top - 1, 10);
+    expect(bar?.top).toBeGreaterThan(geometry.plot.top);
   });
 
-  it("adds one external gap per adjacent pair and caps presentation growth at four units", () => {
+  it("adds one external gap per adjacent pair under one shared nice ceiling", () => {
     const bucket = bucketOf({
       cacheRead: 50,
       input: 100,
@@ -304,7 +305,7 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
       const segment = segments[index];
       if (!segment) continue;
       expect(segment.height).toBeCloseTo(
-        (segment.value / geometry.yMax) * geometry.plot.height,
+        (segment.value / geometry.scaleMax) * geometry.plot.height,
         10,
       );
       expect(segment.radius).toBeCloseTo(Math.min(1, segment.width / 2, segment.height / 2), 10);
@@ -314,10 +315,10 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
       expect(lower.y - (segment.y + segment.height)).toBeCloseTo(1, 10);
     }
     const coloredHeight = segments.reduce((sum, segment) => sum + segment.height, 0);
-    expect(coloredHeight).toBeCloseTo(224, 10);
+    expect(geometry.scaleMax).toBe(250);
+    expect(coloredHeight).toBeCloseTo((224 / geometry.scaleMax) * geometry.plot.height, 10);
     expect(geometry.plot.top).toBe(12);
-    expect(bar?.top).toBe(8);
-    expect(bar?.top).toBeCloseTo(geometry.plot.top - 4, 10);
+    expect(bar?.top).toBeGreaterThan(geometry.plot.top + 8);
     expect(bar?.top).toBeCloseTo(geometry.plot.bottom - coloredHeight - 4, 10);
     expect(bar?.total).toBe(224);
 
@@ -329,7 +330,7 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
     expect(geometry.cacheRateTicks.at(-1)?.y).toBeCloseTo(geometry.plot.top, 10);
   });
 
-  it("keeps dense narrow stacks finite, bounded, and on the unchanged token and cache scales", () => {
+  it("keeps dense narrow stacks finite, bounded, and on the shared token and cache scales", () => {
     const buckets = Array.from({ length: 900 }, () =>
       bucketOf({ input: 1, cacheRead: 1, cacheWrite: 1, output: 1, reasoning: 1 }),
     );
@@ -339,9 +340,14 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
       padding: { top: 12, right: 12, bottom: 24, left: 48 },
     });
     expect(geometry.bars).toHaveLength(900);
+    expect(geometry.scaleMax).toBe(6);
     for (const bar of geometry.bars) {
       expect(bar.segments).toHaveLength(5);
-      expect(bar.top).toBeCloseTo(geometry.plot.top - 4, 10);
+      expect(bar.top).toBeGreaterThan(geometry.plot.top + 8);
+      expect(bar.top).toBeCloseTo(
+        geometry.plot.bottom - (5 / geometry.scaleMax) * geometry.plot.height - 4,
+        10,
+      );
       expect(bar.top).toBeGreaterThanOrEqual(0);
       for (let index = 0; index < bar.segments.length; index += 1) {
         const segment = bar.segments[index];

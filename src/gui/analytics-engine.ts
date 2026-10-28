@@ -12,7 +12,17 @@
  */
 import { performance } from "node:perf_hooks";
 
-import type { HomeSnapshot, ProjectSnapshot, SessionSnapshot } from "../contracts/dashboard.js";
+import {
+  encodeAnalyticsGroupQueryKey,
+  isAnalyticsGroupQuery,
+} from "../contracts/analytics-entity.js";
+import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
+  HomeSnapshot,
+  ProjectSnapshot,
+  SessionSnapshot,
+} from "../contracts/dashboard.js";
 import { isRangeKey, type RangeKey, rangeWindow } from "../contracts/ranges.js";
 import {
   compareOpenCodeSourceIdentity,
@@ -23,6 +33,7 @@ import {
   type OpenCodeStorageSnapshot,
   type OpenCodeStorageSnapshotResult,
   type ReadCompletedAssistantRowsParams,
+  rawAssistantRowHasTokenUsage,
 } from "../lib/opencode-storage.js";
 import { createUsageAnalytics, UNKNOWN_PROJECT_ID } from "./aggregation.js";
 import { createAnalyticsIndexes } from "./analytics-indexes.js";
@@ -55,6 +66,8 @@ export const ANALYTICS_FULL_REPAIR_INTERVAL_MS = 7 * 24 * 60 * 60_000;
 export const ANALYTICS_SOURCE_CURSOR_OVERLAP_MS = 5 * 60_000;
 const MAX_SCOPE_BATCH = 8;
 const MAX_PROJECT_CACHE = 12;
+/** Bound on in-memory grouped DTOs; keeps detail navigation from growing state. */
+const MAX_GROUP_CACHE = 24;
 const PRESENTATION_SAVE_INTERVAL_MS = 60_000;
 /**
  * Idle grace before the automatic 7d -> 30d extension starts. A zero-delay
@@ -140,6 +153,8 @@ export interface AnalyticsEngine {
   home(range: RangeKey): Promise<HomeSnapshot>;
   project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
   session(sessionId: string): Promise<SessionSnapshot>;
+  /** One range-certified grouped model/provider read over the shared model. */
+  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
   refresh(): Promise<void>;
   stats(): Promise<AnalyticsWorkerMemory>;
   /** Best-effort GC trigger; false when the runtime exposes no hook. */
@@ -410,6 +425,10 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   let generation = 0;
   const projectFreshAt = new Map<string, number>();
   const detailFreshAt = new Map<string, number>();
+  /** Bounded in-memory range-certified grouped DTOs, keyed collision-safely. */
+  const groupCache = new Map<string, AnalyticsGroupSnapshot>();
+  /** Last non-blocking scoped-lifetime lifetime read attempt (backoff only). */
+  let scopedLifetimeReadAtMs: number | undefined;
   const closeWriteTimeoutMs =
     options.closeWriteTimeoutMs !== undefined && Number.isFinite(options.closeWriteTimeoutMs)
       ? Math.max(0, options.closeWriteTimeoutMs)
@@ -576,6 +595,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       state.presentation = undefined;
       state.extent = undefined;
       state.frontierAtMs = 0;
+      invalidateGroupSnapshots();
       return false;
     })();
     return warmIdentityVerification;
@@ -658,7 +678,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const rows = function* rowsForModel(): Generator<OpenCodeRawAssistantRow> {
         for (const occurrence of state.occurrences.values()) {
           const row = rowOf(occurrence);
-          if (row) yield row;
+          if (!row) continue;
+          // Zero-token rows stay in the membership index for exact delta
+          // reconciliation, but never enter model ownership/rollups.
+          if (!rawAssistantRowHasTokenUsage(row)) continue;
+          yield row;
         }
       };
       model.apply(rows(), []);
@@ -693,6 +717,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (!occurrence) continue;
       const row = rowOf(occurrence);
       if (!row) continue;
+      // Zero-token rows are metadata/activity only; the session DTO is a
+      // usage view, so it must not grow steps, ownership, or pricing work.
+      if (!rawAssistantRowHasTokenUsage(row)) continue;
       messages.push(row);
       includedSessionIds.add(occurrence.sessionID);
     }
@@ -1099,6 +1126,90 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       usage: { ...snapshot.usage, stale },
       projects: snapshot.projects,
     };
+  }
+
+  /**
+   * Grouped DTOs are cheap to rebuild from the already-owned model and share
+   * Home's certified `nowMs`; only a bounded LRU keeps repeats off the model.
+   */
+  function deriveGroupSnapshot(query: AnalyticsGroupQuery, atMs: number): AnalyticsGroupSnapshot {
+    return measureSync("dtoAggregation", () => model.groups(query, atMs));
+  }
+
+  /**
+   * Lifetime's exact window is the one Home already served. Prefer the loaded
+   * Home lifetime DTO so crossing a local-day boundary cannot move the window
+   * or its buckets; otherwise the successful global certification epoch is the
+   * same anchor Home's finite ranges use.
+   */
+  function certifiedLifetimeWindowAtMs(atMs: number): number | undefined {
+    const presented = state.presentation?.home.lifetime;
+    if (presented !== undefined && presented.usage.timeZone === timeZone) {
+      return presented.usage.window.untilMs;
+    }
+    return homeCertifiedSyncAtMs("lifetime", atMs);
+  }
+
+  function groupDerivationAtMs(range: RangeKey, atMs: number): number {
+    const certified =
+      range === "lifetime" ? certifiedLifetimeWindowAtMs(atMs) : homeCertifiedSyncAtMs(range, atMs);
+    return certified ?? atMs;
+  }
+
+  /**
+   * Provider/model detail lifetime is a scoped view: as soon as any owned
+   * hourly data exists, it can be derived without blocking on the source. It is
+   * marked stale until a global lifetime extent certifies completeness; the
+   * missing history is filled by one background read per refresh interval.
+   *
+   * Membership alone is not owned usage: zero-token occurrences are retained
+   * for exact delta reconciliation but never enter the model. Using their count
+   * would let a lifetime filtered view return an inaccurate empty result while
+   * older matching positive history has not been read yet.
+   */
+  function canDeriveScopedLifetimeFromOwnedData(query: AnalyticsGroupQuery): boolean {
+    if (
+      query.range !== "lifetime" ||
+      query.filter === undefined ||
+      state.occurrences.size === 0 ||
+      coversSince(undefined, state.extent)
+    ) {
+      return false;
+    }
+    ensureModel();
+    return model.ownedStepCount() > 0;
+  }
+
+  function scheduleScopedLifetimeRefresh(atMs: number): void {
+    if (scopedLifetimeReadAtMs !== undefined && atMs - scopedLifetimeReadAtMs < refreshIntervalMs) {
+      return;
+    }
+    scopedLifetimeReadAtMs = atMs;
+    requestBackground({ globalRange: "lifetime", detailSessionIds: [], projectScopes: [] }, true);
+  }
+
+  function cachedGroupSnapshot(query: AnalyticsGroupQuery): AnalyticsGroupSnapshot | undefined {
+    const key = encodeAnalyticsGroupQueryKey(query);
+    const cached = groupCache.get(key);
+    if (cached === undefined) return undefined;
+    groupCache.delete(key);
+    groupCache.set(key, cached);
+    return cached;
+  }
+
+  function storeGroupSnapshot(query: AnalyticsGroupQuery, snapshot: AnalyticsGroupSnapshot): void {
+    const key = encodeAnalyticsGroupQueryKey(query);
+    groupCache.delete(key);
+    groupCache.set(key, { ...snapshot, stale: false });
+    while (groupCache.size > MAX_GROUP_CACHE) {
+      const oldest = groupCache.keys().next().value;
+      if (oldest === undefined) break;
+      groupCache.delete(oldest);
+    }
+  }
+
+  function invalidateGroupSnapshots(): void {
+    groupCache.clear();
   }
 
   /**
@@ -2076,11 +2187,13 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       projectCoverage.clear();
       projectFreshAt.clear();
       detailFreshAt.clear();
+      invalidateGroupSnapshots();
       indexes.rebuild([], {});
       lastSessionIndexSignature = "";
       measureSync("modelUpdate", () => model.clear());
       modelHydrated = false;
       modelDirty = true;
+      scopedLifetimeReadAtMs = undefined;
     }
 
     const removals: OpenCodeRawAssistantRow[] = [];
@@ -2246,17 +2359,28 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       // Extending empty coverage is not a visible data change; keep the sidecar
       // and avoid a no-op host notification in that case.
       if (dataChanged) state.presentation = undefined;
+      // Any contribution/ownership mutation or newly covered history makes
+      // cached grouped totals incomplete or merely old: rebuild on demand.
+      if (dataChanged || candidate.extentChanged) invalidateGroupSnapshots();
     }
 
     if (modelHydrated) {
-      const modelUpserts = agentUpserts.length > 0 ? [...upserts, ...agentUpserts] : upserts;
-      if (removals.length > 0 || modelUpserts.length > 0 || sessionsChanged || projectsChanged) {
+      const modelUpserts = (
+        agentUpserts.length > 0 ? [...upserts, ...agentUpserts] : upserts
+      ).filter(rawAssistantRowHasTokenUsage);
+      const modelRemovals = removals.filter(rawAssistantRowHasTokenUsage);
+      if (
+        modelRemovals.length > 0 ||
+        modelUpserts.length > 0 ||
+        sessionsChanged ||
+        projectsChanged
+      ) {
         measureSync("modelUpdate", () => {
           if (sessionsChanged || projectsChanged) {
             model.setMetadata(candidate.sessions, candidate.projects);
           }
-          if (removals.length > 0 || modelUpserts.length > 0) {
-            model.apply(modelUpserts, removals);
+          if (modelRemovals.length > 0 || modelUpserts.length > 0) {
+            model.apply(modelUpserts, modelRemovals);
           }
         });
       }
@@ -2441,6 +2565,97 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       precomputeHomeSnapshots(atMs);
       scheduleThirtyDayExtension(range, atMs);
       return homeSnapshotWithStaleness(result, range, atMs, stale);
+    },
+
+    async groups(query) {
+      if (!isAnalyticsGroupQuery(query)) throw new AnalyticsLookupError("bad-request");
+      if (closed) throw new Error("analytics closed");
+      await ensureLoaded();
+      const { range } = query;
+      const atMs = now();
+      const window = rangeWindow(range, atMs);
+      const cacheKey = encodeAnalyticsGroupQueryKey(query);
+      lastGlobalRange.value = widerRange(lastGlobalRange.value, range);
+      const cached = cachedGroupSnapshot(query);
+      if (cached && (await warmCacheAllowed())) {
+        let current = cached;
+        let expired = false;
+        let rederiveAtMs: number | undefined;
+        if (range === "lifetime") {
+          const anchor = certifiedLifetimeWindowAtMs(atMs);
+          if (anchor !== undefined && current.window.untilMs !== anchor) {
+            rederiveAtMs = anchor;
+          }
+        } else {
+          const certified = homeCertifiedSyncAtMs(range, atMs);
+          if (certified !== undefined && current.window.untilMs < certified) {
+            rederiveAtMs = certified;
+          }
+        }
+        if (rederiveAtMs !== undefined) {
+          if (modelHydrated && !modelDirty) {
+            current = deriveGroupSnapshot(query, rederiveAtMs);
+            storeGroupSnapshot(query, current);
+          } else {
+            groupCache.delete(cacheKey);
+            expired = true;
+          }
+        }
+        if (!expired) {
+          const missingCoverage = !coversSince(window.sinceMs, state.extent);
+          const stale =
+            current.stale ||
+            sidecarNewerThanIndex ||
+            unavailable ||
+            missingCoverage ||
+            isStale(atMs);
+          if (stale) {
+            const scopedLifetime = range === "lifetime" && query.filter !== undefined;
+            requestBackground(
+              { globalRange: range, detailSessionIds: [], projectScopes: [] },
+              scopedLifetime ? sidecarNewerThanIndex : sidecarNewerThanIndex || missingCoverage,
+            );
+          }
+          return { ...current, stale };
+        }
+      }
+      await ensureIndexLoaded();
+      if (canDeriveScopedLifetimeFromOwnedData(query)) {
+        ensureModel();
+        const result: AnalyticsGroupSnapshot = {
+          ...deriveGroupSnapshot(query, groupDerivationAtMs("lifetime", atMs)),
+          stale: true,
+        };
+        storeGroupSnapshot(query, result);
+        scheduleScopedLifetimeRefresh(atMs);
+        return result;
+      }
+      if (!coverageTrusted || !coversSince(window.sinceMs, state.extent)) {
+        await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
+        if (
+          unavailable &&
+          state.occurrences.size === 0 &&
+          Object.keys(state.sessions).length === 0
+        ) {
+          throw new AnalyticsLookupError("unavailable");
+        }
+      }
+      const derivationAtMs = groupDerivationAtMs(range, atMs);
+      const missingCoverage = !coversSince(window.sinceMs, state.extent);
+      const stale = sidecarNewerThanIndex || unavailable || missingCoverage || isStale(atMs);
+      // The foreground attempt above already counts against due/backoff. Do not
+      // force a second immediate refresh just because last-good data leaves
+      // lifetime coverage incomplete; Home schedules the same bounded attempt.
+      if (stale) {
+        requestBackground({ globalRange: range, detailSessionIds: [], projectScopes: [] });
+      }
+      ensureModel();
+      const result: AnalyticsGroupSnapshot = {
+        ...deriveGroupSnapshot(query, derivationAtMs),
+        stale,
+      };
+      storeGroupSnapshot(query, result);
+      return result;
     },
 
     async project(projectId, range) {
@@ -2654,6 +2869,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         projectCoverage.clear();
         projectFreshAt.clear();
         detailFreshAt.clear();
+        invalidateGroupSnapshots();
       })();
       return await closePromise;
     },

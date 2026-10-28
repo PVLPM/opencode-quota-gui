@@ -35,7 +35,10 @@
  * No TTL, sequence, watermark, or budget machinery exists (R9).
  */
 
+import { encodeAnalyticsGroupQueryKey } from "../contracts/analytics-entity.js";
 import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
   DashboardDataSource,
   DashboardEvent,
   DashboardEventTopic,
@@ -77,6 +80,7 @@ export const MAX_TRACKED_PAGES = 16;
  */
 export type SnapshotSource = Pick<DashboardDataSource, "home" | "project" | "session"> & {
   quota?: DashboardDataSource["quota"];
+  groups?: DashboardDataSource["groups"];
   refreshAnalytics?: () => Promise<void>;
   /** Optional worker generation notifications; never starts analytics eagerly. */
   subscribeAnalytics?: (listener: () => void) => () => void;
@@ -113,6 +117,7 @@ export interface SnapshotService {
   quota(): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
+  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
   /** Invalidations broadcast over SSE (three topics, never raw snapshots). */
   subscribe(listener: (event: DashboardEvent) => void): () => void;
   /** Registers an SSE viewer; the returned disposer detaches it. */
@@ -161,6 +166,10 @@ function projectKey(projectId: string, range: RangeKey): string {
 
 function sessionKey(sessionId: string): string {
   return `session\u0000${sessionId}\u0000`;
+}
+
+function groupsKey(query: AnalyticsGroupQuery): string {
+  return `groups\u0000${encodeAnalyticsGroupQueryKey(query)}`;
 }
 
 function kindOf(key: string): string {
@@ -616,6 +625,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       load(sessionKey(input.sessionId), () =>
         options.source.session({ sessionId: input.sessionId }),
       ),
+    groups: (query) =>
+      load(groupsKey(query), () => {
+        if (!options.source.groups) {
+          return Promise.reject(new Error("Analytics groups source unavailable"));
+        }
+        return options.source.groups(query);
+      }),
 
     subscribe(listener) {
       listeners.add(listener);

@@ -6,6 +6,7 @@ import { formatPercent, formatRunway, formatTimestamp } from "../format";
 import { Icon, Tooltip } from "../opencode-ui";
 import { formatResetCountdown } from "../reset-format";
 import { visibleRows } from "../view-model";
+import { ProviderLogo } from "./provider-logo";
 
 /**
  * One provider account card (design spec §10 "Home").
@@ -23,6 +24,10 @@ export interface DisplayPreferences {
   percentLabelStyle?: "full" | "bare";
   showRunway: boolean;
   detailed: boolean;
+  /** Saved presentation order from `dashboard.cardOrder`; non-empty is authoritative. */
+  cardOrder?: readonly string[];
+  /** Legacy `dashboard.providerOrder`, used when `cardOrder` is empty. */
+  providerOrder?: readonly string[];
 }
 
 export function unitSuffix(unit: AccountingUnit | undefined): string {
@@ -365,6 +370,7 @@ export function QuotaCardView(props: {
     <article class="qg-card" data-error={props.card.errors.length > 0 ? "true" : undefined}>
       <header class="qg-card__head">
         <div class="qg-card__identity">
+          <ProviderLogo providerId={props.card.providerId} class="qg-card__logo" />
           <span class="qg-card__provider">{props.card.providerLabel}</span>
           <Show when={props.card.planLabel}>
             {(plan) => (

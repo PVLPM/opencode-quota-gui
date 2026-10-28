@@ -6,7 +6,15 @@
  * snapshot defaults are documented in
  * `.superpowers/sdd/unified-analytics-liveness/analytics-api.md`.
  */
-import type { HomeSnapshot, ProjectSnapshot, SessionSnapshot } from "../contracts/dashboard.js";
+
+import { isAnalyticsGroupQuery } from "../contracts/analytics-entity.js";
+import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
+  HomeSnapshot,
+  ProjectSnapshot,
+  SessionSnapshot,
+} from "../contracts/dashboard.js";
 import { isRangeKey, type RangeKey } from "../contracts/ranges.js";
 import { createAnalyticsBridge } from "./analytics-bridge.js";
 import {
@@ -20,6 +28,8 @@ export interface AnalyticsReadService {
   home(input: { range: RangeKey }): Promise<HomeSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
+  /** One range-certified grouped model/provider read. */
+  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
   /** Coalesced forced refresh (optional in the spec; always present here). */
   refresh(): Promise<void>;
   /** Worker-side memory sample (benchmark/diagnostics; optional transport seam). */
@@ -182,6 +192,11 @@ export function createAnalyticsReadService(
     async session(input) {
       if (typeof input.sessionId !== "string" || input.sessionId.length === 0) throw badRequest();
       return (await ensureTransport()).session(input.sessionId);
+    },
+
+    async groups(query) {
+      if (!isAnalyticsGroupQuery(query)) throw badRequest();
+      return (await ensureTransport()).groups(query);
     },
 
     async refresh() {

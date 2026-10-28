@@ -2,12 +2,22 @@
  * Worker-only rollup model.
  *
  * Owns deterministic fork ownership over compact fingerprint groups plus
- * per-hour rollups (global / project / session / model) and derives dashboard
- * views by summing rollups. Full hours use pre-aggregated buckets; only the
- * partial edge hours of a request touch the owned step list, so bucket
- * boundaries stay exact without rebuilding a raw model per view.
+ * per-hour rollups (global / project / session) and derives grouped
+ * model/provider views from the same owned steps. Full hours use
+ * pre-aggregated buckets; only the partial edge hours of a request touch the
+ * owned step list, so bucket boundaries stay exact without rebuilding a raw
+ * model per view.
  */
+
 import type {
+  AnalyticsDimension,
+  AnalyticsEntityIdentity,
+  AnalyticsGroupFilter,
+  AnalyticsGroupQuery,
+  AnalyticsGroupRow,
+  AnalyticsGroupSnapshot,
+  AnalyticsSeries,
+  AnalyticsSeriesChildBucket,
   CostedTokens,
   ProjectActivityRow,
   ProjectRootRow,
@@ -28,6 +38,7 @@ import {
   type OpenCodeRawAssistantRow,
   type OpenCodeSessionInfo,
   rawAssistantRowFingerprint,
+  rawAssistantRowHasTokenUsage,
 } from "../lib/opencode-storage.js";
 import { type PricingResolution, priceTokenBuckets } from "../lib/quota-stats.js";
 import { type ForkOwnerCandidate, selectForkOwners } from "../lib/usage-ownership.js";
@@ -111,6 +122,23 @@ interface RangeSum {
   sessions: Set<string>;
 }
 
+/**
+ * One grouped node: flat totals, a distinct-session set, and its opposite
+ * dimension children. Buckets are deliberately absent: only the selected chart
+ * series accumulate them, so long lifetimes stay output-bounded.
+ */
+interface GroupNode {
+  totals: Accumulator;
+  sessions: Set<string>;
+  stepCount: number;
+  children: Map<string | undefined, GroupNode>;
+}
+
+interface GroupEntry {
+  raw: string | undefined;
+  node: GroupNode;
+}
+
 function createAccumulator(): Accumulator {
   return {
     input: 0,
@@ -123,16 +151,6 @@ function createAccumulator(): Accumulator {
     unpricedTokens: 0,
     unknownTokens: 0,
   };
-}
-
-function isZeroTokens(accumulator: Accumulator): boolean {
-  return (
-    accumulator.input === 0 &&
-    accumulator.cacheRead === 0 &&
-    accumulator.cacheWrite === 0 &&
-    accumulator.output === 0 &&
-    accumulator.reasoning === 0
-  );
 }
 
 function addStepToAccumulator(accumulator: Accumulator, step: OwnedStep): void {
@@ -186,6 +204,217 @@ function finalize(accumulator: Accumulator): CostedTokens {
     unpricedTokens: accumulator.unpricedTokens,
     unknownTokens: accumulator.unknownTokens,
   };
+}
+
+function createGroupNode(): GroupNode {
+  return {
+    totals: createAccumulator(),
+    sessions: new Set(),
+    stepCount: 0,
+    children: new Map(),
+  };
+}
+
+function identityOf(raw: string | undefined): AnalyticsEntityIdentity {
+  return raw === undefined ? { kind: "unknown" } : { kind: "known", id: raw };
+}
+
+function identityTotal(identity: AnalyticsEntityIdentity): string | undefined {
+  return identity.kind === "known" ? identity.id : undefined;
+}
+
+/** Known raw ids sort before the explicit unknown identity, then by raw id. */
+function compareIdentities(a: AnalyticsEntityIdentity, b: AnalyticsEntityIdentity): number {
+  if (a.kind !== b.kind) return a.kind === "known" ? -1 : 1;
+  if (a.kind === "known" && b.kind === "known") return compareIds(a.id, b.id);
+  return 0;
+}
+
+function accumulatorTotal(accumulator: Accumulator): number {
+  return (
+    accumulator.input +
+    accumulator.cacheRead +
+    accumulator.cacheWrite +
+    accumulator.output +
+    accumulator.reasoning
+  );
+}
+
+/**
+ * Deterministic token rank for the selected range: token volume descending,
+ * then raw identity ascending with the unknown identity last. The rank never
+ * depends on key insertion order or on cost.
+ */
+function compareGroupEntries(a: GroupEntry, b: GroupEntry): number {
+  const byTokens = accumulatorTotal(b.node.totals) - accumulatorTotal(a.node.totals);
+  if (byTokens !== 0) return byTokens;
+  return compareIdentities(identityOf(a.raw), identityOf(b.raw));
+}
+
+function sortedChildEntries(node: GroupNode): GroupEntry[] {
+  return [...node.children].map(([raw, child]) => ({ raw, node: child })).sort(compareGroupEntries);
+}
+
+function materializeBuckets(
+  bucketTotals: ReadonlyMap<number, Accumulator>,
+  bucketCount: number,
+): CostedTokens[] {
+  const buckets: CostedTokens[] = new Array(bucketCount);
+  for (let index = 0; index < bucketCount; index += 1) {
+    const accumulator = bucketTotals.get(index);
+    buckets[index] = finalize(accumulator ?? createAccumulator());
+  }
+  return buckets;
+}
+
+function addStepToGroupNode(node: GroupNode, step: OwnedStep): void {
+  addStepToAccumulator(node.totals, step);
+  node.sessions.add(step.sessionID);
+  node.stepCount += 1;
+}
+
+function materializeGroupRow(raw: string | undefined, node: GroupNode): AnalyticsGroupRow {
+  return {
+    identity: identityOf(raw),
+    tokens: finalize(node.totals),
+    sessionCount: node.sessions.size,
+    stepCount: node.stepCount,
+    children: sortedChildEntries(node).map((entry) => materializeGroupRow(entry.raw, entry.node)),
+  };
+}
+
+function addStepToBucket(
+  bucketTotals: Map<number, Accumulator>,
+  step: OwnedStep,
+  bucketIndex: number,
+): void {
+  if (bucketIndex < 0) return;
+  let bucket = bucketTotals.get(bucketIndex);
+  if (!bucket) {
+    bucket = createAccumulator();
+    bucketTotals.set(bucketIndex, bucket);
+  }
+  addStepToAccumulator(bucket, step);
+}
+
+/** Per-entity bucket accumulators for one chart series (exact raw key). */
+type SeriesEntityBuckets = Map<string | undefined, Map<number, Accumulator>>;
+
+function addStepToEntityBucket(
+  entityBuckets: SeriesEntityBuckets,
+  raw: string | undefined,
+  step: OwnedStep,
+  bucketIndex: number,
+): void {
+  if (bucketIndex < 0) return;
+  let bucketTotals = entityBuckets.get(raw);
+  if (!bucketTotals) {
+    bucketTotals = new Map();
+    entityBuckets.set(raw, bucketTotals);
+  }
+  addStepToBucket(bucketTotals, step, bucketIndex);
+}
+
+/**
+ * Sparse per-bucket entity breakdown aligned with the snapshot boundaries.
+ * Entities are ranked by their own bucket tokens, then exact identity with the
+ * unknown identity last, so output order never depends on map insertion.
+ */
+function materializeEntityBuckets(
+  entityBuckets: SeriesEntityBuckets,
+  bucketCount: number,
+): AnalyticsSeriesChildBucket[][] {
+  const buckets: AnalyticsSeriesChildBucket[][] = [];
+  for (let index = 0; index < bucketCount; index += 1) buckets.push([]);
+  for (const [raw, bucketTotals] of entityBuckets) {
+    for (const [bucketIndex, accumulator] of bucketTotals) {
+      const bucket = buckets[bucketIndex];
+      if (bucket === undefined) continue;
+      bucket.push({ identity: identityOf(raw), tokens: finalize(accumulator) });
+    }
+  }
+  for (const entries of buckets) {
+    entries.sort((a, b) => {
+      const byTokens = b.tokens.total - a.tokens.total;
+      if (byTokens !== 0) return byTokens;
+      return compareIdentities(a.identity, b.identity);
+    });
+  }
+  return buckets;
+}
+
+interface SeriesSource {
+  raw: string | undefined;
+  totals: Accumulator;
+  bucketTotals: Map<number, Accumulator>;
+  childBuckets: SeriesEntityBuckets;
+  /** Only Other: hidden same-dimension parents aggregated by this series. */
+  parentBuckets?: SeriesEntityBuckets;
+}
+
+/**
+ * Top five entities by selected-range token rank plus one chart-only Other
+ * series. Only these sources carry per-bucket accumulators, so the returned
+ * bucket arrays are bounded by series × buckets and their breakdowns by the
+ * visible entity cardinality, never by a parent × child cross-product.
+ */
+function buildSeries(
+  top: readonly SeriesSource[],
+  other: SeriesSource | undefined,
+  bucketCount: number,
+): AnalyticsSeries[] {
+  const series: AnalyticsSeries[] = top.map((source) => ({
+    kind: "entity",
+    identity: identityOf(source.raw),
+    tokens: finalize(source.totals),
+    buckets: materializeBuckets(source.bucketTotals, bucketCount),
+    childBuckets: materializeEntityBuckets(source.childBuckets, bucketCount),
+  }));
+  if (other !== undefined) {
+    series.push({
+      kind: "other",
+      tokens: finalize(other.totals),
+      buckets: materializeBuckets(other.bucketTotals, bucketCount),
+      childBuckets: materializeEntityBuckets(other.childBuckets, bucketCount),
+      ...(other.parentBuckets === undefined
+        ? {}
+        : { parentBuckets: materializeEntityBuckets(other.parentBuckets, bucketCount) }),
+    });
+  }
+  return series;
+}
+
+function rawIdForDimension(step: OwnedStep, dimension: AnalyticsDimension): string | undefined {
+  return dimension === "model" ? step.modelID : step.providerID;
+}
+
+function oppositeDimension(dimension: AnalyticsDimension): AnalyticsDimension {
+  return dimension === "model" ? "provider" : "model";
+}
+
+/** Filter matches the entity's own dimension, independent of grouping. */
+function matchesFilter(step: OwnedStep, filter: AnalyticsGroupFilter | undefined): boolean {
+  if (filter === undefined) return true;
+  return rawIdForDimension(step, filter.dimension) === identityTotal(filter.identity);
+}
+
+/** Last bucket whose start is at or before `timeMs`; boundaries are contiguous. */
+function bucketIndexAt(bucketStarts: readonly number[], timeMs: number): number {
+  let low = 0;
+  let high = bucketStarts.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const middle = (low + high) >>> 1;
+    const start = bucketStarts[middle];
+    if (start === undefined) return found;
+    if (start <= timeMs) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return found;
 }
 
 function compareIds(a: string, b: string): number {
@@ -242,6 +471,7 @@ export interface AnalyticsModel {
   hasProject(projectId: string): boolean;
   home(range: RangeKey, nowMs: number): HomeAnalyticsRollup;
   project(projectId: string, range: RangeKey, nowMs: number): ProjectSnapshot;
+  groups(query: AnalyticsGroupQuery, nowMs: number): AnalyticsGroupSnapshot;
   earliestActivityMs(): number | undefined;
   ownedStepCount(): number;
 }
@@ -258,8 +488,6 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
   const ownedByFp = new Map<string, Map<string, OwnedStep>>();
   const ownedBySession = new Map<string, Map<string, OwnedStep>>();
   const hours = new Map<number, HourBucket>();
-  /** Lifetime model-dimension rollup (small: one entry per provider/model). */
-  const modelLifetime = new Map<string, Accumulator>();
   const latestStepBySession = new Map<string, number>();
   const earliestStepBySession = new Map<string, number>();
   let earliestHourMs: number | undefined;
@@ -294,6 +522,14 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       },
       cache: pricingCache,
     });
+    if (outcome.status === "partial") {
+      return {
+        costUsd: outcome.costUsd,
+        pricedAny: true,
+        unpricedTokens: outcome.unpricedTokens,
+        unknownTokens: 0,
+      };
+    }
     if (outcome.status === "priced") {
       return { costUsd: outcome.costUsd, pricedAny: true, unpricedTokens: 0, unknownTokens: 0 };
     }
@@ -316,24 +552,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     return bucket;
   }
 
-  function keyedAccumulator(map: Map<string, Accumulator>, key: string): Accumulator {
-    let accumulator = map.get(key);
-    if (!accumulator) {
-      accumulator = createAccumulator();
-      map.set(key, accumulator);
-    }
-    return accumulator;
-  }
-
   function addStep(step: OwnedStep): void {
     const startMs = Math.floor(step.completedAtMs / HOUR_MS) * HOUR_MS;
     if (earliestHourMs === undefined || startMs < earliestHourMs) earliestHourMs = startMs;
     const bucket = bucketFor(startMs);
     addStepToAccumulator(bucket.totals, step);
-    addStepToAccumulator(
-      keyedAccumulator(modelLifetime, `${step.providerID ?? ""}|||${step.modelID ?? ""}`),
-      step,
-    );
     bucket.steps.set(`${step.sessionID}\u0000${step.messageID}`, step);
 
     let sessionSteps = ownedBySession.get(step.sessionID);
@@ -360,12 +583,6 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const bucket = hours.get(startMs);
     if (bucket) {
       subtractStepFromAccumulator(bucket.totals, step);
-      const modelKey = `${step.providerID ?? ""}|||${step.modelID ?? ""}`;
-      const model = modelLifetime.get(modelKey);
-      if (model) {
-        subtractStepFromAccumulator(model, step);
-        if (isZeroTokens(model)) modelLifetime.delete(modelKey);
-      }
       bucket.steps.delete(`${step.sessionID}\u0000${step.messageID}`);
       if (bucket.steps.size <= 0) {
         hours.delete(startMs);
@@ -517,8 +734,44 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     else ownedByFp.set(fingerprint, next);
   }
 
-  function upsertOccurrence(row: OpenCodeRawAssistantRow): void {
+  function removeOccurrenceAt(fingerprint: string, messageID: string): boolean {
+    const occurrences = groups.get(fingerprint);
+    if (!occurrences) return false;
+    const index = occurrences.findIndex((entry) => entry.messageID === messageID);
+    if (index < 0) return false;
+    occurrences.splice(index, 1);
+    if (occurrences.length === 0) groups.delete(fingerprint);
+    return true;
+  }
+
+  /**
+   * Removes one message across fingerprints. Only used for a positive→zero
+   * upsert (rare) or a removal row whose payload no longer matches its owned
+   * fingerprint, never for the steady positive insert path.
+   */
+  function removeOccurrenceByMessage(messageID: string): string | undefined {
+    for (const fingerprint of groups.keys()) {
+      if (!removeOccurrenceAt(fingerprint, messageID)) continue;
+      return fingerprint;
+    }
+    return undefined;
+  }
+
+  /**
+   * Add or replace one physical contribution. Zero-token rows never enter the
+   * ownership groups: they carry metadata/activity but no usage, so they are
+   * excluded from fork ownership, pricing, groups, and activity extents. An
+   * update from positive to zero therefore removes the previously owned copy.
+   */
+  function upsertOccurrence(row: OpenCodeRawAssistantRow): {
+    fingerprint: string;
+    previous?: string;
+  } {
     const fingerprint = rawAssistantRowFingerprint(row);
+    if (!rawAssistantRowHasTokenUsage(row)) {
+      const previous = removeOccurrenceByMessage(row.messageID);
+      return { fingerprint, ...(previous === undefined ? {} : { previous }) };
+    }
     let occurrences = groups.get(fingerprint);
     if (!occurrences) {
       occurrences = [];
@@ -543,15 +796,14 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const index = occurrences.findIndex((entry) => entry.messageID === row.messageID);
     if (index >= 0) occurrences[index] = occurrence;
     else occurrences.push(occurrence);
+    return { fingerprint };
   }
 
   function removeOccurrence(row: OpenCodeRawAssistantRow): void {
     const fingerprint = rawAssistantRowFingerprint(row);
-    const occurrences = groups.get(fingerprint);
-    if (!occurrences) return;
-    const index = occurrences.findIndex((entry) => entry.messageID === row.messageID);
-    if (index >= 0) occurrences.splice(index, 1);
-    if (occurrences.length === 0) groups.delete(fingerprint);
+    if (!removeOccurrenceAt(fingerprint, row.messageID)) {
+      removeOccurrenceByMessage(row.messageID);
+    }
   }
 
   function setMetadata(
@@ -748,6 +1000,180 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     return { totals, stepCount, sessions: sessionsSet };
   }
 
+  /** Populated hour starts intersecting the window, chronologically ordered. */
+  function populatedHourStarts(window: RangeWindow): number[] {
+    const starts: number[] = [];
+    for (const startMs of hours.keys()) {
+      if (startMs + HOUR_MS <= (window.sinceMs ?? Number.NEGATIVE_INFINITY)) continue;
+      if (startMs >= window.untilMs) continue;
+      starts.push(startMs);
+    }
+    starts.sort((a, b) => a - b);
+    return starts;
+  }
+
+  /**
+   * Two passes over owned steps already retained by the hour buckets.
+   *
+   * Pass 1 accumulates flat totals, distinct sessions, pair children, and the
+   * earliest positive owned step matching the query filter. Groups are keyed
+   * by nested maps of the exact raw id (`undefined` is its own key), so a pair
+   * cannot collide across a delimiter and missing ids stay distinct from empty
+   * ones. Pass 2 ranks the visible groups, then fills per-bucket accumulators
+   * for just the top five series and Other, their opposite-dimension child
+   * breakdown, and Other's hidden same-dimension parents. One visit per owned
+   * step feeds every level, so inspection adds no raw scan and no price lookup.
+   * Bucket arrays never scale with parent/child cardinality, and no parent ×
+   * child cross-product or duplicate raw contribution is emitted.
+   */
+  function groupedSnapshot(query: AnalyticsGroupQuery, nowMs: number): AnalyticsGroupSnapshot {
+    const { range, dimension } = query;
+    const filter = query.filter;
+    const window = rangeWindow(range, nowMs);
+    const hourStarts = populatedHourStarts(window);
+
+    function eachOwnedStep(visit: (step: OwnedStep) => void): void {
+      for (const startMs of hourStarts) {
+        const hour = hours.get(startMs);
+        if (!hour) continue;
+        const hourEnd = startMs + HOUR_MS;
+        for (const step of hour.steps.values()) {
+          if (step.completedAtMs < startMs || step.completedAtMs >= hourEnd) continue;
+          if (window.sinceMs !== undefined && step.completedAtMs < window.sinceMs) continue;
+          if (step.completedAtMs >= window.untilMs) continue;
+          visit(step);
+        }
+      }
+    }
+
+    const totals = createAccumulator();
+    const sessions = new Set<string>();
+    const parentGroups = new Map<string | undefined, GroupNode>();
+    const childDimension = oppositeDimension(dimension);
+    const lifetime = range === "lifetime";
+    let stepCount = 0;
+    let earliestMatchedMs: number | undefined;
+
+    eachOwnedStep((step) => {
+      if (!matchesFilter(step, filter)) return;
+      if (lifetime && (earliestMatchedMs === undefined || step.completedAtMs < earliestMatchedMs)) {
+        earliestMatchedMs = step.completedAtMs;
+      }
+      const parentRaw = rawIdForDimension(step, dimension);
+      const childRaw = rawIdForDimension(step, childDimension);
+      addStepToAccumulator(totals, step);
+      sessions.add(step.sessionID);
+      stepCount += 1;
+
+      let parent = parentGroups.get(parentRaw);
+      if (!parent) {
+        parent = createGroupNode();
+        parentGroups.set(parentRaw, parent);
+      }
+      addStepToGroupNode(parent, step);
+      let child = parent.children.get(childRaw);
+      if (!child) {
+        child = createGroupNode();
+        parent.children.set(childRaw, child);
+      }
+      addStepToGroupNode(child, step);
+    });
+
+    // Lifetime buckets start at the exact first positive owned step for this
+    // query filter — never session metadata, and never an older unrelated
+    // model/provider. Finite ranges anchor on their rolling window and ignore
+    // this value. An empty lifetime still renders its fallback current bucket.
+    const boundaries = planRangeBuckets(range, nowMs, lifetime ? earliestMatchedMs : undefined, {
+      timeZone,
+    });
+    const bucketStarts = boundaries.map((boundary) => boundary.startMs);
+
+    const ranked: GroupEntry[] = [...parentGroups]
+      .map(([raw, node]) => ({ raw, node }))
+      .sort(compareGroupEntries);
+    const rows = ranked.map((entry) => materializeGroupRow(entry.raw, entry.node));
+
+    const topEntries = ranked.slice(0, 5);
+    const otherEntries = ranked.slice(5);
+    const topBucketTotals = topEntries.map(() => new Map<number, Accumulator>());
+    const topChildBuckets: SeriesEntityBuckets[] = topEntries.map(() => new Map());
+    const otherBucketTotals = otherEntries.length > 0 ? new Map<number, Accumulator>() : undefined;
+    const otherChildBuckets: SeriesEntityBuckets | undefined =
+      otherEntries.length > 0 ? new Map() : undefined;
+    const otherParentBuckets: SeriesEntityBuckets | undefined =
+      otherEntries.length > 0 ? new Map() : undefined;
+    const seriesIndexByParent = new Map<string | undefined, number>();
+    topEntries.forEach((entry, index) => {
+      seriesIndexByParent.set(entry.raw, index);
+    });
+
+    if (ranked.length > 0) {
+      eachOwnedStep((step) => {
+        if (!matchesFilter(step, filter)) return;
+        const bucketIndex = bucketIndexAt(bucketStarts, step.completedAtMs);
+        if (bucketIndex < 0) return;
+        const parentRaw = rawIdForDimension(step, dimension);
+        const childRaw = rawIdForDimension(step, childDimension);
+        const seriesIndex = seriesIndexByParent.get(parentRaw);
+        if (seriesIndex !== undefined) {
+          const bucketTotals = topBucketTotals[seriesIndex];
+          if (bucketTotals) addStepToBucket(bucketTotals, step, bucketIndex);
+          const childBuckets = topChildBuckets[seriesIndex];
+          if (childBuckets) {
+            addStepToEntityBucket(childBuckets, childRaw, step, bucketIndex);
+          }
+          return;
+        }
+        if (otherBucketTotals) addStepToBucket(otherBucketTotals, step, bucketIndex);
+        if (otherChildBuckets) {
+          addStepToEntityBucket(otherChildBuckets, childRaw, step, bucketIndex);
+        }
+        if (otherParentBuckets) {
+          addStepToEntityBucket(otherParentBuckets, parentRaw, step, bucketIndex);
+        }
+      });
+    }
+
+    const topSources: SeriesSource[] = topEntries.map((entry, index) => ({
+      raw: entry.raw,
+      totals: entry.node.totals,
+      bucketTotals: topBucketTotals[index] ?? new Map(),
+      childBuckets: topChildBuckets[index] ?? new Map(),
+    }));
+    let otherSource: SeriesSource | undefined;
+    if (otherEntries.length > 0) {
+      const otherTotals = createAccumulator();
+      for (const entry of otherEntries) mergeAccumulator(otherTotals, entry.node.totals);
+      otherSource = {
+        raw: undefined,
+        totals: otherTotals,
+        bucketTotals: otherBucketTotals ?? new Map(),
+        childBuckets: otherChildBuckets ?? new Map(),
+        parentBuckets: otherParentBuckets ?? new Map(),
+      };
+    }
+
+    const snapshot: AnalyticsGroupSnapshot = {
+      dimension,
+      range,
+      window,
+      bucketUnit: rangeBucketUnit(range),
+      timeZone,
+      buckets: boundaries.map((boundary) => ({
+        startMs: boundary.startMs,
+        endMs: boundary.endMs,
+      })),
+      totals: finalize(totals),
+      sessionCount: sessions.size,
+      stepCount,
+      rows,
+      series: buildSeries(topSources, otherSource, boundaries.length),
+      stale: false,
+    };
+    if (filter !== undefined) snapshot.filter = filter;
+    return snapshot;
+  }
+
   function buildUsage(
     range: RangeKey,
     nowMs: number,
@@ -942,7 +1368,6 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       ownedByFp.clear();
       ownedBySession.clear();
       hours.clear();
-      modelLifetime.clear();
       latestStepBySession.clear();
       earliestStepBySession.clear();
       earliestHourMs = undefined;
@@ -951,13 +1376,45 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     },
     apply(upserts, removals) {
       const affected = new Set<string>();
+      const applyUpsert = (row: OpenCodeRawAssistantRow): void => {
+        const result = upsertOccurrence(row);
+        affected.add(result.fingerprint);
+        if (result.previous !== undefined) affected.add(result.previous);
+      };
       for (const row of removals) {
         affected.add(rawAssistantRowFingerprint(row));
         removeOccurrence(row);
       }
-      for (const row of upserts) {
-        affected.add(rawAssistantRowFingerprint(row));
-        upsertOccurrence(row);
+      // `upserts` may be a one-shot generator (the engine hydrates the model
+      // this way), so materialize references before the zero-row scan. The
+      // rows themselves are already retained by the caller.
+      const rows = Array.isArray(upserts) ? upserts : [...upserts];
+      let hasZeroRows = false;
+      for (const row of rows) {
+        if (!rawAssistantRowHasTokenUsage(row)) {
+          hasZeroRows = true;
+          break;
+        }
+      }
+      if (!hasZeroRows) {
+        for (const row of rows) applyUpsert(row);
+      } else {
+        // A batch that contains zero-token rows is reconciled in two phases:
+        // last occurrence per message id wins, then zero rows remove prior
+        // ownership before positive rows are inserted. This keeps bulk
+        // hydration linear instead of scanning all groups per zero row.
+        const lastByMessage = new Map<string, OpenCodeRawAssistantRow>();
+        for (const row of rows) lastByMessage.set(row.messageID, row);
+        // With no owned groups there is nothing a zero row can remove. This is
+        // the cold-hydration shape; skipping fingerprint work keeps it linear.
+        if (groups.size > 0) {
+          for (const row of lastByMessage.values()) {
+            if (!rawAssistantRowHasTokenUsage(row)) applyUpsert(row);
+          }
+        }
+        for (const row of lastByMessage.values()) {
+          if (rawAssistantRowHasTokenUsage(row)) applyUpsert(row);
+        }
       }
       for (const fingerprint of affected) recomputeFingerprint(fingerprint);
     },
@@ -966,6 +1423,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       Object.hasOwn(projects, projectId) || sessionsByProject.has(projectId),
     home,
     project,
+    groups: groupedSnapshot,
     earliestActivityMs: earliestActivity,
     ownedStepCount() {
       let count = 0;

@@ -160,6 +160,105 @@ describe("quota export production cache policy", () => {
     });
   });
 
+  it("keeps cache-only OpenCode export network-free across Console rename and failure", async () => {
+    const { buildQuotaExport } = await import("../src/lib/quota-export.js");
+    const { readCachedProviderResult, __resetQuotaStateForTests } = await import(
+      "../src/lib/quota-state.js"
+    );
+    const { getProviders } = await import("../src/providers/registry.js");
+    const auth = await import("../src/lib/opencode-auth.js");
+    const { createFakeIntegration } = await import("./helpers/fake-integration.js");
+    __resetQuotaStateForTests();
+
+    let orgName = "Console Renamed";
+    let failOrgs = false;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/orgs")) {
+        if (failOrgs) throw new Error("network down");
+        return new Response(JSON.stringify({ data: [{ id: "wrk_cache", name: orgName }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected network call ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const integration = createFakeIntegration([
+      {
+        integrationId: "opencode",
+        id: "cred_console_cache",
+        label: "default",
+        registered: true,
+        method: "oauth",
+        value: {
+          type: "oauth",
+          methodID: "device",
+          access: "cache-console-access",
+          refresh: "cache-console-refresh",
+          expires: Date.now() + 60 * 60 * 1000,
+          metadata: { orgID: "wrk_cache", orgName: "Stored Name" },
+        },
+      },
+    ]);
+    const unbind = auth.bindCredentialSource(
+      auth.createIntegrationCredentialSource(integration as never),
+    );
+    auth.notifyCredentialsChanged();
+    auth.clearReadAuthFileCacheForTests();
+
+    try {
+      const providers = getProviders().filter(
+        (provider) => provider.id === "opencode-go" || provider.id === "opencode",
+      );
+      const go = providers.find((provider) => provider.id === "opencode-go");
+      const zen = providers.find((provider) => provider.id === "opencode");
+      if (!go || !zen) throw new Error("Missing production OpenCode providers");
+      if (go.cachePolicy?.kind !== "resolved-auth" || zen.cachePolicy?.kind !== "resolved-auth") {
+        throw new Error("Expected resolved-auth cache policies");
+      }
+
+      const ctx = createTestContext();
+      const exported = await buildQuotaExport({
+        providers,
+        ctx,
+        ttlMs: 60_000,
+        fromCache: true,
+      });
+      expect(exported.providers["opencode-go"]).toEqual({ status: "unavailable" });
+      expect(exported.providers.opencode).toEqual({ status: "unavailable" });
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const goBefore = await go.cachePolicy.resolveIdentity(ctx, {} as never);
+      const zenBefore = await zen.cachePolicy.resolveIdentity(ctx, {} as never);
+
+      orgName = "Console Renamed Again";
+      const goAfterRename = await go.cachePolicy.resolveIdentity(ctx, {} as never);
+      const zenAfterRename = await zen.cachePolicy.resolveIdentity(ctx, {} as never);
+
+      failOrgs = true;
+      const goAfterFailure = await go.cachePolicy.resolveIdentity(ctx, {} as never);
+      const zenAfterFailure = await zen.cachePolicy.resolveIdentity(ctx, {} as never);
+
+      expect(goAfterRename).toBe(goBefore);
+      expect(goAfterFailure).toBe(goBefore);
+      expect(zenAfterRename).toBe(zenBefore);
+      expect(zenAfterFailure).toBe(zenBefore);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await expect(readCachedProviderResult({ provider: go, ctx, ttlMs: 60_000 })).resolves.toEqual(
+        { hit: false },
+      );
+      await buildQuotaExport({ providers, ctx, ttlMs: 60_000, fromCache: true });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      unbind();
+      auth.notifyCredentialsChanged();
+      auth.clearReadAuthFileCacheForTests();
+      __resetQuotaStateForTests();
+    }
+  });
+
   it("isolates process-local export snapshots by runtime client owner", async () => {
     const { buildQuotaExport } = await import("../src/lib/quota-export.js");
     const { fetchQuotaProviderResult, readCachedProviderResult, __resetQuotaStateForTests } =

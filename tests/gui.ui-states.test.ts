@@ -8,6 +8,7 @@ import { orderCardsByPreference } from "../src/contracts/card-order";
 import type {
   HomeSnapshot,
   ProjectSnapshot,
+  ProviderCard,
   QuotaCardRow,
   SettingsSnapshot,
   SettingsWriteResult,
@@ -16,7 +17,7 @@ import type {
 import { DASHBOARD_CONTRACT_VERSION } from "../src/contracts/dashboard";
 import { buildRowKey, composeRowId } from "../src/contracts/identity";
 import { OPENAI_CREDITS_INFO, OPENAI_RESETS_INFO } from "../src/contracts/openai-quota";
-import type { RangeKey } from "../src/contracts/ranges";
+import { planRangeBuckets, type RangeKey } from "../src/contracts/ranges";
 import { buildSessionChartGeometry, buildUsageGeometry } from "../src/ui/chart-geometry";
 import type { Toaster } from "../src/ui/components/toast";
 import {
@@ -30,7 +31,9 @@ import {
   parseSettingsWriteResult,
 } from "../src/ui/dashboard-client";
 import {
+  axisRangeCaption,
   formatApiEquivalentCost,
+  formatBucketRange,
   formatBucketTick,
   formatPercent,
   formatPercentExact,
@@ -400,6 +403,26 @@ describe("section state machine", () => {
     expect(formatBucketTick(midnight, "hour", "UTC")).toBe("00:00");
     // The same instant in a host zone west of UTC is still the previous evening.
     expect(formatBucketTick(midnight, "hour", "America/New_York")).toBe("20:00");
+    expect(
+      formatBucketRange(
+        Date.UTC(2026, 9, 27),
+        Date.UTC(2026, 9, 27, 23, 59, 59, 999),
+        "day",
+        "UTC",
+      ),
+    ).toBe("27 Oct");
+    expect(formatBucketRange(Date.UTC(2026, 9, 27), Date.UTC(2026, 9, 28), "day", "UTC")).toBe(
+      "27 Oct",
+    );
+    expect(
+      formatBucketRange(Date.UTC(2026, 9, 27, 12), Date.UTC(2026, 9, 28, 12), "day", "UTC"),
+    ).toBe("27 Oct – 28 Oct");
+    expect(
+      formatBucketRange(Date.UTC(2026, 9, 27, 12), Date.UTC(2026, 9, 28, 12), "day", "UTC", " to "),
+    ).toBe("27 Oct to 28 Oct");
+    expect(axisRangeCaption("27 Oct", 8, [0, 2, 4, 6])).toBe("Through 27 Oct");
+    expect(axisRangeCaption("27 Oct", 8, [0, 1, 2, 3, 4, 5, 6, 7])).toBeUndefined();
+    expect(axisRangeCaption("27 Oct", 0, [])).toBeUndefined();
     expect(formatTimestamp(midnight, "UTC")).toBe("19/10/2026, 00:00:00");
     expect(formatTimestamp(midnight, "UTC")).not.toContain("UTC");
 
@@ -409,6 +432,60 @@ describe("section state machine", () => {
     expect(formatTimestampMinutes(midnight, "America/New_York")).toBe("18/10/2026, 20:00");
     // The detailed formatter used by Session tooltips keeps its seconds.
     expect(formatTimestamp(polled, "Europe/Istanbul")).toBe("22/10/2026, 13:39:22");
+  });
+
+  it("collapses planned same-day buckets without shifting the half-open end", () => {
+    const nowMs = Date.UTC(2026, 9, 27, 12, 30);
+    const lifetime = planRangeBuckets("lifetime", nowMs, Date.UTC(2026, 9, 27, 9, 15), {
+      timeZone: "UTC",
+    });
+    expect(lifetime).toEqual([{ startMs: Date.UTC(2026, 9, 27), endMs: nowMs }]);
+    const only = lifetime[0] as (typeof lifetime)[number];
+    expect(formatBucketRange(only.startMs, only.endMs, "day", "UTC")).toBe("27 Oct");
+    // The exclusive end is exactly the clipped window end, not end-of-day.
+    expect(only.endMs).toBe(nowMs);
+    expect(only.endMs).toBeGreaterThan(only.startMs);
+
+    const hourly = planRangeBuckets("24h", nowMs, undefined, { timeZone: "UTC" });
+    expect(hourly).toHaveLength(25);
+    const first = hourly[0] as (typeof hourly)[number];
+    const last = hourly.at(-1) as (typeof hourly)[number];
+    // Planned hour buckets cross an hour boundary, so they stay a range.
+    expect(formatBucketRange(first.startMs, first.endMs, "hour", "UTC")).toBe("12:30 – 13:00");
+    expect(formatBucketRange(last.startMs, last.endMs, "hour", "UTC")).toBe("12:00 – 12:30");
+    expect(first.startMs).toBe(nowMs - DAY_MS);
+    expect(last.endMs).toBe(nowMs);
+    for (let index = 0; index < hourly.length - 1; index += 1) {
+      expect(hourly[index]?.endMs).toBe(hourly[index + 1]?.startMs);
+    }
+
+    const week = planRangeBuckets("7d", nowMs, undefined, { timeZone: "UTC" });
+    const priorDay = week.at(-2) as (typeof week)[number];
+    expect(priorDay.startMs).toBe(Date.UTC(2026, 9, 26));
+    expect(priorDay.endMs).toBe(Date.UTC(2026, 9, 27));
+    // A completed local day prints one date; the exclusive boundary is unchanged.
+    expect(formatBucketRange(priorDay.startMs, priorDay.endMs, "day", "UTC")).toBe("26 Oct");
+    expect(priorDay).toEqual({
+      startMs: Date.UTC(2026, 9, 26),
+      endMs: Date.UTC(2026, 9, 27),
+    });
+  });
+
+  it("uses endMs - 1 for a completed DST day from the real planner", () => {
+    const nowMs = Date.UTC(2026, 10, 3, 12);
+    const buckets = planRangeBuckets("7d", nowMs, undefined, {
+      timeZone: "America/New_York",
+    });
+    const dstDay = buckets.find(
+      (bucket) => formatBucketTick(bucket.startMs, "day", "America/New_York") === "1 Nov",
+    );
+    expect(dstDay).toBeDefined();
+    const day = dstDay as (typeof buckets)[number];
+    // The fall-back local day is 25 hours long; subtracting a fixed 24h would miss.
+    expect(day.endMs - day.startMs).toBe(25 * 3_600_000);
+    const before = { ...day };
+    expect(formatBucketRange(day.startMs, day.endMs, "day", "America/New_York")).toBe("1 Nov");
+    expect(day).toEqual(before);
   });
 
   it("wires full and bare percentage labels for both display modes", async () => {
@@ -423,6 +500,46 @@ describe("section state machine", () => {
       );
       expect(valueText(row, bare)).toBe(`${percentDisplayMode === "used" ? 38 : 62}%`);
     }
+  });
+
+  it("rounds fractional percentages in both display modes without changing the raw value", async () => {
+    const module = await graph.load("/components/quota-card.tsx");
+    const valueText = module.rowValueText as (row: unknown, preferences: unknown) => string;
+    const shownPercent = module.rowPercent as (
+      row: unknown,
+      preferences: unknown,
+    ) => number | undefined;
+    const fractional = percentRow({ percentUsed: 8.4, percentRemaining: 91.6 });
+    for (const percentDisplayMode of ["used", "remaining"] as const) {
+      const preferences = displayPreferencesFromValues({
+        percentDisplayMode,
+        percentLabelStyle: "full",
+      });
+      // The raw value still feeds the word and the bar; only the label rounds.
+      expect(shownPercent(fractional, preferences)).toBe(
+        percentDisplayMode === "used" ? 8.4 : 91.6,
+      );
+      expect(valueText(fractional, preferences)).toBe(
+        percentDisplayMode === "used" ? "8% used" : "92% remaining",
+      );
+    }
+
+    const bounds = percentRow({ percentUsed: 0, percentRemaining: 100 });
+    expect(
+      valueText(
+        bounds,
+        displayPreferencesFromValues({ percentDisplayMode: "used", percentLabelStyle: "full" }),
+      ),
+    ).toBe("0% used");
+    expect(
+      valueText(
+        bounds,
+        displayPreferencesFromValues({
+          percentDisplayMode: "remaining",
+          percentLabelStyle: "full",
+        }),
+      ),
+    ).toBe("100% remaining");
   });
 
   it("complements an opposite-only percentage and leaves absent percentages unlabelled", async () => {
@@ -480,12 +597,13 @@ describe("section state machine", () => {
     ).toBe("1.62481239 token");
   });
 
-  it("labels legend inspection without exposing toggle semantics", async () => {
+  it("labels legend pinning as semantic toggle buttons without navigation", async () => {
     const html = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: homeSnapshot().usage,
     });
+    expect(html).toContain('type="button"');
     expect(html).toContain('aria-label="Highlight Input"');
-    expect(html).not.toContain("aria-pressed");
+    expect(html).toContain('aria-pressed="false"');
   });
   it("shows a skeleton only on the first load", () => {
     expect(resolveLoadState<number>({ loading: true })).toEqual({ kind: "skeleton" });
@@ -1182,7 +1300,7 @@ describe("usage chart", () => {
     const buttons = renderGraph.elementsNamed(root, "button");
     const hit = buttons.find((node) => node.props.class === "qg-chart__hit");
     const legend = renderGraph
-      .elementsNamed(root, "li")
+      .elementsNamed(root, "button")
       .find((node) => node.props["aria-label"] === "Highlight Reasoning");
     expect(hit).toBeDefined();
     expect(legend).toBeDefined();
@@ -1218,14 +1336,15 @@ describe("usage chart", () => {
     expect(segments().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(1);
     renderGraph.listenerOf(legend, "onBlur")?.({});
     expect(segments().filter((node) => node.props["data-highlighted"] === "true")).toHaveLength(2);
-    // There is no click/pin or keyboard-release handler on a legend entry.
-    expect(renderGraph.listenerOf(legend, "onClick")).toBeUndefined();
+    // A native button handles Enter/Space; focus remains an emphasis source.
+    expect(legend.tag).toBe("button");
+    expect(legend.props.type).toBe("button");
     expect(renderGraph.listenerOf(legend, "onKeyDown")).toBeUndefined();
     expect(segments().map((node) => node.props.y)).toEqual(initialSegments);
     dispose();
   });
 
-  it("keeps legend emphasis transient and never pins a clicked series", () => {
+  it("pins a clicked legend badge until the same badge or an outside click clears it", () => {
     const root = renderGraph.createTestRoot();
     const snapshot = usage("7d", [
       { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 10, cacheRead: 5 }) },
@@ -1237,54 +1356,87 @@ describe("usage chart", () => {
         .filter((node) => node.props.class === "qg-chart__segment");
     const highlighted = () =>
       segments().filter((node) => node.props["data-highlighted"] === "true");
-    const legend = renderGraph
-      .elementsNamed(root, "li")
-      .find((node) => node.props["aria-label"] === "Highlight Input");
-    expect(legend).toBeDefined();
-    if (!legend) {
+    const legend = (label: string) =>
+      renderGraph.elementsNamed(root, "button").find((node) => node.props["aria-label"] === label);
+    const inputBadge = legend("Highlight Input");
+    const cacheBadge = legend("Highlight Cache Read");
+    const chart = renderGraph
+      .elementsNamed(root, "div")
+      .find((node) => node.props.class === "qg-chart");
+    expect(inputBadge).toBeDefined();
+    expect(cacheBadge).toBeDefined();
+    expect(chart).toBeDefined();
+    if (!inputBadge || !cacheBadge || !chart) {
       dispose();
       return;
     }
+    expect(inputBadge.tag).toBe("button");
+    expect(inputBadge.props.type).toBe("button");
+    expect(inputBadge.props["aria-pressed"]).toBe("false");
+    const fire = (node: TestNode, name: string) => renderGraph.listenerOf(node, name)?.({});
     const baseline = segments().map((node) => [node.props.y, node.props.height]);
     expect(segments()).toHaveLength(2);
+    expect(highlighted()).toHaveLength(2);
 
-    // The legend entry is a focusable, non-actionable list item: it has no
-    // button activation semantics, no click handler, and no pressed state.
-    expect(legend.tag).toBe("li");
-    expect(legend.props.tabIndex).toBe(0);
-    expect(renderGraph.listenerOf(legend, "onClick")).toBeUndefined();
-    expect(renderGraph.listenerOf(legend, "onKeyDown")).toBeUndefined();
-    expect(legend.props["aria-pressed"]).toBeUndefined();
-    expect(legend.props["data-pressed"]).toBeUndefined();
-
-    // Pointer activation natively focuses the entry. Emphasis may appear while
-    // hovered, but pointer leave must ALWAYS clear it even when no blur fires.
-    renderGraph.listenerOf(legend, "onPointerEnter")?.({});
-    renderGraph.listenerOf(legend, "onFocus")?.({});
+    // Pin Input by clicking it while hovered and focused.
+    fire(inputBadge, "onPointerEnter");
+    fire(inputBadge, "onFocus");
+    fire(inputBadge, "onClick");
+    expect(inputBadge.props["data-pinned"]).toBe("true");
+    expect(inputBadge.props["aria-pressed"]).toBe("true");
     expect(highlighted()).toHaveLength(1);
     expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
-    expect(segments()).toHaveLength(2);
-    expect(
-      renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-chart")?.props[
-        "data-highlight"
-      ],
-    ).toBe("true");
-    renderGraph.listenerOf(legend, "onClick")?.({});
-    renderGraph.listenerOf(legend, "onPointerLeave")?.({});
-    expect(highlighted()).toHaveLength(2);
-    expect(
-      renderGraph.elementsNamed(root, "div").find((node) => node.props.class === "qg-chart")?.props[
-        "data-highlight"
-      ],
-    ).toBeUndefined();
+    expect(chart.props["data-highlight"]).toBe("true");
 
-    // Keyboard focus emphasises one series; losing focus restores normal.
-    renderGraph.listenerOf(legend, "onFocus")?.({});
+    // Pointer leave clears transient emphasis; the pin survives.
+    fire(inputBadge, "onPointerLeave");
     expect(highlighted()).toHaveLength(1);
-    renderGraph.listenerOf(legend, "onBlur")?.({});
-    expect(highlighted()).toHaveLength(2);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+    expect(chart.props["data-highlight"]).toBe("true");
 
-    // No series is hidden or toggled at any point, and the stack is unchanged.
+    // Hovering another badge wins temporarily; leaving restores the pin.
+    fire(cacheBadge, "onPointerEnter");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-cache-read)");
+    fire(cacheBadge, "onPointerLeave");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+
+    // Keyboard focus wins temporarily; blur restores the pin.
+    fire(cacheBadge, "onFocus");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-cache-read)");
+    fire(cacheBadge, "onBlur");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+
+    // Clicking the pinned badge again clears the pin and that badge's
+    // transient emphasis, so the reset is immediate even while hovered.
+    fire(inputBadge, "onPointerEnter");
+    fire(inputBadge, "onFocus");
+    fire(inputBadge, "onClick");
+    expect(inputBadge.props["data-pinned"]).toBeUndefined();
+    expect(inputBadge.props["aria-pressed"]).toBe("false");
+    expect(highlighted()).toHaveLength(2);
+    expect(chart.props["data-highlight"]).toBeUndefined();
+
+    // Clicking another badge switches the pin.
+    fire(cacheBadge, "onClick");
+    expect(cacheBadge.props["data-pinned"]).toBe("true");
+    expect(cacheBadge.props["aria-pressed"]).toBe("true");
+    expect(inputBadge.props["data-pinned"]).toBeUndefined();
+    expect(inputBadge.props["aria-pressed"]).toBe("false");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-cache-read)");
+
+    // Any click outside the legend clears the pin.
+    fire(chart, "onClick");
+    expect(cacheBadge.props["data-pinned"]).toBeUndefined();
+    expect(cacheBadge.props["aria-pressed"]).toBe("false");
+    expect(highlighted()).toHaveLength(2);
+    expect(chart.props["data-highlight"]).toBeUndefined();
+
+    // No series is hidden or toggled, and the stack is unchanged.
     expect(
       segments().every(
         (node) =>
@@ -1299,7 +1451,106 @@ describe("usage chart", () => {
     dispose();
   });
 
-  it("reduces axis label density at narrow container widths", () => {
+  it("keeps focused legend emphasis through pointer leave until blur", () => {
+    const root = renderGraph.createTestRoot();
+    const snapshot = usage("7d", [
+      { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 10, cacheRead: 5 }) },
+    ]);
+    const dispose = renderGraph.mount(() => renderGraph.chart({ usage: snapshot }), root);
+    const segments = () =>
+      renderGraph
+        .elementsNamed(root, "rect")
+        .filter((node) => node.props.class === "qg-chart__segment");
+    const highlighted = () =>
+      segments().filter((node) => node.props["data-highlighted"] === "true");
+    const legend = (label: string) =>
+      renderGraph.elementsNamed(root, "button").find((node) => node.props["aria-label"] === label);
+    const inputBadge = legend("Highlight Input");
+    const cacheBadge = legend("Highlight Cache Read");
+    const chart = renderGraph
+      .elementsNamed(root, "div")
+      .find((node) => node.props.class === "qg-chart");
+    expect(inputBadge).toBeDefined();
+    expect(cacheBadge).toBeDefined();
+    expect(chart).toBeDefined();
+    if (!inputBadge || !cacheBadge || !chart) {
+      dispose();
+      return;
+    }
+    renderGraph.listenerOf(inputBadge, "onFocus")?.({});
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+
+    // Hover wins while the pointer is present, but leaving the other badge
+    // must restore the focused badge rather than clearing all emphasis.
+    renderGraph.listenerOf(cacheBadge, "onPointerEnter")?.({});
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-cache-read)");
+    renderGraph.listenerOf(cacheBadge, "onPointerLeave")?.({});
+    expect(chart.props["data-highlight"]).toBe("true");
+    expect(highlighted()).toHaveLength(1);
+    expect(highlighted()[0]?.props.fill).toBe("var(--qg-token-input)");
+
+    // Focus itself still clears only on blur.
+    renderGraph.listenerOf(inputBadge, "onBlur")?.({});
+    expect(chart.props["data-highlight"]).toBeUndefined();
+    expect(highlighted()).toHaveLength(2);
+    dispose();
+  });
+
+  it("drops a pinned badge when its category leaves the visible range", async () => {
+    const [snapshot, setSnapshot] = renderGraph.createSignal(
+      usage("7d", [
+        { startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ input: 10, cacheRead: 5 }) },
+      ]),
+    );
+    const root = renderGraph.createTestRoot();
+    const dispose = renderGraph.mount(
+      () =>
+        renderGraph.chart({
+          get usage() {
+            return snapshot();
+          },
+        }),
+      root,
+    );
+    try {
+      const badges = () =>
+        renderGraph
+          .elementsNamed(root, "button")
+          .filter((node) => node.props.class === "qg-legend__item");
+      const inputBadge = badges().find((node) => node.props["aria-label"] === "Highlight Input");
+      const chart = renderGraph
+        .elementsNamed(root, "div")
+        .find((node) => node.props.class === "qg-chart");
+      expect(inputBadge).toBeDefined();
+      expect(chart).toBeDefined();
+      if (!inputBadge || !chart) {
+        dispose();
+        return;
+      }
+      renderGraph.listenerOf(inputBadge, "onClick")?.({});
+      expect(inputBadge.props["data-pinned"]).toBe("true");
+      expect(chart.props["data-highlight"]).toBe("true");
+
+      // A refetch drops Input entirely; the pin can no longer match a rendered
+      // badge, so it must clear rather than dim the remaining series.
+      setSnapshot(
+        usage("7d", [{ startMs: NOW - HOUR_MS, endMs: NOW, tokens: costed({ cacheRead: 5 }) }]),
+      );
+      await Promise.resolve();
+      const segments = renderGraph
+        .elementsNamed(root, "rect")
+        .filter((node) => node.props.class === "qg-chart__segment");
+      expect(segments).toHaveLength(1);
+      expect(segments[0]?.props["data-highlighted"]).toBe("true");
+      expect(chart.props["data-highlight"]).toBeUndefined();
+      expect(badges().every((node) => node.props["data-pinned"] === undefined)).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("uses a constant narrow label stride and omits an unaligned final bucket", () => {
     const buckets = Array.from({ length: 24 }, (_, index) => ({
       startMs: NOW + index * HOUR_MS,
       endMs: NOW + (index + 1) * HOUR_MS,
@@ -1310,9 +1561,13 @@ describe("usage chart", () => {
       height: 220,
       padding: { top: 12, right: 12, bottom: 24, left: 48 },
     });
-    expect(geometry.labelIndexes.length).toBeLessThanOrEqual(3);
-    expect(geometry.labelIndexes[0]).toBe(0);
-    expect(geometry.labelIndexes.at(-1)).toBe(23);
+    expect(geometry.labelIndexes).toEqual([0, 5, 10, 15, 20]);
+    const gaps = geometry.labelIndexes
+      .slice(1)
+      .map((value, index) => value - (geometry.labelIndexes[index] as number));
+    expect(gaps).toEqual([5, 5, 5, 5]);
+    // The final bucket is three steps away, not a misleading one-step gap.
+    expect(23 - (geometry.labelIndexes.at(-1) as number)).toBeLessThan(gaps[0] as number);
   });
   const stackedBuckets = [
     {
@@ -1387,6 +1642,32 @@ describe("usage chart", () => {
     expect(text(html)).toContain("About the API-equivalent estimate");
   });
 
+  it("shows Free in the usage summary only when the whole range is zero-priced", async () => {
+    const free = await renderView("/components/usage-chart.tsx", "UsageChart", {
+      usage: usage("7d", [
+        {
+          startMs: NOW - DAY_MS,
+          endMs: NOW,
+          tokens: costed({ input: 100 }, { apiEquivalentCostUsd: 0 }),
+        },
+      ]),
+    });
+    expect(text(free)).toContain("Free");
+    expect(text(free)).not.toContain("≈ USD 0.00");
+
+    const partial = await renderView("/components/usage-chart.tsx", "UsageChart", {
+      usage: usage("7d", [
+        {
+          startMs: NOW - DAY_MS,
+          endMs: NOW,
+          tokens: costed({ input: 100 }, { apiEquivalentCostUsd: 0, unpricedTokens: 7 }),
+        },
+      ]),
+    });
+    expect(text(partial)).not.toContain("Free");
+    expect(text(partial)).toContain("Partial estimate");
+  });
+
   it("keeps bar stacks externally separated and preserves a tiny category truthfully", () => {
     const geometry = buildUsageGeometry([
       { startMs: 0, endMs: 1, tokens: costed({ input: 1000000, reasoning: 1 }) },
@@ -1434,6 +1715,13 @@ describe("usage chart", () => {
     expect(formatApiEquivalentCost(null)).toBe("≈ USD —");
     expect(formatApiEquivalentCost(1.5)).toBe("≈ USD 1.50");
     expect(formatPercent(62)).toBe("62%");
+    // Quota percentages display as whole numbers, including below 10%.
+    expect(formatPercent(8)).toBe("8%");
+    expect(formatPercent(8.4)).toBe("8%");
+    expect(formatPercent(8.5)).toBe("9%");
+    expect(formatPercent(0)).toBe("0%");
+    expect(formatPercent(100)).toBe("100%");
+    expect(formatPercent(undefined)).toBe("—");
     expect(formatPercentExact(96.37)).toBe("96.37%");
     expect(formatPercentExact(null)).toBe("—");
     expect(formatRunway(undefined, "UTC")).toBeUndefined();
@@ -1508,6 +1796,30 @@ describe("project view composition", () => {
     expect(html.match(/class="qg-summary-number"/g) ?? []).toHaveLength(0);
     expect(html.match(/class="qg-summary-cost"/g) ?? []).toHaveLength(0);
     expect(text(html).match(/≈ USD/g) ?? []).toHaveLength(1);
+  });
+
+  it("shows a visible Partial estimate note in the project summary", async () => {
+    const base = projectSnapshot();
+    const html = await renderView("/views/project.tsx", "ProjectView", {
+      snapshot: {
+        ...base,
+        totals: {
+          ...costed(
+            { input: 3300, output: 700 },
+            { apiEquivalentCostUsd: 0.6, unpricedTokens: 25 },
+          ),
+          sessionCount: base.totals.sessionCount,
+        },
+      },
+      range: "7d",
+    });
+    const summary = html.slice(
+      html.indexOf('class="qg-summary"'),
+      html.indexOf('class="qg-usage"'),
+    );
+    expect(text(summary)).toContain("API-equivalent estimate");
+    expect(text(summary)).toContain("Partial estimate");
+    expect(text(summary)).not.toContain("Free");
   });
 
   it("marks the current page and keeps the server's activity order", async () => {
@@ -3306,6 +3618,9 @@ describe("range transitions name the range still on screen", () => {
     home?: DashboardClient["home"];
     project?: DashboardClient["project"];
     health?: DashboardClient["health"];
+    quota?: DashboardClient["quota"];
+    settings?: DashboardClient["settings"];
+    subscribe?: DashboardClient["subscribe"];
   }): AppHarness {
     const browser = historyBrowser(options.path);
     vi.stubGlobal("window", browser);
@@ -3313,13 +3628,13 @@ describe("range transitions name the range still on screen", () => {
     const client: DashboardClient = {
       connection: () => "live",
       onConnectionChange: () => () => {},
-      subscribe: () => () => {},
+      subscribe: options.subscribe ?? (() => () => {}),
       health: options.health ?? (async () => ({ app: "opencode-quota-gui", contractVersion: 2 })),
       home: options.home ?? (async () => homeSnapshot()),
-      quota: async () => homeSnapshot(),
+      quota: options.quota ?? (async () => homeSnapshot()),
       project: options.project ?? (async () => projectSnapshot()),
       session: async () => sessionSnapshot(),
-      settings: async () => settingsSnapshot(),
+      settings: options.settings ?? (async () => settingsSnapshot()),
       saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
       saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
       importPreview: async () => ({
@@ -3527,6 +3842,387 @@ describe("range transitions name the range still on screen", () => {
     } finally {
       app.dispose();
     }
+  });
+
+  /**
+   * Saved dashboard order is part of the settings snapshot the browser already
+   * receives. A `settings.changed` event reruns only the settings query, so the
+   * Quota surface must re-order the payload it already holds instead of waiting
+   * for (or triggering) another quota read (design spec dashboard visibility).
+   */
+  describe("quota card order follows live display settings", () => {
+    function orderedCards(): ProviderCard[] {
+      return [
+        providerCard({
+          cardId: "alpha#one" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Alpha main",
+        }),
+        providerCard({
+          cardId: "beta#one" as never,
+          providerId: "beta",
+          providerLabel: "Beta",
+          accountLabel: "Beta main",
+        }),
+        providerCard({
+          cardId: "gamma#one" as never,
+          providerId: "gamma",
+          providerLabel: "Gamma",
+          accountLabel: "Gamma main",
+        }),
+      ];
+    }
+
+    function quotaOf(cards: ProviderCard[]): HomeSnapshot {
+      return homeSnapshot({ providers: { cards, enabledProviders: "auto", polledAtMs: NOW } });
+    }
+
+    function settingsWith(
+      cardOrder: string[],
+      providerOrder: string[] = [],
+      hiddenCards: string[] = [],
+    ): SettingsSnapshot {
+      const base = settingsSnapshot();
+      return settingsSnapshot({
+        values: {
+          ...base.values,
+          "dashboard.cardOrder": cardOrder,
+          "dashboard.providerOrder": providerOrder,
+          "dashboard.hiddenCards": hiddenCards,
+        },
+        visibility: { hiddenCards, hiddenRows: [] },
+      });
+    }
+
+    /** Document order of rendered cards as `Provider:Account` pairs. */
+    function renderedCardOrder(root: TestNode): string[] {
+      return renderGraph
+        .elementsNamed(root, "article")
+        .filter((node) => node.props.class === "qg-card")
+        .map((card) => {
+          const provider = renderGraph
+            .elementsNamed(card, "span")
+            .find((node) => node.props.class === "qg-card__provider");
+          const account = renderGraph
+            .elementsNamed(card, "span")
+            .find((node) => node.props.class === "qg-card__account");
+          return `${provider ? renderGraph.textOf(provider) : "?"}:${
+            account ? renderGraph.textOf(account).replace("· ", "") : "?"
+          }`;
+        });
+    }
+
+    it("reads dotted card and provider order from settings values", () => {
+      const preferences = displayPreferencesFromValues({
+        "dashboard.cardOrder": ["alpha#one", 7, "beta#one"],
+        "dashboard.providerOrder": ["gamma"],
+      });
+      expect(preferences.cardOrder).toEqual(["alpha#one", "beta#one"]);
+      expect(preferences.providerOrder).toEqual(["gamma"]);
+    });
+
+    it("omits empty order lists so the existing preference shape is unchanged", () => {
+      const preferences = displayPreferencesFromValues({
+        "dashboard.cardOrder": [],
+        "dashboard.providerOrder": [],
+      });
+      expect(preferences).not.toHaveProperty("cardOrder");
+      expect(preferences).not.toHaveProperty("providerOrder");
+    });
+
+    it("reorders the same fixed payload after settings.changed without another quota request", async () => {
+      const quota = quotaOf(orderedCards());
+      let quotaCalls = 0;
+      let settings = settingsWith([]);
+      let emit: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => {
+          quotaCalls += 1;
+          return quota;
+        },
+        settings: async () => settings,
+        subscribe: (listener) => {
+          emit = listener;
+          return () => {};
+        },
+      });
+
+      try {
+        await settle();
+        await settle();
+        expect(quotaCalls).toBe(1);
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+          "Gamma:Gamma main",
+        ]);
+
+        settings = settingsWith(["gamma#one", "alpha#one"]);
+        emit?.({ topic: "settings.changed", at: NOW });
+        await settle();
+        await settle();
+
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+        expect(quotaCalls).toBe(1);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("applies a saved card order on first load", async () => {
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(orderedCards()),
+        settings: async () => settingsWith(["beta#one", "gamma#one"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Beta:Beta main",
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+        ]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("falls back to providerOrder when cardOrder is empty", async () => {
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(orderedCards()),
+        settings: async () => settingsWith([], ["gamma", "alpha"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("ignores unknown and duplicate ids and keeps unlisted cards in input order", async () => {
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(orderedCards()),
+        settings: async () =>
+          settingsWith(["ghost#missing", "gamma#one", "gamma#one", "alpha#one"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("orders same-provider cards independently by cardId", async () => {
+      const cards = [
+        providerCard({
+          cardId: "alpha#one" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Team one",
+        }),
+        providerCard({
+          cardId: "beta#one" as never,
+          providerId: "beta",
+          providerLabel: "Beta",
+          accountLabel: "Beta main",
+        }),
+        providerCard({
+          cardId: "alpha#two" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Team two",
+        }),
+      ];
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(cards),
+        settings: async () => settingsWith(["alpha#two", "beta#one", "alpha#one"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Team two",
+          "Beta:Beta main",
+          "Alpha:Team one",
+        ]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("keeps the remaining cards in saved order when a card is hidden", async () => {
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(orderedCards()),
+        settings: async () =>
+          settingsWith(["beta#one", "gamma#one", "alpha#one"], [], ["beta#one"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual(["Gamma:Gamma main", "Alpha:Alpha main"]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("applies the Settings-saved order to the cached payload on a visibility-scoped change", async () => {
+      const cards = [
+        providerCard({
+          cardId: "alpha#one" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Team one",
+        }),
+        providerCard({
+          cardId: "alpha#two" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Team two",
+        }),
+        providerCard({
+          cardId: "beta#one" as never,
+          providerId: "beta",
+          providerLabel: "Beta",
+          accountLabel: "Beta main",
+        }),
+      ];
+      const quota = quotaOf(cards);
+      // SettingsView saves the complete order, same-provider siblings included.
+      const savedOrder = ["alpha#two", "beta#one", "alpha#one"];
+      let quotaCalls = 0;
+      let settings = settingsWith([]);
+      let emit: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => {
+          quotaCalls += 1;
+          return quota;
+        },
+        settings: async () => settings,
+        subscribe: (listener) => {
+          emit = listener;
+          return () => {};
+        },
+      });
+
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Team one",
+          "Alpha:Team two",
+          "Beta:Beta main",
+        ]);
+        expect(quotaCalls).toBe(1);
+
+        // The save succeeded and the server broadcast its visibility-scoped event.
+        settings = settingsWith(savedOrder);
+        emit?.({ topic: "settings.changed", at: NOW, scope: "visibility" });
+        await settle();
+        await settle();
+
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Team two",
+          "Beta:Beta main",
+          "Alpha:Team one",
+        ]);
+        expect(quotaCalls).toBe(1);
+
+        // Navigating away and back remounts Quota and refetches once; the saved
+        // rank still applies to the fresh payload.
+        await app.navigate("/settings");
+        await app.navigate("/quota");
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Team two",
+          "Beta:Beta main",
+          "Alpha:Team one",
+        ]);
+        expect(quotaCalls).toBe(2);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("restores a hidden card at its saved rank after unhide without a quota read", async () => {
+      const savedOrder = ["gamma#one", "alpha#one", "beta#one"];
+      let quotaCalls = 0;
+      let settings = settingsWith(savedOrder);
+      let emit: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => {
+          quotaCalls += 1;
+          return quotaOf(orderedCards());
+        },
+        settings: async () => settings,
+        subscribe: (listener) => {
+          emit = listener;
+          return () => {};
+        },
+      });
+
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+        expect(quotaCalls).toBe(1);
+
+        // Hiding keeps the saved order untouched; the hidden card leaves a gap.
+        settings = settingsWith(savedOrder, [], ["alpha#one"]);
+        emit?.({ topic: "settings.changed", at: NOW, scope: "visibility" });
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual(["Gamma:Gamma main", "Beta:Beta main"]);
+        expect(settings.values["dashboard.cardOrder"]).toEqual(savedOrder);
+        expect(quotaCalls).toBe(1);
+
+        // Unhiding restores the same saved rank, still without a quota read.
+        settings = settingsWith(savedOrder);
+        emit?.({ topic: "settings.changed", at: NOW, scope: "visibility" });
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+        expect(settings.values["dashboard.cardOrder"]).toEqual(savedOrder);
+        expect(quotaCalls).toBe(1);
+      } finally {
+        app.dispose();
+      }
+    });
   });
 });
 
@@ -5308,11 +6004,11 @@ describe("styles and dependency boundaries", () => {
       expect(analyticsReads).toBe(1);
       expect(renderGraph.textOf(root)).toContain("Total tokens");
       expect(renderGraph.textOf(root)).not.toContain("Five hour window");
-      expect(
-        renderGraph
-          .elementsNamed(root, "a")
-          .find((node) => node.props["aria-label"] === "Analytics")?.props["aria-current"],
-      ).toBe("page");
+      const analyticsSection = renderGraph
+        .elementsNamed(root, "a")
+        .find((node) => node.props["aria-label"] === "Analytics");
+      expect(analyticsSection?.props["aria-current"]).toBeUndefined();
+      expect(analyticsSection?.props["data-section-active"]).toBe("true");
       const navigate = async (path: string) => {
         browser.follow(path);
         await settle();
@@ -5431,9 +6127,9 @@ describe("styles and dependency boundaries", () => {
     expect(styles).toContain("--qg-bg: #0a0a0a");
     expect(styles).toContain("--qg-frame: #161616");
     expect(styles).toContain("--qg-surface: #232323");
-    // Frozen v1 chart palette.
-    expect(styles).toContain("--qg-token-input: #51a2ff");
-    expect(styles).toContain("--qg-token-cache-read: #a684ff");
+    // Frozen v1.1 chart palette.
+    expect(styles).toContain("--qg-token-input: #a684ff");
+    expect(styles).toContain("--qg-token-cache-read: #51a2ff");
     expect(styles).toContain("--qg-token-reasoning: #00d5be");
     expect(styles).toContain("--qg-token-output: #9ae600");
     expect(styles).toContain("--qg-token-cache-write: #00d3f2");

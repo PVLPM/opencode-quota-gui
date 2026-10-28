@@ -1,11 +1,16 @@
 /**
  * Synthetic GUI smoke fixture (P7; spec §12 R51).
  *
- * Every project, session, message, account, and label here is invented in this
- * file. The SQLite schema mirrors the one `tests/helpers/gui-database.ts` seeds
+ * Every project, session, message, account, and value here is invented in this
+ * file. The one real public provider id/label (`openai`/`OpenAI`) exists only to
+ * exercise known-brand quota presentation; all of its data is fabricated. The
+ * SQLite schema mirrors the one `tests/helpers/gui-database.ts` seeds
  * (the columns the real read-only readers feature-detect), and every timestamp
  * is relative to the injected `nowMs` so the same fixture covers the 24h / 7d /
- * 30d / lifetime ranges, a compaction marker, and an empty project. Nothing in
+ * 30d / lifetime ranges, a compaction marker, and an empty project. The same
+ * rows also cover the model/provider analytics QA matrix: one raw model through
+ * three providers, a multi-model provider, >5 models and >5 providers (Other),
+ * a catalog-unknown provider fallback, and unpriced/partial pricing. Nothing in
  * this module reads OpenCode, the user profile, a provider, or the network.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -23,6 +28,14 @@ export const SYNTHETIC_PROVIDER_ID = "synthetic-labs";
 export const SYNTHETIC_PROVIDER_LABEL = "Synthetic Labs";
 /** Fake provider-reported amount; never the dashboard's API-equivalent cost. */
 export const SYNTHETIC_PROVIDER_AMOUNT = "42.50";
+
+/**
+ * A real public provider id used only for quota brand-presentation QA. The card
+ * label and logo resolve through the normal known-brand path; every value on the
+ * card is invented. No OpenAI client, credential, or network path is touched.
+ */
+export const SYNTHETIC_OPENAI_PROVIDER_ID = "openai";
+export const SYNTHETIC_OPENAI_PROVIDER_LABEL = "OpenAI";
 
 /** Stable synthetic ids the smoke test asserts on. */
 export const SYNTHETIC_IDS = {
@@ -45,16 +58,63 @@ export const SYNTHETIC_IDS = {
     alphaWorktreeWeek: "msg_a_wt_week",
     betaRecent: "msg_b_recent",
     betaMonth: "msg_b_month",
+    sharedModelOpenai: "msg_models_shared_openai",
+    sharedModelAnthropic: "msg_models_shared_anthropic",
+    sharedModelGoogle: "msg_models_shared_google",
+    openaiMini: "msg_models_openai_mini",
+    anthropicClaude: "msg_models_anthropic_claude",
+    googleGemini: "msg_models_google_gemini",
+    xaiGrok: "msg_models_xai_grok",
+    moonshotaiKimi: "msg_models_moonshotai_kimi",
+    unpricedAnthropic: "msg_models_unpriced_anthropic",
+    unpricedCatalogFallback: "msg_models_unpriced_catalog_fallback",
+    unknownProvider: "msg_models_unknown_provider",
   },
   compaction: "msg_compaction_c2",
   accounts: { one: "acct_synthetic_one", two: "acct_synthetic_two" },
+};
+
+/**
+ * Model/provider analytics QA identities (all recorded in `alphaRoot`).
+ *
+ * - `shared` is one raw model id used through three provider gateways, so its
+ *   model detail lists exactly those three raw providers.
+ * - `anthropic` carries several raw models, including the unpriced one, so its
+ *   provider detail is a partial cost estimate rather than an all-or-nothing one.
+ * - `catalogFallback` is absent from the bundled provider presentation catalog:
+ *   the UI must fall back to the raw id and generic mark, while its tokens stay
+ *   honestly unpriced (no invented cost).
+ * - One row omits the provider id entirely, producing the explicit unknown
+ *   provider identity and the "Unknown provider" label.
+ *
+ * All priced ids are real keys in the bundled models.dev snapshot, so costs are
+ * deterministic and require no network or runtime pricing refresh.
+ */
+export const SYNTHETIC_ANALYTICS = {
+  models: {
+    shared: "gpt-5",
+    openaiMini: "gpt-5-mini",
+    anthropicClaude: "claude-3-5-haiku-latest",
+    googleGemini: "gemini-2.5-flash",
+    xaiGrok: "grok-4",
+    moonshotaiKimi: "kimi-k2.5",
+    unpriced: "synthetic-unpriced-model",
+  },
+  providers: {
+    openai: "openai",
+    anthropic: "anthropic",
+    google: "google",
+    xai: "xai",
+    moonshotai: "moonshotai",
+    catalogFallback: "acme-inference",
+  },
 };
 
 /** The priced model the bundled models.dev snapshot knows; keeps cost derivable. */
 const PRICED_MODEL = { providerID: "openai", id: "gpt-5" };
 
 /** One message with all five token categories so every range changes every metric. */
-function message(id, sessionID, completedMs, base) {
+function message(id, sessionID, completedMs, base, model = PRICED_MODEL) {
   return {
     id,
     sessionID,
@@ -67,7 +127,7 @@ function message(id, sessionID, completedMs, base) {
       output: base + 3,
       reasoning: base + 4,
     },
-    model: PRICED_MODEL,
+    model,
   };
 }
 
@@ -212,6 +272,108 @@ export function buildSyntheticRows(nowMs, workspaceDir) {
       nowMs - 20 * DAY_MS,
       81,
     ),
+    // Analytics QA rows: one raw model through three providers, several models
+    // for one provider, >5 models/providers (Other), an unpriced model, and an
+    // omitted provider id. They live in `alphaRoot` so the existing
+    // project/session/compaction hierarchy and quota probes stay unchanged.
+    message(
+      SYNTHETIC_IDS.messages.sharedModelOpenai,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 5 * HOUR_MS,
+      101,
+      { providerID: SYNTHETIC_ANALYTICS.providers.openai, id: SYNTHETIC_ANALYTICS.models.shared },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.sharedModelAnthropic,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 6 * HOUR_MS,
+      103,
+      {
+        providerID: SYNTHETIC_ANALYTICS.providers.anthropic,
+        id: SYNTHETIC_ANALYTICS.models.shared,
+      },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.sharedModelGoogle,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 7 * HOUR_MS,
+      107,
+      { providerID: SYNTHETIC_ANALYTICS.providers.google, id: SYNTHETIC_ANALYTICS.models.shared },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.openaiMini,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 8 * HOUR_MS,
+      109,
+      {
+        providerID: SYNTHETIC_ANALYTICS.providers.openai,
+        id: SYNTHETIC_ANALYTICS.models.openaiMini,
+      },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.anthropicClaude,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 9 * HOUR_MS,
+      113,
+      {
+        providerID: SYNTHETIC_ANALYTICS.providers.anthropic,
+        id: SYNTHETIC_ANALYTICS.models.anthropicClaude,
+      },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.googleGemini,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 10 * HOUR_MS,
+      127,
+      {
+        providerID: SYNTHETIC_ANALYTICS.providers.google,
+        id: SYNTHETIC_ANALYTICS.models.googleGemini,
+      },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.xaiGrok,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 4 * HOUR_MS,
+      131,
+      { providerID: SYNTHETIC_ANALYTICS.providers.xai, id: SYNTHETIC_ANALYTICS.models.xaiGrok },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.moonshotaiKimi,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 3 * HOUR_MS,
+      137,
+      {
+        providerID: SYNTHETIC_ANALYTICS.providers.moonshotai,
+        id: SYNTHETIC_ANALYTICS.models.moonshotaiKimi,
+      },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.unpricedAnthropic,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 1 * HOUR_MS,
+      139,
+      {
+        providerID: SYNTHETIC_ANALYTICS.providers.anthropic,
+        id: SYNTHETIC_ANALYTICS.models.unpriced,
+      },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.unpricedCatalogFallback,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 2 * HOUR_MS,
+      149,
+      {
+        providerID: SYNTHETIC_ANALYTICS.providers.catalogFallback,
+        id: SYNTHETIC_ANALYTICS.models.unpriced,
+      },
+    ),
+    message(
+      SYNTHETIC_IDS.messages.unknownProvider,
+      SYNTHETIC_IDS.sessions.alphaRoot,
+      nowMs - 30 * 60_000,
+      151,
+      { id: SYNTHETIC_ANALYTICS.models.openaiMini },
+    ),
   ];
   const compactions = [
     {
@@ -225,7 +387,11 @@ export function buildSyntheticRows(nowMs, workspaceDir) {
 
 function messageData(row) {
   const data = { time: { created: row.createdMs, completed: row.completedMs } };
-  if (row.model) data.model = { providerID: row.model.providerID, id: row.model.id };
+  if (row.model) {
+    const model = { id: row.model.id };
+    if (row.model.providerID !== undefined) model.providerID = row.model.providerID;
+    data.model = model;
+  }
   if (row.tokens) {
     data.tokens = {
       input: row.tokens.input,
@@ -370,8 +536,10 @@ export function seedSyntheticFixture(rootDir, nowMs) {
 }
 
 /**
- * One provider with two discovered accounts and a provider-reported currency
- * row. Plain DTOs only: no provider implementation, no credential, no network.
+ * Two providers, both plain DTOs: one wholly synthetic provider with two
+ * discovered accounts and a provider-reported currency row, plus one
+ * provider-scope card under a real public brand id with fake quota data. No
+ * provider implementation, credential, or network is used.
  */
 export function buildSyntheticProviderProbes(nowMs) {
   const observedAtIso = new Date(nowMs).toISOString();
@@ -433,6 +601,30 @@ export function buildSyntheticProviderProbes(nowMs) {
               metric: { kind: "component", component: "remaining_credits" },
               prominence: "primary",
             },
+          },
+        ],
+        errors: [],
+      },
+    },
+    {
+      providerId: SYNTHETIC_OPENAI_PROVIDER_ID,
+      result: {
+        attempted: true,
+        accounts: [],
+        entries: [
+          {
+            kind: "percent",
+            name: "Five hour quota",
+            percentRemaining: 55,
+            resetTimeIso: new Date(nowMs + 4 * HOUR_MS).toISOString(),
+            accounting: {
+              resultType: "quota",
+              acquisitionMethod: "remote_api",
+              ownership: "maintained",
+              authority: "provider_reported",
+              observedAtIso,
+            },
+            semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
           },
         ],
         errors: [],

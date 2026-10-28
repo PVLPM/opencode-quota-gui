@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   bindCredentialSource,
@@ -7,9 +7,15 @@ import {
   notifyCredentialsChanged,
 } from "../src/lib/opencode-auth.js";
 import {
+  clearOpenCodeConsoleOrgNameCacheForTests,
   consoleBaseUrl,
   consoleHeaders,
   consoleUnexpectedErrorText,
+  getOpenCodeConsoleOrgNameCacheSizeForTests,
+  OPENCODE_CONSOLE_ORG_CACHE_MAX_AGE_MS,
+  OPENCODE_CONSOLE_ORG_CACHE_MAX_ENTRIES,
+  OPENCODE_CONSOLE_ORG_REQUEST_TIMEOUT_MS,
+  OPENCODE_CONSOLE_ORG_RESPONSE_MAX_BYTES,
   resolveOpenCodeConsoleAuth,
   resolveOpenCodeConsoleAuthAccounts,
 } from "../src/lib/opencode-console-auth.js";
@@ -17,10 +23,28 @@ import { createFakeIntegration, type FakeCredential } from "./helpers/fake-integ
 
 const unbinds: Array<() => void> = [];
 
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+    ...init,
+  });
+}
+
+beforeEach(() => {
+  // Existing reader tests do not assert org-name refresh; an empty workspace
+  // list keeps their fallback labels deterministic without live network.
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_url: string, _init?: RequestInit) => jsonResponse({ data: [] })),
+  );
+});
+
 afterEach(() => {
   for (const unbind of unbinds.splice(0)) unbind();
   notifyCredentialsChanged();
   clearReadAuthFileCacheForTests();
+  clearOpenCodeConsoleOrgNameCacheForTests();
 });
 
 function bindConsoleLogins(credentials: FakeCredential[]) {
@@ -402,6 +426,494 @@ describe("OpenCode Console multi-workspace reader", () => {
     const accounts = await resolveOpenCodeConsoleAuthAccounts();
 
     expect(accounts.map(({ sourceId }) => sourceId)).toEqual(["cred_a", "cred_b"]);
+  });
+});
+
+describe("OpenCode Console org name refresh", () => {
+  const baseNow = Date.now();
+  const longExpiry = baseNow + 24 * 60 * 60 * 1000;
+  const defaultOrgsUrl = "https://opencode.ai/console/api/orgs";
+
+  function oauthLogin(
+    id: string,
+    metadata: Record<string, unknown>,
+    overrides: Partial<FakeCredential> = {},
+  ): FakeCredential {
+    return consoleLogin(
+      {
+        type: "oauth",
+        methodID: "device",
+        refresh: `${id}-refresh`,
+        access: `${id}-access`,
+        expires: longExpiry,
+        metadata,
+      },
+      { id, ...overrides },
+    );
+  }
+
+  function authorization(call: unknown[] | undefined): string | undefined {
+    const init = call?.[1] as RequestInit | undefined;
+    return (init?.headers as Record<string, string> | undefined)?.Authorization;
+  }
+
+  function chunkedResponse(chunks: readonly string[]): Response {
+    const encoder = new TextEncoder();
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  it("refreshes a renamed org through the shared Console /api/orgs request", async () => {
+    const login = oauthLogin("cred_work", { orgID: "wrk_work", orgName: "Old Name" });
+    const integration = bindConsoleLogins([login]);
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({
+        data: [
+          { id: "wrk_work_extra", name: "Wrong Workspace" },
+          { id: "wrk_work", name: "  Acme\nWorkspace  " },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const accounts = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]).toMatchObject({
+      state: "configured",
+      sourceId: "cred_work",
+      label: "Acme Workspace",
+      active: true,
+      credential: {
+        accessToken: "cred_work-access",
+        orgId: "wrk_work",
+        orgName: "Acme Workspace",
+      },
+    });
+    // The stored login is read-only; refresh only affects the returned view.
+    expect(login.value).toMatchObject({
+      metadata: { orgID: "wrk_work", orgName: "Old Name" },
+    });
+    expect(integration.connection.resolve).toHaveBeenCalledOnce();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(defaultOrgsUrl);
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: "GET",
+      headers: {
+        Authorization: "Bearer cred_work-access",
+        Accept: "application/json",
+        "Cache-Control": "no-store",
+      },
+      redirect: "error",
+    });
+  });
+
+  it("reuses a fetched org name for the shared TTL and refreshes it afterwards", async () => {
+    bindConsoleLogins([oauthLogin("cred_work", { orgID: "wrk_work" }, { label: "Work" })]);
+    let name = "First Name";
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ data: [{ id: "wrk_work", name }] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+    expect(first[0]?.label).toBe("First Name");
+
+    const cached = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow + OPENCODE_CONSOLE_ORG_CACHE_MAX_AGE_MS - 1,
+      enrichOrgNames: true,
+    });
+    expect(cached[0]?.label).toBe("First Name");
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    name = "Second Name";
+    const refreshed = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow + OPENCODE_CONSOLE_ORG_CACHE_MAX_AGE_MS,
+      enrichOrgNames: true,
+    });
+    expect(refreshed[0]).toMatchObject({
+      sourceId: "cred_work",
+      active: true,
+      label: "Second Name",
+      credential: {
+        accessToken: "cred_work-access",
+        orgId: "wrk_work",
+        orgName: "Second Name",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("dedupes concurrent org name lookups for one server and org", async () => {
+    bindConsoleLogins([oauthLogin("cred_work", { orgID: "wrk_work" }, { label: "Work" })]);
+    let release: ((response: Response) => void) | undefined;
+    const gate = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) => gate);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = resolveOpenCodeConsoleAuthAccounts({ nowMs: baseNow, enrichOrgNames: true });
+    const second = resolveOpenCodeConsoleAuthAccounts({ nowMs: baseNow, enrichOrgNames: true });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+    release?.(jsonResponse({ data: [{ id: "wrk_work", name: "Acme" }] }));
+    const [firstAccounts, secondAccounts] = await Promise.all([first, second]);
+
+    expect(firstAccounts[0]?.label).toBe("Acme");
+    expect(secondAccounts[0]?.label).toBe("Acme");
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("keys the name cache by normalized server and org id, not by label", async () => {
+    bindConsoleLogins([
+      oauthLogin("cred_default_shared", { orgID: "wrk_shared" }, { label: "Work" }),
+      oauthLogin("cred_default_other", { orgID: "wrk_other" }, { label: "Other" }),
+      oauthLogin(
+        "cred_default_shared_slash",
+        { orgID: "wrk_shared", server: "https://opencode.ai/console/" },
+        { label: "Work Alias" },
+      ),
+      oauthLogin(
+        "cred_self_hosted",
+        { orgID: "wrk_shared", server: "https://console.self-hosted.example/" },
+        { label: "Work" },
+      ),
+    ]);
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "https://console.self-hosted.example/api/orgs") {
+        return jsonResponse({ data: [{ id: "wrk_shared", name: "Self Hosted" }] });
+      }
+      if (url === defaultOrgsUrl) {
+        return jsonResponse({
+          data: [
+            { id: "wrk_shared", name: "Default Shared" },
+            { id: "wrk_other", name: "Other Workspace" },
+          ],
+        });
+      }
+      throw new Error(`unexpected org URL ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const accounts = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+
+    expect(accounts.map(({ sourceId, label }) => ({ sourceId, label }))).toEqual([
+      { sourceId: "cred_default_shared", label: "Default Shared" },
+      { sourceId: "cred_default_other", label: "Other Workspace" },
+      { sourceId: "cred_default_shared_slash", label: "Default Shared" },
+      { sourceId: "cred_self_hosted", label: "Self Hosted" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.filter(([url]) => url === defaultOrgsUrl)).toHaveLength(2);
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url]) => url === "https://console.self-hosted.example/api/orgs",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("falls back to metadata, alias, and account number when refresh fails", async () => {
+    bindConsoleLogins([
+      oauthLogin("cred_http", { orgID: "wrk_http", orgName: "Metadata Name" }, { label: "HTTP" }),
+      oauthLogin("cred_json", { orgID: "wrk_json" }, { label: "Research" }),
+      oauthLogin("cred_network", { orgID: "wrk_network" }, { label: "default" }),
+      oauthLogin(
+        "cred_missing",
+        { orgID: "wrk_missing", orgName: "Missing Name" },
+        { label: "Missing" },
+      ),
+      oauthLogin("cred_invalid_name", { orgID: "wrk_invalid_name" }, { label: "Invalid" }),
+      oauthLogin("cred_id_name", { orgID: "wrk_id_name" }, { label: "ID Name" }),
+    ]);
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const bearer = authorization([_url, init]) ?? "";
+      if (bearer.includes("cred_http")) return new Response("boom", { status: 500 });
+      if (bearer.includes("cred_json")) return new Response("not json", { status: 200 });
+      if (bearer.includes("cred_network")) throw new Error("network down");
+      if (bearer.includes("cred_missing")) {
+        return jsonResponse({ data: [{ id: "wrk_other", name: "Other" }] });
+      }
+      if (bearer.includes("cred_invalid_name")) {
+        return jsonResponse({ data: [{ id: "wrk_invalid_name", name: "   " }] });
+      }
+      return jsonResponse({ data: [{ id: "wrk_id_name", name: "wrk_id_name" }] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const accounts = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+
+    expect(accounts.map(({ sourceId, label, state }) => ({ sourceId, label, state }))).toEqual([
+      { sourceId: "cred_http", label: "Metadata Name", state: "configured" },
+      { sourceId: "cred_json", label: "Research", state: "configured" },
+      { sourceId: "cred_network", label: "Account 3", state: "configured" },
+      { sourceId: "cred_missing", label: "Missing Name", state: "configured" },
+      { sourceId: "cred_invalid_name", label: "Invalid", state: "configured" },
+      { sourceId: "cred_id_name", label: "ID Name", state: "configured" },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("does not request org names without an org id and keeps stable labels", async () => {
+    bindConsoleLogins([
+      oauthLogin("cred_named", { orgName: "Metadata Only" }, { label: "Named" }),
+      oauthLogin("cred_alias", {}, { label: "Personal" }),
+      oauthLogin("cred_generic", {}, { label: "oauth" }),
+    ]);
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ data: [] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const accounts = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+
+    expect(accounts.map(({ sourceId, label }) => ({ sourceId, label }))).toEqual([
+      { sourceId: "cred_named", label: "Metadata Only" },
+      { sourceId: "cred_alias", label: "Personal" },
+      { sourceId: "cred_generic", label: "Account 3" },
+    ]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps stored labels without enrichment and only fetches when explicitly requested", async () => {
+    bindConsoleLogins([
+      oauthLogin("cred_stored", { orgID: "wrk_stored", orgName: "Stored Name" }, { label: "Work" }),
+    ]);
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ data: [{ id: "wrk_stored", name: "Console Name" }] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const defaultRead = await resolveOpenCodeConsoleAuthAccounts({ nowMs: baseNow });
+    expect(defaultRead[0]).toMatchObject({
+      sourceId: "cred_stored",
+      label: "Stored Name",
+      credential: { orgId: "wrk_stored", orgName: "Stored Name" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const explicitlyOff = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: false,
+    });
+    expect(explicitlyOff[0]).toMatchObject({
+      sourceId: "cred_stored",
+      label: "Stored Name",
+      credential: { orgName: "Stored Name" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const enriched = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+    expect(enriched[0]).toMatchObject({
+      sourceId: "cred_stored",
+      label: "Console Name",
+      credential: { orgId: "wrk_stored", orgName: "Console Name" },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not let an enriched cached name leak into a no-enrichment read", async () => {
+    bindConsoleLogins([
+      oauthLogin("cred_stored", { orgID: "wrk_stored", orgName: "Stored Name" }, { label: "Work" }),
+    ]);
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      jsonResponse({ data: [{ id: "wrk_stored", name: "Console Name" }] }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const enriched = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+    expect(enriched[0]?.label).toBe("Console Name");
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    const stored = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: false,
+    });
+    expect(stored[0]).toMatchObject({
+      sourceId: "cred_stored",
+      label: "Stored Name",
+      credential: { orgName: "Stored Name" },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("parses a chunked org response without a content-length header", async () => {
+    bindConsoleLogins([oauthLogin("cred_chunked", { orgID: "wrk_chunked" }, { label: "Chunked" })]);
+    const body = JSON.stringify({
+      data: [{ id: "wrk_chunked", name: "Chunked Name" }],
+    });
+    const response = chunkedResponse([body.slice(0, 11), body.slice(11, 33), body.slice(33)]);
+    expect(response.headers.has("content-length")).toBe(false);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, _init?: RequestInit) => response),
+    );
+
+    const accounts = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+
+    expect(accounts[0]).toMatchObject({
+      sourceId: "cred_chunked",
+      label: "Chunked Name",
+      credential: { orgName: "Chunked Name" },
+    });
+  });
+
+  it("cancels an oversized chunked org response without a content-length header", async () => {
+    bindConsoleLogins([
+      oauthLogin(
+        "cred_oversized",
+        { orgID: "wrk_oversized", orgName: "Fallback" },
+        { label: "Big" },
+      ),
+    ]);
+    const chunk = new Uint8Array(Math.ceil(OPENCODE_CONSOLE_ORG_RESPONSE_MAX_BYTES / 4));
+    chunk.fill(120);
+    let reads = 0;
+    let cancelled = false;
+    const body = {
+      getReader() {
+        return {
+          async read() {
+            if (reads >= 6) return { done: true, value: undefined };
+            reads += 1;
+            return { done: false, value: chunk };
+          },
+          async cancel() {
+            cancelled = true;
+          },
+          releaseLock() {},
+        };
+      },
+    };
+    const response = { ok: true, headers: new Headers(), body } as unknown as Response;
+    expect(response.headers.has("content-length")).toBe(false);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, _init?: RequestInit) => response),
+    );
+
+    const accounts = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+
+    expect(accounts[0]).toMatchObject({
+      sourceId: "cred_oversized",
+      label: "Fallback",
+      credential: { orgId: "wrk_oversized", orgName: "Fallback" },
+    });
+    expect(cancelled).toBe(true);
+    expect(reads).toBeLessThan(6);
+  });
+
+  it("bounds a hung org lookup and falls back without changing identity fields", async () => {
+    vi.useFakeTimers();
+    bindConsoleLogins([
+      oauthLogin("cred_hung", { orgID: "wrk_hung", orgName: "Fallback" }, { label: "Hung" }),
+    ]);
+    let markStarted: (() => void) | undefined;
+    const fetchStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const fetchMock = vi.fn((_url: string, _init?: RequestInit) => {
+      markStarted?.();
+      return new Promise<Response>(() => {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = resolveOpenCodeConsoleAuthAccounts({ nowMs: baseNow, enrichOrgNames: true });
+    await fetchStarted;
+    await vi.advanceTimersByTimeAsync(OPENCODE_CONSOLE_ORG_REQUEST_TIMEOUT_MS);
+    const accounts = await pending;
+
+    expect(accounts[0]).toMatchObject({
+      state: "configured",
+      sourceId: "cred_hung",
+      label: "Fallback",
+      active: true,
+      credential: {
+        accessToken: "cred_hung-access",
+        orgId: "wrk_hung",
+        orgName: "Fallback",
+      },
+    });
+
+    // The failed lookup is cached, so the next read does not hang again.
+    await expect(
+      resolveOpenCodeConsoleAuthAccounts({ nowMs: baseNow + 1, enrichOrgNames: true }),
+    ).resolves.toMatchObject([{ sourceId: "cred_hung", label: "Fallback" }]);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the shared org name cache bounded and evicts its oldest entry", async () => {
+    const count = OPENCODE_CONSOLE_ORG_CACHE_MAX_ENTRIES + 1;
+    const logins = Array.from({ length: count }, (_, index) =>
+      oauthLogin(`cred_${index}`, { orgID: `wrk_${index}` }, { label: `Org ${index}` }),
+    );
+    bindConsoleLogins(logins);
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const bearer = authorization([_url, init]) ?? "";
+      const index = Number(/cred_(\d+)-access/.exec(bearer)?.[1] ?? Number.NaN);
+      return jsonResponse({ data: [{ id: `wrk_${index}`, name: `Name ${index}` }] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const accounts = await resolveOpenCodeConsoleAuthAccounts({
+      nowMs: baseNow,
+      enrichOrgNames: true,
+    });
+
+    expect(accounts).toHaveLength(count);
+    expect(fetchMock).toHaveBeenCalledTimes(count);
+    expect(getOpenCodeConsoleOrgNameCacheSizeForTests()).toBe(
+      OPENCODE_CONSOLE_ORG_CACHE_MAX_ENTRIES,
+    );
+
+    const firstLogin = logins[0];
+    const lastLogin = logins[count - 1];
+    if (!firstLogin || !lastLogin) throw new Error("expected generated logins");
+
+    bindConsoleLogins([firstLogin]);
+    notifyCredentialsChanged();
+    await resolveOpenCodeConsoleAuthAccounts({ nowMs: baseNow + 1, enrichOrgNames: true });
+    expect(fetchMock).toHaveBeenCalledTimes(count + 1);
+
+    bindConsoleLogins([lastLogin]);
+    notifyCredentialsChanged();
+    await resolveOpenCodeConsoleAuthAccounts({ nowMs: baseNow + 1, enrichOrgNames: true });
+    expect(fetchMock).toHaveBeenCalledTimes(count + 1);
   });
 });
 

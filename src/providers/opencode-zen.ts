@@ -355,6 +355,7 @@ export const opencodeZenProvider: QuotaProvider = {
   async isAvailable(ctx: QuotaProviderContext): Promise<boolean> {
     const consoleAccounts = await resolveOpenCodeConsoleAuthAccounts({
       fallbackLabel: OPENCODE_ZEN_GROUP,
+      enrichOrgNames: false,
     });
     if (consoleAccounts.length > 0) return true;
 
@@ -371,6 +372,7 @@ export const opencodeZenProvider: QuotaProvider = {
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
     const consoleAccounts = await resolveOpenCodeConsoleAuthAccounts({
       fallbackLabel: OPENCODE_ZEN_GROUP,
+      enrichOrgNames: true,
     });
     if (consoleAccounts.length > 0) {
       return await fetchOpenCodeZenConsoleAccounts(ctx, consoleAccounts);

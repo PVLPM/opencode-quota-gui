@@ -29,9 +29,11 @@
   --qg-warning-surface: var(--surface-warning-weak);
   --qg-success: var(--icon-success-base);
 
-  /* The five raw additive token categories carry no library token (R31, R48). */
-  --qg-token-cache-read: #a684ff;
-  --qg-token-input: #51a2ff;
+  /* The five raw additive token categories carry no library token (R31, R48).
+     v1.1 swaps Input and Cache Read: cached input now reads blue, fresh input
+     purple, keeping the token stack distinct from the Session chart series. */
+  --qg-token-cache-read: #51a2ff;
+  --qg-token-input: #a684ff;
   --qg-token-reasoning: #00d5be;
   --qg-token-output: #9ae600;
   --qg-token-cache-write: #00d3f2;
@@ -42,6 +44,19 @@
   --qg-chart-context: #51a2ff;
   --qg-chart-own: #ffb900;
   --qg-chart-total: #ff8904;
+  /* The API-equivalent trend is not a token category. It uses the existing
+     cache-hit amber; the fifth rank stays an independent green. */
+  --qg-chart-cost: #b9b9b9;
+  --qg-chart-cost-strong: #ffb900;
+
+  /* Models chart rank palette: token hues for ranks 1-4, an independent green
+     for rank 5, and one neutral Other. */
+  --qg-rank-1: var(--qg-token-cache-read);
+  --qg-rank-2: var(--qg-token-input);
+  --qg-rank-3: var(--qg-token-reasoning);
+  --qg-rank-4: var(--qg-token-output);
+  --qg-rank-5: #00bc7d;
+  --qg-rank-other: var(--qg-text-muted);
 
   --qg-radius: 8px;
   --qg-unit: 4px;
@@ -50,8 +65,8 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --qg-token-cache-read: #a684ff;
-    --qg-token-input: #51a2ff;
+    --qg-token-cache-read: #51a2ff;
+    --qg-token-input: #a684ff;
     --qg-token-reasoning: #00d5be;
     --qg-token-output: #9ae600;
     --qg-token-cache-write: #00d3f2;
@@ -186,11 +201,13 @@ body {
   background: var(--surface-raised-base-hover);
 }
 
-.qg-topbar__link[aria-current="page"] {
+.qg-topbar__link[aria-current="page"],
+.qg-topbar__link[data-section-active="true"] {
   color: var(--qg-text);
 }
 
-.qg-topbar__link[aria-current="page"]::after {
+.qg-topbar__link[aria-current="page"]::after,
+.qg-topbar__link[data-section-active="true"]::after {
   content: "";
   position: absolute;
   height: 1px;
@@ -215,6 +232,49 @@ body {
   bottom: -9px;
   height: 1px;
   background: var(--qg-text-secondary);
+}
+
+/* Peer Analytics / Models tabs replace the single frame label inside Analytics. */
+.qg-analytics-tabs {
+  gap: 20px;
+}
+
+.qg-analytics-tabs::after {
+  display: none;
+}
+
+.qg-analytics-tabs a {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  color: var(--qg-text-muted);
+  text-decoration: none;
+  cursor: pointer;
+  transition: color var(--qg-transition);
+}
+
+.qg-analytics-tabs a:hover,
+.qg-analytics-tabs a:focus-visible {
+  color: var(--qg-text);
+}
+
+.qg-analytics-tabs a[aria-current="page"] {
+  color: var(--qg-text);
+}
+
+.qg-analytics-tabs a[aria-current="page"]::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  bottom: -9px;
+  height: 1px;
+  background: var(--qg-text-secondary);
+}
+
+.qg-analytics-tabs a:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 4px;
 }
 
 .qg-main {
@@ -264,6 +324,12 @@ body {
 .qg-section__meta {
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
+}
+
+.qg-breakable {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .qg-muted {
@@ -502,6 +568,31 @@ body {
   min-width: 0;
 }
 
+/* A local SVG silhouette: the mask inherits color, so every provider mark stays
+   monochrome and legible against the current surface and text color. */
+.qg-provider-logo {
+  display: inline-block;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  opacity: 0.72;
+  -webkit-mask-image: var(--qg-provider-logo);
+  mask-image: var(--qg-provider-logo);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  vertical-align: -0.2em;
+}
+
+.qg-card__logo {
+  align-self: center;
+  color: var(--qg-text-muted);
+}
+
 .qg-card__provider {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -703,17 +794,105 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* ---------- usage ---------- */
+/* ---------- chart shell & usage ---------- */
+
+/* One chrome for Analytics, Project, Session and the model/provider surfaces:
+   heading, single bordered panel, summary strip, then the chart body. */
+.qg-chart-shell {
+  min-width: 0;
+  gap: 14px;
+}
+
+.qg-chart-shell__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 20px;
+  flex-wrap: wrap;
+  min-height: 24px;
+}
+
+.qg-chart-shell__title {
+  margin: 0;
+  color: var(--qg-text);
+  font-size: var(--font-size-large);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--letter-spacing-tight);
+  line-height: 1.3;
+}
+
+.qg-chart-shell__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.qg-chart-shell__panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--qg-border);
+  border-radius: 10px;
+  background: var(--qg-frame);
+}
+
+/* The summary is part of the same surface as the plot, never a second card. */
+.qg-chart-shell .qg-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px 28px;
+  padding: 16px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--qg-border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.qg-chart-shell__stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.qg-chart-shell__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--qg-text-muted);
+  font-size: 10px;
+  font-weight: 550;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.qg-chart-shell__value {
+  color: var(--qg-text-secondary);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.qg-chart-shell__value[data-emphasis="primary"] {
+  color: var(--qg-text);
+  font-size: 28px;
+  font-weight: 550;
+  letter-spacing: -0.6px;
+  line-height: 1.15;
+}
 
 .qg-usage {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   align-items: start;
-  padding: 16px;
-  border: 1px solid var(--qg-border);
-  border-radius: 6px;
-  background: transparent;
+  min-width: 0;
+  padding: 18px;
 }
 
 @media (max-width: 900px) {
@@ -738,6 +917,14 @@ body {
   stroke-width: 1;
 }
 
+.qg-chart__axis-caption {
+  margin: 2px 2px 0;
+  color: var(--qg-text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: right;
+}
+
 .qg-chart__axis-label {
   fill: var(--qg-text-muted);
   font-size: 10px;
@@ -747,6 +934,9 @@ body {
 .qg-chart__hits {
   position: absolute;
   display: flex;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .qg-chart__hit {
@@ -778,6 +968,30 @@ body {
   transition: opacity var(--qg-transition);
 }
 
+/* On-demand composition: parent-coloured neutral shades, never a second
+   opposite-entity palette. The child selection only quiets its siblings. */
+.qg-chart__child-slice {
+  stroke: none;
+  pointer-events: none;
+  transition: opacity var(--qg-transition);
+}
+
+.qg-model-chart__plot[data-child-highlight] .qg-chart__child-slice:not([data-highlighted="true"]) {
+  opacity: 0.38;
+}
+
+/* Hidden same-dimension parents inside Other use the same slice ladder and
+   dim their siblings while the exact row is inspected. */
+.qg-model-chart__plot[data-parent-highlight] .qg-chart__child-slice:not([data-highlighted="true"]) {
+  opacity: 0.38;
+}
+
+.qg-chart__child-slice[data-highlighted="true"] {
+  stroke: var(--qg-text);
+  stroke-width: 1;
+  paint-order: stroke;
+}
+
 .qg-chart[data-highlight] .qg-chart__segment:not([data-highlighted="true"]) {
   opacity: 0.42;
 }
@@ -794,6 +1008,26 @@ body {
 .qg-chart__rate-point {
   fill: var(--qg-chart-rate);
   pointer-events: none;
+}
+
+/*
+ * The API-equivalent cost line uses the cache-hit amber. A faint dark halo
+ * keeps it legible over the light "Other" bar without adding a second, heavier
+ * stroke; the legend's fifth rank colour is independent.
+ */
+.qg-chart__cost-line {
+  fill: none;
+  stroke: var(--qg-chart-cost-strong);
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+  filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.75));
+}
+
+/* A lone numeric bucket still reads as a line mark, never a dot. */
+.qg-chart__cost-isolated {
+  stroke-width: 1.5;
 }
 
 .qg-chart__axis-title--rate,
@@ -814,6 +1048,13 @@ body {
   font-weight: 550;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+/* Cost-axis text follows its line: amber at rest, grey under emphasis. This
+   rule follows the generic title rule so equal specificity cannot mute it. */
+.qg-chart__axis-title--cost,
+.qg-chart__axis-label--cost {
+  fill: var(--qg-chart-cost-strong);
 }
 
 .qg-chart__axis-title--context,
@@ -879,6 +1120,8 @@ body {
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
+  /* Non-colour distinction from the solid own-session line. */
+  stroke-dasharray: 6 3;
 }
 
 .qg-chart__point--context {
@@ -1016,6 +1259,7 @@ body {
   border-radius: var(--qg-radius);
   background: transparent;
   color: var(--qg-text-secondary);
+  font: inherit;
   font-size: var(--font-size-small);
   text-align: left;
   transition:
@@ -1023,8 +1267,29 @@ body {
     border-color var(--qg-transition);
 }
 
+/* Native buttons stay direct flex items while the list keeps its semantics. */
+.qg-legend__entry {
+  display: flex;
+  min-width: 0;
+}
+
+/* Only the click-to-pin legends read as controls; the others stay plain labels. */
+.qg-legend__item[data-pinnable="true"] {
+  cursor: pointer;
+}
+
 .qg-legend__item:hover,
 .qg-legend__item:focus-visible {
+  border-color: var(--qg-border);
+}
+
+.qg-legend__item:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 1px;
+}
+
+/* A pinned entry keeps the same quiet frame once the pointer leaves. */
+.qg-legend__item[data-pinned="true"] {
   border-color: var(--qg-border);
 }
 
@@ -1034,6 +1299,14 @@ body {
   height: 10px;
   border-radius: 2px;
   background: var(--qg-swatch);
+}
+
+.qg-legend__swatch--dashed {
+  width: 16px;
+  height: 0;
+  border-top: 2px dashed var(--qg-swatch);
+  border-radius: 0;
+  background: transparent;
 }
 
 .qg-legend__label {
@@ -1089,17 +1362,9 @@ body {
 }
 
 .qg-chart__title {
-  flex-basis: 100%;
-  color: var(--qg-text-secondary);
-  font-size: 12px;
-  font-weight: 550;
-  letter-spacing: 0.04em;
-}
-
-.qg-estimate-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
 }
 
 .qg-summary {
@@ -1112,24 +1377,6 @@ body {
   background: transparent;
 }
 
-.qg-summary__item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 150px;
-}
-
-.qg-summary__value {
-  color: var(--qg-text);
-  font-size: 18px;
-  font-variant-numeric: tabular-nums;
-}
-
-.qg-summary__value--secondary {
-  color: var(--qg-text-secondary);
-  font-size: 14px;
-}
-
 .qg-sort[data-slot="segmented-control-v2"] {
   width: 164px;
 }
@@ -1137,6 +1384,320 @@ body {
 .qg-sort [data-slot="segmented-control-v2-item"] {
   padding-inline: 6px;
   font-size: 12px;
+}
+
+.qg-dimension[data-slot="segmented-control-v2"] {
+  width: 144px;
+}
+
+/* ---------- models chart, legend and breakdown ---------- */
+
+.qg-chart-shell__note {
+  display: inline-flex;
+  align-self: flex-start;
+  color: var(--qg-text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.qg-model-chart {
+  gap: 12px;
+}
+
+.qg-model-chart__plot {
+  overflow: visible;
+}
+
+.qg-model-chart__plot .qg-chart__segment {
+  transition: opacity var(--qg-transition);
+}
+
+/* Series emphasis leaves the total line at its true geometry but quiets the
+   amber stroke; Other never gives the line a highlighted state of its own. */
+.qg-model-chart__plot[data-highlight] .qg-chart__cost-line {
+  stroke: var(--qg-chart-cost);
+}
+
+.qg-model-chart__plot[data-highlight] .qg-chart__axis-title--cost,
+.qg-model-chart__plot[data-highlight] .qg-chart__axis-label--cost {
+  fill: var(--qg-chart-cost);
+}
+
+.qg-legend__logo {
+  width: 14px;
+  height: 14px;
+  color: var(--qg-text-muted);
+}
+
+/* The chart-only Other aggregate has no identity mark; keep its text gutter. */
+.qg-legend__logo--empty {
+  flex: none;
+}
+
+.qg-model-tooltip {
+  width: 320px;
+}
+
+.qg-model-tooltip__row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.qg-model-tooltip .qg-totals__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qg-model-tooltip__tokens {
+  color: var(--qg-text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.qg-model-tooltip__cost {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  color: var(--qg-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qg-model-tooltip__cost[data-cost-status="unpriced"] {
+  font-size: 11px;
+}
+
+.qg-model-tooltip__qualifier {
+  color: var(--qg-text-muted);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.qg-model-tooltip__footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Above the compact breakpoint, let the label wrap instead of truncating. */
+.qg-model-tooltip__footer .qg-totals__label {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.qg-model-tooltip__total-short {
+  display: none;
+}
+
+.qg-model-tooltip__footer .qg-totals__value {
+  color: var(--qg-text);
+}
+
+.qg-model-tooltip__note {
+  margin: 4px 0 0;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+}
+
+.qg-breakdown {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--qg-border);
+  border-radius: var(--qg-radius);
+  background: transparent;
+  overflow: hidden;
+}
+
+.qg-breakdown__head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px 92px;
+  gap: 12px;
+  padding: 8px 16px;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  background: var(--qg-surface);
+  border-bottom: 1px solid var(--qg-border);
+}
+
+.qg-breakdown__head > :nth-child(2) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  text-align: right;
+}
+
+.qg-breakdown__head > :last-child {
+  text-align: right;
+}
+
+.qg-breakdown__group {
+  display: contents;
+}
+
+.qg-breakdown__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px 92px;
+  grid-template-areas: "name cost tokens";
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--qg-border);
+  color: inherit;
+  text-decoration: none;
+  background: var(--qg-frame);
+  font: inherit;
+  transition:
+    background var(--qg-transition),
+    opacity var(--qg-transition);
+}
+
+.qg-breakdown__head + .qg-breakdown__group .qg-breakdown__row:first-child {
+  border-top: 0;
+}
+
+.qg-breakdown__row:hover,
+.qg-breakdown__row:focus-visible {
+  background: var(--surface-raised-base-hover);
+}
+
+.qg-breakdown__row:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: -1px;
+}
+
+.qg-breakdown__row[data-highlighted="true"] {
+  background: var(--qg-surface);
+  box-shadow: inset 2px 0 0 var(--qg-text-secondary);
+}
+
+.qg-breakdown__row[data-dimmed="true"] {
+  opacity: 0.55;
+}
+
+.qg-breakdown__row--child {
+  background: var(--qg-bg);
+  padding-left: 42px;
+}
+
+/* Provider-grouped model children have no colour marker; align their labels
+   under the provider label so the hierarchy reads without a second colour. */
+.qg-breakdown__row--child.qg-breakdown__row--plain {
+  padding-left: 57px;
+}
+
+.qg-breakdown__name {
+  grid-area: name;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.qg-breakdown__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--qg-text);
+}
+
+.qg-breakdown__row--child .qg-breakdown__label {
+  color: var(--qg-text-secondary);
+}
+
+.qg-breakdown__swatch {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--qg-swatch);
+}
+
+.qg-breakdown__logo {
+  width: 15px;
+  height: 15px;
+  color: var(--qg-text-muted);
+}
+
+.qg-breakdown__cost {
+  grid-area: cost;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.qg-breakdown__costvalue {
+  color: var(--qg-text-secondary);
+  white-space: nowrap;
+}
+
+.qg-breakdown__costvalue[data-cost-status="unpriced"] {
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.qg-breakdown__tokens {
+  grid-area: tokens;
+  text-align: right;
+  color: var(--qg-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qg-partial {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid var(--qg-border);
+  border-radius: 999px;
+  color: var(--qg-text-muted);
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.qg-page-head__logo {
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+  color: var(--qg-text-muted);
+  vertical-align: -0.15em;
+}
+
+@media (max-width: 640px) {
+  .qg-breakdown__head,
+  .qg-breakdown__row {
+    grid-template-columns: minmax(0, 1fr) 92px 64px;
+    gap: 4px 8px;
+    padding-inline: 10px;
+  }
+
+  .qg-breakdown__row--child {
+    padding-left: 26px;
+  }
+
+  .qg-breakdown__row--child.qg-breakdown__row--plain {
+    padding-left: 51px;
+  }
+
+  .qg-breakdown__head {
+    font-size: 10px;
+  }
 }
 
 /* Delayed foreground loading: fixed rectangular panel, border fade only. */
@@ -1376,6 +1937,7 @@ body {
   grid-area: name;
   color: var(--qg-text);
   min-width: 0;
+  padding-left: calc(var(--qg-node-depth, 0) * 16px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1413,6 +1975,17 @@ body {
 
   .qg-node {
     padding-inline: 10px;
+  }
+
+  /* Narrow rows wrap at word boundaries; a compact, capped indent leaves
+     enough width for the distinguishing words instead of breaking them. */
+  .qg-node__name {
+    padding-left: min(calc(var(--qg-node-depth, 0) * 8px), 40px);
+    overflow-wrap: break-word;
+    word-break: normal;
+    white-space: normal;
+    line-height: 1.35;
+    text-overflow: clip;
   }
 }
 
@@ -1764,43 +2337,42 @@ body {
 }
 
 /* Compact Console composition: numbers lead; surrounding structure stays quiet. */
+.qg-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+.qg-page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 20px;
+  flex-wrap: wrap;
+}
 .qg-page-title {
+  margin: 0;
   color: var(--qg-text);
   font-size: 20px;
   font-weight: 550;
+  letter-spacing: -0.35px;
+  line-height: 1.25;
 }
-.qg-usage__headline {
-  display: flex;
+.qg-page-head__meta {
+  display: inline-flex;
   align-items: baseline;
-  flex-wrap: wrap;
-  gap: 16px 36px;
-  padding: 4px 0 12px;
-  border-bottom: 1px solid var(--qg-border);
-}
-.qg-usage__headline > div {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.qg-usage__headline > .qg-section__meta {
-  margin-left: auto;
-}
-.qg-summary-label {
-  color: var(--qg-text-muted);
-  font-size: 12px;
-}
-.qg-summary-number {
-  color: var(--qg-text);
-  font-size: 30px;
-  line-height: 1.2;
-  font-weight: 550;
-  letter-spacing: -0.8px;
-  font-variant-numeric: tabular-nums;
-}
-.qg-summary-cost {
+  gap: 6px;
+  min-width: 0;
   color: var(--qg-text-secondary);
-  font-size: 17px;
-  font-variant-numeric: tabular-nums;
+  font-size: var(--font-size-small);
+  overflow-wrap: anywhere;
+}
+.qg-page-head__meta-label {
+  color: var(--qg-text-muted);
+  font-size: 10px;
+  font-weight: 550;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 .qg-usage__details .qg-totals__notes {
   padding: 0 0 10px;
@@ -1970,6 +2542,53 @@ body {
 .qg-input {
   color-scheme: dark;
 }
+@media (max-width: 700px) {
+  /*
+   * The chart drops to its 220px layout under 600px, so the tooltip's
+   * computed max-height is 204px. A short visible total keeps the footer on
+   * one line; the full label stays in the accessibility tree.
+   */
+  .qg-model-tooltip__total-long {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+  .qg-model-tooltip__total-short {
+    display: inline;
+  }
+}
+
+@media (max-width: 380px) {
+  /*
+   * The model tooltip's footer carries a label, an amount, and a
+   * "Partial estimate" pill. At 375 the full-size row clips the label and
+   * amount, so step the note text down one size and keep the amount and pill
+   * from shrinking. The compact "Total" label keeps the footer on one line
+   * at 375 while the full label remains available to assistive technology.
+   */
+  .qg-model-tooltip__footer {
+    gap: 6px;
+  }
+  .qg-model-tooltip__footer .qg-totals__label {
+    font-size: 11px;
+  }
+  .qg-model-tooltip__footer .qg-totals__value {
+    flex: none;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .qg-model-tooltip__footer .qg-partial {
+    flex: none;
+    padding-inline: 4px;
+  }
+}
+
 @media (max-width: 600px) {
   /* Both Session axis headings start/end inside the same narrow plot. */
   .qg-chart__axis-title {
@@ -2012,9 +2631,19 @@ body {
   .qg-usage--session {
     grid-template-columns: minmax(0, 1fr);
   }
-  .qg-usage__headline > .qg-section__meta {
-    margin-left: 0;
-    flex-basis: 100%;
+  .qg-chart-shell .qg-summary {
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px 20px;
+    padding: 14px 16px;
+  }
+  .qg-chart-shell__value[data-emphasis="primary"] {
+    font-size: 24px;
+  }
+  .qg-usage {
+    padding: 14px 16px;
+  }
+  .qg-page-head {
+    align-items: flex-start;
   }
   .qg-row {
     grid-template-columns: auto auto minmax(0, 1fr);

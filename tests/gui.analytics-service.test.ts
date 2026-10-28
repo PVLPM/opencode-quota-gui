@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type {
+  AnalyticsGroupSnapshot,
   CostedTokens,
   HomeSnapshot,
   ProjectSnapshot,
@@ -98,6 +99,32 @@ function fakeTransport(trace: TransportTrace): AnalyticsTransport {
         stepSemantics: "synthetic",
       } satisfies SessionSnapshot;
     },
+    async groups(query) {
+      trace.calls.push(
+        `groups:${query.dimension}:${query.range}:${
+          query.filter === undefined
+            ? "none"
+            : `${query.filter.dimension}:${query.filter.identity.kind}:${
+                query.filter.identity.kind === "known" ? query.filter.identity.id : ""
+              }`
+        }`,
+      );
+      return {
+        dimension: query.dimension,
+        range: query.range,
+        window: { sinceMs: NOW - DAY, untilMs: NOW },
+        bucketUnit: query.range === "24h" ? "hour" : "day",
+        timeZone: "UTC",
+        ...(query.filter === undefined ? {} : { filter: query.filter }),
+        buckets: [],
+        totals: costed(0),
+        sessionCount: 0,
+        stepCount: 0,
+        rows: [],
+        series: [],
+        stale: false,
+      } satisfies AnalyticsGroupSnapshot;
+    },
     async refresh() {
       trace.calls.push("refresh");
     },
@@ -132,6 +159,43 @@ describe("analytics read service", () => {
     await service.close();
     expect(trace.closed).toBe(1);
     await expect(service.home({ range: "24h" })).rejects.toMatchObject({ code: "closed" });
+  });
+
+  it("forwards grouped queries and rejects malformed ones before starting a worker", async () => {
+    const trace: TransportTrace = { init: 0, calls: [], closed: 0 };
+    const createTransport = vi.fn(() => fakeTransport(trace));
+    const service = createAnalyticsReadService({ createTransport: createTransport as never });
+
+    const snapshot = await service.groups({
+      range: "30d",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "" } },
+    });
+    expect(snapshot.dimension).toBe("provider");
+    expect(snapshot.filter).toEqual({
+      dimension: "model",
+      identity: { kind: "known", id: "" },
+    });
+    expect(trace.calls).toEqual(["groups:provider:30d:model:known:"]);
+
+    await expect(
+      service.groups({ range: "nope" as RangeKey, dimension: "model" }),
+    ).rejects.toMatchObject({ code: "bad-request" });
+    await expect(
+      service.groups({
+        range: "24h",
+        dimension: "session" as "model",
+      }),
+    ).rejects.toMatchObject({ code: "bad-request" });
+    await expect(
+      service.groups({
+        range: "24h",
+        dimension: "model",
+        filter: { dimension: "model", identity: { kind: "other" } } as never,
+      }),
+    ).rejects.toMatchObject({ code: "bad-request" });
+    expect(createTransport).toHaveBeenCalledTimes(1);
+    await service.close();
   });
 
   it("validates ranges and resource ids without starting a worker", async () => {

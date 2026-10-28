@@ -1,0 +1,17 @@
+{
+  "repository": "https://github.com/anomalyco/opencode",
+  "commit": "86976449c40d48f2731553a024f74552593d1764",
+  "license": "MIT",
+  "sourcePath": "packages/ui/src/components/provider-icons/sprite.svg",
+  "sourceSpriteSha256": "90c22219a2aeff3ea489625156530ea0fa8a072a1b934a52a9192074d39237df",
+  "logos": {
+    "opencode-go-g": {
+      "label": "OpenCode Go",
+      "url": "/assets/providers/opencode-go-g.svg",
+      "bytes": 206,
+      "sha256": "60f3be46aa4b540c24212d12db462a74a5147ed48a3d8116689bfad20598d1e0",
+      "sourcePath": "packages/ui/src/components/provider-icons/sprite.svg",
+      "sourceSymbol": "opencode-go"
+    }
+  }
+}

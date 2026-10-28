@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -27,6 +27,11 @@ import {
 const ANCHOR_MS = Date.parse("2026-10-20T12:00:00.000Z");
 const SMALL_DENSE = { sessions: 60, rows: 6_000 };
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+// The model benchmark child measures ~0.55–3.0 s locally on the 16/32-row
+// semantic fixtures. These bounds replace the previous 120 s defaults while
+// leaving CI headroom for a cold pricing snapshot.
+const MODEL_BENCHMARK_CHILD_TIMEOUT_MS = 20_000;
+const MODEL_BENCHMARK_TEST_TIMEOUT_MS = 30_000;
 const roots: string[] = [];
 
 function tempRoot(): string {
@@ -187,6 +192,275 @@ describe("analytics benchmark real-source read-only isolation", () => {
     expect(hashFile(fixture.dbPath)).toBe(beforeHash);
   });
 });
+
+// Canonical `pnpm verify` builds first; source-only test runs may lack the model build.
+describe.skipIf(!existsSync(join(REPO_ROOT, "dist/gui/analytics-model.js")))(
+  "analytics model grouped-read benchmark",
+  () => {
+    it(
+      "compares warmed Home and grouped reads with bounded series buckets and no DB reads",
+      () => {
+        const child = spawnSync(
+          process.execPath,
+          [
+            join(REPO_ROOT, "scripts/benchmark-analytics-model.mjs"),
+            "--model",
+            join(REPO_ROOT, "dist/gui/analytics-model.js"),
+            "--sizes",
+            "16,32",
+            "--reads",
+            "2",
+            "--json",
+          ],
+          {
+            cwd: REPO_ROOT,
+            encoding: "utf8",
+            timeout: MODEL_BENCHMARK_CHILD_TIMEOUT_MS,
+          },
+        );
+
+        expect(child.error).toBeUndefined();
+        expect(child.status, child.stderr).toBe(0);
+        const result = JSON.parse(child.stdout);
+        expect(result.model).toBe("analytics-model");
+        expect(result.method.rawDbReads).toBe(0);
+        expect(result.method.rawDbReadsIsMeasured).toBe(false);
+        expect(result.method.pricingSnapshotReads).toBe("possible-bundled-or-runtime");
+        expect(result.method.gcExposed).toBe(true);
+        expect(result.method.pairs).toBeGreaterThan(20);
+        expect(result.method.readIterations).toBe(2);
+        expect(result.method.readWarmup).toBeGreaterThanOrEqual(1);
+        expect(result.results).toHaveLength(2);
+
+        for (const entry of result.results) {
+          expect(entry.pairs).toBe(result.method.pairs);
+          expect(entry.groupedRead.rawDbReads).toBe(0);
+          expect(entry.groupedRead.rawDbReadsIsMeasured).toBe(false);
+          expect(entry.groupedRead.ownedStepsStable).toBe(true);
+          expect(entry.groupedRead.scenarios).toHaveLength(8);
+          expect(
+            new Set(
+              entry.groupedRead.scenarios.map(
+                (scenario: { range: string; dimension: string }) =>
+                  `${scenario.range}/${scenario.dimension}`,
+              ),
+            ).size,
+          ).toBe(8);
+          for (const scenario of entry.groupedRead.scenarios) {
+            expect(["24h", "7d", "30d", "lifetime"]).toContain(scenario.range);
+            expect(["model", "provider"]).toContain(scenario.dimension);
+            expect(scenario.matchHome).toBe(true);
+            expect(scenario.seriesConserved).toBe(true);
+            expect(scenario.bucketSeriesMatch).toBe(true);
+            // Grouped lifetime intentionally starts at owned data while Home
+            // lifetime also includes older session metadata. Every grouped
+            // boundary must still map Home, and the first grouped boundary must
+            // equal the fixture's earliest positive owned day. Finite ranges
+            // must match Home bucket-for-bucket.
+            expect(scenario.bucketMatchScope).toBe(
+              scenario.range === "lifetime" ? "scoped-lifetime-subset" : "exact",
+            );
+            if (scenario.range === "lifetime") {
+              expect(scenario.homeBuckets).toBeGreaterThan(scenario.buckets);
+              expect(scenario.expectedLifetimeStartMs).toEqual(expect.any(Number));
+              expect(scenario.firstBucketStartMs).toBe(scenario.expectedLifetimeStartMs);
+            } else {
+              expect(scenario.expectedLifetimeStartMs).toBeNull();
+              expect(scenario.firstBucketStartMs).toEqual(expect.any(Number));
+              expect(scenario.homeBuckets).toBe(scenario.buckets);
+            }
+            expect(scenario.rowsWithoutBuckets).toBe(true);
+            expect(scenario.home.meanMs).toBeGreaterThanOrEqual(0);
+            expect(scenario.grouped.meanMs).toBeGreaterThanOrEqual(0);
+            expect(scenario.bucketSlots).toBeLessThanOrEqual(6 * scenario.buckets);
+            expect(scenario.homeRetainedBytes).toEqual(expect.any(Number));
+            expect(scenario.groupedRetainedBytes).toEqual(expect.any(Number));
+            expect(scenario.homePayloadBytes).toBeGreaterThan(0);
+            expect(scenario.groupedPayloadBytes).toBeGreaterThan(0);
+          }
+        }
+      },
+      MODEL_BENCHMARK_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      "rejects an extra leading empty lifetime bucket",
+      () => {
+        const root = tempRoot();
+        const modelPath = join(REPO_ROOT, "dist/gui/analytics-model.js");
+        const wrapperPath = join(root, "extra-leading-bucket-model.mjs");
+        writeFileSync(
+          wrapperPath,
+          `import { pathToFileURL } from "node:url";
+const actual = await import(${JSON.stringify(pathToFileURL(modelPath).href)});
+const DAY_MS = 86_400_000;
+const EMPTY = {
+  input: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  output: 0,
+  reasoning: 0,
+  total: 0,
+  apiEquivalentCostUsd: null,
+  unpricedTokens: 0,
+  unknownTokens: 0,
+};
+export function createAnalyticsModel(options) {
+  const model = actual.createAnalyticsModel(options);
+  return {
+    ...model,
+    groups(query, nowMs) {
+      const snapshot = model.groups(query, nowMs);
+      const first = snapshot.buckets[0];
+      if (query.range !== "lifetime" || first === undefined) return snapshot;
+      return {
+        ...snapshot,
+        buckets: [{ startMs: first.startMs - DAY_MS, endMs: first.startMs }, ...snapshot.buckets],
+        series: snapshot.series.map((series) => ({
+          ...series,
+          buckets: [{ ...EMPTY }, ...series.buckets],
+        })),
+      };
+    },
+  };
+}
+`,
+        );
+
+        const child = spawnSync(
+          process.execPath,
+          [
+            join(REPO_ROOT, "scripts/benchmark-analytics-model.mjs"),
+            "--model",
+            wrapperPath,
+            "--sizes",
+            "16",
+            "--reads",
+            "1",
+            "--json",
+          ],
+          {
+            cwd: REPO_ROOT,
+            encoding: "utf8",
+            timeout: MODEL_BENCHMARK_CHILD_TIMEOUT_MS,
+          },
+        );
+
+        expect(child.error).toBeUndefined();
+        expect(child.status, child.stderr).toBe(0);
+        const result = JSON.parse(child.stdout);
+        const lifetimeScenarios = result.results[0].groupedRead.scenarios.filter(
+          (scenario: { range: string }) => scenario.range === "lifetime",
+        );
+        expect(lifetimeScenarios).toHaveLength(2);
+        for (const scenario of lifetimeScenarios) {
+          // The extra empty bucket still maps to a Home boundary; only the
+          // precise first-boundary check can reject it.
+          expect(scenario.bucketSeriesMatch).toBe(true);
+          expect(scenario.firstBucketStartMs).not.toBe(scenario.expectedLifetimeStartMs);
+          expect(scenario.seriesConserved).toBe(false);
+        }
+      },
+      MODEL_BENCHMARK_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      "supports a Home-only baseline run without grouped queries",
+      () => {
+        const child = spawnSync(
+          process.execPath,
+          [
+            join(REPO_ROOT, "scripts/benchmark-analytics-model.mjs"),
+            "--model",
+            join(REPO_ROOT, "dist/gui/analytics-model.js"),
+            "--sizes",
+            "16",
+            "--reads",
+            "1",
+            "--home-only",
+            "--json",
+          ],
+          {
+            cwd: REPO_ROOT,
+            encoding: "utf8",
+            timeout: MODEL_BENCHMARK_CHILD_TIMEOUT_MS,
+          },
+        );
+
+        expect(child.error).toBeUndefined();
+        expect(child.status, child.stderr).toBe(0);
+        const result = JSON.parse(child.stdout);
+        expect(result.method.homeOnly).toBe(true);
+        expect(result.results).toHaveLength(1);
+        expect(result.results[0].groupedRead).toBeUndefined();
+        expect(result.results[0].homeRead.rawDbReads).toBe(0);
+        expect(result.results[0].homeRead.rawDbReadsIsMeasured).toBe(false);
+        expect(result.results[0].homeRead.readSource).toBe("owned-steps");
+        expect(result.results[0].homeRead.ownedStepsStable).toBe(true);
+        expect(result.results[0].homeRead.scenarios.map((s: { range: string }) => s.range)).toEqual(
+          ["24h", "7d", "30d", "lifetime"],
+        );
+        for (const scenario of result.results[0].homeRead.scenarios) {
+          expect(scenario.home.meanMs).toBeGreaterThanOrEqual(0);
+          expect(scenario.payloadBytes).toBeGreaterThan(0);
+        }
+      },
+      MODEL_BENCHMARK_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      "reports expected fork dedup counts at semantic block sizes",
+      () => {
+        const child = spawnSync(
+          process.execPath,
+          [
+            join(REPO_ROOT, "scripts/benchmark-analytics-model.mjs"),
+            "--model",
+            join(REPO_ROOT, "dist/gui/analytics-model.js"),
+            "--sizes",
+            "16,32",
+            "--reads",
+            "1",
+            "--home-only",
+            "--json",
+          ],
+          {
+            cwd: REPO_ROOT,
+            encoding: "utf8",
+            timeout: MODEL_BENCHMARK_CHILD_TIMEOUT_MS,
+          },
+        );
+
+        expect(child.error).toBeUndefined();
+        expect(child.status, child.stderr).toBe(0);
+        const result = JSON.parse(child.stdout);
+        // One and two 16-row fork blocks: the measured 32k/128k sizes are only
+        // for the manual benchmark report and are not required to validate the
+        // dedup arithmetic.
+        expect(result.results.map((entry: { rows: number }) => entry.rows)).toEqual([16, 32]);
+        expect(result.results.map((entry: { ownedSteps: number }) => entry.ownedSteps)).toEqual([
+          13, 26,
+        ]);
+        for (const entry of result.results) {
+          // The fixture makes 4 copies per 16-row block but only one is owned,
+          // so 3 of every 16 physical rows are deduplicated.
+          expect(entry.rows % 16).toBe(0);
+          expect(entry.ownedSteps).toBe(entry.rows - (entry.rows / 16) * 3);
+          expect(entry.removedOwnedSteps).toBe(0);
+          expect(entry.homeRead.ownedSteps).toBe(entry.ownedSteps);
+          expect(entry.homeRead.ownedStepsStable).toBe(true);
+          const lifetime = entry.homeRead.scenarios.find(
+            (scenario: { range: string }) => scenario.range === "lifetime",
+          );
+          // Rows span 365 days, but session metadata starts 30 days earlier,
+          // so the lifetime range plans 396 daily buckets, not 365.
+          expect(lifetime?.buckets).toBe(396);
+        }
+      },
+      MODEL_BENCHMARK_TEST_TIMEOUT_MS,
+    );
+  },
+);
 
 // Canonical `pnpm verify` builds first; source-only test runs may lack the CLI worker.
 describe.skipIf(!existsSync(join(REPO_ROOT, "dist/gui/analytics-worker.js")))(

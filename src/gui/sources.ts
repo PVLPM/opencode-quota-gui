@@ -21,6 +21,8 @@
  * and the real provider collector.
  */
 import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
   DashboardDataSource,
   HomeSnapshot,
   ProjectSnapshot,
@@ -30,6 +32,7 @@ import type {
 import type { RangeKey } from "../contracts/ranges.js";
 import { createLoadConfigMeta, loadConfig } from "../lib/config.js";
 import type { QuotaProvider, QuotaProviderContext } from "../lib/entries.js";
+import { rawAssistantRowHasTokenUsage } from "../lib/opencode-storage.js";
 import {
   collectQuotaDashboardProviderResults,
   type QuotaStatusLiveProbe,
@@ -42,6 +45,7 @@ import {
   type UsageAnalytics,
   type UsageAnalyticsDataset,
 } from "./aggregation.js";
+import { createAnalyticsModel } from "./analytics-model.js";
 import { type AnalyticsReadService, createAnalyticsReadService } from "./analytics-service.js";
 import { buildCardId, hashQuotaCardIdentity } from "./identity.js";
 import {
@@ -113,7 +117,7 @@ export interface DashboardReadSourceOptions {
 
 export type DashboardReadSource = Pick<
   DashboardDataSource,
-  "home" | "quota" | "project" | "session"
+  "home" | "quota" | "project" | "session" | "groups"
 > & {
   /** One shared analytics refresh per transport tick, if the service loaded. */
   refreshAnalytics?(): Promise<void>;
@@ -261,9 +265,19 @@ export function createDashboardReadSource(
     const loadDataset = options.loadDataset;
     if (!loadDataset) throw new Error("Analytics dataset seam unavailable");
 
+    /**
+     * Parity with the worker model: zero-token rows are metadata/activity only
+     * and stay out of usage rollups, steps, and pricing. Session/project
+     * metadata is left intact so zero-token-only scopes remain visible.
+     */
+    const usageDataset = (dataset: UsageAnalyticsDataset): UsageAnalyticsDataset => ({
+      ...dataset,
+      messages: dataset.messages.filter(rawAssistantRowHasTokenUsage),
+    });
+
     return {
       async home({ range }) {
-        const analytics = createAnalytics(await loadDataset());
+        const analytics = createAnalytics(usageDataset(await loadDataset()));
         const nowMs = now();
         const { usage, projects } = analytics.home(range, nowMs);
         return {
@@ -278,17 +292,28 @@ export function createDashboardReadSource(
       },
       async project({ projectId, range }) {
         try {
-          return createAnalytics(await loadDataset()).project(projectId, range, now());
+          return createAnalytics(usageDataset(await loadDataset())).project(
+            projectId,
+            range,
+            now(),
+          );
         } catch (error) {
           throw translateAnalyticsError(error);
         }
       },
       async session({ sessionId }) {
         try {
-          return createAnalytics(await loadDataset()).session(sessionId);
+          return createAnalytics(usageDataset(await loadDataset())).session(sessionId);
         } catch (error) {
           throw translateAnalyticsError(error);
         }
+      },
+      async groups(query) {
+        const dataset = await loadDataset();
+        const model = createAnalyticsModel({ timeZone });
+        model.setMetadata(dataset.sessions, dataset.projects);
+        model.apply(dataset.messages, []);
+        return model.groups(query, now());
       },
       // The in-memory dataset is rebuilt per request; there is no worker.
       async refresh() {},
@@ -506,6 +531,10 @@ export function createDashboardReadSource(
     }
   }
 
+  async function groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot> {
+    return (await getAnalyticsService()).groups(query);
+  }
+
   async function refreshAnalytics(): Promise<void> {
     // A quota-only dashboard never loaded analytics, so never start the worker.
     if (!analyticsPromise) return;
@@ -542,5 +571,5 @@ export function createDashboardReadSource(
     await service?.close?.();
   }
 
-  return { home, quota, project, session, refreshAnalytics, subscribeAnalytics, close };
+  return { home, quota, project, session, groups, refreshAnalytics, subscribeAnalytics, close };
 }

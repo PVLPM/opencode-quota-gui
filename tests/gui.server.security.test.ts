@@ -159,8 +159,13 @@ beforeAll(async () => {
   assetRoot = join(baseDir, "root");
   secretPath = join(baseDir, "outside.txt");
   await mkdir(join(assetRoot, "assets"), { recursive: true });
+  await mkdir(join(assetRoot, "assets", "providers"), { recursive: true });
   await writeFile(join(assetRoot, "index.html"), INDEX_HTML);
   await writeFile(join(assetRoot, "assets", "app.js"), "console.log('app');");
+  await writeFile(
+    join(assetRoot, "assets", "providers", "openai.svg"),
+    '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg>',
+  );
   await writeFile(secretPath, OUTSIDE_SECRET);
 });
 
@@ -332,6 +337,12 @@ describe("GUI server security", () => {
       expect(asset.status).toBe(200);
       expect(asset.headers["content-security-policy"]).toBe(EXPECTED_CSP);
       expect(asset.headers["cache-control"]).toBe("no-store");
+
+      const providerLogo = await raw(handle.port, { path: "/assets/providers/openai.svg" });
+      expect(providerLogo.status).toBe(200);
+      expect(providerLogo.headers["content-type"]).toBe("image/svg+xml");
+      expect(providerLogo.body).toContain("<svg");
+      expect(providerLogo.headers["content-security-policy"]).toBe(EXPECTED_CSP);
     } finally {
       await handle.close();
     }

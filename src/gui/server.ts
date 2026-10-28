@@ -14,9 +14,11 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { decodeAnalyticsEntityToken } from "../contracts/analytics-entity.js";
 import { BUILD_IDENTITY } from "../contracts/build-identity.js";
-
 import {
+  type AnalyticsDimension,
+  type AnalyticsGroupQuery,
   DASHBOARD_CONTRACT_VERSION,
   type GuiSettingsStore,
   type JsonValue,
@@ -417,9 +419,24 @@ function parseRange(url: URL): RangeKey | undefined {
   return isRangeKey(raw) ? raw : undefined;
 }
 
+/** `/models` plus exact `/model|provider/<canonical entity token>` direct links. */
+function isAnalyticsUiPath(pathname: string): boolean {
+  if (pathname === "/models") return true;
+  const match = /^\/(?:model|provider)\/([^/]+)$/.exec(pathname);
+  if (!match) return false;
+  let token: string;
+  try {
+    token = decodeURIComponent(match[1] ?? "");
+  } catch {
+    return false;
+  }
+  return decodeAnalyticsEntityToken(token) !== undefined;
+}
+
 /** Known UI paths only: never reinterpret an asset or malformed id as HTML. */
 function isUiPath(pathname: string): boolean {
   if (["/", "/quota", "/analytics", "/settings"].includes(pathname)) return true;
+  if (isAnalyticsUiPath(pathname)) return true;
   const match = /^\/(?:project|session)\/([^/]+)$/.exec(pathname);
   if (!match) return false;
   let id: string;
@@ -673,6 +690,48 @@ export function createDashboardServer(
       }
       snapshots.setViewScope("analytics", "request");
       sendJson(res, 200, await snapshots.session({ sessionId }));
+      return;
+    }
+
+    if ((rest[0] === "models" || rest[0] === "providers") && rest.length <= 2) {
+      if (!requireMethods(req, res, ["GET", "HEAD"])) return;
+      const range = parseRange(url);
+      if (range === undefined) {
+        sendError(res, "bad-request");
+        return;
+      }
+      const entityDimension: AnalyticsDimension = rest[0] === "models" ? "model" : "provider";
+      let query: AnalyticsGroupQuery;
+      if (rest.length === 1) {
+        query = { range, dimension: entityDimension };
+      } else {
+        // Entity tokens are validated by the analytics codec alone: raw ids may
+        // contain characters the filesystem-oriented resource-id route rejects.
+        const identity = decodeAnalyticsEntityToken(rest[1] ?? "");
+        if (identity === undefined) {
+          sendError(res, "bad-request");
+          return;
+        }
+        let groupDimension: AnalyticsDimension = entityDimension === "model" ? "provider" : "model";
+        // The default grouping is the opposite axis (model detail groups by
+        // provider and vice versa); an explicit `group` preserves any exact
+        // Task 1 query that filters and groups on the same axis.
+        const groupParam = url.searchParams.get("group");
+        if (groupParam !== null) {
+          if (groupParam !== "model" && groupParam !== "provider") {
+            sendError(res, "bad-request");
+            return;
+          }
+          groupDimension = groupParam;
+        }
+        query = {
+          range,
+          dimension: groupDimension,
+          filter: { dimension: entityDimension, identity },
+        };
+      }
+      snapshots.setViewScope("analytics", "request");
+      sendJson(res, 200, await snapshots.groups(query));
       return;
     }
 

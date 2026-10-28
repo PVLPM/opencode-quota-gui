@@ -284,9 +284,11 @@ describe("delayed foreground loading", () => {
     const labels = overlays.map(
       (attributes) => /\blabel="([^"]+)"/u.exec(attributes)?.[1] ?? undefined,
     );
-    expect(overlays).toHaveLength(4);
+    // Five analytics surfaces (analytics home, models, model/provider detail,
+    // projects, sessions) plus the single quota view.
+    expect(overlays).toHaveLength(6);
     expect(labels.every((label) => label !== undefined)).toBe(true);
-    expect(labels.filter((label) => label === "analytics")).toHaveLength(3);
+    expect(labels.filter((label) => label === "analytics")).toHaveLength(5);
     expect(labels.filter((label) => label === "quota")).toHaveLength(1);
   });
 

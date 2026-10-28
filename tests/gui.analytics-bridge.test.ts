@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-
+import type { AnalyticsGroupQuery, AnalyticsGroupSnapshot } from "../src/contracts/dashboard.js";
 import {
   ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS,
   type AnalyticsWorkerLike,
   createAnalyticsBridge,
   workerResourceLimits,
 } from "../src/gui/analytics-bridge.js";
+import type { AnalyticsEngine } from "../src/gui/analytics-engine.js";
 import type { AnalyticsWorkerRequest } from "../src/gui/analytics-protocol.js";
+import { createAnalyticsWorkerRuntime } from "../src/gui/analytics-worker-runtime.js";
 import { createGuiLogger } from "../src/gui/log.js";
 
 const logger = createGuiLogger({ sink: () => {} });
+const NOW = Date.parse("2026-10-19T12:00:00.000Z");
+const DAY = 86_400_000;
 
 class FakeWorker implements AnalyticsWorkerLike {
   readonly messages: AnalyticsWorkerRequest[] = [];
@@ -58,6 +62,15 @@ function answerEcho(command: AnalyticsWorkerRequest["command"]): unknown {
       return { marker: `project:${command.projectId}:${command.range}` };
     case "session":
       return { marker: `session:${command.sessionId}` };
+    case "groups": {
+      const filter = command.query.filter;
+      const marker = filter
+        ? `${filter.dimension}:${filter.identity.kind}:${
+            filter.identity.kind === "known" ? filter.identity.id : ""
+          }`
+        : "none";
+      return { marker: `groups:${command.query.dimension}:${command.query.range}:${marker}` };
+    }
     default:
       return undefined;
   }
@@ -475,6 +488,114 @@ describe("analytics worker bridge", () => {
     worker.emit("message", { type: "analytics-generation", generation: 2 });
     expect(notifications).toBe(1);
     await bridge.close();
+  });
+
+  it("coalesces identical group reads and keeps dimensions/filters distinct", async () => {
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const query: AnalyticsGroupQuery = { range: "7d", dimension: "model" };
+
+    const [first, second] = await Promise.all([bridge.groups(query), bridge.groups({ ...query })]);
+    expect(first).toEqual(second);
+    expect(framesOf(worker, "groups")).toHaveLength(1);
+
+    await bridge.groups({ range: "7d", dimension: "provider" });
+    await bridge.groups({
+      ...query,
+      filter: { dimension: "model", identity: { kind: "known", id: "" } },
+    });
+    await bridge.groups({
+      ...query,
+      filter: { dimension: "model", identity: { kind: "unknown" } },
+    });
+    await bridge.groups({
+      ...query,
+      filter: { dimension: "model", identity: { kind: "known", id: "unknown" } },
+    });
+    expect(framesOf(worker, "groups")).toHaveLength(5);
+    await bridge.close();
+  });
+
+  it("round-trips one typed groups command through the worker runtime", async () => {
+    const query: AnalyticsGroupQuery = {
+      range: "30d",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "a|||b" } },
+    };
+    const snapshot: AnalyticsGroupSnapshot = {
+      dimension: "provider",
+      range: "30d",
+      window: { sinceMs: NOW - DAY, untilMs: NOW },
+      bucketUnit: "day",
+      timeZone: "UTC",
+      filter: query.filter,
+      buckets: [{ startMs: NOW - DAY, endMs: NOW }],
+      totals: {
+        input: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        output: 0,
+        reasoning: 0,
+        total: 1,
+        apiEquivalentCostUsd: null,
+        unpricedTokens: 0,
+        unknownTokens: 0,
+      },
+      sessionCount: 1,
+      stepCount: 1,
+      rows: [],
+      series: [],
+      stale: false,
+    };
+    const groups = vi.fn(async () => snapshot);
+    const engine = {
+      home: async () => {
+        throw new Error("not used");
+      },
+      project: async () => {
+        throw new Error("not used");
+      },
+      session: async () => {
+        throw new Error("not used");
+      },
+      groups,
+      refresh: async () => {},
+      stats: async () => ({
+        rss: 0,
+        heapTotal: 0,
+        heapUsed: 0,
+        external: 0,
+        arrayBuffers: 0,
+        peakHeapUsed: 0,
+        peakRss: 0,
+      }),
+      gc: async () => false,
+      close: async () => {},
+    } satisfies AnalyticsEngine;
+    const runtime = createAnalyticsWorkerRuntime({ createEngine: () => engine });
+
+    await runtime.handle({ kind: "init", options: {} });
+    await expect(runtime.handle({ kind: "groups", query })).resolves.toEqual(snapshot);
+    expect(groups).toHaveBeenCalledWith(query);
+
+    await expect(
+      runtime.handle({
+        kind: "groups",
+        query: { range: "1d", dimension: "model" } as unknown as AnalyticsGroupQuery,
+      }),
+    ).rejects.toMatchObject({ code: "bad-request" });
+    await expect(
+      runtime.handle({
+        kind: "groups",
+        query: {
+          range: "24h",
+          dimension: "model",
+          filter: { dimension: "model", identity: { kind: "known", id: 7 } },
+        } as unknown as AnalyticsGroupQuery,
+      }),
+    ).rejects.toMatchObject({ code: "bad-request" });
+    expect(groups).toHaveBeenCalledTimes(1);
+    await runtime.close();
   });
 
   it("uses an optional runtime-managed heap limit only when configured", () => {

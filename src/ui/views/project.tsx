@@ -2,16 +2,14 @@ import type { JSX } from "solid-js";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { ProjectSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
+import { ChartSummary, type ChartSummaryItem } from "../components/chart-shell";
+import { EstimateNote } from "../components/cost-estimate";
 import { EstimateInfo } from "../components/estimate";
 import { SortControl } from "../components/sort-control";
 import { EmptyNotice } from "../components/states";
 import { UsageChart } from "../components/usage-chart";
-import {
-  formatApiEquivalentCost,
-  formatExactCount,
-  formatTokenCount,
-  usageChartTitle,
-} from "../format";
+import { formatExactCount, formatTokenCount, usageChartTitle } from "../format";
+import { formatCostText } from "../model-analytics";
 import { formatPath } from "../routing";
 import { sortRootRows } from "../sorting";
 
@@ -38,57 +36,53 @@ export function ProjectView(props: {
     const [first] = labels;
     return labels.every((label) => label === first) ? first : undefined;
   };
+  const summaryItems = (): ChartSummaryItem[] => [
+    {
+      label: "Total tokens",
+      value: formatExactCount(props.snapshot.totals.total),
+      emphasis: "primary",
+    },
+    {
+      label: "API-equivalent estimate",
+      value: formatCostText(props.snapshot.totals),
+      info: <EstimateInfo totals={props.snapshot.totals} />,
+      note: <EstimateNote totals={props.snapshot.totals} showExclusionTitle={false} />,
+    },
+    {
+      label: "Sessions",
+      value: formatExactCount(props.snapshot.totals.sessionCount),
+    },
+  ];
 
   return (
     <>
-      <nav class="qg-breadcrumbs" aria-label="Breadcrumb">
-        <a href={formatPath({ name: "analytics" }, props.range)}>Analytics</a>
-        <span aria-hidden="true">›</span>
-        <span aria-current="page">{props.snapshot.name}</span>
-      </nav>
-      <section class="qg-section" aria-labelledby="qg-project-head">
-        <header class="qg-section__head">
-          <h2 class="qg-section__title" id="qg-project-head">
+      <div class="qg-detail">
+        <nav class="qg-breadcrumbs" aria-label="Breadcrumb">
+          <a href={formatPath({ name: "analytics" }, props.range)}>Analytics</a>
+          <span aria-hidden="true">›</span>
+          <span aria-current="page">{props.snapshot.name}</span>
+        </nav>
+        <header class="qg-page-head">
+          <h2 class="qg-page-title" id="qg-project-head">
             {props.snapshot.name}
           </h2>
           <Show when={sharedWorktree()}>
-            {(worktree) => <span class="qg-section__meta">{worktree()}</span>}
+            {(worktree) => (
+              <span class="qg-page-head__meta">
+                <span class="qg-page-head__meta-label">Worktree</span>
+                {worktree()}
+              </span>
+            )}
           </Show>
         </header>
-        <div class="qg-summary">
-          <div class="qg-summary__item">
-            <span class="qg-summary-label">Total tokens</span>
-            <strong class="qg-summary__value">
-              {formatExactCount(props.snapshot.totals.total)}
-            </strong>
-          </div>
-          <div class="qg-summary__item">
-            <span class="qg-summary-label qg-estimate-label">
-              API-equivalent estimate
-              <EstimateInfo totals={props.snapshot.totals} />
-            </span>
-            <span class="qg-summary__value qg-summary__value--secondary">
-              {formatApiEquivalentCost(props.snapshot.totals.apiEquivalentCostUsd)}
-            </span>
-          </div>
-          <div class="qg-summary__item">
-            <span class="qg-summary-label">Sessions</span>
-            <span class="qg-summary__value qg-summary__value--secondary">
-              {formatExactCount(props.snapshot.totals.sessionCount)}
-            </span>
-          </div>
-        </div>
-        <Show
-          when={props.snapshot.usage.buckets.length > 0}
-          fallback={<EmptyNotice message="No activity in this range." />}
-        >
-          <UsageChart
-            usage={props.snapshot.usage}
-            title={usageChartTitle(props.snapshot.usage.bucketUnit)}
-            showSummary={false}
-          />
-        </Show>
-      </section>
+        <UsageChart
+          usage={props.snapshot.usage}
+          title={usageChartTitle(props.snapshot.usage.bucketUnit)}
+          headingId="qg-project-usage"
+          summary={<ChartSummary items={summaryItems()} />}
+          emptyMessage="No activity in this range."
+        />
+      </div>
 
       <section class="qg-section" aria-labelledby="qg-project-roots">
         <header class="qg-section__head">

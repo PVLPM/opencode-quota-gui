@@ -8,8 +8,9 @@ import {
 } from "../chart-geometry";
 import { chartIndexAt, createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
-import { formatExactCount, formatTimestamp, formatTokenCount } from "../format";
+import { axisRangeCaption, formatExactCount, formatTimestamp, formatTokenCount } from "../format";
 import { createChartTooltipLayout } from "../tooltip-layout";
+import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
 
 /**
  * Session graphs (design spec §3; owner 13–17).
@@ -28,7 +29,12 @@ import { createChartTooltipLayout } from "../tooltip-layout";
  * the shared custom tooltip; a keyboard slider exposes the same inspection
  * without timers or native `<title>` popups.
  */
-export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element {
+export function SessionChart(props: {
+  snapshot: SessionSnapshot;
+  title?: string;
+  /** Anchor for the shell heading; the view keeps its page identity separate. */
+  headingId?: string;
+}): JSX.Element {
   const inspection = createChartInspection();
   const active = inspection.active;
   const { size, ref } = createChartLayout(DEFAULT_SESSION_SIZE);
@@ -36,6 +42,26 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
   const own = () => props.snapshot.ownSummary;
   const tree = () => props.snapshot.treeTotals;
   const timeZone = () => props.snapshot.timeZone;
+  const summaryItems = (): ChartSummaryItem[] =>
+    geometry().hasDescendants
+      ? [
+          {
+            label: "Tree total tokens",
+            value: formatExactCount(tree().total),
+            emphasis: "primary",
+          },
+          {
+            label: "This session · own tokens",
+            value: formatExactCount(own().total),
+          },
+        ]
+      : [
+          {
+            label: "Total tokens · this session",
+            value: formatExactCount(own().total),
+            emphasis: "primary",
+          },
+        ];
 
   const compactionAt = (index: number): SessionCompactionTick[] =>
     geometry().compaction.filter((marker) => marker.stepIndex === index);
@@ -134,29 +160,63 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
     if (Math.abs(value) < 100) return Number(value.toPrecision(3)).toString();
     return formatTokenCount(value);
   };
+  /**
+   * Both headings share one row above the plot. At the narrow 9px size the
+   * full pair needs about 204 chart units; 210 leaves a clear gap. Below that,
+   * drop the repeated word "tokens" rather than let the two headings collide.
+   * The chart's accessible name still spells out both axes in full.
+   */
+  const compactHeadings = (): boolean => geometry().plot.width < 210;
+  const rangeEndCaption = (): string | undefined => {
+    const count = geometry().stepCount;
+    if (count <= 0) return undefined;
+    return axisRangeCaption(`step ${count}`, count, geometry().labelIndexes);
+  };
 
   return (
-    <div class="qg-usage qg-usage--session">
-      <header class="qg-usage__headline">
-        <Show
-          when={geometry().hasDescendants}
-          fallback={
-            <div>
-              <span class="qg-summary-label">Total tokens · this session</span>
-              <strong class="qg-summary-number">{formatExactCount(own().total)}</strong>
+    <ChartShell
+      title={props.title ?? "Usage by step"}
+      headingId={props.headingId}
+      summary={<ChartSummary items={summaryItems()} />}
+      bodyClass="qg-usage qg-usage--session"
+      aside={
+        <>
+          <div class="qg-totals">
+            <div class="qg-totals__row">
+              <span class="qg-totals__label">Steps (own)</span>
+              <span class="qg-totals__value">{formatExactCount(own().stepCount)}</span>
             </div>
-          }
-        >
-          <div>
-            <span class="qg-summary-label">Tree total tokens</span>
-            <strong class="qg-summary-number">{formatExactCount(tree().total)}</strong>
+            <div class="qg-totals__row">
+              <span class="qg-totals__label">Steps (tree)</span>
+              <span class="qg-totals__value">{formatExactCount(props.snapshot.steps.length)}</span>
+            </div>
+            <div class="qg-totals__row">
+              <span class="qg-totals__label">Compactions (focus session)</span>
+              <span class="qg-totals__value">
+                {formatExactCount(props.snapshot.compactionMarkers.length)}
+              </span>
+            </div>
           </div>
-          <div>
-            <span class="qg-summary-label">This session · own tokens</span>
-            <span class="qg-summary-cost">{formatExactCount(own().total)}</span>
+
+          <div class="qg-legend">
+            <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-context)" }}>
+              <span class="qg-legend__swatch" aria-hidden="true" />
+              <span class="qg-legend__label">Context · focus session</span>
+            </div>
+            <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-own)" }}>
+              <span class="qg-legend__swatch" aria-hidden="true" />
+              <span class="qg-legend__label">Cumulative · this session</span>
+            </div>
+            <Show when={geometry().hasDescendants}>
+              <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-total)" }}>
+                <span class="qg-legend__swatch qg-legend__swatch--dashed" aria-hidden="true" />
+                <span class="qg-legend__label">Cumulative · session tree</span>
+              </div>
+            </Show>
           </div>
-        </Show>
-      </header>
+        </>
+      }
+    >
       <div
         ref={(element) => {
           ref(element);
@@ -190,7 +250,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
               y={geometry().plot.top - 12}
               text-anchor="start"
             >
-              Context tokens
+              {compactHeadings() ? "Context" : "Context tokens"}
             </text>
             <text
               class="qg-chart__axis-title qg-chart__axis-title--total"
@@ -198,7 +258,7 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
               y={geometry().plot.top - 12}
               text-anchor="end"
             >
-              Cumulative tokens
+              {compactHeadings() ? "Cumulative" : "Cumulative tokens"}
             </text>
 
             <For each={geometry().context.ticks}>
@@ -454,48 +514,16 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
         </Show>
       </div>
 
+      <Show when={rangeEndCaption()}>
+        {(caption) => <p class="qg-chart__axis-caption">{caption()}</p>}
+      </Show>
+
       <Show when={geometry().stepCount > 0 && geometry().focusStepCount === 0}>
         <p class="qg-chart__note">
           No completed steps in the focus session yet; the yellow own line stays at zero while the
           orange tree line still covers descendant steps.
         </p>
       </Show>
-
-      <aside class="qg-usage__aside">
-        <div class="qg-totals">
-          <div class="qg-totals__row">
-            <span class="qg-totals__label">Steps (own)</span>
-            <span class="qg-totals__value">{formatExactCount(own().stepCount)}</span>
-          </div>
-          <div class="qg-totals__row">
-            <span class="qg-totals__label">Steps (tree)</span>
-            <span class="qg-totals__value">{formatExactCount(props.snapshot.steps.length)}</span>
-          </div>
-          <div class="qg-totals__row">
-            <span class="qg-totals__label">Compactions (focus session)</span>
-            <span class="qg-totals__value">
-              {formatExactCount(props.snapshot.compactionMarkers.length)}
-            </span>
-          </div>
-        </div>
-
-        <div class="qg-legend">
-          <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-context)" }}>
-            <span class="qg-legend__swatch" aria-hidden="true" />
-            <span class="qg-legend__label">Context · focus session</span>
-          </div>
-          <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-own)" }}>
-            <span class="qg-legend__swatch" aria-hidden="true" />
-            <span class="qg-legend__label">Cumulative · this session</span>
-          </div>
-          <Show when={geometry().hasDescendants}>
-            <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-total)" }}>
-              <span class="qg-legend__swatch" aria-hidden="true" />
-              <span class="qg-legend__label">Cumulative · session tree</span>
-            </div>
-          </Show>
-        </div>
-      </aside>
 
       <div class="sr-only">
         <table>
@@ -555,6 +583,6 @@ export function SessionChart(props: { snapshot: SessionSnapshot }): JSX.Element 
           </tbody>
         </table>
       </div>
-    </div>
+    </ChartShell>
   );
 }

@@ -23,27 +23,58 @@ vi.mock("../src/lib/opencode-storage.js", () => {
   };
 });
 
+const PRICED_EDGE_PROVIDER = "pair-labs";
+const PRICED_EDGE_MODEL = "alpha|||beta";
+const PARTIAL_PROVIDER = "partial-labs";
+const PARTIAL_MODEL = "input-only";
+const FREE_PROVIDER = "free-labs";
+const FREE_MODEL = "zero-cost";
+
 vi.mock("../src/lib/modelsdev-pricing.js", () => ({
   hasCost: vi.fn(
-    (providerID: string, modelID: string) => providerID === "openai" && modelID === "gpt-5",
+    (providerID: string, modelID: string) =>
+      (providerID === "openai" && modelID === "gpt-5") ||
+      (providerID === PRICED_EDGE_PROVIDER && modelID === PRICED_EDGE_MODEL) ||
+      (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
+      (providerID === FREE_PROVIDER && modelID === FREE_MODEL),
   ),
   hasProvider: vi.fn(
-    (providerID: string) => providerID === "openai" || providerID === "unpriced-labs",
+    (providerID: string) =>
+      providerID === "openai" ||
+      providerID === "unpriced-labs" ||
+      providerID === PRICED_EDGE_PROVIDER ||
+      providerID === PARTIAL_PROVIDER ||
+      providerID === FREE_PROVIDER,
+  ),
+  hasCatalogModel: vi.fn(
+    (providerID: string, modelID: string) => providerID === "catalog-labs" && modelID === "gpt-5",
   ),
   hasModel: vi.fn(
     (providerID: string, modelID: string) =>
       (providerID === "openai" && modelID === "gpt-5") ||
-      (providerID === "unpriced-labs" && modelID === "mystery-1"),
+      (providerID === "unpriced-labs" && modelID === "mystery-1") ||
+      (providerID === PRICED_EDGE_PROVIDER && modelID === PRICED_EDGE_MODEL) ||
+      (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
+      (providerID === FREE_PROVIDER && modelID === FREE_MODEL),
   ),
   isModelsDevProviderId: vi.fn(
-    (providerID: string) => providerID === "openai" || providerID === "unpriced-labs",
+    (providerID: string) =>
+      providerID === "openai" ||
+      providerID === "unpriced-labs" ||
+      providerID === PRICED_EDGE_PROVIDER ||
+      providerID === PARTIAL_PROVIDER ||
+      providerID === FREE_PROVIDER,
   ),
   listProvidersForModelId: vi.fn((modelID: string) => (modelID === "gpt-5" ? ["openai"] : [])),
-  lookupCost: vi.fn((providerID: string, modelID: string) =>
-    providerID === "openai" && modelID === "gpt-5"
-      ? { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 }
-      : null,
-  ),
+  lookupCost: vi.fn((providerID: string, modelID: string) => {
+    if (providerID === "openai" && modelID === "gpt-5")
+      return { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };
+    if (providerID === PRICED_EDGE_PROVIDER && modelID === PRICED_EDGE_MODEL)
+      return { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };
+    if (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) return { input: 2 };
+    if (providerID === FREE_PROVIDER && modelID === FREE_MODEL) return { input: 0, output: 0 };
+    return null;
+  }),
 }));
 
 vi.mock("../src/lib/cursor-pricing.js", () => ({
@@ -54,9 +85,15 @@ vi.mock("../src/lib/cursor-pricing.js", () => ({
 }));
 
 vi.mock("../src/lib/token-cost.js", () => ({
-  calculateUsdFromTokenBuckets: vi.fn(
+  tokenRateCoverage: vi.fn(
     (
-      _rates: unknown,
+      rates: {
+        input?: number;
+        output?: number;
+        reasoning?: number;
+        cache_read?: number;
+        cache_write?: number;
+      },
       tokens: {
         input: number;
         output: number;
@@ -64,7 +101,96 @@ vi.mock("../src/lib/token-cost.js", () => ({
         cache_read: number;
         cache_write: number;
       },
-    ) => tokens.input + tokens.output + tokens.reasoning + tokens.cache_read + tokens.cache_write,
+    ) => {
+      const rateFor = (bucket: keyof typeof tokens): number | undefined => {
+        switch (bucket) {
+          case "input":
+            return rates.input;
+          case "output":
+            return rates.output;
+          case "cache_read":
+            return rates.cache_read ?? rates.input;
+          case "cache_write":
+            return rates.cache_write ?? rates.input;
+          case "reasoning":
+            return rates.reasoning ?? rates.output;
+        }
+      };
+      let pricedTokens = 0;
+      let unpricedTokens = 0;
+      for (const bucket of ["input", "output", "cache_read", "cache_write", "reasoning"] as const) {
+        const count = tokens[bucket];
+        if (!(count > 0)) continue;
+        if (typeof rateFor(bucket) === "number") pricedTokens += count;
+        else unpricedTokens += count;
+      }
+      return { pricedTokens, unpricedTokens };
+    },
+  ),
+  splitTokenBucketsByRate: vi.fn(
+    (
+      rates: {
+        input?: number;
+        output?: number;
+        reasoning?: number;
+        cache_read?: number;
+        cache_write?: number;
+      },
+      tokens: {
+        input: number;
+        output: number;
+        reasoning: number;
+        cache_read: number;
+        cache_write: number;
+      },
+    ) => {
+      const rateFor = (bucket: keyof typeof tokens): number | undefined => {
+        switch (bucket) {
+          case "input":
+            return rates.input;
+          case "output":
+            return rates.output;
+          case "cache_read":
+            return rates.cache_read ?? rates.input;
+          case "cache_write":
+            return rates.cache_write ?? rates.input;
+          case "reasoning":
+            return rates.reasoning ?? rates.output;
+        }
+      };
+      const priced = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 };
+      const unpriced = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 };
+      for (const bucket of ["input", "output", "cache_read", "cache_write", "reasoning"] as const) {
+        const count = tokens[bucket];
+        if (!(count > 0)) continue;
+        if (typeof rateFor(bucket) === "number") priced[bucket] = count;
+        else unpriced[bucket] = count;
+      }
+      return { priced, unpriced };
+    },
+  ),
+  calculateUsdFromTokenBuckets: vi.fn(
+    (
+      rates: {
+        input?: number;
+        output?: number;
+        reasoning?: number;
+        cache_read?: number;
+        cache_write?: number;
+      },
+      tokens: {
+        input: number;
+        output: number;
+        reasoning: number;
+        cache_read: number;
+        cache_write: number;
+      },
+    ) =>
+      tokens.input * (rates.input ?? 0) +
+      tokens.output * (rates.output ?? 0) +
+      tokens.reasoning * (rates.reasoning ?? rates.output ?? 0) +
+      tokens.cache_read * (rates.cache_read ?? rates.input ?? 0) +
+      tokens.cache_write * (rates.cache_write ?? rates.input ?? 0),
   ),
 }));
 
@@ -108,6 +234,19 @@ describe("shared priceTokenBuckets primitive", () => {
     }
   });
 
+  it("blocks cross-provider fallback when the source catalog knows the model without rates", () => {
+    const outcome = priceTokenBuckets({
+      providerID: "catalog-labs",
+      modelID: "gpt-5",
+      tokens,
+    });
+
+    expect(outcome).toMatchObject({
+      status: "unpriced",
+      key: { provider: "catalog-labs", model: "gpt-5" },
+    });
+  });
+
   it("classifies an unmappable source as unknown", () => {
     const outcome = priceTokenBuckets({
       providerID: "phantom-labs",
@@ -134,6 +273,77 @@ describe("shared priceTokenBuckets primitive", () => {
     expect(callsAfterFirst).toBeGreaterThan(callsBefore);
     expect(vi.mocked(modelsdev.isModelsDevProviderId).mock.calls.length).toBe(callsAfterFirst);
     expect(cache.size).toBe(1);
+  });
+
+  it("keeps colliding pair encodings in separate cache entries in both orders", () => {
+    const pricedPair = { providerID: PRICED_EDGE_PROVIDER, modelID: PRICED_EDGE_MODEL };
+    const collidingPair = {
+      providerID: `${PRICED_EDGE_PROVIDER}|||alpha`,
+      modelID: "beta",
+    };
+
+    for (const reverse of [false, true]) {
+      const cache = new Map();
+      const first = priceTokenBuckets({ ...(reverse ? collidingPair : pricedPair), tokens, cache });
+      const second = priceTokenBuckets({
+        ...(reverse ? pricedPair : collidingPair),
+        tokens,
+        cache,
+      });
+      const pricedOutcome = reverse ? second : first;
+      const unknownOutcome = reverse ? first : second;
+
+      expect(pricedOutcome.status).toBe("priced");
+      expect(unknownOutcome.status).toBe("unknown");
+      if (unknownOutcome.status === "unknown") {
+        expect(unknownOutcome.unknown.sourceProviderID).toBe(collidingPair.providerID);
+        expect(unknownOutcome.unknown.sourceModelID).toBe(collidingPair.modelID);
+      }
+      expect(cache.size).toBe(2);
+    }
+  });
+
+  it("distinguishes missing, null, and empty raw ids in the cache", () => {
+    const cache = new Map();
+    const missing = priceTokenBuckets({ providerID: undefined, modelID: "ghost", tokens, cache });
+    const empty = priceTokenBuckets({ providerID: "", modelID: "ghost", tokens, cache });
+    const nulled = priceTokenBuckets({ providerID: null, modelID: "ghost", tokens, cache });
+
+    expect(missing.status).toBe("unknown");
+    expect(empty.status).toBe("unknown");
+    expect(nulled.status).toBe("unknown");
+    if (missing.status === "unknown") {
+      expect(missing.unknown.sourceProviderID).toBe("unknown");
+    }
+    if (empty.status === "unknown") {
+      expect(empty.unknown.sourceProviderID).toBe("");
+    }
+    if (nulled.status === "unknown") {
+      expect(nulled.unknown.sourceProviderID).toBe("unknown");
+    }
+    expect(cache.size).toBe(3);
+
+    const modelCache = new Map();
+    const missingModel = priceTokenBuckets({
+      providerID: "phantom-labs",
+      modelID: undefined,
+      tokens,
+      cache: modelCache,
+    });
+    const emptyModel = priceTokenBuckets({
+      providerID: "phantom-labs",
+      modelID: "",
+      tokens,
+      cache: modelCache,
+    });
+
+    if (missingModel.status === "unknown") {
+      expect(missingModel.unknown.sourceModelID).toBe("unknown");
+    }
+    if (emptyModel.status === "unknown") {
+      expect(emptyModel.unknown.sourceModelID).toBe("");
+    }
+    expect(modelCache.size).toBe(2);
   });
 });
 
@@ -451,5 +661,116 @@ describe("aggregateUsage session scoping", () => {
         tokens: expect.objectContaining({ input: 7, output: 2 }),
       }),
     ]);
+  });
+
+  it("tracks fully unpriced messages per session without claiming a partial rate", async () => {
+    const storage = await import("../src/lib/opencode-storage.js");
+    (storage.iterAssistantMessagesForSessions as any).mockResolvedValue([
+      {
+        sessionID: "ses_root",
+        role: "assistant",
+        providerID: "openai",
+        modelID: "gpt-5",
+        tokens: { input: 3, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+      {
+        sessionID: "ses_root",
+        role: "assistant",
+        providerID: "unpriced-labs",
+        modelID: "mystery-1",
+        tokens: { input: 7, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    ]);
+
+    const result = await aggregateUsage({ sessionIDs: ["ses_root"] });
+
+    expect(result.totals).not.toHaveProperty("partialMessageCount");
+    expect(result.totals.priced).toEqual(expect.objectContaining({ input: 3, output: 2 }));
+    expect(result.totals.unpriced).toEqual(expect.objectContaining({ input: 7, output: 2 }));
+    expect(result.bySession).toEqual([
+      expect.objectContaining({
+        sessionID: "ses_root",
+        messageCount: 2,
+        costUsd: 5,
+        pricedMessageCount: 1,
+        unpricedMessageCount: 1,
+      }),
+    ]);
+    expect(result.bySession[0]).not.toHaveProperty("partialMessageCount");
+  });
+
+  it("splits a partially rated message between priced and unpriced totals", async () => {
+    const storage = await import("../src/lib/opencode-storage.js");
+    (storage.iterAssistantMessagesForSessions as any).mockResolvedValue([
+      {
+        sessionID: "ses_root",
+        role: "assistant",
+        providerID: PARTIAL_PROVIDER,
+        modelID: PARTIAL_MODEL,
+        tokens: {
+          input: 1_000_000,
+          output: 2_000_000,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+      },
+    ]);
+
+    const result = await aggregateUsage({ sessionIDs: ["ses_root"] });
+    const empty = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 };
+
+    // Known subtotal stays, but only the input bucket is classified as priced.
+    expect(result.totals.priced).toEqual({ ...empty, input: 1_000_000 });
+    expect(result.totals.unpriced).toEqual({ ...empty, output: 2_000_000 });
+    expect(result.totals.unknown).toEqual(empty);
+    expect(result.totals.costUsd).toBe(2_000_000);
+    expect(result.totals.partialCostUsd).toBe(2_000_000);
+    expect(result.totals.partialMessageCount).toBe(1);
+    expect(result.byModel).toEqual([
+      expect.objectContaining({
+        costUsd: 2_000_000,
+        partialMessageCount: 1,
+        tokens: expect.objectContaining({ input: 1_000_000, output: 2_000_000 }),
+      }),
+    ]);
+    expect(result.bySession).toEqual([
+      expect.objectContaining({
+        sessionID: "ses_root",
+        costUsd: 2_000_000,
+        partialMessageCount: 1,
+      }),
+    ]);
+  });
+
+  it("keeps explicit zero rates fully priced with no partial marker", async () => {
+    const storage = await import("../src/lib/opencode-storage.js");
+    (storage.iterAssistantMessagesForSessions as any).mockResolvedValue([
+      {
+        sessionID: "ses_root",
+        role: "assistant",
+        providerID: FREE_PROVIDER,
+        modelID: FREE_MODEL,
+        tokens: {
+          input: 1_000_000,
+          output: 2_000_000,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+      },
+    ]);
+
+    const result = await aggregateUsage({ sessionIDs: ["ses_root"] });
+    const empty = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 };
+
+    expect(result.totals.priced).toEqual({
+      ...empty,
+      input: 1_000_000,
+      output: 2_000_000,
+    });
+    expect(result.totals.unpriced).toEqual(empty);
+    expect(result.totals.costUsd).toBe(0);
+    expect(result.totals).not.toHaveProperty("partialCostUsd");
+    expect(result.totals).not.toHaveProperty("partialMessageCount");
+    expect(result.byModel[0]).not.toHaveProperty("partialMessageCount");
   });
 });

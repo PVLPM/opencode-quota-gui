@@ -115,7 +115,8 @@ async function consoleAccountIdentities(
  * Every account descriptor, including failed and expired rows, contributes to
  * the Console cache identity. `sourceId`, label, active mark, and state are all
  * display/selection inputs, so a change to any of them must not reuse a cached
- * result built from the previous account set.
+ * result built from the previous account set. Identity reads use the resolver's
+ * no-enrichment mode so a Console rename cannot change a persisted cache key.
  */
 function consoleAccountCacheQualifiers(
   accounts: Awaited<ReturnType<typeof resolveOpenCodeConsoleAuthAccounts>>,
@@ -290,7 +291,7 @@ export const PROVIDER_CACHE_POLICIES = {
     kind: "resolved-auth",
     async resolveIdentity() {
       const [consoleAccounts, legacy] = await Promise.all([
-        resolveOpenCodeConsoleAuthAccounts(),
+        resolveOpenCodeConsoleAuthAccounts({ enrichOrgNames: false }),
         resolveOpenCodeGoAuthCached({
           maxAgeMs: DEFAULT_OPENCODE_GO_AUTH_CACHE_MAX_AGE_MS,
         }),
@@ -313,7 +314,7 @@ export const PROVIDER_CACHE_POLICIES = {
   opencode: {
     kind: "resolved-auth",
     async resolveIdentity() {
-      const accounts = await resolveOpenCodeConsoleAuthAccounts();
+      const accounts = await resolveOpenCodeConsoleAuthAccounts({ enrichOrgNames: false });
       return composeAuthIdentities(
         "opencode",
         await consoleAccountIdentities("opencode", accounts),

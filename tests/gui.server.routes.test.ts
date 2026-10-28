@@ -3,7 +3,10 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { encodeAnalyticsEntityToken } from "../src/contracts/analytics-entity.js";
 import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
   CostedTokens,
   GuiSettingsStore,
   HomeSnapshot,
@@ -104,11 +107,38 @@ function sessionSnapshot(sessionId: string): SessionSnapshot {
   };
 }
 
+function groupSnapshot(query: AnalyticsGroupQuery): AnalyticsGroupSnapshot {
+  return {
+    dimension: query.dimension,
+    range: query.range,
+    window: rangeWindow(query.range, NOW),
+    bucketUnit: rangeBucketUnit(query.range),
+    timeZone: "UTC",
+    ...(query.filter === undefined ? {} : { filter: query.filter }),
+    buckets: planRangeBuckets(query.range, NOW).map((bucket) => ({ ...bucket })),
+    totals: costed(3),
+    sessionCount: 1,
+    stepCount: 1,
+    rows: [
+      {
+        identity: { kind: "known", id: "gpt-5" },
+        tokens: costed(3),
+        sessionCount: 1,
+        stepCount: 1,
+        children: [],
+      },
+    ],
+    series: [],
+    stale: false,
+  };
+}
+
 interface RouteFixtures {
   state: {
     homeRanges: RangeKey[];
     quotaCalls: number;
     projectRanges: RangeKey[];
+    groupQueries: AnalyticsGroupQuery[];
     lastSettingsInput?: { patch: Record<string, JsonValue>; expectedRevision: string };
     lastVisibilityInput?: {
       hiddenCards: string[];
@@ -127,6 +157,7 @@ function buildFixtures(): RouteFixtures {
     homeRanges: [],
     quotaCalls: 0,
     projectRanges: [],
+    groupQueries: [],
     openCalls: 0,
   };
   const source: SnapshotSource = {
@@ -146,6 +177,10 @@ function buildFixtures(): RouteFixtures {
     session: async ({ sessionId }) => {
       if (sessionId === "missing") throw new DashboardHttpError("session-not-found");
       return sessionSnapshot(sessionId);
+    },
+    groups: async (query) => {
+      state.groupQueries.push(query);
+      return groupSnapshot(query);
     },
   };
   const settingsPayload: SettingsSnapshot = {
@@ -287,6 +322,8 @@ describe("GUI HTTP routes", () => {
   it.each([
     "/assets/../quota",
     "/project/%2e%2e/quota",
+    "/model/../quota",
+    "/provider/%2e%2e/quota",
     "/assets\\..\\quota",
   ])("does not normalize raw traversal %s into a shell request", async (path) => {
     const { handle } = await start();
@@ -341,6 +378,46 @@ describe("GUI HTTP routes", () => {
   });
 
   it.each([
+    ["models overview", "/models"],
+    ["models overview with range", "/models?range=30d"],
+    [
+      "known model detail",
+      `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "gpt-5" })}?range=7d`,
+    ],
+    ["unknown model detail", "/model/u?range=7d"],
+    [
+      "known-empty model detail",
+      `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "" })}?range=24h`,
+    ],
+    [
+      "special-character provider detail",
+      `/provider/${encodeAnalyticsEntityToken({
+        kind: "known",
+        id: "a/b?c#d %\0\uD800\u00e9",
+      })}?range=lifetime`,
+    ],
+  ])("serves the shell for %s without analytics work", async (_label, path) => {
+    const { handle, state } = await start();
+    try {
+      const response = await get(handle.port, path);
+      expect(response.status).toBe(200);
+      expect(response.body).toBe(INDEX_HTML);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
+      const head = await fetch(`${base(handle.port)}${path}`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+      const post = await fetch(`${base(handle.port)}${path}`, { method: "POST" });
+      expect(post.status).toBe(405);
+      // Direct navigation serves the shell only; grouped API work is browser-driven.
+      expect(state.groupQueries).toEqual([]);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it.each([
     "/api/analytics",
     "/api/v1/nope",
     "/assets/nope.js",
@@ -381,6 +458,45 @@ describe("GUI HTTP routes", () => {
     }
   });
 
+  it.each([
+    "/model",
+    "/provider",
+    "/model/",
+    "/provider/",
+    "/model/u.",
+    "/provider/u.",
+    "/model/x",
+    "/provider/not-a-token",
+    "/model/k.!!!",
+    "/model/k.a",
+    "/model/k.ZwBwAHQALQA1AA.js",
+    `/model/${encodeAnalyticsEntityToken({ kind: "known", id: "gpt-5" })}/extra`,
+    `/provider/${encodeAnalyticsEntityToken({ kind: "known", id: "anthropic" })}/assets/app.js`,
+    "/model/%ZZ",
+    "/provider/%ZZ",
+    "/model/%00",
+    "/provider/%00",
+    "/model/%2e%2e%2fquota",
+    "/provider/%2e%2e%2fmodel",
+    "/models/extra",
+    "/models/",
+    "/models.js",
+    "/model/u/",
+    "/provider/u/",
+    "/provider/a.js",
+  ])("does not return the shell for invalid analytics path %s", async (path) => {
+    const { handle, state } = await start();
+    try {
+      const response = await get(handle.port, path);
+      expect([400, 404]).toContain(response.status);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(response.body).not.toBe(INDEX_HTML);
+      expect(state.groupQueries).toEqual([]);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("serves health with the frozen app id and contract version", async () => {
     const { handle } = await start();
     try {
@@ -416,6 +532,141 @@ describe("GUI HTTP routes", () => {
       const head = await fetch(`${base(handle.port)}/api/v1/quota`, { method: "HEAD" });
       expect(head.status).toBe(200);
       expect(await head.text()).toBe("");
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("serves grouped model/provider reads through route-specific APIs", async () => {
+    const { handle, state } = await start();
+    try {
+      const models = await get(handle.port, "/api/v1/models?range=24h");
+      expect(models.status).toBe(200);
+      expect(models.body).toMatchObject({ dimension: "model", range: "24h" });
+      expect(state.groupQueries).toEqual([{ range: "24h", dimension: "model" }]);
+
+      const providers = await get(handle.port, "/api/v1/providers");
+      expect(providers.status).toBe(200);
+      expect(providers.body).toMatchObject({ dimension: "provider", range: "7d" });
+      expect(state.groupQueries.at(-1)).toEqual({ range: "7d", dimension: "provider" });
+
+      const head = await fetch(`${base(handle.port)}/api/v1/models?range=30d`, {
+        method: "HEAD",
+      });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+
+      const invalidRange = await get(handle.port, "/api/v1/providers?range=1d");
+      expect(invalidRange.status).toBe(400);
+      expect(errorOf(invalidRange.body).code).toBe("bad-request");
+      expect(state.groupQueries).toHaveLength(3);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("round-trips exact tagged model/provider identities through detail routes", async () => {
+    const { handle, state } = await start();
+    const ids = [
+      "",
+      "padded ",
+      "a/b",
+      "100%",
+      "what?",
+      "a#b",
+      "a|||b",
+      "unknown",
+      "assets/app.js",
+      "C:\\dir\\file.js",
+      "模型/🤖",
+    ];
+    try {
+      for (const id of ids) {
+        const token = encodeAnalyticsEntityToken({ kind: "known", id });
+        const modelDetail = await get(handle.port, `/api/v1/models/${token}?range=7d`);
+        expect(modelDetail.status).toBe(200);
+        expect(state.groupQueries.at(-1)).toEqual({
+          range: "7d",
+          dimension: "provider",
+          filter: { dimension: "model", identity: { kind: "known", id } },
+        });
+        expect(modelDetail.body).toMatchObject({
+          dimension: "provider",
+          filter: { dimension: "model", identity: { kind: "known", id } },
+        });
+
+        const providerDetail = await get(handle.port, `/api/v1/providers/${token}?range=30d`);
+        expect(providerDetail.status).toBe(200);
+        expect(state.groupQueries.at(-1)).toEqual({
+          range: "30d",
+          dimension: "model",
+          filter: { dimension: "provider", identity: { kind: "known", id } },
+        });
+      }
+
+      const unknown = await get(handle.port, "/api/v1/models/u?range=24h");
+      expect(unknown.status).toBe(200);
+      expect(state.groupQueries.at(-1)).toEqual({
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: { kind: "unknown" } },
+      });
+
+      const sameAxisToken = encodeAnalyticsEntityToken({ kind: "known", id: "gpt-5" });
+      const sameAxis = await get(
+        handle.port,
+        `/api/v1/models/${sameAxisToken}?range=7d&group=model`,
+      );
+      expect(sameAxis.status).toBe(200);
+      expect(state.groupQueries.at(-1)).toEqual({
+        range: "7d",
+        dimension: "model",
+        filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+      });
+
+      const malformedGroup = await get(handle.port, `/api/v1/models/${sameAxisToken}?group=tool`);
+      expect(malformedGroup.status).toBe(400);
+      expect(errorOf(malformedGroup.body).code).toBe("bad-request");
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("rejects malformed group routes and keeps quota independent", async () => {
+    const { handle, state } = await start();
+    try {
+      for (const path of [
+        "/api/v1/models/k.!!!",
+        "/api/v1/models/k.a",
+        "/api/v1/models/x",
+        "/api/v1/models/u.",
+      ]) {
+        const response = await get(handle.port, path);
+        expect(response.status).toBe(400);
+        expect(errorOf(response.body).code).toBe("bad-request");
+      }
+      expect(state.groupQueries).toEqual([]);
+
+      for (const path of [
+        "/api/v1/models/u/extra",
+        "/api/v1/providers/u/extra",
+        "/api/v1/providers/%ZZ",
+        "/api/v1/missing",
+      ]) {
+        const response = await get(handle.port, path);
+        expect(response.status).toBe(404);
+        expect(errorOf(response.body).code).toBe("not-found");
+      }
+
+      const wrongMethod = await post(handle.port, "/api/v1/models", {});
+      expect(wrongMethod.status).toBe(405);
+      expect(errorOf(await wrongMethod.json()).code).toBe("method-not-allowed");
+
+      await get(handle.port, "/api/v1/models?range=7d");
+      expect(state.quotaCalls).toBe(0);
+      await get(handle.port, "/api/v1/quota");
+      expect(state.quotaCalls).toBe(1);
+      expect(state.groupQueries).toHaveLength(1);
     } finally {
       await handle.close();
     }

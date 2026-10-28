@@ -992,6 +992,63 @@ describe("gui read source — composition", () => {
     expect(harness.collectorCalls).toHaveLength(0);
   });
 
+  it("keeps legacy dataset usage views consistent with zero-token exclusion", async () => {
+    const harness = createHarness({
+      dataset: {
+        sessions: {
+          ...DATASET.sessions,
+          ses_zero: {
+            id: "ses_zero",
+            title: "Zero only",
+            projectID: "p2",
+            time: { created: NOW - 2 * HOUR_MS, updated: NOW - 1_000 },
+          },
+        },
+        projects: {
+          ...DATASET.projects,
+          p2: { id: "p2", name: "Zero", directories: [], worktrees: [] },
+        },
+        messages: [
+          ...DATASET.messages,
+          {
+            ...messageRow({}),
+            sessionID: "ses_zero",
+            messageID: "msg_zero",
+            providerID: "zero-labs",
+            modelID: "zero-1",
+          },
+        ],
+        compactions: [],
+      },
+    });
+
+    const home = await harness.source.home({ range: "lifetime" });
+    expect(home.usage.totals.input).toBe(10);
+    expect(home.usage.stepCount).toBe(1);
+    expect(home.usage.sessionCount).toBe(1);
+    // Zero-token metadata stays visible without entering usage rollups.
+    const zeroProject = home.projects.find((entry) => entry.projectId === "p2");
+    expect(zeroProject?.tokens.total).toBe(0);
+    expect(zeroProject?.rootSessionCount).toBe(1);
+
+    const project = await harness.source.project({ projectId: "p2", range: "lifetime" });
+    expect(project.roots.map((root) => root.sessionId)).toEqual(["ses_zero"]);
+    expect(project.totals.total).toBe(0);
+
+    const session = await harness.source.session({ sessionId: "ses_zero" });
+    expect(session.nodes.map((node) => node.sessionId)).toEqual(["ses_zero"]);
+    expect(session.steps).toEqual([]);
+    expect(session.ownSummary.stepCount).toBe(0);
+
+    const groups = await harness.source.groups({ range: "lifetime", dimension: "model" });
+    expect(groups.totals.input).toBe(10);
+    expect(
+      groups.rows.some(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "zero-1",
+      ),
+    ).toBe(false);
+  });
+
   it("keeps configured spend quantities separate from API-equivalent usage cost", async () => {
     const harness = createHarness({
       probes: [

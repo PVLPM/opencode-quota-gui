@@ -503,11 +503,17 @@ export function displayPreferencesFromValues(
   values: Record<string, JsonValue>,
 ): DisplayPreferences {
   const percentMode = values.percentDisplayMode === "used" ? "used" : "remaining";
+  const cardOrder = stringList(values["dashboard.cardOrder"]);
+  const providerOrder = stringList(values["dashboard.providerOrder"]);
   return {
     percentMode,
     percentLabelStyle: values.percentLabelStyle === "bare" ? "bare" : "full",
     showRunway: values.quotaProjection === "runway",
     detailed: values.accountingDetail === "detailed",
+    // Absent and empty mean the same thing; omitting them keeps the shape the
+    // view already had when neither order was configured.
+    ...(cardOrder.length > 0 ? { cardOrder } : {}),
+    ...(providerOrder.length > 0 ? { providerOrder } : {}),
   };
 }
 

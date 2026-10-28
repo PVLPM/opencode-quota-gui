@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import type { HomeSnapshot, SessionSnapshot } from "../src/contracts/dashboard.js";
+import type {
+  AnalyticsGroupQuery,
+  CostedTokens,
+  HomeSnapshot,
+  SessionSnapshot,
+} from "../src/contracts/dashboard.js";
+import { startOfZonedUnit } from "../src/contracts/time-zone.js";
 import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/aggregation.js";
 import {
   ANALYTICS_FULL_REPAIR_INTERVAL_MS,
@@ -346,6 +352,7 @@ function harness(
   db: FakeDb,
   overrides: {
     now?: number;
+    reader?: AnalyticsReader;
     loadSnapshot?: () => Promise<AnalyticsState | undefined>;
     saveSnapshot?: (path: string, state: AnalyticsState, savedAtMs: number) => Promise<boolean>;
     loadPresentation?: () => Promise<WarmAnalyticsPresentation | undefined>;
@@ -354,7 +361,7 @@ function harness(
   } = {},
 ): Harness {
   const calls: ReaderCall[] = [];
-  const reader = createFakeReader(db, calls);
+  const reader = overrides.reader ?? createFakeReader(db, calls);
   let nowMs = overrides.now ?? NOW;
   const savedStates: AnalyticsState[] = [];
   const savedPresentations: WarmAnalyticsPresentation[] = [];
@@ -3379,6 +3386,771 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     if (!last) throw new Error("expected saved state");
     expect(last.fingerprints.length).toBeLessThanOrEqual(last.occurrences.size + 32);
     expect(await engine.session("ses_root")).toEqual(analytics(datasetOf(db)).session("ses_root"));
+    await engine.close();
+  });
+});
+
+function sumRows(rows: readonly { tokens: CostedTokens }[]): number {
+  return rows.reduce((total, entry) => total + entry.tokens.total, 0);
+}
+
+const GROUP_RANGES = ["24h", "7d", "30d", "lifetime"] as const;
+
+describe("analytics engine: grouped model/provider transport", () => {
+  it("matches Home totals and windows for every range with full lifetime coverage", async () => {
+    const db = baseDb();
+    const ancient = row("ses_root", "msg_ancient", NOW - 40 * DAY, { input: 9_000 });
+    const missingIds = row("ses_other", "msg_missing_ids", NOW - HOUR, { input: 50 });
+    missingIds.providerID = undefined;
+    missingIds.modelID = undefined;
+    db.rows.push(ancient, missingIds);
+    db.updatedAt.set(rowKey(ancient.sessionID, ancient.messageID), ancient.completedAtMs);
+    db.updatedAt.set(rowKey(missingIds.sessionID, missingIds.messageID), missingIds.completedAtMs);
+    const { engine } = harness(db);
+
+    // A prior finite view must not downgrade the later lifetime certification.
+    await engine.home("30d");
+
+    for (const range of GROUP_RANGES) {
+      const home = await engine.home(range);
+      const grouped = await engine.groups({ range, dimension: "model" });
+      expect(grouped.range).toBe(range);
+      expect(grouped.dimension).toBe("model");
+      expect(grouped.window).toEqual(home.usage.window);
+      expect(grouped.bucketUnit).toBe(home.usage.bucketUnit);
+      expect(grouped.buckets).toHaveLength(home.usage.buckets.length);
+      expect(grouped.totals).toEqual(home.usage.totals);
+      expect(grouped.stepCount).toBe(home.usage.stepCount);
+      expect(grouped.sessionCount).toBe(home.usage.sessionCount);
+      // Every raw identity, including the missing one, stays represented.
+      expect(sumRows(grouped.rows)).toBe(grouped.totals.total);
+      expect(grouped.rows.some((entry) => entry.identity.kind === "unknown")).toBe(true);
+    }
+
+    const lifetime = await engine.groups({ range: "lifetime", dimension: "model" });
+    const ancientRow = lifetime.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5",
+    );
+    expect(ancientRow?.tokens.input).toBeGreaterThanOrEqual(9_000);
+    await engine.close();
+  });
+
+  it("reuses the certified Home epoch and exact window instead of a sampled clock", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    const home = await engine.home("24h");
+    const certifiedWindow = home.usage.window;
+    expect(certifiedWindow.untilMs).toBe(NOW);
+
+    setNow(NOW + 5 * 60_000);
+    const grouped = await engine.groups({ range: "24h", dimension: "provider" });
+    expect(grouped.window).toEqual(certifiedWindow);
+    expect(grouped.stale).toBe(false);
+
+    setNow(NOW + 2 * HOUR);
+    await engine.refresh();
+    const refreshedHome = await engine.home("24h");
+    const refreshedGroup = await engine.groups({ range: "24h", dimension: "provider" });
+    expect(refreshedGroup.window).toEqual(refreshedHome.usage.window);
+    expect(refreshedGroup.totals).toEqual(refreshedHome.usage.totals);
+    expect(refreshedGroup.window.untilMs).toBe(NOW + 2 * HOUR);
+    await engine.close();
+  });
+
+  it("reads no raw payloads for warm grouped and detail queries", async () => {
+    const db = baseDb();
+    const { engine, calls } = harness(db);
+    await engine.home("7d");
+    const baseline = calls.length;
+
+    const modelDetailQuery: AnalyticsGroupQuery = {
+      range: "7d",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+    };
+    const providerDetailQuery: AnalyticsGroupQuery = {
+      range: "7d",
+      dimension: "model",
+      filter: { dimension: "provider", identity: { kind: "known", id: "openai" } },
+    };
+    const queries: AnalyticsGroupQuery[] = [
+      { range: "7d", dimension: "model" },
+      { range: "7d", dimension: "provider" },
+      modelDetailQuery,
+      providerDetailQuery,
+    ];
+
+    for (const query of queries) {
+      const first = await engine.groups(query);
+      expect(first.stepCount).toBeGreaterThan(0);
+      const second = await engine.groups(query);
+      expect(second).toEqual(first);
+    }
+
+    const modelDetail = await engine.groups(modelDetailQuery);
+    expect(modelDetail.rows[0]?.identity).toEqual({ kind: "known", id: "openai" });
+    expect(modelDetail.rows[0]?.children[0]?.identity).toEqual({ kind: "known", id: "gpt-5" });
+    const providerDetail = await engine.groups(providerDetailQuery);
+    expect(providerDetail.rows[0]?.identity).toEqual({ kind: "known", id: "gpt-5" });
+    expect(providerDetail.rows[0]?.children[0]?.identity).toEqual({ kind: "known", id: "openai" });
+
+    expect(calls).toHaveLength(baseline);
+    await engine.close();
+  });
+
+  it("keeps known-empty, literal unknown ids and missing identities distinct", async () => {
+    const db = baseDb();
+    const missingModel = row("ses_other", "msg_missing_ids", NOW - HOUR, { input: 77, output: 0 });
+    missingModel.modelID = undefined;
+    const literalUnknown = row(
+      "ses_root",
+      "msg_literal_unknown",
+      NOW - HOUR,
+      { input: 33, output: 0 },
+      { providerID: "openai", modelID: "unknown" },
+    );
+    db.rows.push(missingModel, literalUnknown);
+    db.updatedAt.set(
+      rowKey(missingModel.sessionID, missingModel.messageID),
+      missingModel.completedAtMs,
+    );
+    db.updatedAt.set(
+      rowKey(literalUnknown.sessionID, literalUnknown.messageID),
+      literalUnknown.completedAtMs,
+    );
+    const { engine } = harness(db);
+    await engine.home("24h");
+
+    const unknownFilter = {
+      range: "24h",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "unknown" } },
+    } satisfies AnalyticsGroupQuery;
+    const unknown = await engine.groups(unknownFilter);
+    expect(unknown.filter).toEqual(unknownFilter.filter);
+    expect(unknown.totals.total).toBe(77);
+
+    const literal = await engine.groups({
+      range: "24h",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "unknown" } },
+    });
+    expect(literal.totals.total).toBe(33);
+
+    const empty = await engine.groups({
+      range: "24h",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "" } },
+    });
+    expect(empty.filter).toEqual({
+      dimension: "model",
+      identity: { kind: "known", id: "" },
+    });
+    expect(empty.totals.total).toBe(0);
+    expect(empty.stepCount).toBe(0);
+    expect(empty.sessionCount).toBe(0);
+    expect(empty.rows).toEqual([]);
+    expect(empty.series).toEqual([]);
+    expect(empty.buckets.every((bucket) => bucket.startMs < bucket.endMs)).toBe(true);
+    expect(empty.stale).toBe(false);
+    await engine.close();
+  });
+
+  it("invalidates grouped snapshots after a scoped contribution edit", async () => {
+    const db = baseDb();
+    const { engine } = harness(db);
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    const beforeTotal = before.totals.total;
+    const beforeGpt = before.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5",
+    );
+    if (!beforeGpt) throw new Error("expected a gpt-5 group");
+
+    const edited = db.rows.find((entry) => entry.messageID === "msg_b");
+    if (!edited) throw new Error("expected msg_b");
+    edited.modelID = "gpt-5-mini";
+    db.updatedAt.set(rowKey(edited.sessionID, edited.messageID), NOW + 1_000);
+    await engine.session("ses_root");
+
+    const after = await engine.groups({ range: "24h", dimension: "model" });
+    expect(after.totals.total).toBe(beforeTotal);
+    const mini = after.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5-mini",
+    );
+    expect(mini?.tokens.input).toBe(200);
+    const gpt = after.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "gpt-5",
+    );
+    expect(gpt?.tokens.input).toBe(beforeGpt.tokens.input - 200);
+    await engine.close();
+  });
+
+  it("clears grouped snapshots on source replacement and re-reads history", async () => {
+    const db = baseDb();
+    const { engine, calls } = harness(db);
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    expect(before.totals.input).toBe(700);
+
+    db.rows = [row("ses_root", "msg_replaced", NOW - HOUR, { input: 42 })];
+    db.identity = identity({ inode: "999" });
+    const replaceStart = calls.length;
+    await engine.refresh();
+    const after = await engine.groups({ range: "24h", dimension: "model" });
+    expect(after.totals.input).toBe(42);
+    expect(after.rows.map((entry) => entry.identity)).toEqual([{ kind: "known", id: "gpt-5" }]);
+    expect(fullReads(calls, replaceStart).length).toBeGreaterThanOrEqual(1);
+    await engine.close();
+  });
+
+  it("retains last-good grouped data while stale and never fabricates zero from an absent source", async () => {
+    const coldDb = baseDb();
+    coldDb.status = "missing";
+    const cold = harness(coldDb);
+    await expect(cold.engine.groups({ range: "24h", dimension: "model" })).rejects.toMatchObject({
+      code: "unavailable",
+    });
+    await cold.engine.close();
+
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    db.status = "missing";
+    setNow(NOW + INTERVAL + 1);
+    await engine.refresh();
+    const after = await engine.groups({ range: "24h", dimension: "model" });
+    expect(after.stale).toBe(true);
+    expect(after.totals).toEqual(before.totals);
+    expect(after.window).toEqual(before.window);
+    await engine.close();
+  });
+
+  it("keeps the Home lifetime window across a local-day boundary", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    const home = await engine.home("lifetime");
+    const certifiedWindow = home.usage.window;
+    const certifiedBuckets = home.usage.buckets.map(({ startMs, endMs }) => ({ startMs, endMs }));
+
+    // Crossing a daily bucket boundary must not move a first grouped lifetime
+    // read past the window Home already certified.
+    setNow(NOW + 2 * DAY);
+    const grouped = await engine.groups({ range: "lifetime", dimension: "model" });
+    expect(grouped.window).toEqual(certifiedWindow);
+    expect(grouped.buckets).toEqual(certifiedBuckets);
+    expect(grouped.totals).toEqual(home.usage.totals);
+    expect(grouped.stale).toBe(true);
+    await engine.close();
+  });
+
+  it("schedules a stale background refresh for a new grouped query like Home", async () => {
+    const db = baseDb();
+    const { engine, calls, setNow } = harness(db);
+    await engine.home("24h");
+    const baseline = calls.length;
+
+    setNow(NOW + INTERVAL + 1);
+    const grouped = await engine.groups({ range: "24h", dimension: "model" });
+    expect(grouped.stale).toBe(true);
+    await flushAsync();
+
+    const backgroundReads = calls.slice(baseline).filter((call) => call.method === "withSnapshot");
+    expect(backgroundReads).toHaveLength(1);
+    await engine.close();
+  });
+
+  it("attempts one refresh for an uncovered grouped range when the source is unavailable", async () => {
+    const groupDb = baseDb();
+    const grouped = harness(groupDb);
+    await grouped.engine.home("24h");
+    groupDb.status = "missing";
+    const groupBaseline = grouped.calls.length;
+
+    const snapshot = await grouped.engine.groups({ range: "lifetime", dimension: "model" });
+    await flushAsync();
+
+    // The failed foreground attempt already consumed this interval: no forced
+    // second global refresh may bypass due/backoff.
+    expect(
+      grouped.calls.slice(groupBaseline).filter((call) => call.method === "withSnapshot"),
+    ).toHaveLength(1);
+    expect(snapshot.stale).toBe(true);
+
+    // The same unavailable, uncovered request on Home makes one attempt too.
+    const homeDb = baseDb();
+    const home = harness(homeDb);
+    await home.engine.home("24h");
+    homeDb.status = "missing";
+    const homeBaseline = home.calls.length;
+    const homeSnapshot = await home.engine.home("lifetime");
+    await flushAsync();
+    expect(
+      home.calls.slice(homeBaseline).filter((call) => call.method === "withSnapshot"),
+    ).toHaveLength(1);
+    expect(homeSnapshot.stale).toBe(true);
+
+    // Last-good partial lifetime data is served truthfully stale, matching
+    // Home's exact fallback window rather than fabricated complete history.
+    expect(snapshot.totals).toEqual(homeSnapshot.usage.totals);
+    expect(snapshot.window).toEqual(homeSnapshot.usage.window);
+    await grouped.engine.close();
+    await home.engine.close();
+  });
+
+  it("does not let a scoped refresh certify a global grouped window", async () => {
+    const db = baseDb();
+    const { engine, setNow } = harness(db);
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    const certifiedWindow = before.window;
+
+    setNow(NOW + INTERVAL - 1);
+    await engine.project("p1", "lifetime");
+    const after = await engine.groups({ range: "24h", dimension: "model" });
+    expect(after.window).toEqual(certifiedWindow);
+    expect(after.stale).toBe(false);
+    await engine.close();
+  });
+});
+
+function zeroRow(
+  sessionID: string,
+  messageID: string,
+  atMs: number,
+  extra: Partial<OpenCodeRawAssistantRow> = {},
+): OpenCodeRawAssistantRow {
+  return row(
+    sessionID,
+    messageID,
+    atMs,
+    { input: 0, output: 0, cacheRead: 0 },
+    {
+      cost: 0,
+      providerID: "zero-labs",
+      modelID: "zero-1",
+      ...extra,
+    },
+  );
+}
+
+describe("analytics engine: zero-token usage exclusion", () => {
+  it("excludes zero-token rows from Home, groups, and session detail", async () => {
+    const db = baseDb();
+    const zero = zeroRow("ses_root", "msg_zero", NOW - HOUR);
+    db.rows.push(zero);
+    db.updatedAt.set(rowKey(zero.sessionID, zero.messageID), zero.completedAtMs);
+
+    const { engine } = harness(db);
+    const home = await engine.home("24h");
+    expect(home.usage.totals.input).toBe(700);
+    expect(home.usage.stepCount).toBe(3);
+    expect(home.usage.sessionCount).toBe(2);
+
+    for (const dimension of ["model", "provider"] as const) {
+      const grouped = await engine.groups({ range: "24h", dimension });
+      expect(grouped.totals).toEqual(home.usage.totals);
+      expect(grouped.stepCount).toBe(3);
+      expect(grouped.sessionCount).toBe(2);
+      expect(
+        grouped.rows.some(
+          (entry) => entry.identity.kind === "known" && entry.identity.id === "zero-1",
+        ),
+      ).toBe(false);
+      expect(
+        grouped.rows.some(
+          (entry) => entry.identity.kind === "known" && entry.identity.id === "zero-labs",
+        ),
+      ).toBe(false);
+      expect(
+        grouped.series.some(
+          (entry) =>
+            entry.kind === "entity" &&
+            entry.identity.kind === "known" &&
+            entry.identity.id === "zero-1",
+        ),
+      ).toBe(false);
+      expect(
+        grouped.series.some(
+          (entry) =>
+            entry.kind === "entity" &&
+            entry.identity.kind === "known" &&
+            entry.identity.id === "zero-labs",
+        ),
+      ).toBe(false);
+    }
+
+    const session = await engine.session("ses_root");
+    expect(session.steps.some((step) => step.messageId === "msg_zero")).toBe(false);
+    expect(session.ownSummary.stepCount).toBe(2);
+    // Metadata survives zero-token exclusion.
+    expect(session.focusSessionId).toBe("ses_root");
+    expect(session.nodes.some((node) => node.sessionId === "ses_root")).toBe(true);
+    await engine.close();
+  });
+
+  it("rebuilds warm Home DTOs written under pre-zero-token presentation semantics", async () => {
+    const db = baseDb();
+    const zero = zeroRow("ses_root", "msg_zero", NOW - HOUR);
+    db.rows.push(zero);
+    db.updatedAt.set(rowKey(zero.sessionID, zero.messageID), zero.completedAtMs);
+
+    // Old semantics counted the zero-token row as a step, so a legacy warm DTO
+    // is observably different from a current rebuild (same tokens, extra step).
+    const legacyHome = homeFromDataset(db, "24h");
+    expect(legacyHome.usage.stepCount).toBe(4);
+    const legacyState: AnalyticsState = {
+      sessions: {},
+      projects: {},
+      fingerprints: [],
+      fingerprintIndex: new Map(),
+      occurrences: new Map(),
+      extent: { sinceMs: NOW - HOUR, untilMs: NOW },
+      sourceIdentity: db.identity,
+      frontierAtMs: NOW,
+      presentation: { home: { "24h": legacyHome }, project: [] },
+    };
+    const legacySidecar = JSON.parse(
+      JSON.stringify(encodeAnalyticsPresentation(legacyState, NOW)),
+    ) as Record<string, unknown>;
+    delete legacySidecar.presentationVersion;
+
+    const warm = harness(db, {
+      loadPresentation: async () => decodeAnalyticsPresentation(legacySidecar),
+    });
+    const home = await warm.engine.home("24h");
+    expect(home.usage.stepCount).toBe(3);
+    expect(home.usage.totals.input).toBe(700);
+    await warm.engine.close();
+  });
+
+  it("reconciles positive→zero and zero→positive deltas without stale usage", async () => {
+    const db = baseDb();
+    const switchRow = row(
+      "ses_root",
+      "msg_switch",
+      NOW - HOUR,
+      { input: 50 },
+      {
+        providerID: "zai",
+        modelID: "glm-4.7",
+      },
+    );
+    db.rows.push(switchRow);
+    db.updatedAt.set(rowKey(switchRow.sessionID, switchRow.messageID), switchRow.completedAtMs);
+    const { engine, setNow } = harness(db);
+
+    await engine.home("24h");
+    const before = await engine.groups({ range: "24h", dimension: "model" });
+    expect(before.totals.input).toBe(750);
+    expect(
+      before.rows.some(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+      ),
+    ).toBe(true);
+
+    const index = db.rows.findIndex((entry) => entry.messageID === "msg_switch");
+    const toZero = zeroRow("ses_root", "msg_switch", NOW - HOUR, {
+      createdAtMs: switchRow.createdAtMs,
+      updatedAtMs: NOW + 1,
+    });
+    db.rows[index] = toZero;
+    db.updatedAt.set(rowKey(toZero.sessionID, toZero.messageID), NOW + 1);
+    setNow(NOW + INTERVAL + 1);
+    await engine.refresh();
+
+    const afterZero = await engine.home("24h");
+    expect(afterZero.usage.totals.input).toBe(700);
+    const zeroGroups = await engine.groups({ range: "24h", dimension: "model" });
+    expect(
+      zeroGroups.rows.some(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+      ),
+    ).toBe(false);
+    expect(
+      (await engine.session("ses_root")).steps.some((step) => step.messageId === "msg_switch"),
+    ).toBe(false);
+
+    const backPositive = row(
+      "ses_root",
+      "msg_switch",
+      NOW - HOUR,
+      { input: 70 },
+      {
+        providerID: "zai",
+        modelID: "glm-4.7",
+        updatedAtMs: NOW + 2,
+      },
+    );
+    db.rows[index] = backPositive;
+    db.updatedAt.set(rowKey(backPositive.sessionID, backPositive.messageID), NOW + 2);
+    setNow(NOW + 2 * INTERVAL + 1);
+    await engine.refresh();
+
+    expect((await engine.home("24h")).usage.totals.input).toBe(770);
+    const restored = await engine.groups({ range: "24h", dimension: "model" });
+    const zai = restored.rows.find(
+      (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+    );
+    expect(zai?.tokens.input).toBe(70);
+    expect(
+      (await engine.session("ses_root")).steps.some((step) => step.messageId === "msg_switch"),
+    ).toBe(true);
+    await engine.close();
+  });
+
+  it("reconciles silent positive→zero and zero→positive edits on full repair", async () => {
+    const db = baseDb();
+    const switchRow = row(
+      "ses_root",
+      "msg_silent",
+      NOW - HOUR,
+      { input: 50 },
+      {
+        providerID: "zai",
+        modelID: "glm-4.7",
+      },
+    );
+    db.rows.push(switchRow);
+    db.updatedAt.set(rowKey(switchRow.sessionID, switchRow.messageID), NOW - HOUR);
+    const { engine, setNow } = harness(db, { fullRepairIntervalMs: 0 });
+
+    await engine.home("24h");
+    expect((await engine.home("24h")).usage.totals.input).toBe(750);
+
+    const index = db.rows.findIndex((entry) => entry.messageID === "msg_silent");
+    // Payload changes without a source-timestamp move: only a full repair can
+    // observe this edit. The range read must remain unfiltered so the zero row
+    // is projected and the previously owned positive contribution is removed.
+    db.rows[index] = zeroRow("ses_root", "msg_silent", NOW - HOUR, {
+      createdAtMs: switchRow.createdAtMs,
+    });
+    setNow(NOW + 1);
+    await engine.refresh();
+    expect((await engine.home("24h")).usage.totals.input).toBe(700);
+    const zeroGroups = await engine.groups({ range: "24h", dimension: "model" });
+    expect(
+      zeroGroups.rows.some(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+      ),
+    ).toBe(false);
+
+    db.rows[index] = row(
+      "ses_root",
+      "msg_silent",
+      NOW - HOUR,
+      { input: 70 },
+      {
+        providerID: "zai",
+        modelID: "glm-4.7",
+      },
+    );
+    setNow(NOW + 2);
+    await engine.refresh();
+    expect((await engine.home("24h")).usage.totals.input).toBe(770);
+    const restored = await engine.groups({ range: "24h", dimension: "model" });
+    expect(
+      restored.rows.find(
+        (entry) => entry.identity.kind === "known" && entry.identity.id === "glm-4.7",
+      )?.tokens.input,
+    ).toBe(70);
+    await engine.close();
+  });
+
+  it("does not shortcut filtered lifetime when only zero-token rows are indexed", async () => {
+    const db = baseDb();
+    // The initial 24h extent owns membership but no usage.
+    const zero = zeroRow("ses_root", "msg_zero_recent", NOW - HOUR);
+    // Older positive history matches the filter but lies outside the extent.
+    const older = row(
+      "ses_root",
+      "msg_old_match",
+      NOW - 45 * DAY,
+      { input: 900 },
+      { providerID: "zai", modelID: "glm-4.7" },
+    );
+    db.rows = [zero, older];
+    db.updatedAt.clear();
+    db.updatedAt.set(rowKey(zero.sessionID, zero.messageID), zero.completedAtMs);
+    db.updatedAt.set(rowKey(older.sessionID, older.messageID), older.completedAtMs);
+
+    const { engine } = harness(db);
+    await engine.home("24h");
+
+    const result = await engine.groups({
+      range: "lifetime",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "glm-4.7" } },
+    });
+
+    // The zero-only shortcut would return an empty stale snapshot before the
+    // older matching positive history was read.
+    expect(result.stale).toBe(false);
+    expect(result.totals.input).toBe(900);
+    expect(result.stepCount).toBe(1);
+    expect(
+      result.rows.find((entry) => entry.identity.kind === "known" && entry.identity.id === "zai")
+        ?.tokens.input,
+    ).toBe(900);
+    await engine.close();
+  });
+});
+
+describe("analytics engine: scoped provider/model lifetime", () => {
+  it("serves detail lifetime from owned hours without awaiting a raw read", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    const baseReader = createFakeReader(db, calls);
+    let releaseRead: (() => void) | undefined;
+    let gateArmed = false;
+    const reader: AnalyticsReader = {
+      async withSnapshot<T>(
+        read: (snapshot: OpenCodeStorageSnapshot) => T | Promise<T>,
+      ): Promise<OpenCodeStorageSnapshotResult<T>> {
+        if (gateArmed) {
+          gateArmed = false;
+          await new Promise<void>((resolve) => {
+            releaseRead = resolve;
+          });
+        }
+        return baseReader.withSnapshot(read);
+      },
+    };
+    const { engine } = harness(db, { reader });
+
+    const home = await engine.home("24h");
+    const query: AnalyticsGroupQuery = {
+      range: "lifetime",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+    };
+    const baseline = calls.length;
+    gateArmed = true;
+    let resolved = false;
+    const pending = engine.groups(query).then((snapshot) => {
+      resolved = true;
+      return snapshot;
+    });
+    await flushAsync();
+    // The render completes while the background lifetime read is still gated.
+    expect(resolved).toBe(true);
+    const partial = await pending;
+    expect(partial.stale).toBe(true);
+    expect(partial.totals).toEqual(home.usage.totals);
+    expect(partial.window.untilMs).toBe(NOW);
+
+    // A repeat render is served from the same owned data/cache, not another read.
+    const repeated = await engine.groups(query);
+    expect(repeated.totals).toEqual(partial.totals);
+    expect(repeated.stale).toBe(true);
+
+    releaseRead?.();
+    await flushAsync();
+    await flushAsync();
+    const backgroundReads = calls.slice(baseline).filter((call) => call.method === "withSnapshot");
+    expect(backgroundReads).toHaveLength(1);
+
+    // The completed background lifetime read extends the extent; the next
+    // detail render re-derives from owned hours without touching SQLite.
+    const beforeComplete = calls.length;
+    const complete = await engine.groups(query);
+    expect(complete.totals.input).toBe(1_500);
+    expect(complete.stale).toBe(false);
+    expect(calls).toHaveLength(beforeComplete);
+    await engine.close();
+  });
+
+  it("keeps a cached partial scoped lifetime stale until refresh covers lifetime", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    const baseReader = createFakeReader(db, calls);
+    let releaseRead: (() => void) | undefined;
+    let gateArmed = false;
+    const reader: AnalyticsReader = {
+      async withSnapshot<T>(
+        read: (snapshot: OpenCodeStorageSnapshot) => T | Promise<T>,
+      ): Promise<OpenCodeStorageSnapshotResult<T>> {
+        if (gateArmed) {
+          gateArmed = false;
+          await new Promise<void>((resolve) => {
+            releaseRead = resolve;
+          });
+        }
+        return baseReader.withSnapshot(read);
+      },
+    };
+    const { engine } = harness(db, { reader });
+    const home = await engine.home("24h");
+    const query: AnalyticsGroupQuery = {
+      range: "lifetime",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+    };
+    const baseline = calls.length;
+    gateArmed = true;
+    const partial = await engine.groups(query);
+    expect(partial.stale).toBe(true);
+    expect(partial.totals).toEqual(home.usage.totals);
+    const partialOrigin = startOfZonedUnit(NOW - HOUR, "day", HOST_ZONE);
+    expect(partial.buckets[0]?.startMs).toBe(partialOrigin);
+
+    // Cached partial data stays explicitly stale and never issues a second
+    // foreground read while the scheduled lifetime refresh is in flight.
+    const cached = await engine.groups(query);
+    expect(cached.stale).toBe(true);
+    expect(cached.totals).toEqual(partial.totals);
+    expect(cached.buckets[0]?.startMs).toBe(partialOrigin);
+
+    releaseRead?.();
+    await flushAsync();
+    await flushAsync();
+    const foregroundReads = calls.slice(baseline).filter((call) => call.method === "withSnapshot");
+    expect(foregroundReads).toHaveLength(1);
+    // The refresh requests full lifetime row coverage, not another 24h slice.
+    const lifetimeRowReads = calls
+      .slice(baseline)
+      .filter((call) => call.method === "loadCompletedRows");
+    expect(lifetimeRowReads.some((call) => call.params?.sinceMs === undefined)).toBe(true);
+
+    const readsBeforeComplete = calls.filter((call) => call.method === "withSnapshot").length;
+    const complete = await engine.groups(query);
+    expect(complete.stale).toBe(false);
+    expect(complete.totals.input).toBe(1_500);
+    // Full owned history now anchors the grouped lifetime range at the oldest
+    // owned step, not session metadata or the partial 24h slice.
+    expect(complete.buckets[0]?.startMs).toBe(startOfZonedUnit(NOW - 2 * DAY, "day", HOST_ZONE));
+    expect(calls.filter((call) => call.method === "withSnapshot")).toHaveLength(
+      readsBeforeComplete,
+    );
+    await engine.close();
+  });
+
+  it("back off repeated scoped lifetime fills while the source is unavailable", async () => {
+    const db = baseDb();
+    const { engine, calls, setNow } = harness(db);
+    const home = await engine.home("24h");
+    db.status = "missing";
+    const baseline = calls.length;
+
+    const query: AnalyticsGroupQuery = {
+      range: "lifetime",
+      dimension: "model",
+      filter: { dimension: "provider", identity: { kind: "known", id: "openai" } },
+    };
+    const first = await engine.groups(query);
+    expect(first.stale).toBe(true);
+    expect(first.totals).toEqual(home.usage.totals);
+    await flushAsync();
+    expect(calls.slice(baseline).filter((call) => call.method === "withSnapshot")).toHaveLength(1);
+
+    // Cached partial data must not force a new source read on every render.
+    setNow(NOW + 1_000);
+    const second = await engine.groups(query);
+    expect(second.stale).toBe(true);
+    expect(second.totals).toEqual(first.totals);
+    await flushAsync();
+    expect(calls.slice(baseline).filter((call) => call.method === "withSnapshot")).toHaveLength(1);
     await engine.close();
   });
 });

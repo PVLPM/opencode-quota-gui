@@ -1,8 +1,14 @@
+import {
+  decodeAnalyticsEntityToken,
+  encodeAnalyticsEntityToken,
+} from "../contracts/analytics-entity";
+import type { AnalyticsDimension, AnalyticsEntityIdentity } from "../contracts/dashboard";
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges";
 
 /**
- * History routing and range persistence. Only Analytics and Project carry a
- * range query; an explicit URL range wins over the remembered browser range.
+ * History routing and range persistence. Analytics, Models, both group details
+ * and Project carry a range query; Session stays deliberately range-free. An
+ * explicit URL range wins over the remembered browser range.
  */
 
 export const RANGE_STORAGE_KEY = "opencode-quota-gui.range";
@@ -10,6 +16,9 @@ export const RANGE_STORAGE_KEY = "opencode-quota-gui.range";
 export type Route =
   | { name: "home" }
   | { name: "analytics" }
+  | { name: "models"; dimension: AnalyticsDimension }
+  | { name: "model"; identity: AnalyticsEntityIdentity; modelsGroup?: AnalyticsDimension }
+  | { name: "provider"; identity: AnalyticsEntityIdentity; modelsGroup?: AnalyticsDimension }
   | { name: "project"; projectId: string }
   | { name: "session"; sessionId: string }
   | { name: "settings" }
@@ -43,6 +52,19 @@ export function writeStoredRange(
   }
 }
 
+function decodeTokenSegment(segment: string): AnalyticsEntityIdentity | undefined {
+  try {
+    return decodeAnalyticsEntityToken(decodeURIComponent(segment));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Only an exact group token is explicit; absent or invalid leaves the route default. */
+function readModelsGroup(value: string | null): AnalyticsDimension | undefined {
+  return value === "model" || value === "provider" ? value : undefined;
+}
+
 function decodeSegment(segment: string): string | undefined {
   try {
     const decoded = decodeURIComponent(segment);
@@ -70,13 +92,32 @@ export function parseLocation(pathWithQuery: string, fallbackRange: RangeKey): L
   const params = new URLSearchParams(query);
   const requested = params.get("range");
   const range: RangeKey = isRangeKey(requested) ? requested : fallbackRange;
+  const modelsGroup = readModelsGroup(params.get("group"));
 
   if (path === "/" || path === "/quota") return { route: { name: "home" }, range };
   if (path === "/analytics") {
     return { route: { name: "analytics" }, range };
   }
+  if (path === "/models") {
+    return { route: { name: "models", dimension: modelsGroup ?? "provider" }, range };
+  }
   if (path === "/settings") {
     return { route: { name: "settings" }, range };
+  }
+  const entityMatch = /^\/(model|provider)\/([^/]+)$/.exec(path);
+  if (entityMatch) {
+    const identity = decodeTokenSegment(entityMatch[2] ?? "");
+    if (identity !== undefined) {
+      const origin = modelsGroup === undefined ? {} : { modelsGroup };
+      return {
+        route:
+          entityMatch[1] === "model"
+            ? { name: "model", identity, ...origin }
+            : { name: "provider", identity, ...origin },
+        range,
+      };
+    }
+    return { route: { name: "not-found", path }, range };
   }
   const match = /^\/(project|session)\/([^/]+)$/.exec(path);
   const id = match ? decodeSegment(match[2] ?? "") : undefined;
@@ -95,11 +136,25 @@ export function parseLocation(pathWithQuery: string, fallbackRange: RangeKey): L
 /** Builds a clean URL, keeping non-range-scoped routes query-free. */
 export function formatPath(route: Route, range: RangeKey): string {
   const suffix = `?range=${range}`;
+  // Provider is the canonical Models default, so only an explicit model
+  // grouping needs the parameter. Detail routes keep any explicit origin.
+  const modelsGroupSuffix = (group: AnalyticsDimension | undefined): string =>
+    group === "model" ? "&group=model" : "";
+  // A detail page keeps its explicit origin group, including the model
+  // default, so browser back and the Models breadcrumb return to the same list.
+  const detailGroupSuffix = (group: AnalyticsDimension | undefined): string =>
+    group === undefined ? "" : `&group=${group}`;
   switch (route.name) {
     case "home":
       return "/quota";
     case "analytics":
       return `/analytics${suffix}`;
+    case "models":
+      return `/models${suffix}${modelsGroupSuffix(route.dimension)}`;
+    case "model":
+      return `/model/${encodeAnalyticsEntityToken(route.identity)}${suffix}${detailGroupSuffix(route.modelsGroup)}`;
+    case "provider":
+      return `/provider/${encodeAnalyticsEntityToken(route.identity)}${suffix}${detailGroupSuffix(route.modelsGroup)}`;
     case "project":
       return `/project/${encodeURIComponent(route.projectId)}${suffix}`;
     case "session":
@@ -132,7 +187,26 @@ export function canonicalizeLocation(
 
 /** True for routes whose data is range-scoped, so a range change refetches only those. */
 export function routeUsesRange(route: Route): boolean {
-  return route.name === "analytics" || route.name === "project";
+  return (
+    route.name === "analytics" ||
+    route.name === "models" ||
+    route.name === "model" ||
+    route.name === "provider" ||
+    route.name === "project"
+  );
+}
+
+/**
+ * The Models grouping a route navigates back to. A detail URL without an
+ * explicit `group` falls back to that entity's own listing, so a direct
+ * provider link opens the provider grouping and never inherits an unrelated
+ * remembered grouping.
+ */
+export function modelsGroupForRoute(route: Route): AnalyticsDimension | undefined {
+  if (route.name === "models") return route.dimension;
+  if (route.name === "model") return route.modelsGroup ?? "model";
+  if (route.name === "provider") return route.modelsGroup ?? "provider";
+  return undefined;
 }
 
 /**

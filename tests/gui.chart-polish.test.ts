@@ -3,17 +3,23 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { SessionSnapshot, TokenStack } from "../src/contracts/dashboard";
-import { buildSessionChartGeometry, buildUsageGeometry } from "../src/ui/chart-geometry";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import type { ProjectSnapshot, SessionSnapshot, TokenStack } from "../src/contracts/dashboard";
+import { planRangeBuckets } from "../src/contracts/ranges";
+import {
+  axisLabelIndexes,
+  buildSessionChartGeometry,
+  buildUsageGeometry,
+} from "../src/ui/chart-geometry";
 import { chartIndexAt, createChartInspection } from "../src/ui/chart-inspection";
 import { parseSessionSnapshot } from "../src/ui/dashboard-client";
-import { formatDay, formatTimestamp } from "../src/ui/format";
+import { formatDay, formatTimestamp, formatTokenCount } from "../src/ui/format";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { TestEvent, TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
 import {
   costed,
   DAY_MS,
+  homeSnapshot,
   NOW,
   projectSnapshot,
   sessionSnapshot,
@@ -48,6 +54,7 @@ let usageChartModule: Record<string, unknown>;
 let sessionChartModule: Record<string, unknown>;
 let sessionViewModule: Record<string, unknown>;
 let projectViewModule: Record<string, unknown>;
+let homeViewModule: Record<string, unknown>;
 
 beforeAll(async () => {
   const rendering = await createServer({
@@ -112,6 +119,7 @@ beforeAll(async () => {
   projectViewModule = await rendering.ssrLoadModule(
     path.join(repoRoot, "src/ui/views/project.tsx"),
   );
+  homeViewModule = await rendering.ssrLoadModule(path.join(repoRoot, "src/ui/views/home.tsx"));
   graph = {
     createComponent: renderCore.createComponent,
     createSignal: renderCore.createSignal,
@@ -151,6 +159,27 @@ function mountSession(snapshot: SessionSnapshot): { root: TestNode; dispose: () 
   return { root, dispose };
 }
 
+function mountProject(snapshot: ProjectSnapshot): { root: TestNode; dispose: () => void } {
+  const root = graph.createTestRoot();
+  const dispose = graph.mount(
+    () => graph.createComponent(projectViewModule.ProjectView, { snapshot, range: "7d" }),
+    root,
+  );
+  return { root, dispose };
+}
+
+function mountHome(snapshot: ReturnType<typeof homeSnapshot>): {
+  root: TestNode;
+  dispose: () => void;
+} {
+  const root = graph.createTestRoot();
+  const dispose = graph.mount(
+    () => graph.createComponent(homeViewModule.HomeView, { snapshot, range: "7d" }),
+    root,
+  );
+  return { root, dispose };
+}
+
 function renderSessionView(snapshot: SessionSnapshot): { root: TestNode; dispose: () => void } {
   const decoded = parseSessionSnapshot(
     JSON.parse(JSON.stringify(snapshot)),
@@ -178,12 +207,145 @@ function byClass(root: TestNode, tag: string, name: string): TestNode[] {
   return graph.elementsNamed(root, tag).filter((node) => hasClass(node, name));
 }
 
+/** The visible heading for one Session axis. */
+function sessionAxisTitle(root: TestNode, axis: "context" | "total"): string {
+  const node = byClass(root, "text", `qg-chart__axis-title--${axis}`)[0] as TestNode;
+  return graph.textOf(node);
+}
+
+/** A focused session of `count` ascending steps, for dense-step coverage. */
+function sessionWithSteps(
+  count: number,
+  overrides: Partial<SessionSnapshot> = {},
+): SessionSnapshot {
+  const base = sessionSnapshot();
+  const firstStep = base.steps[0] as (typeof base.steps)[number];
+  const steps = Array.from({ length: count }, (_, index) => ({
+    ...firstStep,
+    messageId: `msg-dense-${index}`,
+    atMs: NOW - (count - index) * 60_000,
+  }));
+  return sessionSnapshot({ steps, ...overrides });
+}
+
+/** The visible 1-based Session step labels, in render order. */
+function sessionStepLabels(root: TestNode): string[] {
+  return byClass(root, "text", "qg-chart__axis-label--step").map((node) => graph.textOf(node));
+}
+
 function listener(node: TestNode, name: string): TestListener | undefined {
   return graph.listenerOf(node, name);
 }
 
+function descendants(node: TestNode): TestNode[] {
+  const found: TestNode[] = [];
+  for (const child of node.children) {
+    if (child.kind === "element") {
+      found.push(child);
+      found.push(...descendants(child));
+    }
+  }
+  return found;
+}
+
+/** The complete braces of a CSS block starting at `start`. */
+function cssBlockAt(styles: string, start: number): string {
+  const open = styles.indexOf("{", start);
+  if (open === -1) return "";
+  let depth = 0;
+  for (let index = open; index < styles.length; index += 1) {
+    if (styles[index] === "{") depth += 1;
+    else if (styles[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return styles.slice(start, index + 1);
+    }
+  }
+  return "";
+}
+
+/** The narrow media block that owns a selector, with nested rules intact. */
+function mediaBlockFor(styles: string, marker: string, selector: string): string {
+  let index = styles.indexOf(marker);
+  while (index !== -1) {
+    const block = cssBlockAt(styles, index);
+    if (block.includes(selector)) return block;
+    index = styles.indexOf(marker, index + marker.length);
+  }
+  return "";
+}
+
+function cssRuleBody(source: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "su").exec(source)?.[1] ?? "";
+}
+
+/**
+ * The canonical chart chrome shared by Analytics, Project and Session.
+ * Returns undefined when a surface does not render a complete shell, so one
+ * test can prove all three hierarchies are structurally identical.
+ */
+function chartShellOf(root: TestNode):
+  | {
+      shell: TestNode;
+      head: TestNode;
+      title: TestNode;
+      summary: TestNode;
+      body: TestNode;
+      order: (name: string) => number;
+    }
+  | undefined {
+  const shell = byClass(root, "section", "qg-chart-shell")[0];
+  if (!shell) return undefined;
+  const head = byClass(shell, "header", "qg-chart-shell__head")[0];
+  const title = byClass(shell, "span", "qg-chart__title")[0];
+  const summary = byClass(shell, "div", "qg-summary")[0];
+  const body = byClass(shell, "div", "qg-usage")[0];
+  if (!head || !title || !summary || !body) return undefined;
+  const sequence = descendants(shell);
+  const order = (name: string) =>
+    sequence.findIndex((node) =>
+      String(node.props.class ?? "")
+        .split(" ")
+        .includes(name),
+    );
+  return { shell, head, title, summary, body, order };
+}
+
 function bucketOf(startMs: number, tokens: Partial<TokenStack>) {
   return { startMs, endMs: startMs + DAY_MS, tokens: costed(tokens) };
+}
+
+/** A representative five-category bar whose parts sum exactly to `total`. */
+function fiveCategoryBucket(startMs: number, total: number) {
+  const cacheRead = Math.round(total * 0.34);
+  const input = Math.round(total * 0.25);
+  const reasoning = Math.round(total * 0.08);
+  const output = Math.round(total * 0.17);
+  return bucketOf(startMs, {
+    cacheRead,
+    input,
+    reasoning,
+    output,
+    cacheWrite: total - cacheRead - input - reasoning - output,
+  });
+}
+
+/** Drive a chart's ResizeObserver to a fixed narrow width. */
+function stubChartWidth(width: number): { fire: () => void; restore: () => void } {
+  let fire: ((entries: { contentRect: { width: number } }[]) => void) | undefined;
+  class FakeResizeObserver {
+    constructor(callback: (entries: { contentRect: { width: number } }[]) => void) {
+      fire = callback;
+    }
+    observe() {}
+    disconnect() {}
+    unobserve() {}
+  }
+  vi.stubGlobal("ResizeObserver", FakeResizeObserver);
+  return {
+    fire: () => fire?.([{ contentRect: { width } }]),
+    restore: () => vi.unstubAllGlobals(),
+  };
 }
 
 function pointerEvent(clientX: number, rect: { left: number; width: number }): TestEvent {
@@ -271,7 +433,7 @@ describe("shared stacked usage bars", () => {
         expect(Number(segment.props.rx)).toBeCloseTo(radius, 10);
         expect(Number(segment.props.ry)).toBeCloseTo(radius, 10);
       }
-      const legend = byClass(root, "li", "qg-legend__item");
+      const legend = byClass(root, "button", "qg-legend__item");
       expect(legend.map((item) => graph.textOf(item))).toEqual([
         "Cache Read20",
         "Input10",
@@ -304,7 +466,7 @@ describe("shared stacked usage bars", () => {
     try {
       const categories = () =>
         byClass(root, "rect", "qg-chart__segment").map((segment) => segment.props["data-category"]);
-      const legend = () => byClass(root, "li", "qg-legend__item");
+      const legend = () => byClass(root, "button", "qg-legend__item");
       expect(categories()).toEqual(["input"]);
       expect(legend()).toHaveLength(1);
       expect(graph.textOf(root)).not.toContain("Cache Write");
@@ -432,7 +594,406 @@ describe("shared stacked usage bars", () => {
     }
   });
 
-  it("computes the cache ratio from bucket sums and formats the tooltip to two decimals", () => {
+  it("uses a regular two-day stride for the 20–27 Oct narrow charts", () => {
+    const buckets = Array.from({ length: 8 }, (_, index) => ({
+      startMs: Date.UTC(2026, 9, 20 + index),
+      endMs: Date.UTC(2026, 9, 21 + index),
+      tokens: costed({ input: 1 }),
+    }));
+    for (const width of [375, 357, 342]) {
+      const geometry = buildUsageGeometry(buckets, {
+        width,
+        height: 220,
+        padding: { top: 12, right: 12, bottom: 24, left: 48 },
+      });
+      expect(geometry.labelIndexes).toEqual([0, 2, 4, 6]);
+      expect(
+        geometry.labelIndexes.map((index) => formatDay(buckets[index]?.startMs as number, "UTC")),
+      ).toEqual(["20 Oct", "22 Oct", "24 Oct", "26 Oct"]);
+    }
+  });
+
+  it("uses a constant label stride with an explicit final-endpoint policy", () => {
+    const eightBuckets = Array.from({ length: 8 }, (_, index) =>
+      bucketOf(NOW + index * DAY_MS, { input: 1 }),
+    );
+    const desktop = buildUsageGeometry(eightBuckets);
+    expect(desktop.labelIndexes).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+
+    const narrow = buildUsageGeometry(eightBuckets, {
+      width: 375,
+      height: 220,
+      padding: { top: 12, right: 12, bottom: 24, left: 48 },
+    });
+    // The final bucket is labelled only when it lands on the stride. Here one
+    // more label would create a misleading one-step gap, so it is omitted.
+    expect(narrow.labelIndexes).toEqual([0, 2, 4, 6]);
+    expect(narrow.labelIndexes.at(-1)).toBe(6);
+    expect(7 - (narrow.labelIndexes.at(-1) ?? 0)).toBeLessThan(
+      (narrow.labelIndexes[1] as number) - (narrow.labelIndexes[0] as number),
+    );
+    const narrowGaps = narrow.labelIndexes
+      .slice(1)
+      .map((value, index) => value - (narrow.labelIndexes[index] as number));
+    expect(new Set(narrowGaps)).toEqual(new Set([2]));
+    expect(Math.min(...narrowGaps) * narrow.slot).toBeGreaterThanOrEqual(40);
+
+    expect(axisLabelIndexes(8, 100, 40)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(axisLabelIndexes(8, 29, 40)).toEqual([0, 2, 4, 6]);
+    // An aligned endpoint is kept; only an unaligned one is omitted.
+    expect(axisLabelIndexes(9, 29, 40)).toEqual([0, 2, 4, 6, 8]);
+
+    const hourly = Array.from({ length: 24 }, (_, index) =>
+      bucketOf(NOW + index * DAY_MS, { input: 1 }),
+    );
+    const hourlyNarrow = buildUsageGeometry(hourly, {
+      width: 291,
+      height: 220,
+      padding: { top: 12, right: 12, bottom: 24, left: 48 },
+    });
+    expect(hourlyNarrow.labelIndexes).toEqual([0, 5, 10, 15, 20]);
+    expect(
+      hourlyNarrow.labelIndexes
+        .slice(1)
+        .map((value, index) => value - (hourlyNarrow.labelIndexes[index] as number)),
+    ).toEqual([5, 5, 5, 5]);
+  });
+
+  describe("dense session step axis", () => {
+    const narrowSession = (count: number, width: number) =>
+      buildSessionChartGeometry(sessionWithSteps(count), {
+        width,
+        height: 220,
+        padding: { top: 34, right: 56, bottom: 34, left: 52 },
+      });
+    const labelsOf = (count: number, width?: number) =>
+      (width === undefined
+        ? buildSessionChartGeometry(sessionWithSteps(count))
+        : narrowSession(count, width)
+      ).labelIndexes.map((index) => index + 1);
+
+    it("caps dense step labels at twelve and labels the real endpoints", () => {
+      expect(labelsOf(962)).toEqual([1, 100, 200, 300, 400, 500, 600, 700, 800, 900, 962]);
+      expect(labelsOf(9136)).toEqual([1, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9136]);
+
+      for (const count of [962, 9136]) {
+        const labels = labelsOf(count);
+        expect(labels.length).toBeLessThanOrEqual(12);
+        expect(labels[0]).toBe(1);
+        expect(labels.at(-1)).toBe(count);
+        expect(labels).not.toContain(0);
+      }
+    });
+
+    it("uses fewer round labels as the plot narrows", () => {
+      expect(labelsOf(962, 375)).toEqual([1, 100, 200, 300, 400, 500, 600, 700, 800, 962]);
+      expect(labelsOf(962, 342)).toEqual([1, 200, 400, 600, 800, 962]);
+      expect(labelsOf(9136, 375)).toEqual([1, 2000, 4000, 6000, 8000, 9136]);
+
+      expect(labelsOf(962, 375).length).toBeLessThan(labelsOf(962).length);
+      expect(labelsOf(962, 342).length).toBeLessThan(labelsOf(962, 375).length);
+      expect(labelsOf(9136, 375).length).toBeLessThan(labelsOf(9136).length);
+    });
+
+    it("keeps short and medium sessions informative without a synthetic zero", () => {
+      expect(labelsOf(1)).toEqual([1]);
+      expect(labelsOf(3)).toEqual([1, 2, 3]);
+      expect(labelsOf(16)).toEqual([1, 2, 4, 6, 8, 10, 12, 14, 16]);
+      expect(labelsOf(24)).toEqual([1, 5, 10, 15, 20, 24]);
+      expect(labelsOf(52)).toEqual([1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 52]);
+      expect(labelsOf(100)).toEqual([1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+      expect(labelsOf(16, 342)).toEqual([1, 2, 4, 6, 8, 10, 12, 14, 16]);
+    });
+
+    it("drops only a tick that would touch the final endpoint", () => {
+      const desktop962 = labelsOf(962);
+      expect(desktop962.at(-2)).toBe(900);
+      expect(desktop962.at(-1)).toBe(962);
+
+      const narrow962 = labelsOf(962, 375);
+      expect(narrow962).not.toContain(900);
+      expect(narrow962.at(-2)).toBe(800);
+      expect(narrow962.at(-1)).toBe(962);
+
+      const dense9136 = labelsOf(9136);
+      expect(dense9136).not.toContain(9000);
+      expect(dense9136.at(-2)).toBe(8000);
+      expect(dense9136.at(-1)).toBe(9136);
+    });
+
+    it("re-renders dense labels at desktop and narrow widths", async () => {
+      const width = stubChartWidth(342);
+      const { root, dispose } = mountSession(sessionWithSteps(962));
+      try {
+        expect(sessionStepLabels(root)).toEqual([
+          "1",
+          "100",
+          "200",
+          "300",
+          "400",
+          "500",
+          "600",
+          "700",
+          "800",
+          "900",
+          "962",
+        ]);
+        expect(byClass(root, "p", "qg-chart__axis-caption")).toHaveLength(0);
+
+        width.fire();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(sessionStepLabels(root)).toEqual(["1", "200", "400", "600", "800", "962"]);
+        expect(byClass(root, "p", "qg-chart__axis-caption")).toHaveLength(0);
+      } finally {
+        dispose();
+        width.restore();
+      }
+    });
+
+    it("leaves dense series and compaction geometry untouched by label thinning", () => {
+      const base = sessionWithSteps(962);
+      const markerAt = base.steps[700]?.atMs as number;
+      const snapshot = sessionWithSteps(962, {
+        compactionMarkers: [
+          { sessionId: "session-root-1", atMs: markerAt, messageId: "msg-dense-compaction" },
+        ],
+      });
+      const geometry = buildSessionChartGeometry(snapshot);
+
+      expect(geometry.stepCount).toBe(962);
+      expect(geometry.context.points).toHaveLength(962);
+      expect(geometry.own.points).toHaveLength(962);
+      expect(geometry.tree.points).toHaveLength(962);
+      expect(geometry.own.linePath).not.toMatch(/NaN|Infinity|undefined/);
+      expect(geometry.tree.linePath).not.toMatch(/NaN|Infinity|undefined/);
+      expect(geometry.compaction).toHaveLength(1);
+      expect(geometry.compaction[0]).toMatchObject({
+        stepIndex: 700,
+        sessionId: "session-root-1",
+      });
+      expect(geometry.compaction[0]?.x).toBeCloseTo(geometry.stepX(700), 10);
+
+      for (let index = 1; index < geometry.stepCount; index += 1) {
+        expect(geometry.ownCumulativeValues[index]).toBeGreaterThanOrEqual(
+          geometry.ownCumulativeValues[index - 1] as number,
+        );
+        expect(geometry.treeCumulativeValues[index]).toBeGreaterThanOrEqual(
+          geometry.ownCumulativeValues[index] as number,
+        );
+      }
+    });
+  });
+
+  it("shows a range-end caption when the narrow date endpoint is omitted", async () => {
+    const buckets = Array.from({ length: 8 }, (_, index) => ({
+      startMs: Date.UTC(2026, 9, 20 + index),
+      endMs: Date.UTC(2026, 9, 21 + index),
+      tokens: costed({ input: 1 }),
+    }));
+    const desktop = mountUsage(buckets);
+    try {
+      expect(byClass(desktop.root, "p", "qg-chart__axis-caption")).toHaveLength(0);
+    } finally {
+      desktop.dispose();
+    }
+
+    const width = stubChartWidth(342);
+    const { root, dispose } = mountUsage(buckets);
+    try {
+      width.fire();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const labels = byClass(root, "text", "qg-chart__axis-label")
+        .filter((node) => !hasClass(node, "qg-chart__axis-label--rate"))
+        .map((node) => graph.textOf(node))
+        .filter((label) => label.endsWith("Oct"));
+      expect(labels).toEqual(["20 Oct", "22 Oct", "24 Oct", "26 Oct"]);
+      const caption = byClass(root, "p", "qg-chart__axis-caption")[0];
+      expect(caption).toBeDefined();
+      expect(graph.textOf(caption as TestNode)).toBe("Through 27 Oct");
+    } finally {
+      dispose();
+      width.restore();
+    }
+  });
+
+  it("labels the narrow step endpoint and drops the redundant caption", async () => {
+    const base = sessionSnapshot();
+    const firstStep = base.steps[0] as (typeof base.steps)[number];
+    const steps = Array.from({ length: 16 }, (_, index) => ({
+      ...firstStep,
+      messageId: `msg-${index}`,
+      atMs: NOW + index * 60_000,
+    }));
+    const width = stubChartWidth(342);
+    const { root, dispose } = mountSession(sessionSnapshot({ steps }));
+    try {
+      width.fire();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(sessionStepLabels(root)).toEqual(["1", "2", "4", "6", "8", "10", "12", "14", "16"]);
+      expect(byClass(root, "p", "qg-chart__axis-caption")).toHaveLength(0);
+    } finally {
+      dispose();
+      width.restore();
+    }
+  });
+
+  it("shortens the Session axis headings before they collide at 375", async () => {
+    const wide = mountSession(sessionSnapshot());
+    try {
+      expect(sessionAxisTitle(wide.root, "context")).toBe("Context tokens");
+      expect(sessionAxisTitle(wide.root, "total")).toBe("Cumulative tokens");
+    } finally {
+      wide.dispose();
+    }
+
+    // The 375 Session chart is 310px wide inside its padded card.
+    const width = stubChartWidth(310);
+    const { root, dispose } = mountSession(sessionSnapshot());
+    try {
+      width.fire();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(sessionAxisTitle(root, "context")).toBe("Context");
+      expect(sessionAxisTitle(root, "total")).toBe("Cumulative");
+      const svg = graph.elementsNamed(root, "svg")[0] as TestNode;
+      expect(svg.props["aria-label"]).toContain("focus-session context");
+      expect(svg.props["aria-label"]).toContain("cumulative consumption");
+    } finally {
+      dispose();
+      width.restore();
+    }
+
+    // At 390 the plot still holds the full pair, so the bounded fix leaves it.
+    const width390 = stubChartWidth(325);
+    const at390 = mountSession(sessionSnapshot());
+    try {
+      width390.fire();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(sessionAxisTitle(at390.root, "context")).toBe("Context tokens");
+      expect(sessionAxisTitle(at390.root, "total")).toBe("Cumulative tokens");
+    } finally {
+      at390.dispose();
+      width390.restore();
+    }
+  });
+
+  it("keeps the model tooltip footer whole at 380px and below", () => {
+    const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+    const narrow = mediaBlockFor(styles, "@media (max-width: 380px)", ".qg-model-tooltip__footer");
+    expect(narrow).not.toBe("");
+    expect(cssRuleBody(narrow, ".qg-model-tooltip__footer")).toContain("gap: 6px");
+    expect(cssRuleBody(narrow, ".qg-model-tooltip__footer .qg-totals__label")).toContain(
+      "font-size: 11px",
+    );
+    const value = cssRuleBody(narrow, ".qg-model-tooltip__footer .qg-totals__value");
+    expect(value).toContain("flex: none");
+    expect(value).toContain("font-size: 11px");
+    expect(value).toContain("white-space: nowrap");
+    const badge = cssRuleBody(narrow, ".qg-model-tooltip__footer .qg-partial");
+    expect(badge).toContain("flex: none");
+    expect(badge).toContain("padding-inline: 4px");
+  });
+
+  it("keeps y-axis labels unique for one- to three-token totals", () => {
+    for (const total of [1, 2, 3]) {
+      const geometry = buildUsageGeometry([bucketOf(NOW - DAY_MS, { input: total })]);
+      const labels = geometry.ticks.map((tick) => formatTokenCount(tick.value));
+      expect(geometry.ticks.every((tick) => Number.isInteger(tick.value))).toBe(true);
+      expect(new Set(labels).size).toBe(labels.length);
+    }
+  });
+
+  it("does not add a full tick step to an exact Session cumulative maximum", () => {
+    const base = sessionSnapshot();
+    const firstStep = base.steps[0] as (typeof base.steps)[number];
+    const exact = sessionSnapshot({
+      steps: [{ ...firstStep, contextTokens: 1_000, totalTokens: 8_000 }],
+    });
+    const geometry = buildSessionChartGeometry(exact);
+    expect(geometry.tree.domainMax).toBe(8_000);
+    expect(geometry.tree.scaleMax).toBe(8_000);
+    expect(geometry.cumulativeTicks.at(-1)?.value).toBe(8_000);
+  });
+
+  it("puts Analytics and Project on one shared multisegment nice ceiling", () => {
+    for (const total of [5_890, 6_255]) {
+      const bucket = fiveCategoryBucket(NOW - DAY_MS, total);
+      const geometry = buildUsageGeometry([bucket]);
+      expect(geometry.yMax).toBe(total);
+      expect(geometry.scaleMax).toBeGreaterThanOrEqual(total);
+      expect(geometry.scaleMax).toBe(7_000);
+      expect(geometry.ticks.at(-1)?.value).toBe(7_000);
+      expect(geometry.bars[0]?.segments).toHaveLength(5);
+      // Four external gaps plus a clear band sit above the tallest bar.
+      expect(geometry.bars[0]?.top).toBeGreaterThan(geometry.plot.top + 8);
+
+      const narrow = buildUsageGeometry([bucket], {
+        width: 375,
+        height: 220,
+        padding: { top: 12, right: 12, bottom: 24, left: 48 },
+      });
+      expect(narrow.scaleMax).toBe(7_000);
+      expect(narrow.ticks.at(-1)?.value).toBe(7_000);
+      expect(narrow.bars[0]?.top).toBeGreaterThan(narrow.plot.top + 8);
+
+      const home = mountHome(homeSnapshot({ usage: usage("7d", [bucket]) }));
+      try {
+        const labels = byClass(home.root, "text", "qg-chart__axis-label")
+          .filter((node) => !hasClass(node, "qg-chart__axis-label--rate"))
+          .map((node) => graph.textOf(node));
+        expect(labels).toContain("7.0k");
+      } finally {
+        home.dispose();
+      }
+
+      const project = mountProject(projectSnapshot({ usage: usage("7d", [bucket]) }));
+      try {
+        const labels = byClass(project.root, "text", "qg-chart__axis-label")
+          .filter((node) => !hasClass(node, "qg-chart__axis-label--rate"))
+          .map((node) => graph.textOf(node));
+        expect(labels).toContain("7.0k");
+      } finally {
+        project.dispose();
+      }
+    }
+  });
+
+  it("moves an exact-multiple usage peak to the next tick so the gap never closes", () => {
+    for (const [total, expected] of [
+      [6_000, 7_000],
+      [7_000, 8_000],
+    ] as const) {
+      const geometry = buildUsageGeometry([fiveCategoryBucket(NOW - DAY_MS, total)]);
+      expect(geometry.yMax).toBe(total);
+      expect(geometry.scaleMax).toBe(expected);
+      expect(geometry.ticks.at(-1)?.value).toBe(expected);
+      expect(geometry.scaleMax).toBeGreaterThan(total);
+      expect(geometry.bars[0]?.top).toBeGreaterThan(geometry.plot.top + 8);
+    }
+  });
+
+  it("keeps the Session cumulative ceiling above its raw maximum", () => {
+    const base = sessionSnapshot();
+    const firstStep = base.steps[0] as (typeof base.steps)[number];
+    const highSession = sessionSnapshot({
+      steps: [{ ...firstStep, contextTokens: 1_000, totalTokens: 7_770 }],
+    });
+    const sessionGeometry = buildSessionChartGeometry(highSession);
+    expect(sessionGeometry.tree.domainMax).toBe(7_770);
+    expect(sessionGeometry.tree.scaleMax).toBe(8_000);
+    expect(sessionGeometry.cumulativeTicks.at(-1)?.value).toBe(8_000);
+
+    const sessionRoot = mountSession(highSession);
+    try {
+      const totalLabels = byClass(sessionRoot.root, "text", "qg-chart__axis-label--total").map(
+        (node) => graph.textOf(node),
+      );
+      expect(totalLabels.at(-1)).toBe("8.0k");
+    } finally {
+      sessionRoot.dispose();
+    }
+  });
+
+  it("draws a smooth non-overshooting cache-rate curve with fixed integer ticks", () => {
     const ratioBucket = bucketOf(NOW - DAY_MS, { input: 363, cacheRead: 9_637 });
     const { root, dispose } = mountUsage([ratioBucket]);
     try {
@@ -466,6 +1027,47 @@ describe("shared stacked usage bars", () => {
     }
   });
 
+  it("renders an actual planned same-day lifetime bucket as one date", () => {
+    const nowMs = Date.UTC(2026, 9, 27, 12, 30);
+    const planned = planRangeBuckets("lifetime", nowMs, Date.UTC(2026, 9, 27, 9, 15), {
+      timeZone: "UTC",
+    })[0] as { startMs: number; endMs: number };
+    expect(planned).toEqual({ startMs: Date.UTC(2026, 9, 27), endMs: nowMs });
+    const bucket = { ...planned, tokens: costed({ input: 10 }) };
+    const { root, dispose } = mountUsage([bucket], "lifetime");
+    try {
+      const hit = byClass(root, "button", "qg-chart__hit")[0] as TestNode;
+      listener(hit, "onFocus")?.({});
+      const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      expect(graph.textOf(tooltip)).toContain("27 Oct");
+      expect(graph.textOf(tooltip)).not.toContain("27 Oct – 27 Oct");
+      expect(hit.props["aria-label"]).toContain("27 Oct");
+      // The plan still ends at the clipped window edge, not a fabricated midnight.
+      expect(planned.endMs).toBe(nowMs);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("shows one date in a same-day bucket tooltip without changing the half-open end", () => {
+    const startMs = Date.UTC(2026, 9, 27);
+    const endMs = startMs + DAY_MS - 1;
+    const bucket = { startMs, endMs, tokens: costed({ input: 10 }) };
+    const { root, dispose } = mountUsage([bucket]);
+    try {
+      const hit = byClass(root, "button", "qg-chart__hit")[0] as TestNode;
+      listener(hit, "onFocus")?.({});
+      const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
+      expect(graph.textOf(tooltip)).toContain("27 Oct");
+      expect(graph.textOf(tooltip)).not.toContain("27 Oct – 27 Oct");
+      expect(hit.props["aria-label"]).toContain("27 Oct");
+      // The supplied exclusive end is untouched; a next-day boundary still reads as a range.
+      expect(endMs).toBe(startMs + DAY_MS - 1);
+    } finally {
+      dispose();
+    }
+  });
+
   it("draws a smooth non-overshooting cache-rate curve with fixed integer ticks", () => {
     const buckets = [
       bucketOf(NOW - 3 * DAY_MS, { input: 90, cacheRead: 10 }),
@@ -487,7 +1089,7 @@ describe("shared stacked usage bars", () => {
       );
       expect(rateLabels).toEqual(["0%", "25%", "50%", "75%", "100%"]);
       // Only input and cache read have activity in this range.
-      expect(byClass(root, "li", "qg-legend__item")).toHaveLength(2);
+      expect(byClass(root, "button", "qg-legend__item")).toHaveLength(2);
       expect(graph.textOf(root)).not.toContain("right axis");
     } finally {
       dispose();
@@ -529,6 +1131,60 @@ describe("shared stacked usage bars", () => {
   });
 });
 
+describe("canonical chart shell", () => {
+  it("gives Analytics, Project and Session the same head, summary and chart hierarchy", () => {
+    const surfaces = [
+      {
+        name: "Analytics",
+        view: mountUsage([bucketOf(NOW - DAY_MS, { input: 10 })]),
+        title: "Daily token usage",
+      },
+      { name: "Project", view: mountProject(projectSnapshot()), title: "Daily token usage" },
+      { name: "Session", view: mountSession(sessionSnapshot()), title: "Usage by step" },
+    ];
+    try {
+      for (const surface of surfaces) {
+        const shell = chartShellOf(surface.view.root);
+        expect(shell, surface.name).toBeDefined();
+        if (!shell) continue;
+        expect(byClass(shell.shell, "header", "qg-chart-shell__head")).toHaveLength(1);
+        expect(byClass(shell.shell, "div", "qg-chart-shell__stat").length).toBeGreaterThan(0);
+        expect(byClass(shell.shell, "span", "qg-chart-shell__value").length).toBeGreaterThan(0);
+        expect(graph.textOf(shell.title)).toBe(surface.title);
+        expect(shell.order("qg-chart-shell__head")).toBeLessThan(shell.order("qg-summary"));
+        expect(shell.order("qg-summary")).toBeLessThan(shell.order("qg-usage"));
+        expect(byClass(shell.shell, "div", "qg-chart-shell__panel")).toHaveLength(1);
+      }
+    } finally {
+      for (const surface of surfaces) surface.view.dispose();
+    }
+  });
+
+  it("integrates the Project summary and chart while keeping page context and Sessions", () => {
+    const { root, dispose } = mountProject(projectSnapshot());
+    try {
+      const shell = chartShellOf(root);
+      expect(shell).toBeDefined();
+      if (!shell) return;
+      expect(graph.textOf(shell.summary)).toContain("Sessions");
+      expect(graph.textOf(shell.summary)).toContain("4");
+      expect(shell.order("qg-summary")).toBeLessThan(shell.order("qg-usage"));
+      // Breadcrumbs and worktree stay outside the chart shell.
+      expect(byClass(shell.shell, "nav", "qg-breadcrumbs")).toHaveLength(0);
+      expect(byClass(root, "nav", "qg-breadcrumbs")).toHaveLength(1);
+      expect(graph.textOf(root)).toContain("alpha-main");
+      // The chart shell does not take over the Sessions section or its rows.
+      const rootsHeadings = graph
+        .elementsNamed(root, "h2")
+        .filter((node) => node.props.id === "qg-project-roots");
+      expect(rootsHeadings).toHaveLength(1);
+      expect(byClass(root, "a", "qg-list__row")).toHaveLength(2);
+    } finally {
+      dispose();
+    }
+  });
+});
+
 describe("session chart and tree presentation", () => {
   it("uses the frozen Session colours, 1-based step ticks and a Steps title", () => {
     const snapshot = sessionSnapshot();
@@ -554,7 +1210,33 @@ describe("session chart and tree presentation", () => {
       expect(
         legend.map((item) => (item.props.style as Record<string, string>)["--qg-swatch"]),
       ).toEqual(["var(--qg-chart-context)", "var(--qg-chart-own)", "var(--qg-chart-total)"]);
+      // The tree series carries a non-colour distinction in both the plot and legend.
+      expect(byClass(root, "span", "qg-legend__swatch--dashed")).toHaveLength(1);
       expect(graph.elementsNamed(root, "title")).toHaveLength(0);
+
+      const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+      expect(styles).toContain("--qg-chart-own: #ffb900");
+      expect(styles).toContain("--qg-chart-total: #ff8904");
+      expect(styles).toMatch(/\.qg-chart__line--total\s*\{[^}]*stroke-dasharray:/su);
+      expect(styles).not.toMatch(/\.qg-chart__line--own\s*\{[^}]*stroke-dasharray:/su);
+      expect(styles).toMatch(/\.qg-legend__swatch--dashed\s*\{/u);
+      // Wide rows stay single-line; only the narrow breakpoint reveals names.
+      const nodeName = cssRuleBody(styles, ".qg-node__name");
+      expect(nodeName).toContain("overflow: hidden");
+      expect(nodeName).toContain("text-overflow: ellipsis");
+      expect(nodeName).toContain("white-space: nowrap");
+      expect(nodeName).toContain("--qg-node-depth");
+      expect(nodeName).not.toContain("overflow-wrap: anywhere");
+      const narrowTree = mediaBlockFor(styles, "@media (max-width: 640px)", ".qg-node__name");
+      expect(narrowTree).not.toBe("");
+      const narrowName = cssRuleBody(narrowTree, ".qg-node__name");
+      expect(narrowName).toContain("overflow-wrap: break-word");
+      expect(narrowName).not.toContain("overflow-wrap: anywhere");
+      expect(narrowName).toContain("word-break: normal");
+      expect(narrowName).toContain("padding-left: min(calc(var(--qg-node-depth, 0) * 8px), 40px)");
+      expect(narrowName).toContain("white-space: normal");
+      expect(narrowName).not.toContain("white-space: nowrap");
+      expect(narrowName).not.toContain("text-overflow: ellipsis");
     } finally {
       dispose();
     }
@@ -610,6 +1292,42 @@ describe("session chart and tree presentation", () => {
       await Promise.resolve();
       expect(graph.elementsNamed(root, "output")).toHaveLength(0);
       expect(byClass(root, "line", "qg-chart__cursor")).toHaveLength(0);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("keeps full Session tree names in the wrapping row markup", () => {
+    const titles = [
+      "Synthetic Alpha root",
+      "Synthetic Alpha child one",
+      "Synthetic Alpha child two",
+      "Synthetic Alpha child three",
+    ];
+    const nodes = titles.map((title, index) => ({
+      sessionId: index === 0 ? "session-root-1" : `session-child-${index}`,
+      title,
+      depth: index,
+      childIds: index === 0 ? ["session-child-1", "session-child-2", "session-child-3"] : [],
+      ownTokens: costed({ input: 10 }),
+      subtreeTokens: costed({ input: 10 }),
+      stepCount: 1,
+      subtreeNodeCount: 1,
+      latestActivityAtMs: NOW - index,
+    }));
+    const { root, dispose } = renderSessionView(sessionSnapshot({ nodes }));
+    try {
+      const names = byClass(root, "span", "qg-node__name");
+      expect(names.map((node) => graph.textOf(node))).toEqual(titles);
+      expect(names.every((node) => node.props.title === graph.textOf(node))).toBe(true);
+      expect(
+        names.map((node) => (node.props.style as Record<string, string>)["--qg-node-depth"]),
+      ).toEqual(["0", "1", "2", "3"]);
+      expect(
+        names.every(
+          (node) => (node.props.style as Record<string, string>)["padding-left"] === undefined,
+        ),
+      ).toBe(true);
     } finally {
       dispose();
     }
@@ -920,13 +1638,16 @@ describe("session chart and tree presentation", () => {
     }
   });
 
-  it("pins the frozen chart palette and Session colours in the stylesheet", () => {
+  it("pins the exact token palette and shared chart chrome in the stylesheet", () => {
     const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
-    expect(styles).toContain("--qg-token-cache-read: #a684ff");
-    expect(styles).toContain("--qg-token-input: #51a2ff");
+    expect(styles).toContain("--qg-token-cache-read: #51a2ff");
+    expect(styles).toContain("--qg-token-input: #a684ff");
     expect(styles).toContain("--qg-token-reasoning: #00d5be");
     expect(styles).toContain("--qg-token-output: #9ae600");
     expect(styles).toContain("--qg-token-cache-write: #00d3f2");
+    // The v1.1 palette intentionally swaps Input and Cache Read.
+    expect(styles).not.toContain("--qg-token-cache-read: #a684ff");
+    expect(styles).not.toContain("--qg-token-input: #51a2ff");
     expect(styles).toContain("--qg-chart-rate: #ffb900");
     expect(styles).toContain("--qg-chart-context: #51a2ff");
     expect(styles).toContain("--qg-chart-own: #ffb900");
@@ -935,6 +1656,10 @@ describe("session chart and tree presentation", () => {
     expect(styles).not.toContain(".qg-chart__separator");
     expect(styles).toMatch(/\.qg-chart__rate-line\s*\{[^}]*stroke-linecap:\s*round;/s);
     expect(styles).toMatch(/\.qg-chart__rate-line\s*\{[^}]*stroke-linejoin:\s*round;/s);
+    // One shared shell owns the heading, summary and chart surface.
+    expect(styles).toMatch(/\.qg-chart-shell__head\s*\{/);
+    expect(styles).toMatch(/\.qg-chart-shell__panel\s*\{/);
+    expect(styles).toMatch(/\.qg-chart-shell__summary|\.qg-chart-shell \.qg-summary/);
     // The Session inspection surface must let a phone page scroll vertically.
     expect(styles).toMatch(/\.qg-chart__surface\s*\{[^}]*touch-action:\s*pan-y;/s);
     expect(styles).not.toMatch(/\.qg-chart__surface\s*\{[^}]*touch-action:\s*none;/s);

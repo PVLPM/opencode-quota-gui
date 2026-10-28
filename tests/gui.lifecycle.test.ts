@@ -1,7 +1,10 @@
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { encodeAnalyticsEntityToken } from "../src/contracts/analytics-entity.js";
 import type {
+  AnalyticsGroupQuery,
+  AnalyticsGroupSnapshot,
   CostedTokens,
   HomeSnapshot,
   ProjectSnapshot,
@@ -107,13 +110,31 @@ function sessionSnapshot(sessionId: string): SessionSnapshot {
   };
 }
 
+function groupSnapshot(query: AnalyticsGroupQuery, marker: number): AnalyticsGroupSnapshot {
+  return {
+    dimension: query.dimension,
+    range: query.range,
+    window: rangeWindow(query.range, NOW),
+    bucketUnit: rangeBucketUnit(query.range),
+    timeZone: "UTC",
+    ...(query.filter ? { filter: query.filter } : {}),
+    buckets: planRangeBuckets(query.range, NOW).map(({ startMs, endMs }) => ({ startMs, endMs })),
+    totals: costed(marker),
+    sessionCount: 0,
+    stepCount: 0,
+    rows: [],
+    series: [],
+    stale: false,
+  };
+}
+
 interface SourceFixture {
   source: SnapshotSource;
-  calls: { home: number; project: number; session: number };
+  calls: { home: number; project: number; session: number; groups: number };
 }
 
 function buildSource(): SourceFixture {
-  const calls = { home: 0, project: 0, session: 0 };
+  const calls = { home: 0, project: 0, session: 0, groups: 0 };
   const source: SnapshotSource = {
     home: async ({ range }) => {
       calls.home += 1;
@@ -127,14 +148,19 @@ function buildSource(): SourceFixture {
       calls.session += 1;
       return sessionSnapshot(sessionId);
     },
+    groups: async (query) => {
+      calls.groups += 1;
+      return groupSnapshot(query, 0);
+    },
   };
   return { source, calls };
 }
 
 interface OwnerSourceFixture {
   source: SnapshotSource;
-  calls: { home: number; project: number; session: number; quota: number };
+  calls: { home: number; project: number; session: number; quota: number; groups: number };
   readonly closes: number;
+  readonly groupQueries: AnalyticsGroupQuery[];
   /** When set, every read throws; simulates a delegate whose client died. */
   fails: boolean;
 }
@@ -153,7 +179,8 @@ function quotaSnapshot(marker: number): QuotaSnapshot {
  * a live delegate whose reads fail.
  */
 function buildOwnerSource(marker: number): OwnerSourceFixture {
-  const calls = { home: 0, project: 0, session: 0, quota: 0 };
+  const calls = { home: 0, project: 0, session: 0, quota: 0, groups: 0 };
+  const groupQueries: AnalyticsGroupQuery[] = [];
   const state = { closes: 0, fails: false };
   const guard = () => {
     if (state.fails || state.closes > 0) throw new Error(`owner source ${marker} unavailable`);
@@ -179,6 +206,12 @@ function buildOwnerSource(marker: number): OwnerSourceFixture {
       guard();
       return quotaSnapshot(marker);
     },
+    groups: async (query) => {
+      calls.groups += 1;
+      groupQueries.push(query);
+      guard();
+      return groupSnapshot(query, marker);
+    },
     close: async () => {
       state.closes += 1;
     },
@@ -186,6 +219,7 @@ function buildOwnerSource(marker: number): OwnerSourceFixture {
   return {
     source,
     calls,
+    groupQueries,
     get closes() {
       return state.closes;
     },
@@ -322,7 +356,7 @@ describe("dashboard production lifecycle", () => {
     expect(lease.port).toBe(port);
     expect(lease.url).toBe(`http://127.0.0.1:${port}`);
     // Bind only: startup reads no provider data and no snapshots.
-    expect(calls).toEqual({ home: 0, project: 0, session: 0 });
+    expect(calls).toEqual({ home: 0, project: 0, session: 0, groups: 0 });
 
     const health = await fetch(`${lease.url}/api/v1/health`);
     expect(health.status).toBe(200);
@@ -376,7 +410,7 @@ describe("dashboard production lifecycle", () => {
 
     await second.dispose();
     expect(await tryBind(port)).toBe(true);
-    expect(calls).toEqual({ home: 0, project: 0, session: 0 });
+    expect(calls).toEqual({ home: 0, project: 0, session: 0, groups: 0 });
   });
 
   it("hands off to a live owner's source when the first owner disposes without dropping the socket", async () => {
@@ -426,7 +460,7 @@ describe("dashboard production lifecycle", () => {
     expect(await tryBind(port)).toBe(false);
     expect(first.closes).toBe(1);
     expect(secondCreates).toBe(0);
-    expect(second.calls).toEqual({ home: 0, project: 0, session: 0, quota: 0 });
+    expect(second.calls).toEqual({ home: 0, project: 0, session: 0, quota: 0, groups: 0 });
 
     // The surviving owner serves analytics and quota on the same port, lazily.
     expect(await readJson(port, "/api/v1/home?range=30d")).toMatchObject({
@@ -445,6 +479,102 @@ describe("dashboard production lifecycle", () => {
     expect(await tryBind(port)).toBe(true);
     expect(second.closes).toBe(1);
     // The first source was closed exactly once, at its own owner's disposal.
+    expect(first.closes).toBe(1);
+  });
+
+  it("serves the models collection and filtered detail through the active owner's groups source", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const owner = buildOwnerSource(31);
+
+    const lease = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => owner.source,
+      logger: silent,
+    });
+    expect(lease.state).toBe("running");
+
+    expect(await readJson(port, "/api/v1/models?range=7d")).toMatchObject({
+      dimension: "model",
+      range: "7d",
+      totals: { total: 31 },
+    });
+
+    const token = encodeAnalyticsEntityToken({ kind: "known", id: "gpt-5" });
+    expect(await readJson(port, `/api/v1/models/${token}?range=24h`)).toMatchObject({
+      dimension: "provider",
+      range: "24h",
+      filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+      totals: { total: 31 },
+    });
+
+    expect(owner.calls.groups).toBe(2);
+    expect(owner.groupQueries).toEqual([
+      { range: "7d", dimension: "model" },
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+      },
+    ]);
+  });
+
+  it("routes groups to the surviving owner and keeps one host until the last lease", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const first = buildOwnerSource(11);
+    const second = buildOwnerSource(22);
+    let secondCreates = 0;
+
+    const leaseA = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => first.source,
+      logger: silent,
+    });
+    const leaseB = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => {
+        secondCreates += 1;
+        return second.source;
+      },
+      logger: silent,
+    });
+    expect(secondCreates).toBe(0);
+
+    expect(await readJson(port, "/api/v1/models?range=7d")).toMatchObject({
+      dimension: "model",
+      totals: { total: 11 },
+    });
+    expect(first.calls.groups).toBe(1);
+    expect(second.calls.groups).toBe(0);
+
+    await leaseA.dispose();
+    // The socket survives and the surviving owner is still lazy.
+    expect(await tryBind(port)).toBe(false);
+    expect(first.closes).toBe(1);
+    expect(secondCreates).toBe(0);
+
+    expect(await readJson(port, "/api/v1/providers?range=30d")).toMatchObject({
+      dimension: "provider",
+      range: "30d",
+      totals: { total: 22 },
+    });
+    expect(secondCreates).toBe(1);
+    expect(second.calls.groups).toBe(1);
+    expect(first.calls.groups).toBe(1);
+    expect(second.groupQueries).toEqual([{ range: "30d", dimension: "provider" }]);
+
+    await leaseB.dispose();
+    expect(await tryBind(port)).toBe(true);
+    expect(second.closes).toBe(1);
     expect(first.closes).toBe(1);
   });
 
@@ -504,7 +634,7 @@ describe("dashboard production lifecycle", () => {
     expect(await failedQuota.json()).toMatchObject({ error: { code: "internal" } });
 
     // The failing delegate was asked, never silently replaced or re-created.
-    expect(second.calls).toEqual({ home: 2, project: 0, session: 0, quota: 1 });
+    expect(second.calls).toEqual({ home: 2, project: 0, session: 0, quota: 1, groups: 0 });
     await leaseB.dispose();
     expect(await tryBind(port)).toBe(true);
     expect(second.closes).toBe(1);
@@ -529,7 +659,7 @@ describe("dashboard production lifecycle", () => {
       expect(lease.state).toBe("unavailable");
       expect(lease.reason).toBe("port-unavailable");
       expect(lease.url).toBeUndefined();
-      expect(calls).toEqual({ home: 0, project: 0, session: 0 });
+      expect(calls).toEqual({ home: 0, project: 0, session: 0, groups: 0 });
       expect(logs).toHaveLength(1);
       expect(logs[0]).toContain("[opencode-quota-gui] error: dashboard server unavailable");
       expect(logs[0]).toContain("EADDRINUSE");

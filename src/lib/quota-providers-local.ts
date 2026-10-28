@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { writeJsonAtomic } from "./atomic-json.js";
 import type { QuotaToastEntry } from "./entries.js";
-import { lookupCost } from "./modelsdev-pricing.js";
+import { type CostBuckets, lookupCost } from "./modelsdev-pricing.js";
 import type { OpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import type { OpenCodeMessage } from "./opencode-storage.js";
@@ -14,7 +14,7 @@ import type {
 } from "./quota-providers.js";
 import { resolvePricingKey } from "./quota-stats.js";
 import { emptyTokenBuckets, type TokenBuckets, tokenBucketsFromMessage } from "./token-buckets.js";
-import { calculateUsdFromTokenBuckets } from "./token-cost.js";
+import { calculateUsdFromTokenBuckets, tokenRateCoverage } from "./token-cost.js";
 
 export const QUOTA_PROVIDER_LOCAL_STATE_VERSION = 1 as const;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -265,6 +265,16 @@ export async function syncLocalQuotaProviderState(
   return next;
 }
 
+/**
+ * A local estimate's budget contract has no partial state. When a rate entry
+ * is missing any bucket that carries tokens, report the message as unpriced
+ * instead of silently counting the known subtotal as complete spend.
+ */
+function completeRateCostOrNull(rates: CostBuckets, tokens: TokenBuckets): number | null {
+  if (tokenRateCoverage(rates, tokens).unpricedTokens > 0) return null;
+  return calculateUsdFromTokenBuckets(rates, tokens);
+}
+
 function resolveMessageCost(
   definition: LocalEstimateQuotaProviderDefinition,
   message: LocalQuotaProviderMessage,
@@ -275,14 +285,14 @@ function resolveMessageCost(
   });
   if (automatic.ok) {
     const rates = lookupCost(automatic.key.provider, automatic.key.model);
-    return rates ? calculateUsdFromTokenBuckets(rates, message.tokens) : null;
+    return rates ? completeRateCostOrNull(rates, message.tokens) : null;
   }
 
   const manual = definition.pricingModelMap?.[message.modelId];
   if (!manual) return null;
   const slash = manual.indexOf("/");
   const rates = lookupCost(manual.slice(0, slash), manual.slice(slash + 1));
-  return rates ? calculateUsdFromTokenBuckets(rates, message.tokens) : null;
+  return rates ? completeRateCostOrNull(rates, message.tokens) : null;
 }
 
 function nextUtcMidnight(nowMs: number): string {

@@ -7,6 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { encodeAnalyticsEntityToken } from "../src/contracts/analytics-entity.js";
+
 /**
  * P7 synthetic smoke over the built artifacts (plan P7 step 2; spec §12
  * R43/R49/R51).
@@ -47,6 +49,7 @@ interface CardRow {
 interface ProviderCardPayload {
   cardId: string;
   providerId: string;
+  providerLabel: string;
   accountLabel?: string;
   labelSource: string;
   rows: CardRow[];
@@ -104,6 +107,36 @@ interface ImportPreviewPayload {
   expectedRevision: string;
 }
 
+interface GroupTokens extends TokenTotals {
+  unpricedTokens: number;
+  unknownTokens: number;
+}
+
+type GroupIdentity = { kind: "known"; id: string } | { kind: "unknown" };
+
+interface GroupRowPayload {
+  identity: GroupIdentity;
+  tokens: GroupTokens;
+  sessionCount: number;
+  stepCount: number;
+  children: GroupRowPayload[];
+}
+
+interface GroupSeriesPayload {
+  kind: "entity" | "other";
+  identity?: GroupIdentity;
+  tokens: GroupTokens;
+}
+
+interface GroupSnapshotPayload {
+  dimension: "model" | "provider";
+  range: string;
+  filter?: { dimension: "model" | "provider"; identity: GroupIdentity };
+  rows: GroupRowPayload[];
+  series: GroupSeriesPayload[];
+  totals: GroupTokens;
+}
+
 interface ErrorPayload {
   error: { code: string; message: string };
 }
@@ -156,6 +189,22 @@ function putJson<Payload>(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+function groupRowId(row: GroupRowPayload): string {
+  return row.identity.kind === "unknown" ? "unknown" : row.identity.id;
+}
+
+function groupRow(snapshot: GroupSnapshotPayload, id: string): GroupRowPayload {
+  const row = snapshot.rows.find((entry) => groupRowId(entry) === id);
+  if (row === undefined) throw new Error(`synthetic fixture row ${id} is missing`);
+  return row;
+}
+
+function seriesName(series: GroupSeriesPayload): string {
+  if (series.kind === "other") return "other";
+  if (series.identity === undefined) throw new Error("an entity series has no identity");
+  return series.identity.kind === "unknown" ? "unknown" : series.identity.id;
 }
 
 function readCliStdout(child: ChildProcessWithoutNullStreams): Promise<string[]> {
@@ -224,12 +273,12 @@ describe("synthetic GUI smoke", () => {
         expect(totals[index][metric]).toBeGreaterThan(totals[index - 1][metric]);
       }
     }
-    expect(stepCounts).toEqual([2, 4, 7, 8]);
+    expect(stepCounts).toEqual([13, 15, 18, 19]);
     expect(projectOrders[0]).toEqual(["proj_alpha", "proj_beta"]);
     expect(projectOrders[3]).toEqual(["proj_alpha", "proj_beta", "proj_empty"]);
   });
 
-  it("maps two synthetic accounts and a provider amount that is not the API-equivalent cost", async () => {
+  it("maps two synthetic accounts, a known-brand card and a provider amount that is not the API-equivalent cost", async () => {
     // The quota surface is independent; home analytics must not wait on or
     // carry provider cards.
     const home = await requestJson<HomePayload>(apiUrl("/home?range=lifetime"));
@@ -242,10 +291,22 @@ describe("synthetic GUI smoke", () => {
     expect(quota.body.providers.polledAtMs).toBe(FIXED_NOW_MS);
     const cards = quota.body.providers.cards;
 
-    expect(cards).toHaveLength(3);
-    expect(new Set(cards.map((card) => card.cardId)).size).toBe(3);
+    expect(cards).toHaveLength(4);
+    expect(new Set(cards.map((card) => card.cardId)).size).toBe(4);
     expect(cards.filter((card) => card.accountLabel !== undefined)).toHaveLength(2);
-    expect(cards.filter((card) => card.labelSource === "provider")).toHaveLength(1);
+    expect(cards.filter((card) => card.labelSource === "provider")).toHaveLength(2);
+
+    // One card deliberately uses a real public provider id so the known-brand
+    // header label and logo are exercised; every value on it is invented.
+    const branded = cards.find((card) => card.providerId === "openai");
+    expect(branded).toMatchObject({
+      providerLabel: "OpenAI",
+      labelSource: "provider",
+    });
+    expect(branded?.accountLabel).toBeUndefined();
+    expect(branded?.cardId.startsWith("openai:")).toBe(true);
+    expect(branded?.rows).toHaveLength(1);
+    expect(branded?.rows[0]).toMatchObject({ kind: "percent", percentRemaining: 55 });
 
     const quantityRows = cards
       .flatMap((card) => card.rows)
@@ -261,12 +322,141 @@ describe("synthetic GUI smoke", () => {
     const apiEquivalentCostUsd = home.body.usage.totals.apiEquivalentCostUsd ?? -1;
     expect(apiEquivalentCostUsd).toBeGreaterThan(0);
     expect(apiEquivalentCostUsd).toBeLessThan(42.5);
-    expect(home.body.usage.totals.total).toBe(1920);
+    expect(home.body.usage.totals.total).toBe(8865);
 
     // Raw account source ids never reach the browser payload.
     const serializedCards = JSON.stringify(cards);
     expect(serializedCards).not.toContain("acct_synthetic_one");
     expect(serializedCards).not.toContain("acct_synthetic_two");
+  });
+
+  it("serves model analytics with one shared raw model across three providers and Other", async () => {
+    const response = await requestJson<GroupSnapshotPayload>(apiUrl("/models?range=7d"));
+    expect(response.status).toBe(200);
+    expect(response.body.dimension).toBe("model");
+    expect(response.body.range).toBe("7d");
+
+    expect(response.body.rows.map(groupRowId)).toEqual([
+      "gpt-5",
+      "synthetic-unpriced-model",
+      "gpt-5-mini",
+      "kimi-k2.5",
+      "grok-4",
+      "gemini-2.5-flash",
+      "claude-3-5-haiku-latest",
+    ]);
+
+    // One raw model id recorded through three provider gateways (the pre-existing
+    // openai rows use the same gpt-5 id). The provider children are the exact raw
+    // provider ids, ranked by selected-range tokens.
+    const shared = groupRow(response.body, "gpt-5");
+    expect(shared.tokens.total).toBe(2545);
+    expect(shared.children.map(groupRowId)).toEqual(["openai", "google", "anthropic"]);
+    expect(shared.children.map((child) => child.tokens.total)).toEqual([1475, 545, 525]);
+
+    // >5 models means the chart carries five entities plus a merged Other.
+    expect(response.body.series).toHaveLength(6);
+    expect(response.body.series.map(seriesName)).toEqual([
+      "gpt-5",
+      "synthetic-unpriced-model",
+      "gpt-5-mini",
+      "kimi-k2.5",
+      "grok-4",
+      "other",
+    ]);
+    expect(response.body.series[5]?.tokens.total).toBe(1220);
+  });
+
+  it("serves provider analytics with >5 providers, multi-model providers and pricing gaps", async () => {
+    const response = await requestJson<GroupSnapshotPayload>(apiUrl("/providers?range=7d"));
+    expect(response.status).toBe(200);
+    expect(response.body.dimension).toBe("provider");
+    expect(response.body.range).toBe("7d");
+
+    expect(response.body.rows.map(groupRowId)).toEqual([
+      "openai",
+      "anthropic",
+      "google",
+      "unknown",
+      "acme-inference",
+      "moonshotai",
+      "xai",
+    ]);
+
+    // One provider using several raw models, including the unpriced one, so the
+    // provider total is a numeric estimate with excluded tokens (Partial estimate).
+    const anthropic = groupRow(response.body, "anthropic");
+    expect(anthropic.tokens.total).toBe(1805);
+    expect(anthropic.tokens.apiEquivalentCostUsd).not.toBeNull();
+    expect(anthropic.tokens.unknownTokens).toBe(705);
+    expect(anthropic.children.map(groupRowId)).toEqual([
+      "synthetic-unpriced-model",
+      "claude-3-5-haiku-latest",
+      "gpt-5",
+    ]);
+
+    // A raw provider id the presentation catalog does not know keeps its raw
+    // identity for the generic-label/logo fallback; all of its tokens are unpriced.
+    const catalogFallback = groupRow(response.body, "acme-inference");
+    expect(catalogFallback.tokens.total).toBe(755);
+    expect(catalogFallback.tokens.apiEquivalentCostUsd).toBeNull();
+    expect(catalogFallback.tokens.unknownTokens).toBe(755);
+
+    // A missing provider id is the explicit unknown identity. Its model is still
+    // uniquely priceable, so this is not fabricated as zero cost.
+    const unknown = groupRow(response.body, "unknown");
+    expect(unknown.tokens.total).toBe(765);
+    expect(unknown.tokens.apiEquivalentCostUsd).toBeGreaterThan(0);
+
+    expect(response.body.series).toHaveLength(6);
+    expect(response.body.series.map(seriesName)).toEqual([
+      "openai",
+      "anthropic",
+      "google",
+      "unknown",
+      "acme-inference",
+      "other",
+    ]);
+    expect(response.body.series[5]?.tokens.total).toBe(1360);
+  });
+
+  it("serves exact model/provider detail routes for the QA fixture identities", async () => {
+    const sharedToken = encodeAnalyticsEntityToken({ kind: "known", id: "gpt-5" });
+    const shared = await requestJson<GroupSnapshotPayload>(
+      apiUrl(`/models/${sharedToken}?range=7d`),
+    );
+    expect(shared.status).toBe(200);
+    expect(shared.body.dimension).toBe("provider");
+    expect(shared.body.filter).toEqual({
+      dimension: "model",
+      identity: { kind: "known", id: "gpt-5" },
+    });
+    expect(shared.body.rows.map(groupRowId)).toEqual(["openai", "google", "anthropic"]);
+    expect(shared.body.totals.total).toBe(2545);
+
+    const anthropicToken = encodeAnalyticsEntityToken({ kind: "known", id: "anthropic" });
+    const anthropic = await requestJson<GroupSnapshotPayload>(
+      apiUrl(`/providers/${anthropicToken}?range=7d`),
+    );
+    expect(anthropic.status).toBe(200);
+    expect(anthropic.body.dimension).toBe("model");
+    expect(anthropic.body.rows.map(groupRowId)).toEqual([
+      "synthetic-unpriced-model",
+      "claude-3-5-haiku-latest",
+      "gpt-5",
+    ]);
+    expect(anthropic.body.totals.total).toBe(1805);
+    expect(anthropic.body.totals.apiEquivalentCostUsd).not.toBeNull();
+    expect(anthropic.body.totals.unknownTokens).toBe(705);
+
+    const unknown = await requestJson<GroupSnapshotPayload>(apiUrl("/providers/u?range=7d"));
+    expect(unknown.status).toBe(200);
+    expect(unknown.body.filter).toEqual({
+      dimension: "provider",
+      identity: { kind: "unknown" },
+    });
+    expect(unknown.body.rows.map(groupRowId)).toEqual(["gpt-5-mini"]);
+    expect(unknown.body.totals.total).toBe(765);
   });
 
   it("serves the project page with worktree labels and the recursive session tree", async () => {
@@ -281,7 +471,7 @@ describe("synthetic GUI smoke", () => {
     ]);
     expect(project.body.roots.map((root) => root.worktreeLabel)).toEqual(["alpha", "alpha-wt2"]);
     expect(project.body.totals.sessionCount).toBe(5);
-    expect(project.body.totals.total).toBe(1140);
+    expect(project.body.totals.total).toBe(8085);
 
     const session = await requestJson<SessionPayload>(apiUrl("/sessions/ses_alpha_child1"));
     expect(session.status).toBe(200);
