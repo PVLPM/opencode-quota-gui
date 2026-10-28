@@ -10,7 +10,7 @@ import { iterAssistantMessages } from "./opencode-storage.js";
 import type { TokenBuckets } from "./quota-stats.js";
 import { resolvePricingKey } from "./quota-stats.js";
 import { addTokenBuckets, emptyTokenBuckets, tokenBucketsFromMessage } from "./token-buckets.js";
-import { calculateUsdFromTokenBuckets } from "./token-cost.js";
+import { calculateUsdFromTokenBuckets, tokenRateCoverage } from "./token-cost.js";
 
 export interface CursorCycleWindow {
   sinceMs: number;
@@ -139,6 +139,12 @@ export async function getCurrentCursorUsageSummary(params?: {
     if (resolved.kind === "local") {
       const cost = lookupCursorLocalCost(resolved.model);
       if (!cost) continue;
+      // A mixed rate entry cannot produce a complete local cost. Keep the
+      // tokens visible as unknown instead of reporting a silent subtotal.
+      if (tokenRateCoverage(cost, tokens).unpricedTokens > 0) {
+        accumulateUnknownModelUsage(unknownModels, total, sourceModelID, tokens);
+        continue;
+      }
       const costUsd = calculateUsdFromTokenBuckets(cost, tokens);
       accumulateKnownUsage({ bucket: autoComposer, total, tokens, costUsd });
       continue;
@@ -151,7 +157,7 @@ export async function getCurrentCursorUsageSummary(params?: {
       });
       if (mapped.ok) {
         const cost = lookupCost(mapped.key.provider, mapped.key.model);
-        if (cost) {
+        if (cost && tokenRateCoverage(cost, tokens).unpricedTokens === 0) {
           const costUsd = calculateUsdFromTokenBuckets(cost, tokens);
           accumulateKnownUsage({ bucket: api, total, tokens, costUsd });
           continue;

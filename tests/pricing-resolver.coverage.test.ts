@@ -12,7 +12,7 @@ import {
   lookupCost,
   setPricingSnapshotSelection,
 } from "../src/lib/modelsdev-pricing.js";
-import { resolvePricingKey } from "../src/lib/quota-stats.js";
+import { priceTokenBuckets, resolvePricingKey } from "../src/lib/quota-stats.js";
 
 const CURSOR_UPSTREAM_PRICING_PATH = new URL(
   "../references/upstream-plugins/cursor-opencode-provider/dist/pricing-data.js",
@@ -193,6 +193,67 @@ describe("resolvePricingKey snapshot coverage", () => {
         key: { provider, model },
       });
     }
+  });
+
+  it("maps the exact opencode-go deepseek-v4-flash pricing-only alias without rewriting raw ids", () => {
+    const source = { providerID: "opencode-go", modelID: "deepseek-v4-flash" };
+
+    expect(resolvePricingKey(source)).toEqual({
+      ok: true,
+      method: "source_provider",
+      key: { provider: "opencode-go", model: "deepseek-v4.1-flash" },
+    });
+    expect(source).toEqual({ providerID: "opencode-go", modelID: "deepseek-v4-flash" });
+
+    // Pricing-only: the raw id stays absent from the priced catalog.
+    expect(lookupCost("opencode-go", "deepseek-v4-flash")).toBeNull();
+    expect(lookupCost("opencode-go", "deepseek-v4.1-flash")).toEqual({
+      input: 0.15,
+      output: 0.6,
+      cache_read: 0.003,
+    });
+
+    // The registered subscription synonym keeps the same opencode-go route.
+    expect(
+      resolvePricingKey({ providerID: "opencode-go-subscription", modelID: "deepseek-v4-flash" }),
+    ).toMatchObject({
+      ok: true,
+      method: "source_provider",
+      key: { provider: "opencode-go", model: "deepseek-v4.1-flash" },
+    });
+
+    expect(
+      resolvePricingKey({ providerID: "opencode-go", modelID: "opencode-go/deepseek-v4-flash" }),
+    ).toMatchObject({
+      ok: true,
+      method: "source_provider",
+      key: { provider: "opencode-go", model: "deepseek-v4.1-flash" },
+    });
+
+    // Exact provider scope: opencode's own deepseek-v4-flash route is untouched.
+    expect(resolvePricingKey({ providerID: "opencode", modelID: "deepseek-v4-flash" })).toEqual({
+      ok: true,
+      method: "source_provider",
+      key: { provider: "opencode", model: "deepseek-v4-flash" },
+    });
+
+    expect(
+      priceTokenBuckets({
+        providerID: "opencode-go",
+        modelID: "deepseek-v4-flash",
+        tokens: {
+          input: 1_000_000,
+          output: 1_000_000,
+          reasoning: 0,
+          cache_read: 1_000_000,
+          cache_write: 0,
+        },
+      }),
+    ).toEqual({
+      status: "priced",
+      key: { provider: "opencode-go", model: "deepseek-v4.1-flash" },
+      costUsd: 0.753,
+    });
   });
 
   it("still resolves an arbitrary non-listed provider from an explicit model prefix", () => {

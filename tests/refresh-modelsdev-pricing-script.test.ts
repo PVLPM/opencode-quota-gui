@@ -69,6 +69,81 @@ describe("refresh-modelsdev-pricing keepRetiredModels", () => {
   });
 });
 
+describe("refresh-modelsdev-pricing catalog presence retention", () => {
+  it("retains only models absent from the authoritative catalog", () => {
+    const fresh = snapshot({ openai: { "keep-priced": { input: 2, output: 4 } } });
+    const previous = snapshot({
+      openai: {
+        "keep-priced": { input: 1, output: 99 },
+        "absent-retired": { input: 3, output: 15 },
+        "present-unpriced": { input: 4, output: 8 },
+        "present-malformed": { input: 5, output: 10 },
+      },
+    });
+    const catalog = {
+      openai: ["keep-priced", "present-unpriced", "present-malformed", "new-unpriced"],
+    };
+
+    expect(keepRetiredModels(fresh, previous, ["openai"], catalog)).toEqual([
+      "openai/absent-retired",
+    ]);
+    expect(fresh.providers.openai).toEqual({
+      "absent-retired": { input: 3, output: 15 },
+      "keep-priced": { input: 2, output: 4 },
+    });
+  });
+
+  it("treats providers missing from the catalog as unknown and retains them", () => {
+    const fresh = snapshot({ openai: { "gpt-new": { input: 1, output: 2 } } });
+    const previous = snapshot({
+      openai: { "openai-old": { input: 3, output: 4 } },
+      xai: { "grok-old": { input: 2, output: 10 } },
+    });
+
+    expect(keepRetiredModels(fresh, previous, ["openai", "xai"], { openai: ["gpt-new"] })).toEqual([
+      "openai/openai-old",
+      "xai/grok-old",
+    ]);
+    expect(fresh.providers).toEqual({
+      openai: {
+        "gpt-new": { input: 1, output: 2 },
+        "openai-old": { input: 3, output: 4 },
+      },
+      xai: { "grok-old": { input: 2, output: 10 } },
+    });
+  });
+
+  it("applies catalog retention when building the refreshed snapshot", () => {
+    const api = {
+      openai: {
+        models: {
+          repriced: { cost: { input: 2, output: 4 } },
+          unpriced: { cost: {} },
+          malformed: { cost: { input: "2" } },
+        },
+      },
+    };
+    const previous = snapshot({
+      openai: {
+        repriced: { input: 1, output: 2 },
+        unpriced: { input: 4, output: 8 },
+        malformed: { input: 5, output: 10 },
+        retired: { input: 3, output: 15 },
+      },
+      xai: { "grok-old": { input: 2, output: 10 } },
+    });
+
+    const { snapshot: built, keptModelIDs } = buildRefreshedSnapshot(api, previous, undefined);
+
+    expect(built.providers.openai).toEqual({
+      repriced: { input: 2, output: 4 },
+      retired: { input: 3, output: 15 },
+    });
+    expect(built.providers.xai).toEqual({ "grok-old": { input: 2, output: 10 } });
+    expect(new Set(keptModelIDs)).toEqual(new Set(["openai/retired", "xai/grok-old"]));
+  });
+});
+
 describe("refresh-modelsdev-pricing buildRefreshedSnapshot", () => {
   it("refreshes every central provider by default and retains providers the API dropped", () => {
     const api = {

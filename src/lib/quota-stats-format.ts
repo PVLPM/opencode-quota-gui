@@ -3,6 +3,7 @@ import type { WidthMode } from "./markdown-table.js";
 import type { AggregateResult, SessionTreeNode, TokenBuckets } from "./quota-stats.js";
 import {
   commandHeading,
+  type ReportBlock,
   type ReportDocument,
   type ReportSection,
   renderMarkdownReport,
@@ -15,6 +16,33 @@ const TABLE_WIDTH_MODE: WidthMode = "markdown-conceal";
 function fmtUsd(n: number): string {
   if (!Number.isFinite(n)) return "$0.00";
   return `$${n.toFixed(2)}`;
+}
+
+/**
+ * A cost that only covers priced tokens is a known subtotal, not complete
+ * spend. Mark it so the report never presents a partial number as final.
+ */
+type CostBearingRow = {
+  partialMessageCount?: number;
+  pricedMessageCount?: number;
+  unpricedMessageCount?: number;
+};
+
+function rowCostIsPartial(row: CostBearingRow | undefined): boolean {
+  if (!row) return false;
+  return (
+    (row.partialMessageCount ?? 0) > 0 ||
+    ((row.pricedMessageCount ?? 0) > 0 && (row.unpricedMessageCount ?? 0) > 0)
+  );
+}
+
+function fmtCostCell(costUsd: number, partial: boolean): string {
+  const formatted = fmtUsd(costUsd);
+  return partial ? `${formatted} (partial)` : formatted;
+}
+
+function partialCostNote(totals: AggregateResult["totals"]): string {
+  return `Cost is partial: ${fmtUsd(totals.costUsd)} is the known subtotal; tokens without published rates are unpriced.`;
 }
 
 type SessionReportRow = AggregateResult["bySession"][number];
@@ -45,7 +73,7 @@ function appendSessionRow(sessionRows: string[][], row: SessionReportRow, curren
   sessionRows.push([
     current,
     row.sessionID,
-    fmtUsd(row.costUsd),
+    fmtCostCell(row.costUsd, rowCostIsPartial(row)),
     fmtCompact(totalTokenBuckets(row.tokens)),
     fmtCompact(row.messageCount),
     truncateTitle(row.title),
@@ -206,8 +234,15 @@ export function buildQuotaStatsReportDocument(params: QuotaStatsReportParams): R
     totalTokenBuckets(r.totals.priced) +
     totalTokenBuckets(r.totals.unknown) +
     totalTokenBuckets(r.totals.unpriced);
+  const totalsArePartial =
+    (r.totals.partialMessageCount ?? 0) > 0 ||
+    (totalTokenBuckets(r.totals.priced) > 0 &&
+      totalTokenBuckets(r.totals.unpriced) + totalTokenBuckets(r.totals.unknown) > 0);
 
   const sections: ReportSection[] = [];
+  const partialNotes: ReportBlock[] = totalsArePartial
+    ? [{ kind: "lines", lines: [partialCostNote(r.totals)] }]
+    : [];
 
   // Session-scoped reports use a compact summary without the time window column.
   if (sessionOnly) {
@@ -223,10 +258,11 @@ export function buildQuotaStatsReportDocument(params: QuotaStatsReportParams): R
             [
               fmtCompact(r.totals.messageCount),
               fmtCompact(combinedTokens),
-              fmtUsd(r.totals.costUsd),
+              fmtCostCell(r.totals.costUsd, totalsArePartial),
             ],
           ],
         },
+        ...partialNotes,
       ],
     });
   } else if (sessionTreeMode) {
@@ -247,10 +283,11 @@ export function buildQuotaStatsReportDocument(params: QuotaStatsReportParams): R
               fmtCompact(r.totals.messageCount),
               fmtCompact(sessionTree!.nodes.length),
               fmtCompact(combinedTokens),
-              fmtUsd(r.totals.costUsd),
+              fmtCostCell(r.totals.costUsd, totalsArePartial),
             ],
           ],
         },
+        ...partialNotes,
       ],
     });
   } else {
@@ -272,10 +309,11 @@ export function buildQuotaStatsReportDocument(params: QuotaStatsReportParams): R
               fmtCompact(r.totals.messageCount),
               fmtCompact(r.totals.sessionCount),
               fmtCompact(combinedTokens),
-              fmtUsd(r.totals.costUsd),
+              fmtCostCell(r.totals.costUsd, totalsArePartial),
             ],
           ],
         },
+        ...partialNotes,
       ],
     });
   }
@@ -330,7 +368,7 @@ export function buildQuotaStatsReportDocument(params: QuotaStatsReportParams): R
         fmtCompact(t.cache_write),
       ];
       if (hasAnyReasoning) out.push(fmtCompact(t.reasoning));
-      out.push(fmtCompact(totalTokenBuckets(t)), fmtUsd(row.costUsd));
+      out.push(fmtCompact(totalTokenBuckets(t)), fmtCostCell(row.costUsd, rowCostIsPartial(row)));
       rows.push(out);
     }
 
@@ -365,7 +403,7 @@ export function buildQuotaStatsReportDocument(params: QuotaStatsReportParams): R
         treeRelationLabel(node.depth),
         node.parentID ?? "-",
         node.sessionID,
-        fmtUsd(usage?.costUsd ?? 0),
+        fmtCostCell(usage?.costUsd ?? 0, rowCostIsPartial(usage)),
         fmtCompact(totalTokenBuckets(usage?.tokens ?? emptyTokenBuckets())),
         fmtCompact(usage?.messageCount ?? 0),
         truncateTitle(node.title ?? usage?.title),

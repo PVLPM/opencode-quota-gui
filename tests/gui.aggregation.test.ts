@@ -12,17 +12,37 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/modelsdev-pricing.js")>();
   const FAKE_PROVIDER = "unpriced-labs";
   const FAKE_MODEL = "mystery-1";
+  const PARTIAL_PROVIDER = "partial-labs";
+  const PARTIAL_MODEL = "input-only";
+  const FREE_PROVIDER = "free-labs";
+  const FREE_MODEL = "zero-cost";
   return {
     ...actual,
+    hasCost: (providerID: string, modelID: string) =>
+      (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
+      (providerID === FREE_PROVIDER && modelID === FREE_MODEL) ||
+      actual.hasCost(providerID, modelID),
     hasProvider: (providerID: string) =>
-      providerID === FAKE_PROVIDER || actual.hasProvider(providerID),
+      providerID === FAKE_PROVIDER ||
+      providerID === PARTIAL_PROVIDER ||
+      providerID === FREE_PROVIDER ||
+      actual.hasProvider(providerID),
     isModelsDevProviderId: (providerID: string) =>
-      providerID === FAKE_PROVIDER || actual.isModelsDevProviderId(providerID),
+      providerID === FAKE_PROVIDER ||
+      providerID === PARTIAL_PROVIDER ||
+      providerID === FREE_PROVIDER ||
+      actual.isModelsDevProviderId(providerID),
     hasModel: (providerID: string, modelID: string) =>
       (providerID === FAKE_PROVIDER && modelID === FAKE_MODEL) ||
+      (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
+      (providerID === FREE_PROVIDER && modelID === FREE_MODEL) ||
       actual.hasModel(providerID, modelID),
-    lookupCost: (providerID: string, modelID: string) =>
-      providerID === FAKE_PROVIDER ? null : actual.lookupCost(providerID, modelID),
+    lookupCost: (providerID: string, modelID: string) => {
+      if (providerID === FAKE_PROVIDER) return null;
+      if (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) return { input: 2 };
+      if (providerID === FREE_PROVIDER && modelID === FREE_MODEL) return { input: 0, output: 0 };
+      return actual.lookupCost(providerID, modelID);
+    },
   };
 });
 
@@ -34,6 +54,7 @@ import type {
   OpenCodeRawAssistantRow,
   OpenCodeSessionInfo,
 } from "../src/lib/opencode-storage.js";
+import { formatCostText, isAuthoritativelyFree } from "../src/ui/model-analytics.js";
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
@@ -379,6 +400,58 @@ describe("home usage token accounting and pricing", () => {
     expect(usage.totals.unpricedTokens).toBe(1_000);
     expect(usage.totals.unknownTokens).toBe(0);
     expect(usage.totals.apiEquivalentCostUsd).toBeNull();
+    expect(isAuthoritativelyFree(usage.totals)).toBe(false);
+    expect(formatCostText(usage.totals)).toBe("Unpriced");
+  });
+
+  it("keeps the known cost of a partially priced row and marks it partial", () => {
+    const dataset = makeDataset({
+      sessions: [sessionInfo({ id: "ses_s", projectID: "proj_p", createdMs: NOW - 2 * HOUR_MS })],
+      messages: [
+        assistantRow(
+          "ses_s",
+          "msg_partial",
+          NOW - HOUR_MS,
+          NOW - HOUR_MS + 500,
+          { input: 1_000_000, output: 500_000 },
+          { providerID: "partial-labs", modelID: "input-only" },
+        ),
+      ],
+    });
+
+    const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+    expect(usage.totals.total).toBe(1_500_000);
+    expect(usage.totals.apiEquivalentCostUsd).toBe(2);
+    expect(usage.totals.unpricedTokens).toBe(500_000);
+    expect(usage.totals.unknownTokens).toBe(0);
+    expect(isAuthoritativelyFree(usage.totals)).toBe(false);
+    expect(formatCostText(usage.totals)).not.toBe("Free");
+  });
+
+  it("keeps explicit zero rates authoritatively free", () => {
+    const dataset = makeDataset({
+      sessions: [sessionInfo({ id: "ses_s", projectID: "proj_p", createdMs: NOW - 2 * HOUR_MS })],
+      messages: [
+        assistantRow(
+          "ses_s",
+          "msg_free",
+          NOW - HOUR_MS,
+          NOW - HOUR_MS + 500,
+          { input: 1_000_000, output: 1_000_000 },
+          { providerID: "free-labs", modelID: "zero-cost" },
+        ),
+      ],
+    });
+
+    const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+    expect(usage.totals.total).toBe(2_000_000);
+    expect(usage.totals.apiEquivalentCostUsd).toBe(0);
+    expect(usage.totals.unpricedTokens).toBe(0);
+    expect(usage.totals.unknownTokens).toBe(0);
+    expect(isAuthoritativelyFree(usage.totals)).toBe(true);
+    expect(formatCostText(usage.totals)).toBe("Free");
   });
 });
 

@@ -246,6 +246,13 @@ function addRawStep(
     cache: pricingCache,
   });
 
+  if (outcome.status === "partial") {
+    accumulator.pricedAny = true;
+    accumulator.costUsd += outcome.costUsd;
+    accumulator.unpricedTokens += outcome.unpricedTokens;
+    return;
+  }
+
   if (outcome.status === "priced") {
     accumulator.pricedAny = true;
     accumulator.costUsd += outcome.costUsd;

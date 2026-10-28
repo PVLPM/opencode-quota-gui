@@ -10,9 +10,11 @@ import {
   listProviders,
   lookupCost,
   lookupCostAtContext,
+  maybeRefreshPricingSnapshot,
   setPricingSnapshotSelection,
 } from "../src/lib/modelsdev-pricing.js";
 import { calculateCostUsd, priceTokenBuckets, resolvePricingKey } from "../src/lib/quota-stats.js";
+import type { TokenBuckets } from "../src/lib/token-buckets.js";
 
 const SNAPSHOT_URL = new URL("../src/data/modelsdev-pricing.min.json", import.meta.url);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -313,6 +315,183 @@ describe("bundled pricing coverage and tiers", () => {
   });
 });
 
+describe("catalog-aware pricing resolution", () => {
+  it("blocks cross-provider fallback for a source catalog model without a cost", async () => {
+    const nowMs = 1_800_000_000_000;
+    const result = await maybeRefreshPricingSnapshot({
+      nowMs,
+      fetchFn: vi.fn(),
+      snapshotSelection: "bundled",
+      bootstrapSnapshotOverride: {
+        _meta: {
+          source: "test-bootstrap",
+          generatedAt: nowMs,
+          providers: ["priced-source"],
+          units: "USD per 1M tokens",
+        },
+        providers: {
+          "priced-source": {
+            "shared-model": { input: 10, output: 20 },
+          },
+        },
+        catalog: {
+          "priced-source": ["shared-model"],
+          "unpriced-source": ["shared-model"],
+        },
+      },
+    });
+
+    expect(result.reason).toBe("selection_bundled");
+    expect(resolvePricingKey({ providerID: "unpriced-source", modelID: "shared-model" })).toEqual({
+      ok: true,
+      method: "source_provider",
+      key: { provider: "unpriced-source", model: "shared-model" },
+    });
+
+    expect(
+      priceTokenBuckets({
+        providerID: "unpriced-source",
+        modelID: "shared-model",
+        tokens: { input: 1_000_000, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+      }),
+    ).toMatchObject({
+      status: "unpriced",
+      key: { provider: "unpriced-source", model: "shared-model" },
+    });
+  });
+
+  it("still applies an explicit provider route alias for a catalog-present unpriced id", async () => {
+    const nowMs = 1_800_000_000_000;
+    await maybeRefreshPricingSnapshot({
+      nowMs,
+      fetchFn: vi.fn(),
+      snapshotSelection: "bundled",
+      bootstrapSnapshotOverride: {
+        _meta: {
+          source: "test-bootstrap",
+          generatedAt: nowMs,
+          providers: ["opencode-go"],
+          units: "USD per 1M tokens",
+        },
+        providers: {
+          "opencode-go": {
+            "deepseek-v4.1-flash": { input: 0.15, output: 0.6, cache_read: 0.003 },
+          },
+        },
+        catalog: {
+          "opencode-go": ["deepseek-v4-flash", "deepseek-v4.1-flash"],
+        },
+      },
+    });
+
+    expect(resolvePricingKey({ providerID: "opencode-go", modelID: "deepseek-v4-flash" })).toEqual({
+      ok: true,
+      method: "source_provider",
+      key: { provider: "opencode-go", model: "deepseek-v4.1-flash" },
+    });
+  });
+
+  it("keeps an unpriced vendor-prefixed source model out of priced provider heuristics", async () => {
+    const nowMs = 1_800_000_000_000;
+    await maybeRefreshPricingSnapshot({
+      nowMs,
+      fetchFn: vi.fn(),
+      snapshotSelection: "bundled",
+      bootstrapSnapshotOverride: {
+        _meta: {
+          source: "test-bootstrap",
+          generatedAt: nowMs,
+          providers: ["google", "openrouter"],
+          units: "USD per 1M tokens",
+        },
+        providers: {
+          google: {
+            "gemini-x": { input: 1.25, output: 10 },
+          },
+          openrouter: {
+            "gemini-X": { input: 9, output: 11 },
+            "some-priced-model": { input: 2, output: 4 },
+          },
+        },
+        catalog: {
+          google: ["gemini-x"],
+          openrouter: ["gemini-X", "google/gemini-X", "some-priced-model"],
+        },
+      },
+    });
+
+    expect(resolvePricingKey({ providerID: "openrouter", modelID: "google/gemini-X" })).toEqual({
+      ok: true,
+      method: "source_provider",
+      key: { provider: "openrouter", model: "google/gemini-X" },
+    });
+
+    expect(
+      priceTokenBuckets({
+        providerID: "openrouter",
+        modelID: "google/gemini-X",
+        tokens: { input: 1_000_000, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+      }),
+    ).toMatchObject({
+      status: "unpriced",
+      key: { provider: "openrouter", model: "google/gemini-X" },
+    });
+  });
+
+  it("keeps catalog-present unpriced variants out of free/thinking/preview heuristics", async () => {
+    const nowMs = 1_800_000_000_000;
+    await maybeRefreshPricingSnapshot({
+      nowMs,
+      fetchFn: vi.fn(),
+      snapshotSelection: "bundled",
+      bootstrapSnapshotOverride: {
+        _meta: {
+          source: "test-bootstrap",
+          generatedAt: nowMs,
+          providers: ["google", "heuristic-labs"],
+          units: "USD per 1M tokens",
+        },
+        providers: {
+          google: {
+            "gemini-3-pro-preview": { input: 5, output: 6 },
+          },
+          "heuristic-labs": {
+            "base-model": { input: 1, output: 2 },
+            reasoner: { input: 3, output: 4 },
+          },
+        },
+        catalog: {
+          google: ["gemini-3-pro", "gemini-3-pro-preview"],
+          "heuristic-labs": ["base-model", "base-model-free", "reasoner", "reasoner-thinking"],
+        },
+      },
+    });
+
+    for (const [providerID, modelID] of [
+      ["heuristic-labs", "base-model-free"],
+      ["heuristic-labs", "reasoner-thinking"],
+      ["google", "gemini-3-pro"],
+    ] as const) {
+      expect(resolvePricingKey({ providerID, modelID })).toEqual({
+        ok: true,
+        method: "source_provider",
+        key: { provider: providerID, model: modelID },
+      });
+
+      expect(
+        priceTokenBuckets({
+          providerID,
+          modelID,
+          tokens: { input: 1_000_000, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+        }),
+      ).toMatchObject({
+        status: "unpriced",
+        key: { provider: providerID, model: modelID },
+      });
+    }
+  });
+});
+
 describe("models.dev refresh context tiers", () => {
   it("parses explicit context tiers, drops unsupported tiers, and makes one central request", async () => {
     vi.resetModules();
@@ -426,6 +605,144 @@ describe("models.dev refresh context tiers", () => {
       expect(pricing.lookupCost("openai", "malformed-tier")?.tiers).toBeUndefined();
     } finally {
       pricing.__resetPricingSnapshotForTests();
+    }
+  });
+});
+
+describe("partially known token rates", () => {
+  const NOW_MS = 1_800_000_000_000;
+  const tokens = (overrides: Partial<TokenBuckets> = {}): TokenBuckets => ({
+    input: 0,
+    output: 0,
+    reasoning: 0,
+    cache_read: 0,
+    cache_write: 0,
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    await maybeRefreshPricingSnapshot({
+      nowMs: NOW_MS,
+      fetchFn: vi.fn(),
+      snapshotSelection: "bundled",
+      bootstrapSnapshotOverride: {
+        _meta: {
+          source: "test-bootstrap",
+          generatedAt: NOW_MS,
+          providers: ["partial-labs"],
+          units: "USD per 1M tokens",
+        },
+        providers: {
+          "partial-labs": {
+            "input-only": { input: 2 },
+            "output-only": { output: 4 },
+            "cache-only": { cache_read: 1 },
+            "reasoning-only": { reasoning: 6 },
+            "zero-cost": { input: 0, output: 0 },
+            "zero-input-only": { input: 0 },
+            complete: { input: 2, output: 4 },
+          },
+        },
+      },
+    });
+  });
+
+  it("retains known bucket cost and marks only the missing buckets unpriced", () => {
+    const mixed = tokens({ input: 1_000_000, output: 1_000_000 });
+
+    expect(
+      priceTokenBuckets({ providerID: "partial-labs", modelID: "input-only", tokens: mixed }),
+    ).toEqual({
+      status: "partial",
+      key: { provider: "partial-labs", model: "input-only" },
+      costUsd: 2,
+      unpricedTokens: 1_000_000,
+    });
+    expect(
+      priceTokenBuckets({ providerID: "partial-labs", modelID: "output-only", tokens: mixed }),
+    ).toEqual({
+      status: "partial",
+      key: { provider: "partial-labs", model: "output-only" },
+      costUsd: 4,
+      unpricedTokens: 1_000_000,
+    });
+    expect(
+      calculateCostUsd({ provider: "partial-labs", model: "input-only", tokens: mixed }),
+    ).toEqual({
+      ok: true,
+      costUsd: 2,
+      unpricedTokens: 1_000_000,
+    });
+  });
+
+  it("prices only mixes whose positive buckets have applicable rates", () => {
+    const cases = [
+      ["input-only", { input: 1_000_000 }, 2],
+      ["output-only", { output: 1_000_000 }, 4],
+      ["cache-only", { cache_read: 1_000_000 }, 1],
+      ["reasoning-only", { reasoning: 1_000_000 }, 6],
+      ["input-only", { cache_read: 1_000_000 }, 2],
+      ["output-only", { reasoning: 1_000_000 }, 4],
+      ["complete", { input: 1_000_000, output: 1_000_000 }, 6],
+    ] as const;
+
+    for (const [modelID, overrides, costUsd] of cases) {
+      expect(
+        priceTokenBuckets({ providerID: "partial-labs", modelID, tokens: tokens(overrides) }),
+        `${modelID} ${JSON.stringify(overrides)}`,
+      ).toEqual({
+        status: "priced",
+        key: { provider: "partial-labs", model: modelID },
+        costUsd,
+      });
+    }
+  });
+
+  it("keeps explicit zero rates priced at zero", () => {
+    expect(
+      priceTokenBuckets({
+        providerID: "partial-labs",
+        modelID: "zero-cost",
+        tokens: tokens({ input: 1_000_000, output: 1_000_000 }),
+      }),
+    ).toEqual({
+      status: "priced",
+      key: { provider: "partial-labs", model: "zero-cost" },
+      costUsd: 0,
+    });
+  });
+
+  it("marks a zero known cost partial when another bucket has no rate", () => {
+    expect(
+      priceTokenBuckets({
+        providerID: "partial-labs",
+        modelID: "zero-input-only",
+        tokens: tokens({ input: 1_000_000, output: 1_000_000 }),
+      }),
+    ).toEqual({
+      status: "partial",
+      key: { provider: "partial-labs", model: "zero-input-only" },
+      costUsd: 0,
+      unpricedTokens: 1_000_000,
+    });
+  });
+
+  it("does not invent cache or reasoning rates from a missing base rate", () => {
+    const cases = [
+      ["output-only", { cache_read: 1_000_000 }],
+      ["input-only", { reasoning: 1_000_000 }],
+      ["cache-only", { input: 1_000_000 }],
+      ["reasoning-only", { output: 1_000_000 }],
+    ] as const;
+
+    for (const [modelID, overrides] of cases) {
+      expect(
+        priceTokenBuckets({ providerID: "partial-labs", modelID, tokens: tokens(overrides) }),
+        `${modelID} ${JSON.stringify(overrides)}`,
+      ).toMatchObject({
+        status: "unpriced",
+        key: { provider: "partial-labs", model: modelID },
+      });
     }
   });
 });

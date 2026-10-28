@@ -47,6 +47,9 @@ function createRuntimeSnapshot(generatedAt: number, input: number) {
         },
       },
     },
+    catalog: {
+      openai: ["gpt-4o-mini"],
+    },
   };
 }
 
@@ -287,6 +290,15 @@ describe("pricing runtime refresh policy", () => {
     const nowMs = 1_800_000_000_000;
     const staleGeneratedAt = nowMs - 4 * DAY_MS;
 
+    // A current runtime snapshot carries its catalog, so a conditional 304 is a
+    // valid freshness refresh.
+    await mkdir(join(runtimeDirs.cacheDir, "opencode-quota-gui"), { recursive: true });
+    await writeFile(
+      pricing.getRuntimePricingSnapshotPath(runtimeDirs),
+      JSON.stringify(createRuntimeSnapshot(staleGeneratedAt, 0.15)),
+      "utf-8",
+    );
+
     const fetchFn = vi.fn().mockResolvedValue(
       new Response(null, {
         status: 304,
@@ -315,6 +327,122 @@ describe("pricing runtime refresh policy", () => {
     const persistedSnapshot = JSON.parse(await readFile(runtimeSnapshotPath, "utf-8"));
     expect(persistedSnapshot._meta.generatedAt).toBe(nowMs);
     expect(persistedSnapshot.providers.openai["gpt-4o-mini"].input).toBe(0.15);
+  });
+
+  it("forces an unconditional catalog refresh for a legacy runtime snapshot without catalog", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
+    await mkdir(snapshotDir, { recursive: true });
+
+    const legacyRuntime = createRuntimeSnapshot(nowMs - 60_000, 0.5);
+    delete legacyRuntime.catalog;
+    Object.assign(legacyRuntime.providers.openai, {
+      "present-unpriced": { input: 4, output: 8 },
+    });
+    await writeFile(
+      pricing.getRuntimePricingSnapshotPath(runtimeDirs),
+      JSON.stringify(legacyRuntime),
+      "utf-8",
+    );
+    await writeFile(
+      pricing.getRuntimePricingRefreshStatePath(runtimeDirs),
+      JSON.stringify({
+        version: 1,
+        updatedAt: nowMs - 60_000,
+        lastAttemptAt: nowMs - 7 * 60 * 60 * 1000,
+        etag: "legacy-etag",
+        lastModified: "Tue, 03 Mar 2026 00:00:00 GMT",
+      }),
+      "utf-8",
+    );
+
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("If-None-Match")).toBeNull();
+      expect(headers.get("If-Modified-Since")).toBeNull();
+      return new Response(
+        JSON.stringify({
+          openai: {
+            models: {
+              "gpt-4o-mini": { cost: { input: 0.123, output: 0.456 } },
+              "present-unpriced": { cost: {} },
+            },
+          },
+        }),
+        { status: 200, headers: { etag: "fresh-etag" } },
+      );
+    });
+
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      maxAgeMs: 3 * DAY_MS,
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+    });
+
+    expect(result).toMatchObject({ attempted: true, updated: true });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(pricing.lookupCost("openai", "present-unpriced")).toBeNull();
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")).toEqual({
+      input: 0.123,
+      output: 0.456,
+    });
+
+    const persisted = JSON.parse(
+      await readFile(pricing.getRuntimePricingSnapshotPath(runtimeDirs), "utf-8"),
+    );
+    expect(persisted.providers.openai["present-unpriced"]).toBeUndefined();
+    expect(persisted.catalog.openai).toEqual(["gpt-4o-mini", "present-unpriced"]);
+    expect((await pricing.readPricingRefreshState(runtimeDirs))?.etag).toBe("fresh-etag");
+  });
+
+  it("treats a repeated 304 without an authoritative catalog as a failed refresh", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
+    await mkdir(snapshotDir, { recursive: true });
+
+    const legacyRuntime = createRuntimeSnapshot(nowMs - 60_000, 0.5);
+    delete legacyRuntime.catalog;
+    const snapshotPath = pricing.getRuntimePricingSnapshotPath(runtimeDirs);
+    await writeFile(snapshotPath, JSON.stringify(legacyRuntime), "utf-8");
+    await writeFile(
+      pricing.getRuntimePricingRefreshStatePath(runtimeDirs),
+      JSON.stringify({
+        version: 1,
+        updatedAt: nowMs - 60_000,
+        lastAttemptAt: nowMs - 7 * 60 * 60 * 1000,
+        etag: "pinned-etag",
+      }),
+      "utf-8",
+    );
+
+    const before = await readFile(snapshotPath, "utf-8");
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("If-None-Match")).toBeNull();
+      return new Response(null, { status: 304 });
+    });
+
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      force: true,
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+    });
+
+    expect(result).toMatchObject({ attempted: true, updated: false });
+    expect(result.state.lastResult).toBe("failed");
+    expect(result.state.lastSuccessAt).toBeUndefined();
+    expect(result.error).toMatch(/not modified/i);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(await readFile(snapshotPath, "utf-8")).toBe(before);
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")?.input).toBe(0.5);
   });
 
   it("keeps models that models.dev no longer lists, preferring the runtime price", async () => {
@@ -371,6 +499,97 @@ describe("pricing runtime refresh policy", () => {
       "retired-bundled-only",
       "retired-in-both",
     ]);
+  });
+
+  it("uses the authoritative catalog to keep absent, overwrite priced, and remove unpriced models", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    const bundled = createBootstrapSnapshot(nowMs - 10 * DAY_MS);
+    Object.assign(bundled.providers.openai, {
+      "retired-model": { input: 3, output: 15 },
+      "repriced-model": { input: 1, output: 2 },
+      "removed-model": { input: 5, output: 6 },
+    });
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: {
+            models: {
+              "repriced-model": { cost: { input: 2, output: 4 } },
+              "removed-model": { cost: {} },
+              "new-unpriced-model": { cost: { input: "2" } },
+            },
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const first = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      maxAgeMs: 3 * DAY_MS,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(first).toMatchObject({ attempted: true, updated: true });
+    expect(pricing.lookupCost("openai", "repriced-model")).toEqual({ input: 2, output: 4 });
+    expect(pricing.lookupCost("openai", "retired-model")).toEqual({ input: 3, output: 15 });
+    expect(pricing.lookupCost("openai", "removed-model")).toBeNull();
+    expect(pricing.lookupCost("openai", "new-unpriced-model")).toBeNull();
+
+    const snapshotPath = pricing.getRuntimePricingSnapshotPath(runtimeDirs);
+    const persisted = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(persisted.providers.openai).toEqual({
+      "gpt-4o-mini": { input: 0.15, output: 0.6, cache_read: 0.03, cache_write: 0.2 },
+      "repriced-model": { input: 2, output: 4 },
+      "retired-model": { input: 3, output: 15 },
+    });
+    expect(persisted.catalog.openai).toEqual([
+      "new-unpriced-model",
+      "removed-model",
+      "repriced-model",
+    ]);
+
+    // A 304 refresh has no fresh catalog; the persisted catalog still prevents
+    // the old bundled price for a present-but-unpriced model from returning.
+    const notModifiedFetch = vi.fn().mockResolvedValue(new Response(null, { status: 304 }));
+    const second = await pricing.maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 1,
+      force: true,
+      runtimeDirs,
+      fetchFn: notModifiedFetch,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(second.state.lastResult).toBe("not_modified");
+    expect(pricing.lookupCost("openai", "removed-model")).toBeNull();
+    expect(pricing.lookupCost("openai", "retired-model")).toEqual({ input: 3, output: 15 });
+    const persisted304 = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(persisted304.providers.openai["removed-model"]).toBeUndefined();
+    expect(persisted304.catalog.openai).toEqual([
+      "new-unpriced-model",
+      "removed-model",
+      "repriced-model",
+    ]);
+
+    // Offline failure leaves the last successful snapshot exactly as it was.
+    const beforeFailure = await readFile(snapshotPath, "utf-8");
+    const failed = await pricing.maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 2,
+      force: true,
+      runtimeDirs,
+      fetchFn: vi.fn().mockRejectedValue(new Error("offline")),
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(failed).toMatchObject({ attempted: true, updated: false, error: "offline" });
+    expect(await readFile(snapshotPath, "utf-8")).toBe(beforeFailure);
+    expect(pricing.lookupCost("openai", "removed-model")).toBeNull();
   });
 
   it("prefers the runtime price of a retired model even when the bundled file is newer", async () => {
@@ -476,7 +695,7 @@ describe("pricing runtime refresh policy", () => {
     expect(pricing.lookupCost("openai", "gpt-4o-mini")?.input).toBe(0.5);
   });
 
-  it("does not save kept models from providers outside the refresh allowlist", async () => {
+  it("retains kept models from providers outside the refresh allowlist", async () => {
     const pricing = await loadPricingModule();
     const runtimeDirs = await createTempRuntimeDirs();
     const nowMs = 1_800_000_000_000;
@@ -505,8 +724,375 @@ describe("pricing runtime refresh policy", () => {
     const persistedSnapshot = JSON.parse(
       await readFile(pricing.getRuntimePricingSnapshotPath(runtimeDirs), "utf-8"),
     );
-    expect(persistedSnapshot._meta.providers).toEqual(["openai"]);
-    expect(persistedSnapshot.providers.xai).toBeUndefined();
+    expect(persistedSnapshot._meta.providers).toEqual(["openai", "xai"]);
+    expect(persistedSnapshot.providers.xai["grok-old"]).toEqual({ input: 1, output: 2 });
+    expect(persistedSnapshot.catalog.xai).toBeUndefined();
+  });
+
+  it("scopes replacement to allowlisted providers across a later 304 and offline failure", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
+    await mkdir(snapshotDir, { recursive: true });
+
+    const runtime = createRuntimeSnapshot(nowMs - 4 * DAY_MS, 0.5);
+    Object.assign(runtime.providers.openai, {
+      "present-unpriced": { input: 4, output: 8 },
+    });
+    Object.assign(runtime.providers, {
+      xai: { "grok-kept": { input: 7, output: 8 } },
+    });
+    runtime._meta.providers = ["openai", "xai"];
+    const snapshotPath = pricing.getRuntimePricingSnapshotPath(runtimeDirs);
+    await writeFile(snapshotPath, JSON.stringify(runtime), "utf-8");
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: {
+            models: {
+              "gpt-4o-mini": { cost: { input: 0.123, output: 0.456 } },
+              "present-unpriced": { cost: {} },
+            },
+          },
+          xai: {
+            models: {
+              "grok-kept": { cost: { input: 99, output: 100 } },
+            },
+          },
+        }),
+        { status: 200, headers: { etag: "scoped-etag" } },
+      ),
+    );
+
+    const first = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      force: true,
+      providerAllowlist: ["openai"],
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+    });
+
+    expect(first).toMatchObject({ attempted: true, updated: true });
+    const persisted = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(persisted.providers.openai).toEqual({
+      "gpt-4o-mini": { input: 0.123, output: 0.456 },
+    });
+    expect(persisted.providers.xai["grok-kept"]).toEqual({ input: 7, output: 8 });
+    expect(persisted.catalog.openai).toEqual(["gpt-4o-mini", "present-unpriced"]);
+    expect(persisted.catalog.xai).toBeUndefined();
+    expect(pricing.lookupCost("xai", "grok-kept")).toEqual({ input: 7, output: 8 });
+    expect(pricing.lookupCost("openai", "present-unpriced")).toBeNull();
+
+    // The scoped snapshot has an authoritative catalog for openai, so a
+    // conditional 304 is a valid freshness refresh and still keeps xai.
+    const notModifiedFetch = vi.fn().mockResolvedValue(new Response(null, { status: 304 }));
+    const second = await pricing.maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 1,
+      runtimeDirs,
+      fetchFn: notModifiedFetch,
+      force: true,
+      providerAllowlist: ["openai"],
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+    });
+
+    expect(second).toMatchObject({ attempted: true, updated: true });
+    expect(second.state.lastResult).toBe("not_modified");
+    expect(pricing.lookupCost("xai", "grok-kept")).toEqual({ input: 7, output: 8 });
+    expect(pricing.lookupCost("openai", "present-unpriced")).toBeNull();
+    const persisted304 = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(persisted304.providers.xai["grok-kept"]).toEqual({ input: 7, output: 8 });
+    expect(persisted304.catalog.xai).toBeUndefined();
+
+    // Offline failure preserves the scoped snapshot exactly as it was.
+    const beforeFailure = await readFile(snapshotPath, "utf-8");
+    const failed = await pricing.maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 2,
+      runtimeDirs,
+      fetchFn: vi.fn().mockRejectedValue(new Error("offline")),
+      force: true,
+      providerAllowlist: ["openai"],
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+    });
+
+    expect(failed).toMatchObject({ attempted: true, updated: false, error: "offline" });
+    expect(await readFile(snapshotPath, "utf-8")).toBe(beforeFailure);
+    expect(pricing.lookupCost("xai", "grok-kept")).toEqual({ input: 7, output: 8 });
+  });
+
+  it("preserves an unscoped provider's authoritative catalog across scoped refresh, 304, and offline", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotPath = pricing.getRuntimePricingSnapshotPath(runtimeDirs);
+
+    const bundled = createBootstrapSnapshot(nowMs - 10 * DAY_MS);
+    Object.assign(bundled.providers, {
+      "b-labs": {
+        "b-priced": { input: 9, output: 9 },
+        "b-priced-two": { input: 13, output: 14 },
+        "b-unpriced": { input: 11, output: 12 },
+      },
+    });
+
+    const fullFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          "a-labs": { models: { "a-priced": { cost: { input: 1, output: 2 } } } },
+          "b-labs": {
+            models: {
+              "b-priced": { cost: { input: 3, output: 4 } },
+              "b-priced-two": { cost: { input: 5, output: 6 } },
+              "b-unpriced": { cost: {} },
+            },
+          },
+        }),
+        { status: 200, headers: { etag: "full-etag" } },
+      ),
+    );
+
+    const first = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn: fullFetch,
+      force: true,
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(first).toMatchObject({ attempted: true, updated: true });
+    expect(pricing.lookupCost("b-labs", "b-priced")).toEqual({ input: 3, output: 4 });
+    expect(pricing.lookupCost("b-labs", "b-priced-two")).toEqual({ input: 5, output: 6 });
+    expect(pricing.lookupCost("b-labs", "b-unpriced")).toBeNull();
+    const fullPersisted = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(fullPersisted.catalog["b-labs"]).toEqual(["b-priced", "b-priced-two", "b-unpriced"]);
+
+    // The scoped response also carries b-labs, but only a-labs is replaced.
+    const scopedFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          "a-labs": { models: { "a-priced": { cost: { input: 7, output: 8 } } } },
+          "b-labs": {
+            models: {
+              "b-priced": { cost: { input: 99, output: 100 } },
+              "b-priced-two": { cost: { input: 101, output: 102 } },
+              "b-unpriced": { cost: { input: 99 } },
+            },
+          },
+        }),
+        { status: 200, headers: { etag: "scoped-etag" } },
+      ),
+    );
+
+    await pricing.maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 1,
+      runtimeDirs,
+      fetchFn: scopedFetch,
+      force: true,
+      providerAllowlist: ["a-labs"],
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(pricing.lookupCost("a-labs", "a-priced")).toEqual({ input: 7, output: 8 });
+    expect(pricing.lookupCost("b-labs", "b-priced")).toEqual({ input: 3, output: 4 });
+    expect(pricing.lookupCost("b-labs", "b-priced-two")).toEqual({ input: 5, output: 6 });
+    expect(pricing.lookupCost("b-labs", "b-unpriced")).toBeNull();
+    const scopedPersisted = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(scopedPersisted.providers["b-labs"]["b-unpriced"]).toBeUndefined();
+    expect(scopedPersisted.catalog["b-labs"]).toEqual(["b-priced", "b-priced-two", "b-unpriced"]);
+
+    const notModifiedFetch = vi.fn().mockResolvedValue(new Response(null, { status: 304 }));
+    const second = await pricing.maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 2,
+      runtimeDirs,
+      fetchFn: notModifiedFetch,
+      force: true,
+      providerAllowlist: ["a-labs"],
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(second.state.lastResult).toBe("not_modified");
+    expect(pricing.lookupCost("b-labs", "b-priced")).toEqual({ input: 3, output: 4 });
+    expect(pricing.lookupCost("b-labs", "b-priced-two")).toEqual({ input: 5, output: 6 });
+    expect(pricing.lookupCost("b-labs", "b-unpriced")).toBeNull();
+    const persisted304 = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(persisted304.catalog["b-labs"]).toEqual(["b-priced", "b-priced-two", "b-unpriced"]);
+
+    const beforeFailure = await readFile(snapshotPath, "utf-8");
+    const failed = await pricing.maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 3,
+      runtimeDirs,
+      fetchFn: vi.fn().mockRejectedValue(new Error("offline")),
+      force: true,
+      providerAllowlist: ["a-labs"],
+      bootstrapSnapshotOverride: bundled,
+    });
+
+    expect(failed).toMatchObject({ attempted: true, updated: false, error: "offline" });
+    expect(await readFile(snapshotPath, "utf-8")).toBe(beforeFailure);
+    expect(pricing.lookupCost("b-labs", "b-priced")).toEqual({ input: 3, output: 4 });
+    expect(pricing.lookupCost("b-labs", "b-priced-two")).toEqual({ input: 5, output: 6 });
+    expect(pricing.lookupCost("b-labs", "b-unpriced")).toBeNull();
+  });
+
+  it("accepts a scoped all-unpriced catalog and clears stale scoped prices", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
+    await mkdir(snapshotDir, { recursive: true });
+
+    const runtime = createRuntimeSnapshot(nowMs - 4 * DAY_MS, 0.5);
+    Object.assign(runtime.providers.openai, {
+      "present-unpriced": { input: 4, output: 8 },
+    });
+    Object.assign(runtime.providers, {
+      xai: { "grok-kept": { input: 7, output: 8 } },
+    });
+    runtime._meta.providers = ["openai", "xai"];
+    const snapshotPath = pricing.getRuntimePricingSnapshotPath(runtimeDirs);
+    await writeFile(snapshotPath, JSON.stringify(runtime), "utf-8");
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: {
+            models: {
+              "gpt-4o-mini": { cost: {} },
+              "present-unpriced": { cost: {} },
+            },
+          },
+          xai: {
+            models: {
+              "grok-kept": { cost: { input: 99, output: 100 } },
+            },
+          },
+        }),
+        { status: 200, headers: { etag: "all-unpriced-etag" } },
+      ),
+    );
+
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      force: true,
+      providerAllowlist: ["openai"],
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+    });
+
+    expect(result).toMatchObject({ attempted: true, updated: true });
+    expect(result.state.lastResult).toBe("success");
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")).toBeNull();
+    expect(pricing.lookupCost("openai", "present-unpriced")).toBeNull();
+    expect(pricing.lookupCost("xai", "grok-kept")).toEqual({ input: 7, output: 8 });
+
+    const persisted = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(persisted.providers.openai).toBeUndefined();
+    expect(persisted.providers.xai["grok-kept"]).toEqual({ input: 7, output: 8 });
+    expect(persisted.catalog.openai).toEqual(["gpt-4o-mini", "present-unpriced"]);
+    expect(persisted.catalog.xai).toBeUndefined();
+    expect(persisted._meta.providers).toEqual(["xai"]);
+
+    // Offline after an accepted all-unpriced scope preserves the result.
+    const beforeFailure = await readFile(snapshotPath, "utf-8");
+    const failed = await pricing.maybeRefreshPricingSnapshot({
+      nowMs: nowMs + 1,
+      runtimeDirs,
+      fetchFn: vi.fn().mockRejectedValue(new Error("offline")),
+      force: true,
+      providerAllowlist: ["openai"],
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+    });
+
+    expect(failed).toMatchObject({ attempted: true, updated: false, error: "offline" });
+    expect(await readFile(snapshotPath, "utf-8")).toBe(beforeFailure);
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")).toBeNull();
+    expect(pricing.lookupCost("xai", "grok-kept")).toEqual({ input: 7, output: 8 });
+  });
+
+  it("accepts a global all-unpriced catalog and clears all stale prices", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
+    await mkdir(snapshotDir, { recursive: true });
+
+    const runtime = createRuntimeSnapshot(nowMs - 4 * DAY_MS, 0.5);
+    Object.assign(runtime.providers, {
+      xai: { "grok-kept": { input: 7, output: 8 } },
+    });
+    runtime._meta.providers = ["openai", "xai"];
+    const snapshotPath = pricing.getRuntimePricingSnapshotPath(runtimeDirs);
+    await writeFile(snapshotPath, JSON.stringify(runtime), "utf-8");
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: { models: { "gpt-4o-mini": { cost: {} } } },
+          xai: { models: { "grok-kept": { cost: {} } } },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await pricing.maybeRefreshPricingSnapshot({
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      force: true,
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+    });
+
+    expect(result).toMatchObject({ attempted: true, updated: true });
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")).toBeNull();
+    expect(pricing.lookupCost("xai", "grok-kept")).toBeNull();
+
+    const persisted = JSON.parse(await readFile(snapshotPath, "utf-8"));
+    expect(persisted.providers).toEqual({});
+    expect(persisted.catalog.openai).toEqual(["gpt-4o-mini"]);
+    expect(persisted.catalog.xai).toEqual(["grok-kept"]);
+    expect(persisted._meta.providers).toEqual([]);
+  });
+
+  it("rejects upstream responses with neither prices nor catalog entries", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
+    await mkdir(snapshotDir, { recursive: true });
+
+    const snapshotPath = pricing.getRuntimePricingSnapshotPath(runtimeDirs);
+    await writeFile(
+      snapshotPath,
+      JSON.stringify(createRuntimeSnapshot(nowMs - 4 * DAY_MS, 0.5)),
+      "utf-8",
+    );
+    const before = await readFile(snapshotPath, "utf-8");
+
+    for (const api of [{}, { openai: {} }, { openai: { models: {} } }]) {
+      const fetchFn = vi.fn().mockResolvedValue(new Response(JSON.stringify(api), { status: 200 }));
+
+      const result = await pricing.maybeRefreshPricingSnapshot({
+        nowMs,
+        runtimeDirs,
+        fetchFn,
+        force: true,
+        bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 10 * DAY_MS),
+      });
+
+      expect(result, JSON.stringify(api)).toMatchObject({
+        attempted: true,
+        updated: false,
+      });
+      expect(result.state.lastResult).toBe("failed");
+      expect(result.error).toMatch(/Refusing to persist empty pricing snapshot/);
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(await readFile(snapshotPath, "utf-8")).toBe(before);
+    }
+
+    expect(pricing.lookupCost("openai", "gpt-4o-mini")?.input).toBe(0.5);
   });
 
   it("keeps providers the central API dropped when no explicit allowlist is set", async () => {

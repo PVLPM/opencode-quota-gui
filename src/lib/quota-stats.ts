@@ -6,6 +6,8 @@ import {
   resolveCursorModel,
 } from "./cursor-pricing.js";
 import {
+  type CostBuckets,
+  hasCatalogModel,
   hasCost,
   hasModel,
   hasProvider,
@@ -25,7 +27,11 @@ import {
 } from "./opencode-storage.js";
 import type { TokenBuckets } from "./token-buckets.js";
 import { addTokenBuckets, emptyTokenBuckets, tokenBucketsFromMessage } from "./token-buckets.js";
-import { calculateUsdFromTokenBuckets } from "./token-cost.js";
+import {
+  calculateUsdFromTokenBuckets,
+  splitTokenBucketsByRate,
+  tokenRateCoverage,
+} from "./token-cost.js";
 
 // Re-export for consumers
 export { SessionNotFoundError } from "./opencode-storage.js";
@@ -65,6 +71,8 @@ export type AggregateRow = {
   tokens: TokenBuckets;
   costUsd: number;
   messageCount: number;
+  /** Messages in this row whose cost excludes unpriced token buckets. */
+  partialMessageCount?: number;
 };
 
 export type SessionRow = {
@@ -73,6 +81,12 @@ export type SessionRow = {
   tokens: TokenBuckets;
   costUsd: number;
   messageCount: number;
+  /** Messages in this session whose cost excludes unpriced token buckets. */
+  partialMessageCount?: number;
+  /** Messages in this session that contributed a known cost (including zero). */
+  pricedMessageCount?: number;
+  /** Messages in this session with no known cost (fully unpriced or unknown). */
+  unpricedMessageCount?: number;
 };
 
 export type SourceProviderRow = {
@@ -80,6 +94,8 @@ export type SourceProviderRow = {
   tokens: TokenBuckets;
   costUsd: number;
   messageCount: number;
+  /** Messages in this provider whose cost excludes unpriced token buckets. */
+  partialMessageCount?: number;
 };
 
 export type SourceModelRow = {
@@ -88,6 +104,8 @@ export type SourceModelRow = {
   tokens: TokenBuckets;
   costUsd: number;
   messageCount: number;
+  /** Messages in this model whose cost excludes unpriced token buckets. */
+  partialMessageCount?: number;
 };
 
 export type UnknownRow = {
@@ -126,6 +144,10 @@ export type AggregateResult = {
     costUsd: number;
     messageCount: number;
     sessionCount: number;
+    /** Known subtotal contributed by messages with partially known rates. */
+    partialCostUsd?: number;
+    /** Messages whose cost excludes at least one unpriced token bucket. */
+    partialMessageCount?: number;
   };
   bySourceProvider: SourceProviderRow[];
   bySourceModel: SourceModelRow[];
@@ -162,6 +184,38 @@ function freeSuffixCandidates(modelId: string): string[] {
   return candidates.filter((value, index, list) => list.indexOf(value) === index);
 }
 
+function catalogCandidatesFor(...models: Array<string | undefined>): string[] {
+  const candidates = new Set<string>();
+  for (const model of models) {
+    if (!model) continue;
+    for (const candidate of freeSuffixCandidates(model)) candidates.add(candidate);
+  }
+  return [...candidates];
+}
+
+function findCatalogModel(
+  providerID: string | undefined,
+  candidates: readonly string[],
+): string | null {
+  if (!providerID) return null;
+  for (const candidate of candidates) {
+    if (hasCatalogModel(providerID, candidate)) return candidate;
+  }
+  return null;
+}
+
+function findPricedExactModel(
+  providerID: string | undefined,
+  candidates: Array<string | undefined>,
+): string | null {
+  if (!providerID) return null;
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (hasCost(providerID, candidate)) return candidate;
+  }
+  return null;
+}
+
 function pickBestModelForProvider(
   providerID: string,
   candidates: readonly string[],
@@ -183,6 +237,36 @@ function parseModelIdHint(rawModelId?: string): { providerHint?: string; modelPa
   if (lastSlash === -1) return { modelPart: trimmed };
   if (lastSlash === trimmed.length - 1) return { providerHint: trimmed.slice(0, -1) };
   return { providerHint: trimmed.slice(0, lastSlash), modelPart: trimmed.slice(lastSlash + 1) };
+}
+
+/**
+ * Exact provider-scoped pricing aliases. These only choose the priced key used
+ * for cost lookup; source provider/model ids stay untouched. Keep entries
+ * literal instead of deriving nearby versions.
+ */
+const PROVIDER_MODEL_PRICING_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  "opencode-go": {
+    "deepseek-v4-flash": "deepseek-v4.1-flash",
+  },
+};
+
+/**
+ * Resolve an explicitly authoritative provider-scoped alias to a priced model.
+ * These mappings are deliberate, so they win over catalog presence heuristics.
+ */
+function resolveExplicitPricingAlias(
+  providerID: string | undefined,
+  ...models: Array<string | undefined>
+): string | null {
+  if (!providerID) return null;
+  const aliases = PROVIDER_MODEL_PRICING_ALIASES[providerID];
+  if (!aliases) return null;
+  for (const model of models) {
+    if (!model) continue;
+    const alias = aliases[model];
+    if (alias && hasCost(providerID, alias)) return alias;
+  }
+  return null;
 }
 
 const SOURCE_PROVIDER_ALIASES: Record<string, string> = {
@@ -287,6 +371,9 @@ function resolveModelForProvider(providerID: string, normalizedModel: string): s
   );
   if (preferredDirect) return preferredDirect;
 
+  const pricingAlias = resolveExplicitPricingAlias(providerID, normalizedModel);
+  if (pricingAlias) return pricingAlias;
+
   // Some source ids include "-thinking" while snapshot keeps a base key (or vice versa).
   if (normalizedModel.toLowerCase().endsWith("-thinking")) {
     const withoutThinking = normalizedModel.slice(0, -"-thinking".length);
@@ -366,25 +453,6 @@ export function resolvePricingKey(source: {
     }
   }
 
-  // A non-listed gateway may still pass an explicit provider prefix. Try the
-  // leading segment as a models.dev provider before falling back to the usual
-  // single-slash hint parser, which cannot represent vendor-prefixed model ids
-  // such as openrouter/google/gemini-...
-  if (!sourceProviderHint || !isModelsDevProviderId(sourceProviderHint)) {
-    const firstSlash = rawModelID.indexOf("/");
-    if (firstSlash > 0) {
-      const providerHint = normalizeSourceProviderId(rawModelID.slice(0, firstSlash));
-      const modelPart = rawModelID.slice(firstSlash + 1);
-      if (providerHint && isModelsDevProviderId(providerHint) && hasCost(providerHint, modelPart)) {
-        return {
-          ok: true,
-          key: { provider: providerHint, model: modelPart },
-          method: "model_prefix",
-        };
-      }
-    }
-  }
-
   const parsed = parseModelIdHint(rawModelID);
   if (!parsed.modelPart) {
     return {
@@ -394,18 +462,6 @@ export function resolvePricingKey(source: {
         sourceModelID: srcModel,
         reason: "missing_model",
       },
-    };
-  }
-
-  if (
-    sourceProviderHint &&
-    parsed.modelPart &&
-    hasCost(sourceProviderHint, parsed.modelPart.trim())
-  ) {
-    return {
-      ok: true,
-      key: { provider: sourceProviderHint, model: parsed.modelPart.trim() },
-      method: "source_provider",
     };
   }
 
@@ -442,8 +498,112 @@ export function resolvePricingKey(source: {
     }
   }
 
+  // An explicit provider-scoped alias is a deliberate mapping and wins over
+  // catalog presence, but only after exact priced keys were tried above.
+  const sourcePricingAlias = resolveExplicitPricingAlias(sourceProviderHint, normalizedModel);
+  if (sourcePricingAlias && sourceProviderHint) {
+    return {
+      ok: true,
+      key: { provider: sourceProviderHint, model: sourcePricingAlias },
+      method: "source_provider",
+    };
+  }
+
+  // The source catalog is authoritative for presence. Consult it BEFORE any
+  // heuristic fallback (free-suffix stripping, -thinking, preview aliases, ...)
+  // so a catalog-listed model without a cost cannot inherit a different priced
+  // model.
+  const unprefixedRawModelID =
+    sourceProviderHint && rawModelID.startsWith(`${sourceProviderHint}/`)
+      ? rawModelID.slice(sourceProviderHint.length + 1)
+      : rawModelID;
+  const catalogCandidates = catalogCandidatesFor(
+    rawModelID,
+    unprefixedRawModelID,
+    parsed.modelPart.trim(),
+    normalizedModel,
+  );
+  const sourceCatalogModel = findCatalogModel(sourceProviderHint, catalogCandidates);
+  if (sourceCatalogModel && sourceProviderHint) {
+    return {
+      ok: true,
+      key: { provider: sourceProviderHint, model: sourceCatalogModel },
+      method: "source_provider",
+    };
+  }
+
+  // Only now run same-provider heuristics (free-suffix stripping, -thinking,
+  // Gemini preview, Kimi/Anthropic variants).
   const fromSourceProvider = tryProvider(sourceProviderHint, "source_provider");
   if (fromSourceProvider) return fromSourceProvider;
+
+  // A non-listed gateway may still pass an explicit provider prefix. Try the
+  // leading segment as a models.dev provider (and its catalog) after the source
+  // guard, so a listed source provider cannot be rewritten into a vendor route.
+  const firstSlash = rawModelID.indexOf("/");
+  if ((!sourceProviderHint || !isModelsDevProviderId(sourceProviderHint)) && firstSlash > 0) {
+    const firstSegmentProvider = normalizeSourceProviderId(rawModelID.slice(0, firstSlash));
+    const firstSegmentModelPart = rawModelID.slice(firstSlash + 1);
+    if (
+      firstSegmentProvider &&
+      firstSegmentProvider !== sourceProviderHint &&
+      isModelsDevProviderId(firstSegmentProvider)
+    ) {
+      if (hasCost(firstSegmentProvider, firstSegmentModelPart)) {
+        return {
+          ok: true,
+          key: { provider: firstSegmentProvider, model: firstSegmentModelPart },
+          method: "model_prefix",
+        };
+      }
+      const firstSegmentAlias = resolveExplicitPricingAlias(firstSegmentProvider, normalizedModel);
+      if (firstSegmentAlias) {
+        return {
+          ok: true,
+          key: { provider: firstSegmentProvider, model: firstSegmentAlias },
+          method: "model_prefix",
+        };
+      }
+      const firstSegmentCatalogModel = findCatalogModel(
+        firstSegmentProvider,
+        catalogCandidatesFor(firstSegmentModelPart, parsed.modelPart.trim(), normalizedModel),
+      );
+      if (firstSegmentCatalogModel) {
+        return {
+          ok: true,
+          key: { provider: firstSegmentProvider, model: firstSegmentCatalogModel },
+          method: "model_prefix",
+        };
+      }
+    }
+  }
+
+  // For a model-prefix route, prefer an exact priced key, then an explicit
+  // provider-scoped alias, then catalog presence, and only then heuristics.
+  const prefixExactModel = findPricedExactModel(modelProviderHint, [parsed.modelPart.trim()]);
+  if (prefixExactModel && modelProviderHint) {
+    return {
+      ok: true,
+      key: { provider: modelProviderHint, model: prefixExactModel },
+      method: "model_prefix",
+    };
+  }
+  const prefixPricingAlias = resolveExplicitPricingAlias(modelProviderHint, normalizedModel);
+  if (prefixPricingAlias && modelProviderHint) {
+    return {
+      ok: true,
+      key: { provider: modelProviderHint, model: prefixPricingAlias },
+      method: "model_prefix",
+    };
+  }
+  const prefixCatalogModel = findCatalogModel(modelProviderHint, catalogCandidates);
+  if (prefixCatalogModel && modelProviderHint) {
+    return {
+      ok: true,
+      key: { provider: modelProviderHint, model: prefixCatalogModel },
+      method: "model_prefix",
+    };
+  }
 
   const fromModelPrefix = tryProvider(modelProviderHint, "model_prefix");
   if (fromModelPrefix) return fromModelPrefix;
@@ -541,6 +701,60 @@ function promptTokenCount(tokens: TokenBuckets): number {
   return tokens.input + tokens.cache_read + tokens.cache_write;
 }
 
+/**
+ * Known cost for the buckets that have an applicable rate. Returns `ok: false`
+ * only when positive tokens exist but none of them can be priced, preserving
+ * the existing entirely-unpriced path.
+ */
+function calculateKnownCost(
+  rates: CostBuckets,
+  tokens: TokenBuckets,
+): { ok: true; costUsd: number; unpricedTokens?: number } | { ok: false } {
+  const coverage = tokenRateCoverage(rates, tokens);
+  if (coverage.pricedTokens === 0 && coverage.unpricedTokens > 0) {
+    return { ok: false };
+  }
+  return {
+    ok: true,
+    costUsd: calculateUsdFromTokenBuckets(rates, tokens),
+    ...(coverage.unpricedTokens > 0 ? { unpricedTokens: coverage.unpricedTokens } : {}),
+  };
+}
+
+/**
+ * Resolve the rates that apply to one priced key, including context-tier
+ * selection. Shared by `calculateCostUsd` and `aggregateUsage` so bucket
+ * splitting and cost calculation never disagree about which rates applied.
+ */
+function selectTokenRates(params: {
+  provider: string;
+  model: string;
+  tokens: TokenBuckets;
+  contextTokens?: number;
+}): { ok: true; rates: CostBuckets; contextTierSize?: number } | { ok: false } {
+  if (params.provider === "cursor") {
+    const cursorCost = lookupCursorLocalCost(params.model);
+    return cursorCost ? { ok: true, rates: cursorCost } : { ok: false };
+  }
+
+  const cost = lookupCost(params.provider, params.model);
+  if (!cost) return { ok: false };
+
+  const hasExplicitContext =
+    typeof params.contextTokens === "number" && Number.isFinite(params.contextTokens);
+  if (!cost.tiers?.length && !hasExplicitContext) {
+    return { ok: true, rates: cost };
+  }
+
+  const contextTokens = hasExplicitContext ? params.contextTokens : promptTokenCount(params.tokens);
+  const selected = selectCostAtContext(cost, contextTokens);
+  return {
+    ok: true,
+    rates: selected.rates,
+    ...(selected.tierSize !== undefined ? { contextTierSize: selected.tierSize } : {}),
+  };
+}
+
 /** Existing per-message cost calculation (P3 reuses it unchanged). */
 export function calculateCostUsd(params: {
   provider: string;
@@ -552,32 +766,28 @@ export function calculateCostUsd(params: {
    * rates apply and no tier is claimed as applied.
    */
   contextTokens?: number;
-}): { ok: true; costUsd: number; contextTierSize?: number } | { ok: false } {
-  if (params.provider === "cursor") {
-    const cursorCost = lookupCursorLocalCost(params.model);
-    if (!cursorCost) return { ok: false };
-    return { ok: true, costUsd: calculateUsdFromTokenBuckets(cursorCost, params.tokens) };
-  }
-
-  const cost = lookupCost(params.provider, params.model);
-  if (!cost) return { ok: false };
-
-  const hasExplicitContext =
-    typeof params.contextTokens === "number" && Number.isFinite(params.contextTokens);
-  if (!cost.tiers?.length && !hasExplicitContext) {
-    return { ok: true, costUsd: calculateUsdFromTokenBuckets(cost, params.tokens) };
-  }
-
-  const contextTokens = hasExplicitContext ? params.contextTokens : promptTokenCount(params.tokens);
-  const selected = selectCostAtContext(cost, contextTokens);
+}):
+  | {
+      ok: true;
+      costUsd: number;
+      /** Positive tokens whose buckets had no applicable rate; absent when complete. */
+      unpricedTokens?: number;
+      contextTierSize?: number;
+    }
+  | { ok: false } {
+  const selected = selectTokenRates(params);
+  if (!selected.ok) return { ok: false };
+  const known = calculateKnownCost(selected.rates, params.tokens);
+  if (!known.ok) return known;
   return {
-    ok: true,
-    costUsd: calculateUsdFromTokenBuckets(selected.rates, params.tokens),
-    ...(selected.tierSize !== undefined ? { contextTierSize: selected.tierSize } : {}),
+    ...known,
+    ...(selected.contextTierSize !== undefined
+      ? { contextTierSize: selected.contextTierSize }
+      : {}),
   };
 }
 
-/** Existing unpriced/unknown classification (P3 reuses it unchanged). */
+/** Classify a resolved model as unpriced when the snapshot or catalog knows it without rates. */
 export function classifyMissingPricing(params: {
   mappedProvider: string;
   mappedModel: string;
@@ -586,13 +796,15 @@ export function classifyMissingPricing(params: {
     return { kind: "unknown" };
   }
 
-  // Defensive: if provider wasn't in snapshot we should treat this as unknown mapping.
-  if (!hasProvider(params.mappedProvider)) {
+  // When provider/model exists in the priced snapshot or source catalog but
+  // has no numeric rates, classify as unpriced. Catalog-only providers may be
+  // absent from the priced snapshot.
+  const inCatalog = hasCatalogModel(params.mappedProvider, params.mappedModel);
+  if (!hasProvider(params.mappedProvider) && !inCatalog) {
     return { kind: "unknown" };
   }
 
-  // When provider/model exists in snapshot but has no numeric rates, classify as unpriced.
-  if (hasModel(params.mappedProvider, params.mappedModel)) {
+  if (hasModel(params.mappedProvider, params.mappedModel) || inCatalog) {
     if (params.mappedModel.toLowerCase().endsWith("-free")) {
       return { kind: "unpriced", reason: "free-tier model id not priced in snapshot" };
     }
@@ -603,13 +815,27 @@ export function classifyMissingPricing(params: {
   return { kind: "unknown" };
 }
 
-/** One message's pricing outcome: priced cost, unpriced tokens, or an unknown mapping. */
+/**
+ * One message's pricing outcome: fully priced cost, a partial known cost with
+ * the token count that could not be priced, fully unpriced tokens, or an
+ * unknown mapping.
+ */
 export type TokenPricingOutcome =
   | {
       status: "priced";
       key: PricedKey;
       costUsd: number;
       /** Present only when a context tier applied. */
+      contextTierSize?: number;
+    }
+  | {
+      status: "partial";
+      key: PricedKey;
+      /** Cost of the buckets that have an applicable rate. */
+      costUsd: number;
+      /** Positive tokens whose buckets had no applicable rate. */
+      unpricedTokens: number;
+      /** Present only when a context tier applied to the priced buckets. */
       contextTierSize?: number;
     }
   | { status: "unpriced"; key: PricedKey; reason: string }
@@ -654,11 +880,22 @@ export function priceTokenBuckets(params: {
     contextTokens: params.contextTokens,
   });
   if (priced.ok) {
+    const contextTier =
+      priced.contextTierSize !== undefined ? { contextTierSize: priced.contextTierSize } : {};
+    if (priced.unpricedTokens !== undefined && priced.unpricedTokens > 0) {
+      return {
+        status: "partial",
+        key,
+        costUsd: priced.costUsd,
+        unpricedTokens: priced.unpricedTokens,
+        ...contextTier,
+      };
+    }
     return {
       status: "priced",
       key,
       costUsd: priced.costUsd,
-      ...(priced.contextTierSize !== undefined ? { contextTierSize: priced.contextTierSize } : {}),
+      ...contextTier,
     };
   }
 
@@ -788,6 +1025,8 @@ export async function aggregateUsage(params: {
   let unknownTotals = emptyTokenBuckets();
   let unpricedTotals = emptyTokenBuckets();
   let costTotal = 0;
+  let partialCostTotal = 0;
+  let partialMessageCount = 0;
   const resolutionCache = new Map<string, PricingResolution>();
 
   for (const msg of messages) {
@@ -825,6 +1064,10 @@ export async function aggregateUsage(params: {
       } else {
         unknown.set(k, { key: outcome.unknown, tokens, messageCount: 1 });
       }
+      const sessionRow = bySession.get(sid);
+      if (sessionRow) {
+        sessionRow.unpricedMessageCount = (sessionRow.unpricedMessageCount ?? 0) + 1;
+      }
       continue;
     }
 
@@ -845,10 +1088,37 @@ export async function aggregateUsage(params: {
       } else {
         unpriced.set(k, { key: rowKey, tokens, messageCount: 1 });
       }
+      const sessionRow = bySession.get(sid);
+      if (sessionRow) {
+        sessionRow.unpricedMessageCount = (sessionRow.unpricedMessageCount ?? 0) + 1;
+      }
       continue;
     }
 
-    pricedTotals = addTokenBuckets(pricedTotals, tokens);
+    // Remaining outcomes are "priced" or "partial". A partial row keeps its
+    // known cost, but only the buckets with an applicable rate count as priced;
+    // the missing-rate buckets stay in the unpriced totals.
+    const isPartial = outcome.status === "partial";
+    if (isPartial) {
+      const selected = selectTokenRates({
+        provider: outcome.key.provider,
+        model: outcome.key.model,
+        tokens,
+      });
+      if (selected.ok) {
+        const split = splitTokenBucketsByRate(selected.rates, tokens);
+        pricedTotals = addTokenBuckets(pricedTotals, split.priced);
+        unpricedTotals = addTokenBuckets(unpricedTotals, split.unpriced);
+      } else {
+        // A partial outcome always has at least one priced bucket. If a second
+        // lookup disagrees, keep its usage conservative rather than claim it.
+        unpricedTotals = addTokenBuckets(unpricedTotals, tokens);
+      }
+      partialCostTotal += outcome.costUsd;
+      partialMessageCount += 1;
+    } else {
+      pricedTotals = addTokenBuckets(pricedTotals, tokens);
+    }
     costTotal += outcome.costUsd;
 
     // Tokscale-style: key by OpenCode source provider + source model id.
@@ -860,6 +1130,7 @@ export async function aggregateUsage(params: {
       sm.tokens = addTokenBuckets(sm.tokens, tokens);
       sm.costUsd += outcome.costUsd;
       sm.messageCount += 1;
+      if (isPartial) sm.partialMessageCount = (sm.partialMessageCount ?? 0) + 1;
     } else {
       bySourceModel.set(srcModelKey, {
         sourceProviderID: srcProviderID,
@@ -867,6 +1138,7 @@ export async function aggregateUsage(params: {
         tokens,
         costUsd: outcome.costUsd,
         messageCount: 1,
+        ...(isPartial ? { partialMessageCount: 1 } : {}),
       });
     }
 
@@ -876,12 +1148,14 @@ export async function aggregateUsage(params: {
       src.tokens = addTokenBuckets(src.tokens, tokens);
       src.costUsd += outcome.costUsd;
       src.messageCount += 1;
+      if (isPartial) src.partialMessageCount = (src.partialMessageCount ?? 0) + 1;
     } else {
       bySourceProvider.set(srcProvider, {
         providerID: srcProvider,
         tokens,
         costUsd: outcome.costUsd,
         messageCount: 1,
+        ...(isPartial ? { partialMessageCount: 1 } : {}),
       });
     }
 
@@ -891,18 +1165,22 @@ export async function aggregateUsage(params: {
       existing.tokens = addTokenBuckets(existing.tokens, tokens);
       existing.costUsd += outcome.costUsd;
       existing.messageCount += 1;
+      if (isPartial) existing.partialMessageCount = (existing.partialMessageCount ?? 0) + 1;
     } else {
       byModel.set(modelKey, {
         key: outcome.key,
         tokens,
         costUsd: outcome.costUsd,
         messageCount: 1,
+        ...(isPartial ? { partialMessageCount: 1 } : {}),
       });
     }
 
     const s = bySession.get(sid);
     if (s) {
       s.costUsd += outcome.costUsd;
+      s.pricedMessageCount = (s.pricedMessageCount ?? 0) + 1;
+      if (isPartial) s.partialMessageCount = (s.partialMessageCount ?? 0) + 1;
     }
   }
 
@@ -951,6 +1229,7 @@ export async function aggregateUsage(params: {
       costUsd: costTotal,
       messageCount: messages.length,
       sessionCount: new Set(messages.map((m) => m.sessionID)).size,
+      ...(partialMessageCount > 0 ? { partialCostUsd: partialCostTotal, partialMessageCount } : {}),
     },
     bySourceProvider: bySourceProviderRows,
     bySourceModel: bySourceModelRows,

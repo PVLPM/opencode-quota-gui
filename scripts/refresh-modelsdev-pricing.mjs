@@ -192,17 +192,39 @@ async function readPreviousSnapshot(path) {
   }
 }
 
+function buildCatalog(api, providerIDs) {
+  const catalog = {};
+  for (const providerID of providerIDs) {
+    const models = api?.[providerID]?.models;
+    if (!models || typeof models !== "object") continue;
+    catalog[providerID] = Object.keys(models).sort((a, b) => a.localeCompare(b));
+  }
+  return catalog;
+}
+
 // models.dev drops retired models from its list. Keep their last known price so
 // older usage still gets a cost. Prices from models.dev always win.
-export function keepRetiredModels(snapshot, previous, providerIDs) {
+//
+// `catalog` is the authoritative model presence from the API response. A model
+// that is present in the catalog but has no usable cost was delisted from
+// pricing and must not be restored from `previous`. Providers missing from
+// `catalog` are unknown (for example a scoped refresh), so their historical
+// models are still kept.
+export function keepRetiredModels(snapshot, previous, providerIDs, catalog) {
   const previousProviders = previous?.providers ?? {};
+  const catalogByProvider = catalog
+    ? new Map(
+        Object.entries(catalog).map(([providerID, modelIDs]) => [providerID, new Set(modelIDs)]),
+      )
+    : null;
   const keptModelIDs = [];
 
   for (const providerID of providerIDs) {
     const models = { ...(snapshot.providers[providerID] ?? {}) };
+    const presentModelIDs = catalogByProvider?.get(providerID);
     for (const [modelID, rawCost] of Object.entries(previousProviders[providerID] ?? {})) {
       const cost = pickCostBuckets(rawCost);
-      if (models[modelID] || !cost) continue;
+      if (models[modelID] || presentModelIDs?.has(modelID) || !cost) continue;
       models[modelID] = cost;
       keptModelIDs.push(`${providerID}/${modelID}`);
     }
@@ -229,7 +251,11 @@ export function buildRefreshedSnapshot(api, previous, providerIDs) {
       `Refusing to write a pricing snapshot: ${SOURCE_URL} returned no priced models.`,
     );
   }
-  const keptModelIDs = keepRetiredModels(snapshot, previous, scope);
+  // The bundled file stays compact: catalog presence is applied during
+  // generation and only persisted in runtime snapshots, where offline retention
+  // needs it.
+  const catalog = buildCatalog(api, scope);
+  const keptModelIDs = keepRetiredModels(snapshot, previous, scope, catalog);
   return { snapshot, keptModelIDs };
 }
 

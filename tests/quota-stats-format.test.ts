@@ -620,9 +620,11 @@ describe("formatQuotaStatsReport (markdown)", () => {
     expect(blank).toBe("");
 
     expect(body.join("\n")).toMatchInlineSnapshot(`
-      "| Window   | Messages | Sessions | Tokens |  Cost |
-      | -------- | -------: | -------: | -----: | ----: |
-      | all time |        6 |        2 |   3.1K | $1.23 |
+      "| Window   | Messages | Sessions | Tokens |            Cost |
+      | -------- | -------: | -------: | -----: | --------------: |
+      | all time |        6 |        2 |   3.1K | $1.23 (partial) |
+
+      Cost is partial: $1.23 is the known subtotal; tokens without published rates are unpriced.
 
       ## Model breakdown
 
@@ -650,6 +652,168 @@ describe("formatQuotaStatsReport (markdown)", () => {
 
       Run /quota_status to see the full pricing diagnostics report."
     `);
+  });
+
+  it("marks partial costs and states the known subtotal", () => {
+    const out = formatQuotaStatsReport({
+      title: "Tokens used (Last 24 Hours) (/tokens_daily)",
+      generatedAtMs: Date.UTC(2026, 0, 15, 12, 0, 0),
+      result: makeEmptyResult({
+        window: {},
+        totals: {
+          priced: { input: 1_000_000, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+          unknown: { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+          unpriced: { input: 0, output: 2_000_000, reasoning: 0, cache_read: 0, cache_write: 0 },
+          costUsd: 2,
+          messageCount: 1,
+          sessionCount: 1,
+          partialCostUsd: 2,
+          partialMessageCount: 1,
+        },
+        bySourceModel: [
+          {
+            sourceProviderID: "opencode",
+            sourceModelID: "mixed-rate-model",
+            tokens: {
+              input: 1_000_000,
+              output: 2_000_000,
+              reasoning: 0,
+              cache_read: 0,
+              cache_write: 0,
+            },
+            costUsd: 2,
+            messageCount: 1,
+            partialMessageCount: 1,
+          },
+        ],
+        bySession: [
+          {
+            sessionID: "ses_partial",
+            title: "Partial Session",
+            tokens: {
+              input: 1_000_000,
+              output: 2_000_000,
+              reasoning: 0,
+              cache_read: 0,
+              cache_write: 0,
+            },
+            costUsd: 2,
+            messageCount: 1,
+            partialMessageCount: 1,
+          },
+        ],
+      }),
+    });
+
+    const partialCells = out.match(/\$2\.00 \(partial\)/g) ?? [];
+    expect(partialCells).toHaveLength(3);
+    expect(out).toContain(
+      "Cost is partial: $2.00 is the known subtotal; tokens without published rates are unpriced.",
+    );
+  });
+
+  it("marks totals mixing priced usage with fully unpriced or unknown usage", () => {
+    const out = formatQuotaStatsReport({
+      title: "Tokens used (Last 24 Hours) (/tokens_daily)",
+      generatedAtMs: Date.UTC(2026, 0, 15, 12, 0, 0),
+      result: makeEmptyResult({
+        window: {},
+        totals: {
+          priced: { input: 1_000, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+          unknown: { input: 10, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+          unpriced: { input: 30, output: 40, reasoning: 0, cache_read: 0, cache_write: 0 },
+          costUsd: 1.5,
+          messageCount: 3,
+          sessionCount: 2,
+        },
+        bySourceModel: [
+          {
+            sourceProviderID: "opencode",
+            sourceModelID: "priced-model",
+            tokens: { input: 1_000, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+            costUsd: 1.5,
+            messageCount: 1,
+          },
+        ],
+        bySession: [
+          {
+            sessionID: "ses_mixed",
+            title: "Mixed Session",
+            tokens: { input: 1_030, output: 40, reasoning: 0, cache_read: 0, cache_write: 0 },
+            costUsd: 1.5,
+            messageCount: 2,
+            pricedMessageCount: 1,
+            unpricedMessageCount: 1,
+          },
+          {
+            sessionID: "ses_unpriced",
+            title: "Unpriced Session",
+            tokens: { input: 10, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+            costUsd: 0,
+            messageCount: 1,
+            unpricedMessageCount: 1,
+          },
+        ],
+        unpriced: [
+          {
+            key: {
+              sourceProviderID: "cursor",
+              sourceModelID: "foo-model",
+              mappedProvider: "openai",
+              mappedModel: "foo-model",
+              reason: "snapshot missing model",
+            },
+            tokens: { input: 30, output: 40, reasoning: 0, cache_read: 0, cache_write: 0 },
+            messageCount: 1,
+          },
+        ],
+        unknown: [
+          {
+            key: { sourceProviderID: "opencode", sourceModelID: "bar-model" },
+            tokens: { input: 10, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+            messageCount: 1,
+          },
+        ],
+      }),
+    });
+
+    const lines = out.split("\n");
+    const summaryLine = lines.find((line) => line.startsWith("| all time"));
+    const modelLine = lines.find((line) => line.includes("priced-model"));
+    const mixedLine = lines.find((line) => line.includes("ses_mixed"));
+    const unpricedLine = lines.find((line) => line.includes("ses_unpriced"));
+
+    expect(summaryLine).toContain("$1.50 (partial)");
+    expect(modelLine).not.toContain("(partial)");
+    expect(mixedLine).toContain("$1.50 (partial)");
+    expect(unpricedLine).toContain("$0.00");
+    expect(unpricedLine).not.toContain("(partial)");
+    expect(out).toContain(
+      "Cost is partial: $1.50 is the known subtotal; tokens without published rates are unpriced.",
+    );
+  });
+
+  it("keeps entirely unpriced totals unmarked", () => {
+    const out = formatQuotaStatsReport({
+      title: "Tokens used (Last 24 Hours) (/tokens_daily)",
+      generatedAtMs: Date.UTC(2026, 0, 15, 12, 0, 0),
+      result: makeEmptyResult({
+        window: {},
+        totals: {
+          priced: { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+          unknown: { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 },
+          unpriced: { input: 30, output: 40, reasoning: 0, cache_read: 0, cache_write: 0 },
+          costUsd: 0,
+          messageCount: 1,
+          sessionCount: 1,
+        },
+      }),
+    });
+
+    const summaryLine = out.split("\n").find((line) => line.startsWith("| all time"));
+    expect(summaryLine).toContain("$0.00");
+    expect(summaryLine).not.toContain("(partial)");
+    expect(out).not.toContain("Cost is partial");
   });
 
   it("keeps the title line in text and gives the dialog only the facts its title lacks", () => {
