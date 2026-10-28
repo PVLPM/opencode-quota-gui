@@ -320,6 +320,7 @@ export const opencodeGoProvider: QuotaProvider = {
   async isAvailable(_ctx: QuotaProviderContext): Promise<boolean> {
     const consoleAccounts = await resolveOpenCodeConsoleAuthAccounts({
       fallbackLabel: OPENCODE_GO_PROVIDER_LABEL,
+      enrichOrgNames: false,
     });
     if (consoleAccounts.length > 0) return true;
 
@@ -344,6 +345,7 @@ export const opencodeGoProvider: QuotaProvider = {
     const windows = ctx.config.opencodeGoWindows ?? OPENCODE_GO_WINDOW_ORDER;
     const consoleAccounts = await resolveOpenCodeConsoleAuthAccounts({
       fallbackLabel: OPENCODE_GO_PROVIDER_LABEL,
+      enrichOrgNames: true,
     });
     if (consoleAccounts.length > 0) {
       return await fetchOpenCodeGoConsoleAccounts(ctx, windows, consoleAccounts);
