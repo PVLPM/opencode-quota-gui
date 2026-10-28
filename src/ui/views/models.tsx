@@ -21,7 +21,7 @@ import { createSeriesInspection } from "../series-inspection";
 /**
  * Models surface (design spec §2).
  *
- * The chart is token-volume stacked bars, with Model | Provider opposite the
+ * The chart is token-volume stacked bars, with Provider | Model opposite the
  * contextual heading. Breakdown sorting is deliberately local to the three
  * columns and cannot re-rank the chart. The frame stays mounted while a
  * dimension query is pending or failed, so the control keeps focus and the
@@ -121,8 +121,8 @@ export function ModelsView(props: {
               if (value === "model" || value === "provider") props.onDimensionChange(value);
             }}
           >
-            <SegmentedControlItem value="model">Model</SegmentedControlItem>
             <SegmentedControlItem value="provider">Provider</SegmentedControlItem>
+            <SegmentedControlItem value="model">Model</SegmentedControlItem>
           </SegmentedControl>
         }
         activeSeries={activeSeries()}

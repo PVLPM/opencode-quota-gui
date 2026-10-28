@@ -551,12 +551,12 @@ describe("Models view", () => {
       );
       expect(swatchNodes.every((node) => node?.props.style === undefined)).toBe(true);
       expect(swatchStyles).toEqual(expectedFills);
-      // No cost graph toggle: the chart header control offers only Model | Provider.
+      // No cost graph toggle: the chart header control offers only Provider | Model.
       const actions = byClass(shell?.head as TestNode, "div", "qg-chart-shell__actions")[0];
       expect(actions).toBeDefined();
-      expect(
-        segmentedItems(actions as TestNode, "Group usage by").map((button) => graph.textOf(button)),
-      ).toEqual(["Model", "Provider"]);
+      const dimensionItems = segmentedItems(actions as TestNode, "Group usage by");
+      expect(dimensionItems.map((button) => graph.textOf(button))).toEqual(["Provider", "Model"]);
+      expect(dimensionItems.map((button) => button.props["aria-pressed"])).toEqual([false, true]);
     } finally {
       dispose();
     }
@@ -2643,7 +2643,7 @@ function rangeControl(root: TestNode): TestNode | undefined {
 }
 
 describe("peer Analytics / Models navigation", () => {
-  it("renders the frame tabs with the preserved range and the default provider grouping", async () => {
+  it("renders Provider before Model while Provider remains the default grouping", async () => {
     const app = mountApp("/models?range=24h");
     try {
       await settle();
@@ -2655,6 +2655,9 @@ describe("peer Analytics / Models navigation", () => {
       ]);
       expect(links.map((link) => link.props["aria-current"])).toEqual([undefined, "page"]);
       expect(graph.textOf(chartTitle(app.root) as TestNode)).toBe("Usage by provider");
+      const dimensionItems = segmentedItems(app.root, "Group usage by");
+      expect(dimensionItems.map((item) => graph.textOf(item))).toEqual(["Provider", "Model"]);
+      expect(dimensionItems.map((item) => item.props["aria-pressed"])).toEqual([true, false]);
       expect(rangeControl(app.root)).toBeDefined();
       expect(app.calls.groups).toEqual([{ range: "24h", dimension: "provider" }]);
     } finally {
@@ -2681,6 +2684,9 @@ describe("peer Analytics / Models navigation", () => {
       expect(app.calls.home).toEqual(["24h"]);
       await app.follow("/models?range=24h&group=model");
       expect(app.calls.groups).toEqual([{ range: "24h", dimension: "model" }]);
+      const modelItems = segmentedItems(app.root, "Group usage by");
+      expect(modelItems.map((item) => graph.textOf(item))).toEqual(["Provider", "Model"]);
+      expect(modelItems.map((item) => item.props["aria-pressed"])).toEqual([false, true]);
       expect(tabLinks(app.root).map((link) => link.props["aria-current"])).toEqual([
         undefined,
         "page",
