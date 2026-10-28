@@ -4088,6 +4088,141 @@ describe("range transitions name the range still on screen", () => {
         app.dispose();
       }
     });
+
+    it("applies the Settings-saved order to the cached payload on a visibility-scoped change", async () => {
+      const cards = [
+        providerCard({
+          cardId: "alpha#one" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Team one",
+        }),
+        providerCard({
+          cardId: "alpha#two" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Team two",
+        }),
+        providerCard({
+          cardId: "beta#one" as never,
+          providerId: "beta",
+          providerLabel: "Beta",
+          accountLabel: "Beta main",
+        }),
+      ];
+      const quota = quotaOf(cards);
+      // SettingsView saves the complete order, same-provider siblings included.
+      const savedOrder = ["alpha#two", "beta#one", "alpha#one"];
+      let quotaCalls = 0;
+      let settings = settingsWith([]);
+      let emit: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => {
+          quotaCalls += 1;
+          return quota;
+        },
+        settings: async () => settings,
+        subscribe: (listener) => {
+          emit = listener;
+          return () => {};
+        },
+      });
+
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Team one",
+          "Alpha:Team two",
+          "Beta:Beta main",
+        ]);
+        expect(quotaCalls).toBe(1);
+
+        // The save succeeded and the server broadcast its visibility-scoped event.
+        settings = settingsWith(savedOrder);
+        emit?.({ topic: "settings.changed", at: NOW, scope: "visibility" });
+        await settle();
+        await settle();
+
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Team two",
+          "Beta:Beta main",
+          "Alpha:Team one",
+        ]);
+        expect(quotaCalls).toBe(1);
+
+        // Navigating away and back remounts Quota and refetches once; the saved
+        // rank still applies to the fresh payload.
+        await app.navigate("/settings");
+        await app.navigate("/quota");
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Team two",
+          "Beta:Beta main",
+          "Alpha:Team one",
+        ]);
+        expect(quotaCalls).toBe(2);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("restores a hidden card at its saved rank after unhide without a quota read", async () => {
+      const savedOrder = ["gamma#one", "alpha#one", "beta#one"];
+      let quotaCalls = 0;
+      let settings = settingsWith(savedOrder);
+      let emit: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => {
+          quotaCalls += 1;
+          return quotaOf(orderedCards());
+        },
+        settings: async () => settings,
+        subscribe: (listener) => {
+          emit = listener;
+          return () => {};
+        },
+      });
+
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+        expect(quotaCalls).toBe(1);
+
+        // Hiding keeps the saved order untouched; the hidden card leaves a gap.
+        settings = settingsWith(savedOrder, [], ["alpha#one"]);
+        emit?.({ topic: "settings.changed", at: NOW, scope: "visibility" });
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual(["Gamma:Gamma main", "Beta:Beta main"]);
+        expect(settings.values["dashboard.cardOrder"]).toEqual(savedOrder);
+        expect(quotaCalls).toBe(1);
+
+        // Unhiding restores the same saved rank, still without a quota read.
+        settings = settingsWith(savedOrder);
+        emit?.({ topic: "settings.changed", at: NOW, scope: "visibility" });
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+        expect(settings.values["dashboard.cardOrder"]).toEqual(savedOrder);
+        expect(quotaCalls).toBe(1);
+      } finally {
+        app.dispose();
+      }
+    });
   });
 });
 
