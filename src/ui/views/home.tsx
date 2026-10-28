@@ -1,5 +1,6 @@
 import type { JSX } from "solid-js";
 import { createMemo, createSignal, For, Show } from "solid-js";
+import { orderCardsByPreference } from "../../contracts/card-order";
 import type { HomeSnapshot, QuotaSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
 import { type DisplayPreferences, QuotaCardView } from "../components/quota-card";
@@ -26,9 +27,11 @@ import {
  * Quota is the default independent surface. Analytics below uses the compatible
  * HomeSnapshot for usage and projects only; it never renders provider cards.
  *
- * Cards are one per provider account in provider-registration order; usage is
- * the stacked area chart; projects are exactly two columns — name and tokens —
- * in the server's latest-activity order, which the frontend never re-sorts.
+ * Cards are one per provider account; the backend order is the fallback, and a
+ * saved `dashboard.cardOrder`/`dashboard.providerOrder` preference re-orders the
+ * already-received payload on render, so a live settings change needs no refetch.
+ * Usage is the stacked area chart; projects are exactly two columns — name and
+ * tokens — in the server's latest-activity order, which the frontend never re-sorts.
  */
 export function QuotaView(props: {
   snapshot: QuotaSnapshot;
@@ -37,7 +40,12 @@ export function QuotaView(props: {
   hiddenRows: string[];
   stale: boolean;
 }): JSX.Element {
-  const shown = () => visibleCards(props.snapshot.providers.cards, props.hiddenCards);
+  const shown = () =>
+    orderCardsByPreference(
+      visibleCards(props.snapshot.providers.cards, props.hiddenCards),
+      props.preferences.cardOrder,
+      props.preferences.providerOrder,
+    );
 
   return (
     <>

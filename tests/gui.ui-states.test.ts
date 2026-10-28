@@ -8,6 +8,7 @@ import { orderCardsByPreference } from "../src/contracts/card-order";
 import type {
   HomeSnapshot,
   ProjectSnapshot,
+  ProviderCard,
   QuotaCardRow,
   SettingsSnapshot,
   SettingsWriteResult,
@@ -3617,6 +3618,9 @@ describe("range transitions name the range still on screen", () => {
     home?: DashboardClient["home"];
     project?: DashboardClient["project"];
     health?: DashboardClient["health"];
+    quota?: DashboardClient["quota"];
+    settings?: DashboardClient["settings"];
+    subscribe?: DashboardClient["subscribe"];
   }): AppHarness {
     const browser = historyBrowser(options.path);
     vi.stubGlobal("window", browser);
@@ -3624,13 +3628,13 @@ describe("range transitions name the range still on screen", () => {
     const client: DashboardClient = {
       connection: () => "live",
       onConnectionChange: () => () => {},
-      subscribe: () => () => {},
+      subscribe: options.subscribe ?? (() => () => {}),
       health: options.health ?? (async () => ({ app: "opencode-quota-gui", contractVersion: 2 })),
       home: options.home ?? (async () => homeSnapshot()),
-      quota: async () => homeSnapshot(),
+      quota: options.quota ?? (async () => homeSnapshot()),
       project: options.project ?? (async () => projectSnapshot()),
       session: async () => sessionSnapshot(),
-      settings: async () => settingsSnapshot(),
+      settings: options.settings ?? (async () => settingsSnapshot()),
       saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
       saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
       importPreview: async () => ({
@@ -3838,6 +3842,252 @@ describe("range transitions name the range still on screen", () => {
     } finally {
       app.dispose();
     }
+  });
+
+  /**
+   * Saved dashboard order is part of the settings snapshot the browser already
+   * receives. A `settings.changed` event reruns only the settings query, so the
+   * Quota surface must re-order the payload it already holds instead of waiting
+   * for (or triggering) another quota read (design spec dashboard visibility).
+   */
+  describe("quota card order follows live display settings", () => {
+    function orderedCards(): ProviderCard[] {
+      return [
+        providerCard({
+          cardId: "alpha#one" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Alpha main",
+        }),
+        providerCard({
+          cardId: "beta#one" as never,
+          providerId: "beta",
+          providerLabel: "Beta",
+          accountLabel: "Beta main",
+        }),
+        providerCard({
+          cardId: "gamma#one" as never,
+          providerId: "gamma",
+          providerLabel: "Gamma",
+          accountLabel: "Gamma main",
+        }),
+      ];
+    }
+
+    function quotaOf(cards: ProviderCard[]): HomeSnapshot {
+      return homeSnapshot({ providers: { cards, enabledProviders: "auto", polledAtMs: NOW } });
+    }
+
+    function settingsWith(
+      cardOrder: string[],
+      providerOrder: string[] = [],
+      hiddenCards: string[] = [],
+    ): SettingsSnapshot {
+      const base = settingsSnapshot();
+      return settingsSnapshot({
+        values: {
+          ...base.values,
+          "dashboard.cardOrder": cardOrder,
+          "dashboard.providerOrder": providerOrder,
+          "dashboard.hiddenCards": hiddenCards,
+        },
+        visibility: { hiddenCards, hiddenRows: [] },
+      });
+    }
+
+    /** Document order of rendered cards as `Provider:Account` pairs. */
+    function renderedCardOrder(root: TestNode): string[] {
+      return renderGraph
+        .elementsNamed(root, "article")
+        .filter((node) => node.props.class === "qg-card")
+        .map((card) => {
+          const provider = renderGraph
+            .elementsNamed(card, "span")
+            .find((node) => node.props.class === "qg-card__provider");
+          const account = renderGraph
+            .elementsNamed(card, "span")
+            .find((node) => node.props.class === "qg-card__account");
+          return `${provider ? renderGraph.textOf(provider) : "?"}:${
+            account ? renderGraph.textOf(account).replace("· ", "") : "?"
+          }`;
+        });
+    }
+
+    it("reads dotted card and provider order from settings values", () => {
+      const preferences = displayPreferencesFromValues({
+        "dashboard.cardOrder": ["alpha#one", 7, "beta#one"],
+        "dashboard.providerOrder": ["gamma"],
+      });
+      expect(preferences.cardOrder).toEqual(["alpha#one", "beta#one"]);
+      expect(preferences.providerOrder).toEqual(["gamma"]);
+    });
+
+    it("omits empty order lists so the existing preference shape is unchanged", () => {
+      const preferences = displayPreferencesFromValues({
+        "dashboard.cardOrder": [],
+        "dashboard.providerOrder": [],
+      });
+      expect(preferences).not.toHaveProperty("cardOrder");
+      expect(preferences).not.toHaveProperty("providerOrder");
+    });
+
+    it("reorders the same fixed payload after settings.changed without another quota request", async () => {
+      const quota = quotaOf(orderedCards());
+      let quotaCalls = 0;
+      let settings = settingsWith([]);
+      let emit: Parameters<DashboardClient["subscribe"]>[0] | undefined;
+
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => {
+          quotaCalls += 1;
+          return quota;
+        },
+        settings: async () => settings,
+        subscribe: (listener) => {
+          emit = listener;
+          return () => {};
+        },
+      });
+
+      try {
+        await settle();
+        await settle();
+        expect(quotaCalls).toBe(1);
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+          "Gamma:Gamma main",
+        ]);
+
+        settings = settingsWith(["gamma#one", "alpha#one"]);
+        emit?.({ topic: "settings.changed", at: NOW });
+        await settle();
+        await settle();
+
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+        expect(quotaCalls).toBe(1);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("applies a saved card order on first load", async () => {
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(orderedCards()),
+        settings: async () => settingsWith(["beta#one", "gamma#one"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Beta:Beta main",
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+        ]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("falls back to providerOrder when cardOrder is empty", async () => {
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(orderedCards()),
+        settings: async () => settingsWith([], ["gamma", "alpha"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("ignores unknown and duplicate ids and keeps unlisted cards in input order", async () => {
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(orderedCards()),
+        settings: async () =>
+          settingsWith(["ghost#missing", "gamma#one", "gamma#one", "alpha#one"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Gamma:Gamma main",
+          "Alpha:Alpha main",
+          "Beta:Beta main",
+        ]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("orders same-provider cards independently by cardId", async () => {
+      const cards = [
+        providerCard({
+          cardId: "alpha#one" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Team one",
+        }),
+        providerCard({
+          cardId: "beta#one" as never,
+          providerId: "beta",
+          providerLabel: "Beta",
+          accountLabel: "Beta main",
+        }),
+        providerCard({
+          cardId: "alpha#two" as never,
+          providerId: "alpha",
+          providerLabel: "Alpha",
+          accountLabel: "Team two",
+        }),
+      ];
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(cards),
+        settings: async () => settingsWith(["alpha#two", "beta#one", "alpha#one"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual([
+          "Alpha:Team two",
+          "Beta:Beta main",
+          "Alpha:Team one",
+        ]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("keeps the remaining cards in saved order when a card is hidden", async () => {
+      const app = mountApp({
+        path: "/quota",
+        quota: async () => quotaOf(orderedCards()),
+        settings: async () =>
+          settingsWith(["beta#one", "gamma#one", "alpha#one"], [], ["beta#one"]),
+      });
+      try {
+        await settle();
+        await settle();
+        expect(renderedCardOrder(app.root)).toEqual(["Gamma:Gamma main", "Alpha:Alpha main"]);
+      } finally {
+        app.dispose();
+      }
+    });
   });
 });
 

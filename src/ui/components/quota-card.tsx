@@ -24,6 +24,10 @@ export interface DisplayPreferences {
   percentLabelStyle?: "full" | "bare";
   showRunway: boolean;
   detailed: boolean;
+  /** Saved presentation order from `dashboard.cardOrder`; non-empty is authoritative. */
+  cardOrder?: readonly string[];
+  /** Legacy `dashboard.providerOrder`, used when `cardOrder` is empty. */
+  providerOrder?: readonly string[];
 }
 
 export function unitSuffix(unit: AccountingUnit | undefined): string {
