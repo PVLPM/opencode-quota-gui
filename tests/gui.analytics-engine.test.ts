@@ -5,6 +5,7 @@ import type {
   HomeSnapshot,
   SessionSnapshot,
 } from "../src/contracts/dashboard.js";
+import { startOfZonedUnit } from "../src/contracts/time-zone.js";
 import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/aggregation.js";
 import {
   ANALYTICS_FULL_REPAIR_INTERVAL_MS,
@@ -4057,6 +4058,71 @@ describe("analytics engine: scoped provider/model lifetime", () => {
     expect(complete.totals.input).toBe(1_500);
     expect(complete.stale).toBe(false);
     expect(calls).toHaveLength(beforeComplete);
+    await engine.close();
+  });
+
+  it("keeps a cached partial scoped lifetime stale until refresh covers lifetime", async () => {
+    const db = baseDb();
+    const calls: ReaderCall[] = [];
+    const baseReader = createFakeReader(db, calls);
+    let releaseRead: (() => void) | undefined;
+    let gateArmed = false;
+    const reader: AnalyticsReader = {
+      async withSnapshot<T>(
+        read: (snapshot: OpenCodeStorageSnapshot) => T | Promise<T>,
+      ): Promise<OpenCodeStorageSnapshotResult<T>> {
+        if (gateArmed) {
+          gateArmed = false;
+          await new Promise<void>((resolve) => {
+            releaseRead = resolve;
+          });
+        }
+        return baseReader.withSnapshot(read);
+      },
+    };
+    const { engine } = harness(db, { reader });
+    const home = await engine.home("24h");
+    const query: AnalyticsGroupQuery = {
+      range: "lifetime",
+      dimension: "provider",
+      filter: { dimension: "model", identity: { kind: "known", id: "gpt-5" } },
+    };
+    const baseline = calls.length;
+    gateArmed = true;
+    const partial = await engine.groups(query);
+    expect(partial.stale).toBe(true);
+    expect(partial.totals).toEqual(home.usage.totals);
+    const partialOrigin = startOfZonedUnit(NOW - HOUR, "day", HOST_ZONE);
+    expect(partial.buckets[0]?.startMs).toBe(partialOrigin);
+
+    // Cached partial data stays explicitly stale and never issues a second
+    // foreground read while the scheduled lifetime refresh is in flight.
+    const cached = await engine.groups(query);
+    expect(cached.stale).toBe(true);
+    expect(cached.totals).toEqual(partial.totals);
+    expect(cached.buckets[0]?.startMs).toBe(partialOrigin);
+
+    releaseRead?.();
+    await flushAsync();
+    await flushAsync();
+    const foregroundReads = calls.slice(baseline).filter((call) => call.method === "withSnapshot");
+    expect(foregroundReads).toHaveLength(1);
+    // The refresh requests full lifetime row coverage, not another 24h slice.
+    const lifetimeRowReads = calls
+      .slice(baseline)
+      .filter((call) => call.method === "loadCompletedRows");
+    expect(lifetimeRowReads.some((call) => call.params?.sinceMs === undefined)).toBe(true);
+
+    const readsBeforeComplete = calls.filter((call) => call.method === "withSnapshot").length;
+    const complete = await engine.groups(query);
+    expect(complete.stale).toBe(false);
+    expect(complete.totals.input).toBe(1_500);
+    // Full owned history now anchors the grouped lifetime range at the oldest
+    // owned step, not session metadata or the partial 24h slice.
+    expect(complete.buckets[0]?.startMs).toBe(startOfZonedUnit(NOW - 2 * DAY, "day", HOST_ZONE));
+    expect(calls.filter((call) => call.method === "withSnapshot")).toHaveLength(
+      readsBeforeComplete,
+    );
     await engine.close();
   });
 

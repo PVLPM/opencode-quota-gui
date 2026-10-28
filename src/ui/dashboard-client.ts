@@ -533,7 +533,7 @@ function readGroupRow(value: JsonValue, endpoint: string, detail: string): Analy
   };
 }
 
-function readSeriesChildBuckets(
+function readSeriesEntityBuckets(
   value: JsonValue | undefined,
   endpoint: string,
   detail: string,
@@ -567,16 +567,26 @@ function readGroupSeries(value: JsonValue, endpoint: string): AnalyticsSeries {
   const buckets = readArray(series.buckets, endpoint, `${detail}.buckets`).map((bucket, index) =>
     readCostedTokens(bucket, endpoint, `${detail}.buckets[${index}]`),
   );
-  const childBuckets = readSeriesChildBuckets(
+  const childBuckets = readSeriesEntityBuckets(
     series.childBuckets,
     endpoint,
     `${detail}.childBuckets`,
     buckets.length,
   );
   if (kind === "other") {
-    return childBuckets === undefined
-      ? { kind, tokens, buckets }
-      : { kind, tokens, buckets, childBuckets };
+    const parentBuckets = readSeriesEntityBuckets(
+      series.parentBuckets,
+      endpoint,
+      `${detail}.parentBuckets`,
+      buckets.length,
+    );
+    return {
+      kind,
+      tokens,
+      buckets,
+      ...(childBuckets === undefined ? {} : { childBuckets }),
+      ...(parentBuckets === undefined ? {} : { parentBuckets }),
+    };
   }
   const identity = readEntityIdentity(series.identity, endpoint, `${detail}.identity`);
   return childBuckets === undefined

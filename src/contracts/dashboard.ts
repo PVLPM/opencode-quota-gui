@@ -174,6 +174,15 @@ export interface AnalyticsSeriesChildBucket {
 }
 
 /**
+ * One hidden same-dimension parent's additive share inside an Other bucket.
+ * The shape matches `AnalyticsSeriesChildBucket`; only `identity` differs: it
+ * uses the snapshot's own dimension (models when grouping by model). Entries
+ * are sparse and unique per bucket, so Other's composition is inspectable
+ * without a dense hidden-parent × bucket matrix.
+ */
+export type AnalyticsSeriesParentBucket = AnalyticsSeriesChildBucket;
+
+/**
  * One chart series for the visible grouping level, ranked by selected-range
  * token volume. The trailing `"other"` series aggregates every entity outside
  * the top five; it is chart-only and never replaces the breakdown rows.
@@ -204,6 +213,14 @@ export type AnalyticsSeries =
        * child identity per bucket — never a remainder derived from a total.
        */
       childBuckets?: AnalyticsSeriesChildBucket[][];
+      /**
+       * Sparse hidden same-dimension parents aggregated into Other, aligned
+       * index-for-index with `buckets`. Each entry is one exact raw parent
+       * identity with its real bucket tokens (token categories, cost status,
+       * unpriced and unknown counts), so inspection needs no row rescan and no
+       * hidden-parent × bucket dense array. Only Other carries this field.
+       */
+      parentBuckets?: AnalyticsSeriesParentBucket[][];
     };
 
 /**
@@ -247,7 +264,8 @@ export interface AnalyticsGroupSnapshot {
   /**
    * Top five `rows` by selected-range token volume plus Other, for both
    * filtered and unfiltered queries. Only these series carry bucket arrays and
-   * per-bucket child breakdowns.
+   * per-bucket breakdowns; Other additionally carries its hidden
+   * same-dimension parent breakdown.
    */
   series: AnalyticsSeries[];
   stale: boolean;

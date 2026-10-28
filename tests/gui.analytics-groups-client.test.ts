@@ -128,6 +128,64 @@ describe("grouped analytics browser transport", () => {
     );
   });
 
+  it("parses sparse parent buckets on Other only", () => {
+    const payload = groupPayload();
+    const series = payload.series as Record<string, unknown>[];
+    series[1] = {
+      ...series[1],
+      parentBuckets: [
+        [
+          {
+            identity: { kind: "known", id: "hidden-model" },
+            tokens: costed({ input: 6, output: 4 }),
+          },
+          { identity: { kind: "unknown" }, tokens: costed({ input: 3 }) },
+        ],
+      ],
+    };
+
+    const parsed = parseGroupSnapshot(payload as never, "/api/v1/models");
+    const other = parsed.series[1];
+    expect(other?.kind).toBe("other");
+    if (other?.kind !== "other") throw new Error("expected an Other series");
+    expect(other.parentBuckets?.[0]?.map((parent) => parent.identity)).toEqual([
+      { kind: "known", id: "hidden-model" },
+      { kind: "unknown" },
+    ]);
+    expect(other.parentBuckets?.[0]?.[0]?.tokens.total).toBe(10);
+
+    const plain = parseGroupSnapshot(groupPayload() as never, "/api/v1/models");
+    const plainOther = plain.series[1];
+    expect(plainOther?.kind).toBe("other");
+    if (plainOther?.kind !== "other") throw new Error("expected an Other series");
+    expect(Object.hasOwn(plainOther, "parentBuckets")).toBe(false);
+  });
+
+  it.each([
+    ["a misaligned bucket count", [[], []]],
+    ["a non-array bucket", [{}]],
+    ["a null value", null],
+    ["a malformed parent identity", [[{ identity: { kind: "x" }, tokens: costed({ input: 1 }) }]]],
+    [
+      "a malformed parent token total",
+      [[{ identity: { kind: "known", id: "hidden-model" }, tokens: {} }]],
+    ],
+    [
+      "a duplicate parent identity",
+      [
+        [
+          { identity: { kind: "known", id: "hidden-model" }, tokens: costed({ input: 1 }) },
+          { identity: { kind: "known", id: "hidden-model" }, tokens: costed({ input: 2 }) },
+        ],
+      ],
+    ],
+  ])("rejects parent buckets with %s", (_label, parentBuckets) => {
+    const payload = groupPayload();
+    const series = payload.series as Record<string, unknown>[];
+    series[1] = { ...series[1], parentBuckets };
+    expect(() => parseGroupSnapshot(payload as never, "/api/v1/models")).toThrow(DashboardError);
+  });
+
   it.each([
     ["a misaligned bucket count", [[], []]],
     ["a non-array bucket", [{}]],

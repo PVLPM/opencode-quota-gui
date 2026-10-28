@@ -14,7 +14,9 @@
  * analytics view (`groups`) for all four ranges and both dimensions. Each read
  * is warmed, then repeated without retaining results. A separate GC-backed
  * sample reports the retained bytes of one Home and one grouped result. The
- * grouped result must agree with Home totals/counts, keep rows bucket-free,
+ * grouped result must agree with Home totals/counts, map every grouped
+ * lifetime boundary into Home (Home may lead with metadata-only buckets),
+ * start lifetime at the fixture's earliest owned day, keep rows bucket-free,
  * and keep bucket arrays bounded to the series (top five + Other).
  *
  * Analytics reads come from the model's owned in-memory steps only. The script
@@ -184,6 +186,23 @@ function* rowsBetween(start, end, sessions, stride = 1) {
   for (let index = start; index < end; index += stride) yield rowAt(index, sessions);
 }
 
+/**
+ * Earliest positive owned completion in the deterministic fixture, floored to
+ * the model's UTC day boundary. Every fork block owns at least one copy at its
+ * source row's completion time and every generated row has positive tokens, so
+ * the earliest completion over all generated rows is the earliest owned one.
+ * This is intentionally independent of Home's metadata-derived lifetime start.
+ */
+function fixtureEarliestOwnedDayStart(rows) {
+  let earliest = Number.POSITIVE_INFINITY;
+  const sessions = sessionCountFor(rows);
+  for (let index = 0; index < rows; index += 1) {
+    const completedAtMs = rowAt(index, sessions).completedAtMs;
+    if (completedAtMs < earliest) earliest = completedAtMs;
+  }
+  return Number.isFinite(earliest) ? Math.floor(earliest / DAY_MS) * DAY_MS : undefined;
+}
+
 function metadataFor(sessions) {
   const sessionRecords = {};
   for (let index = 0; index < sessions; index += 1) {
@@ -323,74 +342,127 @@ const COSTED_KEYS = [
   "unknownTokens",
 ];
 
+/** Sum one series' bucket arrays into a complete CostedTokens shape. */
+function sumSeriesBuckets(buckets) {
+  const sums = {};
+  for (const key of COSTED_KEYS) sums[key] = 0;
+  let seriesCost = 0;
+  let anyPriced = false;
+  for (const bucket of buckets) {
+    for (const key of COSTED_KEYS) sums[key] += bucket[key];
+    if (bucket.apiEquivalentCostUsd !== null) {
+      anyPriced = true;
+      seriesCost += bucket.apiEquivalentCostUsd;
+    }
+  }
+  sums.apiEquivalentCostUsd = anyPriced ? seriesCost : null;
+  return sums;
+}
+
+/**
+ * Full CostedTokens equality, with the same floating-point tolerance the
+ * benchmark uses for summed costs. Numeric cost status must match exactly.
+ */
+function costedTotalsConserved(actual, expected) {
+  for (const key of COSTED_KEYS) {
+    if (actual[key] !== expected[key]) return false;
+  }
+  if (expected.apiEquivalentCostUsd === null) return actual.apiEquivalentCostUsd === null;
+  if (actual.apiEquivalentCostUsd === null) return false;
+  const tolerance = 1e-9 * Math.max(1, Math.abs(expected.apiEquivalentCostUsd));
+  return Math.abs(actual.apiEquivalentCostUsd - expected.apiEquivalentCostUsd) <= tolerance;
+}
+
+/** Compare the selected series against one exact Home bucket boundary. */
+function bucketTotalsMatch(homeTokens, series, index) {
+  const sums = {};
+  for (const key of COSTED_KEYS) sums[key] = 0;
+  let seriesCost = 0;
+  let anyPriced = false;
+  for (const entry of series) {
+    const bucket = entry.buckets[index];
+    if (!bucket) return false;
+    for (const key of COSTED_KEYS) sums[key] += bucket[key];
+    if (bucket.apiEquivalentCostUsd !== null) {
+      anyPriced = true;
+      seriesCost += bucket.apiEquivalentCostUsd;
+    }
+  }
+
+  for (const key of COSTED_KEYS) {
+    if (sums[key] !== homeTokens[key]) return false;
+  }
+
+  const expectedCost = homeTokens.apiEquivalentCostUsd;
+  if (expectedCost === null) return !anyPriced;
+  if (!anyPriced) return false;
+  const tolerance = 1e-9 * Math.max(1, Math.abs(expectedCost));
+  return Math.abs(seriesCost - expectedCost) <= tolerance;
+}
+
 /**
  * Sum the selected series per bucket and compare each category against the
  * corresponding Home usage bucket. This checks the full CostedTokens shape,
  * not only the aggregate token total.
+ *
+ * Finite ranges must align exactly. Grouped lifetime intentionally starts at
+ * the first positive owned step while Home lifetime also considers older
+ * session metadata, so Home may have extra leading buckets. This fixture
+ * guarantees that, so every grouped lifetime boundary must still map exactly
+ * to a Home bucket; the caller separately pins the precise first boundary.
  */
-function bucketSeriesMatch(homeUsage, snapshot) {
-  if (homeUsage.buckets.length !== snapshot.buckets.length) return false;
-  for (let index = 0; index < homeUsage.buckets.length; index += 1) {
-    const homeBucket = homeUsage.buckets[index];
+function bucketSeriesMatch(homeUsage, snapshot, allowScopedStart) {
+  if (!allowScopedStart && homeUsage.buckets.length !== snapshot.buckets.length) return false;
+  const groupedLast = snapshot.buckets.at(-1);
+  const homeLast = homeUsage.buckets.at(-1);
+  if (!groupedLast || !homeLast || groupedLast.endMs !== homeLast.endMs) return false;
+  const homeByStart = new Map(homeUsage.buckets.map((bucket) => [bucket.startMs, bucket]));
+  let compared = 0;
+  for (let index = 0; index < snapshot.buckets.length; index += 1) {
     const groupedBucket = snapshot.buckets[index];
-    if (!homeBucket || !groupedBucket) return false;
-    if (homeBucket.startMs !== groupedBucket.startMs || homeBucket.endMs !== groupedBucket.endMs) {
-      return false;
-    }
-
-    const sums = {};
-    for (const key of COSTED_KEYS) sums[key] = 0;
-    let seriesCost = 0;
-    let anyPriced = false;
-    for (const series of snapshot.series) {
-      const bucket = series.buckets[index];
-      if (!bucket) return false;
-      for (const key of COSTED_KEYS) sums[key] += bucket[key];
-      if (bucket.apiEquivalentCostUsd !== null) {
-        anyPriced = true;
-        seriesCost += bucket.apiEquivalentCostUsd;
-      }
-    }
-
-    for (const key of COSTED_KEYS) {
-      if (sums[key] !== homeBucket.tokens[key]) return false;
-    }
-
-    const expectedCost = homeBucket.tokens.apiEquivalentCostUsd;
-    if (expectedCost === null) {
-      if (anyPriced) return false;
-    } else {
-      if (!anyPriced) return false;
-      const tolerance = 1e-9 * Math.max(1, Math.abs(expectedCost));
-      if (Math.abs(seriesCost - expectedCost) > tolerance) return false;
-    }
+    if (!groupedBucket) return false;
+    const homeBucket = homeByStart.get(groupedBucket.startMs);
+    if (!homeBucket || homeBucket.endMs !== groupedBucket.endMs) return false;
+    if (!bucketTotalsMatch(homeBucket.tokens, snapshot.series, index)) return false;
+    compared += 1;
   }
-  return true;
+  return compared === snapshot.buckets.length;
 }
 
-function seriesConservation(snapshot, homeUsage) {
+function seriesConservation(snapshot, homeUsage, allowScopedStart, expectedLifetimeStartMs) {
   const bucketCount = snapshot.buckets.length;
   const bucketSlots = snapshot.series.reduce((sum, series) => sum + series.buckets.length, 0);
   const aligned = snapshot.series.every((series) => series.buckets.length === bucketCount);
-  const perSeries = snapshot.series.every(
-    (series) =>
-      series.buckets.reduce((sum, bucket) => sum + bucket.total, 0) === series.tokens.total,
+  const contiguous = snapshot.buckets.every(
+    (bucket, index) => index === 0 || snapshot.buckets[index - 1]?.endMs === bucket.startMs,
+  );
+  // Every bucket contributes to its series across the full CostedTokens shape,
+  // independent of whether Home exposes a boundary for that bucket.
+  const perSeries = snapshot.series.every((series) =>
+    costedTotalsConserved(sumSeriesBuckets(series.buckets), series.tokens),
   );
   const seriesTotal = snapshot.series.reduce((sum, series) => sum + series.tokens.total, 0);
-  const bucketMatch = bucketSeriesMatch(homeUsage, snapshot);
+  const bucketMatch = bucketSeriesMatch(homeUsage, snapshot, allowScopedStart);
+  const firstLifetimeBoundaryMatches =
+    !allowScopedStart ||
+    (expectedLifetimeStartMs !== undefined &&
+      snapshot.buckets[0]?.startMs === expectedLifetimeStartMs);
   return {
     bucketSlots,
     bucketMatch,
+    firstLifetimeBoundaryMatches,
     ok:
       aligned &&
+      contiguous &&
       perSeries &&
       seriesTotal === snapshot.totals.total &&
       bucketSlots <= 6 * bucketCount &&
-      bucketMatch,
+      bucketMatch &&
+      firstLifetimeBoundaryMatches,
   };
 }
 
-function measureReadScenario(model, range, dimension, iterations) {
+function measureReadScenario(model, range, dimension, iterations, expectedLifetimeStartMs) {
   const homeRead = () => model.home(range, NOW);
   const groupedRead = () => model.groups({ range, dimension }, NOW);
 
@@ -405,8 +477,19 @@ function measureReadScenario(model, range, dimension, iterations) {
     totalsMatch(warmGrouped.totals, warmHome.usage.totals) &&
     warmGrouped.stepCount === warmHome.usage.stepCount &&
     warmGrouped.sessionCount === warmHome.usage.sessionCount;
-  const conservation = seriesConservation(warmGrouped, warmHome.usage);
+  // Only lifetime can intentionally start at a different boundary than Home:
+  // grouped lifetime anchors on owned data, Home lifetime also includes older
+  // session metadata. This fixture guarantees Home starts earlier.
+  const allowScopedStart = range === "lifetime";
+  const conservation = seriesConservation(
+    warmGrouped,
+    warmHome.usage,
+    allowScopedStart,
+    expectedLifetimeStartMs,
+  );
   const bucketCount = warmGrouped.buckets.length;
+  const homeBucketCount = warmHome.usage.buckets.length;
+  const firstBucketStartMs = warmGrouped.buckets[0]?.startMs ?? null;
   const rowCount = warmGrouped.rows.length;
   const seriesCount = warmGrouped.series.length;
   const cleanRows = rowsWithoutBuckets(warmGrouped.rows);
@@ -431,6 +514,10 @@ function measureReadScenario(model, range, dimension, iterations) {
     range,
     dimension,
     buckets: bucketCount,
+    homeBuckets: homeBucketCount,
+    firstBucketStartMs,
+    expectedLifetimeStartMs: allowScopedStart ? (expectedLifetimeStartMs ?? null) : null,
+    bucketMatchScope: allowScopedStart ? "scoped-lifetime-subset" : "exact",
     rows: rowCount,
     series: seriesCount,
     iterations,
@@ -487,12 +574,14 @@ function measureHomeReads(model, iterations) {
   };
 }
 
-function measureGroupedReads(model, iterations) {
+function measureGroupedReads(model, iterations, expectedLifetimeStartMs) {
   const ownedSteps = model.ownedStepCount();
   const scenarios = [];
   for (const range of READ_RANGES) {
     for (const dimension of READ_DIMENSIONS) {
-      scenarios.push(measureReadScenario(model, range, dimension, iterations));
+      scenarios.push(
+        measureReadScenario(model, range, dimension, iterations, expectedLifetimeStartMs),
+      );
     }
   }
   return {
@@ -550,7 +639,9 @@ async function measureSize(createAnalyticsModel, rows, warmMetadata, reads, home
   // the existing Home baseline (for a baseline-commit comparison).
   const readResults = homeOnly
     ? { homeRead: measureHomeReads(model, reads) }
-    : { groupedRead: measureGroupedReads(model, reads) };
+    : {
+        groupedRead: measureGroupedReads(model, reads, fixtureEarliestOwnedDayStart(rows)),
+      };
 
   // Churn: drop every tenth row, then re-add the same rows. Both passes
   // regenerate inputs from the index; no row array is retained.

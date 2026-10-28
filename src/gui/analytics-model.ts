@@ -2,13 +2,13 @@
  * Worker-only rollup model.
  *
  * Owns deterministic fork ownership over compact fingerprint groups plus
- * per-hour rollups (global / project / session / model) and derives dashboard
- * views by summing rollups. Full hours use pre-aggregated buckets; only the
- * partial edge hours of a request touch the owned step list, so bucket
- * boundaries stay exact without rebuilding a raw model per view.
+ * per-hour rollups (global / project / session) and derives grouped
+ * model/provider views from the same owned steps. Full hours use
+ * pre-aggregated buckets; only the partial edge hours of a request touch the
+ * owned step list, so bucket boundaries stay exact without rebuilding a raw
+ * model per view.
  */
 
-import { encodeIdentityKey } from "../contracts/collision-safe-key.js";
 import type {
   AnalyticsDimension,
   AnalyticsEntityIdentity,
@@ -151,16 +151,6 @@ function createAccumulator(): Accumulator {
     unpricedTokens: 0,
     unknownTokens: 0,
   };
-}
-
-function isZeroTokens(accumulator: Accumulator): boolean {
-  return (
-    accumulator.input === 0 &&
-    accumulator.cacheRead === 0 &&
-    accumulator.cacheWrite === 0 &&
-    accumulator.output === 0 &&
-    accumulator.reasoning === 0
-  );
 }
 
 function addStepToAccumulator(accumulator: Accumulator, step: OwnedStep): void {
@@ -307,36 +297,36 @@ function addStepToBucket(
   addStepToAccumulator(bucket, step);
 }
 
-/** Per-child bucket accumulators for one chart series (exact raw child key). */
-type SeriesChildBuckets = Map<string | undefined, Map<number, Accumulator>>;
+/** Per-entity bucket accumulators for one chart series (exact raw key). */
+type SeriesEntityBuckets = Map<string | undefined, Map<number, Accumulator>>;
 
-function addStepToSeriesChild(
-  childBuckets: SeriesChildBuckets,
-  childRaw: string | undefined,
+function addStepToEntityBucket(
+  entityBuckets: SeriesEntityBuckets,
+  raw: string | undefined,
   step: OwnedStep,
   bucketIndex: number,
 ): void {
   if (bucketIndex < 0) return;
-  let bucketTotals = childBuckets.get(childRaw);
+  let bucketTotals = entityBuckets.get(raw);
   if (!bucketTotals) {
     bucketTotals = new Map();
-    childBuckets.set(childRaw, bucketTotals);
+    entityBuckets.set(raw, bucketTotals);
   }
   addStepToBucket(bucketTotals, step, bucketIndex);
 }
 
 /**
- * Sparse per-bucket child breakdown aligned with the snapshot boundaries.
- * Children are ranked by their own bucket tokens, then exact identity with the
- * unknown identity last, so series order never depends on map insertion.
+ * Sparse per-bucket entity breakdown aligned with the snapshot boundaries.
+ * Entities are ranked by their own bucket tokens, then exact identity with the
+ * unknown identity last, so output order never depends on map insertion.
  */
-function materializeChildBuckets(
-  childBuckets: SeriesChildBuckets,
+function materializeEntityBuckets(
+  entityBuckets: SeriesEntityBuckets,
   bucketCount: number,
 ): AnalyticsSeriesChildBucket[][] {
   const buckets: AnalyticsSeriesChildBucket[][] = [];
   for (let index = 0; index < bucketCount; index += 1) buckets.push([]);
-  for (const [raw, bucketTotals] of childBuckets) {
+  for (const [raw, bucketTotals] of entityBuckets) {
     for (const [bucketIndex, accumulator] of bucketTotals) {
       const bucket = buckets[bucketIndex];
       if (bucket === undefined) continue;
@@ -357,14 +347,16 @@ interface SeriesSource {
   raw: string | undefined;
   totals: Accumulator;
   bucketTotals: Map<number, Accumulator>;
-  childBuckets: SeriesChildBuckets;
+  childBuckets: SeriesEntityBuckets;
+  /** Only Other: hidden same-dimension parents aggregated by this series. */
+  parentBuckets?: SeriesEntityBuckets;
 }
 
 /**
  * Top five entities by selected-range token rank plus one chart-only Other
  * series. Only these sources carry per-bucket accumulators, so the returned
- * bucket arrays are bounded by series × buckets and their child breakdowns by
- * the opposite dimension's cardinality, never by a parent × child cross-product.
+ * bucket arrays are bounded by series × buckets and their breakdowns by the
+ * visible entity cardinality, never by a parent × child cross-product.
  */
 function buildSeries(
   top: readonly SeriesSource[],
@@ -376,14 +368,17 @@ function buildSeries(
     identity: identityOf(source.raw),
     tokens: finalize(source.totals),
     buckets: materializeBuckets(source.bucketTotals, bucketCount),
-    childBuckets: materializeChildBuckets(source.childBuckets, bucketCount),
+    childBuckets: materializeEntityBuckets(source.childBuckets, bucketCount),
   }));
   if (other !== undefined) {
     series.push({
       kind: "other",
       tokens: finalize(other.totals),
       buckets: materializeBuckets(other.bucketTotals, bucketCount),
-      childBuckets: materializeChildBuckets(other.childBuckets, bucketCount),
+      childBuckets: materializeEntityBuckets(other.childBuckets, bucketCount),
+      ...(other.parentBuckets === undefined
+        ? {}
+        : { parentBuckets: materializeEntityBuckets(other.parentBuckets, bucketCount) }),
     });
   }
   return series;
@@ -493,8 +488,6 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
   const ownedByFp = new Map<string, Map<string, OwnedStep>>();
   const ownedBySession = new Map<string, Map<string, OwnedStep>>();
   const hours = new Map<number, HourBucket>();
-  /** Lifetime model-dimension rollup (small: one entry per provider/model). */
-  const modelLifetime = new Map<string, Accumulator>();
   const latestStepBySession = new Map<string, number>();
   const earliestStepBySession = new Map<string, number>();
   let earliestHourMs: number | undefined;
@@ -529,6 +522,14 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       },
       cache: pricingCache,
     });
+    if (outcome.status === "partial") {
+      return {
+        costUsd: outcome.costUsd,
+        pricedAny: true,
+        unpricedTokens: outcome.unpricedTokens,
+        unknownTokens: 0,
+      };
+    }
     if (outcome.status === "priced") {
       return { costUsd: outcome.costUsd, pricedAny: true, unpricedTokens: 0, unknownTokens: 0 };
     }
@@ -551,24 +552,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     return bucket;
   }
 
-  function keyedAccumulator(map: Map<string, Accumulator>, key: string): Accumulator {
-    let accumulator = map.get(key);
-    if (!accumulator) {
-      accumulator = createAccumulator();
-      map.set(key, accumulator);
-    }
-    return accumulator;
-  }
-
   function addStep(step: OwnedStep): void {
     const startMs = Math.floor(step.completedAtMs / HOUR_MS) * HOUR_MS;
     if (earliestHourMs === undefined || startMs < earliestHourMs) earliestHourMs = startMs;
     const bucket = bucketFor(startMs);
     addStepToAccumulator(bucket.totals, step);
-    addStepToAccumulator(
-      keyedAccumulator(modelLifetime, encodeIdentityKey([step.providerID, step.modelID])),
-      step,
-    );
     bucket.steps.set(`${step.sessionID}\u0000${step.messageID}`, step);
 
     let sessionSteps = ownedBySession.get(step.sessionID);
@@ -595,12 +583,6 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const bucket = hours.get(startMs);
     if (bucket) {
       subtractStepFromAccumulator(bucket.totals, step);
-      const modelKey = encodeIdentityKey([step.providerID, step.modelID]);
-      const model = modelLifetime.get(modelKey);
-      if (model) {
-        subtractStepFromAccumulator(model, step);
-        if (isZeroTokens(model)) modelLifetime.delete(modelKey);
-      }
       bucket.steps.delete(`${step.sessionID}\u0000${step.messageID}`);
       if (bucket.steps.size <= 0) {
         hours.delete(startMs);
@@ -768,7 +750,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
    * fingerprint, never for the steady positive insert path.
    */
   function removeOccurrenceByMessage(messageID: string): string | undefined {
-    for (const [fingerprint, occurrences] of groups) {
+    for (const fingerprint of groups.keys()) {
       if (!removeOccurrenceAt(fingerprint, messageID)) continue;
       return fingerprint;
     }
@@ -1033,13 +1015,14 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
   /**
    * Two passes over owned steps already retained by the hour buckets.
    *
-   * Pass 1 accumulates only flat totals, distinct sessions and pair children;
-   * groups are keyed by nested maps of the exact raw id (`undefined` is its own
-   * key), so a pair cannot collide across a delimiter and missing ids stay
-   * distinct from empty ones. Pass 2 ranks the visible groups, then fills
-   * per-bucket accumulators for just the top five series and Other, together
-   * with their opposite-dimension child breakdown. One visit per owned step
-   * feeds both levels, so the breakdown adds no raw scan and no price lookup.
+   * Pass 1 accumulates flat totals, distinct sessions, pair children, and the
+   * earliest positive owned step matching the query filter. Groups are keyed
+   * by nested maps of the exact raw id (`undefined` is its own key), so a pair
+   * cannot collide across a delimiter and missing ids stay distinct from empty
+   * ones. Pass 2 ranks the visible groups, then fills per-bucket accumulators
+   * for just the top five series and Other, their opposite-dimension child
+   * breakdown, and Other's hidden same-dimension parents. One visit per owned
+   * step feeds every level, so inspection adds no raw scan and no price lookup.
    * Bucket arrays never scale with parent/child cardinality, and no parent ×
    * child cross-product or duplicate raw contribution is emitted.
    */
@@ -1047,8 +1030,6 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const { range, dimension } = query;
     const filter = query.filter;
     const window = rangeWindow(range, nowMs);
-    const boundaries = planRangeBuckets(range, nowMs, earliestActivity(), { timeZone });
-    const bucketStarts = boundaries.map((boundary) => boundary.startMs);
     const hourStarts = populatedHourStarts(window);
 
     function eachOwnedStep(visit: (step: OwnedStep) => void): void {
@@ -1069,10 +1050,15 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const sessions = new Set<string>();
     const parentGroups = new Map<string | undefined, GroupNode>();
     const childDimension = oppositeDimension(dimension);
+    const lifetime = range === "lifetime";
     let stepCount = 0;
+    let earliestMatchedMs: number | undefined;
 
     eachOwnedStep((step) => {
       if (!matchesFilter(step, filter)) return;
+      if (lifetime && (earliestMatchedMs === undefined || step.completedAtMs < earliestMatchedMs)) {
+        earliestMatchedMs = step.completedAtMs;
+      }
       const parentRaw = rawIdForDimension(step, dimension);
       const childRaw = rawIdForDimension(step, childDimension);
       addStepToAccumulator(totals, step);
@@ -1093,6 +1079,15 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       addStepToGroupNode(child, step);
     });
 
+    // Lifetime buckets start at the exact first positive owned step for this
+    // query filter — never session metadata, and never an older unrelated
+    // model/provider. Finite ranges anchor on their rolling window and ignore
+    // this value. An empty lifetime still renders its fallback current bucket.
+    const boundaries = planRangeBuckets(range, nowMs, lifetime ? earliestMatchedMs : undefined, {
+      timeZone,
+    });
+    const bucketStarts = boundaries.map((boundary) => boundary.startMs);
+
     const ranked: GroupEntry[] = [...parentGroups]
       .map(([raw, node]) => ({ raw, node }))
       .sort(compareGroupEntries);
@@ -1101,9 +1096,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const topEntries = ranked.slice(0, 5);
     const otherEntries = ranked.slice(5);
     const topBucketTotals = topEntries.map(() => new Map<number, Accumulator>());
-    const topChildBuckets: SeriesChildBuckets[] = topEntries.map(() => new Map());
+    const topChildBuckets: SeriesEntityBuckets[] = topEntries.map(() => new Map());
     const otherBucketTotals = otherEntries.length > 0 ? new Map<number, Accumulator>() : undefined;
-    const otherChildBuckets: SeriesChildBuckets | undefined =
+    const otherChildBuckets: SeriesEntityBuckets | undefined =
+      otherEntries.length > 0 ? new Map() : undefined;
+    const otherParentBuckets: SeriesEntityBuckets | undefined =
       otherEntries.length > 0 ? new Map() : undefined;
     const seriesIndexByParent = new Map<string | undefined, number>();
     topEntries.forEach((entry, index) => {
@@ -1115,20 +1112,24 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         if (!matchesFilter(step, filter)) return;
         const bucketIndex = bucketIndexAt(bucketStarts, step.completedAtMs);
         if (bucketIndex < 0) return;
+        const parentRaw = rawIdForDimension(step, dimension);
         const childRaw = rawIdForDimension(step, childDimension);
-        const seriesIndex = seriesIndexByParent.get(rawIdForDimension(step, dimension));
+        const seriesIndex = seriesIndexByParent.get(parentRaw);
         if (seriesIndex !== undefined) {
           const bucketTotals = topBucketTotals[seriesIndex];
           if (bucketTotals) addStepToBucket(bucketTotals, step, bucketIndex);
           const childBuckets = topChildBuckets[seriesIndex];
           if (childBuckets) {
-            addStepToSeriesChild(childBuckets, childRaw, step, bucketIndex);
+            addStepToEntityBucket(childBuckets, childRaw, step, bucketIndex);
           }
           return;
         }
         if (otherBucketTotals) addStepToBucket(otherBucketTotals, step, bucketIndex);
         if (otherChildBuckets) {
-          addStepToSeriesChild(otherChildBuckets, childRaw, step, bucketIndex);
+          addStepToEntityBucket(otherChildBuckets, childRaw, step, bucketIndex);
+        }
+        if (otherParentBuckets) {
+          addStepToEntityBucket(otherParentBuckets, parentRaw, step, bucketIndex);
         }
       });
     }
@@ -1148,6 +1149,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         totals: otherTotals,
         bucketTotals: otherBucketTotals ?? new Map(),
         childBuckets: otherChildBuckets ?? new Map(),
+        parentBuckets: otherParentBuckets ?? new Map(),
       };
     }
 
@@ -1366,7 +1368,6 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       ownedByFp.clear();
       ownedBySession.clear();
       hours.clear();
-      modelLifetime.clear();
       latestStepBySession.clear();
       earliestStepBySession.clear();
       earliestHourMs = undefined;

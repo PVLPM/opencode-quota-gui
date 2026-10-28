@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -252,6 +252,23 @@ describe.skipIf(!existsSync(join(REPO_ROOT, "dist/gui/analytics-model.js")))(
             expect(scenario.matchHome).toBe(true);
             expect(scenario.seriesConserved).toBe(true);
             expect(scenario.bucketSeriesMatch).toBe(true);
+            // Grouped lifetime intentionally starts at owned data while Home
+            // lifetime also includes older session metadata. Every grouped
+            // boundary must still map Home, and the first grouped boundary must
+            // equal the fixture's earliest positive owned day. Finite ranges
+            // must match Home bucket-for-bucket.
+            expect(scenario.bucketMatchScope).toBe(
+              scenario.range === "lifetime" ? "scoped-lifetime-subset" : "exact",
+            );
+            if (scenario.range === "lifetime") {
+              expect(scenario.homeBuckets).toBeGreaterThan(scenario.buckets);
+              expect(scenario.expectedLifetimeStartMs).toEqual(expect.any(Number));
+              expect(scenario.firstBucketStartMs).toBe(scenario.expectedLifetimeStartMs);
+            } else {
+              expect(scenario.expectedLifetimeStartMs).toBeNull();
+              expect(scenario.firstBucketStartMs).toEqual(expect.any(Number));
+              expect(scenario.homeBuckets).toBe(scenario.buckets);
+            }
             expect(scenario.rowsWithoutBuckets).toBe(true);
             expect(scenario.home.meanMs).toBeGreaterThanOrEqual(0);
             expect(scenario.grouped.meanMs).toBeGreaterThanOrEqual(0);
@@ -261,6 +278,87 @@ describe.skipIf(!existsSync(join(REPO_ROOT, "dist/gui/analytics-model.js")))(
             expect(scenario.homePayloadBytes).toBeGreaterThan(0);
             expect(scenario.groupedPayloadBytes).toBeGreaterThan(0);
           }
+        }
+      },
+      MODEL_BENCHMARK_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      "rejects an extra leading empty lifetime bucket",
+      () => {
+        const root = tempRoot();
+        const modelPath = join(REPO_ROOT, "dist/gui/analytics-model.js");
+        const wrapperPath = join(root, "extra-leading-bucket-model.mjs");
+        writeFileSync(
+          wrapperPath,
+          `import { pathToFileURL } from "node:url";
+const actual = await import(${JSON.stringify(pathToFileURL(modelPath).href)});
+const DAY_MS = 86_400_000;
+const EMPTY = {
+  input: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  output: 0,
+  reasoning: 0,
+  total: 0,
+  apiEquivalentCostUsd: null,
+  unpricedTokens: 0,
+  unknownTokens: 0,
+};
+export function createAnalyticsModel(options) {
+  const model = actual.createAnalyticsModel(options);
+  return {
+    ...model,
+    groups(query, nowMs) {
+      const snapshot = model.groups(query, nowMs);
+      const first = snapshot.buckets[0];
+      if (query.range !== "lifetime" || first === undefined) return snapshot;
+      return {
+        ...snapshot,
+        buckets: [{ startMs: first.startMs - DAY_MS, endMs: first.startMs }, ...snapshot.buckets],
+        series: snapshot.series.map((series) => ({
+          ...series,
+          buckets: [{ ...EMPTY }, ...series.buckets],
+        })),
+      };
+    },
+  };
+}
+`,
+        );
+
+        const child = spawnSync(
+          process.execPath,
+          [
+            join(REPO_ROOT, "scripts/benchmark-analytics-model.mjs"),
+            "--model",
+            wrapperPath,
+            "--sizes",
+            "16",
+            "--reads",
+            "1",
+            "--json",
+          ],
+          {
+            cwd: REPO_ROOT,
+            encoding: "utf8",
+            timeout: MODEL_BENCHMARK_CHILD_TIMEOUT_MS,
+          },
+        );
+
+        expect(child.error).toBeUndefined();
+        expect(child.status, child.stderr).toBe(0);
+        const result = JSON.parse(child.stdout);
+        const lifetimeScenarios = result.results[0].groupedRead.scenarios.filter(
+          (scenario: { range: string }) => scenario.range === "lifetime",
+        );
+        expect(lifetimeScenarios).toHaveLength(2);
+        for (const scenario of lifetimeScenarios) {
+          // The extra empty bucket still maps to a Home boundary; only the
+          // precise first-boundary check can reject it.
+          expect(scenario.bucketSeriesMatch).toBe(true);
+          expect(scenario.firstBucketStartMs).not.toBe(scenario.expectedLifetimeStartMs);
+          expect(scenario.seriesConserved).toBe(false);
         }
       },
       MODEL_BENCHMARK_TEST_TIMEOUT_MS,

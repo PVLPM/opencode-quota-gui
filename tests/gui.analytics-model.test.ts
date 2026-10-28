@@ -77,6 +77,7 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
   };
 });
 
+import type { CostedTokens } from "../src/contracts/dashboard.js";
 import { RANGE_KEYS } from "../src/contracts/ranges.js";
 import {
   type AnalyticsModel,
@@ -90,9 +91,16 @@ import type {
 } from "../src/lib/opencode-storage.js";
 
 const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
 const NOW_HOUR = Math.floor(NOW / HOUR) * HOUR;
 const PROJECT_IDS = ["p1", "p2"];
+
+/** UTC day boundary; the default analytics model zone is UTC. */
+function utcDayStart(timestampMs: number): number {
+  const date = new Date(timestampMs);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
 
 type RawTokenCounts = OpenCodeRawAssistantRow["tokens"];
 
@@ -518,6 +526,303 @@ describe("analytics model: hour boundaries and extrema", () => {
   });
 });
 
+describe("analytics model: grouped lifetime bucket origins", () => {
+  it("starts lifetime grouped buckets at the earliest positive owned step, not metadata", () => {
+    const sessions = [
+      sessionInfo("ses_a", "p1", {
+        time: { created: NOW - 120 * DAY, updated: NOW - 110 * DAY },
+      }),
+    ];
+    const zeroAt = NOW - 60 * DAY;
+    const olderAt = NOW - 30 * DAY;
+    const newerAt = NOW - 2 * DAY;
+    // Zero-token rows carry no owned usage and must not anchor the range.
+    const zeroRow = row({
+      sessionID: "ses_a",
+      messageID: "msg_zero_anchor",
+      completedAtMs: zeroAt,
+      tokens: {},
+      providerID: "p-zero",
+      modelID: "zero-only",
+    });
+    const olderRow = row({
+      sessionID: "ses_a",
+      messageID: "msg_older_anchor",
+      completedAtMs: olderAt,
+      tokens: { input: 10 },
+      providerID: "p-old",
+      modelID: "old-model",
+    });
+    const newerRow = row({
+      sessionID: "ses_a",
+      messageID: "msg_newer_anchor",
+      completedAtMs: newerAt,
+      tokens: { input: 20 },
+      providerID: "p-new",
+      modelID: "new-model",
+    });
+    const model = createModel(sessions, [zeroRow, olderRow, newerRow]);
+
+    // Public activity and Home lifetime still include session metadata; only
+    // the grouped range anchors on positive owned usage.
+    expect(model.earliestActivityMs()).toBe(NOW - 120 * DAY);
+    expect(model.home("lifetime", NOW).usage.buckets[0]?.startMs).toBe(
+      utcDayStart(NOW - 120 * DAY),
+    );
+
+    const lifetime = model.groups({ range: "lifetime", dimension: "model" }, NOW);
+    // Session metadata reaches back 120 days; the chart starts at 30 days.
+    expect(lifetime.buckets[0]?.startMs).toBe(utcDayStart(olderAt));
+    expect(lifetime.window).toEqual({ untilMs: NOW });
+    expect(lifetime.totals.input).toBe(30);
+    expect(lifetime.stepCount).toBe(2);
+    expect(lifetime.sessionCount).toBe(1);
+    expect(lifetime.series.reduce((sum, series) => sum + series.tokens.total, 0)).toBe(30);
+
+    for (const dimension of DIMENSIONS) {
+      const global = model.groups({ range: "lifetime", dimension }, NOW);
+      expect(global.buckets[0]?.startMs).toBe(utcDayStart(olderAt));
+      expect(global.totals.input).toBe(30);
+    }
+
+    const olderOnly = model.groups(
+      {
+        range: "lifetime",
+        dimension: "model",
+        filter: { dimension: "model", identity: known("old-model") },
+      },
+      NOW,
+    );
+    expect(olderOnly.buckets[0]?.startMs).toBe(utcDayStart(olderAt));
+    expect(olderOnly.totals.input).toBe(10);
+    expect(olderOnly.series.reduce((sum, series) => sum + series.tokens.total, 0)).toBe(10);
+
+    // The exact filter's own earliest positive owned step anchors the detail
+    // range, independent of older models or session metadata.
+    const newerOnly = model.groups(
+      {
+        range: "lifetime",
+        dimension: "model",
+        filter: { dimension: "model", identity: known("new-model") },
+      },
+      NOW,
+    );
+    expect(newerOnly.buckets[0]?.startMs).toBe(utcDayStart(newerAt));
+    expect(newerOnly.totals.input).toBe(20);
+    expect(newerOnly.stepCount).toBe(1);
+    expect(newerOnly.series.reduce((sum, series) => sum + series.tokens.total, 0)).toBe(20);
+
+    const newerProvider = model.groups(
+      {
+        range: "lifetime",
+        dimension: "model",
+        filter: { dimension: "provider", identity: known("p-new") },
+      },
+      NOW,
+    );
+    expect(newerProvider.buckets[0]?.startMs).toBe(utcDayStart(newerAt));
+    expect(newerProvider.totals.input).toBe(20);
+
+    const absent = model.groups(
+      {
+        range: "lifetime",
+        dimension: "model",
+        filter: { dimension: "model", identity: known("absent-model") },
+      },
+      NOW,
+    );
+    expect(absent.buckets).toEqual([{ startMs: utcDayStart(NOW), endMs: NOW }]);
+    expect(absent.totals.total).toBe(0);
+    expect(absent.stepCount).toBe(0);
+    expect(absent.sessionCount).toBe(0);
+
+    // Finite ranges keep their exact rolling-window boundaries.
+    for (const range of ["24h", "7d", "30d"] as const) {
+      const usage = model.home(range, NOW).usage;
+      for (const dimension of DIMENSIONS) {
+        const snapshot = model.groups({ range, dimension }, NOW);
+        expect(snapshot.buckets).toEqual(
+          usage.buckets.map((bucket) => ({ startMs: bucket.startMs, endMs: bucket.endMs })),
+        );
+        expect(snapshot.totals).toEqual(usage.totals);
+      }
+    }
+
+    // Removing the anchoring owned step moves the start to the next oldest.
+    model.apply([], [olderRow]);
+    const afterRemoval = model.groups({ range: "lifetime", dimension: "model" }, NOW);
+    expect(afterRemoval.buckets[0]?.startMs).toBe(utcDayStart(newerAt));
+    expect(afterRemoval.totals.input).toBe(20);
+    expect(afterRemoval.stepCount).toBe(1);
+    expect(afterRemoval.series.reduce((sum, series) => sum + series.tokens.total, 0)).toBe(20);
+  });
+
+  it("anchors unknown-identity filtered lifetime buckets at the earliest owned unknown", () => {
+    const sessions = [
+      sessionInfo("ses_a", "p1", {
+        time: { created: NOW - 120 * DAY, updated: NOW - 100 * DAY },
+      }),
+    ];
+    const unknownAt = NOW - 20 * DAY;
+    const unknownLatestAt = NOW - DAY;
+    const knownAt = NOW - 40 * DAY;
+    const model = createModel(sessions, [
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_unknown_early",
+        completedAtMs: unknownAt,
+        tokens: { input: 10 },
+        providerID: undefined,
+        modelID: undefined,
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_unknown_late",
+        completedAtMs: unknownLatestAt,
+        tokens: { input: 20 },
+        providerID: undefined,
+        modelID: undefined,
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_known_older",
+        completedAtMs: knownAt,
+        tokens: { input: 30 },
+        providerID: "known-provider",
+        modelID: "known-model",
+      }),
+    ]);
+
+    // The unknown identity is exact on either filter dimension, including the
+    // opposite-dimension detail shape. The older known row never anchors it.
+    for (const query of [
+      {
+        range: "lifetime" as const,
+        dimension: "model" as const,
+        filter: { dimension: "model" as const, identity: UNKNOWN_IDENTITY },
+      },
+      {
+        range: "lifetime" as const,
+        dimension: "provider" as const,
+        filter: { dimension: "provider" as const, identity: UNKNOWN_IDENTITY },
+      },
+      {
+        range: "lifetime" as const,
+        dimension: "model" as const,
+        filter: { dimension: "provider" as const, identity: UNKNOWN_IDENTITY },
+      },
+    ]) {
+      const snapshot = model.groups(query, NOW);
+      expect(snapshot.filter).toEqual(query.filter);
+      expect(snapshot.buckets[0]?.startMs).toBe(utcDayStart(unknownAt));
+      expect(snapshot.totals.input).toBe(30);
+      expect(snapshot.stepCount).toBe(2);
+      expect(snapshot.sessionCount).toBe(1);
+      expect(snapshot.series.reduce((sum, series) => sum + series.tokens.total, 0)).toBe(30);
+      expect(snapshot.rows.every((entry) => entry.identity.kind === "unknown")).toBe(true);
+    }
+
+    const knownOnly = model.groups(
+      {
+        range: "lifetime",
+        dimension: "model",
+        filter: { dimension: "model", identity: known("known-model") },
+      },
+      NOW,
+    );
+    expect(knownOnly.buckets[0]?.startMs).toBe(utcDayStart(knownAt));
+    expect(knownOnly.totals.input).toBe(30);
+
+    const global = model.groups({ range: "lifetime", dimension: "model" }, NOW);
+    expect(global.buckets[0]?.startMs).toBe(utcDayStart(knownAt));
+    expect(global.totals.input).toBe(60);
+  });
+
+  it("keeps lifetime origin exact across fork owner promotion and removal", () => {
+    const sessions = [
+      sessionInfo("ses_parent", "p1", {
+        time: { created: NOW - 120 * DAY, updated: NOW - 100 * DAY },
+      }),
+      sessionInfo("ses_fork", "p1", {
+        time: { created: NOW - 120 * DAY, updated: NOW - 100 * DAY },
+      }),
+    ];
+    const forkAt = NOW - 30 * DAY;
+    const laterAt = NOW - 2 * DAY;
+    // Identical fork copies: one owner is selected by deterministic tie-break.
+    const forkCopyA = row({
+      sessionID: "ses_parent",
+      messageID: "msg_fork_a",
+      completedAtMs: forkAt,
+      tokens: { input: 10 },
+      providerID: "p-fork",
+      modelID: "m-fork",
+    });
+    const forkCopyB = row({
+      sessionID: "ses_fork",
+      messageID: "msg_fork_b",
+      completedAtMs: forkAt,
+      tokens: { input: 10 },
+      providerID: "p-fork",
+      modelID: "m-fork",
+    });
+    const later = row({
+      sessionID: "ses_fork",
+      messageID: "msg_after_fork",
+      completedAtMs: laterAt,
+      tokens: { input: 5 },
+      providerID: "p-later",
+      modelID: "m-later",
+    });
+    const model = createModel(sessions, [forkCopyA, forkCopyB, later]);
+
+    expect(model.ownedStepCount()).toBe(2);
+    const initial = model.groups({ range: "lifetime", dimension: "model" }, NOW);
+    expect(initial.buckets[0]?.startMs).toBe(utcDayStart(forkAt));
+    expect(initial.totals.input).toBe(15);
+    expect(initial.stepCount).toBe(2);
+
+    // Removing the owner promotes the other copy at the same instant: totals
+    // and the bucket origin must stay unchanged, not fall through to "later".
+    model.apply([], [forkCopyA]);
+    expect(model.ownedStepCount()).toBe(2);
+    const promoted = model.groups({ range: "lifetime", dimension: "model" }, NOW);
+    expect(promoted.buckets[0]?.startMs).toBe(utcDayStart(forkAt));
+    expect(promoted.totals.input).toBe(15);
+    expect(promoted.stepCount).toBe(2);
+    const promotedFork = model.groups(
+      {
+        range: "lifetime",
+        dimension: "model",
+        filter: { dimension: "model", identity: known("m-fork") },
+      },
+      NOW,
+    );
+    expect(promotedFork.buckets[0]?.startMs).toBe(utcDayStart(forkAt));
+    expect(promotedFork.totals.input).toBe(10);
+
+    // Removing the last owned copy of the old fingerprint advances the origin
+    // to the next positive owned step.
+    model.apply([], [forkCopyB]);
+    expect(model.ownedStepCount()).toBe(1);
+    const afterForkRemoval = model.groups({ range: "lifetime", dimension: "model" }, NOW);
+    expect(afterForkRemoval.buckets[0]?.startMs).toBe(utcDayStart(laterAt));
+    expect(afterForkRemoval.totals.input).toBe(5);
+    expect(afterForkRemoval.stepCount).toBe(1);
+
+    const absentFork = model.groups(
+      {
+        range: "lifetime",
+        dimension: "model",
+        filter: { dimension: "model", identity: known("m-fork") },
+      },
+      NOW,
+    );
+    expect(absentFork.buckets).toEqual([{ startMs: utcDayStart(NOW), endMs: NOW }]);
+    expect(absentFork.totals.total).toBe(0);
+  });
+});
+
 describe("analytics model: price status", () => {
   it("keeps priced, unpriced, unknown, and zero-token rows distinct", () => {
     const sessions = [sessionInfo("ses_a", "p1")];
@@ -617,62 +922,106 @@ function bucketAt(snapshot: GroupSnapshot, completedAtMs: number): number {
   );
 }
 
+interface BucketShare {
+  identity: GroupIdentity;
+  tokens: CostedTokens;
+}
+
+function shareKey(share: BucketShare): string {
+  return share.identity.kind === "unknown" ? "unknown" : `known:${share.identity.id}`;
+}
+
 /**
  * In-bar subdivision is additive: every category, numeric cost, unpriced count
- * and unknown count in a bucket equals the sum of its exact child entries.
+ * and unknown count in a bucket equals the sum of its exact share entries.
+ * Exact identities are unique inside one bucket (no cross-product rows).
  */
-function expectChildBucketsConserve(series: GroupSnapshot["series"][number]): void {
-  expect(series.childBuckets).toHaveLength(series.buckets.length);
-  const childBuckets = series.childBuckets ?? [];
-  series.buckets.forEach((bucket, bucketIndex) => {
-    const children = childBuckets[bucketIndex] ?? [];
-    expect(children.reduce((sum, child) => sum + child.tokens.input, 0)).toBe(bucket.input);
-    expect(children.reduce((sum, child) => sum + child.tokens.cacheRead, 0)).toBe(bucket.cacheRead);
-    expect(children.reduce((sum, child) => sum + child.tokens.cacheWrite, 0)).toBe(
+function expectSharesConserve(
+  totals: CostedTokens,
+  buckets: readonly CostedTokens[],
+  shares: readonly (readonly BucketShare[])[] | undefined,
+): void {
+  expect(shares).toHaveLength(buckets.length);
+  const shareBuckets = shares ?? [];
+  buckets.forEach((bucket, bucketIndex) => {
+    const entries = shareBuckets[bucketIndex] ?? [];
+    expect(new Set(entries.map(shareKey)).size).toBe(entries.length);
+    expect(entries.reduce((sum, entry) => sum + entry.tokens.input, 0)).toBe(bucket.input);
+    expect(entries.reduce((sum, entry) => sum + entry.tokens.cacheRead, 0)).toBe(bucket.cacheRead);
+    expect(entries.reduce((sum, entry) => sum + entry.tokens.cacheWrite, 0)).toBe(
       bucket.cacheWrite,
     );
-    expect(children.reduce((sum, child) => sum + child.tokens.output, 0)).toBe(bucket.output);
-    expect(children.reduce((sum, child) => sum + child.tokens.reasoning, 0)).toBe(bucket.reasoning);
-    expect(children.reduce((sum, child) => sum + child.tokens.total, 0)).toBe(bucket.total);
-    expect(children.reduce((sum, child) => sum + child.tokens.unpricedTokens, 0)).toBe(
+    expect(entries.reduce((sum, entry) => sum + entry.tokens.output, 0)).toBe(bucket.output);
+    expect(entries.reduce((sum, entry) => sum + entry.tokens.reasoning, 0)).toBe(bucket.reasoning);
+    expect(entries.reduce((sum, entry) => sum + entry.tokens.total, 0)).toBe(bucket.total);
+    expect(entries.reduce((sum, entry) => sum + entry.tokens.unpricedTokens, 0)).toBe(
       bucket.unpricedTokens,
     );
-    expect(children.reduce((sum, child) => sum + child.tokens.unknownTokens, 0)).toBe(
+    expect(entries.reduce((sum, entry) => sum + entry.tokens.unknownTokens, 0)).toBe(
       bucket.unknownTokens,
     );
-    const childCosts = children.flatMap((child) =>
-      child.tokens.apiEquivalentCostUsd === null ? [] : [child.tokens.apiEquivalentCostUsd],
+    const costs = entries.flatMap((entry) =>
+      entry.tokens.apiEquivalentCostUsd === null ? [] : [entry.tokens.apiEquivalentCostUsd],
     );
     if (bucket.apiEquivalentCostUsd === null) {
-      expect(childCosts).toEqual([]);
+      expect(costs).toEqual([]);
     } else {
-      expect(childCosts.length).toBeGreaterThan(0);
-      expect(childCosts.reduce((sum, cost) => sum + cost, 0)).toBeCloseTo(
+      expect(costs.length).toBeGreaterThan(0);
+      expect(costs.reduce((sum, cost) => sum + cost, 0)).toBeCloseTo(
         bucket.apiEquivalentCostUsd,
         12,
       );
     }
   });
 
-  const allChildren = childBuckets.flat();
-  expect(allChildren.reduce((sum, child) => sum + child.tokens.total, 0)).toBe(series.tokens.total);
-  expect(allChildren.reduce((sum, child) => sum + child.tokens.unpricedTokens, 0)).toBe(
-    series.tokens.unpricedTokens,
+  const allShares = shareBuckets.flat();
+  expect(allShares.reduce((sum, entry) => sum + entry.tokens.total, 0)).toBe(totals.total);
+  expect(allShares.reduce((sum, entry) => sum + entry.tokens.unpricedTokens, 0)).toBe(
+    totals.unpricedTokens,
   );
-  expect(allChildren.reduce((sum, child) => sum + child.tokens.unknownTokens, 0)).toBe(
-    series.tokens.unknownTokens,
+  expect(allShares.reduce((sum, entry) => sum + entry.tokens.unknownTokens, 0)).toBe(
+    totals.unknownTokens,
   );
-  const allCosts = allChildren.flatMap((child) =>
-    child.tokens.apiEquivalentCostUsd === null ? [] : [child.tokens.apiEquivalentCostUsd],
+  const allCosts = allShares.flatMap((entry) =>
+    entry.tokens.apiEquivalentCostUsd === null ? [] : [entry.tokens.apiEquivalentCostUsd],
   );
-  if (series.tokens.apiEquivalentCostUsd === null) {
+  if (totals.apiEquivalentCostUsd === null) {
     expect(allCosts).toEqual([]);
   } else {
     expect(allCosts.reduce((sum, cost) => sum + cost, 0)).toBeCloseTo(
-      series.tokens.apiEquivalentCostUsd,
+      totals.apiEquivalentCostUsd,
       12,
     );
   }
+}
+
+function expectChildBucketsConserve(series: GroupSnapshot["series"][number]): void {
+  expectSharesConserve(series.tokens, series.buckets, series.childBuckets);
+}
+
+function expectParentBucketsConserve(series: {
+  tokens: CostedTokens;
+  buckets: CostedTokens[];
+  parentBuckets?: readonly (readonly BucketShare[])[];
+}): void {
+  expectSharesConserve(series.tokens, series.buckets, series.parentBuckets);
+}
+
+/** Serialized size with and without the additive Other parent breakdown. */
+function parentBucketsSerializedSize(snapshot: GroupSnapshot): {
+  beforeBytes: number;
+  afterBytes: number;
+} {
+  const before = JSON.stringify({
+    ...snapshot,
+    series: snapshot.series.map((series) => {
+      const rest = { ...series } as Record<string, unknown>;
+      delete rest.parentBuckets;
+      return rest;
+    }),
+  });
+  const after = JSON.stringify(snapshot);
+  return { beforeBytes: Buffer.byteLength(before), afterBytes: Buffer.byteLength(after) };
 }
 
 describe("analytics model: grouped model and provider identities", () => {
@@ -1517,6 +1866,315 @@ describe("analytics model: grouped model and provider identities", () => {
     expect(top.tokens.input).toBe(100);
   });
 
+  it("exposes sparse same-dimension parent shares for Other in both groupings", () => {
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const completedAtMs = NOW_HOUR - 2 * HOUR;
+    const model = createModel(sessions, [
+      ...["top-1", "top-2", "top-3", "top-4", "top-5"].map((modelID, index) =>
+        row({
+          sessionID: "ses_a",
+          messageID: `msg_top_${index}`,
+          completedAtMs,
+          tokens: { input: 100 - index * 10 },
+          providerID: `p${index + 1}`,
+          modelID,
+        }),
+      ),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_a_6",
+        completedAtMs,
+        tokens: { input: 40 },
+        providerID: "p6",
+        modelID: "hidden-a",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_a_7",
+        completedAtMs,
+        tokens: { input: 10 },
+        providerID: "p7",
+        modelID: "hidden-a",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_b_6",
+        completedAtMs,
+        tokens: { input: 30 },
+        providerID: "p6",
+        modelID: "hidden-b",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_c_7",
+        completedAtMs,
+        tokens: { input: 5 },
+        providerID: "p7",
+        modelID: "hidden-c",
+      }),
+    ]);
+    const bucketIndex = bucketAt(
+      model.groups({ range: "24h", dimension: "model" }, NOW),
+      completedAtMs,
+    );
+    expect(bucketIndex).toBeGreaterThanOrEqual(0);
+
+    const expectations = [
+      {
+        dimension: "model" as const,
+        otherInput: 85,
+        parents: ["hidden-a", "hidden-b", "hidden-c"],
+        parentInputs: [50, 30, 5],
+        children: ["p6", "p7"],
+        childInputs: [70, 15],
+      },
+      {
+        dimension: "provider" as const,
+        otherInput: 75,
+        parents: ["p5", "p7"],
+        parentInputs: [60, 15],
+        children: ["top-5", "hidden-a", "hidden-c"],
+        childInputs: [60, 10, 5],
+      },
+    ];
+
+    for (const expected of expectations) {
+      const snapshot = model.groups({ range: "24h", dimension: expected.dimension }, NOW);
+      expect(snapshot.series).toHaveLength(6);
+      expect(
+        snapshot.series.slice(0, 5).every((series) => !Object.hasOwn(series, "parentBuckets")),
+      ).toBe(true);
+      const other = snapshot.series[5];
+      if (other === undefined || other.kind !== "other") throw new Error("expected Other");
+      expect(other.tokens.input).toBe(expected.otherInput);
+      expect(other.buckets[bucketIndex]?.input).toBe(expected.otherInput);
+      expectChildBucketsConserve(other);
+      expectParentBucketsConserve(other);
+
+      expect(
+        other.parentBuckets?.[bucketIndex]?.map((share) => rawIdentityOf(share.identity)),
+      ).toEqual(expected.parents);
+      expect(other.parentBuckets?.[bucketIndex]?.map((share) => share.tokens.input)).toEqual(
+        expected.parentInputs,
+      );
+      expect(
+        other.childBuckets?.[bucketIndex]?.map((share) => rawIdentityOf(share.identity)),
+      ).toEqual(expected.children);
+      expect(other.childBuckets?.[bucketIndex]?.map((share) => share.tokens.input)).toEqual(
+        expected.childInputs,
+      );
+
+      // Sparse per populated bucket: hidden parents appear once, never as a
+      // dense hidden-count × bucket matrix and never in empty buckets.
+      const parentShares = other.parentBuckets ?? [];
+      expect(parentShares).toHaveLength(snapshot.buckets.length);
+      expect(parentShares.flat()).toHaveLength(expected.parents.length);
+      expect(parentShares.filter((shares) => shares.length > 0)).toHaveLength(1);
+      expect(parentShares.every((shares) => shares.length <= expected.parents.length)).toBe(true);
+      expect(parentShares[bucketIndex]?.map(shareKey).sort()).toEqual(
+        expected.parents.map((id) => `known:${id}`).sort(),
+      );
+
+      // The added field is additive: existing series/bucket geometry and the
+      // opposite-dimension child breakdown stay unchanged.
+      expect(other.buckets).toHaveLength(snapshot.buckets.length);
+      expect(other.buckets.reduce((sum, bucket) => sum + bucket.total, 0)).toBe(
+        expected.otherInput,
+      );
+      expect(snapshot.series.reduce((sum, series) => sum + series.tokens.input, 0)).toBe(485);
+
+      const { beforeBytes, afterBytes } = parentBucketsSerializedSize(snapshot);
+      expect(afterBytes).toBeGreaterThan(beforeBytes);
+      expect(afterBytes - beforeBytes).toBeLessThan(beforeBytes);
+    }
+  });
+
+  it("conserves parent cost status for hidden Other parents", () => {
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const completedAtMs = NOW_HOUR - 2 * HOUR;
+    const model = createModel(sessions, [
+      ...["t1", "t2", "t3", "t4", "t5"].map((providerID, index) =>
+        row({
+          sessionID: "ses_a",
+          messageID: `msg_top_provider_${index}`,
+          completedAtMs,
+          tokens: { input: 100 },
+          providerID,
+          modelID: "gpt-5",
+        }),
+      ),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_priced",
+        completedAtMs,
+        tokens: { input: 10 },
+        providerID: "mixed-labs",
+        modelID: "priced-1",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_unpriced",
+        completedAtMs,
+        tokens: { input: 30 },
+        providerID: "mixed-labs",
+        modelID: "flat-1",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_unknown",
+        completedAtMs,
+        tokens: { input: 40 },
+        providerID: "mixed-labs",
+        modelID: "no-such-model",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_unpriced_only",
+        completedAtMs,
+        tokens: { input: 20 },
+        providerID: "unpriced-labs",
+        modelID: "mystery-1",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_hidden_unknown_only",
+        completedAtMs,
+        tokens: { input: 20 },
+        providerID: "no-such-provider",
+        modelID: "no-such-model",
+      }),
+    ]);
+    const snapshot = model.groups({ range: "24h", dimension: "provider" }, NOW);
+    const bucketIndex = bucketAt(snapshot, completedAtMs);
+    expect(bucketIndex).toBeGreaterThanOrEqual(0);
+    const other = snapshot.series[5];
+    if (other === undefined || other.kind !== "other") throw new Error("expected Other");
+    expect(other.tokens.input).toBe(120);
+    expectChildBucketsConserve(other);
+    expectParentBucketsConserve(other);
+
+    const parents = other.parentBuckets?.[bucketIndex] ?? [];
+    expect(parents.map((share) => rawIdentityOf(share.identity))).toEqual([
+      "mixed-labs",
+      "no-such-provider",
+      "unpriced-labs",
+    ]);
+    expect(parents.map((share) => share.tokens.input)).toEqual([80, 20, 20]);
+    const mixed = parents[0];
+    expect(mixed?.tokens.apiEquivalentCostUsd).not.toBeNull();
+    expect(mixed?.tokens.unpricedTokens).toBe(30);
+    expect(mixed?.tokens.unknownTokens).toBe(40);
+    const unknownOnly = parents[1];
+    expect(unknownOnly?.tokens.apiEquivalentCostUsd).toBeNull();
+    expect(unknownOnly?.tokens.unpricedTokens).toBe(0);
+    expect(unknownOnly?.tokens.unknownTokens).toBe(20);
+    const unpricedOnly = parents[2];
+    expect(unpricedOnly?.tokens.apiEquivalentCostUsd).toBeNull();
+    expect(unpricedOnly?.tokens.unpricedTokens).toBe(20);
+    expect(unpricedOnly?.tokens.unknownTokens).toBe(0);
+
+    const bucket = other.buckets[bucketIndex];
+    expect(bucket?.apiEquivalentCostUsd).not.toBeNull();
+    expect(bucket?.unpricedTokens).toBe(50);
+    expect(bucket?.unknownTokens).toBe(60);
+    // The opposite-dimension breakdown still merges the same model across
+    // hidden parents exactly once.
+    expect(
+      other.childBuckets?.[bucketIndex]?.map((share) => rawIdentityOf(share.identity)),
+    ).toEqual(["no-such-model", "flat-1", "mystery-1", "priced-1"]);
+    expect(other.childBuckets?.[bucketIndex]?.map((share) => share.tokens.input)).toEqual([
+      60, 30, 20, 10,
+    ]);
+  });
+
+  it("keeps unknown and empty hidden parents in a filtered Other breakdown", () => {
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const completedAtMs = NOW_HOUR - 2 * HOUR;
+    const model = createModel(sessions, [
+      ...["top-1", "top-2", "top-3", "top-4", "top-5"].map((modelID, index) =>
+        row({
+          sessionID: "ses_a",
+          messageID: `msg_filtered_top_${index}`,
+          completedAtMs,
+          tokens: { input: 100 - index * 10 },
+          providerID: "p1",
+          modelID,
+        }),
+      ),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_filtered_hidden",
+        completedAtMs,
+        tokens: { input: 30 },
+        providerID: "p1",
+        modelID: "hidden-model",
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_filtered_unknown",
+        completedAtMs,
+        tokens: { input: 20 },
+        providerID: "p1",
+        modelID: undefined,
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_filtered_empty",
+        completedAtMs,
+        tokens: { input: 10 },
+        providerID: "p1",
+        modelID: "",
+      }),
+      // Outside the provider filter; must not leak into rows or Other.
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_filtered_out",
+        completedAtMs,
+        tokens: { input: 1_000 },
+        providerID: "p2",
+        modelID: "excluded-model",
+      }),
+    ]);
+    const snapshot = model.groups(
+      {
+        range: "24h",
+        dimension: "model",
+        filter: { dimension: "provider", identity: known("p1") },
+      },
+      NOW,
+    );
+    expect(snapshot.filter).toEqual({ dimension: "provider", identity: known("p1") });
+    expect(snapshot.totals.input).toBe(460);
+    expect(snapshot.rows).toHaveLength(8);
+    expect(snapshot.series).toHaveLength(6);
+    expect(snapshot.rows.some((entry) => rawIdentityOf(entry.identity) === "excluded-model")).toBe(
+      false,
+    );
+
+    const bucketIndex = bucketAt(snapshot, completedAtMs);
+    expect(bucketIndex).toBeGreaterThanOrEqual(0);
+    const other = snapshot.series[5];
+    if (other === undefined || other.kind !== "other") throw new Error("expected Other");
+    expect(other.tokens.input).toBe(60);
+    expectChildBucketsConserve(other);
+    expectParentBucketsConserve(other);
+    expect(other.parentBuckets?.[bucketIndex]?.map((share) => share.identity)).toEqual([
+      known("hidden-model"),
+      UNKNOWN_IDENTITY,
+      known(""),
+    ]);
+    expect(other.parentBuckets?.[bucketIndex]?.map((share) => share.tokens.input)).toEqual([
+      30, 20, 10,
+    ]);
+    expect(
+      other.parentBuckets?.[bucketIndex]?.filter((share) => share.identity.kind === "unknown"),
+    ).toHaveLength(1);
+    expect(other.childBuckets?.[bucketIndex]?.map((share) => share.identity)).toEqual([
+      known("p1"),
+    ]);
+    expect(other.childBuckets?.[bucketIndex]?.[0]?.tokens.input).toBe(60);
+  });
+
   it("returns empty ranges and exactly five groups without an Other series", () => {
     const sessions = [sessionInfo("ses_a", "p1")];
     const emptyModel = createModel(sessions, []);
@@ -1580,6 +2238,21 @@ describe("analytics model: grouped model and provider identities", () => {
     expect(snapshot.series.reduce((sum, series) => sum + series.tokens.input, 0)).toBe(
       snapshot.totals.input,
     );
+
+    const other = snapshot.series[5];
+    if (other === undefined || other.kind !== "other") throw new Error("expected Other");
+    expectChildBucketsConserve(other);
+    expectParentBucketsConserve(other);
+    const parentShares = other.parentBuckets ?? [];
+    const populatedBuckets = other.buckets.filter((bucket) => bucket.total > 0).length;
+    // 115 hidden models, each in its own populated day: the parent breakdown
+    // stays linear in hidden entities rather than hidden × 700+dense buckets.
+    expect(populatedBuckets).toBe(115);
+    expect(parentShares.flat()).toHaveLength(115);
+    expect(parentShares.flat().length).toBeLessThan(115 * populatedBuckets);
+    const { beforeBytes, afterBytes } = parentBucketsSerializedSize(snapshot);
+    expect(afterBytes).toBeGreaterThan(beforeBytes);
+    expect(afterBytes - beforeBytes).toBeLessThan(beforeBytes);
   });
 
   it("breaks more than five equal token totals deterministically", () => {
