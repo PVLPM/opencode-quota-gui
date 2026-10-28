@@ -41,8 +41,12 @@ const approvedPublicDocs = new Set([
 
 const publicImageFiles = new Set([
   "images/opencode-quota-gui_analytics.png",
+  "images/opencode-quota-gui_analytics-1.1.0.png",
+  "images/opencode-quota-gui_providers-1.1.0.png",
   "images/opencode-quota-gui_quota.png",
+  "images/opencode-quota-gui_quota-1.1.0.png",
   "images/opencode-quota-gui_session.png",
+  "images/opencode-quota-gui_session-1.1.0.png",
   "images/opencode-quota-gui-logo.webp",
   "images/opencode-quota-logo-dark.svg",
   "images/opencode-quota-logo-light.svg",
