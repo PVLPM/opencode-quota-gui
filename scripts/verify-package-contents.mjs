@@ -74,6 +74,9 @@ const requiredFiles = new Set([
   "README.md",
   "package.json",
   "dist/data/modelsdev-pricing.min.json",
+  // The server-only temporal policy evaluator resolves this snapshot relative
+  // to its compiled module, so the dashboard crashes at runtime without it.
+  "dist/data/modelsdev-temporal.min.json",
   // The dashboard server serves this entry and the assets beside it (spec §5.3, §9).
   "dist/ui/index.html",
   "dist/provider-logos/UPSTREAM-MIT.txt",
