@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Model-only lane: deterministic fork ownership, incremental rollups, hour
@@ -21,6 +21,8 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
   const ZERO_MODEL = "zero-1";
   const FREE_PROVIDER = "free-labs";
   const FREE_MODEL = "free-1";
+  const TEMPORAL_PROVIDER = "temporal-labs";
+  const TEMPORAL_MODEL = "peak-1";
   const RATES = { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };
   const FREE_RATES = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 };
   const PRICEY_RATES = {
@@ -36,12 +38,14 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
     MIXED_PROVIDER,
     ZERO_PROVIDER,
     FREE_PROVIDER,
+    TEMPORAL_PROVIDER,
   ]);
   const PRICED_MODELS: ReadonlySet<string> = new Set([
     `${EDGE_PROVIDER}\u0000${EDGE_MODEL}`,
     `${MIXED_PROVIDER}\u0000${MIXED_PRICED_MODEL}`,
     `${ZERO_PROVIDER}\u0000${ZERO_MODEL}`,
     `${FREE_PROVIDER}\u0000${FREE_MODEL}`,
+    `${TEMPORAL_PROVIDER}\u0000${TEMPORAL_MODEL}`,
   ]);
   const KNOWN_MODELS: ReadonlySet<string> = new Set([
     `${FAKE_PROVIDER}\u0000${FAKE_MODEL}`,
@@ -71,6 +75,9 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
       if (providerID === FREE_PROVIDER) {
         return modelID === FREE_MODEL ? FREE_RATES : null;
       }
+      if (providerID === TEMPORAL_PROVIDER) {
+        return modelID === TEMPORAL_MODEL ? RATES : null;
+      }
       if (providerID === FAKE_PROVIDER) return null;
       return actual.lookupCost(providerID, modelID);
     },
@@ -84,6 +91,11 @@ import {
   createAnalyticsModel,
   type HomeAnalyticsRollup,
 } from "../src/gui/analytics-model.js";
+import {
+  __resetTemporalSnapshotForTests,
+  normalizeTemporalSnapshot,
+  setTemporalSnapshotForTests,
+} from "../src/lib/modelsdev-temporal.js";
 import type {
   OpenCodeProjectInfo,
   OpenCodeRawAssistantRow,
@@ -95,6 +107,24 @@ const DAY = 24 * HOUR;
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
 const NOW_HOUR = Math.floor(NOW / HOUR) * HOUR;
 const PROJECT_IDS = ["p1", "p2"];
+const TEMPORAL_REVISION = "b".repeat(40);
+const TEMPORAL_TEST_PROVIDER = "temporal-labs";
+const TEMPORAL_TEST_MODEL = "peak-1";
+const CN_2026 = {
+  timeZone: "Asia/Shanghai",
+  source: "https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html",
+  published: "2025-11-04",
+  intervals: [
+    {
+      id: "new-year",
+      localStart: "2026-01-01",
+      localEnd: "2026-01-04",
+      startMs: 1_767_196_800_000,
+      endMs: 1_767_456_000_000,
+    },
+  ],
+  makeupWorkdays: [],
+};
 
 /** UTC day boundary; the default analytics model zone is UTC. */
 function utcDayStart(timestampMs: number): number {
@@ -824,6 +854,10 @@ describe("analytics model: grouped lifetime bucket origins", () => {
 });
 
 describe("analytics model: price status", () => {
+  afterEach(() => {
+    __resetTemporalSnapshotForTests();
+  });
+
   it("keeps priced, unpriced, unknown, and zero-token rows distinct", () => {
     const sessions = [sessionInfo("ses_a", "p1")];
     const completedAtMs = NOW_HOUR - 2 * HOUR;
@@ -880,6 +914,58 @@ describe("analytics model: price status", () => {
         .home("24h", NOW)
         .usage.buckets.every((bucket) => bucket.tokens.apiEquivalentCostUsd === null),
     ).toBe(true);
+  });
+
+  it("prices each physical row at its assistant completion instant", () => {
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [TEMPORAL_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: "providers/temporal-labs/models/peak-1.toml",
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 2,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const model = createModel(sessions, [
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_off_peak",
+        completedAtMs: NOW_HOUR - 6 * HOUR,
+        tokens: { input: 1_000_000 },
+        providerID: TEMPORAL_TEST_PROVIDER,
+        modelID: TEMPORAL_TEST_MODEL,
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_peak",
+        completedAtMs: NOW_HOUR - 30 * 60_000,
+        tokens: { input: 1_000_000 },
+        providerID: TEMPORAL_TEST_PROVIDER,
+        modelID: TEMPORAL_TEST_MODEL,
+      }),
+    ]);
+
+    const totals = model.home("24h", NOW).usage.totals;
+    expect(totals.input).toBe(2_000_000);
+    expect(totals.apiEquivalentCostUsd).toBeCloseTo(3, 10);
   });
 });
 

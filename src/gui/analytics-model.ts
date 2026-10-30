@@ -520,6 +520,9 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         cache_read: row.tokens.cacheRead,
         cache_write: row.tokens.cacheWrite,
       },
+      // Historical temporal pricing follows the physical assistant completion
+      // instant, not the enclosing range window or the worker's wall clock.
+      atMs: row.completedAtMs,
       cache: pricingCache,
     });
     if (outcome.status === "partial") {

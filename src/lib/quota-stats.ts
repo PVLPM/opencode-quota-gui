@@ -16,6 +16,7 @@ import {
   lookupCost,
   selectCostAtContext,
 } from "./modelsdev-pricing.js";
+import { getTemporalPolicy, resolveTemporalRates } from "./modelsdev-temporal.js";
 import { getOpenCodeDbPath } from "./opencode-db-path.js";
 import type { OpenCodeMessage } from "./opencode-storage.js";
 import {
@@ -723,39 +724,123 @@ function calculateKnownCost(
 
 /**
  * Resolve the rates that apply to one priced key, including context-tier
- * selection. Shared by `calculateCostUsd` and `aggregateUsage` so bucket
- * splitting and cost calculation never disagree about which rates applied.
+ * selection and, when a completion instant is supplied, the exact
+ * provider/model temporal policy. Shared by `calculateCostUsd` and
+ * `aggregateUsage` so bucket splitting and cost calculation never disagree
+ * about which rates applied.
+ *
+ * Temporal pricing is opt-in per call: without `atMs`, existing callers keep
+ * using base rates unchanged. With `atMs`, only a verified exact provider/model
+ * route participates (never a provider inference, model alias, or prefix
+ * guess), and an unresolved/unsupported rule fails closed instead of silently
+ * charging base rates.
  */
 function selectTokenRates(params: {
   provider: string;
   model: string;
   tokens: TokenBuckets;
   contextTokens?: number;
-}): { ok: true; rates: CostBuckets; contextTierSize?: number } | { ok: false } {
+  atMs?: number;
+  /**
+   * Verified exact temporal route. `undefined` means direct callers treat the
+   * provided provider/model as exact; `null` means the route was inferred or
+   * aliased and must not receive a temporal correction.
+   */
+  temporalRoute?: PricedKey | null;
+}): { ok: true; rates: CostBuckets; contextTierSize?: number } | { ok: false; reason?: string } {
+  let base: CostBuckets;
+  let contextTierSize: number | undefined;
+
   if (params.provider === "cursor") {
     const cursorCost = lookupCursorLocalCost(params.model);
-    return cursorCost ? { ok: true, rates: cursorCost } : { ok: false };
+    if (!cursorCost) return { ok: false };
+    base = cursorCost;
+  } else {
+    const cost = lookupCost(params.provider, params.model);
+    if (!cost) return { ok: false };
+
+    const hasExplicitContext =
+      typeof params.contextTokens === "number" && Number.isFinite(params.contextTokens);
+    if (!cost.tiers?.length && !hasExplicitContext) {
+      base = cost;
+    } else {
+      const contextTokens = hasExplicitContext
+        ? params.contextTokens
+        : promptTokenCount(params.tokens);
+      const selected = selectCostAtContext(cost, contextTokens);
+      base = selected.rates;
+      contextTierSize = selected.tierSize;
+    }
   }
 
-  const cost = lookupCost(params.provider, params.model);
-  if (!cost) return { ok: false };
-
-  const hasExplicitContext =
-    typeof params.contextTokens === "number" && Number.isFinite(params.contextTokens);
-  if (!cost.tiers?.length && !hasExplicitContext) {
-    return { ok: true, rates: cost };
+  if (params.temporalRoute === null) {
+    return {
+      ok: true,
+      rates: base,
+      ...(contextTierSize !== undefined ? { contextTierSize } : {}),
+    };
   }
 
-  const contextTokens = hasExplicitContext ? params.contextTokens : promptTokenCount(params.tokens);
-  const selected = selectCostAtContext(cost, contextTokens);
+  const temporalProvider = params.temporalRoute?.provider ?? params.provider;
+  const temporalModel = params.temporalRoute?.model ?? params.model;
+  const temporal = applyTemporalRates(temporalProvider, temporalModel, base, params.atMs);
+  if (!temporal.ok) return temporal;
+
   return {
     ok: true,
-    rates: selected.rates,
-    ...(selected.tierSize !== undefined ? { contextTierSize: selected.tierSize } : {}),
+    rates: temporal.rates,
+    ...(contextTierSize !== undefined ? { contextTierSize } : {}),
   };
 }
 
-/** Existing per-message cost calculation (P3 reuses it unchanged). */
+/**
+ * Apply a model's temporal rates at one physical completion instant. Callers
+ * must pass a verified exact source provider/model route; this function never
+ * derives one from a pricing key, alias, or model-family guess.
+ */
+function applyTemporalRates(
+  provider: string,
+  model: string,
+  rates: CostBuckets,
+  atMs: number | undefined,
+): { ok: true; rates: CostBuckets } | { ok: false; reason: string } {
+  if (atMs === undefined) return { ok: true, rates };
+  if (getTemporalPolicy(provider, model) === null) return { ok: true, rates };
+  if (!Number.isFinite(atMs)) {
+    return { ok: false, reason: "temporal pricing requires a finite completion timestamp" };
+  }
+
+  const resolved = resolveTemporalRates(provider, model, atMs, rates);
+  if (resolved.status !== "resolved" || resolved.rates === null) {
+    const detail = resolved.reason ? `: ${resolved.reason}` : "";
+    return {
+      ok: false,
+      reason: `temporal pricing is ${resolved.status} for ${provider}/${model}${detail}`,
+    };
+  }
+  return { ok: true, rates: resolved.rates };
+}
+
+/**
+ * Temporal corrections require a verified exact source route. A pricing key
+ * inferred from a model id, an alias, or a prefix is not evidence that the
+ * source actually came from that provider/model, so it must keep base pricing.
+ */
+function verifiedTemporalRoute(
+  sourceProviderID: string | null | undefined,
+  sourceModelID: string | null | undefined,
+  key: PricedKey,
+): PricedKey | null {
+  if (typeof sourceProviderID !== "string" || typeof sourceModelID !== "string") return null;
+  const provider = sourceProviderID.trim();
+  const model = sourceModelID.trim();
+  if (!provider || !model) return null;
+  if (provider.toLowerCase() !== key.provider.toLowerCase()) return null;
+  if (model !== key.model) return null;
+  return { provider: key.provider, model: key.model };
+}
+
+/** Per-message cost calculation; temporal rates apply only when `atMs` is supplied. */
 export function calculateCostUsd(params: {
   provider: string;
   model: string;
@@ -766,6 +851,18 @@ export function calculateCostUsd(params: {
    * rates apply and no tier is claimed as applied.
    */
   contextTokens?: number;
+  /**
+   * Optional physical completion instant. When supplied, an exact
+   * provider/model temporal policy is applied; unresolved rules fail closed
+   * rather than charging base rates.
+   */
+  atMs?: number;
+  /**
+   * Verified exact temporal route. Callers resolving from source metadata pass
+   * a key only when the source provider/model exactly match it; `null`
+   * suppresses temporal pricing for inferred/aliased routes.
+   */
+  temporalRoute?: PricedKey | null;
 }):
   | {
       ok: true;
@@ -774,9 +871,9 @@ export function calculateCostUsd(params: {
       unpricedTokens?: number;
       contextTierSize?: number;
     }
-  | { ok: false } {
+  | { ok: false; reason?: string } {
   const selected = selectTokenRates(params);
-  if (!selected.ok) return { ok: false };
+  if (!selected.ok) return selected;
   const known = calculateKnownCost(selected.rates, params.tokens);
   if (!known.ok) return known;
   return {
@@ -846,6 +943,12 @@ export type TokenPricingOutcome =
  * and the GUI aggregation call this; neither resolves keys, computes cost, or
  * classifies missing pricing on its own.
  *
+ * `atMs` is the physical assistant completion instant for one row. When it is
+ * supplied, temporal pricing applies only if the raw source provider/model
+ * exactly match the resolved priced route; inferred providers, model aliases,
+ * and prefix guesses keep base pricing. When `atMs` is absent, callers keep the
+ * existing non-temporal pricing behavior.
+ *
  * `cache` is optional and keyed by a collision-safe tuple of the exact raw
  * source ids, so a caller can reuse key resolution across many messages of the
  * same source without conflating delimiter-bearing or missing ids.
@@ -856,6 +959,8 @@ export function priceTokenBuckets(params: {
   tokens: TokenBuckets;
   /** Optional context override; otherwise prompt token buckets select a tier. */
   contextTokens?: number;
+  /** Optional physical completion instant for exact historical temporal rates. */
+  atMs?: number;
   cache?: Map<string, PricingResolution>;
 }): TokenPricingOutcome {
   const cacheKey = encodeIdentityKey([params.providerID, params.modelID]);
@@ -873,11 +978,14 @@ export function priceTokenBuckets(params: {
   }
 
   const key = resolution.key;
+  const temporalRoute = verifiedTemporalRoute(params.providerID, params.modelID, key);
   const priced = calculateCostUsd({
     provider: key.provider,
     model: key.model,
     tokens: params.tokens,
     contextTokens: params.contextTokens,
+    atMs: params.atMs,
+    temporalRoute,
   });
   if (priced.ok) {
     const contextTier =
@@ -897,6 +1005,12 @@ export function priceTokenBuckets(params: {
       costUsd: priced.costUsd,
       ...contextTier,
     };
+  }
+
+  // A temporal policy that cannot be resolved is not a missing catalog price:
+  // report the token count as unpriced without falling back to base rates.
+  if (priced.reason !== undefined) {
+    return { status: "unpriced", key, reason: priced.reason };
   }
 
   const classification = classifyMissingPricing({
@@ -985,6 +1099,12 @@ export async function resolveSessionTree(rootSessionID: string): Promise<Session
   return tree;
 }
 
+/** Physical completion instant of one message, or undefined when absent/invalid. */
+function messageCompletedAtMs(message: OpenCodeMessage): number | undefined {
+  const completed = message.time?.completed;
+  return typeof completed === "number" && Number.isFinite(completed) ? completed : undefined;
+}
+
 export async function aggregateUsage(params: {
   sinceMs?: number;
   untilMs?: number;
@@ -1032,6 +1152,7 @@ export async function aggregateUsage(params: {
   for (const msg of messages) {
     const tokens = tokenBucketsFromMessage(msg);
     const sid = msg.sessionID;
+    const atMs = messageCompletedAtMs(msg);
     const sessionTitle = sessionsIdx[sid]?.title;
     const existingSessionRow = bySession.get(sid);
     if (existingSessionRow) {
@@ -1051,6 +1172,7 @@ export async function aggregateUsage(params: {
       providerID: msg.providerID,
       modelID: msg.modelID,
       tokens,
+      atMs,
       cache: resolutionCache,
     });
 
@@ -1104,6 +1226,7 @@ export async function aggregateUsage(params: {
         provider: outcome.key.provider,
         model: outcome.key.model,
         tokens,
+        atMs,
       });
       if (selected.ok) {
         const split = splitTokenBucketsByRate(selected.rates, tokens);

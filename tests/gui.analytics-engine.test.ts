@@ -26,6 +26,11 @@ import {
   type WarmAnalyticsPresentation,
 } from "../src/gui/analytics-state.js";
 import { resolveHostTimeZone } from "../src/gui/time-zone.js";
+import {
+  __resetTemporalSnapshotForTests,
+  normalizeTemporalSnapshot,
+  setTemporalSnapshotForTests,
+} from "../src/lib/modelsdev-temporal.js";
 import type {
   OpenCodeCompactionMarker,
   OpenCodeMessageRevision,
@@ -2679,6 +2684,66 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     expect(refreshed.stale).toBe(false);
     expect(generations.length).toBeGreaterThan(0);
     await engine.close();
+  });
+
+  it("invalidates derived presentation costs when the pricing fingerprint changes", async () => {
+    const revision = "c".repeat(40);
+    const cn2026 = {
+      timeZone: "Asia/Shanghai",
+      source: "https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html",
+      published: "2025-11-04",
+      intervals: [
+        {
+          id: "new-year",
+          localStart: "2026-01-01",
+          localEnd: "2026-01-04",
+          startMs: 1_767_196_800_000,
+          endMs: 1_767_456_000_000,
+        },
+      ],
+      makeupWorkdays: [],
+    };
+    const snapshot = (generatedAt: number, factor: number) => ({
+      version: 1,
+      revision,
+      source: `https://github.com/anomalyco/models.dev/tree/${revision}`,
+      generatedAt,
+      jurisdictions: { CN: { "2026": cn2026 } },
+      providers: {
+        openai: {
+          "gpt-5": {
+            status: "supported",
+            source: "providers/openai/models/gpt-5.toml",
+            overrides: [],
+            multipliers: [
+              {
+                id: "multipliers[0]",
+                when: { type: "utc_hours", op: "gte", value: "00:00" },
+                factor,
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    try {
+      setTemporalSnapshotForTests(normalizeTemporalSnapshot(snapshot(NOW, 1)));
+      const { engine } = harness(baseDb());
+      const first = await engine.home("24h");
+      const firstCost = first.usage.totals.apiEquivalentCostUsd;
+      if (firstCost === null) throw new Error("expected priced usage");
+      expect(firstCost).toBeGreaterThan(0);
+
+      // Same upstream revision, different generated temporal data: the combined
+      // pricing fingerprint must still invalidate derived costs.
+      setTemporalSnapshotForTests(normalizeTemporalSnapshot(snapshot(NOW + 1, 2)));
+      const second = await engine.home("24h");
+      expect(second.usage.totals.apiEquivalentCostUsd).toBeCloseTo(firstCost * 2, 10);
+      await engine.close();
+    } finally {
+      __resetTemporalSnapshotForTests();
+    }
   });
 
   it("resumes a two-day-old snapshot with a delta, not a full baseline", async () => {

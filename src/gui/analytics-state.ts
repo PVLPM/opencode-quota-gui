@@ -24,6 +24,7 @@ import {
   type OpenCodeSourceIdentity,
   rawAssistantRowFingerprint,
 } from "../lib/opencode-storage.js";
+import { getAnalyticsPricingFingerprint } from "./analytics-pricing-revision.js";
 
 export const ANALYTICS_SNAPSHOT_VERSION = 3;
 export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
@@ -31,9 +32,10 @@ export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
  * Warm DTO aggregation semantics. This is separate from the compact candidate
  * version because the presentation cache is disposable: a sidecar written
  * under older semantics (for example before zero-token rows were excluded from
- * usage rollups) must be rebuilt, not served as if it were current.
+ * usage rollups, or before exact historical temporal pricing) must be rebuilt,
+ * not served as if it were current.
  */
-export const ANALYTICS_PRESENTATION_VERSION = 2;
+export const ANALYTICS_PRESENTATION_VERSION = 3;
 
 export interface AnalyticsCoverage {
   /** Inclusive start; absent means the lifetime read reached the beginning. */
@@ -103,6 +105,8 @@ export interface WarmAnalyticsPresentation extends AnalyticsPresentation {
   frontierAtMs?: number;
   /** Coverage captured with these DTOs; legacy sidecars may omit it. */
   coverage?: AnalyticsCoverage;
+  /** Combined pricing/temporal fingerprint used to derive these DTOs. */
+  pricingRevision?: string;
 }
 
 export interface AnalyticsState {
@@ -568,6 +572,8 @@ interface PersistedPresentationFile {
   frontierAtMs: number;
   sourceIdentity: SourceIdentityTuple | null;
   coverage: { sinceMs: number | null; untilMs: number } | null;
+  /** Combined pricing/temporal fingerprint the DTO costs were derived from. */
+  pricingRevision: string;
   presentation: {
     home: Partial<Record<RangeKey, HomeSnapshot>>;
     project: Array<[projectId: string, range: RangeKey, snapshot: ProjectSnapshot]>;
@@ -594,6 +600,7 @@ export function encodeAnalyticsPresentation(
     coverage: state.extent
       ? { sinceMs: state.extent.sinceMs ?? null, untilMs: state.extent.untilMs }
       : null,
+    pricingRevision: getAnalyticsPricingFingerprint(),
     presentation: state.presentation
       ? {
           home: state.presentation.home,
@@ -656,6 +663,12 @@ export function decodeAnalyticsPresentation(value: unknown): WarmAnalyticsPresen
   // certified against current aggregation semantics, so rebuild them from the
   // compact index instead of serving possibly inflated steps/rollups.
   if (record.presentationVersion !== ANALYTICS_PRESENTATION_VERSION) return undefined;
+  // Derived costs are only certified against the combined pricing and temporal
+  // fingerprint they were computed from. A missing token is a pre-fingerprint
+  // sidecar and is rebuilt just like a mismatch.
+  const pricingRevision = record.pricingRevision;
+  if (typeof pricingRevision !== "string") return undefined;
+  if (pricingRevision !== getAnalyticsPricingFingerprint()) return undefined;
   if (!isFiniteNumber(record.savedAtMs)) return undefined;
   const identityValue = record.sourceIdentity;
   // Absent/null token is a readable legacy sidecar but cannot be verified.
@@ -699,6 +712,7 @@ export function decodeAnalyticsPresentation(value: unknown): WarmAnalyticsPresen
     ...(coverage ? { coverage } : {}),
     savedAtMs: record.savedAtMs,
     ...(typeof frontierValue === "number" ? { frontierAtMs: frontierValue } : {}),
+    pricingRevision,
     sourceIdentity:
       identityValue === undefined || identityValue === null
         ? undefined
