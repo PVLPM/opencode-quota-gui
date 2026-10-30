@@ -721,17 +721,19 @@ export function SettingsView(props: {
                           class="qg-field"
                           data-invalid={errorFor(field.key) ? "true" : undefined}
                         >
-                          <span class="qg-field__label">{field.label}</span>
-                          <div class="qg-field__control">{renderControl(field)}</div>
-                          <span class="qg-field__meta">
-                            <Show when={field.help}>{(help) => <span>{help()}</span>}</Show>
-                            <Show when={sourceNote(field.key)}>
-                              {(note) => <span>{note()}</span>}
+                          <div class="qg-field__text">
+                            <span class="qg-field__label">{field.label}</span>
+                            <span class="qg-field__meta">
+                              <Show when={field.help}>{(help) => <span>{help()}</span>}</Show>
+                              <Show when={sourceNote(field.key)}>
+                                {(note) => <span>{note()}</span>}
+                              </Show>
+                            </span>
+                            <Show when={errorFor(field.key)}>
+                              {(message) => <span class="qg-field__error">{message()}</span>}
                             </Show>
-                          </span>
-                          <Show when={errorFor(field.key)}>
-                            {(message) => <span class="qg-field__error">{message()}</span>}
-                          </Show>
+                          </div>
+                          <div class="qg-field__control">{renderControl(field)}</div>
                         </div>
                       )}
                     </For>
@@ -749,7 +751,14 @@ export function SettingsView(props: {
             Dashboard
           </h2>
           <div class="qg-field">
-            <span class="qg-field__label">Address</span>
+            <div class="qg-field__text">
+              <span class="qg-field__label">Address</span>
+              <span class="qg-field__meta">
+                <span>
+                  Bound to loopback only; the dashboard is not reachable from other machines.
+                </span>
+              </span>
+            </div>
             <div class="qg-field__control">
               <TextInput
                 class="qg-input"
@@ -758,14 +767,21 @@ export function SettingsView(props: {
                 value={props.snapshot.dashboard.url}
               />
             </div>
-            <span class="qg-field__meta">
-              <span>
-                Bound to loopback only; the dashboard is not reachable from other machines.
-              </span>
-            </span>
           </div>
           <div class="qg-field">
-            <span class="qg-field__label">Settings file</span>
+            <div class="qg-field__text">
+              <span class="qg-field__label">Settings file</span>
+              <span class="qg-field__meta" id="qg-settings-file-help">
+                Open in the default application. Unsaved changes are not included.
+              </span>
+              <Show when={openFileError()}>
+                {(message) => (
+                  <p class="qg-field__error" role="alert">
+                    {message()}
+                  </p>
+                )}
+              </Show>
+            </div>
             <div class="qg-field__control">
               <Button
                 class="qg-settings-file"
@@ -781,20 +797,12 @@ export function SettingsView(props: {
               </Button>
               <span class="qg-badge">revision {props.snapshot.revision.slice(0, 8)}</span>
             </div>
-            <span class="qg-field__meta" id="qg-settings-file-help">
-              Open in the default application. Unsaved changes are not included.
-            </span>
-            <Show when={openFileError()}>
-              {(message) => (
-                <p class="qg-field__error" role="alert">
-                  {message()}
-                </p>
-              )}
-            </Show>
           </div>
           <Show when={props.snapshot.issues.length > 0}>
             <div class="qg-field">
-              <span class="qg-field__label">Reported issues</span>
+              <div class="qg-field__text">
+                <span class="qg-field__label">Reported issues</span>
+              </div>
               <div class="qg-field__control">
                 <ul class="qg-note-list">
                   <For each={props.snapshot.issues}>
