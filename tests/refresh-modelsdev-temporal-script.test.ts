@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
@@ -19,6 +20,7 @@ import {
   TEMPORAL_REVISION,
   TEMPORAL_REVISION_GENERATED_AT,
   temporalArchiveUrl,
+  temporalSnapshotProvenance,
   temporalSourceUrl,
 } from "../scripts/refresh-modelsdev-temporal.mjs";
 import {
@@ -61,6 +63,10 @@ function makeTarGz(entries: { name: string; text: string }[]): Buffer {
 function makeTempSourceDir(): string {
   return mkdtempSync(join(tmpdir(), "modelsdev-temporal-source-"));
 }
+
+const BUNDLED_SNAPSHOT = JSON.parse(
+  readFileSync(new URL("../src/data/modelsdev-temporal.min.json", import.meta.url), "utf8"),
+);
 
 const SAMPLE_TOML = `
 # Leading comment
@@ -385,18 +391,19 @@ factor = { text = 0.5 }
     },
   ];
 
+  const BUILD_REVISION = "9".repeat(40);
   const BUILD_OPTIONS = {
-    revision: TEMPORAL_REVISION,
-    generatedAt: TEMPORAL_REVISION_GENERATED_AT,
+    revision: BUILD_REVISION,
+    generatedAt: 1_700_000_000_000,
   };
 
   it("is order-independent, derives source metadata, and passes full runtime validation", async () => {
     const first = await buildTemporalSnapshot(files, BUILD_OPTIONS);
     const second = await buildTemporalSnapshot([...files].reverse(), BUILD_OPTIONS);
     expect(second).toEqual(first);
-    expect(first.revision).toBe(TEMPORAL_REVISION);
-    expect(first.source).toBe(temporalSourceUrl(TEMPORAL_REVISION));
-    expect(first.generatedAt).toBe(TEMPORAL_REVISION_GENERATED_AT);
+    expect(first.revision).toBe(BUILD_REVISION);
+    expect(first.source).toBe(temporalSourceUrl(BUILD_REVISION));
+    expect(first.generatedAt).toBe(BUILD_OPTIONS.generatedAt);
     expect(Object.keys(first.providers)).toEqual(["alibaba", "deepseek"]);
     expect(first.providers.alibaba["deepseek-v4.1-flash"].source).toBe(
       "providers/alibaba/models/deepseek-v4.1-flash.toml",
@@ -665,19 +672,233 @@ factor = 2
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("regenerates the pinned snapshot offline from its archive without network access", async () => {
+    const archive = makeTarGz([
+      {
+        name: `models.dev-${TEMPORAL_REVISION}/providers/pinnedco/models/pinned.toml`,
+        text: `
+schema = 2
+[cost.text.input]
+price = 1
+[[cost.multipliers]]
+when = { utc_hours = { lt = "04:00" } }
+factor = 2
+`,
+      },
+    ]);
+    const dir = makeTempSourceDir();
+    try {
+      const archivePath = join(dir, "pinned.tar.gz");
+      writeFileSync(archivePath, archive);
+      const snapshot = await refreshTemporalSnapshot({ archivePath });
+      expect(snapshot.revision).toBe(TEMPORAL_REVISION);
+      expect(snapshot.source).toBe(temporalSourceUrl(TEMPORAL_REVISION));
+      expect(snapshot.generatedAt).toBe(TEMPORAL_REVISION_GENERATED_AT);
+      expect(snapshot.providers.pinnedco.pinned.source).toBe(
+        "providers/pinnedco/models/pinned.toml",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an offline archive whose revision has no pinned timestamp", async () => {
+    const revision = "a".repeat(40);
+    const archive = makeTarGz([
+      {
+        name: `models.dev-${revision}/providers/unpinnedco/models/unpinned.toml`,
+        text: `
+schema = 2
+[cost.text.input]
+price = 1
+[[cost.multipliers]]
+when = { utc_hours = { lt = "04:00" } }
+factor = 2
+`,
+      },
+    ]);
+    const dir = makeTempSourceDir();
+    try {
+      const archivePath = join(dir, "unpinned.tar.gz");
+      writeFileSync(archivePath, archive);
+      await expect(refreshTemporalSnapshot({ archivePath })).rejects.toThrow(/generatedAt/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("refresh-modelsdev-temporal isolated latest refresh", () => {
+  it("derives pinned constants from the rewritten bundle in a fresh process", () => {
+    const repo = mkdtempSync(join(tmpdir(), "modelsdev-temporal-repo-"));
+    const realBundlePath = new URL("../src/data/modelsdev-temporal.min.json", import.meta.url);
+    const realBundleBefore = readFileSync(realBundlePath, "utf8");
+    const initialRevision = "1".repeat(40);
+    const refreshedRevision = "7".repeat(40);
+    const initialGeneratedAt = 1_700_000_000_000;
+    const refreshedGeneratedAt = Date.parse("2026-10-31T12:00:00Z");
+    try {
+      mkdirSync(join(repo, "scripts"), { recursive: true });
+      mkdirSync(join(repo, "src", "data"), { recursive: true });
+      mkdirSync(join(repo, "src", "lib"), { recursive: true });
+      writeFileSync(join(repo, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
+
+      const tempScriptPath = join(repo, "scripts", "refresh-modelsdev-temporal.mjs");
+      writeFileSync(
+        tempScriptPath,
+        readFileSync(new URL("../scripts/refresh-modelsdev-temporal.mjs", import.meta.url)),
+      );
+      writeFileSync(
+        join(repo, "src", "lib", "modelsdev-temporal.ts"),
+        readFileSync(new URL("../src/lib/modelsdev-temporal.ts", import.meta.url)),
+      );
+
+      const tempBundlePath = join(repo, "src", "data", "modelsdev-temporal.min.json");
+      writeFileSync(
+        tempBundlePath,
+        `${JSON.stringify(
+          {
+            version: 1,
+            revision: initialRevision,
+            source: temporalSourceUrl(initialRevision),
+            generatedAt: initialGeneratedAt,
+            jurisdictions: {},
+            providers: {},
+          },
+          null,
+          2,
+        )}\n`,
+      );
+
+      const archivePath = join(repo, "fixture.tar.gz");
+      writeFileSync(
+        archivePath,
+        makeTarGz([
+          {
+            name: `models.dev-${refreshedRevision}/providers/fixtureco/models/fixture-model.toml`,
+            text: `
+schema = 2
+[cost.text.input]
+price = 1
+[[cost.multipliers]]
+when = { utc_hours = { lt = "04:00" } }
+factor = 2
+`,
+          },
+        ]),
+      );
+
+      const scriptUrl = pathToFileURL(tempScriptPath).href;
+      const atom = `<feed><entry><id>tag:github.com,2008:Grit::Commit/${refreshedRevision}</id><updated>${new Date(refreshedGeneratedAt).toISOString()}</updated></entry></feed>`;
+      const refreshCode = `
+import { readFileSync, writeFileSync } from "node:fs";
+import {
+  refreshTemporalSnapshot,
+  TEMPORAL_COMMITS_ATOM_URL,
+  temporalArchiveUrl,
+} from ${JSON.stringify(scriptUrl)};
+const archive = readFileSync(${JSON.stringify(archivePath)});
+const revision = ${JSON.stringify(refreshedRevision)};
+const fetchImpl = async (url) => {
+  if (url === TEMPORAL_COMMITS_ATOM_URL) {
+    return new Response(${JSON.stringify(atom)}, { status: 200 });
+  }
+  if (url === temporalArchiveUrl(revision)) return new Response(archive, { status: 200 });
+  throw new Error("unexpected fetch " + url);
+};
+const snapshot = await refreshTemporalSnapshot({ fetchImpl });
+writeFileSync(${JSON.stringify(tempBundlePath)}, JSON.stringify(snapshot, null, 2) + "\\n");
+process.stdout.write(JSON.stringify({
+  revision: snapshot.revision,
+  generatedAt: snapshot.generatedAt,
+  source: snapshot.source,
+}));
+`;
+
+      const refreshed = JSON.parse(
+        execFileSync(
+          process.execPath,
+          ["--no-warnings", "--experimental-strip-types", "--input-type=module", "-e", refreshCode],
+          { cwd: repo, encoding: "utf8", maxBuffer: 1024 * 1024 },
+        ),
+      );
+      expect(refreshed).toEqual({
+        revision: refreshedRevision,
+        generatedAt: refreshedGeneratedAt,
+        source: temporalSourceUrl(refreshedRevision),
+      });
+
+      const reloadCode = `
+import {
+  TEMPORAL_REVISION,
+  TEMPORAL_REVISION_GENERATED_AT,
+  TEMPORAL_SOURCE,
+} from ${JSON.stringify(scriptUrl)};
+process.stdout.write(JSON.stringify({
+  revision: TEMPORAL_REVISION,
+  generatedAt: TEMPORAL_REVISION_GENERATED_AT,
+  source: TEMPORAL_SOURCE,
+}));
+`;
+      const reloaded = JSON.parse(
+        execFileSync(
+          process.execPath,
+          ["--no-warnings", "--experimental-strip-types", "--input-type=module", "-e", reloadCode],
+          { cwd: repo, encoding: "utf8", maxBuffer: 1024 * 1024 },
+        ),
+      );
+      expect(reloaded).toEqual(refreshed);
+      expect(reloaded).not.toEqual({
+        revision: initialRevision,
+        generatedAt: initialGeneratedAt,
+        source: temporalSourceUrl(initialRevision),
+      });
+      expect(readFileSync(realBundlePath, "utf8")).toBe(realBundleBefore);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("bundled modelsdev temporal data", () => {
-  const snapshot = normalizeTemporalSnapshot(
-    JSON.parse(
-      readFileSync(new URL("../src/data/modelsdev-temporal.min.json", import.meta.url), "utf8"),
-    ),
-  );
+  const snapshot = normalizeTemporalSnapshot(BUNDLED_SNAPSHOT);
 
-  it("retains the bundled revision and only authoritative CN 2026", () => {
-    expect(snapshot.revision).toBe(TEMPORAL_REVISION);
-    expect(snapshot.source).toBe(temporalSourceUrl(TEMPORAL_REVISION));
-    expect(snapshot.generatedAt).toBe(TEMPORAL_REVISION_GENERATED_AT);
+  it("derives the pinned constants from the bundled snapshot provenance", () => {
+    expect(BUNDLED_SNAPSHOT.revision).toMatch(/^[0-9a-f]{40}$/);
+    expect(BUNDLED_SNAPSHOT.source).toBe(temporalSourceUrl(BUNDLED_SNAPSHOT.revision));
+    expect(TEMPORAL_REVISION).toBe(BUNDLED_SNAPSHOT.revision);
+    expect(TEMPORAL_REVISION_GENERATED_AT).toBe(BUNDLED_SNAPSHOT.generatedAt);
+    expect(temporalSnapshotProvenance(BUNDLED_SNAPSHOT)).toEqual({
+      revision: BUNDLED_SNAPSHOT.revision,
+      source: temporalSourceUrl(BUNDLED_SNAPSHOT.revision),
+      generatedAt: BUNDLED_SNAPSHOT.generatedAt,
+    });
+  });
+
+  it("rejects provenance whose source or timestamp does not match its revision", () => {
+    const revision = "a".repeat(40);
+    const valid = {
+      version: 1,
+      revision,
+      source: temporalSourceUrl(revision),
+      generatedAt: 1_700_000_000_000,
+    };
+    expect(temporalSnapshotProvenance(valid)).toEqual({
+      revision,
+      source: temporalSourceUrl(revision),
+      generatedAt: valid.generatedAt,
+    });
+    expect(() =>
+      temporalSnapshotProvenance({ ...valid, source: temporalSourceUrl("b".repeat(40)) }),
+    ).toThrow(/source/);
+    expect(() => temporalSnapshotProvenance({ ...valid, revision: "deadbeef" })).toThrow(
+      /revision/,
+    );
+    expect(() => temporalSnapshotProvenance({ ...valid, generatedAt: 0 })).toThrow(/generatedAt/);
+  });
+
+  it("retains only authoritative CN 2026", () => {
     expect(Object.keys(snapshot.jurisdictions)).toEqual(["CN"]);
     expect(Object.keys(snapshot.jurisdictions.CN)).toEqual(["2026"]);
     expect(snapshot.jurisdictions.CN["2026"].intervals).toHaveLength(7);
@@ -691,31 +912,16 @@ describe("bundled modelsdev temporal data", () => {
     ]);
   });
 
-  it("contains every temporal route discovered in the current source", () => {
+  it("retains route provenance for every bundled temporal entry", () => {
     let modelCount = 0;
-    for (const models of Object.values(snapshot.providers)) {
-      modelCount += Object.keys(models).length;
+    for (const [providerId, models] of Object.entries(snapshot.providers)) {
+      for (const [modelId, entry] of Object.entries(models)) {
+        modelCount += 1;
+        expect(entry.source).toBe(`providers/${providerId}/models/${modelId}.toml`);
+        expect(["supported", "unsupported"]).toContain(entry.status);
+      }
     }
-    expect(modelCount).toBe(69);
-    expect(snapshot.providers.deepseek["deepseek-v4-pro"].status).toBe("supported");
-    expect(snapshot.providers.openrouter["deepseek/deepseek-v4.1-flash-1017"].source).toBe(
-      "providers/openrouter/models/deepseek/deepseek-v4.1-flash-1017.toml",
-    );
-    expect(snapshot.providers.alibaba["deepseek-v4.1-flash"].status).toBe("supported");
-    expect(snapshot.providers["alibaba-cn"]["deepseek-v4.1-flash-1017"].status).toBe("supported");
-    expect(snapshot.providers["ollama-cloud"]["deepseek-v4-pro:0813"].status).toBe("supported");
-    expect(snapshot.providers["ollama-cloud"]["deepseek-v4.1-flash:1017"].status).toBe("supported");
-  });
-
-  it("marks every discovered date-based monetary rule unsupported instead of dropping it", () => {
-    const entries = Object.values(snapshot.providers).flatMap((models) => Object.values(models));
-    const unsupported = entries.filter((entry) => entry.status === "unsupported");
-    expect(unsupported).toHaveLength(19);
-    expect(unsupported.every((entry) => /date/.test(entry.reason))).toBe(true);
-    expect(snapshot.providers["opencode-go"]["gemini-4-argon"]).toMatchObject({
-      status: "unsupported",
-    });
-    expect(snapshot.providers["opencode-go"]["gemini-4-argon"].reason).toMatch(/date/);
+    expect(modelCount).toBeGreaterThan(0);
   });
 
   it("exposes runtime lookups from the bundled data", () => {

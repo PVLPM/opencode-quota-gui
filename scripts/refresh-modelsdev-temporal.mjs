@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -11,18 +12,18 @@ import { gunzipSync } from "node:zlib";
  * Runtime code reads the bundled JSON only; this script performs the only
  * upstream network access. Refreshes resolve the current upstream revision and
  * discover every provider model TOML from that revision's source archive.
+ * Pinned provenance constants are derived from the bundled snapshot so a normal
+ * latest refresh cannot leave them stale.
  */
 
 export const TEMPORAL_REPOSITORY = "anomalyco/models.dev";
-export const TEMPORAL_REVISION = "74ea3010646df6952827998d7b7b74bf062f3a00";
-export const TEMPORAL_REVISION_GENERATED_AT = 1_793_381_149_000;
-export const TEMPORAL_SOURCE = temporalSourceUrl(TEMPORAL_REVISION);
 export const TEMPORAL_COMMITS_ATOM_URL = `https://github.com/${TEMPORAL_REPOSITORY}/commits.atom`;
 const ARCHIVE_ROOT = `https://codeload.github.com/${TEMPORAL_REPOSITORY}/tar.gz`;
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const CN_SOURCE = "https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html";
 const CN_UTC_OFFSET_MS = 8 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 15_000;
+const BUNDLED_SNAPSHOT_URL = new URL("../src/data/modelsdev-temporal.min.json", import.meta.url);
 const RUNTIME_MODULE_URL = new URL("../src/lib/modelsdev-temporal.ts", import.meta.url);
 const execFileAsync = promisify(execFile);
 
@@ -33,6 +34,49 @@ export function temporalSourceUrl(revision) {
 export function temporalArchiveUrl(revision) {
   return `${ARCHIVE_ROOT}/${revision}`;
 }
+
+/**
+ * Validate and return the provenance fields that pin a temporal snapshot to
+ * exactly one upstream revision. Both the bundled snapshot and every candidate
+ * written by a refresh must satisfy this before their provenance is trusted.
+ */
+export function temporalSnapshotProvenance(snapshot) {
+  if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error("temporal snapshot must be an object");
+  }
+  const revision = snapshot.revision;
+  if (typeof revision !== "string" || !REVISION_PATTERN.test(revision)) {
+    throw new Error("temporal snapshot revision must be a full git revision");
+  }
+  const source = temporalSourceUrl(revision);
+  if (snapshot.source !== source) {
+    throw new Error("temporal snapshot source must match its revision");
+  }
+  const generatedAt = snapshot.generatedAt;
+  if (!Number.isSafeInteger(generatedAt) || generatedAt <= 0) {
+    throw new Error("temporal snapshot generatedAt must be a positive safe integer");
+  }
+  return { revision, source, generatedAt };
+}
+
+// The bundled snapshot is the single source of truth for the pinned revision.
+// A normal latest refresh rewrites it, so the constants below follow it instead
+// of drifting from hand-maintained values.
+function readBundledSnapshotProvenance() {
+  let snapshot;
+  try {
+    snapshot = JSON.parse(readFileSync(BUNDLED_SNAPSHOT_URL, "utf8"));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Bundled temporal snapshot could not be read: ${detail}`);
+  }
+  return temporalSnapshotProvenance(snapshot);
+}
+
+const BUNDLED_PROVENANCE = readBundledSnapshotProvenance();
+export const TEMPORAL_REVISION = BUNDLED_PROVENANCE.revision;
+export const TEMPORAL_REVISION_GENERATED_AT = BUNDLED_PROVENANCE.generatedAt;
+export const TEMPORAL_SOURCE = BUNDLED_PROVENANCE.source;
 
 const CLOCK_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -721,15 +765,7 @@ function parseSourceRoute(path) {
 
 function assertSnapshotForWrite(snapshot) {
   if (snapshot?.version !== 1) throw new Error("temporal snapshot version must be 1");
-  if (!REVISION_PATTERN.test(snapshot.revision)) {
-    throw new Error(`temporal snapshot revision must be a full git revision`);
-  }
-  if (snapshot.source !== temporalSourceUrl(snapshot.revision)) {
-    throw new Error("temporal snapshot source must match its revision");
-  }
-  if (!Number.isSafeInteger(snapshot.generatedAt) || snapshot.generatedAt <= 0) {
-    throw new Error("temporal snapshot generatedAt must be a positive safe integer");
-  }
+  temporalSnapshotProvenance(snapshot);
   if (!snapshot.jurisdictions?.CN?.["2026"]) {
     throw new Error("temporal snapshot must bundle CN 2026");
   }
@@ -1122,8 +1158,14 @@ export async function refreshTemporalSnapshot(options = {}) {
       );
     }
     revision = archive.revision;
-    if (generatedAt === undefined && revision === TEMPORAL_REVISION) {
-      generatedAt = TEMPORAL_REVISION_GENERATED_AT;
+    if (generatedAt === undefined) {
+      if (revision === TEMPORAL_REVISION) {
+        generatedAt = TEMPORAL_REVISION_GENERATED_AT;
+      } else {
+        throw new Error(
+          `Source archive revision ${revision} has no declared generatedAt; pass generatedAt=<epoch ms>`,
+        );
+      }
     }
     files = archive.files;
   } else if (sourceDir) {
