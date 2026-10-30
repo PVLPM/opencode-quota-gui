@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -199,6 +200,40 @@ price = 2
     expect(entry).toBeNull();
   });
 
+  it("fails closed for standalone date-based monetary temporal rules", () => {
+    const entry = extractTemporalModel(
+      "opencode-go",
+      "gemini-4-argon",
+      "providers/opencode-go/models/gemini-4-argon.toml",
+      `
+schema = 2
+[cost.text.input]
+price = 2
+[[cost.multipliers]]
+when = { date = { gte = "2026-12-01" } }
+factor = 2
+`,
+    );
+    expect(entry).toMatchObject({ status: "unsupported" });
+    expect(entry.reason).toMatch(/date/);
+
+    const nested = extractTemporalModel(
+      "opencode-go",
+      "gemini-4-argon",
+      "providers/opencode-go/models/gemini-4-argon.toml",
+      `
+schema = 2
+[cost.text.input]
+price = 2
+[[cost.multipliers]]
+when = { all = [{ utc_hours = { gte = "14:00" } }, { utc_hours = { lt = "18:00" } }, { date = { gte = "2026-12-01" } }] }
+factor = 2
+`,
+    );
+    expect(nested).toMatchObject({ status: "unsupported" });
+    expect(nested.reason).toMatch(/date/);
+  });
+
   it("fails closed when a temporal rule mixes in an unsupported condition", () => {
     const entry = extractTemporalModel(
       "openai",
@@ -350,9 +385,14 @@ factor = { text = 0.5 }
     },
   ];
 
+  const BUILD_OPTIONS = {
+    revision: TEMPORAL_REVISION,
+    generatedAt: TEMPORAL_REVISION_GENERATED_AT,
+  };
+
   it("is order-independent, derives source metadata, and passes full runtime validation", async () => {
-    const first = await buildTemporalSnapshot(files);
-    const second = await buildTemporalSnapshot([...files].reverse());
+    const first = await buildTemporalSnapshot(files, BUILD_OPTIONS);
+    const second = await buildTemporalSnapshot([...files].reverse(), BUILD_OPTIONS);
     expect(second).toEqual(first);
     expect(first.revision).toBe(TEMPORAL_REVISION);
     expect(first.source).toBe(temporalSourceUrl(TEMPORAL_REVISION));
@@ -377,17 +417,19 @@ factor = { text = 0.5 }
   });
 
   it("rejects duplicate routes, provider/path mismatches, and bad revision", async () => {
-    await expect(buildTemporalSnapshot([files[0], files[0]])).rejects.toThrow(/duplicate/i);
-    await expect(buildTemporalSnapshot([{ ...files[0], provider: "openai" }])).rejects.toThrow(
-      /provider/i,
+    await expect(buildTemporalSnapshot([files[0], files[0]], BUILD_OPTIONS)).rejects.toThrow(
+      /duplicate/i,
     );
+    await expect(
+      buildTemporalSnapshot([{ ...files[0], provider: "openai" }], BUILD_OPTIONS),
+    ).rejects.toThrow(/provider/i);
     await expect(buildTemporalSnapshot(files, { revision: "deadbeef" })).rejects.toThrow(
       /revision/i,
     );
   });
 
   it("rejects a candidate that the full runtime schema rejects", async () => {
-    const built = await buildTemporalSnapshot(files);
+    const built = await buildTemporalSnapshot(files, BUILD_OPTIONS);
     const invalid = structuredClone(built);
     invalid.providers.alibaba["deepseek-v4.1-flash"].unexpected = true;
     await expect(assertRuntimeTemporalSnapshot(invalid)).rejects.toThrow(/runtime schema/i);
@@ -503,7 +545,7 @@ price = 2
     expect(() => normalizeTemporalSnapshot(snapshot)).not.toThrow();
   });
 
-  it("builds from a pinned local source without network access", async () => {
+  it("requires explicit provenance for a non-git source directory", async () => {
     const dir = makeTempSourceDir();
     try {
       mkdirSync(join(dir, "providers", "localco", "models"), { recursive: true });
@@ -518,17 +560,64 @@ when = { utc_hours = { gte = "14:00" } }
 factor = 2
 `,
       );
+      const revision = "d".repeat(40);
+      await expect(refreshTemporalSnapshot({ sourceDir: dir })).rejects.toThrow(
+        /revision|provenance/,
+      );
+      await expect(refreshTemporalSnapshot({ sourceDir: dir, revision })).rejects.toThrow(
+        /generatedAt/,
+      );
       const snapshot = await refreshTemporalSnapshot({
         sourceDir: dir,
-        revision: TEMPORAL_REVISION,
+        revision,
+        generatedAt: 1_700_000_000_000,
       });
-      expect(snapshot.revision).toBe(TEMPORAL_REVISION);
-      expect(snapshot.source).toBe(temporalSourceUrl(TEMPORAL_REVISION));
-      expect(snapshot.generatedAt).toBe(TEMPORAL_REVISION_GENERATED_AT);
+      expect(snapshot.revision).toBe(revision);
+      expect(snapshot.source).toBe(temporalSourceUrl(revision));
+      expect(snapshot.generatedAt).toBe(1_700_000_000_000);
       expect(snapshot.providers.localco.local.source).toBe("providers/localco/models/local.toml");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("derives and verifies provenance from a git source checkout", async () => {
+    const dir = makeTempSourceDir();
+    try {
+      mkdirSync(join(dir, "providers", "gitco", "models"), { recursive: true });
+      writeFileSync(
+        join(dir, "providers", "gitco", "models", "git.toml"),
+        `
+schema = 2
+[cost.text.input]
+price = 1
+[[cost.multipliers]]
+when = { utc_hours = { lt = "04:00" } }
+factor = 2
+`,
+      );
+      execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "temporal-test@example.com"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "Temporal Test"], { cwd: dir });
+      execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir });
+      execFileSync("git", ["add", "."], { cwd: dir });
+      execFileSync("git", ["commit", "-m", "fixture"], { cwd: dir, stdio: "ignore" });
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString().trim();
+      const seconds = Number.parseInt(
+        execFileSync("git", ["show", "-s", "--format=%ct", "HEAD"], { cwd: dir }).toString().trim(),
+        10,
+      );
+      const snapshot = await refreshTemporalSnapshot({ sourceDir: dir });
+      expect(snapshot.revision).toBe(head);
+      expect(snapshot.source).toBe(temporalSourceUrl(head));
+      expect(snapshot.generatedAt).toBe(seconds * 1000);
       await expect(
-        refreshTemporalSnapshot({ sourceDir: dir, revision: "d".repeat(40) }),
-      ).rejects.toThrow(/generatedAt/);
+        refreshTemporalSnapshot({ sourceDir: dir, revision: "a".repeat(40) }),
+      ).rejects.toThrow(/does not match/);
+      writeFileSync(join(dir, "providers", "gitco", "models", "git.toml"), "schema = 2\n# dirty\n");
+      await expect(refreshTemporalSnapshot({ sourceDir: dir })).rejects.toThrow(
+        /uncommitted|dirty/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -585,8 +674,10 @@ describe("bundled modelsdev temporal data", () => {
     ),
   );
 
-  it("retains the pinned revision and only authoritative CN 2026", () => {
+  it("retains the bundled revision and only authoritative CN 2026", () => {
     expect(snapshot.revision).toBe(TEMPORAL_REVISION);
+    expect(snapshot.source).toBe(temporalSourceUrl(TEMPORAL_REVISION));
+    expect(snapshot.generatedAt).toBe(TEMPORAL_REVISION_GENERATED_AT);
     expect(Object.keys(snapshot.jurisdictions)).toEqual(["CN"]);
     expect(Object.keys(snapshot.jurisdictions.CN)).toEqual(["2026"]);
     expect(snapshot.jurisdictions.CN["2026"].intervals).toHaveLength(7);
@@ -600,12 +691,12 @@ describe("bundled modelsdev temporal data", () => {
     ]);
   });
 
-  it("contains every temporal route discovered in the pinned source", () => {
+  it("contains every temporal route discovered in the current source", () => {
     let modelCount = 0;
     for (const models of Object.values(snapshot.providers)) {
       modelCount += Object.keys(models).length;
     }
-    expect(modelCount).toBe(50);
+    expect(modelCount).toBe(69);
     expect(snapshot.providers.deepseek["deepseek-v4-pro"].status).toBe("supported");
     expect(snapshot.providers.openrouter["deepseek/deepseek-v4.1-flash-1017"].source).toBe(
       "providers/openrouter/models/deepseek/deepseek-v4.1-flash-1017.toml",
@@ -616,6 +707,17 @@ describe("bundled modelsdev temporal data", () => {
     expect(snapshot.providers["ollama-cloud"]["deepseek-v4.1-flash:1017"].status).toBe("supported");
   });
 
+  it("marks every discovered date-based monetary rule unsupported instead of dropping it", () => {
+    const entries = Object.values(snapshot.providers).flatMap((models) => Object.values(models));
+    const unsupported = entries.filter((entry) => entry.status === "unsupported");
+    expect(unsupported).toHaveLength(19);
+    expect(unsupported.every((entry) => /date/.test(entry.reason))).toBe(true);
+    expect(snapshot.providers["opencode-go"]["gemini-4-argon"]).toMatchObject({
+      status: "unsupported",
+    });
+    expect(snapshot.providers["opencode-go"]["gemini-4-argon"].reason).toMatch(/date/);
+  });
+
   it("exposes runtime lookups from the bundled data", () => {
     expect(getTemporalPolicy("deepseek", "deepseek-v4-pro")).toMatchObject({
       status: "supported",
@@ -623,7 +725,18 @@ describe("bundled modelsdev temporal data", () => {
     expect(getTemporalPolicy("openrouter", "deepseek/deepseek-v4.1-flash-1017")).toMatchObject({
       status: "supported",
     });
+    expect(getTemporalPolicy("opencode-go", "gemini-4-argon")).toMatchObject({
+      status: "unsupported",
+    });
     expect(getTemporalPolicy("deepseek", "deepseek-v4-pro/does-not-exist")).toBeNull();
+    expect(
+      resolveTemporalRates(
+        "opencode-go",
+        "gemini-4-argon",
+        Date.parse("2026-12-02T00:00:00.000Z"),
+        { input: 2, output: 10 },
+      ),
+    ).toMatchObject({ status: "unsupported", rates: null });
   });
 
   it("evaluates bundled DeepSeek and Alibaba rules at exact boundaries", () => {

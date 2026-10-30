@@ -14,8 +14,8 @@ import { gunzipSync } from "node:zlib";
  */
 
 export const TEMPORAL_REPOSITORY = "anomalyco/models.dev";
-export const TEMPORAL_REVISION = "4a58d0bc74552942a2aa29bc9065a38ed3fe04e4";
-export const TEMPORAL_REVISION_GENERATED_AT = 1_793_377_482_000;
+export const TEMPORAL_REVISION = "74ea3010646df6952827998d7b7b74bf062f3a00";
+export const TEMPORAL_REVISION_GENERATED_AT = 1_793_381_149_000;
 export const TEMPORAL_SOURCE = temporalSourceUrl(TEMPORAL_REVISION);
 export const TEMPORAL_COMMITS_ATOM_URL = `https://github.com/${TEMPORAL_REPOSITORY}/commits.atom`;
 const ARCHIVE_ROOT = `https://codeload.github.com/${TEMPORAL_REPOSITORY}/tar.gz`;
@@ -41,6 +41,7 @@ const HOLIDAYS = ["CN", "US", "CA"];
 const HOUR_OPERATORS = new Set(["equals", "in", "gt", "gte", "lt", "lte"]);
 const CHOICE_OPERATORS = new Set(["equals", "in"]);
 const CONDITION_KEYS = new Set(["all", "any", "not", "utc_hours", "utc_days", "holiday"]);
+const UNSUPPORTED_TEMPORAL_KEYS = new Set(["date"]);
 
 function civilMidnight(date, label) {
   if (!DATE_PATTERN.test(date)) throw new Error(`${label} must be YYYY-MM-DD`);
@@ -445,15 +446,18 @@ function analyzeNode(raw, label, depth) {
       const childReason = children.find((child) => child.reason);
       if (childReason) reason = reason ?? childReason.reason;
       const temporalChildren = children.filter((child) => child.temporal);
+      const supportedChildren = temporalChildren.filter((child) => child.condition !== undefined);
       if (temporalChildren.length > 0) {
         temporal = true;
         if (temporalChildren.length !== children.length) {
           reason = reason ?? `${label}.${key} mixes temporal and non-temporal conditions`;
         }
-        parts.push({
-          type: key,
-          of: canonicalConditions(temporalChildren.map((child) => child.condition)),
-        });
+        if (supportedChildren.length > 0) {
+          parts.push({
+            type: key,
+            of: canonicalConditions(supportedChildren.map((child) => child.condition)),
+          });
+        }
       } else if (childReason === undefined) {
         reason = reason ?? `${label}.${key} has no temporal condition`;
       }
@@ -470,6 +474,11 @@ function analyzeNode(raw, label, depth) {
       } else {
         reason = reason ?? `${label}.not has no temporal condition`;
       }
+      continue;
+    }
+    if (UNSUPPORTED_TEMPORAL_KEYS.has(key)) {
+      temporal = true;
+      reason = reason ?? `unsupported temporal condition key: ${key}`;
       continue;
     }
     if (key === "utc_hours") {
@@ -780,15 +789,13 @@ export async function assertRuntimeTemporalSnapshot(snapshot) {
 }
 
 export async function buildTemporalSnapshot(files, options = {}) {
-  const revision = options.revision ?? TEMPORAL_REVISION;
-  if (!REVISION_PATTERN.test(revision)) {
+  const revision = options.revision;
+  if (typeof revision !== "string" || !REVISION_PATTERN.test(revision)) {
     throw new Error(`revision must be a full 40-character git commit, got ${revision}`);
   }
-  const generatedAt =
-    options.generatedAt ??
-    (revision === TEMPORAL_REVISION ? TEMPORAL_REVISION_GENERATED_AT : undefined);
-  if (generatedAt === undefined) {
-    throw new Error("generatedAt is required when refreshing an unpinned revision");
+  const generatedAt = options.generatedAt;
+  if (!Number.isSafeInteger(generatedAt) || generatedAt <= 0) {
+    throw new Error("generatedAt is required when building a temporal snapshot");
   }
   if (!Array.isArray(files)) throw new Error("files must be an array");
   const providers = {};
@@ -1031,6 +1038,62 @@ export function readSourceArchive(gzBuffer) {
   return { revision, files };
 }
 
+function isMissingGitRepository(error) {
+  if (!error || typeof error !== "object") return false;
+  if (error.code === "ENOENT") return true;
+  const stderr = typeof error.stderr === "string" ? error.stderr : "";
+  return /not a git repository/i.test(stderr);
+}
+
+function sameFilesystemPath(left, right) {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+async function runGit(sourceDir, args) {
+  return await execFileAsync("git", ["-C", sourceDir, ...args], { maxBuffer: 1024 * 1024 });
+}
+
+/**
+ * Derive provenance from a git checkout only when `sourceDir` is that checkout's
+ * root. A plain directory (or a subdirectory of another repository) returns null
+ * so the caller must declare an explicit revision and timestamp.
+ */
+export async function resolveGitSourceMetadata(sourceDir) {
+  let topLevel;
+  try {
+    topLevel = (await runGit(sourceDir, ["rev-parse", "--show-toplevel"])).stdout.trim();
+  } catch (error) {
+    if (isMissingGitRepository(error)) return null;
+    throw error;
+  }
+  if (topLevel.length === 0 || !sameFilesystemPath(topLevel, sourceDir)) return null;
+
+  const revision = (await runGit(sourceDir, ["rev-parse", "HEAD"])).stdout.trim();
+  if (!REVISION_PATTERN.test(revision)) {
+    throw new Error(`sourceDir HEAD is not a full git revision: ${revision}`);
+  }
+  const timestampText = (
+    await runGit(sourceDir, ["show", "-s", "--format=%ct", "HEAD"])
+  ).stdout.trim();
+  const seconds = Number.parseInt(timestampText, 10);
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+    throw new Error(`sourceDir HEAD timestamp is invalid: ${timestampText}`);
+  }
+  const status = (
+    await runGit(sourceDir, ["status", "--porcelain", "--untracked-files=all", "--", "providers"])
+  ).stdout.trim();
+  if (status.length > 0) {
+    throw new Error(
+      "sourceDir providers tree has uncommitted changes; commit them or use an archive",
+    );
+  }
+  return { revision, generatedAt: seconds * 1000 };
+}
+
 /**
  * Refresh modes:
  * - no source: resolve the current upstream revision from the commits feed and
@@ -1038,8 +1101,9 @@ export function readSourceArchive(gzBuffer) {
  * - `revision`: fetch one pinned remote revision and derive its commit timestamp.
  * - `archivePath`: read a pinned `.tar.gz` offline; the revision is read from the
  *   archive root and must match `revision` when both are supplied.
- * - `sourceDir`: discover routes in an extracted offline tree. Pinned metadata is
- *   the default; other revisions need an explicit `generatedAt`.
+ * - `sourceDir`: discover routes in an extracted offline tree. Git checkouts
+ *   derive and verify HEAD provenance; other trees require an explicit revision
+ *   and generatedAt.
  */
 export async function refreshTemporalSnapshot(options = {}) {
   const { sourceDir, archivePath, fetchImpl = fetch } = options;
@@ -1063,12 +1127,32 @@ export async function refreshTemporalSnapshot(options = {}) {
     }
     files = archive.files;
   } else if (sourceDir) {
-    revision ??= TEMPORAL_REVISION;
-    if (!REVISION_PATTERN.test(revision)) {
-      throw new Error(`revision must be a full 40-character git commit, got ${revision}`);
-    }
-    if (generatedAt === undefined && revision === TEMPORAL_REVISION) {
-      generatedAt = TEMPORAL_REVISION_GENERATED_AT;
+    const gitMetadata = await resolveGitSourceMetadata(sourceDir);
+    if (gitMetadata) {
+      if (revision !== undefined && revision !== gitMetadata.revision) {
+        throw new Error(
+          `sourceDir revision ${gitMetadata.revision} does not match requested ${revision}`,
+        );
+      }
+      if (generatedAt !== undefined && generatedAt !== gitMetadata.generatedAt) {
+        throw new Error(
+          `sourceDir commit timestamp ${gitMetadata.generatedAt} does not match requested ${generatedAt}`,
+        );
+      }
+      revision = gitMetadata.revision;
+      generatedAt = gitMetadata.generatedAt;
+    } else {
+      if (revision === undefined) {
+        throw new Error(
+          "sourceDir is not a git checkout; pass revision=<full sha> and generatedAt=<epoch ms> to declare its provenance",
+        );
+      }
+      if (!REVISION_PATTERN.test(revision)) {
+        throw new Error(`revision must be a full 40-character git commit, got ${revision}`);
+      }
+      if (generatedAt === undefined) {
+        throw new Error("generatedAt is required when sourceDir is not a git checkout");
+      }
     }
     const routes = await discoverLocalSourceRoutes(sourceDir);
     files = await readLocalSourceFiles(sourceDir, routes);
