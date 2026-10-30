@@ -2257,7 +2257,7 @@ body {
 }
 
 .qg-vis-provider[data-hidden="true"] {
-  background: var(--qg-surface-raised);
+  background: var(--qg-frame);
 }
 
 .qg-vis-provider[data-dragging="true"] {
