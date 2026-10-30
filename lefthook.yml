@@ -9,3 +9,8 @@ pre-push:
   commands:
     verify:
       run: pnpm verify
+
+post-checkout:
+  commands:
+    codegraph:
+      run: node scripts/init-worktree-codegraph.mjs {1} {2} {3}

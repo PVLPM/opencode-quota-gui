@@ -89,7 +89,7 @@ const biomeConfig = JSON.parse(
 const lefthookConfig = parse(
   await readFile(new URL("../lefthook.yml", import.meta.url), "utf8"),
 ) as Record<
-  "pre-commit" | "pre-push",
+  "pre-commit" | "pre-push" | "post-checkout",
   {
     commands?: Record<string, { glob?: string; run?: string; stage_fixed?: boolean }>;
   }
@@ -277,6 +277,11 @@ describe("package manifest compatibility", () => {
     expect(lefthookConfig["pre-push"]?.commands).toEqual({
       verify: {
         run: "pnpm verify",
+      },
+    });
+    expect(lefthookConfig["post-checkout"]?.commands).toEqual({
+      codegraph: {
+        run: "node scripts/init-worktree-codegraph.mjs {1} {2} {3}",
       },
     });
 
