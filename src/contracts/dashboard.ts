@@ -1,6 +1,8 @@
+import type { AnalyticsTemporalBreakdown } from "./analytics-temporal.js";
 import type { CardId, RowId } from "./identity.js";
 import type { BankedResetAvailability } from "./openai-quota.js";
 import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
+import type { TemporalStatusSnapshot } from "./temporal.js";
 
 /**
  * Frozen GUI contracts (design spec §5.1–§5.4).
@@ -269,6 +271,11 @@ export interface AnalyticsGroupSnapshot {
    */
   series: AnalyticsSeries[];
   stale: boolean;
+  /**
+   * Optional additive historical split for a model->provider detail query.
+   * Absent on provider/model overviews and when no exact route is admitted.
+   */
+  temporalBreakdown?: AnalyticsTemporalBreakdown;
 }
 
 export interface QuotaCardRow {
@@ -351,6 +358,12 @@ export interface QuotaSnapshot {
   /** Host zone used to format `polledAtMs` and quota reset timestamps. */
   timeZone: string;
   providers: HomeSnapshot["providers"];
+  /**
+   * Additive live peak/off-peak status for every temporal-capable provider.
+   * Each provider marks whether this cycle discovered an account; discovery
+   * only decides the default chip visibility. Absent on older hosts.
+   */
+  temporal?: TemporalStatusSnapshot;
 }
 
 export interface ProjectRootRow {

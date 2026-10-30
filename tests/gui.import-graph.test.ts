@@ -67,6 +67,7 @@ describe("contract layer import rules", () => {
   it("has contract sources to check", () => {
     expect(contracts.map((entry) => entry.file).sort()).toEqual([
       "src/contracts/analytics-entity.ts",
+      "src/contracts/analytics-temporal.ts",
       "src/contracts/build-identity.ts",
       "src/contracts/card-order.ts",
       "src/contracts/collision-safe-key.ts",
@@ -76,6 +77,7 @@ describe("contract layer import rules", () => {
       "src/contracts/openai-quota.ts",
       "src/contracts/ranges.ts",
       "src/contracts/settings.ts",
+      "src/contracts/temporal.ts",
       "src/contracts/time-zone.ts",
     ]);
   });

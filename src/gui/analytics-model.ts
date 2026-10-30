@@ -10,6 +10,10 @@
  */
 
 import type {
+  AnalyticsTemporalBreakdown as AnalyticsTemporalBreakdownDto,
+  AnalyticsTemporalBreakdownRow,
+} from "../contracts/analytics-temporal.js";
+import type {
   AnalyticsDimension,
   AnalyticsEntityIdentity,
   AnalyticsGroupFilter,
@@ -33,6 +37,14 @@ import {
   rangeBucketUnit,
   rangeWindow,
 } from "../contracts/ranges.js";
+import { lookupCost, selectCostAtContext } from "../lib/modelsdev-pricing.js";
+import {
+  getTemporalPolicy,
+  resolveTemporalRates,
+  TEMPORAL_RATE_KEYS,
+  type TemporalPolicyEntry,
+  type TemporalRates,
+} from "../lib/modelsdev-temporal.js";
 import {
   type OpenCodeProjectInfo,
   type OpenCodeRawAssistantRow,
@@ -40,11 +52,17 @@ import {
   rawAssistantRowFingerprint,
   rawAssistantRowHasTokenUsage,
 } from "../lib/opencode-storage.js";
-import { type PricingResolution, priceTokenBuckets } from "../lib/quota-stats.js";
+import {
+  type PricingResolution,
+  priceTokenBuckets,
+  resolvePricingKey,
+} from "../lib/quota-stats.js";
 import { type ForkOwnerCandidate, selectForkOwners } from "../lib/usage-ownership.js";
 import { UNKNOWN_PROJECT_ID, UNTITLED_SESSION_TITLE } from "./aggregation.js";
 
 const HOUR_MS = 3_600_000;
+
+const TEMPORAL_FACTOR_EPSILON = 1e-9;
 
 export interface OwnedStep {
   sessionID: string;
@@ -540,6 +558,136 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       return { costUsd: 0, pricedAny: false, unpricedTokens: total, unknownTokens: 0 };
     }
     return { costUsd: 0, pricedAny: false, unpricedTokens: 0, unknownTokens: total };
+  }
+
+  /**
+   * Relative movement of one effective monetary rate state against the route's
+   * selected base. Partial override rates are compared field by field; a state
+   * that moves categories in opposite directions is mixed and unusable.
+   */
+  function rateMovement(base: TemporalRates, resolved: TemporalRates) {
+    let comparable = false;
+    let sawIncrease = false;
+    let sawDecrease = false;
+    for (const key of TEMPORAL_RATE_KEYS) {
+      const baseRate = base[key];
+      const resolvedRate = resolved[key];
+      if (
+        typeof baseRate !== "number" ||
+        baseRate <= 0 ||
+        typeof resolvedRate !== "number" ||
+        !Number.isFinite(resolvedRate)
+      ) {
+        continue;
+      }
+      comparable = true;
+      if (resolvedRate > baseRate * (1 + TEMPORAL_FACTOR_EPSILON)) sawIncrease = true;
+      else if (resolvedRate < baseRate * (1 - TEMPORAL_FACTOR_EPSILON)) sawDecrease = true;
+    }
+    if (!comparable) return "incomparable" as const;
+    if (sawIncrease && sawDecrease) return "mixed" as const;
+    if (sawIncrease) return "increase" as const;
+    if (sawDecrease) return "decrease" as const;
+    return "equal" as const;
+  }
+
+  function multiplierMovement(factor: number | { text: number }) {
+    const value = typeof factor === "number" ? factor : factor.text;
+    if (!Number.isFinite(value)) return "incomparable" as const;
+    if (value > 1 + TEMPORAL_FACTOR_EPSILON) return "increase" as const;
+    if (value < 1 - TEMPORAL_FACTOR_EPSILON) return "decrease" as const;
+    return "equal" as const;
+  }
+
+  /**
+   * Direction of every admissible rule in the exact route's policy. A policy
+   * that only discounts has a peak base state; one that only surcharges has an
+   * off-peak base state. Mixed or equal-only rules cannot establish which side
+   * of the schedule the unchanged base belongs to, so they fail closed.
+   */
+  function temporalPolicyDirection(
+    policy: Extract<TemporalPolicyEntry, { status: "supported" }>,
+    base: TemporalRates,
+  ): "discount" | "surcharge" | "mixed" | "equal" {
+    let discount = false;
+    let surcharge = false;
+    for (const override of policy.overrides) {
+      const movement = rateMovement(base, override.rates);
+      if (movement === "mixed") return "mixed";
+      if (movement === "increase") surcharge = true;
+      else if (movement === "decrease") discount = true;
+    }
+    for (const multiplier of policy.multipliers) {
+      const movement = multiplierMovement(multiplier.factor);
+      if (movement === "increase") surcharge = true;
+      else if (movement === "decrease") discount = true;
+    }
+    if (discount && surcharge) return "mixed";
+    if (discount) return "discount";
+    if (surcharge) return "surcharge";
+    return "equal";
+  }
+
+  /**
+   * One historical phase relative to the policy's full set of admissible
+   * periods. A discount policy keeps its unchanged base on peak; a surcharge
+   * policy keeps its unchanged base on off-peak. Unknown, mixed, equal-only or
+   * internally contradictory states are omitted instead of defaulted.
+   */
+  function temporalPhaseFromRates(
+    policy: Extract<TemporalPolicyEntry, { status: "supported" }>,
+    base: TemporalRates,
+    resolved: TemporalRates,
+  ): "peak" | "offpeak" | undefined {
+    const direction = temporalPolicyDirection(policy, base);
+    if (direction === "mixed" || direction === "equal") return undefined;
+
+    const movement = rateMovement(base, resolved);
+    if (movement === "mixed" || movement === "incomparable") return undefined;
+
+    if (direction === "discount") {
+      if (movement === "decrease") return "offpeak";
+      if (movement === "equal") return "peak";
+      return undefined;
+    }
+    if (movement === "increase") return "peak";
+    if (movement === "equal") return "offpeak";
+    return undefined;
+  }
+
+  /**
+   * Historical phase for one owned physical row. Only an exact source
+   * provider/model route with a supported monetary policy in the modelsdev
+   * temporal snapshot is admitted. Non-monetary quota schedules live in a
+   * separate data source and therefore never appear here; an exact monetary
+   * policy is admitted regardless of provider name.
+   */
+  function temporalPhaseForStep(step: OwnedStep): "peak" | "offpeak" | undefined {
+    if (step.providerID === undefined || step.modelID === undefined) return undefined;
+    const provider = step.providerID.trim();
+    const model = step.modelID.trim();
+    if (!provider || !model) return undefined;
+
+    const resolution = resolvePricingKey({
+      providerID: step.providerID,
+      modelID: step.modelID,
+    });
+    if (!resolution.ok) return undefined;
+    const key = resolution.key;
+    if (provider.toLowerCase() !== key.provider.toLowerCase()) return undefined;
+    if (model !== key.model) return undefined;
+
+    const policy = getTemporalPolicy(key.provider, key.model);
+    if (policy === null || policy.status !== "supported") return undefined;
+
+    const promptTokens = step.tokens.input + step.tokens.cacheRead + step.tokens.cacheWrite;
+    const cost = lookupCost(key.provider, key.model);
+    if (cost === null) return undefined;
+    const base = selectCostAtContext(cost, promptTokens).rates;
+    const resolved = resolveTemporalRates(key.provider, key.model, step.completedAtMs, base);
+    if (resolved.status !== "resolved" || resolved.rates === null) return undefined;
+
+    return temporalPhaseFromRates(policy, base, resolved.rates);
   }
 
   function bucketFor(startMs: number): HourBucket {
@@ -1054,6 +1202,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const parentGroups = new Map<string | undefined, GroupNode>();
     const childDimension = oppositeDimension(dimension);
     const lifetime = range === "lifetime";
+    const wantsTemporalBreakdown =
+      dimension === "provider" && filter?.dimension === "model" && filter.identity.kind === "known";
+    const temporalPhases = wantsTemporalBreakdown
+      ? new Map<string | undefined, { peak: Accumulator; offpeak: Accumulator }>()
+      : undefined;
     let stepCount = 0;
     let earliestMatchedMs: number | undefined;
 
@@ -1080,6 +1233,17 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         parent.children.set(childRaw, child);
       }
       addStepToGroupNode(child, step);
+      if (temporalPhases !== undefined) {
+        const phase = temporalPhaseForStep(step);
+        if (phase !== undefined) {
+          let phases = temporalPhases.get(parentRaw);
+          if (!phases) {
+            phases = { peak: createAccumulator(), offpeak: createAccumulator() };
+            temporalPhases.set(parentRaw, phases);
+          }
+          addStepToAccumulator(phases[phase], step);
+        }
+      }
     });
 
     // Lifetime buckets start at the exact first positive owned step for this
@@ -1095,6 +1259,21 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       .map(([raw, node]) => ({ raw, node }))
       .sort(compareGroupEntries);
     const rows = ranked.map((entry) => materializeGroupRow(entry.raw, entry.node));
+
+    let temporalBreakdown: AnalyticsTemporalBreakdownDto | undefined;
+    if (temporalPhases !== undefined) {
+      const breakdownRows: AnalyticsTemporalBreakdownRow[] = [];
+      for (const entry of ranked) {
+        const phases = temporalPhases.get(entry.raw);
+        if (phases === undefined) continue;
+        breakdownRows.push({
+          identity: identityOf(entry.raw),
+          peak: finalize(phases.peak),
+          offpeak: finalize(phases.offpeak),
+        });
+      }
+      if (breakdownRows.length > 0) temporalBreakdown = { rows: breakdownRows };
+    }
 
     const topEntries = ranked.slice(0, 5);
     const otherEntries = ranked.slice(5);
@@ -1174,6 +1353,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       stale: false,
     };
     if (filter !== undefined) snapshot.filter = filter;
+    if (temporalBreakdown !== undefined) snapshot.temporalBreakdown = temporalBreakdown;
     return snapshot;
   }
 
