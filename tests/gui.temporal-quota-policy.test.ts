@@ -105,6 +105,7 @@ describe("Z.ai quota pricing policy", () => {
       state: "peak",
       effect: { factor: 1, direction: "peak", unit: "quota_points" },
       nextChangeAtMs: OFFPEAK_MONDAY,
+      nextState: "offpeak",
     });
     expect(peakModels[0]?.intervals[0]).toMatchObject({
       startMs: PEAK_MONDAY,
@@ -117,6 +118,8 @@ describe("Z.ai quota pricing policy", () => {
     expect(offpeak).toMatchObject({
       state: "offpeak",
       effect: { factor: 0.5, direction: "offpeak", unit: "quota_points" },
+      nextChangeAtMs: Date.parse("2026-11-03T06:00:00.000Z"),
+      nextState: "peak",
     });
   });
 
@@ -126,10 +129,29 @@ describe("Z.ai quota pricing policy", () => {
     const model = buildQuotaPolicyModels(policy, saturday, HORIZON)[0];
     expect(model?.state).toBe("offpeak");
     expect(model?.nextChangeAtMs).toBe(Date.parse("2026-11-09T06:00:00.000Z"));
+    expect(model?.nextState).toBe("peak");
     expect(model?.intervals[0]).toMatchObject({
       startMs: saturday,
       endMs: Date.parse("2026-11-09T06:00:00.000Z"),
       phase: "offpeak",
     });
+  });
+
+  it("reports the true weekly transition beyond a shortened display horizon", () => {
+    const policy = zaiPolicy();
+    // Friday 18:00 SGT, just after the weekday peak window. The preview is
+    // shorter than the weekend gap, so the next transition is not in it.
+    const fridayAfterPeak = Date.parse("2026-11-06T10:00:00.000Z");
+    const shortHorizon = 24 * 60 * 60 * 1000;
+    const model = buildQuotaPolicyModels(policy, fridayAfterPeak, shortHorizon)[0];
+    expect(model?.state).toBe("offpeak");
+    expect(model?.intervals).toHaveLength(1);
+    expect(model?.intervals[0]).toMatchObject({
+      startMs: fridayAfterPeak,
+      endMs: fridayAfterPeak + shortHorizon,
+      phase: "offpeak",
+    });
+    expect(model?.nextChangeAtMs).toBe(Date.parse("2026-11-09T06:00:00.000Z"));
+    expect(model?.nextState).toBe("peak");
   });
 });

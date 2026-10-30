@@ -36,8 +36,13 @@ export interface TemporalModelStatus {
   /** Server-computed state at `TemporalStatusSnapshot.generatedAtMs`. */
   state: TemporalModelPhase;
   effect?: TemporalEffect;
-  /** Next state/rule change, absent when no further transition is known. */
+  /** Next classified state change, absent when no further transition is known. */
   nextChangeAtMs?: number;
+  /**
+   * Classified destination at `nextChangeAtMs`. `unknown` means the
+   * destination is unresolved; absent alongside `nextChangeAtMs`.
+   */
+  nextState?: TemporalModelPhase;
   /** Upcoming exact windows, for live client-side state and local schedules. */
   intervals: TemporalModelInterval[];
   /** Why a policy is unresolved or unsupported; omitted for supported states. */

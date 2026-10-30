@@ -44,6 +44,8 @@ export interface TemporalQuotaPolicy {
 const DAY_MS = 86_400_000;
 const MINUTE_MS = 60_000;
 const MAX_INTERVALS = 24;
+/** The schedule repeats weekly; eight days cover the next boundary from any instant. */
+const NEXT_TRANSITION_LOOKAHEAD_DAYS = 8;
 const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
 
 function clockMinutes(value: string): number {
@@ -107,6 +109,41 @@ function peakWindows(policy: TemporalQuotaPolicy, fromMs: number, toMs: number):
   return windows.sort((left, right) => left.startMs - right.startMs);
 }
 
+interface QuotaPolicyTransition {
+  atMs: number;
+  phase: TemporalModelPhase;
+}
+
+/**
+ * Next real peak/off-peak boundary, independent of the display horizon. The
+ * policy is a repeating weekly schedule, so scanning its raw windows for eight
+ * days finds every possible next transition, including one past a short preview.
+ */
+function nextQuotaPolicyTransition(
+  policy: TemporalQuotaPolicy,
+  fromMs: number,
+): QuotaPolicyTransition | undefined {
+  const offsetMs = policy.utcOffsetMinutes * MINUTE_MS;
+  const startMinute = clockMinutes(policy.peak.start);
+  const endMinute = clockMinutes(policy.peak.end);
+  const firstDay = Math.floor((fromMs + offsetMs) / DAY_MS);
+  const current = quotaPolicyPhase(policy, fromMs);
+  for (let day = firstDay; day < firstDay + NEXT_TRANSITION_LOOKAHEAD_DAYS; day += 1) {
+    if (!policy.peak.days.includes(localDayName(day))) continue;
+    const startMs = day * DAY_MS + startMinute * MINUTE_MS - offsetMs;
+    const endMs = day * DAY_MS + endMinute * MINUTE_MS - offsetMs;
+    if (endMs <= startMs) continue;
+    // A boundary counts only when the published phase actually changes, so
+    // adjacent or all-day windows cannot report a no-op transition.
+    for (const boundary of [startMs, endMs]) {
+      if (boundary <= fromMs) continue;
+      const phase = quotaPolicyPhase(policy, boundary);
+      if (phase !== current) return { atMs: boundary, phase };
+    }
+  }
+  return undefined;
+}
+
 function pushInterval(intervals: TemporalModelInterval[], next: TemporalModelInterval): void {
   const previous = intervals[intervals.length - 1];
   if (
@@ -164,6 +201,9 @@ export function buildQuotaPolicyModels(
   nowMs: number,
   horizonMs: number,
 ): TemporalModelStatus[] {
+  // The preview may end before the next weekly boundary; compute the true
+  // transition from the schedule rather than from the clipped intervals.
+  const next = nextQuotaPolicyTransition(policy, nowMs);
   return Object.keys(policy.models)
     .sort((left, right) => left.localeCompare(right))
     .map((modelId) => {
@@ -171,15 +211,16 @@ export function buildQuotaPolicyModels(
       if (!model) throw new Error(`missing policy model ${modelId}`);
       const state = quotaPolicyPhase(policy, nowMs);
       const intervals = buildIntervals(policy, model, nowMs, nowMs + horizonMs);
-      // The final interval ends at the horizon; it is not a published boundary.
-      const next = intervals.length > 1 ? intervals[0]?.endMs : undefined;
       const status: TemporalModelStatus = {
         modelId,
         state,
         effect: effectFor(model, state),
         intervals,
       };
-      if (next !== undefined && next > nowMs) status.nextChangeAtMs = next;
+      if (next) {
+        status.nextChangeAtMs = next.atMs;
+        status.nextState = next.phase;
+      }
       return status;
     });
 }

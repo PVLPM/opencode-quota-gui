@@ -24,11 +24,13 @@ import type {
 } from "../contracts/temporal.js";
 import { lookupCost } from "../lib/modelsdev-pricing.js";
 import {
+  getNextTemporalTransition,
   getTemporalInstantState,
   getTemporalPolicy,
   getTemporalSnapshotMeta,
   listTemporalIntervals,
   type TemporalCondition,
+  type TemporalInstantState,
   type TemporalPolicyEntry,
   type TemporalRates,
 } from "../lib/modelsdev-temporal.js";
@@ -43,6 +45,14 @@ import { TEMPORAL_QUOTA_POLICIES } from "./temporal-quota-policy-data.js";
 export const TEMPORAL_SCHEDULE_HORIZON_MS = 3 * 24 * 60 * 60 * 1000;
 const MAX_INTERVALS_PER_MODEL = 24;
 const MAX_HOLIDAYS_PER_PROVIDER = 8;
+/**
+ * Mirrors core's private `MAX_TRANSITION_HORIZON_MS` (five 366-day years). The
+ * GUI searches the same supported horizon instead of inventing a step cutoff.
+ */
+const TRANSITION_SEARCH_HORIZON_MS = 5 * 366 * 24 * 60 * 60 * 1000;
+/** Chunk the horizon so long no-op runs exit before allocating years of windows. */
+const TRANSITION_SEARCH_CHUNK_MS = 31 * 24 * 60 * 60 * 1000;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const RATE_KEYS = ["input", "output", "cache_read", "cache_write", "reasoning"] as const;
 
 export interface TemporalProviderSource {
@@ -349,6 +359,79 @@ function classifyState(
   return { phase, effect: effectFor(factorFor(policy, activeRuleIds, base)) };
 }
 
+/** Classify an instant, keeping unresolved/unsupported states unknown. */
+function classifyInstant(
+  policy: TemporalPolicyEntry | null,
+  instant: TemporalInstantState,
+  base: TemporalRates | null,
+): { phase: TemporalModelPhase; effect?: TemporalEffect } {
+  if (instant.status !== "resolved") return { phase: "unknown" };
+  return classifyState(policy, instant.activeRuleIds, base);
+}
+
+function sameEffect(a: TemporalEffect | undefined, b: TemporalEffect | undefined): boolean {
+  if (!a || !b) return a === b;
+  return a.factor === b.factor && a.direction === b.direction && a.unit === b.unit;
+}
+
+interface MeaningfulTransition {
+  atMs: number;
+  phase: TemporalModelPhase;
+}
+
+function isMeaningfulTransition(
+  after: { phase: TemporalModelPhase; effect?: TemporalEffect },
+  current: { phase: TemporalModelPhase; effect?: TemporalEffect },
+): boolean {
+  return after.phase !== current.phase || !sameEffect(after.effect, current.effect);
+}
+
+/**
+ * Core reports active-rule-id changes too, which can leave the classified
+ * phase and effect untouched. Skip those so the countdown only names a
+ * transition the user can observe, scanning the same five-year horizon as the
+ * core within a short preview-style chunk. An unresolved `after` is unknown.
+ */
+function nextMeaningfulTransitionAt(
+  providerId: string,
+  modelId: string,
+  nowMs: number,
+  policy: TemporalPolicyEntry | null,
+  base: TemporalRates | null,
+  current: { phase: TemporalModelPhase; effect?: TemporalEffect },
+): MeaningfulTransition | undefined {
+  const first = getNextTemporalTransition(providerId, modelId, nowMs);
+  if (!first) return undefined;
+  const firstAfter = classifyInstant(policy, first.after, base);
+  if (isMeaningfulTransition(firstAfter, current)) {
+    return { atMs: first.atMs, phase: firstAfter.phase };
+  }
+
+  const horizonEnd = nowMs + TRANSITION_SEARCH_HORIZON_MS;
+  // Without holiday references the policy is strictly weekly-periodic, so a
+  // full no-op week proves the cycle repeats. Holiday policies must keep
+  // scanning: repeated rule ids can still be broken by a future holiday.
+  const weeklyCycle = holidayJurisdictions(policy).size === 0;
+  let cursor = first.atMs;
+  while (cursor <= horizonEnd) {
+    const chunkEnd = Math.min(cursor + TRANSITION_SEARCH_CHUNK_MS, horizonEnd + 1);
+    if (chunkEnd <= cursor) break;
+    // Rates are irrelevant here; active rule ids and status prove the boundary.
+    const intervals = listTemporalIntervals(providerId, modelId, cursor, chunkEnd);
+    for (const interval of intervals) {
+      // The first interval starts at the known no-op transition.
+      if (interval.startMs <= first.atMs) continue;
+      const after = classifyInstant(policy, interval, base);
+      if (isMeaningfulTransition(after, current)) {
+        return { atMs: interval.startMs, phase: after.phase };
+      }
+    }
+    if (weeklyCycle && chunkEnd - first.atMs >= WEEK_MS) return undefined;
+    cursor = chunkEnd;
+  }
+  return undefined;
+}
+
 function collectHolidays(condition: TemporalCondition, into: Set<TemporalHoliday>): void {
   switch (condition.type) {
     case "all":
@@ -380,6 +463,9 @@ function providerPhase(models: readonly TemporalModelStatus[]): TemporalPhase {
   let peak = false;
   let offpeak = false;
   for (const model of models) {
+    // Known states cannot outvote an in-scope unknown model: the provider
+    // aggregate is conservative and must not imply more precision than it has.
+    if (model.state === "unknown") return "unknown";
     if (model.state === "peak") peak = true;
     if (model.state === "offpeak") offpeak = true;
   }
@@ -530,18 +616,23 @@ function modelStatus(
   const policy = getTemporalPolicy(providerId, modelId);
   const base = baseRates(providerId, modelId);
   const state = getTemporalInstantState(providerId, modelId, nowMs);
-  const { phase, effect } = classifyState(policy, state.activeRuleIds, base);
+  const current = classifyInstant(policy, state, base);
   const intervals = projectIntervals(providerId, modelId, nowMs, baseRates);
-  // The last interval always ends at the projection horizon, not necessarily at
-  // a real transition. Only an interval followed by another proves a boundary.
-  const next = intervals.length > 1 ? intervals[0]?.endMs : undefined;
+  // The preview is deliberately short, so its last interval ends at the horizon
+  // rather than at a proved transition. Ask the core evaluator for the real
+  // next transition independently so a long holiday or sparse rule does not
+  // suppress a change that simply falls outside the display window.
+  const next = nextMeaningfulTransitionAt(providerId, modelId, nowMs, policy, base, current);
   const status: TemporalModelStatus = {
     modelId,
-    state: state.status === "resolved" ? phase : "unknown",
+    state: current.phase,
     intervals,
   };
-  if (effect && state.status === "resolved") status.effect = effect;
-  if (next !== undefined && next > nowMs) status.nextChangeAtMs = next;
+  if (current.effect) status.effect = current.effect;
+  if (next) {
+    status.nextChangeAtMs = next.atMs;
+    status.nextState = next.phase;
+  }
   if (state.reason) status.reason = state.reason;
   return status;
 }
