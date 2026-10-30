@@ -7,9 +7,16 @@ import type {
   JsonValue,
   SettingsSnapshot,
 } from "../../contracts/dashboard";
+import type { TemporalStatusSnapshot } from "../../contracts/temporal";
 import { BuildAbout } from "../components/build-info";
 import { EyeToggle } from "../components/eye-toggle";
 import { GripDotsIcon } from "../components/icons";
+import { ProviderLogo } from "../components/provider-logo";
+import {
+  TemporalInfoButton,
+  TemporalProviderSummary,
+  temporalProviderLabel,
+} from "../components/temporal-status";
 import type { Toaster } from "../components/toast";
 import { DashboardError } from "../dashboard-client";
 import {
@@ -42,6 +49,7 @@ import {
   settingProvenanceNote,
   showCardKeepingKnownSiblingsHidden,
   stringList,
+  temporalProviderOverridesFromValue,
   toggleHiddenCard,
   toPatch,
   visibilityAccountLabel,
@@ -67,6 +75,7 @@ export function SettingsView(props: {
   client: DashboardDataSource;
   toaster: Toaster;
   catalog: VisibilityCatalog;
+  temporal?: TemporalStatusSnapshot;
   onReload: () => Promise<void>;
 }): JSX.Element {
   const [draft, setDraft] = createSignal<SettingsDraft>(initialDraft(props.snapshot.revision));
@@ -249,6 +258,22 @@ export function SettingsView(props: {
   const cardOrderWritable = () => props.snapshot.writable.includes("dashboard.cardOrder");
   const hiddenCardsWritable = () => props.snapshot.writable.includes("dashboard.hiddenCards");
   const hiddenRowsWritable = () => props.snapshot.writable.includes("dashboard.hiddenRows");
+  const temporalProviderOverrides = () =>
+    temporalProviderOverridesFromValue(valueForKey("dashboard.temporalProviderOverrides"));
+  const temporalWritable = () =>
+    props.snapshot.writable.includes("dashboard.temporalProviderOverrides");
+
+  /**
+   * Explicit choices persist as a sparse map. An absent provider follows
+   * discovery, so a newly connected account defaults on without a write.
+   */
+  function toggleTemporalProvider(providerId: string, current: boolean): void {
+    if (!temporalWritable() || busy()) return;
+    edit("dashboard.temporalProviderOverrides", {
+      ...temporalProviderOverrides(),
+      [providerId]: !current,
+    });
+  }
 
   const orderedCards = createMemo(() =>
     orderCardsByPreference(
@@ -349,6 +374,79 @@ export function SettingsView(props: {
       // Solid applies keyed DOM moves after the event batch; restore focus afterward.
       queueMicrotask(() => cardNodes.get(card.cardId)?.grip?.focus({ preventScroll: true }));
     }
+  }
+
+  /**
+   * Every temporal-capable provider, whether or not an account was discovered.
+   * Discovery only decides the default; a switch writes an explicit choice.
+   */
+  function renderTemporalSection(): JSX.Element {
+    const providers = () => props.temporal?.providers ?? [];
+    const overrides = () => temporalProviderOverrides();
+    const shownFor = (provider: { providerId: string; discovered: boolean }): boolean => {
+      const override = overrides()[provider.providerId];
+      return typeof override === "boolean" ? override : provider.discovered;
+    };
+    const explicitCount = () =>
+      providers().filter((provider) => Object.hasOwn(overrides(), provider.providerId)).length;
+    return (
+      <>
+        <Show
+          when={providers().length > 0}
+          fallback={<p class="qg-inherited">No temporal pricing providers are available.</p>}
+        >
+          <div class="qg-temporal-settings">
+            <For each={providers()}>
+              {(provider) => {
+                const shown = () => shownFor(provider);
+                const label = temporalProviderLabel(provider);
+                return (
+                  <div class="qg-field qg-temporal-settings__row">
+                    <div class="qg-field__text">
+                      <span class="qg-field__label qg-temporal-settings__identity">
+                        <ProviderLogo
+                          providerId={provider.providerId}
+                          class="qg-temporal-settings__logo"
+                        />
+                        <span>{label}</span>
+                        <TemporalInfoButton status={provider} />
+                      </span>
+                      <span class="qg-field__meta">
+                        <TemporalProviderSummary status={provider} />
+                        <Show when={!provider.discovered}>
+                          <span class="qg-inherited">No account discovered.</span>
+                        </Show>
+                      </span>
+                    </div>
+                    <div class="qg-field__control">
+                      <Switch
+                        appearance="compact"
+                        hideLabel
+                        checked={shown()}
+                        disabled={!temporalWritable() || busy()}
+                        onChange={() => toggleTemporalProvider(provider.providerId, shown())}
+                      >
+                        Show peak and off-peak pricing for {label} on Quota
+                      </Switch>
+                      <span class="qg-inherited" aria-hidden="true">
+                        {shown() ? "On" : "Off"}
+                      </span>
+                    </div>
+                  </div>
+                );
+              }}
+            </For>
+          </div>
+        </Show>
+        <Show when={providers().length > 0}>
+          <output class="qg-inherited" aria-live="polite">
+            {explicitCount() > 0
+              ? `${explicitCount()} manual ${explicitCount() === 1 ? "choice" : "choices"}; the rest follow discovered accounts.`
+              : "Defaults follow discovered accounts."}
+          </output>
+        </Show>
+      </>
+    );
   }
 
   /** One card per Quota card, with the same identity hierarchy and its own rows. */
@@ -706,7 +804,12 @@ export function SettingsView(props: {
 
         <For each={SETTINGS_GROUPS}>
           {(group) => (
-            <Show when={editableFields().some((field) => field.group === group.id)}>
+            <Show
+              when={
+                editableFields().some((field) => field.group === group.id) ||
+                (group.id === "temporal" && props.temporal !== undefined)
+              }
+            >
               <section class="qg-group" aria-labelledby={`qg-settings-${group.id}`}>
                 <h2 class="qg-group__title" id={`qg-settings-${group.id}`}>
                   {group.title}
@@ -715,28 +818,35 @@ export function SettingsView(props: {
                 <Show
                   when={group.id === "visibility"}
                   fallback={
-                    <For each={editableFields().filter((field) => field.group === group.id)}>
-                      {(field) => (
-                        <div
-                          class="qg-field"
-                          data-invalid={errorFor(field.key) ? "true" : undefined}
-                        >
-                          <div class="qg-field__text">
-                            <span class="qg-field__label">{field.label}</span>
-                            <span class="qg-field__meta">
-                              <Show when={field.help}>{(help) => <span>{help()}</span>}</Show>
-                              <Show when={sourceNote(field.key)}>
-                                {(note) => <span>{note()}</span>}
-                              </Show>
-                            </span>
-                            <Show when={errorFor(field.key)}>
-                              {(message) => <span class="qg-field__error">{message()}</span>}
-                            </Show>
-                          </div>
-                          <div class="qg-field__control">{renderControl(field)}</div>
-                        </div>
-                      )}
-                    </For>
+                    <Show
+                      when={group.id === "temporal"}
+                      fallback={
+                        <For each={editableFields().filter((field) => field.group === group.id)}>
+                          {(field) => (
+                            <div
+                              class="qg-field"
+                              data-invalid={errorFor(field.key) ? "true" : undefined}
+                            >
+                              <div class="qg-field__text">
+                                <span class="qg-field__label">{field.label}</span>
+                                <span class="qg-field__meta">
+                                  <Show when={field.help}>{(help) => <span>{help()}</span>}</Show>
+                                  <Show when={sourceNote(field.key)}>
+                                    {(note) => <span>{note()}</span>}
+                                  </Show>
+                                </span>
+                                <Show when={errorFor(field.key)}>
+                                  {(message) => <span class="qg-field__error">{message()}</span>}
+                                </Show>
+                              </div>
+                              <div class="qg-field__control">{renderControl(field)}</div>
+                            </div>
+                          )}
+                        </For>
+                      }
+                    >
+                      {renderTemporalSection()}
+                    </Show>
                   }
                 >
                   {renderVisibilitySection()}

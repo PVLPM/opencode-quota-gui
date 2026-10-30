@@ -28,6 +28,8 @@ export interface DisplayPreferences {
   cardOrder?: readonly string[];
   /** Legacy `dashboard.providerOrder`, used when `cardOrder` is empty. */
   providerOrder?: readonly string[];
+  /** Sparse explicit provider visibility overrides for live temporal chips. */
+  temporalProviderOverrides?: Readonly<Record<string, boolean>>;
 }
 
 export function unitSuffix(unit: AccountingUnit | undefined): string {

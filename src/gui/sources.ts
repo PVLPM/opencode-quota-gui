@@ -53,6 +53,12 @@ import {
   openAiOptionalVisibilityRows,
   type ProviderCardPreferences,
 } from "./provider-cards.js";
+import { TEMPORAL_QUOTA_POLICIES } from "./temporal-quota-policy-data.js";
+import {
+  buildTemporalStatus,
+  listTemporalProviderSources,
+  readBundledTemporalCatalog,
+} from "./temporal-status.js";
 import { resolveHostTimeZone } from "./time-zone.js";
 
 /**
@@ -211,6 +217,31 @@ export function selectQuotaProviders(
 ): QuotaProvider[] {
   const enabled = config.enabledProviders === "auto" ? undefined : new Set(config.enabledProviders);
   return providers.filter((provider) => enabled === undefined || enabled.has(provider.id));
+}
+
+/**
+ * Live temporal status is additive: a missing or invalid snapshot must never
+ * fail quota reads. All temporal-capable providers are projected, including
+ * those without an account; discovery only sets the default visibility.
+ */
+function temporalStatusForCards(
+  cards: QuotaSnapshot["providers"]["cards"],
+  nowMs: number,
+): QuotaSnapshot["temporal"] | undefined {
+  try {
+    const catalog = readBundledTemporalCatalog();
+    const providers = listTemporalProviderSources(catalog, TEMPORAL_QUOTA_POLICIES, cards);
+    if (providers.length === 0) return undefined;
+    return buildTemporalStatus({
+      providers,
+      nowMs,
+      routes: catalog.routes,
+      holidays: catalog.holidays,
+      quotaPolicies: TEMPORAL_QUOTA_POLICIES,
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 function cardPreferences(config: QuotaToastConfig): ProviderCardPreferences {
@@ -487,6 +518,8 @@ export function createDashboardReadSource(
           polledAtMs,
         },
       };
+      const temporal = temporalStatusForCards(cards, nowMs);
+      if (temporal) snapshot.temporal = temporal;
       lastQuotaSnapshot = snapshot;
       return snapshot;
     } catch (error) {

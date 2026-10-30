@@ -36,6 +36,16 @@ import { isCostedTokens, isDashboardEvent, isTokenStack } from "../contracts/gua
 import type { CardId, RowId } from "../contracts/identity";
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota";
 import { type BucketUnit, isRangeKey, type RangeKey, type RangeWindow } from "../contracts/ranges";
+import type {
+  TemporalEffect,
+  TemporalHoliday,
+  TemporalModelInterval,
+  TemporalModelStatus,
+  TemporalPhase,
+  TemporalPolicySource,
+  TemporalProviderStatus,
+  TemporalStatusSnapshot,
+} from "../contracts/temporal";
 
 /**
  * Browser-side HTTP data source (design spec §5.1, §5.3; R37).
@@ -130,6 +140,32 @@ const RUNWAY_KINDS = [
   "before_reset",
   "lasts_past_reset",
 ] as const satisfies readonly RunwayProjection["kind"][];
+
+const TEMPORAL_PHASES = [
+  "peak",
+  "offpeak",
+  "mixed",
+  "unknown",
+] as const satisfies readonly TemporalPhase[];
+
+const TEMPORAL_MODEL_PHASES = [
+  "peak",
+  "offpeak",
+  "unknown",
+] as const satisfies readonly TemporalModelStatus["state"][];
+
+const TEMPORAL_EFFECT_DIRECTIONS = [
+  "peak",
+  "offpeak",
+  "unchanged",
+] as const satisfies readonly TemporalEffect["direction"][];
+
+const TEMPORAL_EFFECT_UNITS = [
+  "api_price",
+  "quota_points",
+] as const satisfies readonly TemporalEffect["unit"][];
+
+const TEMPORAL_HOLIDAYS = ["CN", "US", "CA"] as const satisfies readonly TemporalHoliday[];
 
 function faulty(endpoint: string, detail: string): DashboardError {
   return new DashboardError(
@@ -520,6 +556,36 @@ function readGroupFilter(
   };
 }
 
+type GroupTemporalBreakdown = NonNullable<AnalyticsGroupSnapshot["temporalBreakdown"]>;
+type GroupTemporalBreakdownRow = GroupTemporalBreakdown["rows"][number];
+
+function readTemporalBreakdownRow(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+): GroupTemporalBreakdownRow {
+  const row = readRecord(value, endpoint, detail);
+  return {
+    identity: readEntityIdentity(row.identity, endpoint, `${detail}.identity`),
+    peak: readCostedTokens(row.peak, endpoint, `${detail}.peak`),
+    offpeak: readCostedTokens(row.offpeak, endpoint, `${detail}.offpeak`),
+  };
+}
+
+/** Model-detail-only historical split; absent on overviews, never invented. */
+function readGroupTemporalBreakdown(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+): GroupTemporalBreakdown {
+  const breakdown = readRecord(value, endpoint, detail);
+  return {
+    rows: readArray(breakdown.rows, endpoint, `${detail}.rows`).map((row) =>
+      readTemporalBreakdownRow(row, endpoint, `${detail}.rows[]`),
+    ),
+  };
+}
+
 function readGroupRow(value: JsonValue, endpoint: string, detail: string): AnalyticsGroupRow {
   const row = readRecord(value, endpoint, detail);
   return {
@@ -627,6 +693,13 @@ export function parseGroupSnapshot(
   if (root.filter !== undefined) {
     parsed.filter = readGroupFilter(root.filter, endpoint, "filter");
   }
+  if (root.temporalBreakdown !== undefined) {
+    parsed.temporalBreakdown = readGroupTemporalBreakdown(
+      root.temporalBreakdown,
+      endpoint,
+      "temporalBreakdown",
+    );
+  }
   return parsed;
 }
 
@@ -658,11 +731,142 @@ function readUsage(value: JsonValue | undefined, endpoint: string): Usage {
   };
 }
 
+function readTemporalEffect(value: JsonValue | undefined, endpoint: string): TemporalEffect {
+  const detail = "temporal.providers[].models[].effect";
+  const effect = readRecord(value, endpoint, detail);
+  return {
+    factor: readNumber(effect.factor, endpoint, `${detail}.factor`),
+    direction: readEnum(
+      effect.direction,
+      TEMPORAL_EFFECT_DIRECTIONS,
+      endpoint,
+      `${detail}.direction`,
+    ),
+    unit: readEnum(effect.unit, TEMPORAL_EFFECT_UNITS, endpoint, `${detail}.unit`),
+  };
+}
+
+function readTemporalInterval(value: JsonValue, endpoint: string): TemporalModelInterval {
+  const detail = "temporal.providers[].models[].intervals[]";
+  const interval = readRecord(value, endpoint, detail);
+  const parsed: TemporalModelInterval = {
+    startMs: readNumber(interval.startMs, endpoint, `${detail}.startMs`),
+    endMs: readNumber(interval.endMs, endpoint, `${detail}.endMs`),
+    phase: readEnum(interval.phase, TEMPORAL_MODEL_PHASES, endpoint, `${detail}.phase`),
+  };
+  if (interval.effect !== undefined) {
+    parsed.effect = readTemporalEffect(interval.effect, endpoint);
+  }
+  const reason = readOptionalText(interval.reason, endpoint, `${detail}.reason`);
+  if (reason !== undefined) parsed.reason = reason;
+  return parsed;
+}
+
+function readTemporalModel(value: JsonValue, endpoint: string): TemporalModelStatus {
+  const detail = "temporal.providers[].models[]";
+  const model = readRecord(value, endpoint, detail);
+  const parsed: TemporalModelStatus = {
+    modelId: readText(model.modelId, endpoint, `${detail}.modelId`),
+    state: readEnum(model.state, TEMPORAL_MODEL_PHASES, endpoint, `${detail}.state`),
+    intervals: readArray(model.intervals, endpoint, `${detail}.intervals`).map((interval) =>
+      readTemporalInterval(interval, endpoint),
+    ),
+  };
+  if (model.effect !== undefined) parsed.effect = readTemporalEffect(model.effect, endpoint);
+  const nextChangeAtMs = readOptionalNumber(
+    model.nextChangeAtMs,
+    endpoint,
+    `${detail}.nextChangeAtMs`,
+  );
+  if (nextChangeAtMs !== undefined) parsed.nextChangeAtMs = nextChangeAtMs;
+  const reason = readOptionalText(model.reason, endpoint, `${detail}.reason`);
+  if (reason !== undefined) parsed.reason = reason;
+  return parsed;
+}
+
+function readTemporalHoliday(
+  value: JsonValue,
+  endpoint: string,
+): TemporalProviderStatus["holidays"][number] {
+  const detail = "temporal.providers[].holidays[]";
+  const holiday = readRecord(value, endpoint, detail);
+  return {
+    jurisdiction: readEnum(
+      holiday.jurisdiction,
+      TEMPORAL_HOLIDAYS,
+      endpoint,
+      `${detail}.jurisdiction`,
+    ),
+    id: readText(holiday.id, endpoint, `${detail}.id`),
+    localStart: readText(holiday.localStart, endpoint, `${detail}.localStart`),
+    localEnd: readText(holiday.localEnd, endpoint, `${detail}.localEnd`),
+    startMs: readNumber(holiday.startMs, endpoint, `${detail}.startMs`),
+    endMs: readNumber(holiday.endMs, endpoint, `${detail}.endMs`),
+  };
+}
+
+function readTemporalSource(
+  value: JsonValue | undefined,
+  endpoint: string,
+): TemporalPolicySource | undefined {
+  if (value === undefined) return undefined;
+  const detail = "temporal.providers[].source";
+  const source = readRecord(value, endpoint, detail);
+  return {
+    label: readText(source.label, endpoint, `${detail}.label`),
+    url: readText(source.url, endpoint, `${detail}.url`),
+    accessedAt: readText(source.accessedAt, endpoint, `${detail}.accessedAt`),
+  };
+}
+
+function readTemporalProvider(value: JsonValue, endpoint: string): TemporalProviderStatus {
+  const detail = "temporal.providers[]";
+  const provider = readRecord(value, endpoint, detail);
+  const source = readTemporalSource(provider.source, endpoint);
+  return {
+    providerId: readText(provider.providerId, endpoint, `${detail}.providerId`),
+    providerLabel: readText(provider.providerLabel, endpoint, `${detail}.providerLabel`),
+    discovered: readBoolean(provider.discovered, endpoint, `${detail}.discovered`),
+    phase: readEnum(provider.phase, TEMPORAL_PHASES, endpoint, `${detail}.phase`),
+    models: readArray(provider.models, endpoint, `${detail}.models`).map((model) =>
+      readTemporalModel(model, endpoint),
+    ),
+    holidays: readArray(provider.holidays, endpoint, `${detail}.holidays`).map((holiday) =>
+      readTemporalHoliday(holiday, endpoint),
+    ),
+    ...(source ? { source } : {}),
+  };
+}
+
+function readTemporalStatus(
+  value: JsonValue | undefined,
+  endpoint: string,
+): TemporalStatusSnapshot | undefined {
+  if (value === undefined) return undefined;
+  const detail = "temporal";
+  const temporal = readRecord(value, endpoint, detail);
+  const snapshot = readRecord(temporal.snapshot, endpoint, `${detail}.snapshot`);
+  return {
+    generatedAtMs: readNumber(temporal.generatedAtMs, endpoint, `${detail}.generatedAtMs`),
+    providers: readArray(temporal.providers, endpoint, `${detail}.providers`).map((provider) =>
+      readTemporalProvider(provider, endpoint),
+    ),
+    snapshot: {
+      revision: readText(snapshot.revision, endpoint, `${detail}.snapshot.revision`),
+      generatedAtMs: readNumber(
+        snapshot.generatedAtMs,
+        endpoint,
+        `${detail}.snapshot.generatedAtMs`,
+      ),
+    },
+  };
+}
+
 /** Decodes the independent, range-free quota payload. */
 export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota"): QuotaSnapshot {
   const root = readRecord(value, endpoint, "not an object");
   const providers = readRecord(root.providers, endpoint, "providers");
-  return {
+  const parsed: QuotaSnapshot = {
     generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
     stale: readBoolean(root.stale, endpoint, "stale"),
     timeZone: readText(root.timeZone, endpoint, "timeZone"),
@@ -678,6 +882,9 @@ export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota")
       polledAtMs: readNumber(providers.polledAtMs, endpoint, "providers.polledAtMs"),
     },
   };
+  const temporal = readTemporalStatus(root.temporal, endpoint);
+  if (temporal !== undefined) parsed.temporal = temporal;
+  return parsed;
 }
 
 /** Decodes the compatible Analytics payload (`HomeSnapshot`, spec §5.2). */

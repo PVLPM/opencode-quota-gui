@@ -119,6 +119,7 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
   "dashboard.cardOrder",
+  "dashboard.temporalProviderOverrides",
 ] as const;
 
 export type QuotaToastSettingSourceKey = (typeof QUOTA_TOAST_SETTING_SOURCE_KEYS)[number];
@@ -411,6 +412,7 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
       hiddenRows: [...config.dashboard.hiddenRows],
       providerOrder: [...config.dashboard.providerOrder],
       cardOrder: [...config.dashboard.cardOrder],
+      temporalProviderOverrides: { ...config.dashboard.temporalProviderOverrides },
     },
   };
 }
@@ -699,6 +701,21 @@ function normalizeHiddenIdList(value: unknown): string[] | undefined {
   return dedupe(ids).slice(0, DASHBOARD_HIDDEN_ID_LIMIT);
 }
 
+/** Sparse provider → explicit visibility map. Only booleans are accepted. */
+function normalizeTemporalProviderOverrides(value: unknown): Record<string, boolean> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const entries = Object.entries(value);
+  if (entries.length > DASHBOARD_HIDDEN_ID_LIMIT) return undefined;
+  const overrides: [string, boolean][] = [];
+  for (const [providerId, enabled] of entries) {
+    if (providerId.length === 0 || providerId.length > 512 || typeof enabled !== "boolean") {
+      return undefined;
+    }
+    overrides.push([providerId, enabled]);
+  }
+  return Object.fromEntries(overrides);
+}
+
 function extractDashboardPatch(
   value: unknown,
   reportIssue?: (key: string, message: string) => void,
@@ -740,6 +757,18 @@ function extractDashboardPatch(
       key === "hiddenCards" && value.hiddenCardsVersion !== DASHBOARD_HIDDEN_CARDS_VERSION
         ? normalizeLegacyDashboardHiddenCards(ids)
         : ids;
+  }
+
+  if (hasOwnKey(value, "temporalProviderOverrides")) {
+    const overrides = normalizeTemporalProviderOverrides(value.temporalProviderOverrides);
+    if (overrides === undefined) {
+      reportIssue?.(
+        "dashboard.temporalProviderOverrides",
+        "expected an object of provider ids mapped to booleans",
+      );
+    } else {
+      patch.temporalProviderOverrides = overrides;
+    }
   }
 
   return Object.keys(patch).length > 0 ? patch : undefined;
@@ -1360,6 +1389,13 @@ function applyValidatedQuotaToastPatch(
     if (patch.dashboard.cardOrder) {
       config.dashboard.cardOrder = [...patch.dashboard.cardOrder];
       applySettingSource(settingSources, "dashboard.cardOrder", sourcePath);
+    }
+
+    if (patch.dashboard.temporalProviderOverrides) {
+      config.dashboard.temporalProviderOverrides = {
+        ...patch.dashboard.temporalProviderOverrides,
+      };
+      applySettingSource(settingSources, "dashboard.temporalProviderOverrides", sourcePath);
     }
   }
 }

@@ -6,6 +6,7 @@ import type { RangeKey } from "../../contracts/ranges";
 import { type DisplayPreferences, QuotaCardView } from "../components/quota-card";
 import { SortControl } from "../components/sort-control";
 import { EmptyNotice, Skeleton } from "../components/states";
+import { TemporalStatusStrip } from "../components/temporal-status";
 import { UsageChart } from "../components/usage-chart";
 import {
   formatExactCount,
@@ -48,48 +49,54 @@ export function QuotaView(props: {
     );
 
   return (
-    <>
-      <section class="qg-section" aria-labelledby="qg-home-quota">
-        <header class="qg-section__head">
-          <h2 class="qg-section__title" id="qg-home-quota">
-            Quota
-          </h2>
-          <span class="qg-section__meta">
-            Polled{" "}
-            {formatTimestampMinutes(props.snapshot.providers.polledAtMs, props.snapshot.timeZone)} ·{" "}
-            {props.snapshot.providers.enabledProviders === "auto"
-              ? "automatic provider selection"
-              : pluralize(props.snapshot.providers.enabledProviders.length, "enabled provider")}
-          </span>
-        </header>
-        <Show
-          when={shown().length > 0}
-          fallback={
-            <EmptyNotice
-              message={
-                props.snapshot.providers.cards.length > 0
-                  ? "Every provider card is hidden. Use the eye toggles in Settings to bring one back."
-                  : describeNoProviders(props.snapshot.providers.enabledProviders)
-              }
-            />
-          }
-        >
-          <div class="qg-card-grid">
-            <For each={shown()}>
-              {(card) => (
-                <QuotaCardView
-                  card={card}
-                  preferences={props.preferences}
-                  hiddenRows={props.hiddenRows}
-                  stale={props.stale}
-                  timeZone={props.snapshot.timeZone}
-                />
-              )}
-            </For>
-          </div>
-        </Show>
-      </section>
-    </>
+    <section class="qg-section" aria-labelledby="qg-home-quota">
+      <header class="qg-section__head">
+        <h2 class="qg-section__title" id="qg-home-quota">
+          Quota
+        </h2>
+        <span class="qg-section__meta">
+          Polled{" "}
+          {formatTimestampMinutes(props.snapshot.providers.polledAtMs, props.snapshot.timeZone)} ·{" "}
+          {props.snapshot.providers.enabledProviders === "auto"
+            ? "automatic provider selection"
+            : pluralize(props.snapshot.providers.enabledProviders.length, "enabled provider")}
+        </span>
+      </header>
+      <Show when={props.snapshot.temporal}>
+        {(temporal) => (
+          <TemporalStatusStrip
+            providers={temporal().providers}
+            overrides={props.preferences.temporalProviderOverrides}
+          />
+        )}
+      </Show>
+      <Show
+        when={shown().length > 0}
+        fallback={
+          <EmptyNotice
+            message={
+              props.snapshot.providers.cards.length > 0
+                ? "Every provider card is hidden. Use the eye toggles in Settings to bring one back."
+                : describeNoProviders(props.snapshot.providers.enabledProviders)
+            }
+          />
+        }
+      >
+        <div class="qg-card-grid">
+          <For each={shown()}>
+            {(card) => (
+              <QuotaCardView
+                card={card}
+                preferences={props.preferences}
+                hiddenRows={props.hiddenRows}
+                stale={props.stale}
+                timeZone={props.snapshot.timeZone}
+              />
+            )}
+          </For>
+        </div>
+      </Show>
+    </section>
   );
 }
 

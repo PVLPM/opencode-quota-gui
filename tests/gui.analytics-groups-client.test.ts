@@ -91,6 +91,59 @@ describe("grouped analytics browser transport", () => {
     expect(Object.hasOwn(parsed, "filter")).toBe(false);
   });
 
+  it("parses the optional model-detail temporal split and omits it on overviews", () => {
+    const payload = {
+      ...groupPayload(),
+      temporalBreakdown: {
+        rows: [
+          {
+            identity: { kind: "known", id: "openai" },
+            peak: costed({ input: 10, output: 4 }, { apiEquivalentCostUsd: 2 }),
+            offpeak: costed({ input: 5 }, { apiEquivalentCostUsd: 0.5 }),
+          },
+          {
+            identity: { kind: "unknown" },
+            peak: costed(),
+            offpeak: costed(),
+          },
+        ],
+      },
+    };
+    const parsed = parseGroupSnapshot(payload as never, "/api/v1/models/k.");
+    expect(parsed.temporalBreakdown?.rows).toHaveLength(2);
+    expect(parsed.temporalBreakdown?.rows[0]?.identity).toEqual({ kind: "known", id: "openai" });
+    expect(parsed.temporalBreakdown?.rows[0]?.peak.total).toBe(14);
+    expect(parsed.temporalBreakdown?.rows[0]?.peak.apiEquivalentCostUsd).toBe(2);
+    expect(parsed.temporalBreakdown?.rows[0]?.offpeak.total).toBe(5);
+    expect(parsed.temporalBreakdown?.rows[0]?.offpeak.apiEquivalentCostUsd).toBe(0.5);
+    expect(parsed.temporalBreakdown?.rows[1]?.identity).toEqual({ kind: "unknown" });
+
+    const plain = parseGroupSnapshot(groupPayload() as never, "/api/v1/models");
+    expect(plain.temporalBreakdown).toBeUndefined();
+    expect(Object.hasOwn(plain, "temporalBreakdown")).toBe(false);
+  });
+
+  it.each([
+    ["a non-object breakdown", []],
+    ["a non-array rows field", { rows: {} }],
+    [
+      "a malformed row identity",
+      { rows: [{ identity: { kind: "x" }, peak: costed(), offpeak: costed() }] },
+    ],
+    [
+      "a malformed peak total",
+      { rows: [{ identity: { kind: "unknown" }, peak: {}, offpeak: costed() }] },
+    ],
+    [
+      "a malformed off-peak total",
+      { rows: [{ identity: { kind: "unknown" }, peak: costed(), offpeak: { total: 1 } }] },
+    ],
+  ])("rejects a temporal breakdown with %s", (_label, temporalBreakdown) => {
+    expect(() =>
+      parseGroupSnapshot({ ...groupPayload(), temporalBreakdown } as never, "/api/v1/models/k."),
+    ).toThrow(DashboardError);
+  });
+
   it("parses optional child buckets aligned with each series bucket", () => {
     const payload = groupPayload();
     const series = payload.series as Record<string, unknown>[];

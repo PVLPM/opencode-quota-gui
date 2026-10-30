@@ -84,6 +84,7 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
   "dashboard.cardOrder",
+  "dashboard.temporalProviderOverrides",
 ] as const;
 
 /**
@@ -365,6 +366,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return [...config.dashboard.providerOrder];
       case "dashboard.cardOrder":
         return [...config.dashboard.cardOrder];
+      case "dashboard.temporalProviderOverrides":
+        return { ...config.dashboard.temporalProviderOverrides };
       case "dashboard.port":
         return config.dashboard.port;
     }
@@ -585,6 +588,21 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
           throw invalidSetting(key, `expected at most ${DASHBOARD_HIDDEN_ID_LIMIT} ids`);
         }
         return [...new Set(ids)];
+      }
+      case "dashboard.temporalProviderOverrides": {
+        if (!isPlainObject(value)) {
+          throw invalidSetting(key, "expected an object of provider ids mapped to booleans");
+        }
+        const entries = Object.entries(value);
+        if (entries.length > DASHBOARD_HIDDEN_ID_LIMIT) {
+          throw invalidSetting(key, `expected at most ${DASHBOARD_HIDDEN_ID_LIMIT} providers`);
+        }
+        for (const [providerId, enabled] of entries) {
+          if (providerId.length === 0 || providerId.length > 512 || typeof enabled !== "boolean") {
+            throw invalidSetting(key, "expected an object of provider ids mapped to booleans");
+          }
+        }
+        return Object.fromEntries(entries);
       }
       case "dashboard.port":
         throw invalidSetting(key, "this setting is read-only; edit the canonical file and restart");

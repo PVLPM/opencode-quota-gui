@@ -253,6 +253,28 @@ function childRow(root: TestNode, parentLabel: string, childLabel: string): Test
   return childRows(root, parentLabel).find((row) => labelOf(row) === childLabel);
 }
 
+/** Phase rows are nested inside the provider group, not sibling table rows. */
+function phaseRows(root: TestNode, providerLabel: string): TestNode[] {
+  const provider = rowByLabel(root, providerLabel);
+  const group = provider?.parent as TestNode | undefined;
+  if (!group) return [];
+  return byClass(group, "div", "qg-breakdown__row--phase");
+}
+
+function phaseLabelOf(row: TestNode): string {
+  const label = graph
+    .elementsNamed(row, "span")
+    .find((node) => hasClass(node, "qg-breakdown__phase"));
+  return label ? graph.textOf(label) : "";
+}
+
+function phaseTokens(row: TestNode): { text: string; title: string } | undefined {
+  const node = graph
+    .elementsNamed(row, "span")
+    .find((entry) => hasClass(entry, "qg-breakdown__tokens"));
+  return node ? { text: graph.textOf(node), title: String(node.props.title ?? "") } : undefined;
+}
+
 function summaryText(root: TestNode, label: string): string | undefined {
   const stat = graph
     .elementsNamed(root, "div")
@@ -2194,6 +2216,148 @@ describe("model and provider detail", () => {
         .elementsNamed(root, "span")
         .find((node) => node.props["aria-current"] === "page");
       expect(crumb && hasClass(crumb, "qg-breakable")).toBe(true);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("nests peak and off-peak rows under each provider route on model detail", () => {
+    const temporalBreakdown = {
+      rows: [
+        {
+          identity: known("openai"),
+          peak: costed({ input: 1_000_000 }, { apiEquivalentCostUsd: 3 }),
+          offpeak: costed({ input: 500_000 }, { apiEquivalentCostUsd: 1 }),
+        },
+        {
+          identity: known("anthropic"),
+          peak: costed({ input: 2_000_000 }, { apiEquivalentCostUsd: 4 }),
+          offpeak: costed({ input: 2_000_000 }, { apiEquivalentCostUsd: 2 }),
+        },
+      ],
+    };
+    const { root, dispose } = mountDetail(
+      modelDetailModule,
+      "ModelDetailView",
+      { ...modelAlphaSnapshot(), temporalBreakdown },
+      known("model-alpha"),
+    );
+    try {
+      const openaiGroup = (rowByLabel(root, "OpenAI") as TestNode).parent;
+      const openai = phaseRows(root, "OpenAI");
+      expect(openai.map(phaseLabelOf)).toEqual(["Peak", "Off-peak"]);
+      expect(openai.map((row) => row.props["data-level"])).toEqual(["phase", "phase"]);
+      expect(openai.map((row) => row.props["data-phase"])).toEqual(["peak", "offpeak"]);
+      // Each phase is a child of the provider's group, one level below the route.
+      expect(openai.every((row) => row.parent === openaiGroup)).toBe(true);
+      expect(graph.textOf(openai[0] as TestNode)).toContain("≈ USD 3.00");
+      expect(phaseTokens(openai[0] as TestNode)).toEqual({
+        text: "1.0M",
+        title: "1,000,000 tokens",
+      });
+      expect(graph.textOf(openai[1] as TestNode)).toContain("≈ USD 1.00");
+      expect(phaseTokens(openai[1] as TestNode)).toEqual({
+        text: "500k",
+        title: "500,000 tokens",
+      });
+
+      const anthropic = phaseRows(root, "Anthropic");
+      expect(anthropic.map(phaseLabelOf)).toEqual(["Peak", "Off-peak"]);
+      expect(graph.textOf(anthropic[0] as TestNode)).toContain("≈ USD 4.00");
+      expect(graph.textOf(anthropic[1] as TestNode)).toContain("≈ USD 2.00");
+      expect(phaseTokens(anthropic[1] as TestNode)).toEqual({
+        text: "2.0M",
+        title: "2,000,000 tokens",
+      });
+
+      // Only admitted provider routes get phase levels; the provider list is
+      // otherwise the same hierarchy it was before.
+      expect(phaseRows(root, "Google")).toHaveLength(0);
+      expect(rowLabels(root)).toEqual([
+        "OpenAI",
+        "Anthropic",
+        "Google",
+        "Mistral",
+        "DeepSeek",
+        "OpenRouter",
+      ]);
+      expect(breakdownRows(root)).toHaveLength(6);
+
+      // The data is no longer a separate provider/phase table appended below.
+      expect(graph.textOf(root)).not.toContain("Peak and off-peak history");
+
+      // The existing model-detail layout stays intact around the nested levels.
+      expect(byClass(root, "h2", "qg-page-title")).toHaveLength(1);
+      expect(chartShell(root)?.title && graph.textOf(chartShell(root)?.title as TestNode)).toBe(
+        "Usage by provider",
+      );
+
+      const empty = mountDetail(
+        modelDetailModule,
+        "ModelDetailView",
+        { ...modelAlphaSnapshot(), temporalBreakdown: { rows: [] } },
+        known("model-alpha"),
+      );
+      try {
+        expect(byClass(empty.root, "div", "qg-breakdown__row--phase")).toHaveLength(0);
+      } finally {
+        empty.dispose();
+      }
+    } finally {
+      dispose();
+    }
+  });
+
+  it("never nests temporal phase rows on provider detail", () => {
+    const { root, dispose } = mountDetail(
+      providerDetailModule,
+      "ProviderDetailView",
+      {
+        ...providerOpenAISnapshot(),
+        temporalBreakdown: {
+          rows: [
+            {
+              identity: known("openai"),
+              peak: costed({ input: 1_000_000 }, { apiEquivalentCostUsd: 3 }),
+              offpeak: costed({ input: 500_000 }, { apiEquivalentCostUsd: 1 }),
+            },
+          ],
+        },
+      },
+      known("openai"),
+    );
+    try {
+      expect(byClass(root, "div", "qg-breakdown__row--phase")).toHaveLength(0);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("never nests temporal phase rows on the models overview", () => {
+    const snapshot = {
+      ...modelSnapshot(),
+      temporalBreakdown: {
+        rows: [
+          {
+            identity: known("openai"),
+            peak: costed({ input: 1_000_000 }, { apiEquivalentCostUsd: 3 }),
+            offpeak: costed({ input: 500_000 }, { apiEquivalentCostUsd: 1 }),
+          },
+        ],
+      },
+    };
+    const root = graph.createTestRoot();
+    const dispose = graph.mount(
+      () =>
+        graph.createComponent(modelsViewModule.ModelsView, {
+          snapshot,
+          dimension: "model",
+          onDimensionChange: () => {},
+        }),
+      root,
+    );
+    try {
+      expect(byClass(root, "div", "qg-breakdown__row--phase")).toHaveLength(0);
     } finally {
       dispose();
     }

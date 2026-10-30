@@ -2178,6 +2178,7 @@ describe("settings page", () => {
         "dashboard.hiddenRows",
         "dashboard.port",
         "dashboard.providerOrder",
+        "dashboard.temporalProviderOverrides",
         "enabledProviders",
         "formatStyle",
         "minIntervalMs",
@@ -2207,6 +2208,7 @@ describe("settings page", () => {
     expect(SETTINGS_GROUPS.map((group) => group.id)).toEqual([
       "wait",
       "display",
+      "temporal",
       "advanced",
       "visibility",
       "dashboard",
