@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { orderCardsByPreference } from "../src/contracts/card-order";
@@ -101,6 +101,7 @@ import {
   stack,
   usage,
 } from "./fixtures/gui-ui-fixtures.js";
+import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
  * Section states, view composition, and settings semantics (design spec §10,
@@ -166,7 +167,7 @@ let renderServer: ViteDevServer | undefined;
 let renderGraph: RenderGraph;
 
 beforeAll(async () => {
-  const created = await createServer({
+  const created = await createIsolatedViteServer({
     configFile: false,
     root: path.join(repoRoot, "src/ui"),
     // The same Solid include as the client build, compiled for the server so a
@@ -207,7 +208,7 @@ beforeAll(async () => {
     load: (modulePath) => created.ssrLoadModule(modulePath) as Promise<Record<string, unknown>>,
   };
 
-  const rendering = await createServer({
+  const rendering = await createIsolatedViteServer({
     configFile: false,
     root: repoRoot,
     plugins: [
@@ -582,15 +583,15 @@ describe("section state machine", () => {
 
     expect(
       valueText(quantityRow("1.62481239", { kind: "currency", code: "USD" }), preferences),
-    ).toBe("1.62 USD");
+    ).toBe("$1.62");
     expect(valueText(quantityRow("0", { kind: "currency", code: "USD" }), preferences)).toBe(
-      "0.00 USD",
+      "$0.00",
     );
     expect(valueText(quantityRow("-0.004", { kind: "currency", code: "USD" }), preferences)).toBe(
-      "0.00 USD",
+      "$0.00",
     );
     expect(valueText(quantityRow("-1.625", { kind: "currency", code: "USD" }), preferences)).toBe(
-      "-1.63 USD",
+      "-$1.63",
     );
     expect(
       valueText(quantityRow("1.62481239", { kind: "count", unit: "token" }), preferences),
@@ -1653,7 +1654,7 @@ describe("usage chart", () => {
       ]),
     });
     expect(text(free)).toContain("Free");
-    expect(text(free)).not.toContain("≈ USD 0.00");
+    expect(text(free)).not.toContain("≈ $0.00");
 
     const partial = await renderView("/components/usage-chart.tsx", "UsageChart", {
       usage: usage("7d", [
@@ -1712,8 +1713,8 @@ describe("usage chart", () => {
   it("formats numbers and cost predictably", () => {
     expect(formatTokenCount(9250)).toBe("9.3k");
     expect(formatTokenCount(999)).toBe("999");
-    expect(formatApiEquivalentCost(null)).toBe("≈ USD —");
-    expect(formatApiEquivalentCost(1.5)).toBe("≈ USD 1.50");
+    expect(formatApiEquivalentCost(null)).toBe("≈ $—");
+    expect(formatApiEquivalentCost(1.5)).toBe("≈ $1.50");
     expect(formatPercent(62)).toBe("62%");
     // Quota percentages display as whole numbers, including below 10%.
     expect(formatPercent(8)).toBe("8%");
@@ -1779,7 +1780,7 @@ describe("project view composition", () => {
     const header = html.slice(0, html.indexOf('class="qg-summary"'));
     expect(header).toContain("alpha-main");
     expect(text(header)).not.toContain("4 sessions");
-    expect(text(header)).not.toContain("≈ USD");
+    expect(text(header)).not.toContain("≈ $");
     expect(text(header)).not.toContain("tokens");
     const summary = html.slice(
       html.indexOf('class="qg-summary"'),
@@ -1795,7 +1796,7 @@ describe("project view composition", () => {
     expect(html).toContain('class="qg-chart__title">Daily token usage</span>');
     expect(html.match(/class="qg-summary-number"/g) ?? []).toHaveLength(0);
     expect(html.match(/class="qg-summary-cost"/g) ?? []).toHaveLength(0);
-    expect(text(html).match(/≈ USD/g) ?? []).toHaveLength(1);
+    expect(text(html).match(/≈ \$/g) ?? []).toHaveLength(1);
   });
 
   it("shows a visible Partial estimate note in the project summary", async () => {
@@ -2178,6 +2179,7 @@ describe("settings page", () => {
         "dashboard.hiddenRows",
         "dashboard.port",
         "dashboard.providerOrder",
+        "dashboard.temporalProviderOverrides",
         "enabledProviders",
         "formatStyle",
         "minIntervalMs",
@@ -2207,6 +2209,7 @@ describe("settings page", () => {
     expect(SETTINGS_GROUPS.map((group) => group.id)).toEqual([
       "wait",
       "display",
+      "temporal",
       "advanced",
       "visibility",
       "dashboard",
@@ -6173,10 +6176,10 @@ describe("styles and dependency boundaries", () => {
     expect(wrapper).toContain('import "@opencode/ui/styles"');
   });
 
-  it("always shows the ISO currency code and never a bare symbol", () => {
-    expect(formatApiEquivalentCost(0)).toBe("≈ USD 0.00");
-    expect(formatApiEquivalentCost(1234.5)).toBe("≈ USD 1234.50");
-    expect(formatApiEquivalentCost(0)).not.toContain("$");
+  it("uses a bare dollar sign for visible USD and never the internal ISO code", () => {
+    expect(formatApiEquivalentCost(0)).toBe("≈ $0.00");
+    expect(formatApiEquivalentCost(1234.5)).toBe("≈ $1234.50");
+    expect(formatApiEquivalentCost(0)).not.toContain("USD");
     expect(stack({ input: 1 }).input).toBe(1);
   });
 });

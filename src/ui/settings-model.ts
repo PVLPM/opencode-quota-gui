@@ -12,7 +12,13 @@ import type { DisplayPreferences } from "./components/quota-card";
  * the page only offers what the server reports as writable.
  */
 
-export type SettingsGroupId = "wait" | "display" | "advanced" | "visibility" | "dashboard";
+export type SettingsGroupId =
+  | "wait"
+  | "display"
+  | "temporal"
+  | "advanced"
+  | "visibility"
+  | "dashboard";
 
 export interface SettingsGroupDescriptor {
   id: SettingsGroupId;
@@ -23,6 +29,11 @@ export interface SettingsGroupDescriptor {
 export const SETTINGS_GROUPS: readonly SettingsGroupDescriptor[] = [
   { id: "wait", title: "Wait for quota reset" },
   { id: "display", title: "Display" },
+  {
+    id: "temporal",
+    title: "Temporal pricing",
+    note: "Live peak and off-peak status. Discovered accounts start on; each switch keeps an explicit on or off choice.",
+  },
   {
     id: "advanced",
     title: "Advanced",
@@ -44,6 +55,7 @@ export type SettingsControl =
   | "providers"
   | "windows"
   | "list"
+  | "map"
   | "readonly";
 
 export interface SettingsField {
@@ -228,6 +240,13 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     hidden: true,
   },
   {
+    key: "dashboard.temporalProviderOverrides",
+    group: "temporal",
+    control: "map",
+    label: "Temporal provider overrides",
+    hidden: true,
+  },
+  {
     key: "dashboard.port",
     group: "dashboard",
     control: "readonly",
@@ -261,7 +280,7 @@ export function validateValue(
   value: JsonValue | undefined,
 ): string | undefined {
   if (value === undefined || value === null) {
-    if (field.control === "list") return undefined;
+    if (field.control === "list" || field.control === "map") return undefined;
     return field.clearable ? undefined : `${field.label} needs a value.`;
   }
   switch (field.control) {
@@ -327,6 +346,13 @@ export function validateValue(
       return Array.isArray(value) && value.every((entry) => typeof entry === "string")
         ? undefined
         : `${field.label} takes a list of ids.`;
+    case "map":
+      return value !== null &&
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        Object.values(value).every((entry) => typeof entry === "boolean")
+        ? undefined
+        : `${field.label} takes provider ids mapped to true or false.`;
     default:
       return undefined;
   }
@@ -385,6 +411,18 @@ export function windowSelection(value: JsonValue | undefined): string[] {
 export function stringList(value: JsonValue | undefined): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+/** Sparse explicit provider choices; malformed entries are ignored. */
+export function temporalProviderOverridesFromValue(
+  value: JsonValue | undefined,
+): Record<string, boolean> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries: [string, boolean][] = [];
+  for (const [providerId, enabled] of Object.entries(value)) {
+    if (typeof enabled === "boolean") entries.push([providerId, enabled]);
+  }
+  return Object.fromEntries(entries);
 }
 
 /** Labels are presentation only; ordering and toggles always use cardId. */
@@ -505,6 +543,9 @@ export function displayPreferencesFromValues(
   const percentMode = values.percentDisplayMode === "used" ? "used" : "remaining";
   const cardOrder = stringList(values["dashboard.cardOrder"]);
   const providerOrder = stringList(values["dashboard.providerOrder"]);
+  const temporalProviderOverrides = temporalProviderOverridesFromValue(
+    values["dashboard.temporalProviderOverrides"],
+  );
   return {
     percentMode,
     percentLabelStyle: values.percentLabelStyle === "bare" ? "bare" : "full",
@@ -514,6 +555,7 @@ export function displayPreferencesFromValues(
     // view already had when neither order was configured.
     ...(cardOrder.length > 0 ? { cardOrder } : {}),
     ...(providerOrder.length > 0 ? { providerOrder } : {}),
+    ...(Object.keys(temporalProviderOverrides).length > 0 ? { temporalProviderOverrides } : {}),
   };
 }
 

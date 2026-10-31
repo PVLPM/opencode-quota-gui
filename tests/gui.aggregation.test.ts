@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
  * P3 analytics lane — home usage (spec §6, R29–R31, R48, R50).
@@ -16,31 +16,38 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
   const PARTIAL_MODEL = "input-only";
   const FREE_PROVIDER = "free-labs";
   const FREE_MODEL = "zero-cost";
+  const TEMPORAL_PROVIDER = "temporal-labs";
+  const TEMPORAL_MODEL = "peak-1";
   return {
     ...actual,
     hasCost: (providerID: string, modelID: string) =>
       (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
       (providerID === FREE_PROVIDER && modelID === FREE_MODEL) ||
+      (providerID === TEMPORAL_PROVIDER && modelID === TEMPORAL_MODEL) ||
       actual.hasCost(providerID, modelID),
     hasProvider: (providerID: string) =>
       providerID === FAKE_PROVIDER ||
       providerID === PARTIAL_PROVIDER ||
       providerID === FREE_PROVIDER ||
+      providerID === TEMPORAL_PROVIDER ||
       actual.hasProvider(providerID),
     isModelsDevProviderId: (providerID: string) =>
       providerID === FAKE_PROVIDER ||
       providerID === PARTIAL_PROVIDER ||
       providerID === FREE_PROVIDER ||
+      providerID === TEMPORAL_PROVIDER ||
       actual.isModelsDevProviderId(providerID),
     hasModel: (providerID: string, modelID: string) =>
       (providerID === FAKE_PROVIDER && modelID === FAKE_MODEL) ||
       (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
       (providerID === FREE_PROVIDER && modelID === FREE_MODEL) ||
+      (providerID === TEMPORAL_PROVIDER && modelID === TEMPORAL_MODEL) ||
       actual.hasModel(providerID, modelID),
     lookupCost: (providerID: string, modelID: string) => {
       if (providerID === FAKE_PROVIDER) return null;
       if (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) return { input: 2 };
       if (providerID === FREE_PROVIDER && modelID === FREE_MODEL) return { input: 0, output: 0 };
+      if (providerID === TEMPORAL_PROVIDER && modelID === TEMPORAL_MODEL) return { input: 1 };
       return actual.lookupCost(providerID, modelID);
     },
   };
@@ -48,6 +55,11 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
 
 import type { CostedTokens, ProjectActivityRow } from "../src/contracts/dashboard.js";
 import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/aggregation.js";
+import {
+  __resetTemporalSnapshotForTests,
+  normalizeTemporalSnapshot,
+  setTemporalSnapshotForTests,
+} from "../src/lib/modelsdev-temporal.js";
 import type {
   OpenCodeCompactionMarker,
   OpenCodeProjectInfo,
@@ -59,6 +71,28 @@ import { formatCostText, isAuthoritativelyFree } from "../src/ui/model-analytics
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 const NOW = Date.UTC(2026, 0, 5, 12, 0, 0); // 2026-01-05T12:00:00Z, UTC-hour aligned
+const TEMPORAL_REVISION = "e".repeat(40);
+const TEMPORAL_TEST_PROVIDER = "temporal-labs";
+const TEMPORAL_TEST_MODEL = "peak-1";
+const CN_2026 = {
+  timeZone: "Asia/Shanghai",
+  source: "https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html",
+  published: "2025-11-04",
+  intervals: [
+    {
+      id: "new-year",
+      localStart: "2026-01-01",
+      localEnd: "2026-01-04",
+      startMs: 1_767_196_800_000,
+      endMs: 1_767_456_000_000,
+    },
+  ],
+  makeupWorkdays: [],
+};
+
+afterEach(() => {
+  __resetTemporalSnapshotForTests();
+});
 
 type RawTokenCounts = OpenCodeRawAssistantRow["tokens"];
 
@@ -346,6 +380,62 @@ describe("home usage token accounting and pricing", () => {
     expect(usage.totals.unpricedTokens).toBe(0);
     expect(usage.totals.unknownTokens).toBe(0);
     expect(usage.buckets[23]?.tokens).toEqual(usage.totals);
+  });
+
+  it("prices each completed row at its assistant completion instant", () => {
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [TEMPORAL_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: "providers/temporal-labs/models/peak-1.toml",
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 2,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const dataset = makeDataset({
+      sessions: [sessionInfo({ id: "ses_s", projectID: "proj_p", createdMs: NOW - 7 * HOUR_MS })],
+      messages: [
+        assistantRow(
+          "ses_s",
+          "msg_off_peak",
+          NOW - 7 * HOUR_MS,
+          NOW - 6 * HOUR_MS,
+          { input: 1_000_000 },
+          { providerID: TEMPORAL_TEST_PROVIDER, modelID: TEMPORAL_TEST_MODEL },
+        ),
+        assistantRow(
+          "ses_s",
+          "msg_peak",
+          NOW - HOUR_MS,
+          NOW - 30 * 60_000,
+          { input: 1_000_000 },
+          { providerID: TEMPORAL_TEST_PROVIDER, modelID: TEMPORAL_TEST_MODEL },
+        ),
+      ],
+    });
+
+    const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+    expect(usage.totals.input).toBe(2_000_000);
+    expect(usage.totals.apiEquivalentCostUsd).toBeCloseTo(3, 10);
+    expect(usage.totals.unpricedTokens).toBe(0);
   });
 
   it("reports unknown-priced tokens transparently without inventing a cost", () => {

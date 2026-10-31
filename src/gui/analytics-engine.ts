@@ -38,6 +38,7 @@ import {
 import { createUsageAnalytics, UNKNOWN_PROJECT_ID } from "./aggregation.js";
 import { createAnalyticsIndexes } from "./analytics-indexes.js";
 import { type AnalyticsModel, createAnalyticsModel } from "./analytics-model.js";
+import { getAnalyticsPricingFingerprint } from "./analytics-pricing-revision.js";
 import type { AnalyticsPhaseMetrics } from "./analytics-protocol.js";
 import { type AnalyticsReader, createAnalyticsReader } from "./analytics-reader.js";
 import {
@@ -420,6 +421,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   let closePromise: Promise<void> | undefined;
   let modelHydrated = false;
   let modelDirty = true;
+  /** Exact combined pricing fingerprint the model and derived DTOs were built from. */
+  let pricingRevision = getAnalyticsPricingFingerprint();
   let lastPresentationSaveAtMs = 0;
   let presentationSavedAtMs = 0;
   let generation = 0;
@@ -1210,6 +1213,28 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
 
   function invalidateGroupSnapshots(): void {
     groupCache.clear();
+  }
+
+  /**
+   * Cached Home/Project/Session/group DTOs contain derived costs. If the
+   * combined pricing/temporal fingerprint changes, those DTOs and the hydrated
+   * model no longer certify the rates that produced them, so rebuild them
+   * instead of serving stale prices.
+   */
+  function ensurePricingRevision(): void {
+    const current = getAnalyticsPricingFingerprint();
+    if (current === pricingRevision) return;
+    pricingRevision = current;
+    state.presentation = undefined;
+    warmPresentation = undefined;
+    warmSourceIdentity = undefined;
+    warmIdentityVerification = undefined;
+    warmIdentityVerifiedGeneration = -1;
+    sidecarNewerThanIndex = false;
+    lastPresentationSaveAtMs = 0;
+    modelHydrated = false;
+    modelDirty = true;
+    invalidateGroupSnapshots();
   }
 
   /**
@@ -2505,6 +2530,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (!isRangeKey(range)) throw new AnalyticsLookupError("bad-request");
       if (closed) throw new Error("analytics closed");
       await ensureLoaded();
+      ensurePricingRevision();
       const atMs = now();
       const window = rangeWindow(range, atMs);
       lastGlobalRange.value = widerRange(lastGlobalRange.value, range);
@@ -2571,6 +2597,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (!isAnalyticsGroupQuery(query)) throw new AnalyticsLookupError("bad-request");
       if (closed) throw new Error("analytics closed");
       await ensureLoaded();
+      ensurePricingRevision();
       const { range } = query;
       const atMs = now();
       const window = rangeWindow(range, atMs);
@@ -2663,6 +2690,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (closed) throw new Error("analytics closed");
       if (!projectId) throw new AnalyticsLookupError("bad-request");
       await ensureLoaded();
+      ensurePricingRevision();
       const atMs = now();
       lastProjectScopes.set(projectId, widerRange(lastProjectScopes.get(projectId), range));
       const cached = cachedProject(projectId, range);
@@ -2744,6 +2772,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (closed) throw new Error("analytics closed");
       if (!sessionId) throw new AnalyticsLookupError("bad-request");
       await ensureLoaded();
+      ensurePricingRevision();
       lastDetailSessionIds.add(sessionId);
       trimSet(lastDetailSessionIds, MAX_SCOPE_BATCH * 4);
       const cached = cachedSession(sessionId);
@@ -2787,6 +2816,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     async refresh() {
       if (closed) throw new Error("analytics closed");
       await ensureIndexLoaded();
+      ensurePricingRevision();
       const atMs = now();
       const hasInterests =
         lastGlobalRange.value !== undefined ||

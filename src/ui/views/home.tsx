@@ -48,59 +48,47 @@ export function QuotaView(props: {
     );
 
   return (
-    <>
-      <section class="qg-section" aria-labelledby="qg-home-quota">
-        <header class="qg-section__head">
-          <h2 class="qg-section__title" id="qg-home-quota">
-            Quota
-          </h2>
-          <span class="qg-section__meta">
-            Polled{" "}
-            {formatTimestampMinutes(props.snapshot.providers.polledAtMs, props.snapshot.timeZone)} ·{" "}
-            {props.snapshot.providers.enabledProviders === "auto"
-              ? "automatic provider selection"
-              : pluralize(props.snapshot.providers.enabledProviders.length, "enabled provider")}
-          </span>
-        </header>
-        <Show
-          when={shown().length > 0}
-          fallback={
-            <EmptyNotice
-              message={
-                props.snapshot.providers.cards.length > 0
-                  ? "Every provider card is hidden. Use the eye toggles in Settings to bring one back."
-                  : describeNoProviders(props.snapshot.providers.enabledProviders)
-              }
-            />
-          }
-        >
-          <div class="qg-card-grid">
-            <For each={shown()}>
-              {(card) => (
-                <QuotaCardView
-                  card={card}
-                  preferences={props.preferences}
-                  hiddenRows={props.hiddenRows}
-                  stale={props.stale}
-                  timeZone={props.snapshot.timeZone}
-                />
-              )}
-            </For>
-          </div>
-        </Show>
-      </section>
-    </>
+    <section class="qg-section qg-quota" id="qg-home-quota" aria-label="Quota">
+      <Show
+        when={shown().length > 0}
+        fallback={
+          <EmptyNotice
+            message={
+              props.snapshot.providers.cards.length > 0
+                ? "Every provider card is hidden. Use the eye toggles in Settings to bring one back."
+                : describeNoProviders(props.snapshot.providers.enabledProviders)
+            }
+          />
+        }
+      >
+        <div class="qg-card-grid">
+          <For each={shown()}>
+            {(card) => (
+              <QuotaCardView
+                card={card}
+                preferences={props.preferences}
+                hiddenRows={props.hiddenRows}
+                stale={props.stale}
+                timeZone={props.snapshot.timeZone}
+              />
+            )}
+          </For>
+        </div>
+      </Show>
+      <footer class="qg-quota__meta">
+        Polled{" "}
+        {formatTimestampMinutes(props.snapshot.providers.polledAtMs, props.snapshot.timeZone)} ·{" "}
+        {props.snapshot.providers.enabledProviders === "auto"
+          ? "automatic provider selection"
+          : pluralize(props.snapshot.providers.enabledProviders.length, "enabled provider")}
+      </footer>
+    </section>
   );
 }
 
 export function QuotaLoading(): JSX.Element {
   return (
-    <section class="qg-section" aria-labelledby="qg-loading-quota">
-      <header class="qg-section__head">
-        <h2 class="qg-section__title" id="qg-loading-quota">
-          Quota
-        </h2>
-      </header>
+    <section class="qg-section" aria-label="Quota">
       <div class="qg-card-grid">
         <Skeleton label="Loading providers" />
       </div>

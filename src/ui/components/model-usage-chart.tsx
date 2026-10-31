@@ -380,7 +380,7 @@ export function ModelUsageChart(props: {
                   y={geometry().plot.top - 6}
                   text-anchor="end"
                 >
-                  API-EQUIVALENT (USD)
+                  API-EQUIVALENT ($)
                 </text>
                 <For each={costOverlay().ticks}>
                   {(tick) => (

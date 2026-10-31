@@ -16,6 +16,7 @@ import {
   disambiguatedIdentityLabel,
   entityKey,
   estimateNote,
+  exactCostTitle,
   formatCostText,
   identityLabel,
   identityTitle,
@@ -366,14 +367,20 @@ describe("model analytics presentation", () => {
   });
 
   it("renders an absent priced total as Unpriced, never as a zero-cost estimate", () => {
-    expect(formatApiEquivalentCostText(1.2, 100)).toBe("≈ USD 1.20");
-    expect(formatApiEquivalentCostText(0, 100)).toBe("≈ USD 0.00");
+    expect(formatApiEquivalentCostText(1.2, 100)).toBe("≈ $1.20");
+    expect(formatApiEquivalentCostText(0, 100)).toBe("≈ $0.00");
     expect(formatApiEquivalentCostText(null, 100)).toBe("Unpriced");
     expect(formatApiEquivalentCostText(null, 0)).toBe("—");
-    expect(formatApiEquivalentCostFine(0.0042)).toBe("≈ USD 0.0042");
-    expect(formatApiEquivalentCostFine(0.42)).toBe("≈ USD 0.42");
-    expect(formatApiEquivalentCostFine(0)).toBe("≈ USD 0.00");
-    expect(formatApiEquivalentCostFine(null)).toBe("≈ USD —");
+    expect(formatApiEquivalentCostFine(0.0042)).toBe("≈ $0.0042");
+    expect(formatApiEquivalentCostFine(0.42)).toBe("≈ $0.42");
+    expect(formatApiEquivalentCostFine(0)).toBe("≈ $0.00");
+    expect(formatApiEquivalentCostFine(null)).toBe("≈ $—");
+    expect(exactCostTitle(costed({ input: 1 }, { apiEquivalentCostUsd: 1.234567 }))).toBe(
+      "API-equivalent estimate: $1.234567. Not actual billed spend.",
+    );
+    expect(exactCostTitle(costed({ input: 1 }, { apiEquivalentCostUsd: null }))).toBe(
+      "No priced tokens in this total.",
+    );
   });
 
   it("shows Free only when every token is authoritatively priced at exactly zero", () => {
@@ -393,10 +400,10 @@ describe("model analytics presentation", () => {
 
     expect(formatCostText(free)).toBe("Free");
     expect(costValueTitle(free)).toContain("Free");
-    expect(formatCostText(rounded)).toBe("≈ USD 0.00");
-    expect(formatCostText(partialZero)).toBe("≈ USD 0.00");
+    expect(formatCostText(rounded)).toBe("≈ $0.00");
+    expect(formatCostText(partialZero)).toBe("≈ $0.00");
     expect(costValueTitle(partialZero)).not.toContain("Free");
-    expect(formatCostText(unknownZero)).toBe("≈ USD 0.00");
+    expect(formatCostText(unknownZero)).toBe("≈ $0.00");
     expect(formatCostText(unpriced)).toBe("Unpriced");
     expect(formatCostText(empty)).toBe("—");
   });

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Model-only lane: deterministic fork ownership, incremental rollups, hour
@@ -21,6 +21,10 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
   const ZERO_MODEL = "zero-1";
   const FREE_PROVIDER = "free-labs";
   const FREE_MODEL = "free-1";
+  const TEMPORAL_PROVIDER = "temporal-labs";
+  const TEMPORAL_MODEL = "peak-1";
+  const PLAIN_PROVIDER = "plain-labs";
+  const UNRESOLVED_PROVIDER = "unresolved-labs";
   const RATES = { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };
   const FREE_RATES = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0 };
   const PRICEY_RATES = {
@@ -36,12 +40,18 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
     MIXED_PROVIDER,
     ZERO_PROVIDER,
     FREE_PROVIDER,
+    TEMPORAL_PROVIDER,
+    PLAIN_PROVIDER,
+    UNRESOLVED_PROVIDER,
   ]);
   const PRICED_MODELS: ReadonlySet<string> = new Set([
     `${EDGE_PROVIDER}\u0000${EDGE_MODEL}`,
     `${MIXED_PROVIDER}\u0000${MIXED_PRICED_MODEL}`,
     `${ZERO_PROVIDER}\u0000${ZERO_MODEL}`,
     `${FREE_PROVIDER}\u0000${FREE_MODEL}`,
+    `${TEMPORAL_PROVIDER}\u0000${TEMPORAL_MODEL}`,
+    `${PLAIN_PROVIDER}\u0000${TEMPORAL_MODEL}`,
+    `${UNRESOLVED_PROVIDER}\u0000${TEMPORAL_MODEL}`,
   ]);
   const KNOWN_MODELS: ReadonlySet<string> = new Set([
     `${FAKE_PROVIDER}\u0000${FAKE_MODEL}`,
@@ -71,6 +81,15 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
       if (providerID === FREE_PROVIDER) {
         return modelID === FREE_MODEL ? FREE_RATES : null;
       }
+      if (providerID === TEMPORAL_PROVIDER) {
+        return modelID === TEMPORAL_MODEL ? RATES : null;
+      }
+      if (providerID === PLAIN_PROVIDER) {
+        return modelID === TEMPORAL_MODEL ? RATES : null;
+      }
+      if (providerID === UNRESOLVED_PROVIDER) {
+        return modelID === TEMPORAL_MODEL ? RATES : null;
+      }
       if (providerID === FAKE_PROVIDER) return null;
       return actual.lookupCost(providerID, modelID);
     },
@@ -84,6 +103,11 @@ import {
   createAnalyticsModel,
   type HomeAnalyticsRollup,
 } from "../src/gui/analytics-model.js";
+import {
+  __resetTemporalSnapshotForTests,
+  normalizeTemporalSnapshot,
+  setTemporalSnapshotForTests,
+} from "../src/lib/modelsdev-temporal.js";
 import type {
   OpenCodeProjectInfo,
   OpenCodeRawAssistantRow,
@@ -95,6 +119,26 @@ const DAY = 24 * HOUR;
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
 const NOW_HOUR = Math.floor(NOW / HOUR) * HOUR;
 const PROJECT_IDS = ["p1", "p2"];
+const TEMPORAL_REVISION = "b".repeat(40);
+const TEMPORAL_TEST_PROVIDER = "temporal-labs";
+const TEMPORAL_TEST_MODEL = "peak-1";
+const PLAIN_TEST_PROVIDER = "plain-labs";
+const UNRESOLVED_TEST_PROVIDER = "unresolved-labs";
+const CN_2026 = {
+  timeZone: "Asia/Shanghai",
+  source: "https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html",
+  published: "2025-11-04",
+  intervals: [
+    {
+      id: "new-year",
+      localStart: "2026-01-01",
+      localEnd: "2026-01-04",
+      startMs: 1_767_196_800_000,
+      endMs: 1_767_456_000_000,
+    },
+  ],
+  makeupWorkdays: [],
+};
 
 /** UTC day boundary; the default analytics model zone is UTC. */
 function utcDayStart(timestampMs: number): number {
@@ -824,6 +868,10 @@ describe("analytics model: grouped lifetime bucket origins", () => {
 });
 
 describe("analytics model: price status", () => {
+  afterEach(() => {
+    __resetTemporalSnapshotForTests();
+  });
+
   it("keeps priced, unpriced, unknown, and zero-token rows distinct", () => {
     const sessions = [sessionInfo("ses_a", "p1")];
     const completedAtMs = NOW_HOUR - 2 * HOUR;
@@ -880,6 +928,700 @@ describe("analytics model: price status", () => {
         .home("24h", NOW)
         .usage.buckets.every((bucket) => bucket.tokens.apiEquivalentCostUsd === null),
     ).toBe(true);
+  });
+
+  it("prices each physical row at its assistant completion instant", () => {
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [TEMPORAL_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: "providers/temporal-labs/models/peak-1.toml",
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 2,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const sessions = [sessionInfo("ses_a", "p1")];
+    const model = createModel(sessions, [
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_off_peak",
+        completedAtMs: NOW_HOUR - 6 * HOUR,
+        tokens: { input: 1_000_000 },
+        providerID: TEMPORAL_TEST_PROVIDER,
+        modelID: TEMPORAL_TEST_MODEL,
+      }),
+      row({
+        sessionID: "ses_a",
+        messageID: "msg_peak",
+        completedAtMs: NOW_HOUR - 30 * 60_000,
+        tokens: { input: 1_000_000 },
+        providerID: TEMPORAL_TEST_PROVIDER,
+        modelID: TEMPORAL_TEST_MODEL,
+      }),
+    ]);
+
+    const totals = model.home("24h", NOW).usage.totals;
+    expect(totals.input).toBe(2_000_000);
+    expect(totals.apiEquivalentCostUsd).toBeCloseTo(3, 10);
+  });
+
+  it("splits a model->provider detail by exact route and phase, never on overviews", () => {
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [TEMPORAL_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: `providers/${TEMPORAL_TEST_PROVIDER}/models/${TEMPORAL_TEST_MODEL}.toml`,
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 2,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_off_peak",
+          completedAtMs: NOW_HOUR - 3 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID: TEMPORAL_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_peak",
+          completedAtMs: NOW_HOUR - 1 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID: TEMPORAL_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_plain",
+          completedAtMs: NOW_HOUR - 2 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID: PLAIN_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+      ],
+    );
+    const query = {
+      range: "24h" as const,
+      dimension: "provider" as const,
+      filter: { dimension: "model" as const, identity: known(TEMPORAL_TEST_MODEL) },
+    };
+
+    const detail = model.groups(query, NOW);
+    expect(detail.totals.input).toBe(3_000_000);
+    expect(detail.temporalBreakdown?.rows.map((entry) => entry.identity)).toEqual([
+      known(TEMPORAL_TEST_PROVIDER),
+    ]);
+    const temporal = detail.temporalBreakdown?.rows[0];
+    expect(temporal?.peak).toMatchObject({ input: 1_000_000, total: 1_000_000 });
+    expect(temporal?.peak.apiEquivalentCostUsd).toBeCloseTo(2, 10);
+    expect(temporal?.offpeak).toMatchObject({ input: 1_000_000, total: 1_000_000 });
+    expect(temporal?.offpeak.apiEquivalentCostUsd).toBeCloseTo(1, 10);
+
+    // The existing parent -> children contract stays untouched.
+    const providerRow = findGroupRow(detail.rows, known(TEMPORAL_TEST_PROVIDER));
+    expect(providerRow?.children.map((child) => child.identity)).toEqual([
+      known(TEMPORAL_TEST_MODEL),
+    ]);
+    expect(providerRow?.children[0]).not.toHaveProperty("temporalBreakdown");
+
+    // Only a model->provider detail route qualifies; neither overview does.
+    expect(
+      model.groups({ range: "24h", dimension: "provider" }, NOW).temporalBreakdown,
+    ).toBeUndefined();
+    expect(
+      model.groups({ range: "24h", dimension: "model" }, NOW).temporalBreakdown,
+    ).toBeUndefined();
+    expect(
+      model.groups(
+        {
+          range: "24h",
+          dimension: "model",
+          filter: { dimension: "provider", identity: known(TEMPORAL_TEST_PROVIDER) },
+        },
+        NOW,
+      ).temporalBreakdown,
+    ).toBeUndefined();
+  });
+
+  it("omits unresolved routes and quota-only policies with no source monetary policy", () => {
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [TEMPORAL_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: `providers/${TEMPORAL_TEST_PROVIDER}/models/${TEMPORAL_TEST_MODEL}.toml`,
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 2,
+                },
+              ],
+            },
+          },
+          [UNRESOLVED_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: `providers/${UNRESOLVED_TEST_PROVIDER}/models/${TEMPORAL_TEST_MODEL}.toml`,
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "holiday", op: "equals", value: "US" },
+                  factor: 2,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_resolved",
+          completedAtMs: NOW_HOUR - 3 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID: TEMPORAL_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_unresolved",
+          completedAtMs: NOW_HOUR - 2 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID: UNRESOLVED_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_quota",
+          completedAtMs: NOW_HOUR - 2 * HOUR,
+          tokens: { input: 2_000_000 },
+          providerID: "zai",
+          modelID: "glm-5",
+        }),
+      ],
+    );
+
+    const detail = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known(TEMPORAL_TEST_MODEL) },
+      },
+      NOW,
+    );
+    expect(detail.temporalBreakdown?.rows.map((entry) => entry.identity)).toEqual([
+      known(TEMPORAL_TEST_PROVIDER),
+    ]);
+    expect(detail.temporalBreakdown?.rows[0]?.peak.input).toBe(0);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.input).toBe(1_000_000);
+
+    const quota = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known("glm-5") },
+      },
+      NOW,
+    );
+    expect(quota.rows).toHaveLength(1);
+    expect(quota.temporalBreakdown).toBeUndefined();
+  });
+
+  it("classifies an output-only override at each physical completion instant", () => {
+    const providerID = "openrouter";
+    const modelID = "deepseek/deepseek-v4-pro-0813";
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [providerID]: {
+            [modelID]: {
+              status: "supported",
+              source: `providers/${providerID}/models/${modelID}.toml`,
+              overrides: [
+                {
+                  id: "text.output.overrides[0]",
+                  field: "output",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  rates: { output: 3.96 },
+                },
+                {
+                  id: "text.output.overrides[1]",
+                  field: "output",
+                  when: { type: "utc_hours", op: "lt", value: "10:00" },
+                  rates: { output: 1.98 },
+                },
+              ],
+              multipliers: [],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_override_offpeak",
+          completedAtMs: NOW_HOUR - 3 * HOUR,
+          tokens: { output: 1_000_000 },
+          providerID,
+          modelID,
+        }),
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_override_peak",
+          completedAtMs: NOW_HOUR - 1 * HOUR,
+          tokens: { output: 1_000_000 },
+          providerID,
+          modelID,
+        }),
+      ],
+    );
+
+    const detail = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known(modelID) },
+      },
+      NOW,
+    );
+    expect(detail.temporalBreakdown?.rows.map((entry) => entry.identity)).toEqual([
+      known(providerID),
+    ]);
+    expect(detail.temporalBreakdown?.rows[0]?.peak.output).toBe(1_000_000);
+    expect(detail.temporalBreakdown?.rows[0]?.peak.apiEquivalentCostUsd).toBeCloseTo(3.96, 10);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.output).toBe(1_000_000);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.apiEquivalentCostUsd).toBeCloseTo(1.98, 10);
+  });
+
+  it("classifies an output-only discount across both periods", () => {
+    const providerID = "openrouter";
+    const modelID = "deepseek/deepseek-v4-pro-0813";
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [providerID]: {
+            [modelID]: {
+              status: "supported",
+              source: `providers/${providerID}/models/${modelID}.toml`,
+              overrides: [
+                {
+                  id: "text.output.overrides[0]",
+                  field: "output",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  rates: { output: 0.99 },
+                },
+                {
+                  id: "text.output.overrides[1]",
+                  field: "output",
+                  when: { type: "utc_hours", op: "lt", value: "10:00" },
+                  rates: { output: 1.98 },
+                },
+              ],
+              multipliers: [],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_output_discount_unchanged",
+          completedAtMs: NOW_HOUR - 3 * HOUR,
+          tokens: { output: 1_000_000 },
+          providerID,
+          modelID,
+        }),
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_output_discount_active",
+          completedAtMs: NOW_HOUR - 1 * HOUR,
+          tokens: { output: 1_000_000 },
+          providerID,
+          modelID,
+        }),
+      ],
+    );
+
+    const detail = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known(modelID) },
+      },
+      NOW,
+    );
+    expect(detail.temporalBreakdown?.rows[0]?.peak.output).toBe(1_000_000);
+    expect(detail.temporalBreakdown?.rows[0]?.peak.apiEquivalentCostUsd).toBeCloseTo(1.98, 10);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.output).toBe(1_000_000);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.apiEquivalentCostUsd).toBeCloseTo(0.99, 10);
+  });
+
+  it("admits an exact Z.ai monetary policy instead of excluding the provider name", () => {
+    const providerID = "zai";
+    const modelID = "glm-5";
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [providerID]: {
+            [modelID]: {
+              status: "supported",
+              source: `providers/${providerID}/models/${modelID}.toml`,
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 2,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_zai_offpeak",
+          completedAtMs: NOW_HOUR - 3 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID,
+          modelID,
+        }),
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_zai_peak",
+          completedAtMs: NOW_HOUR - 1 * HOUR,
+          tokens: { input: 2_000_000 },
+          providerID,
+          modelID,
+        }),
+      ],
+    );
+
+    const detail = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known(modelID) },
+      },
+      NOW,
+    );
+    expect(detail.temporalBreakdown?.rows.map((entry) => entry.identity)).toEqual([
+      known(providerID),
+    ]);
+    expect(detail.temporalBreakdown?.rows[0]?.peak.input).toBe(2_000_000);
+    expect(detail.temporalBreakdown?.rows[0]?.peak.apiEquivalentCostUsd).toBeCloseTo(4, 10);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.input).toBe(1_000_000);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.apiEquivalentCostUsd).toBeCloseTo(1, 10);
+  });
+
+  it("classifies discount-only policies across unchanged and discounted periods", () => {
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [TEMPORAL_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: `providers/${TEMPORAL_TEST_PROVIDER}/models/${TEMPORAL_TEST_MODEL}.toml`,
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 0.5,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_discount_unchanged",
+          completedAtMs: NOW_HOUR - 3 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID: TEMPORAL_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_discount_active",
+          completedAtMs: NOW_HOUR - 1 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID: TEMPORAL_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+      ],
+    );
+
+    const detail = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known(TEMPORAL_TEST_MODEL) },
+      },
+      NOW,
+    );
+    expect(detail.temporalBreakdown?.rows[0]?.peak.input).toBe(1_000_000);
+    expect(detail.temporalBreakdown?.rows[0]?.peak.apiEquivalentCostUsd).toBeCloseTo(1, 10);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.input).toBe(1_000_000);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.apiEquivalentCostUsd).toBeCloseTo(0.5, 10);
+  });
+
+  it("fails closed when effective rates move in both directions", () => {
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [TEMPORAL_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: `providers/${TEMPORAL_TEST_PROVIDER}/models/${TEMPORAL_TEST_MODEL}.toml`,
+              overrides: [
+                {
+                  id: "text.input.overrides[0]",
+                  field: "input",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  rates: { input: 2 },
+                },
+                {
+                  id: "text.output.overrides[0]",
+                  field: "output",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  rates: { output: 0.5 },
+                },
+              ],
+              multipliers: [],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_ambiguous",
+          completedAtMs: NOW_HOUR - 1 * HOUR,
+          tokens: { input: 1_000_000, output: 1_000_000 },
+          providerID: TEMPORAL_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+      ],
+    );
+
+    const detail = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known(TEMPORAL_TEST_MODEL) },
+      },
+      NOW,
+    );
+    expect(detail.rows).toHaveLength(1);
+    expect(detail.temporalBreakdown).toBeUndefined();
+  });
+
+  it("fails closed for equal-only policy effects instead of labeling off-peak", () => {
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [TEMPORAL_TEST_PROVIDER]: {
+            [TEMPORAL_TEST_MODEL]: {
+              status: "supported",
+              source: `providers/${TEMPORAL_TEST_PROVIDER}/models/${TEMPORAL_TEST_MODEL}.toml`,
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 1,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_equal",
+          completedAtMs: NOW_HOUR - 1 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID: TEMPORAL_TEST_PROVIDER,
+          modelID: TEMPORAL_TEST_MODEL,
+        }),
+      ],
+    );
+
+    const detail = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known(TEMPORAL_TEST_MODEL) },
+      },
+      NOW,
+    );
+    expect(detail.rows).toHaveLength(1);
+    expect(detail.temporalBreakdown).toBeUndefined();
+  });
+
+  it("admits only an exact source route whose source model matches the pricing key", () => {
+    const providerID = "openai";
+    const modelID = "gpt-5";
+    setTemporalSnapshotForTests(
+      normalizeTemporalSnapshot({
+        version: 1,
+        revision: TEMPORAL_REVISION,
+        source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+        generatedAt: NOW,
+        jurisdictions: { CN: { "2026": CN_2026 } },
+        providers: {
+          [providerID]: {
+            [modelID]: {
+              status: "supported",
+              source: `providers/${providerID}/models/${modelID}.toml`,
+              overrides: [],
+              multipliers: [
+                {
+                  id: "multipliers[0]",
+                  when: { type: "utc_hours", op: "gte", value: "10:00" },
+                  factor: 2,
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+
+    const model = createModel(
+      [sessionInfo("ses_a", "p1")],
+      [
+        row({
+          sessionID: "ses_a",
+          messageID: "msg_aliased_route",
+          completedAtMs: NOW_HOUR - 1 * HOUR,
+          tokens: { input: 1_000_000 },
+          providerID,
+          modelID: `${providerID}/${modelID}`,
+        }),
+      ],
+    );
+
+    const detail = model.groups(
+      {
+        range: "24h",
+        dimension: "provider",
+        filter: { dimension: "model", identity: known(`${providerID}/${modelID}`) },
+      },
+      NOW,
+    );
+    expect(detail.rows).toHaveLength(1);
+    expect(detail.temporalBreakdown).toBeUndefined();
   });
 });
 

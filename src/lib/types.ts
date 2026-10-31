@@ -109,6 +109,12 @@ export interface QuotaDashboardConfig {
    * only; providerOrder remains the legacy fallback when this is empty.
    */
   cardOrder: string[];
+  /**
+   * Explicit temporal chip visibility per provider. Sparse by design: an
+   * absent provider follows account discovery, while a present boolean keeps
+   * the user's explicit on/off choice.
+   */
+  temporalProviderOverrides: Record<string, boolean>;
 }
 
 /** Default dashboard port (spec §5.4); never falls back to another port. */
@@ -353,6 +359,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
     hiddenRows: [],
     providerOrder: [],
     cardOrder: [],
+    temporalProviderOverrides: {},
   },
   layout: {
     maxWidth: 50,

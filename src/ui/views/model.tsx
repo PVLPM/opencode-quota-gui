@@ -134,6 +134,7 @@ export function ModelDetailView(props: {
         sort={sortMode()}
         onSortChange={setSortMode}
         showChildren={false}
+        temporalBreakdown={props.snapshot.temporalBreakdown}
         seriesKeys={seriesKeys()}
         modelsGroup={props.modelsGroup ?? "model"}
         activeSeries={inspection.active()}

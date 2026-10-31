@@ -28,6 +28,13 @@
   --qg-warning-border: var(--border-warning-base);
   --qg-warning-surface: var(--surface-warning-weak);
   --qg-success: var(--icon-success-base);
+  /* Semantic pricing states are independent of the chip surface, so a neutral
+     provider mark and each arrow can carry the correct colour on its own.
+     Peak is the critical-price direction (red up), off-peak the discount
+     direction (green down). */
+  --qg-temporal-peak: var(--qg-danger);
+  --qg-temporal-offpeak: var(--qg-success);
+  --qg-temporal-unknown: var(--qg-text-muted);
 
   /* The five raw additive token categories carry no library token (R31, R48).
      v1.1 swaps Input and Cache Read: cached input now reads blue, fresh input
@@ -163,6 +170,14 @@ body {
   min-width: 0;
 }
 
+.qg-topbar__left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
 .qg-topbar__title {
   color: var(--qg-text);
   font-size: var(--font-size-large);
@@ -175,6 +190,11 @@ body {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+/* The Quota/route tab bar keeps its status controls on the right edge. */
+.qg-frame > .qg-topbar > .qg-topbar__actions {
+  margin-left: auto;
 }
 
 .qg-topbar__link {
@@ -324,6 +344,21 @@ body {
 .qg-section__meta {
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
+}
+
+/* Polled metadata closes the Quota page instead of competing with its heading. */
+.qg-quota {
+  flex-grow: 1;
+}
+
+.qg-quota__meta {
+  display: flex;
+  justify-content: center;
+  margin-top: auto;
+  padding-top: 4px;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+  text-align: center;
 }
 
 .qg-breakable {
@@ -649,14 +684,25 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: var(--qg-text-muted);
-  cursor: help;
+  padding: 0;
+  border: 0;
   border-radius: 999px;
+  background: transparent;
+  color: var(--qg-text-muted);
+  font: inherit;
+  cursor: pointer;
   transition: color var(--qg-transition);
 }
 
-.qg-row__info:hover {
+.qg-row__info:hover,
+.qg-row__info:focus-visible {
   color: var(--qg-text-secondary);
+  outline: none;
+}
+
+.qg-row__info:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
 }
 
 /* The long backend sentence reads comfortably; never a live value, never green. */
@@ -1596,6 +1642,43 @@ body {
   padding-left: 57px;
 }
 
+/* One historical phase level below a provider route: Peak / Off-peak. */
+.qg-breakdown__row--phase {
+  background: var(--qg-bg);
+  padding-left: 57px;
+}
+
+.qg-breakdown__row--phase:hover {
+  background: var(--qg-bg);
+}
+
+.qg-breakdown__row--phase .qg-breakdown__tokens {
+  color: var(--qg-text-secondary);
+}
+
+.qg-breakdown__phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--qg-text-secondary);
+  font-size: 12px;
+}
+
+.qg-breakdown__phase[data-phase="peak"] {
+  color: var(--qg-warning);
+}
+
+.qg-breakdown__phase[data-phase="offpeak"] {
+  color: var(--qg-success);
+}
+
+.qg-breakdown__phase-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 .qg-breakdown__name {
   grid-area: name;
   display: flex;
@@ -1692,6 +1775,10 @@ body {
   }
 
   .qg-breakdown__row--child.qg-breakdown__row--plain {
+    padding-left: 51px;
+  }
+
+  .qg-breakdown__row--phase {
     padding-left: 51px;
   }
 
@@ -2028,6 +2115,9 @@ body {
   border: 1px solid var(--qg-border);
   border-radius: var(--qg-radius);
   background: transparent;
+  /* Rows respond to the width they actually receive, not the window width. */
+  container-name: qg-settings-group;
+  container-type: inline-size;
 }
 
 .qg-group__title {
@@ -2044,9 +2134,9 @@ body {
 
 .qg-field {
   display: grid;
-  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
-  gap: 4px 16px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+  gap: 4px 24px;
+  align-items: start;
   padding: 8px 0;
   border-top: 1px solid var(--qg-border);
 }
@@ -2055,14 +2145,21 @@ body {
   border-top: 0;
 }
 
-@media (max-width: 720px) {
-  .qg-field {
-    grid-template-columns: minmax(0, 1fr);
-  }
+/* Title, help and provenance share one wrapping text column. */
+.qg-field__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .qg-field__label {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 28px;
   color: var(--qg-text-secondary);
+  overflow-wrap: anywhere;
 }
 
 .qg-field__control {
@@ -2073,19 +2170,54 @@ body {
   min-width: 0;
 }
 
+/* The control owns its own right-hand column and never shrinks with the text. */
+.qg-field > .qg-field__control {
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+/* Inputs and selects follow the control column, including on a narrow stack. */
+.qg-field__control > .qg-input {
+  flex: 1 1 180px;
+  width: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .qg-field__meta {
-  grid-column: 2;
   display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
   color: var(--qg-text-muted);
   font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .qg-field__error {
-  grid-column: 2;
+  min-width: 0;
   color: var(--qg-danger);
   font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Stack when the row itself is too narrow for a text column beside the
+ * control. A viewport query is wrong here: the Settings pane can be a narrow
+ * column on a wide window, and the old 720px rule stacked rows that still had
+ * plenty of room, leaving switches below their labels.
+ */
+@container qg-settings-group (max-width: 540px) {
+  .qg-field {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .qg-field > .qg-field__control {
+    justify-content: flex-start;
+  }
 }
 
 .qg-field[data-invalid="true"] .qg-field__label {
@@ -2221,7 +2353,7 @@ body {
 }
 
 .qg-vis-provider[data-hidden="true"] {
-  background: var(--qg-surface-raised);
+  background: var(--qg-frame);
 }
 
 .qg-vis-provider[data-dragging="true"] {
@@ -2624,10 +2756,6 @@ body {
   .qg-topbar__actions {
     gap: 6px;
   }
-  .qg-field__meta,
-  .qg-field__error {
-    grid-column: 1;
-  }
   .qg-usage--session {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2654,6 +2782,313 @@ body {
   .qg-node {
     padding-right: 10px;
   }
+}
+
+/* ---------- temporal pricing ---------- */
+
+.qg-temporal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  min-width: 0;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.qg-temporal__group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.qg-temporal__chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.qg-temporal__chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--qg-border);
+  border-radius: 6px;
+  background: var(--qg-surface);
+  color: var(--qg-text-secondary);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  appearance: none;
+  transition:
+    color var(--qg-transition),
+    border-color var(--qg-transition),
+    background var(--qg-transition);
+}
+
+.qg-temporal__chip:hover,
+.qg-temporal__chip:focus-visible {
+  border-color: var(--qg-border-strong);
+  background: var(--qg-surface-raised);
+  color: var(--qg-text);
+  outline: none;
+}
+
+.qg-temporal__chip:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
+}
+
+.qg-temporal__chip-body {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.qg-temporal__logo {
+  width: 14px;
+  height: 14px;
+  align-self: center;
+  color: var(--qg-text-muted);
+}
+
+.qg-temporal__arrows {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.qg-temporal__arrow {
+  display: inline-flex;
+  align-items: center;
+}
+
+.qg-temporal__arrow[data-phase="peak"] {
+  color: var(--qg-temporal-peak);
+}
+
+.qg-temporal__arrow[data-phase="offpeak"] {
+  color: var(--qg-temporal-offpeak);
+}
+
+.qg-temporal__arrows svg {
+  display: block;
+}
+
+.qg-temporal__unknown {
+  color: var(--qg-temporal-unknown);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.qg-temporal-popover {
+  width: max-content;
+  max-width: min(380px, calc(100vw - 24px));
+  max-height: min(70vh, 540px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-color: var(--qg-border-strong);
+  background-color: var(--qg-surface-raised);
+  color: var(--qg-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  text-wrap: pretty;
+}
+
+.qg-interactive-popover__content {
+  min-width: 0;
+}
+
+.qg-temporal-popover__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 240px;
+}
+
+.qg-temporal-popover__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.qg-temporal-popover__logo,
+.qg-temporal-settings__logo {
+  width: 14px;
+  height: 14px;
+  color: var(--qg-text-muted);
+}
+
+.qg-temporal-popover__provider {
+  min-width: 0;
+  color: var(--qg-text);
+  font-weight: var(--font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.qg-temporal-popover__phase,
+.qg-temporal-popover__state {
+  color: var(--qg-text-muted);
+}
+
+.qg-temporal-popover__phase[data-phase="peak"],
+.qg-temporal-popover__state[data-phase="peak"] {
+  color: var(--qg-temporal-peak);
+}
+
+.qg-temporal-popover__phase[data-phase="offpeak"],
+.qg-temporal-popover__state[data-phase="offpeak"] {
+  color: var(--qg-temporal-offpeak);
+}
+
+.qg-temporal-popover__phase[data-phase="mixed"],
+.qg-temporal-popover__phase[data-phase="unknown"],
+.qg-temporal-popover__state[data-phase="unknown"] {
+  color: var(--qg-temporal-unknown);
+}
+
+.qg-temporal-popover__phase {
+  margin-left: auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.qg-temporal-popover__note,
+.qg-temporal-popover__reason {
+  margin: 0;
+  color: var(--qg-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.qg-temporal-popover__model {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-top: 7px;
+  border-top: 1px solid var(--qg-border);
+}
+
+.qg-temporal-popover__model-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.qg-temporal-popover__model-id {
+  min-width: 0;
+  color: var(--qg-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.qg-temporal-popover__state {
+  flex: none;
+  font-size: 11px;
+}
+
+.qg-temporal-popover__summary {
+  color: var(--qg-text-muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.qg-temporal-popover__effect,
+.qg-temporal-popover__next,
+.qg-temporal-popover__separator {
+  color: var(--qg-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.qg-temporal-popover__schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 2px;
+}
+
+.qg-temporal-popover__schedule-line {
+  display: block;
+  color: var(--qg-text-muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.qg-temporal-popover__interval,
+.qg-temporal-popover__holiday {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--qg-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.qg-temporal-popover__time {
+  font-variant-numeric: tabular-nums;
+}
+
+.qg-temporal-popover__schedule-note {
+  color: var(--qg-text-muted);
+  font-size: 11px;
+}
+
+.qg-temporal-popover__interval [data-phase="peak"],
+.qg-temporal-popover__schedule-line [data-phase="peak"] {
+  color: var(--qg-temporal-peak);
+}
+
+.qg-temporal-popover__interval [data-phase="offpeak"],
+.qg-temporal-popover__schedule-line [data-phase="offpeak"] {
+  color: var(--qg-temporal-offpeak);
+}
+
+.qg-temporal-popover__interval [data-phase="unknown"],
+.qg-temporal-popover__schedule-line [data-phase="unknown"] {
+  color: var(--qg-temporal-unknown);
+}
+
+.qg-temporal-popover__holidays {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 7px;
+  border-top: 1px solid var(--qg-border);
+}
+
+.qg-temporal-popover__holiday {
+  justify-content: flex-start;
+}
+
+.qg-temporal-popover__section-title {
+  color: var(--qg-text-secondary);
+  font-weight: var(--font-weight-medium);
+}
+
+.qg-temporal-settings {
+  display: flex;
+  flex-direction: column;
+}
+
+.qg-temporal-settings__row {
+  align-items: center;
+}
+
+.qg-temporal-settings__identity {
+  gap: 8px;
+}
+
+.qg-temporal-settings__logo {
+  width: 16px;
+  height: 16px;
+  color: var(--qg-text-muted);
 }
 
 /* ---------- toasts ---------- */

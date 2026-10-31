@@ -243,6 +243,9 @@ function addRawStep(
     providerID: row.providerID,
     modelID: row.modelID,
     tokens,
+    // A completed physical row is priced at its own assistant completion
+    // instant; never infer a timestamp from a range boundary or wall clock.
+    atMs: row.completedAtMs,
     cache: pricingCache,
   });
 

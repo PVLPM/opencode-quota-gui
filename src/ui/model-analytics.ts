@@ -281,7 +281,7 @@ export function estimateNoteTitle(
 export function exactCostTitle(tokens: Pick<CostedTokens, "apiEquivalentCostUsd">): string {
   return tokens.apiEquivalentCostUsd === null
     ? "No priced tokens in this total."
-    : `API-equivalent estimate: USD ${tokens.apiEquivalentCostUsd.toFixed(6)}. Not actual billed spend.`;
+    : `API-equivalent estimate: $${tokens.apiEquivalentCostUsd.toFixed(6)}. Not actual billed spend.`;
 }
 
 export type CostBearingTokens = Pick<

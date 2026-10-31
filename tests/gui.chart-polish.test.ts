@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ProjectSnapshot, SessionSnapshot, TokenStack } from "../src/contracts/dashboard";
@@ -25,6 +25,7 @@ import {
   sessionSnapshot,
   usage,
 } from "./fixtures/gui-ui-fixtures.js";
+import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
  * Focused chart/session presentation contract.
@@ -57,7 +58,7 @@ let projectViewModule: Record<string, unknown>;
 let homeViewModule: Record<string, unknown>;
 
 beforeAll(async () => {
-  const rendering = await createServer({
+  const rendering = await createIsolatedViteServer({
     configFile: false,
     root: repoRoot,
     plugins: [

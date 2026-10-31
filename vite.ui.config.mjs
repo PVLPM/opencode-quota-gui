@@ -133,6 +133,10 @@ function uiGraphMetadataPlugin() {
         if (output.type !== "chunk") continue;
         if (output.isEntry) entryChunks.push(output.fileName);
         for (const id of output.moduleIds ?? Object.keys(output.modules ?? {})) {
+          // Dynamic imports make Rolldown inject its preload helper as a
+          // virtual module. It has no source path and is not project code, so
+          // the privacy graph records only real source and package modules.
+          if (id.startsWith("\0")) continue;
           modules.add(normalizeModuleId(id, rootDir));
         }
       }
