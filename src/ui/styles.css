@@ -28,6 +28,11 @@
   --qg-warning-border: var(--border-warning-base);
   --qg-warning-surface: var(--surface-warning-weak);
   --qg-success: var(--icon-success-base);
+  /* Semantic pricing states are independent of the chip surface, so a neutral
+     provider mark and each arrow can carry the correct colour on its own. */
+  --qg-temporal-peak: var(--qg-warning);
+  --qg-temporal-offpeak: var(--qg-success);
+  --qg-temporal-unknown: var(--qg-text-muted);
 
   /* The five raw additive token categories carry no library token (R31, R48).
      v1.1 swaps Input and Cache Read: cached input now reads blue, fresh input
@@ -161,6 +166,14 @@ body {
   align-items: center;
   gap: 12px;
   min-width: 0;
+}
+
+.qg-topbar__left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .qg-topbar__title {
@@ -324,6 +337,16 @@ body {
 .qg-section__meta {
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
+}
+
+/* Polled metadata closes the Quota page instead of competing with its heading. */
+.qg-quota__meta {
+  display: flex;
+  justify-content: center;
+  padding-top: 4px;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+  text-align: center;
 }
 
 .qg-breakable {
@@ -649,14 +672,25 @@ body {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  color: var(--qg-text-muted);
-  cursor: help;
+  padding: 0;
+  border: 0;
   border-radius: 999px;
+  background: transparent;
+  color: var(--qg-text-muted);
+  font: inherit;
+  cursor: pointer;
   transition: color var(--qg-transition);
 }
 
-.qg-row__info:hover {
+.qg-row__info:hover,
+.qg-row__info:focus-visible {
   color: var(--qg-text-secondary);
+  outline: none;
+}
+
+.qg-row__info:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
 }
 
 /* The long backend sentence reads comfortably; never a live value, never green. */
@@ -2069,6 +2103,9 @@ body {
   border: 1px solid var(--qg-border);
   border-radius: var(--qg-radius);
   background: transparent;
+  /* Rows respond to the width they actually receive, not the window width. */
+  container-name: qg-settings-group;
+  container-type: inline-size;
 }
 
 .qg-group__title {
@@ -2154,7 +2191,13 @@ body {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 720px) {
+/*
+ * Stack when the row itself is too narrow for a text column beside the
+ * control. A viewport query is wrong here: the Settings pane can be a narrow
+ * column on a wide window, and the old 720px rule stacked rows that still had
+ * plenty of room, leaving switches below their labels.
+ */
+@container qg-settings-group (max-width: 540px) {
   .qg-field {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
@@ -2735,7 +2778,7 @@ body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 16px;
+  gap: 4px 14px;
   min-width: 0;
   min-height: 24px;
   margin: 0;
@@ -2760,45 +2803,44 @@ body {
 .qg-temporal__chip {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   min-height: 24px;
-  padding: 3px 6px;
-  border: 1px solid var(--qg-border);
-  border-radius: 999px;
-  background: var(--qg-surface-raised);
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   color: var(--qg-text-muted);
+  font: inherit;
   line-height: 1;
-  cursor: help;
+  cursor: pointer;
+  appearance: none;
   transition:
-    border-color var(--qg-transition),
     color var(--qg-transition),
     background var(--qg-transition);
 }
 
 .qg-temporal__chip:hover,
-[data-component="tooltip-v2-trigger"]:focus-visible .qg-temporal__chip {
-  border-color: var(--qg-border-strong);
+.qg-temporal__chip:focus-visible {
   background: var(--surface-raised-base-hover);
   color: var(--qg-text-secondary);
+  outline: none;
 }
 
-.qg-temporal__chip[data-phase="peak"] {
-  border-color: var(--qg-warning-border);
-  color: var(--qg-warning);
+.qg-temporal__chip:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
 }
 
-.qg-temporal__chip[data-phase="offpeak"] {
-  color: var(--qg-success);
-}
-
-.qg-temporal__chip[data-phase="mixed"] {
-  color: var(--qg-text-secondary);
+.qg-temporal__chip-body {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
 }
 
 .qg-temporal__logo {
   width: 14px;
   height: 14px;
   align-self: center;
+  color: var(--qg-text-muted);
 }
 
 .qg-temporal__arrows {
@@ -2807,21 +2849,46 @@ body {
   gap: 2px;
 }
 
+.qg-temporal__arrow {
+  display: inline-flex;
+  align-items: center;
+}
+
+.qg-temporal__arrow[data-phase="peak"] {
+  color: var(--qg-temporal-peak);
+}
+
+.qg-temporal__arrow[data-phase="offpeak"] {
+  color: var(--qg-temporal-offpeak);
+}
+
 .qg-temporal__arrows svg {
   display: block;
 }
 
 .qg-temporal__unknown {
+  color: var(--qg-temporal-unknown);
   font-size: 11px;
   line-height: 1;
 }
 
 .qg-temporal-popover {
-  max-width: 360px;
+  width: max-content;
+  max-width: min(380px, calc(100vw - 24px));
+  max-height: min(70vh, 540px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-color: var(--qg-border-strong);
+  background-color: var(--qg-surface-raised);
+  color: var(--qg-text-secondary);
   font-size: 12px;
   line-height: 1.45;
   white-space: normal;
   text-wrap: pretty;
+}
+
+.qg-interactive-popover__content {
+  min-width: 0;
 }
 
 .qg-temporal-popover__body {
@@ -2837,7 +2904,8 @@ body {
   gap: 6px;
 }
 
-.qg-temporal-popover__logo {
+.qg-temporal-popover__logo,
+.qg-temporal-settings__logo {
   width: 14px;
   height: 14px;
   color: var(--qg-text-muted);
@@ -2851,21 +2919,24 @@ body {
 }
 
 .qg-temporal-popover__phase,
-.qg-temporal-popover__state,
-.qg-temporal__summary [data-phase] {
+.qg-temporal-popover__state {
   color: var(--qg-text-muted);
 }
 
 .qg-temporal-popover__phase[data-phase="peak"],
-.qg-temporal-popover__state[data-phase="peak"],
-.qg-temporal__summary [data-phase="peak"] {
-  color: var(--qg-warning);
+.qg-temporal-popover__state[data-phase="peak"] {
+  color: var(--qg-temporal-peak);
 }
 
 .qg-temporal-popover__phase[data-phase="offpeak"],
-.qg-temporal-popover__state[data-phase="offpeak"],
-.qg-temporal__summary [data-phase="offpeak"] {
-  color: var(--qg-success);
+.qg-temporal-popover__state[data-phase="offpeak"] {
+  color: var(--qg-temporal-offpeak);
+}
+
+.qg-temporal-popover__phase[data-phase="mixed"],
+.qg-temporal-popover__phase[data-phase="unknown"],
+.qg-temporal-popover__state[data-phase="unknown"] {
+  color: var(--qg-temporal-unknown);
 }
 
 .qg-temporal-popover__phase {
@@ -2909,9 +2980,14 @@ body {
 }
 
 .qg-temporal-popover__effect,
-.qg-temporal-popover__next {
+.qg-temporal-popover__next,
+.qg-temporal-popover__effect-varies {
   color: var(--qg-text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+.qg-temporal-popover__effect-varies {
+  color: var(--qg-text-secondary);
 }
 
 .qg-temporal-popover__schedule {
@@ -2919,6 +2995,13 @@ body {
   flex-direction: column;
   gap: 2px;
   margin-top: 2px;
+}
+
+.qg-temporal-popover__schedule-line {
+  display: block;
+  color: var(--qg-text-muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
 .qg-temporal-popover__interval,
@@ -2931,12 +3014,28 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.qg-temporal-popover__interval [data-phase="peak"] {
-  color: var(--qg-warning);
+.qg-temporal-popover__time {
+  font-variant-numeric: tabular-nums;
 }
 
-.qg-temporal-popover__interval [data-phase="offpeak"] {
-  color: var(--qg-success);
+.qg-temporal-popover__schedule-note {
+  color: var(--qg-text-muted);
+  font-size: 11px;
+}
+
+.qg-temporal-popover__interval [data-phase="peak"],
+.qg-temporal-popover__schedule-line [data-phase="peak"] {
+  color: var(--qg-temporal-peak);
+}
+
+.qg-temporal-popover__interval [data-phase="offpeak"],
+.qg-temporal-popover__schedule-line [data-phase="offpeak"] {
+  color: var(--qg-temporal-offpeak);
+}
+
+.qg-temporal-popover__interval [data-phase="unknown"],
+.qg-temporal-popover__schedule-line [data-phase="unknown"] {
+  color: var(--qg-temporal-unknown);
 }
 
 .qg-temporal-popover__holidays {
@@ -2947,18 +3046,13 @@ body {
   border-top: 1px solid var(--qg-border);
 }
 
+.qg-temporal-popover__holiday {
+  justify-content: flex-start;
+}
+
 .qg-temporal-popover__section-title {
   color: var(--qg-text-secondary);
   font-weight: var(--font-weight-medium);
-}
-
-.qg-temporal__summary {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 0;
-  color: var(--qg-text-muted);
-  font-size: 12px;
-  line-height: 1.45;
 }
 
 .qg-temporal-settings {

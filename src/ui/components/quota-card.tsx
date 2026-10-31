@@ -44,6 +44,11 @@ export function unitSuffix(unit: AccountingUnit | undefined): string {
   }
 }
 
+/** Visible USD uses the symbol; other currencies keep their ISO code unchanged. */
+export function formatVisibleUsd(amount: string): string {
+  return amount.startsWith("-") ? `-$${amount.slice(1)}` : `$${amount}`;
+}
+
 /** Currency rows show exactly two decimals; other units keep the exact server decimal. */
 export function formatCurrencyDecimal(decimal: string): string {
   const match = /^(-?)(\d+)(?:\.(\d+))?$/u.exec(decimal);
@@ -77,6 +82,9 @@ export function rowValueText(row: QuotaCardRow, preferences: DisplayPreferences)
         row.quantity.unit.kind === "currency"
           ? formatCurrencyDecimal(row.quantity.decimal)
           : row.quantity.decimal;
+      if (row.quantity.unit.kind === "currency" && row.quantity.unit.code === "USD") {
+        return formatVisibleUsd(amount);
+      }
       return suffix ? `${amount} ${suffix}` : amount;
     }
     case "boolean":

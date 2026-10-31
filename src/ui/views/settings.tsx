@@ -12,11 +12,7 @@ import { BuildAbout } from "../components/build-info";
 import { EyeToggle } from "../components/eye-toggle";
 import { GripDotsIcon } from "../components/icons";
 import { ProviderLogo } from "../components/provider-logo";
-import {
-  TemporalInfoButton,
-  TemporalProviderSummary,
-  temporalProviderLabel,
-} from "../components/temporal-status";
+import { TemporalInfoButton, temporalProviderLabel } from "../components/temporal-status";
 import type { Toaster } from "../components/toast";
 import { DashboardError } from "../dashboard-client";
 import {
@@ -411,12 +407,11 @@ export function SettingsView(props: {
                         <span>{label}</span>
                         <TemporalInfoButton status={provider} />
                       </span>
-                      <span class="qg-field__meta">
-                        <TemporalProviderSummary status={provider} />
-                        <Show when={!provider.discovered}>
+                      <Show when={!provider.discovered}>
+                        <span class="qg-field__meta">
                           <span class="qg-inherited">No account discovered.</span>
-                        </Show>
-                      </span>
+                        </span>
+                      </Show>
                     </div>
                     <div class="qg-field__control">
                       <Switch

@@ -27,6 +27,7 @@ import { BuildMismatchStatus } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
 import { QueryState, ReloadRequired } from "./components/states";
+import { TemporalStatusStrip } from "./components/temporal-status";
 import { createToaster, type Toaster, ToastRegion } from "./components/toast";
 import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashboard-client";
 import { RANGE_LABELS } from "./format";
@@ -511,26 +512,36 @@ export function App(props: { client: DashboardClient }): JSX.Element {
       </header>
       <div class="qg-frame">
         <header class="qg-topbar">
-          <Show
-            when={analyticsTab()}
-            fallback={
-              <span class="qg-frame-tab">
-                {route().name === "home"
-                  ? "Quota"
-                  : route().name === "settings"
-                    ? "Settings"
-                    : "Dashboard"}
-              </span>
-            }
-          >
-            {(tab) => (
-              <AnalyticsTabs
-                active={tab()}
-                range={range()}
-                modelsDimension={modelsDimension() ?? rememberedModelsDimension()}
-              />
-            )}
-          </Show>
+          <div class="qg-topbar__left">
+            <Show
+              when={analyticsTab()}
+              fallback={
+                <span class="qg-frame-tab">
+                  {route().name === "home"
+                    ? "Quota"
+                    : route().name === "settings"
+                      ? "Settings"
+                      : "Dashboard"}
+                </span>
+              }
+            >
+              {(tab) => (
+                <AnalyticsTabs
+                  active={tab()}
+                  range={range()}
+                  modelsDimension={modelsDimension() ?? rememberedModelsDimension()}
+                />
+              )}
+            </Show>
+            <Show when={route().name === "home" ? homeSnapshot()?.temporal : undefined}>
+              {(temporal) => (
+                <TemporalStatusStrip
+                  providers={temporal().providers}
+                  overrides={preferences().temporalProviderOverrides}
+                />
+              )}
+            </Show>
+          </div>
           <Show when={routeShowsRangeSelector(route())}>
             <SegmentedControl
               class="qg-range"

@@ -15,6 +15,10 @@ import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WrapperPath = "src/ui/opencode-ui.ts";
+/**
+ * Statically imported subpaths. The browser-only popover is loaded through the
+ * package wildcard and is asserted separately below.
+ */
 const START_SUBPATHS = [
   "/button",
   "/text-input",
@@ -90,13 +94,23 @@ describe("public UI library adoption", () => {
     expect(peers["@solidjs/meta"]?.startsWith("^0.29.")).toBe(true);
   });
 
-  it("imports the library from one wrapper and only the start subpaths", () => {
+  it("imports the library statically from one wrapper and only the start subpaths", () => {
     expect(librarySpecifiers(wrapperSource).sort()).toEqual(
       START_SUBPATHS.map((subpath) => `@opencode/ui${subpath}`).sort(),
     );
     expect(wrapperSource).toContain('from "@opencode/ui/button"');
     expect(wrapperSource).toContain('from "@opencode/ui/text-input"');
     expect(wrapperSource).toContain('import "@opencode/ui/styles"');
+  });
+
+  it("loads the popover through the wrapper only when a browser mounts it", () => {
+    expect(wrapperSource).toContain('import("@opencode/ui/popover")');
+    expect(wrapperSource).not.toMatch(/from\s+["']@opencode\/ui\/popover["']/);
+    const exportsMap = libraryManifest.exports as Record<string, unknown>;
+    expect(exportsMap["./*"]).toBeDefined();
+    expect(() =>
+      readFileSync(path.join(repoRoot, "node_modules/@opencode/ui/src/components/popover.tsx")),
+    ).not.toThrow();
   });
 
   it("exports exactly the subpaths the wrapper relies on, as source the compiler can read", () => {

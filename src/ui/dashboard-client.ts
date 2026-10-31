@@ -45,6 +45,9 @@ import type {
   TemporalPolicySource,
   TemporalProviderStatus,
   TemporalStatusSnapshot,
+  TemporalWeekday,
+  TemporalWeeklySchedule,
+  TemporalWeeklyWindow,
 } from "../contracts/temporal";
 
 /**
@@ -167,6 +170,16 @@ const TEMPORAL_EFFECT_UNITS = [
 
 const TEMPORAL_HOLIDAYS = ["CN", "US", "CA"] as const satisfies readonly TemporalHoliday[];
 
+const TEMPORAL_WEEKDAYS = [
+  "mon",
+  "tue",
+  "wed",
+  "thu",
+  "fri",
+  "sat",
+  "sun",
+] as const satisfies readonly TemporalWeekday[];
+
 function faulty(endpoint: string, detail: string): DashboardError {
   return new DashboardError(
     "invalid-response",
@@ -225,6 +238,20 @@ function readOptionalNumber(
   detail: string,
 ): number | undefined {
   return value === undefined ? undefined : readNumber(value, endpoint, detail);
+}
+
+function readIntegerInRange(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail: string,
+  minimum: number,
+  maximum: number,
+): number {
+  const number = readNumber(value, endpoint, detail);
+  if (!Number.isInteger(number) || number < minimum || number > maximum) {
+    throw faulty(endpoint, detail);
+  }
+  return number;
 }
 
 function readBoolean(value: JsonValue | undefined, endpoint: string, detail: string): boolean {
@@ -762,6 +789,74 @@ function readTemporalInterval(value: JsonValue, endpoint: string): TemporalModel
   return parsed;
 }
 
+function readTemporalWeeklyWindow(value: JsonValue, endpoint: string): TemporalWeeklyWindow {
+  const detail = "temporal.providers[].models[].weekly.windows[]";
+  const window = readRecord(value, endpoint, detail);
+  const days = readArray(window.days, endpoint, `${detail}.days`).map((day) =>
+    readEnum(day, TEMPORAL_WEEKDAYS, endpoint, `${detail}.days[]`),
+  );
+  if (days.length === 0 || new Set(days).size !== days.length) {
+    throw faulty(endpoint, `${detail}.days`);
+  }
+  const startMinute = readIntegerInRange(
+    window.startMinute,
+    endpoint,
+    `${detail}.startMinute`,
+    0,
+    1439,
+  );
+  const endMinute = readIntegerInRange(window.endMinute, endpoint, `${detail}.endMinute`, 1, 1440);
+  if (endMinute <= startMinute) throw faulty(endpoint, `${detail}.endMinute`);
+  const parsed: TemporalWeeklyWindow = {
+    days: TEMPORAL_WEEKDAYS.filter((day) => days.includes(day)),
+    startMinute,
+    endMinute,
+    phase: readEnum(window.phase, TEMPORAL_MODEL_PHASES, endpoint, `${detail}.phase`),
+  };
+  if (window.effect !== undefined) {
+    parsed.effect = readTemporalEffect(window.effect, endpoint);
+  }
+  return parsed;
+}
+
+function readTemporalWeekly(value: JsonValue, endpoint: string): TemporalWeeklySchedule {
+  const detail = "temporal.providers[].models[].weekly";
+  const weekly = readRecord(value, endpoint, detail);
+  const timeZone = readText(weekly.timeZone, endpoint, `${detail}.timeZone`);
+  if (timeZone.length === 0) throw faulty(endpoint, `${detail}.timeZone`);
+  const parsed: TemporalWeeklySchedule = {
+    timeZone,
+    utcOffsetMinutes: readIntegerInRange(
+      weekly.utcOffsetMinutes,
+      endpoint,
+      `${detail}.utcOffsetMinutes`,
+      -1440,
+      1440,
+    ),
+    basePhase: readEnum(weekly.basePhase, TEMPORAL_MODEL_PHASES, endpoint, `${detail}.basePhase`),
+    windows: readArray(weekly.windows, endpoint, `${detail}.windows`).map((window) =>
+      readTemporalWeeklyWindow(window, endpoint),
+    ),
+  };
+  if (weekly.baseEffect !== undefined) {
+    parsed.baseEffect = readTemporalEffect(weekly.baseEffect, endpoint);
+  }
+  if (weekly.exceptHolidays !== undefined) {
+    const jurisdictions = readArray(
+      weekly.exceptHolidays,
+      endpoint,
+      `${detail}.exceptHolidays`,
+    ).map((jurisdiction) =>
+      readEnum(jurisdiction, TEMPORAL_HOLIDAYS, endpoint, `${detail}.exceptHolidays[]`),
+    );
+    if (new Set(jurisdictions).size !== jurisdictions.length) {
+      throw faulty(endpoint, `${detail}.exceptHolidays`);
+    }
+    parsed.exceptHolidays = TEMPORAL_HOLIDAYS.filter((entry) => jurisdictions.includes(entry));
+  }
+  return parsed;
+}
+
 function readTemporalModel(value: JsonValue, endpoint: string): TemporalModelStatus {
   const detail = "temporal.providers[].models[]";
   const model = readRecord(value, endpoint, detail);
@@ -773,12 +868,21 @@ function readTemporalModel(value: JsonValue, endpoint: string): TemporalModelSta
     ),
   };
   if (model.effect !== undefined) parsed.effect = readTemporalEffect(model.effect, endpoint);
+  if (model.weekly !== undefined) parsed.weekly = readTemporalWeekly(model.weekly, endpoint);
   const nextChangeAtMs = readOptionalNumber(
     model.nextChangeAtMs,
     endpoint,
     `${detail}.nextChangeAtMs`,
   );
   if (nextChangeAtMs !== undefined) parsed.nextChangeAtMs = nextChangeAtMs;
+  if (model.nextState !== undefined) {
+    parsed.nextState = readEnum(
+      model.nextState,
+      TEMPORAL_MODEL_PHASES,
+      endpoint,
+      `${detail}.nextState`,
+    );
+  }
   const reason = readOptionalText(model.reason, endpoint, `${detail}.reason`);
   if (reason !== undefined) parsed.reason = reason;
   return parsed;

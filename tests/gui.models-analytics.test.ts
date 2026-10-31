@@ -503,7 +503,7 @@ describe("Models view", () => {
       expect(shell).toBeDefined();
       expect(graph.textOf(shell?.title as TestNode)).toBe("Usage by model");
       expect(summaryText(root, "Processed tokens")).toContain("2,190");
-      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ USD 12.00");
+      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ $12.00");
       expect(summaryText(root, "API-equivalent estimate")).toContain("Partial estimate");
       expect(shell?.body.children.length).toBeGreaterThan(0);
 
@@ -592,7 +592,7 @@ describe("Models view", () => {
     const { root, dispose } = mountSnapshot(free);
     try {
       expect(summaryText(root, "API-equivalent estimate")).toContain("Free");
-      expect(summaryText(root, "API-equivalent estimate")).not.toContain("≈ USD 0.00");
+      expect(summaryText(root, "API-equivalent estimate")).not.toContain("≈ $0.00");
     } finally {
       dispose();
     }
@@ -691,9 +691,9 @@ describe("Models view", () => {
       const rows = byClass(tooltip, "div", "qg-model-tooltip__row");
       const gamma = rows.find((row) => graph.textOf(row).includes("model-gamma")) as TestNode;
       expect(graph.textOf(gamma)).toContain("Free");
-      expect(graph.textOf(gamma)).not.toContain("≈ USD 0.00");
+      expect(graph.textOf(gamma)).not.toContain("≈ $0.00");
       expect(hit.props["aria-label"]).toContain("model-gamma 240 tokens, Free");
-      expect(hit.props["aria-label"]).not.toContain("≈ USD 0.00");
+      expect(hit.props["aria-label"]).not.toContain("≈ $0.00");
     } finally {
       dispose();
     }
@@ -723,12 +723,12 @@ describe("Models view", () => {
       const row = byClass(tooltip, "div", "qg-model-tooltip__row")[0] as TestNode;
       expect(graph.textOf(row)).toContain("model-alpha");
       expect(graph.textOf(row)).toContain("100");
-      expect(graph.textOf(row)).toContain("≈ USD 0.02");
+      expect(graph.textOf(row)).toContain("≈ $0.02");
       expect(graph.textOf(row)).toContain("partial");
       const footer = byClass(tooltip, "div", "qg-model-tooltip__footer")[0] as TestNode;
       expect(footer).toBeDefined();
       expect(graph.textOf(footer)).toContain("API-equivalent total");
-      expect(graph.textOf(footer)).toContain("≈ USD 0.02");
+      expect(graph.textOf(footer)).toContain("≈ $0.02");
       expect(graph.textOf(footer)).toContain("Partial estimate");
       const fullLabel = graph
         .elementsNamed(footer, "span")
@@ -824,10 +824,10 @@ describe("Models view", () => {
       expect(graph.textOf(delta)).toContain("Partial estimate");
       const beta = rowByLabel(root, "model-beta") as TestNode;
       expect(graph.textOf(beta)).toContain("Unpriced");
-      expect(graph.textOf(beta)).not.toContain("≈ USD —");
+      expect(graph.textOf(beta)).not.toContain("≈ $—");
       const gammaRow = rowByLabel(root, "model-gamma") as TestNode;
       expect(graph.textOf(gammaRow)).toContain("Free");
-      expect(graph.textOf(gammaRow)).not.toContain("≈ USD 0.00");
+      expect(graph.textOf(gammaRow)).not.toContain("≈ $0.00");
       expect(graph.textOf(gammaRow)).not.toContain("Partial estimate");
 
       const unknown = rowByLabel(root, "Unknown model") as TestNode;
@@ -1908,7 +1908,7 @@ describe("Models view", () => {
         .filter((row) => graph.elementsNamed(row, "td").length > 0);
       const apiCell = (row: TestNode) => graph.elementsNamed(row, "td")[1] as TestNode;
       expect(graph.textOf(apiCell(rows[0] as TestNode))).toContain("Unpriced");
-      expect(graph.textOf(apiCell(rows[0] as TestNode))).not.toContain("≈ USD —");
+      expect(graph.textOf(apiCell(rows[0] as TestNode))).not.toContain("≈ $—");
       expect(graph.textOf(apiCell(rows[1] as TestNode))).toContain("Partial estimate");
     } finally {
       dispose();
@@ -1942,7 +1942,7 @@ describe("Models view", () => {
     try {
       const summary = summaryText(root, "API-equivalent estimate");
       expect(summary).toContain("Unpriced");
-      expect(summary).not.toContain("≈ USD —");
+      expect(summary).not.toContain("≈ $—");
     } finally {
       dispose();
     }
@@ -2114,7 +2114,7 @@ describe("Models view", () => {
       await settle();
       const unpricedTooltip = graph.elementsNamed(root, "output")[0] as TestNode;
       expect(graph.textOf(unpricedTooltip)).toContain("Unpriced");
-      expect(graph.textOf(unpricedTooltip)).not.toContain("≈ USD —");
+      expect(graph.textOf(unpricedTooltip)).not.toContain("≈ $—");
       blur(bucketHits(root)[2] as TestNode);
     } finally {
       dispose();
@@ -2189,7 +2189,7 @@ describe("model and provider detail", () => {
       expect(shell).toBeDefined();
       expect(graph.textOf(shell?.title as TestNode)).toBe("Usage by provider");
       expect(summaryText(root, "Total tokens")).toContain("600");
-      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ USD 6.00");
+      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ $6.00");
       expect(summaryText(root, "Sessions")).toContain("6");
       expect(summaryText(root, "Cache hit rate")).toContain("33.50%");
       expect(graph.textOf(root)).toContain("Analytics");
@@ -2250,12 +2250,12 @@ describe("model and provider detail", () => {
       expect(openai.map((row) => row.props["data-phase"])).toEqual(["peak", "offpeak"]);
       // Each phase is a child of the provider's group, one level below the route.
       expect(openai.every((row) => row.parent === openaiGroup)).toBe(true);
-      expect(graph.textOf(openai[0] as TestNode)).toContain("≈ USD 3.00");
+      expect(graph.textOf(openai[0] as TestNode)).toContain("≈ $3.00");
       expect(phaseTokens(openai[0] as TestNode)).toEqual({
         text: "1.0M",
         title: "1,000,000 tokens",
       });
-      expect(graph.textOf(openai[1] as TestNode)).toContain("≈ USD 1.00");
+      expect(graph.textOf(openai[1] as TestNode)).toContain("≈ $1.00");
       expect(phaseTokens(openai[1] as TestNode)).toEqual({
         text: "500k",
         title: "500,000 tokens",
@@ -2263,8 +2263,8 @@ describe("model and provider detail", () => {
 
       const anthropic = phaseRows(root, "Anthropic");
       expect(anthropic.map(phaseLabelOf)).toEqual(["Peak", "Off-peak"]);
-      expect(graph.textOf(anthropic[0] as TestNode)).toContain("≈ USD 4.00");
-      expect(graph.textOf(anthropic[1] as TestNode)).toContain("≈ USD 2.00");
+      expect(graph.textOf(anthropic[0] as TestNode)).toContain("≈ $4.00");
+      expect(graph.textOf(anthropic[1] as TestNode)).toContain("≈ $2.00");
       expect(phaseTokens(anthropic[1] as TestNode)).toEqual({
         text: "2.0M",
         title: "2,000,000 tokens",
@@ -2391,7 +2391,7 @@ describe("model and provider detail", () => {
       expect(shell).toBeDefined();
       expect(graph.textOf(shell?.title as TestNode)).toBe("Usage by model");
       expect(summaryText(root, "Total tokens")).toContain("1,500");
-      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ USD 6.00");
+      expect(summaryText(root, "API-equivalent estimate")).toContain("≈ $6.00");
       expect(summaryText(root, "API-equivalent estimate")).toContain("Partial estimate");
       expect(summaryText(root, "Sessions")).toContain("5");
       expect(summaryText(root, "Models")).toContain("5");
@@ -2424,7 +2424,7 @@ describe("model and provider detail", () => {
     );
     try {
       expect(summaryText(root, "API-equivalent estimate")).toContain("Free");
-      expect(summaryText(root, "API-equivalent estimate")).not.toContain("≈ USD 0.00");
+      expect(summaryText(root, "API-equivalent estimate")).not.toContain("≈ $0.00");
       const gamma = rowByLabel(root, "model-gamma") as TestNode;
       expect(graph.textOf(gamma)).toContain("Free");
       const beta = rowByLabel(root, "model-beta") as TestNode;

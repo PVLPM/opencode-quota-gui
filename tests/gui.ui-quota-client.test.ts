@@ -4,9 +4,166 @@ import {
   DashboardError,
   parseQuotaSnapshot,
 } from "../src/ui/dashboard-client";
+import { groupTemporalModels } from "../src/ui/temporal-format";
 import { homeSnapshot, NOW } from "./fixtures/gui-ui-fixtures";
 
 describe("independent browser quota transport", () => {
+  it("preserves the next temporal destination for far transitions and grouping", () => {
+    const source = homeSnapshot();
+    const interval = { startMs: NOW - 60_000, endMs: NOW + 60_000, phase: "peak" as const };
+    const model = {
+      modelId: "far-model",
+      state: "peak" as const,
+      nextChangeAtMs: NOW + 4 * 24 * 60 * 60 * 1000,
+      nextState: "offpeak" as const,
+      intervals: [interval],
+    };
+    const temporalProvider = {
+      providerId: "deepseek",
+      providerLabel: "DeepSeek",
+      discovered: true,
+      phase: "peak" as const,
+      models: [
+        model,
+        { ...model, modelId: "far-model-2", nextState: "peak" as const },
+        // The server states `unknown` when the destination is unresolved; that
+        // is a real value to preserve, not something to omit or guess past.
+        { ...model, modelId: "far-model-3", nextState: "unknown" as const },
+      ],
+      holidays: [],
+    };
+    const temporal = {
+      generatedAtMs: NOW,
+      providers: [temporalProvider],
+      snapshot: { revision: "parser-test", generatedAtMs: NOW },
+    };
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: source.providers,
+      temporal,
+    };
+    const parsed = parseQuotaSnapshot(payload);
+    const models = parsed.temporal?.providers[0]?.models ?? [];
+    expect(models[0]?.nextState).toBe("offpeak");
+    expect(models[1]?.nextState).toBe("peak");
+    expect(models[2]?.nextState).toBe("unknown");
+    // The destination is policy data: routes with different next states must
+    // never collapse into one schedule row.
+    expect(groupTemporalModels(models)).toHaveLength(3);
+
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        temporal: {
+          ...temporal,
+          providers: [
+            {
+              ...temporalProvider,
+              models: [{ ...model, nextState: "sideways" }],
+            },
+          ],
+        },
+      }),
+    ).toThrow(DashboardError);
+  });
+
+  it("decodes the weekly descriptor and keeps differing schedules apart", () => {
+    const source = homeSnapshot();
+    const effect = { factor: 1, direction: "unchanged" as const, unit: "api_price" as const };
+    const peak = { factor: 2, direction: "peak" as const, unit: "api_price" as const };
+    const interval = {
+      startMs: NOW - 60_000,
+      endMs: NOW + 60_000,
+      phase: "peak" as const,
+      effect: peak,
+    };
+    const weekly = {
+      timeZone: "UTC",
+      utcOffsetMinutes: 0,
+      basePhase: "offpeak" as const,
+      baseEffect: effect,
+      windows: [
+        {
+          days: ["tue", "mon"] as const,
+          startMinute: 60,
+          endMinute: 240,
+          phase: "peak" as const,
+          effect: peak,
+        },
+      ],
+      exceptHolidays: ["CN"] as const,
+    };
+    const base = {
+      modelId: "weekly-a",
+      state: "offpeak" as const,
+      effect,
+      intervals: [interval],
+      weekly,
+    };
+    const same = { ...base, modelId: "weekly-b" };
+    const changed = {
+      ...base,
+      modelId: "weekly-c",
+      weekly: {
+        ...weekly,
+        windows: [{ ...weekly.windows[0], startMinute: 90 }],
+      },
+    };
+    const temporal = {
+      generatedAtMs: NOW,
+      providers: [
+        {
+          providerId: "deepseek",
+          providerLabel: "DeepSeek",
+          discovered: true,
+          phase: "offpeak" as const,
+          models: [base, same, changed],
+          holidays: [],
+        },
+      ],
+      snapshot: { revision: "weekly-parser", generatedAtMs: NOW },
+    };
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: source.providers,
+      temporal,
+    };
+    const models = parseQuotaSnapshot(payload).temporal?.providers[0]?.models ?? [];
+    expect(models[0]?.weekly).toEqual({
+      ...weekly,
+      windows: [{ ...weekly.windows[0], days: ["mon", "tue"] }],
+    });
+    expect(models[0]?.weekly?.exceptHolidays).toEqual(["CN"]);
+    expect(groupTemporalModels(models)).toHaveLength(2);
+
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        temporal: {
+          ...temporal,
+          providers: [
+            {
+              ...temporal.providers[0],
+              models: [
+                {
+                  ...base,
+                  weekly: {
+                    ...weekly,
+                    windows: [{ ...weekly.windows[0], endMinute: 60 }],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ).toThrow(DashboardError);
+  });
+
   it("decodes authoritative legacy provider hide metadata and rejects wrong types", () => {
     const source = homeSnapshot();
     const card = {
