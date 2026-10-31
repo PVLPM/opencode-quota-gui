@@ -81,6 +81,12 @@ export interface QuotaTelemetryConfig {
  */
 export interface QuotaDashboardConfig {
   /**
+   * Whether the optional browser web transport starts. Defaults to `false`,
+   * including for an upgraded config that has no explicit value; only an
+   * explicit `true` enables the existing fixed loopback port.
+   */
+  enabled: boolean;
+  /**
    * Loopback dashboard port (integer 1–65535). Read-only in the GUI: changing it
    * takes effect on restart and there is no fallback when it is occupied.
    */
@@ -353,6 +359,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
     enabled: false,
   },
   dashboard: {
+    enabled: false,
     port: DEFAULT_DASHBOARD_PORT,
     hiddenCards: [],
     hiddenCardsVersion: 2,

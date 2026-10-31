@@ -48,18 +48,15 @@ function installerEnv(dir: string) {
   return { OPENCODE_CONFIG_DIR: join(dir, "global-config") };
 }
 describe("GUI-first onboarding", () => {
-  it.each([
-    4144, 4251,
-  ])("finishes with restart and the configured localhost GUI URL (port %s)", async (port) => {
+  it("prints the configured localhost URL when canonical web access is enabled", async () => {
     const dir = fixture();
     const globalDir = join(dir, "global");
-    if (port !== 4144) {
-      mkdirSync(join(globalDir, "opencode-quota-gui"), { recursive: true });
-      writeFileSync(
-        join(globalDir, "opencode-quota-gui", "config.jsonc"),
-        JSON.stringify({ dashboard: { port } }),
-      );
-    }
+    const port = 4251;
+    mkdirSync(join(globalDir, "opencode-quota-gui"), { recursive: true });
+    writeFileSync(
+      join(globalDir, "opencode-quota-gui", "config.jsonc"),
+      JSON.stringify({ dashboard: { enabled: true, port } }),
+    );
     const { prompts, transcript } = adapter();
     expect(
       await runInitInstaller({ cwd: dir, env: { OPENCODE_CONFIG_DIR: globalDir }, prompts }),
@@ -67,6 +64,16 @@ describe("GUI-first onboarding", () => {
     const outro = transcript.at(-1) ?? "";
     expect(outro).toContain(`Restart OpenCode, then open http://localhost:${port}/quota`);
     expect(outro).not.toContain(" show`");
+  });
+  it("reports the default-off web policy instead of promising a dead URL", async () => {
+    const dir = fixture();
+    const { prompts, transcript } = adapter();
+    expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
+    const outro = transcript.at(-1) ?? "";
+    expect(outro).toContain("Web dashboard access is off by default.");
+    expect(outro).toContain('"dashboard": { "enabled": true }');
+    expect(outro).toContain("http://localhost:4144/quota");
+    expect(outro).not.toContain("Restart OpenCode, then open http://localhost:4144/quota");
   });
   it("notes a real legacy native plugin without treating workspace overrides as legacy", async () => {
     const dir = fixture();

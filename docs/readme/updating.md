@@ -8,9 +8,30 @@ The normal update is the same OpenCode entry:
 
 1. Let OpenCode resolve `opencode-quota-gui` again from your `plugins` list.
 2. Restart OpenCode.
-3. Reload <http://localhost:4144/quota> and check Settings → About for the new Version and Build.
+3. If web access is enabled, reload <http://localhost:4144/quota> and check Settings → About for the new Version and Build.
 
 If you pinned a version or a tarball URL in `plugins`, update that value explicitly. OpenCode installs the configured npm plugin; this package does not run a background updater.
+
+Use a full OpenCode process restart when changing package versions. A cross-version in-process plugin reload is not enough to guarantee old web listeners stop: the previous module graph owns its own lifecycle registry and listener, and the new version intentionally does not adopt that record. The old listener can keep the fixed port until the process exits.
+
+## Web dashboard after upgrade
+
+Browser access is off by default for every user, including upgrades from `1.2.0` or earlier where no `dashboard.enabled` value exists. The plugin, retry handling, credentials, and shared dashboard runtime still load; only the HTTP/SSE/static web transport stays off.
+
+To restore browser access by editing canonical JSONC manually:
+
+1. Open `~/.config/opencode/opencode-quota-gui/config.jsonc` (or the path selected by `OPENCODE_CONFIG_DIR` / `XDG_CONFIG_HOME`).
+2. Add or update:
+   ```jsonc
+   {
+     "dashboard": {
+       "enabled": true,
+       "port": 4144
+     }
+   }
+   ```
+3. Restart OpenCode. The setting is read when the dashboard lifecycle starts and is not hot-reloaded.
+4. Open <http://localhost:4144/quota>. The server binds `127.0.0.1` only and does not choose a fallback port.
 
 ## Optional maintenance CLI
 
@@ -35,16 +56,16 @@ The dashboard reads only `~/.config/opencode/opencode-quota-gui/config.jsonc` at
 
 1. Back up the OpenCode config files you use.
 2. Restart OpenCode after the package update.
-3. Open <http://localhost:4144/settings>. If an eligible global legacy source exists, preview the import and apply it.
+3. If web access is enabled, open <http://localhost:4144/settings>. If an eligible global legacy source exists, preview the import and apply it.
 4. Review configuration issues in Settings. The import copies only seven compatible keys; `quotaProviders` definitions must be added to the canonical file manually.
 
 The import leaves source files byte-for-byte untouched. It does not migrate or delete upstream private state, credentials, logs, or caches.
 
 ## Port changes
 
-`dashboard.port` defaults to `4144` and is read-only in the web UI. To change it:
+`dashboard.port` defaults to `4144` and is read-only in the web UI. To change it, set `dashboard.enabled` to `true`, edit the port, and restart OpenCode:
 
-1. Edit `dashboard.port` in the canonical config file.
+1. Set `dashboard.enabled` to `true` and edit `dashboard.port` in the canonical config file.
 2. Restart OpenCode.
 3. Open the new `http://localhost:<port>/quota` URL.
 

@@ -6,7 +6,7 @@ This release is dashboard-only. There is no supported API, file format, metrics 
 
 ## Supported integration surface
 
-- **The dashboard:** open <http://localhost:4144/quota> in a browser on the same machine. This is the product surface, and it is the only supported way to view the data in this release.
+- **The dashboard:** enable the optional web transport first (see [Configuration: Web dashboard](../readme/configuration.md#web-dashboard)), then open <http://localhost:4144/quota> in a browser on the same machine. This is the product surface, and it is the only supported way to view the data in this release.
 - **OpenCode:** configure the `opencode-quota-gui` entry in the plural `plugins` list. OpenCode loads the server plugin, starts the dashboard, and manages provider logins. See [Manual install](manual-install.md).
 - **Companion provider plugins:** Cursor, Google AGY, and Gemini CLI integrations require their own community plugins, listed before the quota entry. See [Providers](providers.md).
 

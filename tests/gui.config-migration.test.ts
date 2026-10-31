@@ -3,7 +3,11 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createGuiSettingsStore, getGuiDashboardPort } from "../src/gui/config.js";
+import {
+  createGuiSettingsStore,
+  getGuiDashboardEnabled,
+  getGuiDashboardPort,
+} from "../src/gui/config.js";
 import { createLoadConfigMeta, getGuiConfigPath, loadConfigLayered } from "../src/lib/config.js";
 import {
   createGuiConfigWorkspace,
@@ -198,6 +202,16 @@ describe("legacy config compatibility beside the canonical layer", () => {
     expect(getGuiDashboardPort({ dashboard: { port: 1.5 } })).toBe(4144);
     expect(getGuiDashboardPort({ dashboard: { port: Number.NaN } })).toBe(4144);
     expect(getGuiDashboardPort({ dashboard: { port: 70000 } })).toBe(4144);
+  });
+
+  it("enables web only for an explicit dashboard.enabled true", async () => {
+    expect(getGuiDashboardEnabled(undefined)).toBe(false);
+    expect(getGuiDashboardEnabled({})).toBe(false);
+    expect(getGuiDashboardEnabled({ dashboard: {} })).toBe(false);
+    expect(getGuiDashboardEnabled({ dashboard: { enabled: false } })).toBe(false);
+    expect(getGuiDashboardEnabled({ dashboard: { enabled: true } })).toBe(true);
+    expect(getGuiDashboardEnabled({ dashboard: { enabled: "true" } })).toBe(false);
+    expect(getGuiDashboardEnabled({ dashboard: { enabled: 1 } })).toBe(false);
   });
 
   it("exposes only the absolute canonical pathLabel and keeps other strings path-free", async () => {

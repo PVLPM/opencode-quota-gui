@@ -4,7 +4,7 @@
 
 # OpenCode Quota GUI
 
-A local dashboard for your OpenCode quota, provider accounts, token usage, projects, and sessions. It runs beside OpenCode, listens only on loopback, and keeps its settings and cached data in this product's own namespace.
+A local dashboard for your OpenCode quota, provider accounts, token usage, projects, and sessions. The plugin runs beside OpenCode; its optional browser surface, when enabled, listens only on loopback and keeps its settings and cached data in this product's own namespace.
 
 <p align="center">
   <a href="https://www.npmjs.com/package/opencode-quota-gui"><img alt="npm" src="https://img.shields.io/npm/v/opencode-quota-gui?style=flat-square" /></a>
@@ -55,13 +55,24 @@ That adds this entry to your OpenCode configuration, keeping the other plugins t
 
 OpenCode installs the configured npm plugin itself; you do not need a separate `npm install`. If you prefer to edit the config manually, add the same `opencode-quota-gui` entry to the plural `plugins` array in `~/.config/opencode/opencode.json(c)` or a project `opencode.json(c)`.
 
-Restart OpenCode, then open <http://localhost:4144/quota>. The first page may show an empty dashboard until OpenCode has loaded the plugin and discovered a provider account.
+The browser dashboard is off by default for new and upgraded installs. To enable it, edit the canonical settings file and restart OpenCode:
+
+```jsonc
+{
+  "dashboard": {
+    "enabled": true,
+    "port": 4144
+  }
+}
+```
+
+Then open <http://localhost:4144/quota>. The first page may show an empty dashboard until OpenCode has loaded the plugin and discovered a provider account. The path and platform overrides are in [Configuration](docs/readme/configuration.md#web-dashboard).
 
 Requirements: OpenCode `2.0.16` or newer and Node.js `22.13+` or `23.4+`. This package does not support OpenCode 1.
 
 ## Dashboard
 
-The dashboard starts with the plugin and is served on `127.0.0.1` only. It does not listen on network interfaces, and there is no cloud component. Local port forwarding, proxy configuration, or another process running on the same machine is outside this guarantee.
+The optional browser dashboard starts only when `dashboard.enabled` is explicitly `true`; an absent value stays off, including after an upgrade. When enabled it is served on `127.0.0.1` at the fixed `dashboard.port` only. It does not listen on network interfaces, does not fall back to another port, and has no cloud component. Local port forwarding, proxy configuration, or another process running on the same machine is outside this guarantee.
 
 - **Quota:** cards for discovered provider accounts, ordered and grouped by provider. Each card shows the provider mark, plan and account or workspace labels, the rows the integration supports, a compact percentage bar for percentage rows, reset countdowns, and card-local errors. OpenAI cards can include banked resets and credits. Multiple logins for one provider get their own cards, and the active login is marked `(active)`. For providers with time-based pricing, the header shows live peak and off-peak status; open a status for its schedule, next change, and holiday exceptions.
 - **Analytics:** total tokens and API-equivalent estimate for the selected range, a stacked token chart with cache hit rate, and projects ordered by activity or tokens. Open a project for its own token chart, worktree label, and root sessions.
@@ -190,7 +201,7 @@ The dashboard reads only the canonical file at runtime:
 - **Legacy import:** when a global legacy OpenCode Quota source exists, Settings can preview and copy seven compatible keys: `percentDisplayMode`, `percentLabelStyle`, `enabledProviders`, `minIntervalMs`, `requestTimeoutMs`, `accountingDetail`, and `waitForQuotaReset`. The import is read-only for the source; files stay byte-for-byte untouched. Custom provider definitions are not imported, so copy `quotaProviders` into the canonical file yourself.
 - **Visibility:** hiding a provider or row is presentation only and never changes polling or provider data. Opaque card and row IDs in `dashboard.hiddenCards` and `dashboard.hiddenRows` are internal identifiers: use **Settings → Visibility** to manage them instead of editing or deriving IDs by hand.
 - **Temporal pricing:** `dashboard.temporalProviderOverrides` stores sparse per-provider on/off choices for the live peak and off-peak status in the Quota header. A provider with a discovered account is shown by default; an explicit choice wins. Hiding a status is presentation only and never changes polling, quota values, or recorded usage.
-- **Port:** `dashboard.port` is read-only in the web UI. Edit the canonical file and restart OpenCode to change it; the default is `4144`.
+- **Web dashboard:** off by default for new and upgraded installs. Set `"dashboard": { "enabled": true }` in the canonical file and restart OpenCode to serve the browser UI on `127.0.0.1` at `dashboard.port` (default `4144`). An absent setting means off, and the server never falls back to another port.
 - **Browser storage:** the dashboard uses browser-local storage for display state such as the selected range and a visibility-catalog cache. It does not use cross-site cookies.
 - **Local data:** the plugin reads OpenCode's local configuration and login data through OpenCode, plus OpenCode's local session database for usage and session views. Provider quota checks use the provider's API or the documented local CLI or companion plugin. Token pricing can come from the bundled snapshot or `models.dev` at runtime. Peak and off-peak rules ship in the bundled snapshot and are evaluated locally.
 - **OpenTelemetry (optional):** off by default. Set `"telemetry": { "enabled": true }` in the canonical file to publish two gauges, `opencode.quota.consumed` and `opencode.quota.cache.age`, through the `@opentelemetry/api` global `MeterProvider` that your host process configures. The plugin does not create a `MeterProvider`, exporter, collector, or metrics endpoint, sends no metrics by itself, and makes no extra provider requests for telemetry. Metric names and attributes are not a public API. See [External integration](docs/readme/external-integration.md#optional-opentelemetry-advanced-host-owned).

@@ -254,6 +254,30 @@ describe("canonical dashboard config layer", () => {
     expect(invalid.meta.configIssues.some((entry) => entry.key === "dashboard.port")).toBe(true);
   });
 
+  it("defaults dashboard.enabled to false and validates an explicit boolean", async () => {
+    const workspace = makeWorkspace();
+    // Absence is the upgrade path from <= 1.2.0: no web listener by default.
+    writeGuiCanonicalConfig(workspace, { dashboard: { port: 4999 } });
+    const absent = await load(workspace);
+    expect(absent.config.dashboard.enabled).toBe(false);
+    expect(absent.meta.settingSources).not.toHaveProperty("dashboard.enabled");
+
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: true, port: 4999 } });
+    const enabled = await load(workspace);
+    expect(enabled.config.dashboard.enabled).toBe(true);
+    expect(enabled.meta.settingSources["dashboard.enabled"]).toBe(workspace.guiConfigPath);
+
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: false } });
+    const disabled = await load(workspace);
+    expect(disabled.config.dashboard.enabled).toBe(false);
+    expect(disabled.meta.settingSources["dashboard.enabled"]).toBe(workspace.guiConfigPath);
+
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: "yes" } });
+    const invalid = await load(workspace);
+    expect(invalid.config.dashboard.enabled).toBe(false);
+    expect(invalid.meta.configIssues.some((entry) => entry.key === "dashboard.enabled")).toBe(true);
+  });
+
   it("defaults dashboard.providerOrder to an empty list when the key is absent", async () => {
     const workspace = makeWorkspace();
     writeGuiCanonicalConfig(workspace, { minIntervalMs: 500 });

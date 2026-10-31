@@ -16,13 +16,13 @@ Behavior settings are always global. A project install selects only the project 
 
 The Settings page writes only this canonical file. A project or workspace setting does not become effective by being present in an OpenCode config file: only the canonical file and defaults are read by the dashboard.
 
-Settings values, provenance, the dashboard port, and visibility lists come only from the canonical file and defaults. The separate import preview is the only path that reads inherited legacy values.
+Settings values, provenance, the dashboard port, and visibility lists come only from the canonical file and defaults. The web dashboard switch is stored in the same file as `dashboard.enabled`: it is off when absent, and only an explicit `true` enables the fixed loopback port. The separate import preview is the only path that reads inherited legacy values.
 
 Provider credential sidecars are separate files in the same GUI namespace. For example, Xiaomi MiMo may use `opencode-quota-gui/mimo.json`; that file supplies only a provider cookie and is not part of the canonical behavior config. No sidecar is merged into `config.jsonc`.
 
 ## Settings page
 
-Open <http://localhost:4144/settings>. The page groups the supported controls:
+When the web dashboard is enabled, open <http://localhost:4144/settings>. The page groups the supported controls:
 
 | Group | What it changes |
 | --- | --- |
@@ -33,7 +33,7 @@ Open <http://localhost:4144/settings>. The page groups the supported controls:
 | Visibility | Shows or hides cards and rows, and reorders cards. Presentation only. |
 | Dashboard | Read-only address, the canonical file path, configuration issues, and build details. |
 
-Saving Settings writes to the canonical file atomically. If the file changed elsewhere, the save returns a conflict and keeps your draft.
+Saving Settings writes to the canonical file atomically. If the file changed elsewhere, the save returns a conflict and keeps your draft. The web dashboard switch is edited in the canonical file for now; use [Web dashboard](#web-dashboard) followed by an OpenCode restart.
 
 ### Visibility identifiers
 
@@ -47,13 +47,33 @@ Older `dashboard.hiddenCards` lists had no semantics marker, so a full provider-
 
 **Settings → Temporal pricing** lists every provider with time-based pricing rules and toggles its live peak and off-peak status in the Quota header. Choices are stored sparsely in `dashboard.temporalProviderOverrides` as provider ids mapped to booleans. A provider with a discovered account is shown by default; an explicit `true` or `false` overrides that default. The setting changes presentation only: it does not change polling, quota values, or recorded usage.
 
-### Port
+### Web dashboard
 
-`dashboard.port` defaults to `4144` and is read-only in the web UI. To change it, edit the canonical file and restart OpenCode:
+The browser dashboard is disabled by default for every install, including an upgrade from `1.2.0` or earlier. An absent `dashboard.enabled` value means off; only an explicit `true` starts the optional HTTP/SSE/static transport.
+
+To enable it, edit the canonical file and restart OpenCode:
 
 ```jsonc
 {
   "dashboard": {
+    "enabled": true,
+    "port": 4144
+  }
+}
+```
+
+Then open <http://localhost:4144/quota>. This manual JSONC edit is also the recovery path when the dashboard is unavailable and no GUI is reachable. The plugin reads `dashboard.enabled` when its dashboard lifecycle starts; the setting is not hot-reloaded while OpenCode is running.
+
+The plugin's retry handling, credential integration, and shared dashboard runtime keep running whether the browser transport is off or on. Disabling the web transport starts no HTTP listener, SSE stream, or static file server. Quota is collected on demand through the shared runtime, and no background quota or analytics poller starts until a transport has a viewer.
+
+### Port
+
+`dashboard.port` defaults to `4144` and is read-only in the web UI. To change it, set `dashboard.enabled` to `true`, edit the port, and restart OpenCode:
+
+```jsonc
+{
+  "dashboard": {
+    "enabled": true,
     "port": 4144
   }
 }

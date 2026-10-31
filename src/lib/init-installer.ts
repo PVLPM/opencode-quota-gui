@@ -1513,13 +1513,17 @@ export async function runInitInstaller(params?: {
       }),
     });
     const dashboardUrl = `http://localhost:${config.dashboard?.port ?? DEFAULT_DASHBOARD_PORT}/quota`;
+    const dashboardOutro =
+      config.dashboard.enabled === true
+        ? `Restart OpenCode, then open ${dashboardUrl}.`
+        : `Web dashboard access is off by default. Add "dashboard": { "enabled": true } to the canonical config, then restart OpenCode and open ${dashboardUrl}.`;
     prompts.outro(
       [
         "OpenCode Quota setup complete.",
         `Interfaces: ${interfaceLabel}`,
         "Configured paths:",
         ...configuredPaths.map((path) => `- ${path}`),
-        `Restart OpenCode, then open ${dashboardUrl}.`,
+        dashboardOutro,
         `If OpenCode Quota helps, please consider a star: ${GITHUB_REPO_URL}`,
       ].join("\n"),
     );

@@ -918,8 +918,8 @@ export function createDashboardServer(
   /**
    * Detaches this transport: stop broadcasting to the shared service and end
    * SSE clients (releasing the viewer). The snapshot service and source are
-   * caller-owned and are released by the lifecycle only after the last lease or
-   * a terminal bind failure. Idempotent and never rejects.
+   * caller-owned and are released by the lifecycle when the last lease disposes,
+   * including after a terminal bind failure. Idempotent and never rejects.
    */
   function releaseResources(): void {
     if (released) return;
@@ -953,8 +953,8 @@ export function createDashboardServer(
     const failBind = (reason: string | undefined) => {
       logger.error("dashboard server unavailable", reason ?? "unknown");
       // Terminal: no alternate port is attempted. This transport detaches its
-      // SSE subscriber; the lifecycle closes the shared snapshot service and
-      // sources when the create-server promise rejects.
+      // SSE subscriber; the lifecycle keeps the shared snapshot service and
+      // sources alive for its remaining leases.
       try {
         server.close();
       } catch {

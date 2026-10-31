@@ -5,10 +5,11 @@
 ## First checks
 
 1. Confirm the `opencode-quota-gui` entry is in the `plugins` list of `~/.config/opencode/opencode.json(c)`, or in a project `opencode.json(c)` / `.opencode/opencode.json(c)`.
-2. Restart OpenCode after changing the plugin entry, a login, or the canonical settings file.
-3. Open <http://localhost:4144/quota>. If the page is blank or stale, reload it and check the connection state in the top bar.
-4. Open <http://localhost:4144/settings> and read the configuration issues and the Version, Build, and Contract in the About block.
-5. Find the failing provider card and read its card-local error. One card failing does not hide the others.
+2. Restart OpenCode after changing the plugin entry, a login, the canonical settings file, or `dashboard.enabled`.
+3. Confirm browser access is enabled: `~/.config/opencode/opencode-quota-gui/config.jsonc` must contain `"dashboard": { "enabled": true }`. It is off by default, including after an upgrade.
+4. Open <http://localhost:4144/quota>. If the page is blank or stale, reload it and check the connection state in the top bar.
+5. Open <http://localhost:4144/settings> and read the configuration issues and the Version, Build, and Contract in the About block.
+6. Find the failing provider card and read its card-local error. One card failing does not hide the others.
 
 If every provider is missing, check the plugin entry first. The plugin must load in OpenCode before the dashboard can start. Dashboard log lines use the `[opencode-quota-gui]` prefix and are scrubbed of credentials and absolute paths.
 
@@ -16,8 +17,9 @@ If every provider is missing, check the plugin entry first. The plugin must load
 
 | Problem | Try this |
 | --- | --- |
-| Dashboard does not open | Confirm OpenCode loaded the plugin and restart it. Check that nothing else uses the configured port. The server does not choose a fallback port. |
-| `dashboard server unavailable` in the log | Another process owns the port. Stop it, or change `dashboard.port` in the canonical file and restart OpenCode. |
+| Dashboard does not open | Confirm OpenCode loaded the plugin and that `dashboard.enabled` is `true` in the canonical file, then restart OpenCode. Check that nothing else uses the configured port. The server does not choose a fallback port. |
+| Dashboard page cannot connect after an upgrade | Browser access is off by default. Add `"dashboard": { "enabled": true }` to the canonical file and restart OpenCode. |
+| `dashboard server unavailable` in the log | Another process owns the port. The shared quota runtime and retry handling still run. Stop the other process, or change `dashboard.port` in the canonical file and restart OpenCode. |
 | Page says `Data may be stale` or `Reconnecting…` | The browser lost the local event stream. Reload the page; if it persists, restart OpenCode. |
 | Settings will not save | The canonical file changed elsewhere, or the file is malformed. Reopen Settings, review the reported issue, and save again. |
 | `Build mismatch` or contract mismatch | The server and browser page came from different builds. Restart OpenCode, then reload the dashboard. Reinstall the same package or tarball if it persists. |

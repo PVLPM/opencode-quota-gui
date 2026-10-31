@@ -249,7 +249,7 @@ describe("dashboard lifecycle across separately loaded module graphs", () => {
   it("shares one refcounted host, keeps it alive for the surviving graph, and reacquires it after the last dispose", async () => {
     const workspace = makeWorkspace();
     const port = await freePort();
-    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: true, port } });
     const sourceA = buildSource(true);
     const sourceB = buildSource();
     let bCreates = 0;
@@ -335,7 +335,7 @@ describe("dashboard lifecycle across separately loaded module graphs", () => {
   it("classifies a source failure created by the owning graph and logs it once", async () => {
     const workspace = makeWorkspace();
     const port = await freePort();
-    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: true, port } });
     const logs: string[] = [];
     const logger = createGuiLogger({ sink: (line) => logs.push(line) });
 
@@ -389,7 +389,7 @@ describe("dashboard lifecycle across separately loaded module graphs", () => {
     const workspace = makeWorkspace();
     const blocker = await blockerOnFreePort();
     try {
-      writeGuiCanonicalConfig(workspace, { dashboard: { port: blocker.port } });
+      writeGuiCanonicalConfig(workspace, { dashboard: { enabled: true, port: blocker.port } });
       const sourceFixture = buildSource();
       const logs: string[] = [];
       const logger = createGuiLogger({ sink: (line) => logs.push(line) });
@@ -414,8 +414,8 @@ describe("dashboard lifecycle across separately loaded module graphs", () => {
       expect(leaseA.state).toBe("unavailable");
       expect(leaseA.reason).toBe("port-unavailable");
       expect(leaseA.port).toBe(blocker.port);
-      // The terminal bind failure released the source built before the bind.
-      expect(sourceFixture.closes).toBe(1);
+      // The web bind failed, but the shared runtime remains alive for its leases.
+      expect(sourceFixture.closes).toBe(0);
       expect(logs).toHaveLength(1);
       expect(logs[0]).toContain("EADDRINUSE");
       expect(logs[0]).not.toContain(workspace.configDir);
@@ -426,9 +426,14 @@ describe("dashboard lifecycle across separately loaded module graphs", () => {
       expect(leaseB.port).toBe(blocker.port);
       // One controlled line per failed host, and no fallback port was bound.
       expect(logs).toHaveLength(1);
+      expect(sourceFixture.closes).toBe(0);
 
       await leaseA.dispose();
+      // The disposed owner's source ends with its lease; the shared runtime
+      // itself remains until the last lease.
+      expect(sourceFixture.closes).toBe(1);
       await leaseB.dispose();
+      expect(sourceFixture.closes).toBe(1);
       expect(await tryBind(blocker.port)).toBe(false);
     } finally {
       await blocker.close();

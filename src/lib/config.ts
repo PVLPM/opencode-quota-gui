@@ -113,6 +113,7 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "export.enabled",
   "export.path",
   "telemetry.enabled",
+  "dashboard.enabled",
   "dashboard.port",
   "dashboard.hiddenCards",
   "dashboard.hiddenCardsVersion",
@@ -406,6 +407,7 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
     export: { ...config.export },
     telemetry: { ...config.telemetry },
     dashboard: {
+      enabled: config.dashboard.enabled,
       port: config.dashboard.port,
       hiddenCards: [...config.dashboard.hiddenCards],
       hiddenCardsVersion: config.dashboard.hiddenCardsVersion,
@@ -725,6 +727,14 @@ function extractDashboardPatch(
   }
 
   const patch: DashboardConfigPatch = {};
+
+  if (hasOwnKey(value, "enabled")) {
+    if (typeof value.enabled === "boolean") {
+      patch.enabled = value.enabled;
+    } else {
+      reportIssue?.("dashboard.enabled", "expected boolean");
+    }
+  }
 
   if (hasOwnKey(value, "port")) {
     if (isValidDashboardPort(value.port)) {
@@ -1361,6 +1371,11 @@ function applyValidatedQuotaToastPatch(
   }
 
   if (patch.dashboard) {
+    if (hasOwnKey(patch.dashboard, "enabled")) {
+      config.dashboard.enabled = patch.dashboard.enabled!;
+      applySettingSource(settingSources, "dashboard.enabled", sourcePath);
+    }
+
     if (hasOwnKey(patch.dashboard, "port")) {
       config.dashboard.port = patch.dashboard.port!;
       applySettingSource(settingSources, "dashboard.port", sourcePath);

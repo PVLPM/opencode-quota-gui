@@ -247,6 +247,14 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     hidden: true,
   },
   {
+    key: "dashboard.enabled",
+    group: "dashboard",
+    control: "switch",
+    label: "Web dashboard",
+    help: "Serve the browser dashboard on 127.0.0.1 at dashboard.port. Off by default; changing it requires an OpenCode restart.",
+    hidden: true,
+  },
+  {
     key: "dashboard.port",
     group: "dashboard",
     control: "readonly",

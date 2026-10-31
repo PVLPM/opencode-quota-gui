@@ -36,6 +36,17 @@ describe("Settings polish model", () => {
     }
   });
 
+  it("describes dashboard.enabled as shared metadata without a generic control", () => {
+    const field = model.SETTINGS_FIELDS.find((entry) => entry.key === "dashboard.enabled");
+    expect(field).toMatchObject({
+      group: "dashboard",
+      control: "switch",
+      hidden: true,
+      label: "Web dashboard",
+    });
+    expect(field?.help).toContain("127.0.0.1");
+  });
+
   it("links descriptor importability to exactly the seven supported concepts", () => {
     expect(
       model.SETTINGS_FIELDS.filter((field) => field.importable)

@@ -91,6 +91,7 @@ const EXPECTED_KEYS = [
   "dashboard.providerOrder",
   "dashboard.cardOrder",
   "dashboard.temporalProviderOverrides",
+  "dashboard.enabled",
   "dashboard.port",
   "dashboard.hiddenCardsVersion",
 ] as const;
@@ -146,6 +147,7 @@ describe("GUI settings keys", () => {
       "dashboard.providerOrder": [],
       "dashboard.cardOrder": [],
       "dashboard.temporalProviderOverrides": {},
+      "dashboard.enabled": false,
       "dashboard.port": 4144,
       "dashboard.hiddenCardsVersion": 2,
     });
@@ -178,6 +180,45 @@ describe("GUI settings keys", () => {
     );
     expect(error.message).not.toContain(workspace.tempDir);
     expect(readDotted(workspace, "dashboard.port")).toBe(4999);
+  });
+
+  it("writes dashboard.enabled with revision safety and preserves canonical JSONC", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(
+      workspace,
+      `{
+  // Keep this comment when the web switch is stored.
+  "dashboard": {
+    "enabled": false,
+    "port": 4999
+  }
+}
+`,
+    );
+    const store = makeStore(workspace);
+    const before = await store.settings();
+    expect(before.values["dashboard.enabled"]).toBe(false);
+    expect(before.sources["dashboard.enabled"]).toBe("opencode-quota-gui/config.jsonc");
+
+    const saved = await store.saveSettings({
+      patch: { "dashboard.enabled": true },
+      expectedRevision: before.revision,
+    });
+    expect(saved.applied).toEqual({ "dashboard.enabled": true });
+    const after = await store.settings();
+    expect(after.values["dashboard.enabled"]).toBe(true);
+    expect(readFileSync(workspace.guiConfigPath, "utf8")).toContain(
+      "// Keep this comment when the web switch is stored.",
+    );
+
+    // A stale revision is rejected without changing the manual/saved value.
+    await expect(
+      store.saveSettings({
+        patch: { "dashboard.enabled": false },
+        expectedRevision: before.revision,
+      }),
+    ).rejects.toMatchObject({ code: "config-changed" });
+    expect((await store.settings()).values["dashboard.enabled"]).toBe(true);
   });
 
   it("reports an invalid configured port instead of failing", async () => {
@@ -341,6 +382,8 @@ describe("GUI settings keys", () => {
     ["dashboard.hiddenRows", ["card-1#row-1"], ["card-1#row-1"]],
     ["dashboard.providerOrder", ["provider-1", "provider-2"], ["provider-1", "provider-2"]],
     ["dashboard.cardOrder", ["card-2", "card-1"], ["card-2", "card-1"]],
+    ["dashboard.enabled", true, true],
+    ["dashboard.enabled", false, false],
     [
       "dashboard.temporalProviderOverrides",
       { zai: false, deepseek: true },
@@ -516,6 +559,8 @@ describe("GUI settings keys", () => {
       Array.from({ length: 501 }, (_value, index) => `provider-${index}`),
     ],
     ["dashboard.cardOrder", Array.from({ length: 501 }, (_value, index) => `card-${index}`)],
+    ["dashboard.enabled", "yes"],
+    ["dashboard.enabled", 1],
   ];
 
   it.each(invalidCases)("rejects invalid %s = %j with invalid-setting", async (key, value) => {

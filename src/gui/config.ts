@@ -65,7 +65,7 @@ import {
   type SettingsFileOpener,
 } from "./settings-file-opener.js";
 
-/** Writable GUI settings keys (spec §5.4 table order, port excluded). */
+/** Writable GUI settings keys (spec §5.4 table order plus the web switch; port excluded). */
 export const GUI_SETTINGS_WRITABLE_KEYS = [
   "formatStyle",
   "percentDisplayMode",
@@ -85,6 +85,7 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "dashboard.providerOrder",
   "dashboard.cardOrder",
   "dashboard.temporalProviderOverrides",
+  "dashboard.enabled",
 ] as const;
 
 /**
@@ -163,6 +164,17 @@ export function getGuiDashboardPort(
   return port !== undefined && Number.isInteger(port) && port >= 1 && port <= 65535
     ? port
     : DEFAULT_DASHBOARD_PORT;
+}
+
+/**
+ * Whether the optional web transport starts. Absence or any non-boolean value
+ * is off; only an explicit `true` enables the fixed loopback port. This keeps
+ * upgrades from ≤1.2.0 off without a config migration.
+ */
+export function getGuiDashboardEnabled(
+  config: { dashboard?: { enabled?: unknown } } | null | undefined,
+): boolean {
+  return config?.dashboard?.enabled === true;
 }
 
 export function resolveGuiDashboardUrl(port: number): string {
@@ -368,6 +380,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return [...config.dashboard.cardOrder];
       case "dashboard.temporalProviderOverrides":
         return { ...config.dashboard.temporalProviderOverrides };
+      case "dashboard.enabled":
+        return config.dashboard.enabled;
       case "dashboard.port":
         return config.dashboard.port;
     }
@@ -606,6 +620,11 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       }
       case "dashboard.port":
         throw invalidSetting(key, "this setting is read-only; edit the canonical file and restart");
+      case "dashboard.enabled":
+        if (value !== true && value !== false) {
+          throw invalidSetting(key, "expected boolean");
+        }
+        return value;
       case "dashboard.hiddenCardsVersion":
         throw invalidSetting(
           key,

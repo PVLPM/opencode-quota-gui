@@ -74,3 +74,28 @@ late in-flight results, fallback errors, and legacy registry isolation;
 independent re-review found both reported issues addressed.
 Reversible: Yes.
 Owner review: review recommended
+
+## D04 — Canonical opt-in Web transport
+
+Stage: 2
+Status: accepted
+Problem: Web must be optional without disabling the shared runtime or making
+GUI-independent recovery depend on Native functionality.
+Evidence: Runtime settings already use revision-checked canonical JSONC, and
+the lifecycle reads its fixed port at plugin startup.
+Options considered: An automatic mode or recovery CLI; an explicit canonical
+boolean with a full OpenCode restart after editing.
+Decision: Use `dashboard.enabled`, default `false` for absent, invalid and
+upgrade configurations; keep the runtime alive when Web is off or fails to bind.
+Why: This implements the approved policy with the existing configuration and
+ownership machinery and no additional process or recovery command.
+Trade-offs: Web users must opt in and restart OpenCode; enabling it does not
+change a running host until restart. Mixed-version in-process reloads may leave
+an older listener alive, so recovery instructions require a full restart.
+Product impact: Web is no longer available by default, including on upgrade.
+Compatibility impact: Existing configured `dashboard.port` remains effective
+when Web is explicitly enabled; Native Settings integration follows later.
+Test evidence: `pnpm verify` passed: 4,636 tests passed, 50 skipped, plus five
+cross-surface tests; Windows symlink-dependent cases were among the skips.
+Reversible: Yes.
+Owner review: important but reversible

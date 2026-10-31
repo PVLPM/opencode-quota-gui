@@ -82,7 +82,7 @@ export const MAX_TRACKED_PAGES = 16;
  * optional at this seam so older injected mocks keep compiling; production
  * always provides it and `/api/v1/quota` returns a controlled 500 otherwise.
  * `refreshAnalytics` is an optional shared worker refresh seam, and `close` is
- * closed by the server's final dispose/bind-failure path, not by this service.
+ * closed by the lifecycle when the last lease disposes, not by this service.
  */
 export type SnapshotSource = Pick<DashboardDataSource, "home" | "project" | "session"> & {
   quota?: DashboardDataSource["quota"];

@@ -47,7 +47,7 @@ npx opencode-quota-gui init
 
 `init` is not required for the normal install. It previews the plugin entry, the global canonical GUI settings, and the OpenCode config location before writing. Choosing a project install selects only the project OpenCode plugin entry; behavior settings remain in the global `opencode-quota-gui/config.jsonc`. The preview states this, and an existing sibling GUI `config.json` is preserved unchanged, not converted or imported implicitly.
 
-Restart OpenCode, then open <http://localhost:4144/quota>. The dashboard is the product surface; there is no separate TUI entry to add.
+Web access is off by default. Add `"dashboard": { "enabled": true }` to the canonical file above, restart OpenCode, then open <http://localhost:4144/quota>. The dashboard is the product surface; there is no separate TUI entry to add. See [Web dashboard](configuration.md#web-dashboard) for the recovery edit and fixed-port behavior.
 
 ## First settings
 
@@ -57,7 +57,7 @@ The dashboard reads its canonical settings from:
 ~/.config/opencode/opencode-quota-gui/config.jsonc
 ```
 
-A fresh setup works with defaults. Open the [Configuration](configuration.md) guide to set provider selection, display mode, accounting detail, or a custom provider. Settings changes write only this canonical file; see [Settings and privacy](../../README.md#settings-and-privacy). Behavior settings are always global, even when the plugin entry is project-local.
+A fresh setup works with defaults, but the browser dashboard stays off until that file contains `"dashboard": { "enabled": true }` and OpenCode restarts. Open the [Configuration](configuration.md) guide to set provider selection, display mode, accounting detail, web access, or a custom provider. Settings changes write only this canonical file; see [Settings and privacy](../../README.md#settings-and-privacy). Behavior settings are always global, even when the plugin entry is project-local.
 
 ## Requirements
 

@@ -77,7 +77,11 @@ async function freePort(): Promise<number> {
 async function writeCanonicalConfig(port: number): Promise<void> {
   const dir = join(TEST_RUNTIME_ROOT, "config", "opencode-quota-gui");
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "config.jsonc"), JSON.stringify({ dashboard: { port } }), "utf8");
+  await writeFile(
+    join(dir, "config.jsonc"),
+    JSON.stringify({ dashboard: { enabled: true, port } }),
+    "utf8",
+  );
 }
 
 const cleanups: Array<() => Promise<void> | void> = [];

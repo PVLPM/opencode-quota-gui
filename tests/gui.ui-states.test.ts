@@ -2175,6 +2175,7 @@ describe("settings page", () => {
       [
         "accountingDetail",
         "dashboard.cardOrder",
+        "dashboard.enabled",
         "dashboard.hiddenCards",
         "dashboard.hiddenRows",
         "dashboard.port",
@@ -2195,6 +2196,7 @@ describe("settings page", () => {
       ].sort(),
     );
     expect(fieldFor("dashboard.port")?.control).toBe("readonly");
+    expect(fieldFor("dashboard.enabled")?.hidden).toBe(true);
   });
 
   it("keeps card order as a hidden string-list field in the visibility group", () => {
