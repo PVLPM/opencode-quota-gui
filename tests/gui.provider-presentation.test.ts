@@ -5,7 +5,7 @@ import { mkdtemp, rm as removeDirectory, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -21,6 +21,7 @@ import type { DisplayPreferences } from "../src/ui/components/quota-card.js";
 import { resolveProviderPresentation } from "../src/ui/provider-catalog.js";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import { NOW, percentRow, providerCard } from "./fixtures/gui-ui-fixtures.js";
+import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
  * Provider presentation is a local, browser-safe catalog. It is shared by the
@@ -89,7 +90,7 @@ let server: ViteDevServer | undefined;
 let graph: SsrGraph;
 
 beforeAll(async () => {
-  const created = await createServer({
+  const created = await createIsolatedViteServer({
     configFile: false,
     root: path.join(repoRoot, "src/ui"),
     plugins: [

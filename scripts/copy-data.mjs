@@ -6,6 +6,10 @@ const files = [
     src: join("src", "data", "modelsdev-pricing.min.json"),
     dst: join("dist", "data", "modelsdev-pricing.min.json"),
   },
+  {
+    src: join("src", "data", "modelsdev-temporal.min.json"),
+    dst: join("dist", "data", "modelsdev-temporal.min.json"),
+  },
 ];
 
 for (const f of files) {

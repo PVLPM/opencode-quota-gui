@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/lib/opencode-storage.js", () => {
   class SessionNotFoundError extends Error {
@@ -29,6 +29,24 @@ const PARTIAL_PROVIDER = "partial-labs";
 const PARTIAL_MODEL = "input-only";
 const FREE_PROVIDER = "free-labs";
 const FREE_MODEL = "zero-cost";
+const TEMPORAL_PROVIDER = "temporal-labs";
+const TEMPORAL_MODELS = ["peak-1", "peak-1-copy", "holiday-1", "unsupported-1"] as const;
+const TEMPORAL_REVISION = "a".repeat(40);
+const CN_2026 = {
+  timeZone: "Asia/Shanghai",
+  source: "https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html",
+  published: "2025-11-04",
+  intervals: [
+    {
+      id: "new-year",
+      localStart: "2026-01-01",
+      localEnd: "2026-01-04",
+      startMs: 1_767_196_800_000,
+      endMs: 1_767_456_000_000,
+    },
+  ],
+  makeupWorkdays: [],
+};
 
 vi.mock("../src/lib/modelsdev-pricing.js", () => ({
   hasCost: vi.fn(
@@ -36,7 +54,9 @@ vi.mock("../src/lib/modelsdev-pricing.js", () => ({
       (providerID === "openai" && modelID === "gpt-5") ||
       (providerID === PRICED_EDGE_PROVIDER && modelID === PRICED_EDGE_MODEL) ||
       (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
-      (providerID === FREE_PROVIDER && modelID === FREE_MODEL),
+      (providerID === FREE_PROVIDER && modelID === FREE_MODEL) ||
+      (providerID === TEMPORAL_PROVIDER &&
+        (TEMPORAL_MODELS as readonly string[]).includes(modelID)),
   ),
   hasProvider: vi.fn(
     (providerID: string) =>
@@ -44,7 +64,8 @@ vi.mock("../src/lib/modelsdev-pricing.js", () => ({
       providerID === "unpriced-labs" ||
       providerID === PRICED_EDGE_PROVIDER ||
       providerID === PARTIAL_PROVIDER ||
-      providerID === FREE_PROVIDER,
+      providerID === FREE_PROVIDER ||
+      providerID === TEMPORAL_PROVIDER,
   ),
   hasCatalogModel: vi.fn(
     (providerID: string, modelID: string) => providerID === "catalog-labs" && modelID === "gpt-5",
@@ -55,7 +76,9 @@ vi.mock("../src/lib/modelsdev-pricing.js", () => ({
       (providerID === "unpriced-labs" && modelID === "mystery-1") ||
       (providerID === PRICED_EDGE_PROVIDER && modelID === PRICED_EDGE_MODEL) ||
       (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) ||
-      (providerID === FREE_PROVIDER && modelID === FREE_MODEL),
+      (providerID === FREE_PROVIDER && modelID === FREE_MODEL) ||
+      (providerID === TEMPORAL_PROVIDER &&
+        (TEMPORAL_MODELS as readonly string[]).includes(modelID)),
   ),
   isModelsDevProviderId: vi.fn(
     (providerID: string) =>
@@ -63,9 +86,14 @@ vi.mock("../src/lib/modelsdev-pricing.js", () => ({
       providerID === "unpriced-labs" ||
       providerID === PRICED_EDGE_PROVIDER ||
       providerID === PARTIAL_PROVIDER ||
-      providerID === FREE_PROVIDER,
+      providerID === FREE_PROVIDER ||
+      providerID === TEMPORAL_PROVIDER,
   ),
-  listProvidersForModelId: vi.fn((modelID: string) => (modelID === "gpt-5" ? ["openai"] : [])),
+  listProvidersForModelId: vi.fn((modelID: string) => {
+    if (modelID === "gpt-5") return ["openai"];
+    if (modelID === "peak-1") return [TEMPORAL_PROVIDER];
+    return [];
+  }),
   lookupCost: vi.fn((providerID: string, modelID: string) => {
     if (providerID === "openai" && modelID === "gpt-5")
       return { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };
@@ -73,6 +101,11 @@ vi.mock("../src/lib/modelsdev-pricing.js", () => ({
       return { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };
     if (providerID === PARTIAL_PROVIDER && modelID === PARTIAL_MODEL) return { input: 2 };
     if (providerID === FREE_PROVIDER && modelID === FREE_MODEL) return { input: 0, output: 0 };
+    if (
+      providerID === TEMPORAL_PROVIDER &&
+      (TEMPORAL_MODELS as readonly string[]).includes(modelID)
+    )
+      return { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };
     return null;
   }),
 }));
@@ -194,6 +227,12 @@ vi.mock("../src/lib/token-cost.js", () => ({
   ),
 }));
 
+import {
+  __resetTemporalSnapshotForTests,
+  normalizeTemporalSnapshot,
+  setTemporalSnapshotForTests,
+} from "../src/lib/modelsdev-temporal.js";
+import type { OpenCodeMessage } from "../src/lib/opencode-storage.js";
 import {
   aggregateUsage,
   getSessionTokenSummary,
@@ -344,6 +383,261 @@ describe("shared priceTokenBuckets primitive", () => {
       expect(emptyModel.unknown.sourceModelID).toBe("");
     }
     expect(modelCache.size).toBe(2);
+  });
+});
+
+describe("historical temporal pricing", () => {
+  const tokens = { input: 2, output: 3, reasoning: 4, cache_read: 5, cache_write: 6 };
+  const peak = Date.parse("2026-01-05T14:00:00.000Z");
+  const offPeak = Date.parse("2026-01-05T13:59:59.999Z");
+  const unresolvedHoliday = Date.parse("2027-01-04T02:00:00.000Z");
+
+  function snapshot() {
+    return {
+      version: 1,
+      revision: TEMPORAL_REVISION,
+      source: `https://github.com/anomalyco/models.dev/tree/${TEMPORAL_REVISION}`,
+      generatedAt: Date.parse("2026-01-01T00:00:00.000Z"),
+      jurisdictions: { CN: { "2026": CN_2026 } },
+      providers: {
+        openai: {
+          "gpt-5": {
+            status: "supported",
+            source: "providers/openai/models/gpt-5.toml",
+            overrides: [],
+            multipliers: [
+              {
+                id: "multipliers[0]",
+                when: { type: "utc_hours", op: "gte", value: "14:00" },
+                factor: 2,
+              },
+            ],
+          },
+        },
+        [TEMPORAL_PROVIDER]: {
+          "peak-1": {
+            status: "supported",
+            source: "providers/temporal-labs/models/peak-1.toml",
+            overrides: [],
+            multipliers: [
+              {
+                id: "multipliers[0]",
+                when: { type: "utc_hours", op: "gte", value: "14:00" },
+                factor: 2,
+              },
+            ],
+          },
+          "holiday-1": {
+            status: "supported",
+            source: "providers/temporal-labs/models/holiday-1.toml",
+            overrides: [],
+            multipliers: [
+              {
+                id: "multipliers[0]",
+                when: { type: "holiday", op: "equals", value: "CN" },
+                factor: 2,
+              },
+            ],
+          },
+          "unsupported-1": {
+            status: "unsupported",
+            source: "providers/temporal-labs/models/unsupported-1.toml",
+            reason: "unsupported condition key: context",
+          },
+        },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    setTemporalSnapshotForTests(normalizeTemporalSnapshot(snapshot()));
+  });
+
+  afterEach(() => {
+    __resetTemporalSnapshotForTests();
+  });
+
+  it("applies exact provider/model temporal rates at the supplied completion instant", () => {
+    const base = priceTokenBuckets({
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "peak-1",
+      tokens,
+    });
+    expect(base).toMatchObject({ status: "priced", costUsd: 20 });
+
+    const outside = priceTokenBuckets({
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "peak-1",
+      tokens,
+      atMs: offPeak,
+    });
+    expect(outside).toMatchObject({ status: "priced", costUsd: 20 });
+
+    const inside = priceTokenBuckets({
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "peak-1",
+      tokens,
+      atMs: peak,
+    });
+    expect(inside).toMatchObject({
+      status: "priced",
+      key: { provider: TEMPORAL_PROVIDER, model: "peak-1" },
+      costUsd: 40,
+    });
+  });
+
+  it("does not infer a temporal policy for a different exact model route", () => {
+    const outcome = priceTokenBuckets({
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "peak-1-copy",
+      tokens,
+      atMs: peak,
+    });
+
+    expect(outcome).toMatchObject({
+      status: "priced",
+      key: { provider: TEMPORAL_PROVIDER, model: "peak-1-copy" },
+      costUsd: 20,
+    });
+  });
+
+  it("keeps base pricing when the source provider is missing", () => {
+    const outcome = priceTokenBuckets({
+      providerID: undefined,
+      modelID: "peak-1",
+      tokens,
+      atMs: peak,
+    });
+
+    // The key is inferred as temporal-labs/peak-1, but a missing source
+    // provider is not evidence that the row came from that provider.
+    expect(outcome).toMatchObject({
+      status: "priced",
+      key: { provider: TEMPORAL_PROVIDER, model: "peak-1" },
+      costUsd: 20,
+    });
+  });
+
+  it("does not apply another host's temporal policy to an inferred route", () => {
+    const outcome = priceTokenBuckets({
+      providerID: "other-host",
+      modelID: "peak-1",
+      tokens,
+      atMs: peak,
+    });
+
+    expect(outcome).toMatchObject({
+      status: "priced",
+      key: { provider: TEMPORAL_PROVIDER, model: "peak-1" },
+      costUsd: 20,
+    });
+  });
+
+  it("does not apply temporal policy through a provider alias", () => {
+    const outcome = priceTokenBuckets({
+      providerID: "github-copilot",
+      modelID: "gpt-5",
+      tokens,
+      atMs: peak,
+    });
+
+    // github-copilot normalizes to openai for pricing, but the source provider
+    // metadata does not establish an exact openai/gpt-5 identity.
+    expect(outcome).toMatchObject({
+      status: "priced",
+      key: { provider: "openai", model: "gpt-5" },
+      costUsd: 20,
+    });
+  });
+
+  it("does not apply temporal policy through a same-provider model alias", () => {
+    const outcome = priceTokenBuckets({
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "peak-1-free",
+      tokens,
+      atMs: peak,
+    });
+
+    expect(outcome).toMatchObject({
+      status: "priced",
+      key: { provider: TEMPORAL_PROVIDER, model: "peak-1" },
+      costUsd: 20,
+    });
+  });
+
+  it("fails closed when an exact temporal rule is unresolved", () => {
+    const outcome = priceTokenBuckets({
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "holiday-1",
+      tokens,
+      atMs: unresolvedHoliday,
+    });
+
+    expect(outcome).toMatchObject({
+      status: "unpriced",
+      key: { provider: TEMPORAL_PROVIDER, model: "holiday-1" },
+    });
+    if (outcome.status === "unpriced") {
+      expect(outcome.reason).toContain("temporal pricing is unresolved");
+    }
+  });
+
+  it("fails closed for an unsupported temporal policy", () => {
+    const outcome = priceTokenBuckets({
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "unsupported-1",
+      tokens,
+      atMs: peak,
+    });
+
+    expect(outcome.status).toBe("unpriced");
+    if (outcome.status === "unpriced") {
+      expect(outcome.reason).toContain("temporal pricing is unsupported");
+    }
+  });
+
+  it("fails closed when a temporal policy is evaluated without a finite instant", () => {
+    const outcome = priceTokenBuckets({
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "peak-1",
+      tokens,
+      atMs: Number.NaN,
+    });
+
+    expect(outcome.status).toBe("unpriced");
+    if (outcome.status === "unpriced") {
+      expect(outcome.reason).toContain("finite completion timestamp");
+    }
+  });
+
+  it("prices aggregateUsage messages at completed instants without guessing from created", async () => {
+    const storage = await import("../src/lib/opencode-storage.js");
+    const message = (
+      id: string,
+      time: { created: number; completed?: number },
+    ): OpenCodeMessage => ({
+      id,
+      sessionID: "ses_a",
+      role: "assistant",
+      providerID: TEMPORAL_PROVIDER,
+      modelID: "peak-1",
+      tokens: { input: 1, output: 0, cache: { read: 0, write: 0 } },
+      time,
+    });
+
+    vi.mocked(storage.readAllSessionsIndex).mockResolvedValue({});
+    vi.mocked(storage.iterAssistantMessages).mockResolvedValue([
+      message("msg_off_peak", { created: offPeak - 1_000, completed: offPeak }),
+      message("msg_peak", { created: peak - 1_000, completed: peak }),
+      // A created timestamp in a peak window is not evidence of completion.
+      message("msg_created_only", { created: peak }),
+    ]);
+
+    const result = await aggregateUsage({});
+
+    expect(result.totals.messageCount).toBe(3);
+    expect(result.totals.costUsd).toBe(4);
+    expect(result.byModel[0]?.costUsd).toBe(4);
   });
 });
 

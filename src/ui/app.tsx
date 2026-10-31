@@ -4,6 +4,7 @@ import {
   createMemo,
   createSignal,
   Match,
+  on,
   onCleanup,
   onMount,
   Show,
@@ -26,6 +27,7 @@ import { BuildMismatchStatus } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
 import { QueryState, ReloadRequired } from "./components/states";
+import { TemporalStatusStrip } from "./components/temporal-status";
 import { createToaster, type Toaster, ToastRegion } from "./components/toast";
 import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashboard-client";
 import { RANGE_LABELS } from "./format";
@@ -273,15 +275,21 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     displayPreferencesFromValues(settingsQuery.data()?.values ?? {}),
   );
 
-  createEffect(() => {
-    if (route().name !== "settings" || homeSnapshot()) return;
-    void props.client
-      .quota()
-      .then(setHomeSnapshot)
-      .catch(() => {
-        // Settings remain usable if the optional visibility catalog is unavailable.
-      });
-  });
+  createEffect(
+    on([() => route().name, () => quotaReloadToken()], ([routeName, token], previous) => {
+      if (routeName !== "settings") return;
+      // Entry loads the optional catalog only when nothing is cached. A quota
+      // tick while Settings is open refreshes it so temporal rows stay live.
+      const tokenChanged = previous !== undefined && previous[1] !== token;
+      if (!tokenChanged && homeSnapshot()) return;
+      void props.client
+        .quota()
+        .then(setHomeSnapshot)
+        .catch(() => {
+          // Settings remain usable if the optional catalog or temporal status is unavailable.
+        });
+    }),
+  );
 
   /**
    * The visibility section names individual cards, including cards hidden on
@@ -504,40 +512,54 @@ export function App(props: { client: DashboardClient }): JSX.Element {
       </header>
       <div class="qg-frame">
         <header class="qg-topbar">
-          <Show
-            when={analyticsTab()}
-            fallback={
-              <span class="qg-frame-tab">
-                {route().name === "home"
-                  ? "Quota"
-                  : route().name === "settings"
-                    ? "Settings"
-                    : "Dashboard"}
-              </span>
-            }
-          >
-            {(tab) => (
-              <AnalyticsTabs
-                active={tab()}
-                range={range()}
-                modelsDimension={modelsDimension() ?? rememberedModelsDimension()}
-              />
-            )}
-          </Show>
-          <Show when={routeShowsRangeSelector(route())}>
-            <SegmentedControl
-              class="qg-range"
-              aria-label="Time range"
-              value={range()}
-              onChange={(value) => {
-                if (isRangeKey(value)) updateRange(value);
-              }}
+          <div class="qg-topbar__left">
+            <Show
+              when={analyticsTab()}
+              fallback={
+                <span class="qg-frame-tab">
+                  {route().name === "home"
+                    ? "Quota"
+                    : route().name === "settings"
+                      ? "Settings"
+                      : "Dashboard"}
+                </span>
+              }
             >
-              {RANGE_KEYS.map((key) => (
-                <SegmentedControlItem value={key}>{RANGE_LABELS[key] ?? key}</SegmentedControlItem>
-              ))}
-            </SegmentedControl>
-          </Show>
+              {(tab) => (
+                <AnalyticsTabs
+                  active={tab()}
+                  range={range()}
+                  modelsDimension={modelsDimension() ?? rememberedModelsDimension()}
+                />
+              )}
+            </Show>
+          </div>
+          <div class="qg-topbar__actions">
+            <Show when={route().name === "home" ? homeSnapshot()?.temporal : undefined}>
+              {(temporal) => (
+                <TemporalStatusStrip
+                  providers={temporal().providers}
+                  overrides={preferences().temporalProviderOverrides}
+                />
+              )}
+            </Show>
+            <Show when={routeShowsRangeSelector(route())}>
+              <SegmentedControl
+                class="qg-range"
+                aria-label="Time range"
+                value={range()}
+                onChange={(value) => {
+                  if (isRangeKey(value)) updateRange(value);
+                }}
+              >
+                {RANGE_KEYS.map((key) => (
+                  <SegmentedControlItem value={key}>
+                    {RANGE_LABELS[key] ?? key}
+                  </SegmentedControlItem>
+                ))}
+              </SegmentedControl>
+            </Show>
+          </div>
         </header>
 
         <main class="qg-main" data-settings={route().name === "settings" ? "true" : undefined}>
@@ -639,6 +661,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   client={props.client}
                   query={settingsQuery}
                   catalog={catalog()}
+                  temporal={homeSnapshot()?.temporal}
                   toaster={toaster}
                   stale={
                     connection() !== "live" ||
@@ -1126,6 +1149,7 @@ export function SettingsRoute(props: {
   client: DashboardClient;
   query: Query<SettingsSnapshot>;
   catalog: VisibilityCatalog;
+  temporal?: QuotaSnapshot["temporal"];
   toaster: Toaster;
   stale: boolean;
 }): JSX.Element {
@@ -1158,6 +1182,7 @@ export function SettingsRoute(props: {
             client={props.client}
             toaster={props.toaster}
             catalog={props.catalog}
+            temporal={props.temporal}
             onReload={async () => {
               await props.query.run();
             }}

@@ -49,6 +49,7 @@
     "pack:release-package": "node scripts/pack-release-package.mjs",
     "pricing:refresh": "node scripts/refresh-modelsdev-pricing.mjs",
     "pricing:refresh:if-stale": "node scripts/refresh-modelsdev-pricing-if-stale.mjs",
+    "pricing:temporal:refresh": "node scripts/refresh-modelsdev-temporal.mjs && biome format --write src/data/modelsdev-temporal.min.json",
     "upstream:check": "node scripts/check-upstream-plugin-updates.mjs",
     "upstream:prepare-review": "node scripts/prepare-upstream-plugin-review.mjs",
     "upstream:sync": "node scripts/sync-upstream-plugin-references.mjs",

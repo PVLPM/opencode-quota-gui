@@ -4,8 +4,9 @@ import type { TokenStack } from "../contracts/dashboard";
  * Number and time formatting for the dashboard (design spec §10).
  *
  * Five raw additive categories with a derived total; cost is API-equivalent,
- * rendered as `≈ USD x.xx` with an ISO code and no currency symbols, so a
- * figure can never be mistaken for provider spend (R31, R32, R48).
+ * rendered as `≈ $x.xx` so a figure can never be mistaken for provider spend
+ * (R31, R32, R48). Only visible dashboard USD uses the symbol; internal unit
+ * codes and other currencies are unchanged.
  */
 
 export interface CategoryDescriptor {
@@ -51,16 +52,16 @@ export function formatExactCount(value: number): string {
   return Number.isFinite(value) ? Math.round(value).toLocaleString("en-US") : "—";
 }
 
-/** `≈ USD 12.34`; an absent price is reported, never rendered as `0`. */
+/** `≈ $12.34`; an absent price is reported, never rendered as `0`. */
 export function formatApiEquivalentCost(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "≈ USD —";
-  return `≈ USD ${value.toFixed(2)}`;
+  if (value === null || !Number.isFinite(value)) return "≈ $—";
+  return `≈ $${value.toFixed(2)}`;
 }
 
 /**
  * The Models cost display. A total with usage but no priced tokens is
  * `Unpriced`, not a zero estimate; an empty total carries no currency claim at
- * all. Partial numeric estimates still use the same `≈ USD x.xx` form and are
+ * all. Partial numeric estimates still use the same `≈ $x.xx` form and are
  * qualified separately.
  */
 export function formatApiEquivalentCostText(value: number | null, total: number): string {
@@ -71,16 +72,16 @@ export function formatApiEquivalentCostText(value: number | null, total: number)
 
 /**
  * Inspection-level cost text keeps a sub-cent estimate from reading as zero.
- * True zero stays `≈ USD 0.00`; a tiny nonzero value grows to four decimals.
+ * True zero stays `≈ $0.00`; a tiny nonzero value grows to four decimals.
  */
 export function formatApiEquivalentCostFine(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "≈ USD —";
-  if (value === 0) return "≈ USD 0.00";
-  return value < 0.01 ? `≈ USD ${value.toFixed(4)}` : `≈ USD ${value.toFixed(2)}`;
+  if (value === null || !Number.isFinite(value)) return "≈ $—";
+  if (value === 0) return "≈ $0.00";
+  return value < 0.01 ? `≈ $${value.toFixed(4)}` : `≈ $${value.toFixed(2)}`;
 }
 
 /**
- * Compact right-axis tick for the cost overlay. The axis title carries `USD`,
+ * Compact right-axis tick for the cost overlay. The axis title carries `$`,
  * so ticks stay bare numerals; the tick step fixes the precision so a tiny
  * scale never mixes `0.005` with `0.01`.
  */

@@ -90,6 +90,7 @@ const EXPECTED_KEYS = [
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
   "dashboard.cardOrder",
+  "dashboard.temporalProviderOverrides",
   "dashboard.port",
   "dashboard.hiddenCardsVersion",
 ] as const;
@@ -144,6 +145,7 @@ describe("GUI settings keys", () => {
       "dashboard.hiddenRows": [],
       "dashboard.providerOrder": [],
       "dashboard.cardOrder": [],
+      "dashboard.temporalProviderOverrides": {},
       "dashboard.port": 4144,
       "dashboard.hiddenCardsVersion": 2,
     });
@@ -339,6 +341,11 @@ describe("GUI settings keys", () => {
     ["dashboard.hiddenRows", ["card-1#row-1"], ["card-1#row-1"]],
     ["dashboard.providerOrder", ["provider-1", "provider-2"], ["provider-1", "provider-2"]],
     ["dashboard.cardOrder", ["card-2", "card-1"], ["card-2", "card-1"]],
+    [
+      "dashboard.temporalProviderOverrides",
+      { zai: false, deepseek: true },
+      { zai: false, deepseek: true },
+    ],
   ];
 
   it.each(writeCases)("writes %s = %j for real", async (key, value, expected) => {
@@ -358,6 +365,20 @@ describe("GUI settings keys", () => {
     const after = await store.settings();
     expect(after.values[key]).toEqual(expected);
     expect(after.sources[key]).toBe("opencode-quota-gui/config.jsonc");
+  });
+
+  it("rejects temporal overrides that are not provider-to-boolean entries", async () => {
+    const workspace = makeWorkspace();
+    const store = makeStore(workspace);
+    const before = await store.settings();
+    for (const value of [["zai"], { zai: "on" }, { zai: true, openai: 1 }]) {
+      await expect(
+        store.saveSettings({
+          patch: { "dashboard.temporalProviderOverrides": value as JsonValue },
+          expectedRevision: before.revision,
+        }),
+      ).rejects.toMatchObject({ code: "invalid-setting" });
+    }
   });
 
   it("clears a key with null and keeps zero and false as real values", async () => {

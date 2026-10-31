@@ -189,6 +189,31 @@ describe("quota read source", () => {
     ]);
   });
 
+  it("attaches temporal rows for every capable provider, including undiscovered ones", async () => {
+    const config = baseConfig({ enabledProviders: ["deepseek"] });
+    const test = harness({
+      config,
+      collect: async ({ providers }) =>
+        providers.map((provider) => probe(provider.id, result({ entries: [percentEntry(50)] }))),
+    });
+    const snapshot = await test.source.quota();
+    const temporal = snapshot.temporal;
+    expect(temporal).toBeDefined();
+    expect(temporal?.providers.length).toBeGreaterThan(5);
+    expect(
+      temporal?.providers.find((provider) => provider.providerId === "deepseek"),
+    ).toMatchObject({ discovered: true });
+    expect(temporal?.providers.find((provider) => provider.providerId === "zai")).toMatchObject({
+      discovered: false,
+      source: { label: "Z.ai current credits-plan usage" },
+    });
+    expect(
+      temporal?.providers.every(
+        (provider) => provider.providerId === "deepseek" || provider.discovered === false,
+      ),
+    ).toBe(true);
+  });
+
   it("polls a provider hidden by its provider-scope card id and keeps its cards", async () => {
     const config = baseConfig({
       enabledProviders: ["anthropic", "copilot"],

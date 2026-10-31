@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { HomeSnapshot, SessionSnapshot } from "../src/contracts/dashboard.js";
+import { getAnalyticsPricingFingerprint } from "../src/gui/analytics-pricing-revision.js";
 import {
   ANALYTICS_PRESENTATION_SESSION_LIMIT,
   ANALYTICS_PRESENTATION_VERSION,
@@ -280,6 +281,26 @@ describe("analytics snapshot codec v3", () => {
     const withoutIdentity = withRows();
     delete withoutIdentity.sourceIdentity;
     expect(encodeAnalyticsPresentation(withoutIdentity, NOW).sourceIdentity).toBeNull();
+  });
+
+  it("invalidates warm DTOs when the combined pricing fingerprint changes", () => {
+    const state = withRows();
+    state.presentation = {
+      home: { "24h": homeSnapshot("24h") },
+      project: [],
+    };
+    const encoded = encodeAnalyticsPresentation(state, NOW);
+    expect(encoded.pricingRevision).toBe(getAnalyticsPricingFingerprint());
+    expect(
+      decodeAnalyticsPresentation(JSON.parse(JSON.stringify(encoded)) as unknown),
+    ).toBeDefined();
+
+    const stale = JSON.parse(JSON.stringify(encoded)) as Record<string, unknown>;
+    stale.pricingRevision = `${encoded.pricingRevision}-stale`;
+    expect(decodeAnalyticsPresentation(stale)).toBeUndefined();
+
+    delete stale.pricingRevision;
+    expect(decodeAnalyticsPresentation(stale)).toBeUndefined();
   });
 
   it("caps LRU session DTOs and does not mutate the live presentation cache", () => {

@@ -79,6 +79,16 @@ export function GripDotsIcon(): JSX.Element {
   );
 }
 
+/** Peak pricing: a compact upward arrow. */
+export function PeakArrowIcon(props: { size?: number }): JSX.Element {
+  return svg(path("M12 19V5M6.5 10.5 12 5l5.5 5.5"), props.size ?? 12);
+}
+
+/** Off-peak pricing: the matching downward arrow. */
+export function OffpeakArrowIcon(props: { size?: number }): JSX.Element {
+  return svg(path("M12 5v14M6.5 13.5 12 19l5.5-5.5"), props.size ?? 12);
+}
+
 export function RefreshIcon(props: { size?: number }): JSX.Element {
   return svg(
     <>

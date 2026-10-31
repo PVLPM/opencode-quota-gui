@@ -1,6 +1,10 @@
 import type { JSX } from "solid-js";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type {
+  AnalyticsTemporalBreakdown,
+  AnalyticsTemporalBreakdownRow,
+} from "../../contracts/analytics-temporal";
+import type {
   AnalyticsDimension,
   AnalyticsEntityIdentity,
   AnalyticsGroupRow,
@@ -26,6 +30,42 @@ import { EmptyNotice } from "./states";
 /** Unknown and empty identities share the local generic mark, never no mark. */
 function providerIdFor(identity: AnalyticsEntityIdentity): string {
   return identity.kind === "known" ? identity.id : "";
+}
+
+function phaseLabel(phase: "peak" | "offpeak"): string {
+  return phase === "peak" ? "Peak" : "Off-peak";
+}
+
+/**
+ * One historical phase level below a provider route. These are not links and
+ * never enter `AnalyticsGroupRow.children`; they remain a separate projection
+ * from the snapshot's `temporalBreakdown`.
+ */
+function PhaseRow(props: {
+  phase: "peak" | "offpeak";
+  tokens: AnalyticsTemporalBreakdownRow["peak"];
+}): JSX.Element {
+  return (
+    <div
+      class="qg-breakdown__row qg-breakdown__row--phase"
+      data-level="phase"
+      data-phase={props.phase}
+    >
+      <span class="qg-breakdown__name">
+        <span class="qg-breakdown__phase" data-phase={props.phase}>
+          <span class="qg-breakdown__phase-dot" aria-hidden="true" />
+          {phaseLabel(props.phase)}
+        </span>
+      </span>
+      <span class="qg-breakdown__cost">
+        <CostValue class="qg-breakdown__costvalue" tokens={props.tokens} />
+        <EstimateNote totals={props.tokens} />
+      </span>
+      <span class="qg-breakdown__tokens" title={`${formatExactCount(props.tokens.total)} tokens`}>
+        {formatTokenCount(props.tokens.total)}
+      </span>
+    </div>
+  );
 }
 
 /**
@@ -67,8 +107,21 @@ export function AnalyticsBreakdown(props: {
   onPointerParent?: (selection: SeriesParentSelection | undefined) => void;
   onFocusParent?: (selection: SeriesParentSelection | undefined) => void;
   emptyMessage?: string;
+  /**
+   * Model-detail-only historical split. Rendered as phase rows nested under
+   * each matching provider row, never merged into `AnalyticsGroupRow.children`.
+   */
+  temporalBreakdown?: AnalyticsTemporalBreakdown;
 }): JSX.Element {
   const rows = createMemo(() => sortBreakdownRows(props.rows, props.sort));
+  const temporalRows = createMemo(() => {
+    if (props.dimension !== "provider" || props.temporalBreakdown === undefined) return undefined;
+    const byProvider = new Map<string, AnalyticsTemporalBreakdownRow>();
+    for (const row of props.temporalBreakdown.rows) {
+      byProvider.set(entityKey("provider", row.identity), row);
+    }
+    return byProvider;
+  });
   // Children under Other are an aggregate of several parents, so they cannot
   // truthfully point at one chart slice. Their emphasis stays local; a normal
   // parent shares its child selection with the chart through `props.activeChild`.
@@ -120,6 +173,8 @@ export function AnalyticsBreakdown(props: {
                 disambiguatedIdentityLabel(row.identity, props.dimension, peers());
               const children = () => sortBreakdownRows(row.children, props.sort);
               const childPeers = () => row.children.map((child) => child.identity);
+              const phaseRow = (): AnalyticsTemporalBreakdownRow | undefined =>
+                temporalRows()?.get(entityKey("provider", row.identity));
               const childDim: AnalyticsDimension =
                 props.dimension === "model" ? "provider" : "model";
               // Children are never chart series: provider leaves keep only the
@@ -383,6 +438,14 @@ export function AnalyticsBreakdown(props: {
                         );
                       }}
                     </For>
+                  </Show>
+                  <Show when={phaseRow()}>
+                    {(temporal) => (
+                      <>
+                        <PhaseRow phase="peak" tokens={temporal().peak} />
+                        <PhaseRow phase="offpeak" tokens={temporal().offpeak} />
+                      </>
+                    )}
                   </Show>
                 </div>
               );

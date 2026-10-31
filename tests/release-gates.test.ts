@@ -58,6 +58,9 @@ function requiredPackageFiles(): string[] {
     "README.md",
     "package.json",
     "dist/data/modelsdev-pricing.min.json",
+    // The server-only temporal policy evaluator reads this bundled snapshot
+    // with node:fs at runtime (src/lib/modelsdev-temporal.ts).
+    "dist/data/modelsdev-temporal.min.json",
     "dist/ui/index.html",
     "dist/ui/assets/dashboard.js",
     "dist/ui/assets/dashboard.css",
@@ -307,6 +310,36 @@ describe("v4 release gates", () => {
     const result = run(packageScript, [manifestPath]);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("npm contents verified");
+  });
+
+  it("rejects a package that omits the runtime temporal pricing snapshot", async () => {
+    const presentPath = path.join(tempDir, "present-temporal-bundle.json");
+    await writeFile(
+      presentPath,
+      JSON.stringify({ files: requiredPackageFiles().map((entry) => ({ path: entry })) }),
+      "utf8",
+    );
+
+    const present = run(packageScript, [presentPath]);
+    expect(present.status).toBe(0);
+    expect(present.stdout).toContain("npm contents verified");
+
+    const omitted = "dist/data/modelsdev-temporal.min.json";
+    const missingPath = path.join(tempDir, "missing-temporal-bundle.json");
+    await writeFile(
+      missingPath,
+      JSON.stringify({
+        files: requiredPackageFiles()
+          .filter((entry) => entry !== omitted)
+          .map((entry) => ({ path: entry })),
+      }),
+      "utf8",
+    );
+
+    const missing = run(packageScript, [missingPath]);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain("npm package is missing required release output");
+    expect(missing.stderr).toContain(omitted);
   });
 
   it("rejects a package that omits the local OpenCode Go mark and its attribution files", async () => {
