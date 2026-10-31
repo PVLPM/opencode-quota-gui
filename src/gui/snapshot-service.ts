@@ -32,6 +32,12 @@
  * newer one). A load on a closed service still computes for its caller but
  * never touches tracking, registration, or cache.
  *
+ * An owner/source handoff uses a source generation: entries retain the
+ * generation that produced them and old entries are last-good only. A
+ * pre-handoff result is marked stale when the DTO supports it, or failed when
+ * it does not (`SessionSnapshot`), so the previous owner's data is never
+ * presented as fresh.
+ *
  * No TTL, sequence, watermark, or budget machinery exists (R9).
  */
 
@@ -135,6 +141,14 @@ export interface SnapshotService {
    * while the scope is `quota`, analytics refresh/derivation is skipped.
    */
   setViewScope(scope: SnapshotViewScope, origin?: "signal" | "request"): void;
+  /**
+   * The host's active source identity changed (owner handoff in the lifecycle).
+   * Cached pages belong to the previous owner, so they are marked stale; any
+   * pre-handoff in-flight result is never presented as fresh (stale-marked when
+   * the DTO supports it, otherwise failed), and both data topics are emitted so
+   * connected clients refetch through the new source.
+   */
+  sourceChanged(): void;
   close(): void;
 }
 
@@ -142,12 +156,16 @@ interface CacheEntry {
   snapshot: unknown;
   substantive: string;
   stale: boolean;
+  /** Source identity that produced this entry; old entries are only last-good. */
+  sourceGeneration: number;
 }
 
 interface InflightTask {
   promise: Promise<unknown>;
   /** Viewer epoch at creation; ending that session disowns this task. */
   epoch: number;
+  /** Source generation at creation; a handoff disowns this task's result. */
+  sourceGeneration: number;
   /** Recency generation captured when this compute should be allowed to cache. */
   version: number;
 }
@@ -237,12 +255,27 @@ function payloadIsStale(snapshot: unknown): boolean {
   return staleFlag(snapshot.usage);
 }
 
+/** True when the contract carries the top-level `stale` marker. */
+function hasStaleMarker(snapshot: unknown): boolean {
+  return typeof snapshot === "object" && snapshot !== null && "stale" in snapshot;
+}
+
 /** Session snapshots have no `stale` field; they are served as-is. */
 function markStale<T>(snapshot: T): T {
-  if (typeof snapshot !== "object" || snapshot === null || !("stale" in snapshot)) {
-    return snapshot;
-  }
+  if (!hasStaleMarker(snapshot)) return snapshot;
   return { ...snapshot, stale: true };
+}
+
+/**
+ * A source handoff completed while a load that cannot carry the `stale` marker
+ * was still in flight. Failing is safer than returning the previous owner's
+ * payload as fresh; the transport maps it like any other snapshot failure.
+ */
+class SnapshotSourceChangedError extends Error {
+  constructor() {
+    super("Snapshot source changed before the snapshot completed");
+    this.name = "SnapshotSourceChangedError";
+  }
 }
 
 /** Safe log label: an allowlisted-shape code, never a raw message. */
@@ -271,6 +304,12 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
    * in-flight poll ticks and any HTTP cache commit started before that point.
    */
   let viewerEpoch = 0;
+  /**
+   * Bumped when the active source identity changes (owner handoff). The cache
+   * remains as last-good fallback, but pre-handoff commits and poll results must
+   * not freshen it, and a new request must not join a pre-handoff task.
+   */
+  let sourceGeneration = 0;
   let viewScope: SnapshotViewScope = "analytics";
   /** Explicit UI signal outranks read-request inference for this viewer session. */
   let viewScopeExplicit = false;
@@ -390,29 +429,31 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
   function load<T>(key: string, compute: () => Promise<T>): Promise<T> {
     const epoch = viewerEpoch;
+    const generation = sourceGeneration;
     // A closed service does not track, register, or cache: the caller still
     // gets its computation, but a probe (or a late request) cannot repopulate
     // state that close() released.
     const version = closed ? 0 : touch(key);
     if (!closed) computes.set(key, compute);
     const existing = cache.get(key);
-    if (existing && !existing.stale) {
+    if (existing && !existing.stale && existing.sourceGeneration === sourceGeneration) {
       // SAFETY: `load<T>` is only called with a key built from `(kind, resourceId,
       // range)`, and the entry under this key was stored by a compute of that key.
       return Promise.resolve(existing.snapshot as T);
     }
 
     const pending = inflight.get(key);
-    if (pending && pending.epoch === epoch) {
-      // The key was requested again in the same viewer session while its compute
-      // was still pending: preserve single-flight and let it cache again.
+    if (pending && pending.epoch === epoch && pending.sourceGeneration === generation) {
+      // The key was requested again in the same viewer session and source
+      // generation while its compute was still pending: preserve single-flight
+      // and let it cache again.
       if (!closed) pending.version = version;
       // SAFETY: same key contract as the cache above; the inflight task was created
       // by a `load<T>` call for this exact key.
       return pending.promise as Promise<T>;
     }
-    // A pending task from an ended viewer session is disowned: this caller runs
-    // its own compute instead of joining a pre-disconnect task.
+    // A pending task from an ended viewer session or a previous source identity
+    // is disowned: this caller runs its own compute instead.
 
     let computation: Promise<T>;
     try {
@@ -421,39 +462,68 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       computation = Promise.reject(error);
     }
 
-    const task: InflightTask = { epoch, promise: Promise.resolve(), version };
-    task.promise = computation
-      .then((snapshot) => {
-        // A commit belongs to the viewer session that started the load: the
-        // last disconnect already dirtied the entries, so a pre-disconnect
-        // result never re-freshens them.
-        if (!closed && task.epoch === viewerEpoch && tracked.get(key) === task.version) {
-          cache.set(key, {
-            snapshot,
-            substantive: substantiveOf(snapshot),
-            // A payload the source already reports stale stays a cache hit only
-            // for this caller; the next read must recompute rather than serve
-            // stale data as fresh until the next poll.
-            stale: payloadIsStale(snapshot),
-          });
-        }
-        return snapshot;
-      })
-      .catch((error: unknown) => {
+    const task: InflightTask = {
+      epoch,
+      sourceGeneration: generation,
+      promise: Promise.resolve(),
+      version,
+    };
+    const attempt = (async (): Promise<T> => {
+      let snapshot: T;
+      try {
+        snapshot = await computation;
+      } catch (error: unknown) {
         const fallback = tracked.get(key) === task.version ? cache.get(key) : undefined;
         if (!fallback) throw error;
-        if (!closed && task.epoch === viewerEpoch) {
+        // A previous owner's last-good entry may be served only when the DTO
+        // can carry the stale marker. Session snapshots cannot, so their
+        // failure is surfaced rather than presented as fresh old-owner data.
+        if (fallback.sourceGeneration !== sourceGeneration && !hasStaleMarker(fallback.snapshot)) {
+          throw error;
+        }
+        if (!closed && task.epoch === viewerEpoch && task.sourceGeneration === sourceGeneration) {
           fallback.stale = true;
           logger.warn("snapshot compute failed; serving last good snapshot", failureLabel(error));
         }
         // SAFETY: the cached entry under this key is a previous successful compute
         // of the same `(kind, resourceId, range)` key, so it is a T snapshot.
         return markStale(fallback.snapshot) as T;
-      })
-      .finally(() => {
-        // Never delete a newer task that replaced this one after reconnect.
-        if (inflight.get(key) === task) inflight.delete(key);
-      });
+      }
+
+      // A commit belongs to the viewer session and source identity that started
+      // the load: a disconnect or owner handoff already dirtied the entries, so
+      // an old result never re-freshens them.
+      if (
+        !closed &&
+        task.epoch === viewerEpoch &&
+        task.sourceGeneration === sourceGeneration &&
+        tracked.get(key) === task.version
+      ) {
+        cache.set(key, {
+          snapshot,
+          substantive: substantiveOf(snapshot),
+          // A payload the source already reports stale stays a cache hit only
+          // for this caller; the next read must recompute rather than serve
+          // stale data as fresh until the next poll.
+          stale: payloadIsStale(snapshot),
+          sourceGeneration: task.sourceGeneration,
+        });
+        return snapshot;
+      }
+
+      if (task.sourceGeneration !== sourceGeneration) {
+        // A handoff happened while this load was in flight. Never present the
+        // previous owner's payload as fresh: mark it when the contract supports
+        // it, otherwise fail like a post-handoff read would.
+        if (!hasStaleMarker(snapshot)) throw new SnapshotSourceChangedError();
+        return markStale(snapshot);
+      }
+      return snapshot;
+    })();
+    task.promise = attempt.finally(() => {
+      // Never delete a newer task that replaced this one after reconnect.
+      if (inflight.get(key) === task) inflight.delete(key);
+    });
 
     inflight.set(key, task);
     return task.promise as Promise<T>;
@@ -469,6 +539,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     epoch: number,
     changed: Set<DashboardEventTopic>,
   ): Promise<boolean> {
+    const generation = sourceGeneration;
     if (closed || viewerEpoch !== epoch || viewers === 0) return false;
     if (computes.get(key) !== compute) return true;
     if (inflight.has(key)) return true;
@@ -479,9 +550,10 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       snapshot = await compute();
     } catch (error: unknown) {
       // A key evicted (or re-loaded) while the poll was pending must not be
-      // marked current by this late result; an ended viewer session must not
-      // be updated or logged for at all.
+      // marked current by this late result; an ended viewer session or a
+      // previous source identity must not be updated or logged for at all.
       if (closed || viewerEpoch !== epoch || viewers === 0) return false;
+      if (sourceGeneration !== generation) return false;
       if (tracked.get(key) === version && computes.get(key) === compute) {
         const entry = cache.get(key);
         if (entry) entry.stale = true;
@@ -490,13 +562,15 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       return true;
     }
     // Late poll results never resurrect an evicted key, overwrite a key loaded
-    // again mid-poll, or land in a viewer session that has ended.
+    // again mid-poll, land in a viewer session that has ended, or cross a
+    // source-identity handoff.
     if (closed || viewerEpoch !== epoch || viewers === 0) return false;
+    if (sourceGeneration !== generation) return false;
     if (tracked.get(key) !== version || computes.get(key) !== compute) return true;
     const substantive = substantiveOf(snapshot);
     const entry = cache.get(key);
     const changedNow = entry === undefined || entry.stale || entry.substantive !== substantive;
-    cache.set(key, { snapshot, substantive, stale: false });
+    cache.set(key, { snapshot, substantive, stale: false, sourceGeneration: generation });
     if (changedNow) changed.add(topicFor(key));
     return true;
   }
@@ -683,6 +757,16 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       if (origin === "request" && viewScopeExplicit) return;
       viewScope = scope;
       if (origin === "signal") viewScopeExplicit = true;
+    },
+
+    sourceChanged(): void {
+      if (closed) return;
+      // The cached payloads remain useful as last-good fallback, but they must
+      // never be served as fresh data from the previous owner.
+      sourceGeneration += 1;
+      dirty();
+      emit({ topic: "quota.changed", at: now() });
+      emit({ topic: "sessions.changed", at: now() });
     },
 
     close(): void {

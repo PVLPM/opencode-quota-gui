@@ -1,3 +1,4 @@
+import { request as httpRequest } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -24,7 +25,12 @@ import {
   type DashboardServerHandle,
   type DashboardServerOptions,
 } from "../src/gui/server.js";
-import type { SnapshotSource } from "../src/gui/snapshot-service.js";
+import {
+  createSnapshotService,
+  type SnapshotService,
+  type SnapshotServiceOptions,
+  type SnapshotSource,
+} from "../src/gui/snapshot-service.js";
 import {
   createGuiConfigWorkspace,
   type GuiConfigWorkspace,
@@ -269,6 +275,54 @@ async function tryBind(port: number): Promise<boolean> {
   }
 }
 
+function waitFor(check: () => boolean, label: string, timeoutMs = 3000): Promise<void> {
+  const started = Date.now();
+  return new Promise((resolve, reject) => {
+    const step = () => {
+      if (check()) {
+        resolve();
+      } else if (Date.now() - started > timeoutMs) {
+        reject(new Error(`timed out waiting for ${label}`));
+      } else {
+        setTimeout(step, 10);
+      }
+    };
+    step();
+  });
+}
+
+interface SseClient {
+  close(): void;
+}
+
+function openSse(port: number): Promise<SseClient> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path: "/api/v1/events",
+        headers: { Accept: "text/event-stream" },
+      },
+      (res) => {
+        settled = true;
+        res.resume();
+        resolve({
+          close: () => {
+            res.destroy();
+            req.destroy();
+          },
+        });
+      },
+    );
+    req.on("error", (error) => {
+      if (!settled) reject(error);
+    });
+    req.end();
+  });
+}
+
 const leases: DashboardLease[] = [];
 const workspaces: GuiConfigWorkspace[] = [];
 
@@ -289,21 +343,69 @@ function fakeHandle(port: number): DashboardServerHandle {
 }
 
 interface IntervalCapture {
-  createServer: (options: DashboardServerOptions) => Promise<DashboardServerHandle>;
+  createSnapshots: (options: SnapshotServiceOptions) => SnapshotService;
   read: () => number;
 }
 
-/** Wraps the real server factory to capture the effective poll-interval getter. */
+/** Wraps the real snapshot factory to capture the effective poll-interval getter. */
 function captureInterval(): IntervalCapture {
   let interval: (() => number) | undefined;
   return {
-    createServer: async (options) => {
+    createSnapshots: (options) => {
       interval = typeof options.minIntervalMs === "function" ? options.minIntervalMs : undefined;
-      return createDashboardServer(options);
+      return createSnapshotService(options);
     },
     read: () => {
       if (!interval) throw new Error("no interval getter was captured");
       return interval();
+    },
+  };
+}
+
+interface SnapshotCapture {
+  createSnapshots: (options: SnapshotServiceOptions) => SnapshotService;
+  readonly created: SnapshotService[];
+  readonly closes: number;
+  readonly viewers: number;
+}
+
+/** Wraps the real snapshot service to count host-scoped creation and cleanup. */
+function captureSnapshots(): SnapshotCapture {
+  const created: SnapshotService[] = [];
+  let closes = 0;
+  let viewers = 0;
+  return {
+    created,
+    get closes() {
+      return closes;
+    },
+    get viewers() {
+      return viewers;
+    },
+    createSnapshots: (options) => {
+      const service = createSnapshotService(options);
+      const close = service.close.bind(service);
+      let closed = false;
+      service.close = () => {
+        if (closed) return;
+        closed = true;
+        closes += 1;
+        close();
+      };
+      const addViewer = service.addViewer.bind(service);
+      service.addViewer = () => {
+        viewers += 1;
+        const release = addViewer();
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          viewers -= 1;
+          release();
+        };
+      };
+      created.push(service);
+      return service;
     },
   };
 }
@@ -480,6 +582,308 @@ describe("dashboard production lifecycle", () => {
     expect(second.closes).toBe(1);
     // The first source was closed exactly once, at its own owner's disposal.
     expect(first.closes).toBe(1);
+  });
+
+  it("recomputes the same cached page through the surviving owner after a handoff", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const first = buildOwnerSource(11);
+    const second = buildOwnerSource(22);
+    let secondCreates = 0;
+
+    const leaseA = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => first.source,
+      logger: silent,
+    });
+    const leaseB = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => {
+        secondCreates += 1;
+        return second.source;
+      },
+      logger: silent,
+    });
+
+    // Cache the first owner's page and quota under the shared snapshot service.
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      stale: false,
+      usage: { totals: { total: 11 } },
+    });
+    expect(await readJson(port, "/api/v1/quota")).toMatchObject({
+      providers: { polledAtMs: 11 },
+    });
+    expect(secondCreates).toBe(0);
+
+    await leaseA.dispose();
+    expect(await tryBind(port)).toBe(false);
+
+    // The same keys must not serve the previous owner's fresh cache: the
+    // surviving owner is asked and its results replace the entries.
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      stale: false,
+      usage: { totals: { total: 22 } },
+    });
+    expect(await readJson(port, "/api/v1/quota")).toMatchObject({
+      providers: { polledAtMs: 22 },
+    });
+    expect(secondCreates).toBe(1);
+    expect(second.calls.home).toBe(1);
+    expect(second.calls.quota).toBe(1);
+    expect(first.calls.home).toBe(1);
+    expect(first.calls.quota).toBe(1);
+
+    await leaseB.dispose();
+    expect(await tryBind(port)).toBe(true);
+    expect(first.closes).toBe(1);
+    expect(second.closes).toBe(1);
+  });
+
+  it("keeps stale-markable pages but not session payloads after a handoff failure", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const first = buildOwnerSource(11);
+    const second = buildOwnerSource(22);
+
+    const leaseA = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => first.source,
+      logger: silent,
+    });
+    const leaseB = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => second.source,
+      logger: silent,
+    });
+
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      stale: false,
+      usage: { totals: { total: 11 } },
+    });
+    expect(await readJson(port, "/api/v1/sessions/s1")).toMatchObject({
+      focusSessionId: "s1",
+    });
+
+    await leaseA.dispose();
+    second.fails = true;
+
+    // Home can represent last-good data as stale. Session has no stale marker,
+    // so the post-handoff failure must surface instead of returning A's page.
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      stale: true,
+      usage: { totals: { total: 11 } },
+    });
+    const session = await fetch(`http://127.0.0.1:${port}/api/v1/sessions/s1`);
+    expect(session.status).toBe(500);
+    expect(await session.json()).toMatchObject({ error: { code: "internal" } });
+    expect(second.calls.session).toBe(1);
+
+    await leaseB.dispose();
+    expect(await tryBind(port)).toBe(true);
+  });
+
+  it("creates one snapshot runtime per shared host and closes it once after a bind failure", async () => {
+    const workspace = makeWorkspace();
+    const blocker = await blockerOnFreePort();
+    try {
+      writeGuiCanonicalConfig(workspace, { dashboard: { port: blocker.port } });
+      const owner = buildOwnerSource(41);
+      const snapshots = captureSnapshots();
+      const options: StartDashboardOptions = {
+        client: dashboardClient,
+        workspaceRoot: workspace.workspaceRoot,
+        configDir: workspace.configDir,
+        createSource: () => owner.source,
+        createSnapshots: snapshots.createSnapshots,
+        logger: silent,
+      };
+
+      const first = await open(options);
+      expect(first.state).toBe("unavailable");
+      expect(first.reason).toBe("port-unavailable");
+      expect(snapshots.created).toHaveLength(1);
+      expect(snapshots.closes).toBe(1);
+      expect(owner.closes).toBe(1);
+
+      // A later lease joins the failed host instead of constructing a second
+      // runtime, and the host still logs/closes only once.
+      const second = await open(options);
+      expect(second.state).toBe("unavailable");
+      expect(second.reason).toBe("port-unavailable");
+      expect(snapshots.created).toHaveLength(1);
+      expect(snapshots.closes).toBe(1);
+
+      await first.dispose();
+      await second.dispose();
+      expect(snapshots.closes).toBe(1);
+      expect(owner.closes).toBe(1);
+      expect(await tryBind(blocker.port)).toBe(false);
+    } finally {
+      await blocker.close();
+    }
+  });
+
+  it("keeps one shared snapshot runtime open until the last lease disposes", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const { source } = buildSource();
+    const snapshots = captureSnapshots();
+    const received: SnapshotService[] = [];
+
+    const options: StartDashboardOptions = {
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => source,
+      createSnapshots: snapshots.createSnapshots,
+      createServer: async (serverOptions) => {
+        received.push(serverOptions.snapshots);
+        return createDashboardServer(serverOptions);
+      },
+      logger: silent,
+    };
+    const [first, second] = await Promise.all([open(options), open(options)]);
+    expect(snapshots.created).toHaveLength(1);
+    expect(snapshots.closes).toBe(0);
+    // The transport receives the host's one snapshot service; it does not make
+    // its own.
+    expect(received).toEqual([snapshots.created[0]]);
+
+    await first.dispose();
+    expect(await tryBind(port)).toBe(false);
+    expect(snapshots.closes).toBe(0);
+    expect((await fetch(`http://127.0.0.1:${port}/api/v1/health`)).status).toBe(200);
+
+    await second.dispose();
+    expect(await tryBind(port)).toBe(true);
+    expect(snapshots.closes).toBe(1);
+  });
+
+  it("ignores a legacy v2 host record that predates the shared runtime", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const { source } = buildSource();
+    const legacyKey = Symbol.for("opencode-quota-gui/dashboard-lifecycle/v2");
+    const globalState = globalThis as unknown as Record<PropertyKey, unknown>;
+    const previous = globalState[legacyKey];
+    let legacyCloses = 0;
+    const legacyHost = {
+      port,
+      logger: silent,
+      delegation: { owners: [] },
+      refs: 1,
+      start: Promise.resolve({
+        port: 1,
+        url: "http://127.0.0.1:1",
+        close: async () => {
+          legacyCloses += 1;
+        },
+      }),
+    };
+    globalState[legacyKey] = { hosts: new Map([[port, legacyHost]]) };
+
+    let lease: DashboardLease | undefined;
+    try {
+      lease = await startDashboard({
+        client: dashboardClient,
+        workspaceRoot: workspace.workspaceRoot,
+        configDir: workspace.configDir,
+        createSource: () => source,
+        logger: silent,
+      });
+      // A record from the old registry shape lacks the host runtime and cannot
+      // be safely mutated, so it must not be adopted.
+      expect(lease.state).toBe("running");
+      expect(lease.url).toBe(`http://127.0.0.1:${port}`);
+      expect((await fetch(`${lease.url}/api/v1/health`)).status).toBe(200);
+      expect(legacyCloses).toBe(0);
+    } finally {
+      try {
+        await lease?.dispose();
+      } catch {
+        // A failed pre-fix lease has no runtime to dispose; the assertion above
+        // remains the failure signal.
+      }
+      if (previous === undefined) delete globalState[legacyKey];
+      else globalState[legacyKey] = previous;
+    }
+    expect(await tryBind(port)).toBe(true);
+    expect(legacyCloses).toBe(0);
+  });
+
+  it("attaches one shared viewer for multiple SSE clients and releases it after the last disconnect", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const { source } = buildSource();
+    const snapshots = captureSnapshots();
+
+    const lease = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => source,
+      createSnapshots: snapshots.createSnapshots,
+      logger: silent,
+    });
+    expect(lease.state).toBe("running");
+
+    const first = await openSse(port);
+    await waitFor(() => snapshots.viewers === 1, "first viewer");
+    const second = await openSse(port);
+    // Both transports observe the same snapshot service; the second client does
+    // not duplicate the viewer (or its pollers).
+    expect(snapshots.viewers).toBe(1);
+
+    first.close();
+    await waitFor(() => snapshots.viewers === 1, "second client remains attached");
+    second.close();
+    await waitFor(() => snapshots.viewers === 0, "last viewer release");
+
+    await lease.dispose();
+    expect(snapshots.closes).toBe(1);
+  });
+
+  it("contains a source close failure during final disposal", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const { source } = buildSource();
+    const logs: string[] = [];
+    let closes = 0;
+    const failing: SnapshotSource = {
+      ...source,
+      close: async () => {
+        closes += 1;
+        throw new Error("source close failed");
+      },
+    };
+
+    const lease = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => failing,
+      logger: createGuiLogger({ sink: (line) => logs.push(line) }),
+    });
+    expect(lease.state).toBe("running");
+
+    await expect(lease.dispose()).resolves.toBeUndefined();
+    expect(closes).toBe(1);
+    expect(logs.some((line) => line.includes("dashboard source close failed"))).toBe(true);
+    expect(await tryBind(port)).toBe(true);
   });
 
   it("serves the models collection and filtered detail through the active owner's groups source", async () => {
@@ -804,7 +1208,7 @@ describe("dashboard production lifecycle", () => {
         workspaceRoot: workspace.workspaceRoot,
         configDir: workspace.configDir,
         createSource: () => source,
-        createServer: interval.createServer,
+        createSnapshots: interval.createSnapshots,
         logger: silent,
       });
 
@@ -840,7 +1244,7 @@ describe("dashboard production lifecycle", () => {
       workspaceRoot: workspace.workspaceRoot,
       configDir: workspace.configDir,
       createSource: () => source,
-      createServer: interval.createServer,
+      createSnapshots: interval.createSnapshots,
       logger: silent,
     });
     expect(lease.state).toBe("running");
@@ -881,7 +1285,7 @@ describe("dashboard production lifecycle", () => {
       workspaceRoot: workspace.workspaceRoot,
       configDir: workspace.configDir,
       createSource: () => source,
-      createServer: interval.createServer,
+      createSnapshots: interval.createSnapshots,
       logger: silent,
     });
     // Runtime settings are canonical-only: legacy values stay importable but do not

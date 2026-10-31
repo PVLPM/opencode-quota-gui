@@ -8,7 +8,11 @@
  * owner's source, and when that owner disposes while other leases remain the
  * host switches to a live owner's source — created lazily on the next request —
  * without dropping the socket. The settings store is host-scoped file access.
- * The host closes with the last lease, releasing every source it created.
+ * One runtime — the stable delegating source and one `SnapshotService` — is
+ * shared by every transport attached to that host. The host closes with the
+ * last lease, releasing the snapshot service and every source it created; a
+ * terminal bind failure releases the same runtime even though no transport
+ * handle was returned.
  *
  * The registry lives on `globalThis` under a versioned `Symbol.for` key (the
  * quota-telemetry precedent), so two separately loaded copies of this module in
@@ -40,7 +44,12 @@ import {
   type DashboardServerHandle,
   type DashboardServerOptions,
 } from "./server.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "./snapshot-service.js";
+import {
+  createSnapshotService,
+  DEFAULT_POLL_INTERVAL_MS,
+  type SnapshotService,
+  type SnapshotServiceOptions,
+} from "./snapshot-service.js";
 import { createDashboardReadSource } from "./sources.js";
 
 /**
@@ -100,6 +109,8 @@ export interface StartDashboardOptions {
   createSource?: DashboardSourceFactory;
   /** Test seam: replaces the P2 settings store factory. */
   createSettingsStore?: (options: { configDir: string; workspaceRoot: string }) => GuiSettingsStore;
+  /** Test seam: replaces the per-host snapshot service factory. */
+  createSnapshots?: (options: SnapshotServiceOptions) => SnapshotService;
   /** Test seam: replaces the transport factory. */
   createServer?: (options: DashboardServerOptions) => Promise<DashboardServerHandle>;
   logger?: GuiLogger;
@@ -126,10 +137,24 @@ interface OwnerDelegation {
   activeOwner?: DashboardOwner;
 }
 
+/**
+ * Host-scoped shared runtime: the stable delegating source plus the single
+ * `SnapshotService` every transport for this host shares. It is created when
+ * the host starts and released once, on the terminal bind failure or when the
+ * last lease disposes. A surviving lease keeps the cache and poll registrations
+ * across owner handoff.
+ */
+interface DashboardRuntime {
+  readonly source: DashboardReadSource;
+  snapshots: SnapshotService | undefined;
+  close(): Promise<void>;
+}
+
 interface DashboardHost {
   readonly port: number;
   readonly logger: GuiLogger;
   readonly delegation: OwnerDelegation;
+  readonly runtime: DashboardRuntime;
   refs: number;
   /** Resolves with the handle, or rejects with the contained failure. */
   readonly start: Promise<DashboardServerHandle>;
@@ -147,10 +172,11 @@ interface HostContext {
  * Versioned process-wide host registry. `Symbol.for` is realm-global, so every
  * separately loaded copy of this module in the same process resolves the same
  * map and shares the refcount and socket. The version is bumped when the host
- * record shape changes (`v2` adds owner delegation): an older copy then fails
- * the fixed port terminally instead of mutating a host it does not understand.
+ * record shape changes (`v2` added owner delegation, `v3` adds the shared
+ * snapshot/source runtime): an older copy then fails the fixed port terminally
+ * instead of mutating a host it does not understand.
  */
-const HOST_REGISTRY_KEY = Symbol.for("opencode-quota-gui/dashboard-lifecycle/v2");
+const HOST_REGISTRY_KEY = Symbol.for("opencode-quota-gui/dashboard-lifecycle/v3");
 
 interface DashboardHostRegistry {
   readonly hosts: Map<number, DashboardHost>;
@@ -176,6 +202,33 @@ function createOwner(options: StartDashboardOptions, configDir: string): Dashboa
     },
     disposed: false,
   };
+}
+
+/**
+ * One host's shared runtime. `close` is idempotent: bind failure and final
+ * disposal may both call it, and only the first call releases the snapshot
+ * service and every owner source still registered at that moment.
+ */
+function createRuntime(source: DashboardReadSource, logger: GuiLogger): DashboardRuntime {
+  let closing: Promise<void> | undefined;
+  const runtime: DashboardRuntime = {
+    source,
+    snapshots: undefined,
+    close() {
+      if (closing) return closing;
+      closing = (async () => {
+        try {
+          runtime.snapshots?.close();
+        } catch (error) {
+          logger.warn("dashboard runtime close failed", failureLabel(error));
+        }
+        runtime.snapshots = undefined;
+        await closeSource(source, logger);
+      })();
+      return closing;
+    },
+  };
+  return runtime;
 }
 
 /** The owner's source, created at most once and shared by concurrent callers. */
@@ -248,14 +301,17 @@ function disposeOwner(owner: DashboardOwner, logger: GuiLogger): Promise<void> {
   return releaseOwnerSource(owner, logger);
 }
 
-/** Removes a disposed owner and hands the host to the most recent live owner. */
-function dropOwner(host: DashboardHost, owner: DashboardOwner): void {
+/**
+ * Removes a disposed owner and hands the host to the most recent live owner.
+ * Returns true when the active serving identity changed.
+ */
+function dropOwner(host: DashboardHost, owner: DashboardOwner): boolean {
   const { owners } = host.delegation;
   const index = owners.indexOf(owner);
   if (index !== -1) owners.splice(index, 1);
-  if (host.delegation.activeOwner === owner) {
-    host.delegation.activeOwner = owners[owners.length - 1];
-  }
+  if (host.delegation.activeOwner !== owner) return false;
+  host.delegation.activeOwner = owners[owners.length - 1];
+  return true;
 }
 
 /**
@@ -406,14 +462,16 @@ async function createProductionSource(
 }
 
 /**
- * Settings store, first owner's eager source and transport, in that order; each
- * failure is contained. The source passed to the transport is the host's stable
- * delegating source, so later owner handoffs keep the same snapshot service.
+ * Settings store, first owner's eager source, one host snapshot service and the
+ * transport, in that order; each failure is contained. The transport receives
+ * that snapshot service, whose stable delegating source keeps the same cache
+ * and pollers across later owner handoffs.
  */
 async function startHost(
   options: StartDashboardOptions,
   context: HostContext,
   delegation: OwnerDelegation,
+  runtime: DashboardRuntime,
 ): Promise<DashboardServerHandle> {
   const createSettingsStore = options.createSettingsStore ?? createGuiSettingsStore;
   let settings: GuiSettingsStore;
@@ -436,20 +494,36 @@ async function startHost(
     throw new DashboardLifecycleError("source-unavailable");
   }
 
-  const source = createDelegatingSource(delegation, context.logger);
+  // The host owns exactly one snapshot service. Transports (HTTP now, RPC in a
+  // later stage) receive it; they never construct or close it themselves.
+  const createSnapshots = options.createSnapshots ?? createSnapshotService;
+  let snapshots: SnapshotService;
+  try {
+    snapshots = createSnapshots({
+      source: runtime.source,
+      minIntervalMs: minIntervalGetter(context),
+      logger: context.logger,
+    });
+  } catch {
+    await runtime.close();
+    throw new DashboardLifecycleError("server-unavailable");
+  }
+  runtime.snapshots = snapshots;
+
   const createServer = options.createServer ?? createDashboardServer;
   try {
     return await createServer({
       port: context.port,
-      source,
+      snapshots,
       settings,
-      minIntervalMs: minIntervalGetter(context),
       logger: context.logger,
     });
   } catch (error) {
     // A bind failure already logged its one controlled line inside the transport
     // and keeps its `port-unavailable` reason; every other server failure is
-    // reported as `server-unavailable`.
+    // reported as `server-unavailable`. The host runtime (snapshots and every
+    // created source) is released here because no handle was returned.
+    await runtime.close();
     throw new DashboardLifecycleError(unavailableReason(error));
   }
 }
@@ -464,10 +538,13 @@ function makeDispose(
     if (disposed) return;
     disposed = true;
     host.refs = Math.max(0, host.refs - 1);
-    dropOwner(host, owner);
+    const activeChanged = dropOwner(host, owner);
     const closing = disposeOwner(owner, host.logger);
     if (host.refs > 0) {
-      // A live lease keeps the socket; the surviving owner serves next request.
+      // A live lease keeps the socket and the shared runtime. The surviving
+      // owner serves the next request, so cached pages from the disposed owner
+      // are invalidated before any client can see them as fresh.
+      if (activeChanged) host.runtime.snapshots?.sourceChanged();
       await closing;
       return;
     }
@@ -480,6 +557,7 @@ function makeDispose(
         host.logger.warn("dashboard stop failed", failureLabel(error));
       }
     }
+    await host.runtime.close();
     await closing;
   };
 }
@@ -538,12 +616,14 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
 
   const owner = createOwner(options, configDir);
   const delegation: OwnerDelegation = { owners: [owner], activeOwner: owner };
+  const runtime = createRuntime(createDelegatingSource(delegation, logger), logger);
   const host: DashboardHost = {
     port,
     logger,
     delegation,
+    runtime,
     refs: 1,
-    start: startHost(options, { configDir, port, minIntervalMs, logger }, delegation),
+    start: startHost(options, { configDir, port, minIntervalMs, logger }, delegation, runtime),
   };
   hosts.set(port, host);
   return attachLease(host, owner);

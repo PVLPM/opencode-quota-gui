@@ -4,10 +4,12 @@
  * Loopback-only (`127.0.0.1`), Host/Origin/Sec-Fetch-Site hardening, no CORS,
  * JSON writes behind a streamed 64 KiB cap, static assets contained to
  * `dist/ui` under the packaged extension allowlist, SSE on `/api/v1/events`,
- * and one scrubbed log line per failure. `createDashboardServer` is the
- * injectable seam: tests pass in-memory sources/stores and `port: 0`, while the
- * production lifecycle factory wires the P3 source and P2 settings store and
- * the default `4144` port.
+ * and one scrubbed log line per failure. `createDashboardServer` is the web
+ * transport only: it receives the host-scoped `SnapshotService` and settings
+ * store from the lifecycle/runtime and never constructs or closes them. Tests
+ * pass in-memory dependencies and `port: 0`; production wires the P3 source,
+ * one per-host snapshot service and the P2 settings store on the default
+ * `4144` port.
  */
 
 import { readFile, realpath, stat } from "node:fs/promises";
@@ -26,25 +28,21 @@ import {
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges.js";
 import { GuiSettingsError } from "./config.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
-import { createSnapshotService, type SnapshotSource } from "./snapshot-service.js";
+import type { SnapshotService } from "./snapshot-service.js";
 import { createSseHub } from "./sse.js";
 
 export interface DashboardServerOptions {
   /** `0` binds an ephemeral port (tests); production passes the configured port. */
   port: number;
-  source: SnapshotSource;
+  /**
+   * The host-scoped shared snapshot service. The lifecycle/runtime owns its
+   * cache, pollers and final close; the HTTP transport only attaches viewers
+   * and reads it.
+   */
+  snapshots: SnapshotService;
   settings: GuiSettingsStore;
   /** Static root; defaults to `<package>/dist/ui` derived from this module. */
   assetRoot?: string;
-  /**
-   * Existing quota poll interval (positive config value, no new floor) or a
-   * getter re-read on settings changes. Analytics has its own interval below.
-   */
-  minIntervalMs?: number | (() => number);
-  /** Explicit quota interval; wins over `minIntervalMs`. */
-  quotaIntervalMs?: number | (() => number);
-  /** Analytics poll interval; defaults to 600000ms. */
-  analyticsIntervalMs?: number | (() => number);
   /** SSE heartbeat override (test seam; default 20 s). */
   heartbeatMs?: number;
   logger?: GuiLogger;
@@ -464,13 +462,7 @@ export function createDashboardServer(
   options: DashboardServerOptions,
 ): Promise<DashboardServerHandle> {
   const logger = options.logger ?? createGuiLogger();
-  const snapshots = createSnapshotService({
-    source: options.source,
-    minIntervalMs: options.minIntervalMs,
-    quotaIntervalMs: options.quotaIntervalMs,
-    analyticsIntervalMs: options.analyticsIntervalMs,
-    logger,
-  });
+  const snapshots = options.snapshots;
 
   let releaseViewer: (() => void) | undefined;
   const sse = createSseHub({
@@ -921,40 +913,29 @@ export function createDashboardServer(
 
   let actualPort = options.port;
   let closing: Promise<void> | undefined;
-  let released: Promise<void> | undefined;
+  let released = false;
 
   /**
-   * Stops snapshot work and closes the optional source. Used by both the final
-   * server close and a terminal bind failure, so a worker/DB resource created
-   * by the source is never leaked. Idempotent and never rejects.
+   * Detaches this transport: stop broadcasting to the shared service and end
+   * SSE clients (releasing the viewer). The snapshot service and source are
+   * caller-owned and are released by the lifecycle only after the last lease or
+   * a terminal bind failure. Idempotent and never rejects.
    */
-  function releaseResources(): Promise<void> {
-    if (released) return released;
+  function releaseResources(): void {
+    if (released) return;
+    released = true;
     try {
-      snapshots.close();
       unsubscribe();
       sse.close();
     } catch (error: unknown) {
       logger.warn("dashboard release failed", isErrnoCode(error) ? error.code : "failed");
     }
-    const closeSource = options.source.close;
-    released = closeSource
-      ? Promise.resolve()
-          .then(() => closeSource())
-          .catch((error: unknown) => {
-            logger.warn(
-              "dashboard source close failed",
-              isErrnoCode(error) ? error.code : "failed",
-            );
-          })
-      : Promise.resolve();
-    return released;
   }
 
   function close(): Promise<void> {
     if (closing) return closing;
     closing = (async () => {
-      const resources = releaseResources();
+      releaseResources();
       const killTimer = setTimeout(() => {
         server.closeAllConnections();
       }, 1000);
@@ -964,7 +945,6 @@ export function createDashboardServer(
         server.closeIdleConnections();
       });
       clearTimeout(killTimer);
-      await resources;
     })();
     return closing;
   }
@@ -972,14 +952,15 @@ export function createDashboardServer(
   return new Promise<DashboardServerHandle>((resolve, reject) => {
     const failBind = (reason: string | undefined) => {
       logger.error("dashboard server unavailable", reason ?? "unknown");
-      // Terminal: no alternate port is attempted, and source resources created
-      // before the bind are released even though no handle was returned.
+      // Terminal: no alternate port is attempted. This transport detaches its
+      // SSE subscriber; the lifecycle closes the shared snapshot service and
+      // sources when the create-server promise rejects.
       try {
         server.close();
       } catch {
         // The listener never started (bind error) or was already closed.
       }
-      void releaseResources();
+      releaseResources();
       reject(new DashboardBindError(options.port, reason));
     };
 

@@ -182,6 +182,7 @@ export async function loadDistModules(repoRoot) {
   const paths = {
     service: `${repoRoot}/dist/gui/analytics-service.js`,
     server: `${repoRoot}/dist/gui/server.js`,
+    snapshots: `${repoRoot}/dist/gui/snapshot-service.js`,
     logger: `${repoRoot}/dist/gui/log.js`,
     dbPath: `${repoRoot}/dist/lib/opencode-db-path.js`,
     worker: `${repoRoot}/dist/gui/analytics-worker.js`,
@@ -190,15 +191,17 @@ export async function loadDistModules(repoRoot) {
     .filter(([, path]) => !existsSync(path))
     .map(([name]) => name);
   if (missing.length > 0) throw new BenchError("dist-missing");
-  const [service, server, logger, dbPath] = await Promise.all([
+  const [service, server, snapshots, logger, dbPath] = await Promise.all([
     import(pathToFileURL(paths.service).href),
     import(pathToFileURL(paths.server).href),
+    import(pathToFileURL(paths.snapshots).href),
     import(pathToFileURL(paths.logger).href),
     import(pathToFileURL(paths.dbPath).href),
   ]);
   return {
     createAnalyticsReadService: service.createAnalyticsReadService,
     createDashboardServer: server.createDashboardServer,
+    createSnapshotService: snapshots.createSnapshotService,
     createGuiLogger: logger.createGuiLogger,
     getOpenCodeDbPath: dbPath.getOpenCodeDbPath,
     workerPath: paths.worker,
@@ -231,16 +234,52 @@ export async function startDashboard(options) {
       if (service) await service.close();
     },
   };
-  const server = await modules.createDashboardServer({
-    port: 0,
+  const logger = modules.createGuiLogger({ sink: () => {} });
+  const snapshots = modules.createSnapshotService({
     source,
-    settings: createSettingsStub(),
-    assetRoot,
     analyticsIntervalMs: 3_600_000,
     quotaIntervalMs: 3_600_000,
-    logger: modules.createGuiLogger({ sink: () => {} }),
+    logger,
   });
-  return server;
+  let server;
+  try {
+    server = await modules.createDashboardServer({
+      port: 0,
+      snapshots,
+      settings: createSettingsStub(),
+      assetRoot,
+      logger,
+    });
+  } catch (error) {
+    snapshots.close();
+    try {
+      await source.close();
+    } catch {
+      // Keep the original start failure.
+    }
+    throw error;
+  }
+  let closing;
+  return {
+    ...server,
+    close: () => {
+      if (closing === undefined) {
+        closing = (async () => {
+          try {
+            await server.close();
+          } finally {
+            snapshots.close();
+            try {
+              await source.close();
+            } catch {
+              // The benchmark already completed; source cleanup is best effort.
+            }
+          }
+        })();
+      }
+      return closing;
+    },
+  };
 }
 
 function requireService(service) {

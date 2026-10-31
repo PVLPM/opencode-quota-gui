@@ -27,7 +27,8 @@ import {
   DashboardHttpError,
   type DashboardServerHandle,
 } from "../src/gui/server.js";
-import type { SnapshotSource } from "../src/gui/snapshot-service.js";
+import { createSnapshotService, type SnapshotSource } from "../src/gui/snapshot-service.js";
+import { startTestDashboardServer } from "./helpers/dashboard-server-test-harness.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
 const INDEX_HTML = '<!doctype html><html><body><div id="app"></div></body></html>';
@@ -263,7 +264,7 @@ afterAll(async () => {
 
 async function start(): Promise<Running> {
   const { state, source, store } = buildFixtures();
-  const handle = await createDashboardServer({
+  const handle = await startTestDashboardServer({
     port: 0,
     source,
     settings: store,
@@ -672,71 +673,49 @@ describe("GUI HTTP routes", () => {
     }
   });
 
-  it("closes the optional source on final close and on bind failure", async () => {
+  it("leaves the caller-owned snapshot service open when the transport closes", async () => {
     const logger = createGuiLogger({ sink: () => {} });
-    let closes = 0;
     const { source, store } = buildFixtures();
-    const tracked: SnapshotSource = {
-      ...source,
-      close: async () => {
-        closes += 1;
-      },
-    };
+    const snapshots = createSnapshotService({ source, logger });
     const handle = await createDashboardServer({
       port: 0,
-      source: tracked,
+      snapshots,
       settings: store,
       assetRoot,
       logger,
     });
-    await handle.close();
-    await handle.close();
-    expect(closes).toBe(1);
 
-    // A terminal bind failure releases source resources even though no handle
-    // is returned.
-    const occupied = await start();
-    let bindCloses = 0;
-    const failing = buildFixtures();
-    const failingSource: SnapshotSource = {
-      ...failing.source,
-      close: async () => {
-        bindCloses += 1;
-      },
-    };
-    await expect(
-      createDashboardServer({
-        port: occupied.handle.port,
-        source: failingSource,
-        settings: failing.store,
-        assetRoot,
-        logger,
-      }),
-    ).rejects.toMatchObject({ code: "unavailable" });
-    for (let index = 0; index < 50 && bindCloses === 0; index += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(bindCloses).toBe(1);
-    await occupied.handle.close();
+    await handle.close();
+    await handle.close();
+    // The runtime, not HTTP, owns the shared cache: closing this transport must
+    // not clear it or stop the pollers another transport may still use.
+    await expect(snapshots.home({ range: "7d" })).resolves.toMatchObject({ range: "7d" });
+    snapshots.close();
   });
 
-  it("still closes when the source close itself fails", async () => {
+  it("leaves the caller-owned snapshot service usable after a terminal bind failure", async () => {
     const logger = createGuiLogger({ sink: () => {} });
-    const { source, store } = buildFixtures();
-    const failing: SnapshotSource = {
-      ...source,
-      close: async () => {
-        throw new Error("source close failed");
-      },
-    };
-    const handle = await createDashboardServer({
-      port: 0,
-      source: failing,
-      settings: store,
-      assetRoot,
-      logger,
-    });
-    await expect(handle.close()).resolves.toBeUndefined();
+    const occupied = await start();
+    const failing = buildFixtures();
+    const snapshots = createSnapshotService({ source: failing.source, logger });
+    try {
+      await expect(
+        createDashboardServer({
+          port: occupied.handle.port,
+          snapshots,
+          settings: failing.store,
+          assetRoot,
+          logger,
+        }),
+      ).rejects.toMatchObject({ code: "unavailable" });
+
+      // The lifecycle releases the runtime after this rejection; the HTTP
+      // factory itself must not close a service it does not own.
+      await expect(snapshots.home({ range: "7d" })).resolves.toMatchObject({ range: "7d" });
+    } finally {
+      snapshots.close();
+      await occupied.handle.close();
+    }
   });
 
   it("serves index.html at / and packaged assets under /assets", async () => {
@@ -795,7 +774,7 @@ describe("GUI HTTP routes", () => {
     const parent = await mkdtemp(join(tmpdir(), "gui-p4-late-root-"));
     const lateRoot = join(parent, "ui");
     const { source, store } = buildFixtures();
-    const handle = await createDashboardServer({
+    const handle = await startTestDashboardServer({
       port: 0,
       source,
       settings: store,
@@ -988,7 +967,7 @@ describe("GUI HTTP routes", () => {
       importPreview,
       importApply,
     };
-    const handle = await createDashboardServer({
+    const handle = await startTestDashboardServer({
       port: 0,
       source,
       settings: withoutOpen,

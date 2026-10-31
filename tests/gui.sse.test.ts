@@ -14,9 +14,10 @@ import type {
 import type { RangeKey } from "../src/contracts/ranges.js";
 import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts/ranges.js";
 import { createGuiLogger } from "../src/gui/log.js";
-import { createDashboardServer, type DashboardServerHandle } from "../src/gui/server.js";
+import type { DashboardServerHandle } from "../src/gui/server.js";
 import type { SnapshotSource } from "../src/gui/snapshot-service.js";
 import { DEFAULT_SSE_HEARTBEAT_MS, DEFAULT_SSE_RETRY_MS } from "../src/gui/sse.js";
+import { startTestDashboardServer } from "./helpers/dashboard-server-test-harness.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
 
@@ -157,7 +158,7 @@ interface RunningServer {
 
 async function startServer(overrides: { heartbeatMs?: number; analyticsIntervalMs?: number } = {}) {
   const { state, source, store } = buildFixtures();
-  const handle = await createDashboardServer({
+  const handle = await startTestDashboardServer({
     port: 0,
     source,
     settings: store,

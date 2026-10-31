@@ -274,6 +274,137 @@ describe("GUI snapshot service", () => {
     expect(calls).toBe(1);
   });
 
+  it("invalidates cached pages and broadcasts both topics when the active source changes", async () => {
+    const { calls, source } = fakeSource();
+    const service = makeService(source);
+
+    await service.home({ range: "7d" });
+    expect(calls.home).toBe(1);
+
+    const events: DashboardEvent[] = [];
+    const unsubscribe = service.subscribe((event) => events.push(event));
+    service.sourceChanged();
+    expect(events).toEqual([
+      { topic: "quota.changed", at: expect.any(Number) },
+      { topic: "sessions.changed", at: expect.any(Number) },
+    ]);
+
+    await service.home({ range: "7d" });
+    expect(calls.home).toBe(2);
+    unsubscribe();
+    service.close();
+  });
+
+  it("does not let an in-flight pre-handoff load freshen the cache after a source change", async () => {
+    let release!: (value: HomeSnapshot) => void;
+    const pending = new Promise<HomeSnapshot>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const { source } = fakeSource({
+      home: () => {
+        calls += 1;
+        if (calls === 1) return pending;
+        return Promise.resolve(home("7d", { total: 99 }));
+      },
+    });
+    const service = makeService(source);
+
+    const preHandoff = service.home({ range: "7d" });
+    service.sourceChanged();
+    release(home("7d", { total: 11 }));
+    // The caller may keep its result, but never as fresh data from the old
+    // source: the stale marker is the only contract-safe representation.
+    await expect(preHandoff).resolves.toMatchObject({
+      stale: true,
+      usage: { totals: { total: 11 } },
+    });
+
+    await expect(service.home({ range: "7d" })).resolves.toMatchObject({
+      stale: false,
+      usage: { totals: { total: 99 } },
+    });
+    expect(calls).toBe(2);
+    service.close();
+  });
+
+  it("rejects a pre-handoff in-flight session result because it has no stale marker", async () => {
+    let release!: (value: SessionSnapshot) => void;
+    const pending = new Promise<SessionSnapshot>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const { source } = fakeSource({
+      session: () => {
+        calls += 1;
+        return calls === 1 ? pending : Promise.resolve(session());
+      },
+    });
+    const service = makeService(source);
+
+    const preHandoff = service.session({ sessionId: "s1" });
+    service.sourceChanged();
+    release(session("s1"));
+
+    await expect(preHandoff).rejects.toThrow(
+      "Snapshot source changed before the snapshot completed",
+    );
+    // A later post-handoff read uses the new source normally.
+    await expect(service.session({ sessionId: "s1" })).resolves.toMatchObject({
+      focusSessionId: "s1",
+    });
+    expect(calls).toBe(2);
+    service.close();
+  });
+
+  it("does not serve a previous-owner session snapshot as last-good after a handoff", async () => {
+    let calls = 0;
+    const { source } = fakeSource({
+      session: async () => {
+        calls += 1;
+        if (calls === 1) return session("s1");
+        throw new Error("new owner unavailable");
+      },
+    });
+    const service = makeService(source);
+
+    await expect(service.session({ sessionId: "s1" })).resolves.toMatchObject({
+      focusSessionId: "s1",
+    });
+    service.sourceChanged();
+
+    // SessionSnapshot has no stale field, so the old owner's payload must not
+    // be returned unmarked: surface the post-handoff failure instead.
+    await expect(service.session({ sessionId: "s1" })).rejects.toThrow("new owner unavailable");
+    expect(calls).toBe(2);
+    service.close();
+  });
+
+  it("still serves a stale last-good home page after a handoff failure", async () => {
+    let calls = 0;
+    const { source } = fakeSource({
+      home: async ({ range }) => {
+        calls += 1;
+        if (calls === 1) return home(range, { total: 11 });
+        throw new Error("new owner unavailable");
+      },
+    });
+    const service = makeService(source);
+
+    await expect(service.home({ range: "7d" })).resolves.toMatchObject({
+      stale: false,
+      usage: { totals: { total: 11 } },
+    });
+    service.sourceChanged();
+
+    await expect(service.home({ range: "7d" })).resolves.toMatchObject({
+      stale: true,
+      usage: { totals: { total: 11 } },
+    });
+    expect(calls).toBe(2);
+    service.close();
+  });
+
   it("keys the cache by kind, resource id and range", async () => {
     const { calls, source } = fakeSource();
     const service = makeService(source);

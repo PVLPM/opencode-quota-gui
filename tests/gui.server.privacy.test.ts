@@ -14,8 +14,9 @@ import type { RangeKey } from "../src/contracts/ranges.js";
 import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts/ranges.js";
 import { GuiSettingsError } from "../src/gui/config.js";
 import { createGuiLogger, GUI_LOG_PREFIX } from "../src/gui/log.js";
-import { createDashboardServer, DashboardHttpError } from "../src/gui/server.js";
+import { DashboardHttpError } from "../src/gui/server.js";
 import type { SnapshotSource } from "../src/gui/snapshot-service.js";
+import { startTestDashboardServer } from "./helpers/dashboard-server-test-harness.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
 
@@ -182,7 +183,7 @@ async function start(): Promise<{
   fixtures: PrivacyFixtures;
 }> {
   const fixtures = buildFixtures();
-  const handle = await createDashboardServer({
+  const handle = await startTestDashboardServer({
     port: 0,
     source: fixtures.source,
     settings: fixtures.store,
