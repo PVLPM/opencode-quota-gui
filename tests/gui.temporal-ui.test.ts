@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ProviderCard, QuotaSnapshot, SettingsSnapshot } from "../src/contracts/dashboard.js";
@@ -29,6 +29,7 @@ import {
 } from "../src/ui/temporal-format.js";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import { percentRow, providerCard, settingsSnapshot } from "./fixtures/gui-ui-fixtures.js";
+import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
@@ -72,7 +73,7 @@ const tooltipBoundary = {
 };
 
 beforeAll(async () => {
-  const created = await createServer({
+  const created = await createIsolatedViteServer({
     configFile: false,
     root: path.join(repoRoot, "src/ui"),
     plugins: [tooltipBoundary, solid({ include: [...SOLID_JSX_SOURCES], ssr: true })],

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { encodeAnalyticsEntityToken } from "../src/contracts/analytics-entity";
@@ -48,6 +48,7 @@ import {
   withRange,
   zeroSnapshot,
 } from "./fixtures/model-analytics-fixtures";
+import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
  * Focused rendered contract for the Models surfaces.
@@ -80,7 +81,7 @@ let providerDetailModule: Record<string, unknown>;
 let appModule: Record<string, unknown>;
 
 beforeAll(async () => {
-  const rendering = await createServer({
+  const rendering = await createIsolatedViteServer({
     configFile: false,
     root: repoRoot,
     plugins: [

@@ -3,13 +3,14 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { SettingsSnapshot } from "../src/contracts/dashboard.js";
 import type { TemporalStatusSnapshot } from "../src/contracts/temporal.js";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import { settingsSnapshot } from "./fixtures/gui-ui-fixtures.js";
+import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
  * Settings row layout contract (issue #9).
@@ -55,7 +56,7 @@ let graph: SsrGraph;
 let settingsModule: SettingsModule;
 
 beforeAll(async () => {
-  const created = await createServer({
+  const created = await createIsolatedViteServer({
     configFile: false,
     root: path.join(repoRoot, "src/ui"),
     plugins: [

@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { QuotaCardRow } from "../src/contracts/dashboard.js";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import { percentRow } from "./fixtures/gui-ui-fixtures.js";
+import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
  * Focused quota-progress and foreground-loading contract.
@@ -58,7 +59,7 @@ let quotaModule: QuotaModule;
 let busyModule: BusyModule;
 
 beforeAll(async () => {
-  const created = await createServer({
+  const created = await createIsolatedViteServer({
     configFile: false,
     root: path.join(repoRoot, "src/ui"),
     plugins: [

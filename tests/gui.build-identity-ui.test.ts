@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer, type ViteDevServer } from "vite";
+import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DASHBOARD_CONTRACT_VERSION, type DashboardHealth } from "../src/contracts/dashboard";
@@ -13,6 +13,7 @@ import {
   sessionSnapshot,
   settingsSnapshot,
 } from "./fixtures/gui-ui-fixtures.js";
+import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
  * Build identity in the shell (design spec §7, §10).
@@ -48,7 +49,7 @@ let server: ViteDevServer | undefined;
 let graph: RenderGraph;
 
 beforeAll(async () => {
-  const created = await createServer({
+  const created = await createIsolatedViteServer({
     configFile: false,
     root: repoRoot,
     plugins: [
