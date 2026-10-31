@@ -455,6 +455,21 @@ describe("temporal status projection", () => {
       nextChangeAtMs: Date.parse("2026-01-05T14:00:00.000Z"),
       nextState: "offpeak",
     });
+    expect(modelAt(baseline)?.weekly).toEqual({
+      timeZone: "UTC",
+      utcOffsetMinutes: 0,
+      basePhase: "peak",
+      baseEffect: { factor: 1, direction: "unchanged", unit: "api_price" },
+      windows: [
+        {
+          days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+          startMinute: 840,
+          endMinute: 1440,
+          phase: "offpeak",
+          effect: { factor: 0.5, direction: "offpeak", unit: "api_price" },
+        },
+      ],
+    });
 
     const discounted = at("2026-01-05T14:00:00.000Z");
     expect(discounted?.phase).toBe("offpeak");
@@ -464,6 +479,48 @@ describe("temporal status projection", () => {
       effect: { factor: 0.5, direction: "offpeak", unit: "api_price" },
       nextChangeAtMs: Date.parse("2026-01-06T00:00:00.000Z"),
       nextState: "peak",
+    });
+  });
+
+  it("describes the declared DeepSeek weekly windows and keeps CN holidays separate", () => {
+    setTemporalSnapshotForTests(actualSnapshot());
+    const catalog = readBundledTemporalCatalog();
+    const provider = buildTemporalStatus({
+      providers: [{ providerId: "deepseek", providerLabel: "DeepSeek", discovered: true }],
+      // Inside the 2026 Spring Festival: today is off-peak, but the declared
+      // weekday frequency must not be sampled away.
+      nowMs: Date.parse("2026-02-17T02:00:00.000Z"),
+      routes: catalog.routes,
+      holidays: catalog.holidays,
+    }).providers[0];
+    const model = provider?.models.find((entry) => entry.modelId === "deepseek-v4-pro");
+    expect(model?.state).toBe("offpeak");
+    // Exact holiday dates stay on the provider; the weekly base stays weekly.
+    expect(provider?.holidays).toEqual(
+      expect.arrayContaining([expect.objectContaining({ jurisdiction: "CN" })]),
+    );
+    expect(model?.weekly).toEqual({
+      timeZone: "UTC",
+      utcOffsetMinutes: 0,
+      basePhase: "offpeak",
+      baseEffect: { factor: 1, direction: "unchanged", unit: "api_price" },
+      windows: [
+        {
+          days: ["mon", "tue", "wed", "thu", "fri"],
+          startMinute: 60,
+          endMinute: 240,
+          phase: "peak",
+          effect: { factor: 2, direction: "peak", unit: "api_price" },
+        },
+        {
+          days: ["mon", "tue", "wed", "thu", "fri"],
+          startMinute: 360,
+          endMinute: 600,
+          phase: "peak",
+          effect: { factor: 2, direction: "peak", unit: "api_price" },
+        },
+      ],
+      exceptHolidays: ["CN"],
     });
   });
 
@@ -488,7 +545,11 @@ describe("temporal status projection", () => {
     const provider = status.providers[0];
     expect(provider?.phase).toBe("unknown");
     expect(provider?.models.map((model) => model.state)).toEqual(["unknown", "unknown"]);
-    for (const model of provider?.models ?? []) expect(model.effect).toBeUndefined();
+    for (const model of provider?.models ?? []) {
+      expect(model.effect).toBeUndefined();
+      // No provable weekly classification, so no descriptor is invented.
+      expect(model.weekly).toBeUndefined();
+    }
   });
 
   it("ships a live Z.ai quota-point policy from the official schedule", () => {

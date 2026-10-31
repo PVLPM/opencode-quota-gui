@@ -21,6 +21,8 @@ import type {
   TemporalPolicySource,
   TemporalProviderStatus,
   TemporalStatusSnapshot,
+  TemporalWeekday,
+  TemporalWeeklySchedule,
 } from "../contracts/temporal.js";
 import { lookupCost } from "../lib/modelsdev-pricing.js";
 import {
@@ -29,6 +31,8 @@ import {
   getTemporalPolicy,
   getTemporalSnapshotMeta,
   listTemporalIntervals,
+  TEMPORAL_DAYS,
+  TEMPORAL_HOLIDAYS,
   type TemporalCondition,
   type TemporalInstantState,
   type TemporalPolicyEntry,
@@ -374,6 +378,232 @@ function sameEffect(a: TemporalEffect | undefined, b: TemporalEffect | undefined
   return a.factor === b.factor && a.direction === b.direction && a.unit === b.unit;
 }
 
+function weeklyClockMinutes(value: string): number {
+  const [hours, minutes] = value.split(":").map((part) => Number.parseInt(part, 10));
+  return (hours ?? 0) * 60 + (minutes ?? 0);
+}
+
+function weeklyChoiceMatches(
+  value: string,
+  op: "equals" | "in",
+  expected: string | string[],
+): boolean {
+  return op === "equals"
+    ? typeof expected === "string" && value === expected
+    : Array.isArray(expected) && expected.includes(value);
+}
+
+function weeklyClockMatches(
+  minute: number,
+  condition: Extract<TemporalCondition, { type: "utc_hours" }>,
+): boolean {
+  if (condition.op === "in") {
+    const values = Array.isArray(condition.value) ? condition.value : [];
+    return values.some((value) => minute === weeklyClockMinutes(value));
+  }
+  const target = weeklyClockMinutes(condition.value as string);
+  switch (condition.op) {
+    case "equals":
+      return minute === target;
+    case "gt":
+      return minute > target;
+    case "gte":
+      return minute >= target;
+    case "lt":
+      return minute < target;
+    case "lte":
+      return minute <= target;
+  }
+}
+
+/**
+ * Source-AST base week. Holiday leaves evaluate false so the recurring base is
+ * the non-holiday schedule; exact holiday dates remain separate intervals.
+ */
+function weeklyConditionMatches(
+  condition: TemporalCondition,
+  day: TemporalWeekday,
+  minute: number,
+): boolean {
+  switch (condition.type) {
+    case "all":
+      return condition.of.every((child) => weeklyConditionMatches(child, day, minute));
+    case "any":
+      return condition.of.some((child) => weeklyConditionMatches(child, day, minute));
+    case "not":
+      return !weeklyConditionMatches(condition.of, day, minute);
+    case "utc_days":
+      return weeklyChoiceMatches(day, condition.op, condition.value);
+    case "utc_hours":
+      return weeklyClockMatches(minute, condition);
+    case "holiday":
+      return false;
+  }
+}
+
+function collectWeeklyBoundaries(condition: TemporalCondition, minutes: Set<number>): void {
+  switch (condition.type) {
+    case "all":
+    case "any":
+      for (const child of condition.of) collectWeeklyBoundaries(child, minutes);
+      return;
+    case "not":
+      collectWeeklyBoundaries(condition.of, minutes);
+      return;
+    case "utc_hours": {
+      const values = Array.isArray(condition.value) ? condition.value : [condition.value];
+      for (const value of values) {
+        const target = weeklyClockMinutes(value);
+        if (
+          condition.op === "equals" ||
+          condition.op === "in" ||
+          condition.op === "gt" ||
+          condition.op === "lte"
+        ) {
+          minutes.add(target + 1);
+        }
+        if (condition.op !== "gt") minutes.add(target);
+      }
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+interface WeeklySegment {
+  day: TemporalWeekday;
+  startMinute: number;
+  endMinute: number;
+  phase: TemporalModelPhase;
+  effect: TemporalEffect;
+}
+
+/** Exact base-week segments from the AST, or undefined when classification is unknown. */
+function policyWeeklySegments(
+  policy: Extract<TemporalPolicyEntry, { status: "supported" }>,
+  base: TemporalRates | null,
+): WeeklySegment[] | undefined {
+  const boundaries = new Set<number>([0, 1440]);
+  const rules = [...policy.overrides, ...policy.multipliers];
+  for (const rule of rules) collectWeeklyBoundaries(rule.when, boundaries);
+  const sorted = [...boundaries]
+    .filter((minute) => minute >= 0 && minute <= 1440)
+    .sort((left, right) => left - right);
+  const segments: WeeklySegment[] = [];
+  for (const day of TEMPORAL_DAYS) {
+    let previous: WeeklySegment | undefined;
+    for (let index = 0; index < sorted.length - 1; index += 1) {
+      const startMinute = sorted[index];
+      const endMinute = sorted[index + 1];
+      if (startMinute === undefined || endMinute === undefined || endMinute <= startMinute) {
+        continue;
+      }
+      const activeRuleIds: string[] = [];
+      for (const rule of rules) {
+        if (weeklyConditionMatches(rule.when, day, startMinute)) activeRuleIds.push(rule.id);
+      }
+      const classified = classifyState(policy, activeRuleIds, base);
+      if (classified.phase === "unknown" || !classified.effect) return undefined;
+      if (
+        previous &&
+        previous.endMinute === startMinute &&
+        previous.phase === classified.phase &&
+        sameEffect(previous.effect, classified.effect)
+      ) {
+        previous.endMinute = endMinute;
+      } else {
+        previous = {
+          day,
+          startMinute,
+          endMinute,
+          phase: classified.phase,
+          effect: classified.effect,
+        };
+        segments.push(previous);
+      }
+    }
+  }
+  return segments;
+}
+
+/** Browser-safe weekly descriptor, or undefined when no exact base week is provable. */
+function policyWeeklySchedule(
+  policy: TemporalPolicyEntry | null,
+  base: TemporalRates | null,
+): TemporalWeeklySchedule | undefined {
+  if (!policy || policy.status !== "supported") return undefined;
+  const segments = policyWeeklySegments(policy, base);
+  if (!segments || segments.length === 0) return undefined;
+  const baseSegment = segments.find(
+    (segment) => segment.day === "mon" && segment.startMinute === 0,
+  );
+  if (!baseSegment) return undefined;
+
+  const grouped = new Map<
+    string,
+    {
+      days: Set<TemporalWeekday>;
+      startMinute: number;
+      endMinute: number;
+      phase: TemporalModelPhase;
+      effect: TemporalEffect;
+    }
+  >();
+  for (const day of TEMPORAL_DAYS) {
+    let run: WeeklySegment | undefined;
+    const flush = (endMinute: number) => {
+      if (!run) return;
+      const key = JSON.stringify([run.startMinute, endMinute, run.phase, run.effect]);
+      const existing = grouped.get(key);
+      if (existing) {
+        existing.days.add(day);
+      } else {
+        grouped.set(key, {
+          days: new Set([day]),
+          startMinute: run.startMinute,
+          endMinute,
+          phase: run.phase,
+          effect: run.effect,
+        });
+      }
+      run = undefined;
+    };
+    for (const segment of segments) {
+      if (segment.day !== day) continue;
+      const deviates =
+        segment.phase !== baseSegment.phase || !sameEffect(segment.effect, baseSegment.effect);
+      if (deviates) {
+        if (run) flush(segment.startMinute);
+        run = segment;
+      } else {
+        flush(segment.startMinute);
+      }
+    }
+    flush(1440);
+  }
+
+  const windows = [...grouped.values()]
+    .sort((left, right) => left.startMinute - right.startMinute || left.endMinute - right.endMinute)
+    .map((window) => ({
+      days: TEMPORAL_DAYS.filter((day) => window.days.has(day)),
+      startMinute: window.startMinute,
+      endMinute: window.endMinute,
+      phase: window.phase,
+      effect: window.effect,
+    }));
+  const holidays = holidayJurisdictions(policy);
+  const exceptHolidays = TEMPORAL_HOLIDAYS.filter((jurisdiction) => holidays.has(jurisdiction));
+  return {
+    timeZone: "UTC",
+    utcOffsetMinutes: 0,
+    basePhase: baseSegment.phase,
+    baseEffect: baseSegment.effect,
+    windows,
+    ...(exceptHolidays.length > 0 ? { exceptHolidays } : {}),
+  };
+}
+
 interface MeaningfulTransition {
   atMs: number;
   phase: TemporalModelPhase;
@@ -618,6 +848,7 @@ function modelStatus(
   const state = getTemporalInstantState(providerId, modelId, nowMs);
   const current = classifyInstant(policy, state, base);
   const intervals = projectIntervals(providerId, modelId, nowMs, baseRates);
+  const weekly = policyWeeklySchedule(policy, base);
   // The preview is deliberately short, so its last interval ends at the horizon
   // rather than at a proved transition. Ask the core evaluator for the real
   // next transition independently so a long holiday or sparse rule does not
@@ -629,6 +860,7 @@ function modelStatus(
     intervals,
   };
   if (current.effect) status.effect = current.effect;
+  if (weekly) status.weekly = weekly;
   if (next) {
     status.nextChangeAtMs = next.atMs;
     status.nextState = next.phase;

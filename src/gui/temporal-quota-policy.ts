@@ -3,6 +3,8 @@ import type {
   TemporalModelInterval,
   TemporalModelPhase,
   TemporalModelStatus,
+  TemporalWeekday,
+  TemporalWeeklySchedule,
 } from "../contracts/temporal.js";
 
 /**
@@ -47,6 +49,7 @@ const MAX_INTERVALS = 24;
 /** The schedule repeats weekly; eight days cover the next boundary from any instant. */
 const NEXT_TRANSITION_LOOKAHEAD_DAYS = 8;
 const DAY_NAMES = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+const WEEK_ORDER: readonly TemporalWeekday[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 function clockMinutes(value: string): number {
   const [hours, minutes] = value.split(":").map((part) => Number.parseInt(part, 10));
@@ -81,6 +84,37 @@ function effectFor(model: TemporalQuotaPolicyModel, phase: TemporalModelPhase): 
     factor: phase === "peak" ? model.peakFactor : model.offpeakFactor,
     direction: phase === "peak" ? "peak" : "offpeak",
     unit: "quota_points",
+  };
+}
+
+/** Provider-maintained schedules are already weekly; publish their actual zone. */
+function quotaPolicyWeekly(
+  policy: TemporalQuotaPolicy,
+  model: TemporalQuotaPolicyModel,
+): TemporalWeeklySchedule {
+  const startMinute = clockMinutes(policy.peak.start);
+  const endMinute = clockMinutes(policy.peak.end);
+  const days = [...new Set(policy.peak.days)].sort(
+    (left, right) => WEEK_ORDER.indexOf(left) - WEEK_ORDER.indexOf(right),
+  );
+  const windows =
+    days.length > 0 && endMinute > startMinute
+      ? [
+          {
+            days,
+            startMinute,
+            endMinute,
+            phase: "peak" as const,
+            effect: effectFor(model, "peak"),
+          },
+        ]
+      : [];
+  return {
+    timeZone: policy.timeZone,
+    utcOffsetMinutes: policy.utcOffsetMinutes,
+    basePhase: "offpeak",
+    baseEffect: effectFor(model, "offpeak"),
+    windows,
   };
 }
 
@@ -216,6 +250,7 @@ export function buildQuotaPolicyModels(
         state,
         effect: effectFor(model, state),
         intervals,
+        weekly: quotaPolicyWeekly(policy, model),
       };
       if (next) {
         status.nextChangeAtMs = next.atMs;

@@ -107,6 +107,21 @@ describe("Z.ai quota pricing policy", () => {
       nextChangeAtMs: OFFPEAK_MONDAY,
       nextState: "offpeak",
     });
+    expect(peakModels[0]?.weekly).toEqual({
+      timeZone: "Asia/Singapore",
+      utcOffsetMinutes: 480,
+      basePhase: "offpeak",
+      baseEffect: { factor: 0.5, direction: "offpeak", unit: "quota_points" },
+      windows: [
+        {
+          days: ["mon", "tue", "wed", "thu", "fri"],
+          startMinute: 840,
+          endMinute: 1080,
+          phase: "peak",
+          effect: { factor: 1, direction: "peak", unit: "quota_points" },
+        },
+      ],
+    });
     expect(peakModels[0]?.intervals[0]).toMatchObject({
       startMs: PEAK_MONDAY,
       endMs: OFFPEAK_MONDAY,
