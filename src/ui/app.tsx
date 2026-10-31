@@ -533,6 +533,8 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                 />
               )}
             </Show>
+          </div>
+          <div class="qg-topbar__actions">
             <Show when={route().name === "home" ? homeSnapshot()?.temporal : undefined}>
               {(temporal) => (
                 <TemporalStatusStrip
@@ -541,21 +543,23 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                 />
               )}
             </Show>
+            <Show when={routeShowsRangeSelector(route())}>
+              <SegmentedControl
+                class="qg-range"
+                aria-label="Time range"
+                value={range()}
+                onChange={(value) => {
+                  if (isRangeKey(value)) updateRange(value);
+                }}
+              >
+                {RANGE_KEYS.map((key) => (
+                  <SegmentedControlItem value={key}>
+                    {RANGE_LABELS[key] ?? key}
+                  </SegmentedControlItem>
+                ))}
+              </SegmentedControl>
+            </Show>
           </div>
-          <Show when={routeShowsRangeSelector(route())}>
-            <SegmentedControl
-              class="qg-range"
-              aria-label="Time range"
-              value={range()}
-              onChange={(value) => {
-                if (isRangeKey(value)) updateRange(value);
-              }}
-            >
-              {RANGE_KEYS.map((key) => (
-                <SegmentedControlItem value={key}>{RANGE_LABELS[key] ?? key}</SegmentedControlItem>
-              ))}
-            </SegmentedControl>
-          </Show>
         </header>
 
         <main class="qg-main" data-settings={route().name === "settings" ? "true" : undefined}>

@@ -70,11 +70,11 @@ function phaseIcon(phase: TemporalPhase): JSX.Element {
   if (phase === "mixed") {
     return (
       <>
-        <span class="qg-temporal__arrow" data-phase="peak">
-          <PeakArrowIcon />
-        </span>
         <span class="qg-temporal__arrow" data-phase="offpeak">
           <OffpeakArrowIcon />
+        </span>
+        <span class="qg-temporal__arrow" data-phase="peak">
+          <PeakArrowIcon />
         </span>
       </>
     );
@@ -187,24 +187,30 @@ function groupWeeklyWindows(schedule: TemporalWeeklyScheduleDescription): Weekly
 function DatedSchedule(props: {
   schedule: TemporalDatedSchedule;
   effectVaries: boolean;
+  nowMs: number;
   formatOptions?: TemporalFormatOptions;
 }): JSX.Element {
   return (
     <div class="qg-temporal-popover__schedule">
       <For each={props.schedule.intervals}>
-        {(interval) => (
-          <span class="qg-temporal-popover__interval">
-            <span data-phase={interval.phase}>{temporalModelPhaseLabel(interval.phase)}</span>
-            <span class="qg-temporal-popover__time">
-              {formatLocalInterval(interval.startMs, interval.endMs, props.formatOptions)}
+        {(interval) => {
+          // The summary already states the active window's effect. Repeating it
+          // on the active row would add noise; future windows keep their labels.
+          const active = props.nowMs >= interval.startMs && props.nowMs < interval.endMs;
+          return (
+            <span class="qg-temporal-popover__interval">
+              <span data-phase={interval.phase}>{temporalModelPhaseLabel(interval.phase)}</span>
+              <span class="qg-temporal-popover__time">
+                {formatLocalInterval(interval.startMs, interval.endMs, props.formatOptions)}
+              </span>
+              <Show when={props.effectVaries && !active && interval.effect}>
+                {(effect) => (
+                  <span class="qg-temporal-popover__effect">{temporalEffectLabel(effect())}</span>
+                )}
+              </Show>
             </span>
-            <Show when={props.effectVaries && interval.effect}>
-              {(effect) => (
-                <span class="qg-temporal-popover__effect">{temporalEffectLabel(effect())}</span>
-              )}
-            </Show>
-          </span>
-        )}
+          );
+        }}
       </For>
       <Show when={props.schedule.localClockChanges}>
         <span class="qg-temporal-popover__schedule-note">
@@ -250,6 +256,7 @@ function WeeklySchedule(props: {
 function ModelSchedule(props: {
   schedule: TemporalScheduleDescription;
   effectVaries: boolean;
+  nowMs: number;
   formatOptions?: TemporalFormatOptions;
 }): JSX.Element {
   const weekly = () => (props.schedule.kind === "weekly" ? props.schedule : undefined);
@@ -264,6 +271,7 @@ function ModelSchedule(props: {
           <DatedSchedule
             schedule={schedule()}
             effectVaries={props.effectVaries}
+            nowMs={props.nowMs}
             formatOptions={props.formatOptions}
           />
         )}
@@ -282,6 +290,9 @@ function TemporalModelDetail(props: {
   const state = () => temporalModelStateAt(model(), now());
   const next = () => temporalModelNextChange(model(), now());
   const schedule = () => describeTemporalSchedule(model(), now(), props.formatOptions);
+  // Schedule-only: decides whether each dated window needs its own effect label.
+  // The current multiplier comes from the live interval and never from this
+  // comparison across future windows.
   const effectVaries = () => {
     const current = schedule();
     return current.kind === "weekly" ? current.effectVaries : temporalEffectVaries(model(), now());
@@ -297,6 +308,16 @@ function TemporalModelDetail(props: {
     const more = ids.length > 3 ? `, +${ids.length - 3} more` : "";
     return `${ids.length} models · ${shown}${more}`;
   };
+  const effectLabel = () => temporalEffectLabel(state().effect);
+  const nextLabel = () => {
+    const change = next();
+    return change === undefined
+      ? undefined
+      : `${nextChangeLabel(change.phase, state().state)} in ${formatTemporalCountdown(
+          now(),
+          change.atMs,
+        )}`;
+  };
   return (
     <section class="qg-temporal-popover__model">
       <div class="qg-temporal-popover__model-line">
@@ -305,21 +326,23 @@ function TemporalModelDetail(props: {
           {temporalModelPhaseLabel(state().state)}
         </span>
       </div>
-      <Show when={!effectVaries() && state().effect}>
-        {(effect) => (
-          <span class="qg-temporal-popover__effect">{temporalEffectLabel(effect())}</span>
-        )}
-      </Show>
-      <Show when={effectVaries()}>
-        <span class="qg-temporal-popover__effect-varies">Effect varies by window</span>
-      </Show>
-      <Show when={next()}>
-        {(change) => (
-          <span class="qg-temporal-popover__next">
-            {nextChangeLabel(change().phase, state().state)} in{" "}
-            {formatTemporalCountdown(now(), change().atMs)}
-          </span>
-        )}
+      {/* The current scalar comes from the live interval only; future windows
+          are never compared to infer it. Effect and next change share one
+          compact line when both are available. */}
+      <Show when={effectLabel() !== undefined || nextLabel() !== undefined}>
+        <div class="qg-temporal-popover__summary">
+          <Show when={effectLabel()}>
+            {(label) => <span class="qg-temporal-popover__effect">{label()}</span>}
+          </Show>
+          <Show when={effectLabel() !== undefined && nextLabel() !== undefined}>
+            <span class="qg-temporal-popover__separator" aria-hidden="true">
+              {" • "}
+            </span>
+          </Show>
+          <Show when={nextLabel()}>
+            {(label) => <span class="qg-temporal-popover__next">{label()}</span>}
+          </Show>
+        </div>
       </Show>
       <Show when={state().reason}>
         {(reason) => <span class="qg-temporal-popover__reason">{reason()}</span>}
@@ -328,6 +351,7 @@ function TemporalModelDetail(props: {
         <ModelSchedule
           schedule={schedule()}
           effectVaries={effectVaries()}
+          nowMs={now()}
           formatOptions={props.formatOptions}
         />
       </Show>

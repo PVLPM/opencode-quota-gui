@@ -69,6 +69,211 @@ describe("independent browser quota transport", () => {
     ).toThrow(DashboardError);
   });
 
+  it("preserves the explicit scalar classification and rejects a non-boolean", () => {
+    const source = homeSnapshot();
+    const effect = {
+      factor: 0.5,
+      direction: "offpeak" as const,
+      unit: "api_price" as const,
+      scalar: false,
+    };
+    const model = {
+      modelId: "partial-model",
+      state: "offpeak" as const,
+      effect,
+      intervals: [
+        {
+          startMs: NOW - 60_000,
+          endMs: NOW + 60_000,
+          phase: "offpeak" as const,
+          effect,
+        },
+      ],
+    };
+    const temporalProvider = {
+      providerId: "scalar",
+      providerLabel: "Scalar",
+      discovered: true,
+      phase: "offpeak" as const,
+      models: [model],
+      holidays: [],
+    };
+    const temporal = {
+      generatedAtMs: NOW,
+      providers: [temporalProvider],
+      snapshot: { revision: "parser-test", generatedAtMs: NOW },
+    };
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: source.providers,
+      temporal,
+    };
+
+    const parsed = parseQuotaSnapshot(payload);
+    expect(parsed.temporal?.providers[0]?.models[0]?.effect?.scalar).toBe(false);
+    expect(parsed.temporal?.providers[0]?.models[0]?.intervals[0]?.effect?.scalar).toBe(false);
+
+    const uniform = parseQuotaSnapshot({
+      ...payload,
+      temporal: {
+        ...temporal,
+        providers: [
+          {
+            ...temporalProvider,
+            models: [
+              {
+                ...model,
+                effect: { ...effect, scalar: true },
+                intervals: [{ ...model.intervals[0], effect: { ...effect, scalar: true } }],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(uniform.temporal?.providers[0]?.models[0]?.effect?.scalar).toBe(true);
+    expect(uniform.temporal?.providers[0]?.models[0]?.intervals[0]?.effect?.scalar).toBe(true);
+
+    // Old wire omits the additive field entirely and still decodes.
+    const { scalar: _scalar, ...legacyEffect } = effect;
+    const legacy = parseQuotaSnapshot({
+      ...payload,
+      temporal: {
+        ...temporal,
+        providers: [
+          {
+            ...temporalProvider,
+            models: [
+              {
+                ...model,
+                effect: legacyEffect,
+                intervals: [{ ...model.intervals[0], effect: legacyEffect }],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(legacy.temporal?.providers[0]?.models[0]?.effect).toMatchObject({
+      factor: 0.5,
+      direction: "offpeak",
+      unit: "api_price",
+    });
+    expect(legacy.temporal?.providers[0]?.models[0]?.effect?.scalar).toBeUndefined();
+
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        temporal: {
+          ...temporal,
+          providers: [
+            {
+              ...temporalProvider,
+              models: [{ ...model, effect: { ...effect, scalar: "no" } }],
+            },
+          ],
+        },
+      }),
+    ).toThrow(DashboardError);
+  });
+
+  it("rejects scalar on quota-point effects and decodes mixed scalar data", () => {
+    const source = homeSnapshot();
+    const quotaEffect = {
+      factor: 0.5,
+      direction: "offpeak" as const,
+      unit: "quota_points" as const,
+    };
+    const apiEffect = {
+      factor: 2,
+      direction: "peak" as const,
+      unit: "api_price" as const,
+      scalar: true,
+    };
+    const modelFor = (modelId: string, state: "peak" | "offpeak", effect: object) => ({
+      modelId,
+      state,
+      effect,
+      intervals: [{ startMs: NOW - 60_000, endMs: NOW + 60_000, phase: state, effect }],
+    });
+    const temporalProvider = {
+      providerId: "mixed-scalar",
+      providerLabel: "Mixed scalar",
+      discovered: true,
+      phase: "mixed" as const,
+      models: [
+        modelFor("quota-model", "offpeak", quotaEffect),
+        modelFor("api-model", "peak", apiEffect),
+      ],
+      holidays: [],
+    };
+    const temporal = {
+      generatedAtMs: NOW,
+      providers: [temporalProvider],
+      snapshot: { revision: "parser-test", generatedAtMs: NOW },
+    };
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: source.providers,
+      temporal,
+    };
+
+    // A quota-point effect without the field and an API-price effect with it
+    // coexist in one snapshot; only the contradictory combination is rejected.
+    const parsed = parseQuotaSnapshot(payload);
+    expect(parsed.temporal?.providers[0]?.models[0]?.effect).toMatchObject(quotaEffect);
+    expect(parsed.temporal?.providers[0]?.models[1]?.effect).toMatchObject(apiEffect);
+
+    for (const scalar of [false, true]) {
+      expect(() =>
+        parseQuotaSnapshot({
+          ...payload,
+          temporal: {
+            ...temporal,
+            providers: [
+              {
+                ...temporalProvider,
+                models: [modelFor("quota-model", "offpeak", { ...quotaEffect, scalar })],
+              },
+            ],
+          },
+        }),
+      ).toThrow(DashboardError);
+    }
+
+    // Interval effects share the same parser and must reject the field too.
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        temporal: {
+          ...temporal,
+          providers: [
+            {
+              ...temporalProvider,
+              models: [
+                {
+                  ...modelFor("quota-model", "offpeak", quotaEffect),
+                  intervals: [
+                    {
+                      startMs: NOW - 60_000,
+                      endMs: NOW + 60_000,
+                      phase: "offpeak" as const,
+                      effect: { ...quotaEffect, scalar: false },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ).toThrow(DashboardError);
+  });
+
   it("decodes the weekly descriptor and keeps differing schedules apart", () => {
     const source = homeSnapshot();
     const effect = { factor: 1, direction: "unchanged" as const, unit: "api_price" as const };

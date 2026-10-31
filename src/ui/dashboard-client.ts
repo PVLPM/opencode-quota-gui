@@ -761,6 +761,13 @@ function readUsage(value: JsonValue | undefined, endpoint: string): Usage {
 function readTemporalEffect(value: JsonValue | undefined, endpoint: string): TemporalEffect {
   const detail = "temporal.providers[].models[].effect";
   const effect = readRecord(value, endpoint, detail);
+  const unit = readEnum(effect.unit, TEMPORAL_EFFECT_UNITS, endpoint, `${detail}.unit`);
+  const scalar = readOptionalBoolean(effect.scalar, endpoint, `${detail}.scalar`);
+  // Quota-point effects are scalar by contract and omit the cross-rate field.
+  // Reject contradictory wire data instead of silently ignoring it.
+  if (unit === "quota_points" && scalar !== undefined) {
+    throw faulty(endpoint, `${detail}.scalar`);
+  }
   return {
     factor: readNumber(effect.factor, endpoint, `${detail}.factor`),
     direction: readEnum(
@@ -769,7 +776,8 @@ function readTemporalEffect(value: JsonValue | undefined, endpoint: string): Tem
       endpoint,
       `${detail}.direction`,
     ),
-    unit: readEnum(effect.unit, TEMPORAL_EFFECT_UNITS, endpoint, `${detail}.unit`),
+    unit,
+    ...(scalar === undefined ? {} : { scalar }),
   };
 }
 

@@ -1,10 +1,12 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { SettingsSnapshot } from "../src/contracts/dashboard.js";
+import type { ProviderCard, QuotaSnapshot, SettingsSnapshot } from "../src/contracts/dashboard.js";
 import type {
   TemporalModelInterval,
   TemporalModelStatus,
@@ -21,16 +23,29 @@ import {
   groupTemporalModels,
   isCurrentTemporalHoliday,
   nearestTemporalHoliday,
+  temporalEffectLabel,
   temporalEffectVaries,
   temporalModelNextChange,
 } from "../src/ui/temporal-format.js";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
-import { settingsSnapshot } from "./fixtures/gui-ui-fixtures.js";
+import { percentRow, providerCard, settingsSnapshot } from "./fixtures/gui-ui-fixtures.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
 const appSource = readFileSync(path.join(repoRoot, "src/ui/app.tsx"), "utf8");
 const quotaViewSource = readFileSync(path.join(repoRoot, "src/ui/views/home.tsx"), "utf8");
+const chromium = [
+  process.env.QG_LAYOUT_BROWSER,
+  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+].find((candidate): candidate is string => Boolean(candidate) && existsSync(candidate));
 const NOW = Date.now();
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -116,6 +131,7 @@ function model(
           factor,
           direction: state === "peak" ? ("peak" as const) : ("offpeak" as const),
           unit: "api_price" as const,
+          scalar: true,
         };
   return {
     modelId,
@@ -247,8 +263,14 @@ function weekModel(startIso = "2026-11-02T00:00:00.000Z"): TemporalModelStatus {
     factor: 1,
     direction: "unchanged" as const,
     unit: "api_price" as const,
+    scalar: true,
   };
-  const peak = { factor: 2, direction: "peak" as const, unit: "api_price" as const };
+  const peak = {
+    factor: 2,
+    direction: "peak" as const,
+    unit: "api_price" as const,
+    scalar: true,
+  };
   const intervals: TemporalModelInterval[] = [];
   for (let day = 0; day < 7; day += 1) {
     const dayStart = start + day * DAY;
@@ -278,8 +300,14 @@ const OFFPEAK_UNCHANGED = {
   factor: 1,
   direction: "unchanged" as const,
   unit: "api_price" as const,
+  scalar: true,
 };
-const PEAK_2X = { factor: 2, direction: "peak" as const, unit: "api_price" as const };
+const PEAK_2X = {
+  factor: 2,
+  direction: "peak" as const,
+  unit: "api_price" as const,
+  scalar: true,
+};
 
 function deepSeekWeekly(): TemporalWeeklySchedule {
   return {
@@ -329,6 +357,51 @@ function weeklyModel(
 }
 
 describe("temporal formatting helpers", () => {
+  it("labels only server-proven scalars as multipliers", () => {
+    expect(
+      temporalEffectLabel({ factor: 2, direction: "peak", unit: "api_price", scalar: true }),
+    ).toBe("API price: 2×");
+    expect(
+      temporalEffectLabel({ factor: 1, direction: "unchanged", unit: "api_price", scalar: true }),
+    ).toBe("API price: 1×");
+    expect(
+      temporalEffectLabel({ factor: 0.5, direction: "offpeak", unit: "api_price", scalar: false }),
+    ).toBe("API price varies by token type");
+    // Quota-point effects are scalar plan multipliers and omit the cross-rate
+    // comparison by contract.
+    expect(temporalEffectLabel({ factor: 0.5, direction: "offpeak", unit: "quota_points" })).toBe(
+      "Quota points: 0.5×",
+    );
+    // Malformed quota-point data must never be described as an API-price
+    // change; the unit takes precedence over the cross-rate field.
+    expect(
+      temporalEffectLabel({
+        factor: 0.5,
+        direction: "offpeak",
+        unit: "quota_points",
+        scalar: false,
+      }),
+    ).toBe("Quota points: 0.5×");
+    expect(
+      temporalEffectLabel({
+        factor: 0.5,
+        direction: "offpeak",
+        unit: "quota_points",
+        scalar: true,
+      }),
+    ).toBe("Quota points: 0.5×");
+    // Monetary absence is not proof of non-scalarity; report direction only.
+    expect(temporalEffectLabel({ factor: 2, direction: "peak", unit: "api_price" })).toBe(
+      "API price: higher",
+    );
+    expect(temporalEffectLabel({ factor: 0.5, direction: "offpeak", unit: "api_price" })).toBe(
+      "API price: lower",
+    );
+    expect(temporalEffectLabel({ factor: 1, direction: "unchanged", unit: "api_price" })).toBe(
+      "API price: unchanged",
+    );
+  });
+
   it("resolves the clock from the zone: Istanbul 24-hour, US 12-hour", () => {
     const start = Date.parse("2026-11-02T11:00:00.000Z");
     const end = Date.parse("2026-11-02T14:00:00.000Z");
@@ -612,6 +685,31 @@ describe("temporal formatting helpers", () => {
     expect(temporalEffectVaries(zai.models[0] as TemporalModelStatus, NOW)).toBe(false);
   });
 
+  it("distinguishes the scalar indicator in top-level and weekly policy identity", () => {
+    const scalarModel = model("scalar-effect", "peak", 2);
+    const partialModel: TemporalModelStatus = {
+      ...scalarModel,
+      modelId: "partial-effect",
+      effect: {
+        factor: 2,
+        direction: "peak",
+        unit: "api_price",
+        scalar: false,
+      },
+    };
+    expect(groupTemporalModels([scalarModel, partialModel])).toHaveLength(2);
+
+    const weeklyScalar = weeklyModel(deepSeekWeekly(), { modelId: "weekly-scalar" });
+    const weeklyPartial = weeklyModel(
+      {
+        ...deepSeekWeekly(),
+        baseEffect: { ...OFFPEAK_UNCHANGED, scalar: false },
+      },
+      { modelId: "weekly-partial" },
+    );
+    expect(groupTemporalModels([weeklyScalar, weeklyPartial])).toHaveLength(2);
+  });
+
   it("groups models only when their complete policy is identical", () => {
     const first = model("first", "peak", 2);
     const second = { ...first, modelId: "second" };
@@ -704,6 +802,12 @@ describe("temporal live status server-rendered markup", () => {
     expect(html).toContain('aria-label="Test Mixed: Mixed. Show peak and off-peak details."');
     expect(html).toContain('data-provider-logo="deepseek"');
     expect(html).toContain('data-provider-logo="zai"');
+    const mixedStart = html.indexOf('class="qg-temporal__group" data-phase="mixed"');
+    const mixedHtml = html.slice(mixedStart, html.indexOf("</fieldset>", mixedStart));
+    expect(mixedHtml.indexOf('data-phase="offpeak"')).toBeGreaterThan(-1);
+    expect(mixedHtml.indexOf('data-phase="offpeak"')).toBeLessThan(
+      mixedHtml.indexOf('data-phase="peak"'),
+    );
   });
 
   it("puts an unknown model in the conservative unknown group", async () => {
@@ -755,8 +859,12 @@ describe("temporal live status server-rendered markup", () => {
     expect(text).not.toContain("Plan quota schedule");
     expect(text).toContain("2 models · deepseek-v4-pro, deepseek-v4-flash");
     expect(text).toContain("Peak");
-    expect(text).toContain("Effect varies by window");
-    expect(text).toContain("2× API price");
+    expect(text).not.toContain("Effect varies by window");
+    expect(text).toContain("API price: 2×");
+    expect(text).toContain("API price: 0.5×");
+    expect(text).toContain("API price: 2× • Off-peak in 2h");
+    expect(html).toContain('class="qg-temporal-popover__summary"');
+    expect(html).toContain('class="qg-temporal-popover__separator"');
     expect(text).toContain("Off-peak in 2h");
     expect(text).toContain("Next Holiday:");
     expect(text).not.toContain("Next holiday exception");
@@ -767,6 +875,122 @@ describe("temporal live status server-rendered markup", () => {
     expect(text).not.toContain("Holiday exceptions");
     expect(text).not.toContain("USD");
     expect(html.match(/class="qg-temporal-popover__model"/g)).toHaveLength(1);
+  });
+
+  it("shows the current effective multiplier for scalar and genuinely varying windows", async () => {
+    const varying = {
+      ...deepseek,
+      models: [
+        {
+          ...(deepseek.models[0] as TemporalModelStatus),
+          modelId: "varying-model",
+        },
+      ],
+    };
+    const varyingHtml = await renderView("/components/temporal-status.tsx", "TemporalPopoverBody", {
+      status: varying,
+      nowMs: NOW,
+    });
+    const varyingText = visibleText(varyingHtml);
+    expect(varyingText).toContain("API price: 2×");
+    expect(varyingText).toContain("API price: 0.5×");
+    expect(varyingText).toContain("API price: 2× • Off-peak in 2h");
+    expect(varyingText).not.toContain("Effect varies by window");
+
+    const scalar = provider(
+      "scalar",
+      "Scalar Provider",
+      [
+        {
+          modelId: "scalar-model",
+          state: "peak",
+          effect: { factor: 1.5, direction: "peak", unit: "api_price", scalar: true },
+          intervals: [
+            {
+              startMs: NOW - HOUR,
+              endMs: NOW + HOUR,
+              phase: "peak",
+              effect: { factor: 1.5, direction: "peak", unit: "api_price", scalar: true },
+            },
+          ],
+        },
+      ],
+      "peak",
+    );
+    const scalarText = visibleText(
+      await renderView("/components/temporal-status.tsx", "TemporalPopoverBody", {
+        status: scalar,
+        nowMs: NOW,
+      }),
+    );
+    expect(scalarText).toContain("API price: 1.5×");
+    expect(scalarText).not.toContain("Effect varies by window");
+
+    const nonScalar = provider(
+      "non-scalar",
+      "Non-scalar Provider",
+      [
+        {
+          modelId: "non-scalar-model",
+          state: "offpeak",
+          effect: { factor: 0.5, direction: "offpeak", unit: "api_price", scalar: false },
+          intervals: [
+            {
+              startMs: NOW - HOUR,
+              endMs: NOW + HOUR,
+              phase: "offpeak",
+              effect: {
+                factor: 0.5,
+                direction: "offpeak",
+                unit: "api_price",
+                scalar: false,
+              },
+            },
+          ],
+        },
+      ],
+      "offpeak",
+    );
+    const nonScalarText = visibleText(
+      await renderView("/components/temporal-status.tsx", "TemporalPopoverBody", {
+        status: nonScalar,
+        nowMs: NOW,
+      }),
+    );
+    expect(nonScalarText).toContain("API price varies by token type");
+    expect(nonScalarText).not.toContain("API price: 0.5×");
+    expect(nonScalarText).not.toContain("Effect varies by window");
+
+    const legacyEffect = { factor: 2, direction: "peak" as const, unit: "api_price" as const };
+    const legacy = provider(
+      "legacy",
+      "Legacy Provider",
+      [
+        {
+          modelId: "legacy-model",
+          state: "peak",
+          effect: legacyEffect,
+          intervals: [
+            {
+              startMs: NOW - HOUR,
+              endMs: NOW + HOUR,
+              phase: "peak",
+              effect: legacyEffect,
+            },
+          ],
+        },
+      ],
+      "peak",
+    );
+    const legacyText = visibleText(
+      await renderView("/components/temporal-status.tsx", "TemporalPopoverBody", {
+        status: legacy,
+        nowMs: NOW,
+      }),
+    );
+    expect(legacyText).toContain("API price: higher");
+    expect(legacyText).not.toContain("API price: 2×");
+    expect(legacyText).not.toContain("API price varies by token type");
   });
 
   it("labels an ongoing holiday as Current Holiday and a future one as Next Holiday", async () => {
@@ -835,6 +1059,24 @@ describe("temporal live status server-rendered markup", () => {
     expect(html).toContain('class="qg-temporal-popover__time"');
   });
 
+  it("does not repeat the active effect in the dated schedule", async () => {
+    const html = await renderView("/components/temporal-status.tsx", "TemporalPopoverBody", {
+      status: deepseek,
+      nowMs: NOW,
+    });
+    const intervals = html.split('class="qg-temporal-popover__interval"').slice(1);
+    expect(intervals).toHaveLength(2);
+    // The summary already states the active 2x effect, so the active row must
+    // not repeat it. The future 0.5x row still needs its own label.
+    expect(intervals[0]).not.toContain("qg-temporal-popover__effect");
+    expect(intervals[1]).toContain("qg-temporal-popover__effect");
+    expect(intervals[1]).toContain("API price: 0.5×");
+    expect((html.match(/qg-temporal-popover__effect/g) ?? []).length).toBe(2);
+    const text = visibleText(html);
+    expect(text).toContain("API price: 2×");
+    expect(text).toContain("API price: 0.5×");
+  });
+
   it("renders one compact peak line and no redundant local or holiday copy", async () => {
     const weekly = provider(
       "deepseek-weekly",
@@ -854,7 +1096,9 @@ describe("temporal live status server-rendered markup", () => {
     expect(text).not.toContain("Weekly, local time");
     expect(text).not.toContain("at other times");
     expect(text).not.toContain("Holiday dates use exact windows.");
-    expect(text).not.toContain("2× API price");
+    expect(text).toContain("API price: 1×");
+    expect(text).not.toContain("No change to API price");
+    expect(text).not.toContain("API price: 2×");
     expect(text).toContain("Next Holiday:");
     expect(text).not.toContain("CN");
     expect(text).not.toContain("spring-festival");
@@ -930,7 +1174,8 @@ describe("temporal live status server-rendered markup", () => {
       status: zai,
     });
     const text = visibleText(html);
-    expect(text).toContain("2× quota points");
+    expect(text).toContain("Quota points: 2×");
+    expect(text).toContain("Quota points: 2× • Off-peak in 2h");
     expect(text).toContain("Off-peak in 2h");
     expect(text).not.toContain("Effect varies by window");
     expect(text).not.toContain("USD");
@@ -1076,15 +1321,37 @@ describe("temporal live status server-rendered markup", () => {
 
   it("moves the status buttons into the selected Quota header and removes the duplicate heading", () => {
     const topbarLeft = appSource.indexOf('class="qg-topbar__left"');
+    const topbarActions = appSource.indexOf('class="qg-topbar__actions"');
     const strip = appSource.indexOf("<TemporalStatusStrip");
     const frame = appSource.indexOf('<div class="qg-frame">');
     expect(strip).toBeGreaterThan(topbarLeft);
+    expect(strip).toBeGreaterThan(topbarActions);
     expect(strip).toBeGreaterThan(frame);
     expect(strip).toBeLessThan(appSource.indexOf("</header>", topbarLeft));
+    expect(styles).toMatch(
+      /\.qg-frame > \.qg-topbar > \.qg-topbar__actions\s*\{[^}]*margin-left:\s*auto/s,
+    );
     expect(quotaViewSource).not.toContain("<TemporalStatusStrip");
     expect(quotaViewSource).not.toMatch(/<h2[^>]*>\s*Quota\s*<\/h2>/);
+    expect(quotaViewSource).toContain('class="qg-section qg-quota"');
     expect(quotaViewSource).toContain('class="qg-quota__meta"');
+    expect(quotaViewSource.indexOf('<footer class="qg-quota__meta">')).toBeGreaterThan(
+      quotaViewSource.indexOf('<div class="qg-card-grid">'),
+    );
+    expect(styles).toMatch(/\.qg-quota\s*\{[^}]*flex-grow:\s*1/s);
+    expect(styles).toMatch(/\.qg-quota__meta\s*\{[^}]*margin-top:\s*auto/s);
     expect(styles).toMatch(/\.qg-quota__meta\s*\{[^}]*justify-content:\s*center/s);
+    expect(styles).not.toMatch(/\.qg-quota__meta\s*\{[^}]*position:\s*absolute/s);
+  });
+
+  it("does not fall back to vague effect copy", () => {
+    const component = readFileSync(
+      path.join(repoRoot, "src/ui/components/temporal-status.tsx"),
+      "utf8",
+    );
+    const format = readFileSync(path.join(repoRoot, "src/ui/temporal-format.ts"), "utf8");
+    expect(component).not.toContain("Effect varies by window");
+    expect(format).not.toContain("No change to");
   });
 
   it("does not add an independent clock or poll to the temporal UI", () => {
@@ -1108,7 +1375,10 @@ describe("temporal live status server-rendered markup", () => {
   it("keeps the issue #9 text-then-control row contract and local styles scoped", () => {
     expect(styles).toContain(".qg-temporal-settings__row");
     expect(styles).toContain(".qg-temporal-popover");
-    expect(styles).toContain("--qg-temporal-peak");
+    expect(styles).toMatch(/--qg-temporal-peak:\s*var\(--qg-danger\)/);
+    expect(styles).toMatch(/--qg-temporal-offpeak:\s*var\(--qg-success\)/);
+    expect(styles).toMatch(/\.qg-temporal__chip\s*\{[^}]*border:\s*1px solid var\(--qg-border\)/s);
+    expect(styles).toMatch(/\.qg-temporal__chip\s*\{[^}]*border-radius:\s*6px/s);
     expect(styles).toMatch(/\.qg-temporal__logo\s*\{[^}]*color:\s*var\(--qg-text-muted\)/s);
     expect(styles).toMatch(/\.qg-temporal__arrow\[data-phase="peak"\]/);
     expect(styles).toMatch(/\.qg-temporal__arrow\[data-phase="offpeak"\]/);
@@ -1117,5 +1387,250 @@ describe("temporal live status server-rendered markup", () => {
       /\.qg-field\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(220px, 320px\)/s,
     );
     expect(styles).not.toMatch(/\.qg-field\s*\{[^}]*grid-template-columns:\s*1fr\s*;/s);
+  });
+});
+
+function layoutCard(index: number, rowCount: number): ProviderCard {
+  return providerCard({
+    cardId: `layout-card-${index}#hash` as ProviderCard["cardId"],
+    providerLabel: `Layout Provider ${index}`,
+    accountLabel: `Account ${index}`,
+    rows: Array.from({ length: rowCount }, (_, rowIndex) =>
+      percentRow({
+        rowId: `layout-card-${index}#row-${rowIndex}` as ProviderCard["rows"][number]["rowId"],
+        label: `Window ${rowIndex + 1}`,
+        percentRemaining: 62,
+        percentUsed: 38,
+      }),
+    ),
+  });
+}
+
+function quotaSnapshotForLayout(cards: ProviderCard[]): QuotaSnapshot {
+  return {
+    generatedAtMs: NOW,
+    stale: false,
+    timeZone: "UTC",
+    providers: { cards, enabledProviders: "auto", polledAtMs: NOW - 60_000 },
+    temporal: temporal(),
+  };
+}
+
+interface QuotaLayoutProbe {
+  error?: string;
+  viewport: { width: number; height: number };
+  topbar: { right: number; paddingRight: number };
+  actions: { right: number };
+  chip: {
+    height: number;
+    borderTopWidth: string;
+    borderTopStyle: string;
+    borderTopColor: string;
+    borderRadius: string;
+    backgroundColor: string;
+  };
+  logoColor: string;
+  peakColor: string;
+  offpeakColor: string;
+  mixedOrder: string[];
+  main: {
+    scrollHeight: number;
+    clientHeight: number;
+    contentBottom: number;
+    paddingBottom: number;
+  };
+  footer: { top: number; bottom: number };
+  grid: { bottom: number };
+  summary: { text: string; sameLine: boolean } | null;
+}
+
+function runLayoutProbe(pageHtml: string, width: number, height: number): QuotaLayoutProbe {
+  if (chromium === undefined) throw new Error("no local Chromium is available");
+  const directory = mkdtempSync(path.join(os.tmpdir(), "qg-quota-layout-"));
+  try {
+    const page = path.join(directory, "page.html");
+    writeFileSync(page, pageHtml, "utf8");
+    const dom = execFileSync(
+      chromium,
+      [
+        "--headless=new",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-sync",
+        `--user-data-dir=${path.join(directory, "profile")}`,
+        `--window-size=${width},${height}`,
+        "--virtual-time-budget=8000",
+        "--dump-dom",
+        pathToFileURL(page).href,
+      ],
+      { encoding: "utf8", timeout: 60_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+    );
+    const captured = /<pre id="result">([\s\S]*?)<\/pre>/.exec(dom);
+    if (captured?.[1] === undefined || captured[1] === "pending") {
+      throw new Error(`quota layout probe produced no result; output tail: ${dom.slice(-2000)}`);
+    }
+    return JSON.parse(captured[1]) as QuotaLayoutProbe;
+  } finally {
+    rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+function layoutPage(quotaHtml: string, stripHtml: string, popoverHtml = ""): string {
+  const appCss = styles.replaceAll("</style", "<\\/style");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>:root{--font-size-small:13px;--font-size-large:16px;--font-weight-medium:500;--surface-raised-base-hover:rgba(255,255,255,.078);--text-interactive-base:#9dbefe;--border-interactive-active:#9dbefe;--icon-critical-base:#fc533a;--icon-success-base:#12c905;--icon-warning-base:#fbb73c;--shadow-md:0 1px 2px rgba(0,0,0,.4);}html,body{margin:0;height:100%;font:13px system-ui,sans-serif}#result{position:fixed;left:-9999px;top:0}</style>
+<style>${appCss}</style>
+</head>
+<body>
+<div class="qg-app"><div class="qg-frame">
+<header class="qg-topbar"><div class="qg-topbar__left"><span class="qg-frame-tab">Quota</span></div><div class="qg-topbar__actions">${stripHtml}</div></header>
+<main class="qg-main">${quotaHtml}</main>
+</div></div>
+<div id="popover-probe" style="position:fixed;left:-10000px;top:0;width:380px">${popoverHtml}</div>
+<pre id="result">pending</pre>
+<script>
+const finish = () => {
+  try {
+    const rect = (selector) => {
+      const element = document.querySelector(selector);
+      if (element === null) throw new Error("missing " + selector);
+      const box = element.getBoundingClientRect();
+      return { top: box.top, right: box.right, bottom: box.bottom, left: box.left, width: box.width, height: box.height };
+    };
+    const main = document.querySelector(".qg-main");
+    const topbar = document.querySelector(".qg-topbar");
+    const actions = document.querySelector(".qg-topbar__actions");
+    const chip = document.querySelector(".qg-temporal__chip");
+    const logo = document.querySelector(".qg-temporal__logo");
+    const mixed = document.querySelector('.qg-temporal__group[data-phase="mixed"]');
+    const peak = document.querySelector('.qg-temporal__arrow[data-phase="peak"]');
+    const offpeak = document.querySelector('.qg-temporal__arrow[data-phase="offpeak"]');
+    if (!main || !topbar || !actions || !chip || !logo || !mixed || !peak || !offpeak) {
+      throw new Error("layout probe elements are missing");
+    }
+    const chipStyle = getComputedStyle(chip);
+    const topbarStyle = getComputedStyle(topbar);
+    const mainStyle = getComputedStyle(main);
+    const mainBox = main.getBoundingClientRect();
+    const footer = rect(".qg-quota__meta");
+    const grid = rect(".qg-card-grid");
+    const mixedOrder = Array.from(mixed.querySelectorAll(".qg-temporal__arrow")).map((arrow) => arrow.getAttribute("data-phase"));
+    const summary = document.querySelector(".qg-temporal-popover__summary");
+    const summaryEffect = summary ? summary.querySelector(".qg-temporal-popover__effect") : null;
+    const summaryNext = summary ? summary.querySelector(".qg-temporal-popover__next") : null;
+    const summaryProbe = summary
+      ? {
+          text: (summary.textContent || "").replace(/s+/g, " ").trim(),
+          sameLine:
+            summaryEffect && summaryNext
+              ? Math.abs(summaryEffect.getBoundingClientRect().top - summaryNext.getBoundingClientRect().top) <= 1
+              : false,
+        }
+      : null;
+    const result = {
+      viewport: { width: innerWidth, height: innerHeight },
+      topbar: { right: rect(".qg-topbar").right, paddingRight: parseFloat(topbarStyle.paddingRight) },
+      actions: { right: rect(".qg-topbar__actions").right },
+      chip: {
+        height: rect(".qg-temporal__chip").height,
+        borderTopWidth: chipStyle.borderTopWidth,
+        borderTopStyle: chipStyle.borderTopStyle,
+        borderTopColor: chipStyle.borderTopColor,
+        borderRadius: chipStyle.borderRadius,
+        backgroundColor: chipStyle.backgroundColor,
+      },
+      logoColor: getComputedStyle(logo).color,
+      peakColor: getComputedStyle(peak).color,
+      offpeakColor: getComputedStyle(offpeak).color,
+      mixedOrder,
+      main: {
+        scrollHeight: main.scrollHeight,
+        clientHeight: main.clientHeight,
+        contentBottom: mainBox.bottom - parseFloat(mainStyle.paddingBottom),
+        paddingBottom: parseFloat(mainStyle.paddingBottom),
+      },
+      footer: { top: footer.top, bottom: footer.bottom },
+      grid: { bottom: grid.bottom },
+      summary: summaryProbe,
+    };
+    document.getElementById("result").textContent = JSON.stringify(result);
+  } catch (error) {
+    document.getElementById("result").textContent = JSON.stringify({ error: String(error) });
+  }
+};
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(finish);
+else finish();
+</script>
+</body>
+</html>`;
+}
+
+describe.skipIf(chromium === undefined)("temporal controls and Polled footer in Chromium", () => {
+  it("right-aligns the Quota tab bar controls and keeps the footer at the visual bottom", async () => {
+    const strip = await renderView("/components/temporal-status.tsx", "TemporalStatusStrip", {
+      providers: temporal().providers,
+      overrides: {},
+    });
+    const popover = await renderView("/components/temporal-status.tsx", "TemporalPopoverBody", {
+      status: deepseek,
+      nowMs: NOW,
+    });
+    const preferences = {
+      percentMode: "remaining" as const,
+      percentLabelStyle: "full" as const,
+      showRunway: false,
+      detailed: true,
+    };
+    const shortQuota = await renderView("/views/home.tsx", "QuotaView", {
+      snapshot: quotaSnapshotForLayout([layoutCard(1, 1)]),
+      preferences,
+      hiddenCards: [],
+      hiddenRows: [],
+      stale: false,
+    });
+    const tallQuota = await renderView("/views/home.tsx", "QuotaView", {
+      snapshot: quotaSnapshotForLayout(
+        Array.from({ length: 8 }, (_, index) => layoutCard(index + 1, 12)),
+      ),
+      preferences,
+      hiddenCards: [],
+      hiddenRows: [],
+      stale: false,
+    });
+
+    const wide = runLayoutProbe(layoutPage(shortQuota, strip, popover), 1440, 900);
+    expect(wide.error).toBeUndefined();
+    expect(wide.summary?.text).toBe("API price: 2× • Off-peak in 2h");
+    expect(wide.summary?.sameLine).toBe(true);
+    const wideContentRight = wide.topbar.right - wide.topbar.paddingRight;
+    expect(Math.abs(wide.actions.right - wideContentRight)).toBeLessThanOrEqual(1);
+    expect(Math.abs(wide.footer.bottom - wide.main.contentBottom)).toBeLessThanOrEqual(1);
+    expect(wide.footer.top).toBeGreaterThanOrEqual(wide.grid.bottom);
+    expect(wide.main.scrollHeight).toBeLessThanOrEqual(wide.main.clientHeight + 1);
+    expect(wide.chip.height).toBeGreaterThanOrEqual(27.5);
+    expect(wide.chip.height).toBeLessThanOrEqual(28.5);
+    expect(wide.chip.borderTopWidth).toBe("1px");
+    expect(wide.chip.borderTopStyle).toBe("solid");
+    expect(wide.chip.borderTopColor).toBe("rgb(48, 48, 48)");
+    expect(wide.chip.borderRadius).toBe("6px");
+    expect(wide.chip.backgroundColor).toBe("rgb(35, 35, 35)");
+    expect(wide.logoColor).toBe("rgb(150, 150, 150)");
+    expect(wide.peakColor).toBe("rgb(252, 83, 58)");
+    expect(wide.offpeakColor).toBe("rgb(18, 201, 5)");
+    expect(wide.mixedOrder).toEqual(["offpeak", "peak"]);
+
+    const narrow = runLayoutProbe(layoutPage(tallQuota, strip), 520, 760);
+    expect(narrow.error).toBeUndefined();
+    const narrowContentRight = narrow.topbar.right - narrow.topbar.paddingRight;
+    expect(Math.abs(narrow.actions.right - narrowContentRight)).toBeLessThanOrEqual(1);
+    expect(narrow.main.scrollHeight).toBeGreaterThan(narrow.main.clientHeight);
+    expect(narrow.footer.top).toBeGreaterThanOrEqual(narrow.grid.bottom);
+    expect(narrow.footer.bottom).toBeGreaterThan(narrow.main.contentBottom);
   });
 });

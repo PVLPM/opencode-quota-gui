@@ -459,14 +459,14 @@ describe("temporal status projection", () => {
       timeZone: "UTC",
       utcOffsetMinutes: 0,
       basePhase: "peak",
-      baseEffect: { factor: 1, direction: "unchanged", unit: "api_price" },
+      baseEffect: { factor: 1, direction: "unchanged", unit: "api_price", scalar: true },
       windows: [
         {
           days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
           startMinute: 840,
           endMinute: 1440,
           phase: "offpeak",
-          effect: { factor: 0.5, direction: "offpeak", unit: "api_price" },
+          effect: { factor: 0.5, direction: "offpeak", unit: "api_price", scalar: true },
         },
       ],
     });
@@ -503,21 +503,21 @@ describe("temporal status projection", () => {
       timeZone: "UTC",
       utcOffsetMinutes: 0,
       basePhase: "offpeak",
-      baseEffect: { factor: 1, direction: "unchanged", unit: "api_price" },
+      baseEffect: { factor: 1, direction: "unchanged", unit: "api_price", scalar: true },
       windows: [
         {
           days: ["mon", "tue", "wed", "thu", "fri"],
           startMinute: 60,
           endMinute: 240,
           phase: "peak",
-          effect: { factor: 2, direction: "peak", unit: "api_price" },
+          effect: { factor: 2, direction: "peak", unit: "api_price", scalar: true },
         },
         {
           days: ["mon", "tue", "wed", "thu", "fri"],
           startMinute: 360,
           endMinute: 600,
           phase: "peak",
-          effect: { factor: 2, direction: "peak", unit: "api_price" },
+          effect: { factor: 2, direction: "peak", unit: "api_price", scalar: true },
         },
       ],
       exceptHolidays: ["CN"],
@@ -583,9 +583,41 @@ describe("temporal status projection", () => {
       nowMs: Date.parse("2026-11-02T10:00:00.000Z"),
       routes: {},
     }).providers[0]?.models[0];
-    expect(temporalEffectLabel(offpeak?.effect)).toBe("0.5× quota points");
+    expect(temporalEffectLabel(offpeak?.effect)).toBe("Quota points: 0.5×");
+    expect(
+      temporalEffectLabel({
+        factor: 0.5,
+        direction: "offpeak",
+        unit: "api_price",
+        scalar: true,
+      }),
+    ).toBe("API price: 0.5×");
+    expect(
+      temporalEffectLabel({
+        factor: 1,
+        direction: "unchanged",
+        unit: "api_price",
+        scalar: true,
+      }),
+    ).toBe("API price: 1×");
+    expect(
+      temporalEffectLabel({
+        factor: 0.5,
+        direction: "offpeak",
+        unit: "api_price",
+        scalar: false,
+      }),
+    ).toBe("API price varies by token type");
+    // Old wire and multiplier-only effects have no cross-rate indicator, so
+    // only the direction is safe to show.
+    expect(temporalEffectLabel({ factor: 2, direction: "peak", unit: "api_price" })).toBe(
+      "API price: higher",
+    );
     expect(temporalEffectLabel({ factor: 0.5, direction: "offpeak", unit: "api_price" })).toBe(
-      "0.5× API price",
+      "API price: lower",
+    );
+    expect(temporalEffectLabel({ factor: 1, direction: "unchanged", unit: "api_price" })).toBe(
+      "API price: unchanged",
     );
   });
 

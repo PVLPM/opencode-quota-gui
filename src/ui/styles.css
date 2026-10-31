@@ -29,8 +29,10 @@
   --qg-warning-surface: var(--surface-warning-weak);
   --qg-success: var(--icon-success-base);
   /* Semantic pricing states are independent of the chip surface, so a neutral
-     provider mark and each arrow can carry the correct colour on its own. */
-  --qg-temporal-peak: var(--qg-warning);
+     provider mark and each arrow can carry the correct colour on its own.
+     Peak is the critical-price direction (red up), off-peak the discount
+     direction (green down). */
+  --qg-temporal-peak: var(--qg-danger);
   --qg-temporal-offpeak: var(--qg-success);
   --qg-temporal-unknown: var(--qg-text-muted);
 
@@ -190,6 +192,11 @@ body {
   flex-wrap: wrap;
 }
 
+/* The Quota/route tab bar keeps its status controls on the right edge. */
+.qg-frame > .qg-topbar > .qg-topbar__actions {
+  margin-left: auto;
+}
+
 .qg-topbar__link {
   position: relative;
   display: inline-flex;
@@ -340,9 +347,14 @@ body {
 }
 
 /* Polled metadata closes the Quota page instead of competing with its heading. */
+.qg-quota {
+  flex-grow: 1;
+}
+
 .qg-quota__meta {
   display: flex;
   justify-content: center;
+  margin-top: auto;
   padding-top: 4px;
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
@@ -2803,25 +2815,28 @@ body {
 .qg-temporal__chip {
   display: inline-flex;
   align-items: center;
-  min-height: 24px;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--qg-text-muted);
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--qg-border);
+  border-radius: 6px;
+  background: var(--qg-surface);
+  color: var(--qg-text-secondary);
   font: inherit;
   line-height: 1;
   cursor: pointer;
   appearance: none;
   transition:
     color var(--qg-transition),
+    border-color var(--qg-transition),
     background var(--qg-transition);
 }
 
 .qg-temporal__chip:hover,
 .qg-temporal__chip:focus-visible {
-  background: var(--surface-raised-base-hover);
-  color: var(--qg-text-secondary);
+  border-color: var(--qg-border-strong);
+  background: var(--qg-surface-raised);
+  color: var(--qg-text);
   outline: none;
 }
 
@@ -2979,15 +2994,17 @@ body {
   font-size: 11px;
 }
 
-.qg-temporal-popover__effect,
-.qg-temporal-popover__next,
-.qg-temporal-popover__effect-varies {
+.qg-temporal-popover__summary {
   color: var(--qg-text-muted);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
-.qg-temporal-popover__effect-varies {
-  color: var(--qg-text-secondary);
+.qg-temporal-popover__effect,
+.qg-temporal-popover__next,
+.qg-temporal-popover__separator {
+  color: var(--qg-text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .qg-temporal-popover__schedule {

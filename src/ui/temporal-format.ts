@@ -67,11 +67,20 @@ function formatFactor(factor: number): string {
 /** Z.ai effects are quota points; no provider effect is ever labelled USD. */
 export function temporalEffectLabel(effect: TemporalEffect | undefined): string | undefined {
   if (!effect) return undefined;
-  const unit = effect.unit === "quota_points" ? "quota points" : "API price";
-  if (effect.direction === "unchanged" || Math.abs(effect.factor - 1) < 1e-9) {
-    return `No change to ${unit}`;
+  // Quota-point policies are scalar by contract and omit `scalar`. Check the
+  // unit first so malformed data can never be described as an API-price change.
+  if (effect.unit === "quota_points") {
+    return `Quota points: ${formatFactor(effect.factor)}`;
   }
-  return `${formatFactor(effect.factor)} ${unit}`;
+  // A partial bucket change has no single global multiplier; the factor is
+  // only a representative value and must not be presented as one scalar.
+  if (effect.scalar === false) return "API price varies by token type";
+  if (effect.scalar === true) return `API price: ${formatFactor(effect.factor)}`;
+  // Older payloads and multiplier-only policies omit the cross-rate indicator.
+  // Report the direction without promoting a representative factor to a scalar.
+  if (effect.direction === "peak") return "API price: higher";
+  if (effect.direction === "offpeak") return "API price: lower";
+  return "API price: unchanged";
 }
 
 export function formatTemporalCountdown(nowMs: number, targetMs: number | undefined): string {
@@ -286,7 +295,7 @@ function temporalPolicyKey(model: TemporalModelStatus): string {
 function weeklyPolicyKey(weekly: TemporalWeeklySchedule | undefined): unknown {
   if (!weekly) return null;
   const effectFields = (effect: TemporalEffect | undefined) =>
-    effect ? [effect.factor, effect.direction, effect.unit] : null;
+    effect ? [effect.factor, effect.direction, effect.unit, effect.scalar ?? null] : null;
   return {
     timeZone: weekly.timeZone,
     utcOffsetMinutes: weekly.utcOffsetMinutes,

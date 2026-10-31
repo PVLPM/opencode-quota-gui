@@ -22,6 +22,16 @@ export interface TemporalEffect {
   factor: number;
   direction: "peak" | "offpeak" | "unchanged";
   unit: TemporalEffectUnit;
+  /**
+   * Explicit cross-rate classification for API-price effects. `true` when
+   * every applicable base rate resolves to exactly `factor × base`, so the
+   * factor describes the whole model. `false` when buckets move by different
+   * multipliers or a zero/missing base has no finite ratio; `factor` is then
+   * only the first comparable bucket and must not be shown as one global
+   * multiplier. Omitted for quota-point effects, which are always scalar plan
+   * multipliers, and for multiplier-only effects with no base comparison.
+   */
+  scalar?: boolean;
 }
 
 /** One exact half-open `[startMs, endMs)` pricing window for one model. */

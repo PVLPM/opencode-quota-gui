@@ -48,7 +48,7 @@ export function QuotaView(props: {
     );
 
   return (
-    <section class="qg-section" id="qg-home-quota" aria-label="Quota">
+    <section class="qg-section qg-quota" id="qg-home-quota" aria-label="Quota">
       <Show
         when={shown().length > 0}
         fallback={

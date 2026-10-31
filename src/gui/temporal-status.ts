@@ -192,27 +192,63 @@ function mergeActiveRates(
   return rates;
 }
 
-function factorFor(
+interface EffectFactor {
+  /** First comparable resolved/base ratio, or the product of multipliers. */
+  factor: number;
+  /** `true` only when every applicable rate shares one comparable ratio. */
+  scalar?: boolean;
+}
+
+/**
+ * Compare every applicable rate bucket, not just the first one. An override
+ * that changes only some buckets has no single multiplier; the returned factor
+ * is then only a representative value explicitly marked non-scalar. A zero or
+ * missing base with a positive resolved rate has no finite ratio and also
+ * prevents a scalar classification.
+ */
+function effectFactor(
   policy: Extract<TemporalPolicyEntry, { status: "supported" }>,
   activeRuleIds: readonly string[],
   base: TemporalRates | null,
-): number | undefined {
+): EffectFactor | undefined {
   const active = new Set(activeRuleIds);
   if (base) {
     const resolved = mergeActiveRates(policy, activeRuleIds, base);
+    let factor: number | undefined;
+    let scalar = true;
     for (const key of RATE_KEYS) {
       const baseValue = base[key];
       const resolvedValue = resolved[key];
-      if (
-        typeof baseValue === "number" &&
-        baseValue > 0 &&
-        typeof resolvedValue === "number" &&
-        Number.isFinite(resolvedValue)
+      const hasBase = typeof baseValue === "number" && Number.isFinite(baseValue);
+      const hasResolved = typeof resolvedValue === "number" && Number.isFinite(resolvedValue);
+      if (!hasBase) {
+        // An override or multiplier introduced a bucket the base does not
+        // price, so no single ratio can describe the whole model.
+        if (hasResolved) scalar = false;
+        continue;
+      }
+      if (!hasResolved) {
+        scalar = false;
+        continue;
+      }
+      if (baseValue === 0) {
+        // A zero base has no ratio; only an unchanged zero is comparable.
+        if (resolvedValue !== 0) scalar = false;
+        continue;
+      }
+      const ratio = resolvedValue / baseValue;
+      if (factor === undefined) {
+        factor = ratio;
+      } else if (
+        Math.abs(ratio - factor) >
+        TEMPORAL_FACTOR_EPSILON * Math.max(1, Math.abs(factor))
       ) {
-        return resolvedValue / baseValue;
+        scalar = false;
       }
     }
+    return factor === undefined ? undefined : { factor, scalar };
   }
+
   let factor = 1;
   let activeMultiplier = false;
   for (const multiplier of policy.multipliers) {
@@ -225,7 +261,9 @@ function factorFor(
   if (!activeMultiplier && policy.overrides.some((override) => active.has(override.id))) {
     return undefined;
   }
-  return factor;
+  // No base comparison was possible; explicit multipliers remain one scalar,
+  // but the payload does not claim a cross-rate classification.
+  return { factor };
 }
 
 const TEMPORAL_FACTOR_EPSILON = 1e-9;
@@ -318,22 +356,27 @@ function stateMovement(
   if (base) return rateMovement(base, mergeActiveRates(policy, activeRuleIds, base));
   const active = new Set(activeRuleIds);
   if (policy.overrides.some((override) => active.has(override.id))) return "incomparable";
-  const factor = factorFor(policy, activeRuleIds, null);
+  const factor = effectFactor(policy, activeRuleIds, null)?.factor;
   return factor === undefined ? "incomparable" : multiplierMovement(factor);
 }
 
-function effectFor(factor: number | undefined): TemporalEffect | undefined {
-  if (factor === undefined || !Number.isFinite(factor) || factor < 0) return undefined;
+function effectFor(
+  value: EffectFactor | undefined,
+  movement: TemporalMovement,
+): TemporalEffect | undefined {
+  if (!value || !Number.isFinite(value.factor) || value.factor < 0) return undefined;
+  if (movement !== "increase" && movement !== "decrease" && movement !== "equal") {
+    return undefined;
+  }
+  // Direction describes every comparable rate, never just the representative
+  // factor of a non-scalar effect.
   const direction =
-    factor > 1 + TEMPORAL_FACTOR_EPSILON
-      ? "peak"
-      : factor < 1 - TEMPORAL_FACTOR_EPSILON
-        ? "offpeak"
-        : "unchanged";
+    movement === "increase" ? "peak" : movement === "decrease" ? "offpeak" : "unchanged";
   return {
-    factor,
+    factor: value.factor,
     direction,
     unit: "api_price",
+    ...(value.scalar !== undefined ? { scalar: value.scalar } : {}),
   };
 }
 
@@ -360,7 +403,10 @@ function classifyState(
     else if (movement === "equal") phase = "offpeak";
   }
   if (phase === "unknown") return { phase };
-  return { phase, effect: effectFor(factorFor(policy, activeRuleIds, base)) };
+  return {
+    phase,
+    effect: effectFor(effectFactor(policy, activeRuleIds, base), movement),
+  };
 }
 
 /** Classify an instant, keeping unresolved/unsupported states unknown. */
@@ -375,7 +421,12 @@ function classifyInstant(
 
 function sameEffect(a: TemporalEffect | undefined, b: TemporalEffect | undefined): boolean {
   if (!a || !b) return a === b;
-  return a.factor === b.factor && a.direction === b.direction && a.unit === b.unit;
+  return (
+    a.factor === b.factor &&
+    a.direction === b.direction &&
+    a.unit === b.unit &&
+    a.scalar === b.scalar
+  );
 }
 
 function weeklyClockMinutes(value: string): number {
