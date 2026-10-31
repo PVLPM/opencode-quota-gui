@@ -29,6 +29,7 @@ Open <http://localhost:4144/settings>. The page groups the supported controls:
 | Wait for quota reset | `waitForQuotaReset`; holds a request when a used-up quota window has a known reset. |
 | Display | `percentDisplayMode` (remaining or used) and `percentLabelStyle` (full or bare). |
 | Advanced | Provider selection, minimum refresh interval, request timeout, and accounting detail. |
+| Temporal pricing | Shows or hides live peak and off-peak status per provider. Presentation only. |
 | Visibility | Shows or hides cards and rows, and reorders cards. Presentation only. |
 | Dashboard | Read-only address, the canonical file path, configuration issues, and build details. |
 
@@ -41,6 +42,10 @@ Use **Settings → Visibility** to hide individual cards and rows, and drag a ca
 New card-eye actions store exact opaque card ids in `dashboard.hiddenCards`; row eyes use `dashboard.hiddenRows`. Reordering writes opaque card ids to `dashboard.cardOrder`. Do not construct these ids from labels or copy them between accounts. A non-empty card order lists preferred cards first; new or unlisted cards append in backend order. The legacy `dashboard.providerOrder` still contains provider ids, is preserved unchanged, and applies when card order is absent or empty.
 
 Older `dashboard.hiddenCards` lists had no semantics marker, so a full provider-scope card id there meant a provider-wide hide. On read, those ids are automatically normalized to the plain provider id, and the next hidden-card save records `dashboard.hiddenCardsVersion: 2`. That marker is read-only metadata; version 2 lists keep exact card ids, so hiding a provider-scope card no longer hides its sibling account cards. Plain provider ids and legacy bare provider-scope hashes remain provider-wide group hides. Their card eyes stay enabled: **Show** removes those group markers from the draft and stores exact hides for every other card the current Visibility catalog knows for that provider, keeping the selected card visible. Unknown ids and other providers are preserved. Row eyes remain independent.
+
+### Temporal pricing status
+
+**Settings → Temporal pricing** lists every provider with time-based pricing rules and toggles its live peak and off-peak status in the Quota header. Choices are stored sparsely in `dashboard.temporalProviderOverrides` as provider ids mapped to booleans. A provider with a discovered account is shown by default; an explicit `true` or `false` overrides that default. The setting changes presentation only: it does not change polling, quota values, or recorded usage.
 
 ### Port
 

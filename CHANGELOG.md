@@ -2,6 +2,32 @@
 
 User-facing release notes for OpenCode Quota GUI.
 
+## 1.2.0
+
+### Added
+
+- **Live peak and off-peak status.** On the Quota page, providers whose published pricing has time-based rules now show a compact **Peak**, **Off-peak**, or **Mixed** status with the time of the next change. Open a status to see that provider's models grouped by their exact pricing policy, the upcoming windows or recurring weekly schedule in your local time zone, the current or next public-holiday exception, and whether the period raises, lowers, or leaves the API price unchanged. Z.ai plan schedules are described as quota points, never as a dollar price.
+- **Historical peak and off-peak breakdown.** A model's detail page now splits each provider route's recorded tokens and API-equivalent cost into **Peak** and **Off-peak** rows for the selected range.
+- **Temporal pricing controls.** Settings has a new **Temporal pricing** section that lists every provider with time-based pricing. A provider with a discovered account starts on; each switch keeps an explicit on or off choice.
+
+### Improved
+
+- **Estimates follow the price in effect at completion.** Recorded steps are priced with the peak or off-peak rate that applied when each step completed, instead of one current rate. Cached estimates are invalidated when the bundled pricing snapshot changes.
+- **Pricing data ships with the package.** Time-based rules come from a pinned, validated `models.dev` snapshot inside the package, so status and historical estimates need no runtime network request.
+- **Honest pricing labels.** A window that changes different token types by different multipliers is described as varying by token type instead of being shown as one multiplier.
+- **Dollar values use `$`.** Monetary rows on quota cards render `$50.27` instead of `50.27 USD`. Other currencies keep their ISO code.
+
+### Fixed
+
+- **Settings rows stay aligned.** Labels, controls, and eye buttons keep their columns at narrow window widths instead of drifting out of alignment.
+- **Hidden cards look hidden.** Cards turned off in Settings → Visibility are visibly subdued while editing.
+
+### About peak and off-peak status
+
+Peak and off-peak status appears only for providers whose published pricing defines time-based rules. A provider is **Mixed** when its models are in different states at the same moment, and **Unknown** when the applicable rule cannot be resolved; the dashboard does not guess a phase. Z.ai plan schedules that adjust quota points are kept separate from API price changes and are never presented as a dollar amount.
+
+Historical peak and off-peak usage uses the completion time recorded for each step and the rule covering that instant. Steps that fall outside a known schedule, or on a route without a supported rule, stay out of the split instead of being assigned to one phase.
+
 ## 1.1.0
 
 ### Added
