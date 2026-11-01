@@ -13,8 +13,11 @@
  * library-only CSS (tokens, bubbles, segmented control) is restated once, at
  * zero specificity, in `native.css`.
  */
+
+import type { Ui } from "@opencode/plugin/gui";
 import type { Component, JSX } from "solid-js";
 import {
+  children,
   createContext,
   createEffect,
   createSignal,
@@ -26,6 +29,13 @@ import {
 } from "solid-js";
 import { Dynamic, Portal } from "solid-js/web";
 import { type Placement, placePopover } from "./popover-position";
+
+const NativeUiContext = createContext<Ui>();
+
+/** The contribution supplies host primitives without coupling shared views to the SDK. */
+export function NativeUiProvider(props: { ui: Ui; children: JSX.Element }): JSX.Element {
+  return <NativeUiContext.Provider value={props.ui}>{props.children}</NativeUiContext.Provider>;
+}
 
 /* ------------------------------------------------------------------ icons */
 
@@ -435,7 +445,7 @@ function NativePopover(props: LibraryPopoverProps): JSX.Element {
                   : { "max-height": `${anchored.maxHeight()}px` }
               }
             >
-              {props.children}
+              <div data-slot="popover-body">{props.children}</div>
             </div>
           </div>
         </Portal>
@@ -468,9 +478,46 @@ export interface ButtonProps extends JSX.ButtonHTMLAttributes<HTMLButtonElement>
 }
 
 export function Button(props: ButtonProps): JSX.Element {
+  const ui = useContext(NativeUiContext);
   const [local, rest] = splitProps(props, ["variant", "size", "class", "type"]);
   const variant = () => local.variant ?? "secondary";
   const size = () => local.size ?? "normal";
+  // The stable SDK intentionally exposes fewer DOM attributes. Keep the local
+  // button for controls requiring e.g. aria-describedby or non-click handlers.
+  const supported = () =>
+    Object.keys(rest).every((key) => ["children", "onClick", "disabled"].includes(key));
+  const hostVariant = () => {
+    switch (variant()) {
+      case "primary":
+      case "contrast":
+      case "submit":
+        return "contrast";
+      case "ghost":
+      case "ghost-muted":
+      case "danger":
+        return variant() as "ghost" | "ghost-muted" | "danger";
+      default:
+        return "neutral";
+    }
+  };
+  if (
+    ui &&
+    supported() &&
+    (local.type === undefined || local.type === "button" || local.type === "submit")
+  ) {
+    return (
+      <ui.Button
+        variant={hostVariant()}
+        size={size()}
+        class={local.class}
+        type={local.type}
+        disabled={props.disabled}
+        onClick={props.onClick as ((event: MouseEvent) => void) | undefined}
+      >
+        {props.children}
+      </ui.Button>
+    );
+  }
   return (
     <button
       {...rest}
@@ -504,6 +551,26 @@ export interface SwitchProps {
 }
 
 export function Switch(props: SwitchProps): JSX.Element {
+  const ui = useContext(NativeUiContext);
+  const content = children(() => props.children);
+  const label = () =>
+    props.label ??
+    content
+      .toArray()
+      .map((part) => (typeof part === "string" || typeof part === "number" ? String(part) : ""))
+      .join("");
+  if (ui) {
+    return (
+      <ui.Switch
+        checked={props.checked}
+        onChange={props.onChange}
+        disabled={props.disabled}
+        label={label()}
+        hideLabel={props.hideLabel}
+        description={props.description}
+      />
+    );
+  }
   return (
     <button
       type="button"
@@ -523,6 +590,7 @@ export function Switch(props: SwitchProps): JSX.Element {
 
 interface SegmentedContextValue {
   value: () => string | undefined;
+  disabled: () => boolean;
   select: (value: string) => void;
 }
 
@@ -531,6 +599,7 @@ const SegmentedContext = createContext<SegmentedContextValue>();
 export interface SegmentedControlProps {
   value?: string;
   onChange?: (value: string) => void;
+  disabled?: boolean;
   class?: string;
   "aria-label"?: string;
   children?: JSX.Element;
@@ -539,11 +608,18 @@ export interface SegmentedControlProps {
 export function SegmentedControl(props: SegmentedControlProps): JSX.Element {
   return (
     <SegmentedContext.Provider
-      value={{ value: () => props.value, select: (value) => props.onChange?.(value) }}
+      value={{
+        value: () => props.value,
+        disabled: () => props.disabled === true,
+        select: (value) => {
+          if (!props.disabled) props.onChange?.(value);
+        },
+      }}
     >
       <div
         role="radiogroup"
         aria-label={props["aria-label"]}
+        aria-disabled={props.disabled ? "true" : undefined}
         class={`qg-segmented${props.class === undefined ? "" : ` ${props.class}`}`}
         data-slot="segmented-control-v2"
       >
@@ -567,10 +643,33 @@ export function SegmentedControlItem(props: SegmentedControlItemProps): JSX.Elem
       type="button"
       role="radio"
       aria-checked={selected() ? "true" : "false"}
+      disabled={context?.disabled()}
+      tabIndex={!context?.disabled() && selected() ? 0 : -1}
       data-slot="segmented-control-v2-item"
       data-selected={selected() ? "" : undefined}
       class="qg-segmented__item"
       onClick={() => context?.select(props.value)}
+      onKeyDown={(event) => {
+        if (context?.disabled()) return;
+        const delta =
+          event.key === "ArrowRight" || event.key === "ArrowDown"
+            ? 1
+            : event.key === "ArrowLeft" || event.key === "ArrowUp"
+              ? -1
+              : 0;
+        if (!delta) return;
+        const items = Array.from(
+          event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+            '[role="radio"]:not(:disabled)',
+          ) ?? [],
+        );
+        const index = items.indexOf(event.currentTarget);
+        const next = items[(index + delta + items.length) % items.length];
+        if (!next) return;
+        event.preventDefault();
+        next.focus();
+        next.click();
+      }}
     >
       {props.children}
     </button>

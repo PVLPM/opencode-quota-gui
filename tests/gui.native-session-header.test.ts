@@ -1155,6 +1155,13 @@ describe("session.header combined preview", () => {
     expect(html).toContain('data-row-id="card-1#review"');
     expect(html).toContain("Monthly");
     expect(html).toContain("Resets in");
+    expect(html).toContain('class="qg-slot-preview__row-meta"');
+    expect(html.indexOf('class="qg-slot-preview__label"')).toBeLessThan(
+      html.indexOf('class="qg-slot-preview__value"'),
+    );
+    expect(html.indexOf('class="qg-slot-preview__value"')).toBeLessThan(
+      html.indexOf('class="qg-slot-preview__reset"'),
+    );
     expect(html).toContain("2h 59m");
     expect(html).toContain("Peak in 42m");
     expect(html).toContain("--qg-used-position:38%");

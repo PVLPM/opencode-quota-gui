@@ -7,6 +7,7 @@ import { SettingsRoute } from "../ui/routes";
 import { createNativeDashboardClient } from "./dashboard-client.js";
 import { createGuiRpcCaller } from "./rpc.js";
 import { createSettingsPageState } from "./settings-page-state.js";
+import { NativeUiProvider } from "./ui.js";
 
 /** Stable host page id; `Layout.settings` and the Panel both open this page. */
 export const SETTINGS_PAGE_ID = "opencode-quota-gui";
@@ -24,7 +25,7 @@ type SettingsContent = "settings" | "quota-error" | "waiting";
  * the native read lifecycle are new.
  */
 export function NativeSettingsPage(props: {
-  ctx: Pick<Context, "client" | "servers">;
+  ctx: Pick<Context, "client" | "servers" | "ui">;
 }): JSX.Element {
   const client = createNativeDashboardClient({
     rpc: createGuiRpcCaller(props.ctx),
@@ -77,50 +78,52 @@ export function NativeSettingsPage(props: {
   const showStatus = () => state.loading() || state.stale();
 
   return (
-    <div class="qg-native qg-settings-page">
-      <Show when={showStatus()}>
-        <div class="qg-settings-page__status">
-          <span class="qg-stale" aria-live="polite">
-            {statusLabel()}
-          </span>
-          <Show when={state.retryable()}>
-            <button
-              type="button"
-              class="qg-stale__retry"
-              aria-label="Retry settings and quota data"
-              onClick={() => state.retry()}
-            >
-              Retry
-            </button>
-          </Show>
-        </div>
-      </Show>
-      <Switch>
-        <Match when={contentMode() === "settings"}>
-          <div class="qg-main" data-settings="true">
-            <SettingsRoute
-              client={client}
-              query={state.query}
-              catalog={state.catalog()}
-              temporal={state.temporal()}
-              toaster={toaster}
-              stale={state.stale()}
-              webDashboardToggle
-              onRetry={state.retry}
-            />
+    <NativeUiProvider ui={props.ctx.ui}>
+      <div class="qg-native qg-settings-page">
+        <Show when={showStatus()}>
+          <div class="qg-settings-page__status">
+            <span class="qg-stale" aria-live="polite">
+              {statusLabel()}
+            </span>
+            <Show when={state.retryable()}>
+              <button
+                type="button"
+                class="qg-stale__retry"
+                aria-label="Retry settings and quota data"
+                onClick={() => state.retry()}
+              >
+                Retry
+              </button>
+            </Show>
           </div>
-        </Match>
-        <Match when={contentMode() === "quota-error"}>
-          <div class="qg-main" data-settings="true">
-            <ErrorCard
-              message="Quota data could not be loaded. Visibility and temporal settings are unavailable until the quota read succeeds."
-              retryable
-              onRetry={() => state.retry()}
-            />
-          </div>
-        </Match>
-      </Switch>
-      <ToastRegion toaster={toaster} />
-    </div>
+        </Show>
+        <Switch>
+          <Match when={contentMode() === "settings"}>
+            <div class="qg-main" data-settings="true">
+              <SettingsRoute
+                client={client}
+                query={state.query}
+                catalog={state.catalog()}
+                temporal={state.temporal()}
+                toaster={toaster}
+                stale={state.stale()}
+                webDashboardToggle
+                onRetry={state.retry}
+              />
+            </div>
+          </Match>
+          <Match when={contentMode() === "quota-error"}>
+            <div class="qg-main" data-settings="true">
+              <ErrorCard
+                message="Quota data could not be loaded. Visibility and temporal settings are unavailable until the quota read succeeds."
+                retryable
+                onRetry={() => state.retry()}
+              />
+            </div>
+          </Match>
+        </Switch>
+        <ToastRegion toaster={toaster} />
+      </div>
+    </NativeUiProvider>
   );
 }

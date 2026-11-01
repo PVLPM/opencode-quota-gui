@@ -20,6 +20,7 @@ import { createGuiRpcCaller } from "./rpc.js";
 import headerCss from "./session-header.css?inline";
 import { NativeSessionHeader } from "./session-header.js";
 import { NativeSettingsPage, SETTINGS_PAGE_ID } from "./settings-page.js";
+import { NativeUiProvider } from "./ui.js";
 
 /**
  * OpenCode Desktop GUI entry (Stage 5).
@@ -38,7 +39,7 @@ const PANEL_ID = "dashboard";
 const TAB_ID = "dashboard";
 
 /** Stable objects: the host re-renders tab labels only when a new object appears. */
-const DASHBOARD_TAB = { id: TAB_ID, title: "Dashboard" } as const;
+const DASHBOARD_TAB = { id: TAB_ID, title: "Quota & Usage" } as const;
 
 function NativeDashboardPanel(): JSX.Element {
   const ctx = usePlugin();
@@ -60,12 +61,14 @@ function NativeDashboardPanel(): JSX.Element {
   const hostConnected = () => hostServer()?.connected ?? true;
 
   return (
-    <DashboardPanel
-      client={client}
-      visible={panel.visible}
-      hostConnected={hostConnected}
-      onOpenSettings={() => ctx.layout.settings(SETTINGS_PAGE_ID)}
-    />
+    <NativeUiProvider ui={ctx.ui}>
+      <DashboardPanel
+        client={client}
+        visible={panel.visible}
+        hostConnected={hostConnected}
+        onOpenSettings={() => ctx.layout.settings(SETTINGS_PAGE_ID)}
+      />
+    </NativeUiProvider>
   );
 }
 
@@ -108,7 +111,7 @@ export default Plugin.define({
     ctx.add(Panel, {
       id: PANEL_ID,
       region: "side",
-      mobile: { title: "Dashboard", order: 20, kind: "menu", icon: "layout-right" },
+      mobile: { title: "Quota & Usage", order: 20, kind: "menu", icon: "layout-right" },
       list: ({ open }) => (open.includes(TAB_ID) ? [DASHBOARD_TAB] : []),
       render: () => <NativeDashboardPanel />,
     });
@@ -142,7 +145,7 @@ export default Plugin.define({
     ctx.add(MenuItem, {
       menu: "session.panel",
       id: "open-dashboard",
-      title: "Dashboard",
+      title: "Quota & Usage",
       icon: "layout-right",
       run: () => openDashboardPanel(ctx),
     });

@@ -36,8 +36,8 @@
      provider mark and each arrow can carry the correct colour on its own.
      Peak is the critical-price direction (red up), off-peak the discount
      direction (green down). */
-  --qg-temporal-peak: var(--qg-danger);
-  --qg-temporal-offpeak: var(--qg-success);
+  --qg-temporal-peak: #f2827f;
+  --qg-temporal-offpeak: #72d78c;
   --qg-temporal-unknown: var(--qg-text-muted);
 
   /* The five raw additive token categories carry no library token (R31, R48).
@@ -2617,6 +2617,8 @@
 .qg-row[data-severity="warning"] .qg-row__bar-fill {
   background: #f4d585;
 }
+.qg-temporal-popover__phase[data-phase="peak"],
+.qg-temporal-popover__state[data-phase="peak"],
 .qg-row[data-severity="critical"] .qg-row__value {
   color: #f17471;
   background: #461516;
@@ -2918,25 +2920,12 @@
   overflow-wrap: anywhere;
 }
 
-.qg-temporal-popover__phase,
-.qg-temporal-popover__state {
-  color: var(--qg-text-muted);
-}
-
-.qg-temporal-popover__phase[data-phase="peak"],
-.qg-temporal-popover__state[data-phase="peak"] {
-  color: var(--qg-temporal-peak);
-}
-
-.qg-temporal-popover__phase[data-phase="offpeak"],
-.qg-temporal-popover__state[data-phase="offpeak"] {
-  color: var(--qg-temporal-offpeak);
-}
-
 .qg-temporal-popover__phase[data-phase="mixed"],
 .qg-temporal-popover__phase[data-phase="unknown"],
 .qg-temporal-popover__state[data-phase="unknown"] {
   color: var(--qg-temporal-unknown);
+  background: var(--qg-surface);
+  border-color: var(--qg-border-strong);
 }
 
 .qg-temporal-popover__phase {
@@ -3023,21 +3012,6 @@
 .qg-temporal-popover__schedule-note {
   color: var(--qg-text-muted);
   font-size: 11px;
-}
-
-.qg-temporal-popover__interval [data-phase="peak"],
-.qg-temporal-popover__schedule-line [data-phase="peak"] {
-  color: var(--qg-temporal-peak);
-}
-
-.qg-temporal-popover__interval [data-phase="offpeak"],
-.qg-temporal-popover__schedule-line [data-phase="offpeak"] {
-  color: var(--qg-temporal-offpeak);
-}
-
-.qg-temporal-popover__interval [data-phase="unknown"],
-.qg-temporal-popover__schedule-line [data-phase="unknown"] {
-  color: var(--qg-temporal-unknown);
 }
 
 .qg-temporal-popover__holidays {

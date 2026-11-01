@@ -98,13 +98,15 @@ export function SessionHeaderPreviewBody(props: SessionHeaderPreviewBodyProps): 
                       data-row-id={row.rowId}
                       data-severity={row.severity}
                     >
-                      <span class="qg-slot-preview__label">{row.label}</span>
-                      <span class="qg-slot-preview__value">{row.valueText}</span>
-                      <Show when={row.countdown}>
-                        {(countdown) => (
-                          <span class="qg-slot-preview__reset">Resets in {countdown()}</span>
-                        )}
-                      </Show>
+                      <div class="qg-slot-preview__row-meta">
+                        <span class="qg-slot-preview__label">{row.label}</span>
+                        <span class="qg-slot-preview__value">{row.valueText}</span>
+                        <Show when={row.countdown}>
+                          {(countdown) => (
+                            <span class="qg-slot-preview__reset">Resets in {countdown()}</span>
+                          )}
+                        </Show>
+                      </div>
                       <QuotaBar
                         label={row.label}
                         displayPercent={row.percent}

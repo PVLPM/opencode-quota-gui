@@ -133,7 +133,17 @@ describe("Desktop GUI entry", () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the assertion is the literal source of the host tab key.
     expect(guiSource).toContain("`${ctx.id}:${TAB_ID}`");
     expect(guiSource).toMatch(/title:\s*"Open dashboard panel"/u);
-    expect(guiSource).toMatch(/title:\s*"Dashboard"/u);
+    expect(guiSource).toMatch(/title:\s*"Quota & Usage"/u);
+  });
+
+  it("labels the internal quota tab separately from its host panel", () => {
+    expect(panelSource).toContain('route().name === "home" ? "Quota" : "Dashboard"');
+    expect(panelSource).not.toContain('route().name === "home" ? "Quota & Usage"');
+    expect(guiSource).toContain('const DASHBOARD_TAB = { id: TAB_ID, title: "Quota & Usage" }');
+    expect(guiSource).toMatch(/mobile:\s*\{\s*title:\s*"Quota & Usage"/u);
+    expect(guiSource).toMatch(
+      /menu:\s*"session\.panel",\s*id:\s*"open-dashboard",\s*title:\s*"Quota & Usage"/u,
+    );
   });
 
   it("injects the product stylesheet before the host-only additions", () => {

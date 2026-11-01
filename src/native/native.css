@@ -74,15 +74,16 @@
 }
 
 /*
- * The host supplies the Settings page frame. The shared Settings view expects a
- * filled column so its own scroll area and save bar stay distinct.
+ * Desktop 2.2.5's .settings-panel is the scroll container, including for
+ * wheel events over the navigation gutter. Let content grow into that panel;
+ * the shared save bar sticks to its bottom rather than adding a nested scroller.
  */
 .qg-native.qg-settings-page {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
+  flex: 1 0 auto;
+  min-height: 100%;
+  overflow: visible;
   background: var(--qg-bg);
   color: var(--qg-text-secondary);
   font-size: var(--font-size-base);
@@ -91,8 +92,24 @@
 }
 
 .qg-native.qg-settings-page > .qg-main {
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 1 0 auto;
+  overflow: visible;
+}
+
+.qg-native.qg-settings-page .qg-settings {
+  flex: 1 0 auto;
+  overflow: visible;
+}
+
+.qg-native.qg-settings-page .qg-settings__scroll {
+  flex: 1 0 auto;
+  overflow: visible;
+}
+
+.qg-native.qg-settings-page .qg-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
 }
 
 .qg-native .qg-settings-page__status {
@@ -134,6 +151,73 @@
 .qg-panel-root [aria-disabled="true"] {
   opacity: 0.45;
   cursor: default;
+}
+
+/* Like Desktop tabs-v2, full-height tabs own their bottom border. */
+.qg-panel-root .qg-frame > .qg-topbar {
+  padding-block: 0;
+  border-bottom: 0;
+  background-image: linear-gradient(var(--qg-border), var(--qg-border));
+  background-position: bottom;
+  background-size: 100% 1px;
+  background-repeat: no-repeat;
+}
+
+.qg-panel-root .qg-frame > .qg-topbar > .qg-topbar__left {
+  align-self: stretch;
+  align-items: stretch;
+}
+
+.qg-panel-root .qg-frame > .qg-topbar > .qg-topbar__actions {
+  padding-block: 8px;
+}
+
+.qg-panel-root .qg-frame-tab:not(.qg-analytics-tabs) {
+  border-bottom: 1px solid var(--qg-text-secondary);
+}
+
+.qg-panel-root .qg-analytics-tabs a {
+  border-bottom: 1px solid transparent;
+}
+
+.qg-panel-root .qg-analytics-tabs a[aria-current="page"] {
+  border-bottom-color: var(--qg-text-secondary);
+}
+
+.qg-panel-root .qg-frame-tab::after,
+.qg-panel-root .qg-analytics-tabs a[aria-current="page"]::after {
+  display: none;
+}
+
+.qg-panel-root .qg-range[data-slot="segmented-control-v2"] {
+  width: 256px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.qg-panel-root .qg-range [data-slot="segmented-control-v2-item"] {
+  min-width: max-content;
+  white-space: nowrap;
+}
+
+/* An x-scroller clips both axes. Keep the selected and focus rings inside it. */
+.qg-panel-root .qg-range [data-slot="segmented-control-v2-item"][data-selected] {
+  box-shadow: inset 0 0 0 0.5px var(--v2-border-border-strong, var(--qg-border-strong));
+}
+
+.qg-panel-root .qg-range [data-slot="segmented-control-v2-item"]:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--border-weak-selected);
+}
+
+.qg-panel-root .qg-frame > .qg-topbar > .qg-topbar__actions {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.qg-native .qg-segmented__item:focus-visible {
+  outline: 2px solid var(--border-weak-selected);
+  outline-offset: 1px;
 }
 
 /* The ready-state stale label keeps a keyboard-reachable retry beside it. */
@@ -185,6 +269,11 @@
   background-clip: padding-box;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* Match the public Popover body inset; the native adapter supplies this slot. */
+:where(.qg-native-popover__bubble) > [data-slot="popover-body"] {
+  padding: 12px;
 }
 
 :where(.qg-native-tooltip__bubble) {
@@ -340,29 +429,51 @@
 }
 
 :where(.qg-native) .qg-segmented {
-  display: inline-flex;
+  position: relative;
+  isolation: isolate;
+  display: flex;
   align-items: center;
-  padding: 2px;
-  border: 1px solid var(--qg-border);
+  padding: 0;
+  width: 232px;
+  max-width: 100%;
+  height: 28px;
+  flex: none;
+  border: 0;
   border-radius: 6px;
-  background: var(--qg-surface);
-  gap: 2px;
+  background: var(--v2-background-bg-layer-01, var(--qg-surface));
+  box-shadow: 0 0 0 0.5px var(--v2-border-border-base, var(--qg-border));
 }
 
 :where(.qg-native) .qg-segmented__item {
-  padding: 3px 10px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 28px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 6px;
   background: transparent;
-  color: var(--qg-text-muted);
+  color: var(--v2-text-text-muted, var(--qg-text-muted));
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 440;
+  line-height: 100%;
+  letter-spacing: -0.04px;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
 }
 
 :where(.qg-native) .qg-segmented__item[data-selected] {
-  background: var(--qg-surface-raised);
-  color: var(--qg-text);
+  background: var(--v2-background-bg-base, var(--qg-surface-raised));
+  box-shadow: 0 0 0 0.5px var(--v2-border-border-strong, var(--qg-border-strong));
+  color: var(--v2-text-text-base, var(--qg-text));
+}
+
+:where(.qg-native) .qg-segmented__item:hover {
+  color: var(--v2-text-text-base, var(--qg-text));
 }
 
 @media (prefers-reduced-motion: reduce) {
