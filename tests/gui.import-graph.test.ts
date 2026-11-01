@@ -72,6 +72,7 @@ describe("contract layer import rules", () => {
       "src/contracts/card-order.ts",
       "src/contracts/collision-safe-key.ts",
       "src/contracts/dashboard.ts",
+      "src/contracts/dto-guards.ts",
       "src/contracts/guards.ts",
       "src/contracts/identity.ts",
       "src/contracts/openai-quota.ts",

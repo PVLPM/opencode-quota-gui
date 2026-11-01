@@ -1,6 +1,7 @@
 /**
- * The shipped server plugin exposes only the dashboard, credential and retry
- * lifecycle: no commands, tool, RPC or quota-report hooks are registered.
+ * The shipped server plugin exposes the dashboard runtime, its typed RPC
+ * transport, and the credential/retry lifecycle: no commands, tool or
+ * quota-report hooks are registered.
  */
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
@@ -40,6 +41,11 @@ type RetryEvent = {
 
 function createContext() {
   const hooks = new Map<string, (event: RetryEvent) => Promise<void>>();
+  const rpcRegistration = {
+    events: { emit: vi.fn(async () => undefined) },
+    dispose: vi.fn(async () => undefined),
+  };
+  const rpc = { register: vi.fn(async () => rpcRegistration) };
   const ctx = {
     location: { directory: `${TEST_RUNTIME_ROOT}/workspace` },
     provider: { list: vi.fn().mockResolvedValue({ data: [{ id: "openai" }] }) },
@@ -54,11 +60,11 @@ function createContext() {
     },
     tool: { transform: vi.fn() },
     command: { transform: vi.fn() },
-    rpc: { register: vi.fn() },
+    rpc,
     integration: createFakeIntegration([]),
     event: { subscribe: vi.fn(() => ({ async *[Symbol.asyncIterator]() {} })) },
   };
-  return { ctx, hooks };
+  return { ctx, hooks, rpc, rpcRegistration };
 }
 
 async function freePort(): Promise<number> {
@@ -101,17 +107,20 @@ afterEach(async () => {
 });
 
 describe("GUI-only server plugin", () => {
-  it("registers no commands, tool, RPC or report hooks and starts the dashboard", async () => {
+  it("registers no commands, tool or report hooks, attaches dashboard RPC and starts the dashboard", async () => {
     const port = await freePort();
     await writeCanonicalConfig(port);
-    const { ctx, hooks } = createContext();
+    const { ctx, hooks, rpc, rpcRegistration } = createContext();
 
     const cleanup = await plugin.setup(ctx as never);
     if (cleanup) cleanups.push(cleanup);
 
     expect(ctx.tool.transform).not.toHaveBeenCalled();
     expect(ctx.command.transform).not.toHaveBeenCalled();
-    expect(ctx.rpc.register).not.toHaveBeenCalled();
+    expect(rpc.register).toHaveBeenCalledOnce();
+    expect(rpc.register.mock.calls[0]?.[0]).toMatchObject({
+      id: "opencode-quota-gui.dashboard",
+    });
     expect([...hooks.keys()]).toEqual(["retry"]);
     expect(ctx.session.get).not.toHaveBeenCalled();
     expect(ctx.session.wait).not.toHaveBeenCalled();
@@ -120,6 +129,23 @@ describe("GUI-only server plugin", () => {
     const response = await fetch(`http://127.0.0.1:${port}/api/v1/health`);
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ app: "opencode-quota-gui" });
+
+    await cleanup?.();
+    expect(rpcRegistration.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("attaches dashboard RPC with web disabled and binds no listener", async () => {
+    const port = await freePort();
+    const dir = join(TEST_RUNTIME_ROOT, "config", "opencode-quota-gui");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "config.jsonc"), JSON.stringify({ dashboard: { port } }), "utf8");
+    const { ctx, rpc } = createContext();
+
+    const cleanup = await plugin.setup(ctx as never);
+    if (cleanup) cleanups.push(cleanup);
+
+    expect(rpc.register).toHaveBeenCalledOnce();
+    await expect(fetch(`http://127.0.0.1:${port}/api/v1/health`)).rejects.toThrow();
   });
 
   it("retries at the quota reset through the retained retry hook", async () => {

@@ -88,17 +88,28 @@ export type DashboardUnavailableReason =
   | "server-unavailable";
 
 /**
+ * The host-owned dependencies every transport attaches to. Both objects are
+ * created once per shared host; transports never construct or close them.
+ */
+export interface DashboardTransportRuntime {
+  readonly snapshots: SnapshotService;
+  readonly settings: GuiSettingsStore;
+}
+
+/**
  * One setup's claim on the dashboard host. `running` leases share the host
  * runtime; `url` is present only when the web transport is enabled and bound.
  * `unavailable` leases report a controlled `reason`; a web-only failure keeps
- * the shared runtime alive until the last lease disposes. Disposing is
- * idempotent and never rejects.
+ * the shared runtime alive until the last lease disposes. `runtime` is present
+ * whenever the shared source/settings/snapshot service started, including when
+ * web is disabled or its bind failed. Disposing is idempotent and never rejects.
  */
 export interface DashboardLease {
   readonly port: number;
   readonly state: "running" | "unavailable";
   readonly url?: string;
   readonly reason?: DashboardUnavailableReason;
+  readonly runtime?: DashboardTransportRuntime;
   dispose(): Promise<void>;
 }
 
@@ -150,6 +161,7 @@ interface OwnerDelegation {
 interface DashboardRuntime {
   readonly source: DashboardReadSource;
   snapshots: SnapshotService | undefined;
+  settings: GuiSettingsStore | undefined;
   close(): Promise<void>;
 }
 
@@ -183,10 +195,11 @@ interface HostContext {
  * map and shares the refcount and socket. The version is bumped when the host
  * record or start semantics change (`v2` added owner delegation, `v3` added the
  * shared snapshot/source runtime, `v4` made the web transport optional while
- * keeping the runtime): an older copy then fails the fixed port terminally
- * instead of mutating a host it does not understand.
+ * keeping the runtime, `v5` publishes the shared settings/snapshot runtime for
+ * RPC): an older copy then fails the fixed port terminally instead of mutating
+ * a host it does not understand.
  */
-const HOST_REGISTRY_KEY = Symbol.for("opencode-quota-gui/dashboard-lifecycle/v4");
+const HOST_REGISTRY_KEY = Symbol.for("opencode-quota-gui/dashboard-lifecycle/v5");
 
 interface DashboardHostRegistry {
   readonly hosts: Map<number, DashboardHost>;
@@ -224,6 +237,7 @@ function createRuntime(source: DashboardReadSource, logger: GuiLogger): Dashboar
   const runtime: DashboardRuntime = {
     source,
     snapshots: undefined,
+    settings: undefined,
     close() {
       if (closing) return closing;
       closing = (async () => {
@@ -233,6 +247,7 @@ function createRuntime(source: DashboardReadSource, logger: GuiLogger): Dashboar
           logger.warn("dashboard runtime close failed", failureLabel(error));
         }
         runtime.snapshots = undefined;
+        runtime.settings = undefined;
         await closeSource(source, logger);
       })();
       return closing;
@@ -499,6 +514,9 @@ async function startHost(
   } catch {
     throw new DashboardLifecycleError("settings-unavailable");
   }
+  // Publish the same store to every transport. It stays host-owned until the
+  // last lease disposes, regardless of whether the web transport starts.
+  runtime.settings = settings;
 
   const firstOwner = delegation.activeOwner;
   if (!firstOwner) throw new DashboardLifecycleError("source-unavailable");
@@ -510,8 +528,8 @@ async function startHost(
     throw new DashboardLifecycleError("source-unavailable");
   }
 
-  // The host owns exactly one snapshot service. Transports (HTTP now, RPC in a
-  // later stage) receive it; they never construct or close it themselves.
+  // The host owns exactly one snapshot service. HTTP and the typed RPC
+  // transport receive it; they never construct or close it themselves.
   const createSnapshots = options.createSnapshots ?? createSnapshotService;
   let snapshots: SnapshotService;
   try {
@@ -543,10 +561,20 @@ async function startHost(
     // A bind failure already logged its one controlled line inside the transport
     // and keeps its `port-unavailable` reason; every other server failure is
     // reported as `server-unavailable`. The shared runtime deliberately stays
-    // alive for its leases (a future native transport can still use it); only
-    // the failed web transport is detached by the transport itself.
+    // alive for its leases (the RPC transport can still use it); only the
+    // failed web transport is detached by the transport itself.
     throw new DashboardLifecycleError(unavailableReason(error));
   }
+}
+
+/**
+ * The transport-neutral host dependencies for a lease. A missing snapshot
+ * service or settings store means the shared runtime never completed, so there
+ * is nothing safe to attach a second transport to.
+ */
+function transportRuntime(runtime: DashboardRuntime): DashboardTransportRuntime | undefined {
+  if (!runtime.snapshots || !runtime.settings) return undefined;
+  return { snapshots: runtime.snapshots, settings: runtime.settings };
 }
 
 function makeDispose(
@@ -598,17 +626,21 @@ async function attachLease(host: DashboardHost, owner: DashboardOwner): Promise<
         host.logger.error("dashboard unavailable", host.failure);
       }
     }
+    const runtime = transportRuntime(host.runtime);
     return {
       port: host.port,
       state: "unavailable",
       reason: host.failure,
+      ...(runtime ? { runtime } : {}),
       dispose: makeDispose(host, owner, undefined),
     };
   }
+  const runtime = transportRuntime(host.runtime);
   return {
     port: host.port,
     state: "running",
     ...(handle ? { url: handle.url } : {}),
+    ...(runtime ? { runtime } : {}),
     dispose: makeDispose(host, owner, handle),
   };
 }

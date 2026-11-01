@@ -27,9 +27,25 @@ import {
 } from "../contracts/dashboard.js";
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges.js";
 import { GuiSettingsError } from "./config.js";
+import {
+  DASHBOARD_ERROR_MESSAGES,
+  DASHBOARD_ERROR_STATUS,
+  type DashboardErrorCode,
+  type DashboardErrorDetails,
+  DashboardHttpError,
+  sanitizeDashboardErrorDetails,
+  structuralDashboardSourceCode,
+} from "./dashboard-errors.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 import type { SnapshotService } from "./snapshot-service.js";
 import { createSseHub } from "./sse.js";
+
+export {
+  DASHBOARD_ERROR_STATUS,
+  DashboardHttpError,
+  type DashboardErrorCode,
+  type DashboardErrorDetails,
+};
 
 export interface DashboardServerOptions {
   /** `0` binds an ephemeral port (tests); production passes the configured port. */
@@ -52,79 +68,6 @@ export interface DashboardServerHandle {
   port: number;
   url: string;
   close(): Promise<void>;
-}
-
-export type DashboardErrorCode =
-  | "bad-request"
-  | "bad-host"
-  | "bad-origin"
-  | "unsupported-media-type"
-  | "body-too-large"
-  | "method-not-allowed"
-  | "not-found"
-  | "config-read-error"
-  | "config-changed"
-  | "config-target-error"
-  | "config-write-error"
-  | "unknown-setting"
-  | "invalid-setting"
-  | "project-not-found"
-  | "session-not-found"
-  | "internal";
-
-export interface DashboardErrorDetails {
-  reason?: string;
-  key?: string;
-}
-
-/** Status mapping from spec §5.3. */
-export const DASHBOARD_ERROR_STATUS: Readonly<Record<DashboardErrorCode, number>> = {
-  "bad-request": 400,
-  "bad-host": 403,
-  "bad-origin": 403,
-  "unsupported-media-type": 415,
-  "body-too-large": 413,
-  "method-not-allowed": 405,
-  "not-found": 404,
-  "config-read-error": 409,
-  "config-changed": 409,
-  "config-target-error": 409,
-  "config-write-error": 500,
-  "unknown-setting": 422,
-  "invalid-setting": 422,
-  "project-not-found": 404,
-  "session-not-found": 404,
-  internal: 500,
-};
-
-const DASHBOARD_ERROR_MESSAGES: Readonly<Record<DashboardErrorCode, string>> = {
-  "bad-request": "Malformed request",
-  "bad-host": "Requests must target the dashboard loopback address",
-  "bad-origin": "Writes must originate from the dashboard page",
-  "unsupported-media-type": "Writes require application/json",
-  "body-too-large": "Request body exceeds the 64 KiB limit",
-  "method-not-allowed": "Method not allowed",
-  "not-found": "Not found",
-  "config-read-error": "The dashboard config file is not valid JSONC",
-  "config-changed": "Config changed since the last revision",
-  "config-target-error": "The dashboard config path is not writable",
-  "config-write-error": "Config write failed",
-  "unknown-setting": "Unknown setting",
-  "invalid-setting": "Invalid setting",
-  "project-not-found": "Project not found",
-  "session-not-found": "Session not found",
-  internal: "Internal dashboard error",
-};
-
-/** A controlled condition the source or a store wants surfaced verbatim-ish. */
-export class DashboardHttpError extends Error {
-  readonly code: DashboardErrorCode;
-
-  constructor(code: DashboardErrorCode) {
-    super(DASHBOARD_ERROR_MESSAGES[code]);
-    this.name = "DashboardHttpError";
-    this.code = code;
-  }
 }
 
 /** Structured bind failure: terminal, no alternate port is ever attempted. */
@@ -156,27 +99,6 @@ const ASSET_CONTENT_TYPES: ReadonlyMap<string, string> = new Map([
   [".ttf", "font/ttf"],
 ]);
 
-const SOURCE_ERROR_CODES: ReadonlySet<string> = new Set([
-  "bad-request",
-  "project-not-found",
-  "session-not-found",
-]);
-
-/** The set above is the vocabulary; trust it as the membership proof. */
-function isSourceErrorCode(value: string): value is DashboardErrorCode {
-  return SOURCE_ERROR_CODES.has(value);
-}
-
-const TARGET_REASONS: ReadonlySet<string> = new Set([
-  "dangling",
-  "loop",
-  "depth",
-  "non-regular",
-  "permission",
-]);
-
-const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*$/;
-
 const MAX_RESOURCE_ID_LENGTH = 256;
 
 interface MappedError {
@@ -200,39 +122,6 @@ function envelope(code: DashboardErrorCode, details?: DashboardErrorDetails): Ma
   };
 }
 
-function sanitizedDetails(
-  code: DashboardErrorCode,
-  input:
-    | {
-        reason?: string;
-        key?: string;
-      }
-    | undefined,
-): DashboardErrorDetails | undefined {
-  if (!input) return undefined;
-  const details: DashboardErrorDetails = {};
-  // `details.reason` is forwarded for `config-target-error` only, and only from
-  // the allowlisted target-reason vocabulary; other codes never carry it.
-  if (
-    code === "config-target-error" &&
-    input.reason !== undefined &&
-    TARGET_REASONS.has(input.reason)
-  ) {
-    details.reason = input.reason;
-  }
-  if (input.key !== undefined && input.key.length <= 64 && SETTING_KEY_RE.test(input.key)) {
-    details.key = input.key;
-  }
-  return Object.keys(details).length > 0 ? details : undefined;
-}
-
-function structuralSourceCode(error: unknown): DashboardErrorCode | undefined {
-  if (error === null || typeof error !== "object" || !("code" in error)) return undefined;
-  const code = error.code;
-  if (typeof code !== "string" || !isSourceErrorCode(code)) return undefined;
-  return code;
-}
-
 /**
  * Raw exceptions never reach the wire: known controlled errors keep their code,
  * everything else is a generic 500. GuiSettingsError messages are not
@@ -240,12 +129,12 @@ function structuralSourceCode(error: unknown): DashboardErrorCode | undefined {
  */
 function mapError(error: unknown): MappedError {
   if (error instanceof GuiSettingsError) {
-    return envelope(error.code, sanitizedDetails(error.code, error.details));
+    return envelope(error.code, sanitizeDashboardErrorDetails(error.code, error.details));
   }
   if (error instanceof DashboardHttpError) {
     return envelope(error.code, undefined);
   }
-  const sourceCode = structuralSourceCode(error);
+  const sourceCode = structuralDashboardSourceCode(error);
   if (sourceCode) return envelope(sourceCode, undefined);
   return envelope("internal", undefined);
 }

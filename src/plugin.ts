@@ -1,11 +1,14 @@
 /**
- * OpenCode V2 server plugin for the GUI-only product: it starts the local
- * dashboard and keeps the credential and quota-reset retry lifecycle working.
- * Inherited terminal surfaces (commands, tool, RPC, report hooks) are retained in
+ * OpenCode V2 server plugin for the GUI-only product: it starts the shared
+ * dashboard runtime, attaches the typed dashboard RPC transport, and keeps the
+ * credential and quota-reset retry lifecycle working. Inherited terminal
+ * surfaces (commands, tool, the TUI quota RPC and report hooks) are retained in
  * their source modules but are not registered by this product.
  */
 import { Plugin } from "@opencode/plugin";
 import { type DashboardLease, startDashboard } from "./gui/lifecycle.js";
+import { scrubLogReason } from "./gui/log.js";
+import { registerDashboardRpc } from "./gui/rpc.js";
 import { resolveOpenCodeLocationRoots } from "./lib/config-file-utils.js";
 import {
   bindCredentialSource,
@@ -89,9 +92,34 @@ export const QuotaToastPlugin = Plugin.define({
       console.warn(`[opencode-quota-gui] dashboard unavailable: ${logReason(error)}`);
     }
 
+    // Attach the native RPC transport to the same host runtime the web
+    // transport receives. It is available when web is disabled or its bind
+    // failed, and it never constructs another source/snapshot/service.
+    let dashboardRpc: Awaited<ReturnType<typeof registerDashboardRpc>> | undefined;
+    if (dashboardLease?.runtime && ctx.rpc) {
+      try {
+        dashboardRpc = await registerDashboardRpc(ctx.rpc, dashboardLease.runtime, {
+          location: ctx.location,
+        });
+      } catch {
+        console.warn(`[opencode-quota-gui] dashboard RPC unavailable: registration-failed`);
+      }
+    }
+
     return async () => {
       credentialEvents.abort();
       unbindCredentialSource();
+      if (dashboardRpc) {
+        try {
+          await dashboardRpc.dispose();
+        } catch (error) {
+          console.warn(
+            `[opencode-quota-gui] dashboard RPC stop failed: ${scrubLogReason(
+              error instanceof Error ? error.message : String(error),
+            )}`,
+          );
+        }
+      }
       if (dashboardLease) {
         try {
           await dashboardLease.dispose();

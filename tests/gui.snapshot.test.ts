@@ -1529,4 +1529,66 @@ describe("GUI snapshot service", () => {
     expect(stale.stale).toBe(true);
     expect(stale.providers.cards).toHaveLength(1);
   });
+
+  it("aggregates concurrent viewer scopes and keeps analytics active while one viewer needs it", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
+    await service.home({ range: "7d" });
+
+    const quotaViewer = service.addScopedViewer("quota");
+    const analyticsViewer = service.addScopedViewer("analytics");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+    expect(calls.home).toBe(2);
+
+    // One viewer leaving must not suppress the remaining analytics viewer's
+    // refresh, and the quota viewer alone then suppresses it.
+    quotaViewer.release();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(2);
+    expect(calls.home).toBe(3);
+
+    analyticsViewer.release();
+    await vi.advanceTimersByTimeAsync(90);
+    expect(refreshes).toBe(2);
+
+    // A reconnect registers the page again; a quota-only viewer starts the
+    // poller but still performs no analytics refresh.
+    await service.home({ range: "7d" });
+    const quotaOnly = service.addScopedViewer("quota");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(2);
+    expect(calls.home).toBe(4);
+    quotaOnly.release();
+  });
+
+  it("lets an analytics scoped viewer outrank a legacy quota signal", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
+    await service.home({ range: "7d" });
+
+    const webViewer = service.addViewer();
+    service.setViewScope("quota");
+    const nativeViewer = service.addScopedViewer("analytics");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+
+    nativeViewer.release();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+
+    webViewer();
+  });
 });

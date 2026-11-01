@@ -75,6 +75,32 @@ independent re-review found both reported issues addressed.
 Reversible: Yes.
 Owner review: review recommended
 
+## D06 — RPC viewers and setup-scoped registrations
+
+Stage: 3
+Status: accepted
+Problem: Native and Web need the same snapshots and viewer-driven pollers, while
+multiple plugin setups may share a host but have distinct SDK cleanup scopes.
+Evidence: OpenCode's RPC registration is scoped to its originating setup; its
+registry supports multiple same-ID registrations and routes to the latest.
+Options considered: Share one registration across SDK scopes; register per
+setup while sharing the snapshot invalidation subscription.
+Decision: Register per setup, share the runtime/subscription, and hold a scoped
+viewer for the duration of an abortable RPC watch. Combine Native viewer scopes
+with existing Web interest rather than adding independent polling.
+Why: A registration shared across SDK scopes can disappear when its creator
+unloads; per-setup registration keeps a surviving setup callable.
+Trade-offs: Correct watch cleanup depends on host cancellation behavior; real
+Desktop disconnect/reconnect behavior remains to be verified. Existing Web
+tabs retain their legacy shared scope semantics.
+Product impact: Native and Web receive the same data and settings invalidations.
+Compatibility impact: Uses the official RPC API available in SDK 2.0.16.
+Test evidence: Scoped-finalizer, workspace routing, reconnect and lifecycle
+regressions passed; independent re-review passed. `pnpm verify`: 4,684 passed,
+50 skipped, plus five cross-surface tests; Windows symlink cases were skipped.
+Reversible: Yes.
+Owner review: review recommended
+
 ## D04 — Canonical opt-in Web transport
 
 Stage: 2
@@ -99,3 +125,31 @@ Test evidence: `pnpm verify` passed: 4,636 tests passed, 50 skipped, plus five
 cross-surface tests; Windows symlink-dependent cases were among the skips.
 Reversible: Yes.
 Owner review: important but reversible
+
+## D05 — Native RPC trust boundary
+
+Stage: 3
+Status: accepted
+Problem: The official plugin RPC does not supply caller identity for a
+per-method authorization check, while dashboard settings include writes.
+Evidence: OpenCode 2.0.16 and 2.2.5 route RPC through server-wide authorization;
+the normal CLI binds loopback and uses a generated password. Authenticated
+remote callers can invoke registered methods, and custom passwordless embedded
+servers rely on the embedder's access control. RPC handler context exposes no
+documented caller identity. See the official server authorization middleware
+and RPC handlers in the corresponding OpenCode source tags.
+Options considered: Depend on host authorization; invent an independent
+credential system; omit required Native settings operations.
+Decision: Use the supported host authorization boundary and expose only the
+explicit, validated dashboard operations; omit credentials and internal paths.
+The existing settings-path display remains an exception already exposed by Web.
+Why: This is the documented server transport and preserves the shared backend
+without inventing an unsupported authentication system or removing settings.
+Trade-offs: An authenticated OpenCode server client can invoke the registered
+methods; a passwordless embedder must provide its own access control.
+Product impact: Native and Web use the same settings model.
+Compatibility impact: Depends on OpenCode's server security configuration.
+Test evidence: Contract/security review and focused tests passed; real host
+authorization and Desktop integration were not exercised in this workspace.
+Reversible: Yes.
+Owner review: review recommended

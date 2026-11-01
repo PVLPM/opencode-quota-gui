@@ -4,8 +4,8 @@
  * Owns computation, caching, single-flight, viewer-scoped polling and
  * invalidation. Cache keys are `(kind, resourceId, range)`; quota is its own
  * key. Failures serve the last good snapshot with `stale: true` when one
- * exists. Pollers run only while at least one SSE viewer is attached and ticks
- * never overlap within a kind.
+ * exists. Pollers run only while at least one transport viewer (SSE or RPC) is
+ * attached and ticks never overlap within a kind.
  *
  * Quota and analytics poll on independent timers: quota uses the existing
  * positive `minIntervalMs` configuration (default 60000), analytics defaults
@@ -118,6 +118,11 @@ export interface SnapshotServiceOptions {
  */
 export type SnapshotViewScope = "analytics" | "quota";
 
+/** One viewer that carries its own active-surface scope. */
+export interface SnapshotViewer {
+  release(): void;
+}
+
 export interface SnapshotService {
   home(input: { range: RangeKey }): Promise<HomeSnapshot>;
   quota(): Promise<QuotaSnapshot>;
@@ -126,8 +131,17 @@ export interface SnapshotService {
   groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
   /** Invalidations broadcast over SSE (three topics, never raw snapshots). */
   subscribe(listener: (event: DashboardEvent) => void): () => void;
-  /** Registers an SSE viewer; the returned disposer detaches it. */
+  /**
+   * Registers a legacy unscoped viewer (HTTP/SSE); the returned disposer
+   * detaches it. Its active surface comes from `setViewScope`.
+   */
   addViewer(): () => void;
+  /**
+   * Registers a viewer that carries its own active-surface scope (RPC/native).
+   * Concurrent viewers aggregate: analytics refresh runs while any viewer needs
+   * analytics, regardless of other viewers' quota signals.
+   */
+  addScopedViewer(scope: SnapshotViewScope): SnapshotViewer;
   /**
    * A settings write: clears quota/home/project caches and broadcasts
    * `settings.changed`. `scope: "visibility"` only broadcasts (no invalidation,
@@ -300,6 +314,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
   let viewers = 0;
   /**
+   * Scoped viewers are real consumers with their own active surface. Legacy
+   * (HTTP/SSE) viewers stay unscoped and vote through `viewScope`; the effective
+   * scope below aggregates both instead of letting the last signal win.
+   */
+  const scopedViewers = new Map<number, SnapshotViewScope>();
+  let nextScopedViewerId = 1;
+  /**
    * Bumped when the viewer session ends (last disconnect or close). It disowns
    * in-flight poll ticks and any HTTP cache commit started before that point.
    */
@@ -371,6 +392,44 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
   function analyticsIntervalMs(): number {
     return readInterval(options.analyticsIntervalMs, DEFAULT_ANALYTICS_INTERVAL_MS);
+  }
+
+  /**
+   * True when any real consumer still needs analytics. A scoped analytics
+   * viewer always wins, so a quota signal from a concurrent window cannot stop
+   * another window's refresh. Legacy viewers vote through `viewScope`; with no
+   * legacy viewer only scoped interests count.
+   */
+  function analyticsViewActive(): boolean {
+    for (const scope of scopedViewers.values()) {
+      if (scope === "analytics") return true;
+    }
+    const legacyViewers = viewers - scopedViewers.size;
+    return legacyViewers > 0 && viewScope === "analytics";
+  }
+
+  function retainViewer(): void {
+    if (closed) return;
+    viewers += 1;
+    if (viewers === 1) startPollers();
+  }
+
+  function releaseViewer(): void {
+    if (closed) return;
+    viewers = Math.max(0, viewers - 1);
+    if (viewers === 0) {
+      stopPollers();
+      // End the viewer session: abandoned ticks poll no further keys, a
+      // reconnect starts with no stale poll interests, and pages are only
+      // polled again after an actual load re-registers them. Scope signals are
+      // viewer-scoped and reset with it.
+      viewerEpoch += 1;
+      viewScope = "analytics";
+      viewScopeExplicit = false;
+      scopedViewers.clear();
+      computes.clear();
+      dirty();
+    }
   }
 
   function emit(event: DashboardEvent): void {
@@ -604,9 +663,10 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       return;
     }
     if (closed || viewers === 0) return;
-    // Visited once is not an active interest: on the quota surface, no
-    // analytics refresh or range derivation runs even though keys are loaded.
-    if (viewScope === "quota") return;
+    // Visited once is not an active interest: while every live viewer is on
+    // the quota surface, no analytics refresh or range derivation runs even
+    // though keys are loaded.
+    if (!analyticsViewActive()) return;
     const epoch = viewerEpoch;
     // Analytics interests are exactly the loaded home/project/session keys.
     // With only quota viewers this list is empty, so no analytics refresh and
@@ -714,25 +774,29 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
     addViewer() {
       if (closed) return () => {};
-      viewers += 1;
-      if (viewers === 1) startPollers();
+      retainViewer();
       let released = false;
       return () => {
         if (released || closed) return;
         released = true;
-        viewers = Math.max(0, viewers - 1);
-        if (viewers === 0) {
-          stopPollers();
-          // End the viewer session: abandoned ticks poll no further keys, a
-          // reconnect starts with no stale poll interests, and pages are only
-          // polled again after an actual load re-registers them. The explicit
-          // view signal is viewer-scoped and resets with it.
-          viewerEpoch += 1;
-          viewScope = "analytics";
-          viewScopeExplicit = false;
-          computes.clear();
-          dirty();
-        }
+        releaseViewer();
+      };
+    },
+
+    addScopedViewer(scope) {
+      if (closed) return { release: () => {} };
+      const id = nextScopedViewerId;
+      nextScopedViewerId += 1;
+      scopedViewers.set(id, scope);
+      retainViewer();
+      let released = false;
+      return {
+        release: () => {
+          if (released || closed) return;
+          released = true;
+          scopedViewers.delete(id);
+          releaseViewer();
+        },
       };
     },
 
@@ -783,6 +847,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       cache.clear();
       inflight.clear();
       tracked.clear();
+      scopedViewers.clear();
     },
   };
 }

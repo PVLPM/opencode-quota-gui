@@ -90,21 +90,45 @@ export function decodeAnalyticsEntityToken(token: string): AnalyticsEntityIdenti
   return encodeAnalyticsEntityToken(identity) === token ? identity : undefined;
 }
 
-/** True for a structurally valid grouped query; raw id contents are unconstrained. */
+function hasExactKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(record);
+  return actual.length === keys.length && actual.every((key) => keys.includes(key));
+}
+
+/**
+ * True for an exact structurally valid grouped query; raw id contents are
+ * unconstrained. Nested `filter`/`identity` objects may not carry extra keys:
+ * the source echoes the filter into its response, so accepting extras would
+ * round-trip unvalidated data through the transport.
+ */
 export function isAnalyticsGroupQuery(value: unknown): value is AnalyticsGroupQuery {
-  if (typeof value !== "object" || value === null) return false;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   if (!isRangeKey(record.range) || !isAnalyticsDimension(record.dimension)) return false;
   const filter = record.filter;
-  if (filter === undefined) return true;
-  if (typeof filter !== "object" || filter === null) return false;
+  if (filter === undefined) {
+    return hasExactKeys(record, ["range", "dimension"]);
+  }
+  if (!hasExactKeys(record, ["range", "dimension", "filter"])) return false;
+  if (typeof filter !== "object" || filter === null || Array.isArray(filter)) return false;
   const filterRecord = filter as Record<string, unknown>;
-  if (!isAnalyticsDimension(filterRecord.dimension)) return false;
+  if (
+    !hasExactKeys(filterRecord, ["dimension", "identity"]) ||
+    !isAnalyticsDimension(filterRecord.dimension)
+  ) {
+    return false;
+  }
   const identity = filterRecord.identity;
-  if (typeof identity !== "object" || identity === null) return false;
+  if (typeof identity !== "object" || identity === null || Array.isArray(identity)) return false;
   const identityRecord = identity as Record<string, unknown>;
-  if (identityRecord.kind === "unknown") return true;
-  return identityRecord.kind === "known" && typeof identityRecord.id === "string";
+  if (identityRecord.kind === "unknown") {
+    return hasExactKeys(identityRecord, ["kind"]);
+  }
+  return (
+    identityRecord.kind === "known" &&
+    hasExactKeys(identityRecord, ["kind", "id"]) &&
+    typeof identityRecord.id === "string"
+  );
 }
 
 /**
