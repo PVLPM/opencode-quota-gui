@@ -60,6 +60,9 @@ importers:
       babel-preset-solid:
         specifier: ^1.9.12
         version: 1.9.12(@babel/core@7.28.0)(solid-js@1.9.12)
+      happy-dom:
+        specifier: 21.0.4
+        version: 21.0.4
       knip:
         specifier: 6.41.0
         version: 6.41.0
@@ -80,7 +83,7 @@ importers:
         version: 2.11.14(solid-js@1.9.12)(vite@8.3.4(@types/node@22.19.6)(esbuild@0.27.2)(jiti@2.7.0)(yaml@2.8.3))
       vitest:
         specifier: ^4.0.17
-        version: 4.0.17(@opentelemetry/api@1.9.1)(@types/node@22.19.6)(jiti@2.7.0)(lightningcss@1.33.0)(yaml@2.8.3)
+        version: 4.0.17(@opentelemetry/api@1.9.1)(@types/node@22.19.6)(happy-dom@21.0.4)(jiti@2.7.0)(lightningcss@1.33.0)(yaml@2.8.3)
       yaml:
         specifier: ^2.8.3
         version: 2.8.3
@@ -1829,6 +1832,9 @@ packages:
   '@types/unist@3.0.3':
     resolution: {integrity: sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==}
 
+  '@types/whatwg-mimetype@3.0.2':
+    resolution: {integrity: sha512-c2AKvDT8ToxLIOUlN51gTiHXflsfIFisS4pO7pDPoKouJCESkhZnEy623gwP9laCy5lnLDAw1vAzu2vM2YLOrA==}
+
   '@types/ws@8.18.1':
     resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
@@ -2074,6 +2080,10 @@ packages:
 
   buffer-equal-constant-time@1.0.1:
     resolution: {integrity: sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==}
+
+  buffer-image-size@0.6.4:
+    resolution: {integrity: sha512-nEh+kZOPY1w+gcCMobZ6ETUp9WfibndnosbpwB1iJk/8Gt5ZF2bhS6+B6bPYz424KtwsR6Rflc3tCz1/ghX2dQ==}
+    engines: {node: '>=4.0'}
 
   bun-ffi-structs@0.3.1:
     resolution: {integrity: sha512-3gM7PpVWLyrwxWjcilSiGuhWanhZivvo6l0u573NziPH6f/gwk6McbaYgn7oJWov6pKGRTDbrg94W5DcJsKTtQ==}
@@ -2400,6 +2410,10 @@ packages:
   gtoken@8.0.0:
     resolution: {integrity: sha512-+CqsMbHPiSTdtSO14O51eMNlrp9N79gmeqmXeouJOhfucAedHw9noVe/n5uJk3tbKE6a+6ZCQg3RPhVhHByAIw==}
     engines: {node: '>=18'}
+
+  happy-dom@21.0.4:
+    resolution: {integrity: sha512-tFm+GaLBgo6o0awHnvHaNoraVo27qJ+2tZEtZ+cIa08hXbeitrxAJajLI05hsUy/2/YTKcUjQYzHe5mCcraLBw==}
+    engines: {node: '>=20.0.0'}
 
   hasown@2.0.2:
     resolution: {integrity: sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ==}
@@ -3476,6 +3490,10 @@ packages:
     peerDependenciesMeta:
       '@types/emscripten':
         optional: true
+
+  whatwg-mimetype@3.0.0:
+    resolution: {integrity: sha512-nt+N2dzIutVRxARx1nghPKGv1xHikU7HKdfafKkLNLindmPU/ch3U31NOCGGA/dmPcmb1VlofO0vnKAcsm0o/Q==}
+    engines: {node: '>=12'}
 
   which@2.0.2:
     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
@@ -5246,6 +5264,8 @@ snapshots:
 
   '@types/unist@3.0.3': {}
 
+  '@types/whatwg-mimetype@3.0.2': {}
+
   '@types/ws@8.18.1':
     dependencies:
       '@types/node': 22.19.6
@@ -5432,6 +5452,10 @@ snapshots:
       update-browserslist-db: 1.2.3(browserslist@4.28.7)
 
   buffer-equal-constant-time@1.0.1: {}
+
+  buffer-image-size@0.6.4:
+    dependencies:
+      '@types/node': 22.19.6
 
   bun-ffi-structs@0.3.1(typescript@7.0.2):
     dependencies:
@@ -5744,6 +5768,19 @@ snapshots:
       jws: 4.0.1
     transitivePeerDependencies:
       - supports-color
+
+  happy-dom@21.0.4:
+    dependencies:
+      '@types/node': 22.19.6
+      '@types/whatwg-mimetype': 3.0.2
+      '@types/ws': 8.18.1
+      buffer-image-size: 0.6.4
+      entities: 7.0.1
+      whatwg-mimetype: 3.0.0
+      ws: 8.22.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   hasown@2.0.2:
     dependencies:
@@ -6818,7 +6855,7 @@ snapshots:
     optionalDependencies:
       vite: 8.3.4(@types/node@22.19.6)(esbuild@0.27.2)(jiti@2.7.0)(yaml@2.8.3)
 
-  vitest@4.0.17(@opentelemetry/api@1.9.1)(@types/node@22.19.6)(jiti@2.7.0)(lightningcss@1.33.0)(yaml@2.8.3):
+  vitest@4.0.17(@opentelemetry/api@1.9.1)(@types/node@22.19.6)(happy-dom@21.0.4)(jiti@2.7.0)(lightningcss@1.33.0)(yaml@2.8.3):
     dependencies:
       '@vitest/expect': 4.0.17
       '@vitest/mocker': 4.0.17(vite@7.3.2(@types/node@22.19.6)(jiti@2.7.0)(lightningcss@1.33.0)(yaml@2.8.3))
@@ -6843,6 +6880,7 @@ snapshots:
     optionalDependencies:
       '@opentelemetry/api': 1.9.1
       '@types/node': 22.19.6
+      happy-dom: 21.0.4
     transitivePeerDependencies:
       - jiti
       - less
@@ -6861,6 +6899,8 @@ snapshots:
   web-streams-polyfill@3.3.3: {}
 
   web-tree-sitter@0.25.10: {}
+
+  whatwg-mimetype@3.0.0: {}
 
   which@2.0.2:
     dependencies:

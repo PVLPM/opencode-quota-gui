@@ -75,6 +75,37 @@ independent re-review found both reported issues addressed.
 Reversible: Yes.
 Owner review: review recommended
 
+## D10 — Header integration without modifying Desktop registration
+
+Stage: 6
+Status: provisional
+Problem: The packaged Desktop registers a user-level protocol handler even
+with an isolated profile, while header layout needs host-space measurement.
+Evidence: Inspection of Desktop 2.2.5 startup and host source; no live Desktop
+launch or header measurement was performed.
+Decision: Implement the approved Slot against released APIs, measuring actual
+DOM/container space, and test realistic constrained and competing-content
+fixtures. Do not alter the user's protocol association or create isolation
+infrastructure; record real Desktop geometry and interaction as unverified.
+Why: The owner clarified that missing live geometry is not a blocker and that
+the product design must not change because of this limitation.
+Mapping: The shared card DTO carries optional existing row IDs with explicit,
+provider-local outer/middle/inner slots. Missing or hidden windows do not shift
+other rings. Unclassified visible percentage cards retain a logo-only token
+and combined-preview details; the client does not infer primary windows.
+Dynamic Kimi, Gemini and AGY rows, custom providers, and aggregate rows with
+unstable window identity are not assigned primary slots without reliable
+identities. Budget and auxiliary rows are not promoted to primary rings.
+Trade-offs: Automated fixtures cannot establish actual Desktop host behavior;
+some providers therefore show details without rings until their primary-window
+identities can be established safely.
+Test evidence: `pnpm verify` passed with 4,878 tests passed, 50 skipped, and
+five cross-surface tests. Mounted DOM fixtures use explicit geometry and
+controlled resize observation; they are not a real Desktop layout engine.
+The Peak countdown refreshes with new view data and can lag between refreshes.
+Reversible: Yes.
+Owner review: owner-directed clarification
+
 ## D07 — GUI build and narrow native seams
 
 Stage: 4

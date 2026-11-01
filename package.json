@@ -110,6 +110,7 @@
     "@solidjs/meta": "0.29.4",
     "@types/node": "^22.0.0",
     "babel-preset-solid": "^1.9.12",
+    "happy-dom": "21.0.4",
     "knip": "6.41.0",
     "lefthook": "2.0.15",
     "oxlint": "1.88.0",

@@ -17,6 +17,7 @@ import type {
   HomeSnapshot,
   ImportPreview,
   JsonValue,
+  PrimaryQuotaWindowRef,
   ProjectActivityRow,
   ProjectRootRow,
   ProjectSnapshot,
@@ -32,6 +33,7 @@ import type {
   TokenStack,
   Usage,
 } from "../contracts/dashboard";
+import { PRIMARY_QUOTA_WINDOW_LIMIT } from "../contracts/dashboard";
 import { isCostedTokens, isDashboardEvent, isTokenStack } from "../contracts/guards";
 import type { CardId, RowId } from "../contracts/identity";
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota";
@@ -505,6 +507,48 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
       if (info !== undefined) parsedRow.info = info;
       return parsedRow;
     });
+  }
+  if (card.primaryQuotaWindows !== undefined) {
+    const primaryDetail = `${detail}.primaryQuotaWindows`;
+    const primary: NonNullable<ProviderCard["primaryQuotaWindows"]> = readArray(
+      card.primaryQuotaWindows,
+      endpoint,
+      primaryDetail,
+    ).map((entry) => {
+      const window = readRecord(entry, endpoint, `${primaryDetail}[]`);
+      return {
+        rowId: readRowId(window.rowId, endpoint, `${primaryDetail}[].rowId`),
+        slot: readIntegerInRange(
+          window.slot,
+          endpoint,
+          `${primaryDetail}[].slot`,
+          0,
+          2,
+        ) as PrimaryQuotaWindowRef["slot"],
+      };
+    });
+    if (
+      primary.length > PRIMARY_QUOTA_WINDOW_LIMIT ||
+      new Set(primary.map((window) => window.rowId)).size !== primary.length ||
+      new Set(primary.map((window) => window.slot)).size !== primary.length
+    ) {
+      throw faulty(endpoint, primaryDetail);
+    }
+    const rowsById = new Map(parsed.rows.map((row) => [row.rowId, row] as const));
+    if (
+      !primary.every((window) => {
+        const row = rowsById.get(window.rowId);
+        return (
+          row !== undefined &&
+          row.kind === "percent" &&
+          (row.resultType === "quota" || row.resultType === "rate_limit") &&
+          Number.isFinite(row.percentRemaining)
+        );
+      })
+    ) {
+      throw faulty(endpoint, primaryDetail);
+    }
+    parsed.primaryQuotaWindows = primary;
   }
   return parsed;
 }

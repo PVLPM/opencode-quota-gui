@@ -41,6 +41,7 @@ import type {
   StepPoint,
   Usage,
 } from "./dashboard.js";
+import { PRIMARY_QUOTA_WINDOW_LIMIT } from "./dashboard.js";
 import { isCostedTokens, isTokenStack } from "./guards.js";
 import type { BankedResetAvailability } from "./openai-quota.js";
 import { type BucketUnit, isRangeKey, type RangeWindow } from "./ranges.js";
@@ -282,15 +283,51 @@ function isProviderCard(value: unknown): value is ProviderCard {
   ) {
     return false;
   }
-  return isOptional(
-    value.visibilityRows,
-    (rows): rows is { rowId: string; label: string; info?: string }[] =>
-      isArrayOf(
-        rows,
-        (row) =>
-          isRecord(row) && isText(row.rowId) && isText(row.label) && isOptional(row.info, isText),
-      ),
+  if (
+    !isOptional(
+      value.visibilityRows,
+      (rows): rows is { rowId: string; label: string; info?: string }[] =>
+        isArrayOf(
+          rows,
+          (row) =>
+            isRecord(row) && isText(row.rowId) && isText(row.label) && isOptional(row.info, isText),
+        ),
+    )
+  ) {
+    return false;
+  }
+
+  const rowsById = new Map<string, QuotaCardRow>(
+    (value.rows as QuotaCardRow[]).map((row) => [row.rowId, row] as const),
   );
+  return isOptional(value.primaryQuotaWindows, (windows): windows is unknown[] => {
+    if (!Array.isArray(windows) || windows.length > PRIMARY_QUOTA_WINDOW_LIMIT) return false;
+    const seenRowIds = new Set<string>();
+    const seenSlots = new Set<number>();
+    return windows.every((window) => {
+      if (
+        !isRecord(window) ||
+        !isText(window.rowId) ||
+        !isIntegerBetween(window.slot, 0, 2) ||
+        seenRowIds.has(window.rowId) ||
+        seenSlots.has(window.slot)
+      ) {
+        return false;
+      }
+      const row = rowsById.get(window.rowId);
+      if (
+        row === undefined ||
+        row.kind !== "percent" ||
+        (row.resultType !== "quota" && row.resultType !== "rate_limit") ||
+        !isFiniteNumber(row.percentRemaining)
+      ) {
+        return false;
+      }
+      seenRowIds.add(window.rowId);
+      seenSlots.add(window.slot);
+      return true;
+    });
+  });
 }
 
 function isProviders(value: unknown): value is HomeSnapshot["providers"] {

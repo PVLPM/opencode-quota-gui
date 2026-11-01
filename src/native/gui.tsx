@@ -4,6 +4,7 @@ import {
   Panel,
   Plugin,
   SettingsPage,
+  Slot,
   Style,
   usePanel,
   usePlugin,
@@ -14,7 +15,10 @@ import productCss from "../ui/styles.css?inline";
 import { createNativeDashboardClient } from "./dashboard-client.js";
 import nativeCss from "./native.css?inline";
 import { DashboardPanel } from "./panel.js";
+import { revealDashboardPanel } from "./panel-open.js";
 import { createGuiRpcCaller } from "./rpc.js";
+import headerCss from "./session-header.css?inline";
+import { NativeSessionHeader } from "./session-header.js";
 import { NativeSettingsPage, SETTINGS_PAGE_ID } from "./settings-page.js";
 
 /**
@@ -65,11 +69,23 @@ function NativeDashboardPanel(): JSX.Element {
   );
 }
 
+/**
+ * Reveals the Dashboard tab for one session. `Layout.state` keeps an already
+ * visible Panel mounted with its last internal route; a stored/hidden tab is
+ * selected or shown, and a closed tab mounts at its default Quota route.
+ */
+function revealPanel(
+  ctx: ReturnType<typeof usePlugin>,
+  session: Parameters<typeof revealDashboardPanel>[2],
+): void {
+  revealDashboardPanel(ctx.layout, `${ctx.id}:${TAB_ID}`, session);
+}
+
 /** Opens the Dashboard tab in the routed session's side region. */
 function openDashboardPanel(ctx: ReturnType<typeof usePlugin>): void {
   const session = ctx.sessions.current() ?? ctx.sessions.list()[0];
   if (session === undefined) return;
-  ctx.layout.open(`${ctx.id}:${TAB_ID}`, session);
+  revealPanel(ctx, session);
 }
 
 export default Plugin.define({
@@ -79,6 +95,15 @@ export default Plugin.define({
     // except for the namespaced `--qg-*` custom properties on `:root`.
     ctx.add(Style, productCss);
     ctx.add(Style, nativeCss);
+    ctx.add(Style, headerCss);
+
+    ctx.add(Slot, {
+      at: "session.header",
+      order: 0,
+      render: (input) => (
+        <NativeSessionHeader input={input} onOpenPanel={(session) => revealPanel(ctx, session)} />
+      ),
+    });
 
     ctx.add(Panel, {
       id: PANEL_ID,

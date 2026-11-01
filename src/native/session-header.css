@@ -1,0 +1,285 @@
+/*
+ * `session.header` Slot (Stage 6).
+ *
+ * Native-only presentation: the host header is a 28 px action row, so the
+ * tokens are smaller than a card but reuse the product's quota severity
+ * colours and the shared progress-bar geometry in the combined preview.
+ * Nothing here styles the Panel or the browser dashboard.
+ */
+
+.qg-slot-strip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.qg-slot-token {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--qg-text-secondary);
+  cursor: pointer;
+}
+
+.qg-slot-token:hover {
+  background: var(--surface-base-hover, rgba(255, 255, 255, 0.06));
+}
+
+.qg-slot-token:focus-visible {
+  outline: 2px solid var(--qg-accent-border);
+  outline-offset: 2px;
+}
+
+.qg-slot-token__rings {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.qg-slot-token__svg {
+  position: absolute;
+  inset: 0;
+  width: 28px;
+  height: 28px;
+  overflow: visible;
+}
+
+.qg-slot-token__track {
+  fill: none;
+  stroke: #494949;
+  stroke-width: 2;
+  opacity: 0.6;
+}
+
+.qg-slot-token__ring {
+  fill: none;
+  stroke: #72d78c;
+  stroke-width: 2;
+  transition: stroke-dasharray var(--qg-transition);
+}
+
+.qg-slot-token__ring[data-severity="warning"] {
+  stroke: #f4d585;
+}
+
+.qg-slot-token__ring[data-severity="critical"] {
+  stroke: #f2827f;
+}
+
+.qg-slot-token__logo {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  opacity: 0.9;
+}
+
+/* No classified primary window: keep the token legible as a provider mark,
+   without drawing a ring or implying a zero/unknown percentage. */
+.qg-slot-token[data-ring-count="0"] .qg-slot-token__logo {
+  width: 13px;
+  height: 13px;
+}
+
+/* Outside the ring, above-right, never over the rings or logo. */
+.qg-slot-token__peak {
+  position: absolute;
+  top: -2px;
+  inset-inline-end: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--qg-bg);
+  pointer-events: none;
+}
+
+.qg-slot-token__peak[data-peak="now"] {
+  background: #f17471;
+}
+
+.qg-slot-token__peak[data-peak="soon"] {
+  background: #f4cf74;
+}
+
+.qg-slot-overflow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 30px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--qg-border-strong);
+  border-radius: 11px;
+  background: transparent;
+  color: var(--qg-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.qg-slot-overflow:hover {
+  background: var(--surface-base-hover, rgba(255, 255, 255, 0.06));
+  color: var(--qg-text);
+}
+
+.qg-slot-overflow:focus-visible {
+  outline: 2px solid var(--qg-accent-border);
+  outline-offset: 2px;
+}
+
+/* Fixed portal, so the side region and timeline never clip the preview. */
+.qg-slot-preview-layer {
+  position: fixed;
+  z-index: 60;
+  max-width: calc(100vw - 16px);
+  color: var(--qg-text-secondary);
+  font-family: var(--font-family-sans, ui-sans-serif, system-ui, sans-serif);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.qg-slot-preview {
+  box-sizing: border-box;
+  width: min(380px, calc(100vw - 16px));
+  max-height: inherit;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 10px;
+  border: 1px solid var(--qg-border-strong);
+  border-radius: 10px;
+  background: var(--qg-surface);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+.qg-slot-preview__card + .qg-slot-preview__card {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--qg-border);
+}
+
+.qg-slot-preview__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.qg-slot-preview__logo {
+  width: 13px;
+  height: 13px;
+  color: var(--qg-text-muted);
+}
+
+.qg-slot-preview__provider {
+  color: var(--qg-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.qg-slot-preview__meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--qg-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qg-slot-preview__peak {
+  margin-inline-start: auto;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.qg-slot-preview__peak[data-peak="now"] {
+  color: #f17471;
+}
+
+.qg-slot-preview__peak[data-peak="soon"] {
+  color: #f4cf74;
+}
+
+.qg-slot-preview__rows {
+  display: grid;
+  gap: 0;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.qg-slot-preview__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+  padding: 4px 0;
+}
+
+.qg-slot-preview__row + .qg-slot-preview__row {
+  border-top: 1px solid color-mix(in srgb, var(--qg-border) 60%, transparent);
+}
+
+.qg-slot-preview__label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--qg-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qg-slot-preview__value {
+  color: #6bd586;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qg-slot-preview__row[data-severity="warning"] .qg-slot-preview__value {
+  color: #f4cf74;
+}
+
+.qg-slot-preview__row[data-severity="critical"] .qg-slot-preview__value {
+  color: #f17471;
+}
+
+.qg-slot-preview__reset {
+  grid-column: 1 / -1;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+}
+
+.qg-slot-preview__row .qg-row__bar {
+  grid-column: 1 / -1;
+  height: 6px;
+  margin-top: 1px;
+}
+
+.qg-slot-preview__row[data-severity="warning"] .qg-row__bar-fill {
+  background: #f4d585;
+}
+
+.qg-slot-preview__row[data-severity="critical"] .qg-row__bar-fill {
+  background: #f2827f;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qg-slot-token__ring {
+    transition: none;
+  }
+}

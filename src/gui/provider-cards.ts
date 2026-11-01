@@ -10,7 +10,13 @@
  * diagnostics are never copied into a payload.
  */
 import { orderCardsByPreference } from "../contracts/card-order.js";
-import type { ProviderCard, QuotaCardRow } from "../contracts/dashboard.js";
+import {
+  PRIMARY_QUOTA_WINDOW_LIMIT,
+  type PrimaryQuotaWindowRef,
+  type PrimaryQuotaWindowSlot,
+  type ProviderCard,
+  type QuotaCardRow,
+} from "../contracts/dashboard.js";
 import type { CardId } from "../contracts/identity.js";
 import {
   OPENAI_CREDITS_INFO,
@@ -59,6 +65,7 @@ import {
   PROVIDER_SCOPE_IDENTITY_KEY,
   rowIdForEntry,
 } from "./identity.js";
+import { primaryQuotaWindowSlot } from "./primary-quota-windows.js";
 
 /** Controlled fallback for unknown/unsafe provider errors (spec §9 R38). */
 export const PROVIDER_ERROR_GENERIC_MESSAGE =
@@ -231,7 +238,7 @@ function mapEntryRow(params: {
   cardId: CardId;
   preferences: ProviderCardPreferences;
   nowMs: number;
-}): QuotaCardRow {
+}): { row: QuotaCardRow; sanitizedEntry: QuotaToastEntry } {
   const { cardId, preferences, nowMs } = params;
   const entry = sanitizeQuotaToastEntry(params.entry);
   const row: QuotaCardRow = {
@@ -258,7 +265,7 @@ function mapEntryRow(params: {
       const detailRows = detailRowsFor(entry.basis);
       if (detailRows.length > 0) row.detailRows = detailRows;
     }
-    return row;
+    return { row, sanitizedEntry: entry };
   }
 
   applyResetFields(row, entry, preferences);
@@ -272,7 +279,7 @@ function mapEntryRow(params: {
     row.kind = "boolean";
     row.booleanValue = entry.value;
   }
-  return row;
+  return { row, sanitizedEntry: entry };
 }
 
 /**
@@ -282,14 +289,16 @@ function mapEntryRow(params: {
  */
 function mapEntryRows(params: {
   entries: readonly QuotaToastEntry[];
+  providerId: string;
   cardId: CardId;
   preferences: ProviderCardPreferences;
   nowMs: number;
-}): QuotaCardRow[] {
+}): { rows: QuotaCardRow[]; primaryQuotaWindows: PrimaryQuotaWindowRef[] } {
   const rows: QuotaCardRow[] = [];
+  const windowsBySlot = new Map<PrimaryQuotaWindowSlot, PrimaryQuotaWindowRef>();
   const seen = new Set<string>();
   for (const entry of params.entries) {
-    const row = mapEntryRow({
+    const { row, sanitizedEntry } = mapEntryRow({
       entry,
       cardId: params.cardId,
       preferences: params.preferences,
@@ -298,8 +307,19 @@ function mapEntryRows(params: {
     if (seen.has(row.rowId)) continue;
     seen.add(row.rowId);
     rows.push(row);
+    const slot = primaryQuotaWindowSlot(params.providerId, sanitizedEntry);
+    if (
+      slot !== undefined &&
+      windowsBySlot.size < PRIMARY_QUOTA_WINDOW_LIMIT &&
+      !windowsBySlot.has(slot)
+    ) {
+      windowsBySlot.set(slot, { rowId: row.rowId, slot });
+    }
   }
-  return rows;
+  return {
+    rows,
+    primaryQuotaWindows: [...windowsBySlot.values()].sort((left, right) => left.slot - right.slot),
+  };
 }
 
 const OPENAI_OPTIONAL_ROW_ACCOUNTING = {
@@ -390,6 +410,13 @@ function buildProviderCard(params: {
   nowMs: number;
 }): ProviderCard {
   const cardId = buildProviderScopeCardId(params.providerId);
+  const mapped = mapEntryRows({
+    entries: params.entries,
+    providerId: params.providerId,
+    cardId,
+    preferences: params.preferences,
+    nowMs: params.nowMs,
+  });
   const card: ProviderCard = {
     cardId,
     providerId: params.providerId,
@@ -397,14 +424,12 @@ function buildProviderCard(params: {
     providerScopeId: params.providerScopeId,
     providerScopeHash: params.providerScopeHash,
     labelSource: "provider",
-    rows: mapEntryRows({
-      entries: params.entries,
-      cardId,
-      preferences: params.preferences,
-      nowMs: params.nowMs,
-    }),
+    rows: mapped.rows,
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
   };
+  if (mapped.primaryQuotaWindows.length > 0) {
+    card.primaryQuotaWindows = mapped.primaryQuotaWindows;
+  }
   if (params.providerId === "openai") card.visibilityRows = openAiOptionalVisibilityRows(cardId);
   const observedAtIso = latestObservedAtIso(params.entries);
   if (observedAtIso) card.observedAtIso = observedAtIso;
@@ -433,6 +458,13 @@ function buildAccountCard(params: {
   const planLabel = params.account.planLabel
     ? sanitizeSingleLineDisplayText(params.account.planLabel).trim()
     : "";
+  const mapped = mapEntryRows({
+    entries: params.entries,
+    providerId: params.providerId,
+    cardId,
+    preferences: params.preferences,
+    nowMs: params.nowMs,
+  });
   const card: ProviderCard = {
     cardId,
     providerId: params.providerId,
@@ -443,14 +475,12 @@ function buildAccountCard(params: {
     accountLabel: sanitizedLabel || `Account ${params.accountIndex + 1}`,
     ...(planLabel ? { planLabel } : {}),
     labelSource: sanitizedLabel ? "connection" : "account",
-    rows: mapEntryRows({
-      entries: params.entries,
-      cardId,
-      preferences: params.preferences,
-      nowMs: params.nowMs,
-    }),
+    rows: mapped.rows,
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
   };
+  if (mapped.primaryQuotaWindows.length > 0) {
+    card.primaryQuotaWindows = mapped.primaryQuotaWindows;
+  }
   if (params.providerId === "openai") card.visibilityRows = openAiOptionalVisibilityRows(cardId);
   const observedAtIso = latestObservedAtIso(params.entries);
   if (observedAtIso) card.observedAtIso = observedAtIso;
