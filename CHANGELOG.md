@@ -2,6 +2,20 @@
 
 User-facing release notes for OpenCode Quota GUI.
 
+## 1.3.0
+
+### Added
+
+- **OpenCode Desktop GUI.** Open **Quota & Usage** for quota, analytics, models, and detail views, with settings integrated into OpenCode and compact quota previews in session headers. The experimental GUI requires OpenCode Desktop 2.2.x.
+
+### Changed
+
+- **Optional browser dashboard.** Web access is off by default, including when upgrading from 1.2.0 or earlier. Enable it in the canonical settings and restart OpenCode when needed.
+
+### Fixed
+
+- **Native connection recovery.** Recover viewer subscriptions after the Desktop host's request deadline without presenting stale quota as fresh.
+
 ## 1.2.0
 
 ### Added

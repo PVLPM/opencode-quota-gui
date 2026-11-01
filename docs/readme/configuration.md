@@ -22,7 +22,7 @@ Provider credential sidecars are separate files in the same GUI namespace. For e
 
 ## Settings page
 
-When the web dashboard is enabled, open <http://localhost:4144/settings>. The page groups the supported controls:
+In OpenCode Desktop 2.2.x, open the plugin's page in OpenCode Settings. Alternatively, when the web dashboard is enabled, open <http://localhost:4144/settings>. The page groups the supported controls:
 
 | Group | What it changes |
 | --- | --- |
@@ -33,7 +33,7 @@ When the web dashboard is enabled, open <http://localhost:4144/settings>. The pa
 | Visibility | Shows or hides cards and rows, and reorders cards. Presentation only. |
 | Dashboard | Read-only address, the canonical file path, configuration issues, and build details. |
 
-Saving Settings writes to the canonical file atomically. If the file changed elsewhere, the save returns a conflict and keeps your draft. The web dashboard switch is edited in the canonical file for now; use [Web dashboard](#web-dashboard) followed by an OpenCode restart.
+Saving Settings writes to the canonical file atomically. If the file changed elsewhere, the save returns a conflict and keeps your draft. The Desktop Settings page includes the web dashboard switch; changing it requires an OpenCode restart. You can also use the manual recovery edit under [Web dashboard](#web-dashboard).
 
 ### Visibility identifiers
 

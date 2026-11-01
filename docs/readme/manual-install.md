@@ -47,7 +47,7 @@ npx opencode-quota-gui init
 
 `init` is not required for the normal install. It previews the plugin entry, the global canonical GUI settings, and the OpenCode config location before writing. Choosing a project install selects only the project OpenCode plugin entry; behavior settings remain in the global `opencode-quota-gui/config.jsonc`. The preview states this, and an existing sibling GUI `config.json` is preserved unchanged, not converted or imported implicitly.
 
-Web access is off by default. Add `"dashboard": { "enabled": true }` to the canonical file above, restart OpenCode, then open <http://localhost:4144/quota>. The dashboard is the product surface; there is no separate TUI entry to add. See [Web dashboard](configuration.md#web-dashboard) for the recovery edit and fixed-port behavior.
+On OpenCode Desktop 2.2.x, open **Quota & Usage** in the panel. Web access is off by default; to use it, add `"dashboard": { "enabled": true }` to the canonical file above, restart OpenCode, then open <http://localhost:4144/quota>. There is no separate TUI entry to add. See [Web dashboard](configuration.md#web-dashboard) for the recovery edit and fixed-port behavior.
 
 ## First settings
 
@@ -61,7 +61,7 @@ A fresh setup works with defaults, but the browser dashboard stays off until tha
 
 ## Requirements
 
-- OpenCode `>= 2.0.16 < 2.3.0`. The experimental Desktop panel requires OpenCode Desktop `2.2.0` or newer. This package does not support OpenCode 1.
+- OpenCode `>= 2.0.16 < 2.3.0`. The experimental Desktop GUI requires OpenCode Desktop 2.2.x. This package does not support OpenCode 1.
 - Node.js `22.13+` (or `23.4+` on Node 23), whether you run the package with `npx` or from a local checkout.
 
 ## Local checkout (development)

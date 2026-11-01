@@ -68,7 +68,7 @@ The browser dashboard is off by default for new and upgraded installs. To enable
 
 Then open <http://localhost:4144/quota>. The first page may show an empty dashboard until OpenCode has loaded the plugin and discovered a provider account. The path and platform overrides are in [Configuration](docs/readme/configuration.md#web-dashboard).
 
-Requirements: OpenCode `>= 2.0.16 < 2.3.0` and Node.js `22.13+` or `23.4+`. The experimental Desktop panel requires OpenCode Desktop `2.2.0` or newer. This package does not support OpenCode 1.
+Requirements: OpenCode `>= 2.0.16 < 2.3.0` and Node.js `22.13+` or `23.4+`. The experimental Desktop GUI requires OpenCode Desktop 2.2.x. This package does not support OpenCode 1.
 
 ## Dashboard
 
@@ -89,7 +89,7 @@ The routes are real URLs, so reload and browser back/forward work:
 - `/session/<id>` — one session tree
 - `/settings` — dashboard settings
 
-OpenCode Desktop 2.2.0 introduced an experimental GUI plugin API. The in-progress Desktop integration provides a Quota panel using the same backend; Analytics and Settings integration remain under development. The browser dashboard remains an optional recovery surface.
+On OpenCode Desktop 2.2.x, open **Quota & Usage** for Quota, Analytics, Models, and their detail pages. OpenCode Settings also includes the plugin's Settings page. Session headers show compact quota tokens with a combined preview. The browser dashboard remains an optional recovery surface.
 
 ## Scope and limitations
 
@@ -97,7 +97,7 @@ OpenCode Desktop 2.2.0 introduced an experimental GUI plugin API. The in-progres
 - **Cost estimates are not bills.** The API-equivalent figure applies list prices to recorded tokens. It is not subscription spend, an invoice, or a reconciliation of what a provider charged; plan pricing, credits, discounts, taxes, and provider billing adjustments are not applied.
 - **`Free`, `Unpriced`, and unknown tokens are distinct.** `Free` appears only for a non-empty total whose every token has an explicit zero list price. Unpriced or unknown tokens are excluded from the estimate; a mixed total is marked `Partial estimate`, and a non-empty total with no priced tokens is `Unpriced`, never `Free` or `USD 0`. A model with a missing or unrecognized identity or price can make a total partial or unpriced.
 - **Coverage is local and provider-limited.** Analytics covers completed steps in the local OpenCode database; other machines, other clients, deleted sessions, and activity not recorded as completed steps are absent. Historical provider/model attribution depends on the raw identities OpenCode stored. Provider coverage and plan support vary: some APIs expose only balance, spend, budget, or status, and a card cannot invent quota that the provider does not return. Cursor and Alibaba cards that use local history are estimates, not official provider totals.
-- **Browser and host limits.** The optional browser dashboard binds to `127.0.0.1`; it is not a hosted service and has no TUI. The experimental Desktop panel requires OpenCode Desktop 2.2.0 or newer.
+- **Browser and host limits.** The optional browser dashboard binds to `127.0.0.1`; it is not a hosted service and has no TUI. The experimental Desktop GUI requires OpenCode Desktop 2.2.x.
 
 ## Providers
 

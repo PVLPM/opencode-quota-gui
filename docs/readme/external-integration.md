@@ -6,7 +6,8 @@ This release is dashboard-only. There is no supported API, file format, metrics 
 
 ## Supported integration surface
 
-- **The dashboard:** enable the optional web transport first (see [Configuration: Web dashboard](../readme/configuration.md#web-dashboard)), then open <http://localhost:4144/quota> in a browser on the same machine. This is the product surface, and it is the only supported way to view the data in this release.
+- **Native Desktop:** open **Quota & Usage** in OpenCode Desktop 2.2.x, or use its session-header preview and OpenCode Settings page.
+- **The browser dashboard:** enable the optional web transport first (see [Configuration: Web dashboard](../readme/configuration.md#web-dashboard)), then open <http://localhost:4144/quota> on the same machine.
 - **OpenCode:** configure the `opencode-quota-gui` entry in the plural `plugins` list. OpenCode loads the server plugin, starts the dashboard, and manages provider logins. See [Manual install](manual-install.md).
 - **Companion provider plugins:** Cursor, Google AGY, and Gemini CLI integrations require their own community plugins, listed before the quota entry. See [Providers](providers.md).
 
@@ -16,7 +17,7 @@ No public API is exposed. The dashboard page uses `/api/v1` routes and an event 
 
 The local server exposes `/api/v1` HTTP routes and an event stream for the dashboard page. Those routes are internal transport, not a public API: they are not versioned for third parties, they reject non-loopback hosts and origins, they send no CORS headers, and they may change without an external compatibility promise. Do not build status bars, CI checks, monitoring exporters, or other automation against them.
 
-No supported export file, JSON command, CLI report, slash command, tool, or RPC method is registered by this package. No report message, report marker, or report metadata contract is produced for another surface. The inherited source for some of those features is not a supported interface in this GUI-only release. There is no announced external API and no temporary preview contract.
+No supported export file, JSON command, CLI report, slash command, tool, or external RPC API is provided by this package. The Native GUI uses internal RPC methods that are not a supported third-party interface. No report message, report marker, or report metadata contract is produced for another surface. The inherited source for some of those features is not a supported interface in this GUI-only release. There is no announced external API and no temporary preview contract.
 
 ## Optional OpenTelemetry (advanced, host-owned)
 
