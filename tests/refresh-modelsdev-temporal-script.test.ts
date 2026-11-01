@@ -13,6 +13,7 @@ import {
   buildTemporalSnapshot,
   discoverLocalSourceRoutes,
   extractTemporalModel,
+  gitRepositoryEnv,
   parseTomlSubset,
   refreshTemporalSnapshot,
   resolveCurrentSourceRevision,
@@ -757,6 +758,92 @@ factor = 2
 });
 
 describe("refresh-modelsdev-temporal git fixture isolation", () => {
+  it("strips repository-selection git variables case-insensitively and preserves unrelated env", () => {
+    expect(
+      gitRepositoryEnv({
+        PATH: "C:\\bin",
+        git_dir: "hostile-git-dir",
+        GIT_WORK_TREE: "hostile-work-tree",
+        Git_Index_File: "hostile-index",
+        GiT_oBjEcT_dIrEcToRy: "hostile-objects",
+        GIT_OPTIONAL_LOCKS: "1",
+        git_optional_locks: "0",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_AUTHOR_NAME: "Hook Author",
+      }),
+    ).toEqual({
+      PATH: "C:\\bin",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_AUTHOR_NAME: "Hook Author",
+    });
+  });
+
+  it("requires declared provenance for a non-git source named by an inherited absolute GIT_DIR", async () => {
+    const root = mkdtempSync(join(tmpdir(), "modelsdev-temporal-git-dir-"));
+    const hostileRepo = join(root, "hostile-repo");
+    const sourceDir = join(root, "source");
+    try {
+      // Reproduces the failure with an absolute GIT_DIR and no
+      // GIT_WORK_TREE, so git makes the source directory the hostile repository's work tree.
+      mkdirSync(hostileRepo);
+      git(hostileRepo, ["init", "-q"]);
+      git(hostileRepo, [
+        "-c",
+        "user.name=Hostile Repo",
+        "-c",
+        "user.email=hostile@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "hostile head",
+      ]);
+      const hostileBefore = headAndIndex(hostileRepo);
+      // Clear every ambient hook export first, then install only this scenario's variables.
+      stubIsolatedGitEnv();
+      expect(process.env.GIT_DIR).toBeUndefined();
+      expect(process.env.GIT_OPTIONAL_LOCKS).toBeUndefined();
+      vi.stubEnv("GIT_DIR", join(hostileRepo, ".git"));
+      vi.stubEnv("GIT_WORK_TREE", undefined);
+
+      mkdirSync(join(sourceDir, "providers", "plainco", "models"), { recursive: true });
+      writeFileSync(
+        join(sourceDir, "providers", "plainco", "models", "plain.toml"),
+        `
+schema = 2
+[cost.text.input]
+price = 1
+[[cost.multipliers]]
+when = { utc_hours = { lt = "04:00" } }
+factor = 2
+`,
+      );
+
+      // The production call intentionally inherits the hostile environment: it must ignore
+      // repository-selection variables instead of borrowing the hostile HEAD or its index.
+      await expect(refreshTemporalSnapshot({ sourceDir })).rejects.toThrow(/revision|provenance/);
+      const revision = "d".repeat(40);
+      await expect(refreshTemporalSnapshot({ sourceDir, revision })).rejects.toThrow(/generatedAt/);
+      const snapshot = await refreshTemporalSnapshot({
+        sourceDir,
+        revision,
+        generatedAt: 1_700_000_000_000,
+      });
+      expect(snapshot.revision).toBe(revision);
+      expect(snapshot.providers.plainco.plain.source).toBe("providers/plainco/models/plain.toml");
+
+      // The hostile repository named by GIT_DIR was not modified.
+      expect(headAndIndex(hostileRepo)).toEqual(hostileBefore);
+      expect(git(hostileRepo, ["status", "--porcelain", "--untracked-files=all"])).toBe("");
+      expect(git(hostileRepo, ["ls-files"])).toBe("");
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps temp-repo git away from the repository named by inherited GIT_* variables", async () => {
     const root = mkdtempSync(join(tmpdir(), "modelsdev-temporal-git-isolation-"));
     const hostileRepo = join(root, "hostile-repo");
@@ -781,6 +868,10 @@ describe("refresh-modelsdev-temporal git fixture isolation", () => {
       const hostileBefore = headAndIndex(hostileRepo);
 
       // A git hook (lefthook pre-push) exports these for every git process it spawns.
+      // Clear all ambient hook exports first, then install only this scenario's variables.
+      stubIsolatedGitEnv();
+      expect(process.env.GIT_DIR).toBeUndefined();
+      expect(process.env.GIT_OPTIONAL_LOCKS).toBeUndefined();
       const hostileGitDir = join(hostileRepo, ".git");
       vi.stubEnv("GIT_DIR", hostileGitDir);
       vi.stubEnv("GIT_WORK_TREE", hostileRepo);
@@ -819,9 +910,8 @@ factor = 2
         10,
       );
 
-      // refreshTemporalSnapshot spawns git with the inherited process.env, so the operation
-      // under test needs the same isolation the fixture commands receive.
-      stubIsolatedGitEnv();
+      // The production call intentionally inherits the hostile environment and must isolate
+      // its own git subprocesses rather than relying on the fixture helper.
       const snapshot = await refreshTemporalSnapshot({ sourceDir });
       expect(snapshot.revision).toBe(sourceBefore.head);
       expect(snapshot.source).toBe(temporalSourceUrl(sourceBefore.head));
@@ -834,8 +924,8 @@ factor = 2
       expect(git(hostileRepo, ["ls-files"])).toBe("");
       expect(git(hostileRepo, ["config", "--local", "--list"])).not.toContain("user.");
     } finally {
-      // Restore the inherited GIT_* values captured by both vi.stubEnv() and
-      // stubIsolatedGitEnv(), even when an assertion fails mid-test.
+      // Restore the inherited GIT_* values captured by vi.stubEnv(), even when an
+      // assertion fails mid-test.
       vi.unstubAllEnvs();
       rmSync(root, { recursive: true, force: true });
     }
