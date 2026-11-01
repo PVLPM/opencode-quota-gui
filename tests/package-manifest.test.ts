@@ -203,12 +203,13 @@ describe("package manifest compatibility", () => {
     expect(pkg.devDependencies?.yaml).toBe("^2.8.3");
   });
 
-  it("keeps the Desktop SDK and the server peer as separate exact pins", () => {
-    expect(pkg.peerDependencies?.["@opencode/plugin"]).toBe("2.0.16");
+  it("keeps the Desktop SDK pinned and bounds the server peer to tested hosts", () => {
+    expect(pkg.peerDependencies?.["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
     expect(pkg.devDependencies?.["@opencode/plugin"]).toBe("2.2.0");
     expect(pkg.dependencies?.["@opentui/core"]).toBe("^0.5.10");
     expect(pkg.dependencies?.["@opentui/solid"]).toBe("^0.5.10");
     expect(readme).toContain("Node.js `22.13+` or `23.4+`");
+    expect(readme).toContain("OpenCode `>= 2.0.16 < 2.3.0`");
     expect(readme).not.toContain("OpenCode `>= 1.4.3`");
     expect(pkg.engines).not.toHaveProperty("opencode");
   });
@@ -217,7 +218,9 @@ describe("package manifest compatibility", () => {
     expect(tsconfig.compilerOptions?.types).toEqual(["node"]);
     expect(typescriptValidator).toContain('const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";');
     expect(typescriptValidator).toContain('const EXPECTED_PLUGIN_SDK_VERSION = "2.2.0";');
-    expect(typescriptValidator).toContain('const EXPECTED_PLUGIN_PEER_VERSION = "2.0.16";');
+    expect(typescriptValidator).toContain(
+      'const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";',
+    );
     expect(typescriptValidator).toContain('const EXPECTED_OPENTUI_SPECIFIER = "^0.5.10";');
     expect(typescriptValidator).toContain('const EXPECTED_OPENTUI_VERSION = "0.5.10";');
     expect(typescriptValidator).toContain('const BUN_FFI_STRUCTS_VERSION = "0.3.1";');

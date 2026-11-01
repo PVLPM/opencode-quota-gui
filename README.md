@@ -68,7 +68,7 @@ The browser dashboard is off by default for new and upgraded installs. To enable
 
 Then open <http://localhost:4144/quota>. The first page may show an empty dashboard until OpenCode has loaded the plugin and discovered a provider account. The path and platform overrides are in [Configuration](docs/readme/configuration.md#web-dashboard).
 
-Requirements: OpenCode `2.0.16` or newer and Node.js `22.13+` or `23.4+`. The experimental Desktop panel requires OpenCode Desktop `2.2.0` or newer. This package does not support OpenCode 1.
+Requirements: OpenCode `>= 2.0.16 < 2.3.0` and Node.js `22.13+` or `23.4+`. The experimental Desktop panel requires OpenCode Desktop `2.2.0` or newer. This package does not support OpenCode 1.
 
 ## Dashboard
 

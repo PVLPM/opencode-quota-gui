@@ -61,7 +61,7 @@ A fresh setup works with defaults, but the browser dashboard stays off until tha
 
 ## Requirements
 
-- OpenCode `2.0.16` or newer. The experimental Desktop panel requires OpenCode Desktop `2.2.0` or newer. This package does not support OpenCode 1.
+- OpenCode `>= 2.0.16 < 2.3.0`. The experimental Desktop panel requires OpenCode Desktop `2.2.0` or newer. This package does not support OpenCode 1.
 - Node.js `22.13+` (or `23.4+` on Node 23), whether you run the package with `npx` or from a local checkout.
 
 ## Local checkout (development)

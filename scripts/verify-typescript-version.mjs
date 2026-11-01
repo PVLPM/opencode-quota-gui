@@ -6,10 +6,11 @@ import { parse } from "yaml";
 
 const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";
 // The Desktop GUI builds against the SDK that ships the GUI/Vite API; the
-// server keeps its published peer contract until an old/new host test proves a
-// wider range is safe.
+// server peer is bounded by packed-package host evidence: 2.0.16, 2.1.4,
+// 2.2.0, and 2.2.5 passed under Bun, so the range stops before the next
+// unverified minor line.
 const EXPECTED_PLUGIN_SDK_VERSION = "2.2.0";
-const EXPECTED_PLUGIN_PEER_VERSION = "2.0.16";
+const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";
 const PLUGIN_PACKAGE = "@opencode/plugin";
 const EXPECTED_OPENTUI_SPECIFIER = "^0.5.10";
 const EXPECTED_OPENTUI_VERSION = "0.5.10";
@@ -73,7 +74,7 @@ if (configuredPlugin !== EXPECTED_PLUGIN_SDK_VERSION) {
 }
 if (configuredPluginPeer !== EXPECTED_PLUGIN_PEER_VERSION) {
   fail(
-    `${PLUGIN_PACKAGE} peer must stay exactly ${EXPECTED_PLUGIN_PEER_VERSION} for the server runtime; package.json has ${String(configuredPluginPeer)}.`,
+    `${PLUGIN_PACKAGE} peer must stay at the evidence-bounded range ${EXPECTED_PLUGIN_PEER_VERSION} for the server runtime; package.json has ${String(configuredPluginPeer)}.`,
   );
 }
 for (const name of EXPECTED_OPENTUI_PACKAGES) {

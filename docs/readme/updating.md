@@ -73,7 +73,7 @@ The server does not fall back to another port if the configured one is busy.
 
 ## OpenCode 1
 
-This package requires OpenCode `2.0.16` or newer. It does not install, update, or load on OpenCode 1. Use the upstream `@slkiser/opencode-quota` project for that historical line.
+This package requires OpenCode `>= 2.0.16 < 2.3.0`. It does not install, update, or load on OpenCode 1. Use the upstream `@slkiser/opencode-quota` project for that historical line.
 
 ## Rolling back
 

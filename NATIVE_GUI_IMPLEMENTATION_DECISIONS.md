@@ -93,11 +93,38 @@ Trade-offs: Inline logos increase bundle size; native popover placement and
 host styling require real Desktop verification.
 Product impact: Experimental Desktop Quota slice; Analytics and Settings
 remain later stages rather than being represented as complete.
-Compatibility impact: GUI requires Desktop 2.2.0+; the existing exact 2.0.16
-server peer remains pending packed-package compatibility evidence.
+Compatibility impact: GUI requires Desktop 2.2.0+; see D09 for the server
+peer range and the limits of the packed-host evidence.
 Test evidence: `pnpm verify` passed: 4,736 tests passed, 50 skipped, plus five
 cross-surface tests. Native bundle and shared-view tests passed; live Desktop
 geometry, interaction and host loading remain unverified.
+Reversible: Yes.
+Owner review: review recommended
+
+## D09 — Bounded OpenCode SDK peer range
+
+Stage: compatibility verification
+Status: provisional
+Problem: The exact 2.0.16 plugin peer rejects strict installations with newer
+OpenCode SDKs, including those required by the experimental Desktop GUI.
+Evidence: The packed server plugin completed setup, health and settings RPC,
+and cleanup in isolated Bun SDK hosts 2.0.16, 2.1.4, 2.2.0 and 2.2.5 with Web
+off. The original exact peer failed strict npm resolution on the newer versions.
+Options considered: Keep the exact peer; raise the minimum to 2.2.0; permit
+the tested 2.0–2.2 minor lines while excluding the next unverified minor.
+Decision: Declare `>=2.0.16 <2.3.0`; retain the exact 2.2.0 build SDK and the
+separate Desktop 2.2.0 minimum.
+Why: Preserve the tested legacy server path while allowing strict installation
+alongside the tested newer SDKs.
+Trade-offs: The range includes patch releases not individually exercised; a
+future minor requires new compatibility evidence. Node's direct CJS import of
+the GUI bundle is not a Desktop loader test, and real Desktop loading remains
+unverified. Forced dependency trees can duplicate OpenCode internals; use
+normal peer resolution instead.
+Test evidence: Isolated host probes passed at the four specified versions;
+strict peer resolution on an isolated staged package passed those versions and
+rejected the adjacent bounds. `pnpm verify` passed: 4,778 tests passed, 50
+skipped, plus five cross-surface tests.
 Reversible: Yes.
 Owner review: review recommended
 

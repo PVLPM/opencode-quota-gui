@@ -376,11 +376,11 @@ describe("native build configuration", () => {
     expect(configSource).toContain("__OPENCODE_QUOTA_BUILD_IDENTITY__");
   });
 
-  it("ships the bundle from the same package while the server peer stays exact", () => {
+  it("ships the bundle from the same package with a bounded server peer", () => {
     expect(exportsMap["./gui-experimental"]?.default).toBe("./dist/gui-experimental.cjs");
     expect(packageScripts["build:gui"]).toBe("vite build --config vite.native.config.mjs");
     expect(devDependencies["@opencode/plugin"]).toBe("2.2.0");
-    expect(peerDependencies["@opencode/plugin"]).toBe("2.0.16");
+    expect(peerDependencies["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
     expect(dependencies["@opencode/plugin"]).toBeUndefined();
     expect(dependencies["@opencode/ui"]).toBeUndefined();
     expect(devDependencies["@opencode/ui"]).toBe("2.0.32");
