@@ -13,12 +13,18 @@ const serverEntry = join(repoRoot, "server.ts");
 const distEntry = join(repoRoot, "dist", "index.js");
 
 describe("local OpenCode plugin entry", () => {
-  it("resolves the repository directory to both root entries, so it is not server-only", () => {
+  it("resolves the repository directory through the manifest, so it is not server-only", () => {
     const entrypoints = Host.resolve({ directory: repoRoot });
 
-    expect(entrypoints.server).toBe(pathToFileURL(serverEntry).href);
-    // Keep the inherited TUI source honest: directory resolution finds it too.
-    expect(entrypoints.tui).toBe(pathToFileURL(join(repoRoot, "tui.ts")).href);
+    // A named package with an `exports` map resolves like the published
+    // package, so a local directory load finds the built server and the
+    // prebuilt GUI bundle rather than the root `server.ts` shim.
+    expect(entrypoints.server).toBe(pathToFileURL(distEntry).href);
+    expect(entrypoints.gui).toBe(
+      pathToFileURL(join(repoRoot, "dist", "gui-experimental.cjs")).href,
+    );
+    // The inherited TUI source is intentionally not published or exported.
+    expect(entrypoints.tui).toBeUndefined();
     expect(entrypoints.rpc).toBeUndefined();
   });
 
@@ -37,7 +43,7 @@ describe("local OpenCode plugin entry", () => {
     expect(source).not.toContain("export *");
   });
 
-  it("documents the explicit server file as the GUI-only local entry", () => {
+  it("documents the explicit server file as a server-only local entry", () => {
     const manualInstall = readFileSync(
       join(repoRoot, "docs", "readme", "manual-install.md"),
       "utf8",
@@ -50,11 +56,13 @@ describe("local OpenCode plugin entry", () => {
     expect(localCheckout).toContain(
       '"plugins": ["file:///absolute/path/to/opencode-quota-gui/server.ts"]',
     );
-    expect(localCheckout).not.toContain(
-      '"plugins": ["file:///absolute/path/to/opencode-quota-gui"]',
-    );
-    expect(localCheckout).toContain("retained root `tui.ts`");
-    expect(localCheckout.toLowerCase()).toContain("not recommended");
+    // The explicit server file deliberately skips the package exports map, so
+    // it cannot load the Desktop GUI entry.
+    expect(localCheckout).toContain("loads only the server");
+    expect(localCheckout).toContain("does not discover the Desktop GUI export");
+    // Desktop GUI development needs the directory entry instead.
+    expect(localCheckout).toContain("built package directory entry");
+    expect(localCheckout).toContain("`./gui-experimental`");
   });
 
   it("loads the built plugin default through the explicit server file after a build", async (context) => {

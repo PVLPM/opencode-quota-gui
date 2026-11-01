@@ -75,6 +75,32 @@ independent re-review found both reported issues addressed.
 Reversible: Yes.
 Owner review: review recommended
 
+## D07 — GUI build and narrow native seams
+
+Stage: 4
+Status: provisional
+Problem: Desktop requires a host-loaded GUI bundle; it does not supply the
+browser-only `@opencode/ui` imports or the Web provider-logo asset route.
+Evidence: The official GUI Vite preset emits a single CJS bundle and limits
+host-provided modules. The existing Quota and temporal components are Solid/DOM.
+Options considered: Separate package or duplicate Quota; reuse shared views and
+replace the existing UI and logo seams only for the GUI bundle.
+Decision: Build one `./gui-experimental` export with SDK 2.2.0 and reuse shared
+Quota/temporal views with a small native primitive and bundled-logo adapter.
+Why: This keeps the product implementation and backend shared without relying
+on localhost or adding a cross-host framework.
+Trade-offs: Inline logos increase bundle size; native popover placement and
+host styling require real Desktop verification.
+Product impact: Experimental Desktop Quota slice; Analytics and Settings
+remain later stages rather than being represented as complete.
+Compatibility impact: GUI requires Desktop 2.2.0+; the existing exact 2.0.16
+server peer remains pending packed-package compatibility evidence.
+Test evidence: `pnpm verify` passed: 4,736 tests passed, 50 skipped, plus five
+cross-surface tests. Native bundle and shared-view tests passed; live Desktop
+geometry, interaction and host loading remain unverified.
+Reversible: Yes.
+Owner review: review recommended
+
 ## D06 — RPC viewers and setup-scoped registrations
 
 Stage: 3

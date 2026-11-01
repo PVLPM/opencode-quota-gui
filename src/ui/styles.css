@@ -1,4 +1,3 @@
-/* biome-ignore-all lint/complexity/noImportantStyles: a reduced-motion reset has to beat component-level animations, including the ones the public UI library ships. */
 /*
  * Dashboard styling (design spec §10).
  *
@@ -6,10 +5,15 @@
  * importer. Public primitives retain their typography, behavior and status
  * tokens; scoped qg variables supply the requested dark Console surfaces.
  * Charts have no library equivalent. No font is fetched from another origin.
+ *
+ * Document-level rules (`html`, `body`, the global box model, the reduced-motion
+ * reset) live in `base.css`. This file is also injected into the OpenCode
+ * Desktop window by the native GUI bundle, so `.qg-native` joins `:root` as a
+ * variable carrier: the panel gets the same palette without restyling the host.
  */
 
-:root {
-  color-scheme: dark;
+:root,
+.qg-native {
   --qg-bg: #0a0a0a;
   --qg-frame: #161616;
   --qg-surface: #232323;
@@ -71,7 +75,8 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root,
+  .qg-native {
     --qg-token-cache-read: #51a2ff;
     --qg-token-input: #a684ff;
     --qg-token-reasoning: #00d5be;
@@ -80,27 +85,7 @@
   }
 }
 
-html {
-  background: var(--qg-bg);
-}
-
-body {
-  margin: 0;
-  background: var(--qg-bg);
-  color: var(--qg-text-secondary);
-  font-size: var(--font-size-base);
-  line-height: var(--line-height-large);
-  font-family: var(--font-family-sans, ui-sans-serif, system-ui, sans-serif);
-  overflow: hidden;
-}
-
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-
-.sr-only {
+.qg-native .sr-only {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -3130,19 +3115,4 @@ body {
 
 .qg-toast[data-tone="success"] {
   border-color: var(--qg-success);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-  }
-
-  .qg-skeleton__line::after {
-    animation: none;
-    transform: none;
-  }
 }

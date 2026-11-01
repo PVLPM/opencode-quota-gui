@@ -168,32 +168,58 @@ describe("browser layer import rules", () => {
   });
 });
 
-describe("the two TypeScript projects stay separate", () => {
-  const backend = JSON.parse(readFileSync(path.join(repoRoot, "tsconfig.json"), "utf8")) as {
-    compilerOptions: Record<string, unknown>;
-    include: string[];
-    exclude: string[];
+interface TsConfig {
+  compilerOptions?: {
+    jsxImportSource?: string;
+    jsx?: string;
+    lib?: string[];
+    types?: string[];
+    noEmit?: boolean;
+    skipLibCheck?: boolean;
   };
-  const browser = JSON.parse(readFileSync(path.join(repoRoot, "tsconfig.ui.json"), "utf8")) as {
-    compilerOptions: Record<string, unknown>;
-    include: string[];
-  };
+  include?: string[];
+  exclude?: string[];
+}
 
-  it("keeps the browser sources out of the backend project, changing nothing else", () => {
-    expect(backend.exclude).toEqual(["node_modules", "dist", "src/ui"]);
+function readTsConfig(file: string): TsConfig {
+  // SAFETY: these are the repository's own TypeScript project files, and each
+  // assertion below names the exact field it reads.
+  return JSON.parse(readFileSync(path.join(repoRoot, file), "utf8")) as TsConfig;
+}
+
+describe("the three TypeScript projects stay separate", () => {
+  const backend = readTsConfig("tsconfig.json");
+  const browser = readTsConfig("tsconfig.ui.json");
+  const desktop = readTsConfig("tsconfig.native.json");
+
+  it("keeps the browser and Desktop GUI sources out of the backend project, changing nothing else", () => {
+    expect(backend.exclude).toEqual(["node_modules", "dist", "src/ui", "src/native"]);
     expect(backend.include).toEqual(["src/**/*"]);
     // The backend keeps the OpenTUI pragma and the Node types.
-    expect(backend.compilerOptions.jsxImportSource).toBe("@opentui/solid");
-    expect(backend.compilerOptions.types).toEqual(["node"]);
+    expect(backend.compilerOptions?.jsxImportSource).toBe("@opentui/solid");
+    expect(backend.compilerOptions?.types).toEqual(["node"]);
+  });
+
+  it("type-checks the Desktop GUI against DOM types and the Solid JSX runtime only", () => {
+    expect(desktop.include).toEqual([
+      "src/native/**/*",
+      "src/bun-sqlite.d.ts",
+      "src/node-sqlite.d.ts",
+    ]);
+    expect(desktop.compilerOptions?.jsxImportSource).toBe("solid-js");
+    expect(desktop.compilerOptions?.jsx).toBe("preserve");
+    expect(desktop.compilerOptions?.lib).toEqual(["ES2022", "DOM", "DOM.Iterable"]);
+    expect(desktop.compilerOptions?.types).toEqual(["node", "vite/client"]);
+    expect(desktop.compilerOptions?.noEmit).toBe(true);
   });
 
   it("type-checks the browser UI against DOM types and the Solid JSX runtime only", () => {
     expect(browser.include).toEqual(["src/ui/**/*", "src/contracts/**/*"]);
-    expect(browser.compilerOptions.jsxImportSource).toBe("solid-js");
-    expect(browser.compilerOptions.jsx).toBe("preserve");
-    expect(browser.compilerOptions.lib).toEqual(["ES2022", "DOM", "DOM.Iterable"]);
-    expect(browser.compilerOptions.types).toEqual([]);
-    expect(browser.compilerOptions.noEmit).toBe(true);
-    expect(browser.compilerOptions.skipLibCheck).toBe(true);
+    expect(browser.compilerOptions?.jsxImportSource).toBe("solid-js");
+    expect(browser.compilerOptions?.jsx).toBe("preserve");
+    expect(browser.compilerOptions?.lib).toEqual(["ES2022", "DOM", "DOM.Iterable"]);
+    expect(browser.compilerOptions?.types).toEqual([]);
+    expect(browser.compilerOptions?.noEmit).toBe(true);
+    expect(browser.compilerOptions?.skipLibCheck).toBe(true);
   });
 });

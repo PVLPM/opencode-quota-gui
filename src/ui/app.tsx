@@ -33,6 +33,7 @@ import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashbo
 import { RANGE_LABELS } from "./format";
 import { sameIdentity } from "./model-analytics";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
+import { createQuery, type Query } from "./query";
 import {
   canonicalizeLocation,
   formatPath,
@@ -77,42 +78,6 @@ import {
  * fetch, so a range change refetches range-scoped queries only and the session
  * route never refetches on a range change at all.
  */
-
-interface Query<T> {
-  data: () => T | undefined;
-  error: () => unknown;
-  loading: () => boolean;
-  /** Resolves `true` when the fetched payload was applied (not superseded or failed). */
-  run: () => Promise<boolean>;
-}
-
-/** One in-flight request wins; a superseded response is dropped. */
-function createQuery<T>(fetcher: () => Promise<T>): Query<T> {
-  const [data, setData] = createSignal<T | undefined>(undefined);
-  const [error, setError] = createSignal<unknown>(undefined);
-  const [loading, setLoading] = createSignal(false);
-  let requestId = 0;
-
-  async function run(): Promise<boolean> {
-    const id = ++requestId;
-    setLoading(true);
-    try {
-      const value = await fetcher();
-      if (id !== requestId) return false;
-      setData(() => value);
-      setError(undefined);
-      return true;
-    } catch (failure) {
-      if (id !== requestId) return false;
-      setError(failure);
-      return false;
-    } finally {
-      if (id === requestId) setLoading(false);
-    }
-  }
-
-  return { data, error, loading, run };
-}
 
 interface RangeFailure {
   from: RangeKey;

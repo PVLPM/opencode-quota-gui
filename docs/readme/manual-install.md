@@ -61,7 +61,7 @@ A fresh setup works with defaults, but the browser dashboard stays off until tha
 
 ## Requirements
 
-- OpenCode `2.0.16` or newer. This package does not support OpenCode 1.
+- OpenCode `2.0.16` or newer. The experimental Desktop panel requires OpenCode Desktop `2.2.0` or newer. This package does not support OpenCode 1.
 - Node.js `22.13+` (or `23.4+` on Node 23), whether you run the package with `npx` or from a local checkout.
 
 ## Local checkout (development)
@@ -75,7 +75,7 @@ Build once, then point `plugins` at the explicit server file with an absolute `f
 }
 ```
 
-`server.ts` re-exports the built server plugin default from `dist/index.js`. Use this explicit file entry for GUI-only development. Do not point the plugin entry at the repository directory: OpenCode's local directory resolution also finds the retained root `tui.ts` (inherited dormant TUI source), so a directory entry is not server-only and is not recommended.
+`server.ts` re-exports the built server plugin default from `dist/index.js`. This explicit file entry loads only the server; it does not discover the Desktop GUI export. For Desktop GUI development, use the built package directory entry so OpenCode can resolve both the server and `./gui-experimental` exports.
 
 Build before loading:
 

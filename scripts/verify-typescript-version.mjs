@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
 const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";
-const EXPECTED_PLUGIN_VERSION = "2.0.16";
+// The Desktop GUI builds against the SDK that ships the GUI/Vite API; the
+// server keeps its published peer contract until an old/new host test proves a
+// wider range is safe.
+const EXPECTED_PLUGIN_SDK_VERSION = "2.2.0";
+const EXPECTED_PLUGIN_PEER_VERSION = "2.0.16";
 const PLUGIN_PACKAGE = "@opencode/plugin";
 const EXPECTED_OPENTUI_SPECIFIER = "^0.5.10";
 const EXPECTED_OPENTUI_VERSION = "0.5.10";
@@ -56,14 +60,20 @@ function hasTypeScriptPeerOverride(value) {
 
 const configuredTypeScript = packageJson.devDependencies?.typescript;
 const configuredPlugin = packageJson.devDependencies?.[PLUGIN_PACKAGE];
+const configuredPluginPeer = packageJson.peerDependencies?.[PLUGIN_PACKAGE];
 if (configuredTypeScript !== EXPECTED_TYPESCRIPT_VERSION) {
   fail(
     `TypeScript must be pinned exactly to ${EXPECTED_TYPESCRIPT_VERSION}; package.json has ${String(configuredTypeScript)}.`,
   );
 }
-if (configuredPlugin !== EXPECTED_PLUGIN_VERSION) {
+if (configuredPlugin !== EXPECTED_PLUGIN_SDK_VERSION) {
   fail(
-    `${PLUGIN_PACKAGE} must be pinned exactly to ${EXPECTED_PLUGIN_VERSION}; package.json has ${String(configuredPlugin)}.`,
+    `${PLUGIN_PACKAGE} dev dependency must be pinned exactly to ${EXPECTED_PLUGIN_SDK_VERSION}; package.json has ${String(configuredPlugin)}.`,
+  );
+}
+if (configuredPluginPeer !== EXPECTED_PLUGIN_PEER_VERSION) {
+  fail(
+    `${PLUGIN_PACKAGE} peer must stay exactly ${EXPECTED_PLUGIN_PEER_VERSION} for the server runtime; package.json has ${String(configuredPluginPeer)}.`,
   );
 }
 for (const name of EXPECTED_OPENTUI_PACKAGES) {
@@ -125,19 +135,19 @@ for (const name of EXPECTED_OPENTUI_PACKAGES) {
 
 const lockedPlugin = rootImporter.devDependencies?.[PLUGIN_PACKAGE];
 if (
-  lockedPlugin?.specifier !== EXPECTED_PLUGIN_VERSION ||
-  (lockedPlugin?.version !== EXPECTED_PLUGIN_VERSION &&
-    !lockedPlugin?.version?.startsWith(`${EXPECTED_PLUGIN_VERSION}(`))
+  lockedPlugin?.specifier !== EXPECTED_PLUGIN_SDK_VERSION ||
+  (lockedPlugin?.version !== EXPECTED_PLUGIN_SDK_VERSION &&
+    !lockedPlugin?.version?.startsWith(`${EXPECTED_PLUGIN_SDK_VERSION}(`))
 ) {
   fail(
-    `${PLUGIN_PACKAGE} lock mismatch: expected ${EXPECTED_PLUGIN_VERSION}, found ${String(lockedPlugin?.specifier)} and ${String(lockedPlugin?.version)}.`,
+    `${PLUGIN_PACKAGE} lock mismatch: expected ${EXPECTED_PLUGIN_SDK_VERSION}, found ${String(lockedPlugin?.specifier)} and ${String(lockedPlugin?.version)}.`,
   );
 }
 
 const packageKeys = Object.keys(lockfile.packages ?? {});
 const snapshotKeys = Object.keys(lockfile.snapshots ?? {});
 const expectedTypeScriptKey = `typescript@${EXPECTED_TYPESCRIPT_VERSION}`;
-const expectedPluginKey = `${PLUGIN_PACKAGE}@${EXPECTED_PLUGIN_VERSION}`;
+const expectedPluginKey = `${PLUGIN_PACKAGE}@${EXPECTED_PLUGIN_SDK_VERSION}`;
 
 if (!packageKeys.includes(expectedTypeScriptKey) || !snapshotKeys.includes(expectedTypeScriptKey)) {
   fail(`pnpm-lock.yaml must contain package and snapshot entries for ${expectedTypeScriptKey}.`);
@@ -187,5 +197,5 @@ console.warn(
   `Known unmet peer: ${bunPackageKey} declares typescript ${BUN_FFI_TYPESCRIPT_PEER}, while the root uses ${EXPECTED_TYPESCRIPT_VERSION}. This mismatch is intentionally not suppressed.`,
 );
 console.log(
-  `TypeScript ${EXPECTED_TYPESCRIPT_VERSION} and ${PLUGIN_PACKAGE} ${EXPECTED_PLUGIN_VERSION} lock entries verified.`,
+  `TypeScript ${EXPECTED_TYPESCRIPT_VERSION} and ${PLUGIN_PACKAGE} ${EXPECTED_PLUGIN_SDK_VERSION} (peer ${EXPECTED_PLUGIN_PEER_VERSION}) lock entries verified.`,
 );

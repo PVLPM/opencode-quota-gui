@@ -17,6 +17,9 @@
     "./server": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./gui-experimental": {
+      "default": "./dist/gui-experimental.cjs"
     }
   },
   "files": [
@@ -34,6 +37,7 @@
   ],
   "scripts": {
     "build": "node scripts/build-identity.mjs",
+    "build:gui": "vite build --config vite.native.config.mjs",
     "build:ui": "vite build --config vite.ui.config.mjs",
     "build:check": "pnpm run build && pnpm pack --dry-run",
     "check": "biome check .",
@@ -62,7 +66,7 @@
     "verify:release-version": "node scripts/verify-release-version.mjs",
     "verify:typescript-version": "node scripts/verify-typescript-version.mjs",
     "verify:v4-history": "node scripts/verify-v4-history.mjs",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.ui.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.ui.json && tsc -p tsconfig.native.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:windows-platform": "vitest run tests/gui.build-identity.test.ts tests/gui.config-write-safety.test.ts tests/gui.storage.test.ts tests/gui.server.security.test.ts tests/lib.config-symlink-write.test.ts tests/lib.scoped-update.test.ts",
@@ -99,7 +103,7 @@
     "@babel/core": "^7.28.0",
     "@babel/preset-typescript": "^7.27.1",
     "@biomejs/biome": "2.3.11",
-    "@opencode/plugin": "2.0.16",
+    "@opencode/plugin": "2.2.0",
     "@opencode/ui": "2.0.32",
     "@opentelemetry/sdk-metrics": "2.10.0",
     "@oxlint/plugins": "1.88.0",

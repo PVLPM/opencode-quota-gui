@@ -113,6 +113,10 @@ export function runBuild(root, env = process.env) {
   run("scripts/copy-data.mjs");
   run("scripts/prepare-tui-dist.mjs");
   run("node_modules/vite/bin/vite.js", "build", "--config", "vite.ui.config.mjs");
+  // The Desktop bundle is part of the same artifact: one package, one server
+  // plugin, one `./gui-experimental` entry. It is built after the browser UI so
+  // a failure there still leaves the recovery surface intact.
+  run("node_modules/vite/bin/vite.js", "build", "--config", "vite.native.config.mjs");
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

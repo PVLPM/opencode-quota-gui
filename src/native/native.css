@@ -1,0 +1,318 @@
+/* biome-ignore-all lint/complexity/noImportantStyles: the panel's reduced-motion reset has to beat product-level animations, exactly as `base.css` does for the browser document. */
+/*
+ * Native Desktop shell (Stage 4).
+ *
+ * The product stylesheet (`src/ui/styles.css`) is injected unchanged, so every
+ * card, row and temporal rule keeps the web build's values. This file adds only
+ * what the host takes for granted:
+ *
+ * - the OpenCode UI tokens the product palette maps onto (the Desktop window
+ *   does not load that library's stylesheet);
+ * - the panel root's height/scroll frame, because the host provides a region,
+ *   not a document;
+ * - zero-specificity stand-ins for the library CSS the web build gets from
+ *   `@opencode/ui` (popover/tooltip bubbles, segmented control, buttons);
+ * - the fixed portal that escapes the side region's clipping.
+ *
+ * Library stand-ins are written with `:where()`, so a product class always wins
+ * the cascade exactly as an unlayered product rule wins over the library's
+ * `@layer` rules on the web.
+ */
+
+.qg-native {
+  color-scheme: dark;
+
+  /* Typography the product stylesheet reads from the UI library. */
+  --font-family-sans:
+    "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-size-small: 13px;
+  --font-size-base: 14px;
+  --font-size-large: 16px;
+  --font-weight-medium: 500;
+  --letter-spacing-tight: -0.16px;
+  --line-height-large: 150%;
+
+  /* Dark semantic tokens used by the product palette. */
+  --text-interactive-base: #9dbefe;
+  --border-interactive-active: #034cff;
+  --border-weak-base: #282828;
+  --border-weak-selected: rgba(3, 76, 255, 0.62);
+  --border-weaker-base: #202020;
+  --border-warning-base: #e9d282;
+  --icon-critical-base: #fc533a;
+  --icon-warning-base: #fbb73c;
+  --icon-success-base: #12c905;
+  --surface-critical-weak: #28110c;
+  --surface-warning-weak: #fdfaed;
+  --surface-base-hover: rgba(255, 255, 255, 0.039);
+  --surface-raised-base-hover: rgba(255, 255, 255, 0.078);
+  --shadow-md:
+    0 6px 12px -2px hsl(0 0% 0% / 0.1), 0 4px 8px -2px hsl(0 0% 0% / 0.15),
+    0 1px 2px hsl(0 0% 0% / 0.15);
+}
+
+.qg-native,
+.qg-native *,
+.qg-native *::before,
+.qg-native *::after {
+  box-sizing: border-box;
+}
+
+/* The region fills whatever height the host gives its pane. */
+.qg-panel-root {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--qg-bg);
+  color: var(--qg-text-secondary);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-large);
+  font-family: var(--font-family-sans, ui-sans-serif, system-ui, sans-serif);
+}
+
+.qg-panel-root > .qg-app {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+/* The foreground loader is document-fixed on the web; keep it inside the pane. */
+.qg-panel-root > .qg-app .qg-busy {
+  position: absolute;
+}
+
+/* Product chrome was written for links; the native shell uses buttons. */
+:where(.qg-panel-root) button.qg-topbar__link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+}
+
+.qg-panel-root [aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* The ready-state stale label keeps a keyboard-reachable retry beside it. */
+.qg-native .qg-stale-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.qg-native .qg-stale__retry {
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  min-height: 28px;
+  padding: 4px 6px;
+  background: transparent;
+  color: var(--text-interactive-base);
+  font: inherit;
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-large);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.qg-native .qg-stale__retry:hover {
+  color: var(--qg-text);
+}
+
+.qg-native .qg-stale__retry:focus-visible {
+  outline: 2px solid var(--border-weak-selected);
+  outline-offset: 2px;
+}
+
+/* Stand-ins for library component CSS, at zero specificity. */
+:where(.qg-native) :where([data-component="tooltip-v2-trigger"]) {
+  display: flex;
+}
+
+:where(.qg-native-popover__bubble) {
+  min-width: 200px;
+  max-width: 320px;
+  border: 1px solid var(--qg-border-strong);
+  border-radius: 6px;
+  background-color: var(--qg-surface-raised);
+  color: var(--qg-text-secondary);
+  box-shadow: var(--shadow-md);
+  background-clip: padding-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+:where(.qg-native-tooltip__bubble) {
+  max-width: 320px;
+  border: 1px solid var(--qg-border-strong);
+  border-radius: 4px;
+  background: var(--qg-surface-raised);
+  box-shadow: var(--shadow-md);
+  color: var(--qg-text-secondary);
+  white-space: normal;
+  text-wrap: pretty;
+}
+
+:where(.qg-native-tooltip__bubble[data-appearance="compact"]) {
+  padding: 5px 6px;
+  font-size: 11px;
+  line-height: 12px;
+  font-weight: 500;
+}
+
+:where(.qg-native-tooltip__bubble[data-appearance="large"]) {
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+:where(.qg-native-tooltip__bubble[data-appearance="standard"]) {
+  padding: 2px 8px;
+  max-width: 320px;
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-large);
+}
+
+/* Portals live in the host document; they carry their own token scope. */
+.qg-native-portal {
+  position: fixed;
+  z-index: 1000;
+}
+
+.qg-native-popover {
+  pointer-events: auto;
+}
+
+.qg-native-tooltip {
+  pointer-events: none;
+}
+
+:where(.qg-native) .qg-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--qg-border-strong);
+  border-radius: 6px;
+  background: var(--qg-surface);
+  color: var(--qg-text);
+  font: inherit;
+  font-size: var(--font-size-small);
+  cursor: pointer;
+}
+
+:where(.qg-native) .qg-button--primary {
+  border-color: var(--qg-accent-border);
+  background: var(--qg-accent);
+  color: var(--qg-bg);
+}
+
+:where(.qg-native) .qg-button--ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--qg-text-secondary);
+}
+
+:where(.qg-native) .qg-button--danger {
+  border-color: var(--qg-danger-border);
+  background: var(--qg-danger-surface);
+  color: var(--qg-text);
+}
+
+:where(.qg-native) .qg-button--small {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+:where(.qg-native) .qg-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+:where(.qg-native) .qg-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--qg-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+:where(.qg-native) .qg-switch__thumb {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border: 1px solid var(--qg-border-strong);
+  border-radius: 999px;
+  background: var(--qg-surface);
+}
+
+:where(.qg-native) .qg-switch__thumb::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--qg-text-muted);
+  transition:
+    transform var(--qg-transition),
+    background var(--qg-transition);
+}
+
+:where(.qg-native) .qg-switch[aria-checked="true"] .qg-switch__thumb {
+  border-color: var(--qg-accent-border);
+}
+
+:where(.qg-native) .qg-switch[aria-checked="true"] .qg-switch__thumb::after {
+  background: var(--qg-accent);
+  transform: translateX(14px);
+}
+
+:where(.qg-native) .qg-segmented {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--qg-border);
+  border-radius: 6px;
+  background: var(--qg-surface);
+  gap: 2px;
+}
+
+:where(.qg-native) .qg-segmented__item {
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--qg-text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+:where(.qg-native) .qg-segmented__item[data-selected] {
+  background: var(--qg-surface-raised);
+  color: var(--qg-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .qg-native,
+  .qg-native *,
+  .qg-native *::before,
+  .qg-native *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

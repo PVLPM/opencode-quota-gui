@@ -25,7 +25,14 @@ import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+/**
+ * The browser entry loads the product sheet and then the document sheet. The
+ * probe must use the same order: `.sr-only` lives in `base.css`, and without it
+ * a hidden Switch label becomes visible and changes the measured row.
+ */
+const styles = ["styles.css", "base.css"]
+  .map((file) => readFileSync(path.join(repoRoot, "src/ui", file), "utf8"))
+  .join("\n");
 
 /** A local Chromium makes the computed-layout check possible; CI may not have one. */
 const layoutBrowser = [

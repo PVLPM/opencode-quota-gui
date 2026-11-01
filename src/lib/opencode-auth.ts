@@ -36,8 +36,9 @@ export type CredentialRow = {
   /**
    * Why OpenCode could not return this login (for example a failed token
    * refresh), as `<category>: <scrubbed detail>`. A failed row keeps its id,
-   * label and position, but its `value` is only `{ type: "api" | "oauth" }`;
-   * consumers show `resolveError` as a per-account error.
+   * label and position, but its `value` is only `{ type: "api" | "oauth" }`.
+   * A failed `external` connection uses the same fallback because the failed-row
+   * shape only names api/oauth; consumers show `resolveError` as a per-account error.
    */
   resolveError?: string;
 };
@@ -457,9 +458,13 @@ async function credentialRowsForSlots(
   methods: readonly CredentialMethod[] | undefined,
   activeConnections?: ReadonlyMap<string, CredentialConnection>,
 ): Promise<CredentialRow[]> {
-  const wanted = slots.filter(
-    (slot) => !methods || !("connection" in slot) || methods.includes(slot.connection.method),
-  );
+  const wanted = slots.filter((slot) => {
+    if (!methods || !("connection" in slot)) return true;
+    // SDK 2.2 added the host-provided `external` connection method. It is never
+    // one of the readable key/OAuth slots, so compare values instead of asking
+    // a narrower array whether it includes a wider union.
+    return methods.some((method) => method === slot.connection.method);
+  });
   const pairs = await Promise.all(
     wanted.map(async (slot) => ({
       slot,

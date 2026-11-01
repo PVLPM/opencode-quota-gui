@@ -170,6 +170,7 @@ describe("dashboard-first public documentation", () => {
     expect(quickStart).toContain("opencode plugin add opencode-quota-gui");
     expect(quickStart).toContain('"plugins": ["opencode-quota-gui"]');
     expect(quickStart).toContain("http://localhost:4144/quota");
+    expect(quickStart).toContain("OpenCode Desktop `2.2.0`");
     expect(quickStart).toContain("installs the configured npm plugin");
     expect(quickStart).not.toContain("npx opencode-quota-gui init");
   });
@@ -181,7 +182,11 @@ describe("dashboard-first public documentation", () => {
     expect(dashboard).toContain("outside this guarantee");
     expect(dashboard).not.toContain("Nothing on your network can reach it");
     expect(dashboard).toContain("no cloud");
-    expect(dashboard).toContain("native frontend");
+    // The experimental Desktop GUI needs its own host version, and the browser
+    // dashboard stays as the optional fallback rather than the only surface.
+    expect(dashboard).toContain("OpenCode Desktop 2.2.0");
+    expect(dashboard).toContain("experimental GUI plugin API");
+    expect(dashboard).toContain("optional recovery surface");
 
     const settings = readMarkdownSection(readme, "Settings and privacy");
     expect(settings).toContain("~/.config/opencode/opencode-quota-gui/config.jsonc");

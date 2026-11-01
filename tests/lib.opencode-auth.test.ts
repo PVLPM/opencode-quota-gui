@@ -78,6 +78,22 @@ function keyCredential(
   };
 }
 
+function externalCredential(
+  integrationId: string,
+  id: string,
+  overrides: Partial<FakeCredential> = {},
+): FakeCredential {
+  return {
+    integrationId,
+    id,
+    label: "default",
+    registered: true,
+    method: "external",
+    value: { type: "external", methodID: "external" },
+    ...overrides,
+  };
+}
+
 function resolvedIds(integration: ReturnType<typeof createFakeIntegration>): string[] {
   return integration.connection.resolve.mock.calls.map(([connection]) =>
     connection.type === "credential" ? connection.id : `env:${connection.name}`,
@@ -365,6 +381,82 @@ describe("integration credential source", () => {
     expect(
       (await readCredentialRows(["opencode"], { methods: ["oauth"] })).map((row) => row.id),
     ).toEqual(["cred_console"]);
+  });
+
+  it("skips an external connection before resolving it for a key or OAuth read", async () => {
+    const integration = bindFakeIntegration([
+      externalCredential("opencode-go", "cred_external", {
+        resolveError: "external source unavailable",
+      }),
+      keyCredential("opencode-go", "cred_key"),
+    ]);
+
+    expect(
+      (await readCredentialRows(["opencode-go"], { methods: ["key"] })).map((row) => row.id),
+    ).toEqual(["cred_key"]);
+    await expect(readCredentialRows(["opencode-go"], { methods: ["oauth"] })).resolves.toEqual([]);
+    expect(resolvedIds(integration)).toEqual(["cred_key"]);
+    expect(getCredentialSourceDiagnostics().failures).toEqual([]);
+  });
+
+  it("keeps an unfiltered read working and contains a failed external resolution", async () => {
+    const integration = bindFakeIntegration([
+      keyCredential("openai", "cred_key"),
+      externalCredential("openai", "cred_external", {
+        label: "External",
+        resolveError: "external source unavailable",
+      }),
+    ]);
+
+    const rows = await readCredentialRows(["openai"]);
+    expect(rows.map((row) => row.id)).toEqual(["cred_key", "cred_external"]);
+    expect(rows[0]).toMatchObject({ active: true, value: { type: "api" } });
+    expect(rows[1]).toEqual({
+      id: "cred_external",
+      integrationId: "openai",
+      label: "External",
+      active: false,
+      // The existing failed-row contract only names api/oauth; the external
+      // connection is still reported through resolveError.
+      value: { type: "oauth" },
+      resolveError: "refresh_failed: external source unavailable",
+    });
+    expect(resolvedIds(integration)).toEqual(["cred_key", "cred_external"]);
+    expect(getCredentialSourceDiagnostics().failures).toEqual([
+      {
+        integrationId: "openai",
+        connectionId: "cred_external",
+        label: "External",
+        category: "refresh_failed",
+        detail: "external source unavailable",
+        at: expect.any(Number),
+      },
+    ]);
+  });
+
+  it("reads an active external connection unfiltered and reports its failed resolution", async () => {
+    const integration = bindFakeIntegration([
+      externalCredential("openai", "cred_external", {
+        label: "External",
+        resolveError: "external source unavailable",
+      }),
+    ]);
+
+    await expect(readCredentialRows(["openai"], { firstOnly: true })).resolves.toEqual([
+      {
+        id: "cred_external",
+        integrationId: "openai",
+        label: "External",
+        active: true,
+        value: { type: "oauth" },
+        resolveError: "refresh_failed: external source unavailable",
+      },
+    ]);
+    expect(integration.list).not.toHaveBeenCalled();
+    expect(resolvedIds(integration)).toEqual(["cred_external"]);
+    await expect(readAuthFile({ integrationIds: ["openai"] })).resolves.toEqual({
+      openai: { type: "oauth", resolveError: "refresh_failed: external source unavailable" },
+    });
   });
 
   it("reads one active connection per id with firstOnly and never lists", async () => {

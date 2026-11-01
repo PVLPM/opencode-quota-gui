@@ -243,6 +243,8 @@ describe("build identity generation", () => {
       "copy-data.mjs",
       "prepare-tui-dist.mjs",
       "vite.js",
+      // The browser UI and the Desktop GUI are two Vite builds in one artifact.
+      "vite.js",
     ]);
     for (const step of steps)
       expect(step.identity).toEqual({ version: "1.0.0", build: "abcdef012345" });

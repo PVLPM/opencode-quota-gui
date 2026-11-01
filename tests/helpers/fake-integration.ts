@@ -8,7 +8,7 @@ export type FakeCredential = {
   label: string;
   /** Whether `list()` shows this integration; unregistered (alias) ids answer only `active()`. */
   registered: boolean;
-  method: "key" | "oauth";
+  method: "key" | "oauth" | "external";
   /** The stored value: `{ type: "key", key, metadata? }` or `{ type: "oauth", ..., metadata? }`. */
   value: Record<string, unknown>;
   /** When set, `resolve()` rejects with this message (a failed token refresh). */
@@ -16,7 +16,7 @@ export type FakeCredential = {
 };
 
 type FakeConnection =
-  | { type: "credential"; id: string; label: string; method: "key" | "oauth" }
+  | { type: "credential"; id: string; label: string; method: "key" | "oauth" | "external" }
   | { type: "env"; name: string };
 
 const FAKE_LOCATION = { directory: "/tmp/opencode-quota-fake-location" };
