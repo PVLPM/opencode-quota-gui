@@ -5,13 +5,14 @@ import { build } from "vite";
 import { beforeAll, describe, expect, it } from "vitest";
 
 /**
- * Desktop GUI bundle evidence (Stage 4).
+ * Desktop GUI bundle evidence (Stage 5).
  *
  * The host loads one CommonJS file and supplies its own copies of Solid and the
  * plugin API, so the artifact must require nothing else. The test runs the real
  * `vite.native.config.mjs` build and inspects the emitted file: the module set,
- * the shipped product CSS and selectors, the inlined provider marks, and the
- * absence of the browser dashboard transport and the UI library.
+ * the shipped product CSS and selectors, the inlined provider marks, the full
+ * dashboard/settings surface, and the absence of the browser dashboard transport
+ * and the UI library.
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -62,8 +63,19 @@ describe("Desktop GUI bundle", () => {
       "qg-temporal-popover",
       "qg-native-popover",
       "qg-stale__retry",
-      "Retry quota connection",
+      "Retry dashboard data",
       ".qg-native .sr-only",
+      "qg-settings-page",
+      "qg-settings-page__status",
+      "qg-button--contrast",
+      "Quota & analytics",
+      "Web dashboard",
+      "Quota data may be stale",
+      "Quota data could not be loaded",
+      "Retry settings and quota data",
+      "Loading settings and quota data",
+      "Display settings unavailable",
+      "Display settings may be stale",
     ]) {
       expect(bundle, `missing ${token}`).toContain(token);
     }

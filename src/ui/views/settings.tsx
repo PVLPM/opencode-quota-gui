@@ -14,7 +14,6 @@ import { GripDotsIcon } from "../components/icons";
 import { ProviderLogo } from "../components/provider-logo";
 import { TemporalInfoButton, temporalProviderLabel } from "../components/temporal-status";
 import type { Toaster } from "../components/toast";
-import { DashboardError } from "../dashboard-client";
 import {
   Button,
   Icon,
@@ -52,7 +51,7 @@ import {
   windowSelection,
 } from "../settings-model";
 import { createCardSorter, type SortableCardNodes } from "../sortable-cards";
-import { describeError } from "../view-model";
+import { describeError, isConfigChangedError } from "../view-model";
 import type { VisibilityCard, VisibilityCatalog, VisibilityRow } from "../visibility-catalog";
 
 export type { VisibilityCard, VisibilityCatalog, VisibilityRow } from "../visibility-catalog";
@@ -73,6 +72,13 @@ export function SettingsView(props: {
   catalog: VisibilityCatalog;
   temporal?: TemporalStatusSnapshot;
   onReload: () => Promise<void>;
+  /**
+   * Exposes the canonical `dashboard.enabled` switch. Web deliberately hides it
+   * — the listener it stops is the one serving that page — while a native host
+   * can turn the fallback surface on or off. The row rides the shared draft,
+   * save bar and revision/conflict path; only its placement is host-opted-in.
+   */
+  webDashboardToggle?: boolean;
 }): JSX.Element {
   const [draft, setDraft] = createSignal<SettingsDraft>(initialDraft(props.snapshot.revision));
   const [busy, setBusy] = createSignal(false);
@@ -132,6 +138,9 @@ export function SettingsView(props: {
         props.snapshot.writable.includes(field.key),
     ),
   );
+  /** The canonical Web switch is hidden from generic rendering on purpose. */
+  const webDashboardField = (): SettingsField | undefined =>
+    SETTINGS_FIELDS.find((field) => field.key === "dashboard.enabled");
   const dirty = createMemo(() =>
     dirtyKeys(draft(), props.snapshot.values, props.snapshot.writable),
   );
@@ -165,7 +174,7 @@ export function SettingsView(props: {
       props.toaster.push("success", "Global settings saved.");
       await props.onReload();
     } catch (error) {
-      if (isConfigChanged(error)) {
+      if (isConfigChangedError(error)) {
         props.toaster.push(
           "error",
           "Settings changed elsewhere. Your edits were kept — review them against the latest file.",
@@ -230,7 +239,7 @@ export function SettingsView(props: {
     } catch (error) {
       props.toaster.push(
         "error",
-        isConfigChanged(error)
+        isConfigChangedError(error)
           ? "The settings file changed since the preview. Preview the import again."
           : describeError(error),
       );
@@ -855,6 +864,20 @@ export function SettingsView(props: {
           <h2 class="qg-group__title" id="qg-settings-dashboard">
             Dashboard
           </h2>
+          <Show when={props.webDashboardToggle ? webDashboardField() : undefined}>
+            {(field) => (
+              <div class="qg-field">
+                <div class="qg-field__text">
+                  <span class="qg-field__label">{field().label}</span>
+                  <span class="qg-field__meta">
+                    <Show when={field().help}>{(help) => <span>{help()}</span>}</Show>
+                    <Show when={sourceNote(field().key)}>{(note) => <span>{note()}</span>}</Show>
+                  </span>
+                </div>
+                <div class="qg-field__control">{renderControl(field())}</div>
+              </div>
+            )}
+          </Show>
           <div class="qg-field">
             <div class="qg-field__text">
               <span class="qg-field__label">Address</span>
@@ -960,8 +983,4 @@ export function SettingsView(props: {
       </div>
     </div>
   );
-}
-
-function isConfigChanged(error: unknown): boolean {
-  return error instanceof DashboardError && error.isConfigChanged;
 }

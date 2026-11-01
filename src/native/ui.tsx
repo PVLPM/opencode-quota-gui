@@ -451,8 +451,20 @@ export function loadPopover(): Promise<{ Popover: unknown }> {
 /* -------------------------------------------------------- form primitives */
 
 export interface ButtonProps extends JSX.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "primary" | "secondary" | "ghost" | "danger";
-  size?: "small" | "normal";
+  variant?:
+    | "primary"
+    | "secondary"
+    | "neutral"
+    | "outline"
+    | "contrast"
+    | "ghost"
+    | "ghost-muted"
+    | "ghost-faint"
+    | "danger"
+    | "warning"
+    | "submit"
+    | "loading";
+  size?: "small" | "normal" | "large";
 }
 
 export function Button(props: ButtonProps): JSX.Element {
@@ -484,6 +496,10 @@ export interface SwitchProps {
   onChange: (checked: boolean) => void;
   disabled?: boolean;
   label?: string;
+  /** Matches the public Switch: keep the row's label for assistive tech only. */
+  hideLabel?: boolean;
+  appearance?: "standard" | "compact";
+  description?: string;
   children?: JSX.Element;
 }
 
@@ -495,11 +511,12 @@ export function Switch(props: SwitchProps): JSX.Element {
       aria-checked={props.checked ? "true" : "false"}
       aria-label={props.label}
       class="qg-switch"
+      data-appearance={props.appearance ?? "compact"}
       disabled={props.disabled}
       onClick={() => props.onChange(!props.checked)}
     >
       <span class="qg-switch__thumb" aria-hidden="true" />
-      {props.children}
+      {props.hideLabel ? <span class="sr-only">{props.children}</span> : props.children}
     </button>
   );
 }

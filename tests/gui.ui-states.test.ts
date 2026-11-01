@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { orderCardsByPreference } from "../src/contracts/card-order";
 import type {
   HomeSnapshot,
+  ImportPreview,
   ProjectSnapshot,
   ProviderCard,
   QuotaCardRow,
@@ -75,6 +76,7 @@ import {
   describeError,
   describeNoProviders,
   type FetchOutcome,
+  isConfigChangedError,
   isStaleAfterReconnect,
   type LoadState,
   resolveLoadState,
@@ -2199,6 +2201,55 @@ describe("settings page", () => {
     expect(fieldFor("dashboard.enabled")?.hidden).toBe(true);
   });
 
+  it("keeps the Web dashboard switch out of Web Settings but can expose it to a native host", async () => {
+    const base = settingsSnapshot();
+    const snapshot = settingsSnapshot({
+      values: { ...base.values, "dashboard.enabled": false },
+      writable: [...base.writable, "dashboard.enabled"],
+    });
+    const client = {
+      settings: async () => snapshot,
+      saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      importPreview: async () => ({
+        from: "workspace: synthetic",
+        keys: [],
+        issues: [],
+        expectedRevision: "r",
+      }),
+      importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    };
+    const toaster = { toasts: () => [], push: () => {}, dismiss: () => {} };
+    const props = { snapshot, client, toaster, catalog: { cards: [] } };
+
+    // The Web page keeps its current rendering: the Web listener it would stop is
+    // the one serving the page, so recovery stays a documented JSONC edit.
+    const webHtml = await renderView("/views/settings.tsx", "SettingsView", props);
+    expect(text(webHtml)).not.toContain("Web dashboard");
+
+    // A native host can surface the same canonical key through the shared draft,
+    // save bar and revision/conflict path.
+    const nativeHtml = await renderView("/views/settings.tsx", "SettingsView", {
+      ...props,
+      webDashboardToggle: true,
+    });
+    expect(text(nativeHtml)).toContain("Web dashboard");
+    expect(text(nativeHtml)).toContain("requires an OpenCode restart");
+    expect(nativeHtml).toContain('role="switch"');
+  });
+
+  it("drafts the host-opted Web switch through the revision-checked patch", () => {
+    const values = { "dashboard.enabled": false };
+    const writable = ["dashboard.enabled"];
+    const draft = { ...initialDraft("revision-1"), edits: { "dashboard.enabled": true } };
+    expect(dirtyKeys(draft, values, writable)).toEqual(["dashboard.enabled"]);
+    expect(toPatch(draft, dirtyKeys(draft, values, writable))).toEqual({
+      "dashboard.enabled": true,
+    });
+    // The save call still carries the revision the draft was loaded from.
+    expect(draft.revision).toBe("revision-1");
+  });
+
   it("keeps card order as a hidden string-list field in the visibility group", () => {
     const order = fieldFor("dashboard.cardOrder");
     expect(order.group).toBe("visibility");
@@ -4290,6 +4341,8 @@ describe("the settings editor keeps its draft across refetches", () => {
     initial: SettingsSnapshot | undefined;
     saveSettings?: (input: SaveInput) => Promise<SettingsWriteResult>;
     openSettingsFile?: () => Promise<void>;
+    importPreview?: () => Promise<ImportPreview>;
+    importApply?: (input: { expectedRevision: string }) => Promise<SettingsWriteResult>;
     catalog?: VisibilityCatalog;
   }) {
     const server = settingsQuery(options.initial);
@@ -4304,8 +4357,8 @@ describe("the settings editor keeps its draft across refetches", () => {
       session: notUsed,
       settings: notUsed,
       saveVisibility: notUsed,
-      importPreview: notUsed,
-      importApply: notUsed,
+      importPreview: options.importPreview ?? notUsed,
+      importApply: options.importApply ?? notUsed,
       subscribe: () => () => {},
       connection: () => "live",
       onConnectionChange: () => () => {},
@@ -5090,14 +5143,39 @@ describe("the settings editor keeps its draft across refetches", () => {
     mounted.dispose();
   });
 
-  it("keeps the edits and adopts the latest revision after a 409, so an explicit retry saves them", async () => {
+  /**
+   * The official native RPC client unwraps `RpcError` into a plain
+   * `{ type, message, data? }` object (`@opencode/client`'s promise adapter), so
+   * SettingsView must recognize a conflict without an HTTP `DashboardError`.
+   */
+  const nativeConfigChanged = (): unknown => ({
+    type: "config-changed",
+    message: "The settings file changed elsewhere.",
+  });
+
+  const conflictSources: Array<[string, () => unknown]> = [
+    ["HTTP 409", () => renderGraph.configChangedError()],
+    ["native RPC", nativeConfigChanged],
+  ];
+
+  it("recognizes config-changed on both transports without trusting other failures", () => {
+    expect(isConfigChangedError(new DashboardError("config-changed", 409, "conflict"))).toBe(true);
+    expect(isConfigChangedError(nativeConfigChanged())).toBe(true);
+    expect(isConfigChangedError({ type: "config-read-error", message: "read" })).toBe(false);
+    expect(isConfigChangedError(new Error("config-changed"))).toBe(false);
+    expect(isConfigChangedError(undefined)).toBe(false);
+  });
+
+  it.each(
+    conflictSources,
+  )("keeps the edits and adopts the latest revision after a %s config-changed, so an explicit retry saves them", async (_label, conflict) => {
     let attempts = 0;
     const mounted = mountSettings({
       initial: settingsSnapshot(),
       saveSettings: async (input) => {
         attempts += 1;
         if (attempts === 1) {
-          throw renderGraph.configChangedError();
+          throw conflict();
         }
         return { revision: "revision-4", applied: input.patch, warnings: [] };
       },
@@ -5134,6 +5212,42 @@ describe("the settings editor keeps its draft across refetches", () => {
       () => renderGraph.textOf(mounted.root).includes("No unsaved changes."),
       "the retry to clear the draft",
     );
+    mounted.dispose();
+  });
+
+  it.each(
+    conflictSources,
+  )("names a %s config-changed after import apply and keeps the preview for another attempt", async (_label, conflict) => {
+    const preview: ImportPreview = {
+      from: "workspace: synthetic",
+      keys: [{ key: "formatStyle", value: "singleWindow" }],
+      issues: [],
+      expectedRevision: "revision-1",
+    };
+    const mounted = mountSettings({
+      initial: settingsSnapshot(),
+      importPreview: async () => preview,
+      importApply: async () => {
+        throw conflict();
+      },
+    });
+
+    click(buttonByText(mounted.root, "Preview migration"));
+    await until(
+      () =>
+        renderGraph
+          .elementsNamed(mounted.root, "button")
+          .some((node) => renderGraph.textOf(node) === "Apply 1 keys"),
+      "the import preview",
+    );
+    click(buttonByText(mounted.root, "Apply 1 keys"));
+    await until(
+      () => mounted.toasts.some((toast) => toast.message.includes("changed since the preview")),
+      "the import conflict toast",
+    );
+
+    // The preview survives the conflict so the user can preview again.
+    expect(buttonByText(mounted.root, "Apply 1 keys")).toBeDefined();
     mounted.dispose();
   });
 

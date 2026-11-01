@@ -4,14 +4,15 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 /**
- * Desktop GUI wiring (Stage 4).
+ * Desktop GUI wiring (Stage 5).
  *
  * The native bundle is the product's second host, not a second product. These
  * checks keep that true at the seams a build cannot prove on its own: one side
- * panel that renders the shipped Quota surface, a command and a `+` menu entry
- * that open it, the two module substitutions the host cannot provide, the
- * release manifest, and the stylesheet split that lets the same product CSS be
- * injected into a foreign document without repainting it.
+ * panel that renders the shared dashboard route containers, window-local
+ * navigation for Analytics/Models/drilldowns, an official SettingsPage using
+ * the shared settings view and backend, the two module substitutions the host
+ * cannot provide, the release manifest, and the stylesheet split that lets the
+ * same product CSS be injected into a foreign document without repainting it.
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -83,7 +84,14 @@ const exportsMap = packageJson.exports ?? {};
 
 const guiSource = read("src/native/gui.tsx");
 const panelSource = read("src/native/panel.tsx");
-const stateSource = read("src/native/quota-panel-state.ts");
+const stateSource = read("src/native/panel-state.ts");
+const navigationSource = read("src/native/navigation.ts");
+const settingsPageSource = read("src/native/settings-page.tsx");
+const settingsStateSource = read("src/native/settings-page-state.ts");
+const routesSource = read("src/ui/routes.tsx");
+const appSource = read("src/ui/app.tsx");
+const settingsView = read("src/ui/views/settings.tsx");
+const settingsModel = read("src/ui/settings-model.ts");
 const configSource = read("vite.native.config.mjs");
 const productCss = read("src/ui/styles.css");
 const baseCss = read("src/ui/base.css");
@@ -92,14 +100,15 @@ const browserEntry = read("src/ui/main.tsx");
 const buildRunner = read("scripts/build-identity.mjs");
 
 describe("Desktop GUI entry", () => {
-  it("registers one side panel that renders the shared Quota surface", () => {
+  it("registers one side panel that renders the shared dashboard shell", () => {
     expect(guiSource).toContain('from "@opencode/plugin/gui"');
     expect(guiSource).toMatch(/ctx\.add\(Panel,\s*\{/u);
     expect(guiSource).toMatch(/region:\s*"side"/u);
-    expect(guiSource).toMatch(/const TAB_ID = "quota"/u);
+    expect(guiSource).toMatch(/const TAB_ID = "dashboard"/u);
     expect(guiSource).toMatch(/mobile:\s*\{[^}]*kind:\s*"menu"/su);
-    expect(guiSource).toMatch(/render:\s*\(\)\s*=>\s*<NativeQuotaPanel\s*\/>/u);
+    expect(guiSource).toMatch(/render:\s*\(\)\s*=>\s*<NativeDashboardPanel\s*\/>/u);
     expect(guiSource).toMatch(/visible=\{panel\.visible\}/u);
+    expect(panelSource).toContain("DashboardPanel");
   });
 
   it("follows the host's live built-in server connection", () => {
@@ -110,9 +119,9 @@ describe("Desktop GUI entry", () => {
     expect(panelSource).toContain("hostConnected");
   });
 
-  it("offers an accessible retry while ready data is stale", () => {
+  it("offers an accessible retry while data is stale", () => {
     expect(panelSource).toContain('class="qg-stale__retry"');
-    expect(panelSource).toContain('aria-label="Retry quota connection"');
+    expect(panelSource).toContain('aria-label="Retry dashboard data"');
     expect(panelSource).toContain("onClick={() => panel.retry()}");
     expect(nativeCss).toContain(".qg-stale__retry");
   });
@@ -123,7 +132,8 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toContain('menu: "session.panel"');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the assertion is the literal source of the host tab key.
     expect(guiSource).toContain("`${ctx.id}:${TAB_ID}`");
-    expect(guiSource).toMatch(/title:\s*"Open quota panel"/u);
+    expect(guiSource).toMatch(/title:\s*"Open dashboard panel"/u);
+    expect(guiSource).toMatch(/title:\s*"Dashboard"/u);
   });
 
   it("injects the product stylesheet before the host-only additions", () => {
@@ -135,23 +145,70 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toContain('from "./native.css?inline"');
   });
 
-  it("reuses the shipped feature components rather than redrawing them", () => {
-    expect(panelSource).toContain('from "../ui/views/home"');
-    expect(panelSource).toContain("QuotaView");
-    expect(panelSource).toContain("QuotaLoading");
+  it("reuses the shared route containers and feature views rather than redrawing them", () => {
+    expect(panelSource).toContain('from "../ui/routes"');
+    for (const route of [
+      "QuotaRoute",
+      "AnalyticsRoute",
+      "ModelsRoute",
+      "GroupDetailRoute",
+      "ProjectRoute",
+      "SessionRoute",
+    ]) {
+      expect(panelSource, `missing ${route}`).toContain(route);
+    }
+    expect(panelSource).toContain("AnalyticsTabs");
+    expect(panelSource).toContain("SegmentedControl");
     expect(panelSource).toContain("TemporalStatusStrip");
-    expect(panelSource).toContain('from "../ui/components/states"');
-    expect(panelSource).toContain('from "../ui/components/build-info"');
-    expect(guiSource).toContain("createNativeDashboardClient");
+    expect(panelSource.match(/enabled=\{props\.visible\}/gu)?.length).toBe(7);
+    expect(routesSource).toContain("function routeEnabled");
+    expect(routesSource).toContain("props.enabled?.() !== false");
+    expect(routesSource.match(/props\.onFresh\?\.\(\)/gu)?.length).toBe(6);
     expect(stateSource).toContain('from "../ui/query.js"');
+
+    for (const view of [
+      "QuotaView",
+      "QuotaLoading",
+      "HomeView",
+      "ModelsView",
+      "ModelDetailView",
+      "ProviderDetailView",
+      "ProjectView",
+      "SessionView",
+      "SettingsView",
+    ]) {
+      expect(routesSource, `missing ${view}`).toContain(view);
+    }
+    expect(appSource).toContain('from "./routes"');
   });
 
-  it("keeps the product hierarchy, in order", () => {
-    let previous = -1;
-    for (const name of ["qg-app", "qg-chrome", "qg-frame", "qg-main"]) {
-      const position = panelSource.indexOf(`class="${name}"`);
-      expect(position, `missing ${name}`).toBeGreaterThan(previous);
-      previous = position;
+  it("replaces the staged Analytics entry with the current internal hierarchy", () => {
+    expect(panelSource).not.toContain("not yet available");
+    expect(panelSource).not.toContain('aria-disabled="true"');
+    expect(panelSource).toContain('aria-label="Analytics"');
+    expect(panelSource).toContain(
+      'data-section-active={analyticsTab() === undefined ? undefined : "true"}',
+    );
+    expect(panelSource).toContain('formatPath({ name: "analytics" }, range())');
+    expect(panelSource).toContain("modelsDimension() ?? rememberedModelsDimension()");
+    for (const name of ["home", "analytics", "models", "model", "provider", "project", "session"]) {
+      expect(panelSource, `missing ${name} route`).toContain(`when={route().name === "${name}"}`);
+    }
+    expect(panelSource).not.toContain("SettingsRoute");
+  });
+
+  it("keeps navigation window-local: no browser URL, history or storage", () => {
+    expect(panelSource).toContain("initialNativeLocation");
+    expect(panelSource).toContain("navigateNative");
+    expect(panelSource).toContain('addEventListener("click", handleClick)');
+    expect(panelSource).toContain('addEventListener("auxclick", handleAuxClick)');
+    expect(navigationSource).toContain("parseLocation(path, current.range)");
+    expect(navigationSource).toContain("setNativeRange");
+    expect(navigationSource).toContain("replaceModelsDimension");
+
+    const executable = stripComments(navigationSource);
+    for (const token of ["history", "localStorage", "window.location", "pushState"]) {
+      expect(executable, `navigation uses ${token}`).not.toContain(token);
     }
   });
 
@@ -182,6 +239,125 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toContain("createGuiRpcCaller(ctx)");
     expect(read("src/native/rpc.ts")).toContain("ctx.client.rpc(DashboardRpc)");
     expect(read("src/native/dashboard-client.ts")).toContain("createNativeDashboardClient");
+  });
+
+  it("registers the official SettingsPage with the shared settings view and backend", () => {
+    expect(guiSource).toMatch(/ctx\.add\(SettingsPage,\s*\{/u);
+    expect(guiSource).toContain("id: SETTINGS_PAGE_ID");
+    expect(guiSource).toContain('title: "Quota & analytics"');
+    expect(guiSource).toContain('icon: "window-analytics"');
+    expect(guiSource).toMatch(/render:\s*\(\)\s*=>\s*<NativeSettingsPage ctx=\{ctx\}\s*\/>/u);
+    expect(guiSource).toContain("ctx.layout.settings(SETTINGS_PAGE_ID)");
+    expect(settingsPageSource).toContain('from "../ui/routes"');
+    expect(settingsPageSource).toContain("SettingsRoute");
+    expect(settingsPageSource).toContain("createNativeDashboardClient");
+    expect(settingsPageSource).toContain("createGuiRpcCaller");
+    expect(settingsPageSource).toContain("ctx.servers");
+    expect(settingsPageSource).toContain(".builtin");
+    expect(settingsPageSource).toContain(".connected");
+    expect(settingsPageSource).toContain("hostConnected");
+    expect(settingsPageSource).toContain('data-settings="true"');
+    expect(settingsStateSource).toContain("hostStale");
+    expect(settingsStateSource).toContain("recoveredHostEpoch");
+  });
+
+  it("keeps settings capabilities in the shared view, not a native copy", () => {
+    expect(settingsStateSource).toContain("client.settings()");
+    expect(settingsStateSource).toContain("client.quota()");
+    expect(settingsStateSource).toContain("client.onReconnect");
+    expect(settingsStateSource).toContain("visibilityCatalogEquals");
+    expect(settingsStateSource).not.toContain("localStorage");
+
+    expect(settingsView).toContain("props.client.saveSettings");
+    expect(settingsView).toContain("SETTINGS_FIELDS");
+    for (const key of [
+      "dashboard.hiddenCards",
+      "dashboard.cardOrder",
+      "dashboard.temporalProviderOverrides",
+      "dashboard.enabled",
+      "dashboard.port",
+    ]) {
+      expect(settingsModel, `missing ${key}`).toContain(key);
+    }
+    expect(settingsModel).toContain("fieldErrors");
+    expect(settingsModel).toContain("applyConflict");
+  });
+
+  it("exposes the Web dashboard switch and quota staleness only on the native surface", () => {
+    // Native Settings opts into the shared Web-dashboard row; the Web shell does not.
+    expect(settingsPageSource).toContain("webDashboardToggle");
+    expect(settingsView).toContain("webDashboardToggle");
+    expect(settingsView).toContain("dashboard.enabled");
+    expect(routesSource).toContain("webDashboardToggle");
+    expect(appSource).not.toContain("webDashboardToggle");
+
+    // Quota feeds visibility, catalog and temporal rows, so its failure or stale
+    // flag has to be reported and retried without dropping the cached catalog.
+    expect(settingsStateSource).toContain("quotaStale");
+    expect(settingsStateSource).toContain("quotaQuery.error()");
+    expect(settingsStateSource).toContain("quotaQuery.data()?.stale");
+    expect(settingsPageSource).toContain("state.quotaStale()");
+    expect(settingsPageSource).toContain("Quota data may be stale");
+    expect(settingsPageSource).toContain("Retry settings and quota data");
+
+    // Settings and quota each anchor their own reconnect freshness. A clean
+    // first load waits for both; a settled failure becomes actionable at once,
+    // so Retry is never hidden behind the other read's pending state.
+    expect(settingsStateSource).toContain("quotaFreshEpoch");
+    expect(settingsStateSource).toContain(
+      "isStaleAfterReconnect(reconnectEpoch(), quotaFreshEpoch())",
+    );
+    expect(settingsStateSource).toContain("const loading =");
+    expect(settingsStateSource).toContain("settledError");
+    expect(settingsStateSource).toContain("const retryable =");
+    expect(settingsPageSource).toContain("state.loading()");
+    expect(settingsPageSource).toContain("Loading settings and quota data");
+    expect(settingsPageSource).toContain("state.retryable()");
+    expect(settingsPageSource).not.toContain("<Show when={!state.loading()}>");
+
+    // A quota failure with no payload gets an explicit retryable error instead
+    // of mounting the editor on an empty catalog.
+    expect(settingsPageSource).toContain("contentMode");
+    expect(settingsPageSource).toContain('"quota-error"');
+    expect(settingsPageSource).toContain("Quota data could not be loaded");
+    expect(settingsPageSource).toContain("state.quota() === undefined");
+  });
+
+  it("never renders quota cards from default visibility before settings load", () => {
+    // The settings read owns hidden cards/rows. Until it succeeds there is no
+    // authoritative visibility, so the Quota route is gated and fails closed.
+    expect(panelSource).toContain("when={panel.settings()}");
+    expect(panelSource).toContain("panel.settingsError()");
+    expect(panelSource).toContain("ErrorCard");
+    expect(panelSource).toContain("settings().visibility.hiddenCards");
+    expect(panelSource).toContain("settings().visibility.hiddenRows");
+    expect(panelSource).not.toContain("panel.hiddenCards()");
+    expect(panelSource).not.toContain("panel.hiddenRows()");
+    expect(stateSource).not.toContain("hiddenCards");
+    expect(stateSource).not.toContain("settingsQuery.data()?.values ?? {}");
+
+    // A failed shell read is reported in the header and retried locally while
+    // the transport is still live.
+    expect(panelSource).toContain("panel.settingsStale()");
+    expect(panelSource).toContain("Display settings unavailable");
+    expect(panelSource).toContain("Display settings may be stale");
+    expect(stateSource).toContain("settingsStale");
+    expect(stateSource).toContain("refreshSettings()");
+  });
+
+  it("recovers read failures without falling back to a browser reload", () => {
+    expect(routesSource).not.toContain("location.reload");
+    expect((routesSource.match(/onRetry=/gu) ?? []).length).toBeGreaterThanOrEqual(7);
+    expect(settingsPageSource).toContain("onRetry={state.retry}");
+  });
+
+  it("keeps the product hierarchy, in order", () => {
+    let previous = -1;
+    for (const name of ["qg-app", "qg-chrome", "qg-frame", "qg-main"]) {
+      const position = panelSource.indexOf(`class="${name}"`);
+      expect(position, `missing ${name}`).toBeGreaterThan(previous);
+      previous = position;
+    }
   });
 });
 
@@ -264,13 +440,22 @@ describe("stylesheet scoping for a host document", () => {
     expect(document).toBeGreaterThan(product);
   });
 
-  it("keeps host styling inside the panel scope", () => {
+  it("keeps host styling inside the panel and settings scopes", () => {
     expect(nativeCss).not.toMatch(/^html\s*\{/mu);
     expect(nativeCss).not.toMatch(/^body\s*\{/mu);
     expect(nativeCss).not.toMatch(/^:root\s*\{/mu);
     expect(nativeCss).toContain(".qg-panel-root");
+    expect(nativeCss).toContain(".qg-native.qg-settings-page");
+    expect(nativeCss).toContain(".qg-settings-page__status");
+    expect(nativeCss).toContain(".qg-settings-page .qg-toasts");
     expect(nativeCss).toContain(":where(.qg-native)");
     expect(nativeCss).toContain("prefers-reduced-motion");
+  });
+
+  it("styles the shared library button variants the settings view uses", () => {
+    for (const variant of ["outline", "contrast", "ghost-muted"]) {
+      expect(nativeCss, `missing ${variant}`).toContain(`.qg-button--${variant}`);
+    }
   });
 
   it("scopes the screen-reader utility for host injection", () => {

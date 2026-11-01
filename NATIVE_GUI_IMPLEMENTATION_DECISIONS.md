@@ -101,6 +101,30 @@ geometry, interaction and host loading remain unverified.
 Reversible: Yes.
 Owner review: review recommended
 
+## D08 — Share route containers and Settings form
+
+Stage: 5
+Status: provisional
+Problem: Native requires the complete existing dashboard hierarchy and
+revision-safe Settings without duplicating feature logic.
+Evidence: Web route containers already compose the existing views, charts,
+visibility catalog and canonical settings form.
+Options considered: Reimplement each Native feature; extract and reuse the
+existing route containers with a small host navigation and SettingsPage shell.
+Decision: Share the route containers and settings form; retain native-local
+navigation and host lifecycle only. Show the Web switch in Native Settings.
+Why: One feature implementation preserves product semantics across transports.
+Trade-offs: Host-specific layout, focus and popup behavior still need Desktop
+verification; the settings page uses a separate viewer of the same runtime.
+Product impact: Native navigation and Settings target existing capabilities;
+unavailable settings are reported rather than showing hidden cards by default.
+Compatibility impact: Uses the experimental OpenCode SettingsPage API.
+Test evidence: Independent re-review found the addressed Settings and
+visibility issues resolved. `pnpm verify` passed: 4,778 tests passed, 50
+skipped, plus five cross-surface tests. Real Desktop testing remains pending.
+Reversible: Yes.
+Owner review: review recommended
+
 ## D06 — RPC viewers and setup-scoped registrations
 
 Stage: 3

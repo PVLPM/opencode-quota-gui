@@ -59,6 +59,20 @@ export function describeError(error: unknown): string {
   return "The dashboard server did not answer. Check that the local dashboard is still running.";
 }
 
+/**
+ * A settings-revision conflict arrives in two shapes: the browser client throws
+ * a `DashboardError`, while the official native RPC client unwraps the server's
+ * `RpcError` into a plain `{ type, message, data? }` object. Recognize only the
+ * declared `config-changed` code on either transport so an unrelated failure is
+ * never treated as a conflict, and no error text is trusted for control flow.
+ */
+export function isConfigChangedError(error: unknown): boolean {
+  if (error instanceof DashboardError) return error.isConfigChanged;
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { type?: unknown; message?: unknown };
+  return candidate.type === "config-changed" && typeof candidate.message === "string";
+}
+
 export function resolveLoadState<T>(
   outcome: FetchOutcome<T>,
   contractMismatch?: string,

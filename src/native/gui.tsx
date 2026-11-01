@@ -1,4 +1,13 @@
-import { Command, MenuItem, Panel, Plugin, Style, usePanel, usePlugin } from "@opencode/plugin/gui";
+import {
+  Command,
+  MenuItem,
+  Panel,
+  Plugin,
+  SettingsPage,
+  Style,
+  usePanel,
+  usePlugin,
+} from "@opencode/plugin/gui";
 import type { JSX } from "solid-js";
 import { onCleanup } from "solid-js";
 import productCss from "../ui/styles.css?inline";
@@ -6,26 +15,28 @@ import { createNativeDashboardClient } from "./dashboard-client.js";
 import nativeCss from "./native.css?inline";
 import { DashboardPanel } from "./panel.js";
 import { createGuiRpcCaller } from "./rpc.js";
+import { NativeSettingsPage, SETTINGS_PAGE_ID } from "./settings-page.js";
 
 /**
- * OpenCode Desktop GUI entry (Stage 4).
+ * OpenCode Desktop GUI entry (Stage 5).
  *
  * One package, one server plugin, one GUI bundle: the host's Vite preset writes
  * `dist/gui-experimental.cjs`, and this file registers only GUI concerns. It
  * imports no server module and no `@opencode/ui`; the shared product UI is
  * reached through the same feature components the browser build uses.
  *
- * Stage 4 ships the Quota panel. Analytics stays a visibly staged entry until
- * its own panel stage, and Settings delegates to the host's settings window.
+ * The side Panel hosts the full dashboard navigation (Quota, Analytics, Models
+ * and their drilldowns) through the shared route containers. Settings is an
+ * official `SettingsPage` built from the shared settings view and backend.
  */
 
 const PANEL_ID = "dashboard";
-const TAB_ID = "quota";
+const TAB_ID = "dashboard";
 
 /** Stable objects: the host re-renders tab labels only when a new object appears. */
-const QUOTA_TAB = { id: TAB_ID, title: "Quota" } as const;
+const DASHBOARD_TAB = { id: TAB_ID, title: "Dashboard" } as const;
 
-function NativeQuotaPanel(): JSX.Element {
+function NativeDashboardPanel(): JSX.Element {
   const ctx = usePlugin();
   const panel = usePanel();
   const client = createNativeDashboardClient({
@@ -49,13 +60,13 @@ function NativeQuotaPanel(): JSX.Element {
       client={client}
       visible={panel.visible}
       hostConnected={hostConnected}
-      onOpenSettings={() => ctx.layout.settings()}
+      onOpenSettings={() => ctx.layout.settings(SETTINGS_PAGE_ID)}
     />
   );
 }
 
-/** Opens the Quota tab in the routed session's side region. */
-function openQuotaPanel(ctx: ReturnType<typeof usePlugin>): void {
+/** Opens the Dashboard tab in the routed session's side region. */
+function openDashboardPanel(ctx: ReturnType<typeof usePlugin>): void {
   const session = ctx.sessions.current() ?? ctx.sessions.list()[0];
   if (session === undefined) return;
   ctx.layout.open(`${ctx.id}:${TAB_ID}`, session);
@@ -72,27 +83,43 @@ export default Plugin.define({
     ctx.add(Panel, {
       id: PANEL_ID,
       region: "side",
-      mobile: { title: "Quota", order: 20, kind: "menu", icon: "layout-right" },
-      list: ({ open }) => (open.includes(TAB_ID) ? [QUOTA_TAB] : []),
-      render: () => <NativeQuotaPanel />,
+      mobile: { title: "Dashboard", order: 20, kind: "menu", icon: "layout-right" },
+      list: ({ open }) => (open.includes(TAB_ID) ? [DASHBOARD_TAB] : []),
+      render: () => <NativeDashboardPanel />,
+    });
+
+    ctx.add(SettingsPage, {
+      id: SETTINGS_PAGE_ID,
+      title: "Quota & analytics",
+      icon: "window-analytics",
+      entries: [
+        {
+          id: SETTINGS_PAGE_ID,
+          title: "Quota & analytics",
+          description: "Shared product settings for quota cards, analytics and the web dashboard",
+          keywords:
+            "quota providers analytics visibility order temporal pricing web dashboard enabled port",
+        },
+      ],
+      render: () => <NativeSettingsPage ctx={ctx} />,
     });
 
     ctx.add(Command, {
-      id: "open-quota",
-      title: "Open quota panel",
-      description: "Show provider quotas in the side region",
-      keywords: "quota providers limits usage panel",
+      id: "open-dashboard",
+      title: "Open dashboard panel",
+      description: "Show quota, analytics and model usage in the side region",
+      keywords: "dashboard quota analytics models providers limits usage panel",
       section: "navigation",
       group: "Navigation",
-      run: () => openQuotaPanel(ctx),
+      run: () => openDashboardPanel(ctx),
     });
 
     ctx.add(MenuItem, {
       menu: "session.panel",
-      id: "open-quota",
-      title: "Quota",
+      id: "open-dashboard",
+      title: "Dashboard",
       icon: "layout-right",
-      run: () => openQuotaPanel(ctx),
+      run: () => openDashboardPanel(ctx),
     });
   },
 });
