@@ -401,7 +401,7 @@ describe("package manifest compatibility", () => {
       readFile(new URL("../src/plugin.ts", import.meta.url), "utf8"),
     ]);
     expect(rpcSource).toContain('"opencode-quota-gui"');
-    expect(pluginSource).toContain('"opencode-quota-gui.server"');
+    expect(pluginSource).toContain('id: "opencode-quota-gui"');
 
     // README yields the renamed identity and the explicit local-pack install rule.
     expect(readme).toContain("opencode-quota-gui");

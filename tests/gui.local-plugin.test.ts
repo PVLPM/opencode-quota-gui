@@ -74,7 +74,7 @@ describe("local OpenCode plugin entry", () => {
     const loaded = (await Host.load(pathToFileURL(serverEntry).href)) as Record<string, unknown>;
     expect(Object.keys(loaded)).toEqual(["default"]);
     const plugin = loaded.default as { id?: unknown; setup?: unknown; effect?: unknown };
-    expect(plugin.id).toBe("opencode-quota-gui.server");
+    expect(plugin.id).toBe("opencode-quota-gui");
     expect(typeof plugin.setup === "function" || typeof plugin.effect === "function").toBe(true);
 
     const built = (await Host.load(pathToFileURL(distEntry).href)) as Record<string, unknown>;

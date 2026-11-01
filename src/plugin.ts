@@ -25,7 +25,7 @@ function logReason(error: unknown): string {
 }
 
 export const QuotaToastPlugin = Plugin.define({
-  id: "opencode-quota-gui.server",
+  id: "opencode-quota-gui",
   async setup(ctx) {
     const roots = resolveOpenCodeLocationRoots(ctx.location.directory);
     // The quota collector accepts a small V1-shaped configuration client. V2

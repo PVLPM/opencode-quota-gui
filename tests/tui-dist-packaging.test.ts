@@ -75,7 +75,7 @@ describe("tui dist packaging", () => {
     const mod = await import("../dist/index.js");
 
     expect(mod.default).toMatchObject({
-      id: "opencode-quota-gui.server",
+      id: "opencode-quota-gui",
     });
     expect(typeof mod.default.setup).toBe("function");
   });
