@@ -47,15 +47,23 @@ export function createSessionHeaderSource(options: {
   const quotaQuery = createQuery<QuotaSnapshot>(() => options.client.quota());
   const now = options.now ?? Date.now;
   const [localNowMs, setLocalNowMs] = createSignal(now());
+  const [freshReconnectEpoch, setFreshReconnectEpoch] = createSignal(0);
+
+  function refreshQuota(): void {
+    const reconnectEpoch = panel.reconnectEpoch();
+    void quotaQuery.run().then((applied) => {
+      if (!applied) return;
+      setFreshReconnectEpoch(reconnectEpoch);
+      panel.markFresh();
+    });
+  }
 
   createEffect(() => {
     if (!options.active()) return;
     // Read both tokens where they are used; either one asks for a fresh read.
     void panel.quotaReloadToken();
     void panel.reconnectEpoch();
-    void quotaQuery.run().then((applied) => {
-      if (applied) panel.markFresh();
-    });
+    refreshQuota();
   });
 
   // Keep the view clock in sync with reactive data without making the clock
@@ -104,7 +112,9 @@ export function createSessionHeaderSource(options: {
       snapshot.stale === true ||
       quotaQuery.error() !== undefined ||
       panel.connection() !== "live" ||
-      panel.hostStale();
+      panel.hostStale() ||
+      panel.settingsStale() ||
+      freshReconnectEpoch() < panel.reconnectEpoch();
     return buildSessionHeaderView({
       snapshot,
       hiddenCards: settings.visibility.hiddenCards,
@@ -138,7 +148,7 @@ export function createSessionHeaderSource(options: {
     settingsError: panel.settingsError,
     quotaError: quotaQuery.error,
     retry: () => {
-      void quotaQuery.run();
+      refreshQuota();
       panel.retry();
     },
   };

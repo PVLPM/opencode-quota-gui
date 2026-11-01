@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   AnalyticsGroupSnapshot,
   CostedTokens,
+  DashboardHealth,
   HomeSnapshot,
   ProjectSnapshot,
   QuotaSnapshot,
@@ -25,6 +26,10 @@ import {
   type SnapshotSource,
   type SnapshotViewScope,
 } from "../src/gui/snapshot-service.js";
+import {
+  createNativeDashboardClient,
+  type DashboardRpcCaller,
+} from "../src/native/dashboard-client.js";
 import { DashboardRpc } from "../src/rpc.js";
 import {
   createGuiConfigWorkspace,
@@ -67,6 +72,7 @@ function costed(total: number): CostedTokens {
 function buildSource() {
   const calls = { home: 0, project: 0, session: 0, quota: 0, groups: 0 };
   const state = { closes: 0 };
+  let quotaTimeZone = "UTC";
   const source: SnapshotSource = {
     home: async ({ range }) => {
       calls.home += 1;
@@ -133,7 +139,7 @@ function buildSource() {
       return {
         generatedAtMs: 1,
         stale: false,
-        timeZone: "UTC",
+        timeZone: quotaTimeZone,
         providers: { cards: [], enabledProviders: "auto", polledAtMs: 1 },
       } as QuotaSnapshot;
     },
@@ -161,6 +167,9 @@ function buildSource() {
   return {
     source,
     calls,
+    setQuotaTimeZone: (timeZone: string) => {
+      quotaTimeZone = timeZone;
+    },
     get closes() {
       return state.closes;
     },
@@ -173,6 +182,7 @@ interface SnapshotCapture {
   readonly closes: number;
   readonly viewers: number;
   readonly scopedViewers: number;
+  readonly scopedScopes: SnapshotViewScope[];
 }
 
 function captureSnapshots(): SnapshotCapture {
@@ -180,6 +190,7 @@ function captureSnapshots(): SnapshotCapture {
   let closes = 0;
   let viewers = 0;
   let scopedViewers = 0;
+  const scopedScopes: SnapshotViewScope[] = [];
   return {
     created,
     get closes() {
@@ -191,6 +202,7 @@ function captureSnapshots(): SnapshotCapture {
     get scopedViewers() {
       return scopedViewers;
     },
+    scopedScopes,
     createSnapshots: (options) => {
       const service = createSnapshotService(options);
       const close = service.close.bind(service);
@@ -216,6 +228,7 @@ function captureSnapshots(): SnapshotCapture {
       const addScoped = service.addScopedViewer.bind(service);
       service.addScopedViewer = (scope: SnapshotViewScope) => {
         scopedViewers += 1;
+        scopedScopes.push(scope);
         const viewer = addScoped(scope);
         let released = false;
         return {
@@ -390,6 +403,130 @@ describe("dashboard RPC lifecycle", () => {
     await lease.dispose();
     expect(snapshots.closes).toBe(1);
     expect(fixture.closes).toBe(1);
+  });
+
+  it("re-registers page poll interests after the last viewer drops and recovers", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port }, minIntervalMs: 40 });
+    const fixture = buildSource();
+    const snapshots = captureSnapshots();
+    const lease = await open({
+      ...optionsFor(workspace, fixture.source),
+      createSnapshots: snapshots.createSnapshots,
+    });
+    if (!lease.runtime) throw new Error("expected the shared runtime");
+    const registrar = createFakeRegistrar();
+    const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
+    const watchScopes: string[] = [];
+    let healthCalls = 0;
+    let releaseRecoveryHealth: ((health: DashboardHealth) => void) | undefined;
+    let timeoutFirstWatch: ((error: unknown) => void) | undefined;
+    let refetch: Promise<unknown> | undefined;
+    const caller = {
+      health: (_input: unknown, options?: { signal?: AbortSignal }) => {
+        healthCalls += 1;
+        if (healthCalls === 2) {
+          return new Promise<DashboardHealth>((resolve) => {
+            releaseRecoveryHealth = resolve;
+          });
+        }
+        return registrar.call("health", {}, options?.signal) as Promise<DashboardHealth>;
+      },
+      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+        watchScopes.push(input.scope);
+        const backendWatch = registrar.call("watch", input, options?.signal) as Promise<{
+          active: boolean;
+        }>;
+        if (watchScopes.length !== 1) return backendWatch;
+        return new Promise<{ active: boolean }>((resolve, reject) => {
+          timeoutFirstWatch = reject;
+          backendWatch.then(resolve, reject);
+        });
+      },
+      events: {
+        subscribe: (_name: "invalidated", options?: { signal?: AbortSignal }) => {
+          const signal = options?.signal ?? new AbortController().signal;
+          return {
+            async *[Symbol.asyncIterator]() {
+              if (signal.aborted) return;
+              await new Promise<void>((resolve) => {
+                signal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            },
+          };
+        },
+      },
+    } as unknown as DashboardRpcCaller;
+    const client = createNativeDashboardClient({ rpc: caller, scope: "quota" });
+    client.onReconnect(() => {
+      refetch = registrar.call("quota", {});
+    });
+
+    try {
+      client.subscribe(() => {});
+      await vi.waitFor(
+        () => {
+          expect(watchScopes).toEqual(["quota"]);
+          expect(snapshots.scopedViewers).toBe(1);
+          expect(client.connection()).toBe("live");
+        },
+        { timeout: 1000, interval: 5 },
+      );
+      await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
+      expect(fixture.calls.quota).toBe(1);
+
+      timeoutFirstWatch?.(
+        Object.assign(new Error("The operation timed out"), {
+          name: "ClientError",
+          reason: "Transport",
+          cause: new DOMException("The operation timed out", "TimeoutError"),
+        }),
+      );
+      await vi.waitFor(
+        () => {
+          expect(healthCalls).toBe(2);
+          expect(snapshots.scopedViewers).toBe(0);
+        },
+        { timeout: 1000, interval: 5 },
+      );
+      releaseRecoveryHealth?.({
+        app: "opencode-quota-gui",
+        contractVersion: 2,
+        version: "lifecycle-test",
+        build: "lifecycle-test",
+      });
+      await vi.waitFor(
+        () => {
+          expect(watchScopes).toEqual(["quota", "quota"]);
+          expect(snapshots.scopedScopes).toEqual(["quota", "quota"]);
+          expect(snapshots.scopedViewers).toBe(1);
+          expect(client.connection()).toBe("live");
+          expect(refetch).toBeDefined();
+          expect(fixture.calls.quota).toBe(2);
+        },
+        { timeout: 1000, interval: 5 },
+      );
+      await refetch;
+
+      const deliveredBeforePoll = registrar.registrations[0]?.delivered ?? 0;
+      fixture.setQuotaTimeZone("Etc/GMT+1");
+      await vi.waitFor(
+        () => {
+          expect(fixture.calls.quota).toBeGreaterThan(2);
+          expect(registrar.registrations[0]?.delivered).toBeGreaterThan(deliveredBeforePoll);
+        },
+        { timeout: 1000, interval: 5 },
+      );
+    } finally {
+      client.dispose();
+      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(0), {
+        timeout: 1000,
+        interval: 5,
+      });
+      await registration.dispose();
+      await lease.dispose();
+    }
   });
 
   it("keeps the same runtime and RPC available after a web bind failure", async () => {

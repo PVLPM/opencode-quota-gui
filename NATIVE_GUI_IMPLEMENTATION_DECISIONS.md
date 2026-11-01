@@ -4,6 +4,31 @@ This log records material implementation decisions against the owner-approved
 `docs/research/native-gui-migration-architecture.md` baseline. The research
 report is intentionally ignored and remains unchanged.
 
+## D11 — Recover from the Desktop RPC response deadline
+
+Stage: Native stabilization
+Status: implemented; real Desktop soak pending
+Problem: OpenCode Desktop 2.2.5 aborts an ordinary RPC request if response
+headers do not arrive within 60 seconds. Dashboard `watch` intentionally holds
+its response while it owns a viewer, so the host aborts it and the Native client
+previously stayed reconnecting until visibility or host state changed.
+Evidence: Desktop request-queue source and an isolated SDK/server reproduction;
+the observed backend logs contain repeated watch cancellations near one minute.
+Decision: Recognize the host's transport timeout, retire the connection and
+perform one health-checked recovery through the normal connection lifecycle.
+Keep the Slot fail-closed until fresh settings and quota reads complete. Stop
+ownership on host loss or last unsubscribe. No plugin timer, lease, heartbeat,
+or independent poller is added; ordinary failures remain failures.
+Trade-offs: The host deadline causes a fresh connection and reads on renewal.
+The RPC API does not acknowledge held-viewer acquisition separately. The
+observed disappearance of other plugins' Slots has not been attributed to this
+plugin, and a real Desktop soak is still required.
+Test evidence: Native client, Panel, Slot-source and RPC lifecycle regressions
+cover timeout recovery, host loss, scope changes, stale reads and restored poll
+interest; Desktop timing remains unverified.
+Reversible: Yes.
+Owner review: routine defect correction
+
 ## D01 — Isolate Git-backed verification fixtures
 
 Stage: Preflight

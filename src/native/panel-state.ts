@@ -45,6 +45,8 @@ export interface DashboardPanelClient {
   onReconnect(listener: () => void): () => void;
   connection(): NativeDashboardConnection;
   reconnect(): Promise<void>;
+  suspend?(): void;
+  resume?(): Promise<void>;
   /** Live viewer interest; optional so the lifecycle stays testable in isolation. */
   setActiveView?(scope: DashboardRpcViewScope): Promise<void>;
 }
@@ -82,6 +84,7 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
   const [health, setHealth] = createSignal<DashboardHealth>();
   const [connection, setConnection] = createSignal<NativeDashboardConnection>(client.connection());
   const [reconnectEpoch, setReconnectEpoch] = createSignal(0);
+  const [freshSettingsEpoch, setFreshSettingsEpoch] = createSignal(0);
   const [reloadToken, setReloadToken] = createSignal(0);
   const [quotaReloadToken, setQuotaReloadToken] = createSignal(0);
   const [hostEpoch, setHostEpoch] = createSignal(0);
@@ -90,7 +93,10 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
   const [recoveredHostEpoch, setRecoveredHostEpoch] = createSignal(0);
 
   function refreshSettings(): void {
-    void settingsQuery.run();
+    const epoch = reconnectEpoch();
+    void settingsQuery.run().then((applied) => {
+      if (applied) setFreshSettingsEpoch(epoch);
+    });
   }
 
   async function refreshHealth(): Promise<void> {
@@ -114,6 +120,11 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
     setReloadToken((token) => token + 1);
   }
 
+  function resumeClient(): void {
+    if (client.resume) void client.resume();
+    else void client.reconnect();
+  }
+
   // The host's built-in server ref follows restarts and dropped event streams.
   // A loss marks the routed payload stale at once; its return reopens the
   // transport and refetches once. No timer, heartbeat or polling is involved.
@@ -123,13 +134,14 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
     if (!connected) {
       hostWasConnected = false;
       setHostEpoch((epoch) => epoch + 1);
+      client.suspend?.();
       return;
     }
     if (hostWasConnected === false) {
       hostWasConnected = true;
       // While hidden there is no held viewer to reopen; the show path reconnects
       // if this host epoch is still unanchored.
-      if (options.visible()) void client.reconnect();
+      if (options.visible()) resumeClient();
       return;
     }
     hostWasConnected = true;
@@ -155,7 +167,9 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
         setQuotaReloadToken((token) => token + 1);
         // If the host dropped while this tab was hidden, no viewer existed to
         // reopen; the show path is where that recovery is completed.
-        if (hostEpoch() > recoveredHostEpoch()) void client.reconnect();
+        if (hostEpoch() > recoveredHostEpoch() && (options.hostConnected?.() ?? true)) {
+          resumeClient();
+        }
       }
       onCleanup(unsubscribe);
     }),
@@ -183,7 +197,8 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
   return {
     settings: settingsQuery.data,
     settingsError: settingsQuery.error,
-    settingsStale: () => settingsQuery.error() !== undefined,
+    settingsStale: () =>
+      settingsQuery.error() !== undefined || freshSettingsEpoch() < reconnectEpoch(),
     connection,
     buildWarning: () => buildMismatchMessage(health()),
     contractMismatch: () => {
@@ -204,6 +219,7 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
       setFreshHostEpoch(hostEpoch());
     },
     retry: () => {
+      if (options.hostConnected?.() === false) return;
       // A failed shell read on a healthy transport is retried locally; only a
       // dropped host or transport needs the connection reopened.
       if (

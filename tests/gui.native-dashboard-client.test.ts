@@ -30,6 +30,7 @@ function createEventStream(signal: AbortSignal) {
   signal.addEventListener("abort", finish, { once: true });
 
   return {
+    signal,
     stream: {
       async *[Symbol.asyncIterator]() {
         while (!ended) {
@@ -55,13 +56,17 @@ interface ActiveWatch {
   scope: string;
   signal: AbortSignal;
   resolve: (value: { active: boolean }) => void;
+  reject: (error: unknown) => void;
 }
 
 function createFakeCaller() {
   const activeWatches: ActiveWatch[] = [];
   const streams: Array<ReturnType<typeof createEventStream>> = [];
   const caller = {
-    health: vi.fn(async () => ({ app: "opencode-quota-gui", contractVersion: 2 })),
+    health: vi.fn(async (_input?: Record<string, never>, _options?: { signal?: AbortSignal }) => ({
+      app: "opencode-quota-gui",
+      contractVersion: 2,
+    })),
     quota: vi.fn(async () => ({ marker: "quota" })),
     home: vi.fn(async () => ({ marker: "home" })),
     groups: vi.fn(async () => ({ marker: "groups" })),
@@ -75,9 +80,9 @@ function createFakeCaller() {
     openSettingsFile: vi.fn(async () => ({ opened: true as const })),
     watch: vi.fn(
       (input: { scope: string }, options?: { signal?: AbortSignal }) =>
-        new Promise<{ active: boolean }>((resolve) => {
+        new Promise<{ active: boolean }>((resolve, reject) => {
           const signal = options?.signal ?? new AbortController().signal;
-          activeWatches.push({ scope: input.scope, signal, resolve });
+          activeWatches.push({ scope: input.scope, signal, resolve, reject });
           signal.addEventListener("abort", () => resolve({ active: false }), { once: true });
         }),
     ),
@@ -95,6 +100,14 @@ function createFakeCaller() {
     activeWatches,
     streams,
   };
+}
+
+function hostWatchTimeout(): Error {
+  return Object.assign(new Error("The watch request timed out"), {
+    name: "ClientError",
+    reason: "Transport",
+    cause: new DOMException("The operation timed out", "TimeoutError"),
+  });
 }
 
 async function waitFor(check: () => boolean, label: string): Promise<void> {
@@ -134,6 +147,36 @@ describe("native dashboard RPC client", () => {
     await waitFor(() => fake.activeWatches.every((watch) => watch.signal.aborted), "watch abort");
     client.dispose();
     expect(client.connection()).toBe("closed");
+  });
+
+  it("supersedes an immediate startup with an immutable latest scope", async () => {
+    const fake = createFakeCaller();
+    let resolveFirstHealth!: (value: { app: string; contractVersion: number }) => void;
+    fake.raw.health.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirstHealth = resolve;
+        }),
+    );
+    const client = createNativeDashboardClient({ rpc: fake.caller, scope: "quota" });
+    const unsubscribe = client.subscribe(() => {});
+    await waitFor(() => resolveFirstHealth !== undefined, "initial health request");
+    const firstHealthSignal = fake.raw.health.mock.calls[0]?.[1]?.signal;
+
+    await client.setActiveView("analytics");
+    expect(firstHealthSignal?.aborted).toBe(true);
+    expect(fake.raw.health).toHaveBeenCalledTimes(2);
+
+    resolveFirstHealth({ app: "opencode-quota-gui", contractVersion: 2 });
+    await waitFor(
+      () => client.connection() === "live" && fake.activeWatches.length === 1,
+      "latest startup attempt",
+    );
+    expect(fake.activeWatches[0]?.scope).toBe("analytics");
+    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    client.dispose();
   });
 
   it("marks a broken stream as reconnecting, then explicitly re-subscribes, reacquires and refetches", async () => {
@@ -179,7 +222,7 @@ describe("native dashboard RPC client", () => {
     client.dispose();
   });
 
-  it("reopens only the held viewer when the active surface changes", async () => {
+  it("restarts the complete attempt with the active surface scope", async () => {
     const fake = createFakeCaller();
     const client = createNativeDashboardClient({ rpc: fake.caller, scope: "quota" });
     const unsubscribe = client.subscribe(() => {});
@@ -190,7 +233,9 @@ describe("native dashboard RPC client", () => {
     await waitFor(() => fake.raw.watch.mock.calls.length === 2, "second watch");
     expect(firstWatch?.signal.aborted).toBe(true);
     expect(fake.activeWatches[1]?.scope).toBe("analytics");
-    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+    expect(fake.raw.health).toHaveBeenCalledTimes(2);
+    expect(fake.raw.events.subscribe).toHaveBeenCalledTimes(2);
+    expect(fake.streams[0]?.signal.aborted).toBe(true);
     expect(client.connection()).toBe("live");
 
     unsubscribe();
@@ -295,7 +340,7 @@ describe("native dashboard RPC client", () => {
     throwNow = true;
     await expect(client.reconnect()).resolves.toBeUndefined();
     expect(client.connection()).toBe("live");
-    expect(observed).toContain("connecting");
+    expect(observed).toContain("reconnecting");
     expect(observed).toContain("live");
 
     expect(() => unsubscribe()).not.toThrow();
@@ -325,7 +370,9 @@ describe("native dashboard RPC client", () => {
         return immediate.stream;
       });
     } else {
-      fake.raw.watch.mockRejectedValueOnce(new Error("immediate watch failure"));
+      // A timeout reported while opening is not eligible to recursively
+      // recover; only a timeout from an established live attempt is.
+      fake.raw.watch.mockRejectedValueOnce(hostWatchTimeout());
     }
 
     await client.reconnect();
@@ -345,6 +392,251 @@ describe("native dashboard RPC client", () => {
     unsubscribe();
     await waitFor(() => fake.activeWatches[0]?.signal.aborted === true, "viewer release");
     expect(client.connection()).toBe("reconnecting");
+    client.dispose();
+  });
+
+  it("reopens health, events and watch after a live timeout and notifies once per recovery", async () => {
+    const fake = createFakeCaller();
+    const constructorReconnect = vi.fn();
+    const firstReconnectListener = vi.fn();
+    const secondReconnectListener = vi.fn();
+    const notifiedWhileReconnecting: string[] = [];
+    const client = createNativeDashboardClient({
+      rpc: fake.caller,
+      onReconnect: constructorReconnect,
+    });
+    client.onReconnect(() => {
+      notifiedWhileReconnecting.push(client.connection());
+      firstReconnectListener();
+    });
+    client.onReconnect(secondReconnectListener);
+    const unsubscribeFirst = client.subscribe(() => {});
+    const unsubscribeSecond = client.subscribe(() => {});
+    await waitFor(() => client.connection() === "live", "live connection");
+
+    const firstWatch = fake.activeWatches[0];
+    firstWatch?.reject(hostWatchTimeout());
+    await waitFor(() => fake.raw.watch.mock.calls.length === 2, "first recovery watch");
+    await waitFor(
+      () => firstReconnectListener.mock.calls.length === 1,
+      "first reconnect notification",
+    );
+
+    expect(fake.raw.health.mock.calls[0]?.[1]?.signal).toBe(fake.streams[0]?.signal);
+    expect(fake.raw.health.mock.calls[0]?.[1]?.signal).toBe(firstWatch?.signal);
+    expect(fake.raw.health).toHaveBeenCalledTimes(2);
+    expect(fake.raw.health.mock.calls[1]?.[1]?.signal).toBeInstanceOf(AbortSignal);
+    expect(fake.raw.health.mock.calls[1]?.[1]?.signal).toBe(fake.activeWatches[1]?.signal);
+    expect(fake.raw.health.mock.calls[1]?.[1]?.signal?.aborted).toBe(false);
+    expect(fake.raw.events.subscribe).toHaveBeenCalledTimes(2);
+    expect(fake.streams[0]?.signal.aborted).toBe(true);
+    expect(fake.streams[1]?.signal).toBe(fake.activeWatches[1]?.signal);
+    expect(firstWatch?.signal.aborted).toBe(true);
+    expect(fake.activeWatches.filter((watch) => !watch.signal.aborted)).toHaveLength(1);
+    expect(client.connection()).toBe("live");
+    expect(constructorReconnect).toHaveBeenCalledOnce();
+    expect(firstReconnectListener).toHaveBeenCalledOnce();
+    expect(secondReconnectListener).toHaveBeenCalledOnce();
+    expect(notifiedWhileReconnecting).toEqual(["reconnecting"]);
+
+    const secondWatch = fake.activeWatches[1];
+    secondWatch?.reject(hostWatchTimeout());
+    await waitFor(() => fake.raw.watch.mock.calls.length === 3, "second recovery watch");
+    await waitFor(
+      () => firstReconnectListener.mock.calls.length === 2,
+      "second reconnect notification",
+    );
+
+    expect(fake.raw.health).toHaveBeenCalledTimes(3);
+    expect(fake.raw.events.subscribe).toHaveBeenCalledTimes(3);
+    expect(fake.streams[1]?.signal.aborted).toBe(true);
+    expect(fake.activeWatches.filter((watch) => !watch.signal.aborted)).toHaveLength(1);
+    expect(constructorReconnect).toHaveBeenCalledTimes(2);
+    expect(firstReconnectListener).toHaveBeenCalledTimes(2);
+    expect(secondReconnectListener).toHaveBeenCalledTimes(2);
+    expect(notifiedWhileReconnecting).toEqual(["reconnecting", "reconnecting"]);
+
+    unsubscribeFirst();
+    expect(fake.activeWatches[2]?.signal.aborted).toBe(false);
+    unsubscribeSecond();
+    await waitFor(
+      () => fake.activeWatches.every((watch) => watch.signal.aborted),
+      "all renewed watches released",
+    );
+    expect(fake.activeWatches.filter((watch) => !watch.signal.aborted)).toHaveLength(0);
+    client.dispose();
+  });
+
+  it("stops after the full recovery health check fails", async () => {
+    const fake = createFakeCaller();
+    const reconnect = vi.fn();
+    const client = createNativeDashboardClient({ rpc: fake.caller });
+    client.onReconnect(reconnect);
+    const unsubscribe = client.subscribe(() => {});
+    await waitFor(() => client.connection() === "live", "live connection");
+    fake.raw.health.mockRejectedValueOnce(new Error("health unavailable"));
+
+    fake.activeWatches[0]?.reject(hostWatchTimeout());
+    await waitFor(
+      () => fake.activeWatches[0]?.signal.aborted === true,
+      "failed timeout watch abort",
+    );
+
+    expect(client.connection()).toBe("reconnecting");
+    expect(fake.raw.health).toHaveBeenCalledTimes(2);
+    expect(fake.raw.watch).toHaveBeenCalledOnce();
+    expect(fake.streams[0]?.signal.aborted).toBe(true);
+    expect(reconnect).not.toHaveBeenCalled();
+    expect(fake.activeWatches.filter((watch) => !watch.signal.aborted)).toHaveLength(0);
+
+    unsubscribe();
+    client.dispose();
+  });
+
+  it("does not notify success when a renewed watch rejects immediately", async () => {
+    const fake = createFakeCaller();
+    const reconnect = vi.fn();
+    const client = createNativeDashboardClient({ rpc: fake.caller, onReconnect: reconnect });
+    const unsubscribe = client.subscribe(() => {});
+    await waitFor(() => client.connection() === "live", "live connection");
+    fake.raw.watch.mockRejectedValueOnce(new Error("replacement watch failed"));
+
+    fake.activeWatches[0]?.reject(hostWatchTimeout());
+    // The health check and replacement RPC resolve/reject through microtasks;
+    // drain those turns directly rather than waiting on a timer.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fake.raw.watch).toHaveBeenCalledTimes(2);
+    expect(client.connection()).toBe("reconnecting");
+    expect(reconnect).not.toHaveBeenCalled();
+    expect(fake.activeWatches.filter((watch) => !watch.signal.aborted)).toHaveLength(0);
+
+    unsubscribe();
+    client.dispose();
+  });
+
+  it("cancels initial health on suspension and only opens after resume", async () => {
+    const fake = createFakeCaller();
+    let resolveInitialHealth:
+      | ((value: { app: "opencode-quota-gui"; contractVersion: number }) => void)
+      | undefined;
+    const client = createNativeDashboardClient({ rpc: fake.caller });
+    fake.raw.health.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveInitialHealth = resolve;
+        }),
+    );
+    const unsubscribe = client.subscribe(() => {});
+    await waitFor(() => resolveInitialHealth !== undefined, "initial health request");
+    if (!resolveInitialHealth) {
+      client.dispose();
+      throw new Error("expected the initial health request to be pending");
+    }
+    const healthSignal = fake.raw.health.mock.calls[0]?.[1]?.signal;
+
+    client.suspend();
+    expect(healthSignal?.aborted).toBe(true);
+    resolveInitialHealth({ app: "opencode-quota-gui", contractVersion: 2 });
+    await Promise.resolve();
+    expect(fake.raw.watch).not.toHaveBeenCalled();
+
+    await client.resume();
+    expect(client.connection()).toBe("live");
+    expect(fake.raw.watch).toHaveBeenCalledOnce();
+    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    client.dispose();
+  });
+
+  it("does not treat other watch transport errors as host timeouts", async () => {
+    const fake = createFakeCaller();
+    const reconnect = vi.fn();
+    const client = createNativeDashboardClient({ rpc: fake.caller });
+    client.onReconnect(reconnect);
+    const unsubscribe = client.subscribe(() => {});
+    await waitFor(() => client.connection() === "live", "live connection");
+
+    fake.activeWatches[0]?.reject(
+      Object.assign(new Error("transport closed"), {
+        name: "ClientError",
+        reason: "Transport",
+        cause: new DOMException("The operation was aborted", "AbortError"),
+      }),
+    );
+    await waitFor(() => fake.activeWatches[0]?.signal.aborted === true, "disconnected watch abort");
+
+    expect(client.connection()).toBe("reconnecting");
+    expect(fake.raw.health).toHaveBeenCalledOnce();
+    expect(fake.raw.watch).toHaveBeenCalledOnce();
+    expect(fake.streams[0]?.signal.aborted).toBe(true);
+    expect(reconnect).not.toHaveBeenCalled();
+
+    unsubscribe();
+    client.dispose();
+  });
+
+  it("does not open a viewer when disposed during recovery health", async () => {
+    const fake = createFakeCaller();
+    const reconnect = vi.fn();
+    let resolveHealth: (() => void) | undefined;
+    const client = createNativeDashboardClient({ rpc: fake.caller, onReconnect: reconnect });
+    client.subscribe(() => {});
+    await waitFor(() => client.connection() === "live", "live connection");
+    fake.raw.health.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = () => resolve({ app: "opencode-quota-gui", contractVersion: 2 });
+        }),
+    );
+
+    const timedOutWatch = fake.activeWatches[0];
+    timedOutWatch?.reject(hostWatchTimeout());
+    await waitFor(() => resolveHealth !== undefined, "pending timeout health check");
+    const healthSignal = fake.raw.health.mock.calls[1]?.[1]?.signal;
+    client.dispose();
+
+    expect(client.connection()).toBe("closed");
+    expect(healthSignal?.aborted).toBe(true);
+    resolveHealth?.();
+    await Promise.resolve();
+
+    expect(fake.raw.watch).toHaveBeenCalledOnce();
+    expect(reconnect).not.toHaveBeenCalled();
+    expect(fake.activeWatches.every((watch) => watch.signal.aborted)).toBe(true);
+  });
+
+  it("does not open a viewer when the last subscriber leaves during recovery health", async () => {
+    const fake = createFakeCaller();
+    const reconnect = vi.fn();
+    let resolveHealth: (() => void) | undefined;
+    const client = createNativeDashboardClient({ rpc: fake.caller, onReconnect: reconnect });
+    const unsubscribe = client.subscribe(() => {});
+    await waitFor(() => client.connection() === "live", "live connection");
+    fake.raw.health.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveHealth = () => resolve({ app: "opencode-quota-gui", contractVersion: 2 });
+        }),
+    );
+
+    const timedOutWatch = fake.activeWatches[0];
+    timedOutWatch?.reject(hostWatchTimeout());
+    await waitFor(() => resolveHealth !== undefined, "pending timeout health check");
+    const healthSignal = fake.raw.health.mock.calls[1]?.[1]?.signal;
+    unsubscribe();
+
+    expect(client.connection()).toBe("reconnecting");
+    expect(healthSignal?.aborted).toBe(true);
+    resolveHealth?.();
+    await Promise.resolve();
+
+    expect(fake.raw.watch).toHaveBeenCalledOnce();
+    expect(reconnect).not.toHaveBeenCalled();
+    expect(fake.activeWatches.every((watch) => watch.signal.aborted)).toBe(true);
     client.dispose();
   });
 });

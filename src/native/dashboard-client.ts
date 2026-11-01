@@ -101,10 +101,14 @@ export interface NativeDashboardClient extends DashboardDataSource {
   /** Current transport state; last known product data remains usable as stale. */
   connection(): NativeDashboardConnection;
   onConnectionChange(listener: (state: NativeDashboardConnection) => void): () => void;
-  /** Called after a successful explicit reconnect; consumers refetch here. */
+  /** Called after successful transport recovery; consumers refetch here. */
   onReconnect(listener: () => void): () => void;
   /** Explicit recovery: re-subscribe, reacquire the viewer and refetch. */
   reconnect(): Promise<void>;
+  /** Suspend transport resources while the host server is known to be down. */
+  suspend(): void;
+  /** Mark the host available and retry any pending recovery when eligible. */
+  resume(): Promise<void>;
   setActiveView(scope: DashboardRpcViewScope): Promise<void>;
   /** Releases any subscription and held viewer. */
   dispose(): void;
@@ -117,6 +121,20 @@ export interface NativeDashboardClientOptions {
   onReconnect?: () => void;
 }
 
+function isHostWatchTimeout(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const clientError = error as { name?: unknown; reason?: unknown; cause?: unknown };
+  const cause = clientError.cause;
+  return (
+    clientError.name === "ClientError" &&
+    clientError.reason === "Transport" &&
+    typeof cause === "object" &&
+    cause !== null &&
+    "name" in cause &&
+    cause.name === "TimeoutError"
+  );
+}
+
 export function createNativeDashboardClient(
   options: NativeDashboardClientOptions,
 ): NativeDashboardClient {
@@ -124,12 +142,22 @@ export function createNativeDashboardClient(
   const listeners = new Set<(event: DashboardEvent) => void>();
   const stateListeners = new Set<(state: NativeDashboardConnection) => void>();
   const reconnectListeners = new Set<() => void>();
+  interface Attempt {
+    generation: number;
+    controller: AbortController;
+    scope: DashboardRpcViewScope;
+    recovery: boolean;
+    live: boolean;
+    promise: Promise<void>;
+  }
+
   let viewScope: DashboardRpcViewScope = options.scope ?? "analytics";
   let state: NativeDashboardConnection = "connecting";
   let generation = 0;
   let closed = false;
-  let eventController: AbortController | undefined;
-  let watchController: AbortController | undefined;
+  let hostAvailable = true;
+  let recoveryRequired = false;
+  let currentAttempt: Attempt | undefined;
 
   function setConnection(next: NativeDashboardConnection): void {
     if (state === next) return;
@@ -148,28 +176,57 @@ export function createNativeDashboardClient(
     }
   }
 
-  function abortControllers(): void {
-    eventController?.abort();
-    watchController?.abort();
-    eventController = undefined;
-    watchController = undefined;
-  }
-
-  function stop(): void {
+  function retireAttempt(): Attempt | undefined {
+    const retired = currentAttempt;
+    if (!retired) return undefined;
+    // Remove ownership before aborting: abort listeners may settle RPC work
+    // synchronously, but that work can no longer affect the next generation.
+    currentAttempt = undefined;
     generation += 1;
-    abortControllers();
+    retired.controller.abort();
+    return retired;
   }
 
-  function handleDisconnect(owner: number): void {
-    if (closed || owner !== generation) return;
-    abortControllers();
+  function eligible(): boolean {
+    return !closed && hostAvailable && listeners.size > 0;
+  }
+
+  function isCurrent(attempt: Attempt): boolean {
+    return (
+      eligible() &&
+      currentAttempt === attempt &&
+      attempt.generation === generation &&
+      !attempt.controller.signal.aborted
+    );
+  }
+
+  function failAttempt(attempt: Attempt): void {
+    if (!isCurrent(attempt)) return;
+    recoveryRequired ||= attempt.recovery || attempt.live;
+    retireAttempt();
     setConnection("reconnecting");
   }
 
-  async function consumeEvents(owner: number, signal: AbortSignal): Promise<void> {
+  function notifyReconnect(): void {
+    try {
+      options.onReconnect?.();
+    } catch {
+      // A refetch observer never breaks recovery.
+    }
+    for (const listener of Array.from(reconnectListeners)) {
+      try {
+        listener();
+      } catch {
+        // A refetch listener failure never breaks recovery.
+      }
+    }
+  }
+
+  async function consumeEvents(attempt: Attempt): Promise<void> {
+    const signal = attempt.controller.signal;
     try {
       for await (const event of rpc.events.subscribe("invalidated", { signal })) {
-        if (closed || owner !== generation || signal.aborted) return;
+        if (!isCurrent(attempt)) return;
         const data = event.data;
         if (!isDashboardEvent(data)) continue;
         for (const listener of Array.from(listeners)) {
@@ -183,53 +240,78 @@ export function createNativeDashboardClient(
     } catch {
       // A stream failure is a reconnect state, not an event.
     }
-    if (!signal.aborted && !closed && owner === generation) handleDisconnect(owner);
+    if (isCurrent(attempt)) failAttempt(attempt);
   }
 
-  async function acquireWatch(owner: number, signal: AbortSignal): Promise<void> {
+  async function acquireWatch(attempt: Attempt): Promise<void> {
+    const signal = attempt.controller.signal;
     try {
-      await rpc.watch({ scope: viewScope }, { signal });
-      if (closed || signal.aborted || owner !== generation) return;
+      await rpc.watch({ scope: attempt.scope }, { signal });
+      if (!isCurrent(attempt)) return;
       // The watch call is a held viewer; any unexpected completion means the
       // viewer was lost.
-      handleDisconnect(owner);
-    } catch {
-      if (!signal.aborted && !closed && owner === generation) handleDisconnect(owner);
+      failAttempt(attempt);
+    } catch (error) {
+      if (!isCurrent(attempt)) return;
+      if (attempt.live && isHostWatchTimeout(error)) {
+        recoveryRequired = true;
+        void startAttempt(true);
+        return;
+      }
+      failAttempt(attempt);
     }
   }
 
-  /**
-   * Returns the generation that established the live connection, or
-   * `undefined` when this invocation did not. The token lets a caller reject a
-   * reconnect whose live state was superseded or immediately lost.
-   */
-  async function open(): Promise<number | undefined> {
-    if (closed || listeners.size === 0) return undefined;
-    const owner = ++generation;
-    abortControllers();
-    setConnection("connecting");
+  async function runAttempt(attempt: Attempt): Promise<void> {
     try {
-      await rpc.health({});
+      await rpc.health({}, { signal: attempt.controller.signal });
     } catch {
-      if (!closed && owner === generation) setConnection("reconnecting");
+      failAttempt(attempt);
       return undefined;
     }
-    if (closed || owner !== generation || listeners.size === 0) return undefined;
 
-    const events = new AbortController();
-    const watch = new AbortController();
-    eventController = events;
-    watchController = watch;
-    void consumeEvents(owner, events.signal);
-    void acquireWatch(owner, watch.signal);
-    // A synchronously failed stream/watch already aborted the pair; do not
-    // overwrite its reconnect state with an optimistic live state.
-    if (eventController !== events || watchController !== watch || events.signal.aborted) {
-      return undefined;
+    if (!isCurrent(attempt)) return;
+    void consumeEvents(attempt);
+    void acquireWatch(attempt);
+
+    // Surface an already-rejected event stream or watch before reporting a
+    // successful opening. Opening failures never recursively retry.
+    await Promise.resolve();
+    if (!isCurrent(attempt)) return;
+
+    attempt.live = true;
+    if (attempt.recovery) {
+      // Consumers invalidate/refetch while the transport still reports
+      // reconnecting; live is observable only after those callbacks complete.
+      notifyReconnect();
+      if (!isCurrent(attempt)) return;
     }
+    recoveryRequired = false;
     setConnection("live");
-    // A connection observer may have superseded this attempt synchronously.
-    return !closed && owner === generation && state === "live" ? owner : undefined;
+  }
+
+  function startAttempt(recovery: boolean): Promise<void> {
+    if (!eligible()) return Promise.resolve();
+    if (currentAttempt) retireAttempt();
+
+    const attempt: Attempt = {
+      generation: ++generation,
+      controller: new AbortController(),
+      scope: viewScope,
+      recovery: recovery || recoveryRequired,
+      live: false,
+      promise: Promise.resolve(),
+    };
+    currentAttempt = attempt;
+    attempt.promise = Promise.resolve().then(() => runAttempt(attempt));
+    setConnection(attempt.recovery ? "reconnecting" : "connecting");
+    return attempt.promise;
+  }
+
+  function reconnect(): Promise<void> {
+    if (closed) return Promise.resolve();
+    recoveryRequired = true;
+    return startAttempt(true);
   }
 
   return {
@@ -282,47 +364,48 @@ export function createNativeDashboardClient(
       return () => reconnectListeners.delete(listener);
     },
 
-    async reconnect() {
+    reconnect,
+
+    suspend() {
+      if (closed || !hostAvailable) return;
+      hostAvailable = false;
+      recoveryRequired = true;
+      retireAttempt();
+      setConnection("reconnecting");
+    },
+
+    async resume() {
       if (closed) return;
-      stop();
-      const liveOwner = await open();
-      // Only the attempt that still owns the current generation and live state
-      // may notify: an immediate post-live disconnect or a newer reconnect
-      // must not trigger listeners.
-      if (liveOwner === undefined || liveOwner !== generation || state !== "live") return;
-      try {
-        options.onReconnect?.();
-      } catch {
-        // A refetch observer never breaks recovery.
+      hostAvailable = true;
+      if (currentAttempt?.live) return;
+      recoveryRequired = true;
+      if (!eligible()) return;
+      if (currentAttempt) {
+        await currentAttempt.promise;
+        return;
       }
-      for (const listener of Array.from(reconnectListeners)) {
-        try {
-          listener();
-        } catch {
-          // A refetch listener failure never breaks recovery.
-        }
-      }
+      await startAttempt(true);
     },
 
     async setActiveView(scope) {
       if (closed || scope === viewScope) return;
       viewScope = scope;
-      if (!eventController || !watchController) return;
-      watchController.abort();
-      const watch = new AbortController();
-      watchController = watch;
-      void acquireWatch(generation, watch.signal);
+      if (!eligible()) return;
+      const previous = currentAttempt;
+      const recovery = recoveryRequired || previous?.recovery === true || previous?.live === true;
+      if (previous?.live) recoveryRequired = true;
+      await startAttempt(recovery);
     },
 
     subscribe(listener) {
       listeners.add(listener);
-      if (listeners.size === 1) {
-        void open().catch(() => undefined);
+      if (listeners.size === 1 && eligible()) {
+        void startAttempt(recoveryRequired).catch(() => undefined);
       }
       return () => {
         listeners.delete(listener);
         if (listeners.size === 0 && !closed) {
-          stop();
+          retireAttempt();
           setConnection("reconnecting");
         }
       };
@@ -331,7 +414,7 @@ export function createNativeDashboardClient(
     dispose() {
       if (closed) return;
       closed = true;
-      stop();
+      retireAttempt();
       listeners.clear();
       stateListeners.clear();
       reconnectListeners.clear();
