@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { measureHeaderBudget, observeHeaderBudget } from "../src/native/session-header-measure.js";
+import {
+  fitMeasuredHeaderTokens,
+  measureHeaderBudget,
+  measureStripGeometry,
+  observeHeaderBudget,
+} from "../src/native/session-header-measure.js";
 
 /**
  * The `session.header` width controller against a realistic host header.
@@ -133,6 +138,15 @@ function headerFixture(): {
   location.className = "session-header-location";
   const actions = document.createElement("div");
   actions.className = "session-header-actions";
+  actions.style.gap = "8px";
+  actions.style.marginLeft = "2px";
+  const title = document.createElement("div");
+  title.className = "session-header-title";
+  const titleMeasure = document.createElement("div");
+  titleMeasure.className = "session-header-title-measure";
+  const titleSpan = document.createElement("span");
+  titleMeasure.append(titleSpan);
+  title.append(titleMeasure);
   const first = document.createElement("button");
   first.textContent = "Review";
   first.style.display = "block";
@@ -143,10 +157,11 @@ function headerFixture(): {
   slot.className = "qg-slot-strip";
 
   actions.append(first, second, slot);
-  layout.append(location, actions);
+  layout.append(location, title, actions);
   document.body.append(layout);
   setWidth(layout, 900);
   setWidth(location, 200);
+  setWidth(titleSpan, 100);
   setWidth(first, 120);
   setWidth(second, 80);
   setWidth(slot, 0);
@@ -165,10 +180,140 @@ beforeEach(() => {
 afterEach(() => {
   for (const element of fixtures) element.remove();
   fixtures = [];
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("session.header width measurement", () => {
+  it("measures overflow in the host typography context without leaving layout children", () => {
+    const fixture = headerFixture();
+    fixtures.push(fixture.layout);
+    fixture.actions.style.letterSpacing = "3px";
+    fixture.slot.style.letterSpacing = "3px";
+    fixture.slot.style.fontFamily = "serif";
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    const spy = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.classList.contains("qg-slot-overflow")) {
+          const probe = this.parentElement;
+          const style = probe === null ? undefined : getComputedStyle(probe);
+          return rect(
+            probe?.parentElement === fixture.actions &&
+              style?.letterSpacing === "3px" &&
+              style.fontFamily === "serif"
+              ? 48
+              : 30,
+          );
+        }
+        return original.call(this);
+      });
+    const before = fixture.actions.children.length;
+    const metrics = measureStripGeometry(fixture.slot, 12);
+    expect(metrics.chipWidths[12]).toBe(48);
+    expect(fitMeasuredHeaderTokens(108, 12, 28, 4, (n) => metrics.chipWidths[n]).visibleCount).toBe(
+      1,
+    );
+    expect(fixture.actions.children.length).toBe(before);
+    fixture.slot.style.letterSpacing = "0px";
+    expect(measureStripGeometry(fixture.slot, 12).chipWidths[12]).toBe(30);
+    spy.mockRestore();
+  });
+  it("counts visible in-flow layout siblings and their gap rather than assuming three children", () => {
+    const fixture = headerFixture();
+    fixtures.push(fixture.layout);
+    fixture.layout.style.gap = "10px";
+    const extra = document.createElement("div");
+    setWidth(extra, 40);
+    fixture.layout.append(extra);
+    const hidden = document.createElement("div");
+    hidden.style.display = "none";
+    fixture.layout.append(hidden);
+    expect(measureHeaderBudget(fixture.slot)).toBe(312);
+    const budgets: number[] = [];
+    const observer = observeHeaderBudget(fixture.slot, (value) => budgets.push(value));
+    setWidth(extra, 60);
+    resize(extra);
+    expect(budgets.at(-1)).toBe(292);
+    observer.dispose();
+  });
+  it("uses a conservative budget until an intrinsic title becomes measurable", async () => {
+    const fixture = headerFixture();
+    fixtures.push(fixture.layout);
+    fixture.layout.querySelector(".session-header-title")?.remove();
+    const title = document.createElement("div");
+    title.className = "session-header-title";
+    fixture.layout.insertBefore(title, fixture.actions);
+    fixture.actions.style.gap = "8px";
+    fixture.actions.style.marginLeft = "2px";
+    setWidth(title, 150);
+    expect(measureHeaderBudget(fixture.slot)).toBe(0);
+    setWidth(title, 0);
+    expect(measureHeaderBudget(fixture.slot)).toBe(0);
+    title.remove();
+    expect(measureHeaderBudget(fixture.slot)).toBe(0);
+    fixture.layout.insertBefore(title, fixture.actions);
+    const budgets: number[] = [];
+    const observer = observeHeaderBudget(fixture.slot, (value) => budgets.push(value));
+    const container = document.createElement("div");
+    container.className = "session-header-title-measure";
+    const span = document.createElement("span");
+    setWidth(span, 150);
+    container.append(span);
+    title.append(container);
+    await flushMutations();
+    expect(budgets.at(-1)).toBe(332);
+    expect(ControlledResizeObserver.instances[0]?.observed.has(span)).toBe(true);
+    observer.dispose();
+  });
+  it("does not guess an unmeasurable overflow width and preserves a single fallback chip", () => {
+    const fixture = headerFixture();
+    fixtures.push(fixture.layout);
+    const metrics = measureStripGeometry(fixture.slot, 12);
+    expect(metrics.chipWidths[12]).toBeUndefined();
+    expect(fitMeasuredHeaderTokens(70, 12, 28, 4, () => undefined)).toEqual({
+      visibleCount: 0,
+      hiddenCount: 12,
+      overflowVisible: true,
+    });
+  });
+  it("fits measured multi-digit chips, retains a narrow fallback and has no token cap", () => {
+    const widths = (hidden: number) => (hidden >= 10 ? 44 : 30);
+    expect(fitMeasuredHeaderTokens(108, 12, 28, 4, widths)).toEqual({
+      visibleCount: 2,
+      hiddenCount: 10,
+      overflowVisible: true,
+    });
+    expect(fitMeasuredHeaderTokens(0, 12, 28, 4, widths)).toEqual({
+      visibleCount: 0,
+      hiddenCount: 12,
+      overflowVisible: true,
+    });
+    expect(fitMeasuredHeaderTokens(2000, 50, 28, 4, widths).visibleCount).toBe(50);
+  });
+  it("reserves the intrinsic host title and computed spacing and observes title changes", () => {
+    const fixture = headerFixture();
+    fixtures.push(fixture.layout);
+    fixture.layout.querySelector(".session-header-title")?.remove();
+    const title = document.createElement("div");
+    title.className = "session-header-title";
+    const measure = document.createElement("div");
+    measure.className = "session-header-title-measure";
+    const span = document.createElement("span");
+    measure.append(span);
+    title.append(measure);
+    fixture.layout.insertBefore(title, fixture.actions);
+    fixture.layout.style.gap = "10px";
+    fixture.actions.style.gap = "6px";
+    setWidth(span, 240);
+    const budgets: number[] = [];
+    const observer = observeHeaderBudget(fixture.slot, (value) => budgets.push(value));
+    expect(budgets.at(-1)).toBe(226);
+    setWidth(span, 300);
+    resize(span);
+    expect(budgets.at(-1)).toBe(166);
+    observer.dispose();
+  });
   it("observes the layout, location and every competing sibling action", () => {
     const fixture = headerFixture();
     fixtures.push(fixture.layout);

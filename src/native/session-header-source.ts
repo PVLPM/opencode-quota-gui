@@ -1,5 +1,5 @@
 import type { Accessor } from "solid-js";
-import { createEffect, createMemo } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { QuotaSnapshot } from "../contracts/dashboard.js";
 import { createQuery } from "../ui/query.js";
 import type { DisplayPreferences } from "../ui/quota-semantics.js";
@@ -45,6 +45,8 @@ export function createSessionHeaderSource(options: {
     ...(options.hostConnected === undefined ? {} : { hostConnected: options.hostConnected }),
   });
   const quotaQuery = createQuery<QuotaSnapshot>(() => options.client.quota());
+  const now = options.now ?? Date.now;
+  const [localNowMs, setLocalNowMs] = createSignal(now());
 
   createEffect(() => {
     if (!options.active()) return;
@@ -55,6 +57,39 @@ export function createSessionHeaderSource(options: {
       if (applied) panel.markFresh();
     });
   });
+
+  // Keep the view clock in sync with reactive data without making the clock
+  // itself a dependency of this effect. In particular, a wall-clock rollback
+  // must be allowed to move the displayed time backwards.
+  createEffect(() => {
+    if (!options.active()) return;
+    panel.settings();
+    panel.preferences();
+    quotaQuery.data();
+    quotaQuery.error();
+    panel.connection();
+    panel.hostStale();
+    setLocalNowMs(now());
+  });
+
+  const refreshLocalTime = () => {
+    if (!options.active()) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    setLocalNowMs(now());
+  };
+  const onVisibilityChange = () => {
+    if (typeof document === "undefined" || document.visibilityState === "hidden") return;
+    refreshLocalTime();
+  };
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("focus", refreshLocalTime);
+    onCleanup(() => window.removeEventListener("focus", refreshLocalTime));
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    onCleanup(() => document.removeEventListener("visibilitychange", onVisibilityChange));
+  }
 
   const view = createMemo<SessionHeaderView>(() => {
     const settings = panel.settings();
@@ -79,8 +114,21 @@ export function createSessionHeaderSource(options: {
         ? {}
         : { temporalOverrides: preferences.temporalProviderOverrides }),
       stale,
-      nowMs: options.now?.() ?? Date.now(),
+      nowMs: localNowMs(),
     });
+  });
+
+  createEffect(() => {
+    if (!options.active()) return;
+    const nextAtMs = view().nextPeakUpdateAtMs;
+    if (nextAtMs === undefined) return;
+
+    // The host timeout is one-shot. Large exact-date transitions are chunked
+    // to the platform's signed 32-bit timer limit and then scheduled again.
+    const MAX_TIMEOUT_MS = 2_147_483_647;
+    const delayMs = Math.min(Math.max(0, nextAtMs - now()), MAX_TIMEOUT_MS);
+    const timer = setTimeout(refreshLocalTime, delayMs);
+    onCleanup(() => clearTimeout(timer));
   });
 
   return {

@@ -18,8 +18,12 @@ import { createNativeDashboardClient } from "./dashboard-client.js";
 import { placePopover } from "./popover-position.js";
 import { ProviderLogo } from "./provider-logo.js";
 import { createGuiRpcCaller } from "./rpc.js";
-import { observeHeaderBudget } from "./session-header-measure.js";
-import { fitHeaderTokens, type HeaderCard, peakPreviewText } from "./session-header-model.js";
+import {
+  fitMeasuredHeaderTokens,
+  measureStripGeometry,
+  observeHeaderBudget,
+} from "./session-header-measure.js";
+import { type HeaderCard, peakPreviewText } from "./session-header-model.js";
 import { createPreviewDisclosure, previewShouldClose } from "./session-header-preview.js";
 import { createSessionHeaderSource } from "./session-header-source.js";
 import { SessionHeaderStrip } from "./session-header-strip.js";
@@ -148,15 +152,28 @@ export function NativeSessionHeader(props: NativeSessionHeaderProps): JSX.Elemen
   onCleanup(() => disclosure.dispose());
   const previewId = createUniqueId();
   const [budget, setBudget] = createSignal<number>();
+  const [geometryRevision, setGeometryRevision] = createSignal(0);
   let root: HTMLDivElement | undefined;
   let remeasure: (() => void) | undefined;
 
-  const fit = createMemo(() =>
-    fitHeaderTokens({
-      availableWidth: budget() ?? 0,
-      tokenCount: source.view().cards.length,
-    }),
-  );
+  const geometry = createMemo(() => {
+    const count = source.view().cards.length;
+    budget(); // Font/zoom and host resizing can change the rendered chip widths.
+    geometryRevision();
+    return root === undefined || typeof document === "undefined"
+      ? { tokenWidth: 28, gap: 4, chipWidths: [] as (number | undefined)[] }
+      : measureStripGeometry(root, count);
+  });
+  const fit = createMemo(() => {
+    const metrics = geometry();
+    return fitMeasuredHeaderTokens(
+      budget() ?? 0,
+      source.view().cards.length,
+      metrics.tokenWidth,
+      metrics.gap,
+      (hidden) => metrics.chipWidths[hidden],
+    );
+  });
   const stripVisible = () => {
     const current = fit();
     return current.visibleCount > 0 || current.overflowVisible;
@@ -181,10 +198,39 @@ export function NativeSessionHeader(props: NativeSessionHeaderProps): JSX.Elemen
     const element = root;
     if (element === undefined) return;
     const observer = observeHeaderBudget(element, setBudget);
+    // Observe rendered controls, not the strip width: a font or zoom change can
+    // alter +N without changing the available host width.
+    const controls = new Set<Element>();
+    const controlObserver =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(() => setGeometryRevision((value) => value + 1));
+    const syncControls = () => {
+      const current = new Set(element.querySelectorAll(".qg-slot-token, .qg-slot-overflow"));
+      for (const control of controls)
+        if (!current.has(control)) {
+          controlObserver?.unobserve(control);
+          controls.delete(control);
+        }
+      for (const control of current)
+        if (!controls.has(control)) {
+          controls.add(control);
+          controlObserver?.observe(control);
+        }
+    };
+    const controlMutations =
+      typeof MutationObserver === "undefined" ? undefined : new MutationObserver(syncControls);
+    controlMutations?.observe(element, { childList: true, subtree: true });
+    syncControls();
+    const onFontsLoaded = () => setGeometryRevision((value) => value + 1);
+    document.fonts?.addEventListener("loadingdone", onFontsLoaded);
     remeasure = observer.measure;
     onCleanup(() => {
       remeasure = undefined;
       observer.dispose();
+      controlObserver?.disconnect();
+      controlMutations?.disconnect();
+      document.fonts?.removeEventListener("loadingdone", onFontsLoaded);
     });
   });
 
@@ -214,7 +260,19 @@ export function NativeSessionHeader(props: NativeSessionHeaderProps): JSX.Elemen
         previewOpen={disclosure.open()}
         previewId={previewId}
         hidden={!stripVisible()}
-        {...(budget() === undefined ? {} : { maxWidth: budget() })}
+        {...(budget() === undefined ||
+        (fit().visibleCount === 0 &&
+          fit().overflowVisible &&
+          geometry().chipWidths[fit().hiddenCount] === undefined)
+          ? {}
+          : {
+              maxWidth: Math.max(
+                budget() ?? 0,
+                fit().visibleCount === 0 && fit().overflowVisible
+                  ? (geometry().chipWidths[fit().hiddenCount] ?? 0)
+                  : 0,
+              ),
+            })}
         rootRef={(element) => {
           root = element;
         }}

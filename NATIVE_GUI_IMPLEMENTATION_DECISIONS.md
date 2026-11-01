@@ -102,7 +102,11 @@ identities can be established safely.
 Test evidence: `pnpm verify` passed with 4,878 tests passed, 50 skipped, and
 five cross-surface tests. Mounted DOM fixtures use explicit geometry and
 controlled resize observation; they are not a real Desktop layout engine.
-The Peak countdown refreshes with new view data and can lag between refreshes.
+Correction: Peak status is refreshed by a local one-shot timer at relevant
+temporal boundaries, without backend polling. Header fit uses measured host
+title and action geometry and measured overflow-chip widths. A host too narrow
+for even one chip can still clip the fallback; real Desktop behavior remains an
+unverified integration check.
 Reversible: Yes.
 Owner review: owner-directed clarification
 

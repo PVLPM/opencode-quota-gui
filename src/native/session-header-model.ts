@@ -5,7 +5,11 @@ import type {
   QuotaCardRow,
   QuotaSnapshot,
 } from "../contracts/dashboard.js";
-import type { TemporalProviderStatus } from "../contracts/temporal.js";
+import type {
+  TemporalModelPhase,
+  TemporalModelStatus,
+  TemporalProviderStatus,
+} from "../contracts/temporal.js";
 import { formatPercent } from "../ui/format.js";
 import {
   type DisplayPreferences,
@@ -115,11 +119,12 @@ export interface SessionHeaderView {
    */
   cards: HeaderCard[];
   /**
-   * Timestamp this view was built with. It advances when the shared quota
-   * snapshot or settings refresh, so the preview's Peak countdown can follow
-   * the latest data without a timer or a second clock.
+   * Timestamp this view was built with. It advances on shared data refreshes
+   * and local Peak boundaries so the preview's Peak countdown stays current.
    */
   nowMs: number;
+  /** Next local Peak presentation boundary, when the temporal data proves one. */
+  nextPeakUpdateAtMs?: number;
 }
 
 export interface SessionHeaderModelInput {
@@ -267,14 +272,168 @@ export function peakForProvider(
   if (provider === undefined) return undefined;
   let soonest: number | undefined;
   for (const model of provider.models) {
-    if (temporalModelStateAt(model, nowMs).state === "peak") return { peak: "now" };
-    const next = temporalModelNextChange(model, nowMs);
-    if (next === undefined || next.phase !== "peak") continue;
-    const delta = next.atMs - nowMs;
+    if (modelPhaseAt(provider, model, nowMs) === "peak") return { peak: "now" };
+    const nextPeakAtMs = nextPeakStartAt(provider, model, nowMs);
+    if (nextPeakAtMs === undefined) continue;
+    const delta = nextPeakAtMs - nowMs;
     if (delta <= 0 || delta > PEAK_SOON_WINDOW_MS) continue;
-    if (soonest === undefined || next.atMs < soonest) soonest = next.atMs;
+    if (soonest === undefined || nextPeakAtMs < soonest) soonest = nextPeakAtMs;
   }
   return soonest === undefined ? undefined : { peak: "soon", atMs: soonest };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
+const WEEKDAYS_BY_UTC_INDEX = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+const WEEKLY_BOUNDARY_LOOKAHEAD_DAYS = 8;
+
+interface PeakPhaseChange {
+  atMs: number;
+  phase?: TemporalModelPhase;
+}
+
+function modelPhaseAt(
+  provider: TemporalProviderStatus,
+  model: TemporalModelStatus,
+  atMs: number,
+): TemporalModelPhase {
+  const interval = model.intervals.find(
+    (candidate) => atMs >= candidate.startMs && atMs < candidate.endMs,
+  );
+  if (interval !== undefined) return temporalModelStateAt(model, atMs).state;
+
+  const weekly = model.weekly;
+  if (weekly === undefined) return temporalModelStateAt(model, atMs).state;
+  if (
+    weekly.exceptHolidays?.some((jurisdiction) =>
+      provider.holidays.some(
+        (holiday) =>
+          holiday.jurisdiction === jurisdiction && atMs >= holiday.startMs && atMs < holiday.endMs,
+      ),
+    )
+  ) {
+    // Holiday phases are exact dated data, not part of the recurring schedule.
+    return "unknown";
+  }
+
+  const local = new Date(atMs + weekly.utcOffsetMinutes * MINUTE_MS);
+  const weekday = WEEKDAYS_BY_UTC_INDEX[local.getUTCDay()];
+  if (weekday === undefined) return "unknown";
+  const minuteOfDay = local.getUTCHours() * 60 + local.getUTCMinutes();
+  return (
+    weekly.windows.find(
+      (window) =>
+        window.days.includes(weekday) &&
+        minuteOfDay >= window.startMinute &&
+        minuteOfDay < window.endMinute,
+    )?.phase ?? weekly.basePhase
+  );
+}
+
+function nextWeeklyPhaseChange(
+  provider: TemporalProviderStatus,
+  model: TemporalModelStatus,
+  afterMs: number,
+): PeakPhaseChange | undefined {
+  const weekly = model.weekly;
+  if (weekly === undefined) return undefined;
+
+  const offsetMs = weekly.utcOffsetMinutes * MINUTE_MS;
+  const firstLocalDayMs = Math.floor((afterMs + offsetMs) / DAY_MS) * DAY_MS;
+  const candidates = new Set<number>();
+  for (let dayOffset = 0; dayOffset <= WEEKLY_BOUNDARY_LOOKAHEAD_DAYS; dayOffset += 1) {
+    const dayStartMs = firstLocalDayMs + dayOffset * DAY_MS - offsetMs;
+    const weekday =
+      WEEKDAYS_BY_UTC_INDEX[new Date(firstLocalDayMs + dayOffset * DAY_MS).getUTCDay()];
+    if (weekday === undefined) continue;
+    for (const window of weekly.windows) {
+      if (!window.days.includes(weekday)) continue;
+      candidates.add(dayStartMs + window.startMinute * MINUTE_MS);
+      candidates.add(dayStartMs + window.endMinute * MINUTE_MS);
+    }
+  }
+
+  for (const holiday of provider.holidays) {
+    if (!weekly.exceptHolidays?.includes(holiday.jurisdiction)) continue;
+    candidates.add(holiday.startMs);
+    candidates.add(holiday.endMs);
+  }
+
+  for (const atMs of [...candidates]
+    .filter((candidate) => candidate > afterMs)
+    .sort((a, b) => a - b)) {
+    const before = modelPhaseAt(provider, model, atMs - 1);
+    const phase = modelPhaseAt(provider, model, atMs);
+    if (phase !== before) return { atMs, phase };
+  }
+  return undefined;
+}
+
+function nextModelPhaseChange(
+  provider: TemporalProviderStatus,
+  model: TemporalModelStatus,
+  afterMs: number,
+): PeakPhaseChange | undefined {
+  let cursor = afterMs;
+  // Exact intervals can include observable effect-only boundaries. Skip those
+  // until the model's phase changes, while keeping the weekly recurrence as a
+  // source for transitions beyond the projected interval horizon.
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const projected = temporalModelNextChange(model, cursor);
+    const weekly = nextWeeklyPhaseChange(provider, model, cursor);
+    const next =
+      projected !== undefined && (weekly === undefined || projected.atMs <= weekly.atMs)
+        ? projected
+        : weekly;
+    if (next === undefined) return undefined;
+    if (next.phase === undefined) return { atMs: next.atMs };
+    if (next.phase !== modelPhaseAt(provider, model, cursor)) {
+      return { atMs: next.atMs, phase: next.phase };
+    }
+    cursor = next.atMs;
+  }
+  return undefined;
+}
+
+function nextPeakStartAt(
+  provider: TemporalProviderStatus,
+  model: TemporalModelStatus,
+  afterMs: number,
+): number | undefined {
+  let cursor = afterMs;
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const next = nextModelPhaseChange(provider, model, cursor);
+    if (next === undefined || next.phase === undefined || next.phase === "unknown")
+      return undefined;
+    if (next.phase === "peak") return next.atMs;
+    cursor = next.atMs;
+  }
+  return undefined;
+}
+
+function nextPeakUpdateAt(
+  provider: TemporalProviderStatus | undefined,
+  nowMs: number,
+): number | undefined {
+  if (provider === undefined) return undefined;
+  let earliest: number | undefined;
+  for (const model of provider.models) {
+    const phase = modelPhaseAt(provider, model, nowMs);
+    let atMs: number | undefined;
+    if (phase === "peak") {
+      atMs = nextModelPhaseChange(provider, model, nowMs)?.atMs;
+    } else {
+      const peakStart = nextPeakStartAt(provider, model, nowMs);
+      if (peakStart !== undefined) {
+        const threshold = peakStart - PEAK_SOON_WINDOW_MS;
+        atMs = threshold > nowMs ? threshold : peakStart;
+      }
+    }
+    if (atMs !== undefined && atMs > nowMs && (earliest === undefined || atMs < earliest)) {
+      earliest = atMs;
+    }
+  }
+  return earliest;
 }
 
 function cardAriaLabel(
@@ -360,11 +519,28 @@ export function buildSessionHeaderView(input: SessionHeaderModelInput): SessionH
     input.preferences.providerOrder,
   );
   const cards: HeaderCard[] = [];
+  const providers = new Map<string, TemporalProviderStatus | undefined>();
+  let nextUpdateAtMs: number | undefined;
   for (const card of ordered) {
     const header = toHeaderCard(snapshot, card, input);
-    if (header !== undefined) cards.push(header);
+    if (header === undefined) continue;
+    cards.push(header);
+
+    const overrides = input.temporalOverrides ?? input.preferences.temporalProviderOverrides;
+    if (overrides?.[header.providerId] === false) continue;
+    if (!providers.has(header.providerId)) {
+      providers.set(header.providerId, providerTemporalStatus(snapshot, header.providerId));
+    }
+    const next = nextPeakUpdateAt(providers.get(header.providerId), input.nowMs);
+    if (next !== undefined && (nextUpdateAtMs === undefined || next < nextUpdateAtMs)) {
+      nextUpdateAtMs = next;
+    }
   }
-  return { cards, nowMs: input.nowMs };
+  return {
+    cards,
+    nowMs: input.nowMs,
+    ...(nextUpdateAtMs === undefined ? {} : { nextPeakUpdateAtMs: nextUpdateAtMs }),
+  };
 }
 
 /** Peak copy for the combined preview: no Off-Peak commentary, ever. */

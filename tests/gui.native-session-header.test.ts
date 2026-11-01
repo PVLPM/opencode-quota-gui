@@ -1236,7 +1236,7 @@ describe("Native Slot wiring", () => {
     expect(measureSource).toContain('closest(".session-header-actions")');
     expect(measureSource).toContain("ResizeObserver");
     expect(measureSource).toContain("otherActionElements");
-    expect(measureSource).toContain("headerTokenBudget");
+    expect(measureSource).toContain("measureHeaderBudget");
     expect(headerSource).not.toContain("maxCards");
     expect(headerSource).not.toContain("MAX_CARDS");
   });

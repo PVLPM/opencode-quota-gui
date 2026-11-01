@@ -84,13 +84,17 @@ function waitFor(check: () => void): Promise<void> {
   return vi.waitFor(check, { timeout: 5_000 });
 }
 
-function quotaSnapshot(): QuotaSnapshot {
+function quotaSnapshot(count = 1): QuotaSnapshot {
   return {
     generatedAtMs: NOW,
     stale: false,
     timeZone: "UTC",
     providers: {
-      cards: [providerCard()],
+      cards: Array.from({ length: count }, (_, index) =>
+        providerCard({
+          cardId: `provider-${index}#cardhash` as ReturnType<typeof providerCard>["cardId"],
+        }),
+      ),
       enabledProviders: "auto",
       polledAtMs: NOW,
     },
@@ -119,7 +123,7 @@ function quotaSnapshot(): QuotaSnapshot {
   };
 }
 
-function fakeContext(): FakeHost {
+function fakeContext(count = 1): FakeHost {
   const subscribers = new Set<(event: DashboardEvent) => void>();
   const rpc = {
     health: async () => ({
@@ -127,7 +131,7 @@ function fakeContext(): FakeHost {
       contractVersion: DASHBOARD_CONTRACT_VERSION,
     }),
     settings: async () => settingsSnapshot(),
-    quota: async () => quotaSnapshot(),
+    quota: async () => quotaSnapshot(count),
     watch: (_input: unknown, options: { signal: AbortSignal }) =>
       new Promise<void>((_resolve, reject) => {
         const abort = () => reject(new Error("aborted"));
@@ -181,6 +185,8 @@ function fakeContext(): FakeHost {
 
 interface HeaderFixture {
   layout: HTMLDivElement;
+  location: HTMLDivElement;
+  titleMeasure: HTMLSpanElement;
   actions: HTMLDivElement;
   first: HTMLButtonElement;
   second: HTMLButtonElement;
@@ -195,6 +201,16 @@ function mountSlot(): HeaderFixture {
   location.className = "session-header-location";
   const actions = document.createElement("div");
   actions.className = "session-header-actions";
+  actions.style.gap = "8px";
+  actions.style.marginLeft = "2px";
+  const title = document.createElement("div");
+  title.className = "session-header-title";
+  const titleMeasureContainer = document.createElement("div");
+  titleMeasureContainer.className = "session-header-title-measure";
+  const titleMeasure = document.createElement("span");
+  titleMeasure.textContent = "A session title";
+  titleMeasureContainer.append(titleMeasure);
+  title.append(titleMeasureContainer);
   const first = document.createElement("button");
   first.textContent = "Review";
   first.style.display = "block";
@@ -202,10 +218,11 @@ function mountSlot(): HeaderFixture {
   second.textContent = "Share";
   second.style.display = "block";
   actions.append(first, second);
-  layout.append(location, actions);
+  layout.append(location, title, actions);
   document.body.append(layout);
   setWidth(layout, 900);
   setWidth(location, 200);
+  setWidth(titleMeasure, 100);
   setWidth(first, 120);
   setWidth(second, 80);
 
@@ -224,7 +241,7 @@ function mountSlot(): HeaderFixture {
   );
   const root = actions.querySelector(".qg-slot-strip");
   if (!(root instanceof HTMLDivElement)) throw new Error("the Slot did not mount a strip root");
-  return { layout, actions, first, second, root, dispose };
+  return { layout, location, titleMeasure, actions, first, second, root, dispose };
 }
 
 let fixture: HeaderFixture | undefined;
@@ -242,10 +259,106 @@ afterEach(() => {
   fixture?.layout.remove();
   fixture = undefined;
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("mounted session.header", () => {
+  it("keeps one natural-width overflow control when chip measurement is unavailable, then recovers", async () => {
+    host = fakeContext(12);
+    pluginHost.context = host.context;
+    let chipWidth = 0;
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.classList.contains("qg-slot-overflow")) return rect(chipWidth);
+      return original.call(this);
+    });
+    fixture = mountSlot();
+    setWidth(fixture.layout, 626);
+    resize(fixture.layout);
+    await waitFor(() => {
+      expect(fixture?.root.querySelectorAll(".qg-slot-token")).toHaveLength(0);
+      expect(fixture?.root.querySelector(".qg-slot-overflow")?.textContent).toBe("+12");
+      expect(fixture?.root.style.maxWidth).toBe("");
+    });
+    const overflow = fixture.root.querySelector(".qg-slot-overflow");
+    if (overflow === null) throw new Error("missing overflow");
+    await waitFor(() =>
+      expect(ControlledResizeObserver.instances.some((item) => item.observed.has(overflow))).toBe(
+        true,
+      ),
+    );
+    chipWidth = 44;
+    resize(overflow);
+    await waitFor(() => expect(fixture?.root.querySelectorAll(".qg-slot-token")).toHaveLength(2));
+  });
+  it("renders every card when a wide host has room, without a fixed cap", async () => {
+    host = fakeContext(50);
+    pluginHost.context = host.context;
+    fixture = mountSlot();
+    setWidth(fixture.layout, 3000);
+    resize(fixture.layout);
+    await waitFor(() => expect(fixture?.root.querySelectorAll(".qg-slot-token")).toHaveLength(50));
+    expect(fixture.root.querySelector(".qg-slot-overflow")).toBeNull();
+  });
+  it("uses rendered multi-digit overflow width and keeps a focusable fallback at zero budget", async () => {
+    host = fakeContext(12);
+    pluginHost.context = host.context;
+    let multiDigitWidth = 44;
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.classList.contains("qg-slot-token")) return rect(28);
+      if (this.classList.contains("qg-slot-overflow"))
+        return rect((this.textContent?.length ?? 0) >= 3 ? multiDigitWidth : 30);
+      return original.call(this);
+    });
+    fixture = mountSlot();
+    setWidth(fixture.layout, 626);
+    resize(fixture.layout);
+    await waitFor(() => {
+      expect(fixture?.root.querySelectorAll(".qg-slot-token")).toHaveLength(2);
+      expect(fixture?.root.querySelector(".qg-slot-overflow")?.textContent).toBe("+10");
+    });
+    const overflow = fixture.root.querySelector(".qg-slot-overflow");
+    if (overflow === null) throw new Error("missing overflow");
+    await waitFor(() =>
+      expect(ControlledResizeObserver.instances.some((item) => item.observed.has(overflow))).toBe(
+        true,
+      ),
+    );
+    multiDigitWidth = 54;
+    resize(overflow);
+    await waitFor(() => expect(fixture?.root.querySelectorAll(".qg-slot-token")).toHaveLength(1));
+    multiDigitWidth = 44;
+    setWidth(fixture.layout, 300);
+    resize(fixture.layout);
+    await waitFor(() => {
+      expect(fixture?.root.querySelectorAll(".qg-slot-token")).toHaveLength(0);
+      expect(fixture?.root.querySelector<HTMLButtonElement>(".qg-slot-overflow")?.textContent).toBe(
+        "+12",
+      );
+      expect(fixture?.root.style.maxWidth).toBe("44px");
+    });
+    resize(fixture.actions);
+    expect(fixture.root.querySelector(".qg-slot-overflow")?.textContent).toBe("+12");
+  });
+  it("tracks intrinsic title and location without feeding back on the strip", async () => {
+    fixture = mountSlot();
+    await waitFor(() => expect(fixture?.root.style.maxWidth).toBe("382px"));
+    setWidth(fixture.titleMeasure, 200);
+    resize(fixture.titleMeasure);
+    await waitFor(() => expect(fixture?.root.style.maxWidth).toBe("282px"));
+    setWidth(fixture.location, 250);
+    resize(fixture.location);
+    await waitFor(() => expect(fixture?.root.style.maxWidth).toBe("232px"));
+    resize(fixture.actions);
+    resize(fixture.actions);
+    expect(fixture.root.style.maxWidth).toBe("232px");
+  });
   it("updates the strip when a competing host action widens", async () => {
     fixture = mountSlot();
     await waitFor(() => {
