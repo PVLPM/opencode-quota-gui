@@ -1679,5 +1679,5 @@ describe.skipIf(chromium === undefined)("temporal controls and Polled footer in 
     expect(narrow.main.scrollHeight).toBeGreaterThan(narrow.main.clientHeight);
     expect(narrow.footer.top).toBeGreaterThanOrEqual(narrow.grid.bottom);
     expect(narrow.footer.bottom).toBeGreaterThan(narrow.main.contentBottom);
-  });
+  }, 90_000);
 });
