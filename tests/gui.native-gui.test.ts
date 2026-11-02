@@ -107,9 +107,7 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toMatch(/region:\s*"side"/u);
     expect(guiSource).toMatch(/const TAB_ID = "dashboard"/u);
     expect(guiSource).toMatch(/mobile:\s*\{[^}]*kind:\s*"menu"/su);
-    expect(guiSource).toMatch(
-      /render:\s*\(input\)\s*=>\s*\(\s*<NativeDashboardPanel\s+runtime=\{runtime\}/su,
-    );
+    expect(guiSource).toMatch(/render:\s*\(\)\s*=>\s*<NativeDashboardPanel\s+runtime=\{runtime\}/u);
     expect(guiSource).toMatch(/visible=\{panel\.visible\}/u);
     expect(panelSource).toContain("DashboardPanel");
   });
@@ -214,6 +212,14 @@ describe("Desktop GUI entry", () => {
     expect(runtimeSource).toContain("initialNativeLocation");
     expect(panelSource).toContain("props.initialLocation");
     expect(panelSource).toContain("props.onLocationChange(next)");
+    // One window-level location: OpenCode keeps the Panel mounted while the
+    // routed session changes, and a Settings remount re-seeds from the same
+    // value instead of a session-keyed map.
+    expect(guiSource).toContain("initialLocation={props.runtime.location()}");
+    expect(guiSource).toContain("onLocationChange={(next) => props.runtime.setLocation(next)}");
+    expect(guiSource).not.toContain("sessionKey");
+    expect(panelSource).not.toContain("sessionKey");
+    expect(runtimeSource).not.toContain("Map<string, Location>");
     expect(panelSource).toContain("navigateNative");
     expect(panelSource).toContain('addEventListener("click", handleClick)');
     expect(panelSource).toContain('addEventListener("auxclick", handleAuxClick)');

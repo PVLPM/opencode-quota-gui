@@ -304,20 +304,39 @@ describe("native window runtime", () => {
     dispose();
   });
 
-  it("stores one in-memory location per session", () => {
+  it("keeps one window-level location across a session switch and a Settings remount", () => {
     const fake = createFakeCaller();
     const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
-    const first = "server\nsession-a";
-    const second = "server\nsession-b";
     const models = {
       route: { name: "models", dimension: "model" },
       range: "30d",
     } as ReturnType<typeof initialNativeLocation>;
 
-    expect(runtime.location(first)).toEqual(initialNativeLocation());
-    runtime.setLocation(first, models);
-    expect(runtime.location(first)).toEqual(models);
-    expect(runtime.location(second)).toEqual(initialNativeLocation());
+    /** Mirrors DashboardPanel: seed once from the runtime, write through. */
+    const mountPanel = () => {
+      const [location, setLocation] = createSignal(runtime.location());
+      return {
+        location,
+        navigate: (next: ReturnType<typeof initialNativeLocation>) => {
+          setLocation(next);
+          runtime.setLocation(next);
+        },
+      };
+    };
+
+    const panel = mountPanel();
+    expect(panel.location()).toEqual(initialNativeLocation());
+    panel.navigate(models);
+
+    // Session A -> session B: OpenCode keeps Panel.render mounted and only
+    // swaps `input.session`, so neither the Panel nor the window location moves.
+    expect(panel.location()).toEqual(models);
+    expect(runtime.location()).toEqual(models);
+
+    // Settings-style unmount and return: the fresh Panel seeds from the same
+    // window location, not from a per-session entry.
+    const remounted = mountPanel();
+    expect(remounted.location()).toEqual(models);
     dispose();
   });
 });

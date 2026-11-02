@@ -42,10 +42,7 @@ const TAB_ID = "dashboard";
 /** Stable objects: the host re-renders tab labels only when a new object appears. */
 const DASHBOARD_TAB = { id: TAB_ID, title: "Quota & Usage" } as const;
 
-function NativeDashboardPanel(props: {
-  runtime: NativeDashboardRuntime;
-  sessionKey: () => string;
-}): JSX.Element {
+function NativeDashboardPanel(props: { runtime: NativeDashboardRuntime }): JSX.Element {
   const ctx = usePlugin();
   const panel = usePanel();
   // The first Panel open starts the window transport; later mounts reuse it.
@@ -65,8 +62,8 @@ function NativeDashboardPanel(props: {
     <NativeUiProvider ui={ctx.ui}>
       <DashboardPanel
         client={props.runtime.client}
-        initialLocation={props.runtime.location(props.sessionKey())}
-        onLocationChange={(next) => props.runtime.setLocation(props.sessionKey(), next)}
+        initialLocation={props.runtime.location()}
+        onLocationChange={(next) => props.runtime.setLocation(next)}
         onScopeChange={(scope) => props.runtime.setScope(scope)}
         visible={panel.visible}
         hostConnected={hostConnected}
@@ -141,9 +138,7 @@ export default Plugin.define({
       region: "side",
       mobile: { title: "Quota & Usage", order: 20, kind: "menu", icon: "layout-right" },
       list: ({ open }) => (open.includes(TAB_ID) ? [DASHBOARD_TAB] : []),
-      render: (input) => (
-        <NativeDashboardPanel runtime={runtime} sessionKey={() => input.session.key} />
-      ),
+      render: () => <NativeDashboardPanel runtime={runtime} />,
     });
 
     ctx.add(SettingsPage, {

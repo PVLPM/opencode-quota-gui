@@ -420,10 +420,11 @@ export function createNativeDashboardClient(
       if (!eligible()) return;
       const previous = currentAttempt;
       // A deliberate scope change is a reconfiguration, not a connection loss.
-      // While the transport is healthy, keep the live state and skip the
-      // reconnect callback; a failed reacquisition still reports reconnecting.
-      // A watch being renewed after a Desktop deadline is not healthy: that
-      // path keeps its recovery/refetch semantics.
+      // While the transport is healthy, keep the visible live state and skip
+      // the reconnect callback. The attempt is still replaced: the new scope
+      // runs its own health probe, invalidation stream and watch. A watch being
+      // renewed after a Desktop deadline is not healthy: that path keeps its
+      // recovery/refetch semantics.
       const preserveConnection =
         previous?.live === true && !previous.renewing && !recoveryRequired && state === "live";
       const recovery =

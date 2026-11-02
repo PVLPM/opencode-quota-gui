@@ -59,7 +59,7 @@ import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./ui.js";
  */
 export interface DashboardPanelProps {
   client: NativeDashboardClient;
-  /** The window runtime's stored location for this session, if any. */
+  /** The window's stored location; a Settings remount re-seeds it unchanged. */
   initialLocation: Location;
   onLocationChange: (next: Location) => void;
   onScopeChange: (scope: DashboardRpcViewScope) => void;

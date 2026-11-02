@@ -17,18 +17,22 @@ import { createGuiRpcCaller } from "./rpc.js";
  * acquisition, which surfaced as a false `Connecting…`.
  *
  * This runtime owns one transport for the window and one in-memory location
- * per session. A mounted surface retains the transport; the Panel releases
- * analytics interest when it is hidden or unmounted, leaving only the cheap
- * quota scope. A genuine host loss still suspends the client and recovers
- * through the accepted reconnect path.
+ * shared by every routed session. OpenCode keeps `Panel.render` mounted while
+ * `input.session` changes, so the Panel's own signal carries that location for
+ * the window lifetime; a Settings remount re-seeds it from this single value.
+ * A mounted surface retains the transport; the Panel releases analytics
+ * interest when it is hidden or unmounted, leaving only the cheap quota scope.
+ * A genuine host loss still suspends the client and recovers through the
+ * accepted reconnect path.
  */
 
 export interface NativeDashboardRuntime {
   client: NativeDashboardClient;
   /** Starts the window transport on the first surface that needs it. */
   retain(): void;
-  location(sessionKey: string): Location;
-  setLocation(sessionKey: string, next: Location): void;
+  /** The window's current dashboard location, shared by every routed session. */
+  location(): Location;
+  setLocation(next: Location): void;
   /** Follows the visible surface; hidden surfaces never hold analytics interest. */
   setScope(scope: DashboardRpcViewScope): void;
   dispose(): void;
@@ -46,7 +50,7 @@ export function createNativeDashboardRuntime(
     rpc: createGuiRpcCaller(ctx),
     scope: "quota",
   });
-  const locations = new Map<string, Location>();
+  let location: Location = initialNativeLocation();
   let release: (() => void) | undefined;
   let retained = false;
   let scope: DashboardRpcViewScope = "quota";
@@ -97,13 +101,15 @@ export function createNativeDashboardRuntime(
   return {
     client,
     retain,
-    location: (sessionKey) => locations.get(sessionKey) ?? initialNativeLocation(),
-    setLocation: (sessionKey, next) => {
-      locations.set(sessionKey, next);
+    location: () => location,
+    setLocation: (next) => {
+      location = next;
     },
     setScope: (next) => {
       if (next === scope) return;
       scope = next;
+      // A scope change keeps the visible live state but replaces the attempt:
+      // the new scope runs its own health probe, invalidation stream and watch.
       void client.setActiveView(next).catch(() => undefined);
     },
     dispose,
