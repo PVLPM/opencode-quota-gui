@@ -104,10 +104,11 @@ export default Plugin.define({
     // Notifications are a window-lifetime concern: setup runs once per window,
     // so alerts keep arriving while the panel, slot and settings page are
     // closed. The host's builtin-server `connected` ref is the only recovery
-    // signal; no timer or held call keeps this alive.
+    // signal; only a failed connected stream gets a one-shot health probe.
     const rpc = createGuiRpcCaller(ctx);
     const quotaNotifications = startQuotaNotificationSubscription({
       events: rpc.events,
+      health: rpc.health,
       host: ctx,
       focused: windowHasFocus,
       signal: ctx.signal,

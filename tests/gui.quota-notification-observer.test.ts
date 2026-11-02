@@ -178,8 +178,8 @@ describe("quota notification observer", () => {
     expect(events[0]?.id).toMatch(/^[a-f0-9]{64}:\d+$/);
     expect(events[0]?.description).toContain("work");
     expect(events[0]?.description).toContain("5-hour window");
-    expect(events[0]?.description).toContain("5% remaining");
-    expect(events[0]?.description).toContain(RESET_AT);
+    expect(events[0]?.description).toBe("work: 5-hour window: 5% remaining. Resets in 5h 0m.");
+    expect(events[0]?.description).not.toContain(RESET_AT);
     // Every window receives the same identity (and the same value).
     expect(shared).toEqual([events[0]]);
 
@@ -194,6 +194,65 @@ describe("quota notification observer", () => {
     observer.observe(snapshot(5));
     await observer.flush();
     expect(events).toHaveLength(1);
+    await observer.close();
+  });
+
+  it("prunes persisted cooldowns at the exact boundary and rejects future timestamps", async () => {
+    const statePath = makeStatePath();
+    const cooldownMs = 10 * 60_000;
+    await writeJsonAtomic(statePath, {
+      version: 1,
+      cooldowns: {
+        "at-now": NOW,
+        "just-inside": NOW - cooldownMs + 1,
+        "at-boundary": NOW - cooldownMs,
+        expired: NOW - cooldownMs - 1,
+        future: NOW + 1,
+        impossible: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const { observer } = createObserver({
+      statePath,
+      settings: effectiveSettings({ cooldownMs }),
+    });
+
+    observer.observe(snapshot(50));
+    await observer.flush();
+
+    expect(readState(statePath).cooldowns).toEqual({
+      "at-now": NOW,
+      "just-inside": NOW - cooldownMs + 1,
+    });
+    await observer.close();
+  });
+
+  it("prunes merged persisted cooldowns before writing a new notification", async () => {
+    const statePath = makeStatePath();
+    const { observer, events } = createObserver({ statePath });
+
+    observer.observe(snapshot(50));
+    await observer.flush();
+    // Simulate another writer adding stale and future entries after this
+    // observer loaded its initial state.
+    await writeJsonAtomic(statePath, {
+      version: 1,
+      cooldowns: {
+        expired: NOW - 31 * 60_000,
+        future: NOW + 1,
+        recent: NOW - 1_000,
+      },
+    });
+
+    observer.observe(snapshot(5));
+    await observer.flush();
+
+    expect(events).toHaveLength(1);
+    const cooldowns = readState(statePath).cooldowns;
+    const eventFingerprint = events[0]?.id.split(":")[0];
+    expect(eventFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    expect(Object.keys(cooldowns).sort()).toEqual(["recent", String(eventFingerprint)].sort());
+    expect(cooldowns).not.toHaveProperty("expired");
+    expect(cooldowns).not.toHaveProperty("future");
     await observer.close();
   });
 
@@ -305,7 +364,11 @@ describe("quota notification observer", () => {
   });
 
   it("reports a proven provider error without leaking its label or message", async () => {
-    const { observer, events } = createObserver({});
+    const statePath = makeStatePath();
+    const { observer, events } = createObserver({
+      statePath,
+      settings: effectiveSettings({ cooldownMs: 5 * 60_000 }),
+    });
     const rawMessage = "provider body sk-secret-value";
 
     observer.observe(snapshot(50));
@@ -321,6 +384,11 @@ describe("quota notification observer", () => {
     expect(events[0]?.title).toBe("OpenAI quota error");
     expect(events[0]?.description).not.toContain(rawMessage);
     expect(events[0]?.description).not.toContain("sk-secret-value");
+    const providerErrorFingerprint = events[0]?.id.split(":")[0];
+    expect(providerErrorFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    expect(readState(statePath).cooldowns).toEqual({
+      [String(providerErrorFingerprint)]: NOW,
+    });
     await observer.close();
 
     const unknown = createObserver({});
@@ -342,7 +410,7 @@ describe("quota notification observer", () => {
     used.observer.observe(snapshot(50));
     used.observer.observe(snapshot(5));
     await used.observer.flush();
-    expect(used.events[0]?.description).toContain("95% used");
+    expect(used.events[0]?.description).toBe("work: 5-hour window: 95% used. Resets in 5h 0m.");
     expect(used.events[0]?.description).not.toContain("remaining");
     await used.observer.close();
 
@@ -352,8 +420,30 @@ describe("quota notification observer", () => {
     exhausted.observer.observe(snapshot(50));
     exhausted.observer.observe(snapshot(0));
     await exhausted.observer.flush();
-    expect(exhausted.events[0]?.description).toContain("100% used");
+    expect(exhausted.events[0]?.description).toBe(
+      "work: 5-hour window: 100% used. Resets in 5h 0m.",
+    );
     await exhausted.observer.close();
+  });
+
+  it("uses safe countdown wording for expired and invalid reset times", async () => {
+    const expiredReset = new Date(NOW - 60_000).toISOString();
+    const invalidReset = "not-a-reset-timestamp";
+    const { observer, events } = createObserver({});
+
+    observer.observe(snapshot(50));
+    observer.observe(snapshot(5, { resetAtIso: expiredReset }));
+    observer.observe(snapshot(50, { resetAtIso: invalidReset }));
+    observer.observe(snapshot(0, { resetAtIso: invalidReset }));
+    await observer.flush();
+
+    expect(events.map((event) => event.kind)).toEqual(["low", "exhausted"]);
+    for (const event of events) {
+      expect(event.description).toContain("Reset timing unavailable.");
+      expect(event.description).not.toContain(expiredReset);
+      expect(event.description).not.toContain(invalidReset);
+    }
+    await observer.close();
   });
 
   it("gives a later threshold re-cross a distinct deterministic event id", async () => {
@@ -373,6 +463,181 @@ describe("quota notification observer", () => {
     expect(events).toHaveLength(2);
     expect(events[1]?.id).not.toBe(firstId);
     expect(events[1]?.kind).toBe("low");
+    await observer.close();
+  });
+
+  it("applies a lowered cooldown on the next processing pass", async () => {
+    let now = NOW;
+    let settings = effectiveSettings();
+    const statePath = makeStatePath();
+    const { observer, events } = createObserver({
+      statePath,
+      now: () => now,
+      loadSettings: async () => settings,
+    });
+
+    observer.observe(snapshot(50));
+    observer.observe(snapshot(5));
+    await observer.flush();
+    expect(events).toHaveLength(1);
+
+    // A re-cross inside the original cooldown is suppressed but still updates
+    // the detector's in-memory transition state.
+    now += 60_000;
+    observer.observe(snapshot(50));
+    observer.observe(snapshot(5));
+    await observer.flush();
+    expect(events).toHaveLength(1);
+
+    settings = effectiveSettings({ cooldownMs: 5 * 60_000 });
+    now += 10 * 60_000;
+    observer.observe(snapshot(5));
+    await observer.flush();
+    expect(readState(statePath).cooldowns).toEqual({});
+
+    observer.observe(snapshot(50));
+    await observer.flush();
+    observer.observe(snapshot(5));
+    await observer.flush();
+
+    expect(events).toHaveLength(2);
+    expect(events[1]?.kind).toBe("low");
+    await observer.close();
+  });
+
+  it("retains no cooldown timestamps when cooldown is zero", async () => {
+    const statePath = makeStatePath();
+    await writeJsonAtomic(statePath, {
+      version: 1,
+      cooldowns: { persisted: NOW - 1 },
+    });
+    const { observer, events } = createObserver({
+      statePath,
+      settings: effectiveSettings({ cooldownMs: 0 }),
+    });
+
+    observer.observe(snapshot(50));
+    await observer.flush();
+    expect(readState(statePath).cooldowns).toEqual({});
+
+    observer.observe(snapshot(5));
+    await observer.flush();
+    expect(events).toHaveLength(1);
+    expect(readState(statePath).cooldowns).toEqual({});
+    await observer.close();
+  });
+
+  it("keeps sequential reset transitions while pruning their old cooldowns", async () => {
+    let now = NOW;
+    const settings = effectiveSettings({ cooldownMs: 5 * 60_000, percentDisplayMode: "used" });
+    const statePath = makeStatePath();
+    const { observer, events } = createObserver({
+      statePath,
+      now: () => now,
+      settings,
+    });
+    const firstResetAtMs = NOW + 5 * 60 * 60_000;
+    const secondResetAtMs = firstResetAtMs + 5 * 60 * 60_000;
+
+    observer.observe(snapshot(50, { resetAtIso: new Date(NOW + 60_000).toISOString() }));
+    await observer.flush();
+
+    now = NOW + 2 * 60_000;
+    observer.observe(snapshot(70, { resetAtIso: new Date(firstResetAtMs).toISOString() }));
+    await observer.flush();
+    const firstResetFingerprint = events[0]?.id.split(":")[0];
+    expect(firstResetFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    expect(readState(statePath).cooldowns).toEqual({
+      [String(firstResetFingerprint)]: now,
+    });
+    expect(Object.keys(readState(statePath).cooldowns)).toHaveLength(1);
+
+    // Advance beyond the configured horizon without changing the reset
+    // boundary; the transition baseline remains in memory while its persisted
+    // cooldown is pruned.
+    now += settings.cooldownMs + 1;
+    observer.observe(snapshot(70, { resetAtIso: new Date(firstResetAtMs).toISOString() }));
+    await observer.flush();
+    expect(events).toHaveLength(1);
+    expect(readState(statePath).cooldowns).toEqual({});
+
+    now = firstResetAtMs + 60_000;
+    observer.observe(snapshot(85, { resetAtIso: new Date(secondResetAtMs).toISOString() }));
+    await observer.flush();
+    const secondResetFingerprint = events[1]?.id.split(":")[0];
+    expect(secondResetFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    expect(secondResetFingerprint).not.toBe(firstResetFingerprint);
+    expect(readState(statePath).cooldowns).toEqual({
+      [String(secondResetFingerprint)]: now,
+    });
+    expect(readState(statePath).cooldowns).not.toHaveProperty(String(firstResetFingerprint));
+    expect(Object.keys(readState(statePath).cooldowns)).toHaveLength(1);
+
+    expect(events.map((event) => event.kind)).toEqual(["reset", "reset"]);
+    expect(events[0]?.description).toBe(
+      "work: 5-hour window: quota reset; 30% used. Resets in 4h 58m.",
+    );
+    expect(events[1]?.description).toBe(
+      "work: 5-hour window: quota reset; 15% used. Resets in 4h 59m.",
+    );
+    expect(events[0]?.description).not.toContain(new Date(firstResetAtMs).toISOString());
+    expect(events[1]?.description).not.toContain(new Date(secondResetAtMs).toISOString());
+    await observer.close();
+  });
+
+  it("prunes low, exhausted, and provider-error fingerprints after the cooldown horizon", async () => {
+    let now = NOW;
+    const cooldownMs = 5 * 60_000;
+    const statePath = makeStatePath();
+    const { observer, events } = createObserver({
+      statePath,
+      now: () => now,
+      settings: effectiveSettings({ cooldownMs }),
+    });
+
+    observer.observe(snapshot(50));
+    observer.observe(snapshot(5));
+    await observer.flush();
+    const lowFingerprint = events[0]?.id.split(":")[0];
+    expect(events[0]?.kind).toBe("low");
+    expect(readState(statePath).cooldowns).toEqual({ [String(lowFingerprint)]: NOW });
+
+    now += 60_000;
+    observer.observe(snapshot(50));
+    observer.observe(snapshot(0));
+    await observer.flush();
+    const exhaustedFingerprint = events[1]?.id.split(":")[0];
+    expect(events[1]?.kind).toBe("exhausted");
+    expect(readState(statePath).cooldowns).toEqual({
+      [String(lowFingerprint)]: NOW,
+      [String(exhaustedFingerprint)]: now,
+    });
+
+    now += 60_000;
+    observer.observe(
+      snapshot(0, {
+        errors: [{ label: "Provider API", message: "untrusted", failureCategory: "provider_api" }],
+      }),
+    );
+    await observer.flush();
+    const providerErrorFingerprint = events[2]?.id.split(":")[0];
+    expect(events[2]?.kind).toBe("provider-error");
+    expect(readState(statePath).cooldowns).toEqual({
+      [String(lowFingerprint)]: NOW,
+      [String(exhaustedFingerprint)]: NOW + 60_000,
+      [String(providerErrorFingerprint)]: now,
+    });
+    expect(Object.keys(readState(statePath).cooldowns)).toHaveLength(3);
+
+    now += cooldownMs;
+    observer.observe(
+      snapshot(0, {
+        errors: [{ label: "Provider API", message: "untrusted", failureCategory: "provider_api" }],
+      }),
+    );
+    await observer.flush();
+    expect(events).toHaveLength(3);
+    expect(readState(statePath).cooldowns).toEqual({});
     await observer.close();
   });
 

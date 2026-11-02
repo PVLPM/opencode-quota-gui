@@ -17,6 +17,8 @@ The low-quota threshold defaults to 10% remaining and the duplicate cooldown to
 30 minutes; both are configurable in Native Settings. Transition detection uses
 percent remaining regardless of the display preference. Cooldown fingerprints
 are stored in private state, while transition baselines are memory-only.
+Persisted cooldown timestamps are pruned once they reach the effective
+configured cooldown horizon; a zero cooldown retains no timestamps.
 
 Delivery is best effort: live semantic events reach window presenters without a
 held notification RPC, acknowledgment, outbox, or second poller. A focused
@@ -24,6 +26,10 @@ window uses the host toast API; a background window uses the host attention API
 with a stable event ID, leaving system notification preferences and
 cross-window deduplication to OpenCode. An event can be missed if no window is
 listening, and separate server processes can race when updating cooldown state.
+If a window's notification event stream ends unexpectedly while the host remains
+connected, a successful health check permits immediate resubscription. A failed
+health check does not start a retry loop; recovery waits for the existing host
+connectivity lifecycle. Delivery remains best effort, not exactly once.
 
 ## D11 — Recover from the Desktop RPC response deadline
 

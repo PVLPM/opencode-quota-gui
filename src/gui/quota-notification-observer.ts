@@ -20,6 +20,7 @@ import { readFile } from "node:fs/promises";
 
 import type { QuotaSnapshot, SettingsSnapshot } from "../contracts/dashboard.js";
 import { writeJsonAtomic } from "../lib/atomic-json.js";
+import { formatResetCountdown } from "../lib/format-utils.js";
 import { getGuiPrivateStatePath } from "../lib/private-state-paths.js";
 import { DEFAULT_CONFIG, type PercentDisplayMode } from "../lib/types.js";
 import type { DashboardRpcQuotaNotificationData } from "../rpc.js";
@@ -205,6 +206,30 @@ function mergeCooldowns(
   return merged;
 }
 
+function pruneCooldowns(
+  cooldowns: Record<string, number>,
+  nowMs: number,
+  cooldownMs: number,
+): Record<string, number> {
+  if (!Number.isFinite(nowMs) || cooldownMs <= 0) return {};
+  const pruned: Record<string, number> = {};
+  for (const [fingerprint, timestamp] of Object.entries(cooldowns)) {
+    const ageMs = nowMs - timestamp;
+    if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < cooldownMs) {
+      pruned[fingerprint] = timestamp;
+    }
+  }
+  return pruned;
+}
+
+function sameCooldowns(left: Record<string, number>, right: Record<string, number>): boolean {
+  const leftEntries = Object.entries(left);
+  return (
+    leftEntries.length === Object.keys(right).length &&
+    leftEntries.every(([fingerprint, timestamp]) => right[fingerprint] === timestamp)
+  );
+}
+
 function safeLabel(value: string | undefined, fallback: string): string {
   let withoutControls = "";
   for (const character of value ?? "") {
@@ -219,6 +244,12 @@ function displayPercent(percentRemaining: number, mode: PercentDisplayMode): str
   const remaining = Math.min(100, Math.max(0, percentRemaining));
   const value = mode === "used" ? 100 - remaining : remaining;
   return `${Math.round(value)}% ${mode === "used" ? "used" : "remaining"}`;
+}
+
+function resetCountdownDescription(resetAtIso: string | undefined, nowMs: number): string {
+  const countdown =
+    resetAtIso === undefined ? "reset" : formatResetCountdown(resetAtIso, { spaced: true }, nowMs);
+  return countdown === "reset" ? " Reset timing unavailable." : ` Resets in ${countdown}.`;
 }
 
 function notificationTitle(notification: QuotaNotification): string {
@@ -238,23 +269,22 @@ function notificationTitle(notification: QuotaNotification): string {
 function notificationDescription(
   notification: QuotaNotification,
   mode: PercentDisplayMode,
+  nowMs: number,
 ): string {
   const account = safeLabel(notification.accountLabel, "Account");
   switch (notification.kind) {
     case "low":
     case "exhausted": {
-      const reset =
-        notification.resetAtIso === undefined ? "" : ` Resets ${notification.resetAtIso}.`;
       return `${account}: ${safeLabel(notification.rowLabel, "Quota")}: ${displayPercent(
         notification.percentRemaining,
         mode,
-      )}.${reset}`;
+      )}.${resetCountdownDescription(notification.resetAtIso, nowMs)}`;
     }
     case "reset":
       return `${account}: ${safeLabel(notification.rowLabel, "Quota")}: quota reset; ${displayPercent(
         notification.percentRemaining,
         mode,
-      )}. Resets ${notification.resetAtIso}.`;
+      )}.${resetCountdownDescription(notification.resetAtIso, nowMs)}`;
     case "provider-error":
       // Only the safe category is known; labels and raw messages never reach
       // the event, so no provider error detail can leak.
@@ -275,7 +305,7 @@ function quotaNotificationEvent(
     id: `${notification.fingerprint}:${notification.observedAtMs}`,
     kind: notification.kind,
     title: notificationTitle(notification),
-    description: notificationDescription(notification, mode),
+    description: notificationDescription(notification, mode, notification.observedAtMs),
   };
 }
 
@@ -336,11 +366,13 @@ export function createQuotaNotificationObserver(
 
   async function persist(
     next: Record<string, number>,
+    nowMs: number,
+    cooldownMs: number,
   ): Promise<Record<string, number> | undefined> {
     // Best-effort read/merge/write. There is no lock; a concurrent process can
     // still lose this entry or overwrite it with its own atomic replace.
     const persisted = await readCooldowns(statePath);
-    const merged = mergeCooldowns(next, persisted);
+    const merged = pruneCooldowns(mergeCooldowns(next, persisted), nowMs, cooldownMs);
     try {
       await (options.writeState ?? defaultWriteState)(statePath, merged);
       return merged;
@@ -363,9 +395,19 @@ export function createQuotaNotificationObserver(
     }
     if (closed || epoch !== sourceEpoch) return;
 
+    const nowMs = now();
     if (!cooldownsLoaded) {
       cooldowns = mergeCooldowns(cooldowns, await readCooldowns(statePath));
       cooldownsLoaded = true;
+      if (closed || epoch !== sourceEpoch) return;
+    }
+
+    const prunedCooldowns = pruneCooldowns(cooldowns, nowMs, settings.cooldownMs);
+    const cooldownsWerePruned = !sameCooldowns(cooldowns, prunedCooldowns);
+    cooldowns = prunedCooldowns;
+    if (cooldownsWerePruned) {
+      const persisted = await persist(cooldowns, nowMs, settings.cooldownMs);
+      cooldowns = persisted ?? cooldowns;
       if (closed || epoch !== sourceEpoch) return;
     }
 
@@ -375,7 +417,7 @@ export function createQuotaNotificationObserver(
       hiddenRows: settings.hiddenRows,
       ...(needsBaseline || detectorState === undefined ? {} : { state: detectorState }),
       cooldowns,
-      nowMs: now(),
+      nowMs,
       lowThresholdPercent: settings.lowThresholdPercent,
       cooldownMs: settings.cooldownMs,
     });
@@ -387,12 +429,12 @@ export function createQuotaNotificationObserver(
       providers: result.state.providers,
     };
     needsBaseline = false;
-    cooldowns = result.cooldowns;
+    cooldowns = pruneCooldowns(result.cooldowns, nowMs, settings.cooldownMs);
 
     if (result.notifications.length === 0) return;
 
-    const persisted = await persist(result.cooldowns);
-    cooldowns = persisted ?? result.cooldowns;
+    const persisted = await persist(cooldowns, nowMs, settings.cooldownMs);
+    cooldowns = persisted ?? cooldowns;
     // A handoff can land while the cooldown write is in flight. Fence before
     // publishing so the old source's event never reaches the new generation.
     if (closed || epoch !== sourceEpoch) return;

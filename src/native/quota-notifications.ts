@@ -9,8 +9,9 @@
  *
  * RPC events are live-only. A dropped host connection aborts the stream, and the
  * host's builtin-server `connected` signal reopens it when it returns. There is
- * deliberately no timer, heartbeat, retry loop, held request or delivery
- * acknowledgement: if the host dies, that event is lost.
+ * no timer, heartbeat, retry loop, held request or delivery acknowledgement: an
+ * unexpected connected-stream failure gets one health probe and at most one
+ * replacement stream before another host transition or delivered event.
  */
 import type { DashboardRpcCaller } from "./dashboard-client.js";
 import {
@@ -23,6 +24,8 @@ const MAX_REMEMBERED_EVENT_IDS = 128;
 
 export interface QuotaNotificationSubscriptionOptions {
   readonly events: DashboardRpcCaller["events"];
+  /** One-shot liveness probe used only after an unexpected connected-stream end. */
+  readonly health: DashboardRpcCaller["health"];
   readonly host: QuotaNotificationHost;
   /** Evaluated for each event, not captured once: focus can change between polls. */
   readonly focused: () => boolean;
@@ -33,8 +36,8 @@ export interface QuotaNotificationSubscriptionOptions {
 /** One window's notification lifecycle, driven by host connectivity. */
 export interface QuotaNotificationSubscription {
   /**
-   * Reports the host's current connectivity. `false` aborts the live stream;
-   * `true` opens exactly one stream when none is running.
+   * Reports host connectivity. A transition to `false` aborts the stream and
+   * any pending health probe; a later transition to `true` opens one stream.
    */
   setConnected(connected: boolean): void;
   /** Idempotent window cleanup; never unsubscribes another window. */
@@ -60,7 +63,10 @@ export function startQuotaNotificationSubscription(
 ): QuotaNotificationSubscription {
   let stopped = false;
   let connected = false;
+  let connectionGeneration = 0;
   let attempt: AbortController | undefined;
+  let recovery: AbortController | undefined;
+  let recoverySpent = false;
   const deliveredIds = new Set<string>();
 
   function remember(id: string): boolean {
@@ -75,7 +81,15 @@ export function startQuotaNotificationSubscription(
 
   function stopAttempt(): void {
     const current = attempt;
-    attempt = undefined;
+    // Keep ownership until the iterator unwinds. Some transports can ignore
+    // abort temporarily; opening a replacement before this settles would leave
+    // two streams alive for this window.
+    current?.abort();
+  }
+
+  function stopRecovery(): void {
+    const current = recovery;
+    recovery = undefined;
     current?.abort();
   }
 
@@ -84,6 +98,7 @@ export function startQuotaNotificationSubscription(
     // the barrier that keeps it from being presented.
     if (stopped || attempt === undefined || attempt.signal.aborted) return;
     if (!remember(payload.id)) return;
+    recoverySpent = false;
     try {
       presentQuotaNotification(payload, options.host, options.focused);
     } catch {
@@ -91,12 +106,50 @@ export function startQuotaNotificationSubscription(
     }
   }
 
+  async function recoverAfterFailure(generation: number): Promise<void> {
+    if (
+      stopped ||
+      !connected ||
+      connectionGeneration !== generation ||
+      recoverySpent ||
+      recovery !== undefined
+    ) {
+      return;
+    }
+
+    recoverySpent = true;
+    const controller = new AbortController();
+    recovery = controller;
+    let currentRecovery = false;
+    try {
+      await options.health({}, { signal: controller.signal });
+      currentRecovery = recovery === controller;
+    } catch {
+      // A failed probe waits for the host's next false-to-true transition.
+    } finally {
+      if (recovery === controller) recovery = undefined;
+    }
+
+    if (
+      !currentRecovery ||
+      stopped ||
+      !connected ||
+      connectionGeneration !== generation ||
+      controller.signal.aborted
+    ) {
+      return;
+    }
+    startAttempt();
+  }
+
   function startAttempt(): void {
     if (stopped || !connected || attempt !== undefined) return;
 
     const controller = new AbortController();
+    const generation = connectionGeneration;
     attempt = controller;
     void (async () => {
+      let endedUnexpectedly = false;
       try {
         for await (const event of options.events.subscribe("quotaNotification", {
           signal: controller.signal,
@@ -104,11 +157,21 @@ export function startQuotaNotificationSubscription(
           if (stopped || attempt !== controller || controller.signal.aborted) return;
           deliver(event.data);
         }
+        endedUnexpectedly = true;
       } catch {
-        // A stream end is a connectivity state, not a permanent stop. Recovery
-        // is the host's `connected` signal; this module never schedules a retry.
+        endedUnexpectedly = true;
       } finally {
-        if (attempt === controller) attempt = undefined;
+        if (attempt === controller) {
+          attempt = undefined;
+          if (!stopped && connected) {
+            if (connectionGeneration !== generation) {
+              // Resume only after the old stream has been released.
+              startAttempt();
+            } else if (endedUnexpectedly && !controller.signal.aborted) {
+              void recoverAfterFailure(generation);
+            }
+          }
+        }
       }
     })();
   }
@@ -117,8 +180,10 @@ export function startQuotaNotificationSubscription(
     if (stopped) return;
     stopped = true;
     connected = false;
+    connectionGeneration += 1;
     options.signal?.removeEventListener("abort", stop);
     stopAttempt();
+    stopRecovery();
   };
 
   if (options.signal?.aborted) {
@@ -130,13 +195,15 @@ export function startQuotaNotificationSubscription(
   return {
     setConnected(next) {
       if (stopped) return;
+      if (connected === next) return;
+      connected = next;
+      connectionGeneration += 1;
       if (!next) {
-        connected = false;
         stopAttempt();
+        stopRecovery();
         return;
       }
-      if (connected && attempt !== undefined) return;
-      connected = true;
+      recoverySpent = false;
       startAttempt();
     },
     stop,

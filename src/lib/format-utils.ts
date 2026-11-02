@@ -199,10 +199,14 @@ const MS_PER_HOUR = 3_600_000;
  * Returns a precise-to-minute value like "2d 5h 14m", "3h 45m", or "14m".
  * When reset time is in the past or invalid, returns "reset".
  */
-export function formatResetCountdown(iso?: string, opts?: FormatResetCountdownOptions): string {
+export function formatResetCountdown(
+  iso?: string,
+  opts?: FormatResetCountdownOptions,
+  nowMs?: number,
+): string {
   if (!iso) return opts?.missing ?? "";
   const resetDate = new Date(iso);
-  const now = new Date();
+  const now = nowMs === undefined ? new Date() : new Date(nowMs);
   const diffMs = resetDate.getTime() - now.getTime();
   if (!Number.isFinite(diffMs) || diffMs <= 0) return "reset";
 
