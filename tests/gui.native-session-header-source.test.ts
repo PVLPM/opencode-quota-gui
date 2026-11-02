@@ -456,6 +456,44 @@ describe("native session header source", () => {
     expect(source.view().cards).toHaveLength(1);
   });
 
+  it("keeps Slot cards and the event channel live across repeated Desktop watch timeouts", async () => {
+    const rpc = recoveryRpc();
+    const client = createNativeDashboardClient({ rpc: rpc.caller, scope: "quota" });
+    const [active] = createSignal(true);
+    const source = await mount({ client, active });
+    await waitFor(
+      () => rpc.watches.length === 1 && source.view().cards.length === 1,
+      "initial Slot cards and viewer",
+    );
+
+    const attemptSignal = rpc.watches[0]?.signal;
+    const eventSignal = rpc.eventSignals[0];
+    const settingsReads = rpc.counts.settings;
+    const quotaReads = rpc.counts.quota;
+    rpc.watches[0]?.reject(sdkWatchTimeout());
+    await waitFor(() => rpc.watches.length === 2, "first renewed Slot viewer");
+
+    expect(client.connection()).toBe("live");
+    expect(source.view().cards).toHaveLength(1);
+    expect(rpc.watches[1]?.signal).toBe(attemptSignal);
+    expect(rpc.eventSignals).toHaveLength(1);
+    expect(eventSignal?.aborted).toBe(false);
+    expect(rpc.counts.settings).toBe(settingsReads);
+    expect(rpc.counts.quota).toBe(quotaReads);
+
+    rpc.watches[1]?.reject(sdkWatchTimeout());
+    await waitFor(() => rpc.watches.length === 3, "second renewed Slot viewer");
+    expect(client.connection()).toBe("live");
+    expect(source.view().cards).toHaveLength(1);
+    expect(rpc.watches[2]?.signal).toBe(attemptSignal);
+    expect(rpc.eventSignals).toHaveLength(1);
+    expect(eventSignal?.aborted).toBe(false);
+    expect(rpc.counts.settings).toBe(settingsReads);
+    expect(rpc.counts.quota).toBe(quotaReads);
+
+    client.dispose();
+  });
+
   it("drops rings while the transport is reconnecting and refetches after reconnect", async () => {
     const fake = recordingClient();
     const [active] = createSignal(true);

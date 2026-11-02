@@ -8,6 +8,11 @@
  * the connection stale, and `reconnect()` explicitly re-subscribes, reacquires
  * the viewer scope and notifies refetch listeners. No heartbeat or recovery
  * timer is invented.
+ *
+ * Desktop's ordinary RPC deadline can expire a held watch while the host is
+ * still healthy. In that one case the client verifies health and reacquires the
+ * same watch in place, without tearing down the event stream or reporting a
+ * disconnect. A genuine transport failure still reconnects.
  */
 
 import type {
@@ -245,20 +250,32 @@ export function createNativeDashboardClient(
 
   async function acquireWatch(attempt: Attempt): Promise<void> {
     const signal = attempt.controller.signal;
-    try {
-      await rpc.watch({ scope: attempt.scope }, { signal });
-      if (!isCurrent(attempt)) return;
-      // The watch call is a held viewer; any unexpected completion means the
-      // viewer was lost.
-      failAttempt(attempt);
-    } catch (error) {
-      if (!isCurrent(attempt)) return;
-      if (attempt.live && isHostWatchTimeout(error)) {
-        recoveryRequired = true;
-        void startAttempt(true);
+    while (isCurrent(attempt)) {
+      try {
+        await rpc.watch({ scope: attempt.scope }, { signal });
+        if (!isCurrent(attempt)) return;
+        // The watch call is a held viewer; any unexpected completion means the
+        // viewer was lost.
+        failAttempt(attempt);
         return;
+      } catch (error) {
+        if (!isCurrent(attempt)) return;
+        if (!attempt.live || !isHostWatchTimeout(error)) {
+          failAttempt(attempt);
+          return;
+        }
+
+        // Desktop's ordinary RPC deadline expires held watch requests. Check
+        // that the host is still reachable, then reacquire only this viewer;
+        // keep the live attempt and its event stream. Awaiting the rejected
+        // watch before looping guarantees no overlapping held viewers.
+        try {
+          await rpc.health({}, { signal });
+        } catch {
+          if (isCurrent(attempt)) failAttempt(attempt);
+          return;
+        }
       }
-      failAttempt(attempt);
     }
   }
 

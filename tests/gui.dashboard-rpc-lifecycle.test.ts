@@ -2,6 +2,7 @@ import { createServer as createNetServer } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AnalyticsGroupQuery,
   AnalyticsGroupSnapshot,
   CostedTokens,
   DashboardHealth,
@@ -10,6 +11,7 @@ import type {
   QuotaSnapshot,
   SessionSnapshot,
 } from "../src/contracts/dashboard.js";
+import type { RangeKey } from "../src/contracts/ranges.js";
 import {
   type DashboardLease,
   type StartDashboardOptions,
@@ -185,7 +187,7 @@ interface SnapshotCapture {
   readonly scopedScopes: SnapshotViewScope[];
 }
 
-function captureSnapshots(): SnapshotCapture {
+function captureSnapshots(overrides: Partial<SnapshotServiceOptions> = {}): SnapshotCapture {
   const created: SnapshotService[] = [];
   let closes = 0;
   let viewers = 0;
@@ -204,7 +206,7 @@ function captureSnapshots(): SnapshotCapture {
     },
     scopedScopes,
     createSnapshots: (options) => {
-      const service = createSnapshotService(options);
+      const service = createSnapshotService({ ...options, ...overrides });
       const close = service.close.bind(service);
       let closed = false;
       service.close = () => {
@@ -225,11 +227,7 @@ function captureSnapshots(): SnapshotCapture {
           release();
         };
       };
-      const addScoped = service.addScopedViewer.bind(service);
-      service.addScopedViewer = (scope: SnapshotViewScope) => {
-        scopedViewers += 1;
-        scopedScopes.push(scope);
-        const viewer = addScoped(scope);
+      const trackScoped = (viewer: ReturnType<SnapshotService["addScopedViewer"]>) => {
         let released = false;
         return {
           release: () => {
@@ -239,6 +237,12 @@ function captureSnapshots(): SnapshotCapture {
             viewer.release();
           },
         };
+      };
+      const addScoped = service.addScopedViewer.bind(service);
+      service.addScopedViewer = (scope: SnapshotViewScope) => {
+        scopedViewers += 1;
+        scopedScopes.push(scope);
+        return trackScoped(addScoped(scope));
       };
       created.push(service);
       return service;
@@ -386,6 +390,8 @@ describe("dashboard RPC lifecycle", () => {
     expect(lease.url).toBeUndefined();
     expect(snapshots.created).toHaveLength(1);
     expect(snapshots.viewers).toBe(0);
+    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedScopes).toEqual(["quota"]);
     expect(lease.runtime.snapshots).toBe(snapshots.created[0]);
 
     await expect(rpc.call("quota", {})).resolves.toMatchObject({ stale: false });
@@ -394,18 +400,19 @@ describe("dashboard RPC lifecycle", () => {
 
     const controller = new AbortController();
     const watching = rpc.call("watch", { scope: "quota" }, controller.signal);
-    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedViewers).toBe(2);
     controller.abort();
     await expect(watching).resolves.toEqual({ active: false });
-    expect(snapshots.scopedViewers).toBe(0);
+    expect(snapshots.scopedViewers).toBe(1);
 
     await registration.dispose();
     await lease.dispose();
     expect(snapshots.closes).toBe(1);
+    expect(snapshots.scopedViewers).toBe(0);
     expect(fixture.closes).toBe(1);
   });
 
-  it("re-registers page poll interests after the last viewer drops and recovers", async () => {
+  it("keeps the host quota monitor polling through repeated silent watch renewals", async () => {
     const workspace = makeWorkspace();
     const port = await freePort();
     writeGuiCanonicalConfig(workspace, { dashboard: { port }, minIntervalMs: 40 });
@@ -418,35 +425,58 @@ describe("dashboard RPC lifecycle", () => {
     if (!lease.runtime) throw new Error("expected the shared runtime");
     const registrar = createFakeRegistrar();
     const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
-    const watchScopes: string[] = [];
+    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
     let healthCalls = 0;
-    let releaseRecoveryHealth: ((health: DashboardHealth) => void) | undefined;
-    let timeoutFirstWatch: ((error: unknown) => void) | undefined;
-    let refetch: Promise<unknown> | undefined;
+    let releaseTimeoutHealth: ((health: DashboardHealth) => void) | undefined;
+    const timeoutWatches: Array<(error: Error) => void> = [];
+    let eventSubscriptions = 0;
+    const eventSignals: AbortSignal[] = [];
+    const refetch = vi.fn();
+    const hostTimeout = () =>
+      Object.assign(new Error("The operation timed out"), {
+        name: "ClientError",
+        reason: "Transport",
+        cause: new DOMException("The operation timed out", "TimeoutError"),
+      });
+    // SAFETY: this test double implements every method the native client calls
+    // and delegates each call to the fake registrar's typed dashboard schema.
     const caller = {
-      health: (_input: unknown, options?: { signal?: AbortSignal }) => {
+      health: (_input: Record<string, never>, options?: { signal?: AbortSignal }) => {
         healthCalls += 1;
         if (healthCalls === 2) {
           return new Promise<DashboardHealth>((resolve) => {
-            releaseRecoveryHealth = resolve;
+            releaseTimeoutHealth = resolve;
           });
         }
+        // SAFETY: the fake registrar dispatches this call to the real dashboard
+        // RPC schema, whose health output guard validates a DashboardHealth.
         return registrar.call("health", {}, options?.signal) as Promise<DashboardHealth>;
       },
       watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
-        watchScopes.push(input.scope);
-        const backendWatch = registrar.call("watch", input, options?.signal) as Promise<{
+        watchInputs.push(input);
+        // Keep the RPC server's held viewer distinct from the Desktop client's
+        // signal: a host deadline cancels that request, not the live session.
+        const backendController = new AbortController();
+        options?.signal?.addEventListener("abort", () => backendController.abort(), { once: true });
+        // SAFETY: the fake registrar dispatches this call to the real dashboard
+        // RPC schema, whose watch output guard validates `{ active: boolean }`.
+        const backendWatch = registrar.call("watch", input, backendController.signal) as Promise<{
           active: boolean;
         }>;
-        if (watchScopes.length !== 1) return backendWatch;
+        if (watchInputs.length > 2) return backendWatch;
         return new Promise<{ active: boolean }>((resolve, reject) => {
-          timeoutFirstWatch = reject;
+          timeoutWatches.push((error) => {
+            backendController.abort();
+            reject(error);
+          });
           backendWatch.then(resolve, reject);
         });
       },
       events: {
         subscribe: (_name: "invalidated", options?: { signal?: AbortSignal }) => {
           const signal = options?.signal ?? new AbortController().signal;
+          eventSubscriptions += 1;
+          eventSignals.push(signal);
           return {
             async *[Symbol.asyncIterator]() {
               if (signal.aborted) return;
@@ -459,38 +489,50 @@ describe("dashboard RPC lifecycle", () => {
       },
     } as unknown as DashboardRpcCaller;
     const client = createNativeDashboardClient({ rpc: caller, scope: "quota" });
-    client.onReconnect(() => {
-      refetch = registrar.call("quota", {});
-    });
+    client.onReconnect(refetch);
 
     try {
+      // Exactly one host monitor: quota polls, analytics remains lazy.
+      await vi.waitFor(
+        () => {
+          expect(snapshots.scopedViewers).toBe(1);
+          expect(snapshots.scopedScopes).toEqual(["quota"]);
+          expect(fixture.calls.quota).toBe(1);
+          expect(fixture.calls.home).toBe(0);
+          expect(fixture.calls.groups).toBe(0);
+        },
+        { timeout: 1000, interval: 5 },
+      );
       client.subscribe(() => {});
       await vi.waitFor(
         () => {
-          expect(watchScopes).toEqual(["quota"]);
-          expect(snapshots.scopedViewers).toBe(1);
+          expect(watchInputs).toEqual([{ scope: "quota" }]);
+          expect(snapshots.scopedScopes).toEqual(["quota", "quota"]);
+          expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
         },
         { timeout: 1000, interval: 5 },
       );
       await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
       expect(fixture.calls.quota).toBe(1);
+      const initialMonitorQuotaReads = fixture.calls.quota;
 
-      timeoutFirstWatch?.(
-        Object.assign(new Error("The operation timed out"), {
-          name: "ClientError",
-          reason: "Transport",
-          cause: new DOMException("The operation timed out", "TimeoutError"),
-        }),
-      );
+      timeoutWatches[0]?.(hostTimeout());
       await vi.waitFor(
         () => {
           expect(healthCalls).toBe(2);
-          expect(snapshots.scopedViewers).toBe(0);
+          expect(releaseTimeoutHealth).toBeDefined();
         },
         { timeout: 1000, interval: 5 },
       );
-      releaseRecoveryHealth?.({
+      expect(client.connection()).toBe("live");
+      expect(eventSubscriptions).toBe(1);
+      expect(eventSignals[0]?.aborted).toBe(false);
+      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
+        timeout: 1000,
+        interval: 5,
+      });
+      releaseTimeoutHealth?.({
         app: "opencode-quota-gui",
         contractVersion: 2,
         version: "lifecycle-test",
@@ -498,34 +540,519 @@ describe("dashboard RPC lifecycle", () => {
       });
       await vi.waitFor(
         () => {
-          expect(watchScopes).toEqual(["quota", "quota"]);
-          expect(snapshots.scopedScopes).toEqual(["quota", "quota"]);
-          expect(snapshots.scopedViewers).toBe(1);
+          expect(watchInputs).toEqual([{ scope: "quota" }, { scope: "quota" }]);
+          expect(snapshots.scopedScopes).toEqual(["quota", "quota", "quota"]);
+          expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
-          expect(refetch).toBeDefined();
-          expect(fixture.calls.quota).toBe(2);
+          expect(eventSubscriptions).toBe(1);
         },
         { timeout: 1000, interval: 5 },
       );
-      await refetch;
+      // The monitor and its quota interest survive: the poller keeps reading
+      // the same cached slot without a stale marker or a reset.
+      await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
+      await vi.waitFor(
+        () => expect(fixture.calls.quota).toBeGreaterThan(initialMonitorQuotaReads),
+        { timeout: 1000, interval: 5 },
+      );
+      expect(refetch).not.toHaveBeenCalled();
 
-      const deliveredBeforePoll = registrar.registrations[0]?.delivered ?? 0;
-      fixture.setQuotaTimeZone("Etc/GMT+1");
+      // A second Desktop deadline repeats the same in-place renewal with no
+      // stream replacement, overlapping viewer, or analytics read.
+      timeoutWatches[1]?.(hostTimeout());
       await vi.waitFor(
         () => {
-          expect(fixture.calls.quota).toBeGreaterThan(2);
-          expect(registrar.registrations[0]?.delivered).toBeGreaterThan(deliveredBeforePoll);
+          expect(healthCalls).toBe(3);
+          expect(watchInputs).toHaveLength(3);
+          expect(watchInputs[2]).toEqual({ scope: "quota" });
+          expect(snapshots.scopedViewers).toBe(2);
+          expect(client.connection()).toBe("live");
         },
         { timeout: 1000, interval: 5 },
       );
-    } finally {
+      await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
+      await vi.waitFor(
+        () => expect(fixture.calls.home + fixture.calls.project + fixture.calls.groups).toBe(0),
+        { timeout: 1000, interval: 5 },
+      );
+      expect(eventSubscriptions).toBe(1);
+      expect(eventSignals[0]?.aborted).toBe(false);
+      expect(refetch).not.toHaveBeenCalled();
+
       client.dispose();
-      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(0), {
+      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
         timeout: 1000,
         interval: 5,
       });
+      const pollReadsAfterWindowClosed = fixture.calls.quota;
+      await vi.waitFor(
+        () => expect(fixture.calls.quota).toBeGreaterThan(pollReadsAfterWindowClosed),
+        { timeout: 1000, interval: 5 },
+      );
+      expect(eventSignals[0]?.aborted).toBe(true);
+    } finally {
+      releaseTimeoutHealth?.({
+        app: "opencode-quota-gui",
+        contractVersion: 2,
+        version: "lifecycle-test",
+        build: "lifecycle-test",
+      });
+      client.dispose();
       await registration.dispose();
       await lease.dispose();
+      expect(snapshots.scopedViewers).toBe(0);
+    }
+  });
+
+  it("keeps global analytics pages across repeated silent renewals without refetching or dirtying", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port }, minIntervalMs: 40 });
+    const fixture = buildSource();
+    // A long analytics interval isolates the cache probe from poll noise; the
+    // quota monitor still polls on the short host interval.
+    const snapshots = captureSnapshots({ analyticsIntervalMs: 600_000 });
+    const lease = await open({
+      ...optionsFor(workspace, fixture.source),
+      createSnapshots: snapshots.createSnapshots,
+    });
+    if (!lease.runtime) throw new Error("expected the shared runtime");
+    const registrar = createFakeRegistrar();
+    const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
+    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
+    const timeoutWatches: Array<(error: Error) => void> = [];
+    let activeWatches = 0;
+    let maxActiveWatches = 0;
+    let healthCalls = 0;
+    let releaseTimeoutHealth: ((health: DashboardHealth) => void) | undefined;
+    let eventSubscriptions = 0;
+    const eventSignals: AbortSignal[] = [];
+    const refetch = vi.fn();
+    let homeReads = 0;
+    let projectReads = 0;
+    const hostTimeout = () =>
+      Object.assign(new Error("The operation timed out"), {
+        name: "ClientError",
+        reason: "Transport",
+        cause: new DOMException("The operation timed out", "TimeoutError"),
+      });
+    // SAFETY: this test double implements every method the native client calls
+    // and delegates each call to the fake registrar's typed dashboard schema.
+    const caller = {
+      health: (_input: Record<string, never>, options?: { signal?: AbortSignal }) => {
+        healthCalls += 1;
+        if (healthCalls === 2) {
+          return new Promise<DashboardHealth>((resolve) => {
+            releaseTimeoutHealth = resolve;
+          });
+        }
+        // SAFETY: the fake registrar dispatches this call to the real dashboard
+        // RPC schema, whose health output guard validates a DashboardHealth.
+        return registrar.call("health", {}, options?.signal) as Promise<DashboardHealth>;
+      },
+      home: (input: { range: RangeKey }, options?: { signal?: AbortSignal }) => {
+        homeReads += 1;
+        return registrar.call("home", input, options?.signal);
+      },
+      project: (
+        input: { projectId: string; range: RangeKey },
+        options?: { signal?: AbortSignal },
+      ) => {
+        projectReads += 1;
+        return registrar.call("project", input, options?.signal);
+      },
+      groups: (input: AnalyticsGroupQuery, options?: { signal?: AbortSignal }) =>
+        registrar.call("groups", input, options?.signal),
+      session: (input: { sessionId: string }, options?: { signal?: AbortSignal }) =>
+        registrar.call("session", input, options?.signal),
+      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+        watchInputs.push(input);
+        activeWatches += 1;
+        maxActiveWatches = Math.max(maxActiveWatches, activeWatches);
+        // Keep the RPC server's held viewer distinct from the Desktop client's
+        // signal: a host deadline cancels that request, not the live session.
+        const backendController = new AbortController();
+        options?.signal?.addEventListener("abort", () => backendController.abort(), { once: true });
+        // SAFETY: the fake registrar dispatches this call to the real dashboard
+        // RPC schema, whose watch output guard validates `{ active: boolean }`.
+        const backendWatch = registrar.call("watch", input, backendController.signal) as Promise<{
+          active: boolean;
+        }>;
+        if (watchInputs.length > 2) return backendWatch;
+        return new Promise<{ active: boolean }>((resolve, reject) => {
+          timeoutWatches.push((error) => {
+            backendController.abort();
+            reject(error);
+          });
+          backendWatch.then(resolve, reject);
+        }).finally(() => {
+          activeWatches -= 1;
+        });
+      },
+      events: {
+        subscribe: (_name: "invalidated", options?: { signal?: AbortSignal }) => {
+          const signal = options?.signal ?? new AbortController().signal;
+          eventSubscriptions += 1;
+          eventSignals.push(signal);
+          return {
+            async *[Symbol.asyncIterator]() {
+              if (signal.aborted) return;
+              await new Promise<void>((resolve) => {
+                signal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            },
+          };
+        },
+      },
+    } as unknown as DashboardRpcCaller;
+    const client = createNativeDashboardClient({ rpc: caller, scope: "analytics" });
+    client.onReconnect(refetch);
+    let unsubscribe: (() => void) | undefined;
+
+    try {
+      // Exactly one host monitor: quota polls, analytics remains lazy.
+      await vi.waitFor(
+        () => {
+          expect(snapshots.scopedViewers).toBe(1);
+          expect(snapshots.scopedScopes).toEqual(["quota"]);
+          expect(fixture.calls.quota).toBe(1);
+          expect(fixture.calls.home).toBe(0);
+          expect(fixture.calls.project).toBe(0);
+        },
+        { timeout: 1000, interval: 5 },
+      );
+
+      unsubscribe = client.subscribe(() => {});
+      await vi.waitFor(
+        () => {
+          expect(watchInputs).toEqual([{ scope: "analytics" }]);
+          expect(snapshots.scopedScopes).toEqual(["quota", "analytics"]);
+          expect(snapshots.scopedViewers).toBe(2);
+          expect(client.connection()).toBe("live");
+        },
+        { timeout: 1000, interval: 5 },
+      );
+
+      await client.home({ range: "7d" });
+      await client.project({ projectId: "p1", range: "7d" });
+      expect(homeReads).toBe(1);
+      expect(projectReads).toBe(1);
+      expect(fixture.calls.home).toBe(1);
+      expect(fixture.calls.project).toBe(1);
+
+      timeoutWatches[0]?.(hostTimeout());
+      await vi.waitFor(
+        () => {
+          expect(healthCalls).toBe(2);
+          expect(releaseTimeoutHealth).toBeDefined();
+        },
+        { timeout: 1000, interval: 5 },
+      );
+      expect(client.connection()).toBe("live");
+      expect(eventSubscriptions).toBe(1);
+      expect(eventSignals[0]?.aborted).toBe(false);
+      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
+        timeout: 1000,
+        interval: 5,
+      });
+
+      releaseTimeoutHealth?.({
+        app: "opencode-quota-gui",
+        contractVersion: 2,
+        version: "lifecycle-test",
+        build: "lifecycle-test",
+      });
+      await vi.waitFor(
+        () => {
+          expect(watchInputs).toEqual([{ scope: "analytics" }, { scope: "analytics" }]);
+          expect(snapshots.scopedViewers).toBe(2);
+          expect(client.connection()).toBe("live");
+        },
+        { timeout: 1000, interval: 5 },
+      );
+      // No client refetch and no host read on renewal.
+      expect(homeReads).toBe(1);
+      expect(projectReads).toBe(1);
+      expect(fixture.calls.home).toBe(1);
+      expect(fixture.calls.project).toBe(1);
+      expect(refetch).not.toHaveBeenCalled();
+
+      // Cache probe: a direct read is served without the source being called,
+      // proving the global compute/cache was neither cleared nor dirtied.
+      await expect(registrar.call("home", { range: "7d" })).resolves.toMatchObject({
+        stale: false,
+        range: "7d",
+      });
+      await expect(
+        registrar.call("project", { projectId: "p1", range: "7d" }),
+      ).resolves.toMatchObject({ stale: false, projectId: "p1", range: "7d" });
+      expect(fixture.calls.home).toBe(1);
+      expect(fixture.calls.project).toBe(1);
+
+      // A second deadline repeats the same in-place renewal.
+      timeoutWatches[1]?.(hostTimeout());
+      await vi.waitFor(
+        () => {
+          expect(healthCalls).toBe(3);
+          expect(watchInputs).toHaveLength(3);
+          expect(watchInputs[2]).toEqual({ scope: "analytics" });
+          expect(snapshots.scopedViewers).toBe(2);
+          expect(client.connection()).toBe("live");
+        },
+        { timeout: 1000, interval: 5 },
+      );
+      await expect(registrar.call("home", { range: "7d" })).resolves.toMatchObject({
+        stale: false,
+      });
+      expect(fixture.calls.home).toBe(1);
+      expect(homeReads).toBe(1);
+      expect(projectReads).toBe(1);
+
+      // Streaming and attempt continuity: one event stream, one live watch.
+      expect(eventSubscriptions).toBe(1);
+      expect(eventSignals[0]?.aborted).toBe(false);
+      expect(maxActiveWatches).toBe(1);
+
+      // Closing the window leaves the host monitor and the global page intact;
+      // a subsequent direct read is still cache-served and fresh.
+      unsubscribe();
+      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
+        timeout: 1000,
+        interval: 5,
+      });
+      await expect(registrar.call("home", { range: "7d" })).resolves.toMatchObject({
+        stale: false,
+      });
+      expect(fixture.calls.home).toBe(1);
+      const quotaReads = fixture.calls.quota;
+      await vi.waitFor(() => expect(fixture.calls.quota).toBeGreaterThan(quotaReads), {
+        timeout: 1000,
+        interval: 5,
+      });
+    } finally {
+      releaseTimeoutHealth?.({
+        app: "opencode-quota-gui",
+        contractVersion: 2,
+        version: "lifecycle-test",
+        build: "lifecycle-test",
+      });
+      unsubscribe?.();
+      client.dispose();
+      await registration.dispose();
+      await lease.dispose();
+      expect(snapshots.scopedViewers).toBe(0);
+    }
+  });
+
+  it("keeps concurrent analytics and quota windows independent across a renewal", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port }, minIntervalMs: 40 });
+    const fixture = buildSource();
+    const snapshots = captureSnapshots({ analyticsIntervalMs: 600_000 });
+    const lease = await open({
+      ...optionsFor(workspace, fixture.source),
+      createSnapshots: snapshots.createSnapshots,
+    });
+    if (!lease.runtime) throw new Error("expected the shared runtime");
+    const registrar = createFakeRegistrar();
+    const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
+    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
+    const timeoutWatches: Array<(error: Error) => void> = [];
+    let holdNextHealth = false;
+    let releaseHealth: (() => void) | undefined;
+    let homeReads = 0;
+    let eventSubscriptions = 0;
+    const eventSignals: AbortSignal[] = [];
+    const refetch = vi.fn();
+    const hostTimeout = () =>
+      Object.assign(new Error("The operation timed out"), {
+        name: "ClientError",
+        reason: "Transport",
+        cause: new DOMException("The operation timed out", "TimeoutError"),
+      });
+    const healthPayload: DashboardHealth = {
+      app: "opencode-quota-gui",
+      contractVersion: 2,
+      version: "lifecycle-test",
+      build: "lifecycle-test",
+    };
+    // SAFETY: this test double implements every method both native clients call
+    // and delegates each call to the fake registrar's typed dashboard schema.
+    const caller = {
+      health: (_input: Record<string, never>, options?: { signal?: AbortSignal }) => {
+        if (holdNextHealth) {
+          holdNextHealth = false;
+          return new Promise<DashboardHealth>((resolve) => {
+            releaseHealth = () => resolve(healthPayload);
+          });
+        }
+        // SAFETY: the fake registrar dispatches this call to the real dashboard
+        // RPC schema, whose health output guard validates a DashboardHealth.
+        return registrar.call("health", {}, options?.signal) as Promise<DashboardHealth>;
+      },
+      home: (input: { range: RangeKey }, options?: { signal?: AbortSignal }) => {
+        homeReads += 1;
+        return registrar.call("home", input, options?.signal);
+      },
+      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+        watchInputs.push(input);
+        // Keep the RPC server's held viewer distinct from the Desktop client's
+        // signal: a host deadline cancels that request, not the live session.
+        const backendController = new AbortController();
+        options?.signal?.addEventListener("abort", () => backendController.abort(), { once: true });
+        // SAFETY: the fake registrar dispatches this call to the real dashboard
+        // RPC schema, whose watch output guard validates `{ active: boolean }`.
+        const backendWatch = registrar.call("watch", input, backendController.signal) as Promise<{
+          active: boolean;
+        }>;
+        if (watchInputs.length > 2) return backendWatch;
+        return new Promise<{ active: boolean }>((resolve, reject) => {
+          timeoutWatches.push((error) => {
+            backendController.abort();
+            reject(error);
+          });
+          backendWatch.then(resolve, reject);
+        });
+      },
+      events: {
+        subscribe: (_name: "invalidated", options?: { signal?: AbortSignal }) => {
+          const signal = options?.signal ?? new AbortController().signal;
+          eventSubscriptions += 1;
+          eventSignals.push(signal);
+          return {
+            async *[Symbol.asyncIterator]() {
+              if (signal.aborted) return;
+              await new Promise<void>((resolve) => {
+                signal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            },
+          };
+        },
+      },
+    } as unknown as DashboardRpcCaller;
+    const analyticsClient = createNativeDashboardClient({ rpc: caller, scope: "analytics" });
+    const quotaClient = createNativeDashboardClient({ rpc: caller, scope: "quota" });
+    analyticsClient.onReconnect(refetch);
+    quotaClient.onReconnect(refetch);
+    let unsubscribeAnalytics: (() => void) | undefined;
+    let unsubscribeQuota: (() => void) | undefined;
+
+    try {
+      await vi.waitFor(
+        () => {
+          expect(snapshots.scopedViewers).toBe(1);
+          expect(snapshots.scopedScopes).toEqual(["quota"]);
+          expect(fixture.calls.quota).toBe(1);
+        },
+        { timeout: 1000, interval: 5 },
+      );
+
+      unsubscribeAnalytics = analyticsClient.subscribe(() => {});
+      await vi.waitFor(
+        () => {
+          expect(watchInputs).toEqual([{ scope: "analytics" }]);
+          expect(analyticsClient.connection()).toBe("live");
+          expect(snapshots.scopedViewers).toBe(2);
+        },
+        { timeout: 1000, interval: 5 },
+      );
+      unsubscribeQuota = quotaClient.subscribe(() => {});
+      await vi.waitFor(
+        () => {
+          expect(watchInputs).toEqual([{ scope: "analytics" }, { scope: "quota" }]);
+          expect(quotaClient.connection()).toBe("live");
+          expect(snapshots.scopedViewers).toBe(3);
+        },
+        { timeout: 1000, interval: 5 },
+      );
+
+      await analyticsClient.home({ range: "7d" });
+      expect(homeReads).toBe(1);
+      expect(fixture.calls.home).toBe(1);
+      const analyticsStream = eventSignals[0];
+      const quotaStream = eventSignals[1];
+      expect(analyticsStream?.aborted).toBe(false);
+      expect(quotaStream?.aborted).toBe(false);
+
+      // The quota window hits a Desktop deadline. The analytics window and the
+      // shared analytics cache must be unaffected.
+      holdNextHealth = true;
+      timeoutWatches[1]?.(hostTimeout());
+      await vi.waitFor(() => expect(releaseHealth).toBeDefined(), {
+        timeout: 1000,
+        interval: 5,
+      });
+      expect(quotaClient.connection()).toBe("live");
+      expect(analyticsClient.connection()).toBe("live");
+      expect(analyticsStream?.aborted).toBe(false);
+      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(2), {
+        timeout: 1000,
+        interval: 5,
+      });
+      releaseHealth?.();
+      await vi.waitFor(
+        () => {
+          expect(watchInputs).toEqual([
+            { scope: "analytics" },
+            { scope: "quota" },
+            { scope: "quota" },
+          ]);
+          expect(snapshots.scopedViewers).toBe(3);
+          expect(quotaClient.connection()).toBe("live");
+        },
+        { timeout: 1000, interval: 5 },
+      );
+      expect(eventSubscriptions).toBe(2);
+      expect(analyticsStream?.aborted).toBe(false);
+      expect(quotaStream?.aborted).toBe(false);
+      expect(fixture.calls.home).toBe(1);
+
+      // Closing the quota window leaves the analytics window and the cached
+      // page untouched.
+      unsubscribeQuota();
+      quotaClient.dispose();
+      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(2), {
+        timeout: 1000,
+        interval: 5,
+      });
+      expect(quotaStream?.aborted).toBe(true);
+      expect(analyticsStream?.aborted).toBe(false);
+      expect(analyticsClient.connection()).toBe("live");
+      await expect(registrar.call("home", { range: "7d" })).resolves.toMatchObject({
+        stale: false,
+        range: "7d",
+      });
+      expect(fixture.calls.home).toBe(1);
+
+      // Closing the analytics window leaves only the host monitor; the global
+      // page remains cached and fresh for the next session.
+      unsubscribeAnalytics();
+      analyticsClient.dispose();
+      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
+        timeout: 1000,
+        interval: 5,
+      });
+      expect(analyticsStream?.aborted).toBe(true);
+      await expect(registrar.call("home", { range: "7d" })).resolves.toMatchObject({
+        stale: false,
+      });
+      expect(fixture.calls.home).toBe(1);
+      const quotaReads = fixture.calls.quota;
+      await vi.waitFor(() => expect(fixture.calls.quota).toBeGreaterThan(quotaReads), {
+        timeout: 1000,
+        interval: 5,
+      });
+      expect(refetch).not.toHaveBeenCalled();
+    } finally {
+      releaseHealth?.();
+      unsubscribeQuota?.();
+      unsubscribeAnalytics?.();
+      quotaClient.dispose();
+      analyticsClient.dispose();
+      await registration.dispose();
+      await lease.dispose();
+      expect(snapshots.scopedViewers).toBe(0);
     }
   });
 
@@ -591,7 +1118,7 @@ describe("dashboard RPC lifecycle", () => {
     await lease.dispose();
   });
 
-  it("registers RPC without starting a viewer, worker or poller when unused (neither)", async () => {
+  it("starts a quota-only host monitor when RPC has no native window", async () => {
     const workspace = makeWorkspace();
     const port = await freePort();
     writeGuiCanonicalConfig(workspace, { dashboard: { port } });
@@ -607,12 +1134,14 @@ describe("dashboard RPC lifecycle", () => {
 
     expect(snapshots.created).toHaveLength(1);
     expect(snapshots.viewers).toBe(0);
-    expect(snapshots.scopedViewers).toBe(0);
-    expect(fixture.calls).toEqual({ home: 0, project: 0, session: 0, quota: 0, groups: 0 });
+    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedScopes).toEqual(["quota"]);
+    expect(fixture.calls).toEqual({ home: 0, project: 0, session: 0, quota: 1, groups: 0 });
 
     await registration.dispose();
     await lease.dispose();
     expect(snapshots.closes).toBe(1);
+    expect(snapshots.scopedViewers).toBe(0);
   });
 
   it("keeps web behavior when RPC is registered but no native viewer is attached (web-only)", async () => {
@@ -633,10 +1162,12 @@ describe("dashboard RPC lifecycle", () => {
     expect(response.status).toBe(200);
     expect(fixture.calls.home).toBe(1);
     expect(snapshots.viewers).toBe(0);
-    expect(snapshots.scopedViewers).toBe(0);
+    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedScopes).toEqual(["quota"]);
 
     await registration.dispose();
     await lease.dispose();
+    expect(snapshots.scopedViewers).toBe(0);
   });
 
   it("returns the same sanitized settings DTO over RPC as the HTTP boundary", async () => {

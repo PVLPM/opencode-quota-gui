@@ -1591,4 +1591,75 @@ describe("GUI snapshot service", () => {
 
     webViewer();
   });
+
+  it("keeps the host quota monitor alone without analytics work", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 25, analyticsIntervalMs: 25 });
+    const monitor = service.addScopedViewer("quota");
+    await service.quota();
+    await vi.advanceTimersByTimeAsync(90);
+
+    expect(calls.quota).toBeGreaterThan(1);
+    expect(calls.home + calls.project + calls.session).toBe(0);
+    expect(refreshes).toBe(0);
+
+    monitor.release();
+    service.close();
+  });
+
+  it("retains global analytics pages across a 2 to 1 to 2 window transition", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 25, analyticsIntervalMs: 25 });
+    const monitor = service.addScopedViewer("quota");
+    await service.quota();
+    const analytics = service.addScopedViewer("analytics");
+    const quotaWindow = service.addScopedViewer("quota");
+    await service.home({ range: "7d" });
+    await vi.advanceTimersByTimeAsync(30);
+    expect(calls.home).toBe(2);
+    const activeRefreshes = refreshes;
+
+    // Closing the concurrent quota window leaves analytics polling untouched.
+    quotaWindow.release();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(calls.home).toBeGreaterThan(2);
+    expect(refreshes).toBeGreaterThan(activeRefreshes);
+
+    // Closing the analytics window leaves only the host monitor. The global
+    // page stops being polled but stays cached and fresh: a direct read is
+    // served without a source call (no dirty, no compute clearing).
+    analytics.release();
+    const closedHome = calls.home;
+    const closedRefreshes = refreshes;
+    await vi.advanceTimersByTimeAsync(90);
+    expect(calls.home).toBe(closedHome);
+    expect(refreshes).toBe(closedRefreshes);
+    const retained = await service.home({ range: "7d" });
+    expect(retained.stale).toBe(false);
+    expect(calls.home).toBe(closedHome);
+
+    // Reopening on analytics resumes polling for the same global page without a
+    // refetch on attach.
+    const reopened = service.addScopedViewer("analytics");
+    expect(calls.home).toBe(closedHome);
+    await vi.advanceTimersByTimeAsync(30);
+    expect(calls.home).toBeGreaterThan(closedHome);
+    expect(refreshes).toBeGreaterThan(closedRefreshes);
+
+    reopened.release();
+    monitor.release();
+    service.close();
+  });
 });

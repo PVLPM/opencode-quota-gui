@@ -161,6 +161,8 @@ interface OwnerDelegation {
 interface DashboardRuntime {
   readonly source: DashboardReadSource;
   snapshots: SnapshotService | undefined;
+  /** One host-lifetime quota interest, independent of any transport viewer. */
+  quotaMonitor: ReturnType<SnapshotService["addScopedViewer"]> | undefined;
   settings: GuiSettingsStore | undefined;
   close(): Promise<void>;
 }
@@ -237,10 +239,17 @@ function createRuntime(source: DashboardReadSource, logger: GuiLogger): Dashboar
   const runtime: DashboardRuntime = {
     source,
     snapshots: undefined,
+    quotaMonitor: undefined,
     settings: undefined,
     close() {
       if (closing) return closing;
       closing = (async () => {
+        try {
+          runtime.quotaMonitor?.release();
+        } catch (error) {
+          logger.warn("dashboard quota monitor close failed", failureLabel(error));
+        }
+        runtime.quotaMonitor = undefined;
         try {
           runtime.snapshots?.close();
         } catch (error) {
@@ -543,10 +552,19 @@ async function startHost(
     throw new DashboardLifecycleError("server-unavailable");
   }
   runtime.snapshots = snapshots;
+  // One host-lifetime quota viewer keeps `viewers >= 1` across ordinary window
+  // watch aborts and silent renewals, so the original `viewers === 0` teardown
+  // (stopPollers, compute clearing, cache dirtying) never runs on a timeout.
+  // Global bounded analytics pages therefore stay warm until normal eviction.
+  runtime.quotaMonitor = snapshots.addScopedViewer("quota");
+  // A scoped viewer starts the shared pollers, but quota polling has no
+  // registered interest until an actual quota read installs its compute key.
+  // Prime it once so the single host poller remains useful between windows.
+  void snapshots.quota().catch(() => undefined);
 
   // Web is a secondary transport, off unless the canonical setting says true.
-  // The shared runtime above is already live; returning no handle starts no
-  // HTTP listener, SSE hub, static serving, poller, or analytics work.
+  // The shared quota monitor is already live; returning no handle starts no
+  // HTTP listener, SSE hub, or static serving, and does not activate analytics.
   if (!context.webEnabled) return undefined;
 
   const createServer = options.createServer ?? createDashboardServer;

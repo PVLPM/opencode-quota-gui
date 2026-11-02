@@ -30,6 +30,7 @@ import {
   type SnapshotService,
   type SnapshotServiceOptions,
   type SnapshotSource,
+  type SnapshotViewScope,
 } from "../src/gui/snapshot-service.js";
 import {
   createGuiConfigWorkspace,
@@ -374,6 +375,8 @@ interface SnapshotCapture {
   readonly created: SnapshotService[];
   readonly closes: number;
   readonly viewers: number;
+  readonly scopedViewers: number;
+  readonly scopedScopes: SnapshotViewScope[];
 }
 
 /** Wraps the real snapshot service to count host-scoped creation and cleanup. */
@@ -381,6 +384,8 @@ function captureSnapshots(): SnapshotCapture {
   const created: SnapshotService[] = [];
   let closes = 0;
   let viewers = 0;
+  let scopedViewers = 0;
+  const scopedScopes: SnapshotViewScope[] = [];
   return {
     created,
     get closes() {
@@ -389,6 +394,10 @@ function captureSnapshots(): SnapshotCapture {
     get viewers() {
       return viewers;
     },
+    get scopedViewers() {
+      return scopedViewers;
+    },
+    scopedScopes,
     createSnapshots: (options) => {
       const service = createSnapshotService(options);
       const close = service.close.bind(service);
@@ -410,6 +419,23 @@ function captureSnapshots(): SnapshotCapture {
           viewers -= 1;
           release();
         };
+      };
+      const trackScoped = (viewer: ReturnType<SnapshotService["addScopedViewer"]>) => {
+        let released = false;
+        return {
+          release: () => {
+            if (released) return;
+            released = true;
+            scopedViewers -= 1;
+            viewer.release();
+          },
+        };
+      };
+      const addScopedViewer = service.addScopedViewer.bind(service);
+      service.addScopedViewer = (scope) => {
+        scopedViewers += 1;
+        scopedScopes.push(scope);
+        return trackScoped(addScopedViewer(scope));
       };
       created.push(service);
       return service;
@@ -497,16 +523,21 @@ describe("dashboard production lifecycle", () => {
     expect(serverStarts).toBe(0);
     expect(await tryBind(port)).toBe(true);
 
-    // One host-owned snapshot service exists, with no viewer/poller and no
-    // analytics refresh behind it, and it remains usable by a future transport.
+    await waitFor(() => owner.calls.quota === 1, "host quota monitor initialization");
+    // The host retains one quota-only viewer even while Web is off; analytics
+    // remains inactive and another transport can still attach.
     expect(snapshots.created).toHaveLength(1);
     expect(snapshots.viewers).toBe(0);
+    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedScopes).toEqual(["quota"]);
+    expect(owner.calls.quota).toBe(1);
     expect(refreshes).toBe(0);
     expect(snapshots.closes).toBe(0);
     expect((await fixtureAt(snapshots.created, 0).home({ range: "7d" })).range).toBe("7d");
     expect(owner.calls.home).toBe(1);
 
     await lease.dispose();
+    expect(snapshots.scopedViewers).toBe(0);
     expect(snapshots.closes).toBe(1);
     expect(owner.closes).toBe(1);
   });
@@ -541,6 +572,8 @@ describe("dashboard production lifecycle", () => {
     expect(second.url).toBeUndefined();
     expect(snapshots.created).toHaveLength(1);
     expect(snapshots.viewers).toBe(0);
+    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedScopes).toEqual(["quota"]);
     expect(await tryBind(port)).toBe(true);
     // Only the first active owner's source is eagerly created.
     expect(createdSources).toBe(1);
@@ -552,6 +585,7 @@ describe("dashboard production lifecycle", () => {
     // The surviving lease keeps the cache owner and runtime alive; the next read
     // hand off to its lazily created source after invalidation.
     expect(snapshots.closes).toBe(0);
+    expect(snapshots.scopedViewers).toBe(1);
     expect(fixtureAt(owners, 0).closes).toBe(1);
     expect(createdSources).toBe(1);
     await fixtureAt(snapshots.created, 0).home({ range: "7d" });
@@ -561,6 +595,7 @@ describe("dashboard production lifecycle", () => {
 
     await second.dispose();
     expect(snapshots.closes).toBe(1);
+    expect(snapshots.scopedViewers).toBe(0);
     expect(fixtureAt(owners, 1).closes).toBe(1);
     expect(await tryBind(port)).toBe(true);
   });
@@ -611,7 +646,7 @@ describe("dashboard production lifecycle", () => {
     expect(await tryBind(port)).toBe(true);
   });
 
-  it("binds the configured port and computes the first snapshot only on request", async () => {
+  it("binds the configured port and computes analytics snapshots only on request", async () => {
     const workspace = makeWorkspace();
     const port = await freePort();
     writeGuiCanonicalConfig(workspace, { dashboard: { enabled: true, port } });
@@ -628,7 +663,8 @@ describe("dashboard production lifecycle", () => {
     expect(lease.state).toBe("running");
     expect(lease.port).toBe(port);
     expect(lease.url).toBe(`http://127.0.0.1:${port}`);
-    // Bind only: startup reads no provider data and no snapshots.
+    // Startup does not compute analytics snapshots; the host's independent
+    // quota interest is the only exception.
     expect(calls).toEqual({ home: 0, project: 0, session: 0, groups: 0 });
 
     const health = await fetch(`${lease.url}/api/v1/health`);
@@ -886,9 +922,13 @@ describe("dashboard production lifecycle", () => {
       expect(first.state).toBe("unavailable");
       expect(first.reason).toBe("port-unavailable");
       expect(snapshots.created).toHaveLength(1);
-      // The web transport failed, not the shared runtime: no viewer or poller
-      // exists, and the cache/source still answer a native-side read.
+      await waitFor(() => owner.calls.quota === 1, "quota monitor after web bind failure");
+      // The web transport failed, not the shared runtime: its quota monitor
+      // remains active and the cache/source still answer native-side reads.
       expect(snapshots.viewers).toBe(0);
+      expect(snapshots.scopedViewers).toBe(1);
+      expect(snapshots.scopedScopes).toEqual(["quota"]);
+      expect(owner.calls.quota).toBe(1);
       expect(snapshots.closes).toBe(0);
       expect(owner.closes).toBe(0);
       expect((await fixtureAt(snapshots.created, 0).home({ range: "7d" })).range).toBe("7d");
@@ -904,11 +944,13 @@ describe("dashboard production lifecycle", () => {
 
       await first.dispose();
       expect(snapshots.closes).toBe(0);
+      expect(snapshots.scopedViewers).toBe(1);
       // The disposed owner's source is released with its lease; the surviving
       // lease keeps the host runtime and its snapshot service.
       expect(owner.closes).toBe(1);
       await second.dispose();
       expect(snapshots.closes).toBe(1);
+      expect(snapshots.scopedViewers).toBe(0);
       expect(owner.closes).toBe(1);
       expect(await tryBind(blocker.port)).toBe(false);
     } finally {
@@ -939,6 +981,8 @@ describe("dashboard production lifecycle", () => {
     const [first, second] = await Promise.all([open(options), open(options)]);
     expect(snapshots.created).toHaveLength(1);
     expect(snapshots.closes).toBe(0);
+    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedScopes).toEqual(["quota"]);
     // The transport receives the host's one snapshot service; it does not make
     // its own.
     expect(received).toEqual([snapshots.created[0]]);
@@ -946,11 +990,13 @@ describe("dashboard production lifecycle", () => {
     await first.dispose();
     expect(await tryBind(port)).toBe(false);
     expect(snapshots.closes).toBe(0);
+    expect(snapshots.scopedViewers).toBe(1);
     expect((await fetch(`http://127.0.0.1:${port}/api/v1/health`)).status).toBe(200);
 
     await second.dispose();
     expect(await tryBind(port)).toBe(true);
     expect(snapshots.closes).toBe(1);
+    expect(snapshots.scopedViewers).toBe(0);
   });
 
   it("ignores a legacy v2 host record that predates the shared runtime", async () => {
@@ -1075,9 +1121,80 @@ describe("dashboard production lifecycle", () => {
     await waitFor(() => snapshots.viewers === 1, "second client remains attached");
     second.close();
     await waitFor(() => snapshots.viewers === 0, "last viewer release");
+    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedScopes).toEqual(["quota"]);
 
     await lease.dispose();
+    expect(snapshots.scopedViewers).toBe(0);
     expect(snapshots.closes).toBe(1);
+  });
+
+  it("retains global analytics cache after the last window disconnect while the quota monitor remains", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: true, port }, minIntervalMs: 40 });
+    const calls = { home: 0, project: 0, session: 0, quota: 0, groups: 0 };
+    let total = 10;
+    const source: SnapshotSource = {
+      home: async ({ range }) => {
+        calls.home += 1;
+        return { ...homeSnapshot(range), usage: usageFor(range, total) };
+      },
+      project: async ({ projectId, range }) => {
+        calls.project += 1;
+        return projectSnapshot(projectId, range);
+      },
+      session: async ({ sessionId }) => {
+        calls.session += 1;
+        return sessionSnapshot(sessionId);
+      },
+      quota: async () => {
+        calls.quota += 1;
+        return quotaSnapshot(1);
+      },
+      groups: async (query) => {
+        calls.groups += 1;
+        return groupSnapshot(query, 1);
+      },
+    };
+    const snapshots = captureSnapshots();
+
+    const lease = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      createSource: () => source,
+      createSnapshots: snapshots.createSnapshots,
+      logger: silent,
+    });
+    const window = await openSse(port);
+    await waitFor(() => snapshots.viewers === 1, "window viewer");
+
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      stale: false,
+      usage: { totals: { total: 10 } },
+    });
+    expect(calls.home).toBe(1);
+
+    window.close();
+    await waitFor(() => snapshots.viewers === 0, "last window disconnect");
+    // The host monitor is the only remaining viewer, and it keeps polling.
+    expect(snapshots.scopedViewers).toBe(1);
+    expect(snapshots.scopedScopes).toEqual(["quota"]);
+    const quotaReads = calls.quota;
+    await waitFor(() => calls.quota > quotaReads, "quota monitor poll after window close");
+
+    // The closed window's analytics cache remains valid: the host monitor
+    // keeps `viewers >= 1`, so the original teardown never runs. The page is
+    // served fresh from cache until normal eviction or an explicit invalidation.
+    total = 20;
+    expect(await readJson(port, "/api/v1/home?range=7d")).toMatchObject({
+      stale: false,
+      usage: { totals: { total: 10 } },
+    });
+    expect(calls.home).toBe(1);
+
+    await lease.dispose();
   });
 
   it("contains a source close failure during final disposal", async () => {
@@ -1253,13 +1370,17 @@ describe("dashboard production lifecycle", () => {
       usage: { totals: { total: 11 } },
     });
 
-    // Uncached analytics and quota become controlled 500s, never exceptions.
+    // Uncached analytics is a controlled 500. The host quota monitor already
+    // primed quota, so a failed owner read returns that last-good value as stale.
     const failedHome = await fetch(`http://127.0.0.1:${port}/api/v1/home?range=30d`);
     expect(failedHome.status).toBe(500);
     expect(await failedHome.json()).toMatchObject({ error: { code: "internal" } });
     const failedQuota = await fetch(`http://127.0.0.1:${port}/api/v1/quota`);
-    expect(failedQuota.status).toBe(500);
-    expect(await failedQuota.json()).toMatchObject({ error: { code: "internal" } });
+    expect(failedQuota.status).toBe(200);
+    expect(await failedQuota.json()).toMatchObject({
+      stale: true,
+      providers: { polledAtMs: 11 },
+    });
 
     // The failing delegate was asked, never silently replaced or re-created.
     expect(second.calls).toEqual({ home: 2, project: 0, session: 0, quota: 1, groups: 0 });

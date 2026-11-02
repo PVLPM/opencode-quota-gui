@@ -62,6 +62,8 @@ interface ActiveWatch {
 function createFakeCaller() {
   const activeWatches: ActiveWatch[] = [];
   const streams: Array<ReturnType<typeof createEventStream>> = [];
+  let pendingWatches = 0;
+  let maxPendingWatches = 0;
   const caller = {
     health: vi.fn(async (_input?: Record<string, never>, _options?: { signal?: AbortSignal }) => ({
       app: "opencode-quota-gui",
@@ -82,8 +84,24 @@ function createFakeCaller() {
       (input: { scope: string }, options?: { signal?: AbortSignal }) =>
         new Promise<{ active: boolean }>((resolve, reject) => {
           const signal = options?.signal ?? new AbortController().signal;
-          activeWatches.push({ scope: input.scope, signal, resolve, reject });
-          signal.addEventListener("abort", () => resolve({ active: false }), { once: true });
+          pendingWatches += 1;
+          maxPendingWatches = Math.max(maxPendingWatches, pendingWatches);
+          let settled = false;
+          const settle = (finish: () => void) => {
+            if (settled) return;
+            settled = true;
+            pendingWatches -= 1;
+            finish();
+          };
+          activeWatches.push({
+            scope: input.scope,
+            signal,
+            resolve: (value) => settle(() => resolve(value)),
+            reject: (error) => settle(() => reject(error)),
+          });
+          signal.addEventListener("abort", () => settle(() => resolve({ active: false })), {
+            once: true,
+          });
         }),
     ),
     events: {
@@ -99,6 +117,7 @@ function createFakeCaller() {
     raw: caller,
     activeWatches,
     streams,
+    watchActivity: () => ({ active: pendingWatches, max: maxPendingWatches }),
   };
 }
 
@@ -196,6 +215,7 @@ describe("native dashboard RPC client", () => {
     expect(fake.raw.health).toHaveBeenCalledTimes(2);
     expect(fake.raw.events.subscribe).toHaveBeenCalledTimes(2);
     expect(fake.raw.watch).toHaveBeenCalledTimes(2);
+    expect(fake.raw.watch.mock.calls[1]?.[0]).toEqual({ scope: "analytics" });
     expect(fake.activeWatches[1]?.scope).toBe("analytics");
     expect(client.connection()).toBe("live");
     expect(refetch).toHaveBeenCalledOnce();
@@ -395,75 +415,60 @@ describe("native dashboard RPC client", () => {
     client.dispose();
   });
 
-  it("reopens health, events and watch after a live timeout and notifies once per recovery", async () => {
+  it("renews repeated Desktop watch timeouts without reconnecting or replacing events", async () => {
     const fake = createFakeCaller();
-    const constructorReconnect = vi.fn();
-    const firstReconnectListener = vi.fn();
-    const secondReconnectListener = vi.fn();
-    const notifiedWhileReconnecting: string[] = [];
-    const client = createNativeDashboardClient({
-      rpc: fake.caller,
-      onReconnect: constructorReconnect,
-    });
-    client.onReconnect(() => {
-      notifiedWhileReconnecting.push(client.connection());
-      firstReconnectListener();
-    });
-    client.onReconnect(secondReconnectListener);
-    const unsubscribeFirst = client.subscribe(() => {});
-    const unsubscribeSecond = client.subscribe(() => {});
+    const reconnect = vi.fn();
+    const seen: DashboardEvent[] = [];
+    const client = createNativeDashboardClient({ rpc: fake.caller, onReconnect: reconnect });
+    client.onReconnect(reconnect);
+    const unsubscribe = client.subscribe((event) => seen.push(event));
     await waitFor(() => client.connection() === "live", "live connection");
 
     const firstWatch = fake.activeWatches[0];
+    const attemptSignal = firstWatch?.signal;
+    await client.home({ range: "7d" });
+    await client.project({ projectId: "p1", range: "7d" });
     firstWatch?.reject(hostWatchTimeout());
-    await waitFor(() => fake.raw.watch.mock.calls.length === 2, "first recovery watch");
-    await waitFor(
-      () => firstReconnectListener.mock.calls.length === 1,
-      "first reconnect notification",
-    );
+    await waitFor(() => fake.raw.watch.mock.calls.length === 2, "first renewed watch");
 
-    expect(fake.raw.health.mock.calls[0]?.[1]?.signal).toBe(fake.streams[0]?.signal);
-    expect(fake.raw.health.mock.calls[0]?.[1]?.signal).toBe(firstWatch?.signal);
+    const firstInput = fake.raw.watch.mock.calls[0]?.[0];
+    expect(firstInput).toEqual({ scope: "analytics" });
+    expect(fake.raw.watch.mock.calls[1]?.[0]).toEqual({ scope: "analytics" });
+    expect(fake.raw.home).toHaveBeenCalledOnce();
+    expect(fake.raw.project).toHaveBeenCalledOnce();
     expect(fake.raw.health).toHaveBeenCalledTimes(2);
-    expect(fake.raw.health.mock.calls[1]?.[1]?.signal).toBeInstanceOf(AbortSignal);
-    expect(fake.raw.health.mock.calls[1]?.[1]?.signal).toBe(fake.activeWatches[1]?.signal);
-    expect(fake.raw.health.mock.calls[1]?.[1]?.signal?.aborted).toBe(false);
-    expect(fake.raw.events.subscribe).toHaveBeenCalledTimes(2);
-    expect(fake.streams[0]?.signal.aborted).toBe(true);
-    expect(fake.streams[1]?.signal).toBe(fake.activeWatches[1]?.signal);
-    expect(firstWatch?.signal.aborted).toBe(true);
-    expect(fake.activeWatches.filter((watch) => !watch.signal.aborted)).toHaveLength(1);
+    expect(fake.raw.health.mock.calls[1]?.[1]?.signal).toBe(attemptSignal);
+    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+    expect(fake.streams[0]?.signal.aborted).toBe(false);
+    expect(fake.activeWatches[1]?.signal).toBe(attemptSignal);
+    expect(attemptSignal?.aborted).toBe(false);
+    expect(fake.watchActivity()).toEqual({ active: 1, max: 1 });
     expect(client.connection()).toBe("live");
-    expect(constructorReconnect).toHaveBeenCalledOnce();
-    expect(firstReconnectListener).toHaveBeenCalledOnce();
-    expect(secondReconnectListener).toHaveBeenCalledOnce();
-    expect(notifiedWhileReconnecting).toEqual(["reconnecting"]);
+    expect(reconnect).not.toHaveBeenCalled();
+    fake.streams[0]?.pushEvent({ topic: "quota.changed", at: 1 });
+    await waitFor(() => seen.length === 1, "event delivery after first timeout");
 
-    const secondWatch = fake.activeWatches[1];
-    secondWatch?.reject(hostWatchTimeout());
-    await waitFor(() => fake.raw.watch.mock.calls.length === 3, "second recovery watch");
-    await waitFor(
-      () => firstReconnectListener.mock.calls.length === 2,
-      "second reconnect notification",
-    );
-
+    fake.activeWatches[1]?.reject(hostWatchTimeout());
+    await waitFor(() => fake.raw.watch.mock.calls.length === 3, "second renewed watch");
+    expect(fake.raw.watch.mock.calls[2]?.[0]).toEqual(fake.raw.watch.mock.calls[1]?.[0]);
+    expect(fake.raw.home).toHaveBeenCalledOnce();
+    expect(fake.raw.project).toHaveBeenCalledOnce();
     expect(fake.raw.health).toHaveBeenCalledTimes(3);
-    expect(fake.raw.events.subscribe).toHaveBeenCalledTimes(3);
-    expect(fake.streams[1]?.signal.aborted).toBe(true);
-    expect(fake.activeWatches.filter((watch) => !watch.signal.aborted)).toHaveLength(1);
-    expect(constructorReconnect).toHaveBeenCalledTimes(2);
-    expect(firstReconnectListener).toHaveBeenCalledTimes(2);
-    expect(secondReconnectListener).toHaveBeenCalledTimes(2);
-    expect(notifiedWhileReconnecting).toEqual(["reconnecting", "reconnecting"]);
+    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+    expect(fake.streams[0]?.signal.aborted).toBe(false);
+    expect(fake.activeWatches[2]?.signal).toBe(attemptSignal);
+    expect(fake.watchActivity()).toEqual({ active: 1, max: 1 });
+    expect(client.connection()).toBe("live");
+    expect(reconnect).not.toHaveBeenCalled();
+    fake.streams[0]?.pushEvent({ topic: "settings.changed", at: 2 });
+    await waitFor(() => seen.length === 2, "event delivery after repeated timeout");
 
-    unsubscribeFirst();
-    expect(fake.activeWatches[2]?.signal.aborted).toBe(false);
-    unsubscribeSecond();
-    await waitFor(
-      () => fake.activeWatches.every((watch) => watch.signal.aborted),
-      "all renewed watches released",
-    );
-    expect(fake.activeWatches.filter((watch) => !watch.signal.aborted)).toHaveLength(0);
+    fake.streams[0]?.fail(new Error("event stream closed"));
+    await waitFor(() => client.connection() === "reconnecting", "event failure reconnect state");
+    expect(attemptSignal?.aborted).toBe(true);
+    expect(reconnect).not.toHaveBeenCalled();
+
+    unsubscribe();
     client.dispose();
   });
 

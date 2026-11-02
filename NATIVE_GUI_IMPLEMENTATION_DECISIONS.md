@@ -10,22 +10,38 @@ Stage: Native stabilization
 Status: implemented; real Desktop soak pending
 Problem: OpenCode Desktop 2.2.5 aborts an ordinary RPC request if response
 headers do not arrive within 60 seconds. Dashboard `watch` intentionally holds
-its response while it owns a viewer, so the host aborts it and the Native client
-previously stayed reconnecting until visibility or host state changed.
+its response while it owns a viewer, so the host aborts it. Reconnecting the
+whole Native client also drops its event stream, refetches data, and can make
+quota Slots disappear during an otherwise healthy session.
 Evidence: Desktop request-queue source and an isolated SDK/server reproduction;
 the observed backend logs contain repeated watch cancellations near one minute.
-Decision: Recognize the host's transport timeout, retire the connection and
-perform one health-checked recovery through the normal connection lifecycle.
-Keep the Slot fail-closed until fresh settings and quota reads complete. Stop
-ownership on host loss or last unsubscribe. No plugin timer, lease, heartbeat,
-or independent poller is added; ordinary failures remain failures.
-Trade-offs: The host deadline causes a fresh connection and reads on renewal.
-The RPC API does not acknowledge held-viewer acquisition separately. The
-observed disappearance of other plugins' Slots has not been attributed to this
-plugin, and a real Desktop soak is still required.
-Test evidence: Native client, Panel, Slot-source and RPC lifecycle regressions
-cover timeout recovery, host loss, scope changes, stale reads and restored poll
-interest; Desktop timing remains unverified.
+Decision: Treat the recognized Desktop watch deadline as expiration of that
+held watch only. After a successful host health check, reacquire the same scoped
+watch in the existing attempt; do not replace its event subscription, mark the
+connection reconnecting, notify reconnect listeners, or refetch snapshots. The
+shared runtime registers exactly one host-scoped quota viewer for its lifetime
+and primes its quota interest once. Because that viewer counts toward `viewers`,
+an ordinary window watch abort or silent renewal never takes the original
+`viewers === 0` teardown path, so global bounded analytics computes, tracked
+pages and cache entries remain untouched until normal LRU eviction or runtime
+shutdown. No cache dirtying, poller stop, compute clearing or session reset
+occurs on a 2→1→2 window transition. On the quota scope no analytics refresh
+runs; on the analytics scope the existing globally tracked pages are polled
+normally. Genuine host, event-stream and non-timeout watch failures retain the
+normal reconnect/failure path. Release the monitor when the last runtime lease
+closes.
+Trade-offs: Analytics pages loaded by a closed window can stay warm until normal
+eviction; exact page/window ownership is intentionally not tracked. The watch
+contract is unchanged (`{ scope }`); no renewal marker, viewer identity, manifest
+or timers are added. One extra host viewer keeps the shared pollers alive between
+windows and maintains a single quota poller. The RPC API still does not
+acknowledge held-viewer acquisition separately; real Desktop timing remains to
+be verified by soak.
+Test evidence: Focused Native client, Slot-source, RPC lifecycle, snapshot and
+host lifecycle regressions cover the quota monitor alone, repeated quota and
+analytics deadline renewals without dirtying or refetching, retained analytics
+cache across 2→1→2 transitions, concurrent analytics/quota windows, disposal,
+and genuine failures; Desktop timing remains unverified.
 Reversible: Yes.
 Owner review: routine defect correction
 
