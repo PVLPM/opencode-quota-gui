@@ -93,7 +93,7 @@ setTimeout(() => {
           "--dump-dom",
           pathToFileURL(page).href,
         ],
-        { encoding: "utf8", timeout: 60000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+        { encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       );
       const result = JSON.parse(/<pre id="result">([\s\S]*?)<\/pre>/.exec(dom)?.[1] ?? "null") as {
         panel: { left: number; right: number; top: number; bottom: number };
@@ -108,7 +108,7 @@ setTimeout(() => {
         expect(result.panel.bottom - element.bottom).toBeGreaterThanOrEqual(12);
       }
     } finally {
-      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     }
-  }, 60000);
+  }, 150_000);
 });

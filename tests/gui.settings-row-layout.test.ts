@@ -445,7 +445,7 @@ function runLayoutProbe(html: string): LayoutProbe {
     }
     return JSON.parse(captured[1]) as LayoutProbe;
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 }
 

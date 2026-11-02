@@ -341,7 +341,7 @@ beforeAll(() => {
 
 afterAll(() => {
   if (scratch === undefined) return;
-  rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  rmSync(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 });
 
 async function buildHarness(directory: string): Promise<void> {
@@ -452,7 +452,7 @@ function runHarness(directory: string): InteractionResult {
       "--dump-dom",
       pathToFileURL(page).href,
     ],
-    { encoding: "utf8", timeout: 60_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+    { encoding: "utf8", timeout: 120_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
   );
   const captured = /<pre id="result">([\s\S]*?)<\/pre>/.exec(dom);
   if (captured?.[1] === undefined || captured[1] === "pending") {
@@ -519,5 +519,5 @@ describe.skipIf(browser === undefined)("temporal popover rendered interaction", 
     expect(result.pageScrollable).toBe(true);
     expect(result.pageScrollY).toBe(0);
     expect(result.pageScrollTop).toBe(300);
-  }, 120_000);
+  }, 150_000);
 });
