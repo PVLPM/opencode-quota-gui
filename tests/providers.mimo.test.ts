@@ -247,10 +247,12 @@ describe("Xiaomi MiMo provider", () => {
       detail: {
         state: "error",
         error: "Xiaomi MiMo detail response did not match the expected schema",
+        failureCategory: "provider_api",
       },
       balance: {
         state: "error",
         error: "Xiaomi MiMo balance request failed (HTTP 503)",
+        failureCategory: "provider_api",
       },
     });
 
@@ -283,10 +285,12 @@ describe("Xiaomi MiMo provider", () => {
       {
         label: "Xiaomi MiMo",
         message: "Xiaomi MiMo detail response did not match the expected schema",
+        failureCategory: "provider_api",
       },
       {
         label: "Xiaomi MiMo",
         message: "Xiaomi MiMo balance request failed (HTTP 503)",
+        failureCategory: "provider_api",
       },
     ]);
   });
@@ -294,7 +298,11 @@ describe("Xiaomi MiMo provider", () => {
   it("preserves zero optional balances and their deterministic order", async () => {
     configured();
     dashboard({
-      usage: { state: "error", error: "usage unavailable" },
+      usage: {
+        state: "error",
+        error: "usage unavailable",
+        failureCategory: "provider_api",
+      },
       balance: {
         state: "success",
         data: { total: 0, cash: null, gift: 0, currency: null },
@@ -325,15 +333,17 @@ describe("Xiaomi MiMo provider", () => {
         quantity: { decimal: "0", unit: { kind: "count", unit: "credit" } },
       },
     ]);
-    expect(result.errors).toEqual([{ label: "Xiaomi MiMo", message: "usage unavailable" }]);
+    expect(result.errors).toEqual([
+      { label: "Xiaomi MiMo", message: "usage unavailable", failureCategory: "provider_api" },
+    ]);
   });
 
   it("returns all endpoint errors in fixed order when no data is available", async () => {
     configured();
     mocks.queryMimoDashboard.mockResolvedValueOnce({
-      usage: { state: "error", error: "usage failed" },
-      detail: { state: "error", error: "detail failed" },
-      balance: { state: "error", error: "balance failed" },
+      usage: { state: "error", error: "usage failed", failureCategory: "provider_api" },
+      detail: { state: "error", error: "detail failed", failureCategory: "provider_api" },
+      balance: { state: "error", error: "balance failed", failureCategory: "provider_api" },
     });
 
     const result = await xiaomiProvider.fetch(context());
@@ -342,9 +352,9 @@ describe("Xiaomi MiMo provider", () => {
       attempted: true,
       entries: [],
       errors: [
-        { label: "Xiaomi MiMo", message: "usage failed" },
-        { label: "Xiaomi MiMo", message: "detail failed" },
-        { label: "Xiaomi MiMo", message: "balance failed" },
+        { label: "Xiaomi MiMo", message: "usage failed", failureCategory: "provider_api" },
+        { label: "Xiaomi MiMo", message: "detail failed", failureCategory: "provider_api" },
+        { label: "Xiaomi MiMo", message: "balance failed", failureCategory: "provider_api" },
       ],
       statusDetails: [
         { key: "config_state", value: "none" },

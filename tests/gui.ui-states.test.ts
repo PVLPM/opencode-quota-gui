@@ -155,6 +155,7 @@ interface RenderGraph {
     catalog: () => VisibilityCatalog;
     toaster: Toaster;
     stale: () => boolean;
+    nativeQuotaAlerts?: boolean;
   }) => TestNode;
   /** A `config-changed` failure from the same module graph as the mounted route. */
   configChangedError: () => unknown;
@@ -2183,8 +2184,10 @@ describe("settings page", () => {
         "dashboard.port",
         "dashboard.providerOrder",
         "dashboard.temporalProviderOverrides",
+        "duplicateCooldownMinutes",
         "enabledProviders",
         "formatStyle",
+        "lowQuotaThresholdRemainingPercent",
         "minIntervalMs",
         "opencodeGoWindows",
         "opencodeMonthlyLimit",
@@ -2236,6 +2239,49 @@ describe("settings page", () => {
     expect(text(nativeHtml)).toContain("Web dashboard");
     expect(text(nativeHtml)).toContain("requires an OpenCode restart");
     expect(nativeHtml).toContain('role="switch"');
+  });
+
+  it("shows quota alert controls only on the native surface and follows the percent display", async () => {
+    const snapshot = settingsSnapshot();
+    const props = {
+      snapshot,
+      client: {},
+      toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
+      catalog: { cards: [] },
+      onReload: noop,
+    };
+
+    const webHtml = await renderView("/views/settings.tsx", "SettingsView", props);
+    expect(text(webHtml)).not.toContain("Quota alerts");
+    expect(webHtml).not.toContain('aria-label="Low quota threshold"');
+    expect(webHtml).not.toContain('aria-label="Duplicate alert cooldown"');
+
+    const nativeHtml = await renderView("/views/settings.tsx", "SettingsView", {
+      ...props,
+      nativeQuotaAlerts: true,
+    });
+    expect(text(nativeHtml)).toContain("Quota alerts");
+    expect(nativeHtml).toContain('aria-label="Low quota threshold"');
+    expect(nativeHtml).toContain('aria-label="Duplicate alert cooldown"');
+    expect(nativeHtml).toContain('value="10"');
+    expect(text(nativeHtml)).toContain("% remaining");
+    expect(nativeHtml).toContain('value="30"');
+    expect(text(nativeHtml)).toContain("Minutes before the same quota alert can repeat.");
+
+    // The display preference only changes the control; the stored value remains
+    // the remaining percentage.
+    const usedHtml = await renderView("/views/settings.tsx", "SettingsView", {
+      ...props,
+      nativeQuotaAlerts: true,
+      snapshot: {
+        ...snapshot,
+        values: { ...snapshot.values, percentDisplayMode: "used" },
+      },
+    });
+    expect(usedHtml).toContain('value="90"');
+    expect(text(usedHtml)).toContain("% used");
+    expect(usedHtml).not.toContain("% remaining</span>");
+    expect(text(usedHtml)).toContain("Saved as 10% remaining.");
   });
 
   it("drafts the host-opted Web switch through the revision-checked patch", () => {
@@ -4344,6 +4390,7 @@ describe("the settings editor keeps its draft across refetches", () => {
     importPreview?: () => Promise<ImportPreview>;
     importApply?: (input: { expectedRevision: string }) => Promise<SettingsWriteResult>;
     catalog?: VisibilityCatalog;
+    nativeQuotaAlerts?: boolean;
   }) {
     const server = settingsQuery(options.initial);
     const saves: SaveInput[] = [];
@@ -4381,6 +4428,7 @@ describe("the settings editor keeps its draft across refetches", () => {
             dismiss: () => {},
           },
           stale: () => false,
+          nativeQuotaAlerts: options.nativeQuotaAlerts,
         }),
       root,
     );
@@ -4482,6 +4530,40 @@ describe("the settings editor keeps its draft across refetches", () => {
     }
     throw new Error(`probe: ${what} never happened`);
   }
+
+  it("saves the low-quota threshold as remaining when the control shows used percentages", async () => {
+    const base = settingsSnapshot();
+    const mounted = mountSettings({
+      initial: settingsSnapshot({
+        values: { ...base.values, percentDisplayMode: "used" },
+      }),
+      nativeQuotaAlerts: true,
+    });
+
+    const threshold = inputByLabel(mounted.root, "Low quota threshold");
+    expect(threshold.props.value).toBe("90");
+    typeInto(threshold, "100");
+    await settle();
+    expect(renderGraph.textOf(mounted.root)).toContain("must be below 100% used.");
+    expect(buttonByText(mounted.root, "Save").props.disabled).toBe(true);
+    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "95");
+    await settle();
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.value).toBe("95");
+
+    typeInto(inputByLabel(mounted.root, "Duplicate alert cooldown"), "45");
+    await settle();
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the alert settings save");
+
+    expect(mounted.saves[0]).toEqual({
+      patch: {
+        lowQuotaThresholdRemainingPercent: 5,
+        duplicateCooldownMinutes: 45,
+      },
+      expectedRevision: "revision-1",
+    });
+    mounted.dispose();
+  });
 
   it("shows one Address, a complete native settings path, and opens only on explicit activation", async () => {
     const nativePath = path.join(

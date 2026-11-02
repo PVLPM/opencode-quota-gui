@@ -6,6 +6,8 @@
  * authority), `semantic` (metric + prominence), and `accounting` metadata.
  */
 
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import { sanitizeDisplayText } from "../lib/display-sanitize.js";
 import type {
   AccountingMetadata,
@@ -300,6 +302,17 @@ function selectCanonicalMiniMaxModel(
 }
 
 /**
+ * MiniMax `base_resp.status_code` is an application code, not an HTTP status.
+ * Only the documented authentication code maps to credentials; every other
+ * application code stays unclassified, and the message text never classifies.
+ */
+function minimaxApplicationFailureCategory(
+  statusCode: number | undefined,
+): ProviderFailureCategory | undefined {
+  return statusCode === 1004 ? "credentials" : undefined;
+}
+
+/**
  * Fetch MiniMax Token Plan quota from the API.
  *
  * Parses usage for MiniMax Token Plan models returned by the selected endpoint.
@@ -314,6 +327,7 @@ export async function queryMiniMaxQuota(
 ): Promise<QuotaProviderResult> {
   const endpointId = options.endpoint ?? "international";
   const endpoint = getMiniMaxQuotaEndpoint(endpointId);
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(endpoint.quotaUrl, {
       request: {
@@ -325,20 +339,28 @@ export async function queryMiniMaxQuota(
       },
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
+        responseStatus = response.status;
         if (!response.ok) {
           const text = await response.text();
           return attemptedErrorResult(
             options.label ?? MINIMAX_PROVIDER_LABEL,
             `MiniMax API error ${response.status}: ${sanitizeMiniMaxMessage(text, 120)}`,
+            { failureCategory: providerFailureCategoryForHttpStatus(response.status) },
           );
         }
 
         const payload = (await response.json()) as MiniMaxApiResponse;
 
         if (payload.base_resp?.status_code !== 0) {
+          const applicationFailureCategory = minimaxApplicationFailureCategory(
+            payload.base_resp?.status_code,
+          );
           return attemptedErrorResult(
             options.label ?? MINIMAX_PROVIDER_LABEL,
             `MiniMax API error: ${sanitizeMiniMaxMessage(payload.base_resp?.status_msg ?? "unknown")}`,
+            applicationFailureCategory !== undefined
+              ? { failureCategory: applicationFailureCategory }
+              : {},
           );
         }
 
@@ -358,6 +380,12 @@ export async function queryMiniMaxQuota(
     return attemptedErrorResult(
       options.label ?? MINIMAX_PROVIDER_LABEL,
       sanitizeMiniMaxMessage(err instanceof Error ? err.message : String(err)),
+      {
+        failureCategory:
+          responseStatus === undefined
+            ? "provider_api"
+            : providerFailureCategoryForHttpStatus(responseStatus),
+      },
     );
   }
 }
@@ -484,6 +512,7 @@ function createMiniMaxProvider(spec: MiniMaxProviderSpec): QuotaProvider {
               label: displayNamesByRowId.get(row.id) ?? spec.label,
               message: rowAuth.error,
               sourceId: row.id,
+              failureCategory: "credentials",
             });
           }
           return rowAuth.state === "configured" ? [{ row, auth: rowAuth }] : [];
@@ -533,7 +562,10 @@ function createMiniMaxProvider(spec: MiniMaxProviderSpec): QuotaProvider {
       }
 
       if (auth.state === "invalid") {
-        return withStatusDetails(attemptedErrorResult(spec.label, auth.error), statusDetails);
+        return withStatusDetails(
+          attemptedErrorResult(spec.label, auth.error, { failureCategory: "credentials" }),
+          statusDetails,
+        );
       }
 
       const result = await queryMiniMaxQuota(auth.apiKey, {
@@ -545,7 +577,11 @@ function createMiniMaxProvider(spec: MiniMaxProviderSpec): QuotaProvider {
       if (result.errors.length > 0) {
         const firstError = result.errors[0];
         return withStatusDetails(
-          attemptedErrorResult(spec.label, firstError?.message ?? "MiniMax API error"),
+          attemptedErrorResult(spec.label, firstError?.message ?? "MiniMax API error", {
+            ...(firstError?.failureCategory !== undefined
+              ? { failureCategory: firstError.failureCategory }
+              : {}),
+          }),
           [
             ...statusDetails,
             { key: "live_fetch_error", value: firstError?.message ?? "MiniMax API error" },

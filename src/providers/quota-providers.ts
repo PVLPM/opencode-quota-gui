@@ -115,7 +115,13 @@ async function executeRemote(
   if (!auth.key) {
     return {
       entries: [],
-      errors: [{ label: definition.label, message: "API key not configured" }],
+      errors: [
+        {
+          label: definition.label,
+          message: "API key not configured",
+          failureCategory: "credentials",
+        },
+      ],
       diagnostic: {
         ...buildDiagnosticIdentity(definition),
         attempted: false,
@@ -132,7 +138,15 @@ async function executeRemote(
   if (!result.success) {
     return {
       entries: [],
-      errors: [{ label: definition.label, message: result.error }],
+      errors: [
+        {
+          label: definition.label,
+          message: result.error,
+          ...(result.failureCategory !== undefined
+            ? { failureCategory: result.failureCategory }
+            : {}),
+        },
+      ],
       diagnostic: {
         ...buildDiagnosticIdentity(definition),
         attempted: true,
@@ -245,7 +259,13 @@ async function executeDefinition(
     const state = await inspectLocalQuotaProviderState(definition);
     return {
       entries: [],
-      errors: [{ label: definition.label, message: "Failed to update local accounting state" }],
+      errors: [
+        {
+          label: definition.label,
+          message: "Failed to update local accounting state",
+          failureCategory: "local",
+        },
+      ],
       diagnostic: {
         ...buildDiagnosticIdentity(definition),
         attempted: true,
@@ -304,6 +324,7 @@ export const quotaProvidersProvider: QuotaProvider = {
             {
               label: "Quota providers",
               message: "Failed to read exact runtime provider identities",
+              failureCategory: "local",
             },
           ],
         };
@@ -330,7 +351,12 @@ export const quotaProvidersProvider: QuotaProvider = {
         } catch {
           return {
             entries: [],
-            errors: [{ label: definition.label, message: "Provider execution failed" }],
+            errors: [
+              {
+                label: definition.label,
+                message: "Provider execution failed",
+              },
+            ],
             diagnostic: {
               ...buildDiagnosticIdentity(definition),
               attempted: true,

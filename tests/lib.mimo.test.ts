@@ -297,10 +297,29 @@ describe("queryMimoDashboard", () => {
     expect(result.usage).toEqual({
       state: "error",
       error: "Xiaomi MiMo usage request failed (HTTP 503)",
+      failureCategory: "provider_api",
     });
     expect(result.detail.state).toBe("success");
     expect(result.balance.state).toBe("success");
     expect(JSON.stringify(result)).not.toContain("private response body");
+  });
+
+  it("labels an unauthorized endpoint as a credential failure", async () => {
+    mocks.fetchWithTimeout.mockImplementation((url: string, options: MockTimeoutOptions) =>
+      consumeResponse(
+        options,
+        url.endsWith("/tokenPlan/usage")
+          ? new Response("unauthorized", { status: 401 })
+          : responseForUrl(url),
+      ),
+    );
+
+    const result = await queryMimoDashboard(cookie);
+    expect(result.usage).toEqual({
+      state: "error",
+      error: "Xiaomi MiMo usage request failed (HTTP 401)",
+      failureCategory: "credentials",
+    });
   });
 
   it("keeps successful endpoint data when another endpoint times out", async () => {
@@ -316,6 +335,7 @@ describe("queryMimoDashboard", () => {
     expect(result.usage).toEqual({
       state: "error",
       error: "Xiaomi MiMo usage request failed: Request timeout after 2s",
+      failureCategory: "provider_api",
     });
     expect(result.detail.state).toBe("success");
     expect(result.balance.state).toBe("success");
@@ -339,6 +359,7 @@ describe("queryMimoDashboard", () => {
     expect(result.usage).toEqual({
       state: "error",
       error: "Xiaomi MiMo usage request requires login",
+      failureCategory: "credentials",
     });
     expect(JSON.stringify(result)).not.toContain("example.test");
   });
@@ -357,14 +378,17 @@ describe("queryMimoDashboard", () => {
       usage: {
         state: "error",
         error: "Xiaomi MiMo usage response could not be parsed",
+        failureCategory: "provider_api",
       },
       detail: {
         state: "error",
         error: "Xiaomi MiMo detail response did not match the expected schema",
+        failureCategory: "provider_api",
       },
       balance: {
         state: "error",
         error: "Xiaomi MiMo balance response could not be parsed",
+        failureCategory: "provider_api",
       },
     });
   });
@@ -390,6 +414,7 @@ describe("queryMimoDashboard", () => {
     expect(result.usage).toEqual({
       state: "error",
       error: "Xiaomi MiMo usage response could not be parsed",
+      failureCategory: "provider_api",
     });
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(releaseLock).toHaveBeenCalledTimes(3);
@@ -415,6 +440,7 @@ describe("queryMimoDashboard", () => {
     expect(result.usage).toEqual({
       state: "error",
       error: "Xiaomi MiMo usage response could not be parsed",
+      failureCategory: "provider_api",
     });
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(releaseLock).toHaveBeenCalledTimes(3);
@@ -467,6 +493,7 @@ describe("queryMimoDashboard", () => {
     expect(result.usage).toEqual({
       state: "error",
       error: "Xiaomi MiMo usage response could not be parsed",
+      failureCategory: "provider_api",
     });
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(releaseLock).toHaveBeenCalledTimes(3);
@@ -489,6 +516,7 @@ describe("queryMimoDashboard", () => {
     expect(result.usage).toEqual({
       state: "error",
       error: "Xiaomi MiMo usage request failed: timeout for [redacted] [redacted] [redacted] retry",
+      failureCategory: "provider_api",
     });
     expect(serialized).not.toContain("service-secret");
     expect(serialized).not.toContain("user-secret");

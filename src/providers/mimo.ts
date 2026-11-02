@@ -102,7 +102,11 @@ function endpointErrors(result: MimoDashboardResult): QuotaToastError[] {
   const errors: QuotaToastError[] = [];
   for (const endpoint of [result.usage, result.detail, result.balance]) {
     if (endpoint.state === "error") {
-      errors.push({ label: MIMO_LABEL, message: endpoint.error });
+      errors.push({
+        label: MIMO_LABEL,
+        message: endpoint.error,
+        failureCategory: endpoint.failureCategory,
+      });
     }
   }
   return errors;
@@ -138,7 +142,9 @@ export const xiaomiProvider: QuotaProvider = {
     if (config.state === "none") return withStatusDetails(notAttemptedResult(), statusDetails);
     if (config.state === "invalid") {
       return withStatusDetails(
-        attemptedErrorResult(MIMO_LABEL, `Invalid config (${config.source}): ${config.error}`),
+        attemptedErrorResult(MIMO_LABEL, `Invalid config (${config.source}): ${config.error}`, {
+          failureCategory: "local",
+        }),
         statusDetails,
       );
     }

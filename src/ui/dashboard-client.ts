@@ -37,6 +37,7 @@ import { PRIMARY_QUOTA_WINDOW_LIMIT } from "../contracts/dashboard";
 import { isCostedTokens, isDashboardEvent, isTokenStack } from "../contracts/guards";
 import type { CardId, RowId } from "../contracts/identity";
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota";
+import { PROVIDER_FAILURE_CATEGORIES } from "../contracts/provider-failure";
 import { type BucketUnit, isRangeKey, type RangeKey, type RangeWindow } from "../contracts/ranges";
 import type {
   TemporalEffect,
@@ -283,6 +284,15 @@ function readEnum<T extends string>(
   throw faulty(endpoint, detail);
 }
 
+function readOptionalEnum<T extends string>(
+  value: JsonValue | undefined,
+  allowed: readonly T[],
+  endpoint: string,
+  detail: string,
+): T | undefined {
+  return value === undefined ? undefined : readEnum(value, allowed, endpoint, detail);
+}
+
 function readRangeKey(value: JsonValue | undefined, endpoint: string, detail: string): RangeKey {
   if (isRangeKey(value)) return value;
   throw faulty(endpoint, detail);
@@ -466,6 +476,13 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
         `${detail}.errors[].retryable`,
       );
       if (retryable !== undefined) parsedError.retryable = retryable;
+      const failureCategory = readOptionalEnum(
+        error.failureCategory,
+        PROVIDER_FAILURE_CATEGORIES,
+        endpoint,
+        `${detail}.errors[].failureCategory`,
+      );
+      if (failureCategory !== undefined) parsedError.failureCategory = failureCategory;
       return parsedError;
     }),
   };

@@ -4,6 +4,27 @@ This log records material implementation decisions against the owner-approved
 `docs/research/native-gui-migration-architecture.md` baseline. The research
 report is intentionally ignored and remains unchanged.
 
+## D12 — Native quota notifications
+
+The shared dashboard runtime observes fresh quota snapshots once, independently
+of Panel and Slot visibility. Its existing host-scoped quota viewer keeps the
+single quota poller active while the plugin runs, including with all dashboard
+windows closed; it does not activate analytics. Initial observations and
+observations after source handoff establish a silent baseline. Existing card and
+row Visibility settings govern eligibility.
+
+The low-quota threshold defaults to 10% remaining and the duplicate cooldown to
+30 minutes; both are configurable in Native Settings. Transition detection uses
+percent remaining regardless of the display preference. Cooldown fingerprints
+are stored in private state, while transition baselines are memory-only.
+
+Delivery is best effort: live semantic events reach window presenters without a
+held notification RPC, acknowledgment, outbox, or second poller. A focused
+window uses the host toast API; a background window uses the host attention API
+with a stable event ID, leaving system notification preferences and
+cross-window deduplication to OpenCode. An event can be missed if no window is
+listening, and separate server processes can race when updating cooldown state.
+
 ## D11 — Recover from the Desktop RPC response deadline
 
 Stage: Native stabilization

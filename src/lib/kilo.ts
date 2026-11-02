@@ -6,6 +6,7 @@
  * without an active Kilo Pass.
  */
 
+import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import { resolveKiloApiKey } from "./kilo-config.js";
@@ -38,6 +39,10 @@ type NoActiveKiloPassResult = QuotaError & { reason: "no_active_subscription" };
 type ParsedKiloPassState = KiloPassStateSuccess | QuotaError | NoActiveKiloPassResult;
 type KiloBalanceResult = { success: true; balanceUsd: number } | QuotaError;
 type KiloRequestOptions = { requestTimeoutMs?: number };
+
+function invalidKiloResponse(error: string): QuotaError {
+  return { success: false, error, failureCategory: "provider_api" };
+}
 
 function isRecord(value: unknown): value is JsonRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -113,34 +118,22 @@ function isNoActiveKiloPassResult(result: ParsedKiloPassState): result is NoActi
 function parseKiloPassState(payload: unknown): ParsedKiloPassState {
   const item = Array.isArray(payload) ? payload[0] : payload;
   if (!isRecord(item)) {
-    return {
-      success: false,
-      error: "Kilo Gateway state API returned an unexpected response shape",
-    };
+    return invalidKiloResponse("Kilo Gateway state API returned an unexpected response shape");
   }
 
   const result = item.result;
   const data = isRecord(result) ? result.data : undefined;
   if (!isRecord(data)) {
-    return {
-      success: false,
-      error: "Kilo Gateway state API returned an unexpected response shape",
-    };
+    return invalidKiloResponse("Kilo Gateway state API returned an unexpected response shape");
   }
 
   if ("json" in data && !isRecord(data.json)) {
-    return {
-      success: false,
-      error: "Kilo Gateway state API returned an unexpected response shape",
-    };
+    return invalidKiloResponse("Kilo Gateway state API returned an unexpected response shape");
   }
 
   const root = isRecord(data.json) ? data.json : data;
   if (!isRecord(root)) {
-    return {
-      success: false,
-      error: "Kilo Gateway state API returned an unexpected response shape",
-    };
+    return invalidKiloResponse("Kilo Gateway state API returned an unexpected response shape");
   }
 
   const subscription = root.subscription;
@@ -148,10 +141,7 @@ function parseKiloPassState(payload: unknown): ParsedKiloPassState {
     return noActiveKiloPass();
   }
   if (!isRecord(subscription)) {
-    return {
-      success: false,
-      error: "Kilo Gateway state API returned an invalid Kilo Pass subscription",
-    };
+    return invalidKiloResponse("Kilo Gateway state API returned an invalid Kilo Pass subscription");
   }
 
   const baseCreditsUsd = nonnegativeNumber(subscription.currentPeriodBaseCreditsUsd);
@@ -163,22 +153,17 @@ function parseKiloPassState(payload: unknown): ParsedKiloPassState {
       : nonnegativeNumber(rawBonusCreditsUsd);
 
   if (baseCreditsUsd === null) {
-    return {
-      success: false,
-      error: "Kilo Gateway state API returned invalid currentPeriodBaseCreditsUsd",
-    };
+    return invalidKiloResponse(
+      "Kilo Gateway state API returned invalid currentPeriodBaseCreditsUsd",
+    );
   }
   if (usageUsd === null) {
-    return {
-      success: false,
-      error: "Kilo Gateway state API returned invalid currentPeriodUsageUsd",
-    };
+    return invalidKiloResponse("Kilo Gateway state API returned invalid currentPeriodUsageUsd");
   }
   if (bonusCreditsUsd === null) {
-    return {
-      success: false,
-      error: "Kilo Gateway state API returned invalid currentPeriodBonusCreditsUsd",
-    };
+    return invalidKiloResponse(
+      "Kilo Gateway state API returned invalid currentPeriodBonusCreditsUsd",
+    );
   }
 
   const resetTimeIso = firstValidResetTimeIso(
@@ -202,18 +187,12 @@ function parseKiloPassState(payload: unknown): ParsedKiloPassState {
 
 function parseKiloBalance(payload: unknown): KiloBalanceResult {
   if (!isRecord(payload)) {
-    return {
-      success: false,
-      error: "Kilo Gateway balance API returned an unexpected response shape",
-    };
+    return invalidKiloResponse("Kilo Gateway balance API returned an unexpected response shape");
   }
 
   const balanceUsd = nonnegativeNumber(payload.balance);
   if (balanceUsd === null) {
-    return {
-      success: false,
-      error: "Kilo Gateway balance API returned an invalid balance",
-    };
+    return invalidKiloResponse("Kilo Gateway balance API returned an invalid balance");
   }
 
   return { success: true, balanceUsd };
@@ -228,6 +207,7 @@ async function requestKiloPassState(
     input: JSON.stringify({ "0": null }),
   });
 
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(`${KILO_PASS_STATE_ENDPOINT}?${query.toString()}`, {
       request: {
@@ -241,11 +221,13 @@ async function requestKiloPassState(
       },
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
+        responseStatus = response.status;
         const text = await readResponseText(response, "state");
         if (!response.ok) {
           return {
             success: false,
             error: `Kilo Gateway state API error ${response.status}: ${sanitizeMessage(text, key)}`,
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
 
@@ -256,6 +238,10 @@ async function requestKiloPassState(
     return {
       success: false,
       error: sanitizeMessage(error instanceof Error ? error.message : String(error), key),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }
@@ -264,6 +250,7 @@ async function requestKiloBalance(
   key: string,
   options: KiloRequestOptions,
 ): Promise<KiloBalanceResult> {
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(KILO_BALANCE_ENDPOINT, {
       request: {
@@ -277,11 +264,13 @@ async function requestKiloBalance(
       },
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
+        responseStatus = response.status;
         const text = await readResponseText(response, "balance");
         if (!response.ok) {
           return {
             success: false,
             error: `Kilo Gateway balance API error ${response.status}: ${sanitizeMessage(text, key)}`,
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
 
@@ -292,6 +281,10 @@ async function requestKiloBalance(
     return {
       success: false,
       error: sanitizeMessage(error instanceof Error ? error.message : String(error), key),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }
@@ -329,5 +322,8 @@ export async function queryKiloQuota(options: KiloRequestOptions = {}): Promise<
   return {
     success: false,
     error: `Kilo Gateway has no active Kilo Pass subscription; balance fallback failed: ${balanceResult.error}`,
+    ...(balanceResult.failureCategory !== undefined
+      ? { failureCategory: balanceResult.failureCategory }
+      : {}),
   };
 }

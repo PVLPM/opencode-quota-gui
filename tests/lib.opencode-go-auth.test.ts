@@ -385,6 +385,7 @@ describe("OpenCode Go auth resolution", () => {
     expect(result.errors).toContainEqual({
       label: "OpenCode Go",
       message: "OpenCode Go auth entry has unsupported type",
+      failureCategory: "credentials",
     });
     expect(JSON.stringify(result)).not.toContain(secret);
     expect(authMocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();

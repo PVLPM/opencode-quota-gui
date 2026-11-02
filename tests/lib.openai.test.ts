@@ -130,6 +130,7 @@ describe("openai auth resolution", () => {
       success: false,
       error:
         "OpenAI sign-in could not be refreshed: refresh_failed: HTTP 400. Run `opencode auth login openai`.",
+      failureCategory: "credentials",
     });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mocks.deriveResolvedAuthIdentity).not.toHaveBeenCalled();
@@ -144,12 +145,14 @@ describe("openai auth resolution", () => {
       success: false,
       error:
         "OpenAI sign-in could not be refreshed: refresh_failed: Request failed: 401. Run `opencode auth logout openai default`, then `opencode auth login openai`.",
+      failureCategory: "credentials",
     });
     for (const loginLabel of ["My work; rm", " Work ", "--help"]) {
       await expect(queryOpenAIQuota({ auth: failed, loginLabel })).resolves.toEqual({
         success: false,
         error:
           "OpenAI sign-in could not be refreshed: refresh_failed: Request failed: 401. Run `opencode auth login openai`.",
+        failureCategory: "credentials",
       });
     }
   });
@@ -200,8 +203,28 @@ describe("openai auth resolution", () => {
     );
 
     const result = await queryOpenAIQuota();
-    expect(result).toEqual({ success: false, error: "OpenAI API error 403" });
+    expect(result).toEqual({
+      success: false,
+      error: "OpenAI API error 403",
+      failureCategory: "credentials",
+    });
     expect(JSON.stringify(result)).not.toMatch(/alice@example\.com|account-id-123|access-secret/u);
+  });
+
+  it("classifies non-auth HTTP failures as provider API", async () => {
+    mocks.readAuthFileCached.mockResolvedValueOnce({
+      openai: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "boom" }), { status: 500 })) as any,
+    );
+
+    await expect(queryOpenAIQuota()).resolves.toEqual({
+      success: false,
+      error: "OpenAI API error 500",
+      failureCategory: "provider_api",
+    });
   });
 
   it("adds only OpenAI's short error code to an HTTP error (#316)", async () => {
@@ -223,12 +246,14 @@ describe("openai auth resolution", () => {
     await expect(queryOpenAIQuota()).resolves.toEqual({
       success: false,
       error: "OpenAI API error 401 (no_matching_rule)",
+      failureCategory: "credentials",
     });
 
     vi.stubGlobal("fetch", vi.fn(async () => respond("alice@example.com is blocked")) as any);
     await expect(queryOpenAIQuota()).resolves.toEqual({
       success: false,
       error: "OpenAI API error 401",
+      failureCategory: "credentials",
     });
   });
 
@@ -1061,6 +1086,7 @@ describe("openai auth resolution", () => {
     await expect(queryOpenAIQuota()).resolves.toEqual({
       success: false,
       error: "No quota data",
+      failureCategory: "provider_api",
     });
   });
 

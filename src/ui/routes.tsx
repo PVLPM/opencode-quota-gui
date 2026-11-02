@@ -590,6 +590,8 @@ export interface SettingsRouteProps {
   onRetry?: () => void;
   /** Native hosts expose the canonical Web dashboard switch; Web keeps it hidden. */
   webDashboardToggle?: boolean;
+  /** Native hosts expose the quota alert threshold and cooldown controls. */
+  nativeQuotaAlerts?: boolean;
 }
 
 export function SettingsRoute(props: SettingsRouteProps): JSX.Element {
@@ -631,6 +633,7 @@ export function SettingsRoute(props: SettingsRouteProps): JSX.Element {
             catalog={props.catalog}
             temporal={props.temporal}
             webDashboardToggle={props.webDashboardToggle}
+            nativeQuotaAlerts={props.nativeQuotaAlerts}
             onReload={async () => {
               await props.query.run();
             }}

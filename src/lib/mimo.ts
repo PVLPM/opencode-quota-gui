@@ -1,3 +1,4 @@
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import { sanitizeSingleLineDisplaySnippet } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 
@@ -29,7 +30,7 @@ export interface MimoBalance {
 
 export type MimoEndpointResult<T> =
   | { state: "success"; data: T }
-  | { state: "error"; error: string };
+  | { state: "error"; error: string; failureCategory: ProviderFailureCategory };
 
 export interface MimoDashboardResult {
   usage: MimoEndpointResult<MimoMonthlyQuota>;
@@ -218,12 +219,18 @@ async function fetchMimoEndpoint<T>(params: {
       timeoutMs: params.requestTimeoutMs,
       consume: async (response, timeoutSignal): Promise<MimoEndpointResult<T>> => {
         if (response.status >= 300 && response.status < 400) {
-          return { state: "error", error: `Xiaomi MiMo ${params.name} request requires login` };
+          return {
+            state: "error",
+            error: `Xiaomi MiMo ${params.name} request requires login`,
+            failureCategory: "credentials",
+          };
         }
         if (!response.ok) {
           return {
             state: "error",
             error: `Xiaomi MiMo ${params.name} request failed (HTTP ${response.status})`,
+            failureCategory:
+              response.status === 401 || response.status === 403 ? "credentials" : "provider_api",
           };
         }
 
@@ -235,6 +242,7 @@ async function fetchMimoEndpoint<T>(params: {
           return {
             state: "error",
             error: `Xiaomi MiMo ${params.name} response could not be parsed`,
+            failureCategory: "provider_api",
           };
         }
 
@@ -244,6 +252,7 @@ async function fetchMimoEndpoint<T>(params: {
           return {
             state: "error",
             error: `Xiaomi MiMo ${params.name} response did not match the expected schema`,
+            failureCategory: "provider_api",
           };
         }
       },
@@ -252,6 +261,7 @@ async function fetchMimoEndpoint<T>(params: {
     return {
       state: "error",
       error: `Xiaomi MiMo ${params.name} request failed: ${sanitizeRequestError(error, params.cookie)}`,
+      failureCategory: "provider_api",
     };
   }
 }

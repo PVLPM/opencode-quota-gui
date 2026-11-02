@@ -270,6 +270,7 @@ async function fetchOpenCodeZenConsoleAccounts(
         label: account.label,
         message: zenSignInFailure(account),
         sourceId: account.sourceId,
+        failureCategory: "credentials",
       });
       accounts.push(zenAccountDescriptor(account));
       continue;
@@ -283,6 +284,9 @@ async function fetchOpenCodeZenConsoleAccounts(
         label: account.label,
         message: result.error,
         sourceId: account.sourceId,
+        ...(result.failureCategory !== undefined
+          ? { failureCategory: result.failureCategory }
+          : {}),
       });
       statusDetails.push({
         key: `live_fetch_error:${account.sourceId}`,
@@ -297,8 +301,28 @@ async function fetchOpenCodeZenConsoleAccounts(
       configuredMonthlyLimit,
     });
     entries.push(...built.entries);
-    for (const message of result.errors) {
-      errors.push({ label: account.label, message, sourceId: account.sourceId });
+    if (result.optionalErrors) {
+      for (const optionalError of result.optionalErrors) {
+        errors.push({
+          label: account.label,
+          message: optionalError.message,
+          sourceId: account.sourceId,
+          ...(optionalError.failureCategory !== undefined
+            ? { failureCategory: optionalError.failureCategory }
+            : {}),
+        });
+      }
+    } else {
+      // Legacy producers only returned display strings. Absence of structured
+      // provenance means unknown: fail closed instead of inferring provider_api
+      // from the message text.
+      for (const message of result.errors) {
+        errors.push({
+          label: account.label,
+          message,
+          sourceId: account.sourceId,
+        });
+      }
     }
     statusDetails.push(
       {
@@ -383,7 +407,9 @@ export const opencodeZenProvider: QuotaProvider = {
       return withStatusDetails(notAttemptedResult(), noneStatusDetails);
     }
     return withStatusDetails(
-      attemptedErrorResult(OPENCODE_ZEN_GROUP, `No OpenCode Console sign-in found. ${LOGIN_HINT}`),
+      attemptedErrorResult(OPENCODE_ZEN_GROUP, `No OpenCode Console sign-in found. ${LOGIN_HINT}`, {
+        failureCategory: "credentials",
+      }),
       noneStatusDetails,
     );
   },

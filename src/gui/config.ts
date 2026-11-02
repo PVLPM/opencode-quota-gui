@@ -32,6 +32,8 @@ import {
   getGuiConfigPath,
   getGuiConfigSiblingJsonPath,
   isPositiveNumber,
+  isValidDuplicateCooldownMinutes,
+  isValidLowQuotaThresholdRemainingPercent,
   isValidOpenCodeGoWindows,
   loadConfig,
   loadConfigLayered,
@@ -78,6 +80,8 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "minIntervalMs",
   "requestTimeoutMs",
   "accountingDetail",
+  "lowQuotaThresholdRemainingPercent",
+  "duplicateCooldownMinutes",
   "opencodeGoWindows",
   "opencodeMonthlyLimit",
   "dashboard.hiddenCards",
@@ -364,6 +368,10 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return config.requestTimeoutMs;
       case "accountingDetail":
         return config.accountingDetail;
+      case "lowQuotaThresholdRemainingPercent":
+        return config.lowQuotaThresholdRemainingPercent;
+      case "duplicateCooldownMinutes":
+        return config.duplicateCooldownMinutes;
       case "opencodeGoWindows":
         return [...config.opencodeGoWindows];
       case "opencodeMonthlyLimit":
@@ -569,6 +577,16 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       case "accountingDetail":
         if (value !== "summary" && value !== "detailed") {
           throw invalidSetting(key, 'expected "summary" or "detailed"');
+        }
+        return value;
+      case "lowQuotaThresholdRemainingPercent":
+        if (!isValidLowQuotaThresholdRemainingPercent(value)) {
+          throw invalidSetting(key, "expected an integer between 1 and 100");
+        }
+        return value;
+      case "duplicateCooldownMinutes":
+        if (!isValidDuplicateCooldownMinutes(value)) {
+          throw invalidSetting(key, "expected an integer of 0 or more");
         }
         return value;
       case "opencodeGoWindows":

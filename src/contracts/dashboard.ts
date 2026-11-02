@@ -1,6 +1,7 @@
 import type { AnalyticsTemporalBreakdown } from "./analytics-temporal.js";
 import type { CardId, RowId } from "./identity.js";
 import type { BankedResetAvailability } from "./openai-quota.js";
+import type { ProviderFailureCategory } from "./provider-failure.js";
 import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
 import type { TemporalStatusSnapshot } from "./temporal.js";
 
@@ -347,7 +348,13 @@ export interface ProviderCard {
    * mapping, not an empty quota.
    */
   primaryQuotaWindows?: PrimaryQuotaWindowRef[];
-  errors: { label: string; message: string; retryable?: boolean }[];
+  errors: {
+    label: string;
+    message: string;
+    retryable?: boolean;
+    /** Source-assigned safe category; absence means unknown and consumers fail closed. */
+    failureCategory?: ProviderFailureCategory;
+  }[];
   /** Explicit safe field list only — never a raw `statusDetails` copy. */
   details?: { label: string; value: string }[];
   observedAtIso?: string;

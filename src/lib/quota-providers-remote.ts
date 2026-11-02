@@ -1,4 +1,8 @@
 import {
+  type ProviderFailureCategory,
+  providerFailureCategoryForHttpStatus,
+} from "../contracts/provider-failure.js";
+import {
   createProviderApiKeyResolver,
   getApiKeyCheckedPaths,
   getGlobalOpencodeConfigCandidatePaths,
@@ -52,7 +56,7 @@ export interface QuotaProviderAuthResolution {
 
 export type RemoteQuotaProviderResult =
   | { success: true; entries: QuotaToastEntry[]; rowErrors?: string[] }
-  | { success: false; error: string };
+  | { success: false; error: string; failureCategory?: ProviderFailureCategory };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -192,10 +196,10 @@ function parseQuotaV1(
     body.version !== "quota-v1" ||
     !Array.isArray(body.entries)
   ) {
-    return { success: false, error: "Invalid quota-v1 response" };
+    return { success: false, error: "Invalid quota-v1 response", failureCategory: "provider_api" };
   }
   if (body.entries.length < 1 || body.entries.length > QUOTA_PROVIDER_MAX_REMOTE_ROWS) {
-    return { success: false, error: "Invalid quota-v1 response" };
+    return { success: false, error: "Invalid quota-v1 response", failureCategory: "provider_api" };
   }
 
   const entries: QuotaToastEntry[] = [];
@@ -214,7 +218,11 @@ function parseQuotaV1(
         "observedAtIso",
       ])
     ) {
-      return { success: false, error: "Invalid quota-v1 response" };
+      return {
+        success: false,
+        error: "Invalid quota-v1 response",
+        failureCategory: "provider_api",
+      };
     }
 
     const name = boundedDisplayText(raw.name, 80);
@@ -245,7 +253,11 @@ function parseQuotaV1(
       resetTimeIso === null ||
       observedAtIso === null
     ) {
-      return { success: false, error: "Invalid quota-v1 response" };
+      return {
+        success: false,
+        error: "Invalid quota-v1 response",
+        failureCategory: "provider_api",
+      };
     }
 
     const common = {
@@ -275,7 +287,7 @@ function parseQuotaV1(
       continue;
     }
 
-    return { success: false, error: "Invalid quota-v1 response" };
+    return { success: false, error: "Invalid quota-v1 response", failureCategory: "provider_api" };
   }
 
   return { success: true, entries };
@@ -587,6 +599,7 @@ function parseJsonV1(
   const invalid = (message: string): RemoteQuotaProviderResult => ({
     success: false,
     error: `Invalid json-v1 response: ${message}`,
+    failureCategory: "provider_api",
   });
 
   if (!isJsonV1ResponseDepthValid(body)) {
@@ -739,13 +752,21 @@ function parseOpenRouterKeyV1(
   body: unknown,
 ): RemoteQuotaProviderResult {
   if (!isRecord(body) || !isRecord(body.data)) {
-    return { success: false, error: "Invalid openrouter-key-v1 response" };
+    return {
+      success: false,
+      error: "Invalid openrouter-key-v1 response",
+      failureCategory: "provider_api",
+    };
   }
 
   const data = body.data;
   const usage = data.usage;
   if (typeof usage !== "number" || !Number.isFinite(usage) || usage < 0) {
-    return { success: false, error: "Invalid openrouter-key-v1 response" };
+    return {
+      success: false,
+      error: "Invalid openrouter-key-v1 response",
+      failureCategory: "provider_api",
+    };
   }
 
   const rawLimit = data.limit;
@@ -754,7 +775,11 @@ function parseOpenRouterKeyV1(
     rawLimit !== undefined &&
     (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit < 0)
   ) {
-    return { success: false, error: "Invalid openrouter-key-v1 response" };
+    return {
+      success: false,
+      error: "Invalid openrouter-key-v1 response",
+      failureCategory: "provider_api",
+    };
   }
   // A key limit is a cap only when it is positive. Zero and null mean unlimited.
   const limit = typeof rawLimit === "number" && rawLimit > 0 ? rawLimit : null;
@@ -765,15 +790,27 @@ function parseOpenRouterKeyV1(
     rawRemaining !== undefined &&
     (typeof rawRemaining !== "number" || !Number.isFinite(rawRemaining))
   ) {
-    return { success: false, error: "Invalid openrouter-key-v1 response" };
+    return {
+      success: false,
+      error: "Invalid openrouter-key-v1 response",
+      failureCategory: "provider_api",
+    };
   }
   // `limit_remaining` is capacity left on the key, never an account balance.
   if (rawRemaining === null && limit !== null) {
-    return { success: false, error: "Invalid openrouter-key-v1 response" };
+    return {
+      success: false,
+      error: "Invalid openrouter-key-v1 response",
+      failureCategory: "provider_api",
+    };
   }
   const remaining = typeof rawRemaining === "number" ? rawRemaining : null;
   if (limit !== null && remaining !== null && remaining > limit) {
-    return { success: false, error: "Invalid openrouter-key-v1 response" };
+    return {
+      success: false,
+      error: "Invalid openrouter-key-v1 response",
+      failureCategory: "provider_api",
+    };
   }
 
   const rawReset = data.limit_reset;
@@ -781,7 +818,11 @@ function parseOpenRouterKeyV1(
   if (rawReset === null || rawReset === undefined) {
     reset = null;
   } else if (typeof rawReset !== "string") {
-    return { success: false, error: "Invalid openrouter-key-v1 response" };
+    return {
+      success: false,
+      error: "Invalid openrouter-key-v1 response",
+      failureCategory: "provider_api",
+    };
   } else {
     reset = OPENROUTER_LIMIT_RESETS.has(rawReset) ? (rawReset as OpenRouterLimitReset) : "unknown";
   }
@@ -790,7 +831,11 @@ function parseOpenRouterKeyV1(
     const value = data[key];
     if (value === null || value === undefined) continue;
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-      return { success: false, error: "Invalid openrouter-key-v1 response" };
+      return {
+        success: false,
+        error: "Invalid openrouter-key-v1 response",
+        failureCategory: "provider_api",
+      };
     }
   }
 
@@ -804,11 +849,19 @@ function parseOpenRouterKeyV1(
 
     if (remainingValue !== null) {
       if (remainingValue > limit) {
-        return { success: false, error: "Invalid openrouter-key-v1 response" };
+        return {
+          success: false,
+          error: "Invalid openrouter-key-v1 response",
+          failureCategory: "provider_api",
+        };
       }
       const percentRemaining = (remainingValue / limit) * 100;
       if (!Number.isFinite(percentRemaining)) {
-        return { success: false, error: "Invalid openrouter-key-v1 response" };
+        return {
+          success: false,
+          error: "Invalid openrouter-key-v1 response",
+          failureCategory: "provider_api",
+        };
       }
       const usedUsd = limit - remainingValue;
       return {
@@ -858,10 +911,14 @@ export async function fetchRemoteQuotaProvider(
     });
 
     if (response.redirected || (response.status >= 300 && response.status < 400)) {
-      return { success: false, error: "Redirect rejected" };
+      return { success: false, error: "Redirect rejected", failureCategory: "provider_api" };
     }
     if (!response.ok) {
-      return { success: false, error: `HTTP ${response.status}` };
+      return {
+        success: false,
+        error: `HTTP ${response.status}`,
+        failureCategory: providerFailureCategoryForHttpStatus(response.status),
+      };
     }
 
     const body = await readBoundedJson(response);
@@ -878,6 +935,7 @@ export async function fetchRemoteQuotaProvider(
       return {
         success: false,
         error: `Request timeout after ${Math.round(timeoutMs / 1000)}s`,
+        failureCategory: "provider_api",
       };
     }
     if (
@@ -888,9 +946,13 @@ export async function fetchRemoteQuotaProvider(
         "Invalid JSON response",
       ].includes(error.message)
     ) {
-      return { success: false, error: error.message };
+      return { success: false, error: error.message, failureCategory: "provider_api" };
     }
-    return { success: false, error: "Failed to read accounting data" };
+    return {
+      success: false,
+      error: "Failed to read accounting data",
+      failureCategory: "provider_api",
+    };
   } finally {
     clearTimeout(timeoutId);
   }

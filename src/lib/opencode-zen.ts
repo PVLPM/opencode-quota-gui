@@ -1,3 +1,5 @@
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import { sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import {
@@ -53,11 +55,22 @@ export interface OpenCodeZenBillingData {
 
 /**
  * billing/status (balance) is required. The other routes are optional: when one fails,
- * its fields are null and its error is listed in `errors`.
+ * its fields are null and its error is listed in `errors`. `optionalErrors`
+ * carries the same messages with their producer-assigned failure category.
  */
+export type OpenCodeZenOptionalError = {
+  message: string;
+  failureCategory?: ProviderFailureCategory;
+};
+
 export type OpenCodeZenResult =
-  | { success: true; data: OpenCodeZenBillingData; errors: string[] }
-  | { success: false; error: string };
+  | {
+      success: true;
+      data: OpenCodeZenBillingData;
+      errors: string[];
+      optionalErrors?: OpenCodeZenOptionalError[];
+    }
+  | { success: false; error: string; failureCategory?: ProviderFailureCategory };
 
 type ConsoleRoute =
   | "billing/status"
@@ -66,7 +79,9 @@ type ConsoleRoute =
   | "policies/members"
   | "usage/cost-by-day";
 
-type ConsoleRouteResult<T> = { success: true; data: T } | { success: false; error: string };
+type ConsoleRouteResult<T> =
+  | { success: true; data: T }
+  | { success: false; error: string; failureCategory?: ProviderFailureCategory };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -313,19 +328,21 @@ async function fetchConsoleRoute<T>(params: {
       },
       timeoutMs: params.timeoutMs,
       consume: async (response): Promise<ConsoleRouteResult<T>> => {
-        // Redirects and 401 mean the whole session is gone; a 403 is treated as
-        // a per-route failure so optional routes can fall back gracefully.
+        // Redirects and 401 mean the whole session is gone; a 403 stays a
+        // per-route failure so optional routes can fall back gracefully, but it
+        // is still an authorization outcome at the HTTP boundary.
         if ((response.status >= 300 && response.status < 400) || response.status === 401) {
-          return { success: false, error: SESSION_ERROR };
+          return { success: false, error: SESSION_ERROR, failureCategory: "credentials" };
         }
         if (!response.ok) {
           return {
             success: false,
             error: `OpenCode Console ${params.route} error ${response.status}`,
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
         if (response.headers.get("content-type")?.includes("text/html")) {
-          return { success: false, error: SESSION_ERROR };
+          return { success: false, error: SESSION_ERROR, failureCategory: "credentials" };
         }
 
         const text = await response.text();
@@ -337,6 +354,7 @@ async function fetchConsoleRoute<T>(params: {
           return {
             success: false,
             error: `Could not parse OpenCode Console ${params.route} response`,
+            failureCategory: "provider_api",
           };
         }
       },
@@ -349,7 +367,11 @@ async function fetchConsoleRoute<T>(params: {
       accountId,
       accountId && encodeURIComponent(accountId),
     ]);
-    return { success: false, error: `OpenCode Console ${params.route} request failed: ${message}` };
+    return {
+      success: false,
+      error: `OpenCode Console ${params.route} request failed: ${message}`,
+      failureCategory: "provider_api",
+    };
   }
 }
 
@@ -363,6 +385,7 @@ function memberBudgetRequest(request: {
     return {
       success: false,
       error: "OpenCode Console member budgets unavailable: the Console sign-in has no account id",
+      failureCategory: "discovery",
     };
   }
   return fetchConsoleRoute({
@@ -396,7 +419,7 @@ export async function queryOpenCodeZenQuota(
 
   const optional = [creditLimit, autoRecharge, member, monthlyUsage];
   if ([balance, ...optional].some((result) => !result.success && result.error === SESSION_ERROR)) {
-    return { success: false, error: SESSION_ERROR };
+    return { success: false, error: SESSION_ERROR, failureCategory: "credentials" };
   }
   if (!balance.success) return balance;
 
@@ -421,6 +444,19 @@ export async function queryOpenCodeZenQuota(
     }
   }
 
+  const optionalErrors = optional.flatMap((result) =>
+    result.success
+      ? []
+      : [
+          {
+            message: result.error,
+            ...(result.failureCategory !== undefined
+              ? { failureCategory: result.failureCategory }
+              : {}),
+          },
+        ],
+  );
+
   return {
     success: true,
     data: {
@@ -435,6 +471,7 @@ export async function queryOpenCodeZenQuota(
       budgetSource,
       memberBudgetsSkipped,
     },
-    errors: optional.flatMap((result) => (result.success ? [] : [result.error])),
+    errors: optionalErrors.map((error) => error.message),
+    ...(optionalErrors.length > 0 ? { optionalErrors } : {}),
   };
 }

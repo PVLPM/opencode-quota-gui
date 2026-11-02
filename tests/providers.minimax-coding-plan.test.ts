@@ -209,6 +209,7 @@ describe("minimax-coding-plan provider", () => {
       label: "[MiniMax Token Plan shared] (active)",
       message: "empty key",
       sourceId: "bad",
+      failureCategory: "credentials",
     });
     expect(out.entries).toContainEqual(
       expect.objectContaining({
@@ -866,6 +867,16 @@ describe("minimax-coding-plan provider", () => {
     const out = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
     expectAttemptedWithErrorLabel(out, "MiniMax Token Plan");
     expect(out.errors[0]?.message).toContain("401");
+    expect(out.errors[0]?.failureCategory).toBe("credentials");
+  });
+
+  it("labels provider-side API failures as provider API", async () => {
+    mockMiniMaxAuthConfigured();
+    mockMiniMaxHttpFailure(503, "unavailable");
+
+    const out = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
+    expectAttemptedWithErrorLabel(out, "MiniMax Token Plan");
+    expect(out.errors[0]?.failureCategory).toBe("provider_api");
   });
 
   it("sanitizes remote response text in API errors", async () => {
@@ -877,7 +888,7 @@ describe("minimax-coding-plan provider", () => {
     expect(out.errors[0]?.message).toBe("MiniMax API error 401: Unauthorized retry later");
   });
 
-  it("returns error on non-zero status code", async () => {
+  it("leaves undocumented application status codes unclassified", async () => {
     mockMiniMaxAuthConfigured();
     mocks.fetchResponse.mockResolvedValueOnce({
       ok: true,
@@ -890,6 +901,59 @@ describe("minimax-coding-plan provider", () => {
     const out = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
     expectAttemptedWithErrorLabel(out, "MiniMax Token Plan");
     expect(out.errors[0]?.message).toContain("invalid token");
+    // 1001 is not a documented auth code, and the message must not classify it.
+    expect(out.errors[0]).not.toHaveProperty("failureCategory");
+  });
+
+  it("maps the documented MiniMax authentication application code to credentials", async () => {
+    mockMiniMaxAuthConfigured();
+    mocks.fetchResponse.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        model_remains: [],
+        base_resp: { status_code: 1004, status_msg: "authentication failed" },
+      }),
+    });
+
+    const out = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
+    expectAttemptedWithErrorLabel(out, "MiniMax Token Plan");
+    expect(out.errors[0]?.failureCategory).toBe("credentials");
+  });
+
+  it.each([
+    401, 403,
+  ])("does not read application status code %i as an HTTP credential status", async (statusCode) => {
+    mockMiniMaxAuthConfigured();
+    mocks.fetchResponse.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        model_remains: [],
+        base_resp: { status_code: statusCode, status_msg: "authentication failed" },
+      }),
+    });
+
+    const out = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
+    expectAttemptedWithErrorLabel(out, "MiniMax Token Plan");
+    expect(out.errors[0]).not.toHaveProperty("failureCategory");
+  });
+
+  it.each([
+    [401, "credentials"],
+    [403, "credentials"],
+    [500, "provider_api"],
+  ])("classifies HTTP %i as %s even when the error body cannot be read", async (status, failureCategory) => {
+    mockMiniMaxAuthConfigured();
+    mocks.fetchResponse.mockResolvedValueOnce({
+      ok: false,
+      status,
+      text: async () => {
+        throw new Error("body stream failed");
+      },
+    });
+
+    const out = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
+    expectAttemptedWithErrorLabel(out, "MiniMax Token Plan");
+    expect(out.errors[0]?.failureCategory).toBe(failureCategory);
   });
 
   it("sanitizes status messages and thrown errors", async () => {
@@ -917,6 +981,7 @@ describe("minimax-coding-plan provider", () => {
     const thrownOut = await minimaxCodingPlanProvider.fetch({ config: {} } as any);
     expectAttemptedWithErrorLabel(thrownOut, "MiniMax Token Plan");
     expect(thrownOut.errors[0]?.message).toBe("network failed");
+    expect(thrownOut.errors[0]?.failureCategory).toBe("provider_api");
   });
 
   it("does not add provider-specific projection metadata", async () => {

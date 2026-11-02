@@ -8,7 +8,8 @@
  */
 import type { Context } from "@opencode/plugin/gui";
 import { isDashboardEvent } from "../contracts/guards.js";
-import { DashboardRpc } from "../rpc.js";
+import type { DashboardRpcQuotaNotificationData } from "../rpc.js";
+import { DashboardRpc, isDashboardRpcQuotaNotificationData } from "../rpc.js";
 import type { DashboardRpcCaller } from "./dashboard-client.js";
 
 export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCaller {
@@ -30,17 +31,23 @@ export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCa
     watch: (input, options) => rpc().watch(input, options),
     events: {
       /**
-       * The transport validates the event schema; the guard repeats the shape
+       * The transport validates the event schema; the guards repeat the shape
        * check at the seam so an unexpected payload is dropped here rather than
-       * reaching the feature layer.
+       * reaching the feature layer. Notifications use their own channel, so an
+       * invalidation subscriber never has to interpret one.
        */
-      subscribe: (name, options) =>
+      subscribe: ((name: "invalidated" | "quotaNotification", options?: { signal?: AbortSignal }) =>
         (async function* () {
           for await (const event of rpc().events.subscribe(name, options)) {
-            if (!isDashboardEvent(event.data)) continue;
-            yield { data: event.data };
+            if (name === "invalidated") {
+              if (!isDashboardEvent(event.data)) continue;
+              yield { data: event.data };
+            } else {
+              if (!isDashboardRpcQuotaNotificationData(event.data)) continue;
+              yield { data: event.data as DashboardRpcQuotaNotificationData };
+            }
           }
-        })(),
+        })()) as DashboardRpcCaller["events"]["subscribe"],
     },
   };
 }

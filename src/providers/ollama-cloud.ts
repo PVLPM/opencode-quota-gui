@@ -94,7 +94,9 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
     });
   }
 
-  const errors = (result.rowErrors ?? []).map((message) => ({
+  // Row-level mapping warnings carry no source-assigned category; absence means
+  // unknown, so they stay unclassified rather than being inferred as API failures.
+  const errors: QuotaProviderResult["errors"] = (result.rowErrors ?? []).map((message) => ({
     label: OLLAMA_CLOUD_PROVIDER_LABEL,
     message,
   }));
@@ -102,6 +104,7 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
     errors.push({
       label: OLLAMA_CLOUD_PROVIDER_LABEL,
       message: "Ollama Cloud returned no limits or balance",
+      failureCategory: "discovery",
     });
   }
 

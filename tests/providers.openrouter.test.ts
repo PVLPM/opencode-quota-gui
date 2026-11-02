@@ -327,6 +327,53 @@ describe("OpenRouter provider", () => {
     expect(out.statusDetails).toEqual(expectedStatusDetails(true, "opencode.db"));
   });
 
+  it("leaves row-level mapping warnings unclassified instead of labeling them API failures", async () => {
+    await mockAuth(
+      authResolution([
+        {
+          sourceId: "row_work",
+          label: "Work",
+          groupLabel: "[OpenRouter Work]",
+          active: true,
+          resolved: resolvedAuth(SECRET_CANARY),
+        },
+      ]),
+    );
+    const { queryOpenRouterQuota } = await import("../src/lib/openrouter.js");
+    vi.mocked(queryOpenRouterQuota).mockResolvedValueOnce({
+      success: true,
+      entries: [
+        {
+          accounting: {
+            resultType: "spend",
+            acquisitionMethod: "remote_api",
+            ownership: "maintained",
+            authority: "provider_reported",
+            sourceId: "row_work",
+          },
+          kind: "value",
+          name: "[OpenRouter Work] spend",
+          group: "[OpenRouter Work]",
+          label: "Spend:",
+          value: "$2.00",
+        },
+      ],
+      rowErrors: ["adapter.mappings[0].metric.value was null at row 1"],
+    });
+
+    const out = await openRouterProvider.fetch({} as any);
+
+    expect(out.entries).toHaveLength(1);
+    // Row-level mapping warnings carry no provenance and must fail closed.
+    expect(out.errors).toEqual([
+      {
+        label: "Work",
+        message: "adapter.mappings[0].metric.value was null at row 1",
+        sourceId: "row_work",
+      },
+    ]);
+  });
+
   it("reports a failed stored login and queries the env/config fallback", async () => {
     await mockAuth(
       authResolution(

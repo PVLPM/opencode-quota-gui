@@ -325,6 +325,7 @@ export const openaiProvider: QuotaProvider = {
           label: name,
           message: `OpenAI API key could not be read: ${row.resolveError}`,
           sourceId: row.id,
+          failureCategory: "credentials",
         });
         continue;
       }

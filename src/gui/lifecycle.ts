@@ -41,6 +41,11 @@ import { getOpencodeRuntimeDirs } from "../lib/opencode-runtime-paths.js";
 import { createGuiSettingsStore, getGuiDashboardEnabled, getGuiDashboardPort } from "./config.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 import {
+  createQuotaNotificationObserver,
+  type QuotaNotificationObserver,
+  quotaNotificationSettingsFromSnapshot,
+} from "./quota-notification-observer.js";
+import {
   createDashboardServer,
   type DashboardServerHandle,
   type DashboardServerOptions,
@@ -94,6 +99,8 @@ export type DashboardUnavailableReason =
 export interface DashboardTransportRuntime {
   readonly snapshots: SnapshotService;
   readonly settings: GuiSettingsStore;
+  /** One host-owned observer; its safe events use the quota notification channel. */
+  readonly quotaNotifications?: QuotaNotificationObserver;
 }
 
 /**
@@ -125,6 +132,8 @@ export interface StartDashboardOptions {
   createSettingsStore?: (options: { configDir: string; workspaceRoot: string }) => GuiSettingsStore;
   /** Test seam: replaces the per-host snapshot service factory. */
   createSnapshots?: (options: SnapshotServiceOptions) => SnapshotService;
+  /** Test/embedding seam: private quota notification cooldown state path. */
+  quotaNotificationStatePath?: string;
   /** Test seam: replaces the transport factory. */
   createServer?: (options: DashboardServerOptions) => Promise<DashboardServerHandle>;
   logger?: GuiLogger;
@@ -163,6 +172,7 @@ interface DashboardRuntime {
   snapshots: SnapshotService | undefined;
   /** One host-lifetime quota interest, independent of any transport viewer. */
   quotaMonitor: ReturnType<SnapshotService["addScopedViewer"]> | undefined;
+  quotaNotifications: QuotaNotificationObserver | undefined;
   settings: GuiSettingsStore | undefined;
   close(): Promise<void>;
 }
@@ -240,10 +250,17 @@ function createRuntime(source: DashboardReadSource, logger: GuiLogger): Dashboar
     source,
     snapshots: undefined,
     quotaMonitor: undefined,
+    quotaNotifications: undefined,
     settings: undefined,
     close() {
       if (closing) return closing;
       closing = (async () => {
+        try {
+          await runtime.quotaNotifications?.close();
+        } catch (error) {
+          logger.warn("quota notification observer close failed", failureLabel(error));
+        }
+        runtime.quotaNotifications = undefined;
         try {
           runtime.quotaMonitor?.release();
         } catch (error) {
@@ -348,6 +365,11 @@ function dropOwner(host: DashboardHost, owner: DashboardOwner): boolean {
   return true;
 }
 
+/** Late-bound pointer to the host observer created after the source. */
+interface QuotaObservationTarget {
+  observer?: QuotaNotificationObserver;
+}
+
 /**
  * The stable source the transport keeps for the host's lifetime. Every read
  * resolves the active owner's source; a delegate's source is not created until
@@ -356,6 +378,7 @@ function dropOwner(host: DashboardHost, owner: DashboardOwner): boolean {
 function createDelegatingSource(
   delegation: OwnerDelegation,
   logger: GuiLogger,
+  observation: QuotaObservationTarget,
 ): DashboardReadSource {
   const requireSource = (): Promise<DashboardReadSource> => {
     const owner = delegation.activeOwner;
@@ -369,10 +392,21 @@ function createDelegatingSource(
     session: async (input) => (await requireSource()).session(input),
     groups: async (query) => (await requireSource()).groups(query),
     quota: async () => {
+      // Capture the source generation before resolving the owner and before the
+      // asynchronous provider read. A handoff during either step changes the
+      // token, and the observer drops the old source's snapshot instead of
+      // classifying it against the replacement source's baseline.
+      const observer = observation.observer;
+      const epoch = observer?.epoch();
+      const owner = delegation.activeOwner;
       const source = await requireSource();
       // Mirrors `SnapshotService`: a source without quota answers as unavailable.
       if (!source.quota) throw new Error("Quota source unavailable");
-      return source.quota();
+      const snapshot = await source.quota();
+      if (observer !== undefined && delegation.activeOwner === owner) {
+        observer.observe(snapshot, epoch);
+      }
+      return snapshot;
     },
     refreshAnalytics: async () => {
       // Only refresh an already-created active source; never build one here.
@@ -512,6 +546,7 @@ async function startHost(
   context: HostContext,
   delegation: OwnerDelegation,
   runtime: DashboardRuntime,
+  observation: QuotaObservationTarget,
 ): Promise<DashboardServerHandle | undefined> {
   const createSettingsStore = options.createSettingsStore ?? createGuiSettingsStore;
   let settings: GuiSettingsStore;
@@ -526,6 +561,24 @@ async function startHost(
   // Publish the same store to every transport. It stays host-owned until the
   // last lease disposes, regardless of whether the web transport starts.
   runtime.settings = settings;
+
+  // One observer for this shared host. It is fed by the stable delegating
+  // source's quota cycle, so it adds no poller and works with every transport
+  // combination, including a closed panel. Settings are read per cycle so a
+  // saved threshold or visibility change applies without a restart.
+  try {
+    const quotaNotifications = createQuotaNotificationObserver({
+      loadSettings: async () => quotaNotificationSettingsFromSnapshot(await settings.settings()),
+      ...(options.quotaNotificationStatePath !== undefined
+        ? { statePath: options.quotaNotificationStatePath }
+        : {}),
+      logger: context.logger,
+    });
+    runtime.quotaNotifications = quotaNotifications;
+    observation.observer = quotaNotifications;
+  } catch (error) {
+    context.logger.warn("quota notifications unavailable", failureLabel(error));
+  }
 
   const firstOwner = delegation.activeOwner;
   if (!firstOwner) throw new DashboardLifecycleError("source-unavailable");
@@ -592,7 +645,11 @@ async function startHost(
  */
 function transportRuntime(runtime: DashboardRuntime): DashboardTransportRuntime | undefined {
   if (!runtime.snapshots || !runtime.settings) return undefined;
-  return { snapshots: runtime.snapshots, settings: runtime.settings };
+  return {
+    snapshots: runtime.snapshots,
+    settings: runtime.settings,
+    ...(runtime.quotaNotifications ? { quotaNotifications: runtime.quotaNotifications } : {}),
+  };
 }
 
 function makeDispose(
@@ -611,7 +668,10 @@ function makeDispose(
       // A live lease keeps the socket and the shared runtime. The surviving
       // owner serves the next request, so cached pages from the disposed owner
       // are invalidated before any client can see them as fresh.
-      if (activeChanged) host.runtime.snapshots?.sourceChanged();
+      if (activeChanged) {
+        host.runtime.snapshots?.sourceChanged();
+        host.runtime.quotaNotifications?.sourceChanged();
+      }
       await closing;
       return;
     }
@@ -687,7 +747,8 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
 
   const owner = createOwner(options, configDir);
   const delegation: OwnerDelegation = { owners: [owner], activeOwner: owner };
-  const runtime = createRuntime(createDelegatingSource(delegation, logger), logger);
+  const observation: QuotaObservationTarget = {};
+  const runtime = createRuntime(createDelegatingSource(delegation, logger, observation), logger);
   const host: DashboardHost = {
     port,
     logger,
@@ -699,6 +760,7 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
       { configDir, port, webEnabled, minIntervalMs, logger },
       delegation,
       runtime,
+      observation,
     ),
   };
   hosts.set(port, host);

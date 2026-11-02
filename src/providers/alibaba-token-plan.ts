@@ -1,5 +1,7 @@
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import {
   type AlibabaTokenPlanClosedResult,
+  type AlibabaTokenPlanErrorKind,
   type AlibabaTokenPlanWindow,
   isAlibabaTokenPlanSupportedPlatform,
   queryAlibabaTokenPlanQuota,
@@ -66,6 +68,24 @@ function statusDetailsFromResult(
   });
 }
 
+function alibabaFailureCategory(
+  kind: AlibabaTokenPlanErrorKind,
+): ProviderFailureCategory | undefined {
+  switch (kind) {
+    case "executable_not_found":
+    case "shell_launcher_rejected":
+    case "workspace_path_rejected":
+    case "spawn_failed":
+      return "local";
+    case "not_authenticated":
+      return "credentials";
+    default:
+      // Timeout, malformed output, nonzero exit, and unavailable data can come
+      // from either the CLI process or the remote console. Absence fails closed.
+      return undefined;
+  }
+}
+
 function mapClosedResult(result: AlibabaTokenPlanClosedResult): QuotaProviderResult {
   if (result.ok) {
     const entries: QuotaToastEntry[] = [];
@@ -76,8 +96,10 @@ function mapClosedResult(result: AlibabaTokenPlanClosedResult): QuotaProviderRes
   if (result.error.kind === "unsupported_platform") {
     return notAttemptedResult();
   }
+  const failureCategory = alibabaFailureCategory(result.error.kind);
   return attemptedErrorResult(GROUP, result.error.message, {
     retryable: result.error.retryable === true,
+    ...(failureCategory !== undefined ? { failureCategory } : {}),
   });
 }
 

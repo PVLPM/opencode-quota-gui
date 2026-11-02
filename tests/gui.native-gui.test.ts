@@ -293,6 +293,13 @@ describe("Desktop GUI entry", () => {
     expect(settingsModel).toContain("applyConflict");
   });
 
+  it("exposes quota alert settings only on the native surface", () => {
+    expect(settingsPageSource).toContain("nativeQuotaAlerts");
+    expect(settingsView).toContain("nativeQuotaAlerts");
+    expect(routesSource).toContain("nativeQuotaAlerts");
+    expect(appSource).not.toContain("nativeQuotaAlerts");
+  });
+
   it("exposes the Web dashboard switch and quota staleness only on the native surface", () => {
     // Native Settings opts into the shared Web-dashboard row; the Web shell does not.
     expect(settingsPageSource).toContain("webDashboardToggle");

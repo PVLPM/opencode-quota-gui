@@ -2,7 +2,9 @@ import { rm } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const TEST_RUNTIME_ROOT = "/tmp/opencode-quota-provider-cache-tests";
+const NOW = Date.UTC(2026, 10, 2, 12, 0, 0);
 
+import { buildProviderCards } from "../src/gui/provider-cards.js";
 import type { QuotaProviderContext } from "../src/lib/entries.js";
 import type {
   QuotaProviderDefinition,
@@ -189,6 +191,7 @@ describe("quota-providers aggregate provider", () => {
         {
           label: "Quota providers",
           message: "Failed to read exact runtime provider identities",
+          failureCategory: "local",
         },
       ],
     });
@@ -424,7 +427,7 @@ describe("quota-providers aggregate provider", () => {
     runtimeMocks.fetchRemoteQuotaProvider.mockImplementation(
       async (definition: RemoteApiQuotaProviderDefinition) =>
         definition.id === "bad"
-          ? { success: false, error: "HTTP 503" }
+          ? { success: false, error: "HTTP 503", failureCategory: "provider_api" }
           : {
               success: true,
               entries: [
@@ -445,11 +448,56 @@ describe("quota-providers aggregate provider", () => {
 
     const result = await quotaProvidersProvider.fetch(context(definitions, ["good", "bad"]));
     expect(result.entries).toHaveLength(1);
-    expect(result.errors).toEqual([{ label: "bad", message: "HTTP 503" }]);
+    expect(result.errors).toEqual([
+      { label: "bad", message: "HTTP 503", failureCategory: "provider_api" },
+    ]);
     expect(result.diagnostics?.map((diagnostic) => diagnostic.outcome)).toEqual([
       "success",
       "http_error",
     ]);
+  });
+
+  it("preserves the producer failure category instead of relabeling remote failures", async () => {
+    const definition = remote("unauthorized");
+    runtimeMocks.fetchRemoteQuotaProvider.mockResolvedValue({
+      success: false,
+      error: "HTTP 401",
+      failureCategory: "credentials",
+    });
+
+    const result = await quotaProvidersProvider.fetch(context([definition], ["unauthorized"]));
+
+    expect(result.errors).toEqual([
+      { label: "unauthorized", message: "HTTP 401", failureCategory: "credentials" },
+    ]);
+  });
+
+  it("leaves unclassified remote failures unclassified while typed API failures reach cards", async () => {
+    const definition = remote("opaque");
+    const aggregate = quotaProvidersProvider;
+    const cards = async () => {
+      const result = await aggregate.fetch(context([definition], ["opaque"]));
+      return buildProviderCards({
+        probes: [{ providerId: aggregate.id, result }],
+        preferences: { accountingDetail: "summary" },
+        nowMs: NOW,
+      });
+    };
+
+    runtimeMocks.fetchRemoteQuotaProvider.mockResolvedValueOnce({
+      success: false,
+      error: "HTTP 503",
+    });
+    const unclassified = await cards();
+    expect(unclassified[0]?.errors).toEqual([{ label: "opaque", message: "HTTP 503" }]);
+
+    runtimeMocks.fetchRemoteQuotaProvider.mockResolvedValueOnce({
+      success: false,
+      error: "HTTP 503",
+      failureCategory: "provider_api",
+    });
+    const typed = await cards();
+    expect(typed[0]?.errors[0]?.failureCategory).toBe("provider_api");
   });
 
   it("propagates json-v1 row errors as partial output while keeping source diagnostics successful", async () => {
@@ -533,12 +581,33 @@ describe("quota-providers aggregate provider", () => {
 
     const result = await quotaProvidersProvider.fetch(context([local], ["local"]));
     expect(result.errors).toEqual([
-      { label: "Local", message: "Failed to update local accounting state" },
+      {
+        label: "Local",
+        message: "Failed to update local accounting state",
+        failureCategory: "local",
+      },
     ]);
     expect(result.diagnostics?.[0]).toMatchObject({
       sourceId: "local",
       outcome: "local_state_error",
       statePath: "/state/local.json",
     });
+  });
+
+  it("fails closed when local estimate and state inspection both escape", async () => {
+    const local: QuotaProviderDefinition = {
+      id: "local",
+      providerId: "local",
+      label: "Local",
+      mode: "local-estimate",
+      windows: [{ id: "daily", label: "Daily", type: "utc-day", requestLimit: 10 }],
+    };
+    runtimeMocks.collectLocalQuotaProviderEstimate.mockRejectedValue(new Error("disk"));
+    runtimeMocks.inspectLocalQuotaProviderState.mockRejectedValue(new Error("state"));
+
+    const result = await quotaProvidersProvider.fetch(context([local], ["local"]));
+
+    expect(result.errors).toEqual([{ label: "Local", message: "Provider execution failed" }]);
+    expect(result.errors[0]).not.toHaveProperty("failureCategory");
   });
 });

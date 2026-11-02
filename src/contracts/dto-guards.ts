@@ -44,6 +44,7 @@ import type {
 import { PRIMARY_QUOTA_WINDOW_LIMIT } from "./dashboard.js";
 import { isCostedTokens, isTokenStack } from "./guards.js";
 import type { BankedResetAvailability } from "./openai-quota.js";
+import { isProviderFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { type BucketUnit, isRangeKey, type RangeWindow } from "./ranges.js";
 import type {
   TemporalEffect,
@@ -263,14 +264,22 @@ function isProviderCard(value: unknown): value is ProviderCard {
   if (
     !isOptional(
       value.errors,
-      (errors): errors is { label: string; message: string; retryable?: boolean }[] =>
+      (
+        errors,
+      ): errors is {
+        label: string;
+        message: string;
+        retryable?: boolean;
+        failureCategory?: ProviderFailureCategory;
+      }[] =>
         isArrayOf(
           errors,
           (entry) =>
             isRecord(entry) &&
             isText(entry.label) &&
             isText(entry.message) &&
-            isOptional(entry.retryable, isBoolean),
+            isOptional(entry.retryable, isBoolean) &&
+            isOptional(entry.failureCategory, isProviderFailureCategory),
         ),
     )
   ) {

@@ -359,10 +359,15 @@ describe("Kilo Gateway provider", () => {
   });
 
   it("maps API failures into a safe Kilo Gateway error", async () => {
-    mocks.queryKiloQuota.mockResolvedValueOnce({ success: false, error: "Unauthorized" });
+    mocks.queryKiloQuota.mockResolvedValueOnce({
+      success: false,
+      error: "Unauthorized",
+      failureCategory: "credentials",
+    });
 
     const out = await kiloProvider.fetch({} as any);
 
     expectAttemptedWithErrorLabel(out, "Kilo Gateway");
+    expect(out.errors[0]?.failureCategory).toBe("credentials");
   });
 });

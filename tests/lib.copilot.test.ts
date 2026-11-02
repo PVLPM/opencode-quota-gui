@@ -553,6 +553,36 @@ describe("GitHub Copilot AI Credit accounting", () => {
   });
 
   it.each([
+    [401, "credentials"],
+    [403, "credentials"],
+    [500, "provider_api"],
+  ])("keeps GitHub HTTP %i classified as %s when the error body cannot be read", async (status, failureCategory) => {
+    authMocks.readAuthFile.mockResolvedValue({
+      "github-copilot": { type: "oauth", access: "oauth-token" },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.error(new Error("body stream failed"));
+              },
+            }),
+            { status },
+          ),
+      ) as any,
+    );
+
+    const { queryCopilotQuota } = await import("../src/lib/copilot.js");
+    await expect(queryCopilotQuota()).resolves.toMatchObject({
+      success: false,
+      failureCategory,
+    });
+  });
+
+  it.each([
     "http://acme.ghe.com",
     "https://user@acme.ghe.com",
     "https://acme.ghe.com/path",
@@ -1201,6 +1231,7 @@ describe("GitHub Copilot AI Credit accounting", () => {
       {
         response: json({ message: "Bad credentials" }, { status: 401 }),
         expected: "GitHub API error 401: Bad credentials",
+        expectedCategory: "credentials",
       },
       {
         response: json(
@@ -1208,14 +1239,17 @@ describe("GitHub Copilot AI Credit accounting", () => {
           { status: 403, headers: { "x-ratelimit-remaining": "0" } },
         ),
         expected: "GitHub API rate limit exhausted",
+        expectedCategory: "provider_api",
       },
       {
         response: json({ message: "Resource not accessible" }, { status: 403 }),
         expected: "GitHub API error 403: Resource not accessible",
+        expectedCategory: "credentials",
       },
       {
         response: new Response("{", { status: 200 }),
         expected: "malformed JSON",
+        expectedCategory: "provider_api",
       },
     ];
 
@@ -1225,7 +1259,34 @@ describe("GitHub Copilot AI Credit accounting", () => {
       const { queryCopilotQuota } = await import("../src/lib/copilot.js");
       const result = await queryCopilotQuota();
       expect(result && !result.success ? result.error : "").toContain(scenario.expected);
+      expect(result && !result.success ? result.failureCategory : undefined).toBe(
+        scenario.expectedCategory,
+      );
     }
+  });
+
+  it("labels OAuth request-boundary failures as provider API", async () => {
+    authMocks.readAuthFile.mockResolvedValue({
+      "github-copilot": { type: "oauth", access: "oauth-api-failure-token" },
+    });
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("server error", { status: 500 })) as any);
+    const { queryCopilotQuota } = await import("../src/lib/copilot.js");
+    await expect(queryCopilotQuota()).resolves.toMatchObject({
+      success: false,
+      failureCategory: "provider_api",
+    });
+
+    vi.resetModules();
+    authMocks.readAuthFile.mockResolvedValue({
+      "github-copilot": { type: "oauth", access: "oauth-malformed-token" },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{", { status: 200 })) as any);
+    const reloaded = await import("../src/lib/copilot.js");
+    await expect(reloaded.queryCopilotQuota()).resolves.toMatchObject({
+      success: false,
+      failureCategory: "provider_api",
+    });
   });
 
   it("rejects malformed and wrong-SKU usage responses", async () => {

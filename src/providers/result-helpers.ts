@@ -1,5 +1,6 @@
 import { readFile } from "fs/promises";
 
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import { sanitizeDisplayText } from "../lib/display-sanitize.js";
 import type {
   AccountingMetadata,
@@ -31,11 +32,20 @@ export function attemptedResult(
 export function attemptedErrorResult(
   label: string,
   message: string,
-  options: { retryable?: boolean } = {},
+  options: { retryable?: boolean; failureCategory?: ProviderFailureCategory } = {},
 ): QuotaProviderResult {
   return attemptedResult(
     [],
-    [{ label, message, ...(options.retryable === true ? { retryable: true } : {}) }],
+    [
+      {
+        label,
+        message,
+        ...(options.retryable === true ? { retryable: true } : {}),
+        ...(options.failureCategory !== undefined
+          ? { failureCategory: options.failureCategory }
+          : {}),
+      },
+    ],
   );
 }
 
@@ -149,11 +159,20 @@ export async function inspectGeneratedCounterFile(
 }
 
 export function mapNullableProviderResult<
-  TResult extends { success: true } | { success: false; error: string; retryable?: boolean } | null,
+  TResult extends
+    | { success: true }
+    | {
+        success: false;
+        error: string;
+        retryable?: boolean;
+        failureCategory?: ProviderFailureCategory;
+      }
+    | null,
 >(
   result: TResult,
   params: {
     errorLabel: string;
+    failureCategory?: ProviderFailureCategory;
     onSuccess: (result: Extract<TResult, { success: true }>) => QuotaProviderResult;
   },
 ): QuotaProviderResult {
@@ -162,7 +181,12 @@ export function mapNullableProviderResult<
   }
 
   if (!result.success) {
-    return attemptedErrorResult(params.errorLabel, result.error, { retryable: result.retryable });
+    return attemptedErrorResult(params.errorLabel, result.error, {
+      ...(result.retryable === true ? { retryable: true } : {}),
+      ...((result.failureCategory ?? params.failureCategory) !== undefined
+        ? { failureCategory: result.failureCategory ?? params.failureCategory }
+        : {}),
+    });
   }
 
   return params.onSuccess(result as Extract<TResult, { success: true }>);

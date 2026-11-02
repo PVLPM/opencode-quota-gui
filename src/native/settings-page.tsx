@@ -19,10 +19,10 @@ type SettingsContent = "settings" | "quota-error" | "waiting";
  * The official Desktop Settings page (Stage 5).
  *
  * It reuses the browser's `SettingsRoute`/`SettingsView` against the same typed
- * RPC settings backend, so display, visibility/order, temporal pricing, the Web
- * dashboard toggle, validation and conflict handling are the shared feature
- * code rather than a second renderer. Only the surrounding host page frame and
- * the native read lifecycle are new.
+ * RPC settings backend, so display, visibility/order, temporal pricing, quota
+ * alerts, the Web dashboard toggle, validation and conflict handling are the
+ * shared feature code rather than a second renderer. Only the surrounding host
+ * page frame and the native read lifecycle are new.
  */
 export function NativeSettingsPage(props: {
   ctx: Pick<Context, "client" | "servers" | "ui">;
@@ -108,6 +108,7 @@ export function NativeSettingsPage(props: {
                 toaster={toaster}
                 stale={state.stale()}
                 webDashboardToggle
+                nativeQuotaAlerts
                 onRetry={state.retry}
               />
             </div>

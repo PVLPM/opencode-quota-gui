@@ -34,6 +34,7 @@ import {
   parseOAuthUsageResponse,
   parseUsageResponse,
   queryAnthropicQuota,
+  queryAnthropicQuotaWithOAuth,
   resolveAnthropicAuthIdentity,
 } from "../src/lib/anthropic.js";
 import { fetchWithTimeout } from "../src/lib/http.js";
@@ -715,6 +716,60 @@ describe("Claude CLI diagnostics", () => {
     await expect(queryAnthropicQuota()).resolves.toMatchObject({
       success: false,
       error: expect.stringContaining("Anthropic API error 429: rate limited"),
+      failureCategory: "provider_api",
+    });
+    expect(diagnostics.failureCategory).toBe("provider_api");
+  });
+
+  it("labels OAuth HTTP, transport, and malformed-response failures as provider API", async () => {
+    fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(500, "server error"));
+    await expect(queryAnthropicQuotaWithOAuth("oauth-http-failure-token")).resolves.toMatchObject({
+      success: false,
+      failureCategory: "provider_api",
+    });
+
+    fetchWithTimeoutMock.mockRejectedValueOnce(new Error("socket hang up"));
+    await expect(
+      queryAnthropicQuotaWithOAuth("oauth-transport-failure-token"),
+    ).resolves.toMatchObject({
+      success: false,
+      failureCategory: "provider_api",
+    });
+
+    fetchResponseMock.mockResolvedValueOnce(mockInvalidJsonResponse());
+    await expect(queryAnthropicQuotaWithOAuth("oauth-invalid-json-token")).resolves.toMatchObject({
+      success: false,
+      failureCategory: "provider_api",
+    });
+
+    fetchResponseMock.mockResolvedValueOnce(mockJsonResponse({ unexpected: true }));
+    await expect(queryAnthropicQuotaWithOAuth("oauth-invalid-shape-token")).resolves.toMatchObject({
+      success: false,
+      failureCategory: "provider_api",
+    });
+  });
+
+  it("labels OAuth authentication failures as credentials", async () => {
+    mockExecSequence([
+      {
+        code: "ENOENT",
+        errorMessage: "spawn claude ENOENT",
+      },
+    ]);
+    readAuthFileCachedMock.mockResolvedValue({
+      anthropic: {
+        type: "oauth",
+        access: "oauth-authentication-failure-token",
+        expires: Date.now() + 60_000,
+      },
+    });
+    fetchResponseMock.mockResolvedValue(mockOAuthResponse(401, "unauthorized"));
+
+    const diagnostics = await getAnthropicDiagnostics();
+    expect(diagnostics.failureCategory).toBe("credentials");
+    await expect(queryAnthropicQuota()).resolves.toMatchObject({
+      success: false,
+      failureCategory: "credentials",
     });
   });
 

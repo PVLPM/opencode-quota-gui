@@ -219,7 +219,12 @@ export const googleAgyProvider: QuotaProvider = {
         const credentialName = names[index] ?? "Google AGY";
         if (!result) continue;
         if (!result.success) {
-          errors.push({ label: credentialName, message: result.error, sourceId: row.id });
+          errors.push({
+            label: credentialName,
+            message: result.error,
+            sourceId: row.id,
+            failureCategory: result.failureCategory,
+          });
           continue;
         }
         for (const bucket of [...result.buckets].sort(compareBuckets)) {
@@ -249,6 +254,9 @@ export const googleAgyProvider: QuotaProvider = {
             label: credentialName,
             message: error.error,
             sourceId: row.id,
+            ...(error.failureCategory !== undefined
+              ? { failureCategory: error.failureCategory }
+              : {}),
           })),
         );
       }
@@ -268,7 +276,12 @@ export const googleAgyProvider: QuotaProvider = {
     }
 
     if (!result.success) {
-      return withStatusDetails(attemptedErrorResult("Google AGY", result.error), statusDetails);
+      return withStatusDetails(
+        attemptedErrorResult("Google AGY", result.error, {
+          failureCategory: result.failureCategory,
+        }),
+        statusDetails,
+      );
     }
 
     const sortedBuckets = [...result.buckets].sort(compareBuckets);

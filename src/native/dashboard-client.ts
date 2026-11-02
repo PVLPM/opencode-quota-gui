@@ -35,6 +35,7 @@ import type { RangeKey } from "../contracts/ranges.js";
 import type {
   DashboardRpcEventData,
   DashboardRpcNoInput,
+  DashboardRpcQuotaNotificationData,
   DashboardRpcViewScope,
   DashboardRpcWatchInput,
   DashboardRpcWatchOutput,
@@ -99,6 +100,10 @@ export interface DashboardRpcCaller {
       name: "invalidated",
       options?: DashboardRpcCallOptions,
     ): AsyncIterable<{ data: DashboardRpcEventData }>;
+    subscribe(
+      name: "quotaNotification",
+      options?: DashboardRpcCallOptions,
+    ): AsyncIterable<{ data: DashboardRpcQuotaNotificationData }>;
   };
 }
 

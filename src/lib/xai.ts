@@ -11,6 +11,10 @@
  * OpenCode remains the sole owner of OAuth refresh and opencode.db persistence.
  */
 
+import {
+  type ProviderFailureCategory,
+  providerFailureCategoryForHttpStatus,
+} from "../contracts/provider-failure.js";
 import { sanitizeSingleLineDisplaySnippet } from "./display-sanitize.js";
 import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { clampPercent } from "./format-utils.js";
@@ -269,6 +273,7 @@ export async function queryXaiQuota(
     return {
       success: false,
       error: `xAI sign-in could not be refreshed: ${resolvedAuth.error}. Run \`opencode auth login xai\`.`,
+      failureCategory: "credentials",
     };
   }
   if (resolvedAuth.state !== "configured") return null;
@@ -277,12 +282,15 @@ export async function queryXaiQuota(
     return {
       success: false,
       error: "xAI OAuth token expired; use xAI in OpenCode to refresh it or reconnect xAI",
+      failureCategory: "credentials",
     };
   }
 
+  let responseStatus: number | undefined;
   try {
     const creditsResult = await fetchWithTimeout<
-      { success: true; window: XaiWindowValue } | QuotaError
+      | { success: true; window: XaiWindowValue }
+      | { success: false; error: string; failureCategory?: ProviderFailureCategory }
     >(CREDITS_URL, {
       request: {
         method: "GET",
@@ -290,17 +298,25 @@ export async function queryXaiQuota(
       },
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
+        responseStatus = response.status;
         if (!response.ok) {
           const body = await response.text();
           return {
             success: false,
             error: `xAI API error ${response.status}: ${safeErrorText(body, resolvedAuth.accessToken)}`,
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
 
         const payload = await response.json();
         const window = parseCreditsWindow(payload, Date.now());
-        if (!window) return { success: false, error: "No weekly quota data" };
+        if (!window) {
+          return {
+            success: false,
+            error: "No weekly quota data",
+            failureCategory: "discovery",
+          };
+        }
 
         return { success: true, window };
       },
@@ -316,6 +332,10 @@ export async function queryXaiQuota(
         error instanceof Error ? error.message : String(error),
         resolvedAuth.accessToken,
       ),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }

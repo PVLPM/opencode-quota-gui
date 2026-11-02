@@ -7,6 +7,7 @@ User-facing release notes for OpenCode Quota GUI.
 ### Added
 
 - **OpenCode Desktop GUI.** Open **Quota & Usage** for quota, analytics, models, and detail views, with settings integrated into OpenCode and compact quota previews in session headers. The experimental GUI requires OpenCode Desktop 2.2.x.
+- **Native quota notifications.** Visible quota cards can report low or exhausted limits, resets, and provider API failures through OpenCode notifications. Configure the low-quota threshold and duplicate cooldown in Native Settings.
 
 ### Changed
 
@@ -14,7 +15,7 @@ User-facing release notes for OpenCode Quota GUI.
 
 ### Fixed
 
-- **Native connection recovery.** Recover viewer subscriptions after the Desktop host's request deadline without presenting stale quota as fresh.
+- **Native connection recovery.** Renew viewer subscriptions after the Desktop host's request deadline without interrupting a healthy connection or hiding quota previews.
 
 ## 1.2.0
 

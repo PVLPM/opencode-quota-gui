@@ -32,6 +32,9 @@ import {
   initialDraft,
   isInheritedProviderHidden,
   keyboardMovedCardOrder,
+  lowQuotaThresholdDisplayValue,
+  lowQuotaThresholdRemainingValue,
+  NATIVE_QUOTA_ALERT_KEYS,
   OPENCODE_GO_WINDOWS,
   parseIntegerInput,
   parseNumberInput,
@@ -79,6 +82,11 @@ export function SettingsView(props: {
    * save bar and revision/conflict path; only its placement is host-opted-in.
    */
   webDashboardToggle?: boolean;
+  /**
+   * Exposes native quota alert settings. Native Settings opts in; the Web
+   * shell keeps its existing field set.
+   */
+  nativeQuotaAlerts?: boolean;
 }): JSX.Element {
   const [draft, setDraft] = createSignal<SettingsDraft>(initialDraft(props.snapshot.revision));
   const [busy, setBusy] = createSignal(false);
@@ -141,10 +149,22 @@ export function SettingsView(props: {
   /** The canonical Web switch is hidden from generic rendering on purpose. */
   const webDashboardField = (): SettingsField | undefined =>
     SETTINGS_FIELDS.find((field) => field.key === "dashboard.enabled");
+  /** Native-only rows also validate through the same draft and save bar. */
+  const nativeAlertFields = createMemo(() =>
+    props.nativeQuotaAlerts
+      ? SETTINGS_FIELDS.filter(
+          (field) =>
+            (NATIVE_QUOTA_ALERT_KEYS as readonly string[]).includes(field.key) &&
+            props.snapshot.writable.includes(field.key),
+        )
+      : [],
+  );
   const dirty = createMemo(() =>
     dirtyKeys(draft(), props.snapshot.values, props.snapshot.writable),
   );
-  const errors = createMemo(() => fieldErrors(draft(), editableFields()));
+  const errors = createMemo(() =>
+    fieldErrors(draft(), [...editableFields(), ...nativeAlertFields()]),
+  );
   const errorFor = (key: string) => errors().find((error) => error.key === key)?.message;
   const fieldValue = (field: SettingsField): JsonValue | undefined =>
     field.key in draft().edits ? draft().edits[field.key] : props.snapshot.values[field.key];
@@ -730,6 +750,122 @@ export function SettingsView(props: {
     }
   }
 
+  /**
+   * Native-only quota alert rows. The threshold control follows the current
+   * used/remaining display preference while the draft always stores remaining.
+   */
+  function renderQuotaAlertSection(): JSX.Element | undefined {
+    const fields = nativeAlertFields();
+    if (fields.length === 0) return undefined;
+    const threshold = fields.find((field) => field.key === "lowQuotaThresholdRemainingPercent");
+    const cooldown = fields.find((field) => field.key === "duplicateCooldownMinutes");
+
+    const percentMode = () => (valueForKey("percentDisplayMode") === "used" ? "used" : "remaining");
+    const thresholdDisplay = () =>
+      threshold
+        ? lowQuotaThresholdDisplayValue(valueForKey(threshold.key), percentMode())
+        : undefined;
+    const thresholdRemaining = () => (threshold ? valueForKey(threshold.key) : undefined);
+    const showStoredRemaining = () =>
+      threshold !== undefined &&
+      errorFor(threshold.key) === undefined &&
+      percentMode() === "used" &&
+      typeof thresholdRemaining() === "number" &&
+      Number.isFinite(thresholdRemaining());
+    /**
+     * The stored bounds are 1–100 remaining. In used mode that reads as 0–99,
+     * so translate the two boundary errors instead of naming the hidden value.
+     */
+    const thresholdError = () => {
+      if (!threshold) return undefined;
+      const message = errorFor(threshold.key);
+      if (message === undefined || percentMode() !== "used") return message;
+      const remaining = thresholdRemaining();
+      if (typeof remaining !== "number" || !Number.isFinite(remaining)) return message;
+      if (remaining < 1) return `${threshold.label} must be below 100% used.`;
+      if (remaining > 100) return `${threshold.label} must be at least 0% used.`;
+      return message;
+    };
+
+    return (
+      <section class="qg-group" aria-labelledby="qg-settings-alerts">
+        <h2 class="qg-group__title" id="qg-settings-alerts">
+          Quota alerts
+        </h2>
+        <p class="qg-group__note">
+          Warn when a visible quota window runs low, and limit how often the same alert can repeat.
+        </p>
+        <Show when={threshold}>
+          {(field) => (
+            <div class="qg-field" data-invalid={thresholdError() ? "true" : undefined}>
+              <div class="qg-field__text">
+                <span class="qg-field__label">{field().label}</span>
+                <span class="qg-field__meta">
+                  <span>
+                    {percentMode() === "used"
+                      ? "Warn when used quota reaches this percent. Saved as remaining."
+                      : "Warn when remaining quota falls to this percent."}
+                  </span>
+                  <Show when={showStoredRemaining()}>
+                    <span>Saved as {String(thresholdRemaining())}% remaining.</span>
+                  </Show>
+                  <Show when={sourceNote(field().key)}>{(note) => <span>{note()}</span>}</Show>
+                </span>
+                <Show when={thresholdError()}>
+                  {(message) => <span class="qg-field__error">{message()}</span>}
+                </Show>
+              </div>
+              <div class="qg-field__control">
+                <TextInput
+                  class="qg-input"
+                  aria-label={field().label}
+                  numeric
+                  invalid={thresholdError() !== undefined}
+                  disabled={busy()}
+                  value={
+                    thresholdDisplay() === undefined || thresholdDisplay() === null
+                      ? ""
+                      : String(thresholdDisplay())
+                  }
+                  onInput={(event) =>
+                    edit(
+                      field().key,
+                      lowQuotaThresholdRemainingValue(
+                        parseIntegerInput(event.currentTarget.value),
+                        percentMode(),
+                      ),
+                    )
+                  }
+                />
+                <span class="qg-inherited">% {percentMode()}</span>
+              </div>
+            </div>
+          )}
+        </Show>
+        <Show when={cooldown}>
+          {(field) => (
+            <div class="qg-field" data-invalid={errorFor(field().key) ? "true" : undefined}>
+              <div class="qg-field__text">
+                <span class="qg-field__label">{field().label}</span>
+                <span class="qg-field__meta">
+                  <Show when={field().help}>{(help) => <span>{help()}</span>}</Show>
+                  <Show when={sourceNote(field().key)}>{(note) => <span>{note()}</span>}</Show>
+                </span>
+                <Show when={errorFor(field().key)}>
+                  {(message) => <span class="qg-field__error">{message()}</span>}
+                </Show>
+              </div>
+              <div class="qg-field__control">
+                {renderControl(field())}
+                <span class="qg-inherited">minutes</span>
+              </div>
+            </div>
+          )}
+        </Show>
+      </section>
+    );
+  }
+
   return (
     <div class="qg-settings">
       <div class="qg-form qg-settings__scroll">
@@ -859,6 +995,8 @@ export function SettingsView(props: {
             </Show>
           )}
         </For>
+
+        <Show when={props.nativeQuotaAlerts}>{renderQuotaAlertSection()}</Show>
 
         <section class="qg-group" aria-labelledby="qg-settings-dashboard">
           <h2 class="qg-group__title" id="qg-settings-dashboard">

@@ -606,6 +606,7 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid openrouter-key-v1 response",
     });
   });
@@ -638,6 +639,7 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid openrouter-key-v1 response",
     });
   });
@@ -703,6 +705,7 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid openrouter-key-v1 response",
     });
   });
@@ -716,6 +719,7 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid openrouter-key-v1 response",
     });
   });
@@ -777,6 +781,7 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid openrouter-key-v1 response",
     });
   });
@@ -798,6 +803,7 @@ describe("quota provider remote runtime", () => {
       fetchRemoteQuotaProvider(source({ format: "openrouter-key-v1" }), "secret"),
     ).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid openrouter-key-v1 response",
     });
   });
@@ -831,6 +837,7 @@ describe("quota provider remote runtime", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
     await expect(fetchRemoteQuotaProvider(source(), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error,
     });
   });
@@ -851,11 +858,34 @@ describe("quota provider remote runtime", () => {
 
     await expect(fetchRemoteQuotaProvider(source(), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "credentials",
       error: "HTTP 401",
     });
     await expect(fetchRemoteQuotaProvider(source(), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Failed to read accounting data",
+    });
+  });
+
+  it("classifies 403 as credentials and other HTTP failures as provider API", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response("forbidden", { status: 403 }))
+        .mockResolvedValueOnce(new Response("boom", { status: 500 })),
+    );
+
+    await expect(fetchRemoteQuotaProvider(source(), "secret")).resolves.toEqual({
+      success: false,
+      failureCategory: "credentials",
+      error: "HTTP 403",
+    });
+    await expect(fetchRemoteQuotaProvider(source(), "secret")).resolves.toEqual({
+      success: false,
+      failureCategory: "provider_api",
+      error: "HTTP 500",
     });
   });
 
@@ -873,6 +903,7 @@ describe("quota provider remote runtime", () => {
     );
     await expect(fetchRemoteQuotaProvider(source(), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Response exceeded 262144 bytes",
     });
   });
@@ -896,6 +927,7 @@ describe("quota provider remote runtime", () => {
 
     await expect(pending).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Request timeout after 0s",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -926,6 +958,7 @@ describe("quota provider remote runtime", () => {
 
     await expect(pending).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Request timeout after 0s",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -942,6 +975,7 @@ describe("quota provider remote runtime", () => {
     );
     await expect(fetchRemoteQuotaProvider(source(), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Response exceeded 262144 bytes",
     });
   });
@@ -1110,6 +1144,7 @@ describe("quota provider remote runtime", () => {
     const result = await fetchRemoteQuotaProvider(jsonSource(adapter), "secret-key");
     expect(result).toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid json-v1 response: adapter.mappings[0].metric.value had wrong type at row 0",
     });
     expect(JSON.stringify(result)).not.toContain("SUPER_SECRET_BODY_VALUE");
@@ -1185,6 +1220,7 @@ describe("quota provider remote runtime", () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ balance })));
       await expect(fetchRemoteQuotaProvider(jsonSource(adapter), "secret")).resolves.toEqual({
         success: false,
+        failureCategory: "provider_api",
         error: "Invalid json-v1 response: adapter.mappings[0].metric.value had wrong type at row 0",
       });
     }
@@ -1192,6 +1228,7 @@ describe("quota provider remote runtime", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ balance: "1".repeat(17) })));
     await expect(fetchRemoteQuotaProvider(jsonSource(adapter), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error:
         "Invalid json-v1 response: adapter.mappings[0].metric.value exceeded the numeric magnitude limit at row 0",
     });
@@ -1261,6 +1298,7 @@ describe("quota provider remote runtime", () => {
 
     await expect(fetchRemoteQuotaProvider(jsonSource(adapter), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid json-v1 response: selected rows must contain 1-100 elements",
     });
   });
@@ -1291,6 +1329,7 @@ describe("quota provider remote runtime", () => {
 
     await expect(fetchRemoteQuotaProvider(jsonSource(adapter), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid json-v1 response: more than 100 entries were produced",
     });
   });
@@ -1313,6 +1352,7 @@ describe("quota provider remote runtime", () => {
 
     await expect(fetchRemoteQuotaProvider(jsonSource(adapter), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error:
         "Invalid json-v1 response: adapter.mappings[0].metric.limit produced a non-finite percentage at row 0",
     });
@@ -1336,6 +1376,7 @@ describe("quota provider remote runtime", () => {
 
     await expect(fetchRemoteQuotaProvider(jsonSource(adapter), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error:
         "Invalid json-v1 response: adapter.mappings[0].metric.budget produced a percentage beyond the numeric magnitude limit at row 0",
     });
@@ -1376,6 +1417,7 @@ describe("quota provider remote runtime", () => {
 
     await expect(fetchRemoteQuotaProvider(jsonSource(adapter), "secret")).resolves.toEqual({
       success: false,
+      failureCategory: "provider_api",
       error: "Invalid json-v1 response: nesting depth exceeded 32",
     });
   });

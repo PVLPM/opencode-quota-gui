@@ -36,6 +36,7 @@ import {
   type DashboardRpcErrorDetails,
   type DashboardRpcEventData,
   type DashboardRpcMethod,
+  type DashboardRpcQuotaNotificationData,
   type DashboardRpcWatchInput,
   type DashboardRpcWatchOutput,
 } from "../rpc.js";
@@ -47,12 +48,15 @@ import {
   sanitizeDashboardErrorDetails,
 } from "./dashboard-errors.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
+import type { QuotaNotificationObserver } from "./quota-notification-observer.js";
 import type { SnapshotService } from "./snapshot-service.js";
 
 /** The host-owned dependencies every transport attaches to. */
 export interface DashboardRpcRuntime {
   readonly snapshots: SnapshotService;
   readonly settings: GuiSettingsStore;
+  /** Optional host observer; its safe events use their own dashboard channel. */
+  readonly quotaNotifications?: Pick<QuotaNotificationObserver, "subscribe">;
 }
 
 /** The complete OpenCode location whose event stream this transport serves. */
@@ -113,6 +117,7 @@ interface SharedMember {
 interface SharedEntry {
   readonly members: SharedMember[];
   unsubscribe: () => void;
+  unsubscribeNotifications?: () => void;
 }
 
 const SHARED_REGISTRY_KEY = Symbol.for("opencode-quota-gui/dashboard-rpc-registry/v3");
@@ -312,6 +317,7 @@ function joinSharedEntry(
   snapshots: SnapshotService,
   key: string,
   member: SharedMember,
+  notifications?: Pick<QuotaNotificationObserver, "subscribe">,
 ): SharedEntry {
   const registry = sharedRegistry();
   let byKey = registry.get(snapshots);
@@ -323,6 +329,7 @@ function joinSharedEntry(
   const existing = byKey.get(key);
   if (existing) {
     existing.members.push(member);
+    attachNotificationSubscription(existing, notifications);
     return existing;
   }
 
@@ -332,7 +339,18 @@ function joinSharedEntry(
   });
   entry = { members: [member], unsubscribe };
   byKey.set(key, entry);
+  attachNotificationSubscription(entry, notifications);
   return entry;
+}
+
+function attachNotificationSubscription(
+  entry: SharedEntry,
+  notifications?: Pick<QuotaNotificationObserver, "subscribe">,
+): void {
+  if (!notifications || entry.unsubscribeNotifications) return;
+  entry.unsubscribeNotifications = notifications.subscribe((data) => {
+    emitQuotaNotification(entry, data);
+  });
 }
 
 /** Delivers one invalidation through the first registration this setup owns. */
@@ -344,6 +362,16 @@ function emitInvalidation(entry: SharedEntry, event: DashboardEvent): void {
   // Events are live-only; a disconnected client re-subscribes and refetches.
   // A disposed SDK emitter still publishes, so this does not branch on failure.
   void member.registration.events.emit("invalidated", data).catch(() => undefined);
+}
+
+/**
+ * Delivers one safe quota notification on its own event. One emission is enough:
+ * the host event bus fans it out to every app window, each with the same id.
+ */
+function emitQuotaNotification(entry: SharedEntry, data: DashboardRpcQuotaNotificationData): void {
+  const member = entry.members.find((candidate) => candidate.alive);
+  if (member === undefined) return;
+  void member.registration.events.emit("quotaNotification", data).catch(() => undefined);
 }
 
 /** Releases one setup's held viewers and, on the last member, the subscription. */
@@ -361,6 +389,8 @@ function leaveSharedEntry(
   member.heldWatches.clear();
   if (entry.members.length > 0) return;
   entry.unsubscribe();
+  entry.unsubscribeNotifications?.();
+  entry.unsubscribeNotifications = undefined;
   const byKey = sharedRegistry().get(snapshots);
   if (byKey?.get(key) === entry) byKey.delete(key);
 }
@@ -383,7 +413,7 @@ export async function registerDashboardRpc(
   const heldWatches = new Set<() => void>();
   const registration = await rpc.register(DashboardRpc, createHandlers(runtime, heldWatches));
   const member: SharedMember = { registration, heldWatches, alive: true };
-  const entry = joinSharedEntry(runtime.snapshots, key, member);
+  const entry = joinSharedEntry(runtime.snapshots, key, member, runtime.quotaNotifications);
 
   let disposed = false;
   return {

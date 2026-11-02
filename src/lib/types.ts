@@ -2,6 +2,7 @@
  * Type definitions for the opencode-quota-gui product.
  */
 
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { QuotaFormatStyle } from "./quota-format-style.js";
 import { DEFAULT_QUOTA_FORMAT_STYLE } from "./quota-format-style.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
@@ -158,6 +159,16 @@ export interface QuotaToastConfig {
   resetNotifications: QuotaResetNotificationsConfig;
 
   /**
+   * Percent of a quota window remaining at or below which quota is considered
+   * low. Stored as remaining even when the UI displays used percentages.
+   * Default: 10.
+   */
+  lowQuotaThresholdRemainingPercent: number;
+
+  /** Minutes before an identical quota alert may repeat. Default: 30. */
+  duplicateCooldownMinutes: number;
+
+  /**
    * Where TUI quota slash command reports appear: "dialog" shows only the popup,
    * "inline" keeps the report in the chat. Web and Desktop always show it in the chat.
    */
@@ -301,6 +312,8 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
     enabled: false,
     windows: ["weekly"],
   },
+  lowQuotaThresholdRemainingPercent: 10,
+  duplicateCooldownMinutes: 30,
   tuiCommandDisplay: "dialog",
   formatStyle: DEFAULT_QUOTA_FORMAT_STYLE,
   percentDisplayMode: "remaining",
@@ -764,6 +777,7 @@ export interface CopilotEnterpriseUsageResult {
 export interface GoogleAccountError {
   email: string;
   error: string;
+  failureCategory?: ProviderFailureCategory;
 }
 
 export interface GeminiCliQuotaBucket {
@@ -836,6 +850,8 @@ export interface QuotaError {
   error: string;
   /** Whether retrying later may succeed without changing credentials or configuration. */
   retryable?: boolean;
+  /** Source-assigned safe category; absence means unknown and consumers fail closed. */
+  failureCategory?: ProviderFailureCategory;
 }
 
 /** Combined quota result */

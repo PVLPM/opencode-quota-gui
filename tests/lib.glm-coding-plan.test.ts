@@ -96,6 +96,7 @@ describe("GLM coding plan quota contract", () => {
       await expect(provider.query(), `${provider.label} invalid auth`).resolves.toEqual({
         success: false,
         error,
+        failureCategory: "credentials",
       });
     }
 
@@ -137,6 +138,36 @@ describe("GLM coding plan quota contract", () => {
       await expect(provider.query(), provider.label).resolves.toEqual({
         success: false,
         error: `${provider.httpErrorPrefix} 500: ${"x".repeat(120)}`,
+        failureCategory: "provider_api",
+      });
+    }
+  });
+
+  it.each([
+    [401, "credentials"],
+    [403, "credentials"],
+    [500, "provider_api"],
+  ])("keeps HTTP %i classified as %s when the error body cannot be read", async (status, category) => {
+    for (const provider of providers) {
+      configure(provider);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          async () =>
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.error(new Error("body stream failed"));
+                },
+              }),
+              { status },
+            ),
+        ) as any,
+      );
+
+      await expect(provider.query(), `${provider.label} ${status}`).resolves.toMatchObject({
+        success: false,
+        failureCategory: category,
       });
     }
   });
@@ -148,6 +179,7 @@ describe("GLM coding plan quota contract", () => {
       await expect(provider.query(), `${provider.label} null limits`).resolves.toEqual({
         success: false,
         error: "Invalid quota data",
+        failureCategory: "provider_api",
       });
 
       configure(provider);
@@ -155,6 +187,7 @@ describe("GLM coding plan quota contract", () => {
       await expect(provider.query(), `${provider.label} object limits`).resolves.toEqual({
         success: false,
         error: "Invalid quota data",
+        failureCategory: "provider_api",
       });
     }
   });
@@ -202,6 +235,7 @@ describe("GLM coding plan quota contract", () => {
       await expect(provider.query(), `${provider.label} network`).resolves.toEqual({
         success: false,
         error: "network down",
+        failureCategory: "provider_api",
       });
 
       vi.useFakeTimers();
@@ -212,6 +246,7 @@ describe("GLM coding plan quota contract", () => {
       await expect(result, `${provider.label} timeout`).resolves.toEqual({
         success: false,
         error: "Request timeout after 1s",
+        failureCategory: "provider_api",
       });
       vi.useRealTimers();
     }
@@ -235,6 +270,7 @@ describe("provider-specific GLM envelopes", () => {
       await expect(queryZaiQuota()).resolves.toEqual({
         success: false,
         error: testCase.error,
+        failureCategory: "provider_api",
       });
     }
   });
@@ -476,6 +512,7 @@ describe("provider-specific GLM envelopes", () => {
     await expect(queryZhipuQuota()).resolves.toEqual({
       success: false,
       error: "Invalid quota data",
+      failureCategory: "provider_api",
     });
   });
 });

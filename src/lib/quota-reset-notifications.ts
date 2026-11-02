@@ -11,7 +11,9 @@ import { classifyQuotaWindowText, type QuotaWindowKind } from "./quota-entry-dis
 import type { QuotaResetWindow } from "./types.js";
 
 const STATE_VERSION = 2;
-const MAX_TRANSITION_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** Pure shared reset-transition age limit. */
+export const MAX_TRANSITION_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_OBSERVATION_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const LOCK_RETRY_DELAY_MS = 20;
 const LOCK_TIMEOUT_MS = 2_000;
@@ -28,7 +30,8 @@ const WINDOW_KINDS: Readonly<Record<QuotaResetWindow, QuotaWindowKind>> = {
   yearly: "year",
 };
 
-type ResetObservation = {
+/** One pure reset observation, shared with the native notification detector. */
+export type ResetObservation = {
   resetAtMs: number;
   percentRemaining: number;
   observedAtMs: number;
@@ -259,6 +262,10 @@ async function acquireStateLock(statePath: string): Promise<() => Promise<void>>
   }
 }
 
+/**
+ * Pure reset proof. The legacy notifier depends on this exact predicate, so do
+ * not fork it.
+ */
 function didReset(previous: ResetObservation, current: ResetObservation, nowMs: number): boolean {
   const transitionAge = nowMs - previous.resetAtMs;
   return (
@@ -273,7 +280,11 @@ function didReset(previous: ResetObservation, current: ResetObservation, nowMs: 
   );
 }
 
-function updateObservation(
+/**
+ * Pure reset observation update. Exported for the native quota notification
+ * detector; keep these exact semantics for the legacy notifier.
+ */
+export function updateObservation(
   previous: ResetObservation | undefined,
   current: ResetObservation,
   nowMs: number,

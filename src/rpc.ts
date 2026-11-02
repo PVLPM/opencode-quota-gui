@@ -207,6 +207,17 @@ export type DashboardRpcEventData = {
   at: number;
   scope?: "visibility";
 };
+export type DashboardRpcQuotaNotificationKind = "low" | "exhausted" | "reset" | "provider-error";
+/**
+ * Safe quota notification payload. The host writes the wording; no raw provider
+ * message, label, path or credential is ever carried.
+ */
+export type DashboardRpcQuotaNotificationData = {
+  id: string;
+  kind: DashboardRpcQuotaNotificationKind;
+  title: string;
+  description?: string;
+};
 export type DashboardRpcErrorDetails = {
   key?: string;
   reason?: string;
@@ -264,6 +275,23 @@ function hasControlCharacters(value: string): boolean {
   return false;
 }
 
+/** Bounded single-line text for a user-facing notification event. */
+function isSafeNotificationText(value: unknown, maxLength: number): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    !hasControlCharacters(value)
+  );
+}
+
+const QUOTA_NOTIFICATION_KINDS: readonly DashboardRpcQuotaNotificationKind[] = [
+  "low",
+  "exhausted",
+  "reset",
+  "provider-error",
+];
+
 function isValidResourceId(value: string): boolean {
   return value.length > 0 && value.length <= MAX_RESOURCE_ID_LENGTH && !hasControlCharacters(value);
 }
@@ -300,6 +328,30 @@ export const DashboardRpc = {
         if (!Number.isFinite(value.at)) return "at must be a finite number";
         if (value.scope !== undefined && value.scope !== "visibility") {
           return "scope must be visibility";
+        }
+        return null;
+      }),
+    },
+    quotaNotification: {
+      schema: eventSchema<DashboardRpcQuotaNotificationData>((value) => {
+        if (!isObject(value)) return "event must be an object";
+        if (!hasOnlyKeys(value, ["id", "kind", "title", "description"])) {
+          return "event must contain only id, kind, title and description";
+        }
+        if (!isSafeNotificationText(value.id, 256)) {
+          return "id must be a safe non-empty string";
+        }
+        if (
+          typeof value.kind !== "string" ||
+          !(QUOTA_NOTIFICATION_KINDS as readonly string[]).includes(value.kind)
+        ) {
+          return "kind must be a quota notification kind";
+        }
+        if (!isSafeNotificationText(value.title, 200)) {
+          return "title must be a safe non-empty string";
+        }
+        if (value.description !== undefined && !isSafeNotificationText(value.description, 1024)) {
+          return "description must be a safe non-empty string when present";
         }
         return null;
       }),
@@ -450,3 +502,23 @@ export const DASHBOARD_HEALTH: DashboardHealth = {
   app: "opencode-quota-gui",
   contractVersion: DASHBOARD_CONTRACT_VERSION,
 };
+
+/**
+ * Runtime guard for the event seam. It mirrors the RPC schema so a malformed or
+ * unsafe payload is dropped before it can reach a window's presenter.
+ */
+export function isDashboardRpcQuotaNotificationData(
+  value: unknown,
+): value is DashboardRpcQuotaNotificationData {
+  if (!isObject(value)) return false;
+  if (!hasOnlyKeys(value, ["id", "kind", "title", "description"])) return false;
+  if (!isSafeNotificationText(value.id, 256)) return false;
+  if (
+    typeof value.kind !== "string" ||
+    !(QUOTA_NOTIFICATION_KINDS as readonly string[]).includes(value.kind)
+  ) {
+    return false;
+  }
+  if (!isSafeNotificationText(value.title, 200)) return false;
+  return value.description === undefined || isSafeNotificationText(value.description, 1024);
+}

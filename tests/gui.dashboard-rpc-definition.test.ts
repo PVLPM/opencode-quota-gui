@@ -61,7 +61,7 @@ describe("dashboard RPC definition", () => {
       "openSettingsFile",
       "watch",
     ]);
-    expect(Object.keys(DashboardRpc.events)).toEqual(["invalidated"]);
+    expect(Object.keys(DashboardRpc.events)).toEqual(["invalidated", "quotaNotification"]);
   });
 
   it("uses Standard Schema v1 validators that carry no runtime types", () => {
@@ -274,6 +274,42 @@ describe("dashboard RPC definition", () => {
       schema,
       { topic: "quota.changed", at: 1, extra: true },
       "event must contain only topic, at and scope",
+    );
+  });
+
+  it("validates safe quota notification events on their own channel", async () => {
+    const schema = DashboardRpc.events.quotaNotification.schema;
+    await expectAccepted(schema, {
+      id: `${"a".repeat(64)}:1762084920000`,
+      kind: "low",
+      title: "OpenAI quota low",
+      description: "work: 5-hour window: 5% remaining.",
+    });
+    await expectAccepted(schema, {
+      id: "opaque",
+      kind: "provider-error",
+      title: "OpenAI quota error",
+    });
+    await expectRejected(schema, null, "event must be an object");
+    await expectRejected(
+      schema,
+      { id: "x", kind: "nope", title: "T" },
+      "kind must be a quota notification kind",
+    );
+    await expectRejected(
+      schema,
+      { id: "x", kind: "low", title: "" },
+      "title must be a safe non-empty string",
+    );
+    await expectRejected(
+      schema,
+      { id: "x", kind: "low", title: "T", description: "line\nbreak" },
+      "description must be a safe non-empty string when present",
+    );
+    await expectRejected(
+      schema,
+      { id: "x", kind: "low", title: "T", extra: "raw provider body" },
+      "event must contain only id, kind, title and description",
     );
   });
 

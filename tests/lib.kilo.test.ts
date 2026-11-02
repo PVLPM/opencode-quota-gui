@@ -301,6 +301,7 @@ describe("Kilo Gateway API client", () => {
     const error = out && !out.success ? out.error : "";
 
     expect(error).toBe("Kilo Gateway state API error 401: Unauthorized [redacted]");
+    expect(out).toMatchObject({ success: false, failureCategory: "credentials" });
     expect(mocks.fetchWithTimeout).toHaveBeenCalledTimes(1);
   });
 
@@ -320,6 +321,7 @@ describe("Kilo Gateway API client", () => {
     );
     expect(error).not.toContain("kilo-secret-key");
     expect(error).not.toContain("\u001b");
+    expect(out).toMatchObject({ success: false, failureCategory: "provider_api" });
   });
 
   it("rejects an invalid balance without inventing quota data", async () => {
@@ -330,6 +332,7 @@ describe("Kilo Gateway API client", () => {
       success: false,
       error:
         "Kilo Gateway has no active Kilo Pass subscription; balance fallback failed: Kilo Gateway balance API returned an invalid balance",
+      failureCategory: "provider_api",
     });
   });
 

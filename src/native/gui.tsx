@@ -10,12 +10,13 @@ import {
   usePlugin,
 } from "@opencode/plugin/gui";
 import type { JSX } from "solid-js";
-import { onCleanup } from "solid-js";
+import { createEffect, onCleanup } from "solid-js";
 import productCss from "../ui/styles.css?inline";
 import { createNativeDashboardClient } from "./dashboard-client.js";
 import nativeCss from "./native.css?inline";
 import { DashboardPanel } from "./panel.js";
 import { revealDashboardPanel } from "./panel-open.js";
+import { startQuotaNotificationSubscription, windowHasFocus } from "./quota-notifications.js";
 import { createGuiRpcCaller } from "./rpc.js";
 import headerCss from "./session-header.css?inline";
 import { NativeSessionHeader } from "./session-header.js";
@@ -99,6 +100,25 @@ export default Plugin.define({
     ctx.add(Style, productCss);
     ctx.add(Style, nativeCss);
     ctx.add(Style, headerCss);
+
+    // Notifications are a window-lifetime concern: setup runs once per window,
+    // so alerts keep arriving while the panel, slot and settings page are
+    // closed. The host's builtin-server `connected` ref is the only recovery
+    // signal; no timer or held call keeps this alive.
+    const rpc = createGuiRpcCaller(ctx);
+    const quotaNotifications = startQuotaNotificationSubscription({
+      events: rpc.events,
+      host: ctx,
+      focused: windowHasFocus,
+      signal: ctx.signal,
+    });
+    const hostConnected = () =>
+      ctx.servers
+        .list()
+        .map((id) => ctx.servers.get(id))
+        .find((server) => server?.builtin)?.connected ?? true;
+    createEffect(() => quotaNotifications.setConnected(hostConnected()));
+    onCleanup(quotaNotifications.stop);
 
     ctx.add(Slot, {
       at: "session.header",

@@ -5,6 +5,10 @@
  * Auth: Bearer token in Authorization header.
  */
 
+import {
+  type ProviderFailureCategory,
+  providerFailureCategoryForHttpStatus,
+} from "../contracts/provider-failure.js";
 import { isCanonicalAccountingDecimal } from "./accounting-format.js";
 import { resolveDeepSeekApiKey } from "./deepseek-auth.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
@@ -108,7 +112,11 @@ function parseDeepSeekBalance(payload: unknown): DeepSeekBalanceResult {
 async function fetchDeepSeekBalance(
   apiKey: string,
   requestTimeoutMs?: number,
-): Promise<{ success: true; data: DeepSeekBalanceResult } | { success: false; message: string }> {
+): Promise<
+  | { success: true; data: DeepSeekBalanceResult }
+  | { success: false; message: string; failureCategory: ProviderFailureCategory }
+> {
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(DEEPSEEK_BALANCE_URL, {
       request: {
@@ -120,11 +128,13 @@ async function fetchDeepSeekBalance(
       },
       timeoutMs: requestTimeoutMs,
       consume: async (response) => {
+        responseStatus = response.status;
         if (!response.ok) {
           const text = await response.text();
           return {
             success: false as const,
             message: `DeepSeek API error ${response.status}: ${sanitizeDisplaySnippet(text, 120)}`,
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
 
@@ -138,6 +148,10 @@ async function fetchDeepSeekBalance(
     return {
       success: false,
       message: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }
@@ -156,7 +170,11 @@ export async function queryDeepSeekBalance(
   const result = await fetchDeepSeekBalance(resolved.key, options.requestTimeoutMs);
 
   if (!result.success) {
-    return { success: false, error: result.message };
+    return {
+      success: false,
+      error: result.message,
+      failureCategory: result.failureCategory,
+    };
   }
 
   return {

@@ -1,3 +1,4 @@
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import type {
   AccountingMetadata,
   QuotaProvider,
@@ -101,7 +102,11 @@ export function createGlmCodingPlanProvider(params: {
   queryQuota: (params: {
     requestTimeoutMs?: number;
     apiKey?: string;
-  }) => Promise<GlmQuotaResult | { success: false; error: string } | null>;
+  }) => Promise<
+    | GlmQuotaResult
+    | { success: false; error: string; failureCategory?: ProviderFailureCategory }
+    | null
+  >;
   matchesCurrentModel: (model: string) => boolean;
 }): QuotaProvider {
   return {
@@ -141,7 +146,11 @@ export function createGlmCodingPlanProvider(params: {
               row,
               result:
                 auth.state === "invalid"
-                  ? { success: false as const, error: auth.error }
+                  ? {
+                      success: false as const,
+                      error: auth.error,
+                      failureCategory: "credentials" as const,
+                    }
                   : await params.queryQuota({
                       requestTimeoutMs: ctx.config?.requestTimeoutMs,
                       apiKey: auth.apiKey,

@@ -28,6 +28,7 @@ export function LiveSettingsRoute(props: {
   catalog: () => VisibilityCatalog;
   toaster: Toaster;
   stale: () => boolean;
+  nativeQuotaAlerts?: boolean;
 }): JSX.Element {
   return createComponent(SettingsRoute, {
     client: props.client,
@@ -39,6 +40,7 @@ export function LiveSettingsRoute(props: {
     get stale() {
       return props.stale();
     },
+    nativeQuotaAlerts: props.nativeQuotaAlerts,
   });
 }
 

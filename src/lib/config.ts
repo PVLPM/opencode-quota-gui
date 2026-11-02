@@ -65,6 +65,8 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "enableToast",
   "resetNotifications.enabled",
   "resetNotifications.windows",
+  "lowQuotaThresholdRemainingPercent",
+  "duplicateCooldownMinutes",
   "tuiCommandDisplay",
   "formatStyle",
   "percentDisplayMode",
@@ -199,6 +201,8 @@ type ValidatedQuotaToastPatch = {
   enabled?: boolean;
   enableToast?: boolean;
   resetNotifications?: QuotaResetNotificationsPatch;
+  lowQuotaThresholdRemainingPercent?: number;
+  duplicateCooldownMinutes?: number;
   tuiCommandDisplay?: TuiCommandDisplay;
   formatStyle?: QuotaToastConfig["formatStyle"];
   percentDisplayMode?: PercentDisplayMode;
@@ -427,6 +431,16 @@ const QUOTA_RESET_WINDOWS: readonly QuotaResetWindow[] = [
   "monthly",
   "yearly",
 ];
+
+/** Quota alert threshold: a whole percent remaining, from 1 through 100. */
+export function isValidLowQuotaThresholdRemainingPercent(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 100;
+}
+
+/** Duplicate alert cooldown: a whole number of minutes, zero or more. */
+export function isValidDuplicateCooldownMinutes(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
 
 function extractQuotaResetNotificationsPatch(
   value: unknown,
@@ -810,6 +824,24 @@ function extractValidatedQuotaToastPatch(
     if (resetNotifications) patch.resetNotifications = resetNotifications;
   }
 
+  if (hasOwnKey(quotaToastConfig, "lowQuotaThresholdRemainingPercent")) {
+    if (
+      isValidLowQuotaThresholdRemainingPercent(quotaToastConfig.lowQuotaThresholdRemainingPercent)
+    ) {
+      patch.lowQuotaThresholdRemainingPercent = quotaToastConfig.lowQuotaThresholdRemainingPercent;
+    } else {
+      reportIssue?.("lowQuotaThresholdRemainingPercent", "expected an integer between 1 and 100");
+    }
+  }
+
+  if (hasOwnKey(quotaToastConfig, "duplicateCooldownMinutes")) {
+    if (isValidDuplicateCooldownMinutes(quotaToastConfig.duplicateCooldownMinutes)) {
+      patch.duplicateCooldownMinutes = quotaToastConfig.duplicateCooldownMinutes;
+    } else {
+      reportIssue?.("duplicateCooldownMinutes", "expected an integer of 0 or more");
+    }
+  }
+
   if (hasOwnKey(quotaToastConfig, "tuiCommandDisplay")) {
     if (isValidTuiCommandDisplay(quotaToastConfig.tuiCommandDisplay)) {
       patch.tuiCommandDisplay = quotaToastConfig.tuiCommandDisplay;
@@ -1116,6 +1148,16 @@ function applyValidatedQuotaToastPatch(
       config.resetNotifications.windows = [...patch.resetNotifications.windows!];
       applySettingSource(settingSources, "resetNotifications.windows", sourcePath);
     }
+  }
+
+  if (hasOwnKey(patch, "lowQuotaThresholdRemainingPercent")) {
+    config.lowQuotaThresholdRemainingPercent = patch.lowQuotaThresholdRemainingPercent!;
+    applySettingSource(settingSources, "lowQuotaThresholdRemainingPercent", sourcePath);
+  }
+
+  if (hasOwnKey(patch, "duplicateCooldownMinutes")) {
+    config.duplicateCooldownMinutes = patch.duplicateCooldownMinutes!;
+    applySettingSource(settingSources, "duplicateCooldownMinutes", sourcePath);
   }
 
   if (hasOwnKey(patch, "tuiCommandDisplay")) {

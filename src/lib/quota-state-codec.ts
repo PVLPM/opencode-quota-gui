@@ -1,3 +1,4 @@
+import { isProviderFailureCategory } from "../contracts/provider-failure.js";
 import { accountingUnitsEqual, isCanonicalAccountingDecimal } from "./accounting-format.js";
 import { sanitizeQuotaProviderResult, sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import type {
@@ -338,10 +339,11 @@ function isQuotaToastEntry(value: unknown, safeText: boolean): value is QuotaToa
 function isQuotaToastError(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(value, ["label", "message", "retryable", "kind", "sourceId"]) &&
+    hasOnlyKeys(value, ["label", "message", "retryable", "failureCategory", "kind", "sourceId"]) &&
     typeof value.label === "string" &&
     typeof value.message === "string" &&
     (value.retryable === undefined || typeof value.retryable === "boolean") &&
+    (value.failureCategory === undefined || isProviderFailureCategory(value.failureCategory)) &&
     (value.kind === undefined || value.kind === "intentional-filter") &&
     (value.sourceId === undefined || typeof value.sourceId === "string")
   );

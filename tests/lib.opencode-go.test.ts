@@ -214,6 +214,7 @@ describe("queryOpenCodeGoQuota", () => {
       success: false,
       error:
         "Invalid OpenCode Go API response: weekly percent must be a finite number from 0 to 100",
+      failureCategory: "provider_api",
     });
   });
 
@@ -227,6 +228,7 @@ describe("queryOpenCodeGoQuota", () => {
       success: false,
       error:
         "Invalid OpenCode Go API response: monthly resetsAt must be an offset-qualified ISO timestamp",
+      failureCategory: "provider_api",
     });
   });
 
@@ -235,6 +237,7 @@ describe("queryOpenCodeGoQuota", () => {
     await expect(queryOpenCodeGoQuota("token")).resolves.toEqual({
       success: false,
       error: "Invalid OpenCode Go API response: root must be an object",
+      failureCategory: "provider_api",
     });
   });
 
@@ -243,6 +246,7 @@ describe("queryOpenCodeGoQuota", () => {
     await expect(queryOpenCodeGoQuota("token")).resolves.toEqual({
       success: false,
       error: "Invalid OpenCode Go API response: usage must be an object",
+      failureCategory: "provider_api",
     });
   });
 
@@ -254,6 +258,7 @@ describe("queryOpenCodeGoQuota", () => {
     await expect(queryOpenCodeGoQuota("token")).resolves.toEqual({
       success: false,
       error: `Invalid OpenCode Go API response: ${window} window is missing or malformed`,
+      failureCategory: "provider_api",
     });
   });
 
@@ -293,6 +298,7 @@ describe("queryOpenCodeGoQuota", () => {
       success: false,
       error:
         "Invalid OpenCode Go API response: monthly percent must be a finite number from 0 to 100",
+      failureCategory: "provider_api",
     });
   });
 
@@ -315,6 +321,7 @@ describe("queryOpenCodeGoQuota", () => {
       success: false,
       error:
         "Invalid OpenCode Go API response: rolling resetsAt must be an offset-qualified ISO timestamp",
+      failureCategory: "provider_api",
     });
   });
 
@@ -334,6 +341,7 @@ describe("queryOpenCodeGoQuota", () => {
       success: false,
       error:
         "Invalid OpenCode Go API response: body is not valid JSON: Unexpected [redacted] end [redacted] of JSON input",
+      failureCategory: "provider_api",
     });
   });
 
@@ -343,7 +351,11 @@ describe("queryOpenCodeGoQuota", () => {
 
     const result = await queryOpenCodeGoQuota(token);
 
-    expect(result).toMatchObject({ success: false, retryable: false });
+    expect(result).toMatchObject({
+      success: false,
+      retryable: false,
+      failureCategory: "credentials",
+    });
     expect(JSON.stringify(result)).not.toContain(token);
     expect((result as { error: string }).error).toContain("OpenCode Go API error 401: [redacted]");
     expect((result as { error: string }).error.length).toBeLessThanOrEqual(
@@ -379,7 +391,11 @@ describe("queryOpenCodeGoQuota", () => {
 
     const result = await queryOpenCodeGoQuota("token");
 
-    expect(result).toMatchObject({ success: false, retryable: false });
+    expect(result).toMatchObject({
+      success: false,
+      retryable: false,
+      failureCategory: "credentials",
+    });
     expect((result as { error: string }).error).toContain(`OpenCode Go API error ${status}`);
     expect((result as { notSubscribed?: true }).notSubscribed).toBeUndefined();
   });
@@ -396,7 +412,11 @@ describe("queryOpenCodeGoQuota", () => {
 
     const result = await queryOpenCodeGoQuota(token);
 
-    expect(result).toMatchObject({ success: false, retryable: true });
+    expect(result).toMatchObject({
+      success: false,
+      retryable: true,
+      failureCategory: "provider_api",
+    });
     expect(JSON.stringify(result)).not.toContain(token);
     expect((result as { error: string }).error).toContain(
       "OpenCode Go API error 503: body [redacted]",
@@ -420,7 +440,11 @@ describe("queryOpenCodeGoQuota", () => {
 
     const result = await queryOpenCodeGoQuota(token);
 
-    expect(result).toMatchObject({ success: false, retryable: true });
+    expect(result).toMatchObject({
+      success: false,
+      retryable: true,
+      failureCategory: "provider_api",
+    });
     expect(JSON.stringify(result)).not.toContain(token);
     expect((result as { error: string }).error).toContain("[redacted]");
   });
@@ -437,6 +461,7 @@ describe("queryOpenCodeGoQuota", () => {
     expect(result).toEqual({
       success: false,
       error: "Invalid OpenCode Go API response: rolling status is not ok: [redacted] retry",
+      failureCategory: "provider_api",
     });
   });
 });
@@ -564,6 +589,7 @@ describe("queryOpenCodeGoConsoleStatus", () => {
     await expect(queryOpenCodeGoConsoleStatus({ accessToken: "console-access" })).resolves.toEqual({
       success: false,
       error: "Invalid OpenCode Go API response: console rolling resetsAt is missing or invalid",
+      failureCategory: "provider_api",
     });
   });
 
@@ -616,16 +642,17 @@ describe("queryOpenCodeGoConsoleStatus", () => {
   });
 
   it.each([
-    [401, false],
-    [403, false],
-    [500, true],
-  ])("keeps HTTP %s as a failed Console request", async (status, retryable) => {
+    [401, false, "credentials"],
+    [403, false, "credentials"],
+    [500, true, "provider_api"],
+  ])("keeps HTTP %s as a failed Console request", async (status, retryable, failureCategory) => {
     mocks.fetchResponse.mockResolvedValueOnce({ ok: false, status });
 
     await expect(queryOpenCodeGoConsoleStatus({ accessToken: "console-access" })).resolves.toEqual({
       success: false,
       error: `OpenCode Console API error ${status} (/api/go/status)`,
       retryable,
+      failureCategory,
     });
   });
 });

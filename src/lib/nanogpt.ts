@@ -6,6 +6,10 @@
  * - https://nano-gpt.com/api/check-balance
  */
 
+import {
+  type ProviderFailureCategory,
+  providerFailureCategoryForHttpStatus,
+} from "../contracts/provider-failure.js";
 import { isCanonicalAccountingDecimal } from "./accounting-format.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
@@ -50,7 +54,11 @@ export type NanoGptResult =
       success: true;
       subscription?: NanoGptSubscription;
       balance?: NanoGptBalance;
-      endpointErrors?: Array<{ endpoint: NanoGptEndpoint; message: string }>;
+      endpointErrors?: Array<{
+        endpoint: NanoGptEndpoint;
+        message: string;
+        failureCategory?: ProviderFailureCategory;
+      }>;
     }
   | QuotaError
   | null;
@@ -239,7 +247,12 @@ async function fetchNanoGptUsage(
   requestTimeoutMs?: number,
 ): Promise<
   | { success: true; subscription: NanoGptSubscription }
-  | { success: false; message: string; retryable: boolean }
+  | {
+      success: false;
+      message: string;
+      retryable: boolean;
+      failureCategory: ProviderFailureCategory;
+    }
 > {
   try {
     return await fetchWithTimeout(NANOGPT_USAGE_URL, {
@@ -260,6 +273,7 @@ async function fetchNanoGptUsage(
             success: false as const,
             message: `NanoGPT API error ${response.status}: ${sanitizeDisplaySnippet(text, 120)}`,
             retryable: isRetryableHttpStatus(response.status),
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
 
@@ -274,6 +288,7 @@ async function fetchNanoGptUsage(
       success: false,
       message: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
       retryable: true,
+      failureCategory: "provider_api",
     };
   }
 }
@@ -283,7 +298,12 @@ async function fetchNanoGptBalance(
   requestTimeoutMs?: number,
 ): Promise<
   | { success: true; balance: NanoGptBalance; fieldErrors: string[] }
-  | { success: false; message: string; retryable: boolean }
+  | {
+      success: false;
+      message: string;
+      retryable: boolean;
+      failureCategory: ProviderFailureCategory;
+    }
 > {
   try {
     return await fetchWithTimeout(NANOGPT_BALANCE_URL, {
@@ -304,6 +324,7 @@ async function fetchNanoGptBalance(
             success: false as const,
             message: `NanoGPT API error ${response.status}: ${sanitizeDisplaySnippet(text, 120)}`,
             retryable: isRetryableHttpStatus(response.status),
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
 
@@ -318,6 +339,7 @@ async function fetchNanoGptBalance(
       success: false,
       message: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
       retryable: true,
+      failureCategory: "provider_api",
     };
   }
 }
@@ -344,14 +366,30 @@ export async function queryNanoGptQuota(
     fetchNanoGptBalance(headers, options.requestTimeoutMs),
   ]);
 
-  const endpointErrors: Array<{ endpoint: NanoGptEndpoint; message: string }> = [];
+  const endpointErrors: Array<{
+    endpoint: NanoGptEndpoint;
+    message: string;
+    failureCategory?: ProviderFailureCategory;
+  }> = [];
   if (!usageResult.success) {
-    endpointErrors.push({ endpoint: "usage", message: usageResult.message });
+    endpointErrors.push({
+      endpoint: "usage",
+      message: usageResult.message,
+      failureCategory: usageResult.failureCategory,
+    });
   }
   if (!balanceResult.success) {
-    endpointErrors.push({ endpoint: "balance", message: balanceResult.message });
+    endpointErrors.push({
+      endpoint: "balance",
+      message: balanceResult.message,
+      failureCategory: balanceResult.failureCategory,
+    });
   } else if (balanceResult.fieldErrors.length > 0) {
-    endpointErrors.push({ endpoint: "balance", message: balanceResult.fieldErrors.join("; ") });
+    endpointErrors.push({
+      endpoint: "balance",
+      message: balanceResult.fieldErrors.join("; "),
+      failureCategory: "provider_api",
+    });
   }
 
   if (!usageResult.success && !balanceResult.success) {
@@ -361,6 +399,11 @@ export async function queryNanoGptQuota(
         .map((entry) => `${entry.endpoint === "usage" ? "Usage" : "Balance"}: ${entry.message}`)
         .join("; "),
       retryable: usageResult.retryable || balanceResult.retryable,
+      failureCategory:
+        usageResult.failureCategory === "provider_api" ||
+        balanceResult.failureCategory === "provider_api"
+          ? "provider_api"
+          : "credentials",
     };
   }
 

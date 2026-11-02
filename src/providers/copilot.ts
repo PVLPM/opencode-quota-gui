@@ -352,7 +352,12 @@ export const copilotProvider: QuotaProvider = {
           const group = names[index] ?? "Copilot";
           if (!result) continue;
           if (!result.success) {
-            errors.push({ label: group, message: result.error, sourceId: row.id });
+            errors.push({
+              label: group,
+              message: result.error,
+              sourceId: row.id,
+              failureCategory: result.failureCategory,
+            });
             continue;
           }
           const resultEntries =
@@ -374,6 +379,7 @@ export const copilotProvider: QuotaProvider = {
               label: group,
               message,
               sourceId: row.id,
+              failureCategory: "provider_api" as const,
             })),
           );
         }
@@ -383,7 +389,12 @@ export const copilotProvider: QuotaProvider = {
     const result = await queryCopilotQuota({ requestTimeoutMs: ctx.config?.requestTimeoutMs });
     if (!result) return withStatusDetails(notAttemptedResult(), statusDetails);
     if (!result.success) {
-      return withStatusDetails(attemptedErrorResult("Copilot", result.error), statusDetails);
+      return withStatusDetails(
+        attemptedErrorResult("Copilot", result.error, {
+          failureCategory: result.failureCategory,
+        }),
+        statusDetails,
+      );
     }
 
     const entries =

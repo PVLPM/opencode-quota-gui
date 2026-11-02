@@ -1,3 +1,7 @@
+import {
+  type ProviderFailureCategory,
+  providerFailureCategoryForHttpStatus,
+} from "../contracts/provider-failure.js";
 import { readGlobalProviderConfigString } from "./api-key-resolver.js";
 import {
   clearGeminiCliCompanionCacheForTests as clearGeminiCliCompanionResolutionCacheForTests,
@@ -327,7 +331,10 @@ async function refreshAccessToken(params: {
   clientId: string;
   clientSecret: string;
   timeoutMs?: number;
-}): Promise<{ accessToken: string; expiresIn: number } | { error: string }> {
+}): Promise<
+  | { accessToken: string; expiresIn: number }
+  | { error: string; failureCategory: ProviderFailureCategory }
+> {
   try {
     return await fetchWithTimeout(GEMINI_TOKEN_REFRESH_URL, {
       request: {
@@ -349,19 +356,33 @@ async function refreshAccessToken(params: {
               error_description?: string;
             };
             if (errorData.error === "invalid_grant") {
-              return { error: "Token revoked" };
+              return { error: "Token revoked", failureCategory: "credentials" as const };
             }
-            return { error: errorData.error_description || `HTTP ${response.status}` };
+            return {
+              error: errorData.error_description || `HTTP ${response.status}`,
+              failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            };
           } catch (error) {
             if (timeoutSignal.aborted) throw error;
-            return { error: `HTTP ${response.status}` };
+            return {
+              error: `HTTP ${response.status}`,
+              failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            };
           }
         }
 
         const data = (await response.json()) as {
-          access_token: string;
-          expires_in: number;
+          access_token?: unknown;
+          expires_in?: unknown;
         };
+        if (
+          typeof data.access_token !== "string" ||
+          data.access_token.length === 0 ||
+          typeof data.expires_in !== "number" ||
+          !Number.isFinite(data.expires_in)
+        ) {
+          throw new Error("Token refresh response returned an unexpected response shape");
+        }
 
         return {
           accessToken: data.access_token,
@@ -371,9 +392,9 @@ async function refreshAccessToken(params: {
     });
   } catch (err) {
     if (err instanceof Error && err.message.includes("timeout")) {
-      return { error: "Token refresh timeout" };
+      return { error: "Token refresh timeout", failureCategory: "provider_api" };
     }
-    return { error: "Token refresh failed" };
+    return { error: "Token refresh failed", failureCategory: "provider_api" };
   }
 }
 
@@ -383,7 +404,7 @@ async function refreshGeminiCliAccessTokenWithCache(params: {
   skewMs?: number;
   force?: boolean;
   timeoutMs?: number;
-}): Promise<{ accessToken: string } | { error: string }> {
+}): Promise<{ accessToken: string } | { error: string; failureCategory: ProviderFailureCategory }> {
   const skewMs = params.skewMs ?? 2 * 60_000;
   const key = makeAccountCacheKey({
     refreshToken: params.account.refreshToken,
@@ -422,6 +443,16 @@ async function refreshGeminiCliAccessTokenWithCache(params: {
   return { accessToken: refreshed.accessToken };
 }
 
+class GeminiCliQuotaRequestError extends Error {
+  readonly failureCategory: ProviderFailureCategory;
+
+  constructor(message: string, failureCategory: ProviderFailureCategory) {
+    super(message);
+    this.name = "GeminiCliQuotaRequestError";
+    this.failureCategory = failureCategory;
+  }
+}
+
 async function retrieveGeminiCliQuota(
   accessToken: string,
   projectId: string,
@@ -440,10 +471,13 @@ async function retrieveGeminiCliQuota(
     timeoutMs,
     consume: async (response) => {
       if (!response.ok) {
-        if (response.status === 401 || response.status === 403) {
-          throw new Error(`Gemini CLI quota auth error: ${response.status}`);
-        }
-        throw new Error(`Gemini CLI quota API error: ${response.status}`);
+        const failureCategory = providerFailureCategoryForHttpStatus(response.status);
+        throw new GeminiCliQuotaRequestError(
+          response.status === 401 || response.status === 403
+            ? `Gemini CLI quota auth error: ${response.status}`
+            : `Gemini CLI quota API error: ${response.status}`,
+          failureCategory,
+        );
       }
 
       return (await response.json()) as RetrieveUserQuotaResponse;
@@ -568,6 +602,7 @@ async function fetchAccountQuota(params: {
   success: boolean;
   buckets?: GeminiCliQuotaBucket[];
   error?: string;
+  failureCategory?: ProviderFailureCategory;
   accountEmail?: string;
 }> {
   const accountEmail = params.account.email || params.account.sourceKey;
@@ -579,7 +614,12 @@ async function fetchAccountQuota(params: {
       timeoutMs: params.timeoutMs,
     });
     if ("error" in tokenResult) {
-      return { success: false, error: tokenResult.error, accountEmail };
+      return {
+        success: false,
+        error: tokenResult.error,
+        failureCategory: tokenResult.failureCategory,
+        accountEmail,
+      };
     }
 
     let quota: RetrieveUserQuotaResponse;
@@ -590,7 +630,7 @@ async function fetchAccountQuota(params: {
         params.timeoutMs,
       );
     } catch (err) {
-      if (err instanceof Error && err.message.includes("auth error")) {
+      if (err instanceof GeminiCliQuotaRequestError && err.failureCategory === "credentials") {
         const retryToken = await refreshGeminiCliAccessTokenWithCache({
           account: params.account,
           credentials: params.credentials,
@@ -598,7 +638,12 @@ async function fetchAccountQuota(params: {
           timeoutMs: params.timeoutMs,
         });
         if ("error" in retryToken) {
-          return { success: false, error: retryToken.error, accountEmail };
+          return {
+            success: false,
+            error: retryToken.error,
+            failureCategory: retryToken.failureCategory,
+            accountEmail,
+          };
         }
         quota = await retrieveGeminiCliQuota(
           retryToken.accessToken,
@@ -617,11 +662,18 @@ async function fetchAccountQuota(params: {
     };
   } catch (err) {
     if (err instanceof Error && err.message.includes("timeout")) {
-      return { success: false, error: "API timeout", accountEmail };
+      return {
+        success: false,
+        error: "API timeout",
+        failureCategory: "provider_api",
+        accountEmail,
+      };
     }
     return {
       success: false,
       error: err instanceof Error ? err.message : String(err),
+      failureCategory:
+        err instanceof GeminiCliQuotaRequestError ? err.failureCategory : "provider_api",
       accountEmail,
     };
   }
@@ -648,6 +700,7 @@ export async function queryGeminiCliQuota(
     return {
       success: false,
       error: getCompanionQuotaError(credentials.state),
+      failureCategory: "local",
     };
   }
 
@@ -662,7 +715,13 @@ export async function queryGeminiCliQuota(
     if (result.success && result.buckets && result.buckets.length > 0) {
       allBuckets.push(...result.buckets);
     } else if (!result.success && result.error && result.accountEmail) {
-      errors.push({ email: result.accountEmail, error: result.error });
+      errors.push({
+        email: result.accountEmail,
+        error: result.error,
+        ...(result.failureCategory !== undefined
+          ? { failureCategory: result.failureCategory }
+          : {}),
+      });
     }
   }
 

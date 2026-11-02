@@ -152,6 +152,7 @@ describe("xai provider", () => {
         message:
           "xAI sign-in could not be refreshed: refresh_failed: HTTP 401. Run `opencode auth login xai`.",
         sourceId: "xai-id",
+        failureCategory: "credentials",
       },
     ]);
   });
