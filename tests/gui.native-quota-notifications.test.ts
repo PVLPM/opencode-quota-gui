@@ -711,7 +711,7 @@ describe("native quota notification subscription", () => {
       createGuiRpcCaller: vi.fn(() => ({ health, events: source.events })),
     }));
     vi.doMock("../src/native/dashboard-client.js", () => ({
-      createNativeDashboardClient: vi.fn(),
+      createNativeDashboardClient: vi.fn(() => ({ dispose: vi.fn() })),
     }));
     vi.doMock("../src/native/panel.js", () => ({ DashboardPanel: () => null }));
     vi.doMock("../src/native/panel-open.js", () => ({ revealDashboardPanel: vi.fn() }));

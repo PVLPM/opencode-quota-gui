@@ -86,6 +86,7 @@ const guiSource = read("src/native/gui.tsx");
 const panelSource = read("src/native/panel.tsx");
 const stateSource = read("src/native/panel-state.ts");
 const navigationSource = read("src/native/navigation.ts");
+const runtimeSource = read("src/native/runtime.ts");
 const settingsPageSource = read("src/native/settings-page.tsx");
 const settingsStateSource = read("src/native/settings-page-state.ts");
 const routesSource = read("src/ui/routes.tsx");
@@ -106,7 +107,9 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toMatch(/region:\s*"side"/u);
     expect(guiSource).toMatch(/const TAB_ID = "dashboard"/u);
     expect(guiSource).toMatch(/mobile:\s*\{[^}]*kind:\s*"menu"/su);
-    expect(guiSource).toMatch(/render:\s*\(\)\s*=>\s*<NativeDashboardPanel\s*\/>/u);
+    expect(guiSource).toMatch(
+      /render:\s*\(input\)\s*=>\s*\(\s*<NativeDashboardPanel\s+runtime=\{runtime\}/su,
+    );
     expect(guiSource).toMatch(/visible=\{panel\.visible\}/u);
     expect(panelSource).toContain("DashboardPanel");
   });
@@ -208,7 +211,9 @@ describe("Desktop GUI entry", () => {
   });
 
   it("keeps navigation window-local: no browser URL, history or storage", () => {
-    expect(panelSource).toContain("initialNativeLocation");
+    expect(runtimeSource).toContain("initialNativeLocation");
+    expect(panelSource).toContain("props.initialLocation");
+    expect(panelSource).toContain("props.onLocationChange(next)");
     expect(panelSource).toContain("navigateNative");
     expect(panelSource).toContain('addEventListener("click", handleClick)');
     expect(panelSource).toContain('addEventListener("auxclick", handleAuxClick)');

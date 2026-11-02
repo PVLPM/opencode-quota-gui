@@ -17,17 +17,14 @@ import type {
   QuotaSnapshot,
 } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS } from "../contracts/ranges";
+import type { DashboardRpcViewScope } from "../rpc.js";
 import { AnalyticsTabs } from "../ui/components/analytics-tabs";
 import { BuildMismatchStatus } from "../ui/components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "../ui/components/icons";
 import { ErrorCard, ReloadRequired } from "../ui/components/states";
 import { TemporalStatusStrip } from "../ui/components/temporal-status";
 import { RANGE_LABELS } from "../ui/format";
-import {
-  analyticsTabForRoute,
-  isInternalDashboardHref,
-  viewScopeForRoute,
-} from "../ui/navigation-model";
+import { analyticsTabForRoute, isInternalDashboardHref } from "../ui/navigation-model";
 import {
   AnalyticsRoute,
   GroupDetailRoute,
@@ -36,17 +33,18 @@ import {
   QuotaRoute,
   SessionRoute,
 } from "../ui/routes";
-import { formatPath, modelsGroupForRoute, routeShowsRangeSelector } from "../ui/routing";
+import {
+  formatPath,
+  type Location,
+  modelsGroupForRoute,
+  routeShowsRangeSelector,
+} from "../ui/routing";
 import { displayPreferencesFromValues } from "../ui/settings-model";
 import { QuotaLoading } from "../ui/views/home";
 import type { NativeDashboardClient } from "./dashboard-client.js";
-import {
-  initialNativeLocation,
-  navigateNative,
-  replaceModelsDimension,
-  setNativeRange,
-} from "./navigation.js";
+import { navigateNative, replaceModelsDimension, setNativeRange } from "./navigation.js";
 import { createDashboardPanelState } from "./panel-state.js";
+import { panelScope } from "./runtime.js";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./ui.js";
 
 /**
@@ -61,6 +59,10 @@ import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./ui.js";
  */
 export interface DashboardPanelProps {
   client: NativeDashboardClient;
+  /** The window runtime's stored location for this session, if any. */
+  initialLocation: Location;
+  onLocationChange: (next: Location) => void;
+  onScopeChange: (scope: DashboardRpcViewScope) => void;
   /** Live visibility of this panel tab; drives subscriptions and reads. */
   visible: () => boolean;
   /** Live connection of the host server; drives stale marking and recovery. */
@@ -76,7 +78,11 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
     visible: props.visible,
     hostConnected: props.hostConnected,
   });
-  const [location, setLocation] = createSignal(initialNativeLocation());
+  const [location, setLocationSignal] = createSignal(props.initialLocation);
+  function setLocation(next: Location): void {
+    setLocationSignal(next);
+    props.onLocationChange(next);
+  }
   const [navTooltip, setNavTooltip] = createSignal<NavTarget>();
   const [homeSnapshot, setHomeSnapshot] = createSignal<QuotaSnapshot>();
   const [routeStale, setRouteStale] = createSignal(false);
@@ -95,11 +101,13 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
     if (dimension !== undefined) setRememberedModelsDimension(dimension);
   });
 
-  // One window-local viewer scope follows the current section. No transport
-  // call is made for a hidden tab; the subscription itself is visibility-gated.
+  // One window-local viewer scope follows the visible section. A hidden or
+  // unmounted Panel releases analytics interest but keeps the window transport
+  // alive, so a Settings round-trip is not a reconnect.
   createEffect(() => {
-    panel.setScope(viewScopeForRoute(route()));
+    props.onScopeChange(panelScope(props.visible(), route()));
   });
+  onCleanup(() => props.onScopeChange("quota"));
 
   // A new route starts without the previous route's stale badge and at the top
   // of its own scroll. Grouping changes count as a new view; range changes do

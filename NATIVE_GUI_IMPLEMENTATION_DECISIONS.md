@@ -4,6 +4,36 @@ This log records material implementation decisions against the owner-approved
 `docs/research/native-gui-migration-architecture.md` baseline. The research
 report is intentionally ignored and remains unchanged.
 
+## D13 — Preserve Native dashboard continuity across Settings navigation
+
+Stage: Native stabilization
+Status: implemented
+Problem: OpenCode routes Settings as its own page, so a normal Settings round-trip
+removes the session route subtree, including the side Panel, while `Plugin.setup`
+stays alive. The Panel created and disposed its dashboard client on mount, so
+returning rebuilt the transport and showed a false `Connecting…` until the health
+probe and watch acquisition completed.
+Evidence: Desktop routes `/settings` and `/server/:serverKey/session/:id` as
+separate pages; the window-level plugin setup remains mounted. Focused runtime
+tests observe one transport across consumer unmount/remount and no reconnect
+callback or new event stream.
+Decision: One window-lived Native runtime owns the dashboard transport and one
+in-memory location per session. The first Panel open retains the transport; a
+hidden or unmounted Panel returns to the quota scope, and a visible Panel applies
+its route scope. A deliberate scope change while the transport is live keeps the
+live state and skips the reconnect callback; a failed reacquisition still reports
+`reconnecting`. Host loss still suspends and resumes through the accepted path.
+Why: Removes the artificial outage without changing shared-runtime ownership or
+adding pollers, timers, caches, persistence or a second transport.
+Trade-offs: While Settings is open, the window keeps one quota-scoped viewer and
+event stream alive; analytics interest is released. Panel navigation is
+memory-only and per session; it does not survive a window restart.
+Test evidence: Focused runtime tests cover consumer unmount/remount, scope changes
+without a reconnect callback or overlapping watches, a genuine scope failure,
+host loss and resume, per-session location, and the hidden-panel scope policy.
+Reversible: Yes.
+Owner review: pre-release defect correction
+
 ## D12 — Native quota notifications
 
 The shared dashboard runtime observes fresh quota snapshots once, independently

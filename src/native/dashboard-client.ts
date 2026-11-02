@@ -158,6 +158,8 @@ export function createNativeDashboardClient(
     scope: DashboardRpcViewScope;
     recovery: boolean;
     live: boolean;
+    /** A Desktop watch deadline is being verified/reacquired in place. */
+    renewing: boolean;
     promise: Promise<void>;
   }
 
@@ -274,12 +276,14 @@ export function createNativeDashboardClient(
         // that the host is still reachable, then reacquire only this viewer;
         // keep the live attempt and its event stream. Awaiting the rejected
         // watch before looping guarantees no overlapping held viewers.
+        attempt.renewing = true;
         try {
           await rpc.health({}, { signal });
         } catch {
           if (isCurrent(attempt)) failAttempt(attempt);
           return;
         }
+        attempt.renewing = false;
       }
     }
   }
@@ -312,7 +316,7 @@ export function createNativeDashboardClient(
     setConnection("live");
   }
 
-  function startAttempt(recovery: boolean): Promise<void> {
+  function startAttempt(recovery: boolean, preserveConnection = false): Promise<void> {
     if (!eligible()) return Promise.resolve();
     if (currentAttempt) retireAttempt();
 
@@ -322,11 +326,12 @@ export function createNativeDashboardClient(
       scope: viewScope,
       recovery: recovery || recoveryRequired,
       live: false,
+      renewing: false,
       promise: Promise.resolve(),
     };
     currentAttempt = attempt;
     attempt.promise = Promise.resolve().then(() => runAttempt(attempt));
-    setConnection(attempt.recovery ? "reconnecting" : "connecting");
+    if (!preserveConnection) setConnection(attempt.recovery ? "reconnecting" : "connecting");
     return attempt.promise;
   }
 
@@ -414,9 +419,19 @@ export function createNativeDashboardClient(
       viewScope = scope;
       if (!eligible()) return;
       const previous = currentAttempt;
-      const recovery = recoveryRequired || previous?.recovery === true || previous?.live === true;
-      if (previous?.live) recoveryRequired = true;
-      await startAttempt(recovery);
+      // A deliberate scope change is a reconfiguration, not a connection loss.
+      // While the transport is healthy, keep the live state and skip the
+      // reconnect callback; a failed reacquisition still reports reconnecting.
+      // A watch being renewed after a Desktop deadline is not healthy: that
+      // path keeps its recovery/refetch semantics.
+      const preserveConnection =
+        previous?.live === true && !previous.renewing && !recoveryRequired && state === "live";
+      const recovery =
+        recoveryRequired ||
+        previous?.recovery === true ||
+        previous?.renewing === true ||
+        state === "reconnecting";
+      await startAttempt(recovery, preserveConnection);
     },
 
     subscribe(listener) {

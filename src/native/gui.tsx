@@ -12,12 +12,12 @@ import {
 import type { JSX } from "solid-js";
 import { createEffect, onCleanup } from "solid-js";
 import productCss from "../ui/styles.css?inline";
-import { createNativeDashboardClient } from "./dashboard-client.js";
 import nativeCss from "./native.css?inline";
 import { DashboardPanel } from "./panel.js";
 import { revealDashboardPanel } from "./panel-open.js";
 import { startQuotaNotificationSubscription, windowHasFocus } from "./quota-notifications.js";
 import { createGuiRpcCaller } from "./rpc.js";
+import { createNativeDashboardRuntime, type NativeDashboardRuntime } from "./runtime.js";
 import headerCss from "./session-header.css?inline";
 import { NativeSessionHeader } from "./session-header.js";
 import { NativeSettingsPage, SETTINGS_PAGE_ID } from "./settings-page.js";
@@ -42,14 +42,14 @@ const TAB_ID = "dashboard";
 /** Stable objects: the host re-renders tab labels only when a new object appears. */
 const DASHBOARD_TAB = { id: TAB_ID, title: "Quota & Usage" } as const;
 
-function NativeDashboardPanel(): JSX.Element {
+function NativeDashboardPanel(props: {
+  runtime: NativeDashboardRuntime;
+  sessionKey: () => string;
+}): JSX.Element {
   const ctx = usePlugin();
   const panel = usePanel();
-  const client = createNativeDashboardClient({
-    rpc: createGuiRpcCaller(ctx),
-    scope: "quota",
-  });
-  onCleanup(() => client.dispose());
+  // The first Panel open starts the window transport; later mounts reuse it.
+  props.runtime.retain();
 
   // The plugin's server is the app's own (builtin) server. Its ref follows the
   // live connection across restarts, so `connected` is the host-supported
@@ -64,7 +64,10 @@ function NativeDashboardPanel(): JSX.Element {
   return (
     <NativeUiProvider ui={ctx.ui}>
       <DashboardPanel
-        client={client}
+        client={props.runtime.client}
+        initialLocation={props.runtime.location(props.sessionKey())}
+        onLocationChange={(next) => props.runtime.setLocation(props.sessionKey(), next)}
+        onScopeChange={(scope) => props.runtime.setScope(scope)}
         visible={panel.visible}
         hostConnected={hostConnected}
         onOpenSettings={() => ctx.layout.settings(SETTINGS_PAGE_ID)}
@@ -101,6 +104,10 @@ export default Plugin.define({
     ctx.add(Style, nativeCss);
     ctx.add(Style, headerCss);
 
+    // One transport and one in-memory navigation map live for the window: a
+    // Settings route change unmounts the Panel without ending this setup.
+    const runtime = createNativeDashboardRuntime(ctx);
+
     // Notifications are a window-lifetime concern: setup runs once per window,
     // so alerts keep arriving while the panel, slot and settings page are
     // closed. The host's builtin-server `connected` ref is the only recovery
@@ -134,7 +141,9 @@ export default Plugin.define({
       region: "side",
       mobile: { title: "Quota & Usage", order: 20, kind: "menu", icon: "layout-right" },
       list: ({ open }) => (open.includes(TAB_ID) ? [DASHBOARD_TAB] : []),
-      render: () => <NativeDashboardPanel />,
+      render: (input) => (
+        <NativeDashboardPanel runtime={runtime} sessionKey={() => input.session.key} />
+      ),
     });
 
     ctx.add(SettingsPage, {
