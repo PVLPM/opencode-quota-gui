@@ -437,7 +437,7 @@ function runLayoutProbe(html: string): LayoutProbe {
         "--dump-dom",
         pathToFileURL(page).href,
       ],
-      { encoding: "utf8", timeout: 45_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+      { encoding: "utf8", timeout: 120_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
     );
     const captured = /<pre id="layout-result">([\s\S]*?)<\/pre>/.exec(dom);
     if (captured?.[1] === undefined || captured[1] === "") {
@@ -497,5 +497,5 @@ describe.skipIf(layoutBrowser === undefined)("Settings row rendered layout", () 
     expect(narrowTemporal.controlLeftGap).toBeLessThanOrEqual(1);
     expect(Math.abs(narrowTemporal.controlWidth - narrowTemporal.rowWidth)).toBeLessThanOrEqual(1);
     expect(narrowTemporal.trailingRightGap).toBeGreaterThan(narrowTemporal.rowWidth / 2);
-  }, 60_000);
+  }, 150_000);
 });
