@@ -4,7 +4,7 @@
  * quota-report hooks are registered.
  */
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { createServer as createNetServer } from "node:net";
+import { createConnection, createServer as createNetServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -68,6 +68,40 @@ function createContext() {
 }
 
 async function freePort(): Promise<number> {
+  const reservation = await reservePort();
+  await reservation.release();
+  return reservation.port;
+}
+
+function assertNoDashboardListener(port: number, timeoutMs = 1_000): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout>;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      if (error) reject(error);
+      else resolve();
+    };
+
+    timeout = setTimeout(
+      () => finish(new Error(`Timed out checking for a dashboard listener on port ${port}`)),
+      timeoutMs,
+    );
+    socket.once("connect", () =>
+      finish(new Error(`Unexpected dashboard listener on port ${port}`)),
+    );
+    socket.once("error", (error) => {
+      if ((error as NodeJS.ErrnoException).code === "ECONNREFUSED") finish();
+      else finish(error);
+    });
+  });
+}
+
+async function reservePort(): Promise<{ port: number; release: () => Promise<void> }> {
   const server = createNetServer();
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -75,9 +109,16 @@ async function freePort(): Promise<number> {
   });
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("no port");
-  const port = address.port;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return port;
+  let releasePromise: Promise<void> | undefined;
+  return {
+    port: address.port,
+    release: () => {
+      releasePromise ??= new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+      return releasePromise;
+    },
+  };
 }
 
 async function writeCanonicalConfig(port: number): Promise<void> {
@@ -107,6 +148,28 @@ afterEach(async () => {
 });
 
 describe("GUI-only server plugin", () => {
+  it("rejects a silent listener in the bounded no-listener probe", async () => {
+    const sockets = new Set<Socket>();
+    const server = createNetServer((socket) => sockets.add(socket));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("no port");
+
+    try {
+      await expect(assertNoDashboardListener(address.port)).rejects.toThrow(
+        /unexpected dashboard listener/i,
+      );
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
   it("registers no commands, tool or report hooks, attaches dashboard RPC and starts the dashboard", async () => {
     const port = await freePort();
     await writeCanonicalConfig(port);
@@ -135,17 +198,29 @@ describe("GUI-only server plugin", () => {
   });
 
   it("attaches dashboard RPC with web disabled and binds no listener", async () => {
-    const port = await freePort();
-    const dir = join(TEST_RUNTIME_ROOT, "config", "opencode-quota-gui");
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, "config.jsonc"), JSON.stringify({ dashboard: { port } }), "utf8");
+    const reservation = await reservePort();
+    const { port } = reservation;
+    try {
+      const dir = join(TEST_RUNTIME_ROOT, "config", "opencode-quota-gui");
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, "config.jsonc"),
+        JSON.stringify({ dashboard: { enabled: false, port } }),
+        "utf8",
+      );
+    } finally {
+      await reservation.release();
+    }
     const { ctx, rpc } = createContext();
 
     const cleanup = await plugin.setup(ctx as never);
     if (cleanup) cleanups.push(cleanup);
 
     expect(rpc.register).toHaveBeenCalledOnce();
-    await expect(fetch(`http://127.0.0.1:${port}/api/v1/health`)).rejects.toThrow();
+    expect(rpc.register.mock.calls[0]?.[0]).toMatchObject({
+      id: "opencode-quota-gui.dashboard",
+    });
+    await assertNoDashboardListener(port);
   });
 
   it("retries at the quota reset through the retained retry hook", async () => {
