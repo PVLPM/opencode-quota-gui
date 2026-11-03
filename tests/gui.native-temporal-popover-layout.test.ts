@@ -87,13 +87,18 @@ setTimeout(() => {
           "--headless=new",
           "--disable-gpu",
           "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--disable-sync",
+          "--disable-component-update",
           `--user-data-dir=${path.join(dir, "profile")}`,
           "--window-size=900,700",
           "--virtual-time-budget=3000",
           "--dump-dom",
           pathToFileURL(page).href,
         ],
-        { encoding: "utf8", timeout: 120_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+        { encoding: "utf8", timeout: 180_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       );
       const result = JSON.parse(/<pre id="result">([\s\S]*?)<\/pre>/.exec(dom)?.[1] ?? "null") as {
         panel: { left: number; right: number; top: number; bottom: number };
@@ -110,5 +115,5 @@ setTimeout(() => {
     } finally {
       rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
     }
-  }, 150_000);
+  }, 210_000);
 });
