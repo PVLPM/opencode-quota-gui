@@ -22,7 +22,8 @@ import {
   DashboardBindError,
   type DashboardServerHandle,
 } from "../src/gui/server.js";
-import type { SnapshotSource } from "../src/gui/snapshot-service.js";
+import { createSnapshotService, type SnapshotSource } from "../src/gui/snapshot-service.js";
+import { startTestDashboardServer } from "./helpers/dashboard-server-test-harness.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
 const INDEX_HTML = "<!doctype html><html><body>shell</body></html>";
@@ -175,7 +176,7 @@ afterAll(async () => {
 
 async function start(): Promise<DashboardServerHandle> {
   const { source, store } = buildFixtures();
-  return createDashboardServer({
+  return startTestDashboardServer({
     port: 0,
     source,
     settings: store,
@@ -448,12 +449,13 @@ describe("GUI server security", () => {
 
     const logs: string[] = [];
     const { source, store } = buildFixtures();
+    const snapshots = createSnapshotService({ source });
     try {
       let error: unknown;
       try {
         await createDashboardServer({
           port,
-          source,
+          snapshots,
           settings: store,
           assetRoot,
           logger: createGuiLogger({ sink: (line) => logs.push(line) }),
@@ -474,6 +476,7 @@ describe("GUI server security", () => {
       expect(logs[0]).toContain("unavailable");
       expect(logs[0]).toContain("EADDRINUSE");
     } finally {
+      snapshots.close();
       await new Promise<void>((resolve) => blocker.close(() => resolve()));
     }
   });

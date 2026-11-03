@@ -203,12 +203,13 @@ describe("package manifest compatibility", () => {
     expect(pkg.devDependencies?.yaml).toBe("^2.8.3");
   });
 
-  it("reflects the local OpenCode V2 plugin dependency override", () => {
-    expect(pkg.peerDependencies?.["@opencode/plugin"]).toBe("2.0.16");
-    expect(pkg.devDependencies?.["@opencode/plugin"]).toBe("2.0.16");
+  it("keeps the Desktop SDK pinned and bounds the server peer to tested hosts", () => {
+    expect(pkg.peerDependencies?.["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
+    expect(pkg.devDependencies?.["@opencode/plugin"]).toBe("2.2.0");
     expect(pkg.dependencies?.["@opentui/core"]).toBe("^0.5.10");
     expect(pkg.dependencies?.["@opentui/solid"]).toBe("^0.5.10");
     expect(readme).toContain("Node.js `22.13+` or `23.4+`");
+    expect(readme).toContain("OpenCode `>= 2.0.16 < 2.3.0`");
     expect(readme).not.toContain("OpenCode `>= 1.4.3`");
     expect(pkg.engines).not.toHaveProperty("opencode");
   });
@@ -216,7 +217,10 @@ describe("package manifest compatibility", () => {
   it("keeps the TypeScript 7 toolchain explicit without suppressing the known peer mismatch", () => {
     expect(tsconfig.compilerOptions?.types).toEqual(["node"]);
     expect(typescriptValidator).toContain('const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";');
-    expect(typescriptValidator).toContain('const EXPECTED_PLUGIN_VERSION = "2.0.16";');
+    expect(typescriptValidator).toContain('const EXPECTED_PLUGIN_SDK_VERSION = "2.2.0";');
+    expect(typescriptValidator).toContain(
+      'const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";',
+    );
     expect(typescriptValidator).toContain('const EXPECTED_OPENTUI_SPECIFIER = "^0.5.10";');
     expect(typescriptValidator).toContain('const EXPECTED_OPENTUI_VERSION = "0.5.10";');
     expect(typescriptValidator).toContain('const BUN_FFI_STRUCTS_VERSION = "0.3.1";');
@@ -347,7 +351,7 @@ describe("package manifest compatibility", () => {
     }
   });
 
-  it("appends the browser UI build and covers both TypeScript projects", async () => {
+  it("appends the browser and Desktop GUI builds and covers all TypeScript projects", async () => {
     // Identity is captured once; the runner retains the backend order and appends Vite.
     // gui.build-identity.test.ts additionally executes this order with synthetic tools.
     expect(pkg.scripts?.build).toBe("node scripts/build-identity.mjs");
@@ -363,6 +367,7 @@ describe("package manifest compatibility", () => {
       'run("scripts/copy-data.mjs")',
       'run("scripts/prepare-tui-dist.mjs")',
       'run("node_modules/vite/bin/vite.js", "build", "--config", "vite.ui.config.mjs")',
+      'run("node_modules/vite/bin/vite.js", "build", "--config", "vite.native.config.mjs")',
     ];
     let previous = -1;
     for (const step of steps) {
@@ -371,9 +376,12 @@ describe("package manifest compatibility", () => {
       previous = position;
     }
     expect(pkg.scripts?.["build:ui"]).toBe("vite build --config vite.ui.config.mjs");
+    expect(pkg.scripts?.["build:gui"]).toBe("vite build --config vite.native.config.mjs");
     expect(pkg.scripts?.["verify:ui-bundle"]).toBe("node scripts/verify-ui-bundle.mjs");
-    // Typecheck runs the backend project and the browser-only UI project.
-    expect(pkg.scripts?.typecheck).toBe("tsc --noEmit && tsc -p tsconfig.ui.json");
+    // Typecheck runs the backend, browser UI and Desktop GUI projects.
+    expect(pkg.scripts?.typecheck).toBe(
+      "tsc --noEmit && tsc -p tsconfig.ui.json && tsc -p tsconfig.native.json",
+    );
   });
 
   it("renames the package identity while preserving upstream attribution", async () => {
@@ -393,7 +401,7 @@ describe("package manifest compatibility", () => {
       readFile(new URL("../src/plugin.ts", import.meta.url), "utf8"),
     ]);
     expect(rpcSource).toContain('"opencode-quota-gui"');
-    expect(pluginSource).toContain('"opencode-quota-gui.server"');
+    expect(pluginSource).toContain('id: "opencode-quota-gui"');
 
     // README yields the renamed identity and the explicit local-pack install rule.
     expect(readme).toContain("opencode-quota-gui");
@@ -602,6 +610,7 @@ describe("package manifest compatibility", () => {
   it("keeps npm publication on a strict root allowlist and excludes the dormant TUI entry", () => {
     expect(pkg.files).toEqual([
       "dist",
+      "!dist/**/*.map",
       "!dist/tui.js",
       "!dist/tui.js.map",
       "!dist/tui.d.ts",

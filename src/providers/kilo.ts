@@ -173,7 +173,15 @@ export const kiloProvider: QuotaProvider = {
         {
           attempted: true,
           entries: [],
-          errors: [{ label: "Kilo Gateway", message: stateResult.error }],
+          errors: [
+            {
+              label: "Kilo Gateway",
+              message: stateResult.error,
+              ...(stateResult.failureCategory !== undefined
+                ? { failureCategory: stateResult.failureCategory }
+                : {}),
+            },
+          ],
         },
         keyStatusDetails,
       );

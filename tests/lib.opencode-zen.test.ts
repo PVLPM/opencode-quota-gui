@@ -206,6 +206,13 @@ describe("queryOpenCodeZenQuota", () => {
       errors: [
         "OpenCode Console member budgets unavailable: the Console sign-in has no account id",
       ],
+      optionalErrors: [
+        {
+          message:
+            "OpenCode Console member budgets unavailable: the Console sign-in has no account id",
+          failureCategory: "discovery",
+        },
+      ],
     });
   });
 
@@ -728,6 +735,12 @@ describe("queryOpenCodeZenQuota", () => {
         memberBudgetsSkipped: false,
       },
       errors: ["Could not parse OpenCode Console policies/members response"],
+      optionalErrors: [
+        {
+          message: "Could not parse OpenCode Console policies/members response",
+          failureCategory: "provider_api",
+        },
+      ],
     });
   });
 
@@ -812,6 +825,12 @@ describe("queryOpenCodeZenQuota", () => {
         memberBudgetsSkipped: false,
       },
       errors: ["OpenCode Console policies/members error 500"],
+      optionalErrors: [
+        {
+          message: "OpenCode Console policies/members error 500",
+          failureCategory: "provider_api",
+        },
+      ],
     });
   });
 
@@ -902,6 +921,12 @@ describe("queryOpenCodeZenQuota", () => {
         ...expected,
       },
       errors: [`OpenCode Console ${route} error 500`],
+      optionalErrors: [
+        {
+          message: `OpenCode Console ${route} error 500`,
+          failureCategory: "provider_api",
+        },
+      ],
     });
   });
 
@@ -933,6 +958,24 @@ describe("queryOpenCodeZenQuota", () => {
         "OpenCode Console billing/auto-recharge error 500",
         "OpenCode Console policies/members error 500",
         "OpenCode Console usage/cost-by-day error 500",
+      ],
+      optionalErrors: [
+        {
+          message: "OpenCode Console billing/account error 500",
+          failureCategory: "provider_api",
+        },
+        {
+          message: "OpenCode Console billing/auto-recharge error 500",
+          failureCategory: "provider_api",
+        },
+        {
+          message: "OpenCode Console policies/members error 500",
+          failureCategory: "provider_api",
+        },
+        {
+          message: "OpenCode Console usage/cost-by-day error 500",
+          failureCategory: "provider_api",
+        },
       ],
     });
   });
@@ -970,7 +1013,11 @@ describe("queryOpenCodeZenQuota", () => {
 
     const result = await queryOpenCodeZenQuota(credential);
 
-    expect(result).toEqual({ success: false, error: SESSION_ERROR });
+    expect(result).toEqual({
+      success: false,
+      error: SESSION_ERROR,
+      failureCategory: "credentials",
+    });
     expect(JSON.stringify(result)).not.toContain("st_secret-token");
   });
 
@@ -980,6 +1027,7 @@ describe("queryOpenCodeZenQuota", () => {
     await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
       success: false,
       error: "OpenCode Console billing/status error 403",
+      failureCategory: "credentials",
     });
   });
 
@@ -1008,6 +1056,12 @@ describe("queryOpenCodeZenQuota", () => {
         memberBudgetsSkipped: false,
       },
       errors: ["OpenCode Console policies/members error 403"],
+      optionalErrors: [
+        {
+          message: "OpenCode Console policies/members error 403",
+          failureCategory: "credentials",
+        },
+      ],
     });
     expect(JSON.stringify(result)).not.toContain("usr_me");
   });
@@ -1059,6 +1113,7 @@ describe("queryOpenCodeZenQuota", () => {
     await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
       success: false,
       error: SESSION_ERROR,
+      failureCategory: "credentials",
     });
   });
 
@@ -1071,6 +1126,7 @@ describe("queryOpenCodeZenQuota", () => {
     expect(result).toEqual({
       success: false,
       error: "OpenCode Console billing/status error 500",
+      failureCategory: "provider_api",
     });
     expect(JSON.stringify(result)).not.toContain(secretBody);
     expect(JSON.stringify(result)).not.toContain("st_secret-token");
@@ -1086,6 +1142,7 @@ describe("queryOpenCodeZenQuota", () => {
     await expect(queryOpenCodeZenQuota(credential)).resolves.toEqual({
       success: false,
       error: "Could not parse OpenCode Console billing/status response",
+      failureCategory: "provider_api",
     });
   });
 
@@ -1234,6 +1291,7 @@ describe("queryOpenCodeZenQuota", () => {
       success: false,
       error:
         "OpenCode Console billing/status request failed: timeout for [redacted] with [redacted] retry",
+      failureCategory: "provider_api",
     });
     expect(JSON.stringify(result)).not.toContain("wrk_abc");
     expect(JSON.stringify(result)).not.toContain("st_secret-token");

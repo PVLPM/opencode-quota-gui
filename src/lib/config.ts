@@ -65,6 +65,8 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "enableToast",
   "resetNotifications.enabled",
   "resetNotifications.windows",
+  "lowQuotaThresholdRemainingPercent",
+  "duplicateCooldownMinutes",
   "tuiCommandDisplay",
   "formatStyle",
   "percentDisplayMode",
@@ -113,6 +115,7 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "export.enabled",
   "export.path",
   "telemetry.enabled",
+  "dashboard.enabled",
   "dashboard.port",
   "dashboard.hiddenCards",
   "dashboard.hiddenCardsVersion",
@@ -198,6 +201,8 @@ type ValidatedQuotaToastPatch = {
   enabled?: boolean;
   enableToast?: boolean;
   resetNotifications?: QuotaResetNotificationsPatch;
+  lowQuotaThresholdRemainingPercent?: number;
+  duplicateCooldownMinutes?: number;
   tuiCommandDisplay?: TuiCommandDisplay;
   formatStyle?: QuotaToastConfig["formatStyle"];
   percentDisplayMode?: PercentDisplayMode;
@@ -406,6 +411,7 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
     export: { ...config.export },
     telemetry: { ...config.telemetry },
     dashboard: {
+      enabled: config.dashboard.enabled,
       port: config.dashboard.port,
       hiddenCards: [...config.dashboard.hiddenCards],
       hiddenCardsVersion: config.dashboard.hiddenCardsVersion,
@@ -425,6 +431,16 @@ const QUOTA_RESET_WINDOWS: readonly QuotaResetWindow[] = [
   "monthly",
   "yearly",
 ];
+
+/** Quota alert threshold: a whole percent remaining, from 1 through 100. */
+export function isValidLowQuotaThresholdRemainingPercent(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 100;
+}
+
+/** Duplicate alert cooldown: a whole number of minutes, zero or more. */
+export function isValidDuplicateCooldownMinutes(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
 
 function extractQuotaResetNotificationsPatch(
   value: unknown,
@@ -726,6 +742,14 @@ function extractDashboardPatch(
 
   const patch: DashboardConfigPatch = {};
 
+  if (hasOwnKey(value, "enabled")) {
+    if (typeof value.enabled === "boolean") {
+      patch.enabled = value.enabled;
+    } else {
+      reportIssue?.("dashboard.enabled", "expected boolean");
+    }
+  }
+
   if (hasOwnKey(value, "port")) {
     if (isValidDashboardPort(value.port)) {
       patch.port = value.port;
@@ -798,6 +822,24 @@ function extractValidatedQuotaToastPatch(
       reportIssue,
     );
     if (resetNotifications) patch.resetNotifications = resetNotifications;
+  }
+
+  if (hasOwnKey(quotaToastConfig, "lowQuotaThresholdRemainingPercent")) {
+    if (
+      isValidLowQuotaThresholdRemainingPercent(quotaToastConfig.lowQuotaThresholdRemainingPercent)
+    ) {
+      patch.lowQuotaThresholdRemainingPercent = quotaToastConfig.lowQuotaThresholdRemainingPercent;
+    } else {
+      reportIssue?.("lowQuotaThresholdRemainingPercent", "expected an integer between 1 and 100");
+    }
+  }
+
+  if (hasOwnKey(quotaToastConfig, "duplicateCooldownMinutes")) {
+    if (isValidDuplicateCooldownMinutes(quotaToastConfig.duplicateCooldownMinutes)) {
+      patch.duplicateCooldownMinutes = quotaToastConfig.duplicateCooldownMinutes;
+    } else {
+      reportIssue?.("duplicateCooldownMinutes", "expected an integer of 0 or more");
+    }
   }
 
   if (hasOwnKey(quotaToastConfig, "tuiCommandDisplay")) {
@@ -1108,6 +1150,16 @@ function applyValidatedQuotaToastPatch(
     }
   }
 
+  if (hasOwnKey(patch, "lowQuotaThresholdRemainingPercent")) {
+    config.lowQuotaThresholdRemainingPercent = patch.lowQuotaThresholdRemainingPercent!;
+    applySettingSource(settingSources, "lowQuotaThresholdRemainingPercent", sourcePath);
+  }
+
+  if (hasOwnKey(patch, "duplicateCooldownMinutes")) {
+    config.duplicateCooldownMinutes = patch.duplicateCooldownMinutes!;
+    applySettingSource(settingSources, "duplicateCooldownMinutes", sourcePath);
+  }
+
   if (hasOwnKey(patch, "tuiCommandDisplay")) {
     config.tuiCommandDisplay = patch.tuiCommandDisplay!;
     applySettingSource(settingSources, "tuiCommandDisplay", sourcePath);
@@ -1361,6 +1413,11 @@ function applyValidatedQuotaToastPatch(
   }
 
   if (patch.dashboard) {
+    if (hasOwnKey(patch.dashboard, "enabled")) {
+      config.dashboard.enabled = patch.dashboard.enabled!;
+      applySettingSource(settingSources, "dashboard.enabled", sourcePath);
+    }
+
     if (hasOwnKey(patch.dashboard, "port")) {
       config.dashboard.port = patch.dashboard.port!;
       applySettingSource(settingSources, "dashboard.port", sourcePath);

@@ -163,7 +163,12 @@ export const googleGeminiCliProvider: QuotaProvider = {
         const group = names[index] ?? "Gemini CLI";
         if (!result) continue;
         if (!result.success) {
-          errors.push({ label: group, message: result.error, sourceId: row.id });
+          errors.push({
+            label: group,
+            message: result.error,
+            sourceId: row.id,
+            failureCategory: result.failureCategory,
+          });
           continue;
         }
         for (const bucket of result.buckets) {
@@ -202,6 +207,9 @@ export const googleGeminiCliProvider: QuotaProvider = {
             label: group,
             message: error.error,
             sourceId: row.id,
+            ...(error.failureCategory !== undefined
+              ? { failureCategory: error.failureCategory }
+              : {}),
           })),
         );
       }
@@ -227,7 +235,12 @@ export const googleGeminiCliProvider: QuotaProvider = {
     }
 
     if (!result.success) {
-      return withStatusDetails(attemptedErrorResult("Gemini CLI", result.error), statusDetails);
+      return withStatusDetails(
+        attemptedErrorResult("Gemini CLI", result.error, {
+          failureCategory: result.failureCategory,
+        }),
+        statusDetails,
+      );
     }
 
     const accountLabels = createGoogleAccountLabelMap(

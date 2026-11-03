@@ -3,7 +3,12 @@ import { readFile } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 
-import { getGuiConfigPath, getGuiConfigSiblingJsonPath, loadConfig } from "./config.js";
+import {
+  createLoadConfigMeta,
+  getGuiConfigPath,
+  getGuiConfigSiblingJsonPath,
+  loadConfig,
+} from "./config.js";
 import {
   type ConfigFileFormat,
   dedupeNonEmptyStrings,
@@ -13,6 +18,11 @@ import {
   resolveEditableConfigPath,
 } from "./config-file-utils.js";
 import { writeConfiguredJsonAtomic } from "./config-write-target.js";
+import {
+  getDashboardEnabledSetting,
+  hasInvalidDashboardWebConfig,
+  resolveDashboardWebEnabled,
+} from "./dashboard-web-policy.js";
 import { assertGuiConfigTargetIsIndependent } from "./gui-config-target.js";
 import { parseJsonOrJsonc } from "./jsonc.js";
 import {
@@ -22,7 +32,7 @@ import {
   validateConfigDocumentEdit,
 } from "./opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
-import { detectOpenCodeMajor } from "./opencode-version.js";
+import { detectOpenCodeMajor, detectOpenCodeVersion } from "./opencode-version.js";
 import {
   getQuotaProviderDisplayLabel,
   normalizeQuotaProviderId,
@@ -1504,7 +1514,8 @@ export async function runInitInstaller(params?: {
           ? "Web"
           : "TUI and Web";
     const configuredPaths = [...result.writtenPaths, ...result.unchangedPaths];
-    const config = await loadConfig(undefined, undefined, {
+    const configMeta = createLoadConfigMeta();
+    const config = await loadConfig(undefined, configMeta, {
       configRootDir: resolveInitInstallerBaseDir({ scope: "project", cwd: params?.cwd }),
       globalConfigDir: resolveInitInstallerBaseDir({
         scope: "global",
@@ -1512,14 +1523,34 @@ export async function runInitInstaller(params?: {
         homeDir: params?.homeDir,
       }),
     });
+    const explicitDashboardEnabled = getDashboardEnabledSetting(config, configMeta);
+    const invalidDashboardConfig = hasInvalidDashboardWebConfig(configMeta);
+    // The version probe is bounded and only needed when the canonical key is
+    // absent; explicit configuration and malformed files decide on their own.
+    const hostVersion =
+      explicitDashboardEnabled === undefined && !invalidDashboardConfig
+        ? await detectOpenCodeVersion()
+        : undefined;
+    const webEnabled = resolveDashboardWebEnabled({
+      ...(explicitDashboardEnabled !== undefined
+        ? { explicitEnabled: explicitDashboardEnabled }
+        : {}),
+      ...(hostVersion !== undefined ? { hostVersion } : {}),
+      invalidConfig: invalidDashboardConfig,
+    });
     const dashboardUrl = `http://localhost:${config.dashboard?.port ?? DEFAULT_DASHBOARD_PORT}/quota`;
+    const dashboardOutro = webEnabled
+      ? `Restart OpenCode, then open ${dashboardUrl}.`
+      : explicitDashboardEnabled === false
+        ? `Web dashboard access is disabled in the canonical config. Set "dashboard": { "enabled": true }, then restart OpenCode and open ${dashboardUrl}.`
+        : `Web dashboard access is off. Add "dashboard": { "enabled": true } to the canonical config, then restart OpenCode and open ${dashboardUrl}.`;
     prompts.outro(
       [
         "OpenCode Quota setup complete.",
         `Interfaces: ${interfaceLabel}`,
         "Configured paths:",
         ...configuredPaths.map((path) => `- ${path}`),
-        `Restart OpenCode, then open ${dashboardUrl}.`,
+        dashboardOutro,
         `If OpenCode Quota helps, please consider a star: ${GITHUB_REPO_URL}`,
       ].join("\n"),
     );

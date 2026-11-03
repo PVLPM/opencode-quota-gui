@@ -12,9 +12,14 @@ import {
 } from "../src/lib/init-installer.js";
 import { parseJsonOrJsonc } from "../src/lib/jsonc.js";
 
-vi.mock("../src/lib/opencode-version.js", () => ({
-  detectOpenCodeMajor: async () => 2,
-}));
+vi.mock("../src/lib/opencode-version.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/lib/opencode-version.js")>();
+  return {
+    ...original,
+    detectOpenCodeMajor: async () => 2,
+    detectOpenCodeVersion: async () => ({ major: 2, minor: 2, patch: 0 }),
+  };
+});
 
 // A stable running package resolves the default install spec to the npm latest tag.
 vi.mock("../src/lib/version.js", () => ({

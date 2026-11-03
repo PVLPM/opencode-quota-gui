@@ -15,6 +15,8 @@ import { readFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
 
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+
 import { resolveAnthropicOAuthCached } from "./anthropic-auth.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
@@ -81,6 +83,8 @@ export interface AnthropicUsageParseOptions {
 export interface AnthropicQuotaError {
   success: false;
   error: string;
+  /** Source-assigned safe category; absence means unknown and consumers fail closed. */
+  failureCategory?: ProviderFailureCategory;
 }
 
 export type AnthropicResult = AnthropicQuotaResult | AnthropicQuotaError | null;
@@ -106,6 +110,8 @@ export interface AnthropicDiagnostics {
   binaryPath: string | null;
   checkedCommands: string[];
   message?: string;
+  /** Source-assigned category for a failed OAuth usage request; absent otherwise. */
+  failureCategory?: ProviderFailureCategory;
   quota?: AnthropicQuotaResult;
 }
 
@@ -193,6 +199,7 @@ type AnthropicFallbackQuota =
       state: "unavailable";
       detail?: string;
       failureKind?: "authentication";
+      failureCategory?: ProviderFailureCategory;
     };
 
 type ParsedAuthProbe = {
@@ -850,6 +857,7 @@ async function performAnthropicOAuthUsageRequest(
           return {
             state: "unavailable",
             detail: `${errorDetail} ${getAnthropicOAuthCooldownMessage(durationMs)}`,
+            failureCategory: "provider_api",
           };
         }
 
@@ -871,6 +879,7 @@ async function performAnthropicOAuthUsageRequest(
               ? `Anthropic API error ${response.status}: ${detail}`
               : `Anthropic API returned ${response.status}`,
             ...(authenticationFailure ? { failureKind: "authentication" as const } : {}),
+            failureCategory: authenticationFailure ? "credentials" : "provider_api",
           };
         }
 
@@ -882,6 +891,7 @@ async function performAnthropicOAuthUsageRequest(
           return {
             state: "unavailable",
             detail: "Failed to parse Anthropic quota response",
+            failureCategory: "provider_api",
           };
         }
 
@@ -890,6 +900,7 @@ async function performAnthropicOAuthUsageRequest(
           return {
             state: "unavailable",
             detail: "Unexpected Anthropic quota response shape",
+            failureCategory: "provider_api",
           };
         }
 
@@ -906,6 +917,7 @@ async function performAnthropicOAuthUsageRequest(
         error instanceof Error ? error.message : String(error),
         accessToken,
       ),
+      failureCategory: "provider_api",
     };
   }
 }
@@ -954,7 +966,13 @@ export async function queryAnthropicQuotaWithOAuth(
   const result = await queryAnthropicQuotaFromOAuthAccessToken(accessToken, requestTimeoutMs);
   return result.state === "success"
     ? result.quota
-    : { success: false, error: result.detail ?? "Anthropic OAuth quota unavailable" };
+    : {
+        success: false,
+        error: result.detail ?? "Anthropic OAuth quota unavailable",
+        ...(result.failureCategory !== undefined
+          ? { failureCategory: result.failureCategory }
+          : {}),
+      };
 }
 
 function extractAuthBoolean(data: unknown): boolean | undefined {
@@ -1423,6 +1441,9 @@ export async function getAnthropicDiagnostics(
         binaryPath: localDiagnostics.binaryPath,
         checkedCommands: localDiagnostics.checkedCommands,
         message: buildAnthropicNoQuotaDiagnosticsMessage(fallbackQuota.detail),
+        ...(fallbackQuota.failureCategory !== undefined
+          ? { failureCategory: fallbackQuota.failureCategory }
+          : {}),
       };
       return diagnostics;
     }
@@ -1553,6 +1574,9 @@ export async function queryAnthropicQuota(
       return {
         success: false,
         error: diagnostics.message,
+        ...(diagnostics.failureCategory !== undefined
+          ? { failureCategory: diagnostics.failureCategory }
+          : {}),
       };
     }
 

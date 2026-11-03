@@ -129,7 +129,7 @@ export type DashboardReadSource = Pick<
   refreshAnalytics?(): Promise<void>;
   /** Worker background-generation notifications (lazy; never starts analytics). */
   subscribeAnalytics?(listener: () => void): () => void;
-  /** Final server dispose / bind-failure cleanup; closes the analytics worker. */
+  /** Final host-dispose cleanup; closes the analytics worker. */
   close?(): Promise<void>;
 };
 

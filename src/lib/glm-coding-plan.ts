@@ -1,3 +1,4 @@
+import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import type { InvalidAwareAuthResult } from "./api-key-resolver.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
@@ -27,8 +28,11 @@ export async function queryGlmCodingPlanQuota(
     ? { state: "configured" as const, apiKey: options.apiKey }
     : await descriptor.resolveAuth();
   if (auth.state === "none") return null;
-  if (auth.state === "invalid") return { success: false, error: auth.error };
+  if (auth.state === "invalid") {
+    return { success: false, error: auth.error, failureCategory: "credentials" };
+  }
 
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(descriptor.endpoint, {
       request: {
@@ -40,11 +44,13 @@ export async function queryGlmCodingPlanQuota(
       },
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
+        responseStatus = response.status;
         if (!response.ok) {
           const body = sanitizeDisplaySnippet(await response.text(), 120);
           return {
             success: false,
             error: `${descriptor.httpErrorPrefix} ${response.status}: ${body}`,
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
 
@@ -61,12 +67,15 @@ export async function queryGlmCodingPlanQuota(
               (typeof body.code === "number"
                 ? `${descriptor.apiErrorPrefix} ${body.code}`
                 : descriptor.apiErrorPrefix),
+            failureCategory: "provider_api",
           };
         }
 
         const limits =
           descriptor.envelope === "zai" ? (body.data?.limits ?? body.limits) : body.data?.limits;
-        if (!Array.isArray(limits)) return { success: false, error: "Invalid quota data" };
+        if (!Array.isArray(limits)) {
+          return { success: false, error: "Invalid quota data", failureCategory: "provider_api" };
+        }
 
         const windows: ZaiQuotaResult["windows"] = {};
         for (const limit of limits as ZaiQuotaLimit[]) {
@@ -104,6 +113,10 @@ export async function queryGlmCodingPlanQuota(
     return {
       success: false,
       error: sanitizeDisplayText(error instanceof Error ? error.message : String(error)),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }

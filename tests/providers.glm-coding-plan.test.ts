@@ -136,8 +136,14 @@ describe.each(PROVIDERS)("$label GLM provider", (descriptor) => {
   });
 
   it("maps query errors into toast errors", async () => {
-    descriptor.query.mockResolvedValueOnce({ success: false, error: "Unauthorized" });
-    expectAttemptedWithErrorLabel(await descriptor.provider.fetch({} as any), descriptor.label);
+    descriptor.query.mockResolvedValueOnce({
+      success: false,
+      error: "Unauthorized",
+      failureCategory: "credentials",
+    });
+    const out = await descriptor.provider.fetch({} as any);
+    expectAttemptedWithErrorLabel(out, descriptor.label);
+    expect(out.errors[0]?.failureCategory).toBe("credentials");
   });
 
   it("keeps provider-specific model matching", () => {
@@ -249,6 +255,7 @@ describe("GLM database credential rows", () => {
         label: "[Z.ai Work] (active)",
         message: "OpenCode could not read this login: refresh_failed: HTTP 401",
         sourceId: "failed-id",
+        failureCategory: "credentials",
       },
     ]);
     expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([

@@ -274,6 +274,137 @@ describe("GUI snapshot service", () => {
     expect(calls).toBe(1);
   });
 
+  it("invalidates cached pages and broadcasts both topics when the active source changes", async () => {
+    const { calls, source } = fakeSource();
+    const service = makeService(source);
+
+    await service.home({ range: "7d" });
+    expect(calls.home).toBe(1);
+
+    const events: DashboardEvent[] = [];
+    const unsubscribe = service.subscribe((event) => events.push(event));
+    service.sourceChanged();
+    expect(events).toEqual([
+      { topic: "quota.changed", at: expect.any(Number) },
+      { topic: "sessions.changed", at: expect.any(Number) },
+    ]);
+
+    await service.home({ range: "7d" });
+    expect(calls.home).toBe(2);
+    unsubscribe();
+    service.close();
+  });
+
+  it("does not let an in-flight pre-handoff load freshen the cache after a source change", async () => {
+    let release!: (value: HomeSnapshot) => void;
+    const pending = new Promise<HomeSnapshot>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const { source } = fakeSource({
+      home: () => {
+        calls += 1;
+        if (calls === 1) return pending;
+        return Promise.resolve(home("7d", { total: 99 }));
+      },
+    });
+    const service = makeService(source);
+
+    const preHandoff = service.home({ range: "7d" });
+    service.sourceChanged();
+    release(home("7d", { total: 11 }));
+    // The caller may keep its result, but never as fresh data from the old
+    // source: the stale marker is the only contract-safe representation.
+    await expect(preHandoff).resolves.toMatchObject({
+      stale: true,
+      usage: { totals: { total: 11 } },
+    });
+
+    await expect(service.home({ range: "7d" })).resolves.toMatchObject({
+      stale: false,
+      usage: { totals: { total: 99 } },
+    });
+    expect(calls).toBe(2);
+    service.close();
+  });
+
+  it("rejects a pre-handoff in-flight session result because it has no stale marker", async () => {
+    let release!: (value: SessionSnapshot) => void;
+    const pending = new Promise<SessionSnapshot>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const { source } = fakeSource({
+      session: () => {
+        calls += 1;
+        return calls === 1 ? pending : Promise.resolve(session());
+      },
+    });
+    const service = makeService(source);
+
+    const preHandoff = service.session({ sessionId: "s1" });
+    service.sourceChanged();
+    release(session("s1"));
+
+    await expect(preHandoff).rejects.toThrow(
+      "Snapshot source changed before the snapshot completed",
+    );
+    // A later post-handoff read uses the new source normally.
+    await expect(service.session({ sessionId: "s1" })).resolves.toMatchObject({
+      focusSessionId: "s1",
+    });
+    expect(calls).toBe(2);
+    service.close();
+  });
+
+  it("does not serve a previous-owner session snapshot as last-good after a handoff", async () => {
+    let calls = 0;
+    const { source } = fakeSource({
+      session: async () => {
+        calls += 1;
+        if (calls === 1) return session("s1");
+        throw new Error("new owner unavailable");
+      },
+    });
+    const service = makeService(source);
+
+    await expect(service.session({ sessionId: "s1" })).resolves.toMatchObject({
+      focusSessionId: "s1",
+    });
+    service.sourceChanged();
+
+    // SessionSnapshot has no stale field, so the old owner's payload must not
+    // be returned unmarked: surface the post-handoff failure instead.
+    await expect(service.session({ sessionId: "s1" })).rejects.toThrow("new owner unavailable");
+    expect(calls).toBe(2);
+    service.close();
+  });
+
+  it("still serves a stale last-good home page after a handoff failure", async () => {
+    let calls = 0;
+    const { source } = fakeSource({
+      home: async ({ range }) => {
+        calls += 1;
+        if (calls === 1) return home(range, { total: 11 });
+        throw new Error("new owner unavailable");
+      },
+    });
+    const service = makeService(source);
+
+    await expect(service.home({ range: "7d" })).resolves.toMatchObject({
+      stale: false,
+      usage: { totals: { total: 11 } },
+    });
+    service.sourceChanged();
+
+    await expect(service.home({ range: "7d" })).resolves.toMatchObject({
+      stale: true,
+      usage: { totals: { total: 11 } },
+    });
+    expect(calls).toBe(2);
+    service.close();
+  });
+
   it("keys the cache by kind, resource id and range", async () => {
     const { calls, source } = fakeSource();
     const service = makeService(source);
@@ -1397,5 +1528,138 @@ describe("GUI snapshot service", () => {
     const stale = await service.quota();
     expect(stale.stale).toBe(true);
     expect(stale.providers.cards).toHaveLength(1);
+  });
+
+  it("aggregates concurrent viewer scopes and keeps analytics active while one viewer needs it", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
+    await service.home({ range: "7d" });
+
+    const quotaViewer = service.addScopedViewer("quota");
+    const analyticsViewer = service.addScopedViewer("analytics");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+    expect(calls.home).toBe(2);
+
+    // One viewer leaving must not suppress the remaining analytics viewer's
+    // refresh, and the quota viewer alone then suppresses it.
+    quotaViewer.release();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(2);
+    expect(calls.home).toBe(3);
+
+    analyticsViewer.release();
+    await vi.advanceTimersByTimeAsync(90);
+    expect(refreshes).toBe(2);
+
+    // A reconnect registers the page again; a quota-only viewer starts the
+    // poller but still performs no analytics refresh.
+    await service.home({ range: "7d" });
+    const quotaOnly = service.addScopedViewer("quota");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(2);
+    expect(calls.home).toBe(4);
+    quotaOnly.release();
+  });
+
+  it("lets an analytics scoped viewer outrank a legacy quota signal", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { analyticsIntervalMs: 25 });
+    await service.home({ range: "7d" });
+
+    const webViewer = service.addViewer();
+    service.setViewScope("quota");
+    const nativeViewer = service.addScopedViewer("analytics");
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+
+    nativeViewer.release();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(refreshes).toBe(1);
+
+    webViewer();
+  });
+
+  it("keeps the host quota monitor alone without analytics work", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 25, analyticsIntervalMs: 25 });
+    const monitor = service.addScopedViewer("quota");
+    await service.quota();
+    await vi.advanceTimersByTimeAsync(90);
+
+    expect(calls.quota).toBeGreaterThan(1);
+    expect(calls.home + calls.project + calls.session).toBe(0);
+    expect(refreshes).toBe(0);
+
+    monitor.release();
+    service.close();
+  });
+
+  it("retains global analytics pages across a 2 to 1 to 2 window transition", async () => {
+    vi.useFakeTimers();
+    let refreshes = 0;
+    const { calls, source } = fakeSource({
+      refreshAnalytics: async () => {
+        refreshes += 1;
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 25, analyticsIntervalMs: 25 });
+    const monitor = service.addScopedViewer("quota");
+    await service.quota();
+    const analytics = service.addScopedViewer("analytics");
+    const quotaWindow = service.addScopedViewer("quota");
+    await service.home({ range: "7d" });
+    await vi.advanceTimersByTimeAsync(30);
+    expect(calls.home).toBe(2);
+    const activeRefreshes = refreshes;
+
+    // Closing the concurrent quota window leaves analytics polling untouched.
+    quotaWindow.release();
+    await vi.advanceTimersByTimeAsync(30);
+    expect(calls.home).toBeGreaterThan(2);
+    expect(refreshes).toBeGreaterThan(activeRefreshes);
+
+    // Closing the analytics window leaves only the host monitor. The global
+    // page stops being polled but stays cached and fresh: a direct read is
+    // served without a source call (no dirty, no compute clearing).
+    analytics.release();
+    const closedHome = calls.home;
+    const closedRefreshes = refreshes;
+    await vi.advanceTimersByTimeAsync(90);
+    expect(calls.home).toBe(closedHome);
+    expect(refreshes).toBe(closedRefreshes);
+    const retained = await service.home({ range: "7d" });
+    expect(retained.stale).toBe(false);
+    expect(calls.home).toBe(closedHome);
+
+    // Reopening on analytics resumes polling for the same global page without a
+    // refetch on attach.
+    const reopened = service.addScopedViewer("analytics");
+    expect(calls.home).toBe(closedHome);
+    await vi.advanceTimersByTimeAsync(30);
+    expect(calls.home).toBeGreaterThan(closedHome);
+    expect(refreshes).toBeGreaterThan(closedRefreshes);
+
+    reopened.release();
+    monitor.release();
+    service.close();
   });
 });

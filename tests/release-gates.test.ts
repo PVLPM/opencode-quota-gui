@@ -152,7 +152,7 @@ describe("v4 release gates", () => {
     const typescript = run(typescriptScript);
     expect(typescript.status).toBe(0);
     expect(typescript.stdout).toContain(
-      "TypeScript 7.0.2 and @opencode/plugin 2.0.16 lock entries verified",
+      "TypeScript 7.0.2 and @opencode/plugin 2.2.0 (peer >=2.0.16 <2.3.0) lock entries verified",
     );
 
     const historyRepo = path.join(tempDir, "clean-history");
@@ -442,6 +442,23 @@ describe("v4 release gates", () => {
     const result = run(packageScript, [manifestPath]);
     expect(result.status).toBe(1);
     for (const file of forbiddenFiles) expect(result.stderr).toContain(file);
+  });
+
+  it("rejects any source map in the packed manifest", async () => {
+    const sourceMaps = ["dist/index.js.map", "dist/lib/example.d.ts.map"];
+    const manifestPath = path.join(tempDir, "source-map.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        files: [...requiredPackageFiles(), ...sourceMaps].map((entry) => ({ path: entry })),
+      }),
+      "utf8",
+    );
+
+    const result = run(packageScript, [manifestPath]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("npm package must not include source maps");
+    for (const file of sourceMaps) expect(result.stderr).toContain(file);
   });
 
   it("verifies one exact release tarball and rejects content tampering", async () => {

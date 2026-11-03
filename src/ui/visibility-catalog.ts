@@ -1,3 +1,5 @@
+import type { QuotaSnapshot } from "../contracts/dashboard";
+
 /** Bounded, untrusted browser-local memory of individual quota cards for Settings. */
 export interface VisibilityRow {
   id: string;
@@ -177,6 +179,47 @@ export function visibilityCatalogEquals(
       );
     })
   );
+}
+
+/**
+ * The quota payload's individual card identities, including cards hidden on
+ * Quota, in the same order and with the same row ownership. Shared by the
+ * browser Settings route and the native SettingsPage.
+ */
+export function catalogFromQuotaSnapshot(snapshot: QuotaSnapshot | undefined): VisibilityCatalog {
+  if (snapshot === undefined) return { cards: [] };
+  const cards: VisibilityCard[] = [];
+  for (const card of snapshot.providers.cards) {
+    if (cards.some((entry) => entry.cardId === card.cardId)) continue;
+    const visibility: VisibilityCard = {
+      cardId: card.cardId,
+      providerId: card.providerId,
+      providerLabel: card.providerLabel,
+      ...(card.planLabel === undefined ? {} : { planLabel: card.planLabel }),
+      ...(card.accountLabel === undefined ? {} : { accountLabel: card.accountLabel }),
+      ...(card.providerScopeId === undefined ? {} : { providerScopeId: card.providerScopeId }),
+      ...(card.providerScopeHash === undefined
+        ? {}
+        : { providerScopeHash: card.providerScopeHash }),
+      rows: [],
+    };
+    const addRow = (id: string, label: string, info?: string): void => {
+      const existing = visibility.rows.find((row) => row.id === id);
+      if (existing) {
+        if (existing.info === undefined && info !== undefined) existing.info = info;
+        return;
+      }
+      visibility.rows.push({
+        id,
+        label,
+        ...(info === undefined ? {} : { info }),
+      });
+    };
+    for (const row of card.rows) addRow(row.rowId, row.label, row.info);
+    for (const row of card.visibilityRows ?? []) addRow(row.rowId, row.label, row.info);
+    cards.push(visibility);
+  }
+  return { cards };
 }
 
 /** Current identity wins, cached absent cards/rows survive, help fills transient gaps. */

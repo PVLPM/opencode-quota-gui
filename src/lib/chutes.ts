@@ -5,6 +5,7 @@
  * https://api.chutes.ai/users/me/quota_usage/me
  */
 
+import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import {
   type ChutesKeySource,
   getChutesKeyDiagnostics,
@@ -43,6 +44,7 @@ export async function queryChutesQuota(
   const resolved = await resolveChutesApiKey();
   if (!resolved) return null;
 
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(CHUTES_QUOTA_URL, {
       request: {
@@ -54,19 +56,33 @@ export async function queryChutesQuota(
       },
       timeoutMs: options.requestTimeoutMs,
       consume: async (resp): Promise<Exclude<ChutesResult, null>> => {
+        responseStatus = resp.status;
         if (!resp.ok) {
           const text = await resp.text();
           return {
             success: false,
             error: `Chutes API error ${resp.status}: ${sanitizeDisplaySnippet(text, 120)}`,
+            failureCategory: providerFailureCategoryForHttpStatus(resp.status),
           };
         }
 
         const data = (await resp.json()) as ChutesQuotaResponse;
+        if (
+          typeof data.used !== "number" ||
+          !Number.isFinite(data.used) ||
+          typeof data.quota !== "number" ||
+          !Number.isFinite(data.quota)
+        ) {
+          return {
+            success: false,
+            error: "Chutes API response returned an unexpected response shape",
+            failureCategory: "provider_api",
+          };
+        }
 
         // Chutes returns used and quota.
-        const used = typeof data.used === "number" ? data.used : 0;
-        const quota = typeof data.quota === "number" ? data.quota : 0;
+        const used = data.used;
+        const quota = data.quota;
         const percentRemaining = quota > 0 ? clampPercent(((quota - used) / quota) * 100) : 0;
 
         return {
@@ -80,6 +96,10 @@ export async function queryChutesQuota(
     return {
       success: false,
       error: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }

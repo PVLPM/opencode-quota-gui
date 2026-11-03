@@ -128,6 +128,50 @@ describe("alibaba-token-plan provider", () => {
     );
   });
 
+  it("maps structured CLI failures to local or credential categories", async () => {
+    const { queryAlibabaTokenPlanQuota } = await import("../src/lib/alibaba-token-plan.js");
+    const cases = [
+      ["executable_not_found", "local"],
+      ["shell_launcher_rejected", "local"],
+      ["workspace_path_rejected", "local"],
+      ["spawn_failed", "local"],
+      ["not_authenticated", "credentials"],
+    ] as const;
+
+    for (const [kind, expected] of cases) {
+      vi.mocked(queryAlibabaTokenPlanQuota).mockResolvedValue({
+        ok: false,
+        error: { kind, message: `failure: ${kind}` },
+      });
+      const out = await alibabaTokenPlanProvider.fetch({ config: {} } as any);
+      expectAttemptedWithErrorLabel(out, "Alibaba Personal Token Plan");
+      expect(out.errors[0]?.failureCategory, kind).toBe(expected);
+    }
+  });
+
+  it("fails closed instead of labeling ambiguous CLI failures as provider API", async () => {
+    const { queryAlibabaTokenPlanQuota } = await import("../src/lib/alibaba-token-plan.js");
+    const ambiguousKinds = [
+      "timeout",
+      "output_truncated",
+      "nonzero_exit",
+      "invalid_json",
+      "invalid_schema",
+      "no_data",
+    ] as const;
+
+    for (const kind of ambiguousKinds) {
+      vi.mocked(queryAlibabaTokenPlanQuota).mockResolvedValue({
+        ok: false,
+        error: { kind, message: `failure: ${kind}` },
+      });
+      const out = await alibabaTokenPlanProvider.fetch({ config: {} } as any);
+      expectAttemptedWithErrorLabel(out, "Alibaba Personal Token Plan");
+      expect(out.errors[0]?.failureCategory, kind).toBeUndefined();
+      expect(out.errors[0], kind).not.toHaveProperty("failureCategory");
+    }
+  });
+
   it("returns not-attempted on unsupported platforms", async () => {
     const { queryAlibabaTokenPlanQuota } = await import("../src/lib/alibaba-token-plan.js");
     vi.mocked(queryAlibabaTokenPlanQuota).mockResolvedValue({

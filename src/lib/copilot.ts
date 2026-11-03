@@ -8,6 +8,7 @@
 
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import { readAuthFile } from "./opencode-auth.js";
@@ -719,6 +720,20 @@ function redactGitHubErrorText(text: string, secrets: readonly string[]): string
   return sanitized;
 }
 
+class CopilotRequestError extends Error {
+  constructor(
+    message: string,
+    readonly failureCategory: ProviderFailureCategory,
+  ) {
+    super(message);
+    this.name = "CopilotRequestError";
+  }
+}
+
+function requestFailureCategory(error: unknown): ProviderFailureCategory {
+  return error instanceof CopilotRequestError ? error.failureCategory : "provider_api";
+}
+
 async function readGitHubRestErrorMessage(
   response: Response,
   secrets: readonly string[],
@@ -739,6 +754,21 @@ async function readGitHubRestErrorMessage(
   return sanitizeDisplaySnippet(redactGitHubErrorText(text, secrets), 160);
 }
 
+/**
+ * Keeps the HTTP status available for classification when the error body
+ * cannot be read at all.
+ */
+async function readGitHubRestErrorMessageForClassification(
+  response: Response,
+  secrets: readonly string[],
+): Promise<string> {
+  try {
+    return await readGitHubRestErrorMessage(response, secrets);
+  } catch {
+    return "response body could not be read";
+  }
+}
+
 async function fetchGitHubRestJson<T>(
   url: string,
   token: string,
@@ -749,18 +779,22 @@ async function fetchGitHubRestJson<T>(
     timeoutMs: requestTimeoutMs,
     consume: async (response) => {
       if (!response.ok) {
-        const message = await readGitHubRestErrorMessage(response, [token]);
-        const rateLimit =
-          response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0"
-            ? " (GitHub API rate limit exhausted)"
-            : "";
-        throw new Error(`GitHub API error ${response.status}: ${message}${rateLimit}`);
+        const message = await readGitHubRestErrorMessageForClassification(response, [token]);
+        const rateLimited =
+          response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0";
+        const rateLimit = rateLimited ? " (GitHub API rate limit exhausted)" : "";
+        throw new CopilotRequestError(
+          `GitHub API error ${response.status}: ${message}${rateLimit}`,
+          response.status === 401 || (response.status === 403 && !rateLimited)
+            ? "credentials"
+            : "provider_api",
+        );
       }
 
       try {
         return (await response.json()) as T;
       } catch {
-        throw new Error("GitHub API returned malformed JSON");
+        throw new CopilotRequestError("GitHub API returned malformed JSON", "provider_api");
       }
     },
   });
@@ -1195,8 +1229,12 @@ function toLegacyResult(
   };
 }
 
-function toQuotaError(message: string): QuotaError {
-  return { success: false, error: message };
+function toQuotaError(message: string, failureCategory?: ProviderFailureCategory): QuotaError {
+  return {
+    success: false,
+    error: message,
+    ...(failureCategory !== undefined ? { failureCategory } : {}),
+  };
 }
 
 function buildCopilotInternalHeaders(token: string): Record<string, string> {
@@ -1337,18 +1375,21 @@ async function fetchCopilotInternalUser(params: {
     timeoutMs: params.requestTimeoutMs,
     consume: async (response) => {
       if (!response.ok) {
-        const message = await readGitHubRestErrorMessage(response, [params.token]);
-        throw new Error(`GitHub Copilot API error ${response.status}: ${message}`);
+        const message = await readGitHubRestErrorMessageForClassification(response, [params.token]);
+        throw new CopilotRequestError(
+          `GitHub Copilot API error ${response.status}: ${message}`,
+          response.status === 401 || response.status === 403 ? "credentials" : "provider_api",
+        );
       }
 
       let parsed: CopilotInternalUserResponse;
       try {
         parsed = (await response.json()) as CopilotInternalUserResponse;
       } catch {
-        throw new Error("GitHub Copilot API returned malformed JSON");
+        throw new CopilotRequestError("GitHub Copilot API returned malformed JSON", "provider_api");
       }
       if (!parsed || typeof parsed !== "object") {
-        throw new Error("GitHub Copilot API returned malformed JSON");
+        throw new CopilotRequestError("GitHub Copilot API returned malformed JSON", "provider_api");
       }
       return parseCopilotInternalUser(parsed);
     },
@@ -1394,7 +1435,10 @@ export async function queryCopilotQuota(
         requestTimeoutMs: options.requestTimeoutMs,
       });
     } catch (error) {
-      return toQuotaError(error instanceof Error ? error.message : String(error));
+      return toQuotaError(
+        error instanceof Error ? error.message : String(error),
+        requestFailureCategory(error),
+      );
     }
   }
 
@@ -1427,7 +1471,10 @@ export async function queryCopilotQuota(
           requestTimeoutMs: options.requestTimeoutMs,
         });
   } catch (error) {
-    return toQuotaError(error instanceof Error ? error.message : String(error));
+    return toQuotaError(
+      error instanceof Error ? error.message : String(error),
+      requestFailureCategory(error),
+    );
   }
 }
 

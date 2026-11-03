@@ -330,7 +330,12 @@ describe("Kimi regional providers", () => {
 
     expect(out.attempted).toBe(true);
     expect(out.errors).toEqual([
-      { label: expect.stringContaining("shared"), message: "empty key", sourceId: "bad" },
+      {
+        label: expect.stringContaining("shared"),
+        message: "empty key",
+        sourceId: "bad",
+        failureCategory: "credentials",
+      },
     ]);
     expect(out.entries).toHaveLength(2);
     expect(out.entries[0]?.accounting.sourceId).toBe("good");
@@ -382,6 +387,7 @@ describe("Kimi regional providers", () => {
         label: "[Kimi Code (CN) Work]",
         message: "OpenCode could not read this login: resolve_empty: no value",
         sourceId: "failed",
+        failureCategory: "credentials",
       },
     ]);
     expect(queryKimiQuota).not.toHaveBeenCalled();

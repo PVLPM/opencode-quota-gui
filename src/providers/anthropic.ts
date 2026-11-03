@@ -116,6 +116,7 @@ export const anthropicProvider: QuotaProvider = {
               ? {
                   success: false as const,
                   error: `Anthropic sign-in could not be read: ${auth.error}. Run \`opencode auth login anthropic\`.`,
+                  failureCategory: "credentials" as const,
                 }
               : await queryAnthropicQuotaWithOAuth(auth.accessToken, options.requestTimeoutMs),
         })),
@@ -134,7 +135,14 @@ export const anthropicProvider: QuotaProvider = {
       for (const [index, { row, result }] of results.entries()) {
         const group = names[index] ?? "Claude";
         if (!result?.success) {
-          if (result) errors.push({ label: group, message: result.error, sourceId: row.id });
+          if (result) {
+            errors.push({
+              label: group,
+              message: result.error,
+              sourceId: row.id,
+              failureCategory: result.failureCategory,
+            });
+          }
           continue;
         }
         entries.push(
@@ -203,7 +211,12 @@ export const anthropicProvider: QuotaProvider = {
     }
 
     if (!result.success) {
-      return withStatusDetails(attemptedErrorResult("Claude", result.error), statusDetails);
+      return withStatusDetails(
+        attemptedErrorResult("Claude", result.error, {
+          failureCategory: result.failureCategory,
+        }),
+        statusDetails,
+      );
     }
 
     const entries: QuotaToastEntry[] = [

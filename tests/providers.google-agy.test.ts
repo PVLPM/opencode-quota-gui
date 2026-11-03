@@ -91,7 +91,7 @@ describe("google agy provider", () => {
           resetTimeIso: "2026-06-23T00:00:00.000Z",
         }),
       ],
-      errors: [{ email: "bob@example.com", error: "Unauthorized" }],
+      errors: [{ email: "bob@example.com", error: "Unauthorized", failureCategory: "credentials" }],
     });
 
     const out = await googleAgyProvider.fetch({ client: {} } as any);
@@ -136,7 +136,9 @@ describe("google agy provider", () => {
         resetTimeIso: undefined,
       },
     ]);
-    expect(out.errors).toEqual([{ label: "bob…", message: "Unauthorized" }]);
+    expect(out.errors).toEqual([
+      { label: "bob…", message: "Unauthorized", failureCategory: "credentials" },
+    ]);
     expect(out.presentation).toEqual({
       singleWindowShowRight: true,
     });

@@ -118,6 +118,7 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
               label: displayNamesByRowId.get(row.id) ?? spec.label,
               message: rowAuth.error,
               sourceId: row.id,
+              failureCategory: "credentials",
             });
           }
           return rowAuth.state === "configured" ? [{ row, auth: rowAuth }] : [];
@@ -144,7 +145,12 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
           for (const { row, result } of results) {
             const group = displayNamesByRowId.get(row.id) ?? spec.label;
             if (!result.success) {
-              errors.push({ label: group, message: result.error, sourceId: row.id });
+              errors.push({
+                label: group,
+                message: result.error,
+                sourceId: row.id,
+                failureCategory: result.failureCategory,
+              });
               continue;
             }
             entries.push(
@@ -171,7 +177,10 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
       }
 
       if (auth.state === "invalid") {
-        return withStatusDetails(attemptedErrorResult(spec.label, auth.error), authDetails);
+        return withStatusDetails(
+          attemptedErrorResult(spec.label, auth.error, { failureCategory: "credentials" }),
+          authDetails,
+        );
       }
 
       const result = await queryKimiQuota({
@@ -182,10 +191,12 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
       });
 
       if (!result.success) {
-        return withStatusDetails(attemptedErrorResult(spec.label, result.error), [
-          ...authDetails,
-          { key: "live_fetch_error", value: result.error },
-        ]);
+        return withStatusDetails(
+          attemptedErrorResult(spec.label, result.error, {
+            failureCategory: result.failureCategory,
+          }),
+          [...authDetails, { key: "live_fetch_error", value: result.error }],
+        );
       }
 
       const entries: QuotaToastEntry[] = result.windows.map((window) => ({

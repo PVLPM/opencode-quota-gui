@@ -277,6 +277,8 @@ export function settingsSnapshot(overrides: Partial<SettingsSnapshot> = {}): Set
     minIntervalMs: 300000,
     requestTimeoutMs: 20000,
     accountingDetail: "summary",
+    lowQuotaThresholdRemainingPercent: 10,
+    duplicateCooldownMinutes: 30,
     opencodeGoWindows: ["rolling", "weekly", "monthly"],
     "dashboard.hiddenCards": [],
     "dashboard.hiddenRows": [],

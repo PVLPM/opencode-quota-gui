@@ -66,6 +66,7 @@ describe("MiMo end-to-end body timeout", () => {
       usage: {
         state: "error",
         error: "Xiaomi MiMo usage request failed: Request timeout after 1s",
+        failureCategory: "provider_api",
       },
       detail: {
         state: "success",

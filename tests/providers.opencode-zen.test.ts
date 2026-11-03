@@ -171,10 +171,18 @@ function consoleAccountState(state: "configured" | "expired" | "invalid") {
       };
 }
 
-function success(overrides: Record<string, unknown> = {}, errors: string[] = []): void {
+function success(
+  overrides: Record<string, unknown> = {},
+  errors: string[] = [],
+  optionalErrors: Array<{
+    message: string;
+    failureCategory?: "provider_api" | "credentials" | "discovery" | "local";
+  }> = errors.map((message) => ({ message, failureCategory: "provider_api" })),
+): void {
   mocks.queryOpenCodeZenQuota.mockResolvedValueOnce({
     success: true,
     errors,
+    ...(optionalErrors.length > 0 ? { optionalErrors } : {}),
     data: {
       balance: 4_250_000_000,
       monthlyLimit: null,
@@ -251,7 +259,11 @@ describe("opencode Zen provider", () => {
 
     expectAttemptedWithErrorLabel(result, "OpenCode Zen");
     expect(result.errors).toEqual([
-      { label: "OpenCode Zen", message: `No OpenCode Console sign-in found. ${LOGIN_HINT}` },
+      {
+        label: "OpenCode Zen",
+        message: `No OpenCode Console sign-in found. ${LOGIN_HINT}`,
+        failureCategory: "credentials",
+      },
     ]);
     expect(result.statusDetails).toEqual([{ key: "console_auth_state", value: "none" }]);
     expect(mocks.queryOpenCodeZenQuota).not.toHaveBeenCalled();
@@ -278,6 +290,7 @@ describe("opencode Zen provider", () => {
         label: "Acme",
         message: `OpenCode Console sign-in failed: refresh_failed: token [redacted] was rejected. ${LOGIN_HINT}`,
         sourceId: consoleSourceId,
+        failureCategory: "credentials",
       },
     ]);
     expect(result.statusDetails).toEqual(
@@ -301,6 +314,7 @@ describe("opencode Zen provider", () => {
         label: "Acme",
         message: `OpenCode Console sign-in failed: the sign-in expired. ${LOGIN_HINT}`,
         sourceId: consoleSourceId,
+        failureCategory: "credentials",
       },
     ]);
     expect(result.statusDetails).toEqual(
@@ -665,11 +679,13 @@ describe("opencode Zen provider", () => {
         label: "Acme",
         message: "OpenCode Console billing/auto-recharge error 500",
         sourceId: consoleSourceId,
+        failureCategory: "provider_api",
       },
       {
         label: "Acme",
         message: "OpenCode Console usage/cost-by-day error 500",
         sourceId: consoleSourceId,
+        failureCategory: "provider_api",
       },
     ]);
     expect(result.statusDetails).toContainEqual({
@@ -681,6 +697,36 @@ describe("opencode Zen provider", () => {
       value:
         "OpenCode Console billing/auto-recharge error 500 | OpenCode Console usage/cost-by-day error 500",
     });
+  });
+
+  it("propagates the producer category for optional Console routes", async () => {
+    configured();
+    const message =
+      "OpenCode Console member budgets unavailable: the Console sign-in has no account id";
+    success({}, [message], [{ message, failureCategory: "discovery" }]);
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expect(result.entries).toEqual([balanceEntry("primary"), autoReloadEntry()]);
+    expect(result.errors).toEqual([
+      {
+        label: "Acme",
+        message,
+        sourceId: consoleSourceId,
+        failureCategory: "discovery",
+      },
+    ]);
+  });
+
+  it("does not label legacy string-only optional failures", async () => {
+    configured();
+    const message = "OpenCode Console billing/account error 500";
+    success({}, [message], []);
+
+    const result = await opencodeZenProvider.fetch(context());
+
+    expect(result.errors).toEqual([{ label: "Acme", message, sourceId: consoleSourceId }]);
+    expect(result.errors[0]).not.toHaveProperty("failureCategory");
   });
 
   it("uses the plugin monthly limit when the Console credit-limit request fails", async () => {
@@ -706,6 +752,7 @@ describe("opencode Zen provider", () => {
         label: "Acme",
         message: "OpenCode Console billing/account error 500",
         sourceId: consoleSourceId,
+        failureCategory: "provider_api",
       },
     ]);
   });
@@ -924,6 +971,7 @@ describe("opencode Zen multi-workspace credentials", () => {
         label: "Expired",
         message: `OpenCode Console sign-in failed: the sign-in expired. ${LOGIN_HINT}`,
         sourceId: "cred_expired",
+        failureCategory: "credentials",
       },
     ]);
     expect(result.accounts?.map(({ sourceId }) => sourceId)).toEqual(["cred_live", "cred_expired"]);

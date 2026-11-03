@@ -1,3 +1,7 @@
+import {
+  type ProviderFailureCategory,
+  providerFailureCategoryForHttpStatus,
+} from "../contracts/provider-failure.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
@@ -262,13 +266,14 @@ function parseKimiUsagePayload(payload: Record<string, unknown>): {
 
 type FetchResult =
   | { ok: true; windows: KimiQuotaWindowWithTechnicalKey[]; topLevelKeys: string[] }
-  | { ok: false; error: string };
+  | { ok: false; error: string; failureCategory?: ProviderFailureCategory };
 
 async function fetchKimiQuotaFromUrl(
   url: string,
   apiKey: string,
   requestTimeoutMs?: number,
 ): Promise<FetchResult> {
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(url, {
       request: {
@@ -279,11 +284,13 @@ async function fetchKimiQuotaFromUrl(
       },
       timeoutMs: requestTimeoutMs,
       consume: async (resp): Promise<FetchResult> => {
+        responseStatus = resp.status;
         if (!resp.ok) {
           const text = await resp.text();
           return {
             ok: false,
             error: `Kimi API error ${resp.status}: ${sanitizeDisplaySnippet(text, 120)}`,
+            failureCategory: providerFailureCategoryForHttpStatus(resp.status),
           };
         }
 
@@ -296,6 +303,10 @@ async function fetchKimiQuotaFromUrl(
     return {
       ok: false,
       error: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }
@@ -321,12 +332,17 @@ export async function queryKimiQuota(options: {
   }
 
   if (!result.ok) {
-    return { success: false, error: result.error };
+    return {
+      success: false,
+      error: result.error,
+      ...(result.failureCategory !== undefined ? { failureCategory: result.failureCategory } : {}),
+    };
   }
 
   // Succeeded structurally but had no usable windows.
   return {
     success: false,
     error: describeUnexpectedPayload(result.topLevelKeys),
+    failureCategory: "provider_api",
   };
 }

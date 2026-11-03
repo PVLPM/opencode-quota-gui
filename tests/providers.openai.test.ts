@@ -258,6 +258,7 @@ describe("openai provider", () => {
         message:
           "OpenAI sign-in could not be refreshed: refresh_failed: HTTP 400. Run `opencode auth logout openai Work`, then `opencode auth login openai`.",
         sourceId: "work-id",
+        failureCategory: "credentials",
       },
     ]);
     expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([
@@ -712,6 +713,7 @@ describe("openai provider", () => {
         label: "[OpenAI Key]",
         message: "OpenAI API key could not be read: refresh_failed: HTTP 400",
         sourceId: "key-id",
+        failureCategory: "credentials",
       },
     ]);
     expect(out.statusDetails).toEqual(

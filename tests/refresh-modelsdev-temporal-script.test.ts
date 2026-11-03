@@ -1,17 +1,19 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   assertRuntimeTemporalSnapshot,
   buildTemporalSnapshot,
   discoverLocalSourceRoutes,
   extractTemporalModel,
+  gitRepositoryEnv,
   parseTomlSubset,
   refreshTemporalSnapshot,
   resolveCurrentSourceRevision,
@@ -29,6 +31,7 @@ import {
   normalizeTemporalSnapshot,
   resolveTemporalRates,
 } from "../src/lib/modelsdev-temporal.js";
+import { isolatedGitEnv, stubIsolatedGitEnv } from "./helpers/isolated-git-env.js";
 
 function tarHeader(name: string, size: number): Buffer {
   const header = Buffer.alloc(512);
@@ -62,6 +65,29 @@ function makeTarGz(entries: { name: string; text: string }[]): Buffer {
 
 function makeTempSourceDir(): string {
   return mkdtempSync(join(tmpdir(), "modelsdev-temporal-source-"));
+}
+
+/**
+ * Fixture git must never inherit hook-exported GIT_* variables (GIT_DIR, GIT_INDEX_FILE, ...),
+ * or `git init`/`commit` silently target the hook's repository instead of the temp fixture.
+ */
+function git(cwd: string, args: readonly string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: isolatedGitEnv(),
+  }).trim();
+}
+
+/** HEAD plus a digest of the index bytes, used to prove a repository was not touched. */
+function headAndIndex(root: string): { head: string; index: string } {
+  const gitDir = git(root, ["rev-parse", "--absolute-git-dir"]);
+  return {
+    head: git(root, ["rev-parse", "HEAD"]),
+    index: createHash("sha256")
+      .update(readFileSync(join(gitDir, "index")))
+      .digest("hex"),
+  };
 }
 
 const BUNDLED_SNAPSHOT = JSON.parse(
@@ -603,17 +629,16 @@ when = { utc_hours = { lt = "04:00" } }
 factor = 2
 `,
       );
-      execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
-      execFileSync("git", ["config", "user.email", "temporal-test@example.com"], { cwd: dir });
-      execFileSync("git", ["config", "user.name", "Temporal Test"], { cwd: dir });
-      execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir });
-      execFileSync("git", ["add", "."], { cwd: dir });
-      execFileSync("git", ["commit", "-m", "fixture"], { cwd: dir, stdio: "ignore" });
-      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString().trim();
-      const seconds = Number.parseInt(
-        execFileSync("git", ["show", "-s", "--format=%ct", "HEAD"], { cwd: dir }).toString().trim(),
-        10,
-      );
+      git(dir, ["init"]);
+      git(dir, ["config", "user.email", "temporal-test@example.com"]);
+      git(dir, ["config", "user.name", "Temporal Test"]);
+      git(dir, ["config", "commit.gpgsign", "false"]);
+      git(dir, ["add", "."]);
+      git(dir, ["commit", "-m", "fixture"]);
+      const head = git(dir, ["rev-parse", "HEAD"]);
+      const seconds = Number.parseInt(git(dir, ["show", "-s", "--format=%ct", "HEAD"]), 10);
+      // refreshTemporalSnapshot spawns git with the inherited process.env.
+      stubIsolatedGitEnv();
       const snapshot = await refreshTemporalSnapshot({ sourceDir: dir });
       expect(snapshot.revision).toBe(head);
       expect(snapshot.source).toBe(temporalSourceUrl(head));
@@ -626,6 +651,9 @@ factor = 2
         /uncommitted|dirty/,
       );
     } finally {
+      // stubIsolatedGitEnv() captured the inherited GIT_* values through vi.stubEnv();
+      // unstub restores them, including when an assertion throws.
+      vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -725,6 +753,181 @@ factor = 2
       await expect(refreshTemporalSnapshot({ archivePath })).rejects.toThrow(/generatedAt/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("refresh-modelsdev-temporal git fixture isolation", () => {
+  it("strips repository-selection git variables case-insensitively and preserves unrelated env", () => {
+    expect(
+      gitRepositoryEnv({
+        PATH: "C:\\bin",
+        git_dir: "hostile-git-dir",
+        GIT_WORK_TREE: "hostile-work-tree",
+        Git_Index_File: "hostile-index",
+        GiT_oBjEcT_dIrEcToRy: "hostile-objects",
+        GIT_OPTIONAL_LOCKS: "1",
+        git_optional_locks: "0",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_AUTHOR_NAME: "Hook Author",
+      }),
+    ).toEqual({
+      PATH: "C:\\bin",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_AUTHOR_NAME: "Hook Author",
+    });
+  });
+
+  it("requires declared provenance for a non-git source named by an inherited absolute GIT_DIR", async () => {
+    const root = mkdtempSync(join(tmpdir(), "modelsdev-temporal-git-dir-"));
+    const hostileRepo = join(root, "hostile-repo");
+    const sourceDir = join(root, "source");
+    try {
+      // Reproduces the failure with an absolute GIT_DIR and no
+      // GIT_WORK_TREE, so git makes the source directory the hostile repository's work tree.
+      mkdirSync(hostileRepo);
+      git(hostileRepo, ["init", "-q"]);
+      git(hostileRepo, [
+        "-c",
+        "user.name=Hostile Repo",
+        "-c",
+        "user.email=hostile@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "hostile head",
+      ]);
+      const hostileBefore = headAndIndex(hostileRepo);
+      // Clear every ambient hook export first, then install only this scenario's variables.
+      stubIsolatedGitEnv();
+      expect(process.env.GIT_DIR).toBeUndefined();
+      expect(process.env.GIT_OPTIONAL_LOCKS).toBeUndefined();
+      vi.stubEnv("GIT_DIR", join(hostileRepo, ".git"));
+      vi.stubEnv("GIT_WORK_TREE", undefined);
+
+      mkdirSync(join(sourceDir, "providers", "plainco", "models"), { recursive: true });
+      writeFileSync(
+        join(sourceDir, "providers", "plainco", "models", "plain.toml"),
+        `
+schema = 2
+[cost.text.input]
+price = 1
+[[cost.multipliers]]
+when = { utc_hours = { lt = "04:00" } }
+factor = 2
+`,
+      );
+
+      // The production call intentionally inherits the hostile environment: it must ignore
+      // repository-selection variables instead of borrowing the hostile HEAD or its index.
+      await expect(refreshTemporalSnapshot({ sourceDir })).rejects.toThrow(/revision|provenance/);
+      const revision = "d".repeat(40);
+      await expect(refreshTemporalSnapshot({ sourceDir, revision })).rejects.toThrow(/generatedAt/);
+      const snapshot = await refreshTemporalSnapshot({
+        sourceDir,
+        revision,
+        generatedAt: 1_700_000_000_000,
+      });
+      expect(snapshot.revision).toBe(revision);
+      expect(snapshot.providers.plainco.plain.source).toBe("providers/plainco/models/plain.toml");
+
+      // The hostile repository named by GIT_DIR was not modified.
+      expect(headAndIndex(hostileRepo)).toEqual(hostileBefore);
+      expect(git(hostileRepo, ["status", "--porcelain", "--untracked-files=all"])).toBe("");
+      expect(git(hostileRepo, ["ls-files"])).toBe("");
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps temp-repo git away from the repository named by inherited GIT_* variables", async () => {
+    const root = mkdtempSync(join(tmpdir(), "modelsdev-temporal-git-isolation-"));
+    const hostileRepo = join(root, "hostile-repo");
+    const sourceDir = join(root, "source");
+    try {
+      // The hostile variables below point only at this disposable repository. If isolation
+      // regresses, the fixture is damaged or misread, never the real product checkout.
+      mkdirSync(hostileRepo);
+      git(hostileRepo, ["init", "-q"]);
+      git(hostileRepo, [
+        "-c",
+        "user.name=Hostile Repo",
+        "-c",
+        "user.email=hostile@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "hostile head",
+      ]);
+      const hostileBefore = headAndIndex(hostileRepo);
+
+      // A git hook (lefthook pre-push) exports these for every git process it spawns.
+      // Clear all ambient hook exports first, then install only this scenario's variables.
+      stubIsolatedGitEnv();
+      expect(process.env.GIT_DIR).toBeUndefined();
+      expect(process.env.GIT_OPTIONAL_LOCKS).toBeUndefined();
+      const hostileGitDir = join(hostileRepo, ".git");
+      vi.stubEnv("GIT_DIR", hostileGitDir);
+      vi.stubEnv("GIT_WORK_TREE", hostileRepo);
+      vi.stubEnv("GIT_INDEX_FILE", join(hostileGitDir, "index"));
+      vi.stubEnv("GIT_COMMON_DIR", hostileGitDir);
+      vi.stubEnv("GIT_OBJECT_DIRECTORY", join(hostileGitDir, "objects"));
+      vi.stubEnv("GIT_NAMESPACE", "hostile-hook");
+      expect(process.env.GIT_DIR).toBe(hostileGitDir);
+
+      // Fixture setup runs while the hostile variables are active. The helper env keeps
+      // init/config/add/commit inside sourceDir instead of the hook's repository.
+      mkdirSync(join(sourceDir, "providers", "isolatedco", "models"), { recursive: true });
+      writeFileSync(
+        join(sourceDir, "providers", "isolatedco", "models", "isolated.toml"),
+        `
+schema = 2
+[cost.text.input]
+price = 1
+[[cost.multipliers]]
+when = { utc_hours = { lt = "04:00" } }
+factor = 2
+`,
+      );
+      git(sourceDir, ["init", "-q"]);
+      git(sourceDir, ["config", "user.email", "temporal-test@example.invalid"]);
+      git(sourceDir, ["config", "user.name", "Temporal Test"]);
+      git(sourceDir, ["config", "commit.gpgsign", "false"]);
+      git(sourceDir, ["add", "."]);
+      git(sourceDir, ["commit", "-qm", "fixture"]);
+      expect(realpathSync.native(git(sourceDir, ["rev-parse", "--show-toplevel"]))).toBe(
+        realpathSync.native(sourceDir),
+      );
+      const sourceBefore = headAndIndex(sourceDir);
+      const sourceSeconds = Number.parseInt(
+        git(sourceDir, ["show", "-s", "--format=%ct", "HEAD"]),
+        10,
+      );
+
+      // The production call intentionally inherits the hostile environment and must isolate
+      // its own git subprocesses rather than relying on the fixture helper.
+      const snapshot = await refreshTemporalSnapshot({ sourceDir });
+      expect(snapshot.revision).toBe(sourceBefore.head);
+      expect(snapshot.source).toBe(temporalSourceUrl(sourceBefore.head));
+      expect(snapshot.generatedAt).toBe(sourceSeconds * 1000);
+
+      // Neither repository was rewritten: source kept its commit and index, hostile stayed put.
+      expect(headAndIndex(sourceDir)).toEqual(sourceBefore);
+      expect(headAndIndex(hostileRepo)).toEqual(hostileBefore);
+      expect(git(hostileRepo, ["status", "--porcelain", "--untracked-files=all"])).toBe("");
+      expect(git(hostileRepo, ["ls-files"])).toBe("");
+      expect(git(hostileRepo, ["config", "--local", "--list"])).not.toContain("user.");
+    } finally {
+      // Restore the inherited GIT_* values captured by vi.stubEnv(), even when an
+      // assertion fails mid-test.
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

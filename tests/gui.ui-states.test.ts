@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { orderCardsByPreference } from "../src/contracts/card-order";
 import type {
   HomeSnapshot,
+  ImportPreview,
   ProjectSnapshot,
   ProviderCard,
   QuotaCardRow,
@@ -75,6 +76,7 @@ import {
   describeError,
   describeNoProviders,
   type FetchOutcome,
+  isConfigChangedError,
   isStaleAfterReconnect,
   type LoadState,
   resolveLoadState,
@@ -153,6 +155,7 @@ interface RenderGraph {
     catalog: () => VisibilityCatalog;
     toaster: Toaster;
     stale: () => boolean;
+    nativeQuotaAlerts?: boolean;
   }) => TestNode;
   /** A `config-changed` failure from the same module graph as the mounted route. */
   configChangedError: () => unknown;
@@ -2175,13 +2178,16 @@ describe("settings page", () => {
       [
         "accountingDetail",
         "dashboard.cardOrder",
+        "dashboard.enabled",
         "dashboard.hiddenCards",
         "dashboard.hiddenRows",
         "dashboard.port",
         "dashboard.providerOrder",
         "dashboard.temporalProviderOverrides",
+        "duplicateCooldownMinutes",
         "enabledProviders",
         "formatStyle",
+        "lowQuotaThresholdRemainingPercent",
         "minIntervalMs",
         "opencodeGoWindows",
         "opencodeMonthlyLimit",
@@ -2195,6 +2201,99 @@ describe("settings page", () => {
       ].sort(),
     );
     expect(fieldFor("dashboard.port")?.control).toBe("readonly");
+    expect(fieldFor("dashboard.enabled")?.hidden).toBe(true);
+  });
+
+  it("keeps the Web dashboard switch out of Web Settings but can expose it to a native host", async () => {
+    const base = settingsSnapshot();
+    const snapshot = settingsSnapshot({
+      values: { ...base.values, "dashboard.enabled": false },
+      writable: [...base.writable, "dashboard.enabled"],
+    });
+    const client = {
+      settings: async () => snapshot,
+      saveSettings: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      saveVisibility: async () => ({ revision: "r", applied: {}, warnings: [] }),
+      importPreview: async () => ({
+        from: "workspace: synthetic",
+        keys: [],
+        issues: [],
+        expectedRevision: "r",
+      }),
+      importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    };
+    const toaster = { toasts: () => [], push: () => {}, dismiss: () => {} };
+    const props = { snapshot, client, toaster, catalog: { cards: [] } };
+
+    // The Web page keeps its current rendering: the Web listener it would stop is
+    // the one serving the page, so recovery stays a documented JSONC edit.
+    const webHtml = await renderView("/views/settings.tsx", "SettingsView", props);
+    expect(text(webHtml)).not.toContain("Web dashboard");
+
+    // A native host can surface the same canonical key through the shared draft,
+    // save bar and revision/conflict path.
+    const nativeHtml = await renderView("/views/settings.tsx", "SettingsView", {
+      ...props,
+      webDashboardToggle: true,
+    });
+    expect(text(nativeHtml)).toContain("Web dashboard");
+    expect(text(nativeHtml)).toContain("requires an OpenCode restart");
+    expect(nativeHtml).toContain('role="switch"');
+  });
+
+  it("shows quota alert controls only on the native surface and follows the percent display", async () => {
+    const snapshot = settingsSnapshot();
+    const props = {
+      snapshot,
+      client: {},
+      toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
+      catalog: { cards: [] },
+      onReload: noop,
+    };
+
+    const webHtml = await renderView("/views/settings.tsx", "SettingsView", props);
+    expect(text(webHtml)).not.toContain("Quota alerts");
+    expect(webHtml).not.toContain('aria-label="Low quota threshold"');
+    expect(webHtml).not.toContain('aria-label="Duplicate alert cooldown"');
+
+    const nativeHtml = await renderView("/views/settings.tsx", "SettingsView", {
+      ...props,
+      nativeQuotaAlerts: true,
+    });
+    expect(text(nativeHtml)).toContain("Quota alerts");
+    expect(nativeHtml).toContain('aria-label="Low quota threshold"');
+    expect(nativeHtml).toContain('aria-label="Duplicate alert cooldown"');
+    expect(nativeHtml).toContain('value="10"');
+    expect(text(nativeHtml)).toContain("% remaining");
+    expect(nativeHtml).toContain('value="30"');
+    expect(text(nativeHtml)).toContain("Minutes before the same quota alert can repeat.");
+
+    // The display preference only changes the control; the stored value remains
+    // the remaining percentage.
+    const usedHtml = await renderView("/views/settings.tsx", "SettingsView", {
+      ...props,
+      nativeQuotaAlerts: true,
+      snapshot: {
+        ...snapshot,
+        values: { ...snapshot.values, percentDisplayMode: "used" },
+      },
+    });
+    expect(usedHtml).toContain('value="90"');
+    expect(text(usedHtml)).toContain("% used");
+    expect(usedHtml).not.toContain("% remaining</span>");
+    expect(text(usedHtml)).toContain("Saved as 10% remaining.");
+  });
+
+  it("drafts the host-opted Web switch through the revision-checked patch", () => {
+    const values = { "dashboard.enabled": false };
+    const writable = ["dashboard.enabled"];
+    const draft = { ...initialDraft("revision-1"), edits: { "dashboard.enabled": true } };
+    expect(dirtyKeys(draft, values, writable)).toEqual(["dashboard.enabled"]);
+    expect(toPatch(draft, dirtyKeys(draft, values, writable))).toEqual({
+      "dashboard.enabled": true,
+    });
+    // The save call still carries the revision the draft was loaded from.
+    expect(draft.revision).toBe("revision-1");
   });
 
   it("keeps card order as a hidden string-list field in the visibility group", () => {
@@ -4288,7 +4387,10 @@ describe("the settings editor keeps its draft across refetches", () => {
     initial: SettingsSnapshot | undefined;
     saveSettings?: (input: SaveInput) => Promise<SettingsWriteResult>;
     openSettingsFile?: () => Promise<void>;
+    importPreview?: () => Promise<ImportPreview>;
+    importApply?: (input: { expectedRevision: string }) => Promise<SettingsWriteResult>;
     catalog?: VisibilityCatalog;
+    nativeQuotaAlerts?: boolean;
   }) {
     const server = settingsQuery(options.initial);
     const saves: SaveInput[] = [];
@@ -4302,8 +4404,8 @@ describe("the settings editor keeps its draft across refetches", () => {
       session: notUsed,
       settings: notUsed,
       saveVisibility: notUsed,
-      importPreview: notUsed,
-      importApply: notUsed,
+      importPreview: options.importPreview ?? notUsed,
+      importApply: options.importApply ?? notUsed,
       subscribe: () => () => {},
       connection: () => "live",
       onConnectionChange: () => () => {},
@@ -4326,6 +4428,7 @@ describe("the settings editor keeps its draft across refetches", () => {
             dismiss: () => {},
           },
           stale: () => false,
+          nativeQuotaAlerts: options.nativeQuotaAlerts,
         }),
       root,
     );
@@ -4427,6 +4530,40 @@ describe("the settings editor keeps its draft across refetches", () => {
     }
     throw new Error(`probe: ${what} never happened`);
   }
+
+  it("saves the low-quota threshold as remaining when the control shows used percentages", async () => {
+    const base = settingsSnapshot();
+    const mounted = mountSettings({
+      initial: settingsSnapshot({
+        values: { ...base.values, percentDisplayMode: "used" },
+      }),
+      nativeQuotaAlerts: true,
+    });
+
+    const threshold = inputByLabel(mounted.root, "Low quota threshold");
+    expect(threshold.props.value).toBe("90");
+    typeInto(threshold, "100");
+    await settle();
+    expect(renderGraph.textOf(mounted.root)).toContain("must be below 100% used.");
+    expect(buttonByText(mounted.root, "Save").props.disabled).toBe(true);
+    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "95");
+    await settle();
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.value).toBe("95");
+
+    typeInto(inputByLabel(mounted.root, "Duplicate alert cooldown"), "45");
+    await settle();
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the alert settings save");
+
+    expect(mounted.saves[0]).toEqual({
+      patch: {
+        lowQuotaThresholdRemainingPercent: 5,
+        duplicateCooldownMinutes: 45,
+      },
+      expectedRevision: "revision-1",
+    });
+    mounted.dispose();
+  });
 
   it("shows one Address, a complete native settings path, and opens only on explicit activation", async () => {
     const nativePath = path.join(
@@ -5088,14 +5225,39 @@ describe("the settings editor keeps its draft across refetches", () => {
     mounted.dispose();
   });
 
-  it("keeps the edits and adopts the latest revision after a 409, so an explicit retry saves them", async () => {
+  /**
+   * The official native RPC client unwraps `RpcError` into a plain
+   * `{ type, message, data? }` object (`@opencode/client`'s promise adapter), so
+   * SettingsView must recognize a conflict without an HTTP `DashboardError`.
+   */
+  const nativeConfigChanged = (): unknown => ({
+    type: "config-changed",
+    message: "The settings file changed elsewhere.",
+  });
+
+  const conflictSources: Array<[string, () => unknown]> = [
+    ["HTTP 409", () => renderGraph.configChangedError()],
+    ["native RPC", nativeConfigChanged],
+  ];
+
+  it("recognizes config-changed on both transports without trusting other failures", () => {
+    expect(isConfigChangedError(new DashboardError("config-changed", 409, "conflict"))).toBe(true);
+    expect(isConfigChangedError(nativeConfigChanged())).toBe(true);
+    expect(isConfigChangedError({ type: "config-read-error", message: "read" })).toBe(false);
+    expect(isConfigChangedError(new Error("config-changed"))).toBe(false);
+    expect(isConfigChangedError(undefined)).toBe(false);
+  });
+
+  it.each(
+    conflictSources,
+  )("keeps the edits and adopts the latest revision after a %s config-changed, so an explicit retry saves them", async (_label, conflict) => {
     let attempts = 0;
     const mounted = mountSettings({
       initial: settingsSnapshot(),
       saveSettings: async (input) => {
         attempts += 1;
         if (attempts === 1) {
-          throw renderGraph.configChangedError();
+          throw conflict();
         }
         return { revision: "revision-4", applied: input.patch, warnings: [] };
       },
@@ -5132,6 +5294,42 @@ describe("the settings editor keeps its draft across refetches", () => {
       () => renderGraph.textOf(mounted.root).includes("No unsaved changes."),
       "the retry to clear the draft",
     );
+    mounted.dispose();
+  });
+
+  it.each(
+    conflictSources,
+  )("names a %s config-changed after import apply and keeps the preview for another attempt", async (_label, conflict) => {
+    const preview: ImportPreview = {
+      from: "workspace: synthetic",
+      keys: [{ key: "formatStyle", value: "singleWindow" }],
+      issues: [],
+      expectedRevision: "revision-1",
+    };
+    const mounted = mountSettings({
+      initial: settingsSnapshot(),
+      importPreview: async () => preview,
+      importApply: async () => {
+        throw conflict();
+      },
+    });
+
+    click(buttonByText(mounted.root, "Preview migration"));
+    await until(
+      () =>
+        renderGraph
+          .elementsNamed(mounted.root, "button")
+          .some((node) => renderGraph.textOf(node) === "Apply 1 keys"),
+      "the import preview",
+    );
+    click(buttonByText(mounted.root, "Apply 1 keys"));
+    await until(
+      () => mounted.toasts.some((toast) => toast.message.includes("changed since the preview")),
+      "the import conflict toast",
+    );
+
+    // The preview survives the conflict so the user can preview again.
+    expect(buttonByText(mounted.root, "Apply 1 keys")).toBeDefined();
     mounted.dispose();
   });
 

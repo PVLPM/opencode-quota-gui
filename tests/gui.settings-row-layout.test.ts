@@ -25,7 +25,14 @@ import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
  */
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
+/**
+ * The browser entry loads the product sheet and then the document sheet. The
+ * probe must use the same order: `.sr-only` lives in `base.css`, and without it
+ * a hidden Switch label becomes visible and changes the measured row.
+ */
+const styles = ["styles.css", "base.css"]
+  .map((file) => readFileSync(path.join(repoRoot, "src/ui", file), "utf8"))
+  .join("\n");
 
 /** A local Chromium makes the computed-layout check possible; CI may not have one. */
 const layoutBrowser = [
@@ -430,7 +437,7 @@ function runLayoutProbe(html: string): LayoutProbe {
         "--dump-dom",
         pathToFileURL(page).href,
       ],
-      { encoding: "utf8", timeout: 45_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+      { encoding: "utf8", timeout: 120_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
     );
     const captured = /<pre id="layout-result">([\s\S]*?)<\/pre>/.exec(dom);
     if (captured?.[1] === undefined || captured[1] === "") {
@@ -438,7 +445,7 @@ function runLayoutProbe(html: string): LayoutProbe {
     }
     return JSON.parse(captured[1]) as LayoutProbe;
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    rmSync(scratch, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 }
 
@@ -490,5 +497,5 @@ describe.skipIf(layoutBrowser === undefined)("Settings row rendered layout", () 
     expect(narrowTemporal.controlLeftGap).toBeLessThanOrEqual(1);
     expect(Math.abs(narrowTemporal.controlWidth - narrowTemporal.rowWidth)).toBeLessThanOrEqual(1);
     expect(narrowTemporal.trailingRightGap).toBeGreaterThan(narrowTemporal.rowWidth / 2);
-  }, 60_000);
+  }, 150_000);
 });

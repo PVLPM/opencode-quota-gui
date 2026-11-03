@@ -257,6 +257,7 @@ describe("queryOllamaCloudQuota", () => {
     expect(_parseOllamaCloudBalance(payload)).toEqual({
       success: false,
       error: "Ollama Cloud balance API returned an unexpected response shape",
+      failureCategory: "provider_api",
     });
   });
 
@@ -279,6 +280,7 @@ describe("queryOllamaCloudQuota", () => {
     expect(_parseOllamaCloudBalance(payload)).toEqual({
       success: false,
       error: "Ollama Cloud balance API returned no limits or balance",
+      failureCategory: "provider_api",
     });
   });
 
@@ -293,8 +295,33 @@ describe("queryOllamaCloudQuota", () => {
     const error = out && !out.success ? out.error : "";
 
     expect(error).toBe("Ollama Cloud balance API error 401: Unauthorized [redacted]");
+    expect(out).toMatchObject({ success: false, failureCategory: "credentials" });
     expect(error).not.toContain("ollama-secret-key");
     expect(error).not.toContain("\u001b");
+
+    mockResponse({ ok: false, status: 503, text: "unavailable" });
+    const unavailable = await queryOllamaCloudQuota();
+    expect(unavailable).toMatchObject({
+      success: false,
+      failureCategory: "provider_api",
+    });
+  });
+
+  it.each([
+    [401, "credentials"],
+    [403, "credentials"],
+    [500, "provider_api"],
+  ])("keeps HTTP %i classified as %s when the error body cannot be read", async (status, failureCategory) => {
+    mockResponse({
+      ok: false,
+      status,
+      jsonError: new Error("body stream failed"),
+    });
+
+    await expect(queryOllamaCloudQuota()).resolves.toMatchObject({
+      success: false,
+      failureCategory,
+    });
   });
 
   it("rejects an oversized response before parsing it", async () => {
@@ -308,6 +335,7 @@ describe("queryOllamaCloudQuota", () => {
     expect(out && !out.success ? out.error : "").toBe(
       "Ollama Cloud balance API response exceeded 262144 bytes",
     );
+    expect(out).toMatchObject({ success: false, failureCategory: "provider_api" });
   });
 
   it("sanitizes malformed JSON and transport errors without leaking the API key", async () => {
@@ -319,9 +347,11 @@ describe("queryOllamaCloudQuota", () => {
 
     const malformed = await queryOllamaCloudQuota();
     expect(malformed && !malformed.success ? malformed.error : "").toBe("bad JSON [redacted] next");
+    expect(malformed).toMatchObject({ success: false, failureCategory: "provider_api" });
 
     mocks.fetchWithTimeout.mockRejectedValueOnce(new Error("timeout ollama-secret-key\u001b[31m"));
     const timedOut = await queryOllamaCloudQuota();
     expect(timedOut && !timedOut.success ? timedOut.error : "").toBe("timeout [redacted]");
+    expect(timedOut).toMatchObject({ success: false, failureCategory: "provider_api" });
   });
 });

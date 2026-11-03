@@ -98,12 +98,15 @@ export const openRouterProvider: QuotaProvider = {
         errors.push({
           label: account.label,
           message: result.error,
+          failureCategory: result.failureCategory,
           ...(account.sourceId ? { sourceId: account.sourceId } : {}),
         });
         continue;
       }
       entries.push(...result.entries);
       for (const message of result.rowErrors ?? []) {
+        // Row-level mapping warnings carry no source-assigned category; absence
+        // means unknown, so this stays unclassified rather than inferred.
         errors.push({
           label: account.label,
           message,

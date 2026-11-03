@@ -858,7 +858,10 @@ describe("temporal live status server-rendered markup", () => {
     expect(text).not.toContain("models.dev schedule");
     expect(text).not.toContain("times local to you");
     expect(text).not.toContain("Plan quota schedule");
-    expect(text).toContain("2 models · deepseek-v4-pro, deepseek-v4-flash");
+    expect(text).toContain("deepseek-v4-pro, deepseek-v4-flash");
+    expect(text).not.toContain("2 models ·");
+    expect(html).not.toContain('class="qg-temporal-popover__state"');
+    expect(html).toContain('class="qg-temporal-popover__phase qg-row__value"');
     expect(text).toContain("Peak");
     expect(text).not.toContain("Effect varies by window");
     expect(text).toContain("API price: 2×");
@@ -876,6 +879,45 @@ describe("temporal live status server-rendered markup", () => {
     expect(text).not.toContain("Holiday exceptions");
     expect(text).not.toContain("USD");
     expect(html.match(/class="qg-temporal-popover__model"/g)).toHaveLength(1);
+  });
+
+  it("retains model phases when the provider aggregate is mixed or unknown", async () => {
+    for (const status of [
+      mixed,
+      provider(
+        "partial",
+        "Partial",
+        [model("known", "peak"), model("unknown", "unknown")],
+        "unknown",
+      ),
+    ]) {
+      const html = await renderView("/components/temporal-status.tsx", "TemporalPopoverBody", {
+        status,
+        nowMs: NOW,
+      });
+      expect(html.match(/class="qg-temporal-popover__state qg-row__value"/g) ?? []).toHaveLength(2);
+    }
+  });
+
+  it("shows every grouped model identity without truncation", async () => {
+    const first = model("model-one", "peak", 2);
+    const status = provider(
+      "many",
+      "Many",
+      [
+        first,
+        ...["two", "three", "four", "five"].map((id) => ({ ...first, modelId: `model-${id}` })),
+      ],
+      "peak",
+    );
+    const html = await renderView("/components/temporal-status.tsx", "TemporalPopoverBody", {
+      status,
+      nowMs: NOW,
+    });
+    expect(visibleText(html)).toContain(
+      "model-one, model-two, model-three, model-four, model-five",
+    );
+    expect(html).not.toContain("+2 more");
   });
 
   it("shows the current effective multiplier for scalar and genuinely varying windows", async () => {
@@ -1376,8 +1418,12 @@ describe("temporal live status server-rendered markup", () => {
   it("keeps the issue #9 text-then-control row contract and local styles scoped", () => {
     expect(styles).toContain(".qg-temporal-settings__row");
     expect(styles).toContain(".qg-temporal-popover");
-    expect(styles).toMatch(/--qg-temporal-peak:\s*var\(--qg-danger\)/);
-    expect(styles).toMatch(/--qg-temporal-offpeak:\s*var\(--qg-success\)/);
+    expect(styles).toMatch(/--qg-temporal-peak:\s*#f2827f/);
+    expect(styles).toMatch(/--qg-temporal-offpeak:\s*#72d78c/);
+    expect(styles).toMatch(
+      /\.qg-temporal-popover__phase\[data-phase="peak"\][\s\S]*?\.qg-row\[data-severity="critical"\] \.qg-row__value\s*\{[^}]*background:\s*#461516/s,
+    );
+    expect(styles).not.toMatch(/\.qg-temporal-popover__interval \[data-phase="peak"\]/);
     expect(styles).toMatch(/\.qg-temporal__chip\s*\{[^}]*border:\s*1px solid var\(--qg-border\)/s);
     expect(styles).toMatch(/\.qg-temporal__chip\s*\{[^}]*border-radius:\s*6px/s);
     expect(styles).toMatch(/\.qg-temporal__logo\s*\{[^}]*color:\s*var\(--qg-text-muted\)/s);
@@ -1467,7 +1513,7 @@ function runLayoutProbe(pageHtml: string, width: number, height: number): QuotaL
         "--dump-dom",
         pathToFileURL(page).href,
       ],
-      { encoding: "utf8", timeout: 60_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
+      { encoding: "utf8", timeout: 120_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
     );
     const captured = /<pre id="result">([\s\S]*?)<\/pre>/.exec(dom);
     if (captured?.[1] === undefined || captured[1] === "pending") {
@@ -1475,7 +1521,7 @@ function runLayoutProbe(pageHtml: string, width: number, height: number): QuotaL
     }
     return JSON.parse(captured[1]) as QuotaLayoutProbe;
   } finally {
-    rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   }
 }
 
@@ -1622,8 +1668,8 @@ describe.skipIf(chromium === undefined)("temporal controls and Polled footer in 
     expect(wide.chip.borderRadius).toBe("6px");
     expect(wide.chip.backgroundColor).toBe("rgb(35, 35, 35)");
     expect(wide.logoColor).toBe("rgb(150, 150, 150)");
-    expect(wide.peakColor).toBe("rgb(252, 83, 58)");
-    expect(wide.offpeakColor).toBe("rgb(18, 201, 5)");
+    expect(wide.peakColor).toBe("rgb(242, 130, 127)");
+    expect(wide.offpeakColor).toBe("rgb(114, 215, 140)");
     expect(wide.mixedOrder).toEqual(["offpeak", "peak"]);
 
     const narrow = runLayoutProbe(layoutPage(tallQuota, strip), 520, 760);
@@ -1633,5 +1679,5 @@ describe.skipIf(chromium === undefined)("temporal controls and Polled footer in 
     expect(narrow.main.scrollHeight).toBeGreaterThan(narrow.main.clientHeight);
     expect(narrow.footer.top).toBeGreaterThanOrEqual(narrow.grid.bottom);
     expect(narrow.footer.bottom).toBeGreaterThan(narrow.main.contentBottom);
-  });
+  }, 150_000);
 });

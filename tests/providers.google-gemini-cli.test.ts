@@ -75,7 +75,7 @@ describe("google gemini cli provider", () => {
           tokenType: "REQUESTS",
         },
       ],
-      errors: [{ email: "bob@example.com", error: "Unauthorized" }],
+      errors: [{ email: "bob@example.com", error: "Unauthorized", failureCategory: "credentials" }],
     });
 
     const out = await googleGeminiCliProvider.fetch({ client: {} } as any);
@@ -93,7 +93,12 @@ describe("google gemini cli provider", () => {
     ]);
     expect(out.entries[0]?.accounting.sourceId).toBe("alice@example.com");
     expect(out.errors).toEqual([
-      { label: "bob…", message: "Unauthorized", sourceId: "bob@example.com" },
+      {
+        label: "bob…",
+        message: "Unauthorized",
+        sourceId: "bob@example.com",
+        failureCategory: "credentials",
+      },
     ]);
     expect(out.presentation).toEqual({
       singleWindowDisplayName: "Gemini CLI",

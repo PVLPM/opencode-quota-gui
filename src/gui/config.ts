@@ -32,6 +32,8 @@ import {
   getGuiConfigPath,
   getGuiConfigSiblingJsonPath,
   isPositiveNumber,
+  isValidDuplicateCooldownMinutes,
+  isValidLowQuotaThresholdRemainingPercent,
   isValidOpenCodeGoWindows,
   loadConfig,
   loadConfigLayered,
@@ -43,6 +45,11 @@ import {
   type ConfigWriteTargetReason,
 } from "../lib/config-write-target.js";
 import { DASHBOARD_HIDDEN_CARDS_VERSION } from "../lib/dashboard-visibility.js";
+import {
+  getDashboardEnabledSetting,
+  hasInvalidDashboardWebConfig,
+  resolveDashboardWebEnabled,
+} from "../lib/dashboard-web-policy.js";
 import { isResetTimeDecimals } from "../lib/format-utils.js";
 import { assertGuiConfigTargetIsIndependent } from "../lib/gui-config-target.js";
 import {
@@ -53,6 +60,7 @@ import {
   parseConfigDocument,
   planConfigDocumentEdit,
 } from "../lib/opencode-config-editor.js";
+import type { OpenCodeVersion } from "../lib/opencode-version.js";
 import { isQuotaFormatStyle, resolveQuotaFormatStyle } from "../lib/quota-format-style.js";
 import {
   DASHBOARD_HIDDEN_ID_LIMIT,
@@ -65,7 +73,7 @@ import {
   type SettingsFileOpener,
 } from "./settings-file-opener.js";
 
-/** Writable GUI settings keys (spec §5.4 table order, port excluded). */
+/** Writable GUI settings keys (spec §5.4 table order plus the web switch; port excluded). */
 export const GUI_SETTINGS_WRITABLE_KEYS = [
   "formatStyle",
   "percentDisplayMode",
@@ -78,6 +86,8 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "minIntervalMs",
   "requestTimeoutMs",
   "accountingDetail",
+  "lowQuotaThresholdRemainingPercent",
+  "duplicateCooldownMinutes",
   "opencodeGoWindows",
   "opencodeMonthlyLimit",
   "dashboard.hiddenCards",
@@ -85,6 +95,7 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "dashboard.providerOrder",
   "dashboard.cardOrder",
   "dashboard.temporalProviderOverrides",
+  "dashboard.enabled",
 ] as const;
 
 /**
@@ -165,6 +176,17 @@ export function getGuiDashboardPort(
     : DEFAULT_DASHBOARD_PORT;
 }
 
+/**
+ * The explicit canonical switch only: absence or any non-boolean value is off.
+ * The effective value also follows the host version when the key is absent; use
+ * `resolveDashboardWebEnabled` for that decision.
+ */
+export function getGuiDashboardEnabled(
+  config: { dashboard?: { enabled?: unknown } } | null | undefined,
+): boolean {
+  return config?.dashboard?.enabled === true;
+}
+
 export function resolveGuiDashboardUrl(port: number): string {
   return `http://127.0.0.1:${getGuiDashboardPort({ dashboard: { port } })}`;
 }
@@ -174,6 +196,12 @@ export interface GuiSettingsStoreOptions {
   configDir: string;
   /** Project config root whose legacy layers are read and reported, never written. */
   workspaceRoot?: string;
+  /**
+   * Running host version. When `dashboard.enabled` is absent, the snapshot
+   * reports the version-gated effective value so the Settings switch matches
+   * the transport. Missing or unparseable versions report off.
+   */
+  hostVersion?: string | OpenCodeVersion;
   /** Test/embedding seam: replaces the OS default-application opener. */
   settingsFileOpener?: SettingsFileOpener;
 }
@@ -352,6 +380,10 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return config.requestTimeoutMs;
       case "accountingDetail":
         return config.accountingDetail;
+      case "lowQuotaThresholdRemainingPercent":
+        return config.lowQuotaThresholdRemainingPercent;
+      case "duplicateCooldownMinutes":
+        return config.duplicateCooldownMinutes;
       case "opencodeGoWindows":
         return [...config.opencodeGoWindows];
       case "opencodeMonthlyLimit":
@@ -368,6 +400,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return [...config.dashboard.cardOrder];
       case "dashboard.temporalProviderOverrides":
         return { ...config.dashboard.temporalProviderOverrides };
+      case "dashboard.enabled":
+        return config.dashboard.enabled;
       case "dashboard.port":
         return config.dashboard.port;
     }
@@ -557,6 +591,16 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
           throw invalidSetting(key, 'expected "summary" or "detailed"');
         }
         return value;
+      case "lowQuotaThresholdRemainingPercent":
+        if (!isValidLowQuotaThresholdRemainingPercent(value)) {
+          throw invalidSetting(key, "expected an integer between 1 and 100");
+        }
+        return value;
+      case "duplicateCooldownMinutes":
+        if (!isValidDuplicateCooldownMinutes(value)) {
+          throw invalidSetting(key, "expected an integer of 0 or more");
+        }
+        return value;
       case "opencodeGoWindows":
         if (!isValidOpenCodeGoWindows(value)) {
           throw invalidSetting(
@@ -606,6 +650,11 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       }
       case "dashboard.port":
         throw invalidSetting(key, "this setting is read-only; edit the canonical file and restart");
+      case "dashboard.enabled":
+        if (value !== true && value !== false) {
+          throw invalidSetting(key, "expected boolean");
+        }
+        return value;
       case "dashboard.hiddenCardsVersion":
         throw invalidSetting(
           key,
@@ -815,9 +864,15 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
   async function settings(): Promise<SettingsSnapshot> {
     const state = await readState();
+    const dashboardEnabled = resolveDashboardWebEnabled({
+      explicitEnabled: getDashboardEnabledSetting(state.runtimeConfig, state.runtimeMeta),
+      ...(options.hostVersion !== undefined ? { hostVersion: options.hostVersion } : {}),
+      invalidConfig: hasInvalidDashboardWebConfig(state.runtimeMeta),
+    });
     const values: Record<string, JsonValue> = {};
     for (const key of GUI_SETTINGS_KEYS) {
-      values[key] = settingValue(state.runtimeConfig, key);
+      values[key] =
+        key === "dashboard.enabled" ? dashboardEnabled : settingValue(state.runtimeConfig, key);
     }
 
     const sources: Record<string, string> = {};

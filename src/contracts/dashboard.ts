@@ -1,6 +1,7 @@
 import type { AnalyticsTemporalBreakdown } from "./analytics-temporal.js";
 import type { CardId, RowId } from "./identity.js";
 import type { BankedResetAvailability } from "./openai-quota.js";
+import type { ProviderFailureCategory } from "./provider-failure.js";
 import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
 import type { TemporalStatusSnapshot } from "./temporal.js";
 
@@ -303,6 +304,24 @@ export type RunwayProjection =
   | { kind: "before_reset"; projectedAtIso: string }
   | { kind: "lasts_past_reset" };
 
+/** Approved maximum number of primary quota-window references per card. */
+export const PRIMARY_QUOTA_WINDOW_LIMIT = 3;
+
+/**
+ * Stable provider-defined ring slot: 0 outermost, 1 middle, 2 innermost.
+ * Slots are per-card family positions in full-card order, not global time-unit
+ * ranks. They are assigned from established window semantics, never from
+ * current utilization, and remain fixed when earlier windows are absent.
+ */
+export type PrimaryQuotaWindowSlot = 0 | 1 | 2;
+
+export interface PrimaryQuotaWindowRef {
+  /** Existing row on the owning card. */
+  rowId: RowId;
+  /** Stable provider-defined ring slot, not the array position. */
+  slot: PrimaryQuotaWindowSlot;
+}
+
 export interface ProviderCard {
   cardId: CardId;
   providerId: string;
@@ -320,7 +339,22 @@ export interface ProviderCard {
   providerScopeId?: CardId;
   providerScopeHash?: string;
   rows: QuotaCardRow[];
-  errors: { label: string; message: string; retryable?: boolean }[];
+  /**
+   * Primary quota-window references for the native `session.header` rings
+   * (additive, optional): unique existing percent rows, at most three, never
+   * budget/spend/auxiliary percentages. Each entry carries the stable
+   * provider-defined `slot` (0..2), so a missing earlier window does not move
+   * later rings. Absent means the provider/card has no defensible primary
+   * mapping, not an empty quota.
+   */
+  primaryQuotaWindows?: PrimaryQuotaWindowRef[];
+  errors: {
+    label: string;
+    message: string;
+    retryable?: boolean;
+    /** Source-assigned safe category; absence means unknown and consumers fail closed. */
+    failureCategory?: ProviderFailureCategory;
+  }[];
   /** Explicit safe field list only — never a raw `statusDetails` copy. */
   details?: { label: string; value: string }[];
   observedAtIso?: string;

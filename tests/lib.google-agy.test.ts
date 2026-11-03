@@ -350,6 +350,7 @@ describe("google agy logic", () => {
     await expect(queryGoogleAgyQuota()).resolves.toEqual({
       success: false,
       error: "Companion plugin is missing",
+      failureCategory: "local",
     });
   });
 
@@ -571,7 +572,13 @@ describe("google agy logic", () => {
     await expect(queryGoogleAgyQuota()).resolves.toEqual({
       success: true,
       buckets: [],
-      errors: [{ email: "google-agy", error: "Quota summary API unavailable" }],
+      errors: [
+        {
+          email: "google-agy",
+          error: "Quota summary API unavailable",
+          failureCategory: "provider_api",
+        },
+      ],
     });
   });
 
@@ -767,7 +774,13 @@ describe("google agy logic", () => {
     const result = await queryGoogleAgyQuota();
     expect(result).toMatchObject({
       success: true,
-      errors: [{ email: "bob@example.com", error: "Google AGY quota API error: 500" }],
+      errors: [
+        {
+          email: "bob@example.com",
+          error: "Google AGY quota API error: 500",
+          failureCategory: "provider_api",
+        },
+      ],
     });
     if (!result || !result.success) throw new Error("expected success");
     expect(result.buckets).toHaveLength(4);
@@ -788,7 +801,13 @@ describe("google agy logic", () => {
     const result = await queryGoogleAgyQuota();
     expect(result).toMatchObject({
       success: true,
-      errors: [{ email: "bob@example.com", error: "Quota summary API unavailable" }],
+      errors: [
+        {
+          email: "bob@example.com",
+          error: "Quota summary API unavailable",
+          failureCategory: "provider_api",
+        },
+      ],
     });
     if (!result || !result.success) throw new Error("expected success");
     expect(result.buckets).toHaveLength(4);
@@ -805,8 +824,16 @@ describe("google agy logic", () => {
       success: true,
       buckets: [],
       errors: [
-        { email: "alice@example.com", error: "Google AGY quota API error: 500" },
-        { email: "bob@example.com", error: "Google AGY quota API error: 500" },
+        {
+          email: "alice@example.com",
+          error: "Google AGY quota API error: 500",
+          failureCategory: "provider_api",
+        },
+        {
+          email: "bob@example.com",
+          error: "Google AGY quota API error: 500",
+          failureCategory: "provider_api",
+        },
       ],
     });
   });
@@ -821,6 +848,99 @@ describe("google agy logic", () => {
       sourceKey: "google-agy",
       accountCount: 1,
       validAccountCount: 0,
+    });
+  });
+
+  it("labels token revocation and request failures with structured provenance", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-agy": authAccount("refresh-token", "project-1", "alice@example.com"),
+    });
+    mocks.getCachedAccessToken.mockResolvedValue(null);
+
+    mocks.fetchResponse.mockResolvedValueOnce(mockJsonResponse({ error: "invalid_grant" }, 400));
+    const revoked = await queryGoogleAgyQuota();
+    expect(revoked).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ error: "Token revoked", failureCategory: "credentials" }],
+    });
+
+    mocks.fetchResponse.mockResolvedValueOnce(mockJsonResponse({}, 500));
+    const refreshFailed = await queryGoogleAgyQuota();
+    expect(refreshFailed).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ failureCategory: "provider_api" }],
+    });
+
+    mocks.fetchResponse.mockResolvedValueOnce(mockJsonResponse({}));
+    const malformedRefresh = await queryGoogleAgyQuota();
+    expect(malformedRefresh).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ failureCategory: "provider_api" }],
+    });
+
+    mocks.fetchResponse
+      .mockResolvedValueOnce(mockJsonResponse({ access_token: "token", expires_in: 3600 }))
+      .mockResolvedValueOnce(mockJsonResponse({}, 500));
+    const quotaFailed = await queryGoogleAgyQuota();
+    expect(quotaFailed).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [
+        {
+          error: "Google AGY quota API error: 500",
+          failureCategory: "provider_api",
+        },
+      ],
+    });
+  });
+
+  it("labels an expired quota credential after one retry as credentials", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-agy": authAccount("refresh-token", "project-1", "alice@example.com"),
+    });
+    mocks.getCachedAccessToken.mockResolvedValue(null);
+    mocks.fetchResponse
+      .mockResolvedValueOnce(mockJsonResponse({ access_token: "token-1", expires_in: 3600 }))
+      .mockResolvedValueOnce(mockJsonResponse({}, 401))
+      .mockResolvedValueOnce(mockJsonResponse({ access_token: "token-2", expires_in: 3600 }))
+      .mockResolvedValueOnce(mockJsonResponse({}, 403));
+
+    const result = await queryGoogleAgyQuota();
+    expect(result).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [
+        {
+          error: "Google AGY quota auth error: 403",
+          failureCategory: "credentials",
+        },
+      ],
+    });
+  });
+
+  it("labels malformed quota payloads as provider API", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-agy": authAccount("refresh-token", "project-1", "alice@example.com"),
+    });
+    mocks.getCachedAccessToken.mockResolvedValue(null);
+    mocks.fetchResponse
+      .mockResolvedValueOnce(mockJsonResponse({ access_token: "token", expires_in: 3600 }))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error("invalid json");
+        },
+      });
+
+    const result = await queryGoogleAgyQuota();
+    expect(result).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ failureCategory: "provider_api" }],
     });
   });
 });

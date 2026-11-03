@@ -1089,8 +1089,49 @@ function sameFilesystemPath(left, right) {
     : normalizedLeft === normalizedRight;
 }
 
+/**
+ * Git hooks export repository-selection variables (GIT_DIR, GIT_WORK_TREE, ...)
+ * for every child process. An inherited absolute GIT_DIR makes `git -C sourceDir`
+ * treat sourceDir as that repository's work tree, so provenance would be read
+ * from the hook's repository. Strip only those selectors, case-insensitively
+ * because Git reads environment names that way on Windows, preserving unrelated
+ * configuration and credentials.
+ *
+ * Provenance is read-only: `git status` otherwise refreshes and can rewrite the
+ * inspected checkout's index. Force GIT_OPTIONAL_LOCKS=0 even when the incoming
+ * environment sets it to another value under any casing.
+ */
+const REPOSITORY_SELECTION_GIT_ENV = new Set([
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_SHALLOW_FILE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_PREFIX",
+]);
+const GIT_OPTIONAL_LOCKS = "GIT_OPTIONAL_LOCKS";
+
+export function gitRepositoryEnv(env = process.env) {
+  const sanitized = Object.fromEntries(
+    Object.entries(env).filter(([key]) => {
+      const upperKey = key.toUpperCase();
+      return !REPOSITORY_SELECTION_GIT_ENV.has(upperKey) && upperKey !== GIT_OPTIONAL_LOCKS;
+    }),
+  );
+  return { ...sanitized, [GIT_OPTIONAL_LOCKS]: "0" };
+}
+
 async function runGit(sourceDir, args) {
-  return await execFileAsync("git", ["-C", sourceDir, ...args], { maxBuffer: 1024 * 1024 });
+  return await execFileAsync("git", ["-C", sourceDir, ...args], {
+    maxBuffer: 1024 * 1024,
+    env: gitRepositoryEnv(),
+  });
 }
 
 /**

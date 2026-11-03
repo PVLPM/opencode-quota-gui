@@ -6,6 +6,7 @@
  */
 
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota.js";
+import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import { sanitizeDisplayText, sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { clampPercent } from "./format-utils.js";
@@ -423,12 +424,13 @@ export async function queryOpenAIQuota(
     return {
       success: false,
       error: `OpenAI sign-in could not be refreshed: ${resolvedAuth.error}. ${fix}`,
+      failureCategory: "credentials",
     };
   }
   if (resolvedAuth.state !== "configured") return null;
 
   if (resolvedAuth.expiresAt && resolvedAuth.expiresAt < Date.now()) {
-    return { success: false, error: "Token expired" };
+    return { success: false, error: "Token expired", failureCategory: "credentials" };
   }
 
   try {
@@ -451,6 +453,7 @@ export async function queryOpenAIQuota(
           return {
             success: false,
             error: `OpenAI API error ${resp.status}${code ? ` (${code})` : ""}`,
+            failureCategory: providerFailureCategoryForHttpStatus(resp.status),
           };
         }
 
@@ -512,7 +515,7 @@ export async function queryOpenAIQuota(
         // Empty bodies stay invalid; a useful Credits-only/reset-count-only
         // payload is a real measurement even without a percent window.
         if (Object.keys(windows).length === 0 && !positiveCredits && availableResetCount === null) {
-          return { success: false, error: "No quota data" };
+          return { success: false, error: "No quota data", failureCategory: "provider_api" };
         }
 
         return {
@@ -537,6 +540,7 @@ export async function queryOpenAIQuota(
     return {
       success: false,
       error: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
+      failureCategory: "provider_api",
     };
   }
 }

@@ -176,6 +176,7 @@ describe("nanogpt provider", () => {
         {
           endpoint: "balance",
           message: "NanoGPT API error 401: Unauthorized",
+          failureCategory: "provider_api",
         },
       ],
     });
@@ -212,10 +213,12 @@ describe("nanogpt provider", () => {
       {
         label: "NanoGPT Balance",
         message: "NanoGPT API error 401: Unauthorized",
+        failureCategory: "provider_api",
       },
       {
         label: "NanoGPT",
         message: "Subscription state: grace",
+        failureCategory: "discovery",
       },
     ]);
   });
@@ -229,6 +232,7 @@ describe("nanogpt provider", () => {
         {
           endpoint: "balance",
           message: "NanoGPT balance response returned an invalid usd_balance decimal",
+          failureCategory: "provider_api",
         },
       ],
     });
@@ -251,6 +255,7 @@ describe("nanogpt provider", () => {
       {
         label: "NanoGPT Balance",
         message: "NanoGPT balance response returned an invalid usd_balance decimal",
+        failureCategory: "provider_api",
       },
     ]);
   });

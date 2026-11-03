@@ -5,6 +5,7 @@
  * https://api.synthetic.new/v2/quotas
  */
 
+import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
@@ -42,6 +43,7 @@ function invalidSyntheticResponse(message: string): QuotaError {
   return {
     success: false,
     error: message,
+    failureCategory: "provider_api",
   };
 }
 
@@ -172,6 +174,7 @@ export async function querySyntheticQuota(
   const resolved = await resolveSyntheticApiKey();
   if (!resolved) return null;
 
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(SYNTHETIC_QUOTA_URL, {
       request: {
@@ -183,11 +186,13 @@ export async function querySyntheticQuota(
       },
       timeoutMs: options.requestTimeoutMs,
       consume: async (resp) => {
+        responseStatus = resp.status;
         if (!resp.ok) {
           const text = await resp.text();
           return {
             success: false,
             error: `Synthetic API error ${resp.status}: ${sanitizeDisplaySnippet(text, 120)}`,
+            failureCategory: providerFailureCategoryForHttpStatus(resp.status),
           };
         }
 
@@ -226,6 +231,10 @@ export async function querySyntheticQuota(
     return {
       success: false,
       error: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }

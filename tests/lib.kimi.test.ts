@@ -159,11 +159,31 @@ describe("queryKimiQuota", () => {
     await expect(queryCn()).resolves.toEqual({
       success: false,
       error: `Kimi API error ${status}: ${body}`,
+      failureCategory: "credentials",
     });
     expect(fetchMocks.fetchWithTimeout).toHaveBeenCalledTimes(1);
     expect(fetchMocks.fetchWithTimeout.mock.calls[0]?.[0]).toBe(
       "https://api.kimi.com/coding/v1/usages",
     );
+  });
+
+  it.each([
+    [401, "credentials"],
+    [403, "credentials"],
+    [500, "provider_api"],
+  ])("keeps HTTP %i classified as %s when the error body cannot be read", async (status, failureCategory) => {
+    fetchMocks.fetchResponse.mockResolvedValueOnce({
+      ok: false,
+      status,
+      text: async () => {
+        throw new Error("body stream failed");
+      },
+    });
+
+    await expect(queryCn()).resolves.toMatchObject({
+      success: false,
+      failureCategory,
+    });
   });
 
   it("returns an error for an empty usable payload without trying the other host", async () => {
@@ -172,6 +192,7 @@ describe("queryKimiQuota", () => {
     await expect(queryCn()).resolves.toEqual({
       success: false,
       error: "Unexpected response structure (keys: message, code)",
+      failureCategory: "provider_api",
     });
     expect(fetchMocks.fetchWithTimeout).toHaveBeenCalledTimes(1);
   });
@@ -182,6 +203,7 @@ describe("queryKimiQuota", () => {
     await expect(queryCn()).resolves.toEqual({
       success: false,
       error: "network error",
+      failureCategory: "provider_api",
     });
     expect(fetchMocks.fetchWithTimeout).toHaveBeenCalledTimes(1);
   });

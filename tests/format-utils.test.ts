@@ -37,6 +37,16 @@ describe("formatResetCountdown", () => {
     expect(formatResetCountdown(sameDay, { spaced: true })).toBe("3h 45m");
   });
 
+  it("uses an explicit reference time when supplied", () => {
+    const nowMs = Date.parse("2026-01-15T10:00:00.000Z");
+
+    expect(formatResetCountdown("2026-01-17T15:14:00.000Z", { spaced: true }, nowMs)).toBe(
+      "2d 5h 14m",
+    );
+    expect(formatResetCountdown("2026-01-15T10:14:00.000Z", { spaced: true }, nowMs)).toBe("14m");
+    expect(formatResetCountdown("2026-01-15T10:00:00.000Z", {}, nowMs)).toBe("reset");
+  });
+
   it("leaves minute-only and partial-minute behavior unchanged in spaced mode", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-15T10:00:00.000Z"));

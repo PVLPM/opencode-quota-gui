@@ -94,10 +94,11 @@ function pushQuotaEntry(
 
 function mapNanoGptSuccess(result: NanoGptQuotaSuccess): QuotaProviderResult {
   const entries: QuotaToastEntry[] = [];
-  const errors =
+  const errors: QuotaProviderResult["errors"] =
     result.endpointErrors?.map((entry) => ({
       label: entry.endpoint === "usage" ? "NanoGPT Usage" : "NanoGPT Balance",
       message: entry.message,
+      ...(entry.failureCategory !== undefined ? { failureCategory: entry.failureCategory } : {}),
     })) ?? [];
 
   const subscription = result.subscription;
@@ -130,6 +131,7 @@ function mapNanoGptSuccess(result: NanoGptQuotaSuccess): QuotaProviderResult {
     errors.push({
       label: "NanoGPT",
       message: `Subscription state: ${subscription.state}`,
+      failureCategory: "discovery",
     });
   }
 
@@ -137,6 +139,7 @@ function mapNanoGptSuccess(result: NanoGptQuotaSuccess): QuotaProviderResult {
     errors.push({
       label: "NanoGPT",
       message: "No usable NanoGPT quota or balance data",
+      failureCategory: "discovery",
     });
   }
 

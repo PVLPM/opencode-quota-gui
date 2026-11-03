@@ -1,8 +1,12 @@
 import { BUILD_IDENTITY, type BuildIdentity } from "../contracts/build-identity";
+import { isCardHidden, isLegacyProviderHidden } from "../contracts/card-visibility";
 import type { Bucket, ProviderCard, QuotaCardRow, Usage } from "../contracts/dashboard";
 import { DASHBOARD_CONTRACT_VERSION } from "../contracts/dashboard";
 import type { ConnectionState } from "./dashboard-client";
 import { DashboardError } from "./dashboard-client";
+
+/** UI consumers keep the existing view-model import path. */
+export { isCardHidden, isLegacyProviderHidden };
 
 /** Diagnostic only: never pass this warning to the contract/load-state gate. */
 export function buildMismatchMessage(
@@ -59,6 +63,20 @@ export function describeError(error: unknown): string {
   return "The dashboard server did not answer. Check that the local dashboard is still running.";
 }
 
+/**
+ * A settings-revision conflict arrives in two shapes: the browser client throws
+ * a `DashboardError`, while the official native RPC client unwraps the server's
+ * `RpcError` into a plain `{ type, message, data? }` object. Recognize only the
+ * declared `config-changed` code on either transport so an unrelated failure is
+ * never treated as a conflict, and no error text is trusted for control flow.
+ */
+export function isConfigChangedError(error: unknown): boolean {
+  if (error instanceof DashboardError) return error.isConfigChanged;
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { type?: unknown; message?: unknown };
+  return candidate.type === "config-changed" && typeof candidate.message === "string";
+}
+
 export function resolveLoadState<T>(
   outcome: FetchOutcome<T>,
   contractMismatch?: string,
@@ -91,29 +109,6 @@ export function visibleCards(cards: ProviderCard[], hiddenCards: string[]): Prov
   if (hiddenCards.length === 0) return cards;
   const hidden = new Set(hiddenCards);
   return cards.filter((card) => !isCardHidden(card, hidden));
-}
-
-interface ProviderVisibilityIdentity {
-  providerId: string;
-  providerScopeHash?: string;
-}
-
-/** Consume normalized settings; never guess old semantics from the current catalog. */
-export function isLegacyProviderHidden(
-  card: ProviderVisibilityIdentity,
-  hidden: ReadonlySet<string>,
-): boolean {
-  return (
-    hidden.has(card.providerId) ||
-    (card.providerScopeHash !== undefined && hidden.has(card.providerScopeHash))
-  );
-}
-
-export function isCardHidden(
-  card: ProviderVisibilityIdentity & { cardId: string },
-  hidden: ReadonlySet<string>,
-): boolean {
-  return hidden.has(card.cardId) || isLegacyProviderHidden(card, hidden);
 }
 
 /**

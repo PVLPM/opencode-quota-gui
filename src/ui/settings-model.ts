@@ -91,6 +91,12 @@ export function isPositiveNumberValue(value: JsonValue | undefined): boolean {
 
 export const OPENCODE_GO_WINDOWS = ["rolling", "weekly", "monthly"] as const;
 
+/** Native-only quota alert controls; hidden from the shared generic renderer. */
+export const NATIVE_QUOTA_ALERT_KEYS = [
+  "lowQuotaThresholdRemainingPercent",
+  "duplicateCooldownMinutes",
+] as const;
+
 function withImportEligibility(fields: SettingsField[]): readonly SettingsField[] {
   return fields.map((field) => ({ ...field, importable: isLegacyImportKey(field.key) }));
 }
@@ -196,6 +202,25 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     ],
   },
   {
+    key: "lowQuotaThresholdRemainingPercent",
+    hidden: true,
+    group: "advanced",
+    control: "integer",
+    label: "Low quota threshold",
+    help: "Percent of quota remaining at or below which a low-quota alert is sent.",
+    min: 1,
+    max: 100,
+  },
+  {
+    key: "duplicateCooldownMinutes",
+    hidden: true,
+    group: "advanced",
+    control: "integer",
+    label: "Duplicate alert cooldown",
+    help: "Minutes before the same quota alert can repeat. 0 allows immediate repeats.",
+    min: 0,
+  },
+  {
     key: "opencodeGoWindows",
     hidden: true,
     group: "advanced",
@@ -244,6 +269,14 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     group: "temporal",
     control: "map",
     label: "Temporal provider overrides",
+    hidden: true,
+  },
+  {
+    key: "dashboard.enabled",
+    group: "dashboard",
+    control: "switch",
+    label: "Web dashboard",
+    help: "Serve the browser dashboard on 127.0.0.1 at dashboard.port. When unset, it follows the OpenCode host version: on below 2.2.0 and off at 2.2.0 or newer. Changing it requires an OpenCode restart.",
     hidden: true,
   },
   {
@@ -398,6 +431,27 @@ export function parseProviderIds(raw: string): string[] {
     .split(/[,\s]+/)
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
+}
+
+/**
+ * The threshold is persisted as remaining, but the control follows the
+ * used/remaining display preference. Undefined and non-finite input passes
+ * through so the normal validation still reports it.
+ */
+export function lowQuotaThresholdDisplayValue(
+  remaining: JsonValue | undefined,
+  mode: DisplayPreferences["percentMode"],
+): JsonValue | undefined {
+  if (typeof remaining !== "number" || !Number.isFinite(remaining)) return remaining;
+  return mode === "used" ? 100 - remaining : remaining;
+}
+
+export function lowQuotaThresholdRemainingValue(
+  displayed: JsonValue | undefined,
+  mode: DisplayPreferences["percentMode"],
+): JsonValue | undefined {
+  if (typeof displayed !== "number" || !Number.isFinite(displayed)) return displayed;
+  return mode === "used" ? 100 - displayed : displayed;
 }
 
 export function windowSelection(value: JsonValue | undefined): string[] {

@@ -167,6 +167,7 @@ describe("collectQuotaRenderData shared quota state", () => {
       message:
         "OpenCode Console sign-in failed: refresh_failed: boom. Run `opencode auth login opencode`.",
       sourceId: "cred_console",
+      failureCategory: "credentials",
     });
 
     // Without a Console sign-in, auto mode stays silent, but an explicit
@@ -194,6 +195,7 @@ describe("collectQuotaRenderData shared quota state", () => {
     expect(explicitNone.data?.errors).toContainEqual({
       label: "OpenCode Zen",
       message: "No OpenCode Console sign-in found. Run `opencode auth login opencode`.",
+      failureCategory: "credentials",
     });
   });
 

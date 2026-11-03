@@ -105,7 +105,11 @@ describe("simple API-key provider queries", () => {
       "fetch",
       vi.fn(async () => new Response("Unauthorized\u001b[31m", { status: 401 })),
     );
-    await expect(query()).resolves.toEqual({ success: false, error });
+    await expect(query()).resolves.toEqual({
+      success: false,
+      error,
+      failureCategory: "credentials",
+    });
   });
 
   describe("Chutes", () => {
@@ -286,6 +290,7 @@ describe("simple API-key provider queries", () => {
       await expect(querySyntheticQuota()).resolves.toEqual({
         success: false,
         error: "Synthetic returned no quota data for this account.",
+        failureCategory: "provider_api",
       });
       expect(fetchMock).toHaveBeenCalledWith(
         "https://api.synthetic.new/v2/quotas",
@@ -304,6 +309,7 @@ describe("simple API-key provider queries", () => {
       await expect(querySyntheticQuota()).resolves.toEqual({
         success: false,
         error: "Synthetic API response missing rollingFiveHourLimit quota window",
+        failureCategory: "provider_api",
       });
     });
 
@@ -339,7 +345,11 @@ describe("simple API-key provider queries", () => {
       ],
     ] as const)("rejects %s", async (_name, payload, error) => {
       stubJsonFetch(payload);
-      await expect(querySyntheticQuota()).resolves.toEqual({ success: false, error });
+      await expect(querySyntheticQuota()).resolves.toEqual({
+        success: false,
+        error,
+        failureCategory: "provider_api",
+      });
     });
   });
 
@@ -515,7 +525,13 @@ describe("simple API-key provider queries", () => {
         success: true,
         subscription: undefined,
         balance: { usdBalanceRaw: "12.50", nanoBalanceRaw: "3.25" },
-        endpointErrors: [{ endpoint: "usage", message: "NanoGPT API error 502: bad gateway" }],
+        endpointErrors: [
+          {
+            endpoint: "usage",
+            message: "NanoGPT API error 502: bad gateway",
+            failureCategory: "provider_api",
+          },
+        ],
       });
     });
 
@@ -590,6 +606,7 @@ describe("simple API-key provider queries", () => {
             endpoint: "balance",
             message:
               "NanoGPT balance response returned an invalid usd_balance decimal; NanoGPT balance response returned an invalid nano_balance decimal",
+            failureCategory: "provider_api",
           },
         ],
       });
@@ -611,6 +628,7 @@ describe("simple API-key provider queries", () => {
         error:
           "Usage: NanoGPT API error 500: usage failed; Balance: NanoGPT API error 403: balance failed",
         retryable: true,
+        failureCategory: "provider_api",
       });
     });
 
@@ -663,6 +681,7 @@ describe("simple API-key provider queries", () => {
           {
             endpoint: "usage",
             message: "NanoGPT usage response returned an unexpected response shape",
+            failureCategory: "provider_api",
           },
         ],
       });
@@ -678,6 +697,7 @@ describe("simple API-key provider queries", () => {
         success: false,
         error: "Usage: network down; Balance: network down",
         retryable: true,
+        failureCategory: "provider_api",
       });
     });
   });
@@ -788,6 +808,7 @@ describe("simple API-key provider queries", () => {
       await expect(queryDeepSeekBalance()).resolves.toEqual({
         success: false,
         error: "DeepSeek balance response returned an unexpected response shape",
+        failureCategory: "provider_api",
       });
     });
   });

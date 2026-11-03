@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { BankedResetAvailability } from "../contracts/openai-quota.js";
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
 import type { QuotaTelemetryToken } from "./quota-telemetry.js";
 import type { ResolvedAuthIdentity } from "./resolved-auth-identity.js";
@@ -290,6 +291,8 @@ export interface QuotaToastError {
   message: string;
   /** Whether a later refresh may succeed without user action. */
   retryable?: boolean;
+  /** Source-assigned safe category; absence means unknown and consumers fail closed. */
+  failureCategory?: ProviderFailureCategory;
   /** Intentional diagnostics remain verbose but do not count as compact-status issues. */
   kind?: "intentional-filter";
   /**

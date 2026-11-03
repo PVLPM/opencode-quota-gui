@@ -282,6 +282,7 @@ function ModelSchedule(props: {
 
 function TemporalModelDetail(props: {
   group: TemporalModelGroup;
+  showPhase: boolean;
   nowMs?: number;
   formatOptions?: TemporalFormatOptions;
 }): JSX.Element {
@@ -303,10 +304,7 @@ function TemporalModelDetail(props: {
   };
   const modelLabel = () => {
     const ids = props.group.models.map((entry) => entry.modelId);
-    if (ids.length === 1) return ids[0] ?? "";
-    const shown = ids.slice(0, 3).join(", ");
-    const more = ids.length > 3 ? `, +${ids.length - 3} more` : "";
-    return `${ids.length} models · ${shown}${more}`;
+    return ids.join(", ");
   };
   const effectLabel = () => temporalEffectLabel(state().effect);
   const nextLabel = () => {
@@ -322,9 +320,11 @@ function TemporalModelDetail(props: {
     <section class="qg-temporal-popover__model">
       <div class="qg-temporal-popover__model-line">
         <span class="qg-temporal-popover__model-id">{modelLabel()}</span>
-        <span class="qg-temporal-popover__state" data-phase={state().state}>
-          {temporalModelPhaseLabel(state().state)}
-        </span>
+        <Show when={props.showPhase}>
+          <span class="qg-temporal-popover__state qg-row__value" data-phase={state().state}>
+            {temporalModelPhaseLabel(state().state)}
+          </span>
+        </Show>
       </div>
       {/* The current scalar comes from the live interval only; future windows
           are never compared to infer it. Effect and next change share one
@@ -376,7 +376,7 @@ export function TemporalPopoverBody(props: {
       <header class="qg-temporal-popover__head">
         <ProviderLogo providerId={props.status.providerId} class="qg-temporal-popover__logo" />
         <span class="qg-temporal-popover__provider">{label()}</span>
-        <span class="qg-temporal-popover__phase" data-phase={phase()}>
+        <span class="qg-temporal-popover__phase qg-row__value" data-phase={phase()}>
           {temporalPhaseLabel(phase())}
         </span>
       </header>
@@ -387,6 +387,13 @@ export function TemporalPopoverBody(props: {
         {(group) => (
           <TemporalModelDetail
             group={group}
+            showPhase={
+              phase() === "mixed" ||
+              (phase() === "unknown" &&
+                props.status.models.some(
+                  (model) => temporalModelStateAt(model, now()).state !== "unknown",
+                ))
+            }
             nowMs={props.nowMs}
             formatOptions={props.formatOptions}
           />

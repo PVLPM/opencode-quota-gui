@@ -430,8 +430,11 @@ describe("copilot provider", () => {
     (queryCopilotQuota as any).mockResolvedValueOnce({
       success: false,
       error: "Forbidden",
+      failureCategory: "credentials",
     });
-    expectAttemptedWithErrorLabel(await copilotProvider.fetch({} as any), "Copilot");
+    const out = await copilotProvider.fetch({} as any);
+    expectAttemptedWithErrorLabel(out, "Copilot");
+    expect(out.errors[0]?.failureCategory).toBe("credentials");
   });
 
   it("uses runtime provider ids or trusted local billing auth for availability", async () => {

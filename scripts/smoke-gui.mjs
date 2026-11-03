@@ -36,6 +36,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const DIST_MODULES = {
   server: join(REPO_ROOT, "dist", "gui", "server.js"),
+  snapshots: join(REPO_ROOT, "dist", "gui", "snapshot-service.js"),
   sources: join(REPO_ROOT, "dist", "gui", "sources.js"),
   config: join(REPO_ROOT, "dist", "gui", "config.js"),
   types: join(REPO_ROOT, "dist", "lib", "types.js"),
@@ -68,13 +69,14 @@ function assertBuiltDist() {
 
 async function importDistModules() {
   assertBuiltDist();
-  const [server, sources, config, types] = await Promise.all([
+  const [server, snapshots, sources, config, types] = await Promise.all([
     import(pathToFileURL(DIST_MODULES.server).href),
+    import(pathToFileURL(DIST_MODULES.snapshots).href),
     import(pathToFileURL(DIST_MODULES.sources).href),
     import(pathToFileURL(DIST_MODULES.config).href),
     import(pathToFileURL(DIST_MODULES.types).href),
   ]);
-  return { server, sources, config, types };
+  return { server, snapshots, sources, config, types };
 }
 
 /**
@@ -138,8 +140,22 @@ export async function startSyntheticDashboard(options = {}) {
       },
     });
     const port = options.port ?? modules.types.DEFAULT_DASHBOARD_PORT;
-    const handle = await modules.server.createDashboardServer({ port, source, settings });
-    dashboard = { handle };
+    // Mirror the lifecycle-owned runtime: one shared snapshot service per host,
+    // handed to the HTTP transport rather than constructed inside it.
+    const snapshots = modules.snapshots.createSnapshotService({ source });
+    let handle;
+    try {
+      handle = await modules.server.createDashboardServer({ port, snapshots, settings });
+    } catch (error) {
+      snapshots.close();
+      try {
+        await source.close?.();
+      } catch {
+        // The bind failure remains the reported error.
+      }
+      throw error;
+    }
+    dashboard = { handle, snapshots, source };
   } catch (error) {
     restoreEnvironment();
     await removeOwnRoot();
@@ -155,6 +171,12 @@ export async function startSyntheticDashboard(options = {}) {
           await dashboard.handle.close();
         } catch (error) {
           closeFailure = error;
+        }
+        dashboard.snapshots.close();
+        try {
+          await dashboard.source.close?.();
+        } catch {
+          // The smoke owns no long-lived resource beyond the fixture root.
         }
         restoreEnvironment();
         await removeOwnRoot();

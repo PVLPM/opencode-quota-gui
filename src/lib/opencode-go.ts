@@ -1,3 +1,4 @@
+import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import { sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import {
@@ -33,7 +34,16 @@ function errorMessage(error: unknown, accessToken: string): string {
 }
 
 function contractError(message: string): OpenCodeGoResult {
-  return { success: false, error: `Invalid OpenCode Go API response: ${message}` };
+  return {
+    success: false,
+    error: `Invalid OpenCode Go API response: ${message}`,
+    failureCategory: "provider_api",
+  };
+}
+
+/** 401/403 resolve credentials before the endpoint contract can be read. */
+function httpFailureCategory(status: number): ProviderFailureCategory {
+  return status === 401 || status === 403 ? "credentials" : "provider_api";
 }
 
 function isRetryableHttpStatus(status: number): boolean {
@@ -174,6 +184,7 @@ export async function queryOpenCodeGoQuota(
               success: false,
               error: `OpenCode Go API error ${response.status}: ${errorMessage(error, accessToken)}`,
               retryable: isRetryableHttpStatus(response.status),
+              failureCategory: httpFailureCategory(response.status),
             };
           }
           if (isNotSubscribedResponse(response.status, text)) {
@@ -188,6 +199,7 @@ export async function queryOpenCodeGoQuota(
             success: false,
             error: `OpenCode Go API error ${response.status}: ${sanitizeMessage(text, accessToken)}`,
             retryable: isRetryableHttpStatus(response.status),
+            failureCategory: httpFailureCategory(response.status),
           };
         }
 
@@ -201,7 +213,12 @@ export async function queryOpenCodeGoQuota(
       },
     });
   } catch (error) {
-    return { success: false, error: errorMessage(error, accessToken), retryable: true };
+    return {
+      success: false,
+      error: errorMessage(error, accessToken),
+      retryable: true,
+      failureCategory: "provider_api",
+    };
   }
 }
 
@@ -283,6 +300,7 @@ export async function queryOpenCodeGoConsoleStatus(
             success: false,
             error: `OpenCode Console API error ${response.status} (/api/go/status)`,
             retryable: isRetryableHttpStatus(response.status),
+            failureCategory: httpFailureCategory(response.status),
           };
         }
 
@@ -331,6 +349,11 @@ export async function queryOpenCodeGoConsoleStatus(
       },
     });
   } catch (error) {
-    return { success: false, error: errorMessage(error, credential.accessToken), retryable: true };
+    return {
+      success: false,
+      error: errorMessage(error, credential.accessToken),
+      retryable: true,
+      failureCategory: "provider_api",
+    };
   }
 }

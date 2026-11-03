@@ -6,6 +6,7 @@
  * endpoint.
  */
 
+import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import { resolveOllamaCloudApiKey } from "./ollama-cloud-config.js";
@@ -119,6 +120,7 @@ function parseOllamaCloudBalance(payload: unknown): OllamaCloudResult {
     return {
       success: false,
       error: "Ollama Cloud balance API returned an unexpected response shape",
+      failureCategory: "provider_api",
     };
   }
 
@@ -153,6 +155,7 @@ function parseOllamaCloudBalance(payload: unknown): OllamaCloudResult {
     return {
       success: false,
       error: "Ollama Cloud balance API returned no limits or balance",
+      failureCategory: "provider_api",
     };
   }
 
@@ -172,6 +175,7 @@ export async function queryOllamaCloudQuota(
   const resolved = await resolveOllamaCloudApiKey();
   if (!resolved) return null;
 
+  let responseStatus: number | undefined;
   try {
     return await fetchWithTimeout(OLLAMA_CLOUD_BALANCE_URL, {
       request: {
@@ -184,12 +188,14 @@ export async function queryOllamaCloudQuota(
       },
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
+        responseStatus = response.status;
         const text = await readBoundedText(response, MAX_RESPONSE_BYTES);
         if (!response.ok) {
           const snippet = sanitizeMessage(text, resolved.key);
           return {
             success: false,
             error: `Ollama Cloud balance API error ${response.status}: ${snippet}`,
+            failureCategory: providerFailureCategoryForHttpStatus(response.status),
           };
         }
 
@@ -200,6 +206,10 @@ export async function queryOllamaCloudQuota(
     return {
       success: false,
       error: sanitizeMessage(error instanceof Error ? error.message : String(error), resolved.key),
+      failureCategory:
+        responseStatus === undefined
+          ? "provider_api"
+          : providerFailureCategoryForHttpStatus(responseStatus),
     };
   }
 }

@@ -17,6 +17,7 @@ import type {
   HomeSnapshot,
   ImportPreview,
   JsonValue,
+  PrimaryQuotaWindowRef,
   ProjectActivityRow,
   ProjectRootRow,
   ProjectSnapshot,
@@ -32,9 +33,11 @@ import type {
   TokenStack,
   Usage,
 } from "../contracts/dashboard";
+import { PRIMARY_QUOTA_WINDOW_LIMIT } from "../contracts/dashboard";
 import { isCostedTokens, isDashboardEvent, isTokenStack } from "../contracts/guards";
 import type { CardId, RowId } from "../contracts/identity";
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota";
+import { PROVIDER_FAILURE_CATEGORIES } from "../contracts/provider-failure";
 import { type BucketUnit, isRangeKey, type RangeKey, type RangeWindow } from "../contracts/ranges";
 import type {
   TemporalEffect,
@@ -281,6 +284,15 @@ function readEnum<T extends string>(
   throw faulty(endpoint, detail);
 }
 
+function readOptionalEnum<T extends string>(
+  value: JsonValue | undefined,
+  allowed: readonly T[],
+  endpoint: string,
+  detail: string,
+): T | undefined {
+  return value === undefined ? undefined : readEnum(value, allowed, endpoint, detail);
+}
+
 function readRangeKey(value: JsonValue | undefined, endpoint: string, detail: string): RangeKey {
   if (isRangeKey(value)) return value;
   throw faulty(endpoint, detail);
@@ -464,6 +476,13 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
         `${detail}.errors[].retryable`,
       );
       if (retryable !== undefined) parsedError.retryable = retryable;
+      const failureCategory = readOptionalEnum(
+        error.failureCategory,
+        PROVIDER_FAILURE_CATEGORIES,
+        endpoint,
+        `${detail}.errors[].failureCategory`,
+      );
+      if (failureCategory !== undefined) parsedError.failureCategory = failureCategory;
       return parsedError;
     }),
   };
@@ -505,6 +524,48 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
       if (info !== undefined) parsedRow.info = info;
       return parsedRow;
     });
+  }
+  if (card.primaryQuotaWindows !== undefined) {
+    const primaryDetail = `${detail}.primaryQuotaWindows`;
+    const primary: NonNullable<ProviderCard["primaryQuotaWindows"]> = readArray(
+      card.primaryQuotaWindows,
+      endpoint,
+      primaryDetail,
+    ).map((entry) => {
+      const window = readRecord(entry, endpoint, `${primaryDetail}[]`);
+      return {
+        rowId: readRowId(window.rowId, endpoint, `${primaryDetail}[].rowId`),
+        slot: readIntegerInRange(
+          window.slot,
+          endpoint,
+          `${primaryDetail}[].slot`,
+          0,
+          2,
+        ) as PrimaryQuotaWindowRef["slot"],
+      };
+    });
+    if (
+      primary.length > PRIMARY_QUOTA_WINDOW_LIMIT ||
+      new Set(primary.map((window) => window.rowId)).size !== primary.length ||
+      new Set(primary.map((window) => window.slot)).size !== primary.length
+    ) {
+      throw faulty(endpoint, primaryDetail);
+    }
+    const rowsById = new Map(parsed.rows.map((row) => [row.rowId, row] as const));
+    if (
+      !primary.every((window) => {
+        const row = rowsById.get(window.rowId);
+        return (
+          row !== undefined &&
+          row.kind === "percent" &&
+          (row.resultType === "quota" || row.resultType === "rate_limit") &&
+          Number.isFinite(row.percentRemaining)
+        );
+      })
+    ) {
+      throw faulty(endpoint, primaryDetail);
+    }
+    parsed.primaryQuotaWindows = primary;
   }
   return parsed;
 }

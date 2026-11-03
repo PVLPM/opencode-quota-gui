@@ -4,10 +4,12 @@
  * Loopback-only (`127.0.0.1`), Host/Origin/Sec-Fetch-Site hardening, no CORS,
  * JSON writes behind a streamed 64 KiB cap, static assets contained to
  * `dist/ui` under the packaged extension allowlist, SSE on `/api/v1/events`,
- * and one scrubbed log line per failure. `createDashboardServer` is the
- * injectable seam: tests pass in-memory sources/stores and `port: 0`, while the
- * production lifecycle factory wires the P3 source and P2 settings store and
- * the default `4144` port.
+ * and one scrubbed log line per failure. `createDashboardServer` is the web
+ * transport only: it receives the host-scoped `SnapshotService` and settings
+ * store from the lifecycle/runtime and never constructs or closes them. Tests
+ * pass in-memory dependencies and `port: 0`; production wires the P3 source,
+ * one per-host snapshot service and the P2 settings store on the default
+ * `4144` port.
  */
 
 import { readFile, realpath, stat } from "node:fs/promises";
@@ -25,26 +27,38 @@ import {
 } from "../contracts/dashboard.js";
 import { DEFAULT_RANGE_KEY, isRangeKey, type RangeKey } from "../contracts/ranges.js";
 import { GuiSettingsError } from "./config.js";
+import {
+  DASHBOARD_ERROR_MESSAGES,
+  DASHBOARD_ERROR_STATUS,
+  type DashboardErrorCode,
+  type DashboardErrorDetails,
+  DashboardHttpError,
+  sanitizeDashboardErrorDetails,
+  structuralDashboardSourceCode,
+} from "./dashboard-errors.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
-import { createSnapshotService, type SnapshotSource } from "./snapshot-service.js";
+import type { SnapshotService } from "./snapshot-service.js";
 import { createSseHub } from "./sse.js";
+
+export {
+  DASHBOARD_ERROR_STATUS,
+  DashboardHttpError,
+  type DashboardErrorCode,
+  type DashboardErrorDetails,
+};
 
 export interface DashboardServerOptions {
   /** `0` binds an ephemeral port (tests); production passes the configured port. */
   port: number;
-  source: SnapshotSource;
+  /**
+   * The host-scoped shared snapshot service. The lifecycle/runtime owns its
+   * cache, pollers and final close; the HTTP transport only attaches viewers
+   * and reads it.
+   */
+  snapshots: SnapshotService;
   settings: GuiSettingsStore;
   /** Static root; defaults to `<package>/dist/ui` derived from this module. */
   assetRoot?: string;
-  /**
-   * Existing quota poll interval (positive config value, no new floor) or a
-   * getter re-read on settings changes. Analytics has its own interval below.
-   */
-  minIntervalMs?: number | (() => number);
-  /** Explicit quota interval; wins over `minIntervalMs`. */
-  quotaIntervalMs?: number | (() => number);
-  /** Analytics poll interval; defaults to 600000ms. */
-  analyticsIntervalMs?: number | (() => number);
   /** SSE heartbeat override (test seam; default 20 s). */
   heartbeatMs?: number;
   logger?: GuiLogger;
@@ -54,79 +68,6 @@ export interface DashboardServerHandle {
   port: number;
   url: string;
   close(): Promise<void>;
-}
-
-export type DashboardErrorCode =
-  | "bad-request"
-  | "bad-host"
-  | "bad-origin"
-  | "unsupported-media-type"
-  | "body-too-large"
-  | "method-not-allowed"
-  | "not-found"
-  | "config-read-error"
-  | "config-changed"
-  | "config-target-error"
-  | "config-write-error"
-  | "unknown-setting"
-  | "invalid-setting"
-  | "project-not-found"
-  | "session-not-found"
-  | "internal";
-
-export interface DashboardErrorDetails {
-  reason?: string;
-  key?: string;
-}
-
-/** Status mapping from spec §5.3. */
-export const DASHBOARD_ERROR_STATUS: Readonly<Record<DashboardErrorCode, number>> = {
-  "bad-request": 400,
-  "bad-host": 403,
-  "bad-origin": 403,
-  "unsupported-media-type": 415,
-  "body-too-large": 413,
-  "method-not-allowed": 405,
-  "not-found": 404,
-  "config-read-error": 409,
-  "config-changed": 409,
-  "config-target-error": 409,
-  "config-write-error": 500,
-  "unknown-setting": 422,
-  "invalid-setting": 422,
-  "project-not-found": 404,
-  "session-not-found": 404,
-  internal: 500,
-};
-
-const DASHBOARD_ERROR_MESSAGES: Readonly<Record<DashboardErrorCode, string>> = {
-  "bad-request": "Malformed request",
-  "bad-host": "Requests must target the dashboard loopback address",
-  "bad-origin": "Writes must originate from the dashboard page",
-  "unsupported-media-type": "Writes require application/json",
-  "body-too-large": "Request body exceeds the 64 KiB limit",
-  "method-not-allowed": "Method not allowed",
-  "not-found": "Not found",
-  "config-read-error": "The dashboard config file is not valid JSONC",
-  "config-changed": "Config changed since the last revision",
-  "config-target-error": "The dashboard config path is not writable",
-  "config-write-error": "Config write failed",
-  "unknown-setting": "Unknown setting",
-  "invalid-setting": "Invalid setting",
-  "project-not-found": "Project not found",
-  "session-not-found": "Session not found",
-  internal: "Internal dashboard error",
-};
-
-/** A controlled condition the source or a store wants surfaced verbatim-ish. */
-export class DashboardHttpError extends Error {
-  readonly code: DashboardErrorCode;
-
-  constructor(code: DashboardErrorCode) {
-    super(DASHBOARD_ERROR_MESSAGES[code]);
-    this.name = "DashboardHttpError";
-    this.code = code;
-  }
 }
 
 /** Structured bind failure: terminal, no alternate port is ever attempted. */
@@ -158,27 +99,6 @@ const ASSET_CONTENT_TYPES: ReadonlyMap<string, string> = new Map([
   [".ttf", "font/ttf"],
 ]);
 
-const SOURCE_ERROR_CODES: ReadonlySet<string> = new Set([
-  "bad-request",
-  "project-not-found",
-  "session-not-found",
-]);
-
-/** The set above is the vocabulary; trust it as the membership proof. */
-function isSourceErrorCode(value: string): value is DashboardErrorCode {
-  return SOURCE_ERROR_CODES.has(value);
-}
-
-const TARGET_REASONS: ReadonlySet<string> = new Set([
-  "dangling",
-  "loop",
-  "depth",
-  "non-regular",
-  "permission",
-]);
-
-const SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z][A-Za-z0-9]*)*$/;
-
 const MAX_RESOURCE_ID_LENGTH = 256;
 
 interface MappedError {
@@ -202,39 +122,6 @@ function envelope(code: DashboardErrorCode, details?: DashboardErrorDetails): Ma
   };
 }
 
-function sanitizedDetails(
-  code: DashboardErrorCode,
-  input:
-    | {
-        reason?: string;
-        key?: string;
-      }
-    | undefined,
-): DashboardErrorDetails | undefined {
-  if (!input) return undefined;
-  const details: DashboardErrorDetails = {};
-  // `details.reason` is forwarded for `config-target-error` only, and only from
-  // the allowlisted target-reason vocabulary; other codes never carry it.
-  if (
-    code === "config-target-error" &&
-    input.reason !== undefined &&
-    TARGET_REASONS.has(input.reason)
-  ) {
-    details.reason = input.reason;
-  }
-  if (input.key !== undefined && input.key.length <= 64 && SETTING_KEY_RE.test(input.key)) {
-    details.key = input.key;
-  }
-  return Object.keys(details).length > 0 ? details : undefined;
-}
-
-function structuralSourceCode(error: unknown): DashboardErrorCode | undefined {
-  if (error === null || typeof error !== "object" || !("code" in error)) return undefined;
-  const code = error.code;
-  if (typeof code !== "string" || !isSourceErrorCode(code)) return undefined;
-  return code;
-}
-
 /**
  * Raw exceptions never reach the wire: known controlled errors keep their code,
  * everything else is a generic 500. GuiSettingsError messages are not
@@ -242,12 +129,12 @@ function structuralSourceCode(error: unknown): DashboardErrorCode | undefined {
  */
 function mapError(error: unknown): MappedError {
   if (error instanceof GuiSettingsError) {
-    return envelope(error.code, sanitizedDetails(error.code, error.details));
+    return envelope(error.code, sanitizeDashboardErrorDetails(error.code, error.details));
   }
   if (error instanceof DashboardHttpError) {
     return envelope(error.code, undefined);
   }
-  const sourceCode = structuralSourceCode(error);
+  const sourceCode = structuralDashboardSourceCode(error);
   if (sourceCode) return envelope(sourceCode, undefined);
   return envelope("internal", undefined);
 }
@@ -464,13 +351,7 @@ export function createDashboardServer(
   options: DashboardServerOptions,
 ): Promise<DashboardServerHandle> {
   const logger = options.logger ?? createGuiLogger();
-  const snapshots = createSnapshotService({
-    source: options.source,
-    minIntervalMs: options.minIntervalMs,
-    quotaIntervalMs: options.quotaIntervalMs,
-    analyticsIntervalMs: options.analyticsIntervalMs,
-    logger,
-  });
+  const snapshots = options.snapshots;
 
   let releaseViewer: (() => void) | undefined;
   const sse = createSseHub({
@@ -921,40 +802,29 @@ export function createDashboardServer(
 
   let actualPort = options.port;
   let closing: Promise<void> | undefined;
-  let released: Promise<void> | undefined;
+  let released = false;
 
   /**
-   * Stops snapshot work and closes the optional source. Used by both the final
-   * server close and a terminal bind failure, so a worker/DB resource created
-   * by the source is never leaked. Idempotent and never rejects.
+   * Detaches this transport: stop broadcasting to the shared service and end
+   * SSE clients (releasing the viewer). The snapshot service and source are
+   * caller-owned and are released by the lifecycle when the last lease disposes,
+   * including after a terminal bind failure. Idempotent and never rejects.
    */
-  function releaseResources(): Promise<void> {
-    if (released) return released;
+  function releaseResources(): void {
+    if (released) return;
+    released = true;
     try {
-      snapshots.close();
       unsubscribe();
       sse.close();
     } catch (error: unknown) {
       logger.warn("dashboard release failed", isErrnoCode(error) ? error.code : "failed");
     }
-    const closeSource = options.source.close;
-    released = closeSource
-      ? Promise.resolve()
-          .then(() => closeSource())
-          .catch((error: unknown) => {
-            logger.warn(
-              "dashboard source close failed",
-              isErrnoCode(error) ? error.code : "failed",
-            );
-          })
-      : Promise.resolve();
-    return released;
   }
 
   function close(): Promise<void> {
     if (closing) return closing;
     closing = (async () => {
-      const resources = releaseResources();
+      releaseResources();
       const killTimer = setTimeout(() => {
         server.closeAllConnections();
       }, 1000);
@@ -964,7 +834,6 @@ export function createDashboardServer(
         server.closeIdleConnections();
       });
       clearTimeout(killTimer);
-      await resources;
     })();
     return closing;
   }
@@ -972,14 +841,15 @@ export function createDashboardServer(
   return new Promise<DashboardServerHandle>((resolve, reject) => {
     const failBind = (reason: string | undefined) => {
       logger.error("dashboard server unavailable", reason ?? "unknown");
-      // Terminal: no alternate port is attempted, and source resources created
-      // before the bind are released even though no handle was returned.
+      // Terminal: no alternate port is attempted. This transport detaches its
+      // SSE subscriber; the lifecycle keeps the shared snapshot service and
+      // sources alive for its remaining leases.
       try {
         server.close();
       } catch {
         // The listener never started (bind error) or was already closed.
       }
-      void releaseResources();
+      releaseResources();
       reject(new DashboardBindError(options.port, reason));
     };
 

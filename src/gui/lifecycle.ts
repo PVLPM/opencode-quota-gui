@@ -8,7 +8,13 @@
  * owner's source, and when that owner disposes while other leases remain the
  * host switches to a live owner's source — created lazily on the next request —
  * without dropping the socket. The settings store is host-scoped file access.
- * The host closes with the last lease, releasing every source it created.
+ * One runtime — the stable delegating source and one `SnapshotService` — is
+ * shared by every transport attached to that host. The host closes with the
+ * last lease, releasing the snapshot service and every source it created. The
+ * web transport is optional and follows the host version when `dashboard.enabled`
+ * is absent (on below OpenCode 2.2.0, off from 2.2.0): when it is off, or when
+ * its fixed port cannot bind, the shared runtime stays available for the
+ * remaining leases and no HTTP/SSE/static surface is started.
  *
  * The registry lives on `globalThis` under a versioned `Symbol.for` key (the
  * quota-telemetry precedent), so two separately loaded copies of this module in
@@ -17,9 +23,9 @@
  * an error thrown by another module graph is structurally identical.
  *
  * Nothing here throws into the plugin: every failure becomes one controlled log
- * line and a lease in state `unavailable`. A failed bind is terminal (spec
- * §4.3) — no alternate port is ever tried, and the plugin's other surfaces are
- * untouched.
+ * line and a lease in state `unavailable`. A failed bind is terminal for the web
+ * transport (spec §4.3) — no alternate port is ever tried, and the plugin's
+ * other surfaces are untouched.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -29,18 +35,38 @@ import type {
   GuiSettingsStore,
   QuotaSnapshot,
 } from "../contracts/dashboard.js";
-import { getGuiConfigPath, loadConfig } from "../lib/config.js";
+import { createLoadConfigMeta, getGuiConfigPath, loadConfig } from "../lib/config.js";
+import {
+  getDashboardEnabledSetting,
+  hasInvalidDashboardWebConfig,
+  resolveDashboardWebEnabled,
+} from "../lib/dashboard-web-policy.js";
 import type { QuotaProviderContext } from "../lib/entries.js";
 import { parseConfigDocument } from "../lib/opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "../lib/opencode-runtime-paths.js";
-import { createGuiSettingsStore, getGuiDashboardPort } from "./config.js";
+import { detectOpenCodeVersion, type OpenCodeVersion } from "../lib/opencode-version.js";
+import {
+  createGuiSettingsStore,
+  type GuiSettingsStoreOptions,
+  getGuiDashboardPort,
+} from "./config.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
+import {
+  createQuotaNotificationObserver,
+  type QuotaNotificationObserver,
+  quotaNotificationSettingsFromSnapshot,
+} from "./quota-notification-observer.js";
 import {
   createDashboardServer,
   type DashboardServerHandle,
   type DashboardServerOptions,
 } from "./server.js";
-import { DEFAULT_POLL_INTERVAL_MS } from "./snapshot-service.js";
+import {
+  createSnapshotService,
+  DEFAULT_POLL_INTERVAL_MS,
+  type SnapshotService,
+  type SnapshotServiceOptions,
+} from "./snapshot-service.js";
 import { createDashboardReadSource } from "./sources.js";
 
 /**
@@ -78,15 +104,30 @@ export type DashboardUnavailableReason =
   | "server-unavailable";
 
 /**
- * One setup's claim on the dashboard host. `running` leases share the host bound
- * on `port`; `unavailable` leases report a controlled `reason` and hold no
- * socket. Disposing is idempotent and never rejects.
+ * The host-owned dependencies every transport attaches to. Both objects are
+ * created once per shared host; transports never construct or close them.
+ */
+export interface DashboardTransportRuntime {
+  readonly snapshots: SnapshotService;
+  readonly settings: GuiSettingsStore;
+  /** One host-owned observer; its safe events use the quota notification channel. */
+  readonly quotaNotifications?: QuotaNotificationObserver;
+}
+
+/**
+ * One setup's claim on the dashboard host. `running` leases share the host
+ * runtime; `url` is present only when the web transport is enabled and bound.
+ * `unavailable` leases report a controlled `reason`; a web-only failure keeps
+ * the shared runtime alive until the last lease disposes. `runtime` is present
+ * whenever the shared source/settings/snapshot service started, including when
+ * web is disabled or its bind failed. Disposing is idempotent and never rejects.
  */
 export interface DashboardLease {
   readonly port: number;
   readonly state: "running" | "unavailable";
   readonly url?: string;
   readonly reason?: DashboardUnavailableReason;
+  readonly runtime?: DashboardTransportRuntime;
   dispose(): Promise<void>;
 }
 
@@ -96,10 +137,22 @@ export interface StartDashboardOptions {
   workspaceRoot: string;
   /** Global OpenCode config dir; defaults to the runtime dirs. */
   configDir?: string;
+  /**
+   * Running OpenCode host version (`ctx.app?.version`). When absent, a bounded
+   * `opencode --version` probe supplies it; if that also fails, the
+   * version-dependent web default stays off.
+   */
+  hostVersion?: string;
+  /** Test/embedding seam: replaces the bounded host-version probe. */
+  detectHostVersion?: () => Promise<OpenCodeVersion | undefined>;
   /** Test/P7 seam: replaces the P3 read-source factory. */
   createSource?: DashboardSourceFactory;
   /** Test seam: replaces the P2 settings store factory. */
-  createSettingsStore?: (options: { configDir: string; workspaceRoot: string }) => GuiSettingsStore;
+  createSettingsStore?: (options: GuiSettingsStoreOptions) => GuiSettingsStore;
+  /** Test seam: replaces the per-host snapshot service factory. */
+  createSnapshots?: (options: SnapshotServiceOptions) => SnapshotService;
+  /** Test/embedding seam: private quota notification cooldown state path. */
+  quotaNotificationStatePath?: string;
   /** Test seam: replaces the transport factory. */
   createServer?: (options: DashboardServerOptions) => Promise<DashboardServerHandle>;
   logger?: GuiLogger;
@@ -126,19 +179,45 @@ interface OwnerDelegation {
   activeOwner?: DashboardOwner;
 }
 
+/**
+ * Host-scoped shared runtime: the stable delegating source plus the single
+ * `SnapshotService` every transport for this host shares. It is created when
+ * the host starts and released once, when the last lease disposes. A failed web
+ * bind detaches only that transport; it never releases this runtime. A surviving
+ * lease keeps the cache and poll registrations across owner handoff.
+ */
+interface DashboardRuntime {
+  readonly source: DashboardReadSource;
+  snapshots: SnapshotService | undefined;
+  /** One host-lifetime quota interest, independent of any transport viewer. */
+  quotaMonitor: ReturnType<SnapshotService["addScopedViewer"]> | undefined;
+  quotaNotifications: QuotaNotificationObserver | undefined;
+  settings: GuiSettingsStore | undefined;
+  close(): Promise<void>;
+}
+
 interface DashboardHost {
   readonly port: number;
   readonly logger: GuiLogger;
   readonly delegation: OwnerDelegation;
+  readonly runtime: DashboardRuntime;
   refs: number;
-  /** Resolves with the handle, or rejects with the contained failure. */
-  readonly start: Promise<DashboardServerHandle>;
+  /**
+   * Resolves with the web handle, or `undefined` when the effective web policy
+   * keeps the transport off. Rejects only when the shared runtime or the enabled
+   * transport could not start.
+   */
+  readonly start: Promise<DashboardServerHandle | undefined>;
   failure?: DashboardUnavailableReason;
 }
 
 interface HostContext {
   configDir: string;
   port: number;
+  /** Effective web transport switch; false means no HTTP/SSE/static transport. */
+  webEnabled: boolean;
+  /** Resolved host version for the version-gated settings snapshot default. */
+  hostVersion: string | OpenCodeVersion | undefined;
   minIntervalMs: number | undefined;
   logger: GuiLogger;
 }
@@ -147,10 +226,13 @@ interface HostContext {
  * Versioned process-wide host registry. `Symbol.for` is realm-global, so every
  * separately loaded copy of this module in the same process resolves the same
  * map and shares the refcount and socket. The version is bumped when the host
- * record shape changes (`v2` adds owner delegation): an older copy then fails
- * the fixed port terminally instead of mutating a host it does not understand.
+ * record or start semantics change (`v2` added owner delegation, `v3` added the
+ * shared snapshot/source runtime, `v4` made the web transport optional while
+ * keeping the runtime, `v5` publishes the shared settings/snapshot runtime for
+ * RPC): an older copy then fails the fixed port terminally instead of mutating
+ * a host it does not understand.
  */
-const HOST_REGISTRY_KEY = Symbol.for("opencode-quota-gui/dashboard-lifecycle/v2");
+const HOST_REGISTRY_KEY = Symbol.for("opencode-quota-gui/dashboard-lifecycle/v5");
 
 interface DashboardHostRegistry {
   readonly hosts: Map<number, DashboardHost>;
@@ -176,6 +258,49 @@ function createOwner(options: StartDashboardOptions, configDir: string): Dashboa
     },
     disposed: false,
   };
+}
+
+/**
+ * One host's shared runtime. `close` is idempotent and is called by the final
+ * lease disposal; only the first call releases the snapshot service and every
+ * owner source still registered at that moment.
+ */
+function createRuntime(source: DashboardReadSource, logger: GuiLogger): DashboardRuntime {
+  let closing: Promise<void> | undefined;
+  const runtime: DashboardRuntime = {
+    source,
+    snapshots: undefined,
+    quotaMonitor: undefined,
+    quotaNotifications: undefined,
+    settings: undefined,
+    close() {
+      if (closing) return closing;
+      closing = (async () => {
+        try {
+          await runtime.quotaNotifications?.close();
+        } catch (error) {
+          logger.warn("quota notification observer close failed", failureLabel(error));
+        }
+        runtime.quotaNotifications = undefined;
+        try {
+          runtime.quotaMonitor?.release();
+        } catch (error) {
+          logger.warn("dashboard quota monitor close failed", failureLabel(error));
+        }
+        runtime.quotaMonitor = undefined;
+        try {
+          runtime.snapshots?.close();
+        } catch (error) {
+          logger.warn("dashboard runtime close failed", failureLabel(error));
+        }
+        runtime.snapshots = undefined;
+        runtime.settings = undefined;
+        await closeSource(source, logger);
+      })();
+      return closing;
+    },
+  };
+  return runtime;
 }
 
 /** The owner's source, created at most once and shared by concurrent callers. */
@@ -248,14 +373,22 @@ function disposeOwner(owner: DashboardOwner, logger: GuiLogger): Promise<void> {
   return releaseOwnerSource(owner, logger);
 }
 
-/** Removes a disposed owner and hands the host to the most recent live owner. */
-function dropOwner(host: DashboardHost, owner: DashboardOwner): void {
+/**
+ * Removes a disposed owner and hands the host to the most recent live owner.
+ * Returns true when the active serving identity changed.
+ */
+function dropOwner(host: DashboardHost, owner: DashboardOwner): boolean {
   const { owners } = host.delegation;
   const index = owners.indexOf(owner);
   if (index !== -1) owners.splice(index, 1);
-  if (host.delegation.activeOwner === owner) {
-    host.delegation.activeOwner = owners[owners.length - 1];
-  }
+  if (host.delegation.activeOwner !== owner) return false;
+  host.delegation.activeOwner = owners[owners.length - 1];
+  return true;
+}
+
+/** Late-bound pointer to the host observer created after the source. */
+interface QuotaObservationTarget {
+  observer?: QuotaNotificationObserver;
 }
 
 /**
@@ -266,6 +399,7 @@ function dropOwner(host: DashboardHost, owner: DashboardOwner): void {
 function createDelegatingSource(
   delegation: OwnerDelegation,
   logger: GuiLogger,
+  observation: QuotaObservationTarget,
 ): DashboardReadSource {
   const requireSource = (): Promise<DashboardReadSource> => {
     const owner = delegation.activeOwner;
@@ -279,18 +413,29 @@ function createDelegatingSource(
     session: async (input) => (await requireSource()).session(input),
     groups: async (query) => (await requireSource()).groups(query),
     quota: async () => {
+      // Capture the source generation before resolving the owner and before the
+      // asynchronous provider read. A handoff during either step changes the
+      // token, and the observer drops the old source's snapshot instead of
+      // classifying it against the replacement source's baseline.
+      const observer = observation.observer;
+      const epoch = observer?.epoch();
+      const owner = delegation.activeOwner;
       const source = await requireSource();
       // Mirrors `SnapshotService`: a source without quota answers as unavailable.
       if (!source.quota) throw new Error("Quota source unavailable");
-      return source.quota();
+      const snapshot = await source.quota();
+      if (observer !== undefined && delegation.activeOwner === owner) {
+        observer.observe(snapshot, epoch);
+      }
+      return snapshot;
     },
     refreshAnalytics: async () => {
       // Only refresh an already-created active source; never build one here.
       await delegation.activeOwner?.source?.refreshAnalytics?.();
     },
     close: async () => {
-      // Bind failure and final close both land here: release every source this
-      // host created, without ending the leases themselves.
+      // Final host close lands here: release every source this host created,
+      // without ending the leases themselves.
       await Promise.all(delegation.owners.map((owner) => releaseOwnerSource(owner, logger)));
     },
   };
@@ -378,24 +523,54 @@ function canonicalMinIntervalMs(configDir: string): number | undefined {
   }
 }
 
-/** Port and interval from the effective config; a read failure keeps the defaults. */
+/**
+ * Port, effective web switch and interval from the loaded config and host
+ * version; a read failure keeps safe defaults. The version probe runs only when
+ * the key is absent, so explicit configuration never spawns a CLI process.
+ */
 async function readDashboardConfig(
   workspaceRoot: string,
   configDir: string,
   logger: GuiLogger,
-): Promise<{ port: number; minIntervalMs: number | undefined }> {
+  hostVersion: string | undefined,
+  detectHostVersion: () => Promise<OpenCodeVersion | undefined>,
+): Promise<{
+  port: number;
+  webEnabled: boolean;
+  hostVersion: string | OpenCodeVersion | undefined;
+  minIntervalMs: number | undefined;
+}> {
   try {
-    const config = await loadConfig(undefined, undefined, {
+    const meta = createLoadConfigMeta();
+    const config = await loadConfig(undefined, meta, {
       configRootDir: workspaceRoot,
       globalConfigDir: configDir,
     });
+    const explicitEnabled = getDashboardEnabledSetting(config, meta);
+    const invalidConfig = hasInvalidDashboardWebConfig(meta);
+    let resolvedHostVersion: string | OpenCodeVersion | undefined =
+      typeof hostVersion === "string" && hostVersion.trim().length > 0 ? hostVersion : undefined;
+    if (explicitEnabled === undefined && !invalidConfig && resolvedHostVersion === undefined) {
+      resolvedHostVersion = await detectHostVersion();
+    }
     return {
       port: getGuiDashboardPort(config),
+      webEnabled: resolveDashboardWebEnabled({
+        ...(explicitEnabled !== undefined ? { explicitEnabled } : {}),
+        ...(resolvedHostVersion !== undefined ? { hostVersion: resolvedHostVersion } : {}),
+        invalidConfig,
+      }),
+      hostVersion: resolvedHostVersion,
       minIntervalMs: positiveNumber(config.minIntervalMs),
     };
   } catch {
-    logger.warn("dashboard config unavailable; using the default port", "config-unavailable");
-    return { port: getGuiDashboardPort(undefined), minIntervalMs: undefined };
+    logger.warn("dashboard config unavailable; using safe defaults", "config-unavailable");
+    return {
+      port: getGuiDashboardPort(undefined),
+      webEnabled: false,
+      hostVersion: undefined,
+      minIntervalMs: undefined,
+    };
   }
 }
 
@@ -406,24 +581,50 @@ async function createProductionSource(
 }
 
 /**
- * Settings store, first owner's eager source and transport, in that order; each
- * failure is contained. The source passed to the transport is the host's stable
- * delegating source, so later owner handoffs keep the same snapshot service.
+ * Settings store, first owner's eager source, one host snapshot service and the
+ * optional web transport, in that order; each failure is contained. The
+ * transport receives that snapshot service, whose stable delegating source
+ * keeps the same cache and pollers across later owner handoffs. A disabled or
+ * unavailable web transport never tears down that shared runtime.
  */
 async function startHost(
   options: StartDashboardOptions,
   context: HostContext,
   delegation: OwnerDelegation,
-): Promise<DashboardServerHandle> {
+  runtime: DashboardRuntime,
+  observation: QuotaObservationTarget,
+): Promise<DashboardServerHandle | undefined> {
   const createSettingsStore = options.createSettingsStore ?? createGuiSettingsStore;
   let settings: GuiSettingsStore;
   try {
     settings = createSettingsStore({
       configDir: context.configDir,
       workspaceRoot: options.workspaceRoot,
+      ...(context.hostVersion !== undefined ? { hostVersion: context.hostVersion } : {}),
     });
   } catch {
     throw new DashboardLifecycleError("settings-unavailable");
+  }
+  // Publish the same store to every transport. It stays host-owned until the
+  // last lease disposes, regardless of whether the web transport starts.
+  runtime.settings = settings;
+
+  // One observer for this shared host. It is fed by the stable delegating
+  // source's quota cycle, so it adds no poller and works with every transport
+  // combination, including a closed panel. Settings are read per cycle so a
+  // saved threshold or visibility change applies without a restart.
+  try {
+    const quotaNotifications = createQuotaNotificationObserver({
+      loadSettings: async () => quotaNotificationSettingsFromSnapshot(await settings.settings()),
+      ...(options.quotaNotificationStatePath !== undefined
+        ? { statePath: options.quotaNotificationStatePath }
+        : {}),
+      logger: context.logger,
+    });
+    runtime.quotaNotifications = quotaNotifications;
+    observation.observer = quotaNotifications;
+  } catch (error) {
+    context.logger.warn("quota notifications unavailable", failureLabel(error));
   }
 
   const firstOwner = delegation.activeOwner;
@@ -436,22 +637,66 @@ async function startHost(
     throw new DashboardLifecycleError("source-unavailable");
   }
 
-  const source = createDelegatingSource(delegation, context.logger);
+  // The host owns exactly one snapshot service. HTTP and the typed RPC
+  // transport receive it; they never construct or close it themselves.
+  const createSnapshots = options.createSnapshots ?? createSnapshotService;
+  let snapshots: SnapshotService;
+  try {
+    snapshots = createSnapshots({
+      source: runtime.source,
+      minIntervalMs: minIntervalGetter(context),
+      logger: context.logger,
+    });
+  } catch {
+    await runtime.close();
+    throw new DashboardLifecycleError("server-unavailable");
+  }
+  runtime.snapshots = snapshots;
+  // One host-lifetime quota viewer keeps `viewers >= 1` across ordinary window
+  // watch aborts and silent renewals, so the original `viewers === 0` teardown
+  // (stopPollers, compute clearing, cache dirtying) never runs on a timeout.
+  // Global bounded analytics pages therefore stay warm until normal eviction.
+  runtime.quotaMonitor = snapshots.addScopedViewer("quota");
+  // A scoped viewer starts the shared pollers, but quota polling has no
+  // registered interest until an actual quota read installs its compute key.
+  // Prime it once so the single host poller remains useful between windows.
+  void snapshots.quota().catch(() => undefined);
+
+  // Web is a secondary transport; the version-gated policy decides whether it
+  // starts. The shared quota monitor is already live; returning no handle starts
+  // no HTTP listener, SSE hub, or static serving, and does not activate analytics.
+  if (!context.webEnabled) return undefined;
+
   const createServer = options.createServer ?? createDashboardServer;
   try {
     return await createServer({
       port: context.port,
-      source,
+      snapshots,
       settings,
-      minIntervalMs: minIntervalGetter(context),
       logger: context.logger,
     });
   } catch (error) {
     // A bind failure already logged its one controlled line inside the transport
     // and keeps its `port-unavailable` reason; every other server failure is
-    // reported as `server-unavailable`.
+    // reported as `server-unavailable`. The shared runtime deliberately stays
+    // alive for its leases (the RPC transport can still use it); only the
+    // failed web transport is detached by the transport itself.
     throw new DashboardLifecycleError(unavailableReason(error));
   }
+}
+
+/**
+ * The transport-neutral host dependencies for a lease. A missing snapshot
+ * service or settings store means the shared runtime never completed, so there
+ * is nothing safe to attach a second transport to.
+ */
+function transportRuntime(runtime: DashboardRuntime): DashboardTransportRuntime | undefined {
+  if (!runtime.snapshots || !runtime.settings) return undefined;
+  return {
+    snapshots: runtime.snapshots,
+    settings: runtime.settings,
+    ...(runtime.quotaNotifications ? { quotaNotifications: runtime.quotaNotifications } : {}),
+  };
 }
 
 function makeDispose(
@@ -464,10 +709,16 @@ function makeDispose(
     if (disposed) return;
     disposed = true;
     host.refs = Math.max(0, host.refs - 1);
-    dropOwner(host, owner);
+    const activeChanged = dropOwner(host, owner);
     const closing = disposeOwner(owner, host.logger);
     if (host.refs > 0) {
-      // A live lease keeps the socket; the surviving owner serves next request.
+      // A live lease keeps the socket and the shared runtime. The surviving
+      // owner serves the next request, so cached pages from the disposed owner
+      // are invalidated before any client can see them as fresh.
+      if (activeChanged) {
+        host.runtime.snapshots?.sourceChanged();
+        host.runtime.quotaNotifications?.sourceChanged();
+      }
       await closing;
       return;
     }
@@ -480,12 +731,13 @@ function makeDispose(
         host.logger.warn("dashboard stop failed", failureLabel(error));
       }
     }
+    await host.runtime.close();
     await closing;
   };
 }
 
 async function attachLease(host: DashboardHost, owner: DashboardOwner): Promise<DashboardLease> {
-  let handle: DashboardServerHandle;
+  let handle: DashboardServerHandle | undefined;
   try {
     handle = await host.start;
   } catch (error) {
@@ -499,17 +751,21 @@ async function attachLease(host: DashboardHost, owner: DashboardOwner): Promise<
         host.logger.error("dashboard unavailable", host.failure);
       }
     }
+    const runtime = transportRuntime(host.runtime);
     return {
       port: host.port,
       state: "unavailable",
       reason: host.failure,
+      ...(runtime ? { runtime } : {}),
       dispose: makeDispose(host, owner, undefined),
     };
   }
+  const runtime = transportRuntime(host.runtime);
   return {
     port: host.port,
     state: "running",
-    url: handle.url,
+    ...(handle ? { url: handle.url } : {}),
+    ...(runtime ? { runtime } : {}),
     dispose: makeDispose(host, owner, handle),
   };
 }
@@ -521,10 +777,13 @@ async function attachLease(host: DashboardHost, owner: DashboardOwner): Promise<
 export async function startDashboard(options: StartDashboardOptions): Promise<DashboardLease> {
   const logger = options.logger ?? createGuiLogger();
   const configDir = options.configDir ?? getOpencodeRuntimeDirs().configDir;
-  const { port, minIntervalMs } = await readDashboardConfig(
+  const detectHostVersion = options.detectHostVersion ?? detectOpenCodeVersion;
+  const { port, webEnabled, hostVersion, minIntervalMs } = await readDashboardConfig(
     options.workspaceRoot,
     configDir,
     logger,
+    options.hostVersion,
+    detectHostVersion,
   );
 
   const hosts = hostRegistry().hosts;
@@ -538,12 +797,21 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
 
   const owner = createOwner(options, configDir);
   const delegation: OwnerDelegation = { owners: [owner], activeOwner: owner };
+  const observation: QuotaObservationTarget = {};
+  const runtime = createRuntime(createDelegatingSource(delegation, logger, observation), logger);
   const host: DashboardHost = {
     port,
     logger,
     delegation,
+    runtime,
     refs: 1,
-    start: startHost(options, { configDir, port, minIntervalMs, logger }, delegation),
+    start: startHost(
+      options,
+      { configDir, port, webEnabled, hostVersion, minIntervalMs, logger },
+      delegation,
+      runtime,
+      observation,
+    ),
   };
   hosts.set(port, host);
   return attachLease(host, owner);

@@ -73,6 +73,30 @@ describe("anthropic provider", () => {
     ]);
   });
 
+  it("forwards the producer failure category from the OAuth query", async () => {
+    const { getAnthropicDiagnostics, queryAnthropicQuota } = await import(
+      "../src/lib/anthropic.js"
+    );
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: false,
+      version: null,
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: null,
+      checkedCommands: [],
+    });
+    (queryAnthropicQuota as any).mockResolvedValueOnce({
+      success: false,
+      error: "Anthropic API returned 500",
+      failureCategory: "provider_api",
+    });
+
+    const out = await anthropicProvider.fetch({} as any);
+
+    expect(out.errors[0]?.failureCategory).toBe("provider_api");
+  });
+
   it("shows a login OpenCode could not read as its own error row", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuota, queryAnthropicQuotaWithOAuth } =
       await import("../src/lib/anthropic.js");
@@ -118,6 +142,7 @@ describe("anthropic provider", () => {
         message:
           "Anthropic sign-in could not be read: refresh_failed: HTTP 500. Run `opencode auth login anthropic`.",
         sourceId: "failed-active",
+        failureCategory: "credentials",
       },
     ]);
     expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([

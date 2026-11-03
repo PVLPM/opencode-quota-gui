@@ -129,6 +129,7 @@ describe("queryXaiQuota", () => {
       success: false,
       error:
         "xAI sign-in could not be refreshed: refresh_failed: HTTP 401. Run `opencode auth login xai`.",
+      failureCategory: "credentials",
     });
     await expect(resolveXaiAuthIdentity()).resolves.toBeNull();
     expect(readAuthFile).toHaveBeenCalledWith({ integrationIds: ["xai"] });
@@ -153,6 +154,7 @@ describe("queryXaiQuota", () => {
     await expect(queryXaiQuota()).resolves.toEqual({
       success: false,
       error: "xAI OAuth token expired; use xAI in OpenCode to refresh it or reconnect xAI",
+      failureCategory: "credentials",
     });
     expect(readAuthFile).toHaveBeenCalledOnce();
     expect(readAuthFileCached).not.toHaveBeenCalled();
@@ -530,10 +532,12 @@ describe("queryXaiQuota", () => {
     await expect(queryXaiQuota()).resolves.toEqual({
       success: false,
       error: "xAI credits response returned an invalid usage percentage",
+      failureCategory: "provider_api",
     });
     await expect(queryXaiQuota()).resolves.toEqual({
       success: false,
       error: "xAI credits response returned an unexpected response shape",
+      failureCategory: "provider_api",
     });
   });
 
@@ -550,6 +554,7 @@ describe("queryXaiQuota", () => {
     await expect(queryXaiQuota()).resolves.toEqual({
       success: false,
       error: "No weekly quota data",
+      failureCategory: "discovery",
     });
   });
 
@@ -564,6 +569,7 @@ describe("queryXaiQuota", () => {
     vi.stubGlobal("fetch", fetchMock as any);
 
     const result = await queryXaiQuota();
+    expect(result && !result.success ? result.failureCategory : "").toBe("credentials");
     expect(result && !result.success ? result.error : "").toMatch(
       /^xAI API error 401: denied \[redacted\] x+$/,
     );
@@ -574,6 +580,46 @@ describe("queryXaiQuota", () => {
       "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
       expect.any(Object),
     );
+  });
+
+  it.each([
+    [403, "credentials"],
+    [500, "provider_api"],
+  ])("classifies credits HTTP %i as %s", async (status, category) => {
+    await mockConfiguredAuth();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("denied", { status })) as any);
+
+    await expect(queryXaiQuota()).resolves.toMatchObject({
+      success: false,
+      failureCategory: category,
+    });
+  });
+
+  it.each([
+    [401, "credentials"],
+    [403, "credentials"],
+    [500, "provider_api"],
+  ])("classifies credits HTTP %i as %s when the error body cannot be read", async (status, category) => {
+    await mockConfiguredAuth();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.error(new Error("body stream failed"));
+              },
+            }),
+            { status },
+          ),
+      ) as any,
+    );
+
+    await expect(queryXaiQuota()).resolves.toMatchObject({
+      success: false,
+      failureCategory: category,
+    });
   });
 
   it("sanitizes network errors without exposing the bearer token", async () => {
@@ -588,6 +634,7 @@ describe("queryXaiQuota", () => {
     await expect(queryXaiQuota()).resolves.toEqual({
       success: false,
       error: "socket failed for [redacted]",
+      failureCategory: "provider_api",
     });
   });
 
@@ -615,6 +662,7 @@ describe("queryXaiQuota", () => {
     await expect(resultPromise).resolves.toEqual({
       success: false,
       error: "Request timeout after 1s",
+      failureCategory: "provider_api",
     });
   });
 });

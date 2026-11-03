@@ -1,0 +1,64 @@
+/* biome-ignore-all lint/complexity/noImportantStyles: a reduced-motion reset has to beat component-level animations, including the ones the public UI library ships. */
+/*
+ * Document-level resets for the browser dashboard.
+ *
+ * These rules describe the page, not the product: they own `<html>`, `<body>`,
+ * the global box model and the document-wide reduced-motion reset. They stay
+ * out of `styles.css` so a host that embeds the product stylesheet (the native
+ * Desktop panel) does not repaint or reflow its own document.
+ *
+ * Import order: after the library stylesheet and `styles.css`, so the page
+ * background, font and overflow win the cascade exactly as before the split.
+ */
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  background: var(--qg-bg);
+}
+
+body {
+  margin: 0;
+  background: var(--qg-bg);
+  color: var(--qg-text-secondary);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-large);
+  font-family: var(--font-family-sans, ui-sans-serif, system-ui, sans-serif);
+  overflow: hidden;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Browser-only: the product stylesheet scopes this utility to the native panel. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .qg-skeleton__line::after {
+    animation: none;
+    transform: none;
+  }
+}

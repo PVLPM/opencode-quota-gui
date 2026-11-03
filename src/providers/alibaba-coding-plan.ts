@@ -89,7 +89,9 @@ export const alibabaCodingPlanProvider: QuotaProvider = {
 
     if (plan.state === "invalid") {
       return withStatusDetails(
-        attemptedErrorResult("Alibaba Coding Plan", plan.error),
+        attemptedErrorResult("Alibaba Coding Plan", plan.error, {
+          failureCategory: "credentials",
+        }),
         statusDetails,
       );
     }

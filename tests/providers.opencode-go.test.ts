@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   expectAttemptedWithErrorLabel,
@@ -109,6 +109,10 @@ describe("opencode-go provider", () => {
     mocks.queryOpenCodeGoQuota.mockResolvedValue(successfulResult());
     mocks.resolveOpenCodeGoAuth.mockReturnValue({ state: "configured", apiKey: "row-token" });
     mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   function consoleAccount(
@@ -318,6 +322,7 @@ describe("opencode-go provider", () => {
         message:
           "OpenCode Console sign-in failed: refresh_failed: HTTP 401 [redacted]. Run `opencode auth login opencode`.",
         sourceId: "cred_console",
+        failureCategory: "credentials",
       },
     ]);
     expect(out.statusDetails).toEqual(
@@ -349,6 +354,7 @@ describe("opencode-go provider", () => {
         message:
           "OpenCode Console sign-in failed: refresh_failed: HTTP 401 [redacted]. Run `opencode auth login opencode`.",
         sourceId: "cred_console",
+        failureCategory: "credentials",
       },
     ]);
     expect(out.statusDetails).toEqual(
@@ -474,6 +480,7 @@ describe("opencode-go provider", () => {
       label: "[OpenCode Go shared] (active)",
       message: "empty key",
       sourceId: "bad",
+      failureCategory: "credentials",
     });
     expect(out.entries).toContainEqual(
       expect.objectContaining({
@@ -508,8 +515,18 @@ describe("opencode-go provider", () => {
 
     const message = "OpenCode could not read this login: active_failed: database is locked";
     expect(out.errors).toEqual([
-      { label: "[OpenCode Go Personal] (active)", message, sourceId: "cred_personal" },
-      { label: "[OpenCode Go Work]", message, sourceId: "cred_work" },
+      {
+        label: "[OpenCode Go Personal] (active)",
+        message,
+        sourceId: "cred_personal",
+        failureCategory: "credentials",
+      },
+      {
+        label: "[OpenCode Go Work]",
+        message,
+        sourceId: "cred_work",
+        failureCategory: "credentials",
+      },
     ]);
     expect(mocks.queryOpenCodeGoQuota).not.toHaveBeenCalled();
   });
@@ -1009,6 +1026,10 @@ describe("opencode-go multi-workspace Console accounts", () => {
     mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([]);
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   function account(
     sourceId: string,
     label: string,
@@ -1214,6 +1235,44 @@ describe("opencode-go multi-workspace Console accounts", () => {
       },
     ]);
     expect(out.accounts?.map(({ sourceId }) => sourceId)).toEqual(["cred_ok", "cred_bad"]);
+  });
+
+  it("carries a real Console HTTP failure through the adapter and card", async () => {
+    const nowMs = Date.UTC(2026, 10, 2, 12, 0, 0);
+    mocks.resolveOpenCodeConsoleAuthAccounts.mockResolvedValue([
+      account("cred_console", "Console workspace", "console-access", "wrk_1", { active: true }),
+    ]);
+
+    // Use the real producer request path; only the network response is stubbed.
+    const actual = await vi.importActual<typeof import("../src/lib/opencode-go.js")>(
+      "../src/lib/opencode-go.js",
+    );
+    mocks.queryOpenCodeGoConsoleStatus.mockReset();
+    mocks.queryOpenCodeGoConsoleStatus.mockImplementation(actual.queryOpenCodeGoConsoleStatus);
+    mocks.resolveOpenCodeGoAuthCached.mockResolvedValue({ state: "none" });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("server error", { status: 503 })) as unknown as typeof fetch,
+    );
+
+    const failed = await runFetch(["rolling"]);
+    expect(failed.errors).toEqual([
+      {
+        label: "Console workspace",
+        message: "OpenCode Console API error 503 (/api/go/status)",
+        retryable: true,
+        sourceId: "cred_console",
+        failureCategory: "provider_api",
+      },
+    ]);
+
+    const failedCards = buildProviderCards({
+      probes: [{ providerId: "opencode-go", result: failed }],
+      preferences: { accountingDetail: "summary" },
+      nowMs: nowMs + 60_000,
+    });
+    expect(failedCards[0]?.errors[0]?.failureCategory).toBe("provider_api");
+    mocks.queryOpenCodeGoConsoleStatus.mockReset();
   });
 });
 

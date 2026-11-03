@@ -21,6 +21,9 @@ import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const styles = readFileSync(path.join(repoRoot, "src/ui/styles.css"), "utf8");
 const appSource = readFileSync(path.join(repoRoot, "src/ui/app.tsx"), "utf8");
+// The route containers — and therefore every BusyOverlay — moved to the shared
+// module both the browser shell and the native panel render.
+const routesSource = readFileSync(path.join(repoRoot, "src/ui/routes.tsx"), "utf8");
 
 interface SsrGraph {
   renderToString: (fn: () => unknown) => string;
@@ -279,7 +282,11 @@ describe("delayed foreground loading", () => {
   });
 
   it("gives every busy overlay an explicit label", () => {
-    const overlays = [...appSource.matchAll(/<BusyOverlay\b([^>]*)>/gu)].map(
+    // The shared route containers own the overlays now; the app shell must not
+    // drift back to a private copy.
+    expect(appSource).toContain('from "./routes"');
+    expect(appSource).not.toContain("<BusyOverlay");
+    const overlays = [...routesSource.matchAll(/<BusyOverlay\b([^>]*)>/gu)].map(
       (match) => match[1] ?? "",
     );
     const labels = overlays.map(

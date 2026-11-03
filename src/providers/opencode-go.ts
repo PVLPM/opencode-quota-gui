@@ -239,6 +239,7 @@ async function fetchOpenCodeGoConsoleAccounts(
         label: account.label,
         message: consoleSignInFailure(account),
         sourceId: account.sourceId,
+        failureCategory: "credentials",
       });
       accounts.push(consoleAccountDescriptor(account));
       continue;
@@ -261,6 +262,7 @@ async function fetchOpenCodeGoConsoleAccounts(
       message: result.error,
       retryable: result.retryable,
       sourceId: account.sourceId,
+      failureCategory: result.failureCategory,
     });
     fetchErrorsBySourceId.set(account.sourceId, result.error);
     accounts.push(consoleAccountDescriptor(account));
@@ -410,6 +412,7 @@ async function fetchOpenCodeGoLegacy(
           label: displayNamesByRowId.get(row.id) ?? OPENCODE_GO_PROVIDER_LABEL,
           message: rowAuth.error,
           sourceId: row.id,
+          failureCategory: "credentials",
         });
       }
       return rowAuth.state === "configured" ? [{ row, auth: rowAuth }] : [];
@@ -447,6 +450,7 @@ async function fetchOpenCodeGoLegacy(
             message: result.error,
             retryable: result.retryable,
             sourceId: row.id,
+            failureCategory: result.failureCategory,
           });
       }
       const attemptedSourceIds = new Set([
@@ -474,7 +478,9 @@ async function fetchOpenCodeGoLegacy(
   if (auth.state === "invalid") {
     notSubscribedCredentialFingerprints.clear();
     return withStatusDetails(
-      attemptedErrorResult(OPENCODE_GO_PROVIDER_LABEL, auth.error),
+      attemptedErrorResult(OPENCODE_GO_PROVIDER_LABEL, auth.error, {
+        failureCategory: "credentials",
+      }),
       baseStatusDetails,
     );
   }
@@ -504,6 +510,7 @@ async function fetchOpenCodeGoLegacy(
     return withStatusDetails(
       attemptedErrorResult(OPENCODE_GO_PROVIDER_LABEL, result.error, {
         retryable: result.retryable,
+        failureCategory: result.failureCategory,
       }),
       [...baseStatusDetails, { key: "live_fetch_error", value: result.error }],
     );

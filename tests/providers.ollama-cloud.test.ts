@@ -189,7 +189,11 @@ describe("ollama-cloud provider", () => {
     expect(out.attempted).toBe(true);
     expect(out.entries).toEqual([]);
     expect(out.errors).toEqual([
-      { label: "Ollama Cloud", message: "Ollama Cloud returned no limits or balance" },
+      {
+        label: "Ollama Cloud",
+        message: "Ollama Cloud returned no limits or balance",
+        failureCategory: "discovery",
+      },
     ]);
   });
 
@@ -207,6 +211,8 @@ describe("ollama-cloud provider", () => {
     expect(out.entries[0]).not.toHaveProperty("resetTimeIso");
     expect(out.errors[0]?.label).toBe("Ollama Cloud");
     expect(out.errors[0]?.message).toBe("Weekly: ignored invalid remaining percent");
+    // Row-level response warnings carry no provenance and must fail closed.
+    expect(out.errors[0]).not.toHaveProperty("failureCategory");
     expect(out.statusDetails).toContainEqual({
       key: "live_error_1",
       value: "Weekly: ignored invalid remaining percent",

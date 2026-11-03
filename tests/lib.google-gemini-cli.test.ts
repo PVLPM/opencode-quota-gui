@@ -522,4 +522,121 @@ describe("gemini cli auth resolution", () => {
       },
     ]);
   });
+
+  it("labels token revocation and request failures with structured provenance", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-gemini-cli": {
+        type: "oauth",
+        refresh: "refresh-token|project-1|",
+        email: "alice@example.com",
+      },
+    });
+    mocks.getCachedAccessToken.mockResolvedValue(null);
+
+    mocks.fetchResponse.mockResolvedValueOnce(mockJsonResponse({ error: "invalid_grant" }, 400));
+    const revoked = await queryGeminiCliQuota();
+    expect(revoked).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ error: "Token revoked", failureCategory: "credentials" }],
+    });
+
+    mocks.fetchResponse.mockResolvedValueOnce(mockJsonResponse({}, 500));
+    const refreshFailed = await queryGeminiCliQuota();
+    expect(refreshFailed).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ failureCategory: "provider_api" }],
+    });
+
+    mocks.fetchResponse.mockResolvedValueOnce(mockJsonResponse({}));
+    const malformedRefresh = await queryGeminiCliQuota();
+    expect(malformedRefresh).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ failureCategory: "provider_api" }],
+    });
+
+    mocks.fetchResponse
+      .mockResolvedValueOnce(mockJsonResponse({ access_token: "token", expires_in: 3600 }))
+      .mockResolvedValueOnce(mockJsonResponse({}, 500));
+    const quotaFailed = await queryGeminiCliQuota();
+    expect(quotaFailed).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ error: "Gemini CLI quota API error: 500", failureCategory: "provider_api" }],
+    });
+  });
+
+  it("labels an expired quota credential after one retry as credentials", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-gemini-cli": {
+        type: "oauth",
+        refresh: "refresh-token|project-1|",
+        email: "alice@example.com",
+      },
+    });
+    mocks.getCachedAccessToken.mockResolvedValue(null);
+    mocks.fetchResponse
+      .mockResolvedValueOnce(mockJsonResponse({ access_token: "token-1", expires_in: 3600 }))
+      .mockResolvedValueOnce(mockJsonResponse({}, 401))
+      .mockResolvedValueOnce(mockJsonResponse({ access_token: "token-2", expires_in: 3600 }))
+      .mockResolvedValueOnce(mockJsonResponse({}, 403));
+
+    const result = await queryGeminiCliQuota();
+    expect(result).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [
+        {
+          error: "Gemini CLI quota auth error: 403",
+          failureCategory: "credentials",
+        },
+      ],
+    });
+  });
+
+  it("labels malformed quota payloads as provider API", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-gemini-cli": {
+        type: "oauth",
+        refresh: "refresh-token|project-1|",
+        email: "alice@example.com",
+      },
+    });
+    mocks.getCachedAccessToken.mockResolvedValue(null);
+    mocks.fetchResponse
+      .mockResolvedValueOnce(mockJsonResponse({ access_token: "token", expires_in: 3600 }))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => {
+          throw new Error("invalid json");
+        },
+      });
+
+    const result = await queryGeminiCliQuota();
+    expect(result).toMatchObject({
+      success: true,
+      buckets: [],
+      errors: [{ failureCategory: "provider_api" }],
+    });
+  });
+
+  it("labels a missing companion plugin as local", async () => {
+    mocks.readAuthFileCached.mockResolvedValue({
+      "google-gemini-cli": {
+        type: "oauth",
+        refresh: "refresh-token|project-1|",
+        email: "alice@example.com",
+      },
+    });
+    mocks.resolveGeminiCliClientCredentials.mockResolvedValueOnce({ state: "missing" });
+
+    await expect(queryGeminiCliQuota()).resolves.toEqual({
+      success: false,
+      error: "Gemini CLI requires the opencode-gemini-auth plugin",
+      failureCategory: "local",
+    });
+  });
 });

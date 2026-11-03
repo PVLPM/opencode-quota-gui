@@ -220,6 +220,40 @@ describe("the terminal command's database login reader", () => {
     ).toEqual(["console", "workspace-key", "deepseek", "openai"]);
   });
 
+  it("returns external rows unfiltered and excludes them from key or OAuth filters", async () => {
+    writeCredentialDatabase(databasePath, [
+      {
+        id: "openai-external",
+        integrationId: "openai",
+        label: "External",
+        active: 1,
+        updated: 3,
+        value: { type: "external", methodID: "external" },
+      },
+      {
+        id: "openai-key",
+        integrationId: "openai",
+        label: "Key",
+        active: 0,
+        updated: 2,
+        value: { type: "key", key: "openai-key" },
+      },
+    ]);
+
+    const rows = await readCredentialRows(["openai"]);
+    expect(rows.map((row) => [row.id, row.value.type])).toEqual([
+      ["openai-external", "external"],
+      ["openai-key", "api"],
+    ]);
+    await expect(readAuthFile({ integrationIds: ["openai"] })).resolves.toEqual({
+      openai: { type: "external", methodID: "external" },
+    });
+    expect(
+      (await readCredentialRows(["openai"], { methods: ["key"] })).map((row) => row.id),
+    ).toEqual(["openai-key"]);
+    await expect(readCredentialRows(["openai"], { methods: ["oauth"] })).resolves.toEqual([]);
+  });
+
   it("keeps the first (active) row per id when firstOnly is set", async () => {
     writeCredentialDatabase(databasePath, [
       ...withRow("openai", { active: 1 }),

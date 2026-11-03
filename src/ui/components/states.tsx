@@ -26,10 +26,16 @@ export function QueryState<T>(props: {
   label: string;
   skeleton?: JSX.Element;
   render: (data: T, stale: boolean) => JSX.Element;
+  /** Recovery for a failed read; defaults to a full page reload. */
+  onRetry?: () => void;
 }): JSX.Element {
   const ready = () => (props.state.kind === "ready" ? props.state : undefined);
   const failed = () => (props.state.kind === "error" ? props.state : undefined);
   const reload = () => {
+    if (props.onRetry !== undefined) {
+      props.onRetry();
+      return;
+    }
     if (typeof window !== "undefined") window.location.reload();
   };
 
