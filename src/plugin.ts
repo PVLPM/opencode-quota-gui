@@ -84,9 +84,13 @@ export const QuotaToastPlugin = Plugin.define({
     // first snapshot is computed on the first request.
     let dashboardLease: DashboardLease | undefined;
     try {
+      // Older hosts may not supply `ctx.app` at runtime; an absent or empty
+      // version lets the lifecycle use its bounded `opencode --version` probe.
+      const hostVersion = (ctx.app as { version?: string } | undefined)?.version;
       dashboardLease = await startDashboard({
         client,
         workspaceRoot: ctx.location.directory,
+        ...(hostVersion !== undefined ? { hostVersion } : {}),
       });
     } catch (error) {
       console.warn(`[opencode-quota-gui] dashboard unavailable: ${logReason(error)}`);

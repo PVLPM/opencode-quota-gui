@@ -5,9 +5,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { runInitInstaller } from "../src/lib/init-installer.js";
 import { parseJsonOrJsonc } from "../src/lib/jsonc.js";
 
-vi.mock("../src/lib/opencode-version.js", () => ({ detectOpenCodeMajor: async () => 2 }));
+const hostVersion = vi.hoisted(() => ({ value: "2.2.0" }));
+vi.mock("../src/lib/opencode-version.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/lib/opencode-version.js")>();
+  return {
+    ...original,
+    detectOpenCodeMajor: async () => 2,
+    detectOpenCodeVersion: async () =>
+      original.detectOpenCodeVersion(async () => hostVersion.value),
+  };
+});
 const dirs: string[] = [];
 afterEach(() => {
+  hostVersion.value = "2.2.0";
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 function fixture() {
@@ -65,14 +75,42 @@ describe("GUI-first onboarding", () => {
     expect(outro).toContain(`Restart OpenCode, then open http://localhost:${port}/quota`);
     expect(outro).not.toContain(" show`");
   });
-  it("reports the default-off web policy instead of promising a dead URL", async () => {
+  it("reports the version-gated default-off web policy on 2.2.0 and newer", async () => {
     const dir = fixture();
+    hostVersion.value = "2.2.0";
     const { prompts, transcript } = adapter();
     expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
     const outro = transcript.at(-1) ?? "";
-    expect(outro).toContain("Web dashboard access is off by default.");
+    expect(outro).toContain("Web dashboard access is off.");
     expect(outro).toContain('"dashboard": { "enabled": true }');
     expect(outro).toContain("http://localhost:4144/quota");
+    expect(outro).not.toContain("Restart OpenCode, then open http://localhost:4144/quota");
+  });
+  it("promises the default web URL on a host below 2.2.0", async () => {
+    const dir = fixture();
+    hostVersion.value = "2.1.4";
+    const { prompts, transcript } = adapter();
+    expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
+    const outro = transcript.at(-1) ?? "";
+    expect(outro).toContain("Restart OpenCode, then open http://localhost:4144/quota.");
+    expect(outro).not.toContain("off by default");
+  });
+  it("honors an explicit dashboard.enabled false on a host below 2.2.0", async () => {
+    const dir = fixture();
+    hostVersion.value = "2.1.4";
+    const globalDir = join(dir, "global");
+    mkdirSync(join(globalDir, "opencode-quota-gui"), { recursive: true });
+    writeFileSync(
+      join(globalDir, "opencode-quota-gui", "config.jsonc"),
+      JSON.stringify({ dashboard: { enabled: false } }),
+    );
+    const { prompts, transcript } = adapter();
+    expect(
+      await runInitInstaller({ cwd: dir, env: { OPENCODE_CONFIG_DIR: globalDir }, prompts }),
+    ).toBe(0);
+    const outro = transcript.at(-1) ?? "";
+    expect(outro).toContain("Web dashboard access is disabled in the canonical config.");
+    expect(outro).toContain('"dashboard": { "enabled": true }');
     expect(outro).not.toContain("Restart OpenCode, then open http://localhost:4144/quota");
   });
   it("notes a real legacy native plugin without treating workspace overrides as legacy", async () => {

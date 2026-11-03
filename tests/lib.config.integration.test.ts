@@ -24,9 +24,14 @@ vi.mock("os", async (importOriginal) => {
   };
 });
 
-vi.mock("../src/lib/opencode-version.js", () => ({
-  detectOpenCodeMajor: async () => 2,
-}));
+vi.mock("../src/lib/opencode-version.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/lib/opencode-version.js")>();
+  return {
+    ...original,
+    detectOpenCodeMajor: async () => 2,
+    detectOpenCodeVersion: async () => ({ major: 2, minor: 2, patch: 0 }),
+  };
+});
 
 import { createGuiSettingsStore } from "../src/gui/config.js";
 import { createLoadConfigMeta, loadConfig, loadConfigLayered } from "../src/lib/config.js";

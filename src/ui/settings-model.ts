@@ -276,7 +276,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     group: "dashboard",
     control: "switch",
     label: "Web dashboard",
-    help: "Serve the browser dashboard on 127.0.0.1 at dashboard.port. Off by default; changing it requires an OpenCode restart.",
+    help: "Serve the browser dashboard on 127.0.0.1 at dashboard.port. When unset, it follows the OpenCode host version: on below 2.2.0 and off at 2.2.0 or newer. Changing it requires an OpenCode restart.",
     hidden: true,
   },
   {

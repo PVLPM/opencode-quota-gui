@@ -4,18 +4,37 @@ User-facing release notes for OpenCode Quota GUI.
 
 ## 1.3.0
 
+The Native OpenCode Desktop release. Quota, analytics, models, and settings now live inside OpenCode Desktop, with a session-header quota slot and native notifications. The browser dashboard is now a fallback: on by default below OpenCode 2.2.0, off by default at 2.2.0 and newer.
+
 ### Added
 
-- **OpenCode Desktop GUI.** Open **Quota & Usage** for quota, analytics, models, and detail views, with settings integrated into OpenCode and compact quota previews in session headers. The experimental GUI requires OpenCode Desktop 2.2.x.
-- **Native quota notifications.** Visible quota cards can report low or exhausted limits, resets, and provider API failures through OpenCode notifications. Configure the low-quota threshold and duplicate cooldown in Native Settings.
+- **Native OpenCode Desktop panel.** **Quota & Usage** opens a full side panel with Quota, Analytics, Models, and their project, session, provider, and model detail pages. No browser tab is required. The Native integration is available from **v1.3.0** and requires **OpenCode Desktop 2.2.0 or newer**.
+- **Native Settings.** OpenCode Settings includes a **Quota & analytics** page for display, provider, request, temporal pricing, visibility, and card-order controls, plus the web dashboard switch and the canonical settings file.
+- **Session header quota slot.** Compact rings show quota windows at a glance; open the slot for a combined preview of every visible provider and account, including reset countdowns.
+- **Native notifications.** Low quota, exhausted quota, quota reset, and provider or API failures. A focused OpenCode window shows an in-app toast; a background window asks OpenCode for a system notification. The low-quota threshold and duplicate cooldown are configurable. Delivery is best effort while OpenCode Desktop is running, not exactly once.
+- **Multiple providers and accounts.** Every signed-in account, seat, API key, or workspace keeps its own card.
 
-### Changed
+### Improved
 
-- **Optional browser dashboard.** Web access is off by default, including when upgrading from 1.2.0 or earlier. Enable it in the canonical settings and restart OpenCode when needed.
+- **Session switching stays fast.** Moving between sessions reuses the same shared quota and analytics state instead of reloading the dashboard.
+- **Quota cards, natively.** Provider marks, plan and account labels, remaining windows, reset countdowns, balance, spend, budget, and status rows use native Desktop presentation.
+- **Peak and off-peak context.** The Quota header keeps its **Peak**, **Off-peak**, or **Mixed** status with the next change, and model detail pages keep their historical Peak and Off-peak split.
+- **Analytics and Models.** Daily usage, projects, sessions, the session tree, provider and model breakdowns, and token and API-equivalent cost views are all available in the panel.
+- **Settings layout.** Native controls and a clearer Settings layout make the shared options easier to scan and change.
+- **Web dashboard default is version-gated.** Browser access stays on by default below OpenCode 2.2.0, where the Native panel does not exist. At 2.2.0 and newer it is off by default, including after an upgrade from 1.2.0 or earlier. An explicit `dashboard.enabled` in the canonical settings always wins. Web access remains loopback-only on port `4144` by default.
 
 ### Fixed
 
-- **Native connection recovery.** Renew viewer subscriptions after the Desktop host's request deadline without interrupting a healthy connection or hiding quota previews.
+- **Smoother Native reconnect.** Recovering from a normal Desktop connection renewal no longer interrupts a healthy session or forces a full dashboard reload.
+- **Quota indicators stay visible.** Header quota rings remain available across normal Desktop watch rotations instead of disappearing during routine connection maintenance.
+- **Settings navigation stays connected.** Opening OpenCode Settings and returning to a session keeps the same dashboard connection, so the panel no longer shows a false `Connecting…`.
+
+### Compatibility
+
+- OpenCode `>= 2.0.16 < 2.3.0` and Node.js `22.13+` or `23.4+`.
+- The Native Desktop integration is included from v1.3.0 and requires OpenCode Desktop 2.2.0+.
+- The browser dashboard is on by default below OpenCode 2.2.0 and off by default at 2.2.0 and newer; an explicit `dashboard.enabled` value wins. It remains loopback-only.
+- This package does not support OpenCode 1.
 
 ## 1.2.0
 

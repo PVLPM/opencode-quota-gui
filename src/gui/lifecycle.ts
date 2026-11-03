@@ -11,9 +11,10 @@
  * One runtime — the stable delegating source and one `SnapshotService` — is
  * shared by every transport attached to that host. The host closes with the
  * last lease, releasing the snapshot service and every source it created. The
- * web transport is optional (`dashboard.enabled`, absent means off): when it is
- * off, or when its fixed port cannot bind, the shared runtime stays available
- * for the remaining leases and no HTTP/SSE/static surface is started.
+ * web transport is optional and follows the host version when `dashboard.enabled`
+ * is absent (on below OpenCode 2.2.0, off from 2.2.0): when it is off, or when
+ * its fixed port cannot bind, the shared runtime stays available for the
+ * remaining leases and no HTTP/SSE/static surface is started.
  *
  * The registry lives on `globalThis` under a versioned `Symbol.for` key (the
  * quota-telemetry precedent), so two separately loaded copies of this module in
@@ -34,11 +35,21 @@ import type {
   GuiSettingsStore,
   QuotaSnapshot,
 } from "../contracts/dashboard.js";
-import { getGuiConfigPath, loadConfig } from "../lib/config.js";
+import { createLoadConfigMeta, getGuiConfigPath, loadConfig } from "../lib/config.js";
+import {
+  getDashboardEnabledSetting,
+  hasInvalidDashboardWebConfig,
+  resolveDashboardWebEnabled,
+} from "../lib/dashboard-web-policy.js";
 import type { QuotaProviderContext } from "../lib/entries.js";
 import { parseConfigDocument } from "../lib/opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "../lib/opencode-runtime-paths.js";
-import { createGuiSettingsStore, getGuiDashboardEnabled, getGuiDashboardPort } from "./config.js";
+import { detectOpenCodeVersion, type OpenCodeVersion } from "../lib/opencode-version.js";
+import {
+  createGuiSettingsStore,
+  type GuiSettingsStoreOptions,
+  getGuiDashboardPort,
+} from "./config.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 import {
   createQuotaNotificationObserver,
@@ -126,10 +137,18 @@ export interface StartDashboardOptions {
   workspaceRoot: string;
   /** Global OpenCode config dir; defaults to the runtime dirs. */
   configDir?: string;
+  /**
+   * Running OpenCode host version (`ctx.app?.version`). When absent, a bounded
+   * `opencode --version` probe supplies it; if that also fails, the
+   * version-dependent web default stays off.
+   */
+  hostVersion?: string;
+  /** Test/embedding seam: replaces the bounded host-version probe. */
+  detectHostVersion?: () => Promise<OpenCodeVersion | undefined>;
   /** Test/P7 seam: replaces the P3 read-source factory. */
   createSource?: DashboardSourceFactory;
   /** Test seam: replaces the P2 settings store factory. */
-  createSettingsStore?: (options: { configDir: string; workspaceRoot: string }) => GuiSettingsStore;
+  createSettingsStore?: (options: GuiSettingsStoreOptions) => GuiSettingsStore;
   /** Test seam: replaces the per-host snapshot service factory. */
   createSnapshots?: (options: SnapshotServiceOptions) => SnapshotService;
   /** Test/embedding seam: private quota notification cooldown state path. */
@@ -184,9 +203,9 @@ interface DashboardHost {
   readonly runtime: DashboardRuntime;
   refs: number;
   /**
-   * Resolves with the web handle, or `undefined` when the canonical
-   * `dashboard.enabled` setting keeps the web transport off. Rejects only when
-   * the shared runtime or the enabled transport could not start.
+   * Resolves with the web handle, or `undefined` when the effective web policy
+   * keeps the transport off. Rejects only when the shared runtime or the enabled
+   * transport could not start.
    */
   readonly start: Promise<DashboardServerHandle | undefined>;
   failure?: DashboardUnavailableReason;
@@ -195,8 +214,10 @@ interface DashboardHost {
 interface HostContext {
   configDir: string;
   port: number;
-  /** Canonical `dashboard.enabled`; false means no HTTP/SSE/static transport. */
+  /** Effective web transport switch; false means no HTTP/SSE/static transport. */
   webEnabled: boolean;
+  /** Resolved host version for the version-gated settings snapshot default. */
+  hostVersion: string | OpenCodeVersion | undefined;
   minIntervalMs: number | undefined;
   logger: GuiLogger;
 }
@@ -502,20 +523,44 @@ function canonicalMinIntervalMs(configDir: string): number | undefined {
   }
 }
 
-/** Port, web switch and interval from the effective config; a read failure keeps safe defaults. */
+/**
+ * Port, effective web switch and interval from the loaded config and host
+ * version; a read failure keeps safe defaults. The version probe runs only when
+ * the key is absent, so explicit configuration never spawns a CLI process.
+ */
 async function readDashboardConfig(
   workspaceRoot: string,
   configDir: string,
   logger: GuiLogger,
-): Promise<{ port: number; webEnabled: boolean; minIntervalMs: number | undefined }> {
+  hostVersion: string | undefined,
+  detectHostVersion: () => Promise<OpenCodeVersion | undefined>,
+): Promise<{
+  port: number;
+  webEnabled: boolean;
+  hostVersion: string | OpenCodeVersion | undefined;
+  minIntervalMs: number | undefined;
+}> {
   try {
-    const config = await loadConfig(undefined, undefined, {
+    const meta = createLoadConfigMeta();
+    const config = await loadConfig(undefined, meta, {
       configRootDir: workspaceRoot,
       globalConfigDir: configDir,
     });
+    const explicitEnabled = getDashboardEnabledSetting(config, meta);
+    const invalidConfig = hasInvalidDashboardWebConfig(meta);
+    let resolvedHostVersion: string | OpenCodeVersion | undefined =
+      typeof hostVersion === "string" && hostVersion.trim().length > 0 ? hostVersion : undefined;
+    if (explicitEnabled === undefined && !invalidConfig && resolvedHostVersion === undefined) {
+      resolvedHostVersion = await detectHostVersion();
+    }
     return {
       port: getGuiDashboardPort(config),
-      webEnabled: getGuiDashboardEnabled(config),
+      webEnabled: resolveDashboardWebEnabled({
+        ...(explicitEnabled !== undefined ? { explicitEnabled } : {}),
+        ...(resolvedHostVersion !== undefined ? { hostVersion: resolvedHostVersion } : {}),
+        invalidConfig,
+      }),
+      hostVersion: resolvedHostVersion,
       minIntervalMs: positiveNumber(config.minIntervalMs),
     };
   } catch {
@@ -523,6 +568,7 @@ async function readDashboardConfig(
     return {
       port: getGuiDashboardPort(undefined),
       webEnabled: false,
+      hostVersion: undefined,
       minIntervalMs: undefined,
     };
   }
@@ -554,6 +600,7 @@ async function startHost(
     settings = createSettingsStore({
       configDir: context.configDir,
       workspaceRoot: options.workspaceRoot,
+      ...(context.hostVersion !== undefined ? { hostVersion: context.hostVersion } : {}),
     });
   } catch {
     throw new DashboardLifecycleError("settings-unavailable");
@@ -615,9 +662,9 @@ async function startHost(
   // Prime it once so the single host poller remains useful between windows.
   void snapshots.quota().catch(() => undefined);
 
-  // Web is a secondary transport, off unless the canonical setting says true.
-  // The shared quota monitor is already live; returning no handle starts no
-  // HTTP listener, SSE hub, or static serving, and does not activate analytics.
+  // Web is a secondary transport; the version-gated policy decides whether it
+  // starts. The shared quota monitor is already live; returning no handle starts
+  // no HTTP listener, SSE hub, or static serving, and does not activate analytics.
   if (!context.webEnabled) return undefined;
 
   const createServer = options.createServer ?? createDashboardServer;
@@ -730,10 +777,13 @@ async function attachLease(host: DashboardHost, owner: DashboardOwner): Promise<
 export async function startDashboard(options: StartDashboardOptions): Promise<DashboardLease> {
   const logger = options.logger ?? createGuiLogger();
   const configDir = options.configDir ?? getOpencodeRuntimeDirs().configDir;
-  const { port, webEnabled, minIntervalMs } = await readDashboardConfig(
+  const detectHostVersion = options.detectHostVersion ?? detectOpenCodeVersion;
+  const { port, webEnabled, hostVersion, minIntervalMs } = await readDashboardConfig(
     options.workspaceRoot,
     configDir,
     logger,
+    options.hostVersion,
+    detectHostVersion,
   );
 
   const hosts = hostRegistry().hosts;
@@ -757,7 +807,7 @@ export async function startDashboard(options: StartDashboardOptions): Promise<Da
     refs: 1,
     start: startHost(
       options,
-      { configDir, port, webEnabled, minIntervalMs, logger },
+      { configDir, port, webEnabled, hostVersion, minIntervalMs, logger },
       delegation,
       runtime,
       observation,

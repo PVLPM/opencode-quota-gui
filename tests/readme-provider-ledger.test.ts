@@ -138,14 +138,17 @@ describe("README provider ledger", () => {
   });
 });
 
-describe("dashboard-first public documentation", () => {
+describe("native-first public documentation", () => {
   const readme = read("README.md");
 
-  it("presents the requested README sections in dashboard-first order", () => {
+  it("presents the requested README sections in native-first order", () => {
     const headings = [
-      "Features",
+      "Native OpenCode Desktop",
+      "What you get",
       "Quick start",
-      "Dashboard",
+      "Native panel",
+      "Optional browser dashboard",
+      "Scope and limitations",
       "Providers",
       "Settings and privacy",
       "Installing and updating",
@@ -165,29 +168,56 @@ describe("dashboard-first public documentation", () => {
     expect(readme).toContain("# OpenCode Quota GUI");
   });
 
-  it("leads with the approved OpenCode plugin install and dashboard URL", () => {
+  it("leads with the approved OpenCode plugin install and Native panel", () => {
     const quickStart = readMarkdownSection(readme, "Quick start");
     expect(quickStart).toContain("opencode plugin add opencode-quota-gui");
     expect(quickStart).toContain('"plugins": ["opencode-quota-gui"]');
-    expect(quickStart).toContain("http://localhost:4144/quota");
-    expect(quickStart).toContain("OpenCode Desktop 2.2.x");
+    expect(quickStart).toContain("Quota & Usage");
+    expect(quickStart).toContain("OpenCode Desktop 2.2.0");
     expect(quickStart).toContain("installs the configured npm plugin");
+    expect(quickStart).toContain("http://localhost:4144/quota");
     expect(quickStart).not.toContain("npx opencode-quota-gui init");
   });
 
-  it("documents loopback hosting, canonical settings, and upstream coexistence", () => {
-    const dashboard = readMarkdownSection(readme, "Dashboard");
-    expect(dashboard).toContain("127.0.0.1");
-    expect(dashboard).toContain("does not listen on network interfaces");
-    expect(dashboard).toContain("outside this guarantee");
-    expect(dashboard).not.toContain("Nothing on your network can reach it");
-    expect(dashboard).toContain("no cloud");
-    // The experimental Desktop GUI needs its own host version, and the browser
-    // dashboard stays as the optional fallback rather than the only surface.
-    expect(dashboard).toContain("OpenCode Desktop 2.2.x");
-    expect(dashboard).toContain("Quota & Usage");
-    expect(dashboard).toContain("Settings page");
-    expect(dashboard).toContain("optional recovery surface");
+  it("documents the version-gated web dashboard default", () => {
+    const quickStart = readMarkdownSection(readme, "Quick start");
+    const browser = readMarkdownSection(readme, "Optional browser dashboard");
+    const settings = readMarkdownSection(readme, "Settings and privacy");
+    const compatibility = readMarkdownSection(readme, "OpenCode and upstream compatibility");
+
+    for (const section of [quickStart, browser, settings, compatibility]) {
+      expect(section).toContain("2.2.0");
+      expect(section).toContain("by default");
+      expect(section).not.toMatch(/off by default for (?:new and upgraded|every) installs?/i);
+    }
+
+    expect(browser).toContain("on hosts below **2.2.0**");
+    expect(browser).toContain("at **2.2.0 or newer** it is off by default");
+    expect(browser).toContain("dashboard.enabled");
+    expect(browser).toContain("always wins");
+    expect(browser).toContain("4144");
+    expect(settings).toContain("always wins");
+    expect(compatibility).toContain("loopback-only");
+  });
+
+  it("documents the Native surfaces, the optional loopback fallback, and canonical settings", () => {
+    const native = readMarkdownSection(readme, "Native panel");
+    expect(native).toContain("Quota & Usage");
+    expect(native).toContain("OpenCode Settings");
+    expect(native).toContain("session header");
+    expect(native).toContain("notifications");
+
+    const browser = readMarkdownSection(readme, "Optional browser dashboard");
+    expect(browser).toContain("127.0.0.1");
+    expect(browser).toContain("does not listen on network interfaces");
+    expect(browser).toContain("outside this guarantee");
+    expect(browser).not.toContain("Nothing on your network can reach it");
+    expect(browser).toContain("no cloud");
+    expect(browser).toContain("fallback");
+
+    const hero = readMarkdownSection(readme, "Native OpenCode Desktop");
+    expect(hero).toContain("OpenCode Desktop 2.2.0");
+    expect(hero).toContain("v1.3.0");
 
     const settings = readMarkdownSection(readme, "Settings and privacy");
     expect(settings).toContain("~/.config/opencode/opencode-quota-gui/config.jsonc");
@@ -201,6 +231,15 @@ describe("dashboard-first public documentation", () => {
     expect(compatibility).toContain("maintenance only");
     expect(compatibility).toContain("@slkiser/opencode-quota");
     expect(compatibility).toContain("no dependency or conflict guard");
+  });
+
+  it("uses the Native screenshots as the main gallery with four in the grid", () => {
+    expect(readme).toContain('src="images/opencode-quota-gui_quota.png"');
+    for (const image of ["session", "providers", "analytics", "slot"]) {
+      expect(readme).toContain(`src="images/opencode-quota-gui_${image}.png"`);
+    }
+    expect(readme).not.toContain("-1.1.0.png");
+    expect(readme).toContain("combined quota preview popup open");
   });
 
   it("keeps the npm version and license badges and omits download and CI badges", () => {

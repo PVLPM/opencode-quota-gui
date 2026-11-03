@@ -16,7 +16,7 @@ Behavior settings are always global. A project install selects only the project 
 
 The Settings page writes only this canonical file. A project or workspace setting does not become effective by being present in an OpenCode config file: only the canonical file and defaults are read by the dashboard.
 
-Settings values, provenance, the dashboard port, and visibility lists come only from the canonical file and defaults. The web dashboard switch is stored in the same file as `dashboard.enabled`: it is off when absent, and only an explicit `true` enables the fixed loopback port. The separate import preview is the only path that reads inherited legacy values.
+Settings values, provenance, the dashboard port, and visibility lists come only from the canonical file and defaults. The web dashboard switch is stored in the same file as `dashboard.enabled`: an absent value follows the OpenCode host version (on below 2.2.0, off at 2.2.0 and newer), and an explicit `true` or `false` always wins. When on, it serves the fixed loopback port. The separate import preview is the only path that reads inherited legacy values.
 
 Provider credential sidecars are separate files in the same GUI namespace. For example, Xiaomi MiMo may use `opencode-quota-gui/mimo.json`; that file supplies only a provider cookie and is not part of the canonical behavior config. No sidecar is merged into `config.jsonc`.
 
@@ -49,9 +49,9 @@ Older `dashboard.hiddenCards` lists had no semantics marker, so a full provider-
 
 ### Web dashboard
 
-The browser dashboard is disabled by default for every install, including an upgrade from `1.2.0` or earlier. An absent `dashboard.enabled` value means off; only an explicit `true` starts the optional HTTP/SSE/static transport.
+The browser dashboard default follows the OpenCode host version. On hosts below 2.2.0 it is on by default, including after an upgrade from `1.2.0` or earlier, because the Native panel requires 2.2.0 or newer. At 2.2.0 and newer it is off by default. An explicit `dashboard.enabled: true` or `false` always wins. When on, it starts the optional HTTP/SSE/static transport; when off, none starts.
 
-To enable it, edit the canonical file and restart OpenCode:
+To force it on (or off), edit the canonical file and restart OpenCode:
 
 ```jsonc
 {
@@ -68,12 +68,11 @@ The plugin's retry handling, credential integration, and shared dashboard runtim
 
 ### Port
 
-`dashboard.port` defaults to `4144` and is read-only in the web UI. To change it, set `dashboard.enabled` to `true`, edit the port, and restart OpenCode:
+`dashboard.port` defaults to `4144` and is read-only in the web UI. To change it, edit `dashboard.port` in the canonical file and restart OpenCode. Set `dashboard.enabled` explicitly only if you also want to pin web access on or off:
 
 ```jsonc
 {
   "dashboard": {
-    "enabled": true,
     "port": 4144
   }
 }

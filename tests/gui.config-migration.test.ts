@@ -214,6 +214,27 @@ describe("legacy config compatibility beside the canonical layer", () => {
     expect(getGuiDashboardEnabled({ dashboard: { enabled: 1 } })).toBe(false);
   });
 
+  it("reports the version-gated effective dashboard.enabled in the settings snapshot", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port: 4567 } });
+    const store = (hostVersion?: string) =>
+      createGuiSettingsStore({
+        configDir: workspace.configDir,
+        workspaceRoot: workspace.workspaceRoot,
+        ...(hostVersion !== undefined ? { hostVersion } : {}),
+      });
+
+    expect((await store("2.1.4").settings()).values["dashboard.enabled"]).toBe(true);
+    expect((await store("2.2.0").settings()).values["dashboard.enabled"]).toBe(false);
+    expect((await store().settings()).values["dashboard.enabled"]).toBe(false);
+
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: false, port: 4567 } });
+    expect((await store("2.1.4").settings()).values["dashboard.enabled"]).toBe(false);
+
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: true, port: 4567 } });
+    expect((await store("2.2.0").settings()).values["dashboard.enabled"]).toBe(true);
+  });
+
   it("exposes only the absolute canonical pathLabel and keeps other strings path-free", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, { minIntervalMs: 1000 });

@@ -334,7 +334,12 @@ function makeWorkspace(): GuiConfigWorkspace {
 }
 
 async function open(options: StartDashboardOptions): Promise<DashboardLease> {
-  const lease = await startDashboard(options);
+  const lease = await startDashboard({
+    // Existing lifecycle tests never spawn the real `opencode --version` probe;
+    // version-sensitive tests pass `hostVersion` or their own detector.
+    detectHostVersion: async () => undefined,
+    ...options,
+  });
   leases.push(lease);
   return lease;
 }
@@ -486,9 +491,9 @@ afterEach(async () => {
 
 describe("dashboard production lifecycle", () => {
   it.each([
-    ["absent (upgrade)", {}],
-    ["explicitly false", { enabled: false }],
-  ] as const)("keeps the shared runtime available and starts no web transport when enabled is %s", async (_label, dashboard) => {
+    ["absent on a 2.2.0+ host", {}, "2.2.0"],
+    ["explicitly false on a pre-2.2.0 host", { enabled: false }, "2.1.4"],
+  ] as const)("keeps the shared runtime available and starts no web transport when enabled is %s", async (_label, dashboard, hostVersion) => {
     const workspace = makeWorkspace();
     const port = await freePort();
     writeGuiCanonicalConfig(workspace, { dashboard: { ...dashboard, port } });
@@ -507,6 +512,7 @@ describe("dashboard production lifecycle", () => {
       client: dashboardClient,
       workspaceRoot: workspace.workspaceRoot,
       configDir: workspace.configDir,
+      hostVersion,
       createSource: () => source,
       createSnapshots: snapshots.createSnapshots,
       createServer: async (options) => {
@@ -542,10 +548,99 @@ describe("dashboard production lifecycle", () => {
     expect(owner.closes).toBe(1);
   });
 
+  it("starts the web transport for an absent key on a pre-2.2.0 host", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const { source } = buildSource();
+    const ports: number[] = [];
+
+    const lease = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      hostVersion: "2.1.4",
+      createSource: () => source,
+      createServer: async (options) => {
+        ports.push(options.port);
+        return fakeHandle(options.port);
+      },
+      logger: silent,
+    });
+
+    expect(lease.state).toBe("running");
+    expect(lease.port).toBe(port);
+    expect(lease.url).toBe(`http://127.0.0.1:${port}`);
+    expect(ports).toEqual([port]);
+  });
+
+  it("uses the bounded version probe when the setup supplies no host version", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const { source } = buildSource();
+
+    const lease = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      detectHostVersion: async () => ({ major: 2, minor: 1, patch: 4 }),
+      createSource: () => source,
+      createServer: async (options) => fakeHandle(options.port),
+      logger: silent,
+    });
+
+    expect(lease.url).toBe(`http://127.0.0.1:${port}`);
+  });
+
+  it("keeps web off when the host version is absent and the probe fails", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { port } });
+    const { source } = buildSource();
+    let serverStarts = 0;
+
+    const lease = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      detectHostVersion: async () => undefined,
+      createSource: () => source,
+      createServer: async (options) => {
+        serverStarts += 1;
+        return fakeHandle(options.port);
+      },
+      logger: silent,
+    });
+
+    expect(lease.port).toBe(port);
+    expect(lease.url).toBeUndefined();
+    expect(serverStarts).toBe(0);
+  });
+
+  it("starts the web transport for an explicit true on a 2.2.0 host", async () => {
+    const workspace = makeWorkspace();
+    const port = await freePort();
+    writeGuiCanonicalConfig(workspace, { dashboard: { enabled: true, port } });
+    const { source } = buildSource();
+
+    const lease = await open({
+      client: dashboardClient,
+      workspaceRoot: workspace.workspaceRoot,
+      configDir: workspace.configDir,
+      hostVersion: "2.2.0",
+      createSource: () => source,
+      createServer: async (options) => fakeHandle(options.port),
+      logger: silent,
+    });
+
+    expect(lease.url).toBe(`http://127.0.0.1:${port}`);
+  });
+
   it("keeps the web-less runtime and owner handoff alive while a lease remains", async () => {
     const workspace = makeWorkspace();
     const port = await freePort();
-    // `dashboard.enabled` absent: the upgrade/default-off path.
+    // `dashboard.enabled` absent on a 2.2.0+ host: the version-gated off path.
     writeGuiCanonicalConfig(workspace, { dashboard: { port } });
     const owners = [buildOwnerSource(1), buildOwnerSource(2)];
     let createdSources = 0;
@@ -554,6 +649,7 @@ describe("dashboard production lifecycle", () => {
       client: dashboardClient,
       workspaceRoot: workspace.workspaceRoot,
       configDir: workspace.configDir,
+      hostVersion: "2.2.0",
       createSource: () => {
         const owner = owners[createdSources];
         createdSources += 1;
@@ -1510,7 +1606,7 @@ describe("dashboard production lifecycle", () => {
     expect(closes).toBe(1);
   });
 
-  it("keeps the spec default port while a malformed config leaves web off by default", async () => {
+  it("keeps the spec default port while a malformed config leaves web off", async () => {
     const workspace = makeWorkspace();
     writeGuiCanonicalConfig(workspace, '{ "dashboard": { "port": ');
     const { source } = buildSource();
@@ -1524,6 +1620,9 @@ describe("dashboard production lifecycle", () => {
         client: dashboardClient,
         workspaceRoot: workspace.workspaceRoot,
         configDir,
+        // A malformed file fails closed even on a host that would otherwise
+        // default web on.
+        hostVersion: "2.1.4",
         createSource: () => source,
         createServer: capture,
         logger: silent,

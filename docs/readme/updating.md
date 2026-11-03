@@ -16,9 +16,9 @@ Use a full OpenCode process restart when changing package versions. A cross-vers
 
 ## Web dashboard after upgrade
 
-Browser access is off by default for every user, including upgrades from `1.2.0` or earlier where no `dashboard.enabled` value exists. The plugin, retry handling, credentials, and shared dashboard runtime still load; only the HTTP/SSE/static web transport stays off.
+Browser access now follows the OpenCode host version. Below 2.2.0 it stays on by default, including after an upgrade from `1.2.0` or earlier where no `dashboard.enabled` value exists, because the Native panel requires 2.2.0 or newer. At 2.2.0 and newer it is off by default. An explicit `dashboard.enabled` value always wins. The plugin, retry handling, credentials, and shared dashboard runtime still load; only the HTTP/SSE/static web transport follows this setting.
 
-To restore browser access by editing canonical JSONC manually:
+To override the default by editing canonical JSONC manually:
 
 1. Open `~/.config/opencode/opencode-quota-gui/config.jsonc` (or the path selected by `OPENCODE_CONFIG_DIR` / `XDG_CONFIG_HOME`).
 2. Add or update:
@@ -63,9 +63,9 @@ The import leaves source files byte-for-byte untouched. It does not migrate or d
 
 ## Port changes
 
-`dashboard.port` defaults to `4144` and is read-only in the web UI. To change it, set `dashboard.enabled` to `true`, edit the port, and restart OpenCode:
+`dashboard.port` defaults to `4144` and is read-only in the web UI. To change it, edit the port in the canonical config file and restart OpenCode:
 
-1. Set `dashboard.enabled` to `true` and edit `dashboard.port` in the canonical config file.
+1. Edit `dashboard.port` in the canonical config file. Set `dashboard.enabled` explicitly if you also want to pin web access on or off.
 2. Restart OpenCode.
 3. Open the new `http://localhost:<port>/quota` URL.
 

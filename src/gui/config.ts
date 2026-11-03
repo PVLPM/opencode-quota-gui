@@ -45,6 +45,11 @@ import {
   type ConfigWriteTargetReason,
 } from "../lib/config-write-target.js";
 import { DASHBOARD_HIDDEN_CARDS_VERSION } from "../lib/dashboard-visibility.js";
+import {
+  getDashboardEnabledSetting,
+  hasInvalidDashboardWebConfig,
+  resolveDashboardWebEnabled,
+} from "../lib/dashboard-web-policy.js";
 import { isResetTimeDecimals } from "../lib/format-utils.js";
 import { assertGuiConfigTargetIsIndependent } from "../lib/gui-config-target.js";
 import {
@@ -55,6 +60,7 @@ import {
   parseConfigDocument,
   planConfigDocumentEdit,
 } from "../lib/opencode-config-editor.js";
+import type { OpenCodeVersion } from "../lib/opencode-version.js";
 import { isQuotaFormatStyle, resolveQuotaFormatStyle } from "../lib/quota-format-style.js";
 import {
   DASHBOARD_HIDDEN_ID_LIMIT,
@@ -171,9 +177,9 @@ export function getGuiDashboardPort(
 }
 
 /**
- * Whether the optional web transport starts. Absence or any non-boolean value
- * is off; only an explicit `true` enables the fixed loopback port. This keeps
- * upgrades from ≤1.2.0 off without a config migration.
+ * The explicit canonical switch only: absence or any non-boolean value is off.
+ * The effective value also follows the host version when the key is absent; use
+ * `resolveDashboardWebEnabled` for that decision.
  */
 export function getGuiDashboardEnabled(
   config: { dashboard?: { enabled?: unknown } } | null | undefined,
@@ -190,6 +196,12 @@ export interface GuiSettingsStoreOptions {
   configDir: string;
   /** Project config root whose legacy layers are read and reported, never written. */
   workspaceRoot?: string;
+  /**
+   * Running host version. When `dashboard.enabled` is absent, the snapshot
+   * reports the version-gated effective value so the Settings switch matches
+   * the transport. Missing or unparseable versions report off.
+   */
+  hostVersion?: string | OpenCodeVersion;
   /** Test/embedding seam: replaces the OS default-application opener. */
   settingsFileOpener?: SettingsFileOpener;
 }
@@ -852,9 +864,15 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
   async function settings(): Promise<SettingsSnapshot> {
     const state = await readState();
+    const dashboardEnabled = resolveDashboardWebEnabled({
+      explicitEnabled: getDashboardEnabledSetting(state.runtimeConfig, state.runtimeMeta),
+      ...(options.hostVersion !== undefined ? { hostVersion: options.hostVersion } : {}),
+      invalidConfig: hasInvalidDashboardWebConfig(state.runtimeMeta),
+    });
     const values: Record<string, JsonValue> = {};
     for (const key of GUI_SETTINGS_KEYS) {
-      values[key] = settingValue(state.runtimeConfig, key);
+      values[key] =
+        key === "dashboard.enabled" ? dashboardEnabled : settingValue(state.runtimeConfig, key);
     }
 
     const sources: Record<string, string> = {};

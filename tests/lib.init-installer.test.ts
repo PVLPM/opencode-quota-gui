@@ -28,9 +28,19 @@ import { symlinkOrSkip } from "./helpers/symlink-capability.js";
 const EXPLICIT_PACK_SPEC = "file:./opencode-quota-gui-5.0.0.tgz";
 
 const openCodeMajor = vi.hoisted(() => ({ value: 2 as 1 | 2 | undefined }));
-vi.mock("../src/lib/opencode-version.js", () => ({
-  detectOpenCodeMajor: async () => openCodeMajor.value,
-}));
+vi.mock("../src/lib/opencode-version.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/lib/opencode-version.js")>();
+  return {
+    ...original,
+    detectOpenCodeMajor: async () => openCodeMajor.value,
+    detectOpenCodeVersion: async () =>
+      openCodeMajor.value === 1
+        ? { major: 1, minor: 18, patch: 32 }
+        : openCodeMajor.value === 2
+          ? { major: 2, minor: 2, patch: 0 }
+          : undefined,
+  };
+});
 
 function readJson(path: string): any {
   const resolvedPath = !existsSync(path) && path.endsWith(".json") ? `${path}c` : path;

@@ -162,7 +162,12 @@ function optionsFor(
 }
 
 async function open(options: StartDashboardOptions) {
-  const lease = await startDashboard(options);
+  const lease = await startDashboard({
+    // These fixtures exercise the runtime while Web is off; never spawn the
+    // real `opencode --version` probe.
+    detectHostVersion: async () => undefined,
+    ...options,
+  });
   leases.push(lease);
   return lease;
 }
