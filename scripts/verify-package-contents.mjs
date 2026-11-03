@@ -62,6 +62,13 @@ if (unexpected.length > 0) {
   process.exit(1);
 }
 
+const sourceMaps = files.filter((file) => file.endsWith(".map"));
+if (sourceMaps.length > 0) {
+  console.error("npm package must not include source maps:");
+  for (const file of sourceMaps) console.error(`- ${file}`);
+  process.exit(1);
+}
+
 const packageJson = JSON.parse(await readFile(path.join(repoRoot, "package.json"), "utf8"));
 const providerManifest = JSON.parse(
   await readFile(path.join(repoRoot, "src/ui/assets/provider-logos/manifest.json"), "utf8"),

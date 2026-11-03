@@ -610,6 +610,7 @@ describe("package manifest compatibility", () => {
   it("keeps npm publication on a strict root allowlist and excludes the dormant TUI entry", () => {
     expect(pkg.files).toEqual([
       "dist",
+      "!dist/**/*.map",
       "!dist/tui.js",
       "!dist/tui.js.map",
       "!dist/tui.d.ts",

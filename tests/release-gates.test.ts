@@ -444,6 +444,23 @@ describe("v4 release gates", () => {
     for (const file of forbiddenFiles) expect(result.stderr).toContain(file);
   });
 
+  it("rejects any source map in the packed manifest", async () => {
+    const sourceMaps = ["dist/index.js.map", "dist/lib/example.d.ts.map"];
+    const manifestPath = path.join(tempDir, "source-map.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        files: [...requiredPackageFiles(), ...sourceMaps].map((entry) => ({ path: entry })),
+      }),
+      "utf8",
+    );
+
+    const result = run(packageScript, [manifestPath]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("npm package must not include source maps");
+    for (const file of sourceMaps) expect(result.stderr).toContain(file);
+  });
+
   it("verifies one exact release tarball and rejects content tampering", async () => {
     const artifactDir = path.join(tempDir, "artifact");
     const filename = "slkiser-opencode-quota-4.0.0.tgz";
