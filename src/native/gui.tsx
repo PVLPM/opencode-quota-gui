@@ -136,7 +136,7 @@ export default Plugin.define({
     ctx.add(Panel, {
       id: PANEL_ID,
       region: "side",
-      mobile: { title: "Quota & Usage", order: 20, kind: "menu", icon: "layout-right" },
+      mobile: { title: "Quota & Usage", order: 20, kind: "menu", icon: "sliders" },
       list: ({ open }) => (open.includes(TAB_ID) ? [DASHBOARD_TAB] : []),
       render: () => <NativeDashboardPanel runtime={runtime} />,
     });
@@ -144,7 +144,7 @@ export default Plugin.define({
     ctx.add(SettingsPage, {
       id: SETTINGS_PAGE_ID,
       title: "Quota & analytics",
-      icon: "window-analytics",
+      icon: "sliders",
       entries: [
         {
           id: SETTINGS_PAGE_ID,
@@ -171,7 +171,7 @@ export default Plugin.define({
       menu: "session.panel",
       id: "open-dashboard",
       title: "Quota & Usage",
-      icon: "layout-right",
+      icon: "sliders",
       run: () => openDashboardPanel(ctx),
     });
   },

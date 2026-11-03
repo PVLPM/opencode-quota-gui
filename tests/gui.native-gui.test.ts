@@ -147,6 +147,12 @@ describe("Desktop GUI entry", () => {
     );
   });
 
+  it("uses the product icon on every Native surface that accepts one", () => {
+    expect(guiSource).toMatch(/mobile:\s*\{[^}]*icon:\s*"sliders"/su);
+    expect(guiSource).toMatch(/ctx\.add\(SettingsPage,\s*\{[^}]*icon:\s*"sliders"/su);
+    expect(guiSource).toMatch(/ctx\.add\(MenuItem,\s*\{[^}]*icon:\s*"sliders"/su);
+  });
+
   it("injects the product stylesheet before the host-only additions", () => {
     const product = guiSource.indexOf("ctx.add(Style, productCss)");
     const native = guiSource.indexOf("ctx.add(Style, nativeCss)");
@@ -266,7 +272,7 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toMatch(/ctx\.add\(SettingsPage,\s*\{/u);
     expect(guiSource).toContain("id: SETTINGS_PAGE_ID");
     expect(guiSource).toContain('title: "Quota & analytics"');
-    expect(guiSource).toContain('icon: "window-analytics"');
+    expect(guiSource).toContain('icon: "sliders"');
     expect(guiSource).toMatch(/render:\s*\(\)\s*=>\s*<NativeSettingsPage ctx=\{ctx\}\s*\/>/u);
     expect(guiSource).toContain("ctx.layout.settings(SETTINGS_PAGE_ID)");
     expect(settingsPageSource).toContain('from "../ui/routes"');
