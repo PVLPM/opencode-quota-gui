@@ -38,10 +38,12 @@ the release cannot mutate what it verifies.
 - Decide the version and set it in the commit to release; the workflow refuses a
   tag/version mismatch. No tooling rewrites `package.json` for you.
 - Run the canonical release check locally: `pnpm run release:check`
-  (`pnpm verify && pnpm run verify:release-version`). The `prepublishOnly` hook runs the
-  same check and never calls back into `npm publish`, `pnpm publish`, or packing, so it
-  cannot recurse.
-- Optionally pack and smoke the artifact end-to-end: `pnpm run verify:release-package`.
+  (`pnpm verify && pnpm run verify:release-version`). Local runs skip the tag check
+  unless `RELEASE_TAG` is set; the publish workflow always sets it. A stale `GITHUB_REF`
+  from another CI shell is ignored. The `prepublishOnly` hook runs the same check and
+  never calls back into `npm publish`, `pnpm publish`, or packing, so it cannot recurse.
+- Optionally pack and smoke the artifact end-to-end on Node 24:
+  `pnpm run verify:release-package`. The pack step refuses other Node majors.
 
 ## Additional analyzers are advisory
 
