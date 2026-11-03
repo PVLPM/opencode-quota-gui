@@ -50,6 +50,8 @@ The Native integration ships from **v1.3.0** and requires **OpenCode Desktop 2.2
 
 ## What you get
 
+The Native panel is the primary surface in v1.3.0. Every feature below is available there, and the optional browser dashboard mirrors the same views as a fallback.
+
 ## Features
 
 - **Native panel:** Quota, Analytics, Models, and Settings live in OpenCode Desktop, with project, session, provider, and model drilldowns in the same side panel.
