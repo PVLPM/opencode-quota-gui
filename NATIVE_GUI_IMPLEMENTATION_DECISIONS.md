@@ -4,6 +4,44 @@ This log records material implementation decisions against the owner-approved
 `docs/research/native-gui-migration-architecture.md` baseline. The research
 report is intentionally ignored and remains unchanged.
 
+## D14 — Version-gated Web dashboard default
+
+Stage: 1.3.0 release
+Status: implemented
+Problem: The Native GUI entry point ships from v1.3.0 and needs OpenCode
+Desktop 2.2.0+. Hosts below 2.2.0 load the server plugin but cannot open the
+Native panel, and D04's opt-in Web transport left those hosts with no UI at all.
+Evidence: `ctx.app.version` is part of the `@opencode/plugin` Context and is
+available during `Plugin.setup` on 2.2.0; older hosts may omit it at runtime.
+Focused lifecycle tests cover 2.1.4 and 2.2.0 with an absent, explicit `true`,
+and explicit `false` value, plus a failed version probe. Settings snapshots and
+installer output were checked against the same matrix.
+Options considered: Keep Web opt-in everywhere (no UI below 2.2.0); always
+start Web on `:4144` (changes the posture on 2.2.0+ and contradicts the
+Native-first default); gate the default on the host version (chosen).
+Decision: An explicit canonical `dashboard.enabled: true|false` always wins.
+When the key is absent, the Web transport starts on hosts below OpenCode 2.2.0
+and stays off at 2.2.0 and newer. A prerelease counts by its numeric core, so
+`2.2.0-beta.1` is at least 2.2.0. A missing or unparseable host version, a
+malformed canonical file, or an invalid `dashboard.enabled` value fails closed.
+The listener remains loopback-only at `dashboard.port` (default `4144`).
+Why: Preserves the Native-first posture where the Native panel exists and keeps
+a working local UI for the compatibility range that cannot use it, without
+widening the Native compatibility claim.
+Trade-offs: Behavior now depends on host version when the key is absent, and the
+settings switch reports the effective value while its source still says
+`defaults`. On hosts that omit `ctx.app.version`, setup runs one bounded
+`opencode --version` probe; if that also fails, Web stays off.
+Product impact: Web access is on by default below 2.2.0 and off by default at
+2.2.0+; Settings and installer copy describe the same rule.
+Compatibility impact: Supersedes D04. Peer range stays `>=2.0.16 <2.3.0`; no
+claim is made about untested 2.3.0 hosts.
+Test evidence: Policy, parser, lifecycle, settings-snapshot, installer and
+README contract tests passed; full `pnpm verify` passed (314 files, 5,186 tests,
+50 skipped), and `pnpm run build:gui` produced `dist/gui-experimental.cjs`.
+Reversible: Yes.
+Owner review: approved default policy
+
 ## D13 — Preserve Native dashboard continuity across Settings navigation
 
 Stage: Native stabilization
