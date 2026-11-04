@@ -44,7 +44,7 @@ export default defineConfig({
         extends: true,
         // Only the native header's presentational modules need the Solid DOM
         // compiler and browser condition; the rest of the suite keeps the Node
-        // runtime and the TUI's own JSX transform.
+        // runtime.
         plugins: [solid({ include: [/src\/native\/.*\.tsx$/, /src\/ui\/.*\.tsx$/] })],
         resolve: { conditions: ["browser", "development"], alias: solidAliases },
         test: {

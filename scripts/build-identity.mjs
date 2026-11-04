@@ -111,7 +111,6 @@ export function runBuild(root, env = process.env) {
   run("node_modules/typescript/bin/tsc");
   writeBuildIdentity(root, identity);
   run("scripts/copy-data.mjs");
-  run("scripts/prepare-tui-dist.mjs");
   run("node_modules/vite/bin/vite.js", "build", "--config", "vite.ui.config.mjs");
   // The Desktop bundle is part of the same artifact: one package, one server
   // plugin, one `./gui-experimental` entry. It is built after the browser UI so

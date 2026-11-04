@@ -12,11 +12,6 @@ const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";
 const EXPECTED_PLUGIN_SDK_VERSION = "2.2.0";
 const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";
 const PLUGIN_PACKAGE = "@opencode/plugin";
-const EXPECTED_OPENTUI_SPECIFIER = "^0.5.10";
-const EXPECTED_OPENTUI_VERSION = "0.5.10";
-const EXPECTED_OPENTUI_PACKAGES = ["@opentui/core", "@opentui/solid"];
-const BUN_FFI_STRUCTS_VERSION = "0.3.1";
-const BUN_FFI_TYPESCRIPT_PEER = "^5";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -47,15 +42,15 @@ function findPeerSuppressions(value, location, suppressions = []) {
   return suppressions;
 }
 
-function hasTypeScriptPeerOverride(value) {
+function hasTypeScriptOverride(value) {
   if (!value || typeof value !== "object") return false;
 
   return Object.entries(value).some(([key, nestedValue]) => {
-    if (/bun-ffi-structs|typescript/i.test(key)) return true;
-    if (typeof nestedValue === "string" && /bun-ffi-structs|typescript/i.test(nestedValue)) {
+    if (/typescript/i.test(key)) return true;
+    if (typeof nestedValue === "string" && /typescript/i.test(nestedValue)) {
       return true;
     }
-    return hasTypeScriptPeerOverride(nestedValue);
+    return hasTypeScriptOverride(nestedValue);
   });
 }
 
@@ -77,15 +72,6 @@ if (configuredPluginPeer !== EXPECTED_PLUGIN_PEER_VERSION) {
     `${PLUGIN_PACKAGE} peer must stay at the evidence-bounded range ${EXPECTED_PLUGIN_PEER_VERSION} for the server runtime; package.json has ${String(configuredPluginPeer)}.`,
   );
 }
-for (const name of EXPECTED_OPENTUI_PACKAGES) {
-  const configuredVersion = packageJson.dependencies?.[name];
-  if (configuredVersion !== EXPECTED_OPENTUI_SPECIFIER) {
-    fail(
-      `${name} must be pinned to ${EXPECTED_OPENTUI_SPECIFIER}; package.json has ${String(configuredVersion)}.`,
-    );
-  }
-}
-
 const suppressions = [
   ...findPeerSuppressions(packageJson, "package.json"),
   ...findPeerSuppressions(workspace, "pnpm-workspace.yaml"),
@@ -101,8 +87,8 @@ const overrideSections = [
   workspace?.overrides,
   workspace?.packageExtensions,
 ];
-if (overrideSections.some(hasTypeScriptPeerOverride)) {
-  fail("TypeScript or bun-ffi-structs must not be hidden behind an override or package extension.");
+if (overrideSections.some(hasTypeScriptOverride)) {
+  fail("TypeScript must not be hidden behind an override or package extension.");
 }
 
 const rootImporter = lockfile?.importers?.["."];
@@ -120,19 +106,6 @@ function verifyImporterDependency(name, expectedVersion) {
 }
 
 verifyImporterDependency("typescript", EXPECTED_TYPESCRIPT_VERSION);
-
-for (const name of EXPECTED_OPENTUI_PACKAGES) {
-  const dependency = rootImporter.dependencies?.[name];
-  if (
-    dependency?.specifier !== EXPECTED_OPENTUI_SPECIFIER ||
-    (dependency?.version !== EXPECTED_OPENTUI_VERSION &&
-      !dependency?.version?.startsWith(`${EXPECTED_OPENTUI_VERSION}(`))
-  ) {
-    fail(
-      `${name} lock mismatch: expected ${EXPECTED_OPENTUI_VERSION}, found ${String(dependency?.specifier)} and ${String(dependency?.version)}.`,
-    );
-  }
-}
 
 const lockedPlugin = rootImporter.devDependencies?.[PLUGIN_PACKAGE];
 if (
@@ -174,29 +147,6 @@ if (
   );
 }
 
-const bunPackageKey = `bun-ffi-structs@${BUN_FFI_STRUCTS_VERSION}`;
-const bunPackage = lockfile.packages?.[bunPackageKey];
-if (bunPackage?.peerDependencies?.typescript !== BUN_FFI_TYPESCRIPT_PEER) {
-  fail(
-    `${bunPackageKey} must retain its visible typescript peer ${BUN_FFI_TYPESCRIPT_PEER}; found ${String(bunPackage?.peerDependencies?.typescript)}.`,
-  );
-}
-
-const bunSnapshots = snapshotKeys.filter(
-  (key) => key === bunPackageKey || key.startsWith(`${bunPackageKey}(`),
-);
-if (
-  bunSnapshots.length !== 1 ||
-  !bunSnapshots[0].includes(`typescript@${EXPECTED_TYPESCRIPT_VERSION}`)
-) {
-  fail(
-    `${bunPackageKey} must resolve visibly against TypeScript ${EXPECTED_TYPESCRIPT_VERSION}; found ${bunSnapshots.join(", ") || "no snapshot"}.`,
-  );
-}
-
-console.warn(
-  `Known unmet peer: ${bunPackageKey} declares typescript ${BUN_FFI_TYPESCRIPT_PEER}, while the root uses ${EXPECTED_TYPESCRIPT_VERSION}. This mismatch is intentionally not suppressed.`,
-);
 console.log(
   `TypeScript ${EXPECTED_TYPESCRIPT_VERSION} and ${PLUGIN_PACKAGE} ${EXPECTED_PLUGIN_SDK_VERSION} (peer ${EXPECTED_PLUGIN_PEER_VERSION}) lock entries verified.`,
 );

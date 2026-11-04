@@ -197,8 +197,8 @@ describe("the three TypeScript projects stay separate", () => {
   it("keeps the browser and Desktop GUI sources out of the backend project, changing nothing else", () => {
     expect(backend.exclude).toEqual(["node_modules", "dist", "src/ui", "src/native"]);
     expect(backend.include).toEqual(["src/**/*"]);
-    // The backend keeps the OpenTUI pragma and the Node types.
-    expect(backend.compilerOptions?.jsxImportSource).toBe("@opentui/solid");
+    // The backend uses no TUI-specific JSX runtime and keeps the Node types.
+    expect(backend.compilerOptions?.jsxImportSource).toBeUndefined();
     expect(backend.compilerOptions?.types).toEqual(["node"]);
   });
 

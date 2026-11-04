@@ -82,19 +82,6 @@
           }
         }
       }
-    },
-    {
-      "includes": ["src/tui-v2.tsx"],
-      "linter": {
-        "rules": {
-          "a11y": {
-            "noStaticElementInteractions": "off"
-          },
-          "suspicious": {
-            "noImplicitAnyLet": "off"
-          }
-        }
-      }
     }
   ]
 }

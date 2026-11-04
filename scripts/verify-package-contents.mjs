@@ -114,8 +114,8 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
-// The shipped product is dashboard-only: inherited TUI source and build support stay in
-// the repository, but no public TUI export or compiled TUI entry may reach the artifact.
+// The shipped product is dashboard-only: no public terminal export or stale compiled
+// terminal entry may reach the artifact.
 const forbiddenFiles = [
   "dist/tui.js",
   "dist/tui.js.map",

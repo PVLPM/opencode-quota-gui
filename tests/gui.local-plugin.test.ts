@@ -23,7 +23,7 @@ describe("local OpenCode plugin entry", () => {
     expect(entrypoints.gui).toBe(
       pathToFileURL(join(repoRoot, "dist", "gui-experimental.cjs")).href,
     );
-    // The inherited TUI source is intentionally not published or exported.
+    // No terminal entrypoint is advertised by the GUI-only package.
     expect(entrypoints.tui).toBeUndefined();
     expect(entrypoints.rpc).toBeUndefined();
   });

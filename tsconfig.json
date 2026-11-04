@@ -4,7 +4,6 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "preserve",
-    "jsxImportSource": "@opentui/solid",
     "lib": ["ES2022"],
     "types": ["node"],
     "outDir": "./dist",

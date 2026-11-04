@@ -1,7 +1,7 @@
 /**
- * The plugin RPC definitions. `QuotaRpc` is the inherited TUI contract (still
- * used by the retained TUI source, but no longer registered by the GUI-only
- * server plugin). `DashboardRpc` is the Stage 3 typed dashboard contract the
+ * The plugin RPC definitions. `QuotaRpc` is a legacy terminal-client contract
+ * retained for compatibility, but is not registered by the GUI-only server
+ * plugin. `DashboardRpc` is the typed dashboard contract the
  * server plugin registers for native clients. Imports from `@opencode/*` stay
  * type-only, so loading this file loads no OpenCode package.
  */

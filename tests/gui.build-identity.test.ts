@@ -223,7 +223,6 @@ describe("build identity generation", () => {
     for (const file of [
       "scripts/clean-dist.mjs",
       "scripts/copy-data.mjs",
-      "scripts/prepare-tui-dist.mjs",
       "node_modules/typescript/bin/tsc",
       "node_modules/vite/bin/vite.js",
     ]) {
@@ -241,7 +240,6 @@ describe("build identity generation", () => {
       "clean-dist.mjs",
       "tsc",
       "copy-data.mjs",
-      "prepare-tui-dist.mjs",
       "vite.js",
       // The browser UI and the Desktop GUI are two Vite builds in one artifact.
       "vite.js",
