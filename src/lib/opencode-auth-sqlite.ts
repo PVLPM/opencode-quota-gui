@@ -4,8 +4,8 @@
  * `opencode-quota-gui show` and `status` bind this source while one report runs, so they work
  * with OpenCode closed. It is the only code that queries OpenCode's `credential` table. It
  * never refreshes or writes a login: a sign-in whose token expired stays expired here until
- * OpenCode refreshes it. The server plugin and the TUI must never import this file
- * (`tests/tui-dist-import-graph.test.ts`).
+ * OpenCode refreshes it. The server plugin must never import this file
+ * (`tests/plugin-dist-import-graph.test.ts`).
  */
 
 import { existsSync } from "fs";

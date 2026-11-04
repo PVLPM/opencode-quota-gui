@@ -206,26 +206,29 @@ describe("package manifest compatibility", () => {
   it("keeps the Desktop SDK pinned and bounds the server peer to tested hosts", () => {
     expect(pkg.peerDependencies?.["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
     expect(pkg.devDependencies?.["@opencode/plugin"]).toBe("2.2.0");
-    expect(pkg.dependencies?.["@opentui/core"]).toBe("^0.5.10");
-    expect(pkg.dependencies?.["@opentui/solid"]).toBe("^0.5.10");
+    for (const dependencies of [
+      pkg.dependencies,
+      pkg.devDependencies,
+      pkg.optionalDependencies,
+      pkg.peerDependencies,
+    ]) {
+      expect(dependencies ?? {}).not.toHaveProperty("@opentui/core");
+      expect(dependencies ?? {}).not.toHaveProperty("@opentui/solid");
+    }
     expect(readme).toContain("Node.js `22.13+` or `23.4+`");
     expect(readme).toContain("OpenCode `>= 2.0.16 < 2.3.0`");
     expect(readme).not.toContain("OpenCode `>= 1.4.3`");
     expect(pkg.engines).not.toHaveProperty("opencode");
   });
 
-  it("keeps the TypeScript 7 toolchain explicit without suppressing the known peer mismatch", () => {
+  it("keeps the TypeScript 7 toolchain explicit without peer suppressions", () => {
     expect(tsconfig.compilerOptions?.types).toEqual(["node"]);
     expect(typescriptValidator).toContain('const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";');
     expect(typescriptValidator).toContain('const EXPECTED_PLUGIN_SDK_VERSION = "2.2.0";');
     expect(typescriptValidator).toContain(
       'const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";',
     );
-    expect(typescriptValidator).toContain('const EXPECTED_OPENTUI_SPECIFIER = "^0.5.10";');
-    expect(typescriptValidator).toContain('const EXPECTED_OPENTUI_VERSION = "0.5.10";');
-    expect(typescriptValidator).toContain('const BUN_FFI_STRUCTS_VERSION = "0.3.1";');
-    expect(typescriptValidator).toContain('const BUN_FFI_TYPESCRIPT_PEER = "^5";');
-    expect(typescriptValidator).toContain("Known unmet peer:");
+    expect(typescriptValidator).not.toMatch(/@opentui|bun-ffi-structs|Known unmet peer/);
     expect(typescriptValidator).not.toMatch(/TypeScript v4 freeze|\^5\.9/);
     expect(pkg.pnpm?.peerDependencyRules).toBeUndefined();
     expect(pkg.pnpm?.strictPeerDependencies).not.toBe(false);
@@ -365,7 +368,6 @@ describe("package manifest compatibility", () => {
       'run("node_modules/typescript/bin/tsc")',
       "writeBuildIdentity(root, identity)",
       'run("scripts/copy-data.mjs")',
-      'run("scripts/prepare-tui-dist.mjs")',
       'run("node_modules/vite/bin/vite.js", "build", "--config", "vite.ui.config.mjs")',
       'run("node_modules/vite/bin/vite.js", "build", "--config", "vite.native.config.mjs")',
     ];
@@ -426,6 +428,12 @@ describe("package manifest compatibility", () => {
       types: "./dist/index.d.ts",
     });
     expect(pkg.exports).not.toHaveProperty("./tui");
+  });
+
+  it("has no legacy TUI source or build-preparation entrypoints", async () => {
+    for (const path of ["../tui.ts", "../src/tui-v2.tsx", "../scripts/prepare-tui-dist.mjs"]) {
+      await expect(access(new URL(path, import.meta.url))).rejects.toThrow();
+    }
   });
 
   it("describes a GUI-only product and advertises no terminal surfaces", () => {

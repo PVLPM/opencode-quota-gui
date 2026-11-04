@@ -14,11 +14,9 @@ import {
 /**
  * Browser-only UI build (design spec §11.1).
  *
- * The build runner preserves the backend chain (`clean-dist` → `tsc` →
- * `copy-data` → `prepare-tui-dist`) and stamps identity after compilation.
- * The browser build is separate
- * because `@opencode/ui` ships TSX source that the Solid compiler must process,
- * and because `tsconfig.json` compiles the backend with the OpenTUI JSX pragma.
+ * The build runner compiles the backend and copies its data before the browser
+ * build. The browser build is separate because `@opencode/ui` ships TSX source
+ * that the Solid compiler must process.
  *
  * `root` points at `src/ui`, so the HTML entry is `src/ui/index.html`; the
  * output directory is therefore spelled absolutely — it is the repo-root
@@ -181,8 +179,7 @@ export default defineConfig({
   resolve: {
     dedupe: ["solid-js", "solid-js/web", "solid-js/store", "@solidjs/meta"],
   },
-  // The backend's root tsconfig uses the OpenTUI pragma, so this build preserves
-  // JSX and lets the Solid compiler own it (spec §11.1).
+  // Preserve JSX here and let the Solid compiler transform browser components (spec §11.1).
   esbuild: { jsx: "preserve", jsxImportSource: "solid-js" },
   build: {
     outDir: path.resolve(rootDir, UI_OUT_DIR),

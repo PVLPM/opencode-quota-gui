@@ -3,7 +3,6 @@
   "entry": [
     "src/index.ts",
     "src/plugin.ts",
-    "src/tui-v2.tsx",
     "src/bin/opencode-quota-gui.ts",
     "src/ui/index.html",
     "vite.ui.config.mjs",

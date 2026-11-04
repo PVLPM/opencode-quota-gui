@@ -81,9 +81,17 @@ setTimeout(() => {
         page,
         `<!doctype html><style>${css}</style><div class="qg-native" id="host"></div><pre id="result">pending</pre><script>${script}</script>`,
       );
+      // GitHub's Linux runner cannot provide a usable Chromium sandbox. This
+      // invocation loads only the generated local probe page, so keep the
+      // sandbox exception scoped to this CI-only browser process.
+      const sandboxArgs =
+        process.env.CI === "true" && process.platform === "linux" && browser === "/usr/bin/chromium"
+          ? ["--no-sandbox"]
+          : [];
       const dom = execFileSync(
         browser!,
         [
+          ...sandboxArgs,
           "--headless=new",
           "--disable-gpu",
           "--no-first-run",
