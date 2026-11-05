@@ -238,6 +238,55 @@ describe("OpenCode JSON/JSONC config editor", () => {
     expect(existsSync(join(dir, "opencode.jsonc"))).toBe(false);
   });
 
+  it("rejects source byte changes that occur after the temp file is staged", async () => {
+    const dir = makeTempDir();
+    const path = join(dir, "opencode.json");
+    writeFileSync(path, '{"theme":"dark"}\n', "utf8");
+    const plan = await planConfigDocumentEdit({
+      target: resolveEditableConfigPath({ dir, kind: "opencode", preferredFormat: "json" }),
+      desiredData: { theme: "light" },
+    });
+
+    await expect(
+      applyConfigDocumentEdit(plan, {
+        beforeRename: async () => {
+          writeFileSync(path, '{"theme":"external edit"}\n', "utf8");
+        },
+      }),
+    ).rejects.toThrow("Config changed since preview");
+
+    expect(readFileSync(path, "utf8")).toBe('{"theme":"external edit"}\n');
+  });
+
+  it("rejects a destination target that appears after the temp file is staged", async () => {
+    const dir = makeTempDir();
+    const jsonPath = join(dir, "opencode.json");
+    const jsoncPath = join(dir, "opencode.jsonc");
+    const original = '{"theme":"dark"}\n';
+    const externalTarget = '{"theme":"external target"}\n';
+    writeFileSync(jsonPath, original, "utf8");
+    const plan = await planConfigDocumentEdit({
+      target: resolveEditableConfigPath({
+        dir,
+        kind: "opencode",
+        preferredFormat: "jsonc",
+        convertJsonToJsonc: true,
+      }),
+      desiredData: { theme: "light" },
+    });
+
+    await expect(
+      applyConfigDocumentEdit(plan, {
+        beforeRename: async () => {
+          writeFileSync(jsoncPath, externalTarget, "utf8");
+        },
+      }),
+    ).rejects.toThrow("Config target appeared since preview");
+
+    expect(readFileSync(jsonPath, "utf8")).toBe(original);
+    expect(readFileSync(jsoncPath, "utf8")).toBe(externalTarget);
+  });
+
   it("rolls back the new JSONC target when removing the converted JSON fails", async () => {
     const dir = makeTempDir();
     const jsonPath = join(dir, "opencode.json");

@@ -23,6 +23,7 @@ import type {
   SettingsWriteResult,
 } from "../contracts/dashboard.js";
 import { LEGACY_IMPORT_KEYS } from "../contracts/settings.js";
+import { withCanonicalConfigLock } from "../lib/canonical-config-lock.js";
 import {
   buildConfigLayerCandidates,
   type ConfigLayerCandidate,
@@ -311,7 +312,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
   /** One serialized queue for all writers: the loser's stale revision yields 409. */
   function withLock<T>(run: () => Promise<T>): Promise<T> {
-    const next = lockTail.then(run, run);
+    const write = () => withCanonicalConfigLock(canonicalPath, run);
+    const next = lockTail.then(write, write);
     lockTail = next.then(
       () => undefined,
       () => undefined,

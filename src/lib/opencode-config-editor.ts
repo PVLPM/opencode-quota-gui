@@ -491,6 +491,7 @@ export async function applyConfigDocumentEdit(
     pathExists?: (path: string) => boolean;
     writeText?: (path: string, content: string) => Promise<void>;
     removePath?: (path: string) => Promise<void>;
+    beforeRename?: () => Promise<void>;
   } = {},
 ): Promise<void> {
   if (!edit.changed) {
@@ -499,14 +500,20 @@ export async function applyConfigDocumentEdit(
 
   await validateConfigDocumentEdit(edit, options);
 
+  const validateBeforeRename = async () => {
+    await options.beforeRename?.();
+    await validateConfigDocumentEdit(edit, options);
+  };
+
   const removePath = options.removePath ?? ((path: string) => rm(path));
   try {
     const currentTarget = await resolveConfigWriteTarget(edit.path);
     assertSameConfigWriteTarget(edit.writeTarget, currentTarget);
     if (options.writeText) {
+      await validateBeforeRename();
       await options.writeText(currentTarget.writePath, edit.updated);
     } else {
-      await writeResolvedConfigText(currentTarget, edit.updated);
+      await writeResolvedConfigText(currentTarget, edit.updated, validateBeforeRename);
     }
   } catch (error) {
     asConfigDocumentError(error, edit.path);
