@@ -1,3 +1,10 @@
+import { createSafeAgentProviderFetch } from "../lib/agent-custom-provider-network.js";
+import {
+  agentCustomProviderTrustFingerprint,
+  isAgentCustomProviderManagedDefinition,
+  isAgentCustomProviderTrustedDefinition,
+  resolveApprovedAgentCustomProviderApiKey,
+} from "../lib/agent-custom-provider-trust.js";
 import type {
   QuotaProvider,
   QuotaProviderContext,
@@ -30,6 +37,7 @@ import { resolveQuotaProviderDefinitionAuthIdentity } from "./cache-policies.js"
 
 export const QUOTA_PROVIDERS_PROVIDER_ID = QUOTA_PROVIDERS_AGGREGATE_ID;
 export const selectEligibleQuotaProviders = selectEligibleQuotaProviderDefinitions;
+const safeAgentProviderFetch = createSafeAgentProviderFetch();
 
 function matchesConfiguredCurrentSelection(
   model: string,
@@ -51,6 +59,26 @@ function matchesConfiguredCurrentSelection(
 
 async function getAvailableProviderIds(ctx: QuotaProviderContext): Promise<ReadonlySet<string>> {
   return ctx.resolveRuntimeProviderIds();
+}
+
+function currentlyTrustedDefinitions(ctx: QuotaProviderContext): QuotaProviderDefinition[] {
+  return (ctx.config.quotaProviders ?? []).filter((definition) =>
+    isAgentCustomProviderTrustedDefinition(definition, ctx.config),
+  );
+}
+
+function selectedDefinitionsStillCurrent(
+  selected: readonly QuotaProviderDefinition[],
+  current: readonly QuotaProviderDefinition[],
+): QuotaProviderDefinition[] {
+  return selected.filter((definition) =>
+    current.some(
+      (candidate) =>
+        candidate.id === definition.id &&
+        agentCustomProviderTrustFingerprint(candidate) ===
+          agentCustomProviderTrustFingerprint(definition),
+    ),
+  );
 }
 
 type InstanceResult = {
@@ -109,9 +137,42 @@ function classifyRuntimeError(
 
 async function executeRemote(
   definition: RemoteApiQuotaProviderDefinition,
+  ctx: QuotaProviderContext,
   requestTimeoutMs?: number,
 ): Promise<InstanceResult> {
-  const auth = await resolveQuotaProviderApiKey(definition);
+  const isManaged = isAgentCustomProviderManagedDefinition(definition, ctx.config);
+  if (isManaged && !isAgentCustomProviderTrustedDefinition(definition, ctx.config)) {
+    return {
+      entries: [],
+      errors: [
+        {
+          label: definition.label,
+          message: "Current user approval is required",
+          failureCategory: "credentials",
+        },
+      ],
+      diagnostic: {
+        ...buildDiagnosticIdentity(definition),
+        attempted: false,
+        credentialSource: null,
+        outcome: "missing_credential",
+        entryCount: 0,
+        checkedPaths: [],
+        credentialDatabasePaths: [],
+      },
+    };
+  }
+  const auth = isManaged
+    ? (() => {
+        const key = resolveApprovedAgentCustomProviderApiKey(definition, ctx.config);
+        return {
+          key,
+          source: key ? ("env" as const) : null,
+          checkedPaths: [],
+          credentialDatabasePaths: [],
+        };
+      })()
+    : await resolveQuotaProviderApiKey(definition);
   if (!auth.key) {
     return {
       entries: [],
@@ -134,7 +195,9 @@ async function executeRemote(
     };
   }
 
-  const result = await fetchRemoteQuotaProvider(definition, auth.key, requestTimeoutMs);
+  const result = isManaged
+    ? await fetchRemoteQuotaProvider(definition, auth.key, requestTimeoutMs, safeAgentProviderFetch)
+    : await fetchRemoteQuotaProvider(definition, auth.key, requestTimeoutMs);
   if (!result.success) {
     return {
       entries: [],
@@ -189,10 +252,11 @@ async function executeRemoteWithCache(
     isAvailable: async () => true,
     cachePolicy: {
       kind: "resolved-auth",
-      resolveIdentity: () => resolveQuotaProviderDefinitionAuthIdentity(definition),
+      resolveIdentity: (_cacheCtx) =>
+        resolveQuotaProviderDefinitionAuthIdentity(definition, ctx.config),
     },
     fetch: async () => {
-      const result = await executeRemote(definition, ctx.config.requestTimeoutMs);
+      const result = await executeRemote(definition, ctx, ctx.config.requestTimeoutMs);
       return {
         attempted: result.diagnostic.attempted,
         entries: result.entries,
@@ -287,7 +351,7 @@ export const quotaProvidersProvider: QuotaProvider = {
   id: QUOTA_PROVIDERS_PROVIDER_ID,
 
   async isAvailable(ctx): Promise<boolean> {
-    const definitions = ctx.config.quotaProviders ?? [];
+    const definitions = currentlyTrustedDefinitions(ctx);
     if (customQuotaProviderDefinitions(definitions).length === 0) return false;
     const availableProviderIds = await getAvailableProviderIds(ctx);
     return (
@@ -306,13 +370,15 @@ export const quotaProvidersProvider: QuotaProvider = {
   },
 
   async fetch(ctx, cacheContext): Promise<QuotaProviderResult> {
-    const definitions = ctx.config.quotaProviders ?? [];
+    const definitions = currentlyTrustedDefinitions(ctx);
     if (customQuotaProviderDefinitions(definitions).length === 0) {
       return { attempted: false, entries: [], errors: [] };
     }
 
     let selected = cacheContext?.runtimeEligibleQuotaProviders;
-    if (!selected) {
+    if (selected) {
+      selected = selectedDefinitionsStillCurrent(selected, definitions);
+    } else {
       let availableProviderIds: ReadonlySet<string>;
       try {
         availableProviderIds = await getAvailableProviderIds(ctx);

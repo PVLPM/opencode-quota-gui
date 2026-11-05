@@ -102,7 +102,7 @@ Except for Copilot organization and enterprise billing, each integration reports
 
 ## Custom providers
 
-Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Define them in the global canonical file from [Configuration](configuration.md#custom-providers). There is no provider-definition command in the dashboard-only release, and Settings never asks for or stores a credential.
+Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Define active providers in the global canonical file from [Configuration](configuration.md#custom-providers). The server plugin also exposes agent tools to list, read, add, test, and remove *proposals* under `agentCustomProviders` in that same canonical file. Proposals are separate from `quotaProviders`: adding one never enables it, even with `enabledProviders: "auto"`, and the agent tools cannot approve or enable it. Testing performs at most one HTTPS request to a public address on port 443, never follows redirects, and returns no credential or response rows; a successful test is not approval. Settings never asks for or stores a credential.
 
 - **Remote API:** real quota data from a supported endpoint.
 - **Local estimate:** counts matching completed OpenCode requests in 1–16 windows, with optional spend estimates. `utc-day` resets at UTC midnight; `rolling` uses `durationMinutes` (up to 366 days). Every window needs `requestLimit`; `usdBudget` is optional.

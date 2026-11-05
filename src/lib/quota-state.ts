@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { isAgentCustomProviderTrustedDefinition } from "./agent-custom-provider-trust.js";
 import { writeJsonAtomic } from "./atomic-json.js";
 import type {
   QuotaProvider,
@@ -238,7 +239,7 @@ async function resolveRuntimeEligibleQuotaProviders(
       onlyCurrentModel: ctx.config.onlyCurrentModel,
       currentModel: ctx.config.currentModel,
       currentProviderID: ctx.config.currentProviderID,
-    });
+    }).filter((definition) => isAgentCustomProviderTrustedDefinition(definition, ctx.config));
   } catch {
     return null;
   }
@@ -541,6 +542,7 @@ export async function readCachedProviderResult(params: {
     params.ctx,
   );
   if (runtimeEligibleQuotaProviders === null) return { hit: false };
+  if (runtimeEligibleQuotaProviders?.length === 0) return { hit: false };
 
   const cacheContext: QuotaProviderCacheContext = { runtimeEligibleQuotaProviders };
   const scope = await resolveProviderCacheScope(params.provider, params.ctx, cacheContext);

@@ -150,6 +150,16 @@ function createFakeRuntime() {
     importPreview: vi.fn(async () => ({ from: "legacy" }) as unknown as ImportPreview),
     importApply: vi.fn(async () => ({ revision: "rev-4" }) as unknown as SettingsWriteResult),
     openSettingsFile: vi.fn(async () => undefined),
+    agentCustomProviders: vi.fn(async () => ({ revision: "a".repeat(64), providers: [] })),
+    approveAgentCustomProvider: vi.fn(async () => ({ revision: "b".repeat(64), providers: [] })),
+    setAgentCustomProviderEnabled: vi.fn(async () => ({ revision: "c".repeat(64), providers: [] })),
+    testApprovedAgentCustomProvider: vi.fn(async () => ({
+      id: "acme-quota",
+      status: "passed",
+      reason: "provider-responded",
+      trusted: true,
+      enabled: false,
+    })),
   } as unknown as GuiSettingsStore;
   const runtime: DashboardRpcRuntime = { snapshots, settings };
 
@@ -230,6 +240,47 @@ describe("dashboard RPC handlers", () => {
     await call(captured, "importApply", { expectedRevision: "rev-1" });
     expect(fake.snapshots.notifySettingsChanged).toHaveBeenLastCalledWith();
     expect(fake.settings.importApply).toHaveBeenCalledWith({ expectedRevision: "rev-1" });
+  });
+
+  it("exposes proposal approval and activation only through user-owned dashboard RPC methods", async () => {
+    const { captured, fake } = await setup();
+    const revision = "a".repeat(64);
+
+    await expect(call(captured, "agentCustomProviders", {})).resolves.toEqual({
+      revision,
+      providers: [],
+    });
+    await expect(
+      call(captured, "approveAgentCustomProvider", {
+        id: "acme-quota",
+        expectedRevision: revision,
+      }),
+    ).resolves.toEqual({ revision: "b".repeat(64), providers: [] });
+    await expect(
+      call(captured, "setAgentCustomProviderEnabled", {
+        id: "acme-quota",
+        enabled: true,
+        expectedRevision: revision,
+      }),
+    ).resolves.toEqual({ revision: "c".repeat(64), providers: [] });
+    await expect(
+      call(captured, "testApprovedAgentCustomProvider", {
+        id: "acme-quota",
+        expectedRevision: revision,
+      }),
+    ).resolves.toMatchObject({ trusted: true, status: "passed" });
+
+    expect(fake.settings.approveAgentCustomProvider).toHaveBeenCalledWith({
+      id: "acme-quota",
+      expectedRevision: revision,
+    });
+    expect(fake.settings.setAgentCustomProviderEnabled).toHaveBeenCalledWith({
+      id: "acme-quota",
+      enabled: true,
+      expectedRevision: revision,
+    });
+    expect(fake.snapshots.notifySettingsChanged).toHaveBeenCalledTimes(2);
+    expect(Object.keys(captured.handlers)).toContain("approveAgentCustomProvider");
   });
 
   it("maps controlled failures to fixed typed errors without raw messages or paths", async () => {

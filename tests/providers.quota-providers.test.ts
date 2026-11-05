@@ -1,10 +1,13 @@
-import { rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const TEST_RUNTIME_ROOT = "/tmp/opencode-quota-provider-cache-tests";
 const NOW = Date.UTC(2026, 10, 2, 12, 0, 0);
 
 import { buildProviderCards } from "../src/gui/provider-cards.js";
+import { agentCustomProviderTrustFingerprint } from "../src/lib/agent-custom-providers.js";
+import { getGuiConfigPath, loadConfig } from "../src/lib/config.js";
 import type { QuotaProviderContext } from "../src/lib/entries.js";
 import type {
   QuotaProviderDefinition,
@@ -17,6 +20,8 @@ const runtimeMocks = vi.hoisted(() => ({
   fetchRemoteQuotaProvider: vi.fn(),
   collectLocalQuotaProviderEstimate: vi.fn(),
   inspectLocalQuotaProviderState: vi.fn(),
+  resolveAgentProviderHost: vi.fn(),
+  requestPinnedAgentProvider: vi.fn(),
 }));
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
@@ -37,6 +42,19 @@ vi.mock("../src/lib/quota-providers-remote.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../src/lib/agent-custom-provider-network.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../src/lib/agent-custom-provider-network.js")>();
+  return {
+    ...actual,
+    createSafeAgentProviderFetch: () =>
+      actual.createSafeAgentProviderFetch({
+        resolveHost: runtimeMocks.resolveAgentProviderHost,
+        requestPinned: runtimeMocks.requestPinnedAgentProvider,
+      }),
+  };
+});
+
 vi.mock("../src/lib/quota-providers-local.js", () => ({
   collectLocalQuotaProviderEstimate: runtimeMocks.collectLocalQuotaProviderEstimate,
   inspectLocalQuotaProviderState: runtimeMocks.inspectLocalQuotaProviderState,
@@ -53,7 +71,11 @@ vi.mock("../src/lib/resolved-auth-identity.js", () => ({
   ),
 }));
 
-import { __resetQuotaStateForTests, fetchQuotaProviderResult } from "../src/lib/quota-state.js";
+import {
+  __resetQuotaStateForTests,
+  fetchQuotaProviderResult,
+  readCachedProviderResult,
+} from "../src/lib/quota-state.js";
 import {
   QUOTA_PROVIDERS_PROVIDER_ID,
   quotaProvidersProvider,
@@ -104,6 +126,39 @@ function context(
   };
 }
 
+async function enabledAgentContext(
+  definition: RemoteApiQuotaProviderDefinition,
+  options: {
+    approvedDefinition?: RemoteApiQuotaProviderDefinition;
+    storedDefinition?: RemoteApiQuotaProviderDefinition;
+  } = {},
+): Promise<QuotaProviderContext> {
+  const configDir = join(TEST_RUNTIME_ROOT, "config");
+  const canonicalPath = getGuiConfigPath(configDir);
+  const storedDefinition = options.storedDefinition ?? definition;
+  const approvedDefinition = options.approvedDefinition ?? definition;
+  await mkdir(dirname(canonicalPath), { recursive: true });
+  await writeFile(
+    canonicalPath,
+    JSON.stringify({
+      agentCustomProviders: [
+        {
+          definition: storedDefinition,
+          trustedDefinitionHash: agentCustomProviderTrustFingerprint(approvedDefinition),
+          enabled: true,
+        },
+      ],
+    }),
+    "utf8",
+  );
+  const loaded = await loadConfig(undefined, undefined, { globalConfigDir: configDir });
+  return context(loaded.quotaProviders, [definition.providerId], {
+    agentCustomProviderIds: loaded.agentCustomProviderIds,
+    agentCustomProviderTrust: loaded.agentCustomProviderTrust,
+    providerCacheTtlMs: 60_000,
+  });
+}
+
 describe("quota-providers aggregate provider", () => {
   beforeEach(async () => {
     __resetQuotaStateForTests();
@@ -118,6 +173,12 @@ describe("quota-providers aggregate provider", () => {
       success: true,
       entries: [],
     });
+    runtimeMocks.resolveAgentProviderHost
+      .mockReset()
+      .mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    runtimeMocks.requestPinnedAgentProvider
+      .mockReset()
+      .mockResolvedValue(new Response("{}", { status: 200 }));
     runtimeMocks.collectLocalQuotaProviderEstimate.mockReset().mockResolvedValue({
       entries: [],
       state: {
@@ -140,6 +201,7 @@ describe("quota-providers aggregate provider", () => {
 
   afterEach(async () => {
     await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   it("uses one stable aggregate identity", () => {
@@ -218,6 +280,29 @@ describe("quota-providers aggregate provider", () => {
         currentModel: "model-a",
       }).map((definition) => definition.id),
     ).toEqual(["stable-one"]);
+  });
+
+  it("rechecks agent-managed approval fingerprints before polling even preselected definitions", async () => {
+    const definition = remote("agent-proposal", "provider-one");
+    const ctx = context([definition], ["provider-one"], {
+      agentCustomProviderTrust: { "agent-proposal": "0".repeat(64) },
+    });
+
+    await expect(quotaProvidersProvider.isAvailable(ctx)).resolves.toBe(false);
+    await expect(
+      quotaProvidersProvider.fetch(ctx, {
+        runtimeEligibleQuotaProviders: [definition],
+      }),
+    ).resolves.toEqual({ attempted: false, entries: [], errors: [] });
+    expect(runtimeMocks.resolveQuotaProviderApiKey).not.toHaveBeenCalled();
+    expect(runtimeMocks.fetchRemoteQuotaProvider).not.toHaveBeenCalled();
+
+    const valid = context([definition], ["provider-one"], {
+      agentCustomProviderTrust: {
+        "agent-proposal": agentCustomProviderTrustFingerprint(definition),
+      },
+    });
+    await expect(quotaProvidersProvider.isAvailable(valid)).resolves.toBe(true);
   });
 
   it("treats slash-containing currentModel as an opaque model id when provider is supplied", () => {
@@ -353,6 +438,195 @@ describe("quota-providers aggregate provider", () => {
     expect(cached.entries[0]?.name).toBe("Account one");
     expect(second.entries[0]?.name).toBe("Account two");
     expect(runtimeMocks.fetchRemoteQuotaProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not resolve unrelated OpenCode credentials for an enabled agent proposal", async () => {
+    const definition = remote("agent-acme", "openai", undefined);
+    definition.apiKeyEnv = "AGENT_APPROVED_QUOTA_KEY";
+    const ctx = await enabledAgentContext(definition);
+    const provider = getProviders().find((candidate) => candidate.id === "quota-providers");
+    if (!provider) throw new Error("Expected aggregate provider");
+    vi.stubEnv("AGENT_APPROVED_QUOTA_KEY", "");
+    runtimeMocks.resolveQuotaProviderApiKey.mockResolvedValue({
+      key: "unrelated-global-secret-marker",
+      source: "opencode.json",
+      checkedPaths: ["/test/opencode.json"],
+      credentialDatabasePaths: [],
+    });
+
+    const result = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    expect(runtimeMocks.resolveQuotaProviderApiKey).not.toHaveBeenCalled();
+    expect(runtimeMocks.fetchRemoteQuotaProvider).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("unrelated-global-secret-marker");
+  });
+
+  it("pins enabled agent requests to the validated public address", async () => {
+    const definition = remote("agent-acme", "openai", undefined);
+    definition.apiKeyEnv = "AGENT_APPROVED_QUOTA_KEY";
+    const ctx = await enabledAgentContext(definition);
+    const provider = getProviders().find((candidate) => candidate.id === "quota-providers");
+    if (!provider) throw new Error("Expected aggregate provider");
+    runtimeMocks.fetchRemoteQuotaProvider.mockImplementation(
+      async (
+        source: RemoteApiQuotaProviderDefinition,
+        key: string | undefined,
+        _timeoutMs: number | undefined,
+        fetcher: typeof fetch,
+      ) => {
+        await fetcher(source.url, {
+          method: "GET",
+          redirect: "manual",
+          headers: {
+            ...(key ? { Authorization: `Bearer ${key}` } : {}),
+            Accept: "application/json",
+          },
+        });
+        return { success: true, entries: [] };
+      },
+    );
+
+    vi.stubEnv("AGENT_APPROVED_QUOTA_KEY", "approved-env-secret-marker");
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    expect(runtimeMocks.resolveAgentProviderHost).toHaveBeenCalledWith("agent-acme.example");
+    expect(runtimeMocks.requestPinnedAgentProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: "93.184.216.34",
+        family: 4,
+        hostname: "agent-acme.example",
+        authority: "agent-acme.example",
+        path: "/accounting",
+        method: "GET",
+        headers: expect.objectContaining({
+          host: "agent-acme.example",
+          authorization: "Bearer approved-env-secret-marker",
+          accept: "application/json",
+        }),
+      }),
+    );
+    expect(runtimeMocks.fetchRemoteQuotaProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "agent-acme" }),
+      "approved-env-secret-marker",
+      undefined,
+      expect.any(Function),
+    );
+    expect(runtimeMocks.resolveQuotaProviderApiKey).not.toHaveBeenCalled();
+    expect(runtimeMocks.fetchRemoteQuotaProvider).toHaveBeenCalledOnce();
+  });
+
+  it("rejects private endpoints during enabled agent polling", async () => {
+    const definition = remote("agent-acme", "openai", undefined);
+    definition.apiKeyEnv = "AGENT_APPROVED_QUOTA_KEY";
+    definition.url = "https://127.0.0.1/v1/quota";
+    const ctx = await enabledAgentContext(definition);
+    const provider = getProviders().find((candidate) => candidate.id === "quota-providers");
+    if (!provider) throw new Error("Expected aggregate provider");
+    vi.stubEnv("AGENT_APPROVED_QUOTA_KEY", "approved-env-secret-marker");
+    runtimeMocks.fetchRemoteQuotaProvider.mockImplementation(
+      async (
+        source: RemoteApiQuotaProviderDefinition,
+        key: string | undefined,
+        _timeoutMs: number | undefined,
+        fetcher: typeof fetch,
+      ) => {
+        try {
+          await fetcher(source.url, {
+            headers: key ? { authorization: `Bearer ${key}` } : undefined,
+          });
+          return { success: false, error: "Unexpected private endpoint response" };
+        } catch (error) {
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : "Unexpected request failure",
+          };
+        }
+      },
+    );
+
+    const result = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    expect(result.errors[0]?.message).toBe("Unsafe provider endpoint");
+    expect(runtimeMocks.requestPinnedAgentProvider).not.toHaveBeenCalled();
+    expect(runtimeMocks.resolveQuotaProviderApiKey).not.toHaveBeenCalled();
+  });
+
+  it("keys enabled agent cache entries by the explicitly approved env credential", async () => {
+    const definition = remote("agent-acme", "openai", undefined);
+    definition.apiKeyEnv = "AGENT_APPROVED_QUOTA_KEY";
+    const ctx = await enabledAgentContext(definition);
+    const provider = getProviders().find((candidate) => candidate.id === "quota-providers");
+    if (!provider) throw new Error("Expected aggregate provider");
+    runtimeMocks.resolveQuotaProviderApiKey.mockResolvedValue({
+      key: "unrelated-global-secret-marker",
+      source: "opencode.json",
+      checkedPaths: ["/test/opencode.json"],
+      credentialDatabasePaths: [],
+    });
+    runtimeMocks.fetchRemoteQuotaProvider.mockImplementation(async (_source, key) => ({
+      success: true,
+      entries: [
+        {
+          accounting: {
+            resultType: "quota",
+            acquisitionMethod: "remote_api",
+            ownership: "user_configured",
+            authority: "provider_reported",
+          },
+          name: key ?? "missing-key",
+          percentRemaining: 50,
+        },
+      ],
+    }));
+
+    vi.stubEnv("AGENT_APPROVED_QUOTA_KEY", "approved-env-secret-marker");
+    const first = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    const cached = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    vi.stubEnv("AGENT_APPROVED_QUOTA_KEY", "approved-env-secret-marker-2");
+    const second = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    expect(first.entries[0]?.name).toBe("approved-env-secret-marker");
+    expect(cached.entries[0]?.name).toBe("approved-env-secret-marker");
+    expect(second.entries[0]?.name).toBe("approved-env-secret-marker-2");
+    expect(runtimeMocks.resolveQuotaProviderApiKey).not.toHaveBeenCalled();
+    expect(runtimeMocks.fetchRemoteQuotaProvider).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidates enabled agent cache results immediately when approval becomes stale", async () => {
+    const definition = remote("agent-acme", "openai", undefined);
+    definition.apiKeyEnv = "AGENT_APPROVED_QUOTA_KEY";
+    const ctx = await enabledAgentContext(definition);
+    const provider = getProviders().find((candidate) => candidate.id === "quota-providers");
+    if (!provider) throw new Error("Expected aggregate provider");
+    vi.stubEnv("AGENT_APPROVED_QUOTA_KEY", "approved-env-secret-marker");
+    runtimeMocks.fetchRemoteQuotaProvider.mockResolvedValue({
+      success: true,
+      entries: [
+        {
+          accounting: {
+            resultType: "quota",
+            acquisitionMethod: "remote_api",
+            ownership: "user_configured",
+            authority: "provider_reported",
+          },
+          name: "Previously approved result",
+          percentRemaining: 75,
+        },
+      ],
+    });
+
+    const initial = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    expect(initial.entries.map((entry) => entry.name)).toEqual(["Previously approved result"]);
+    ctx.config.agentCustomProviderTrust = { "agent-acme": "stale-material-definition" };
+
+    await expect(readCachedProviderResult({ provider, ctx, ttlMs: 60_000 })).resolves.toEqual({
+      hit: false,
+    });
+    const stale = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    expect(stale.entries).toEqual([]);
+    expect(stale.attempted).toBe(false);
+    expect(runtimeMocks.fetchRemoteQuotaProvider).toHaveBeenCalledOnce();
   });
 
   it("refreshes mixed local data while retaining remote definition caching", async () => {

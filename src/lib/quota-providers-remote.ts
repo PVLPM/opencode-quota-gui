@@ -892,20 +892,21 @@ function parseOpenRouterKeyV1(
 
 export async function fetchRemoteQuotaProvider(
   source: RemoteApiQuotaProviderDefinition,
-  apiKey: string,
+  apiKey: string | undefined,
   requestTimeoutMs?: number,
+  fetcher: typeof fetch = fetch,
 ): Promise<RemoteQuotaProviderResult> {
   const timeoutMs = requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(source.url, {
+    const response = await fetcher(source.url, {
       method: "GET",
       redirect: "manual",
       signal: controller.signal,
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         Accept: "application/json",
       },
     });
@@ -931,6 +932,9 @@ export async function fetchRemoteQuotaProvider(
         return parseJsonV1(source, body);
     }
   } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "unsafe-endpoint") {
+      return { success: false, error: "Unsafe provider endpoint", failureCategory: "provider_api" };
+    }
     if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
       return {
         success: false,
