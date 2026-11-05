@@ -8,6 +8,8 @@
 import type { Rpc } from "@opencode/plugin/rpc";
 import { isAnalyticsGroupQuery } from "./contracts/analytics-entity.js";
 import {
+  type AgentCustomProviderSnapshot,
+  type AgentCustomProviderTestResult,
   type AnalyticsGroupQuery,
   DASHBOARD_CONTRACT_VERSION,
   type DashboardEventTopic,
@@ -199,13 +201,50 @@ export type DashboardRpcSaveVisibilityInput = {
   expectedRevision: string;
 };
 export type DashboardRpcImportApplyInput = { expectedRevision: string };
+export type DashboardRpcAgentCustomProviderInput = { id: string; expectedRevision: string };
+export type DashboardRpcSetAgentCustomProviderEnabledInput = {
+  id: string;
+  enabled: boolean;
+  expectedRevision: string;
+};
 export type DashboardRpcWatchInput = { scope: DashboardRpcViewScope };
 export type DashboardRpcWatchOutput = { active: boolean };
 export type DashboardRpcOpenSettingsOutput = { opened: true };
+export type DashboardRpcCacheObserverEvent =
+  | {
+      type: "session.step.ended";
+      created: number;
+      data: {
+        sessionID: string;
+        assistantMessageID: string;
+        tokens: {
+          input?: number;
+          cache?: { read?: number; write?: number };
+        };
+      };
+    }
+  | {
+      type: "session.created";
+      data: { sessionID: string; parentID: string };
+    }
+  | {
+      type: "session.forked";
+      data: { sessionID: string; parentID?: string };
+    }
+  | {
+      type: "session.compaction.ended" | "session.deleted";
+      data: { sessionID: string };
+    }
+  | {
+      type: "source.status";
+      created: number;
+      data: { state: "observed" | "unavailable" | "stopped" };
+    };
 export type DashboardRpcEventData = {
-  topic: DashboardEventTopic;
+  topic: DashboardEventTopic | "cache.observer";
   at: number;
   scope?: "visibility";
+  cacheObserverEvent?: DashboardRpcCacheObserverEvent;
 };
 export type DashboardRpcQuotaNotificationKind = "low" | "exhausted" | "reset" | "provider-error";
 /**
@@ -300,14 +339,61 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
+function isAgentCustomProviderSnapshot(value: unknown): value is AgentCustomProviderSnapshot {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, ["revision", "providers"]) &&
+    typeof value.revision === "string" &&
+    /^[0-9a-f]{64}$/.test(value.revision) &&
+    Array.isArray(value.providers) &&
+    value.providers.every(
+      (provider) =>
+        isObject(provider) &&
+        hasExactKeys(provider, ["id", "definition", "approved", "enabled"]) &&
+        typeof provider.id === "string" &&
+        /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(provider.id) &&
+        isJsonValue(provider.definition) &&
+        typeof provider.approved === "boolean" &&
+        typeof provider.enabled === "boolean",
+    )
+  );
+}
+
+function isAgentCustomProviderTestResult(value: unknown): value is AgentCustomProviderTestResult {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, ["id", "status", "reason", "trusted", "enabled"]) &&
+    typeof value.id === "string" &&
+    /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(value.id) &&
+    (value.status === "passed" || value.status === "failed" || value.status === "not-applicable") &&
+    (value.reason === "provider-responded" ||
+      value.reason === "provider-rejected" ||
+      value.reason === "unsafe-endpoint" ||
+      value.reason === "local-estimate") &&
+    typeof value.trusted === "boolean" &&
+    typeof value.enabled === "boolean"
+  );
+}
+
+function checkAgentCustomProviderActionInput(value: unknown): string | null {
+  if (!isObject(value) || !hasExactKeys(value, ["id", "expectedRevision"])) {
+    return "input must contain only id and expectedRevision";
+  }
+  if (typeof value.id !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(value.id)) {
+    return "id must be a provider id";
+  }
+  return typeof value.expectedRevision === "string" && /^[0-9a-f]{64}$/.test(value.expectedRevision)
+    ? null
+    : "expectedRevision must be a canonical config revision";
+}
+
 function checkRange(value: Record<string, unknown>): string | null {
   return isRangeKey(value.range) ? null : "range must be one of 24h, 7d, 30d, lifetime";
 }
 
 /**
- * The explicit typed dashboard RPC. Every method maps to one `DashboardDataSource`
- * operation (plus the transport-lifecycle `watch` method); there is deliberately
- * no generic dispatch/call method.
+ * The explicit typed dashboard RPC. Methods map to a dashboard data-source or
+ * user settings-store operation (plus `watch`); there is no generic dispatch.
  */
 export const DashboardRpc = {
   id: DASHBOARD_RPC_ID,
@@ -315,8 +401,15 @@ export const DashboardRpc = {
     invalidated: {
       schema: eventSchema<DashboardRpcEventData>((value) => {
         if (!isObject(value)) return "event must be an object";
-        if (!hasOnlyKeys(value, ["topic", "at", "scope"])) {
-          return "event must contain only topic, at and scope";
+        if (!hasOnlyKeys(value, ["topic", "at", "scope", "cacheObserverEvent"])) {
+          return "event must contain only topic, at, scope and cacheObserverEvent";
+        }
+        if (!Number.isFinite(value.at)) return "at must be a finite number";
+        if (value.topic === "cache.observer") {
+          if (value.scope !== undefined) return "cache observer events cannot have a scope";
+          return isDashboardRpcCacheObserverEvent(value.cacheObserverEvent)
+            ? null
+            : "cache.observer topic requires a valid cache observer payload";
         }
         if (
           value.topic !== "quota.changed" &&
@@ -325,9 +418,11 @@ export const DashboardRpc = {
         ) {
           return "topic must be a dashboard event topic";
         }
-        if (!Number.isFinite(value.at)) return "at must be a finite number";
         if (value.scope !== undefined && value.scope !== "visibility") {
           return "scope must be visibility";
+        }
+        if (value.cacheObserverEvent !== undefined) {
+          return "cache observer payload requires the cache.observer topic";
         }
         return null;
       }),
@@ -421,6 +516,35 @@ export const DashboardRpc = {
     settings: {
       input: NO_INPUT,
       output: output(isSettingsSnapshot),
+      errors: DASHBOARD_RPC_ERRORS,
+    },
+    agentCustomProviders: {
+      input: NO_INPUT,
+      output: output(isAgentCustomProviderSnapshot),
+      errors: DASHBOARD_RPC_ERRORS,
+    },
+    approveAgentCustomProvider: {
+      input: schema<DashboardRpcAgentCustomProviderInput>(checkAgentCustomProviderActionInput),
+      output: output(isAgentCustomProviderSnapshot),
+      errors: DASHBOARD_RPC_ERRORS,
+    },
+    setAgentCustomProviderEnabled: {
+      input: schema<DashboardRpcSetAgentCustomProviderEnabledInput>((value) => {
+        if (!isObject(value) || !hasExactKeys(value, ["id", "enabled", "expectedRevision"])) {
+          return "input must contain only id, enabled and expectedRevision";
+        }
+        if (typeof value.enabled !== "boolean") return "enabled must be a boolean";
+        return checkAgentCustomProviderActionInput({
+          id: value.id,
+          expectedRevision: value.expectedRevision,
+        });
+      }),
+      output: output(isAgentCustomProviderSnapshot),
+      errors: DASHBOARD_RPC_ERRORS,
+    },
+    testApprovedAgentCustomProvider: {
+      input: schema<DashboardRpcAgentCustomProviderInput>(checkAgentCustomProviderActionInput),
+      output: output(isAgentCustomProviderTestResult),
       errors: DASHBOARD_RPC_ERRORS,
     },
     saveSettings: {
@@ -521,4 +645,102 @@ export function isDashboardRpcQuotaNotificationData(
   }
   if (!isSafeNotificationText(value.title, 200)) return false;
   return value.description === undefined || isSafeNotificationText(value.description, 1024);
+}
+
+/** Strict runtime validation for the narrow, content-free cache observer event DTO. */
+export function isDashboardRpcCacheObserverEvent(
+  value: unknown,
+): value is DashboardRpcCacheObserverEvent {
+  if (!isObject(value) || typeof value.type !== "string") return false;
+
+  if (value.type === "source.status") {
+    return (
+      hasExactKeys(value, ["type", "created", "data"]) &&
+      Number.isFinite(value.created) &&
+      isObject(value.data) &&
+      hasExactKeys(value.data, ["state"]) &&
+      (value.data.state === "observed" ||
+        value.data.state === "unavailable" ||
+        value.data.state === "stopped")
+    );
+  }
+
+  if (value.type === "session.step.ended") {
+    if (!hasExactKeys(value, ["type", "created", "data"]) || !isObject(value.data)) return false;
+    if (
+      !Number.isFinite(value.created) ||
+      !hasExactKeys(value.data, ["sessionID", "assistantMessageID", "tokens"]) ||
+      typeof value.data.sessionID !== "string" ||
+      !isValidResourceId(value.data.sessionID) ||
+      typeof value.data.assistantMessageID !== "string" ||
+      !isValidResourceId(value.data.assistantMessageID) ||
+      !isObject(value.data.tokens) ||
+      !hasOnlyKeys(value.data.tokens, ["input", "cache"])
+    ) {
+      return false;
+    }
+    const tokens = value.data.tokens;
+    if (
+      tokens.input !== undefined &&
+      (!Number.isFinite(tokens.input) || (tokens.input as number) < 0)
+    ) {
+      return false;
+    }
+    if (tokens.cache === undefined) return true;
+    if (!isObject(tokens.cache) || !hasOnlyKeys(tokens.cache, ["read", "write"])) return false;
+    return [tokens.cache.read, tokens.cache.write].every(
+      (count) => count === undefined || (Number.isFinite(count) && (count as number) >= 0),
+    );
+  }
+
+  if (value.type === "session.created") {
+    return (
+      hasExactKeys(value, ["type", "data"]) &&
+      isObject(value.data) &&
+      hasExactKeys(value.data, ["sessionID", "parentID"]) &&
+      typeof value.data.sessionID === "string" &&
+      isValidResourceId(value.data.sessionID) &&
+      typeof value.data.parentID === "string" &&
+      isValidResourceId(value.data.parentID)
+    );
+  }
+
+  if (value.type === "session.forked") {
+    return (
+      hasExactKeys(value, ["type", "data"]) &&
+      isObject(value.data) &&
+      hasOnlyKeys(value.data, ["sessionID", "parentID"]) &&
+      typeof value.data.sessionID === "string" &&
+      isValidResourceId(value.data.sessionID) &&
+      (value.data.parentID === undefined ||
+        (typeof value.data.parentID === "string" && isValidResourceId(value.data.parentID)))
+    );
+  }
+
+  if (value.type !== "session.compaction.ended" && value.type !== "session.deleted") return false;
+  return (
+    hasExactKeys(value, ["type", "data"]) &&
+    isObject(value.data) &&
+    hasExactKeys(value.data, ["sessionID"]) &&
+    typeof value.data.sessionID === "string" &&
+    isValidResourceId(value.data.sessionID)
+  );
+}
+
+/** Strict guard for cache observer DTOs wrapped in the existing invalidation event envelope. */
+export function isDashboardRpcCacheObserverEventData(
+  value: unknown,
+): value is DashboardRpcEventData & {
+  topic: "cache.observer";
+  cacheObserverEvent: DashboardRpcCacheObserverEvent;
+} {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, ["topic", "at", "cacheObserverEvent"]) &&
+    value.topic === "cache.observer" &&
+    typeof value.at === "number" &&
+    Number.isFinite(value.at) &&
+    value.at >= 0 &&
+    isDashboardRpcCacheObserverEvent(value.cacheObserverEvent)
+  );
 }

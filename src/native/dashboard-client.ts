@@ -16,6 +16,8 @@
  */
 
 import type {
+  AgentCustomProviderSnapshot,
+  AgentCustomProviderTestResult,
   AnalyticsGroupQuery,
   AnalyticsGroupSnapshot,
   DashboardDataSource,
@@ -33,13 +35,17 @@ import type {
 import { isDashboardEvent } from "../contracts/guards.js";
 import type { RangeKey } from "../contracts/ranges.js";
 import type {
+  DashboardRpcAgentCustomProviderInput,
+  DashboardRpcCacheObserverEvent,
   DashboardRpcEventData,
   DashboardRpcNoInput,
   DashboardRpcQuotaNotificationData,
+  DashboardRpcSetAgentCustomProviderEnabledInput,
   DashboardRpcViewScope,
   DashboardRpcWatchInput,
   DashboardRpcWatchOutput,
 } from "../rpc.js";
+import { isDashboardRpcCacheObserverEvent } from "../rpc.js";
 
 export type NativeDashboardConnection = "connecting" | "live" | "reconnecting" | "closed";
 
@@ -91,6 +97,22 @@ export interface DashboardRpcCaller {
     input: DashboardRpcNoInput,
     options?: DashboardRpcCallOptions,
   ): Promise<{ opened: true }>;
+  agentCustomProviders(
+    input: DashboardRpcNoInput,
+    options?: DashboardRpcCallOptions,
+  ): Promise<AgentCustomProviderSnapshot>;
+  approveAgentCustomProvider(
+    input: DashboardRpcAgentCustomProviderInput,
+    options?: DashboardRpcCallOptions,
+  ): Promise<AgentCustomProviderSnapshot>;
+  setAgentCustomProviderEnabled(
+    input: DashboardRpcSetAgentCustomProviderEnabledInput,
+    options?: DashboardRpcCallOptions,
+  ): Promise<AgentCustomProviderSnapshot>;
+  testApprovedAgentCustomProvider(
+    input: DashboardRpcAgentCustomProviderInput,
+    options?: DashboardRpcCallOptions,
+  ): Promise<AgentCustomProviderTestResult>;
   watch(
     input: DashboardRpcWatchInput,
     options?: DashboardRpcCallOptions,
@@ -108,11 +130,26 @@ export interface DashboardRpcCaller {
 }
 
 export interface NativeDashboardClient extends DashboardDataSource {
+  /** User-only proposal review seam: agent tools receive no approval or enable RPC. */
+  agentCustomProviders(): Promise<AgentCustomProviderSnapshot>;
+  approveAgentCustomProvider(
+    input: DashboardRpcAgentCustomProviderInput,
+  ): Promise<AgentCustomProviderSnapshot>;
+  setAgentCustomProviderEnabled(
+    input: DashboardRpcSetAgentCustomProviderEnabledInput,
+  ): Promise<AgentCustomProviderSnapshot>;
+  testApprovedAgentCustomProvider(
+    input: DashboardRpcAgentCustomProviderInput,
+  ): Promise<AgentCustomProviderTestResult>;
   /** Current transport state; last known product data remains usable as stale. */
   connection(): NativeDashboardConnection;
   onConnectionChange(listener: (state: NativeDashboardConnection) => void): () => void;
   /** Called after successful transport recovery; consumers refetch here. */
   onReconnect(listener: () => void): () => void;
+  /** Observes cache events on the existing invalidation stream, without activating transport. */
+  subscribeCacheObserverEvent(
+    listener: (event: DashboardRpcCacheObserverEvent) => void,
+  ): () => void;
   /** Explicit recovery: re-subscribe, reacquire the viewer and refetch. */
   reconnect(): Promise<void>;
   /** Suspend transport resources while the host server is known to be down. */
@@ -150,6 +187,7 @@ export function createNativeDashboardClient(
 ): NativeDashboardClient {
   const rpc = options.rpc;
   const listeners = new Set<(event: DashboardEvent) => void>();
+  const cacheObserverListeners = new Set<(event: DashboardRpcCacheObserverEvent) => void>();
   const stateListeners = new Set<(state: NativeDashboardConnection) => void>();
   const reconnectListeners = new Set<() => void>();
   interface Attempt {
@@ -240,10 +278,26 @@ export function createNativeDashboardClient(
       for await (const event of rpc.events.subscribe("invalidated", { signal })) {
         if (!isCurrent(attempt)) return;
         const data = event.data;
+        if (data.topic === "cache.observer") {
+          if (!isDashboardRpcCacheObserverEvent(data.cacheObserverEvent)) continue;
+          for (const listener of Array.from(cacheObserverListeners)) {
+            try {
+              listener(data.cacheObserverEvent);
+            } catch {
+              // A cache observer failure never breaks the shared event stream.
+            }
+          }
+          continue;
+        }
         if (!isDashboardEvent(data)) continue;
+        const dashboardEvent: DashboardEvent = {
+          topic: data.topic,
+          at: data.at,
+          ...(data.scope === undefined ? {} : { scope: data.scope }),
+        };
         for (const listener of Array.from(listeners)) {
           try {
-            listener(data);
+            listener(dashboardEvent);
           } catch {
             // A subscriber failure never breaks the event stream.
           }
@@ -378,6 +432,18 @@ export function createNativeDashboardClient(
     async openSettingsFile() {
       await rpc.openSettingsFile({});
     },
+    async agentCustomProviders() {
+      return rpc.agentCustomProviders({});
+    },
+    async approveAgentCustomProvider(input) {
+      return rpc.approveAgentCustomProvider(input);
+    },
+    async setAgentCustomProviderEnabled(input) {
+      return rpc.setAgentCustomProviderEnabled(input);
+    },
+    async testApprovedAgentCustomProvider(input) {
+      return rpc.testApprovedAgentCustomProvider(input);
+    },
 
     connection: () => state,
 
@@ -389,6 +455,11 @@ export function createNativeDashboardClient(
     onReconnect(listener) {
       reconnectListeners.add(listener);
       return () => reconnectListeners.delete(listener);
+    },
+
+    subscribeCacheObserverEvent(listener) {
+      cacheObserverListeners.add(listener);
+      return () => cacheObserverListeners.delete(listener);
     },
 
     reconnect,
@@ -454,6 +525,7 @@ export function createNativeDashboardClient(
       closed = true;
       retireAttempt();
       listeners.clear();
+      cacheObserverListeners.clear();
       stateListeners.clear();
       reconnectListeners.clear();
       setConnection("closed");

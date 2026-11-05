@@ -54,6 +54,10 @@ describe("dashboard RPC definition", () => {
       "project",
       "session",
       "settings",
+      "agentCustomProviders",
+      "approveAgentCustomProvider",
+      "setAgentCustomProviderEnabled",
+      "testApprovedAgentCustomProvider",
       "saveSettings",
       "saveVisibility",
       "importPreview",
@@ -83,6 +87,7 @@ describe("dashboard RPC definition", () => {
       "health",
       "quota",
       "settings",
+      "agentCustomProviders",
       "importPreview",
       "openSettingsFile",
     ] as const) {
@@ -94,6 +99,51 @@ describe("dashboard RPC definition", () => {
       await expectRejected(input, null, "input must be an empty object");
       await expectRejected(input, { extra: true }, "input must be an empty object");
     }
+  });
+
+  it("validates user-only custom provider review inputs and sanitized outputs", async () => {
+    const revision = "a".repeat(64);
+    const action = { id: "acme-quota", expectedRevision: revision };
+    await expectAccepted(methods.approveAgentCustomProvider.input, action);
+    await expectAccepted(methods.testApprovedAgentCustomProvider.input, action);
+    await expectAccepted(methods.setAgentCustomProviderEnabled.input, {
+      ...action,
+      enabled: true,
+    });
+    await expectRejected(
+      methods.approveAgentCustomProvider.input,
+      { id: "acme-quota", expectedRevision: "stale" },
+      "expectedRevision must be a canonical config revision",
+    );
+    await expectRejected(
+      methods.setAgentCustomProviderEnabled.input,
+      { ...action, enabled: "yes" },
+      "enabled must be a boolean",
+    );
+
+    await expectAccepted(methods.agentCustomProviders.output, {
+      revision,
+      providers: [
+        {
+          id: "acme-quota",
+          definition: {
+            id: "acme-quota",
+            providerId: "acme",
+            mode: "remote-api",
+            url: "https://quota.example.test/v1/quota",
+            format: "quota-v1",
+            apiKeyEnv: "ACME_KEY",
+          },
+          approved: false,
+          enabled: false,
+        },
+      ],
+    });
+    await expectRejected(
+      methods.agentCustomProviders.output,
+      { revision, providers: [{ id: "acme-quota", secret: "must not cross" }] },
+      "output does not match the dashboard contract",
+    );
   });
 
   it("validates home, project and session resource inputs", async () => {
@@ -273,7 +323,88 @@ describe("dashboard RPC definition", () => {
     await expectRejected(
       schema,
       { topic: "quota.changed", at: 1, extra: true },
-      "event must contain only topic, at and scope",
+      "event must contain only topic, at, scope and cacheObserverEvent",
+    );
+  });
+
+  it("validates minimal cache observer payloads on their isolated event topic", async () => {
+    const schema = DashboardRpc.events.invalidated.schema;
+    const cacheObserverEvent = {
+      type: "session.step.ended",
+      created: 3,
+      data: {
+        sessionID: "ses-1",
+        assistantMessageID: "msg-1",
+        tokens: { input: 0, cache: { read: 0 } },
+      },
+    };
+
+    await expectAccepted(schema, {
+      topic: "cache.observer",
+      at: 3,
+      cacheObserverEvent,
+    });
+    await expectAccepted(schema, {
+      topic: "cache.observer",
+      at: 4,
+      cacheObserverEvent: {
+        type: "source.status",
+        created: 4,
+        data: { state: "observed" },
+      },
+    });
+    await expectAccepted(schema, {
+      topic: "cache.observer",
+      at: 5,
+      cacheObserverEvent: {
+        type: "session.created",
+        data: { sessionID: "ses-child", parentID: "ses-root" },
+      },
+    });
+    await expectAccepted(schema, {
+      topic: "cache.observer",
+      at: 6,
+      cacheObserverEvent: {
+        type: "session.forked",
+        data: { sessionID: "ses-fork", parentID: "ses-root" },
+      },
+    });
+    await expectRejected(
+      schema,
+      { topic: "cache.observer", at: 3 },
+      "cache.observer topic requires a valid cache observer payload",
+    );
+    await expectRejected(
+      schema,
+      { topic: "sessions.changed", at: 3, cacheObserverEvent },
+      "cache observer payload requires the cache.observer topic",
+    );
+    await expectRejected(
+      schema,
+      {
+        topic: "cache.observer",
+        at: 3,
+        cacheObserverEvent: {
+          ...cacheObserverEvent,
+          data: { ...cacheObserverEvent.data, prompt: "must never cross the RPC boundary" },
+        },
+      },
+      "cache.observer topic requires a valid cache observer payload",
+    );
+    await expectRejected(
+      schema,
+      {
+        topic: "cache.observer",
+        at: 3,
+        cacheObserverEvent: {
+          ...cacheObserverEvent,
+          data: {
+            ...cacheObserverEvent.data,
+            tokens: { ...cacheObserverEvent.data.tokens, output: 99 },
+          },
+        },
+      },
+      "cache.observer topic requires a valid cache observer payload",
     );
   });
 
