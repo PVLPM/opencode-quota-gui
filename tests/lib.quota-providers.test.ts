@@ -885,39 +885,58 @@ describe("quotaProviders schema", () => {
     expect(normalizeJsonV1Timestamp(253_402_300_800_000, "unix-milliseconds")).toBeNull();
   });
 
-  it("rejects local-estimate tuning for Alibaba Coding Plan runtime providers", () => {
+  it("ignores retired Alibaba local estimates without dropping other quota providers", () => {
     const windows = [
       { id: "five-hour", type: "rolling", durationMinutes: 300, requestLimit: 2000 },
       { id: "weekly", type: "rolling", durationMinutes: 10080, requestLimit: 10000 },
       { id: "monthly", type: "rolling", durationMinutes: 43200, requestLimit: 20000 },
     ];
 
-    for (const providerId of ["alibaba-coding-plan", "alibaba"]) {
-      const result = validateQuotaProviders([
-        {
-          id: "custom-alibaba-estimate",
-          providerId,
-          mode: "local-estimate",
-          windows,
-        },
-      ]);
+    const result = validateQuotaProviders([
+      {
+        id: "custom-alibaba-plan-estimate",
+        providerId: "alibaba-coding-plan",
+        mode: "local-estimate",
+        windows,
+      },
+      {
+        id: "custom-alibaba-alias-estimate",
+        providerId: "alibaba",
+        mode: "local-estimate",
+        windows,
+      },
+      {
+        id: "alibaba-coding-plan",
+        mode: "local-estimate",
+        windows,
+      },
+      quotaProvider({ id: "retained-provider" }),
+    ]);
 
-      expect(result.issues).toContainEqual(
-        expect.objectContaining({
-          key: "quotaProviders[0].providerId",
-          message: expect.stringContaining("Bailian CLI"),
-        }),
-      );
-    }
+    expect(result.issues).toEqual([]);
+    expect(result.value?.map(({ id, mode }) => ({ id, mode }))).toEqual([
+      { id: "retained-provider", mode: "remote-api" },
+    ]);
+  });
 
-    expect(
-      validateQuotaProviders([
-        {
-          id: "alibaba-coding-plan",
-          mode: "local-estimate",
-          windows,
-        },
-      ]).issues,
-    ).not.toEqual([]);
+  it("keeps original validation indexes after skipping retired Alibaba estimates", () => {
+    const result = validateQuotaProviders([
+      quotaProvider({ id: "valid-provider" }),
+      {
+        id: "custom-alibaba-plan-estimate",
+        providerId: "alibaba-coding-plan",
+        mode: "local-estimate",
+        windows: [{ id: "daily", type: "utc-day", requestLimit: 1000 }],
+      },
+      quotaProvider({ id: "invalid-provider", providerId: "INVALID" }),
+    ]);
+
+    expect(result.value).toBeUndefined();
+    expect(result.issues).toEqual([
+      {
+        key: "quotaProviders[2].providerId",
+        message: "expected 1-64 lowercase provider-id characters",
+      },
+    ]);
   });
 });

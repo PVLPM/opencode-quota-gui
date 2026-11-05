@@ -12,10 +12,11 @@ export const QUOTA_PROVIDERS_AGGREGATE_ID = "quota-providers";
 export const MAINTAINED_LOCAL_ESTIMATE_IDS = [] as const;
 const LOCAL_ESTIMATE_PROVIDER_IDS_WITHOUT_ESTIMATES = new Set(["alibaba", "alibaba-coding-plan"]);
 
-function hasUnsupportedAlibabaLocalEstimate(definition: QuotaProviderDefinition): boolean {
+function hasUnsupportedAlibabaLocalEstimate(definition: unknown): boolean {
+  if (!isPlainObject(definition) || definition.mode !== "local-estimate") return false;
+  const providerId = hasOwnKey(definition, "providerId") ? definition.providerId : definition.id;
   return (
-    definition.mode === "local-estimate" &&
-    LOCAL_ESTIMATE_PROVIDER_IDS_WITHOUT_ESTIMATES.has(definition.providerId)
+    typeof providerId === "string" && LOCAL_ESTIMATE_PROVIDER_IDS_WITHOUT_ESTIMATES.has(providerId)
   );
 }
 
@@ -1293,6 +1294,7 @@ export function validateQuotaProviders(value: unknown): QuotaProvidersValidation
       issues.push({ key: providerKey, message: "expected an object" });
       continue;
     }
+    if (hasUnsupportedAlibabaLocalEstimate(raw)) continue;
 
     const issueStart = issues.length;
     const mode = raw.mode;
@@ -1364,18 +1366,6 @@ export function validateQuotaProviders(value: unknown): QuotaProvidersValidation
       });
     } else {
       providerId = raw.providerId;
-    }
-
-    if (
-      mode === "local-estimate" &&
-      providerId !== undefined &&
-      LOCAL_ESTIMATE_PROVIDER_IDS_WITHOUT_ESTIMATES.has(providerId)
-    ) {
-      issues.push({
-        key: `${providerKey}.providerId`,
-        message:
-          "local-estimate is not supported for Alibaba Coding Plan; use the Bailian CLI quota source",
-      });
     }
 
     const label = normalizeLabel(raw.label, idValid ? id : undefined);

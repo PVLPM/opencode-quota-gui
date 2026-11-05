@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -300,7 +300,8 @@ describe("provider add global config workflow", () => {
           ],
         },
       }),
-    ).rejects.toThrow("Bailian CLI");
+    ).rejects.toThrow("definition is not a supported quota provider");
+    expect(await readdir(dir)).toEqual([]);
   });
 
   it("rejects old customSources instead of migrating or aliasing it", async () => {

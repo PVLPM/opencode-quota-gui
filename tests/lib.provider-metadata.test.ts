@@ -63,10 +63,10 @@ describe("provider-metadata", () => {
       },
       {
         id: "alibaba-coding-plan",
-        autoSetup: "yes",
-        authentication: "opencode_auth_api_key",
-        authFallbacks: ["env_api_key", "global_opencode_config"],
-        quota: "local_estimation",
+        autoSetup: "needs_quick_setup",
+        authentication: "local_cli_auth",
+        quota: "local_cli_report",
+        quickSetupAnchor: "alibaba-coding-plan",
       },
       {
         id: "alibaba-token-plan",
@@ -400,10 +400,10 @@ describe("provider-metadata", () => {
     });
     expect(getQuotaProviderShape("alibaba")).toEqual({
       id: "alibaba-coding-plan",
-      autoSetup: "yes",
-      authentication: "opencode_auth_api_key",
-      authFallbacks: ["env_api_key", "global_opencode_config"],
-      quota: "local_estimation",
+      autoSetup: "needs_quick_setup",
+      authentication: "local_cli_auth",
+      quota: "local_cli_report",
+      quickSetupAnchor: "alibaba-coding-plan",
     });
     expect(getQuotaProviderShape("alibaba-token-plan")).toEqual({
       id: "alibaba-token-plan",
