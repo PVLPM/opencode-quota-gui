@@ -1802,6 +1802,77 @@ describe("Claude CLI diagnostics", () => {
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
+  it("shares in-flight OAuth usage requests across module instances", async () => {
+    let resolveFetch!: (response: Response) => void;
+    fetchResponseMock.mockReturnValue(
+      new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      }),
+    );
+
+    const first = queryAnthropicQuotaWithOAuth("shared-oauth-token");
+    await vi.waitFor(() => expect(fetchResponseMock).toHaveBeenCalledTimes(1));
+
+    vi.resetModules();
+    const secondModule = await import("../src/lib/anthropic.js");
+    const second = secondModule.queryAnthropicQuotaWithOAuth("shared-oauth-token");
+    await Promise.resolve();
+    expect(fetchResponseMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch(
+      mockJsonResponse({
+        five_hour: { utilization: 10 },
+        seven_day: { utilization: 20 },
+      }),
+    );
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(firstResult).toEqual({
+      success: true,
+      five_hour: { percentRemaining: 90, resetTimeIso: undefined },
+      seven_day: { percentRemaining: 80, resetTimeIso: undefined },
+    });
+    expect(secondResult).toEqual(firstResult);
+    expect(fetchResponseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares OAuth cooldown and recent success across instances per token", async () => {
+    fetchResponseMock
+      .mockResolvedValueOnce(mockOAuthResponse(429, "rate limited", "900"))
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          five_hour: { utilization: 10 },
+          seven_day: { utilization: 20 },
+        }),
+      );
+
+    const blocked = await queryAnthropicQuotaWithOAuth("opencode-account-token");
+    expect(blocked?.success).toBe(false);
+
+    vi.resetModules();
+    const secondModule = await import("../src/lib/anthropic.js");
+    const stillBlocked = await secondModule.queryAnthropicQuotaWithOAuth("opencode-account-token");
+    expect(stillBlocked?.success).toBe(false);
+    expect(fetchResponseMock).toHaveBeenCalledTimes(1);
+
+    const claudeCredentialQuota = await secondModule.queryAnthropicQuotaWithOAuth(
+      "claude-credentials-token",
+    );
+    expect(claudeCredentialQuota).toEqual({
+      success: true,
+      five_hour: { percentRemaining: 90, resetTimeIso: undefined },
+      seven_day: { percentRemaining: 80, resetTimeIso: undefined },
+    });
+    expect(fetchResponseMock).toHaveBeenCalledTimes(2);
+
+    vi.resetModules();
+    const thirdModule = await import("../src/lib/anthropic.js");
+    await expect(
+      thirdModule.queryAnthropicQuotaWithOAuth("claude-credentials-token"),
+    ).resolves.toEqual(claudeCredentialQuota);
+    expect(fetchResponseMock).toHaveBeenCalledTimes(2);
+  });
+
   it("does not apply an old token cooldown to a newly observed token", async () => {
     setProcessPlatform("linux");
     mockExecSequence(authenticatedWithoutQuotaSteps(2));

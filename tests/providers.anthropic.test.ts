@@ -455,6 +455,73 @@ describe("anthropic provider", () => {
     });
   });
 
+  it("keeps per-account OAuth failures and quota rows separate in Claude Code all-provider mode", async () => {
+    const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
+      "../src/lib/anthropic.js"
+    );
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "anthropic-personal",
+        integrationId: "anthropic",
+        label: "Personal",
+        active: true,
+        value: { type: "oauth", access: "personal-token" },
+      },
+      {
+        id: "anthropic-work",
+        integrationId: "anthropic",
+        label: "Work",
+        active: false,
+        value: { type: "oauth", access: "work-token" },
+      },
+    ]);
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+    });
+    (queryAnthropicQuotaWithOAuth as any)
+      .mockResolvedValueOnce({
+        success: false,
+        error: "Anthropic OAuth usage probe paused after HTTP 429; retry in 900s.",
+        failureCategory: "provider_api",
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        five_hour: { percentRemaining: 60 },
+      });
+
+    const ctx = createProviderAvailabilityContext({
+      providerIds: ["anthropic", "claude-code"],
+      configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: false },
+    });
+    const out = await anthropicProvider.fetch(ctx);
+
+    expect(queryAnthropicQuotaWithOAuth).toHaveBeenNthCalledWith(1, "personal-token", undefined);
+    expect(queryAnthropicQuotaWithOAuth).toHaveBeenNthCalledWith(2, "work-token", undefined);
+    expect(out.accounts?.map((account) => account.sourceId)).toEqual([
+      "anthropic-personal",
+      "anthropic-work",
+    ]);
+    expect(out.errors).toEqual([
+      expect.objectContaining({
+        sourceId: "anthropic-personal",
+        failureCategory: "provider_api",
+        message: "Anthropic OAuth usage probe paused after HTTP 429; retry in 900s.",
+      }),
+    ]);
+    expect(out.entries.map((entry) => [entry.accounting.sourceId, entry.percentRemaining])).toEqual(
+      [["anthropic-work", 60]],
+    );
+    expect(getAnthropicDiagnostics).toHaveBeenCalledWith({
+      binaryPath: undefined,
+      requestTimeoutMs: undefined,
+    });
+  });
+
   it("reports enabled Usage Credits as a third remote API quota row", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuota } = await import(
       "../src/lib/anthropic.js"

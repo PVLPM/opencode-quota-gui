@@ -199,12 +199,35 @@ type ParsedAuthProbe = {
   unsupportedCommand?: boolean;
 };
 
-const anthropicOAuthCooldowns = new Map<string, AnthropicOAuthCooldown>();
-const anthropicOAuthInFlight = new Map<string, Promise<AnthropicFallbackQuota>>();
-const anthropicOAuthRecent = new Map<
-  string,
-  { quota: AnthropicQuotaResult; checkedAtMs: number }
->();
+type AnthropicOAuthSharedState = {
+  cooldowns: Map<string, AnthropicOAuthCooldown>;
+  inFlight: Map<string, Promise<AnthropicFallbackQuota>>;
+  recent: Map<string, { quota: AnthropicQuotaResult; checkedAtMs: number }>;
+};
+
+const ANTHROPIC_OAUTH_SHARED_STATE_KEY = Symbol.for(
+  "opencode-quota-gui.anthropic-oauth-shared-state.v1",
+);
+const anthropicOAuthGlobal = globalThis as unknown as Record<PropertyKey, unknown>;
+let anthropicOAuthSharedState = anthropicOAuthGlobal[ANTHROPIC_OAUTH_SHARED_STATE_KEY] as
+  | AnthropicOAuthSharedState
+  | undefined;
+if (anthropicOAuthSharedState === undefined) {
+  anthropicOAuthSharedState = {
+    cooldowns: new Map<string, AnthropicOAuthCooldown>(),
+    inFlight: new Map<string, Promise<AnthropicFallbackQuota>>(),
+    recent: new Map<string, { quota: AnthropicQuotaResult; checkedAtMs: number }>(),
+  };
+  Object.defineProperty(anthropicOAuthGlobal, ANTHROPIC_OAUTH_SHARED_STATE_KEY, {
+    value: anthropicOAuthSharedState,
+    configurable: true,
+    writable: true,
+  });
+}
+
+const anthropicOAuthCooldowns = anthropicOAuthSharedState.cooldowns;
+const anthropicOAuthInFlight = anthropicOAuthSharedState.inFlight;
+const anthropicOAuthRecent = anthropicOAuthSharedState.recent;
 
 export function resolveAnthropicBinaryPath(binaryPath?: string): string {
   const trimmed = binaryPath?.trim();
