@@ -648,6 +648,20 @@ describe("provider logo cleanup", () => {
 });
 
 describe("quota card provider logos", () => {
+  it("offers an accessible card-local copy action", async () => {
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: quotaCard(),
+      preferences,
+      hiddenRows: [],
+      stale: false,
+      timeZone: "UTC",
+    });
+    expect(html).toContain('class="qg-card__copy"');
+    expect(html).toContain('aria-label="Copy quota summary for OpenCode Go, Work"');
+    // An output element has the implicit status role and polite live-region semantics.
+    expect(html).toContain('<output class="sr-only">');
+  });
+
   it("preserves provider, plan, account, row order and visibility", async () => {
     const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
       card: quotaCard(),
@@ -665,7 +679,7 @@ describe("quota card provider logos", () => {
     expect(identity).toContain("Work");
     expect(identity).toContain('data-provider-logo="opencode-go-g"');
     expect(identity).toContain("/assets/providers/opencode-go-g.svg");
-    expect(identity).not.toContain("<svg");
+    expect(identity).not.toContain("<svg data-provider-logo");
     expect(html).not.toMatch(REMOTE_URL);
     expect(html.indexOf("Five hour window")).toBeLessThan(html.indexOf("Weekly window"));
 
@@ -759,7 +773,7 @@ describe("quota card provider logos", () => {
     expect(html).toContain('data-provider-logo="generic"');
     expect(html).toContain("/assets/providers/generic.svg");
     expect(html).not.toContain("../../etc/passwd.svg");
-    expect(html).not.toContain("<svg");
+    expect(html).not.toContain("<svg data-provider-logo");
     expect(html).not.toMatch(REMOTE_URL);
   });
 });

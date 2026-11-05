@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { createMemo, For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { ProviderCard, QuotaCardRow } from "../../contracts/dashboard";
 import type { BankedResetAvailability, BankedResetCredit } from "../../contracts/openai-quota";
 import { formatRunway, formatTimestamp } from "../format";
@@ -280,6 +280,36 @@ export function QuotaCardView(props: {
   const shownRows = () => visibleRows(props.card.rows, props.hiddenRows);
   const displayRows = () =>
     shownRows().filter((row) => !isSuppressedOptionalRow(row, props.card.providerId));
+  const [copyStatus, setCopyStatus] = createSignal("");
+
+  async function copySummary(): Promise<void> {
+    const identity = [
+      props.card.providerLabel,
+      props.card.planLabel,
+      props.card.accountLabel
+        ? inlineAccountLabel(props.card.providerLabel, props.card.accountLabel)
+        : undefined,
+    ]
+      .filter((part) => part !== undefined && part.length > 0)
+      .join(" · ");
+    const lines = displayRows().map((row) => {
+      if (isOpenAiProvider(props.card.providerId) && isOpenAiResetsRow(row)) {
+        const segments = resetSegments(row.bankedResets);
+        return `${row.label}: ${segments.length} available · ${resetSummary(segments)}`;
+      }
+      const countdown = row.countdown ? ` · Resets in ${row.countdown}` : "";
+      const runway = props.preferences.showRunway
+        ? formatRunway(row.runway, props.timeZone)
+        : undefined;
+      return `${row.label}: ${rowValueText(row, props.preferences)}${countdown}${runway ? ` · ${runway}` : ""}`;
+    });
+    try {
+      await navigator.clipboard.writeText([identity, ...lines].join("\n"));
+      setCopyStatus("Quota summary copied.");
+    } catch {
+      setCopyStatus("Could not copy quota summary.");
+    }
+  }
 
   return (
     <article class="qg-card" data-error={props.card.errors.length > 0 ? "true" : undefined}>
@@ -304,6 +334,29 @@ export function QuotaCardView(props: {
             )}
           </Show>
         </div>
+        <button
+          type="button"
+          class="qg-card__copy"
+          aria-label={`Copy quota summary for ${props.card.providerLabel}${props.card.accountLabel ? `, ${inlineAccountLabel(props.card.providerLabel, props.card.accountLabel)}` : ""}`}
+          title="Copy quota summary"
+          onClick={() => void copySummary()}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="8" y="8" width="11" height="12" rx="2" />
+            <path d="M16 8V6a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1" />
+          </svg>
+        </button>
+        <output class="sr-only">{copyStatus()}</output>
       </header>
 
       <Show when={props.card.errors.length > 0}>
