@@ -126,9 +126,12 @@ function validVersion(value: unknown): value is string {
 function projectProviders(value: unknown): NativeSettingsCopyDiagnostics["providers"] {
   const input = asRecord(value);
   if (!input) return undefined;
-  const enabledCount = validCount(input.enabledCount) ? input.enabledCount : undefined;
-  const availableCount = validCount(input.availableCount) ? input.availableCount : undefined;
-  const status = isOneOf(input.status, PROBE_STATUSES) ? input.status : undefined;
+  const rawEnabledCount = input.enabledCount;
+  const rawAvailableCount = input.availableCount;
+  const rawStatus = input.status;
+  const enabledCount = validCount(rawEnabledCount) ? rawEnabledCount : undefined;
+  const availableCount = validCount(rawAvailableCount) ? rawAvailableCount : undefined;
+  const status = isOneOf(rawStatus, PROBE_STATUSES) ? rawStatus : undefined;
   const projected: {
     enabledCount?: number;
     availableCount?: number;
@@ -153,37 +156,47 @@ function projectProviders(value: unknown): NativeSettingsCopyDiagnostics["provid
 function projectQuota(value: unknown): NativeSettingsCopyDiagnostics["quota"] {
   const input = asRecord(value);
   if (!input) return undefined;
+  const source = input.source;
+  const status = input.status;
+  const stale = input.stale;
+  const providerCount = input.providerCount;
+  const cardCount = input.cardCount;
+  const errorCount = input.errorCount;
   const projected: Mutable<NonNullable<NativeSettingsCopyDiagnostics["quota"]>> = {};
-  if (isOneOf(input.source, ["remote-api", "local-estimate", "mixed"] as const)) {
-    projected.source = input.source;
-  }
-  if (isOneOf(input.status, PROBE_STATUSES)) projected.status = input.status;
-  if (typeof input.stale === "boolean") projected.stale = input.stale;
-  if (validCount(input.providerCount)) projected.providerCount = input.providerCount;
-  if (validCount(input.cardCount)) projected.cardCount = input.cardCount;
-  if (validCount(input.errorCount)) projected.errorCount = input.errorCount;
+  if (isOneOf(source, ["remote-api", "local-estimate", "mixed"] as const))
+    projected.source = source;
+  if (isOneOf(status, PROBE_STATUSES)) projected.status = status;
+  if (typeof stale === "boolean") projected.stale = stale;
+  if (validCount(providerCount)) projected.providerCount = providerCount;
+  if (validCount(cardCount)) projected.cardCount = cardCount;
+  if (validCount(errorCount)) projected.errorCount = errorCount;
   return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
 function projectConfiguration(value: unknown): NativeSettingsCopyDiagnostics["configuration"] {
   const input = asRecord(value);
   if (!input) return undefined;
+  const source = input.source;
+  const status = input.status;
+  const issueCount = input.issueCount;
   const projected: Mutable<NonNullable<NativeSettingsCopyDiagnostics["configuration"]>> = {};
-  if (isOneOf(input.source, ["defaults", "files"] as const)) projected.source = input.source;
-  if (isOneOf(input.status, ["ready", "issues", "unavailable"] as const)) {
-    projected.status = input.status;
+  if (isOneOf(source, ["defaults", "files"] as const)) projected.source = source;
+  if (isOneOf(status, ["ready", "issues", "unavailable"] as const)) {
+    projected.status = status;
   }
-  if (validCount(input.issueCount)) projected.issueCount = input.issueCount;
+  if (validCount(issueCount)) projected.issueCount = issueCount;
   return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
 function projectPricing(value: unknown): NativeSettingsCopyDiagnostics["pricing"] {
   const input = asRecord(value);
   if (!input) return undefined;
-  const source = isOneOf(input.source, ["runtime", "bundled", "empty"] as const)
-    ? input.source
+  const rawSource = input.source;
+  const rawStale = input.stale;
+  const source = isOneOf(rawSource, ["runtime", "bundled", "empty"] as const)
+    ? rawSource
     : undefined;
-  const stale = typeof input.stale === "boolean" ? input.stale : undefined;
+  const stale = typeof rawStale === "boolean" ? rawStale : undefined;
   const projected: Mutable<NonNullable<NativeSettingsCopyDiagnostics["pricing"]>> = {};
   if (source !== undefined) projected.source = source;
   if (source !== undefined && stale !== undefined) {
@@ -195,31 +208,33 @@ function projectPricing(value: unknown): NativeSettingsCopyDiagnostics["pricing"
 function sanitizePricingDto(value: unknown): NativeSettingsCopyDiagnostics["pricing"] {
   const input = asRecord(value);
   if (!input) return undefined;
+  const rawSource = input.source;
+  const status = input.status;
   const projected: Mutable<NonNullable<NativeSettingsCopyDiagnostics["pricing"]>> = {};
-  const source = isOneOf(input.source, ["runtime", "bundled", "empty"] as const)
-    ? input.source
+  const source = isOneOf(rawSource, ["runtime", "bundled", "empty"] as const)
+    ? rawSource
     : undefined;
   if (source !== undefined) projected.source = source;
-  if (source === "empty" && input.status === "unavailable") {
+  if (source === "empty" && status === "unavailable") {
     projected.status = "unavailable";
   } else if (
     (source === "runtime" || source === "bundled") &&
-    isOneOf(input.status, ["current", "stale"] as const)
+    isOneOf(status, ["current", "stale"] as const)
   ) {
-    projected.status = input.status;
+    projected.status = status;
   }
   return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
 function projectTemporal(value: unknown): NativeSettingsCopyDiagnostics["temporal"] {
   const input = asRecord(value);
-  if (
-    !input ||
-    !Array.isArray(input.providers) ||
-    input.providers.length > MAX_TEMPORAL_PROVIDERS
-  ) {
+  if (!input) {
     return undefined;
   }
+  const providers = input.providers;
+  if (!Array.isArray(providers)) return undefined;
+  const providersLength = providers.length;
+  if (providersLength > MAX_TEMPORAL_PROVIDERS) return undefined;
 
   const phases: Record<NativeSettingsCopyTemporalPhase, number> = {
     peak: 0,
@@ -229,18 +244,22 @@ function projectTemporal(value: unknown): NativeSettingsCopyDiagnostics["tempora
   };
   let providerCount = 0;
   let discoveredCount = 0;
-  for (const rawProvider of input.providers) {
+  for (let index = 0; index < providersLength; index += 1) {
+    const rawProvider = providers[index];
     const provider = asRecord(rawProvider);
-    if (!provider || typeof provider.discovered !== "boolean") continue;
-    if (!isOneOf(provider.phase, TEMPORAL_PHASES)) continue;
+    if (!provider) continue;
+    const discovered = provider.discovered;
+    const phase = provider.phase;
+    if (typeof discovered !== "boolean") continue;
+    if (!isOneOf(phase, TEMPORAL_PHASES)) continue;
     providerCount += 1;
-    if (provider.discovered) discoveredCount += 1;
-    phases[provider.phase] += 1;
+    if (discovered) discoveredCount += 1;
+    phases[phase] += 1;
   }
 
   // An explicitly empty list is trustworthy. If a non-empty list contains no
   // recognized records, its status is unknown, so do not report a false zero.
-  if (providerCount === 0 && input.providers.length > 0) return undefined;
+  if (providerCount === 0 && providersLength > 0) return undefined;
   return {
     status: providerCount === 0 ? "no_data" : "available",
     providerCount,
@@ -270,13 +289,20 @@ export function projectNativeSettingsCopyDiagnostics(
   try {
     const input = asRecord(source);
     if (!input) return projected;
-    if (validVersion(input.appVersion)) projected.appVersion = input.appVersion;
-    if (validVersion(input.hostVersion)) projected.hostVersion = input.hostVersion;
-    const providers = projectProviders(input.providerAvailability);
-    const quota = projectQuota(input.quota);
-    const configuration = projectConfiguration(input.configuration);
-    const pricing = projectPricing(input.pricing);
-    const temporal = projectTemporal(input.temporal);
+    const appVersion = input.appVersion;
+    const hostVersion = input.hostVersion;
+    const providerAvailability = input.providerAvailability;
+    const quotaValue = input.quota;
+    const configurationValue = input.configuration;
+    const pricingValue = input.pricing;
+    const temporalValue = input.temporal;
+    if (validVersion(appVersion)) projected.appVersion = appVersion;
+    if (validVersion(hostVersion)) projected.hostVersion = hostVersion;
+    const providers = projectProviders(providerAvailability);
+    const quota = projectQuota(quotaValue);
+    const configuration = projectConfiguration(configurationValue);
+    const pricing = projectPricing(pricingValue);
+    const temporal = projectTemporal(temporalValue);
     if (providers !== undefined) projected.providers = providers;
     if (quota !== undefined) projected.quota = quota;
     if (configuration !== undefined) projected.configuration = configuration;
@@ -294,7 +320,16 @@ function sanitizeDto(value: unknown): NativeSettingsCopyDiagnostics {
   const empty: NativeSettingsCopyDiagnostics = { schemaVersion: 1 };
   try {
     const input = asRecord(value);
-    if (!input || input.schemaVersion !== 1) return empty;
+    if (!input) return empty;
+    const schemaVersion = input.schemaVersion;
+    if (schemaVersion !== 1) return empty;
+    const appVersion = input.appVersion;
+    const hostVersion = input.hostVersion;
+    const providersValue = input.providers;
+    const quotaValue = input.quota;
+    const configurationValue = input.configuration;
+    const pricingValue = input.pricing;
+    const temporalValue = input.temporal;
     const safe: {
       schemaVersion: 1;
       appVersion?: string;
@@ -306,40 +341,57 @@ function sanitizeDto(value: unknown): NativeSettingsCopyDiagnostics {
       temporal?: NativeSettingsCopyDiagnostics["temporal"];
     } = { schemaVersion: 1 };
 
-    if (validVersion(input.appVersion)) safe.appVersion = input.appVersion;
-    if (validVersion(input.hostVersion)) safe.hostVersion = input.hostVersion;
-    const providers = projectProviders(input.providers);
-    const quota = projectQuota(input.quota);
-    const configuration = projectConfiguration(input.configuration);
-    const pricing = sanitizePricingDto(input.pricing);
+    if (validVersion(appVersion)) safe.appVersion = appVersion;
+    if (validVersion(hostVersion)) safe.hostVersion = hostVersion;
+    const providers = projectProviders(providersValue);
+    const quota = projectQuota(quotaValue);
+    const configuration = projectConfiguration(configurationValue);
+    const pricing = sanitizePricingDto(pricingValue);
     if (providers !== undefined) safe.providers = providers;
     if (quota !== undefined) safe.quota = quota;
     if (configuration !== undefined) safe.configuration = configuration;
     if (pricing !== undefined) safe.pricing = pricing;
 
-    const temporal = asRecord(input.temporal);
+    const temporal = asRecord(temporalValue);
+    const rawStatus = temporal?.status;
+    const rawProviderCount = temporal?.providerCount;
+    const rawDiscoveredCount = temporal?.discoveredCount;
     const phases = asRecord(temporal?.phases);
+    const rawPeak = phases?.peak;
+    const rawOffpeak = phases?.offpeak;
+    const rawMixed = phases?.mixed;
+    const rawUnknown = phases?.unknown;
+    const phaseCounts: Record<NativeSettingsCopyTemporalPhase, unknown> = {
+      peak: rawPeak,
+      offpeak: rawOffpeak,
+      mixed: rawMixed,
+      unknown: rawUnknown,
+    };
+    const phaseCountValues = TEMPORAL_PHASES.map((phase) => phaseCounts[phase]);
+    const phaseTotal = phaseCountValues.reduce<number>(
+      (total, count) => total + (typeof count === "number" ? count : 0),
+      0,
+    );
     if (
       temporal &&
       phases &&
-      isOneOf(temporal.status, ["available", "no_data"] as const) &&
-      validCount(temporal.providerCount) &&
-      validCount(temporal.discoveredCount) &&
-      temporal.discoveredCount <= temporal.providerCount &&
-      TEMPORAL_PHASES.every((phase) => validCount(phases[phase])) &&
-      TEMPORAL_PHASES.reduce((total, phase) => total + Number(phases[phase]), 0) ===
-        temporal.providerCount &&
-      (temporal.status === "available" ? temporal.providerCount > 0 : temporal.providerCount === 0)
+      isOneOf(rawStatus, ["available", "no_data"] as const) &&
+      validCount(rawProviderCount) &&
+      validCount(rawDiscoveredCount) &&
+      rawDiscoveredCount <= rawProviderCount &&
+      phaseCountValues.every(validCount) &&
+      phaseTotal === rawProviderCount &&
+      (rawStatus === "available" ? rawProviderCount > 0 : rawProviderCount === 0)
     ) {
       safe.temporal = {
-        status: temporal.status,
-        providerCount: temporal.providerCount,
-        discoveredCount: temporal.discoveredCount,
+        status: rawStatus,
+        providerCount: rawProviderCount,
+        discoveredCount: rawDiscoveredCount,
         phases: {
-          peak: phases.peak as number,
-          offpeak: phases.offpeak as number,
-          mixed: phases.mixed as number,
-          unknown: phases.unknown as number,
+          peak: rawPeak as number,
+          offpeak: rawOffpeak as number,
+          mixed: rawMixed as number,
+          unknown: rawUnknown as number,
         },
       };
     }

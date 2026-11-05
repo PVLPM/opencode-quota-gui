@@ -1,6 +1,7 @@
 import type { Context } from "@opencode/plugin/gui";
 import type { JSX } from "solid-js";
 import { Match, onCleanup, Show, Switch } from "solid-js";
+import { getPackageVersion } from "../lib/version.js";
 import { ErrorCard } from "../ui/components/states";
 import { createToaster, ToastRegion } from "../ui/components/toast";
 import { SettingsRoute } from "../ui/routes";
@@ -30,7 +31,7 @@ type SettingsContent = "settings" | "quota-error" | "waiting";
  * page frame and the native read lifecycle are new.
  */
 export function NativeSettingsPage(props: {
-  ctx: Pick<Context, "client" | "servers" | "ui">;
+  ctx: Pick<Context, "app" | "client" | "servers" | "ui">;
 }): JSX.Element {
   const client = createNativeDashboardClient({
     rpc: createGuiRpcCaller(props.ctx),
@@ -92,12 +93,21 @@ export function NativeSettingsPage(props: {
             onClick={() => {
               const clipboard = globalThis.navigator?.clipboard;
               void copySettingsDiagnostics(
-                () =>
-                  settingsDiagnosticsFromSnapshots(
+                async () => {
+                  const appVersion = await getPackageVersion();
+                  return settingsDiagnosticsFromSnapshots(
                     state.quota(),
                     state.query.data(),
                     state.stale(),
-                  ),
+                    {
+                      appVersion,
+                      hostVersion: props.ctx.app.version,
+                      quotaUnavailable: state.quota() === undefined && state.quotaStale(),
+                      settingsUnavailable:
+                        state.query.data() === undefined && state.query.error() !== undefined,
+                    },
+                  );
+                },
                 clipboard?.writeText?.bind(clipboard),
                 toaster.push,
               );

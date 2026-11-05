@@ -237,4 +237,68 @@ describe("Native Settings Copy diagnostics projection", () => {
       "Native Settings diagnostics",
     );
   });
+
+  it("reads changing getters only once while projecting and formatting", () => {
+    let projectedVersionReads = 0;
+    let projectedSourceReads = 0;
+    let temporalProvidersReads = 0;
+    let temporalDiscoveredReads = 0;
+    let temporalPhaseReads = 0;
+    const temporalProvider = {
+      get discovered() {
+        temporalDiscoveredReads += 1;
+        return temporalDiscoveredReads === 1 ? true : "SENTINEL_DISCOVERED";
+      },
+      get phase() {
+        temporalPhaseReads += 1;
+        return temporalPhaseReads === 1 ? "peak" : "SENTINEL_PHASE";
+      },
+    };
+    const hostileInput = {
+      get appVersion() {
+        projectedVersionReads += 1;
+        return projectedVersionReads === 1 ? "1.2.3" : "SENTINEL_PROJECT_VERSION";
+      },
+      quota: {
+        get source() {
+          projectedSourceReads += 1;
+          return projectedSourceReads === 1 ? "remote-api" : "SENTINEL_PROJECT_SOURCE";
+        },
+      },
+      temporal: {
+        get providers() {
+          temporalProvidersReads += 1;
+          return [temporalProvider];
+        },
+      },
+    };
+    const projected = projectNativeSettingsCopyDiagnostics(hostileInput as never);
+    expect(projectedVersionReads).toBe(1);
+    expect(projectedSourceReads).toBe(1);
+    expect(temporalProvidersReads).toBe(1);
+    expect(temporalDiscoveredReads).toBe(1);
+    expect(temporalPhaseReads).toBe(1);
+    expect(JSON.stringify(projected)).not.toContain("SENTINEL");
+
+    let formattedVersionReads = 0;
+    let formattedStatusReads = 0;
+    const hostileDto = {
+      schemaVersion: 1,
+      get appVersion() {
+        formattedVersionReads += 1;
+        return formattedVersionReads === 1 ? "2.3.4" : "SENTINEL_FORMATTER_VERSION";
+      },
+      quota: {
+        get status() {
+          formattedStatusReads += 1;
+          return formattedStatusReads === 1 ? "success" : "SENTINEL_FORMATTER_STATUS";
+        },
+      },
+    };
+    const formatted = formatNativeSettingsCopyDiagnostics(hostileDto as never);
+    expect(formattedVersionReads).toBe(1);
+    expect(formattedStatusReads).toBe(1);
+    expect(formatted).toContain("Application version: 2.3.4");
+    expect(formatted).not.toContain("SENTINEL");
+  });
 });
