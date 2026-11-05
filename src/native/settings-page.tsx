@@ -6,6 +6,10 @@ import { createToaster, ToastRegion } from "../ui/components/toast";
 import { SettingsRoute } from "../ui/routes";
 import { createNativeDashboardClient } from "./dashboard-client.js";
 import { createGuiRpcCaller } from "./rpc.js";
+import {
+  copySettingsDiagnostics,
+  settingsDiagnosticsFromSnapshots,
+} from "./settings-copy-action.js";
 import { createSettingsPageState } from "./settings-page-state.js";
 import { NativeUiProvider } from "./ui.js";
 
@@ -80,6 +84,27 @@ export function NativeSettingsPage(props: {
   return (
     <NativeUiProvider ui={props.ctx.ui}>
       <div class="qg-native qg-settings-page">
+        <div class="qg-settings-page__status">
+          <button
+            type="button"
+            class="qg-stale__retry"
+            onClick={() => {
+              const clipboard = globalThis.navigator?.clipboard;
+              void copySettingsDiagnostics(
+                () =>
+                  settingsDiagnosticsFromSnapshots(
+                    state.quota(),
+                    state.query.data(),
+                    state.stale(),
+                  ),
+                clipboard?.writeText?.bind(clipboard),
+                toaster.push,
+              );
+            }}
+          >
+            Copy diagnostics
+          </button>
+        </div>
         <Show when={showStatus()}>
           <div class="qg-settings-page__status">
             <span class="qg-stale" aria-live="polite">
