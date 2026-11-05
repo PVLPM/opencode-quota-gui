@@ -3,6 +3,11 @@ import { createEffect, onCleanup } from "solid-js";
 import type { DashboardRpcViewScope } from "../rpc.js";
 import { viewScopeForRoute } from "../ui/navigation-model.js";
 import type { Location, Route } from "../ui/routing.js";
+import {
+  createNativeCacheObserverRuntime,
+  type NativeCacheObserver,
+  type NativeCacheObserverRuntime,
+} from "./cache-observer-runtime.js";
 import { createNativeDashboardClient, type NativeDashboardClient } from "./dashboard-client.js";
 import { initialNativeLocation } from "./navigation.js";
 import { createGuiRpcCaller } from "./rpc.js";
@@ -28,6 +33,8 @@ import { createGuiRpcCaller } from "./rpc.js";
 
 export interface NativeDashboardRuntime {
   client: NativeDashboardClient;
+  /** Best-effort cache observations from Native's existing dashboard event stream. */
+  cacheObserver: NativeCacheObserver;
   /** Starts the window transport on the first surface that needs it. */
   retain(): void;
   /** The window's current dashboard location, shared by every routed session. */
@@ -49,6 +56,45 @@ export function createNativeDashboardRuntime(
   const client = createNativeDashboardClient({
     rpc: createGuiRpcCaller(ctx),
     scope: "quota",
+  });
+  const cacheObserver = createNativeCacheObserverRuntime({
+    subscribeEvents: (listener) => client.subscribeCacheObserverEvent(listener),
+    rpcConnection: () => client.connection(),
+    subscribeRpcConnection: (listener) => client.onConnectionChange(listener),
+    subscribeReconnect: (listener) => client.onReconnect(listener),
+    listChildren: async (parentSessionId) => {
+      const children: Array<{ id: string; parentID?: string; title?: string }> = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+
+      while (true) {
+        const page = await ctx.client.session.list({
+          parentID: parentSessionId,
+          limit: 100,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        for (const session of page.data) {
+          children.push({
+            id: session.id,
+            ...(session.parentID === undefined ? {} : { parentID: session.parentID }),
+            ...(session.title === undefined ? {} : { title: session.title }),
+          });
+        }
+
+        const nextCursor = page.cursor.next;
+        if (
+          typeof nextCursor !== "string" ||
+          nextCursor.length === 0 ||
+          seenCursors.has(nextCursor)
+        ) {
+          break;
+        }
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+
+      return children;
+    },
   });
   let location: Location = initialNativeLocation();
   let release: (() => void) | undefined;
@@ -92,6 +138,7 @@ export function createNativeDashboardRuntime(
   });
 
   function dispose(): void {
+    cacheObserver.dispose();
     client.dispose();
     release?.();
     release = undefined;
@@ -100,6 +147,7 @@ export function createNativeDashboardRuntime(
 
   return {
     client,
+    cacheObserver,
     retain,
     location: () => location,
     setLocation: (next) => {

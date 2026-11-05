@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Keep the plugin's runtime dirs synthetic: the dashboard setup reads the global
 // config dir, and no test may touch the user's real config or state.
 const TEST_RUNTIME_ROOT = vi.hoisted(() => "/tmp/opencode-quota-plugin-v2-tests");
+const cacheEventEmit = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => ({
     dataDir: `${TEST_RUNTIME_ROOT}/data`,
@@ -16,7 +17,15 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
 vi.mock("../src/gui/lifecycle.js", () => ({
   startDashboard: vi.fn(async () => ({ dispose: async () => {} })),
 }));
+vi.mock("../src/gui/rpc.js", () => ({
+  registerDashboardRpc: vi.fn(async () => ({
+    events: { emit: cacheEventEmit },
+    dispose: async () => {},
+  })),
+}));
 
+import { startDashboard } from "../src/gui/lifecycle.js";
+import { registerDashboardRpc } from "../src/gui/rpc.js";
 import {
   clearReadAuthFileCacheForTests,
   getCredentialSourceDiagnostics,
@@ -138,7 +147,7 @@ describe("V2 server plugin credential lifecycle", () => {
     await cleanup?.();
   });
 
-  it("logs why the credential event subscription stopped, without tokens", async () => {
+  it("logs why the host event subscription stopped, without tokens", async () => {
     const ctx = createContext();
     const token = `eyJ${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
     const subscribe = vi.fn(() => ({
@@ -152,7 +161,7 @@ describe("V2 server plugin credential lifecycle", () => {
     const cleanup = await setupPlugin({ ...ctx, event: { subscribe } });
     await vi.waitFor(() =>
       expect(warn).toHaveBeenCalledWith(
-        "[opencode-quota-gui] credential event subscription stopped: event stream closed [redacted]",
+        "[opencode-quota-gui] host event subscription stopped: event stream closed [redacted]",
       ),
     );
     await cleanup?.();
@@ -175,5 +184,81 @@ describe("V2 server plugin credential lifecycle", () => {
 
     expect(warn.mock.calls.flat().join("\n")).not.toContain("credential event subscription");
     warn.mockRestore();
+  });
+
+  it("forwards minimal assistant-step cache evidence over the existing host and RPC lifecycles", async () => {
+    const ctx = createContext();
+    let pushHostEvent!: (event: unknown) => void;
+    let signal: AbortSignal | undefined;
+    const nextEvent = () =>
+      new Promise<unknown>((resolve) => {
+        pushHostEvent = resolve;
+      });
+    const subscribe = vi.fn(({ signal: nextSignal }: { signal: AbortSignal }) => {
+      signal = nextSignal;
+      return {
+        async *[Symbol.asyncIterator]() {
+          while (!nextSignal.aborted) yield await nextEvent();
+        },
+      };
+    });
+    const created = 1_700_000_000_000;
+    const hostEvent = {
+      type: "session.step.ended",
+      id: "evt_step_1",
+      created,
+      data: {
+        sessionID: "ses_opaque",
+        assistantMessageID: "msg_opaque",
+        finish: "stop",
+        cost: 1.25,
+        tokens: { input: 10, output: 99, reasoning: 8, cache: { read: 0, write: 4 } },
+        model: { providerID: "must-not-cross", modelID: "must-not-cross" },
+      },
+      metadata: { prompt: "must-not-cross" },
+    };
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    cacheEventEmit.mockClear();
+
+    const cleanup = await setupPlugin({
+      ...ctx,
+      rpc: {} as never,
+      event: { subscribe },
+    });
+    expect(subscribe).toHaveBeenCalledOnce();
+    expect(registerDashboardRpc).toHaveBeenCalledOnce();
+
+    pushHostEvent(hostEvent);
+    await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(2));
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(1, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "source.status",
+        created,
+        data: { state: "observed" },
+      },
+    });
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(2, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "session.step.ended",
+        created,
+        data: {
+          sessionID: "ses_opaque",
+          assistantMessageID: "msg_opaque",
+          tokens: { input: 10, cache: { read: 0, write: 4 } },
+        },
+      },
+    });
+
+    await cleanup?.();
+    expect(signal?.aborted).toBe(true);
+    expect(subscribe).toHaveBeenCalledOnce();
   });
 });

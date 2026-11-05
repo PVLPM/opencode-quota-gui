@@ -9,6 +9,7 @@ import { Plugin } from "@opencode/plugin";
 import { type DashboardLease, startDashboard } from "./gui/lifecycle.js";
 import { scrubLogReason } from "./gui/log.js";
 import { registerDashboardRpc } from "./gui/rpc.js";
+import { projectOpenCodeCacheObserverEvent } from "./lib/cache-observer-ingestion.js";
 import { resolveOpenCodeLocationRoots } from "./lib/config-file-utils.js";
 import {
   bindCredentialSource,
@@ -60,21 +61,64 @@ export const QuotaToastPlugin = Plugin.define({
     const unbindCredentialSource = bindCredentialSource(
       createIntegrationCredentialSource(ctx.integration),
     );
-    // A login added, changed or switched in OpenCode drops cached logins and failed-login
-    // entries, so the next read asks OpenCode again. If the subscription fails, cached logins
-    // stay until they expire; the log says why. The cleanup's abort ends it silently.
-    const credentialEvents = new AbortController();
+    let dashboardRpc: Awaited<ReturnType<typeof registerDashboardRpc>> | undefined;
+    type HostEventSourceState = "unverified" | "observed" | "unavailable" | "stopped";
+    let hostEventSourceState: HostEventSourceState = "unverified";
+    let lastHostEventAtMs: number | undefined;
+    const publishHostEventSourceState = (
+      state: Exclude<HostEventSourceState, "unverified">,
+      at: number,
+    ): void => {
+      hostEventSourceState = state;
+      if (state === "observed") lastHostEventAtMs = at;
+      if (!dashboardRpc) return;
+      void dashboardRpc.events
+        .emit("invalidated", {
+          topic: "cache.observer",
+          at,
+          cacheObserverEvent: { type: "source.status", created: at, data: { state } },
+        })
+        .catch(() => undefined);
+    };
+    // Reuse the existing host stream for credential invalidation and narrowly projected cache
+    // evidence. No Native-side OpenCode event subscription is opened.
+    const hostEvents = new AbortController();
     void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: credentialEvents.signal })) {
+      for await (const event of ctx.event.subscribe({ signal: hostEvents.signal })) {
+        if (hostEvents.signal.aborted) return;
+        if (hostEventSourceState === "unverified") {
+          publishHostEventSourceState(
+            "observed",
+            typeof event.created === "number" && Number.isFinite(event.created)
+              ? event.created
+              : Date.now(),
+          );
+        }
         if (event.type === "credential.updated" || event.type === "credential.switched") {
           notifyCredentialsChanged();
         }
+        const cacheObserverEvent = projectOpenCodeCacheObserverEvent(event);
+        if (
+          cacheObserverEvent !== undefined &&
+          dashboardRpc !== undefined &&
+          typeof event.created === "number" &&
+          Number.isFinite(event.created) &&
+          event.created >= 0
+        ) {
+          void dashboardRpc.events
+            .emit("invalidated", {
+              topic: "cache.observer",
+              at: event.created,
+              cacheObserverEvent,
+            })
+            .catch(() => undefined);
+        }
       }
+      if (!hostEvents.signal.aborted) throw new Error("host event stream ended");
     })().catch((error) => {
-      if (credentialEvents.signal.aborted) return;
-      console.warn(
-        `[opencode-quota-gui] credential event subscription stopped: ${logReason(error)}`,
-      );
+      if (hostEvents.signal.aborted) return;
+      publishHostEventSourceState("unavailable", Date.now());
+      console.warn(`[opencode-quota-gui] host event subscription stopped: ${logReason(error)}`);
     });
 
     // The dashboard host binds last — after the retry hook and the credential binding — and it
@@ -99,19 +143,25 @@ export const QuotaToastPlugin = Plugin.define({
     // Attach the native RPC transport to the same host runtime the web
     // transport receives. It is available when web is disabled or its bind
     // failed, and it never constructs another source/snapshot/service.
-    let dashboardRpc: Awaited<ReturnType<typeof registerDashboardRpc>> | undefined;
     if (dashboardLease?.runtime && ctx.rpc) {
       try {
         dashboardRpc = await registerDashboardRpc(ctx.rpc, dashboardLease.runtime, {
           location: ctx.location,
         });
+        if (hostEventSourceState !== "unverified") {
+          publishHostEventSourceState(
+            hostEventSourceState,
+            hostEventSourceState === "observed" ? (lastHostEventAtMs ?? Date.now()) : Date.now(),
+          );
+        }
       } catch {
         console.warn(`[opencode-quota-gui] dashboard RPC unavailable: registration-failed`);
       }
     }
 
     return async () => {
-      credentialEvents.abort();
+      hostEvents.abort();
+      publishHostEventSourceState("stopped", Date.now());
       unbindCredentialSource();
       if (dashboardRpc) {
         try {

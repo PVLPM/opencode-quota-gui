@@ -180,11 +180,20 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
 function mountRuntime(options: {
   fake: ReturnType<typeof createFakeCaller>;
   connected: () => boolean;
+  sessionList?: (input: { parentID: string; limit?: number; cursor?: string }) => Promise<{
+    data: Array<{ id: string; parentID?: string; title?: string }>;
+    cursor: { next?: string | null };
+  }>;
 }): { runtime: NativeDashboardRuntime; dispose: () => void } {
   let runtime!: NativeDashboardRuntime;
   const dispose = createRoot((disposeRoot) => {
     runtime = createNativeDashboardRuntime({
-      client: { rpc: () => options.fake.caller } as never,
+      client: {
+        rpc: () => options.fake.caller,
+        session: {
+          list: options.sessionList ?? (async () => ({ data: [], cursor: {} })),
+        },
+      } as never,
       servers: {
         list: () => ["builtin"],
         get: () => ({ builtin: true, connected: options.connected() }),
@@ -196,6 +205,151 @@ function mountRuntime(options: {
 }
 
 describe("native window runtime", () => {
+  it("discovers direct children through the installed client without analytics or another stream", async () => {
+    const fake = createFakeCaller();
+    const sessionList = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: [
+          { id: "ses_child", parentID: "ses_root", title: "  child\nlabel\u202Eignored  " },
+          { id: "ses_wrong_parent", parentID: "ses_other", title: "Wrong parent" },
+        ],
+        cursor: { next: "next-page" },
+      })
+      .mockResolvedValueOnce({
+        data: [{ id: "ses_child_empty", parentID: "ses_root", title: " \u0000 " }],
+        cursor: {},
+      });
+    const { runtime, dispose } = mountRuntime({
+      fake,
+      connected: () => true,
+      sessionList,
+    });
+
+    await expect(runtime.cacheObserver.children("ses_root")).resolves.toEqual([
+      { sessionId: "ses_child", label: "child labelignored" },
+      { sessionId: "ses_child_empty", label: "Untitled child session" },
+    ]);
+    expect(sessionList).toHaveBeenNthCalledWith(1, { parentID: "ses_root", limit: 100 });
+    expect(sessionList).toHaveBeenNthCalledWith(2, {
+      parentID: "ses_root",
+      limit: 100,
+      cursor: "next-page",
+    });
+    expect(fake.raw.health).not.toHaveBeenCalled();
+    expect(fake.raw.session).not.toHaveBeenCalled();
+    expect(fake.raw.watch).not.toHaveBeenCalled();
+    expect(fake.streams).toHaveLength(0);
+
+    dispose();
+  });
+
+  it("rediscovers direct children when the existing Native transport reconnects", async () => {
+    const fake = createFakeCaller();
+    const liveChildren = [
+      { id: "ses_before_restart", parentID: "ses_root", title: "Before restart" },
+    ];
+    const sessionList = vi.fn(async () => ({ data: [...liveChildren], cursor: {} }));
+    const { runtime, dispose } = mountRuntime({
+      fake,
+      connected: () => true,
+      sessionList,
+    });
+    runtime.retain();
+    await waitFor(() => runtime.client.connection() === "live", "live transport");
+
+    const snapshots: Array<{
+      status: "loading" | "ready" | "error";
+      children: Array<{ sessionId: string; label: string }>;
+    }> = [];
+    const releaseChildren = runtime.cacheObserver.subscribeChildren("ses_root", (snapshot) =>
+      snapshots.push(snapshot),
+    );
+    await waitFor(() => snapshots.at(-1)?.status === "ready", "initial child discovery");
+    expect(snapshots.at(-1)?.children.map((child) => child.sessionId)).toEqual([
+      "ses_before_restart",
+    ]);
+
+    liveChildren.splice(0, liveChildren.length);
+    liveChildren.push({ id: "ses_after_restart", parentID: "ses_root", title: "After restart" });
+    await runtime.client.reconnect();
+    await waitFor(
+      () =>
+        snapshots
+          .at(-1)
+          ?.children.map((child) => child.sessionId)
+          .join(",") === "ses_after_restart",
+      "child creation and deletion rediscovery after reconnect",
+    );
+    expect(sessionList).toHaveBeenCalledTimes(2);
+    expect(fake.streams).toHaveLength(2);
+
+    releaseChildren();
+    dispose();
+  });
+
+  it("updates an open root from lifecycle events on the existing Native stream", async () => {
+    const fake = createFakeCaller();
+    const liveChildren = [{ id: "ses_existing", parentID: "ses_root", title: "Existing" }];
+    const sessionList = vi.fn(async ({ parentID }: { parentID: string }) => ({
+      data: liveChildren.filter((child) => child.parentID === parentID),
+      cursor: {},
+    }));
+    const { runtime, dispose } = mountRuntime({
+      fake,
+      connected: () => true,
+      sessionList,
+    });
+    runtime.retain();
+    await waitFor(() => runtime.client.connection() === "live", "live transport");
+
+    const snapshots: Array<{
+      status: "loading" | "ready" | "error";
+      children: Array<{ sessionId: string; label: string }>;
+    }> = [];
+    const releaseChildren = runtime.cacheObserver.subscribeChildren("ses_root", (snapshot) =>
+      snapshots.push(snapshot),
+    );
+    await waitFor(() => snapshots.at(-1)?.status === "ready", "initial child discovery");
+    expect(fake.streams).toHaveLength(1);
+
+    liveChildren.push({ id: "ses_created", parentID: "ses_root", title: "Created" });
+    fake.streams[0]?.pushEvent({
+      topic: "cache.observer",
+      at: 1,
+      cacheObserverEvent: {
+        type: "session.created",
+        data: { sessionID: "ses_created", parentID: "ses_root" },
+      },
+    });
+    await waitFor(() => sessionList.mock.calls.length === 2, "creation event triggers rediscovery");
+    await waitFor(
+      () => snapshots.at(-1)?.children.some((child) => child.sessionId === "ses_created"),
+      "created child arrives through the existing stream",
+    );
+
+    liveChildren.splice(
+      liveChildren.findIndex((child) => child.id === "ses_created"),
+      1,
+    );
+    fake.streams[0]?.pushEvent({
+      topic: "cache.observer",
+      at: 2,
+      cacheObserverEvent: {
+        type: "session.deleted",
+        data: { sessionID: "ses_created" },
+      },
+    });
+    await waitFor(
+      () => !snapshots.at(-1)?.children.some((child) => child.sessionId === "ses_created"),
+      "deleted child is removed from the open root",
+    );
+    expect(fake.streams).toHaveLength(1);
+
+    releaseChildren();
+    dispose();
+  });
+
   it("keeps the transport live across a Settings-style Panel remount", async () => {
     const fake = createFakeCaller();
     const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
