@@ -4,10 +4,10 @@
  * Normalizes Claude CLI-exposed quota windows into generic toast entries.
  */
 
+import type { AnthropicResult } from "../lib/anthropic.js";
 import {
   getAnthropicDiagnostics,
   hasAnthropicCredentialsConfigured,
-  queryAnthropicQuota,
   queryAnthropicQuotaWithOAuth,
 } from "../lib/anthropic.js";
 import { resolveAnthropicOAuth } from "../lib/anthropic-auth.js";
@@ -23,7 +23,8 @@ import {
   formatCredentialDisplayNames,
   readCredentialRows,
 } from "../lib/opencode-auth.js";
-import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
+import { isAnyProviderIdAvailable } from "../lib/provider-availability.js";
+import { resolveQuotaProviderSessionModelIdentity } from "../lib/quota-providers.js";
 import type { AuthData } from "../lib/types.js";
 import {
   attemptedErrorResult,
@@ -37,13 +38,39 @@ export function getAnthropicNoDataMessage(): string {
   return "Quota unavailable via local Claude CLI or OAuth credentials";
 }
 
+const CLAUDE_CODE_RUNTIME_IDS = ["claude-agent", "claude-code"] as const;
+
+function getClaudeCodeRuntimeProviderId(
+  ctx: QuotaProviderContext,
+): (typeof CLAUDE_CODE_RUNTIME_IDS)[number] | undefined {
+  if (ctx.config?.onlyCurrentModel !== true) return undefined;
+
+  const currentProviderId = (
+    ctx.config?.currentProviderID ??
+    resolveQuotaProviderSessionModelIdentity({ currentModel: ctx.config?.currentModel ?? "" })
+      ?.providerId
+  )
+    ?.trim()
+    .toLowerCase();
+  return currentProviderId &&
+    CLAUDE_CODE_RUNTIME_IDS.includes(currentProviderId as (typeof CLAUDE_CODE_RUNTIME_IDS)[number])
+    ? (currentProviderId as (typeof CLAUDE_CODE_RUNTIME_IDS)[number])
+    : undefined;
+}
+
 export const anthropicProvider: QuotaProvider = {
   id: "anthropic",
 
   async isAvailable(ctx: QuotaProviderContext): Promise<boolean> {
-    const providerAvailable = await isCanonicalProviderAvailable({
+    const claudeCodeRuntimeId = getClaudeCodeRuntimeProviderId(ctx);
+    const candidateIds = claudeCodeRuntimeId
+      ? [claudeCodeRuntimeId]
+      : ctx.config?.onlyCurrentModel
+        ? ["anthropic"]
+        : ["anthropic", ...CLAUDE_CODE_RUNTIME_IDS];
+    const providerAvailable = await isAnyProviderIdAvailable({
       ctx,
-      providerId: "anthropic",
+      candidateIds,
       fallbackOnError: false,
     });
     if (!providerAvailable) {
@@ -52,31 +79,53 @@ export const anthropicProvider: QuotaProvider = {
 
     return await hasAnthropicCredentialsConfigured({
       binaryPath: ctx.config?.anthropicBinaryPath,
+      ...(claudeCodeRuntimeId ? { useClaudeCodeCredentials: true } : {}),
     });
   },
 
   matchesCurrentModel(model: string): boolean {
-    return model.toLowerCase().startsWith("anthropic/");
+    const normalized = model.toLowerCase();
+    return ["anthropic", ...CLAUDE_CODE_RUNTIME_IDS].some((id) => normalized.startsWith(`${id}/`));
   },
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
+    const claudeCodeRuntimeId = getClaudeCodeRuntimeProviderId(ctx);
     const options = {
       binaryPath: ctx.config?.anthropicBinaryPath,
       requestTimeoutMs: ctx.config?.requestTimeoutMs,
+      ...(claudeCodeRuntimeId ? { useClaudeCodeCredentials: true } : {}),
     };
     let statusDetails;
+    let quotaResult: AnthropicResult = null;
     let acquisitionMethod: QuotaToastEntry["accounting"]["acquisitionMethod"] = "local_cli";
     // A failed login stays in the list so it shows as its own error row.
-    const databaseCredentials = (
-      await readCredentialRows(["anthropic"], { methods: ["oauth"] })
-    ).flatMap((row) => {
-      if (row.integrationId !== "anthropic") return [];
-      const auth = resolveAnthropicOAuth({ anthropic: credentialRowAuthEntry(row) } as AuthData);
-      return auth.state === "configured" || auth.state === "failed" ? [{ row, auth }] : [];
-    });
+    const databaseCredentials = claudeCodeRuntimeId
+      ? []
+      : (await readCredentialRows(["anthropic"], { methods: ["oauth"] })).flatMap((row) => {
+          if (row.integrationId !== "anthropic") return [];
+          const auth = resolveAnthropicOAuth({
+            anthropic: credentialRowAuthEntry(row),
+          } as AuthData);
+          return auth.state === "configured" || auth.state === "failed" ? [{ row, auth }] : [];
+        });
     try {
       const diagnostics = await getAnthropicDiagnostics(options);
       const quota = diagnostics.quotaSupported ? diagnostics.quota : undefined;
+      if (diagnostics.quotaSupported) {
+        quotaResult = quota ?? null;
+      } else if (
+        (diagnostics.authStatus === "authenticated" ||
+          diagnostics.oauthCredentialSource !== undefined) &&
+        diagnostics.message
+      ) {
+        quotaResult = {
+          success: false,
+          error: diagnostics.message,
+          ...(diagnostics.failureCategory !== undefined
+            ? { failureCategory: diagnostics.failureCategory }
+            : {}),
+        };
+      }
       if (diagnostics.quotaSupported && diagnostics.quotaSource !== "claude-auth-status-json") {
         acquisitionMethod = "remote_api";
       }
@@ -90,10 +139,10 @@ export const anthropicProvider: QuotaProvider = {
         oauth_credential_source: diagnostics.oauthCredentialSource ?? "(none)",
         checked_commands: diagnostics.checkedCommands.join(" | ") || "(none)",
         message: diagnostics.message,
-        five_hour_remaining: quota
+        five_hour_remaining: quota?.five_hour
           ? `${quota.five_hour.percentRemaining}% reset_at=${quota.five_hour.resetTimeIso ?? "(none)"}`
           : undefined,
-        seven_day_remaining: quota
+        seven_day_remaining: quota?.seven_day
           ? `${quota.seven_day.percentRemaining}% reset_at=${quota.seven_day.resetTimeIso ?? "(none)"}`
           : undefined,
         fable_weekly_remaining: quota?.fable_weekly
@@ -101,9 +150,14 @@ export const anthropicProvider: QuotaProvider = {
           : undefined,
       });
     } catch (error) {
+      const message = sanitizeDisplayText(error instanceof Error ? error.message : String(error));
+      quotaResult = {
+        success: false,
+        error: `Claude CLI probe failed: ${message}`,
+      };
       statusDetails = statusDetailsFromRecord({
         cli_installed: "false",
-        message: `failed to probe Claude CLI: ${sanitizeDisplayText(error instanceof Error ? error.message : String(error))}`,
+        message: `failed to probe Claude CLI: ${message}`,
       });
     }
 
@@ -145,11 +199,16 @@ export const anthropicProvider: QuotaProvider = {
           }
           continue;
         }
+        const windows = [
+          ...(result.five_hour
+            ? [{ label: "5h", window: result.five_hour, rowKey: "window:five_hour" }]
+            : []),
+          ...(result.seven_day
+            ? [{ label: "Weekly", window: result.seven_day, rowKey: "window:week" }]
+            : []),
+        ];
         entries.push(
-          ...[
-            ["5h", result.five_hour, "window:five_hour"] as const,
-            ["Weekly", result.seven_day, "window:week"] as const,
-          ].map(([label, window, rowKey]) => ({
+          ...windows.map(({ label, window, rowKey }) => ({
             accounting: {
               resultType: "quota" as const,
               acquisitionMethod: "remote_api" as const,
@@ -205,7 +264,7 @@ export const anthropicProvider: QuotaProvider = {
       return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, statusDetails);
     }
 
-    const result = await queryAnthropicQuota(options);
+    const result = quotaResult;
     if (!result) {
       return withStatusDetails(notAttemptedResult(), statusDetails);
     }
@@ -219,8 +278,9 @@ export const anthropicProvider: QuotaProvider = {
       );
     }
 
-    const entries: QuotaToastEntry[] = [
-      {
+    const entries: QuotaToastEntry[] = [];
+    if (result.five_hour) {
+      entries.push({
         accounting: {
           resultType: "quota",
           acquisitionMethod,
@@ -233,8 +293,10 @@ export const anthropicProvider: QuotaProvider = {
         rowKey: "window:five_hour",
         percentRemaining: result.five_hour.percentRemaining,
         resetTimeIso: result.five_hour.resetTimeIso,
-      },
-      {
+      });
+    }
+    if (result.seven_day) {
+      entries.push({
         accounting: {
           resultType: "quota",
           acquisitionMethod,
@@ -247,8 +309,8 @@ export const anthropicProvider: QuotaProvider = {
         rowKey: "window:week",
         percentRemaining: result.seven_day.percentRemaining,
         resetTimeIso: result.seven_day.resetTimeIso,
-      },
-    ];
+      });
+    }
 
     if (result.extra_usage) {
       entries.push({

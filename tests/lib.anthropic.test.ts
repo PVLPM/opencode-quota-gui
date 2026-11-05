@@ -397,10 +397,100 @@ describe("parseUsageResponse", () => {
       }),
     ).toBeNull();
   });
+
+  it.each([
+    [
+      "an Enterprise response without a weekly limit",
+      {
+        five_hour: { utilization: 25 },
+        seven_day: null,
+      },
+    ],
+    [
+      "an Ultra response without a five-hour limit",
+      {
+        five_hour: null,
+        seven_day: { utilization: 35 },
+      },
+    ],
+  ])("parses the reported OAuth window for %s", (_label, response) => {
+    expect(parseOAuthUsageResponse(response)).toEqual(
+      response.five_hour === null
+        ? { success: true, seven_day: { percentRemaining: 65, resetTimeIso: undefined } }
+        : { success: true, five_hour: { percentRemaining: 75, resetTimeIso: undefined } },
+    );
+  });
+
+  it.each([
+    [
+      "the 5-hour field",
+      { seven_day: { utilization: 35 } },
+      { success: true, seven_day: { percentRemaining: 65, resetTimeIso: undefined } },
+    ],
+    [
+      "the weekly field",
+      { five_hour: { utilization: 25 } },
+      { success: true, five_hour: { percentRemaining: 75, resetTimeIso: undefined } },
+    ],
+  ])("accepts a valid OAuth reply with omitted %s", (_label, response, expected) => {
+    expect(parseOAuthUsageResponse(response)).toEqual(expected);
+  });
+
+  it.each([
+    { five_hour: { utilization: "invalid" }, seven_day: null },
+    { five_hour: null, seven_day: { utilization: "invalid" } },
+    { five_hour: null, seven_day: null },
+  ])("does not infer absent or malformed windows from %j", (response) => {
+    expect(parseOAuthUsageResponse(response)).toBeNull();
+  });
+
+  it("does not treat a partial local CLI response as quota", () => {
+    expect(parseUsageResponse({ five_hour: null, seven_day: { utilization: 35 } })).toBeNull();
+  });
+
+  it("parses Enterprise extra usage from its reported used and monthly credits", () => {
+    expect(
+      parseOAuthUsageResponse({
+        five_hour: { utilization: 25 },
+        seven_day: null,
+        extra_usage: { is_enabled: true, utilization: null, used_credits: 50, monthly_limit: 200 },
+      }),
+    ).toEqual({
+      success: true,
+      five_hour: { percentRemaining: 75, resetTimeIso: undefined },
+      extra_usage: { percentRemaining: 75 },
+    });
+  });
+
+  it("parses an Enterprise OAuth reply containing only reported usage credits", () => {
+    expect(
+      parseOAuthUsageResponse({
+        five_hour: null,
+        seven_day: null,
+        limits: [],
+        extra_usage: {
+          is_enabled: true,
+          monthly_limit: 50_000,
+          used_credits: 40_000,
+          utilization: 80,
+        },
+      }),
+    ).toEqual({ success: true, extra_usage: { percentRemaining: 20 } });
+  });
+
+  it("does not treat a malformed window as an omitted optional window", () => {
+    expect(
+      parseOAuthUsageResponse({
+        five_hour: { utilization: "malformed" },
+        seven_day: { utilization: 35 },
+        extra_usage: { is_enabled: true, utilization: 20 },
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("Claude CLI diagnostics", () => {
-  it("keeps direct Claude CLI quota uncached without an account identity", async () => {
+  it("keeps selected Claude Code CLI quota uncached without an Anthropic account identity", async () => {
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
       {
@@ -414,7 +504,9 @@ describe("Claude CLI diagnostics", () => {
       },
     ]);
 
-    await expect(resolveAnthropicAuthIdentity()).resolves.toBeNull();
+    await expect(
+      resolveAnthropicAuthIdentity({ useClaudeCodeCredentials: true }),
+    ).resolves.toBeNull();
     expect(identityMocks.deriveResolvedAuthIdentity).not.toHaveBeenCalled();
   });
 
@@ -560,10 +652,10 @@ describe("Claude CLI diagnostics", () => {
   it("reports missing Claude CLI as unavailable without quota data", async () => {
     setProcessPlatform("linux");
     mockExecSequence([
-      {
+      ...Array.from({ length: 3 }, () => ({
         code: "ENOENT",
         errorMessage: "spawn claude ENOENT",
-      },
+      })),
     ]);
 
     const diagnostics = await getAnthropicDiagnostics();
@@ -661,10 +753,10 @@ describe("Claude CLI diagnostics", () => {
 
   it("uses OpenCode Anthropic OAuth when Claude CLI is unavailable", async () => {
     mockExecSequence([
-      {
+      ...Array.from({ length: 2 }, () => ({
         code: "ENOENT",
         errorMessage: "spawn claude ENOENT",
-      },
+      })),
     ]);
     readAuthFileCachedMock.mockResolvedValue({
       anthropic: { type: "oauth", access: "opencode-access-token", expires: Date.now() + 60_000 },
@@ -691,17 +783,17 @@ describe("Claude CLI diagnostics", () => {
     expect(diagnostics.quota?.five_hour.percentRemaining).toBe(80);
     expect(diagnostics.quota?.seven_day.percentRemaining).toBe(70);
     await expect(queryAnthropicQuota()).resolves.toMatchObject({ success: true });
-    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledTimes(2);
     expect(readFileMock).not.toHaveBeenCalled();
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
   it("reports an OpenCode OAuth failure when Claude CLI is unavailable", async () => {
     mockExecSequence([
-      {
+      ...Array.from({ length: 2 }, () => ({
         code: "ENOENT",
         errorMessage: "spawn claude ENOENT",
-      },
+      })),
     ]);
     readAuthFileCachedMock.mockResolvedValue({
       anthropic: { type: "oauth", access: "opencode-access-token", expires: Date.now() + 60_000 },
@@ -715,7 +807,7 @@ describe("Claude CLI diagnostics", () => {
 
     await expect(queryAnthropicQuota()).resolves.toMatchObject({
       success: false,
-      error: expect.stringContaining("Anthropic API error 429: rate limited"),
+      error: expect.stringContaining("Anthropic OAuth usage probe paused after HTTP 429"),
       failureCategory: "provider_api",
     });
     expect(diagnostics.failureCategory).toBe("provider_api");
@@ -749,12 +841,37 @@ describe("Claude CLI diagnostics", () => {
     });
   });
 
+  it("reuses a recent OAuth quota only for the same credential", async () => {
+    fetchResponseMock
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          five_hour: { utilization: 10 },
+          seven_day: { utilization: 20 },
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockJsonResponse({
+          five_hour: { utilization: 40 },
+          seven_day: { utilization: 50 },
+        }),
+      );
+
+    const first = await queryAnthropicQuotaWithOAuth("account-a-token");
+    const sameCredential = await queryAnthropicQuotaWithOAuth("account-a-token");
+    const otherCredential = await queryAnthropicQuotaWithOAuth("account-b-token");
+
+    expect(first).toMatchObject({ success: true, five_hour: { percentRemaining: 90 } });
+    expect(sameCredential).toMatchObject({ success: true, five_hour: { percentRemaining: 90 } });
+    expect(otherCredential).toMatchObject({ success: true, five_hour: { percentRemaining: 60 } });
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(2);
+  });
+
   it("labels OAuth authentication failures as credentials", async () => {
     mockExecSequence([
-      {
+      ...Array.from({ length: 2 }, () => ({
         code: "ENOENT",
         errorMessage: "spawn claude ENOENT",
-      },
+      })),
     ]);
     readAuthFileCachedMock.mockResolvedValue({
       anthropic: {
@@ -796,13 +913,14 @@ describe("Claude CLI diagnostics", () => {
   });
 
   it("reports unauthenticated Claude CLI status", async () => {
-    mockExecSequence([
+    const unauthenticatedProbe: ExecSequenceStep[] = [
       { stdout: "claude 1.2.3\n" },
       {
         code: 1,
         stderr: "Not logged in. Run `claude auth login` to continue.",
       },
-    ]);
+    ];
+    mockExecSequence([...unauthenticatedProbe, ...unauthenticatedProbe, ...unauthenticatedProbe]);
 
     const diagnostics = await getAnthropicDiagnostics();
 
@@ -818,7 +936,7 @@ describe("Claude CLI diagnostics", () => {
   });
 
   it("returns quota data when Claude auth status JSON includes quota windows", async () => {
-    mockExecSequence([
+    const localQuotaProbe: ExecSequenceStep[] = [
       { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
@@ -836,7 +954,8 @@ describe("Claude CLI diagnostics", () => {
           },
         }),
       },
-    ]);
+    ];
+    mockExecSequence([...localQuotaProbe, ...localQuotaProbe, ...localQuotaProbe]);
 
     const diagnostics = await getAnthropicDiagnostics();
     expect(diagnostics.installed).toBe(true);
@@ -873,14 +992,15 @@ describe("Claude CLI diagnostics", () => {
 
   it("falls back to Claude OAuth usage when local Claude auth omits quota windows", async () => {
     setProcessPlatform("linux");
-    mockExecSequence([
+    const authenticatedProbe: ExecSequenceStep[] = [
       { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
           authenticated: true,
         }),
       },
-    ]);
+    ];
+    mockExecSequence([...authenticatedProbe, ...authenticatedProbe]);
     readFileMock.mockResolvedValue(
       JSON.stringify({
         claudeAiOauth: {
@@ -928,8 +1048,8 @@ describe("Claude CLI diagnostics", () => {
       expect(quota.fable_weekly?.percentRemaining).toBe(98);
     }
 
-    expect(execFileMock).toHaveBeenCalledTimes(2);
-    expect(readFileMock).toHaveBeenCalledTimes(1);
+    expect(execFileMock).toHaveBeenCalledTimes(4);
+    expect(readFileMock).toHaveBeenCalledTimes(2);
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
@@ -1275,6 +1395,8 @@ describe("Claude CLI diagnostics", () => {
     setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true }) },
+      { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
           authenticated: true,
@@ -1307,12 +1429,22 @@ describe("Claude CLI diagnostics", () => {
       expect(quota.error).toContain(join(".claude", ".credentials.json"));
     }
     expect(fetchWithTimeoutMock).not.toHaveBeenCalled();
-    expect(readFileMock).toHaveBeenCalledTimes(1);
+    expect(readFileMock).toHaveBeenCalledTimes(2);
   });
 
   it("includes the macOS Keychain source when Claude OAuth fallback credentials are unavailable on macOS", async () => {
     setProcessPlatform("darwin");
     mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      {
+        stdout: JSON.stringify({
+          authenticated: true,
+        }),
+      },
+      {
+        code: 44,
+        stderr: "The specified item could not be found in the keychain.",
+      },
       { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
@@ -1342,13 +1474,15 @@ describe("Claude CLI diagnostics", () => {
       expect(quota.error).toContain(join(".claude", ".credentials.json"));
     }
     expect(fetchWithTimeoutMock).not.toHaveBeenCalled();
-    expect(readFileMock).toHaveBeenCalledTimes(1);
-    expect(execFileMock).toHaveBeenCalledTimes(3);
+    expect(readFileMock).toHaveBeenCalledTimes(2);
+    expect(execFileMock).toHaveBeenCalledTimes(6);
   });
 
   it("returns no quota when the Claude OAuth fallback access token is malformed", async () => {
     setProcessPlatform("linux");
     mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true }) },
       { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
@@ -1380,6 +1514,8 @@ describe("Claude CLI diagnostics", () => {
     setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true }) },
+      { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
           authenticated: true,
@@ -1408,8 +1544,9 @@ describe("Claude CLI diagnostics", () => {
     const quota = await queryAnthropicQuota();
     expect(quota?.success).toBe(false);
     if (quota && !quota.success) {
-      expect(quota.error).toContain("Anthropic API error 429: rate limited");
+      expect(quota.error).toContain("Anthropic OAuth usage probe paused after HTTP 429");
       expect(quota.error).not.toContain("\u001b");
+      expect(quota.failureCategory).toBe("provider_api");
     }
   });
 
@@ -1705,6 +1842,8 @@ describe("Claude CLI diagnostics", () => {
     setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true }) },
+      { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
           authenticated: true,
@@ -1735,6 +1874,8 @@ describe("Claude CLI diagnostics", () => {
     setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true }) },
+      { stdout: "claude 1.2.3\n" },
       {
         stdout: JSON.stringify({
           authenticated: true,
@@ -1763,7 +1904,7 @@ describe("Claude CLI diagnostics", () => {
 
   it("falls back to plain auth status when --json is unsupported", async () => {
     setProcessPlatform("linux");
-    mockExecSequence([
+    const unsupportedJsonProbe: ExecSequenceStep[] = [
       { stdout: "Claude CLI version 1.2.3\n" },
       {
         code: 1,
@@ -1772,7 +1913,8 @@ describe("Claude CLI diagnostics", () => {
       {
         stdout: "Authenticated",
       },
-    ]);
+    ];
+    mockExecSequence([...unsupportedJsonProbe, ...unsupportedJsonProbe, ...unsupportedJsonProbe]);
     readFileMock.mockRejectedValue(
       Object.assign(new Error("missing credentials"), {
         code: "ENOENT",
@@ -1821,7 +1963,7 @@ describe("Claude CLI diagnostics", () => {
     expect(diagnostics.message).not.toContain("\u001b");
   });
 
-  it("caches diagnostics until the test helper clears the cache", async () => {
+  it("does not reuse CLI quota by binary path across probes", async () => {
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
       {
@@ -1845,20 +1987,14 @@ describe("Claude CLI diagnostics", () => {
       },
     ]);
 
-    const first = await getAnthropicDiagnostics();
-    const second = await getAnthropicDiagnostics();
+    const first = await getAnthropicDiagnostics({ binaryPath: "shared-claude" });
+    const second = await getAnthropicDiagnostics({ binaryPath: "shared-claude" });
     expect(first.quota?.five_hour.percentRemaining).toBe(90);
-    expect(second.quota?.five_hour.percentRemaining).toBe(90);
-    expect(execFileMock).toHaveBeenCalledTimes(2);
-
-    clearAnthropicDiagnosticsCacheForTests();
-
-    const third = await getAnthropicDiagnostics();
-    expect(third.quota?.five_hour.percentRemaining).toBe(70);
+    expect(second.quota?.five_hour.percentRemaining).toBe(70);
     expect(execFileMock).toHaveBeenCalledTimes(4);
   });
 
-  it("caches fallback-backed diagnostics until the test helper clears the cache", async () => {
+  it("does not reuse fallback diagnostics across credentials sharing a CLI path", async () => {
     setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
@@ -1903,24 +2039,44 @@ describe("Claude CLI diagnostics", () => {
         }),
       );
 
-    const first = await getAnthropicDiagnostics();
-    const second = await getAnthropicDiagnostics();
+    const first = await getAnthropicDiagnostics({ binaryPath: "shared-claude" });
+    const second = await getAnthropicDiagnostics({ binaryPath: "shared-claude" });
     expect(first.quota?.five_hour.percentRemaining).toBe(90);
-    expect(second.quota?.five_hour.percentRemaining).toBe(90);
+    expect(second.quota?.five_hour.percentRemaining).toBe(70);
     expect(first.quotaSource).toBe("claude-credentials-oauth-api");
     expect(second.quotaSource).toBe("claude-credentials-oauth-api");
-    expect(execFileMock).toHaveBeenCalledTimes(2);
-    expect(readFileMock).toHaveBeenCalledTimes(1);
-    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
-
-    clearAnthropicDiagnosticsCacheForTests();
-
-    const third = await getAnthropicDiagnostics();
-    expect(third.quota?.five_hour.percentRemaining).toBe(70);
-    expect(third.quotaSource).toBe("claude-credentials-oauth-api");
     expect(execFileMock).toHaveBeenCalledTimes(4);
     expect(readFileMock).toHaveBeenCalledTimes(2);
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses Claude's own OAuth token when probing the Claude Code runtime", async () => {
+    setProcessPlatform("linux");
+    mockExecSequence(authenticatedWithoutQuotaSteps(1));
+    readAuthFileCachedMock.mockResolvedValue({
+      anthropic: { type: "oauth", access: "opencode-account-token" },
+    });
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "claude-code-token" } }),
+    );
+    fetchResponseMock.mockResolvedValue(
+      mockJsonResponse({
+        five_hour: { utilization: 10 },
+        seven_day: null,
+      }),
+    );
+
+    const diagnostics = await getAnthropicDiagnostics({ useClaudeCodeCredentials: true });
+
+    expect(diagnostics.quota?.five_hour.percentRemaining).toBe(90);
+    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(
+      ANTHROPIC_USAGE_URL,
+      expect.objectContaining({
+        request: expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: "Bearer claude-code-token" }),
+        }),
+      }),
+    );
   });
 
   it("returns a sanitized error result when the CLI probe throws unexpectedly", async () => {

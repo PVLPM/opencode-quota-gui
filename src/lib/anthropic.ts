@@ -30,10 +30,10 @@ const DEFAULT_CLAUDE_BINARY = "claude";
 /** How `binaryPath` reads when the default `claude` ran from PATH. */
 const CLAUDE_ON_PATH_DISPLAY = "claude (PATH)";
 const CLAUDE_COMMAND_TIMEOUT_MS = 3_000;
-const ANTHROPIC_DIAGNOSTICS_TTL_MS = 5_000;
 const ANTHROPIC_OAUTH_BACKOFF_BASE_MS = 30_000;
 const ANTHROPIC_OAUTH_COOLDOWN_MAX_MS = 15 * 60_000;
 const ANTHROPIC_OAUTH_COOLDOWN_MAX_ENTRIES = 16;
+const ANTHROPIC_OAUTH_REUSE_MS = 60_000;
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_BETA_HEADER = "oauth-2025-04-20";
 const CLAUDE_CODE_CREDENTIALS_SERVICE = "Claude Code-credentials";
@@ -62,16 +62,16 @@ export interface AnthropicExtraUsage {
 }
 
 export interface AnthropicUsageResponse {
-  five_hour: AnthropicQuotaWindow;
-  seven_day: AnthropicQuotaWindow;
+  five_hour?: AnthropicQuotaWindow | null;
+  seven_day?: AnthropicQuotaWindow | null;
   extra_usage?: AnthropicExtraUsage;
   limits?: unknown[];
 }
 
 export interface AnthropicQuotaResult {
   success: true;
-  five_hour: { percentRemaining: number; resetTimeIso?: string };
-  seven_day: { percentRemaining: number; resetTimeIso?: string };
+  five_hour?: { percentRemaining: number; resetTimeIso?: string };
+  seven_day?: { percentRemaining: number; resetTimeIso?: string };
   extra_usage?: { percentRemaining: number };
   fable_weekly?: { percentRemaining: number; resetTimeIso?: string };
 }
@@ -118,6 +118,8 @@ export interface AnthropicDiagnostics {
 export interface AnthropicProbeOptions {
   binaryPath?: string;
   requestTimeoutMs?: number;
+  /** Use the local Claude Code/Agent OAuth account, not OpenCode's Anthropic login. */
+  useClaudeCodeCredentials?: boolean;
 }
 
 type ClaudeCommandResult = {
@@ -135,12 +137,6 @@ export type ClaudeCommandInvocation = {
   display: string;
 };
 
-type AnthropicDiagnosticsCacheEntry = {
-  timestamp: number;
-  value: AnthropicDiagnostics | null;
-  inFlight?: Promise<AnthropicDiagnostics>;
-};
-
 type AnthropicLocalDiagnostics = {
   installed: boolean;
   version: string | null;
@@ -149,12 +145,6 @@ type AnthropicLocalDiagnostics = {
   checkedCommands: string[];
   message?: string;
   localQuota?: AnthropicQuotaResult;
-};
-
-type AnthropicLocalDiagnosticsCacheEntry = {
-  timestamp: number;
-  value: AnthropicLocalDiagnostics | null;
-  inFlight?: Promise<AnthropicLocalDiagnostics>;
 };
 
 type AnthropicOAuthCooldown = {
@@ -209,10 +199,12 @@ type ParsedAuthProbe = {
   unsupportedCommand?: boolean;
 };
 
-const diagnosticsCache = new Map<string, AnthropicDiagnosticsCacheEntry>();
-const localDiagnosticsCache = new Map<string, AnthropicLocalDiagnosticsCacheEntry>();
 const anthropicOAuthCooldowns = new Map<string, AnthropicOAuthCooldown>();
 const anthropicOAuthInFlight = new Map<string, Promise<AnthropicFallbackQuota>>();
+const anthropicOAuthRecent = new Map<
+  string,
+  { quota: AnthropicQuotaResult; checkedAtMs: number }
+>();
 
 export function resolveAnthropicBinaryPath(binaryPath?: string): string {
   const trimmed = binaryPath?.trim();
@@ -377,8 +369,20 @@ function parseExtraUsageQuota(extraUsage: unknown): { percentRemaining: number }
     return undefined;
   }
 
-  const used = record["utilization"];
-  if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || used > 100) {
+  const utilization = record["utilization"];
+  const usedCredits = record["used_credits"];
+  const monthlyLimit = record["monthly_limit"];
+  const used =
+    typeof utilization === "number" && Number.isFinite(utilization)
+      ? utilization
+      : typeof usedCredits === "number" &&
+          Number.isFinite(usedCredits) &&
+          typeof monthlyLimit === "number" &&
+          Number.isFinite(monthlyLimit) &&
+          monthlyLimit > 0
+        ? (usedCredits / monthlyLimit) * 100
+        : undefined;
+  if (used === undefined || used < 0 || used > 100) {
     return undefined;
   }
 
@@ -447,54 +451,105 @@ function parseFableWeeklyWindow(
   return undefined;
 }
 
-function parseUsageResponse(
-  data: unknown,
-  options: AnthropicUsageParseOptions = {},
-): AnthropicQuotaResult | null {
-  for (const root of getUsageRoots(data)) {
-    const fiveHour = parseQuotaWindow(root["five_hour"] ?? root["fiveHour"]);
-    const sevenDay = parseQuotaWindow(root["seven_day"] ?? root["sevenDay"]);
+type ParsedUsageWindow = NonNullable<ReturnType<typeof parseQuotaWindow>>;
 
-    if (!fiveHour || !sevenDay) {
+type UsageWindowRead =
+  | { state: "absent" }
+  | { state: "malformed" }
+  | { state: "present"; window: ParsedUsageWindow };
+
+function readUsageWindow(
+  root: Record<string, unknown>,
+  snakeKey: string,
+  camelKey: string,
+): UsageWindowRead {
+  const hasSnakeKey = Object.hasOwn(root, snakeKey);
+  const hasCamelKey = Object.hasOwn(root, camelKey);
+  if (!hasSnakeKey && !hasCamelKey) {
+    return { state: "absent" };
+  }
+
+  if (hasSnakeKey && hasCamelKey && root[snakeKey] !== root[camelKey]) {
+    return { state: "malformed" };
+  }
+
+  const value = hasSnakeKey ? root[snakeKey] : root[camelKey];
+  if (value === null) {
+    return { state: "absent" };
+  }
+
+  const window = parseQuotaWindow(value);
+  return window ? { state: "present", window } : { state: "malformed" };
+}
+
+function findUsageWindows(
+  data: unknown,
+  options: { allowSupplementalOnly?: boolean } = {},
+): {
+  root: Record<string, unknown>;
+  fiveHour?: ParsedUsageWindow;
+  sevenDay?: ParsedUsageWindow;
+} | null {
+  for (const root of getUsageRoots(data)) {
+    const fiveHour = readUsageWindow(root, "five_hour", "fiveHour");
+    const sevenDay = readUsageWindow(root, "seven_day", "sevenDay");
+    if (fiveHour.state === "malformed" || sevenDay.state === "malformed") {
       continue;
     }
 
-    const extraUsage = options.includeExtraUsage
-      ? parseExtraUsageQuota(root["extra_usage"])
-      : undefined;
+    const fiveHourWindow = fiveHour.state === "present" ? fiveHour.window : undefined;
+    const sevenDayWindow = sevenDay.state === "present" ? sevenDay.window : undefined;
+    if (!fiveHourWindow && !sevenDayWindow) {
+      if (!options.allowSupplementalOnly) {
+        continue;
+      }
+      if (!parseExtraUsageQuota(root["extra_usage"]) && !parseFableWeeklyWindow(root["limits"])) {
+        continue;
+      }
+    }
 
     return {
-      success: true,
-      five_hour: fiveHour,
-      seven_day: sevenDay,
-      ...(extraUsage ? { extra_usage: extraUsage } : {}),
+      root,
+      ...(fiveHourWindow ? { fiveHour: fiveHourWindow } : {}),
+      ...(sevenDayWindow ? { sevenDay: sevenDayWindow } : {}),
     };
   }
 
   return null;
 }
 
+function parseUsageResponse(
+  data: unknown,
+  options: AnthropicUsageParseOptions = {},
+): AnthropicQuotaResult | null {
+  const windows = findUsageWindows(data);
+  if (!windows?.fiveHour || !windows.sevenDay) return null;
+
+  const extraUsage = options.includeExtraUsage
+    ? parseExtraUsageQuota(windows.root["extra_usage"])
+    : undefined;
+
+  return {
+    success: true,
+    five_hour: windows.fiveHour,
+    seven_day: windows.sevenDay,
+    ...(extraUsage ? { extra_usage: extraUsage } : {}),
+  };
+}
+
 function parseOAuthUsageResponse(data: unknown): AnthropicQuotaResult | null {
-  for (const root of getUsageRoots(data)) {
-    const fiveHour = parseQuotaWindow(root["five_hour"] ?? root["fiveHour"]);
-    const sevenDay = parseQuotaWindow(root["seven_day"] ?? root["sevenDay"]);
+  const windows = findUsageWindows(data, { allowSupplementalOnly: true });
+  if (!windows) return null;
 
-    if (!fiveHour || !sevenDay) {
-      continue;
-    }
-
-    const extraUsage = parseExtraUsageQuota(root["extra_usage"]);
-    const fableWeekly = parseFableWeeklyWindow(root["limits"]);
-    return {
-      success: true,
-      five_hour: fiveHour,
-      seven_day: sevenDay,
-      ...(extraUsage ? { extra_usage: extraUsage } : {}),
-      ...(fableWeekly ? { fable_weekly: fableWeekly } : {}),
-    };
-  }
-
-  return null;
+  const extraUsage = parseExtraUsageQuota(windows.root["extra_usage"]);
+  const fableWeekly = parseFableWeeklyWindow(windows.root["limits"]);
+  return {
+    success: true,
+    ...(windows.fiveHour ? { five_hour: windows.fiveHour } : {}),
+    ...(windows.sevenDay ? { seven_day: windows.sevenDay } : {}),
+    ...(extraUsage ? { extra_usage: extraUsage } : {}),
+    ...(fableWeekly ? { fable_weekly: fableWeekly } : {}),
+  };
 }
 
 function getClaudeCredentialsPath(): string {
@@ -797,6 +852,16 @@ function retainAnthropicOAuthCooldownForToken(tokenFingerprint: string): void {
   }
 }
 
+function rememberAnthropicOAuthQuota(tokenFingerprint: string, quota: AnthropicQuotaResult): void {
+  const nowMs = Date.now();
+  for (const [fingerprint, entry] of anthropicOAuthRecent) {
+    if (nowMs - entry.checkedAtMs >= ANTHROPIC_OAUTH_REUSE_MS) {
+      anthropicOAuthRecent.delete(fingerprint);
+    }
+  }
+  anthropicOAuthRecent.set(tokenFingerprint, { quota, checkedAtMs: nowMs });
+}
+
 function redactAccessTokenFromSanitizedDetail(detail: string, accessToken: string): string {
   const sanitizedDetail = sanitizeDisplayText(detail);
   const sanitizedAccessToken = sanitizeDisplayText(accessToken);
@@ -935,7 +1000,17 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
     return {
       state: "unavailable",
       detail: getAnthropicOAuthCooldownMessage(cooldown.blockedUntilMs - nowMs),
+      failureCategory: "provider_api",
     };
+  }
+
+  const recent = anthropicOAuthRecent.get(tokenFingerprint);
+  if (
+    recent &&
+    nowMs >= recent.checkedAtMs &&
+    nowMs - recent.checkedAtMs < ANTHROPIC_OAUTH_REUSE_MS
+  ) {
+    return { state: "success", quota: recent.quota };
   }
 
   const existingInFlight = anthropicOAuthInFlight.get(tokenFingerprint);
@@ -947,7 +1022,12 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
     accessToken,
     tokenFingerprint,
     requestTimeoutMs,
-  );
+  ).then((result) => {
+    if (result.state === "success") {
+      rememberAnthropicOAuthQuota(tokenFingerprint, result.quota);
+    }
+    return result;
+  });
   anthropicOAuthInFlight.set(tokenFingerprint, inFlight);
 
   try {
@@ -1307,204 +1387,120 @@ async function probeAnthropicLocalDiagnostics(
 }
 
 export function clearAnthropicDiagnosticsCacheForTests(): void {
-  diagnosticsCache.clear();
-  localDiagnosticsCache.clear();
   anthropicOAuthCooldowns.clear();
   anthropicOAuthInFlight.clear();
+  anthropicOAuthRecent.clear();
 }
 
-async function getCachedAnthropicLocalDiagnostics(
+async function getAnthropicLocalDiagnostics(
   options: AnthropicProbeOptions = {},
 ): Promise<AnthropicLocalDiagnostics> {
-  const binaryPath = resolveAnthropicBinaryPath(options.binaryPath);
-  const now = Date.now();
-  const cached = localDiagnosticsCache.get(binaryPath) ?? {
-    timestamp: 0,
-    value: null,
-  };
-
-  if (
-    cached.value &&
-    cached.timestamp > 0 &&
-    now - cached.timestamp < ANTHROPIC_DIAGNOSTICS_TTL_MS
-  ) {
-    return cached.value;
-  }
-
-  if (cached.inFlight) {
-    return cached.inFlight;
-  }
-
-  const inFlight = probeAnthropicLocalDiagnostics({ binaryPath }).then((value) => {
-    localDiagnosticsCache.set(binaryPath, {
-      timestamp: Date.now(),
-      value,
-    });
-    return value;
-  });
-
-  localDiagnosticsCache.set(binaryPath, {
-    timestamp: cached.timestamp,
-    value: cached.value,
-    inFlight,
-  });
-
-  try {
-    return await inFlight;
-  } finally {
-    const latest = localDiagnosticsCache.get(binaryPath);
-    if (latest?.inFlight === inFlight) {
-      localDiagnosticsCache.set(binaryPath, {
-        timestamp: latest.timestamp,
-        value: latest.value,
-      });
-    }
-  }
+  return await probeAnthropicLocalDiagnostics(options);
 }
 
 export async function getAnthropicDiagnostics(
   options: AnthropicProbeOptions = {},
 ): Promise<AnthropicDiagnostics> {
-  const binaryPath = resolveAnthropicBinaryPath(options.binaryPath);
-  const now = Date.now();
-  const cached = diagnosticsCache.get(binaryPath) ?? {
-    timestamp: 0,
-    value: null,
-  };
-
-  if (
-    cached.value &&
-    cached.timestamp > 0 &&
-    now - cached.timestamp < ANTHROPIC_DIAGNOSTICS_TTL_MS
-  ) {
-    return cached.value;
+  const localDiagnostics = await getAnthropicLocalDiagnostics(options);
+  if (localDiagnostics.localQuota) {
+    return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
   }
 
-  if (cached.inFlight) {
-    return cached.inFlight;
+  if (options.useClaudeCodeCredentials && localDiagnostics.authStatus !== "authenticated") {
+    return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
   }
 
-  const inFlight = (async () => {
-    const localDiagnostics = await getCachedAnthropicLocalDiagnostics({ binaryPath });
-    if (localDiagnostics.localQuota) {
+  let credentials = options.useClaudeCodeCredentials
+    ? await readClaudeOAuthAccessToken()
+    : await readAnthropicOAuthAccessToken({
+        includeClaudeCredentials: localDiagnostics.authStatus === "authenticated",
+      });
+  if (credentials.state !== "configured") {
+    if (localDiagnostics.authStatus !== "authenticated") {
       return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
     }
 
-    let credentials = await readAnthropicOAuthAccessToken({
-      includeClaudeCredentials: localDiagnostics.authStatus === "authenticated",
-    });
-    if (credentials.state !== "configured") {
-      if (localDiagnostics.authStatus !== "authenticated") {
-        return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
-      }
-
-      const diagnostics: AnthropicDiagnostics = {
-        installed: localDiagnostics.installed,
-        version: localDiagnostics.version,
-        authStatus: localDiagnostics.authStatus,
-        quotaSupported: false,
-        quotaSource: "none",
-        binaryPath: localDiagnostics.binaryPath,
-        checkedCommands: localDiagnostics.checkedCommands,
-        message: buildAnthropicNoQuotaDiagnosticsMessage(credentials.detail),
-      };
-      return diagnostics;
-    }
-
-    let fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
-      credentials.accessToken,
-      options.requestTimeoutMs,
-    );
-    if (
-      fallbackQuota.state === "unavailable" &&
-      fallbackQuota.failureKind === "authentication" &&
-      credentials.source === "opencode-auth" &&
-      localDiagnostics.authStatus === "authenticated"
-    ) {
-      const claudeCredentials = await readClaudeOAuthAccessToken();
-      if (claudeCredentials.state === "configured") {
-        credentials = claudeCredentials;
-        fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
-          claudeCredentials.accessToken,
-          options.requestTimeoutMs,
-        );
-      }
-    }
-    if (fallbackQuota.state !== "success") {
-      const diagnostics: AnthropicDiagnostics = {
-        installed: localDiagnostics.installed,
-        version: localDiagnostics.version,
-        authStatus: localDiagnostics.authStatus,
-        quotaSupported: false,
-        quotaSource: "none",
-        oauthCredentialSource: credentials.source,
-        binaryPath: localDiagnostics.binaryPath,
-        checkedCommands: localDiagnostics.checkedCommands,
-        message: buildAnthropicNoQuotaDiagnosticsMessage(fallbackQuota.detail),
-        ...(fallbackQuota.failureCategory !== undefined
-          ? { failureCategory: fallbackQuota.failureCategory }
-          : {}),
-      };
-      return diagnostics;
-    }
-
-    const diagnostics: AnthropicDiagnostics = {
+    return {
       installed: localDiagnostics.installed,
       version: localDiagnostics.version,
       authStatus: localDiagnostics.authStatus,
-      quotaSupported: true,
-      quotaSource:
-        credentials.source === "opencode-auth"
-          ? "opencode-auth-oauth-api"
-          : "claude-credentials-oauth-api",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: localDiagnostics.binaryPath,
+      checkedCommands: localDiagnostics.checkedCommands,
+      message: buildAnthropicNoQuotaDiagnosticsMessage(credentials.detail),
+    };
+  }
+
+  let fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
+    credentials.accessToken,
+    options.requestTimeoutMs,
+  );
+  if (
+    fallbackQuota.state === "unavailable" &&
+    fallbackQuota.failureKind === "authentication" &&
+    credentials.source === "opencode-auth" &&
+    localDiagnostics.authStatus === "authenticated"
+  ) {
+    const claudeCredentials = await readClaudeOAuthAccessToken();
+    if (claudeCredentials.state === "configured") {
+      credentials = claudeCredentials;
+      fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
+        claudeCredentials.accessToken,
+        options.requestTimeoutMs,
+      );
+    }
+  }
+  if (fallbackQuota.state !== "success") {
+    return {
+      installed: localDiagnostics.installed,
+      version: localDiagnostics.version,
+      authStatus: localDiagnostics.authStatus,
+      quotaSupported: false,
+      quotaSource: "none",
       oauthCredentialSource: credentials.source,
       binaryPath: localDiagnostics.binaryPath,
       checkedCommands: localDiagnostics.checkedCommands,
-      quota: fallbackQuota.quota,
+      message: buildAnthropicNoQuotaDiagnosticsMessage(fallbackQuota.detail),
+      ...(fallbackQuota.failureCategory !== undefined
+        ? { failureCategory: fallbackQuota.failureCategory }
+        : {}),
     };
-    return diagnostics;
-  })().then((value) => {
-    diagnosticsCache.set(binaryPath, {
-      timestamp: Date.now(),
-      value,
-    });
-    return value;
-  });
-
-  diagnosticsCache.set(binaryPath, {
-    timestamp: cached.timestamp,
-    value: cached.value,
-    inFlight,
-  });
-
-  try {
-    return await inFlight;
-  } finally {
-    const latest = diagnosticsCache.get(binaryPath);
-    if (latest?.inFlight === inFlight) {
-      diagnosticsCache.set(binaryPath, {
-        timestamp: latest.timestamp,
-        value: latest.value,
-      });
-    }
   }
+
+  return {
+    installed: localDiagnostics.installed,
+    version: localDiagnostics.version,
+    authStatus: localDiagnostics.authStatus,
+    quotaSupported: true,
+    quotaSource:
+      credentials.source === "opencode-auth"
+        ? "opencode-auth-oauth-api"
+        : "claude-credentials-oauth-api",
+    oauthCredentialSource: credentials.source,
+    binaryPath: localDiagnostics.binaryPath,
+    checkedCommands: localDiagnostics.checkedCommands,
+    quota: fallbackQuota.quota,
+  };
 }
 
 export async function hasAnthropicCredentialsConfigured(
   options: AnthropicProbeOptions = {},
 ): Promise<boolean> {
-  try {
-    const opencodeCredentials = await resolveAnthropicOAuthCached();
-    // A login OpenCode could not return still counts, so it shows as an error.
-    if (opencodeCredentials.state === "configured" || opencodeCredentials.state === "failed") {
-      return true;
+  if (!options.useClaudeCodeCredentials) {
+    try {
+      const opencodeCredentials = await resolveAnthropicOAuthCached();
+      // A login OpenCode could not return still counts, so it shows as an error.
+      if (opencodeCredentials.state === "configured" || opencodeCredentials.state === "failed") {
+        return true;
+      }
+    } catch {
+      // Fall back to the existing local Claude CLI probe.
     }
-  } catch {
-    // Fall back to the existing local Claude CLI probe.
   }
 
   try {
-    const diagnostics = await getCachedAnthropicLocalDiagnostics(options);
+    const diagnostics = await getAnthropicLocalDiagnostics(options);
     return diagnostics.installed && diagnostics.authStatus === "authenticated";
   } catch {
     return false;
@@ -1516,7 +1512,7 @@ export async function resolveAnthropicAuthIdentity(
 ): Promise<ResolvedAuthIdentity | null> {
   let localDiagnostics: AnthropicLocalDiagnostics;
   try {
-    localDiagnostics = await getCachedAnthropicLocalDiagnostics(options);
+    localDiagnostics = await getAnthropicLocalDiagnostics(options);
   } catch {
     return null;
   }
