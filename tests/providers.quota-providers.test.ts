@@ -242,7 +242,7 @@ describe("quota-providers aggregate provider", () => {
     ).toBe(true);
   });
 
-  it("skips maintained Alibaba tuning in the aggregate", () => {
+  it("skips obsolete Alibaba local-estimate definitions in the aggregate", () => {
     const definitions: QuotaProviderDefinition[] = [
       {
         id: "alibaba-coding-plan",

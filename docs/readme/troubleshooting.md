@@ -123,10 +123,10 @@ Custom definitions live in the canonical `quotaProviders` array. See [Configurat
 
 | Symptom | Fix |
 | --- | --- |
-| API key not detected | See [API keys](providers.md#api-keys). Repo-local provider secrets are ignored. |
-| Limits need tuning | Define a local estimate with the reserved `alibaba-coding-plan` id in the canonical `quotaProviders` array. |
-| Counters do not move | Make sure the current model is `alibaba/*` or `alibaba-cn/*`. |
-| Quota seems stale | Check the state path under `~/.local/state/opencode/opencode-quota-gui/quota-providers/` and restart OpenCode. |
+| CLI not detected | Install `bailian-cli` and make sure `bl` is on an absolute, non-project folder in the OpenCode service's [PATH](#service-environment). Coding Plan supports macOS, Linux, and Windows. See [setup](providers.md#alibaba-coding-plan). |
+| Not authenticated | Run `bl auth login --console` manually for the intended Model Studio account, then restart OpenCode or wait for the next live check. |
+| Wrong account or usage | Coding Plan uses the Bailian CLI's Console account, which is independent of OpenCode API-key identity. Sign in to the intended account with `bl auth login --console`. |
+| No quota data | Run `bl usage coding-plan --output json` and check the CLI response. An empty `{}` means that CLI account has no Coding Plan subscription; the plugin does not substitute a local estimate. |
 
 </details>
 

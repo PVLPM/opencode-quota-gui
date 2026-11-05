@@ -9,7 +9,15 @@ export const QUOTA_PROVIDER_REMOTE_FORMATS = ["quota-v1", "openrouter-key-v1", "
 export const QUOTA_PROVIDER_MODES = ["remote-api", "local-estimate"] as const;
 export const QUOTA_PROVIDER_WINDOW_TYPES = ["utc-day", "rolling"] as const;
 export const QUOTA_PROVIDERS_AGGREGATE_ID = "quota-providers";
-export const MAINTAINED_LOCAL_ESTIMATE_IDS = ["alibaba-coding-plan"] as const;
+export const MAINTAINED_LOCAL_ESTIMATE_IDS = [] as const;
+const LOCAL_ESTIMATE_PROVIDER_IDS_WITHOUT_ESTIMATES = new Set(["alibaba", "alibaba-coding-plan"]);
+
+function hasUnsupportedAlibabaLocalEstimate(definition: QuotaProviderDefinition): boolean {
+  return (
+    definition.mode === "local-estimate" &&
+    LOCAL_ESTIMATE_PROVIDER_IDS_WITHOUT_ESTIMATES.has(definition.providerId)
+  );
+}
 
 export function isMaintainedQuotaProviderTuning(definition: QuotaProviderDefinition): boolean {
   return (MAINTAINED_LOCAL_ESTIMATE_IDS as readonly string[]).includes(definition.id);
@@ -18,7 +26,11 @@ export function isMaintainedQuotaProviderTuning(definition: QuotaProviderDefinit
 export function customQuotaProviderDefinitions(
   definitions: readonly QuotaProviderDefinition[],
 ): QuotaProviderDefinition[] {
-  return definitions.filter((definition) => !isMaintainedQuotaProviderTuning(definition));
+  return definitions.filter(
+    (definition) =>
+      !isMaintainedQuotaProviderTuning(definition) &&
+      !hasUnsupportedAlibabaLocalEstimate(definition),
+  );
 }
 
 export function resolveQuotaProviderSessionModelIdentity(params: {
@@ -1205,40 +1217,6 @@ function validateWindows(
   return windows.length === raw.length ? windows : undefined;
 }
 
-function validateMaintainedWindows(
-  id: string,
-  windows: LocalEstimateWindow[] | undefined,
-  providerKey: string,
-  issues: QuotaProviderValidationIssue[],
-): void {
-  if (!windows || !(MAINTAINED_LOCAL_ESTIMATE_IDS as readonly string[]).includes(id)) return;
-  const expected = [
-    { id: "five-hour", type: "rolling" as const, durationMinutes: 300 },
-    { id: "weekly", type: "rolling" as const, durationMinutes: 10_080 },
-    { id: "monthly", type: "rolling" as const, durationMinutes: 43_200 },
-  ];
-
-  if (
-    windows.length !== expected.length ||
-    expected.some((item, index) => {
-      const window = windows[index];
-      return (
-        !window ||
-        window.id !== item.id ||
-        window.type !== item.type ||
-        window.durationMinutes !== item.durationMinutes ||
-        window.usdBudget !== undefined
-      );
-    })
-  ) {
-    issues.push({
-      key: `${providerKey}.windows`,
-      message:
-        "alibaba-coding-plan tuning requires ordered five-hour, weekly, and monthly rolling request windows",
-    });
-  }
-}
-
 function validatePricingModelMap(
   raw: unknown,
   providerKey: string,
@@ -1388,6 +1366,18 @@ export function validateQuotaProviders(value: unknown): QuotaProvidersValidation
       providerId = raw.providerId;
     }
 
+    if (
+      mode === "local-estimate" &&
+      providerId !== undefined &&
+      LOCAL_ESTIMATE_PROVIDER_IDS_WITHOUT_ESTIMATES.has(providerId)
+    ) {
+      issues.push({
+        key: `${providerKey}.providerId`,
+        message:
+          "local-estimate is not supported for Alibaba Coding Plan; use the Bailian CLI quota source",
+      });
+    }
+
     const label = normalizeLabel(raw.label, idValid ? id : undefined);
     if (hasOwnKey(raw, "label") && label === null) {
       issues.push({
@@ -1407,17 +1397,6 @@ export function validateQuotaProviders(value: unknown): QuotaProvidersValidation
     const modelIdsValid =
       !hasOwnKey(raw, "modelIds") ||
       (Array.isArray(raw.modelIds) && modelIds?.length === raw.modelIds.length);
-
-    if (
-      idValid &&
-      (MAINTAINED_LOCAL_ESTIMATE_IDS as readonly string[]).includes(id) &&
-      mode !== "local-estimate"
-    ) {
-      issues.push({
-        key: `${providerKey}.mode`,
-        message: `${id} tuning must use local-estimate mode`,
-      });
-    }
 
     if (mode === "remote-api") {
       for (const field of ["url", "format"] as const) {
@@ -1516,7 +1495,6 @@ export function validateQuotaProviders(value: unknown): QuotaProvidersValidation
         issues.push({ key: `${providerKey}.windows`, message: "field is required" });
       }
       const windows = validateWindows(raw.windows, providerKey, issues);
-      if (idValid) validateMaintainedWindows(id, windows, providerKey, issues);
       const pricingModelMap =
         providerId && hasOwnKey(raw, "pricingModelMap")
           ? validatePricingModelMap(raw.pricingModelMap, providerKey, providerId, issues)

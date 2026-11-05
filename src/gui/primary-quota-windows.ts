@@ -130,12 +130,11 @@ const PRIMARY_QUOTA_WINDOW_RULES: Readonly<Record<string, PrimaryQuotaWindowRule
       { value: "named:period", slot: 0 },
     ],
   },
-  // These providers always emit the same single surviving row, so its window
-  // meaning cannot move with availability. Synthetic always emits 5h then
-  // weekly; Alibaba Coding Plan always emits 5h/weekly/monthly in that order;
-  // Chutes emits one daily-reset quota window (`src/providers/synthetic.ts`
-  // 84-103, `src/providers/alibaba-coding-plan.ts` 116-159,
-  // `src/providers/chutes.ts` 43-55).
+  // These provider cards compact their quota entries into one aggregate row.
+  // Synthetic returns 5h before weekly; Bailian CLI Coding Plan may return any
+  // of 5h/weekly/monthly in that order; Chutes returns one daily-reset window
+  // (`src/providers/synthetic.ts` 84-103, `src/providers/alibaba-coding-plan.ts`
+  // 116-159, `src/providers/chutes.ts` 43-55).
   //
   // Deliberately omitted untyped providers:
   // - Alibaba Token Plan emits optional 5h/weekly

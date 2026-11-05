@@ -61,7 +61,7 @@ Gemini CLI works only with Gemini Code Assist Standard or Enterprise (organizati
 
 | Provider                      | Auth/setup                                                                   | Data from      | Reports            |
 | ----------------------------- | ---------------------------------------------------------------------------- | -------------- | ------------------ |
-| Alibaba Coding Plan           | Automatic                                                                    | Local estimate | Quota              |
+| Alibaba Coding Plan           | [Needs setup](#alibaba-coding-plan)                                           | Official CLI   | Quota              |
 | Alibaba Personal Token Plan   | [Needs setup](#alibaba-personal-token-plan)                                  | Official CLI   | Quota              |
 | DeepSeek                      | Automatic                                                                    | Remote API     | Balance and status |
 | Kimi Code                     | Automatic                                                                    | Remote API     | Quota              |
@@ -110,7 +110,7 @@ Custom providers can report quota, rate limit, usage, spend, budget, balance, or
 - With `enabledProviders: "auto"`, definitions run automatically. A manual list must include `quota-providers` plus every built-in provider you still want.
 - A custom model provider still needs its normal OpenCode provider/model config.
 - OpenRouter is built in. A custom OpenRouter definition only helps if you need a different endpoint or label.
-- Alibaba Personal Token Plan uses the reserved `alibaba-token-plan` ID and stays a separate official-CLI provider; it is not a local-estimate tuning target.
+- Alibaba Coding Plan and Personal Token Plan are separate official-CLI providers with reserved IDs `alibaba-coding-plan` and `alibaba-token-plan`; neither is a local-estimate tuning target.
 
 <details>
 <summary><strong>Recipes: Vercel AI Gateway, Moonshot, Poe</strong></summary>
@@ -265,7 +265,6 @@ These providers read an API key from, in order: an environment variable, then tr
 
 | Provider                | Environment variables (first match wins)              | Notes |
 | ----------------------- | ----------------------------------------------------- | ----- |
-| Alibaba Coding Plan     | `ALIBABA_CODING_PLAN_API_KEY`, `ALIBABA_API_KEY`       | |
 | Chutes AI               | `CHUTES_API_KEY`                                       | |
 | DeepSeek                | `DEEPSEEK_API_KEY`                                     | See [DeepSeek](#deepseek). |
 | Kilo Gateway            | `KILO_API_KEY`                                         | See [Kilo Gateway](#kilo-gateway). |
@@ -399,6 +398,22 @@ Cursor estimates the current billing cycle from your local OpenCode history:
 - **Auto+Composer spend** is a supplementary row shown in detailed mode when there is room.
 - Set `cursorBillingCycleStartDay` to your billing day; otherwise the cycle is the local calendar month.
 
+<a id="alibaba-coding-plan"></a>
+
+### Alibaba Coding Plan
+
+Install and sign in to Alibaba Cloud Model Studio's official Bailian CLI yourself:
+
+```bash
+npm install -g bailian-cli
+bl auth login --console
+```
+
+- The plugin runs only `bl usage coding-plan --output json`; it never installs the CLI or opens a login.
+- Coding Plan is supported on macOS, Linux, and Windows. Keep `bl` in an absolute folder on the OpenCode service's `PATH`, outside the project folder. Windows native executables and `.cmd`/`.bat` shims are supported.
+- The CLI's Console account is independent and is not matched to the OpenCode API-key identity. The plugin uses only quota reported by the CLI and does not infer an account from an API key. Missing CLI, authentication failures, or unavailable quota data are errors; the plugin does not fall back to local estimates. An empty `{}` response means there is no Coding Plan subscription for that CLI account.
+- With a manual provider list, include `alibaba-coding-plan` in `enabledProviders`.
+
 <a id="alibaba-personal-token-plan"></a>
 
 ### Alibaba Personal Token Plan
@@ -412,7 +427,7 @@ bl auth login --console
 
 - The plugin runs only `bl usage token-plan --output json`. It never installs `bl`, opens a login, reads console cookies, or runs a custom command.
 - On macOS and Linux, `bl` must be in an absolute folder on the `PATH` (the OpenCode service's inside OpenCode, your shell's in the terminal). Relative entries are ignored, and so is anything inside the project folder, including a `bl` that links into it. Your home folder is not a project, so `~/.local/bin` and nvm folders work.
-- On Windows, use WSL. Native `bl.exe` and `.cmd` shims are not supported in this release.
+- This Token Plan integration supports macOS and Linux only. On Windows, use WSL; native `bl.exe` and `.cmd` shims are not supported. This differs from Coding Plan, which supports Windows.
 - Team plans, China-only `alibaba-token-plan-cn` runtimes, and cookie-based console scraping are not supported.
 - After switching the CLI's console account, restart OpenCode or wait for the next live check.
 - With a manual provider list, include `alibaba-token-plan` in `enabledProviders`.

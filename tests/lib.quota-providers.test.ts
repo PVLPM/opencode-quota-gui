@@ -885,29 +885,39 @@ describe("quotaProviders schema", () => {
     expect(normalizeJsonV1Timestamp(253_402_300_800_000, "unix-milliseconds")).toBeNull();
   });
 
-  it("accepts only the exact maintained Alibaba tuning windows", () => {
-    expect(
-      validateQuotaProviders([
+  it("rejects local-estimate tuning for Alibaba Coding Plan runtime providers", () => {
+    const windows = [
+      { id: "five-hour", type: "rolling", durationMinutes: 300, requestLimit: 2000 },
+      { id: "weekly", type: "rolling", durationMinutes: 10080, requestLimit: 10000 },
+      { id: "monthly", type: "rolling", durationMinutes: 43200, requestLimit: 20000 },
+    ];
+
+    for (const providerId of ["alibaba-coding-plan", "alibaba"]) {
+      const result = validateQuotaProviders([
         {
-          id: "alibaba-coding-plan",
+          id: "custom-alibaba-estimate",
+          providerId,
           mode: "local-estimate",
-          windows: [
-            { id: "five-hour", type: "rolling", durationMinutes: 300, requestLimit: 2000 },
-            { id: "weekly", type: "rolling", durationMinutes: 10080, requestLimit: 10000 },
-            { id: "monthly", type: "rolling", durationMinutes: 43200, requestLimit: 20000 },
-          ],
+          windows,
         },
-      ]).issues,
-    ).toEqual([]);
+      ]);
+
+      expect(result.issues).toContainEqual(
+        expect.objectContaining({
+          key: "quotaProviders[0].providerId",
+          message: expect.stringContaining("Bailian CLI"),
+        }),
+      );
+    }
 
     expect(
       validateQuotaProviders([
         {
           id: "alibaba-coding-plan",
           mode: "local-estimate",
-          windows: [{ id: "five-hour", type: "rolling", durationMinutes: 300, requestLimit: 2000 }],
+          windows,
         },
-      ]).issues[0]?.key,
-    ).toBe("quotaProviders[0].windows");
+      ]).issues,
+    ).not.toEqual([]);
   });
 });

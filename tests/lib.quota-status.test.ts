@@ -16,13 +16,6 @@ import {
   makeStatusDetails,
 } from "./helpers/quota-status-test-harness.js";
 
-const QUOTA_ACCOUNTING = {
-  resultType: "quota",
-  acquisitionMethod: "local_estimation",
-  ownership: "maintained",
-  authority: "locally_derived",
-} as const;
-
 const fsPromiseMocks = vi.hoisted(() => ({
   stat: vi.fn(async () => {
     throw new Error("missing");
@@ -90,18 +83,6 @@ vi.mock("../src/lib/openrouter.js", () => ({
   resolveOpenRouterApiKey: openrouterMocks.resolveOpenRouterApiKey,
 }));
 
-vi.mock("../src/lib/alibaba-coding-plan-local-quota.js", () => ({
-  ALIBABA_CODING_PLAN_STATE_VERSION: 1,
-  computeAlibabaCodingPlanQuota: () => ({
-    tier: "lite",
-    fiveHour: { used: 0, limit: 1200 },
-    weekly: { used: 0, limit: 9000 },
-    monthly: { used: 0, limit: 18000 },
-  }),
-  getAlibabaCodingPlanQuotaPath: () => "/tmp/alibaba-state.json",
-  readAlibabaCodingPlanQuotaState: vi.fn(async () => ({})),
-}));
-
 vi.mock("../src/lib/modelsdev-pricing.js", () => ({
   getPricingSnapshotHealth: () => ({
     ageMs: 0,
@@ -129,6 +110,7 @@ vi.mock("../src/providers/registry.js", () => ({
   getProviders: () => [
     { id: "copilot" },
     { id: "cursor" },
+    { id: "alibaba-coding-plan" },
     { id: "synthetic" },
     { id: "nanogpt" },
     { id: "deepseek" },
@@ -396,7 +378,7 @@ describe("buildQuotaStatusReport", () => {
     expect(section).not.toContain("401");
   });
 
-  it("uses maintained Alibaba probes and state paths for tuning diagnostics", async () => {
+  it("does not report obsolete Alibaba Coding Plan local-estimate state", async () => {
     const report = await buildQuotaStatusReportForTest({
       enabledProviders: ["alibaba-coding-plan"],
       quotaProviders: [
@@ -411,37 +393,13 @@ describe("buildQuotaStatusReport", () => {
           ],
         },
       ],
-      providerLiveProbes: [
-        {
-          providerId: "alibaba-coding-plan",
-          result: {
-            attempted: true,
-            entries: [
-              {
-                accounting: QUOTA_ACCOUNTING,
-                name: "Alibaba 5h",
-                percentRemaining: 80,
-              },
-            ],
-            errors: [],
-            statusDetails: makeStatusDetails({
-              local_state_path: "/tmp/alibaba-state.json",
-              local_state_exists: "true",
-              local_state_health: "valid",
-              local_state_version: "1",
-              local_state_last_update: "2026-03-12T12:00:00.000Z",
-            }),
-          },
-        },
-      ],
     });
 
     const section = getReportSection(report, "quota_providers:");
-    expect(section).toContain(
-      "provider_alibaba-coding-plan: provider_id=alibaba-coding-plan mode=local-estimate coverage=all_models outcome=success",
-    );
-    expect(section).toContain("limits=five-hour:1000,weekly:8000,monthly:16000");
-    expect(section).toContain("state_path=/tmp/alibaba-state.json");
+    expect(section).toContain("provider_alibaba-coding-plan: provider_id=alibaba-coding-plan");
+    expect(section).toContain("outcome=unavailable state_path=(none)");
+    expect(section).not.toContain("limits=five-hour:1000,weekly:8000,monthly:16000");
+    expect(section).not.toContain("/tmp/alibaba-state.json");
     expect(section).not.toContain("quota-providers/alibaba-coding-plan.json");
   });
 
@@ -618,6 +576,9 @@ describe("buildQuotaStatusReport", () => {
     );
     expect(report).toContain(
       "- synthetic: pricing=no (subscription request quota (not token-priced))",
+    );
+    expect(report).toContain(
+      "- alibaba-coding-plan: pricing=no (official Bailian CLI Coding Plan quota (not token-priced))",
     );
     expect(report).toContain(
       "- nanogpt: pricing=no (subscription request quota + account balance (not token-priced))",
@@ -1607,11 +1568,14 @@ describe("buildQuotaStatusReport", () => {
       configSource: "defaults",
       providerLiveProbes: [
         makeProviderSuccessProbe("alibaba-coding-plan", {
+          alibaba_coding_plan_source: "bl usage coding-plan --output json",
+          alibaba_coding_plan_cli_status: "success",
           "alibaba auth configured": "false",
           alibaba_api_key_source: "(none)",
           alibaba_api_key_checked_paths: "(none)",
           alibaba_api_key_credential_database_paths: "/tmp/opencode.db",
           alibaba_coding_plan: "(none)",
+          "alibaba coding plan local quota": "obsolete local estimate",
         }),
         makeProviderSuccessProbe("openai", {
           auth_configured: "false",
@@ -1664,11 +1628,8 @@ describe("buildQuotaStatusReport", () => {
       paths:
       - opencode_dirs: data=/tmp/data config=/tmp/config cache=/tmp/cache state=/tmp/state
       - opencode.db: path=/tmp/opencode.db present=false (session and token history)
-      - alibaba auth configured: false
-      - alibaba_api_key_source: (none)
-      - alibaba_api_key_checked_paths: (none)
-      - alibaba_api_key_credential_database_paths: /tmp/opencode.db
-      - alibaba_coding_plan: (none)
+      - alibaba_coding_plan_source: bl usage coding-plan --output json
+      - alibaba_coding_plan_cli_status: success
 
       credential_source:
       - source: opencode-integration-api
@@ -1700,8 +1661,17 @@ describe("buildQuotaStatusReport", () => {
 
       minimax:
 
-      minimax_china:"
+      minimax_china:
+
+      kimi:
+      "
     `);
+
+    expect(report).toContain("- alibaba_coding_plan_source: bl usage coding-plan --output json");
+    expect(report).toContain("- alibaba_coding_plan_cli_status: success");
+    expect(report).not.toContain("alibaba auth configured");
+    expect(report).not.toContain("alibaba_api_key_source");
+    expect(report).not.toContain("obsolete local estimate");
 
     const titles = report
       .split("\n")
