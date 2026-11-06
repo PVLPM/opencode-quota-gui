@@ -65,6 +65,190 @@ describe("native cache observer runtime", () => {
     expect(releaseNativeListener).toHaveBeenCalledTimes(2);
   });
 
+  it("ingests Started DTOs through the Native entry point, normalizes default, and resets route epochs", () => {
+    let receiveEvent: ((event: never) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      now: () => 2_000,
+    });
+    const release = runtime.subscribe("ses_route", vi.fn());
+
+    const started = (messageId: string, variant?: string) =>
+      receiveEvent?.({
+        type: "session.step.started",
+        created: 1_000,
+        data: {
+          sessionID: "ses_route",
+          assistantMessageID: messageId,
+          model: {
+            providerID: "anthropic",
+            id: "claude-test",
+            ...(variant === undefined ? {} : { variant }),
+          },
+          started: 900,
+        },
+      } as never);
+    const ended = (messageId: string, created: number) =>
+      receiveEvent?.({
+        type: "session.step.ended",
+        created,
+        data: {
+          sessionID: "ses_route",
+          assistantMessageID: messageId,
+          tokens: { input: 100, cache: { read: 20, write: 10 } },
+        },
+      } as never);
+
+    started("msg_default", "default");
+    ended("msg_default", 1_100);
+    expect(runtime.query("ses_route")).toMatchObject({
+      color: "yellow",
+      reason: "ttl-unverified",
+      primaryCacheReadRatio: { value: 0.15384615384615385, messageId: "msg_default" },
+    });
+    expect(runtime.query("ses_route")).not.toHaveProperty("configuredTtlDeadlineAtMs");
+
+    started("msg_implicit_default");
+    expect(runtime.query("ses_route")).toMatchObject({ reason: "ttl-unverified" });
+    ended("msg_implicit_default", 1_200);
+    expect(runtime.query("ses_route")).toMatchObject({
+      reason: "ttl-unverified",
+      primaryCacheReadRatio: {
+        value: 0.15384615384615385,
+        messageId: "msg_implicit_default",
+      },
+    });
+
+    started("msg_variant_change", "fast");
+    expect(runtime.query("ses_route")).toMatchObject({
+      color: "gray",
+      reason: "insufficient-evidence",
+    });
+    ended("msg_variant_change", 1_300);
+    expect(runtime.query("ses_route")).toMatchObject({
+      color: "yellow",
+      reason: "ttl-unverified",
+      primaryCacheReadRatio: {
+        value: 0.15384615384615385,
+        messageId: "msg_variant_change",
+      },
+    });
+    expect(runtime.query("ses_route")).not.toHaveProperty("configuredTtlDeadlineAtMs");
+
+    release();
+    runtime.dispose();
+  });
+
+  it("reports host cache-read ratios for non-Anthropic parent and child sessions independently", async () => {
+    let receiveEvent: ((event: never) => void) | undefined;
+    const parentSessionId = "ses_ratio_parent";
+    const childSessionId = "ses_ratio_child";
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async (sessionId) =>
+        sessionId === parentSessionId
+          ? [{ id: childSessionId, parentID: parentSessionId, title: "child" }]
+          : [],
+      now: () => 2_000,
+    });
+    const childSnapshots: Array<{
+      status: "loading" | "ready" | "error";
+      children: Array<{ sessionId: string; label: string }>;
+    }> = [];
+    const releaseChildren = runtime.subscribeChildren(parentSessionId, (snapshot) => {
+      childSnapshots.push(snapshot);
+    });
+    await vi.waitFor(() =>
+      expect(childSnapshots.at(-1)).toMatchObject({
+        status: "ready",
+        children: [{ sessionId: childSessionId }],
+      }),
+    );
+    const releaseParent = runtime.subscribe(parentSessionId, vi.fn());
+
+    const started = (sessionId: string, messageId: string, created: number) =>
+      receiveEvent?.({
+        type: "session.step.started",
+        created,
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: messageId,
+          model: { providerID: "openai", id: "gpt-test" },
+          started: created - 10,
+        },
+      } as never);
+    const ended = (
+      sessionId: string,
+      messageId: string,
+      created: number,
+      tokens: { input: number; cache: { read: number; write: number } },
+    ) =>
+      receiveEvent?.({
+        type: "session.step.ended",
+        created,
+        data: { sessionID: sessionId, assistantMessageID: messageId, tokens },
+      } as never);
+
+    started(parentSessionId, "msg_parent", 1_000);
+    ended(parentSessionId, "msg_parent", 1_100, {
+      input: 100,
+      cache: { read: 20, write: 10 },
+    });
+    started(childSessionId, "msg_child", 1_200);
+    ended(childSessionId, "msg_child", 1_300, {
+      input: 70,
+      cache: { read: 30, write: 10 },
+    });
+
+    expect(runtime.query(parentSessionId)).toMatchObject({
+      color: "yellow",
+      reason: "ttl-unverified",
+      primaryCacheReadRatio: {
+        value: 0.15384615384615385,
+        messageId: "msg_parent",
+        observedAtMs: 1_100,
+        numerator: "cache-read",
+        denominator: "fresh+read+write",
+      },
+    });
+    expect(runtime.query(childSessionId)).toMatchObject({
+      color: "yellow",
+      reason: "ttl-unverified",
+      primaryCacheReadRatio: {
+        value: 0.2727272727272727,
+        messageId: "msg_child",
+        observedAtMs: 1_300,
+      },
+    });
+
+    started(parentSessionId, "msg_parent_zero", 1_400);
+    ended(parentSessionId, "msg_parent_zero", 1_500, {
+      input: 0,
+      cache: { read: 0, write: 0 },
+    });
+    expect(runtime.query(parentSessionId)).toMatchObject({
+      color: "yellow",
+      reason: "ambiguous-invocation",
+    });
+    expect(runtime.query(parentSessionId)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(runtime.query(childSessionId)).toMatchObject({
+      primaryCacheReadRatio: { messageId: "msg_child", value: 0.2727272727272727 },
+    });
+
+    releaseParent();
+    releaseChildren();
+    runtime.dispose();
+  });
+
   it("does not attach to the Native event listener until an observer subscribes", () => {
     const subscribeEvents = vi.fn(() => vi.fn());
     const runtime = createNativeCacheObserverRuntime({

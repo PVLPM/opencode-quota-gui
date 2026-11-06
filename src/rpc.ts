@@ -212,6 +212,18 @@ export type DashboardRpcWatchOutput = { active: boolean };
 export type DashboardRpcOpenSettingsOutput = { opened: true };
 export type DashboardRpcCacheObserverEvent =
   | {
+      type: "session.step.started";
+      created: number;
+      data: {
+        sessionID: string;
+        assistantMessageID: string;
+        /** OpenCode's selected model identity, not the resolved HTTP request route. */
+        model: { providerID: string; id: string; variant?: string };
+        /** Captured before `llm.stream`; event.created is emitted at first output instead. */
+        started?: number;
+      };
+    }
+  | {
       type: "session.step.ended";
       created: number;
       data: {
@@ -663,6 +675,35 @@ export function isDashboardRpcCacheObserverEvent(
         value.data.state === "unavailable" ||
         value.data.state === "stopped")
     );
+  }
+
+  if (value.type === "session.step.started") {
+    if (
+      !hasExactKeys(value, ["type", "created", "data"]) ||
+      !Number.isFinite(value.created) ||
+      !isObject(value.data) ||
+      !hasOnlyKeys(value.data, ["sessionID", "assistantMessageID", "model", "started"]) ||
+      typeof value.data.sessionID !== "string" ||
+      !isValidResourceId(value.data.sessionID) ||
+      typeof value.data.assistantMessageID !== "string" ||
+      !isValidResourceId(value.data.assistantMessageID) ||
+      !isObject(value.data.model) ||
+      !hasOnlyKeys(value.data.model, ["providerID", "id", "variant"]) ||
+      typeof value.data.model.providerID !== "string" ||
+      !isValidResourceId(value.data.model.providerID) ||
+      typeof value.data.model.id !== "string" ||
+      !isValidResourceId(value.data.model.id) ||
+      (value.data.model.variant !== undefined &&
+        (typeof value.data.model.variant !== "string" ||
+          !isValidResourceId(value.data.model.variant))) ||
+      (value.data.started !== undefined &&
+        (typeof value.data.started !== "number" ||
+          !Number.isFinite(value.data.started) ||
+          value.data.started < 0))
+    ) {
+      return false;
+    }
+    return true;
   }
 
   if (value.type === "session.step.ended") {

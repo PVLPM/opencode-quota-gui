@@ -9,13 +9,14 @@ import {
   observeCacheCompactionBoundary,
   observeCacheInvalidation,
   observeCacheInvocation,
-  setCacheInvalidationCoverage,
   setCacheTtlEvidence,
 } from "../src/lib/cache-observer.js";
 
 const route: CacheRouteProvenance = {
   providerId: "anthropic",
   modelId: "claude-test",
+  variantId: "fast",
+  protocolId: "anthropic-messages",
   basis: { source: "opencode-message-metadata", reference: "msg-1" },
 };
 
@@ -40,22 +41,18 @@ function invocation(
 }
 
 function withActiveTtl(state = stateFor(), expiresAtMs = 500) {
-  const withTtl = setCacheTtlEvidence(state, {
-    kind: "verified",
+  return setCacheTtlEvidence(state, {
+    kind: "configured",
+    protocolId: "anthropic-messages",
     route,
+    configuredTtlMs: 300_000,
     expiresAtMs,
-    basis: { source: "provider-contract", reference: "documented-route-ttl" },
-  });
-  return setCacheInvalidationCoverage(withTtl, {
-    sessionId: "ses-parent",
-    route,
-    verifiedThroughMs: 200,
-    basis: { source: "host-cache-state", reference: "route-state-200" },
+    basis: { source: "anthropic-messages", reference: "accepted-5m-cache-ttl" },
   });
 }
 
 describe("observer-only cache state", () => {
-  it("stays insufficient without observations, but a verified primary cache write establishes a prefix", () => {
+  it("stays insufficient without observations, but a primary cache write establishes a prefix", () => {
     const empty = classifyCacheObserverState(stateFor(), 200);
     expect(empty.color).toBe("gray");
 
@@ -67,16 +64,25 @@ describe("observer-only cache state", () => {
     expect(writtenClassification).toMatchObject({
       color: "green",
       reason: "observed-write-with-active-ttl",
+      confidence: "best-effort",
+      ttlSemantics: "configured-minimum",
+      configuredTtlMs: 300_000,
+      configuredTtlDeadlineAtMs: 500,
     });
-    expect(writtenClassification.primaryCacheReadRatio?.value).toBe(0);
+    expect(writtenClassification).not.toHaveProperty("verifiedExpiresAtMs");
+    expect(writtenClassification.primaryCacheReadRatio).toBeUndefined();
+    expect(writtenClassification).not.toHaveProperty("warmingEnabled");
   });
 
-  it("turns green only for an observed cache read with matching verified active TTL", () => {
+  it("turns green only for an observed cache read with matching supported configured TTL", () => {
     const state = observeCacheInvocation(withActiveTtl(), invocation());
 
     expect(classifyCacheObserverState(state, 200)).toMatchObject({
       color: "green",
       reason: "observed-reuse-with-active-ttl",
+      confidence: "best-effort",
+      ttlSemantics: "configured-minimum",
+      configuredTtlDeadlineAtMs: 500,
       primaryCacheReadRatio: {
         value: 80 / 110,
         messageId: "msg-1",
@@ -86,18 +92,39 @@ describe("observer-only cache state", () => {
     });
   });
 
-  it("does not treat missing invalidation telemetry as proof of no invalidation", () => {
+  it("allows best-effort green without an impossible invalidation-coverage horizon", () => {
     const withTtl = setCacheTtlEvidence(stateFor(), {
-      kind: "verified",
+      kind: "configured",
+      protocolId: "anthropic-messages",
       route,
+      configuredTtlMs: 300_000,
       expiresAtMs: 500,
-      basis: { source: "provider-contract", reference: "documented-route-ttl" },
+      basis: { source: "anthropic-messages", reference: "accepted-5m-cache-ttl" },
     });
     const state = observeCacheInvocation(withTtl, invocation());
 
     expect(classifyCacheObserverState(state, 200)).toMatchObject({
+      color: "green",
+      reason: "observed-reuse-with-active-ttl",
+      confidence: "best-effort",
+      ttlSemantics: "configured-minimum",
+    });
+  });
+
+  it("does not accept a configured TTL unless the exact supported protocol and route match", () => {
+    const unsupportedProtocol = setCacheTtlEvidence(stateFor(), {
+      kind: "configured",
+      protocolId: "anthropic-messages",
+      route: { ...route, protocolId: undefined },
+      configuredTtlMs: 300_000,
+      expiresAtMs: 500,
+      basis: { source: "anthropic-messages", reference: "accepted-5m-cache-ttl" },
+    });
+    const state = observeCacheInvocation(unsupportedProtocol, invocation());
+
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
       color: "yellow",
-      reason: "invalidation-unverified",
+      reason: "ttl-unverified",
     });
   });
 
@@ -241,7 +268,7 @@ describe("observer-only cache state", () => {
     expect(classifyCacheObserverState(invalidatedWrite, 200).color).toBe("red");
   });
 
-  it("reports the last certain primary ratio in invocation order and requires every count category", () => {
+  it("reports host cache-read ratios from positive counters without protocol identity", () => {
     let state = withActiveTtl();
     state = observeCacheInvocation(
       state,
@@ -291,36 +318,58 @@ describe("observer-only cache state", () => {
     );
     expect(classifyCacheObserverState(missingFresh, 200).primaryCacheReadRatio).toBeUndefined();
     expect(classifyCacheObserverState(zeroDenominator, 200).primaryCacheReadRatio).toBeUndefined();
+
+    const normalizedZero = observeCacheInvocation(
+      withActiveTtl(),
+      invocation({ counts: { fresh: 20, read: 80, write: 0 } }),
+    );
+    expect(classifyCacheObserverState(normalizedZero, 200).primaryCacheReadRatio).toBeUndefined();
+
+    const nonAnthropicRoute: CacheRouteProvenance = {
+      ...route,
+      providerId: "openai",
+      modelId: "gpt-test",
+      protocolId: undefined,
+    };
+    const nonAnthropic = createCacheObserverState({
+      sessionId: "ses-parent",
+      route: nonAnthropicRoute,
+    });
+    const nonAnthropicState = observeCacheInvocation(
+      nonAnthropic,
+      invocation({ route: nonAnthropicRoute }),
+    );
+    expect(classifyCacheObserverState(nonAnthropicState, 200)).toMatchObject({
+      color: "yellow",
+      reason: "ttl-unverified",
+      primaryCacheReadRatio: {
+        value: 0.7272727272727273,
+        messageId: "msg-1",
+        numerator: "cache-read",
+        denominator: "fresh+read+write",
+      },
+    });
   });
 
-  it("exposes verified expiry and source timestamps without inventing a ratio freshness threshold", () => {
-    let state = observeCacheInvocation(withActiveTtl(), invocation());
-    state = setCacheInvalidationCoverage(state, {
-      sessionId: "ses-parent",
-      route,
-      verifiedThroughMs: 350,
-      basis: { source: "host-cache-state", reference: "route-state-350" },
-    });
-
+  it("exposes the conservative configured-TTL deadline without claiming physical eviction", () => {
+    const state = observeCacheInvocation(withActiveTtl(), invocation());
     expect(classifyCacheObserverState(state, 200)).toMatchObject({
       color: "green",
-      verifiedExpiresAtMs: 500,
-      recheckAtMs: 351,
+      configuredTtlMs: 300_000,
+      configuredTtlDeadlineAtMs: 500,
+      confidence: "best-effort",
+      ttlSemantics: "configured-minimum",
+      recheckAtMs: 500,
       primaryCacheReadRatio: {
         observedAtMs: 100,
       },
     });
-    const coverageExpired = classifyCacheObserverState(state, 351);
-    expect(coverageExpired).toMatchObject({
-      color: "yellow",
-      reason: "invalidation-unverified",
-    });
-    expect(coverageExpired).not.toHaveProperty("verifiedExpiresAtMs");
-    expect(coverageExpired).not.toHaveProperty("recheckAtMs");
-    expect(classifyCacheObserverState(state, 500)).toMatchObject({
+    const ttlExpired = classifyCacheObserverState(state, 500);
+    expect(ttlExpired).toMatchObject({
       color: "yellow",
       reason: "ttl-expired",
     });
+    expect(ttlExpired).not.toHaveProperty("configuredTtlDeadlineAtMs");
   });
 
   it("uses the host completion-time and message-id ordering, not arrival order", () => {
@@ -399,7 +448,7 @@ describe("observer-only cache state", () => {
         state,
         invocation({
           order: { completedAtMs: 100 + index, messageId: `msg-${index}` },
-          counts: { fresh: 0, read: index + 1, write: 0 },
+          counts: { fresh: 20, read: index + 1, write: 10 },
         }),
       );
     }

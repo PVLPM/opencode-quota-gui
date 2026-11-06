@@ -26,6 +26,7 @@ let server: ViteDevServer | undefined;
 let createRoot: CreateRoot;
 let createSignal: CreateSignal;
 let createNativeDashboardRuntime: typeof import("../src/native/runtime.js").createNativeDashboardRuntime;
+let createCacheComposerPill: typeof import("../src/native/cache-composer-pill.js").createCacheComposerPill;
 let panelScope: typeof import("../src/native/runtime.js").panelScope;
 
 beforeAll(async () => {
@@ -57,6 +58,10 @@ beforeAll(async () => {
   )) as typeof import("../src/native/runtime.js");
   createNativeDashboardRuntime = runtimeModule.createNativeDashboardRuntime;
   panelScope = runtimeModule.panelScope;
+  const cachePillModule = (await created.ssrLoadModule(
+    path.join(repoRoot, "src/native/cache-composer-pill.ts"),
+  )) as typeof import("../src/native/cache-composer-pill.js");
+  createCacheComposerPill = cachePillModule.createCacheComposerPill;
 }, 60_000);
 
 afterAll(async () => {
@@ -177,6 +182,43 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
   if (!check()) throw new Error(`timed out waiting for ${label}`);
 }
 
+function pushCacheObserverEvent(
+  fake: ReturnType<typeof createFakeCaller>,
+  at: number,
+  cacheObserverEvent: unknown,
+): void {
+  fake.streams.at(-1)?.pushEvent({
+    topic: "cache.observer",
+    at,
+    cacheObserverEvent,
+  });
+}
+
+function pushPrimaryInvocation(
+  fake: ReturnType<typeof createFakeCaller>,
+  sessionId: string,
+  messageId: string,
+  startedAt: number,
+  endedAt: number,
+  tokens: { input: number; cache: { read: number; write: number } },
+): void {
+  pushCacheObserverEvent(fake, startedAt, {
+    type: "session.step.started",
+    created: startedAt,
+    data: {
+      sessionID: sessionId,
+      assistantMessageID: messageId,
+      model: { providerID: "openai", id: "gpt-test" },
+      started: startedAt - 10,
+    },
+  });
+  pushCacheObserverEvent(fake, endedAt, {
+    type: "session.step.ended",
+    created: endedAt,
+    data: { sessionID: sessionId, assistantMessageID: messageId, tokens },
+  });
+}
+
 function mountRuntime(options: {
   fake: ReturnType<typeof createFakeCaller>;
   connected: () => boolean;
@@ -205,6 +247,192 @@ function mountRuntime(options: {
 }
 
 describe("native window runtime", () => {
+  it("activates the existing window stream for an idle root cache pill before the dashboard opens", async () => {
+    const fake = createFakeCaller();
+    const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
+    const session = {
+      key: "builtin\nses_idle_root",
+      id: "ses_idle_root",
+      server: { builtin: true, connected: true },
+    };
+    const [current] = createSignal(session);
+    let pill!: ReturnType<typeof createCacheComposerPill>;
+    const disposePill = createRoot((disposeRoot) => {
+      pill = createCacheComposerPill({ current, list: () => [session] } as never, runtime);
+      return disposeRoot;
+    });
+
+    // No Panel is mounted and the test never calls runtime.retain() directly.
+    await waitFor(() => runtime.client.connection() === "live", "root pill window transport");
+    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+    expect(fake.raw.watch).toHaveBeenCalledOnce();
+
+    fake.streams[0]?.pushEvent({
+      topic: "cache.observer",
+      at: 1_000,
+      cacheObserverEvent: {
+        type: "session.step.started",
+        created: 1_000,
+        data: {
+          sessionID: session.id,
+          assistantMessageID: "msg_idle_root",
+          model: { providerID: "openai", id: "gpt-test" },
+          started: 990,
+        },
+      },
+    });
+    fake.streams[0]?.pushEvent({
+      topic: "cache.observer",
+      at: 1_100,
+      cacheObserverEvent: {
+        type: "session.step.ended",
+        created: 1_100,
+        data: {
+          sessionID: session.id,
+          assistantMessageID: "msg_idle_root",
+          tokens: { input: 100, cache: { read: 20, write: 10 } },
+        },
+      },
+    });
+    await waitFor(
+      () =>
+        runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId ===
+        "msg_idle_root",
+      "root pill host cache event",
+    );
+    expect(pill.show({ session } as never).label).toContain("15.4%");
+
+    disposePill();
+    dispose();
+  });
+
+  it("fences a switched-away session ratio until a new primary end is observed", async () => {
+    const fake = createFakeCaller();
+    const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
+    const sessionA = {
+      key: "builtin\nses_switch_a",
+      id: "ses_switch_a",
+      server: { builtin: true, connected: true },
+    };
+    const sessionB = {
+      key: "builtin\nses_switch_b",
+      id: "ses_switch_b",
+      server: { builtin: true, connected: true },
+    };
+    const [current, setCurrent] = createSignal(sessionA);
+    let pill!: ReturnType<typeof createCacheComposerPill>;
+    const disposePill = createRoot((disposeRoot) => {
+      pill = createCacheComposerPill(
+        { current, list: () => [sessionA, sessionB] } as never,
+        runtime,
+      );
+      return disposeRoot;
+    });
+    await waitFor(() => runtime.client.connection() === "live", "session switch transport");
+
+    pushPrimaryInvocation(fake, sessionA.id, "msg_a_initial", 1_000, 1_100, {
+      input: 100,
+      cache: { read: 20, write: 10 },
+    });
+    await waitFor(
+      () =>
+        runtime.cacheObserver.query(sessionA.id)?.primaryCacheReadRatio?.messageId ===
+        "msg_a_initial",
+      "initial session A ratio",
+    );
+    expect(pill.show({ session: sessionA } as never).label).toContain("15.4%");
+
+    setCurrent(sessionB);
+    await waitFor(
+      () => !/\d+\.\d+%/.test(pill.show({ session: sessionB } as never).label),
+      "session B pill selection",
+    );
+    pushPrimaryInvocation(fake, sessionA.id, "msg_a_missed", 1_200, 1_300, {
+      input: 100,
+      cache: { read: 40, write: 10 },
+    });
+    pushPrimaryInvocation(fake, sessionB.id, "msg_b", 1_400, 1_500, {
+      input: 100,
+      cache: { read: 30, write: 10 },
+    });
+    await waitFor(
+      () => runtime.cacheObserver.query(sessionB.id)?.primaryCacheReadRatio?.messageId === "msg_b",
+      "session B event-stream barrier",
+    );
+    expect(runtime.cacheObserver.query(sessionA.id)).not.toHaveProperty("primaryCacheReadRatio");
+
+    setCurrent(sessionA);
+    await waitFor(
+      () => !/\d+\.\d+%/.test(pill.show({ session: sessionA } as never).label),
+      "session A returns without claiming a latest ratio",
+    );
+    pushPrimaryInvocation(fake, sessionA.id, "msg_a_new", 1_600, 1_700, {
+      input: 100,
+      cache: { read: 30, write: 10 },
+    });
+    await waitFor(
+      () =>
+        runtime.cacheObserver.query(sessionA.id)?.primaryCacheReadRatio?.messageId === "msg_a_new",
+      "new session A primary end",
+    );
+    expect(pill.show({ session: sessionA } as never).label).toContain("21.4%");
+
+    disposePill();
+    dispose();
+  });
+
+  it("fences a connected session ratio over a transport reconnect until a new primary end", async () => {
+    const fake = createFakeCaller();
+    const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
+    const session = {
+      key: "builtin\nses_reconnect",
+      id: "ses_reconnect",
+      server: { builtin: true, connected: true },
+    };
+    const [current] = createSignal(session);
+    let pill!: ReturnType<typeof createCacheComposerPill>;
+    const disposePill = createRoot((disposeRoot) => {
+      pill = createCacheComposerPill({ current, list: () => [session] } as never, runtime);
+      return disposeRoot;
+    });
+    await waitFor(() => runtime.client.connection() === "live", "reconnect test transport");
+    pushPrimaryInvocation(fake, session.id, "msg_before_disconnect", 2_000, 2_100, {
+      input: 100,
+      cache: { read: 20, write: 10 },
+    });
+    await waitFor(
+      () =>
+        runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId ===
+        "msg_before_disconnect",
+      "pre-disconnect ratio",
+    );
+
+    fake.streams[0]?.finish();
+    await waitFor(() => runtime.client.connection() === "reconnecting", "transport disconnect");
+    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
+
+    await runtime.client.reconnect();
+    await waitFor(() => runtime.client.connection() === "live", "transport reconnect");
+    expect(fake.streams).toHaveLength(2);
+    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(pill.show({ session } as never).label).not.toContain("15.4%");
+
+    pushPrimaryInvocation(fake, session.id, "msg_after_reconnect", 2_200, 2_300, {
+      input: 100,
+      cache: { read: 30, write: 10 },
+    });
+    await waitFor(
+      () =>
+        runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId ===
+        "msg_after_reconnect",
+      "post-reconnect primary end",
+    );
+    expect(pill.show({ session } as never).label).toContain("21.4%");
+
+    disposePill();
+    dispose();
+  });
+
   it("discovers direct children through the installed client without analytics or another stream", async () => {
     const fake = createFakeCaller();
     const sessionList = vi
@@ -419,6 +647,88 @@ describe("native window runtime", () => {
     expect(fake.watchActivity().max).toBe(1);
     expect(states).toEqual([]);
 
+    dispose();
+  });
+
+  it("fences the cache ratio during a healthy scope stream replacement without reporting reconnect", async () => {
+    const fake = createFakeCaller();
+    const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
+    const session = {
+      key: "builtin\nses_scope_transition",
+      id: "ses_scope_transition",
+      server: { builtin: true, connected: true },
+    };
+    const [current] = createSignal(session);
+    let pill!: ReturnType<typeof createCacheComposerPill>;
+    const disposePill = createRoot((disposeRoot) => {
+      pill = createCacheComposerPill({ current, list: () => [session] } as never, runtime);
+      return disposeRoot;
+    });
+    await waitFor(() => runtime.client.connection() === "live", "scope-transition transport");
+    pushPrimaryInvocation(fake, session.id, "msg_before_scope_change", 3_000, 3_100, {
+      input: 100,
+      cache: { read: 20, write: 10 },
+    });
+    await waitFor(
+      () =>
+        runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId ===
+        "msg_before_scope_change",
+      "ratio before scope change",
+    );
+
+    const reconnected = vi.fn();
+    const states: string[] = [];
+    runtime.client.onReconnect(reconnected);
+    runtime.client.onConnectionChange((state) => states.push(state));
+    let finishScopeHealth!: () => void;
+    const scopeHealth = new Promise<{ app: string; contractVersion: number }>((resolve) => {
+      finishScopeHealth = () => resolve({ app: "opencode-quota-gui", contractVersion: 2 });
+    });
+    fake.raw.health.mockImplementationOnce(() => scopeHealth);
+
+    runtime.setScope("analytics");
+    await waitFor(
+      () => fake.streams[0]?.signal.aborted === true,
+      "old event stream retirement on scope change",
+    );
+    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(pill.show({ session } as never).label).not.toContain("15.4%");
+
+    // This primary occurs while the replacement health probe is pending. The
+    // old stream is already retired, so the host event is not replayed later.
+    pushPrimaryInvocation(fake, session.id, "msg_missed_during_scope_change", 3_200, 3_300, {
+      input: 100,
+      cache: { read: 40, write: 10 },
+    });
+    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
+
+    finishScopeHealth();
+    await waitFor(() => fake.streams.length === 2, "replacement scope event stream");
+    await waitFor(
+      () =>
+        fake.activeWatches.some((watch) => watch.scope === "analytics" && !watch.signal.aborted),
+      "replacement analytics watch",
+    );
+    expect(fake.raw.events.subscribe).toHaveBeenCalledTimes(2);
+    expect(runtime.client.connection()).toBe("live");
+    expect(reconnected).not.toHaveBeenCalled();
+    expect(states).toEqual([]);
+    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
+
+    pushPrimaryInvocation(fake, session.id, "msg_after_scope_change", 3_400, 3_500, {
+      input: 100,
+      cache: { read: 30, write: 10 },
+    });
+    await waitFor(
+      () =>
+        runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId ===
+        "msg_after_scope_change",
+      "new primary after scope replacement",
+    );
+    expect(pill.show({ session } as never).label).toContain("21.4%");
+
+    disposePill();
     dispose();
   });
 

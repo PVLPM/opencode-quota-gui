@@ -18,6 +18,16 @@ const reasons: Record<CacheObserverClassification["reason"], string> = {
   "compaction-boundary-uncertain": "Cache state after compaction unknown",
 };
 
+function childLabel(label: string): string {
+  // Treat session names as untrusted display text, including bidi controls.
+  const clean = label
+    .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const chars = Array.from(clean || "Child session");
+  return chars.length > 40 ? `${chars.slice(0, 39).join("")}…` : chars.join("");
+}
+
 function presentation(observed: CacheObserverClassification | undefined, now = Date.now()) {
   const expires = observed?.verifiedExpiresAtMs;
   const recheck = observed?.recheckAtMs;
@@ -40,7 +50,7 @@ function presentation(observed: CacheObserverClassification | undefined, now = D
         : undefined;
   const ratio = observed?.primaryCacheReadRatio?.value;
   const observedAt = observed?.primaryCacheReadRatio?.observedAtMs;
-  const primaryRead =
+  const validRatio =
     ratio !== undefined &&
     Number.isFinite(ratio) &&
     ratio >= 0 &&
@@ -48,14 +58,17 @@ function presentation(observed: CacheObserverClassification | undefined, now = D
     observedAt !== undefined &&
     Number.isFinite(observedAt) &&
     Number.isFinite(new Date(observedAt).getTime())
-      ? `Last primary read: ${Number((ratio * 100).toFixed(1))}% at ${new Date(observedAt).toISOString()}`
-      : "Primary read unavailable";
+      ? `${Number((ratio * 100).toFixed(1))}%`
+      : undefined;
+  const primaryRead =
+    validRatio === undefined
+      ? "Primary read unavailable"
+      : `Last primary read: ${validRatio} at ${new Date(observedAt!).toISOString()}`;
+  const countdown =
+    verified && expires !== undefined ? `${Math.ceil((expires - now) / 60_000)}m` : undefined;
   return {
     tone,
-    label:
-      observed === undefined || observed.color === "gray"
-        ? "Cache unknown"
-        : `Cache: ${verified ? "verified" : observed.color === "red" ? "invalidation observed" : "uncertain"}`,
+    summary: `${validRatio ?? "?"}${countdown === undefined ? "" : ` · TTL ${countdown}`}`,
     detail:
       observed === undefined
         ? "Not enough evidence"
@@ -65,12 +78,12 @@ function presentation(observed: CacheObserverClassification | undefined, now = D
     primaryRead,
     expiry:
       verified && expires !== undefined
-        ? `Expires at ${new Date(expires).toISOString()} (${Math.ceil((expires - now) / 1000)}s remaining at ${new Date(now).toISOString()})`
+        ? `Expires at ${new Date(expires).toISOString()} (${Math.ceil((expires - now) / 60_000)}m remaining)`
         : "Expiry time unavailable",
   } as const;
 }
 
-/** Observe only sessions the host exposes, using the already-running dashboard stream. */
+/** Observe host-exposed sessions on the window-lived Native transport. */
 export function createCacheComposerPill(
   sessions: Sessions,
   runtime: NativeDashboardRuntime,
@@ -91,6 +104,9 @@ export function createCacheComposerPill(
       setDiscovery(undefined);
       return;
     }
+    // The idle composer pill is itself a window surface that needs host events;
+    // retain the existing transport instead of waiting for the dashboard Panel.
+    runtime.retain();
     const key = current.key;
     let cancelled = false;
     setDiscovery({ key, status: "loading", children: [] });
@@ -103,8 +119,8 @@ export function createCacheComposerPill(
     });
   });
 
-  // One deadline wakeup, shared across the visible root and its children. No
-  // periodic clock or transport activity: query recomputes the classification.
+  // One shared wakeup for minute countdown changes and evidence deadlines.
+  // This reads local observer state only; it never polls the transport.
   createEffect(() => {
     revision();
     const current = sessions.current();
@@ -138,7 +154,9 @@ export function createCacheComposerPill(
       )
         return [];
       const next = Math.min(deadline, expiry);
-      return next > now && next - now <= 2_147_483_647 ? [next] : [];
+      if (next <= now || next - now > 2_147_483_647) return [];
+      const minuteChange = expiry - (Math.ceil((expiry - now) / 60_000) - 1) * 60_000;
+      return [Math.min(next, minuteChange)];
     });
     if (deadlines.length === 0) return;
     const timer = setTimeout(() => setRevision((value) => value + 1), Math.min(...deadlines) - now);
@@ -220,8 +238,8 @@ export function createCacheComposerPill(
         return `${result.detail} · ${result.primaryRead} · ${result.expiry} · Live status unknown`;
       };
       return {
-        label: view.label,
-        icon: "cube",
+        label: `▤ Cache ${view.summary}`,
+        icon: "status",
         ...(view.tone === undefined ? {} : { tone: view.tone }),
         title: "Cache observation (last observed state)",
         rows: [
@@ -232,8 +250,8 @@ export function createCacheComposerPill(
                 );
                 return {
                   id: `child:${child.sessionId}`,
-                  label: child.label,
-                  icon: "cube" as const,
+                  label: `${childLabel(child.label)} · ${childView.summary}`,
+                  icon: "status" as const,
                   ...(childView.tone === undefined ? {} : { tone: childView.tone }),
                   detail: detail(child.sessionId),
                 };
@@ -241,6 +259,7 @@ export function createCacheComposerPill(
             : [
                 {
                   id: "children-status",
+                  icon: "status" as const,
                   label:
                     discovered?.status === "error"
                       ? "Child sessions unavailable"
@@ -253,8 +272,8 @@ export function createCacheComposerPill(
               ]),
           {
             id: "main",
-            label: "Main",
-            icon: "cube",
+            label: `Main · ${view.summary}`,
+            icon: "status",
             ...(view.tone === undefined ? {} : { tone: view.tone }),
             detail: detail(session.id),
           },

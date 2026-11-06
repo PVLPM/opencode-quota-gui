@@ -62,6 +62,7 @@ export function createNativeDashboardRuntime(
     rpcConnection: () => client.connection(),
     subscribeRpcConnection: (listener) => client.onConnectionChange(listener),
     subscribeReconnect: (listener) => client.onReconnect(listener),
+    subscribeEventStreamRetire: (listener) => client.onEventStreamRetire(listener),
     listChildren: async (parentSessionId) => {
       const children: Array<{ id: string; parentID?: string; title?: string }> = [];
       const seenCursors = new Set<string>();
@@ -107,9 +108,8 @@ export function createNativeDashboardRuntime(
       .map((id) => ctx.servers.get(id))
       .find((server) => server?.builtin)?.connected ?? true;
 
-  // Window-level interest: once a Panel has opened, a later remount must not
-  // look like a reconnect. The window-level subscription keeps the transport
-  // eligible; route-specific interest is applied through `setScope`.
+  // Window-level interest: once a Panel or cache-pill surface needs transport,
+  // later remounts reuse it. Route-specific interest is applied through `setScope`.
   function retain(): void {
     if (retained) return;
     retained = true;

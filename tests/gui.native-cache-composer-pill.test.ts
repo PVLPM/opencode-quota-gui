@@ -47,7 +47,11 @@ function setup(initialQuery?: (id: string) => CacheObserverClassification | unde
     },
   );
   const releases: string[] = [];
-  const subscribe = vi.fn((id: string) => () => releases.push(id));
+  const observerListeners = new Map<string, () => void>();
+  const subscribe = vi.fn((id: string, listener: () => void) => {
+    observerListeners.set(id, listener);
+    return () => releases.push(id);
+  });
   const query = vi.fn((id: string): CacheObserverClassification | undefined =>
     initialQuery
       ? initialQuery(id)
@@ -58,6 +62,7 @@ function setup(initialQuery?: (id: string) => CacheObserverClassification | unde
   let notifyTransport: (value: { rpc: string; hostEvents: string }) => void = () => {};
   const transport = { rpc: "live", hostEvents: "observed" };
   const runtime = {
+    retain: vi.fn(),
     cacheObserver: {
       subscribeChildren,
       subscribe,
@@ -86,6 +91,7 @@ function setup(initialQuery?: (id: string) => CacheObserverClassification | unde
     releasedChildren,
     releases,
     subscribe,
+    observerListeners,
     query,
     show,
     setCurrent,
@@ -98,8 +104,9 @@ it("tracks child creation, deletion and reconnect independently", () => {
   const t = setup();
   expect(t.subscribeChildren).toHaveBeenCalledTimes(1);
   t.listeners.get("a")?.({ status: "ready", children: [{ sessionId: "child", label: "Worker" }] });
-  expect(t.show(t.a)?.rows?.map((row) => row.label)).toEqual(["Worker", "Main"]);
+  expect(t.show(t.a)?.rows?.map((row) => row.label)).toEqual(["Worker · ?", "Main · ?"]);
   expect(t.show(t.a)?.rows?.[0]?.tone).toBe("danger");
+  expect(t.show(t.a)?.rows?.[0]?.icon).toBe("status");
   expect(t.subscribe.mock.calls.map(([id]) => id)).toEqual(["a", "child"]);
   t.listeners.get("a")?.({
     status: "ready",
@@ -112,7 +119,7 @@ it("tracks child creation, deletion and reconnect independently", () => {
   expect(t.releases).not.toContain("child");
   t.listeners.get("a")?.({ status: "ready", children: [{ sessionId: "child2", label: "Second" }] });
   expect(t.releases).toContain("child");
-  expect(t.show(t.a)?.rows?.map((row) => row.label)).toEqual(["Second", "Main"]);
+  expect(t.show(t.a)?.rows?.map((row) => row.label)).toEqual(["Second · ?", "Main · ?"]);
   t.notifyTransport({ rpc: "reconnecting", hostEvents: "unavailable" });
   expect(t.releases).toContain("child2");
   t.notifyTransport({ rpc: "live", hostEvents: "observed" });
@@ -144,7 +151,10 @@ it("never presents a green TTL classification as current after clock expiry", ()
     );
     const retained = t.show(t.a);
     expect(retained?.tone).toBe("success");
-    expect(retained?.rows?.at(-1)?.detail).toContain("remaining at");
+    expect(retained?.icon).toBe("status");
+    expect(retained?.rows?.at(-1)?.icon).toBe("status");
+    expect(retained?.rows?.at(-1)?.tone).toBe("success");
+    expect(retained?.rows?.at(-1)?.detail).toContain("1m remaining");
     const before = t.query.mock.calls.length;
     vi.advanceTimersByTime(99);
     expect(t.query.mock.calls.length).toBeGreaterThan(before);
@@ -171,16 +181,154 @@ it("labels a supplied primary ratio as historical and makes missing values expli
     },
   }));
   const supplied = t.show(t.a)?.rows?.at(-1)?.detail;
+  expect(t.show(t.a)?.label).toBe("▤ Cache 62.5%");
+  expect(t.show(t.a)?.rows?.at(-1)?.label).toBe("Main · 62.5%");
   expect(supplied).toContain("Last primary read: 62.5%");
   expect(supplied).toContain("1970-01-01T00:00:01.000Z");
   expect(supplied).toContain("Expiry time unavailable");
   expect(supplied).toContain("Live status unknown");
   t.query.mockImplementation(() => ({ color: "gray", reason: "insufficient-evidence" }));
   const missing = t.show(t.a)?.rows?.at(-1)?.detail;
+  expect(t.show(t.a)?.label).toBe("▤ Cache ?");
   expect(missing).toContain("Primary read unavailable");
   expect(missing).toContain("Expiry time unavailable");
   expect(missing).not.toContain("%");
   t.dispose();
+});
+
+it("shows idle cache with a neutral status icon and bounds child labels", () => {
+  const t = setup();
+  t.listeners.get("a")?.({
+    status: "ready",
+    children: [{ sessionId: "child", label: "x".repeat(100) }],
+  });
+  const view = t.show(t.a);
+  expect(view?.label).toBe("▤ Cache ?");
+  expect(view?.icon).toBe("status");
+  expect(view?.tone).toBeUndefined();
+  expect(view?.rows?.[0]?.label).toBe(`${"x".repeat(39)}… · ?`);
+  expect(view?.rows?.[0]?.detail).toContain("Cache invalidation observed");
+  expect(view?.rows?.[1]?.label).toBe("Main · ?");
+  t.dispose();
+});
+
+it("updates a verified countdown at minute boundaries without transport polling", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(1_000);
+    const t = setup(() => ({
+      color: "green",
+      reason: "observed-reuse-with-active-ttl",
+      verifiedExpiresAtMs: 122_000,
+      recheckAtMs: 122_000,
+    }));
+    expect(t.show(t.a)?.rows?.at(-1)?.detail).toContain("3m remaining");
+    expect(t.show(t.a)?.label).toBe("▤ Cache ? · TTL 3m");
+    expect(t.show(t.a)?.rows?.at(-1)?.label).toBe("Main · ? · TTL 3m");
+    vi.advanceTimersByTime(1_000);
+    expect(t.show(t.a)?.rows?.at(-1)?.detail).toContain("2m remaining");
+    expect(t.show(t.a)?.label).toBe("▤ Cache ? · TTL 2m");
+    expect(t.subscribeChildren).toHaveBeenCalledTimes(1);
+    expect(t.subscribe).toHaveBeenCalledTimes(1);
+    t.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("reactively updates a mounted consumer at countdown boundaries and expiry", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(1_000);
+    const t = setup(() =>
+      Date.now() < 122_000
+        ? {
+            color: "green",
+            reason: "observed-reuse-with-active-ttl",
+            verifiedExpiresAtMs: 122_000,
+            recheckAtMs: 122_000,
+          }
+        : { color: "yellow", reason: "ttl-expired" },
+    );
+    let captured: ReturnType<ComposerPill["show"]>;
+    let renders = 0;
+    const disposeConsumer = solid.createRoot((dispose) => {
+      solid.createComputed(() => {
+        captured = t.show(t.a);
+        renders++;
+      });
+      return dispose;
+    });
+    expect(captured?.label).toBe("▤ Cache ? · TTL 3m");
+    const initialRenders = renders;
+    vi.advanceTimersByTime(1_000);
+    expect(renders).toBeGreaterThan(initialRenders);
+    expect(captured?.label).toBe("▤ Cache ? · TTL 2m");
+    vi.advanceTimersByTime(120_000);
+    expect(captured?.label).toBe("▤ Cache ?");
+    expect(captured?.tone).toBe("warning");
+    disposeConsumer();
+    t.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("keeps the idle mounted consumer visible and reacts to its observer subscription", () => {
+  const t = setup();
+  let captured: ReturnType<ComposerPill["show"]>;
+  const disposeConsumer = solid.createRoot((dispose) => {
+    solid.createComputed(() => {
+      captured = t.show(t.a);
+    });
+    return dispose;
+  });
+  expect(captured?.label).toBe("▤ Cache ?");
+  expect(t.subscribe).toHaveBeenCalledWith("a", expect.any(Function));
+  expect(t.subscribeChildren).toHaveBeenCalledWith("a", expect.any(Function));
+  t.query.mockImplementation(() => ({ color: "red", reason: "known-invalidation" }));
+  t.observerListeners.get("a")?.();
+  expect(captured?.tone).toBe("danger");
+  disposeConsumer();
+  t.dispose();
+});
+
+it("sanitizes child names and shows each child's own ratio and verified countdown", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(1_000);
+    const t = setup((id) =>
+      id !== "child"
+        ? undefined
+        : {
+            color: "green",
+            reason: "observed-reuse-with-active-ttl",
+            verifiedExpiresAtMs: 122_000,
+            recheckAtMs: 122_000,
+            primaryCacheReadRatio: {
+              value: 0.75,
+              messageId: "m",
+              observedAtMs: 1_000,
+              numerator: "cache-read",
+              denominator: "fresh+read+write",
+              basis: { source: "test", reference: "m" },
+            },
+          },
+    );
+    t.listeners.get("a")?.({
+      status: "ready",
+      children: [{ sessionId: "child", label: "  Worker\n\u202eevil\t " }],
+    });
+    expect(t.show(t.a)?.rows?.map((row) => row.label)).toEqual([
+      "Worker evil · 75% · TTL 3m",
+      "Main · ?",
+    ]);
+    vi.advanceTimersByTime(1_000);
+    expect(t.show(t.a)?.rows?.[0]?.label).toBe("Worker evil · 75% · TTL 2m");
+    t.dispose();
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("cancels an old session's deadline on route change and unmount", () => {
@@ -222,7 +370,7 @@ it("reports discovery failure and does not present it as an empty child list", (
   const t = setup();
   t.listeners.get("a")?.({ status: "error", children: [] });
   expect(t.show(t.a)?.rows?.[0]?.label).toBe("Child sessions unavailable");
-  expect(t.show(t.a)?.rows?.[1]?.label).toBe("Main");
+  expect(t.show(t.a)?.rows?.[1]?.label).toBe("Main · ?");
   t.dispose();
 });
 
@@ -235,7 +383,7 @@ it("ignores old notifications after switching sessions or disposal", () => {
   expect(t.show(t.b)?.rows?.map((row) => row.label)).not.toContain("Old");
   expect(t.subscribe.mock.calls.map(([id]) => id)).not.toContain("old-child");
   t.listeners.get("b")?.({ status: "ready", children: [] });
-  expect(t.show(t.b)?.rows?.map((row) => row.label)).toEqual(["Main"]);
+  expect(t.show(t.b)?.rows?.map((row) => row.label)).toEqual(["Main · ?"]);
   t.setCurrent(t.a);
   const late = t.listeners.get("a");
   t.dispose();

@@ -261,4 +261,73 @@ describe("V2 server plugin credential lifecycle", () => {
     expect(signal?.aborted).toBe(true);
     expect(subscribe).toHaveBeenCalledOnce();
   });
+
+  it("does not treat model.list settings at Started-event arrival as dispatch-bound TTL evidence", async () => {
+    const ctx = createContext();
+    let pushHostEvent!: (event: unknown) => void;
+    const nextEvent = () =>
+      new Promise<unknown>((resolve) => {
+        pushHostEvent = resolve;
+      });
+    const subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => ({
+      async *[Symbol.asyncIterator]() {
+        while (!signal.aborted) yield await nextEvent();
+      },
+    }));
+    const modelList = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: "claude-test",
+          providerID: "anthropic",
+          package: "@opencode/ai/providers/anthropic",
+          settings: { cache: { ttl: "1h" } },
+        },
+      ],
+    });
+    const created = 1_700_000_000_000;
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    cacheEventEmit.mockClear();
+
+    const cleanup = await setupPlugin({
+      ...ctx,
+      model: { list: modelList },
+      rpc: {} as never,
+      event: { subscribe },
+    });
+    pushHostEvent({
+      type: "session.step.started",
+      id: "evt_started",
+      created,
+      data: {
+        sessionID: "ses_started",
+        assistantMessageID: "msg_started",
+        agent: "build",
+        model: { providerID: "anthropic", id: "claude-test", variant: "default" },
+        started: created - 100,
+      },
+    });
+
+    await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(2));
+    expect(modelList).not.toHaveBeenCalled();
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(2, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "session.step.started",
+        created,
+        data: {
+          sessionID: "ses_started",
+          assistantMessageID: "msg_started",
+          model: { providerID: "anthropic", id: "claude-test" },
+          started: created - 100,
+        },
+      },
+    });
+
+    await cleanup?.();
+  });
 });

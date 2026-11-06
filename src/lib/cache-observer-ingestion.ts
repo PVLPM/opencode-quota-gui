@@ -4,6 +4,7 @@ import {
   type CacheInvocationObservation,
   type CacheObserverClassification,
   type CacheObserverState,
+  type CacheRouteProvenance,
   classifyCacheObserverState,
   createCacheObserverState,
   observeCacheInvocation,
@@ -22,19 +23,33 @@ export type CacheObserverListener = (
 
 /** Bound retained exact-session state even when a window observes many forks. */
 export const CACHE_OBSERVER_MAX_SESSIONS = 128;
+const CACHE_OBSERVER_MAX_STARTED_STEPS = 512;
+const PRIMARY_STEP_BASIS = {
+  source: "opencode-v2.2.0-session-runner",
+  reference: "packages/core/src/session/runner/llm.ts#233-287",
+} satisfies CacheEvidenceBasis;
+
+interface StartedStepEvidence {
+  sessionId: string;
+  messageId: string;
+  route?: CacheRouteProvenance;
+}
 
 /** Read-only query/subscription seam; each id is an exact session, never a tree aggregate. */
 export interface CacheObserverIngestor {
   query(sessionId: string): CacheObserverClassification | undefined;
   subscribe(sessionId: string, listener: CacheObserverListener): () => void;
+  /** Hide the reported ratio until this exact session yields a new qualifying primary end. */
+  markObservationGap(sessionId: string): void;
   ingest(event: unknown): void;
   dispose(): void;
 }
 
 /**
- * Only a completed assistant step proves a message-level invocation. The host
- * does not prove that it was primary or supply route/TTL/invalidation evidence,
- * so those remain unknown. Session usage aggregates are not invocation data.
+ * OpenCode v2.2.0's runner calls the primary request path before its completed
+ * step event. Selected model identity is correlated from the exact Started
+ * event; session usage aggregates and mutable model catalogs are not invocation
+ * route or dispatch-TTL evidence.
  */
 export function cacheObserverUpdateFromOpenCodeEvent(
   event: unknown,
@@ -66,6 +81,11 @@ export function cacheObserverUpdateFromOpenCodeEvent(
   if (order === undefined) return undefined;
   const tokens = event.data.tokens;
   const cache = isRecord(tokens.cache) ? tokens.cache : undefined;
+  // OpenCode v2.2.0 defines distinct fresh/cache-read/cache-write counters in
+  // https://github.com/anomalyco/opencode/blob/v2.2.0/packages/ai/src/schema/events.ts#L20-L55
+  // and maps them onto step tokens (normalizing missing values to zero) in
+  // https://github.com/anomalyco/opencode/blob/v2.2.0/packages/core/src/session/usage.ts#L8-L18.
+  // This supports host-reported telemetry only, not protocol or cache-validity inference.
   const fresh = ownFiniteNumber(tokens, "input");
   const read = cache === undefined ? undefined : ownFiniteNumber(cache, "read");
   const write = cache === undefined ? undefined : ownFiniteNumber(cache, "write");
@@ -74,23 +94,31 @@ export function cacheObserverUpdateFromOpenCodeEvent(
     ...(read === undefined ? {} : { read }),
     ...(write === undefined ? {} : { write }),
   };
-  const basis = eventBasis("session.step.ended", order.messageId);
-
   return {
     kind: "invocation",
     observation: {
       sessionId,
       order,
-      primaryClassification: { kind: "unknown", basis },
+      primaryClassification: { kind: "primary", basis: PRIMARY_STEP_BASIS },
       counts,
     },
   };
 }
 
-/** Strip an OpenCode event to the content-free DTO carried on Native's shared RPC stream. */
+/**
+ * Strip an OpenCode event to the content-free DTO carried on Native's shared RPC stream.
+ * Started is published at first output (v2.2.0 `publish-llm-event.ts:121-135`). The actual
+ * request uses resolved `model.cache` (`model-request.ts:277-294`), while
+ * `SessionModelRequest.prepare` can rewrite the base URL and HTTP request through hooks
+ * (`model-request.ts:303-329`). The mutable model catalog therefore cannot establish
+ * invocation-bound TTL or effective-route evidence here.
+ */
 export function projectOpenCodeCacheObserverEvent(
   event: unknown,
 ): DashboardRpcCacheObserverEvent | undefined {
+  const started = projectStartedStep(event);
+  if (started !== undefined) return started;
+
   const update = cacheObserverUpdateFromOpenCodeEvent(event);
   if (update === undefined) return undefined;
 
@@ -142,6 +170,8 @@ export function createCacheObserverIngestor(
   const now = options.now ?? Date.now;
   const states = new Map<string, CacheObserverState>();
   const listeners = new Map<string, Set<CacheObserverListener>>();
+  const startedSteps = new Map<string, StartedStepEvidence>();
+  const ratioFencedSessions = new Set<string>();
   let disposed = false;
 
   function query(sessionId: string): CacheObserverClassification | undefined {
@@ -151,7 +181,13 @@ export function createCacheObserverIngestor(
       states.delete(sessionId);
       states.set(sessionId, state);
     }
-    return state === undefined ? undefined : classifyCacheObserverState(state, now());
+    if (state === undefined) return undefined;
+    const classification = classifyCacheObserverState(state, now());
+    if (!ratioFencedSessions.has(sessionId) || classification.primaryCacheReadRatio === undefined) {
+      return classification;
+    }
+    const { primaryCacheReadRatio: _fencedRatio, ...lastObservedClassification } = classification;
+    return lastObservedClassification;
   }
 
   function notify(sessionId: string): void {
@@ -165,20 +201,80 @@ export function createCacheObserverIngestor(
     }
   }
 
+  function clearStartedSteps(sessionId: string): void {
+    for (const [key, started] of startedSteps) {
+      if (started.sessionId === sessionId) startedSteps.delete(key);
+    }
+  }
+
+  function markObservationGap(sessionId: string): void {
+    if (disposed || !sessionId.trim() || !states.has(sessionId)) return;
+    ratioFencedSessions.add(sessionId);
+    notify(sessionId);
+  }
+
   function ingest(event: unknown): void {
     if (disposed) return;
+    const started = startedStepFromDto(event);
+    if (started !== undefined) {
+      const state = states.get(started.sessionId);
+      if (
+        state?.scope.route !== undefined &&
+        started.route !== undefined &&
+        !sameRouteProvenance(state.scope.route, started.route)
+      ) {
+        // A changed selected provider/model/variant starts a new evidence epoch. The Started
+        // model identity is not proof of the effective HTTP route or protocol.
+        clearStartedSteps(started.sessionId);
+        states.delete(started.sessionId);
+        ratioFencedSessions.delete(started.sessionId);
+        states.set(
+          started.sessionId,
+          createCacheObserverState({ sessionId: started.sessionId, route: started.route }),
+        );
+        notify(started.sessionId);
+      }
+      const key = startedStepKey(started.sessionId, started.messageId);
+      startedSteps.delete(key);
+      startedSteps.set(key, started);
+      while (startedSteps.size > CACHE_OBSERVER_MAX_STARTED_STEPS) {
+        const oldestKey = startedSteps.keys().next().value;
+        if (oldestKey === undefined) break;
+        startedSteps.delete(oldestKey);
+      }
+      return;
+    }
+
     const update = cacheObserverUpdateFromOpenCodeEvent(event);
     if (update === undefined) return;
 
-    if (update.kind === "created") return;
+    if (update.kind === "created") {
+      clearStartedSteps(update.sessionId);
+      return;
+    }
 
     if (update.kind !== "invocation") {
+      clearStartedSteps(update.sessionId);
+      ratioFencedSessions.delete(update.sessionId);
       if (states.delete(update.sessionId)) notify(update.sessionId);
       return;
     }
 
     const sessionId = update.observation.sessionId;
-    let state = states.get(sessionId) ?? createCacheObserverState({ sessionId });
+    const startedKey = startedStepKey(sessionId, update.observation.order.messageId);
+    const startedEvidence = startedSteps.get(startedKey);
+    startedSteps.delete(startedKey);
+
+    let state = states.get(sessionId);
+    if (state === undefined) {
+      state = createCacheObserverState({
+        sessionId,
+        ...(startedEvidence?.route === undefined ? {} : { route: startedEvidence.route }),
+      });
+    } else if (state.scope.route === undefined && startedEvidence?.route !== undefined) {
+      state = { ...state, scope: { ...state.scope, route: startedEvidence.route } };
+    }
+
     if (
       state.invocations.some(
         (entry) => entry.order.messageId === update.observation.order.messageId,
@@ -186,16 +282,34 @@ export function createCacheObserverIngestor(
     ) {
       return;
     }
-    state = observeCacheInvocation(state, update.observation);
+
+    const observation = update.observation;
+    const matchedRoute =
+      startedEvidence?.route !== undefined &&
+      sameRouteProvenance(state.scope.route, startedEvidence.route)
+        ? startedEvidence.route
+        : undefined;
+    state = observeCacheInvocation(state, {
+      ...observation,
+      ...(matchedRoute === undefined ? {} : { route: matchedRoute }),
+    });
+
     if (!states.has(sessionId) && states.size >= CACHE_OBSERVER_MAX_SESSIONS) {
       const oldestSessionId = states.keys().next().value;
       if (oldestSessionId !== undefined) {
         states.delete(oldestSessionId);
+        ratioFencedSessions.delete(oldestSessionId);
         notify(oldestSessionId);
       }
     }
     states.delete(sessionId);
     states.set(sessionId, state);
+    if (
+      classifyCacheObserverState(state, now()).primaryCacheReadRatio?.messageId ===
+      observation.order.messageId
+    ) {
+      ratioFencedSessions.delete(sessionId);
+    }
     notify(sessionId);
   }
 
@@ -219,9 +333,112 @@ export function createCacheObserverIngestor(
     disposed = true;
     states.clear();
     listeners.clear();
+    startedSteps.clear();
+    ratioFencedSessions.clear();
   }
 
-  return { query, subscribe, ingest, dispose };
+  return { query, subscribe, markObservationGap, ingest, dispose };
+}
+
+function projectStartedStep(
+  event: unknown,
+): Extract<DashboardRpcCacheObserverEvent, { type: "session.step.started" }> | undefined {
+  if (
+    !isRecord(event) ||
+    event.type !== "session.step.started" ||
+    !isRecord(event.data) ||
+    typeof event.created !== "number" ||
+    !Number.isFinite(event.created)
+  ) {
+    return undefined;
+  }
+
+  const sessionId = nonEmptyString(event.data.sessionID);
+  const messageId = nonEmptyString(event.data.assistantMessageID);
+  const model = isRecord(event.data.model) ? event.data.model : undefined;
+  const providerId = model === undefined ? undefined : nonEmptyString(model.providerID);
+  const modelId = model === undefined ? undefined : nonEmptyString(model.id);
+  if (
+    sessionId === undefined ||
+    messageId === undefined ||
+    providerId === undefined ||
+    modelId === undefined
+  )
+    return undefined;
+
+  const variantId = model === undefined ? undefined : normalizedVariantId(model.variant);
+  const dispatchAtMs = ownFiniteNumber(event.data, "started");
+
+  return {
+    type: "session.step.started",
+    created: event.created,
+    data: {
+      sessionID: sessionId,
+      assistantMessageID: messageId,
+      model: {
+        providerID: providerId,
+        id: modelId,
+        ...(variantId === undefined ? {} : { variant: variantId }),
+      },
+      ...(dispatchAtMs === undefined || dispatchAtMs < 0 ? {} : { started: dispatchAtMs }),
+    },
+  };
+}
+
+function startedStepFromDto(event: unknown): StartedStepEvidence | undefined {
+  if (
+    !isRecord(event) ||
+    event.type !== "session.step.started" ||
+    !isRecord(event.data) ||
+    !isRecord(event.data.model)
+  ) {
+    return undefined;
+  }
+  const sessionId = nonEmptyString(event.data.sessionID);
+  const messageId = nonEmptyString(event.data.assistantMessageID);
+  const providerId = nonEmptyString(event.data.model.providerID);
+  const modelId = nonEmptyString(event.data.model.id);
+  if (
+    sessionId === undefined ||
+    messageId === undefined ||
+    providerId === undefined ||
+    modelId === undefined
+  )
+    return undefined;
+
+  const variantId = normalizedVariantId(event.data.model.variant);
+  const basis: CacheEvidenceBasis = {
+    source: "OpenCode session.step.started selected model identity",
+    reference: messageId,
+  };
+  return {
+    sessionId,
+    messageId,
+    route: {
+      providerId,
+      modelId,
+      ...(variantId === undefined ? {} : { variantId }),
+      basis,
+    },
+  };
+}
+
+function startedStepKey(sessionId: string, messageId: string): string {
+  return JSON.stringify([sessionId, messageId]);
+}
+
+function sameRouteProvenance(
+  left: CacheRouteProvenance | undefined,
+  right: CacheRouteProvenance | undefined,
+): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.providerId === right.providerId &&
+    left.modelId === right.modelId &&
+    left.variantId === right.variantId &&
+    left.protocolId === right.protocolId
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -230,6 +447,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+/** OpenCode v2.2.0 `ModelResolver.withVariant` maps `default` to an omitted variant. */
+function normalizedVariantId(value: unknown): string | undefined {
+  const variantId = nonEmptyString(value);
+  return variantId === "default" ? undefined : variantId;
 }
 
 function ownFiniteNumber(record: Record<string, unknown>, key: string): number | undefined {
@@ -250,8 +473,4 @@ function eventOrder(
     return undefined;
   }
   return { completedAtMs: event.created, messageId };
-}
-
-function eventBasis(type: string, reference: string): CacheEvidenceBasis {
-  return { source: `OpenCode event ${type}`, reference };
 }

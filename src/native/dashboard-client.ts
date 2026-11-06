@@ -146,6 +146,8 @@ export interface NativeDashboardClient extends DashboardDataSource {
   onConnectionChange(listener: (state: NativeDashboardConnection) => void): () => void;
   /** Called after successful transport recovery; consumers refetch here. */
   onReconnect(listener: () => void): () => void;
+  /** Fires when the current attempt's shared invalidation stream is retired. */
+  onEventStreamRetire(listener: () => void): () => void;
   /** Observes cache events on the existing invalidation stream, without activating transport. */
   subscribeCacheObserverEvent(
     listener: (event: DashboardRpcCacheObserverEvent) => void,
@@ -190,12 +192,14 @@ export function createNativeDashboardClient(
   const cacheObserverListeners = new Set<(event: DashboardRpcCacheObserverEvent) => void>();
   const stateListeners = new Set<(state: NativeDashboardConnection) => void>();
   const reconnectListeners = new Set<() => void>();
+  const eventStreamRetireListeners = new Set<() => void>();
   interface Attempt {
     generation: number;
     controller: AbortController;
     scope: DashboardRpcViewScope;
     recovery: boolean;
     live: boolean;
+    eventStreamStarted: boolean;
     /** A Desktop watch deadline is being verified/reacquired in place. */
     renewing: boolean;
     promise: Promise<void>;
@@ -233,6 +237,15 @@ export function createNativeDashboardClient(
     // synchronously, but that work can no longer affect the next generation.
     currentAttempt = undefined;
     generation += 1;
+    if (retired.eventStreamStarted) {
+      for (const listener of Array.from(eventStreamRetireListeners)) {
+        try {
+          listener();
+        } catch {
+          // A stream-retirement observer never interrupts transport cleanup.
+        }
+      }
+    }
     retired.controller.abort();
     return retired;
   }
@@ -275,6 +288,7 @@ export function createNativeDashboardClient(
   async function consumeEvents(attempt: Attempt): Promise<void> {
     const signal = attempt.controller.signal;
     try {
+      attempt.eventStreamStarted = true;
       for await (const event of rpc.events.subscribe("invalidated", { signal })) {
         if (!isCurrent(attempt)) return;
         const data = event.data;
@@ -380,6 +394,7 @@ export function createNativeDashboardClient(
       scope: viewScope,
       recovery: recovery || recoveryRequired,
       live: false,
+      eventStreamStarted: false,
       renewing: false,
       promise: Promise.resolve(),
     };
@@ -457,6 +472,11 @@ export function createNativeDashboardClient(
       return () => reconnectListeners.delete(listener);
     },
 
+    onEventStreamRetire(listener) {
+      eventStreamRetireListeners.add(listener);
+      return () => eventStreamRetireListeners.delete(listener);
+    },
+
     subscribeCacheObserverEvent(listener) {
       cacheObserverListeners.add(listener);
       return () => cacheObserverListeners.delete(listener);
@@ -528,6 +548,7 @@ export function createNativeDashboardClient(
       cacheObserverListeners.clear();
       stateListeners.clear();
       reconnectListeners.clear();
+      eventStreamRetireListeners.clear();
       setConnection("closed");
     },
   };

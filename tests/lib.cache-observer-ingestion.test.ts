@@ -5,6 +5,7 @@ import {
   createCacheObserverIngestor,
   projectOpenCodeCacheObserverEvent,
 } from "../src/lib/cache-observer-ingestion.js";
+import { isDashboardRpcCacheObserverEvent } from "../src/rpc.js";
 
 function stepEndedEvent(
   sessionID: string,
@@ -20,8 +21,23 @@ function stepEndedEvent(
   };
 }
 
+function stepStartedEvent(
+  sessionID: string,
+  assistantMessageID: string,
+  model: Record<string, unknown>,
+  started: number,
+  created = 1_700_000_000_000,
+) {
+  return {
+    type: "session.step.started",
+    id: `evt_${assistantMessageID}`,
+    created,
+    data: { sessionID, assistantMessageID, agent: "build", model, started },
+  };
+}
+
 describe("cache observer event ingestion", () => {
-  it("uses the assistant message identity without inferring primary or route", () => {
+  it("classifies ended steps as primary from the runner path and requires Started for route", () => {
     expect(
       cacheObserverUpdateFromOpenCodeEvent(
         stepEndedEvent("ses_child", "msg_1", { cache: { read: 12 } }),
@@ -32,12 +48,255 @@ describe("cache observer event ingestion", () => {
         sessionId: "ses_child",
         order: { completedAtMs: 1_700_000_000_000, messageId: "msg_1" },
         primaryClassification: {
-          kind: "unknown",
-          basis: { source: "OpenCode event session.step.ended", reference: "msg_1" },
+          kind: "primary",
+          basis: {
+            source: "opencode-v2.2.0-session-runner",
+            reference: "packages/core/src/session/runner/llm.ts#233-287",
+          },
         },
         counts: { read: 12 },
       },
     });
+  });
+
+  it("projects selected model identity and dispatch time, normalizing the host default variant", () => {
+    expect(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(
+          "ses_one",
+          "msg_1",
+          { providerID: "anthropic", id: "claude-test", variant: "default" },
+          1_000,
+          9_000,
+        ),
+      ),
+    ).toEqual({
+      type: "session.step.started",
+      created: 9_000,
+      data: {
+        sessionID: "ses_one",
+        assistantMessageID: "msg_1",
+        model: { providerID: "anthropic", id: "claude-test" },
+        started: 1_000,
+      },
+    });
+
+    expect(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(
+          "ses_one",
+          "msg_fast",
+          { providerID: "anthropic", id: "claude-test", variant: "fast" },
+          1_100,
+        ),
+      ),
+    ).toMatchObject({
+      data: { model: { providerID: "anthropic", id: "claude-test", variant: "fast" } },
+    });
+
+    expect(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(
+          "ses_one",
+          "msg_1h",
+          { providerID: "anthropic", id: "claude-test" },
+          1_000,
+        ),
+      ),
+    ).not.toHaveProperty("data.cacheTtlMs");
+
+    const missingDispatch = projectOpenCodeCacheObserverEvent(
+      stepStartedEvent(
+        "ses_one",
+        "msg_no_dispatch",
+        { providerID: "anthropic", id: "claude-test" },
+        Number.NaN,
+      ),
+    );
+    expect(missingDispatch).not.toHaveProperty("data.started");
+    expect(missingDispatch).not.toHaveProperty("data.cacheTtlMs");
+  });
+
+  it("validates the narrow Started DTO and rejects unverified route or TTL claims", () => {
+    const projected = projectOpenCodeCacheObserverEvent(
+      stepStartedEvent(
+        "ses_one",
+        "msg_rpc",
+        { providerID: "anthropic", id: "claude-test", variant: "fast" },
+        1_000,
+      ),
+    );
+    expect(isDashboardRpcCacheObserverEvent(projected)).toBe(true);
+    if (projected?.type !== "session.step.started") throw new Error("Expected Started DTO");
+
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        ...projected,
+        data: { ...projected.data, protocolId: "anthropic-messages" },
+      }),
+    ).toBe(false);
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        ...projected,
+        data: { ...projected.data, cacheTtlMs: 3_600_000 },
+      }),
+    ).toBe(false);
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        ...projected,
+        data: { ...projected.data, authorization: "must-not-cross-rpc" },
+      }),
+    ).toBe(false);
+  });
+
+  it("does not infer a protocol or dispatch TTL from the selected model identity", () => {
+    const started = projectOpenCodeCacheObserverEvent(
+      stepStartedEvent(
+        "ses_one",
+        "msg_compatible",
+        { providerID: "anthropic", id: "claude-test", variant: "fast" },
+        1_000,
+      ),
+    );
+    expect(started).toMatchObject({ type: "session.step.started" });
+    expect(started).not.toHaveProperty("data.protocolId");
+    expect(started).not.toHaveProperty("data.cacheTtlMs");
+    expect(started).not.toHaveProperty("data.warmingEnabled");
+  });
+
+  it("correlates Started and Ended by exact session/message without asserting route or TTL", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
+    const started = projectOpenCodeCacheObserverEvent(
+      stepStartedEvent(
+        "ses_one",
+        "msg_1",
+        { providerID: "anthropic", id: "claude-test", variant: "fast" },
+        1_000,
+        9_000,
+      ),
+    );
+    const ended = projectOpenCodeCacheObserverEvent(
+      stepEndedEvent("ses_one", "msg_1", { input: 100, cache: { read: 20, write: 10 } }, 9_500),
+    );
+    expect(started).toBeDefined();
+    expect(ended).toBeDefined();
+    ingestor.ingest(started);
+    ingestor.ingest(ended);
+
+    expect(ingestor.query("ses_one")).toMatchObject({
+      color: "yellow",
+      reason: "ttl-unverified",
+    });
+    expect(ingestor.query("ses_one")).not.toHaveProperty("configuredTtlDeadlineAtMs");
+    expect(ingestor.query("ses_one")).toMatchObject({
+      primaryCacheReadRatio: {
+        value: 0.15384615384615385,
+        messageId: "msg_1",
+      },
+    });
+    expect(ingestor.query("ses_one")).not.toHaveProperty("warmingEnabled");
+
+    const unrelated = projectOpenCodeCacheObserverEvent(
+      stepEndedEvent("ses_other", "msg_1", { input: 100, cache: { read: 20, write: 10 } }, 9_500),
+    );
+    ingestor.ingest(unrelated);
+    expect(ingestor.query("ses_other")).toMatchObject({
+      color: "yellow",
+      reason: "ambiguous-invocation",
+    });
+  });
+
+  it("correlates selected model identity only with the exact assistant message", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(
+          "ses_message",
+          "msg_started",
+          { providerID: "anthropic", id: "claude-test", variant: "fast" },
+          1_000,
+        ),
+      ),
+    );
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          "ses_message",
+          "msg_other",
+          { input: 100, cache: { read: 20, write: 10 } },
+          9_500,
+        ),
+      ),
+    );
+    expect(ingestor.query("ses_message")).toMatchObject({
+      color: "yellow",
+      reason: "ambiguous-invocation",
+    });
+
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          "ses_message",
+          "msg_started",
+          { input: 100, cache: { read: 20, write: 10 } },
+          9_600,
+        ),
+      ),
+    );
+    expect(ingestor.query("ses_message")).toMatchObject({
+      color: "yellow",
+      reason: "ttl-unverified",
+    });
+  });
+
+  it("resets the old route epoch on variant transition and recovers with new evidence", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(
+          "ses_variant",
+          "msg_variant",
+          { providerID: "anthropic", id: "claude-test", variant: "fast" },
+          1_000,
+        ),
+      ),
+    );
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          "ses_variant",
+          "msg_variant",
+          { input: 100, cache: { read: 20, write: 10 } },
+          9_500,
+        ),
+      ),
+    );
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(
+          "ses_variant",
+          "msg_variant_two",
+          { providerID: "anthropic", id: "claude-test", variant: "slow" },
+          10_000,
+        ),
+      ),
+    );
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          "ses_variant",
+          "msg_variant_two",
+          { input: 100, cache: { read: 20, write: 10 } },
+          10_500,
+        ),
+      ),
+    );
+
+    expect(ingestor.query("ses_variant")).toMatchObject({
+      color: "yellow",
+      reason: "ttl-unverified",
+    });
+    expect(ingestor.query("ses_variant")).not.toHaveProperty("configuredTtlDeadlineAtMs");
   });
 
   it("preserves explicit zeroes and omitted cache categories independently", () => {

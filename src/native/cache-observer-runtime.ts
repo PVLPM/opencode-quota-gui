@@ -55,6 +55,7 @@ export function createNativeCacheObserverRuntime(options: {
   rpcConnection: () => NativeDashboardConnection;
   subscribeRpcConnection?: (listener: (state: NativeDashboardConnection) => void) => () => void;
   subscribeReconnect?: (listener: () => void) => () => void;
+  subscribeEventStreamRetire?: (listener: () => void) => () => void;
   listChildren: (
     parentSessionId: string,
   ) => Promise<ReadonlyArray<{ id: string; parentID?: string; title?: string }>>;
@@ -119,6 +120,7 @@ export function createNativeCacheObserverRuntime(options: {
       changed = true;
       if (nextChild === undefined && childOwners.get(sessionId) === watcher.parentSessionId) {
         childOwners.delete(sessionId);
+        markObservationGapIfUnobserved(sessionId);
       }
     }
     for (const [sessionId, child] of ownedChildren) {
@@ -278,6 +280,21 @@ export function createNativeCacheObserverRuntime(options: {
     }
   }
 
+  function markObservationGapIfUnobserved(sessionId: string): void {
+    if (!interestedSessions.has(sessionId) && !childOwners.has(sessionId)) {
+      ingestor.markObservationGap(sessionId);
+    }
+  }
+
+  function markActiveObservationGaps(): void {
+    const sessionIds = new Set([
+      ...interestedSessions.keys(),
+      ...childWatchers.keys(),
+      ...childOwners.keys(),
+    ]);
+    for (const sessionId of sessionIds) ingestor.markObservationGap(sessionId);
+  }
+
   function setHostEventState(state: NativeCacheObserverHostEventState, atMs?: number): void {
     const nextAt =
       state === "observed" && typeof atMs === "number" && Number.isFinite(atMs) && atMs >= 0
@@ -291,6 +308,7 @@ export function createNativeCacheObserverRuntime(options: {
 
   let initialTransportReady = options.rpcConnection() === "live";
   const releaseRpcConnection = options.subscribeRpcConnection?.((state) => {
+    if (state === "reconnecting" || state === "closed") markActiveObservationGaps();
     notifyTransport();
     if (state !== "live" || initialTransportReady) return;
     initialTransportReady = true;
@@ -301,6 +319,7 @@ export function createNativeCacheObserverRuntime(options: {
       void refreshChildren(watcher, { reconcilePendingCreates: true });
     }
   });
+  const releaseEventStreamRetire = options.subscribeEventStreamRetire?.(markActiveObservationGaps);
 
   async function children(sessionId: string): Promise<NativeCacheObserverChild[]> {
     if (disposed) throw new Error("Cache observer runtime is closed");
@@ -355,8 +374,12 @@ export function createNativeCacheObserverRuntime(options: {
       if (watcher?.listeners.size !== 0) return;
       watcher.refreshVersion += 1;
       childWatchers.delete(sessionId);
+      markObservationGapIfUnobserved(sessionId);
       for (const childSessionId of watcher.children.keys()) {
-        if (childOwners.get(childSessionId) === sessionId) childOwners.delete(childSessionId);
+        if (childOwners.get(childSessionId) === sessionId) {
+          childOwners.delete(childSessionId);
+          markObservationGapIfUnobserved(childSessionId);
+        }
       }
       watcher.children.clear();
       watcher.pendingCreatedChildren.clear();
@@ -377,11 +400,14 @@ export function createNativeCacheObserverRuntime(options: {
     }
     releaseEventListener = options.subscribeEvents((event) => {
       if (event.type === "source.status") {
+        if (event.data.state !== "observed") markActiveObservationGaps();
         setHostEventState(event.data.state, event.created);
         return;
       }
       const update = cacheObserverUpdateFromOpenCodeEvent(event);
-      if (update !== undefined) {
+      const startedSessionId =
+        event.type === "session.step.started" ? event.data.sessionID : undefined;
+      if (update !== undefined || startedSessionId !== undefined) {
         const timestamp = "created" in event ? event.created : undefined;
         setHostEventState(
           "observed",
@@ -390,7 +416,12 @@ export function createNativeCacheObserverRuntime(options: {
             : (options.now?.() ?? Date.now()),
         );
       }
-      if (update === undefined) return;
+      if (update === undefined) {
+        if (startedSessionId === undefined) return;
+        if (!interestedSessions.has(startedSessionId) && !childOwners.has(startedSessionId)) return;
+        ingestor.ingest(event);
+        return;
+      }
 
       let isOwnedChild = false;
       if (update.kind === "created") {
@@ -424,6 +455,7 @@ export function createNativeCacheObserverRuntime(options: {
       const count = interestedSessions.get(sessionId) ?? 0;
       if (count <= 1) interestedSessions.delete(sessionId);
       else interestedSessions.set(sessionId, count - 1);
+      markObservationGapIfUnobserved(sessionId);
       if (interestedSessions.size === 0 && childWatchers.size === 0) {
         releaseEventListener?.();
         releaseEventListener = undefined;
@@ -442,6 +474,7 @@ export function createNativeCacheObserverRuntime(options: {
     transportListeners.clear();
     releaseRpcConnection?.();
     releaseReconnect?.();
+    releaseEventStreamRetire?.();
     ingestor.dispose();
   }
 

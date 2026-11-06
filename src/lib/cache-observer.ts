@@ -14,10 +14,12 @@ export interface CacheEvidenceBasis {
   reference: string;
 }
 
-/** Provider/model provenance as recorded on an OpenCode assistant message. */
+/** Selected provider/model/variant from Started; this does not prove the effective HTTP route. */
 export interface CacheRouteProvenance {
   providerId: string;
   modelId: string;
+  variantId?: string;
+  protocolId?: "anthropic-messages";
   basis: CacheEvidenceBasis;
 }
 
@@ -35,8 +37,11 @@ export type CachePrimaryClassification =
 
 /** Omitted means the category was not present in the pre-normalized source. */
 export interface CacheInvocationCounts {
+  /** Host-reported fresh input tokens, distinct from cache reads and writes. */
   fresh?: number;
+  /** Host-reported cache-read tokens. */
   read?: number;
+  /** Host-reported cache-write tokens. */
   write?: number;
 }
 
@@ -69,10 +74,15 @@ export interface CacheInvalidationCoverage {
   basis: CacheEvidenceBasis;
 }
 
+export type CacheSupportedTtlMs = 300_000 | 3_600_000;
+
 export type CacheTtlEvidence =
   | {
-      kind: "verified";
+      kind: "configured";
+      protocolId: "anthropic-messages";
       route: CacheRouteProvenance;
+      configuredTtlMs: CacheSupportedTtlMs;
+      /** Conservative configured-minimum boundary from request dispatch; not physical eviction. */
       expiresAtMs: number;
       basis: CacheEvidenceBasis;
     }
@@ -96,6 +106,7 @@ export interface CacheObserverState {
 }
 
 export interface CachePrimaryRatio {
+  /** Host-reported usage telemetry only; not protocol, cache-validity, or TTL evidence. */
   value: number;
   messageId: string;
   /** Source assistant-message completion time; no age/staleness threshold is inferred. */
@@ -109,6 +120,10 @@ export type CacheObserverColor = "gray" | "green" | "yellow" | "red";
 
 export interface CacheObserverClassification {
   color: CacheObserverColor;
+  confidence?: "best-effort";
+  ttlSemantics?: "configured-minimum";
+  configuredTtlMs?: CacheSupportedTtlMs;
+  configuredTtlDeadlineAtMs?: number;
   reason:
     | "insufficient-evidence"
     | "observed-reuse-with-active-ttl"
@@ -122,9 +137,9 @@ export interface CacheObserverClassification {
     | "known-invalidation"
     | "compaction-boundary-uncertain";
   primaryCacheReadRatio?: CachePrimaryRatio;
-  /** Verified TTL deadline, exposed only while the classification is green. */
+  /** @deprecated Retained for older consumers; configured TTL is not a physical expiry claim. */
   verifiedExpiresAtMs?: number;
-  /** Earliest instant the green result can expire without a newer event. */
+  /** Earliest instant to reconsider configured-minimum evidence without a newer event. */
   recheckAtMs?: number;
 }
 
@@ -232,7 +247,7 @@ export function setCacheTtlEvidence(
   return {
     ...state,
     ttlEvidence:
-      ttlEvidence.kind === "verified"
+      ttlEvidence.kind === "configured"
         ? {
             ...ttlEvidence,
             route: { ...ttlEvidence.route, basis: { ...ttlEvidence.route.basis } },
@@ -265,7 +280,7 @@ export function classifyCacheObserverState(
   const latestAmbiguous = last(
     currentInvocations.filter((entry) => isAmbiguousInvocation(state.scope.route, entry)),
   );
-  const ratio = lastPrimaryRatio(currentInvocations, state.scope.route);
+  const ratio = lastPrimaryRatio(currentInvocations);
 
   if (latestReuse === undefined) {
     const hadReuseBeforeBoundary =
@@ -318,10 +333,11 @@ export function classifyCacheObserverState(
 
   const ttl = state.ttlEvidence;
   if (
-    ttl?.kind !== "verified" ||
+    ttl?.kind !== "configured" ||
     !hasValidBasis(ttl.basis) ||
     !hasValidRouteProvenance(ttl.route) ||
-    !sameRoute(state.scope.route, ttl.route)
+    !sameRoute(state.scope.route, ttl.route) ||
+    !isSupportedAnthropicTtl(state.scope.route, ttl)
   ) {
     return { color: "yellow", reason: "ttl-unverified", ...optionalRatio(ratio) };
   }
@@ -329,26 +345,16 @@ export function classifyCacheObserverState(
     return { color: "yellow", reason: "ttl-expired", ...optionalRatio(ratio) };
   }
 
-  const invalidationCoverage = state.invalidationCoverage;
-  if (
-    invalidationCoverage === undefined ||
-    !hasValidBasis(invalidationCoverage.basis) ||
-    !hasValidRouteProvenance(invalidationCoverage.route) ||
-    !sameRoute(state.scope.route, invalidationCoverage.route) ||
-    !Number.isFinite(invalidationCoverage.verifiedThroughMs) ||
-    invalidationCoverage.verifiedThroughMs < nowMs ||
-    invalidationCoverage.verifiedThroughMs < latestReuse.order.completedAtMs
-  ) {
-    return { color: "yellow", reason: "invalidation-unverified", ...optionalRatio(ratio) };
-  }
-
   return {
     color: "green",
+    confidence: "best-effort",
+    ttlSemantics: "configured-minimum",
+    configuredTtlMs: ttl.configuredTtlMs,
+    configuredTtlDeadlineAtMs: ttl.expiresAtMs,
     reason: hasObservedRead(latestReuse.counts)
       ? "observed-reuse-with-active-ttl"
       : "observed-write-with-active-ttl",
-    verifiedExpiresAtMs: ttl.expiresAtMs,
-    recheckAtMs: Math.min(ttl.expiresAtMs, invalidationCoverage.verifiedThroughMs + 1),
+    recheckAtMs: ttl.expiresAtMs,
     ...optionalRatio(ratio),
   };
 }
@@ -457,9 +463,9 @@ function isAmbiguousInvocation(
   return true;
 }
 
+/** Keep only the latest classified primary's host counters; never infer route or cache policy. */
 function lastPrimaryRatio(
   invocations: readonly CacheInvocationObservation[],
-  route: CacheRouteProvenance | undefined,
 ): CachePrimaryRatio | undefined {
   let lastCandidate: CacheInvocationObservation | undefined;
   for (const invocation of invocations) {
@@ -469,19 +475,23 @@ function lastPrimaryRatio(
     }
   }
 
-  if (lastCandidate === undefined || !isCertainPrimaryForRoute(route, lastCandidate)) {
+  if (
+    lastCandidate === undefined ||
+    lastCandidate.primaryClassification.kind !== "primary" ||
+    !hasValidBasis(lastCandidate.primaryClassification.basis)
+  ) {
     return undefined;
   }
   const { fresh, read, write } = lastCandidate.counts;
   if (
-    !isPresentNonNegativeFinite(fresh) ||
-    !isPresentNonNegativeFinite(read) ||
-    !isPresentNonNegativeFinite(write)
+    !isPresentPositiveFinite(fresh) ||
+    !isPresentPositiveFinite(read) ||
+    !isPresentPositiveFinite(write)
   ) {
     return undefined;
   }
   const denominator = fresh + read + write;
-  if (!(denominator > 0) || !hasValidBasis(lastCandidate.primaryClassification.basis)) {
+  if (!(denominator > 0) || !Number.isFinite(denominator)) {
     return undefined;
   }
 
@@ -495,8 +505,23 @@ function lastPrimaryRatio(
   };
 }
 
-function isPresentNonNegativeFinite(value: number | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+function isPresentPositiveFinite(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isAuthoritativeAnthropicRoute(route: CacheRouteProvenance | undefined): boolean {
+  return route?.providerId === "anthropic" && route.protocolId === "anthropic-messages";
+}
+
+function isSupportedAnthropicTtl(
+  route: CacheRouteProvenance | undefined,
+  evidence: Extract<CacheTtlEvidence, { kind: "configured" }>,
+): boolean {
+  return (
+    isAuthoritativeAnthropicRoute(route) &&
+    evidence.protocolId === "anthropic-messages" &&
+    (evidence.configuredTtlMs === 300_000 || evidence.configuredTtlMs === 3_600_000)
+  );
 }
 
 function hasValidBasis(basis: CacheEvidenceBasis | undefined): boolean {
@@ -524,7 +549,11 @@ function sameRoute(
 ): boolean {
   return left === undefined
     ? right === undefined
-    : right !== undefined && left.providerId === right.providerId && left.modelId === right.modelId;
+    : right !== undefined &&
+        left.providerId === right.providerId &&
+        left.modelId === right.modelId &&
+        left.variantId === right.variantId &&
+        left.protocolId === right.protocolId;
 }
 
 function optionalRatio(ratio: CachePrimaryRatio | undefined): {
