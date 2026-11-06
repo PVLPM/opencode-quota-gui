@@ -803,6 +803,80 @@ describe("agent custom-provider backend", () => {
 
 describe("safe agent provider test transport", () => {
   it.each([
+    ["truncated", "/truncated"],
+    ["oversized", "/oversized"],
+  ] as const)("rejects %s HTTPS responses without leaking stream errors", async (_label, path) => {
+    const certPath = new URL("./fixtures/agent-provider-test-ca.pem", import.meta.url);
+    const keyPath = new URL("./fixtures/agent-provider-test-key.pem", import.meta.url);
+    const cert = await readFile(certPath, "utf8");
+    const key = await readFile(keyPath, "utf8");
+    const oversizedBody = Buffer.alloc(256 * 1024 + 1, "x");
+    const server = createHttpsServer({ cert, key }, (request, response) => {
+      if (request.url === "/truncated") {
+        response.writeHead(200, { "content-length": "64" });
+        response.flushHeaders();
+        response.write("partial", () => response.destroy());
+        return;
+      }
+      response.writeHead(200, { "content-length": String(oversizedBody.byteLength) });
+      response.end(oversizedBody);
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("HTTPS fixture did not bind");
+    const uncaughtErrors: Error[] = [];
+    const onUncaughtException = (error: Error) => uncaughtErrors.push(error);
+    process.on("uncaughtException", onUncaughtException);
+
+    try {
+      async function expectRequestRejected(path: string): Promise<void> {
+        let timedOut = false;
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const responsePromise = requestPinnedAddressForTest({
+          address: "127.0.0.1",
+          family: 4,
+          hostname: "localhost",
+          authority: `localhost:${address.port}`,
+          port: address.port,
+          path,
+          method: "GET",
+          headers: { host: `localhost:${address.port}`, accept: "application/json" },
+          ca: cert,
+        });
+        try {
+          await expect(
+            Promise.race([
+              responsePromise,
+              new Promise<never>((_resolve, reject) => {
+                timeout = setTimeout(() => {
+                  timedOut = true;
+                  reject(new Error("pinned HTTPS response did not terminate"));
+                }, 2000);
+              }),
+            ]),
+          ).rejects.toThrow();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(uncaughtErrors).toEqual([]);
+          expect(timedOut).toBe(false);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+      }
+
+      await expectRequestRejected(path);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      process.off("uncaughtException", onUncaughtException);
+    }
+  });
+
+  it.each([
     204, 205, 304,
   ] as const)("returns %i from the real pinned HTTPS transport without throwing on an empty body", async (status) => {
     const certPath = new URL("./fixtures/agent-provider-test-ca.pem", import.meta.url);

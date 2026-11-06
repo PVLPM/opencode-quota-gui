@@ -139,6 +139,17 @@ function headersForRequest(input: ProviderFetchInput, init?: RequestInit): Recor
 
 function requestPinnedAddress(request: SafeProviderRequest): Promise<Response> {
   return new Promise<Response>((resolve, reject) => {
+    let settled = false;
+    const rejectOnce = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const resolveOnce = (response: Response) => {
+      if (settled) return;
+      settled = true;
+      resolve(response);
+    };
     const isLiteral = isIP(request.hostname) !== 0;
     const responseChunks: Buffer[] = [];
     let responseBytes = 0;
@@ -169,6 +180,8 @@ function requestPinnedAddress(request: SafeProviderRequest): Promise<Response> {
         ...(request.signal ? { signal: request.signal } : {}),
       },
       (incoming) => {
+        incoming.once("aborted", () => rejectOnce(new Error("response-aborted")));
+        incoming.once("error", rejectOnce);
         incoming.on("data", (chunk: Buffer | string) => {
           const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           responseBytes += bytes.byteLength;
@@ -190,7 +203,7 @@ function requestPinnedAddress(request: SafeProviderRequest): Promise<Response> {
               ? null
               : Buffer.concat(responseChunks);
           try {
-            resolve(
+            resolveOnce(
               new Response(body, {
                 status,
                 statusText: incoming.statusMessage,
@@ -198,12 +211,12 @@ function requestPinnedAddress(request: SafeProviderRequest): Promise<Response> {
               }),
             );
           } catch (error) {
-            reject(error);
+            rejectOnce(error);
           }
         });
       },
     );
-    outgoing.once("error", reject);
+    outgoing.once("error", rejectOnce);
     outgoing.end();
   });
 }
