@@ -17,7 +17,14 @@ import {
   validateConfigDocumentEdit,
 } from "./opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
-import { type QuotaProviderDefinition, validateQuotaProviders } from "./quota-providers.js";
+import {
+  type JsonV1Metric,
+  type JsonV1NumberSource,
+  type JsonV1TextSource,
+  type JsonV1TimestampSource,
+  type QuotaProviderDefinition,
+  validateQuotaProviders,
+} from "./quota-providers.js";
 import {
   fetchRemoteQuotaProvider,
   type RemoteQuotaProviderResult,
@@ -26,7 +33,6 @@ import {
 export { agentCustomProviderTrustFingerprint } from "./agent-custom-provider-trust.js";
 
 const AGENT_CUSTOM_PROVIDERS_KEY = "agentCustomProviders";
-const MAX_AGENT_CUSTOM_PROVIDERS = 100;
 const ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const TRUST_HASH_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -40,7 +46,6 @@ export type AgentCustomProviderErrorCode =
   | "config-read-error"
   | "config-write-error"
   | "unsafe-config-target"
-  | "provider-limit"
   | "approval-required"
   | "provider-enabled";
 
@@ -61,6 +66,11 @@ export interface AgentCustomProviderSummary {
   trusted: boolean;
   /** Agent tools never receive activation state or an activation capability. */
   enabled: false;
+}
+
+export interface AgentCustomProviderReadResult extends AgentCustomProviderSummary {
+  /** Normalized schema-role projection; credential values are never resolved. */
+  definition: QuotaProviderDefinition;
 }
 
 export interface AgentCustomProviderTestResult {
@@ -104,7 +114,7 @@ export interface AgentCustomProviderStoreOptions {
 
 export interface AgentCustomProviderStore {
   list(): Promise<AgentCustomProviderSummary[]>;
-  read(id: string): Promise<AgentCustomProviderSummary>;
+  read(id: string): Promise<AgentCustomProviderReadResult>;
   add(definition: unknown): Promise<AgentCustomProviderSummary>;
   test(id: string): Promise<AgentCustomProviderTestResult>;
   remove(id: string): Promise<{ id: string; removed: true }>;
@@ -158,8 +168,6 @@ function controlledError(code: AgentCustomProviderErrorCode): AgentCustomProvide
       );
     case "unsafe-config-target":
       return new AgentCustomProviderError(code, "Canonical settings target is not safe to update");
-    case "provider-limit":
-      return new AgentCustomProviderError(code, "The custom-provider proposal limit was reached");
     case "approval-required":
       return new AgentCustomProviderError(
         code,
@@ -185,10 +193,148 @@ function validateDefinition(value: unknown): QuotaProviderDefinition {
   return validation.value[0]!;
 }
 
-function parseStoredRecords(value: unknown): AgentCustomProviderRecord[] {
-  if (!Array.isArray(value) || value.length > MAX_AGENT_CUSTOM_PROVIDERS) {
-    throw controlledError("config-invalid");
+const REDACTED_PROVIDER_VALUE = "[redacted]";
+
+function redactJsonPath(path: string[]): string[] {
+  return path.map(() => REDACTED_PROVIDER_VALUE);
+}
+
+function redactJsonNumberSource(source: JsonV1NumberSource): JsonV1NumberSource {
+  return "path" in source ? { ...source, path: redactJsonPath(source.path) } : { ...source };
+}
+
+function redactJsonTextSource(source: JsonV1TextSource): JsonV1TextSource {
+  return "path" in source
+    ? { path: redactJsonPath(source.path) }
+    : { literal: REDACTED_PROVIDER_VALUE };
+}
+
+function redactJsonTimestampSource(source: JsonV1TimestampSource): JsonV1TimestampSource {
+  if ("path" in source) return { ...source, path: redactJsonPath(source.path) };
+  return {
+    ...source,
+    literal: typeof source.literal === "string" ? REDACTED_PROVIDER_VALUE : source.literal,
+  };
+}
+
+function redactJsonMetric(metric: JsonV1Metric): JsonV1Metric {
+  switch (metric.type) {
+    case "percentage":
+      return { ...metric, percentage: redactJsonNumberSource(metric.percentage) };
+    case "used-limit":
+      return {
+        ...metric,
+        used: redactJsonNumberSource(metric.used),
+        limit: redactJsonNumberSource(metric.limit),
+      };
+    case "remaining-limit":
+      return {
+        ...metric,
+        remaining: redactJsonNumberSource(metric.remaining),
+        limit: redactJsonNumberSource(metric.limit),
+      };
+    case "spend-budget":
+      return {
+        ...metric,
+        spend: redactJsonNumberSource(metric.spend),
+        budget: redactJsonNumberSource(metric.budget),
+      };
+    case "remaining-budget":
+      return {
+        ...metric,
+        remaining: redactJsonNumberSource(metric.remaining),
+        budget: redactJsonNumberSource(metric.budget),
+      };
+    case "value":
+      return { ...metric, value: redactJsonNumberSource(metric.value) };
+    case "status":
+      return { ...metric, value: redactJsonTextSource(metric.value) };
   }
+}
+
+function redactJsonAdapter(
+  adapter: Extract<QuotaProviderDefinition, { mode: "remote-api"; format: "json-v1" }>["adapter"],
+): typeof adapter {
+  return {
+    ...(adapter.rowsPath ? { rowsPath: redactJsonPath(adapter.rowsPath) } : {}),
+    mappings: adapter.mappings.map((mapping) => ({
+      ...mapping,
+      name: REDACTED_PROVIDER_VALUE,
+      ...(mapping.label !== undefined ? { label: REDACTED_PROVIDER_VALUE } : {}),
+      ...(mapping.unit !== undefined ? { unit: REDACTED_PROVIDER_VALUE } : {}),
+      ...(mapping.resetTime !== undefined
+        ? { resetTime: redactJsonTimestampSource(mapping.resetTime) }
+        : {}),
+      ...(mapping.observedTime !== undefined
+        ? { observedTime: redactJsonTimestampSource(mapping.observedTime) }
+        : {}),
+      metric: redactJsonMetric(mapping.metric),
+    })),
+  };
+}
+
+function redactUrlPath(urlValue: string): string {
+  const url = new URL(urlValue);
+  const pathname = url.pathname
+    .split("/")
+    .map((segment, index) =>
+      index === 0 || segment.length === 0 ? segment : REDACTED_PROVIDER_VALUE,
+    )
+    .join("/");
+  return `${url.origin}${pathname}`;
+}
+
+function redactStringMap(values: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.keys(values)
+      .sort()
+      .map((_, index) => [`[redacted-key-${index + 1}]`, REDACTED_PROVIDER_VALUE]),
+  );
+}
+
+/**
+ * Keep schema shape and non-free-form settings useful for inspection. This is role-based
+ * redaction, not semantic secret detection: identifiers, endpoint origin, and env-var names
+ * remain visible by design and may themselves contain user-chosen text.
+ */
+function safeProviderDefinition(definition: QuotaProviderDefinition): QuotaProviderDefinition {
+  const modelIds = definition.modelIds?.map(() => REDACTED_PROVIDER_VALUE);
+  if (definition.mode === "remote-api") {
+    const safeBase = {
+      id: definition.id,
+      providerId: definition.providerId,
+      label: REDACTED_PROVIDER_VALUE,
+      mode: definition.mode,
+      ...(modelIds ? { modelIds } : {}),
+      url: redactUrlPath(definition.url),
+      ...(definition.apiKeyEnv !== undefined ? { apiKeyEnv: definition.apiKeyEnv } : {}),
+    };
+    if (definition.format === "json-v1") {
+      return {
+        ...safeBase,
+        format: definition.format,
+        adapter: redactJsonAdapter(definition.adapter),
+      };
+    }
+    return { ...safeBase, format: definition.format };
+  }
+
+  return {
+    ...definition,
+    label: REDACTED_PROVIDER_VALUE,
+    ...(modelIds ? { modelIds } : {}),
+    windows: definition.windows.map((window) => ({
+      ...window,
+      label: REDACTED_PROVIDER_VALUE,
+    })),
+    ...(definition.pricingModelMap
+      ? { pricingModelMap: redactStringMap(definition.pricingModelMap) }
+      : {}),
+  };
+}
+
+function parseStoredRecords(value: unknown): AgentCustomProviderRecord[] {
+  if (!Array.isArray(value)) throw controlledError("config-invalid");
   const records: AgentCustomProviderRecord[] = [];
   const ids = new Set<string>();
   for (const raw of value) {
@@ -394,23 +540,21 @@ export function createAgentCustomProviderStore(
     },
 
     async read(id) {
-      return summarize(await findRecord(id));
+      const record = await findRecord(id);
+      return { ...summarize(record), definition: safeProviderDefinition(record.definition) };
     },
 
     async add(value) {
       const definition = validateDefinition(value);
       return mutateRecords((data, records) => {
         if (
-          records.length >= MAX_AGENT_CUSTOM_PROVIDERS ||
           records.some((record) => record.definition.id === definition.id) ||
           (Array.isArray(data.quotaProviders) &&
             data.quotaProviders.some(
               (record) => isPlainObject(record) && record.id === definition.id,
             ))
         ) {
-          throw controlledError(
-            records.length >= MAX_AGENT_CUSTOM_PROVIDERS ? "provider-limit" : "duplicate-id",
-          );
+          throw controlledError("duplicate-id");
         }
         const record: AgentCustomProviderRecord = {
           definition,

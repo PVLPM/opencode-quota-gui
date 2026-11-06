@@ -346,7 +346,6 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       case "not-found":
       case "invalid-definition":
       case "duplicate-id":
-      case "provider-limit":
         return new GuiSettingsError("invalid-setting", "The provider action is not valid", {
           key: "agentCustomProviders",
         });
