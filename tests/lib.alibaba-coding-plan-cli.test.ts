@@ -179,6 +179,7 @@ describe("Alibaba Coding Plan CLI execution", () => {
     const request = spawn.mock.calls[0]?.[0] as any;
     expect(request.args).toEqual(ALIBABA_CODING_PLAN_ARGS);
     expect(request.shell).toBe(false);
+    expect(request).not.toHaveProperty("windowsVerbatimArguments");
     expect(request.stdin).toBe("ignore");
     expect(request.timeoutMs).toBe(15_000);
     expect(request.stdoutLimitBytes).toBe(ALIBABA_CODING_PLAN_STDOUT_LIMIT_BYTES);
@@ -250,37 +251,43 @@ describe("Alibaba Coding Plan CLI execution", () => {
   });
 
   it.skipIf(process.platform !== "win32")(
-    "starts Windows npm shims through fixed cmd.exe arguments",
+    "executes a Windows npm shim from a path containing spaces",
     async () => {
       const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
-      if (!systemRoot) return;
-      const { root, workspace } = await makeCliPath("bl.cmd");
-      const spawn = vi.fn(async () => ({
-        code: 0,
-        stdout: Buffer.from("{}"),
-        stderr: Buffer.alloc(0),
-        timedOut: false,
-        truncated: false,
-      }));
+      expect(systemRoot).toBeTruthy();
+      const root = await mkdtemp(path.join(os.tmpdir(), "alibaba coding plan shim-"));
+      temporaryRoots.push(root);
+      const workspace = path.join(root, "workspace");
+      await mkdir(workspace);
+      const argsPath = path.join(root, "args.txt");
+      await writeFile(
+        path.join(root, "bl.cmd"),
+        [
+          "@echo off",
+          `echo %* > "${argsPath}"`,
+          'if not "%*"=="usage coding-plan --output json" exit /b 17',
+          'echo {"per5Hour":{"usedQuota":1,"totalQuota":10}}',
+          "",
+        ].join("\r\n"),
+        "utf8",
+      );
+      expect(root).toContain(" ");
 
-      await queryAlibabaCodingPlanQuota({
+      const result = await queryAlibabaCodingPlanQuota({
         runtime: {
           cwd: workspace,
           pathEnv: root,
           tmpdir: root,
           env: process.env,
           platform: "win32",
-          spawn,
         },
       });
 
-      const request = spawn.mock.calls[0]?.[0] as any;
-      expect(request.file.toLowerCase()).toBe(
-        path.win32.join(systemRoot, "System32", "cmd.exe").toLowerCase(),
-      );
-      expect(request.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
-      expect(request.args[3]).toContain('bl.cmd" usage coding-plan --output json');
-      expect(request.shell).toBe(false);
+      expect((await readFile(argsPath, "utf8")).trimEnd()).toBe("usage coding-plan --output json");
+      expect(result).toMatchObject({
+        state: "success",
+        usage: { fiveHour: { used: 1, total: 10, percentage: 0.1 } },
+      });
     },
   );
 });

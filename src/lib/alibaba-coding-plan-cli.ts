@@ -79,6 +79,8 @@ export interface AlibabaCodingPlanSpawnRequest {
   stderrLimitBytes: number;
   stdin: "ignore";
   shell: false;
+  /** Preserve the `/c` command string verbatim for the carefully quoted Windows shim. */
+  windowsVerbatimArguments?: boolean;
   platform: NodeJS.Platform;
   killGraceMs: number;
 }
@@ -465,6 +467,7 @@ export async function runAlibabaCodingPlanProcess(
         env: request.env,
         argv0: request.file,
         shell: false,
+        ...(request.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         windowsHide: true,
         detached: request.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
@@ -667,6 +670,7 @@ export async function queryAlibabaCodingPlanQuota(
     stderrLimitBytes: ALIBABA_CODING_PLAN_STDERR_LIMIT_BYTES,
     stdin: "ignore",
     shell: false,
+    ...(resolved.kind === "windows-shim" ? { windowsVerbatimArguments: true } : {}),
     platform,
     killGraceMs: ALIBABA_CODING_PLAN_KILL_GRACE_MS,
   };
