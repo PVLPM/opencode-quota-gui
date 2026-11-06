@@ -1,15 +1,15 @@
 /**
  * Effective localhost web dashboard switch.
  *
- * The Native GUI is the primary surface from OpenCode 2.2.0, so the compatibility
+ * The full Native GUI is the primary surface from OpenCode 2.2.1, so the compatibility
  * web transport follows the host version when the canonical key is absent:
- * hosts below 2.2.0 keep it on (the only GUI they have), and 2.2.0+ keeps it off.
+ * supported hosts below 2.2.1 keep it on (including 2.2.0), and 2.2.1+ keeps it off.
  * An explicit `dashboard.enabled` value always wins. Missing or unparseable host
  * versions, a malformed canonical file, and an invalid `dashboard.enabled` value
  * all fail closed. The listener itself stays loopback-only at `dashboard.port`.
  */
 import type { LoadConfigMeta } from "./config.js";
-import { isPreNativeGuiVersion, type OpenCodeVersion } from "./opencode-version.js";
+import { isPreNativeGuiVersion, type OpenCodeVersion } from "./opencode-version-core.js";
 
 export interface DashboardWebPolicyInput {
   /** Canonical `dashboard.enabled` when the key is present and valid. */
@@ -20,7 +20,7 @@ export interface DashboardWebPolicyInput {
   invalidConfig?: boolean;
 }
 
-/** Explicit config wins; otherwise only a parseable pre-2.2.0 host defaults on. */
+/** Explicit config wins; otherwise only a parseable pre-2.2.1 host defaults on. */
 export function resolveDashboardWebEnabled(input: DashboardWebPolicyInput): boolean {
   if (input.invalidConfig) return false;
   if (input.explicitEnabled !== undefined) return input.explicitEnabled;

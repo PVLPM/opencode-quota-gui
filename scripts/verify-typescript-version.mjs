@@ -5,11 +5,9 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
 const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";
-// The Desktop GUI builds against the SDK that ships the GUI/Vite API; the
-// server peer is bounded by packed-package host evidence: 2.0.16, 2.1.4,
-// 2.2.0, and 2.2.5 passed under Bun, so the range stops before the next
-// unverified minor line.
-const EXPECTED_PLUGIN_SDK_VERSION = "2.2.0";
+// The Desktop GUI builds against the 2.2.1 SDK; keep the server peer range
+// independently bounded to the host versions supported by this package.
+const EXPECTED_PLUGIN_SDK_VERSION = "2.2.1";
 const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";
 const PLUGIN_PACKAGE = "@opencode/plugin";
 

@@ -12,6 +12,7 @@ import {
 } from "@opencode/plugin/gui";
 import type { JSX } from "solid-js";
 import { createEffect, onCleanup } from "solid-js";
+import { supportsNativeGui } from "../lib/opencode-version-core.js";
 import productCss from "../ui/styles.css?inline";
 import { createCacheComposerPill } from "./cache-composer-pill.js";
 import nativeCss from "./native.css?inline";
@@ -96,6 +97,11 @@ function openDashboardPanel(ctx: ReturnType<typeof usePlugin>): void {
 
 export default Plugin.define({
   setup(ctx) {
+    // The GUI host exposes its version through the public app context. Older
+    // hosts may not provide it; unknown versions fail closed without affecting
+    // the separate server-plugin browser fallback.
+    if (!supportsNativeGui(ctx.app?.version)) return;
+
     // Contribution order is cascade order: the product sheet first, then the
     // host-only additions. Both are inert outside `.qg-native`/`.qg-panel-root`
     // except for the namespaced `--qg-*` custom properties on `:root`.

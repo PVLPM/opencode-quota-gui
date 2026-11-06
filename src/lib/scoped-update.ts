@@ -17,7 +17,8 @@ import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import { isVerifiedGuiQuotaPluginSpec, resolveExplicitQuotaPluginSpec } from "./init-installer.js";
 import { editConfigDocumentPaths, parseConfigDocument } from "./opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
-import { detectOpenCodeMajor, type OpenCodeMajor } from "./opencode-version.js";
+import { detectOpenCodeMajor } from "./opencode-version.js";
+import type { OpenCodeMajor } from "./opencode-version-core.js";
 import {
   auditObsoleteUpdateSources,
   type ScopedUpdateManualFinding,

@@ -12,6 +12,7 @@ describe("effective web dashboard policy", () => {
     [true, "2.0.16", true],
     [true, "2.1.4", true],
     [true, "2.2.0", true],
+    [true, "2.2.1", true],
     [true, "2.3.0", true],
     [true, undefined, true],
     [false, "2.0.16", false],
@@ -25,10 +26,12 @@ describe("effective web dashboard policy", () => {
   it.each([
     ["2.0.16", true],
     ["2.1.4", true],
-    ["2.2.0", false],
+    ["2.2.0", true],
+    ["2.2.0-beta.1", true],
+    ["2.2.1", false],
     ["2.2.5", false],
     ["2.3.0", false],
-    ["2.2.0-beta.1", false],
+    ["2.2.1-beta.1", false],
   ] as const)("absent key on host %j defaults to %j", (hostVersion, expected) => {
     expect(resolveDashboardWebEnabled({ hostVersion })).toBe(expected);
   });
@@ -42,7 +45,7 @@ describe("effective web dashboard policy", () => {
     expect(resolveDashboardWebEnabled({ hostVersion })).toBe(false);
   });
 
-  it("fails closed for malformed config even when the host predates 2.2.0", () => {
+  it("fails closed for malformed config even when the host predates 2.2.1", () => {
     expect(resolveDashboardWebEnabled({ hostVersion: "2.1.4", invalidConfig: true })).toBe(false);
   });
 

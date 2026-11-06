@@ -12,7 +12,7 @@
  * shared by every transport attached to that host. The host closes with the
  * last lease, releasing the snapshot service and every source it created. The
  * web transport is optional and follows the host version when `dashboard.enabled`
- * is absent (on below OpenCode 2.2.0, off from 2.2.0): when it is off, or when
+ * is absent (on below OpenCode 2.2.1, off from 2.2.1): when it is off, or when
  * its fixed port cannot bind, the shared runtime stays available for the
  * remaining leases and no HTTP/SSE/static surface is started.
  *
@@ -44,7 +44,8 @@ import {
 import type { QuotaProviderContext } from "../lib/entries.js";
 import { parseConfigDocument } from "../lib/opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "../lib/opencode-runtime-paths.js";
-import { detectOpenCodeVersion, type OpenCodeVersion } from "../lib/opencode-version.js";
+import { detectOpenCodeVersion } from "../lib/opencode-version.js";
+import type { OpenCodeVersion } from "../lib/opencode-version-core.js";
 import {
   createGuiSettingsStore,
   type GuiSettingsStoreOptions,

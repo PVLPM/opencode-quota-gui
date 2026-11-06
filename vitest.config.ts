@@ -7,6 +7,7 @@ const DOM_TESTS = [
   "tests/gui.native-session-header-measure-dom.test.ts",
   "tests/gui.native-session-header-mount-dom.test.ts",
   "tests/gui.native-controls-dom.test.ts",
+  "tests/gui.native-compatibility-runtime.test.ts",
 ];
 const SOLID_DEV = fileURLToPath(new URL("./node_modules/solid-js/dist/dev.js", import.meta.url));
 const SOLID_WEB_DEV = fileURLToPath(

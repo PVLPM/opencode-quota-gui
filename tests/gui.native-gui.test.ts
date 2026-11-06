@@ -112,6 +112,19 @@ describe("Desktop GUI entry", () => {
     expect(panelSource).toContain("DashboardPanel");
   });
 
+  it("gates Native contributions on the public host version before setup side effects", () => {
+    const setupStart = guiSource.indexOf("setup(ctx) {");
+    const firstContribution = guiSource.indexOf("ctx.add(", setupStart);
+    const versionGate = guiSource.indexOf(
+      "if (!supportsNativeGui(ctx.app?.version)) return;",
+      setupStart,
+    );
+
+    expect(guiSource).toContain('from "../lib/opencode-version-core.js"');
+    expect(versionGate).toBeGreaterThan(setupStart);
+    expect(firstContribution).toBeGreaterThan(versionGate);
+  });
+
   it("follows the host's live built-in server connection", () => {
     expect(guiSource).toContain("ctx.servers");
     expect(guiSource).toContain(".builtin");
@@ -413,14 +426,14 @@ describe("native build configuration", () => {
   it("ships the bundle from the same package with a bounded server peer", () => {
     expect(exportsMap["./gui-experimental"]?.default).toBe("./dist/gui-experimental.cjs");
     expect(packageScripts["build:gui"]).toBe("vite build --config vite.native.config.mjs");
-    expect(devDependencies["@opencode/plugin"]).toBe("2.2.0");
+    expect(devDependencies["@opencode/plugin"]).toBe("2.2.1");
     expect(peerDependencies["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
     expect(dependencies["@opencode/plugin"]).toBeUndefined();
     expect(dependencies["@opencode/ui"]).toBeUndefined();
     expect(devDependencies["@opencode/ui"]).toBe("2.0.32");
 
     const installed = readJson<PluginManifest>("node_modules/@opencode/plugin/package.json");
-    expect(installed.version).toBe("2.2.0");
+    expect(installed.version).toBe("2.2.1");
     const pluginExports = installed.exports ?? {};
     expect(pluginExports["./gui"]).toBeDefined();
     expect(pluginExports["./gui/vite"]).toBeDefined();

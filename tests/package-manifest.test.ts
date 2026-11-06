@@ -118,7 +118,7 @@ const packedRealOtelFixture = await readFile(
 );
 
 const VERIFY_COMMAND =
-  "pnpm run check && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents";
+  "pnpm run check && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm run verify:native-gui-bundle && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents";
 const NPM_PUBLISH_GUARD = "${{ vars.NPM_PUBLISH_ENABLED == 'true' && inputs.publish == true }}";
 const TAG_REF = "refs/tags/${{ inputs.tag }}";
 // Use Git Bash on Windows, not the WSL launcher that can reinterpret native paths.
@@ -137,6 +137,7 @@ const VERIFY_COMPONENT_COMMANDS = [
   "pnpm run verify:v4-history",
   "pnpm run typecheck",
   "pnpm run build",
+  "pnpm run verify:native-gui-bundle",
   "pnpm test",
   "pnpm run test:four-surfaces",
   "pnpm run verify:package-contents",
@@ -205,7 +206,7 @@ describe("package manifest compatibility", () => {
 
   it("keeps the Desktop SDK pinned and bounds the server peer to tested hosts", () => {
     expect(pkg.peerDependencies?.["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
-    expect(pkg.devDependencies?.["@opencode/plugin"]).toBe("2.2.0");
+    expect(pkg.devDependencies?.["@opencode/plugin"]).toBe("2.2.1");
     for (const dependencies of [
       pkg.dependencies,
       pkg.devDependencies,
@@ -224,7 +225,7 @@ describe("package manifest compatibility", () => {
   it("keeps the TypeScript 7 toolchain explicit without peer suppressions", () => {
     expect(tsconfig.compilerOptions?.types).toEqual(["node"]);
     expect(typescriptValidator).toContain('const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";');
-    expect(typescriptValidator).toContain('const EXPECTED_PLUGIN_SDK_VERSION = "2.2.0";');
+    expect(typescriptValidator).toContain('const EXPECTED_PLUGIN_SDK_VERSION = "2.2.1";');
     expect(typescriptValidator).toContain(
       'const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";',
     );

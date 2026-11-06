@@ -65,7 +65,7 @@ import {
   parseConfigDocument,
   planConfigDocumentEdit,
 } from "../lib/opencode-config-editor.js";
-import type { OpenCodeVersion } from "../lib/opencode-version.js";
+import type { OpenCodeVersion } from "../lib/opencode-version-core.js";
 import { isQuotaFormatStyle, resolveQuotaFormatStyle } from "../lib/quota-format-style.js";
 import {
   DASHBOARD_HIDDEN_ID_LIMIT,
