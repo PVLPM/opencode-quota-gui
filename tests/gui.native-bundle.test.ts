@@ -53,6 +53,10 @@ describe("Desktop GUI bundle", () => {
     expect(requires).toContain("solid-js");
   });
 
+  it("keeps the Node filesystem version lookup out of the window bundle", () => {
+    expect(bundle).not.toContain('require("fs/promises")');
+  });
+
   it("carries the shipped product stylesheet and its selectors", () => {
     for (const token of [
       ":root,.qg-native",

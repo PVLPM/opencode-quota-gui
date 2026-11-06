@@ -1,7 +1,7 @@
 import type { Context } from "@opencode/plugin/gui";
 import type { JSX } from "solid-js";
 import { Match, onCleanup, Show, Switch } from "solid-js";
-import { getPackageVersion } from "../lib/version.js";
+import { BUILD_IDENTITY } from "../contracts/build-identity.js";
 import { ErrorCard } from "../ui/components/states";
 import { createToaster, ToastRegion } from "../ui/components/toast";
 import { SettingsRoute } from "../ui/routes";
@@ -92,10 +92,11 @@ export function NativeSettingsPage(props: {
             class="qg-stale__retry"
             onClick={() => {
               const clipboard = globalThis.navigator?.clipboard;
+              const appVersion =
+                BUILD_IDENTITY.version === "unknown" ? undefined : BUILD_IDENTITY.version;
               void copySettingsDiagnostics(
-                async () => {
-                  const appVersion = await getPackageVersion();
-                  return settingsDiagnosticsFromSnapshots(
+                () =>
+                  settingsDiagnosticsFromSnapshots(
                     state.quota(),
                     state.query.data(),
                     state.stale(),
@@ -106,8 +107,7 @@ export function NativeSettingsPage(props: {
                       settingsUnavailable:
                         state.query.data() === undefined && state.query.error() !== undefined,
                     },
-                  );
-                },
+                  ),
                 clipboard?.writeText?.bind(clipboard),
                 toaster.push,
               );
