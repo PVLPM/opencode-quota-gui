@@ -69,6 +69,15 @@ const ADD_TOOL_INPUT = {
   additionalProperties: false,
 } as const;
 
+const MAX_PENDING_CACHE_OBSERVER_EVENTS = 512;
+type ProjectedCacheObserverEvent = NonNullable<
+  ReturnType<typeof projectOpenCodeCacheObserverEvent>
+>;
+interface PendingCacheObserverEvent {
+  at: number;
+  event: ProjectedCacheObserverEvent;
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -134,9 +143,79 @@ export const QuotaToastPlugin = Plugin.define({
       createIntegrationCredentialSource(ctx.integration),
     );
     let dashboardRpc: Awaited<ReturnType<typeof registerDashboardRpc>> | undefined;
+    let cacheObserverEmitChain: Promise<void> = Promise.resolve();
+    const pendingCacheObserverEvents: PendingCacheObserverEvent[] = [];
+    let pendingCacheObserverEventsDropped = false;
+    const cacheObserverRelayAbort = new AbortController();
+    let cacheObserverEmitWorkerRunning = false;
     type HostEventSourceState = "unverified" | "observed" | "unavailable" | "stopped";
     let hostEventSourceState: HostEventSourceState = "unverified";
     let lastHostEventAtMs: number | undefined;
+    async function emitCacheObserverEventNow(
+      registration: NonNullable<typeof dashboardRpc>,
+      pending: PendingCacheObserverEvent,
+    ): Promise<void> {
+      const { signal } = cacheObserverRelayAbort;
+      if (signal.aborted) return;
+      const emission = Promise.resolve()
+        .then(() => {
+          if (signal.aborted) return;
+          return registration.events.emit("invalidated", {
+            topic: "cache.observer",
+            at: pending.at,
+            cacheObserverEvent: pending.event,
+          });
+        })
+        .then(
+          () => undefined,
+          () => undefined,
+        );
+      if (signal.aborted) return;
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        signal.addEventListener("abort", finish, { once: true });
+        void emission.then(finish);
+      });
+    }
+    async function drainCacheObserverEvents(): Promise<void> {
+      try {
+        while (!cacheObserverRelayAbort.signal.aborted) {
+          if (pendingCacheObserverEventsDropped) {
+            pendingCacheObserverEventsDropped = false;
+            const registration = dashboardRpc;
+            if (!registration) continue;
+            const gapAt = Date.now();
+            await emitCacheObserverEventNow(registration, {
+              at: gapAt,
+              event: { type: "source.status", created: gapAt, data: { state: "unavailable" } },
+            });
+            continue;
+          }
+          const pending = pendingCacheObserverEvents.shift();
+          if (!pending) break;
+          const registration = dashboardRpc;
+          if (registration) await emitCacheObserverEventNow(registration, pending);
+        }
+      } finally {
+        cacheObserverEmitWorkerRunning = false;
+      }
+    }
+    const emitCacheObserverEvent = (event: ProjectedCacheObserverEvent, at: number): void => {
+      const registration = dashboardRpc;
+      if (!registration || cacheObserverRelayAbort.signal.aborted) return;
+      if (pendingCacheObserverEvents.length >= MAX_PENDING_CACHE_OBSERVER_EVENTS) {
+        pendingCacheObserverEvents.shift();
+        pendingCacheObserverEventsDropped = true;
+      }
+      pendingCacheObserverEvents.push({ at, event });
+      if (!cacheObserverEmitWorkerRunning) {
+        cacheObserverEmitWorkerRunning = true;
+        cacheObserverEmitChain = drainCacheObserverEvents().catch(() => undefined);
+      }
+    };
     const publishHostEventSourceState = (
       state: Exclude<HostEventSourceState, "unverified">,
       at: number,
@@ -144,13 +223,7 @@ export const QuotaToastPlugin = Plugin.define({
       hostEventSourceState = state;
       if (state === "observed") lastHostEventAtMs = at;
       if (!dashboardRpc) return;
-      void dashboardRpc.events
-        .emit("invalidated", {
-          topic: "cache.observer",
-          at,
-          cacheObserverEvent: { type: "source.status", created: at, data: { state } },
-        })
-        .catch(() => undefined);
+      emitCacheObserverEvent({ type: "source.status", created: at, data: { state } }, at);
     };
     // Reuse the existing host stream for credential invalidation and narrowly projected cache
     // evidence. No Native-side OpenCode event subscription is opened.
@@ -174,18 +247,19 @@ export const QuotaToastPlugin = Plugin.define({
         const cacheObserverEvent = projectOpenCodeCacheObserverEvent(event);
         if (
           cacheObserverEvent !== undefined &&
-          dashboardRpc !== undefined &&
           typeof event.created === "number" &&
           Number.isFinite(event.created) &&
           event.created >= 0
         ) {
-          void dashboardRpc.events
-            .emit("invalidated", {
-              topic: "cache.observer",
-              at: event.created,
-              cacheObserverEvent,
-            })
-            .catch(() => undefined);
+          if (dashboardRpc !== undefined) {
+            emitCacheObserverEvent(cacheObserverEvent, event.created);
+          } else {
+            if (pendingCacheObserverEvents.length >= MAX_PENDING_CACHE_OBSERVER_EVENTS) {
+              pendingCacheObserverEvents.shift();
+              pendingCacheObserverEventsDropped = true;
+            }
+            pendingCacheObserverEvents.push({ at: event.created, event: cacheObserverEvent });
+          }
         }
       }
       if (!hostEvents.signal.aborted) throw new Error("host event stream ended");
@@ -222,11 +296,23 @@ export const QuotaToastPlugin = Plugin.define({
         dashboardRpc = await registerDashboardRpc(ctx.rpc, dashboardLease.runtime, {
           location: ctx.location,
         });
+        const bufferedCacheObserverEvents = pendingCacheObserverEvents.splice(0);
+        if (pendingCacheObserverEventsDropped) {
+          const gapAt = Date.now();
+          pendingCacheObserverEventsDropped = false;
+          emitCacheObserverEvent(
+            { type: "source.status", created: gapAt, data: { state: "unavailable" } },
+            gapAt,
+          );
+        }
         if (hostEventSourceState !== "unverified") {
           publishHostEventSourceState(
             hostEventSourceState,
             hostEventSourceState === "observed" ? (lastHostEventAtMs ?? Date.now()) : Date.now(),
           );
+        }
+        for (const pending of bufferedCacheObserverEvents) {
+          emitCacheObserverEvent(pending.event, pending.at);
         }
       } catch {
         console.warn(`[opencode-quota-gui] dashboard RPC unavailable: registration-failed`);
@@ -298,8 +384,13 @@ export const QuotaToastPlugin = Plugin.define({
 
     return async () => {
       hostEvents.abort();
+      pendingCacheObserverEvents.length = 0;
       publishHostEventSourceState("stopped", Date.now());
       unbindCredentialSource();
+      pendingCacheObserverEvents.length = 0;
+      pendingCacheObserverEventsDropped = false;
+      cacheObserverRelayAbort.abort();
+      await cacheObserverEmitChain;
       if (agentProviderTools) {
         try {
           await agentProviderTools.dispose();

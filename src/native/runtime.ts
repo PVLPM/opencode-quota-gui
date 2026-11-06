@@ -96,6 +96,9 @@ export function createNativeDashboardRuntime(
 
       return children;
     },
+    // Lazy cache-history demand is the only Native path that calls message.list.
+    // Forward its cancellation signal directly to the installed public client.
+    listMessages: (input, requestOptions) => ctx.client.message.list(input, requestOptions),
   });
   let location: Location = initialNativeLocation();
   let release: (() => void) | undefined;

@@ -206,6 +206,140 @@ describe("cache observer event ingestion", () => {
     });
   });
 
+  it("does not report ratios for an unmatched Ended event, then correlates it when Started arrives late", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
+    const ended = projectOpenCodeCacheObserverEvent(
+      stepEndedEvent("ses_out_of_order", "msg_late_start", {
+        input: 100,
+        cache: { read: 20, write: 10 },
+      }),
+    );
+    const started = projectOpenCodeCacheObserverEvent(
+      stepStartedEvent(
+        "ses_out_of_order",
+        "msg_late_start",
+        { providerID: "openai", id: "gpt-test" },
+        9_000,
+      ),
+    );
+
+    expect(ended).toBeDefined();
+    expect(started).toBeDefined();
+    ingestor.ingest(ended);
+    expect(ingestor.query("ses_out_of_order")).not.toHaveProperty("primaryCacheReadRatio");
+    expect(ingestor.query("ses_out_of_order")).toMatchObject({
+      primaryCacheReadTelemetry: "unavailable",
+    });
+
+    ingestor.ingest(started);
+    expect(ingestor.query("ses_out_of_order")).toMatchObject({
+      primaryCacheReadRatio: {
+        value: 0.15384615384615385,
+        messageId: "msg_late_start",
+      },
+      primaryCacheReadTelemetry: "available",
+    });
+  });
+
+  it("recovers unmatched live Ended telemetry from the exact historical assistant and merges missing counters", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
+    const sessionId = "ses_history_recovery";
+    const messageId = "msg_history_recovery";
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(sessionId, messageId, { input: 100 }, 9_500),
+      ),
+    );
+    expect(ingestor.query(sessionId)).not.toHaveProperty("primaryCacheReadRatio");
+
+    ingestor.ingestHistory([
+      {
+        sessionId,
+        messageId,
+        completedAtMs: 9_000,
+        route: {
+          providerId: "openai",
+          modelId: "gpt-test",
+          basis: { source: "OpenCode message.list assistant model identity", reference: messageId },
+        },
+        counts: { fresh: 100, read: 50, write: 0 },
+      },
+    ]);
+
+    expect(ingestor.query(sessionId)).toMatchObject({
+      primaryCacheReadRatio: {
+        value: 1 / 3,
+        messageId,
+        observedAtMs: 9_500,
+      },
+    });
+  });
+
+  it("recovers history for an orphan without clearing a newer live Started on the current route", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
+    const sessionId = "ses_history_does_not_reset_live";
+    const liveRoute = { providerID: "openai", id: "gpt-live" };
+
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(sessionId, "msg_live_previous", liveRoute, 1_000),
+      ),
+    );
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          sessionId,
+          "msg_live_previous",
+          { input: 40, cache: { read: 60, write: 0 } },
+          1_100,
+        ),
+      ),
+    );
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(sessionId, "msg_orphan_history", { input: 100 }, 1_200),
+      ),
+    );
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(sessionId, "msg_live_newer", liveRoute, 1_300),
+      ),
+    );
+
+    ingestor.ingestHistory([
+      {
+        sessionId,
+        messageId: "msg_orphan_history",
+        completedAtMs: 1_250,
+        route: {
+          providerId: "anthropic",
+          modelId: "claude-history",
+          basis: {
+            source: "OpenCode message.list assistant model identity",
+            reference: "msg_orphan_history",
+          },
+        },
+        counts: { fresh: 50, read: 50, write: 0 },
+      },
+    ]);
+
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          sessionId,
+          "msg_live_newer",
+          { input: 30, cache: { read: 70, write: 0 } },
+          1_400,
+        ),
+      ),
+    );
+
+    expect(ingestor.query(sessionId)).toMatchObject({
+      primaryCacheReadRatio: { value: 0.7, messageId: "msg_live_newer" },
+      primaryCacheReadTelemetry: "available",
+    });
+  });
+
   it("correlates selected model identity only with the exact assistant message", () => {
     const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
     ingestor.ingest(

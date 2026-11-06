@@ -17,6 +17,15 @@ export type CacheObserverUpdate =
   | { kind: "deleted"; sessionId: string }
   | { kind: "forked"; sessionId: string; parentSessionId?: string };
 
+/** Content-free projection of one completed assistant message from message.list. */
+export interface CacheObserverHistoryInvocation {
+  sessionId: string;
+  messageId: string;
+  completedAtMs: number;
+  route: CacheRouteProvenance;
+  counts: CacheInvocationObservation["counts"];
+}
+
 export type CacheObserverListener = (
   classification: CacheObserverClassification | undefined,
 ) => void;
@@ -35,6 +44,16 @@ interface StartedStepEvidence {
   route?: CacheRouteProvenance;
 }
 
+interface PendingEndedStep {
+  sessionId: string;
+  event: Extract<DashboardRpcCacheObserverEvent, { type: "session.step.ended" }>;
+}
+
+interface LiveCompletionEvidence {
+  messageId: string;
+  completedAtMs: number;
+}
+
 /** Read-only query/subscription seam; each id is an exact session, never a tree aggregate. */
 export interface CacheObserverIngestor {
   query(sessionId: string): CacheObserverClassification | undefined;
@@ -42,6 +61,13 @@ export interface CacheObserverIngestor {
   /** Hide the reported ratio until this exact session yields a new qualifying primary end. */
   markObservationGap(sessionId: string): void;
   ingest(event: unknown): void;
+  /** Merge historical message-list DTOs without allowing them to supersede live observations. */
+  ingestHistory(
+    invocations: readonly CacheObserverHistoryInvocation[],
+    options?: { truncatedSessionIds?: readonly string[] },
+  ): void;
+  /** True when the newest live completion has exact Started/Ended correlation and counters. */
+  hasUsableLiveObservation(sessionId: string): boolean;
   dispose(): void;
 }
 
@@ -164,6 +190,67 @@ export function projectOpenCodeCacheObserverEvent(
   return { type, data: { sessionID: update.sessionId } };
 }
 
+/**
+ * Immediately project a message.list item to the small cache-observer domain DTO.
+ * Assistant content, metadata, tools, cost, and all unrelated message fields
+ * are intentionally neither read nor copied.
+ */
+export function projectOpenCodeCacheObserverHistoryMessage(
+  sessionId: string,
+  message: unknown,
+): CacheObserverHistoryInvocation | undefined {
+  if (!sessionId.trim() || !isRecord(message) || message.type !== "assistant") return undefined;
+  const messageId = nonEmptyString(message.id);
+  const model = isRecord(message.model) ? message.model : undefined;
+  const providerId = model === undefined ? undefined : nonEmptyString(model.providerID);
+  const modelId = model === undefined ? undefined : nonEmptyString(model.id);
+  const time = isRecord(message.time) ? message.time : undefined;
+  const completedAtMs =
+    time === undefined ? undefined : ownNonNegativeFiniteNumber(time, "completed");
+  if (
+    messageId === undefined ||
+    providerId === undefined ||
+    modelId === undefined ||
+    completedAtMs === undefined
+  ) {
+    return undefined;
+  }
+
+  const variantId = normalizedVariantId(model?.variant);
+  const tokenUsage = isRecord(message.tokens) ? message.tokens : undefined;
+  const cache =
+    tokenUsage !== undefined && isRecord(tokenUsage.cache) ? tokenUsage.cache : undefined;
+  const fresh =
+    tokenUsage === undefined ? undefined : ownNonNegativeFiniteNumber(tokenUsage, "input");
+  const read = cache === undefined ? undefined : ownNonNegativeFiniteNumber(cache, "read");
+  const write = cache === undefined ? undefined : ownNonNegativeFiniteNumber(cache, "write");
+
+  return {
+    sessionId,
+    messageId,
+    completedAtMs,
+    route: {
+      providerId,
+      modelId,
+      ...(variantId === undefined ? {} : { variantId }),
+      basis: {
+        source: "OpenCode message.list assistant model identity",
+        reference: messageId,
+      },
+    },
+    counts: {
+      ...(fresh === undefined ? {} : { fresh }),
+      ...(read === undefined ? {} : { read }),
+      ...(write === undefined ? {} : { write }),
+    },
+  };
+}
+
+/** True only for a completed compaction boundary in the public message-list DTO. */
+export function isCompletedCacheObserverHistoryCompaction(message: unknown): boolean {
+  return isRecord(message) && message.type === "compaction" && message.status === "completed";
+}
+
 export function createCacheObserverIngestor(
   options: { now?: () => number } = {},
 ): CacheObserverIngestor {
@@ -171,6 +258,12 @@ export function createCacheObserverIngestor(
   const states = new Map<string, CacheObserverState>();
   const listeners = new Map<string, Set<CacheObserverListener>>();
   const startedSteps = new Map<string, StartedStepEvidence>();
+  const pendingEndedSteps = new Map<string, PendingEndedStep>();
+  const liveStepKeys = new Map<string, string>();
+  const latestLiveRoutes = new Map<string, CacheRouteProvenance>();
+  const latestLiveCompletedAt = new Map<string, number>();
+  const latestLiveCompletion = new Map<string, LiveCompletionEvidence>();
+  const latestUsableLiveCompletion = new Map<string, LiveCompletionEvidence>();
   const ratioFencedSessions = new Set<string>();
   let disposed = false;
 
@@ -187,7 +280,7 @@ export function createCacheObserverIngestor(
       return classification;
     }
     const { primaryCacheReadRatio: _fencedRatio, ...lastObservedClassification } = classification;
-    return lastObservedClassification;
+    return { ...lastObservedClassification, primaryCacheReadTelemetry: "unavailable" };
   }
 
   function notify(sessionId: string): void {
@@ -207,18 +300,57 @@ export function createCacheObserverIngestor(
     }
   }
 
+  function clearPendingEndedSteps(sessionId: string): void {
+    for (const [key, ended] of pendingEndedSteps) {
+      if (ended.sessionId === sessionId) pendingEndedSteps.delete(key);
+    }
+  }
+
+  function clearPendingSteps(sessionId: string): void {
+    clearStartedSteps(sessionId);
+    clearPendingEndedSteps(sessionId);
+  }
+
   function markObservationGap(sessionId: string): void {
-    if (disposed || !sessionId.trim() || !states.has(sessionId)) return;
+    if (disposed || !sessionId.trim()) return;
+    clearPendingSteps(sessionId);
+    clearLiveContext(sessionId);
+    if (!states.has(sessionId)) return;
     ratioFencedSessions.add(sessionId);
     notify(sessionId);
   }
 
   function ingest(event: unknown): void {
+    ingestEvent(event, "live");
+  }
+
+  function ingestEvent(event: unknown, source: "live" | "history"): void {
     if (disposed) return;
     const started = startedStepFromDto(event);
     if (started !== undefined) {
+      const key = startedStepKey(started.sessionId, started.messageId);
+      if (source === "live") {
+        rememberLiveStep(key, started.sessionId);
+        const previousRoute = latestLiveRoutes.get(started.sessionId);
+        if (previousRoute !== undefined && !sameRouteProvenance(previousRoute, started.route)) {
+          latestLiveCompletedAt.delete(started.sessionId);
+          latestLiveCompletion.delete(started.sessionId);
+          latestUsableLiveCompletion.delete(started.sessionId);
+        }
+        latestLiveRoutes.delete(started.sessionId);
+        latestLiveRoutes.set(started.sessionId, started.route!);
+        while (latestLiveRoutes.size > CACHE_OBSERVER_MAX_SESSIONS) {
+          const oldestSessionId = latestLiveRoutes.keys().next().value;
+          if (oldestSessionId === undefined) break;
+          latestLiveRoutes.delete(oldestSessionId);
+          latestLiveCompletedAt.delete(oldestSessionId);
+          latestLiveCompletion.delete(oldestSessionId);
+          latestUsableLiveCompletion.delete(oldestSessionId);
+        }
+      }
       const state = states.get(started.sessionId);
       if (
+        source === "live" &&
         state?.scope.route !== undefined &&
         started.route !== undefined &&
         !sameRouteProvenance(state.scope.route, started.route)
@@ -234,13 +366,20 @@ export function createCacheObserverIngestor(
         );
         notify(started.sessionId);
       }
-      const key = startedStepKey(started.sessionId, started.messageId);
       startedSteps.delete(key);
       startedSteps.set(key, started);
       while (startedSteps.size > CACHE_OBSERVER_MAX_STARTED_STEPS) {
         const oldestKey = startedSteps.keys().next().value;
         if (oldestKey === undefined) break;
         startedSteps.delete(oldestKey);
+      }
+      const pendingEnd = pendingEndedSteps.get(key);
+      if (pendingEnd !== undefined) {
+        pendingEndedSteps.delete(key);
+        // The Ended may have arrived first on the shared stream. Re-ingest only
+        // its content-free projected DTO once exact session/message correlation
+        // is now available.
+        ingestEvent(pendingEnd.event, source);
       }
       return;
     }
@@ -249,21 +388,75 @@ export function createCacheObserverIngestor(
     if (update === undefined) return;
 
     if (update.kind === "created") {
-      clearStartedSteps(update.sessionId);
+      clearPendingSteps(update.sessionId);
       return;
     }
 
     if (update.kind !== "invocation") {
-      clearStartedSteps(update.sessionId);
+      clearPendingSteps(update.sessionId);
       ratioFencedSessions.delete(update.sessionId);
+      if (source === "live") {
+        clearLiveContext(update.sessionId);
+      }
       if (states.delete(update.sessionId)) notify(update.sessionId);
       return;
     }
 
     const sessionId = update.observation.sessionId;
     const startedKey = startedStepKey(sessionId, update.observation.order.messageId);
+    if (source === "live") {
+      rememberLiveStep(startedKey, sessionId);
+      const previousCompletedAt = latestLiveCompletedAt.get(sessionId);
+      latestLiveCompletedAt.set(
+        sessionId,
+        Math.max(previousCompletedAt ?? 0, update.observation.order.completedAtMs),
+      );
+      rememberLiveCompletion(sessionId, {
+        messageId: update.observation.order.messageId,
+        completedAtMs: update.observation.order.completedAtMs,
+      });
+    }
     const startedEvidence = startedSteps.get(startedKey);
     startedSteps.delete(startedKey);
+
+    const endedEvent: Extract<DashboardRpcCacheObserverEvent, { type: "session.step.ended" }> = {
+      type: "session.step.ended",
+      created: update.observation.order.completedAtMs,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: update.observation.order.messageId,
+        tokens: {
+          ...(update.observation.counts.fresh === undefined
+            ? {}
+            : { input: update.observation.counts.fresh }),
+          ...(update.observation.counts.read === undefined &&
+          update.observation.counts.write === undefined
+            ? {}
+            : {
+                cache: {
+                  ...(update.observation.counts.read === undefined
+                    ? {}
+                    : { read: update.observation.counts.read }),
+                  ...(update.observation.counts.write === undefined
+                    ? {}
+                    : { write: update.observation.counts.write }),
+                },
+              }),
+        },
+      },
+    };
+
+    if (startedEvidence === undefined) {
+      pendingEndedSteps.delete(startedKey);
+      pendingEndedSteps.set(startedKey, { sessionId, event: endedEvent });
+      while (pendingEndedSteps.size > CACHE_OBSERVER_MAX_STARTED_STEPS) {
+        const oldestKey = pendingEndedSteps.keys().next().value;
+        if (oldestKey === undefined) break;
+        pendingEndedSteps.delete(oldestKey);
+      }
+    } else {
+      pendingEndedSteps.delete(startedKey);
+    }
 
     let state = states.get(sessionId);
     if (state === undefined) {
@@ -275,15 +468,32 @@ export function createCacheObserverIngestor(
       state = { ...state, scope: { ...state.scope, route: startedEvidence.route } };
     }
 
+    const previousInvocation = state.invocations.find(
+      (entry) => entry.order.messageId === update.observation.order.messageId,
+    );
     if (
-      state.invocations.some(
-        (entry) => entry.order.messageId === update.observation.order.messageId,
-      )
+      source === "live" &&
+      startedEvidence !== undefined &&
+      hasObservedCounts(update.observation.counts)
     ) {
-      return;
+      rememberUsableLiveCompletion(sessionId, {
+        messageId: update.observation.order.messageId,
+        completedAtMs: update.observation.order.completedAtMs,
+      });
     }
+    const previousHasCounts =
+      previousInvocation !== undefined &&
+      (previousInvocation.counts.fresh !== undefined ||
+        previousInvocation.counts.read !== undefined ||
+        previousInvocation.counts.write !== undefined);
+    if (previousInvocation !== undefined && (startedEvidence === undefined || previousHasCounts))
+      return;
 
-    const observation = update.observation;
+    // Ended counters are useful only after an exact Started correlation. Keep
+    // the event receipt, but do not treat its untrusted zero-normalized values
+    // as a real cache-read denominator.
+    const observation =
+      startedEvidence === undefined ? { ...update.observation, counts: {} } : update.observation;
     const matchedRoute =
       startedEvidence?.route !== undefined &&
       sameRouteProvenance(state.scope.route, startedEvidence.route)
@@ -313,6 +523,150 @@ export function createCacheObserverIngestor(
     notify(sessionId);
   }
 
+  function rememberLiveStep(key: string, sessionId: string): void {
+    liveStepKeys.delete(key);
+    liveStepKeys.set(key, sessionId);
+    while (liveStepKeys.size > CACHE_OBSERVER_MAX_STARTED_STEPS) {
+      const oldestKey = liveStepKeys.keys().next().value;
+      if (oldestKey === undefined) break;
+      liveStepKeys.delete(oldestKey);
+    }
+  }
+
+  function clearLiveContext(sessionId: string): void {
+    for (const [key, ownerSessionId] of liveStepKeys) {
+      if (ownerSessionId === sessionId) liveStepKeys.delete(key);
+    }
+    latestLiveRoutes.delete(sessionId);
+    latestLiveCompletedAt.delete(sessionId);
+    latestLiveCompletion.delete(sessionId);
+    latestUsableLiveCompletion.delete(sessionId);
+  }
+
+  function rememberLiveCompletion(sessionId: string, completion: LiveCompletionEvidence): void {
+    rememberNewestCompletion(latestLiveCompletion, sessionId, completion);
+  }
+
+  function rememberUsableLiveCompletion(
+    sessionId: string,
+    completion: LiveCompletionEvidence,
+  ): void {
+    rememberNewestCompletion(latestUsableLiveCompletion, sessionId, completion);
+  }
+
+  function rememberNewestCompletion(
+    completions: Map<string, LiveCompletionEvidence>,
+    sessionId: string,
+    completion: LiveCompletionEvidence,
+  ): void {
+    const previous = completions.get(sessionId);
+    if (previous !== undefined && compareLiveCompletion(completion, previous) < 0) return;
+    completions.delete(sessionId);
+    completions.set(sessionId, completion);
+    while (completions.size > CACHE_OBSERVER_MAX_SESSIONS) {
+      const oldestSessionId = completions.keys().next().value;
+      if (oldestSessionId === undefined) break;
+      completions.delete(oldestSessionId);
+    }
+  }
+
+  function hasUsableLiveObservation(sessionId: string): boolean {
+    const latest = latestLiveCompletion.get(sessionId);
+    const usable = latestUsableLiveCompletion.get(sessionId);
+    return (
+      latest !== undefined &&
+      usable !== undefined &&
+      latest.messageId === usable.messageId &&
+      latest.completedAtMs === usable.completedAtMs
+    );
+  }
+
+  function ingestHistory(
+    invocations: readonly CacheObserverHistoryInvocation[],
+    historyOptions: { truncatedSessionIds?: readonly string[] } = {},
+  ): void {
+    if (disposed) return;
+    for (const invocation of invocations) {
+      const key = startedStepKey(invocation.sessionId, invocation.messageId);
+      const pendingLiveEnd = pendingEndedSteps.get(key);
+      const recoveringUnmatchedLiveEnd = pendingLiveEnd !== undefined && !startedSteps.has(key);
+      if (liveStepKeys.has(key) && !recoveringUnmatchedLiveEnd) continue;
+      const liveCompletedAt = latestLiveCompletedAt.get(invocation.sessionId);
+      if (
+        !recoveringUnmatchedLiveEnd &&
+        liveCompletedAt !== undefined &&
+        invocation.completedAtMs >= liveCompletedAt
+      ) {
+        continue;
+      }
+      const liveRoute = latestLiveRoutes.get(invocation.sessionId);
+      if (
+        !recoveringUnmatchedLiveEnd &&
+        liveRoute !== undefined &&
+        !sameRouteProvenance(liveRoute, invocation.route)
+      ) {
+        continue;
+      }
+
+      const startedEvent: Extract<
+        DashboardRpcCacheObserverEvent,
+        { type: "session.step.started" }
+      > = {
+        type: "session.step.started",
+        created: invocation.completedAtMs,
+        data: {
+          sessionID: invocation.sessionId,
+          assistantMessageID: invocation.messageId,
+          model: {
+            providerID: invocation.route.providerId,
+            id: invocation.route.modelId,
+            ...(invocation.route.variantId === undefined
+              ? {}
+              : { variant: invocation.route.variantId }),
+          },
+          started: invocation.completedAtMs,
+        },
+      };
+      const { fresh, read, write } = invocation.counts;
+      const endedEvent: Extract<DashboardRpcCacheObserverEvent, { type: "session.step.ended" }> = {
+        type: "session.step.ended",
+        created: invocation.completedAtMs,
+        data: {
+          sessionID: invocation.sessionId,
+          assistantMessageID: invocation.messageId,
+          tokens: {
+            ...(fresh === undefined ? {} : { input: fresh }),
+            ...(read === undefined && write === undefined
+              ? {}
+              : {
+                  cache: {
+                    ...(read === undefined ? {} : { read }),
+                    ...(write === undefined ? {} : { write }),
+                  },
+                }),
+          },
+        },
+      };
+      if (recoveringUnmatchedLiveEnd && pendingLiveEnd !== undefined) {
+        pendingEndedSteps.set(key, {
+          sessionId: invocation.sessionId,
+          event: mergeHistoricalCountersIntoLiveEnd(pendingLiveEnd.event, endedEvent),
+        });
+        ingestEvent(startedEvent, "history");
+        continue;
+      }
+      ingestEvent(startedEvent, "history");
+      ingestEvent(endedEvent, "history");
+    }
+
+    for (const sessionId of historyOptions.truncatedSessionIds ?? []) {
+      const state = states.get(sessionId);
+      if (state === undefined || state.invocationsTruncated) continue;
+      states.set(sessionId, { ...state, invocationsTruncated: true });
+      notify(sessionId);
+    }
+  }
+
   function subscribe(sessionId: string, listener: CacheObserverListener): () => void {
     if (disposed || !sessionId.trim()) return () => undefined;
     let sessionListeners = listeners.get(sessionId);
@@ -334,10 +688,24 @@ export function createCacheObserverIngestor(
     states.clear();
     listeners.clear();
     startedSteps.clear();
+    pendingEndedSteps.clear();
+    liveStepKeys.clear();
+    latestLiveRoutes.clear();
+    latestLiveCompletedAt.clear();
+    latestLiveCompletion.clear();
+    latestUsableLiveCompletion.clear();
     ratioFencedSessions.clear();
   }
 
-  return { query, subscribe, markObservationGap, ingest, dispose };
+  return {
+    query,
+    subscribe,
+    markObservationGap,
+    ingest,
+    ingestHistory,
+    hasUsableLiveObservation,
+    dispose,
+  };
 }
 
 function projectStartedStep(
@@ -459,6 +827,65 @@ function ownFiniteNumber(record: Record<string, unknown>, key: string): number |
   if (!Object.hasOwn(record, key)) return undefined;
   const value = record[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function ownNonNegativeFiniteNumber(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = ownFiniteNumber(record, key);
+  return value !== undefined && value >= 0 ? value : undefined;
+}
+
+function hasObservedCounts(counts: CacheInvocationObservation["counts"]): boolean {
+  return counts.fresh !== undefined || counts.read !== undefined || counts.write !== undefined;
+}
+
+function compareLiveCompletion(
+  left: LiveCompletionEvidence,
+  right: LiveCompletionEvidence,
+): number {
+  if (left.completedAtMs !== right.completedAtMs) {
+    return left.completedAtMs - right.completedAtMs;
+  }
+  return left.messageId < right.messageId ? -1 : left.messageId > right.messageId ? 1 : 0;
+}
+
+function mergeHistoricalCountersIntoLiveEnd(
+  liveEvent: Extract<DashboardRpcCacheObserverEvent, { type: "session.step.ended" }>,
+  historyEvent: Extract<DashboardRpcCacheObserverEvent, { type: "session.step.ended" }>,
+): Extract<DashboardRpcCacheObserverEvent, { type: "session.step.ended" }> {
+  const liveTokens = liveEvent.data.tokens;
+  const historyTokens = historyEvent.data.tokens;
+  const liveCache = isRecord(liveTokens.cache) ? liveTokens.cache : undefined;
+  const historyCache = isRecord(historyTokens.cache) ? historyTokens.cache : undefined;
+  const fresh = ownFiniteNumber(liveTokens, "input") ?? ownFiniteNumber(historyTokens, "input");
+  const read =
+    (liveCache === undefined ? undefined : ownFiniteNumber(liveCache, "read")) ??
+    (historyCache === undefined ? undefined : ownFiniteNumber(historyCache, "read"));
+  const write =
+    (liveCache === undefined ? undefined : ownFiniteNumber(liveCache, "write")) ??
+    (historyCache === undefined ? undefined : ownFiniteNumber(historyCache, "write"));
+
+  return {
+    type: "session.step.ended",
+    created: liveEvent.created,
+    data: {
+      sessionID: liveEvent.data.sessionID,
+      assistantMessageID: liveEvent.data.assistantMessageID,
+      tokens: {
+        ...(fresh === undefined ? {} : { input: fresh }),
+        ...(read === undefined && write === undefined
+          ? {}
+          : {
+              cache: {
+                ...(read === undefined ? {} : { read }),
+                ...(write === undefined ? {} : { write }),
+              },
+            }),
+      },
+    },
+  };
 }
 
 function eventOrder(

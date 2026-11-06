@@ -51,6 +51,32 @@ function withActiveTtl(state = stateFor(), expiresAtMs = 500) {
   });
 }
 
+describe("primary cache-read ratio telemetry", () => {
+  it("accepts a positive read when present fresh and write counters are legitimately zero", () => {
+    const state = observeCacheInvocation(
+      stateFor(),
+      invocation({ counts: { fresh: 0, read: 80, write: 0 } }),
+    );
+
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+      primaryCacheReadRatio: { value: 1, messageId: "msg-1" },
+      primaryCacheReadTelemetry: "available",
+    });
+  });
+
+  it("does not fabricate a zero-read ratio from normalized all-zero counters", () => {
+    const state = observeCacheInvocation(
+      stateFor(),
+      invocation({ counts: { fresh: 0, read: 0, write: 0 } }),
+    );
+
+    expect(classifyCacheObserverState(state, 200)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+      primaryCacheReadTelemetry: "unavailable",
+    });
+  });
+});
+
 describe("observer-only cache state", () => {
   it("stays insufficient without observations, but a primary cache write establishes a prefix", () => {
     const empty = classifyCacheObserverState(stateFor(), 200);
@@ -319,11 +345,14 @@ describe("observer-only cache state", () => {
     expect(classifyCacheObserverState(missingFresh, 200).primaryCacheReadRatio).toBeUndefined();
     expect(classifyCacheObserverState(zeroDenominator, 200).primaryCacheReadRatio).toBeUndefined();
 
-    const normalizedZero = observeCacheInvocation(
+    const explicitZeroWrite = observeCacheInvocation(
       withActiveTtl(),
       invocation({ counts: { fresh: 20, read: 80, write: 0 } }),
     );
-    expect(classifyCacheObserverState(normalizedZero, 200).primaryCacheReadRatio).toBeUndefined();
+    expect(classifyCacheObserverState(explicitZeroWrite, 200)).toMatchObject({
+      primaryCacheReadRatio: { value: 0.8, messageId: "msg-1" },
+      primaryCacheReadTelemetry: "available",
+    });
 
     const nonAnthropicRoute: CacheRouteProvenance = {
       ...route,

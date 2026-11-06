@@ -1,8 +1,12 @@
 import type { CacheObserverClassification } from "../lib/cache-observer.js";
 import {
+  CACHE_OBSERVER_MAX_SESSIONS,
+  type CacheObserverHistoryInvocation,
   type CacheObserverListener,
   cacheObserverUpdateFromOpenCodeEvent,
   createCacheObserverIngestor,
+  isCompletedCacheObserverHistoryCompaction,
+  projectOpenCodeCacheObserverHistoryMessage,
 } from "../lib/cache-observer-ingestion.js";
 import type { DashboardRpcCacheObserverEvent } from "../rpc.js";
 import type { NativeDashboardConnection } from "./dashboard-client.js";
@@ -36,6 +40,8 @@ export interface NativeCacheObserver {
   subscribe(sessionId: string, listener: CacheObserverListener): () => void;
   /** One-shot direct-child discovery; it does not start or retain a transport. */
   children(sessionId: string): Promise<NativeCacheObserverChild[]>;
+  /** Lazily reads selected session history; callers cancel with a signal on selection changes. */
+  bootstrapHistory(sessionIds: readonly string[], signal?: AbortSignal): Promise<void>;
   /** Event-driven direct-child snapshot; refreshes after lifecycle events and reconnects. */
   subscribeChildren(
     sessionId: string,
@@ -49,6 +55,10 @@ export interface NativeCacheObserverRuntime extends NativeCacheObserver {
   dispose(): void;
 }
 
+type NativeCacheObserverMessageListQuery =
+  | { sessionID: string; limit: 200; order: "desc"; cursor?: undefined }
+  | { sessionID: string; limit: 200; cursor: string; order?: undefined };
+
 /** Fans observer interest into Native's existing shared RPC event subscription. */
 export function createNativeCacheObserverRuntime(options: {
   subscribeEvents: (listener: (event: DashboardRpcCacheObserverEvent) => void) => () => void;
@@ -59,6 +69,13 @@ export function createNativeCacheObserverRuntime(options: {
   listChildren: (
     parentSessionId: string,
   ) => Promise<ReadonlyArray<{ id: string; parentID?: string; title?: string }>>;
+  listMessages?: (
+    input: NativeCacheObserverMessageListQuery,
+    requestOptions: { signal: AbortSignal },
+  ) => Promise<{
+    data: ReadonlyArray<unknown>;
+    cursor?: { next?: string | null };
+  }>;
   now?: () => number;
 }): NativeCacheObserverRuntime {
   interface ChildWatcher {
@@ -75,11 +92,17 @@ export function createNativeCacheObserverRuntime(options: {
     options.now === undefined ? {} : { now: options.now },
   );
   const interestedSessions = new Map<string, number>();
+  const historyInterestCounts = new Map<string, number>();
+  const pendingObservationGaps = new Set<string>();
   const childWatchers = new Map<string, ChildWatcher>();
   /** Child ownership exists only while an exact parent has active child listeners. */
   const childOwners = new Map<string, string>();
   const transportListeners = new Set<(transport: NativeCacheObserverTransport) => void>();
+  const historyLoadedSessions = new Set<string>();
+  const historyEpochs = new Map<string, number>();
   let releaseEventListener: (() => void) | undefined;
+  let activeHistoryController: AbortController | undefined;
+  let activeHistorySessionIds = new Set<string>();
   let hostEventState: NativeCacheObserverHostEventState = "unverified";
   let lastHostEventAtMs: number | undefined;
   let disposed = false;
@@ -281,9 +304,20 @@ export function createNativeCacheObserverRuntime(options: {
   }
 
   function markObservationGapIfUnobserved(sessionId: string): void {
-    if (!interestedSessions.has(sessionId) && !childOwners.has(sessionId)) {
-      ingestor.markObservationGap(sessionId);
+    if (childOwners.has(sessionId)) return;
+    const historyCount = historyInterestCounts.get(sessionId) ?? 0;
+    const interestCount = interestedSessions.get(sessionId) ?? 0;
+    if (historyCount > 0 && interestCount <= historyCount) {
+      pendingObservationGaps.add(sessionId);
+      return;
     }
+    if (interestCount === 0) markObservationGap(sessionId);
+  }
+
+  function markObservationGap(sessionId: string): void {
+    bumpHistoryEpoch(sessionId, true);
+    ingestor.markObservationGap(sessionId);
+    if (activeHistorySessionIds.has(sessionId)) activeHistoryController?.abort();
   }
 
   function markActiveObservationGaps(): void {
@@ -292,7 +326,167 @@ export function createNativeCacheObserverRuntime(options: {
       ...childWatchers.keys(),
       ...childOwners.keys(),
     ]);
-    for (const sessionId of sessionIds) ingestor.markObservationGap(sessionId);
+    for (const sessionId of sessionIds) markObservationGap(sessionId);
+  }
+
+  function historyEpoch(sessionId: string): number {
+    return historyEpochs.get(sessionId) ?? 0;
+  }
+
+  function bumpHistoryEpoch(sessionId: string, invalidateLoadedHistory = false): void {
+    historyEpochs.set(sessionId, historyEpoch(sessionId) + 1);
+    if (invalidateLoadedHistory) historyLoadedSessions.delete(sessionId);
+    trimHistoryEpochs();
+  }
+
+  function trimHistoryEpochs(): void {
+    while (historyEpochs.size > CACHE_OBSERVER_MAX_SESSIONS) {
+      const oldestSessionId = [...historyEpochs.keys()].find(
+        (candidate) =>
+          !interestedSessions.has(candidate) &&
+          !childWatchers.has(candidate) &&
+          !childOwners.has(candidate),
+      );
+      if (oldestSessionId === undefined) break;
+      historyEpochs.delete(oldestSessionId);
+    }
+  }
+
+  function markHistoryLoaded(sessionId: string): void {
+    historyLoadedSessions.delete(sessionId);
+    historyLoadedSessions.add(sessionId);
+    while (historyLoadedSessions.size > CACHE_OBSERVER_MAX_SESSIONS) {
+      const oldestSessionId = historyLoadedSessions.values().next().value;
+      if (oldestSessionId === undefined) break;
+      historyLoadedSessions.delete(oldestSessionId);
+    }
+  }
+
+  function releaseHistoryInterests(sessionIds: readonly string[]): void {
+    for (const sessionId of sessionIds) {
+      const count = interestedSessions.get(sessionId) ?? 0;
+      if (count <= 1) interestedSessions.delete(sessionId);
+      else interestedSessions.set(sessionId, count - 1);
+
+      const historyCount = historyInterestCounts.get(sessionId) ?? 0;
+      if (historyCount <= 1) historyInterestCounts.delete(sessionId);
+      else historyInterestCounts.set(sessionId, historyCount - 1);
+
+      if (historyCount <= 1 && pendingObservationGaps.delete(sessionId)) {
+        markObservationGapIfUnobserved(sessionId);
+      }
+    }
+    if (interestedSessions.size === 0 && childWatchers.size === 0) {
+      releaseEventListener?.();
+      releaseEventListener = undefined;
+    }
+    trimHistoryEpochs();
+  }
+
+  async function bootstrapHistory(
+    requestedSessionIds: readonly string[],
+    callerSignal?: AbortSignal,
+  ): Promise<void> {
+    if (disposed) throw new Error("Cache observer runtime is closed");
+    const sessionIds = [...new Set(requestedSessionIds)];
+    for (const sessionId of sessionIds) {
+      if (!isSafeSessionId(sessionId)) throw new TypeError("Invalid session id");
+    }
+    if (sessionIds.length > 0 && options.listMessages === undefined) {
+      throw new Error("Historical cache observer is unavailable");
+    }
+
+    activeHistoryController?.abort();
+    if (sessionIds.length === 0) return;
+    const controller = new AbortController();
+    activeHistoryController = controller;
+    activeHistorySessionIds = new Set(sessionIds);
+    const abortForCaller = () => controller.abort();
+    if (callerSignal?.aborted) controller.abort();
+    else callerSignal?.addEventListener("abort", abortForCaller, { once: true });
+
+    for (const sessionId of sessionIds) {
+      interestedSessions.set(sessionId, (interestedSessions.get(sessionId) ?? 0) + 1);
+      historyInterestCounts.set(sessionId, (historyInterestCounts.get(sessionId) ?? 0) + 1);
+    }
+    attachEventListener();
+    const initialEpochs = new Map(
+      sessionIds.map((sessionId) => [sessionId, historyEpoch(sessionId)]),
+    );
+
+    try {
+      for (const sessionId of sessionIds) {
+        throwIfAborted(controller.signal);
+        const expectedEpoch = initialEpochs.get(sessionId) ?? 0;
+        if (
+          historyLoadedSessions.has(sessionId) ||
+          historyEpoch(sessionId) !== expectedEpoch ||
+          ingestor.hasUsableLiveObservation(sessionId)
+        ) {
+          continue;
+        }
+        const history: CacheObserverHistoryInvocation[] = [];
+        const seenCursors = new Set<string>();
+        let stopPagination = false;
+        let cursor: string | undefined;
+
+        while (true) {
+          throwIfAborted(controller.signal);
+          if (
+            historyEpoch(sessionId) !== expectedEpoch ||
+            ingestor.hasUsableLiveObservation(sessionId)
+          ) {
+            break;
+          }
+          const page = await awaitWithAbort(
+            options.listMessages!(
+              {
+                sessionID: sessionId,
+                limit: 200,
+                ...(cursor === undefined ? { order: "desc" as const } : { cursor }),
+              },
+              { signal: controller.signal },
+            ),
+            controller.signal,
+          );
+          throwIfAborted(controller.signal);
+          if (historyEpoch(sessionId) !== expectedEpoch) break;
+          if (!Array.isArray(page.data)) throw new TypeError("Invalid message.list response");
+
+          for (const message of page.data) {
+            if (isCompletedCacheObserverHistoryCompaction(message)) {
+              stopPagination = true;
+              break;
+            }
+            const projected = projectOpenCodeCacheObserverHistoryMessage(sessionId, message);
+            if (projected === undefined) continue;
+            history.push(projected);
+            stopPagination = true;
+            break;
+          }
+          if (stopPagination) break;
+
+          const nextCursor = page.cursor?.next;
+          if (nextCursor === undefined || nextCursor === null || nextCursor === "") break;
+          if (typeof nextCursor !== "string") throw new TypeError("Invalid message.list cursor");
+          if (seenCursors.has(nextCursor)) throw new Error("Repeated message.list cursor");
+          seenCursors.add(nextCursor);
+          cursor = nextCursor;
+        }
+
+        throwIfAborted(controller.signal);
+        if (historyEpoch(sessionId) !== expectedEpoch) continue;
+        ingestor.ingestHistory(history);
+        markHistoryLoaded(sessionId);
+      }
+    } finally {
+      callerSignal?.removeEventListener("abort", abortForCaller);
+      releaseHistoryInterests(sessionIds);
+      if (activeHistoryController === controller) {
+        activeHistoryController = undefined;
+        activeHistorySessionIds.clear();
+      }
+    }
   }
 
   function setHostEventState(state: NativeCacheObserverHostEventState, atMs?: number): void {
@@ -407,6 +601,12 @@ export function createNativeCacheObserverRuntime(options: {
       const update = cacheObserverUpdateFromOpenCodeEvent(event);
       const startedSessionId =
         event.type === "session.step.started" ? event.data.sessionID : undefined;
+      if (startedSessionId !== undefined) bumpHistoryEpoch(startedSessionId);
+      if (update?.kind === "invocation") {
+        bumpHistoryEpoch(update.observation.sessionId);
+      } else if (update?.kind === "compaction" || update?.kind === "deleted") {
+        bumpHistoryEpoch(update.sessionId, true);
+      }
       if (update !== undefined || startedSessionId !== undefined) {
         const timestamp = "created" in event ? event.created : undefined;
         setHostEventState(
@@ -455,7 +655,14 @@ export function createNativeCacheObserverRuntime(options: {
       const count = interestedSessions.get(sessionId) ?? 0;
       if (count <= 1) interestedSessions.delete(sessionId);
       else interestedSessions.set(sessionId, count - 1);
-      markObservationGapIfUnobserved(sessionId);
+      const historyCount = historyInterestCounts.get(sessionId) ?? 0;
+      if (childOwners.has(sessionId)) {
+        pendingObservationGaps.delete(sessionId);
+      } else if (historyCount > 0 && (interestedSessions.get(sessionId) ?? 0) <= historyCount) {
+        pendingObservationGaps.add(sessionId);
+      } else {
+        markObservationGapIfUnobserved(sessionId);
+      }
       if (interestedSessions.size === 0 && childWatchers.size === 0) {
         releaseEventListener?.();
         releaseEventListener = undefined;
@@ -466,11 +673,18 @@ export function createNativeCacheObserverRuntime(options: {
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    activeHistoryController?.abort();
+    activeHistoryController = undefined;
+    activeHistorySessionIds.clear();
     releaseEventListener?.();
     releaseEventListener = undefined;
     interestedSessions.clear();
+    historyInterestCounts.clear();
+    pendingObservationGaps.clear();
     childWatchers.clear();
     childOwners.clear();
+    historyLoadedSessions.clear();
+    historyEpochs.clear();
     transportListeners.clear();
     releaseRpcConnection?.();
     releaseReconnect?.();
@@ -495,11 +709,44 @@ export function createNativeCacheObserverRuntime(options: {
     query,
     subscribe,
     children,
+    bootstrapHistory,
     subscribeChildren,
     transport,
     subscribeTransport,
     dispose,
   };
+}
+
+function abortError(): Error {
+  const error = new Error("Historical cache observer request was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw abortError();
+}
+
+function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      cleanup();
+      reject(abortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 const MAX_SESSION_LABEL_CODEPOINTS = 80;

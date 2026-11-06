@@ -3,6 +3,591 @@ import { describe, expect, it, vi } from "vitest";
 import { createNativeCacheObserverRuntime } from "../src/native/cache-observer-runtime.js";
 
 describe("native cache observer runtime", () => {
+  it("treats the newest completed assistant without counters as unknown instead of falling back", async () => {
+    const sessionId = "ses_history_main";
+    const childSessionId = "ses_history_child";
+    const listMessages = vi.fn(
+      async (input: { sessionID: string; limit: number; order?: "desc"; cursor?: string }) => {
+        if (input.sessionID === sessionId && input.cursor === undefined) {
+          return {
+            data: [
+              {
+                id: "msg_main_newest_incomplete",
+                type: "assistant",
+                model: { providerID: "openai", id: "gpt-test" },
+                time: { created: 2_000, completed: 2_100 },
+                content: [{ text: "PRIVATE NEWEST PROMPT MUST NOT BE RETAINED" }],
+              },
+            ],
+            cursor: { next: "older-page-1" },
+          };
+        }
+        const pageNumber = input.cursor?.startsWith("older-page-")
+          ? Number(input.cursor.slice("older-page-".length))
+          : undefined;
+        if (input.sessionID === sessionId && pageNumber !== undefined && pageNumber === 1) {
+          return {
+            data: [
+              {
+                id: "msg_main_older_with_counters",
+                type: "assistant",
+                model: { providerID: "openai", id: "gpt-test" },
+                time: { created: 2_000 - pageNumber * 100, completed: 2_100 - pageNumber * 100 },
+                tokens: { input: 0, cache: { read: 80, write: 0 } },
+                content: [{ text: `PRIVATE PAGE ${pageNumber} CONTENT MUST NOT BE RETAINED` }],
+              },
+            ],
+            cursor: { next: "must-not-fetch" },
+          };
+        }
+        return {
+          data: [
+            {
+              id: "msg_child_newest",
+              type: "assistant",
+              model: { providerID: "anthropic", id: "claude-test" },
+              time: { created: 3_000, completed: 3_100 },
+              tokens: { input: 40, cache: { read: 60, write: 0 } },
+              content: [{ text: "child private content" }],
+            },
+          ],
+          cursor: { next: null },
+        };
+      },
+    );
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => vi.fn(),
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+
+    expect(listMessages).not.toHaveBeenCalled();
+    await runtime.bootstrapHistory([sessionId, childSessionId]);
+
+    expect(listMessages).toHaveBeenCalledTimes(2);
+    expect(
+      listMessages.mock.calls.map(([input]) => ({
+        sessionID: input.sessionID,
+        limit: input.limit,
+        ...(input.order === undefined ? {} : { order: input.order }),
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+      })),
+    ).toEqual([
+      { sessionID: sessionId, limit: 200, order: "desc" },
+      { sessionID: childSessionId, limit: 200, order: "desc" },
+    ]);
+    expect(runtime.query(sessionId)).toMatchObject({
+      primaryCacheReadTelemetry: "unavailable",
+    });
+    expect(runtime.query(sessionId)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(runtime.query(childSessionId)).toMatchObject({
+      primaryCacheReadRatio: { value: 0.6, messageId: "msg_child_newest" },
+    });
+    expect(JSON.stringify(runtime.query(sessionId))).not.toContain("PRIVATE");
+    expect(JSON.stringify(runtime.query(childSessionId))).not.toContain("private content");
+
+    runtime.dispose();
+  });
+
+  it("cancels an in-flight historical request when the selected session changes", async () => {
+    let firstSignal: AbortSignal | undefined;
+    const listMessages = vi.fn((input: { sessionID: string }, options: { signal: AbortSignal }) => {
+      if (input.sessionID === "ses_history_old_selection") {
+        firstSignal = options.signal;
+        return new Promise<{
+          data: unknown[];
+          cursor: { next: string | null };
+        }>((_resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      }
+      return Promise.resolve({ data: [], cursor: { next: null } });
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => vi.fn(),
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+
+    const staleRequest = runtime.bootstrapHistory(["ses_history_old_selection"]);
+    await vi.waitFor(() => expect(listMessages).toHaveBeenCalledOnce());
+    await runtime.bootstrapHistory(["ses_history_new_selection"]);
+
+    await expect(staleRequest).rejects.toMatchObject({ name: "AbortError" });
+    expect(firstSignal?.aborted).toBe(true);
+    expect(listMessages.mock.calls[1]?.[0]).toMatchObject({
+      sessionID: "ses_history_new_selection",
+    });
+
+    runtime.dispose();
+  });
+
+  it("invalidates a loaded session when its last observer releases during a cancelled multi-session history batch", async () => {
+    const mainSessionId = "ses_history_released_main";
+    const childSessionId = "ses_history_released_child";
+    const listMessages = vi.fn((input: { sessionID: string }, options: { signal: AbortSignal }) => {
+      if (input.sessionID === mainSessionId && listMessages.mock.calls.length === 1) {
+        return Promise.resolve({
+          data: [
+            {
+              id: "msg_history_before_release",
+              type: "assistant",
+              model: { providerID: "openai", id: "gpt-test" },
+              time: { created: 1_000, completed: 1_100 },
+              tokens: { input: 20, cache: { read: 80, write: 0 } },
+            },
+          ],
+          cursor: { next: null },
+        });
+      }
+      if (input.sessionID === childSessionId) {
+        return new Promise<{ data: unknown[]; cursor: { next: null } }>(() => {});
+      }
+      return Promise.resolve({
+        data: [
+          {
+            id: "msg_history_after_release",
+            type: "assistant",
+            model: { providerID: "openai", id: "gpt-test" },
+            time: { created: 2_000, completed: 2_100 },
+            tokens: { input: 60, cache: { read: 40, write: 0 } },
+          },
+        ],
+        cursor: { next: null },
+      });
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => vi.fn(),
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+    const releaseMain = runtime.subscribe(mainSessionId, vi.fn());
+    const batch = new AbortController();
+
+    const loading = runtime.bootstrapHistory([mainSessionId, childSessionId], batch.signal);
+    await vi.waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+    expect(runtime.query(mainSessionId)).toMatchObject({
+      primaryCacheReadRatio: { value: 0.8, messageId: "msg_history_before_release" },
+    });
+
+    releaseMain();
+    batch.abort();
+    await expect(loading).rejects.toMatchObject({ name: "AbortError" });
+    expect(runtime.query(mainSessionId)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(runtime.query(mainSessionId)).toMatchObject({
+      primaryCacheReadTelemetry: "unavailable",
+    });
+
+    const releaseReselectedMain = runtime.subscribe(mainSessionId, vi.fn());
+    await runtime.bootstrapHistory([mainSessionId]);
+    expect(
+      listMessages.mock.calls.filter(([input]) => input.sessionID === mainSessionId),
+    ).toHaveLength(2);
+    expect(runtime.query(mainSessionId)).toMatchObject({
+      primaryCacheReadRatio: { value: 0.4, messageId: "msg_history_after_release" },
+    });
+
+    releaseReselectedMain();
+    runtime.dispose();
+  });
+
+  it.each([
+    "child-first",
+    "root-first",
+  ] as const)("defers a child observation gap through temporary history interest when cleanup is %s", async (cleanupOrder) => {
+    const rootSessionId = "ses_history_child_gap_root";
+    const childSessionId = "ses_history_child_gap_child";
+    const otherSessionId = "ses_history_child_gap_other";
+    const childSnapshots: Array<{ children: Array<{ sessionId: string }> }> = [];
+    let childHistoryRequests = 0;
+    const listMessages = vi.fn((input: { sessionID: string }) => {
+      if (input.sessionID === childSessionId) {
+        childHistoryRequests += 1;
+        return Promise.resolve({
+          data: [
+            {
+              id: `msg_child_history_${childHistoryRequests}`,
+              type: "assistant",
+              model: { providerID: "openai", id: "gpt-test" },
+              time: {
+                created: childHistoryRequests * 1_000,
+                completed: childHistoryRequests * 1_000 + 100,
+              },
+              tokens:
+                childHistoryRequests === 1
+                  ? { input: 20, cache: { read: 80, write: 0 } }
+                  : { input: 60, cache: { read: 40, write: 0 } },
+            },
+          ],
+          cursor: { next: null },
+        });
+      }
+      return new Promise<{ data: unknown[]; cursor: { next: null } }>(() => {});
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => vi.fn(),
+      rpcConnection: () => "live",
+      listChildren: async () => [{ id: childSessionId, parentID: rootSessionId, title: "Child" }],
+      listMessages,
+    });
+    const releaseRootWatcher = runtime.subscribeChildren(rootSessionId, (snapshot) => {
+      childSnapshots.push({ children: snapshot.children });
+    });
+    await vi.waitFor(() =>
+      expect(
+        childSnapshots.some((snapshot) => snapshot.children[0]?.sessionId === childSessionId),
+      ).toBe(true),
+    );
+    const releaseChildSubscription = runtime.subscribe(childSessionId, vi.fn());
+    const batch = new AbortController();
+    const loading = runtime.bootstrapHistory([childSessionId, otherSessionId], batch.signal);
+    await vi.waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+    expect(runtime.query(childSessionId)).toMatchObject({
+      primaryCacheReadRatio: { value: 0.8, messageId: "msg_child_history_1" },
+    });
+
+    if (cleanupOrder === "child-first") {
+      releaseChildSubscription();
+      releaseRootWatcher();
+    } else {
+      releaseRootWatcher();
+      releaseChildSubscription();
+    }
+    batch.abort();
+    await expect(loading).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(runtime.query(childSessionId)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(runtime.query(childSessionId)).toMatchObject({
+      primaryCacheReadTelemetry: "unavailable",
+    });
+
+    const releaseReselectedChild = runtime.subscribe(childSessionId, vi.fn());
+    await runtime.bootstrapHistory([childSessionId]);
+    expect(childHistoryRequests).toBe(2);
+    expect(runtime.query(childSessionId)).toMatchObject({
+      primaryCacheReadRatio: { value: 0.4, messageId: "msg_child_history_2" },
+    });
+
+    releaseReselectedChild();
+    runtime.dispose();
+  });
+
+  it("checks each session epoch and skips history for completed live evidence", async () => {
+    let receiveEvent: ((event: never) => void) | undefined;
+    let resolveFirstPage!: (value: { data: unknown[]; cursor: { next: null } }) => void;
+    const listMessages = vi.fn((input: { sessionID: string }) => {
+      if (input.sessionID === "ses_history_first") {
+        return new Promise<{ data: unknown[]; cursor: { next: null } }>((resolve) => {
+          resolveFirstPage = resolve;
+        });
+      }
+      return Promise.resolve({ data: [], cursor: { next: null } });
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+
+    const loading = runtime.bootstrapHistory([
+      "ses_history_first",
+      "ses_history_started",
+      "ses_history_live",
+    ]);
+    await vi.waitFor(() => expect(listMessages).toHaveBeenCalledOnce());
+    receiveEvent?.({
+      type: "session.step.started",
+      created: 3_000,
+      data: {
+        sessionID: "ses_history_started",
+        assistantMessageID: "msg_live_start_before_page",
+        model: { providerID: "openai", id: "gpt-live" },
+        started: 2_900,
+      },
+    } as never);
+    receiveEvent?.({
+      type: "session.step.started",
+      created: 3_000,
+      data: {
+        sessionID: "ses_history_live",
+        assistantMessageID: "msg_live_before_page",
+        model: { providerID: "openai", id: "gpt-live" },
+        started: 2_900,
+      },
+    } as never);
+    receiveEvent?.({
+      type: "session.step.ended",
+      created: 3_100,
+      data: {
+        sessionID: "ses_history_live",
+        assistantMessageID: "msg_live_before_page",
+        tokens: { input: 50, cache: { read: 50, write: 0 } },
+      },
+    } as never);
+    resolveFirstPage({ data: [], cursor: { next: null } });
+    await loading;
+
+    expect(listMessages.mock.calls.map(([input]) => input.sessionID)).toEqual([
+      "ses_history_first",
+    ]);
+    expect(runtime.query("ses_history_live")).toMatchObject({
+      primaryCacheReadRatio: { value: 0.5, messageId: "msg_live_before_page" },
+    });
+
+    await runtime.bootstrapHistory(["ses_history_live"]);
+    expect(listMessages).toHaveBeenCalledOnce();
+    runtime.dispose();
+  });
+
+  it("cancels pre-gap history, invalidates loaded history, and permits explicit recovery after reconnect", async () => {
+    let receiveEvent: ((event: never) => void) | undefined;
+    let firstSignal: AbortSignal | undefined;
+    const listMessages = vi.fn(
+      (_input: { sessionID: string }, options: { signal: AbortSignal }) => {
+        if (listMessages.mock.calls.length === 1) {
+          firstSignal = options.signal;
+          return new Promise<{ data: unknown[]; cursor: { next: null } }>(() => {});
+        }
+        return Promise.resolve({ data: [], cursor: { next: null } });
+      },
+    );
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+    const release = runtime.subscribe("ses_history_gap", vi.fn());
+
+    const staleLoad = runtime.bootstrapHistory(["ses_history_gap"]);
+    await vi.waitFor(() => expect(listMessages).toHaveBeenCalledOnce());
+    receiveEvent?.({
+      type: "source.status",
+      created: 4_000,
+      data: { state: "unavailable" },
+    } as never);
+    await expect(staleLoad).rejects.toMatchObject({ name: "AbortError" });
+    expect(firstSignal?.aborted).toBe(true);
+
+    receiveEvent?.({ type: "source.status", created: 4_100, data: { state: "observed" } } as never);
+    await runtime.bootstrapHistory(["ses_history_gap"]);
+    expect(listMessages).toHaveBeenCalledTimes(2);
+    await runtime.bootstrapHistory(["ses_history_gap"]);
+    expect(listMessages).toHaveBeenCalledTimes(2);
+
+    receiveEvent?.({
+      type: "source.status",
+      created: 4_200,
+      data: { state: "unavailable" },
+    } as never);
+    receiveEvent?.({ type: "source.status", created: 4_300, data: { state: "observed" } } as never);
+    await runtime.bootstrapHistory(["ses_history_gap"]);
+    expect(listMessages).toHaveBeenCalledTimes(3);
+
+    release();
+    runtime.dispose();
+  });
+
+  it("stops newest-first pagination at the latest completed compaction boundary", async () => {
+    const listMessages = vi.fn(async (input: { cursor?: string }) =>
+      input.cursor === undefined
+        ? {
+            data: [{ id: "msg_compaction", type: "compaction", status: "completed" }],
+            cursor: { next: "pre-compaction-page" },
+          }
+        : {
+            data: [
+              {
+                id: "msg_pre_compaction",
+                type: "assistant",
+                model: { providerID: "openai", id: "gpt-test" },
+                time: { created: 100, completed: 200 },
+                tokens: { input: 10, cache: { read: 90, write: 0 } },
+              },
+            ],
+            cursor: { next: null },
+          },
+    );
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => vi.fn(),
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+
+    await runtime.bootstrapHistory(["ses_history_compacted"]);
+
+    expect(listMessages).toHaveBeenCalledOnce();
+    expect(runtime.query("ses_history_compacted")).toBeUndefined();
+    runtime.dispose();
+  });
+
+  it("recovers a child's completed usage from history when its live end preceded child discovery", async () => {
+    const parentSessionId = "ses_history_parent";
+    const childSessionId = "ses_history_child_before_discovery";
+    let receiveEvent: ((event: never) => void) | undefined;
+    let reconnect: (() => void) | undefined;
+    let rows: Array<{ id: string; parentID?: string; title?: string }> = [];
+    const listChildren = vi.fn(async () => rows);
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      subscribeReconnect: (listener) => {
+        reconnect = listener;
+        return vi.fn();
+      },
+      listChildren,
+      listMessages: async () => ({
+        data: [
+          {
+            id: "msg_child_completed_before_discovery",
+            type: "assistant",
+            model: { providerID: "openai", id: "gpt-child" },
+            time: { created: 5_000, completed: 5_100 },
+            tokens: { input: 25, cache: { read: 75, write: 0 } },
+          },
+        ],
+        cursor: { next: null },
+      }),
+    });
+    const release = runtime.subscribeChildren(parentSessionId, vi.fn());
+    await vi.waitFor(() => expect(listChildren).toHaveBeenCalledOnce());
+
+    receiveEvent?.({
+      type: "session.step.started",
+      created: 4_900,
+      data: {
+        sessionID: childSessionId,
+        assistantMessageID: "msg_child_completed_before_discovery",
+        model: { providerID: "openai", id: "gpt-child" },
+        started: 4_800,
+      },
+    } as never);
+    receiveEvent?.({
+      type: "session.step.ended",
+      created: 5_100,
+      data: {
+        sessionID: childSessionId,
+        assistantMessageID: "msg_child_completed_before_discovery",
+        tokens: { input: 25, cache: { read: 75, write: 0 } },
+      },
+    } as never);
+    expect(runtime.query(childSessionId)).toBeUndefined();
+
+    rows = [{ id: childSessionId, parentID: parentSessionId, title: "Child" }];
+    reconnect?.();
+    await vi.waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2));
+    await runtime.bootstrapHistory([childSessionId]);
+
+    expect(runtime.query(childSessionId)).toMatchObject({
+      primaryCacheReadRatio: {
+        value: 0.75,
+        messageId: "msg_child_completed_before_discovery",
+      },
+    });
+    release();
+    runtime.dispose();
+  });
+
+  it("keeps live observations ahead of historical results and discards a history page invalidated by compaction", async () => {
+    let receiveEvent: ((event: never) => void) | undefined;
+    let resolveMessages!: (value: { data: unknown[]; cursor: { next: null } }) => void;
+    const listMessages = vi.fn(
+      () =>
+        new Promise<{ data: unknown[]; cursor: { next: null } }>((resolve) => {
+          resolveMessages = resolve;
+        }),
+    );
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+    const release = runtime.subscribe("ses_history_race", vi.fn());
+    const loading = runtime.bootstrapHistory(["ses_history_race"]);
+
+    receiveEvent?.({
+      type: "session.step.started",
+      created: 3_000,
+      data: {
+        sessionID: "ses_history_race",
+        assistantMessageID: "msg_live",
+        model: { providerID: "openai", id: "gpt-live" },
+      },
+    } as never);
+    receiveEvent?.({
+      type: "session.step.ended",
+      created: 3_100,
+      data: {
+        sessionID: "ses_history_race",
+        assistantMessageID: "msg_live",
+        tokens: { input: 50, cache: { read: 50, write: 0 } },
+      },
+    } as never);
+    resolveMessages({
+      data: [
+        {
+          id: "msg_history_stale",
+          type: "assistant",
+          model: { providerID: "anthropic", id: "claude-old" },
+          time: { created: 4_000, completed: 4_100 },
+          tokens: { input: 100, cache: { read: 0, write: 0 } },
+          content: [{ text: "stale content" }],
+        },
+      ],
+      cursor: { next: null },
+    });
+    await loading;
+
+    expect(runtime.query("ses_history_race")).toMatchObject({
+      primaryCacheReadRatio: { value: 0.5, messageId: "msg_live" },
+    });
+
+    const compactionLoading = runtime.bootstrapHistory(["ses_history_race"]);
+    receiveEvent?.({
+      type: "session.compaction.ended",
+      data: { sessionID: "ses_history_race" },
+    } as never);
+    resolveMessages({
+      data: [
+        {
+          id: "msg_pre_compaction",
+          type: "assistant",
+          model: { providerID: "openai", id: "gpt-live" },
+          time: { created: 2_000, completed: 2_100 },
+          tokens: { input: 100, cache: { read: 70, write: 0 } },
+        },
+      ],
+      cursor: { next: null },
+    });
+    await compactionLoading;
+    expect(runtime.query("ses_history_race")).toBeUndefined();
+
+    release();
+    runtime.dispose();
+  });
+
   it("shares the existing Native event listener across exact-session subscribers", () => {
     let receiveEvent: ((event: never) => void) | undefined;
     const releaseNativeListener = vi.fn();

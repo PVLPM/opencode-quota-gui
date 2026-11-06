@@ -137,6 +137,8 @@ export interface CacheObserverClassification {
     | "known-invalidation"
     | "compaction-boundary-uncertain";
   primaryCacheReadRatio?: CachePrimaryRatio;
+  /** Distinguishes received but unusable usage counters from no observed step telemetry. */
+  primaryCacheReadTelemetry?: "available" | "unavailable";
   /** @deprecated Retained for older consumers; configured TTL is not a physical expiry claim. */
   verifiedExpiresAtMs?: number;
   /** Earliest instant to reconsider configured-minimum evidence without a newer event. */
@@ -280,7 +282,9 @@ export function classifyCacheObserverState(
   const latestAmbiguous = last(
     currentInvocations.filter((entry) => isAmbiguousInvocation(state.scope.route, entry)),
   );
-  const ratio = lastPrimaryRatio(currentInvocations);
+  const telemetry = lastPrimaryRatio(currentInvocations);
+  const ratio = telemetry?.ratio;
+  const telemetryStatus = optionalPrimaryCacheReadTelemetry(telemetry?.status);
 
   if (latestReuse === undefined) {
     const hadReuseBeforeBoundary =
@@ -291,19 +295,35 @@ export function classifyCacheObserverState(
           isEstablishedReusablePrefix(state.scope.route, entry),
       );
     if (latestAmbiguous !== undefined) {
-      return { color: "yellow", reason: "ambiguous-invocation", ...optionalRatio(ratio) };
+      return {
+        color: "yellow",
+        reason: "ambiguous-invocation",
+        ...telemetryStatus,
+        ...optionalRatio(ratio),
+      };
     }
     if (hadReuseBeforeBoundary) {
       return {
         color: "yellow",
         reason: "compaction-boundary-uncertain",
+        ...telemetryStatus,
         ...optionalRatio(ratio),
       };
     }
     if (state.invocationsTruncated) {
-      return { color: "yellow", reason: "history-truncated", ...optionalRatio(ratio) };
+      return {
+        color: "yellow",
+        reason: "history-truncated",
+        ...telemetryStatus,
+        ...optionalRatio(ratio),
+      };
     }
-    return { color: "gray", reason: "insufficient-evidence", ...optionalRatio(ratio) };
+    return {
+      color: "gray",
+      reason: "insufficient-evidence",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
   }
 
   if (
@@ -314,13 +334,28 @@ export function classifyCacheObserverState(
       latestAmbiguous !== undefined &&
       compareOrder(latestAmbiguous.order, latestInvalidation.order) > 0
     ) {
-      return { color: "yellow", reason: "ambiguous-invocation", ...optionalRatio(ratio) };
+      return {
+        color: "yellow",
+        reason: "ambiguous-invocation",
+        ...telemetryStatus,
+        ...optionalRatio(ratio),
+      };
     }
-    return { color: "red", reason: "known-invalidation", ...optionalRatio(ratio) };
+    return {
+      color: "red",
+      reason: "known-invalidation",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
   }
 
   if (latestAmbiguous !== undefined && compareOrder(latestAmbiguous.order, latestReuse.order) > 0) {
-    return { color: "yellow", reason: "ambiguous-invocation", ...optionalRatio(ratio) };
+    return {
+      color: "yellow",
+      reason: "ambiguous-invocation",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
   }
 
   if (
@@ -328,7 +363,12 @@ export function classifyCacheObserverState(
     !hasValidRouteProvenance(state.scope.route) ||
     !hasValidRouteProvenance(latestReuse.route)
   ) {
-    return { color: "yellow", reason: "route-unverified", ...optionalRatio(ratio) };
+    return {
+      color: "yellow",
+      reason: "route-unverified",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
   }
 
   const ttl = state.ttlEvidence;
@@ -339,10 +379,20 @@ export function classifyCacheObserverState(
     !sameRoute(state.scope.route, ttl.route) ||
     !isSupportedAnthropicTtl(state.scope.route, ttl)
   ) {
-    return { color: "yellow", reason: "ttl-unverified", ...optionalRatio(ratio) };
+    return {
+      color: "yellow",
+      reason: "ttl-unverified",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
   }
   if (!Number.isFinite(ttl.expiresAtMs) || ttl.expiresAtMs <= nowMs) {
-    return { color: "yellow", reason: "ttl-expired", ...optionalRatio(ratio) };
+    return {
+      color: "yellow",
+      reason: "ttl-expired",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
   }
 
   return {
@@ -355,6 +405,7 @@ export function classifyCacheObserverState(
       ? "observed-reuse-with-active-ttl"
       : "observed-write-with-active-ttl",
     recheckAtMs: ttl.expiresAtMs,
+    ...telemetryStatus,
     ...optionalRatio(ratio),
   };
 }
@@ -466,7 +517,7 @@ function isAmbiguousInvocation(
 /** Keep only the latest classified primary's host counters; never infer route or cache policy. */
 function lastPrimaryRatio(
   invocations: readonly CacheInvocationObservation[],
-): CachePrimaryRatio | undefined {
+): { status: "available" | "unavailable"; ratio?: CachePrimaryRatio } | undefined {
   let lastCandidate: CacheInvocationObservation | undefined;
   for (const invocation of invocations) {
     const classification = invocation.primaryClassification;
@@ -484,29 +535,36 @@ function lastPrimaryRatio(
   }
   const { fresh, read, write } = lastCandidate.counts;
   if (
-    !isPresentPositiveFinite(fresh) ||
+    !isPresentNonNegativeFinite(fresh) ||
     !isPresentPositiveFinite(read) ||
-    !isPresentPositiveFinite(write)
+    !isPresentNonNegativeFinite(write)
   ) {
-    return undefined;
+    return { status: "unavailable" };
   }
   const denominator = fresh + read + write;
   if (!(denominator > 0) || !Number.isFinite(denominator)) {
-    return undefined;
+    return { status: "unavailable" };
   }
 
   return {
-    value: read / denominator,
-    messageId: lastCandidate.order.messageId,
-    observedAtMs: lastCandidate.order.completedAtMs,
-    numerator: "cache-read",
-    denominator: "fresh+read+write",
-    basis: { ...lastCandidate.primaryClassification.basis },
+    status: "available",
+    ratio: {
+      value: read / denominator,
+      messageId: lastCandidate.order.messageId,
+      observedAtMs: lastCandidate.order.completedAtMs,
+      numerator: "cache-read",
+      denominator: "fresh+read+write",
+      basis: { ...lastCandidate.primaryClassification.basis },
+    },
   };
 }
 
 function isPresentPositiveFinite(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function isPresentNonNegativeFinite(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 function isAuthoritativeAnthropicRoute(route: CacheRouteProvenance | undefined): boolean {
@@ -560,4 +618,10 @@ function optionalRatio(ratio: CachePrimaryRatio | undefined): {
   primaryCacheReadRatio?: CachePrimaryRatio;
 } {
   return ratio === undefined ? {} : { primaryCacheReadRatio: ratio };
+}
+
+function optionalPrimaryCacheReadTelemetry(status: "available" | "unavailable" | undefined): {
+  primaryCacheReadTelemetry?: "available" | "unavailable";
+} {
+  return status === undefined ? {} : { primaryCacheReadTelemetry: status };
 }
