@@ -680,12 +680,14 @@ describe("native quota notification subscription", () => {
       | "connection"
       | "onConnectionChange"
       | "onReconnect"
+      | "onEventStreamRetire"
       | "subscribeCacheObserverEvent"
       | "dispose"
     > = {
       connection: vi.fn(() => "connecting"),
       onConnectionChange: vi.fn(() => vi.fn()),
       onReconnect: vi.fn(() => vi.fn()),
+      onEventStreamRetire: vi.fn(() => vi.fn()),
       subscribeCacheObserverEvent: vi.fn(() => vi.fn()),
       dispose: vi.fn(),
     };
