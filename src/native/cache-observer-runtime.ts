@@ -38,6 +38,8 @@ export interface NativeCacheObserverTransport {
 export interface NativeCacheObserver {
   query(sessionId: string): CacheObserverClassification | undefined;
   subscribe(sessionId: string, listener: CacheObserverListener): () => void;
+  /** Notifies exact sessions whose history was invalidated by an observation gap. */
+  subscribeGaps(listener: (sessionId: string) => void): () => void;
   /** One-shot direct-child discovery; it does not start or retain a transport. */
   children(sessionId: string): Promise<NativeCacheObserverChild[]>;
   /** Lazily reads selected session history; callers cancel with a signal on selection changes. */
@@ -98,6 +100,7 @@ export function createNativeCacheObserverRuntime(options: {
   /** Child ownership exists only while an exact parent has active child listeners. */
   const childOwners = new Map<string, string>();
   const transportListeners = new Set<(transport: NativeCacheObserverTransport) => void>();
+  const gapListeners = new Set<(sessionId: string) => void>();
   const historyLoadedSessions = new Set<string>();
   const historyEpochs = new Map<string, number>();
   let releaseEventListener: (() => void) | undefined;
@@ -318,6 +321,13 @@ export function createNativeCacheObserverRuntime(options: {
     bumpHistoryEpoch(sessionId, true);
     ingestor.markObservationGap(sessionId);
     if (activeHistorySessionIds.has(sessionId)) activeHistoryController?.abort();
+    for (const listener of Array.from(gapListeners)) {
+      try {
+        listener(sessionId);
+      } catch {
+        /* A consumer cannot interrupt invalidation. */
+      }
+    }
   }
 
   function markActiveObservationGaps(): void {
@@ -477,6 +487,11 @@ export function createNativeCacheObserverRuntime(options: {
         throwIfAborted(controller.signal);
         if (historyEpoch(sessionId) !== expectedEpoch) continue;
         ingestor.ingestHistory(history);
+        throwIfAborted(controller.signal);
+        if (historyEpoch(sessionId) !== expectedEpoch) continue;
+        // This is the first completed assistant after the newest compaction
+        // boundary, fetched with the same epoch throughout pagination.
+        if (history[0] !== undefined) ingestor.confirmLatestHistory(history[0]);
         markHistoryLoaded(sessionId);
       }
     } finally {
@@ -686,6 +701,7 @@ export function createNativeCacheObserverRuntime(options: {
     historyLoadedSessions.clear();
     historyEpochs.clear();
     transportListeners.clear();
+    gapListeners.clear();
     releaseRpcConnection?.();
     releaseReconnect?.();
     releaseEventStreamRetire?.();
@@ -708,6 +724,11 @@ export function createNativeCacheObserverRuntime(options: {
   return {
     query,
     subscribe,
+    subscribeGaps(listener) {
+      if (disposed) return () => {};
+      gapListeners.add(listener);
+      return () => gapListeners.delete(listener);
+    },
     children,
     bootstrapHistory,
     subscribeChildren,

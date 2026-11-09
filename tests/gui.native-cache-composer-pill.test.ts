@@ -1,392 +1,558 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import type { ComposerPill, ComposerPillProps, Sessions } from "@opencode/plugin/gui";
-import type { ViteDevServer } from "vite";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+// @vitest-environment happy-dom
+import type { ComposerPillMenuProps, ComposerPillProps, Sessions } from "@opencode/plugin/gui";
+import { createRoot, createSignal } from "solid-js";
+import { render } from "solid-js/web";
+import { expect, it, vi } from "vitest";
 import type { CacheObserverClassification } from "../src/lib/cache-observer.js";
+import {
+  classifyCacheObserverState,
+  createCacheObserverState,
+  observeCacheInvocation,
+  setCacheTtlEvidence,
+} from "../src/lib/cache-observer.js";
+import { createCacheComposerPill } from "../src/native/cache-composer-pill.js";
 import type { NativeCacheObserverChildrenSnapshot } from "../src/native/cache-observer-runtime.js";
+import { createNativeCacheObserverRuntime } from "../src/native/cache-observer-runtime.js";
 import type { NativeDashboardRuntime } from "../src/native/runtime.js";
-import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-let server: ViteDevServer;
-let solid: typeof import("solid-js");
-let createPill: typeof import("../src/native/cache-composer-pill.js").createCacheComposerPill;
-beforeAll(async () => {
-  server = await createIsolatedViteServer({
-    configFile: false,
-    root,
-    resolve: {
-      alias: [
-        { find: /^solid-js$/, replacement: path.join(root, "node_modules/solid-js/dist/solid.js") },
-      ],
-    },
-    ssr: { noExternal: ["solid-js"] },
-    logLevel: "silent",
-    server: { middlewareMode: true },
-    appType: "custom",
+it("mounts the public menu lazily, updates live, and cancels on session changes", async () => {
+  const addListener = vi.spyOn(document, "addEventListener");
+  const removeListener = vi.spyOn(document, "removeEventListener");
+  const a = { id: "a", key: "server\na", server: { builtin: true, connected: true } };
+  const b = { id: "b", key: "server\nb", server: { builtin: true, connected: true } };
+  const observations = new Map<string, CacheObserverClassification>();
+  const listeners = new Map<string, () => void>();
+  let childrenListener: ((snapshot: NativeCacheObserverChildrenSnapshot) => void) | undefined;
+  const requests: Array<{ ids: readonly string[]; signal: AbortSignal }> = [];
+  const bootstrapHistory = vi.fn((ids: readonly string[], signal: AbortSignal) => {
+    requests.push({ ids, signal });
+    return new Promise<void>(() => {});
   });
-  solid = await server.ssrLoadModule("solid-js");
-  ({ createCacheComposerPill: createPill } = await server.ssrLoadModule(
-    path.join(root, "src/native/cache-composer-pill.ts"),
-  ));
-});
-afterAll(async () => server?.close());
-
-function setup(initialQuery?: (id: string) => CacheObserverClassification | undefined) {
-  const a = { key: "server\na", id: "a", server: { builtin: true, connected: true } };
-  const b = { key: "server\nb", id: "b", server: { builtin: true, connected: true } };
-  const listeners = new Map<string, (snapshot: NativeCacheObserverChildrenSnapshot) => void>();
-  const releasedChildren: string[] = [];
-  const subscribeChildren = vi.fn(
-    (id: string, listener: (snapshot: NativeCacheObserverChildrenSnapshot) => void) => {
-      listeners.set(id, listener);
-      return () => {
-        releasedChildren.push(id);
-      };
-    },
-  );
-  const releases: string[] = [];
-  const observerListeners = new Map<string, () => void>();
-  const subscribe = vi.fn((id: string, listener: () => void) => {
-    observerListeners.set(id, listener);
-    return () => releases.push(id);
-  });
-  const query = vi.fn((id: string): CacheObserverClassification | undefined =>
-    initialQuery
-      ? initialQuery(id)
-      : id === "child"
-        ? { color: "red", reason: "known-invalidation" }
-        : undefined,
-  );
-  let notifyTransport: (value: { rpc: string; hostEvents: string }) => void = () => {};
-  const transport = { rpc: "live", hostEvents: "observed" };
   const runtime = {
     retain: vi.fn(),
     cacheObserver: {
-      subscribeChildren,
-      subscribe,
-      query,
-      transport: () => transport,
-      subscribeTransport: (listener: typeof notifyTransport) => {
+      transport: () => ({ rpc: "live", hostEvents: "observed" }),
+      subscribeTransport: () => () => {},
+      subscribeGaps: () => () => {},
+      query: (id: string) => observations.get(id),
+      subscribe: (id: string, listener: () => void) => {
+        listeners.set(id, listener);
+        return () => listeners.delete(id);
+      },
+      subscribeChildren: vi.fn((_id: string, listener: typeof childrenListener) => {
+        childrenListener = listener;
+        return () => {};
+      }),
+      bootstrapHistory,
+    },
+  } as unknown as NativeDashboardRuntime;
+  const get = vi.fn(async ({ sessionID }: { sessionID: string }) => ({
+    title: sessionID === "a" ? "Main\u202e title" : "Second",
+  }));
+  const container = document.createElement("div");
+  document.body.append(container);
+  let setCurrent!: (value: typeof a) => void;
+  let disposeMenu = () => {};
+  const { dispose, pill, current } = createRoot((cleanup) => {
+    const [current, set] = createSignal(a);
+    setCurrent = set;
+    const pill = createCacheComposerPill({ current } as unknown as Sessions, runtime, {
+      get,
+    } as never);
+    return { dispose: cleanup, pill, current };
+  });
+  expect(pill.show({ session: a } as ComposerPillProps)?.label).toBe("Cache · Loading…");
+  expect(runtime.cacheObserver.subscribeChildren).not.toHaveBeenCalled();
+  await Promise.resolve();
+  expect(requests[0]?.ids).toEqual(["a"]);
+  disposeMenu = render(
+    () =>
+      pill.menu!({
+        get session() {
+          return current();
+        },
+        close() {},
+      } as ComposerPillMenuProps),
+    container,
+  );
+  childrenListener?.({ status: "error", children: [] });
+  expect(container.textContent).toContain("Could not load child sessions.");
+  childrenListener?.({ status: "ready", children: [{ sessionId: "child", label: "Worker" }] });
+  expect(container.querySelector('.qg-cache-child [role="img"]')?.getAttribute("aria-label")).toBe(
+    "Cache observation unknown",
+  );
+  expect(container.textContent).not.toContain("Could not load child sessions.");
+  expect(requests[0]?.signal.aborted).toBe(true);
+  await Promise.resolve();
+  expect(requests.at(-1)?.ids).toEqual(["a", "child"]);
+  observations.set("a", {
+    color: "yellow",
+    reason: "ttl-unverified",
+    primaryCacheReadRatio: { value: 0.82, observedAtMs: Date.now() },
+  } as CacheObserverClassification);
+  listeners.get("a")?.();
+  expect(pill.show({ session: a } as ComposerPillProps)?.label).toBe("Cache 82%");
+  observations.set("child", { color: "red", reason: "known-invalidation" });
+  listeners.get("child")?.();
+  const childButton = container.querySelector<HTMLButtonElement>(
+    ".qg-cache-child button.qg-cache-danger",
+  );
+  const mainButton = container.querySelector<HTMLButtonElement>(
+    ".qg-cache-row:not(.qg-cache-child) button.qg-cache-warning",
+  );
+  expect(childButton?.getAttribute("aria-label")).toBe("Cache details for Worker");
+  const childTooltip = container.querySelector<HTMLElement>(
+    `#${childButton?.getAttribute("aria-describedby")}`,
+  );
+  const mainTooltip = container.querySelector<HTMLElement>(
+    `#${mainButton?.getAttribute("aria-describedby")}`,
+  );
+  expect(childTooltip?.hidden).toBe(true);
+  expect(mainTooltip?.hidden).toBe(true);
+  const wrapper = childButton?.parentElement;
+  wrapper?.dispatchEvent(new MouseEvent("mouseenter"));
+  expect(childTooltip?.hidden).toBe(false);
+  const escapeListener = addListener.mock.calls.filter(([type]) => type === "keydown").at(-1)?.[1];
+  expect(escapeListener).toBeDefined();
+  childButton?.dispatchEvent(new MouseEvent("mouseleave", { relatedTarget: childTooltip }));
+  childTooltip?.dispatchEvent(new MouseEvent("mouseenter", { relatedTarget: childButton }));
+  expect(childTooltip?.hidden).toBe(false);
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  elsewhere.focus();
+  expect(document.activeElement).toBe(elsewhere);
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  expect(childTooltip?.hidden).toBe(true);
+  expect(removeListener).toHaveBeenCalledWith("keydown", escapeListener);
+  elsewhere.remove();
+  wrapper?.dispatchEvent(new MouseEvent("mouseleave"));
+  expect(childTooltip?.hidden).toBe(true);
+  childButton?.focus();
+  expect(document.activeElement).toBe(childButton);
+  expect(childTooltip?.hidden).toBe(false);
+  expect(childTooltip?.textContent).toBe("Invalidation observed");
+  childButton?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  expect(childTooltip?.hidden).toBe(true);
+  mainButton?.focus();
+  expect(mainTooltip?.hidden).toBe(false);
+  expect(mainTooltip?.textContent).toContain("Reuse not verified");
+  expect(mainTooltip?.textContent).toContain(
+    "Last completed primary call · host-reported cache read",
+  );
+  mainButton?.blur();
+  expect(mainTooltip?.hidden).toBe(true);
+  const callsAfterLiveUpdate = bootstrapHistory.mock.calls.length;
+  listeners.get("a")?.();
+  expect(bootstrapHistory).toHaveBeenCalledTimes(callsAfterLiveUpdate);
+  expect(container.textContent).toContain("Worker");
+  expect(container.querySelector("hr")).not.toBeNull();
+  expect(container.textContent).toContain("Main title");
+  expect(container.textContent).not.toContain("\u202e");
+  const oldChildrenListener = childrenListener;
+  childrenListener?.({
+    status: "ready",
+    children: [{ sessionId: "child2", label: "Second worker" }],
+  });
+  expect(container.textContent).not.toContain("Worker");
+  expect(container.textContent).toContain("Second worker");
+  setCurrent(b);
+  expect(requests.at(-2)?.signal.aborted).toBe(true);
+  await Promise.resolve();
+  oldChildrenListener?.({
+    status: "ready",
+    children: [{ sessionId: "stale", label: "Stale child" }],
+  });
+  expect(container.textContent).not.toContain("Stale child");
+  expect(requests.at(-1)?.ids).toEqual(["b"]);
+  await Promise.resolve();
+  expect(container.textContent).toContain("Second");
+  expect(container.textContent).not.toContain("Main");
+  observations.set("b", { color: "yellow", reason: "ttl-unverified" });
+  listeners.get("b")?.();
+  container.querySelector<HTMLButtonElement>("button.qg-cache-warning")?.focus();
+  const unmountListener = addListener.mock.calls.filter(([type]) => type === "keydown").at(-1)?.[1];
+  expect(unmountListener).toBeDefined();
+  disposeMenu();
+  expect(removeListener).toHaveBeenCalledWith("keydown", unmountListener);
+  dispose();
+  expect(requests.at(-1)?.signal.aborted).toBe(true);
+  container.remove();
+  addListener.mockRestore();
+  removeListener.mockRestore();
+});
+
+it("clears pending loading on RPC loss and starts only the selected session on recovery", async () => {
+  const a = { id: "a", key: "server\na", server: { builtin: true, connected: true } };
+  const b = { id: "b", key: "server\nb", server: { builtin: true, connected: true } };
+  type Transport = { rpc: "live" | "reconnecting"; hostEvents: "observed" };
+  let notifyTransport: (value: Transport) => void = () => {};
+  const requests: Array<{ ids: readonly string[]; signal: AbortSignal }> = [];
+  const runtime = {
+    retain() {},
+    cacheObserver: {
+      transport: (): Transport => ({ rpc: "live", hostEvents: "observed" }),
+      subscribeTransport: (listener: (value: Transport) => void) => {
         notifyTransport = listener;
         return () => {};
       },
+      subscribeGaps: () => () => {},
+      subscribe: () => () => {},
+      query: () => undefined,
+      bootstrapHistory: (ids: readonly string[], signal: AbortSignal) => {
+        requests.push({ ids, signal });
+        return new Promise<void>(() => {});
+      },
     },
   } as unknown as NativeDashboardRuntime;
-  let pill!: ComposerPill;
-  let setCurrent!: (session: typeof a) => unknown;
-  const dispose = solid.createRoot((end) => {
-    const [current, set] = solid.createSignal(a);
+  let setCurrent!: (value: typeof a) => void;
+  const { pill, dispose } = createRoot((cleanup) => {
+    const [current, set] = createSignal(a);
     setCurrent = set;
-    pill = createPill({ current, list: () => [a, b] } as unknown as Sessions, runtime);
-    return end;
+    return {
+      pill: createCacheComposerPill({ current } as unknown as Sessions, runtime, {} as never),
+      dispose: cleanup,
+    };
   });
-  const show = (session: typeof a) => pill.show({ session } as ComposerPillProps);
-  return {
-    a,
-    b,
-    listeners,
-    subscribeChildren,
-    releasedChildren,
-    releases,
-    subscribe,
-    observerListeners,
-    query,
-    show,
-    setCurrent,
-    dispose,
-    notifyTransport: (value: typeof transport) => notifyTransport(value),
-  };
-}
-
-it("tracks child creation, deletion and reconnect independently", () => {
-  const t = setup();
-  expect(t.subscribeChildren).toHaveBeenCalledTimes(1);
-  t.listeners.get("a")?.({ status: "ready", children: [{ sessionId: "child", label: "Worker" }] });
-  expect(t.show(t.a)?.rows?.map((row) => row.label)).toEqual(["Worker · ?", "Main · ?"]);
-  expect(t.show(t.a)?.rows?.[0]?.tone).toBe("danger");
-  expect(t.show(t.a)?.rows?.[0]?.icon).toBe("status");
-  expect(t.subscribe.mock.calls.map(([id]) => id)).toEqual(["a", "child"]);
-  t.listeners.get("a")?.({
-    status: "ready",
-    children: [
-      { sessionId: "child", label: "Worker" },
-      { sessionId: "child2", label: "Second" },
-    ],
-  });
-  expect(t.subscribe.mock.calls.map(([id]) => id)).toEqual(["a", "child", "child2"]);
-  expect(t.releases).not.toContain("child");
-  t.listeners.get("a")?.({ status: "ready", children: [{ sessionId: "child2", label: "Second" }] });
-  expect(t.releases).toContain("child");
-  expect(t.show(t.a)?.rows?.map((row) => row.label)).toEqual(["Second · ?", "Main · ?"]);
-  t.notifyTransport({ rpc: "reconnecting", hostEvents: "unavailable" });
-  expect(t.releases).toContain("child2");
-  t.notifyTransport({ rpc: "live", hostEvents: "observed" });
-  t.listeners.get("a")?.({ status: "ready", children: [{ sessionId: "child2", label: "Second" }] });
-  expect(t.subscribeChildren).toHaveBeenCalledTimes(1);
-  expect(t.subscribe.mock.calls.map(([id]) => id)).toEqual(["a", "child", "child2", "a", "child2"]);
-  expect(t.query.mock.calls.map(([id]) => id)).not.toContain("b");
-  t.notifyTransport({ rpc: "live", hostEvents: "unavailable" });
-  expect(t.show(t.a)?.rows?.[0]?.tone).toBeUndefined();
-  expect(t.show(t.a)?.rows?.[0]?.detail).toContain("Host event status unverified");
-  expect(t.subscribe.mock.calls.map(([id]) => id)).toEqual(["a", "child", "child2", "a", "child2"]);
-  t.dispose();
-  expect(t.releases).toContain("child");
+  await Promise.resolve();
+  expect(requests[0]?.ids).toEqual(["a"]);
+  expect(pill.show({ session: a } as ComposerPillProps)?.label).toBe("Cache · Loading…");
+  notifyTransport({ rpc: "reconnecting", hostEvents: "observed" });
+  expect(requests[0]?.signal.aborted).toBe(true);
+  expect(pill.show({ session: a } as ComposerPillProps)?.label).toBe("Cache");
+  setCurrent(b);
+  expect(pill.show({ session: b } as ComposerPillProps)?.label).toBe("Cache");
+  notifyTransport({ rpc: "live", hostEvents: "observed" });
+  await Promise.resolve();
+  expect(requests.at(-1)?.ids).toEqual(["b"]);
+  expect(pill.show({ session: b } as ComposerPillProps)?.label).toBe("Cache · Loading…");
+  dispose();
+  expect(requests.at(-1)?.signal.aborted).toBe(true);
 });
 
-it("never presents a green TTL classification as current after clock expiry", () => {
+it("marks a collapsed history error without exposing technical details", async () => {
+  const session = { id: "error", key: "server\nerror", server: { builtin: true, connected: true } };
+  const observer = createNativeCacheObserverRuntime({
+    subscribeEvents: () => () => {},
+    rpcConnection: () => "live",
+    listChildren: async () => [],
+    listMessages: async () => {
+      throw new Error("private server error");
+    },
+  });
+  const runtime = { retain() {}, cacheObserver: observer } as unknown as NativeDashboardRuntime;
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => session } as unknown as Sessions, runtime, {
+      get: async () => ({ title: "Session" }),
+    } as never),
+    dispose: cleanup,
+  }));
+  await vi.waitFor(() =>
+    expect(pill.show({ session } as ComposerPillProps)).toMatchObject({
+      label: "Cache",
+      icon: "warning",
+      tone: "warning",
+      title: "Cache observation",
+    }),
+  );
+  const container = document.createElement("div");
+  const close = render(
+    () => pill.menu!({ session, close() {} } as ComposerPillMenuProps),
+    container,
+  );
+  expect(container.textContent).toContain("Could not load cache history.");
+  expect(container.textContent).not.toContain("private server error");
+  close();
+  dispose();
+  observer.dispose();
+});
+
+it("does not interpret a real configured-minimum classification as verified expiry", () => {
   vi.useFakeTimers();
-  try {
-    vi.setSystemTime(1);
-    const t = setup(() =>
-      Date.now() < 100
-        ? {
-            color: "green",
-            reason: "observed-reuse-with-active-ttl",
-            verifiedExpiresAtMs: 150,
-            recheckAtMs: 100,
-          }
-        : { color: "yellow", reason: "ttl-expired" },
+  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  const session = { id: "timer", key: "server\ntimer", server: { builtin: true, connected: true } };
+  const route = {
+    providerId: "anthropic",
+    modelId: "test",
+    protocolId: "anthropic-messages",
+    basis: { source: "test", reference: "route" },
+  };
+  const state = setCacheTtlEvidence(
+    observeCacheInvocation(createCacheObserverState({ sessionId: session.id, route }), {
+      sessionId: session.id,
+      route,
+      order: { completedAtMs: Date.now(), messageId: "msg" },
+      primaryClassification: { kind: "primary", basis: { source: "test", reference: "call" } },
+      counts: { fresh: 20, read: 80, write: 0 },
+    }),
+    {
+      kind: "configured",
+      protocolId: "anthropic-messages",
+      route,
+      configuredTtlMs: 300_000,
+      expiresAtMs: Date.now() + 61_000,
+      basis: { source: "test", reference: "ttl" },
+    },
+  );
+  const observed = classifyCacheObserverState(state, Date.now());
+  expect(observed.color).toBe("green");
+  expect(observed).not.toHaveProperty("verifiedExpiresAtMs");
+  const query = vi.fn(() => observed);
+  const runtime = {
+    retain() {},
+    cacheObserver: {
+      transport: () => ({ rpc: "live", hostEvents: "observed" }),
+      subscribeTransport: () => () => {},
+      subscribeGaps: () => () => {},
+      subscribe: () => () => {},
+      query,
+      bootstrapHistory: () => Promise.resolve(),
+    },
+  } as unknown as NativeDashboardRuntime;
+  const { pill, dispose } = createRoot((cleanup) => {
+    const pill = createCacheComposerPill(
+      { current: () => session } as unknown as Sessions,
+      runtime,
+      {} as never,
     );
-    const retained = t.show(t.a);
-    expect(retained?.tone).toBe("success");
-    expect(retained?.icon).toBe("status");
-    expect(retained?.rows?.at(-1)?.icon).toBe("status");
-    expect(retained?.rows?.at(-1)?.tone).toBe("success");
-    expect(retained?.rows?.at(-1)?.detail).toContain("1m remaining");
-    const before = t.query.mock.calls.length;
-    vi.advanceTimersByTime(99);
-    expect(t.query.mock.calls.length).toBeGreaterThan(before);
-    expect(t.show(t.a)?.rows?.at(-1)?.detail).toContain("Verified cache lifetime expired");
-    expect(t.show(t.a)?.tone).toBe("warning");
-    t.dispose();
-  } finally {
-    vi.useRealTimers();
-  }
+    return { pill, dispose: cleanup };
+  });
+  expect(pill.show({ session } as ComposerPillProps)).toMatchObject({
+    label: "Cache 80%",
+    tone: "warning",
+  });
+  expect(vi.getTimerCount()).toBe(0);
+  dispose();
+  vi.useRealTimers();
 });
 
-it("labels a supplied primary ratio as historical and makes missing values explicit", () => {
-  const t = setup();
-  t.query.mockImplementation(() => ({
+it("reboots history after a shared stream gap without an RPC disconnect", async () => {
+  const session = { id: "gap", key: "server\ngap", server: { builtin: true, connected: true } };
+  let retire = () => {};
+  const cacheRead = 80;
+  const listMessages = vi.fn(async () => ({
+    data: [
+      {
+        id: "msg_gap",
+        type: "assistant",
+        model: { providerID: "openai", id: "test" },
+        time: { created: 1000, completed: 1100 },
+        tokens: { input: 100 - cacheRead, cache: { read: cacheRead, write: 0 } },
+      },
+    ],
+    cursor: { next: null },
+  }));
+  const observer = createNativeCacheObserverRuntime({
+    subscribeEvents: () => () => {},
+    subscribeEventStreamRetire: (listener) => {
+      retire = listener;
+      return () => {};
+    },
+    rpcConnection: () => "live",
+    listChildren: async () => [],
+    listMessages,
+  });
+  const runtime = { retain() {}, cacheObserver: observer } as unknown as NativeDashboardRuntime;
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => session } as unknown as Sessions,
+      runtime,
+      {} as never,
+    ),
+    dispose: cleanup,
+  }));
+  await vi.waitFor(() =>
+    expect(pill.show({ session } as ComposerPillProps)?.label).toBe("Cache 80%"),
+  );
+  expect(listMessages).toHaveBeenCalledTimes(1);
+  retire();
+  await vi.waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() =>
+    expect(pill.show({ session } as ComposerPillProps)?.label).toBe("Cache 80%"),
+  );
+  dispose();
+  observer.dispose();
+});
+
+it.each([
+  "empty",
+  "in-flight",
+] as const)("retries %s history after a stream gap", async (scenario) => {
+  const session = {
+    id: "gap-empty",
+    key: "server\ngap-empty",
+    server: { builtin: true, connected: true },
+  };
+  let retire = () => {};
+  let firstSignal: AbortSignal | undefined;
+  let calls = 0;
+  const observer = createNativeCacheObserverRuntime({
+    subscribeEvents: () => () => {},
+    subscribeEventStreamRetire: (listener) => {
+      retire = listener;
+      return () => {};
+    },
+    rpcConnection: () => "live",
+    listChildren: async () => [],
+    listMessages: async (_input, options) => {
+      calls++;
+      if (calls === 1) {
+        firstSignal = options.signal;
+        if (scenario === "in-flight") return new Promise(() => {});
+        return { data: [], cursor: { next: null } };
+      }
+      return {
+        data: [
+          {
+            id: "new",
+            type: "assistant",
+            model: { providerID: "openai", id: "test" },
+            time: { completed: 1100 },
+            tokens: { input: 20, cache: { read: 80, write: 0 } },
+          },
+        ],
+        cursor: { next: null },
+      };
+    },
+  });
+  const runtime = { retain() {}, cacheObserver: observer } as unknown as NativeDashboardRuntime;
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => session } as unknown as Sessions,
+      runtime,
+      {} as never,
+    ),
+    dispose: cleanup,
+  }));
+  await vi.waitFor(() => expect(calls).toBe(1));
+  if (scenario === "empty")
+    await vi.waitFor(() =>
+      expect(pill.show({ session } as ComposerPillProps)?.label).toBe("Cache"),
+    );
+  retire();
+  if (scenario === "in-flight") expect(firstSignal?.aborted).toBe(true);
+  await vi.waitFor(() =>
+    expect(pill.show({ session } as ComposerPillProps)?.label).toBe("Cache 80%"),
+  );
+  expect(calls).toBe(2);
+  dispose();
+  observer.dispose();
+});
+
+it("renders real history bootstrap results independently without exposing message content", async () => {
+  const session = { id: "main", key: "server\nmain", server: { builtin: true, connected: true } };
+  const listMessages = vi.fn(async ({ sessionID }: { sessionID: string }) => ({
+    data: [
+      {
+        id: `msg_${sessionID}`,
+        type: "assistant",
+        model: { providerID: "openai", id: "test" },
+        time: { created: 1000, completed: 1100 },
+        tokens: {
+          input: sessionID === "main" ? 18 : 60,
+          cache: { read: sessionID === "main" ? 82 : 40, write: 0 },
+        },
+        content: [{ text: "PRIVATE CONTENT" }],
+      },
+    ],
+    cursor: { next: null },
+  }));
+  const observer = createNativeCacheObserverRuntime({
+    subscribeEvents: () => () => {},
+    rpcConnection: () => "live",
+    listChildren: async () => [
+      { id: "child", parentID: "main", title: `Worker\u202e${"x".repeat(100)}` },
+    ],
+    listMessages,
+  });
+  const runtime = { retain() {}, cacheObserver: observer } as unknown as NativeDashboardRuntime;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => session } as unknown as Sessions, runtime, {
+      get: async () => ({ title: "Main\u202e title" }),
+    } as never),
+    dispose: cleanup,
+  }));
+  await vi.waitFor(() =>
+    expect(pill.show({ session } as ComposerPillProps)?.label).toBe("Cache 82%"),
+  );
+  expect(listMessages.mock.calls.map(([input]) => input.sessionID)).toEqual(["main"]);
+  const close = render(
+    () => pill.menu!({ session, close() {} } as ComposerPillMenuProps),
+    container,
+  );
+  await vi.waitFor(() => expect(container.textContent).toContain("40%"));
+  expect(container.textContent).toContain("Worker");
+  expect(container.textContent).toContain("Main title");
+  expect(container.textContent).not.toContain("\u202e");
+  expect(
+    container.querySelector(".qg-cache-child .qg-cache-title")?.textContent?.length,
+  ).toBeLessThanOrEqual(80);
+  expect(container.textContent).not.toContain("PRIVATE CONTENT");
+  expect(listMessages.mock.calls.map(([input]) => input.sessionID)).toEqual(["main", "child"]);
+  close();
+  dispose();
+  observer.dispose();
+  container.remove();
+});
+
+it("uses neutral, warning and verified tones without guessing a lifetime", () => {
+  const session = { id: "tone", key: "server\ntone", server: { builtin: true, connected: true } };
+  let observed: CacheObserverClassification | undefined;
+  let update = () => {};
+  let updateTransport: (value: { rpc: "live"; hostEvents: "observed" | "unavailable" }) => void =
+    () => {};
+  const runtime = {
+    retain() {},
+    cacheObserver: {
+      transport: () => ({ rpc: "live", hostEvents: "observed" }),
+      subscribeTransport: (listener: typeof updateTransport) => {
+        updateTransport = listener;
+        return () => {};
+      },
+      subscribeGaps: () => () => {},
+      subscribe: (_id: string, listener: () => void) => {
+        update = listener;
+        return () => {};
+      },
+      query: () => observed,
+      bootstrapHistory: () => new Promise<void>(() => {}),
+    },
+  } as unknown as NativeDashboardRuntime;
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => session } as unknown as Sessions,
+      runtime,
+      {} as never,
+    ),
+    dispose: cleanup,
+  }));
+  const show = () => pill.show({ session } as ComposerPillProps)!;
+  expect(show()).toMatchObject({ icon: "archive", title: "Cache observation" });
+  expect(show().tone).toBeUndefined();
+  expect(show().label).not.toContain("?");
+  observed = {
     color: "yellow",
     reason: "ttl-unverified",
-    primaryCacheReadRatio: {
-      value: 0.625,
-      messageId: "message",
-      observedAtMs: 1_000,
-      numerator: "cache-read",
-      denominator: "fresh+read+write",
-      basis: { source: "test", reference: "message" },
-    },
-  }));
-  const supplied = t.show(t.a)?.rows?.at(-1)?.detail;
-  expect(t.show(t.a)?.label).toBe("▤ Cache 62.5%");
-  expect(t.show(t.a)?.rows?.at(-1)?.label).toBe("Main · 62.5%");
-  expect(supplied).toContain("Last primary read: 62.5%");
-  expect(supplied).toContain("1970-01-01T00:00:01.000Z");
-  expect(supplied).toContain("Expiry time unavailable");
-  expect(supplied).toContain("Live status unknown");
-  t.query.mockImplementation(() => ({ color: "gray", reason: "insufficient-evidence" }));
-  const missing = t.show(t.a)?.rows?.at(-1)?.detail;
-  expect(t.show(t.a)?.label).toBe("▤ Cache ?");
-  expect(missing).toContain("Primary read unavailable");
-  expect(missing).toContain("Expiry time unavailable");
-  expect(missing).not.toContain("%");
-  t.dispose();
-});
-
-it("shows idle cache with a neutral status icon and bounds child labels", () => {
-  const t = setup();
-  t.listeners.get("a")?.({
-    status: "ready",
-    children: [{ sessionId: "child", label: "x".repeat(100) }],
-  });
-  const view = t.show(t.a);
-  expect(view?.label).toBe("▤ Cache ?");
-  expect(view?.icon).toBe("status");
-  expect(view?.tone).toBeUndefined();
-  expect(view?.rows?.[0]?.label).toBe(`${"x".repeat(39)}… · ?`);
-  expect(view?.rows?.[0]?.detail).toContain("Cache invalidation observed");
-  expect(view?.rows?.[1]?.label).toBe("Main · ?");
-  t.dispose();
-});
-
-it("updates a verified countdown at minute boundaries without transport polling", () => {
-  vi.useFakeTimers();
-  try {
-    vi.setSystemTime(1_000);
-    const t = setup(() => ({
-      color: "green",
-      reason: "observed-reuse-with-active-ttl",
-      verifiedExpiresAtMs: 122_000,
-      recheckAtMs: 122_000,
-    }));
-    expect(t.show(t.a)?.rows?.at(-1)?.detail).toContain("3m remaining");
-    expect(t.show(t.a)?.label).toBe("▤ Cache ? · TTL 3m");
-    expect(t.show(t.a)?.rows?.at(-1)?.label).toBe("Main · ? · TTL 3m");
-    vi.advanceTimersByTime(1_000);
-    expect(t.show(t.a)?.rows?.at(-1)?.detail).toContain("2m remaining");
-    expect(t.show(t.a)?.label).toBe("▤ Cache ? · TTL 2m");
-    expect(t.subscribeChildren).toHaveBeenCalledTimes(1);
-    expect(t.subscribe).toHaveBeenCalledTimes(1);
-    t.dispose();
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-it("reactively updates a mounted consumer at countdown boundaries and expiry", () => {
-  vi.useFakeTimers();
-  try {
-    vi.setSystemTime(1_000);
-    const t = setup(() =>
-      Date.now() < 122_000
-        ? {
-            color: "green",
-            reason: "observed-reuse-with-active-ttl",
-            verifiedExpiresAtMs: 122_000,
-            recheckAtMs: 122_000,
-          }
-        : { color: "yellow", reason: "ttl-expired" },
-    );
-    let captured: ReturnType<ComposerPill["show"]>;
-    let renders = 0;
-    const disposeConsumer = solid.createRoot((dispose) => {
-      solid.createComputed(() => {
-        captured = t.show(t.a);
-        renders++;
-      });
-      return dispose;
-    });
-    expect(captured?.label).toBe("▤ Cache ? · TTL 3m");
-    const initialRenders = renders;
-    vi.advanceTimersByTime(1_000);
-    expect(renders).toBeGreaterThan(initialRenders);
-    expect(captured?.label).toBe("▤ Cache ? · TTL 2m");
-    vi.advanceTimersByTime(120_000);
-    expect(captured?.label).toBe("▤ Cache ?");
-    expect(captured?.tone).toBe("warning");
-    disposeConsumer();
-    t.dispose();
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-it("keeps the idle mounted consumer visible and reacts to its observer subscription", () => {
-  const t = setup();
-  let captured: ReturnType<ComposerPill["show"]>;
-  const disposeConsumer = solid.createRoot((dispose) => {
-    solid.createComputed(() => {
-      captured = t.show(t.a);
-    });
-    return dispose;
-  });
-  expect(captured?.label).toBe("▤ Cache ?");
-  expect(t.subscribe).toHaveBeenCalledWith("a", expect.any(Function));
-  expect(t.subscribeChildren).toHaveBeenCalledWith("a", expect.any(Function));
-  t.query.mockImplementation(() => ({ color: "red", reason: "known-invalidation" }));
-  t.observerListeners.get("a")?.();
-  expect(captured?.tone).toBe("danger");
-  disposeConsumer();
-  t.dispose();
-});
-
-it("sanitizes child names and shows each child's own ratio and verified countdown", () => {
-  vi.useFakeTimers();
-  try {
-    vi.setSystemTime(1_000);
-    const t = setup((id) =>
-      id !== "child"
-        ? undefined
-        : {
-            color: "green",
-            reason: "observed-reuse-with-active-ttl",
-            verifiedExpiresAtMs: 122_000,
-            recheckAtMs: 122_000,
-            primaryCacheReadRatio: {
-              value: 0.75,
-              messageId: "m",
-              observedAtMs: 1_000,
-              numerator: "cache-read",
-              denominator: "fresh+read+write",
-              basis: { source: "test", reference: "m" },
-            },
-          },
-    );
-    t.listeners.get("a")?.({
-      status: "ready",
-      children: [{ sessionId: "child", label: "  Worker\n\u202eevil\t " }],
-    });
-    expect(t.show(t.a)?.rows?.map((row) => row.label)).toEqual([
-      "Worker evil · 75% · TTL 3m",
-      "Main · ?",
-    ]);
-    vi.advanceTimersByTime(1_000);
-    expect(t.show(t.a)?.rows?.[0]?.label).toBe("Worker evil · 75% · TTL 2m");
-    t.dispose();
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-it("cancels an old session's deadline on route change and unmount", () => {
-  vi.useFakeTimers();
-  try {
-    vi.setSystemTime(1);
-    const t = setup((id) =>
-      id === "a"
-        ? {
-            color: "green",
-            reason: "observed-reuse-with-active-ttl",
-            verifiedExpiresAtMs: 100,
-            recheckAtMs: 50,
-          }
-        : undefined,
-    );
-    t.setCurrent(t.b);
-    t.query.mockClear();
-    vi.advanceTimersByTime(50);
-    expect(t.query.mock.calls.map(([id]) => id)).not.toContain("a");
-    t.setCurrent(t.a);
-    t.dispose();
-    t.query.mockClear();
-    vi.advanceTimersByTime(100);
-    expect(t.query).not.toHaveBeenCalled();
-  } finally {
-    vi.useRealTimers();
-  }
-});
-
-it("does not invent an expiry or green state when deadlines are absent", () => {
-  const t = setup(() => ({ color: "green", reason: "observed-reuse-with-active-ttl" }));
-  expect(t.show(t.a)?.tone).toBe("warning");
-  expect(t.show(t.a)?.rows?.at(-1)?.detail).toContain("Expiry time unavailable");
-  t.dispose();
-});
-
-it("reports discovery failure and does not present it as an empty child list", () => {
-  const t = setup();
-  t.listeners.get("a")?.({ status: "error", children: [] });
-  expect(t.show(t.a)?.rows?.[0]?.label).toBe("Child sessions unavailable");
-  expect(t.show(t.a)?.rows?.[1]?.label).toBe("Main · ?");
-  t.dispose();
-});
-
-it("ignores old notifications after switching sessions or disposal", () => {
-  const t = setup();
-  const old = t.listeners.get("a");
-  t.setCurrent(t.b);
-  expect(t.releasedChildren).toContain("a");
-  old?.({ status: "ready", children: [{ sessionId: "old-child", label: "Old" }] });
-  expect(t.show(t.b)?.rows?.map((row) => row.label)).not.toContain("Old");
-  expect(t.subscribe.mock.calls.map(([id]) => id)).not.toContain("old-child");
-  t.listeners.get("b")?.({ status: "ready", children: [] });
-  expect(t.show(t.b)?.rows?.map((row) => row.label)).toEqual(["Main · ?"]);
-  t.setCurrent(t.a);
-  const late = t.listeners.get("a");
-  t.dispose();
-  late?.({ status: "ready", children: [{ sessionId: "late", label: "Late" }] });
-  expect(t.subscribe.mock.calls.map(([id]) => id)).not.toContain("late");
+    primaryCacheReadRatio: { value: 0.82, observedAtMs: Date.now() },
+  } as CacheObserverClassification;
+  update();
+  expect(show()).toMatchObject({ label: "Cache 82%", tone: "warning" });
+  observed = {
+    ...observed,
+    color: "green",
+    reason: "observed-reuse-with-active-ttl",
+    configuredTtlDeadlineAtMs: Date.now() + 120_000,
+    recheckAtMs: Date.now() + 60_000,
+  };
+  update();
+  expect(show().tone).toBe("warning");
+  expect(show().label).toBe("Cache 82%");
+  updateTransport({ rpc: "live", hostEvents: "unavailable" });
+  expect(show().tone).toBe("warning");
+  expect(show().label).not.toContain("m");
+  observed = { color: "red", reason: "known-invalidation" } as CacheObserverClassification;
+  update();
+  expect(show().tone).toBe("danger");
+  dispose();
 });

@@ -66,6 +66,8 @@ export interface CacheObserverIngestor {
     invocations: readonly CacheObserverHistoryInvocation[],
     options?: { truncatedSessionIds?: readonly string[] },
   ): void;
+  /** Confirm the newest completed message from a fresh, gap-free history read. */
+  confirmLatestHistory(invocation: CacheObserverHistoryInvocation): void;
   /** True when the newest live completion has exact Started/Ended correlation and counters. */
   hasUsableLiveObservation(sessionId: string): boolean;
   dispose(): void;
@@ -667,6 +669,30 @@ export function createCacheObserverIngestor(
     }
   }
 
+  function confirmLatestHistory(invocation: CacheObserverHistoryInvocation): void {
+    if (disposed || !ratioFencedSessions.has(invocation.sessionId)) return;
+    const state = states.get(invocation.sessionId);
+    const latest =
+      state === undefined
+        ? undefined
+        : classifyCacheObserverState(state, now()).primaryCacheReadRatio;
+    const previous = state?.invocations.find(
+      (entry) => entry.order.messageId === invocation.messageId,
+    );
+    if (
+      latest?.messageId !== invocation.messageId ||
+      previous === undefined ||
+      previous.order.completedAtMs !== invocation.completedAtMs ||
+      !sameRouteProvenance(previous.route, invocation.route) ||
+      previous.counts.fresh !== invocation.counts.fresh ||
+      previous.counts.read !== invocation.counts.read ||
+      previous.counts.write !== invocation.counts.write
+    )
+      return;
+    ratioFencedSessions.delete(invocation.sessionId);
+    notify(invocation.sessionId);
+  }
+
   function subscribe(sessionId: string, listener: CacheObserverListener): () => void {
     if (disposed || !sessionId.trim()) return () => undefined;
     let sessionListeners = listeners.get(sessionId);
@@ -703,6 +729,7 @@ export function createCacheObserverIngestor(
     markObservationGap,
     ingest,
     ingestHistory,
+    confirmLatestHistory,
     hasUsableLiveObservation,
     dispose,
   };

@@ -112,7 +112,7 @@ export default Plugin.define({
     // One transport and one in-memory navigation map live for the window: a
     // Settings route change unmounts the Panel without ending this setup.
     const runtime = createNativeDashboardRuntime(ctx);
-    ctx.add(ComposerPill, createCacheComposerPill(ctx.sessions, runtime));
+    ctx.add(ComposerPill, createCacheComposerPill(ctx.sessions, runtime, ctx.client.session));
 
     // Notifications are a window-lifetime concern: setup runs once per window,
     // so alerts keep arriving while the panel, slot and settings page are

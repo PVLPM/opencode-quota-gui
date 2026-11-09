@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ViteDevServer } from "vite";
+import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { DashboardRpcCaller } from "../src/native/dashboard-client.js";
@@ -32,6 +33,7 @@ let panelScope: typeof import("../src/native/runtime.js").panelScope;
 beforeAll(async () => {
   const created = await createIsolatedViteServer({
     configFile: false,
+    plugins: [solid({ ssr: true })],
     root: repoRoot,
     resolve: {
       alias: [
@@ -59,7 +61,7 @@ beforeAll(async () => {
   createNativeDashboardRuntime = runtimeModule.createNativeDashboardRuntime;
   panelScope = runtimeModule.panelScope;
   const cachePillModule = (await created.ssrLoadModule(
-    path.join(repoRoot, "src/native/cache-composer-pill.ts"),
+    path.join(repoRoot, "src/native/cache-composer-pill.tsx"),
   )) as typeof import("../src/native/cache-composer-pill.js");
   createCacheComposerPill = cachePillModule.createCacheComposerPill;
 }, 60_000);
@@ -258,7 +260,11 @@ describe("native window runtime", () => {
     const [current] = createSignal(session);
     let pill!: ReturnType<typeof createCacheComposerPill>;
     const disposePill = createRoot((disposeRoot) => {
-      pill = createCacheComposerPill({ current, list: () => [session] } as never, runtime);
+      pill = createCacheComposerPill(
+        { current, list: () => [session] } as never,
+        runtime,
+        {} as never,
+      );
       return disposeRoot;
     });
 
@@ -325,6 +331,7 @@ describe("native window runtime", () => {
       pill = createCacheComposerPill(
         { current, list: () => [sessionA, sessionB] } as never,
         runtime,
+        {} as never,
       );
       return disposeRoot;
     });
@@ -392,7 +399,11 @@ describe("native window runtime", () => {
     const [current] = createSignal(session);
     let pill!: ReturnType<typeof createCacheComposerPill>;
     const disposePill = createRoot((disposeRoot) => {
-      pill = createCacheComposerPill({ current, list: () => [session] } as never, runtime);
+      pill = createCacheComposerPill(
+        { current, list: () => [session] } as never,
+        runtime,
+        {} as never,
+      );
       return disposeRoot;
     });
     await waitFor(() => runtime.client.connection() === "live", "reconnect test transport");
@@ -661,7 +672,11 @@ describe("native window runtime", () => {
     const [current] = createSignal(session);
     let pill!: ReturnType<typeof createCacheComposerPill>;
     const disposePill = createRoot((disposeRoot) => {
-      pill = createCacheComposerPill({ current, list: () => [session] } as never, runtime);
+      pill = createCacheComposerPill(
+        { current, list: () => [session] } as never,
+        runtime,
+        {} as never,
+      );
       return disposeRoot;
     });
     await waitFor(() => runtime.client.connection() === "live", "scope-transition transport");

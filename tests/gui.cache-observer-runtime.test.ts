@@ -3,6 +3,46 @@ import { describe, expect, it, vi } from "vitest";
 import { createNativeCacheObserverRuntime } from "../src/native/cache-observer-runtime.js";
 
 describe("native cache observer runtime", () => {
+  it.each([
+    "changed counters",
+    "compaction",
+  ] as const)("does not unfence old telemetry after a gap when fresh history reports %s", async (scenario) => {
+    let retire = () => {};
+    let subsequent = false;
+    const message = (read: number) => ({
+      id: "msg_same",
+      type: "assistant",
+      model: { providerID: "openai", id: "test" },
+      time: { created: 1000, completed: 1100 },
+      tokens: { input: 20, cache: { read, write: 0 } },
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => () => {},
+      subscribeEventStreamRetire: (listener) => {
+        retire = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages: async () => ({
+        data:
+          subsequent && scenario === "compaction"
+            ? [{ id: "compact", type: "compaction", status: "completed" }]
+            : [message(subsequent ? 60 : 80)],
+        cursor: { next: null },
+      }),
+    });
+    const release = runtime.subscribe("ses_gap", () => {});
+    await runtime.bootstrapHistory(["ses_gap"]);
+    expect(runtime.query("ses_gap")?.primaryCacheReadRatio?.value).toBe(0.8);
+    retire();
+    subsequent = true;
+    await runtime.bootstrapHistory(["ses_gap"]);
+    expect(runtime.query("ses_gap")?.primaryCacheReadRatio).toBeUndefined();
+    release();
+    runtime.dispose();
+  });
+
   it("treats the newest completed assistant without counters as unknown instead of falling back", async () => {
     const sessionId = "ses_history_main";
     const childSessionId = "ses_history_child";
