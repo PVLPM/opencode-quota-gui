@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  CACHE_OBSERVER_MAX_SESSIONS,
   cacheObserverUpdateFromOpenCodeEvent,
   createCacheObserverIngestor,
   projectOpenCodeCacheObserverEvent,
+  projectOpenCodeCacheObserverHistoryMessage,
 } from "../src/lib/cache-observer-ingestion.js";
 import { isDashboardRpcCacheObserverEvent } from "../src/rpc.js";
 
@@ -34,6 +36,58 @@ function stepStartedEvent(
     created,
     data: { sessionID, assistantMessageID, agent: "build", model, started },
   };
+}
+
+/** One correlated live Started+Ended step whose request start is 1_000. */
+function ingestLiveRecoverableStep(
+  ingestor: ReturnType<typeof createCacheObserverIngestor>,
+  sessionId: string,
+  messageId: string,
+  tokens: Record<string, unknown> = { input: 10, cache: { read: 20, write: 0 } },
+): void {
+  ingestor.ingest(
+    projectOpenCodeCacheObserverEvent(
+      stepStartedEvent(
+        sessionId,
+        messageId,
+        { providerID: "anthropic", id: "claude-test" },
+        1_000,
+        1_050,
+      ),
+    ),
+  );
+  ingestor.ingest(
+    projectOpenCodeCacheObserverEvent(stepEndedEvent(sessionId, messageId, tokens, 1_100)),
+  );
+}
+
+/** Project the matching history DTO; defaults re-confirm the live step exactly. */
+function recoverableHistoryInvocation(
+  sessionId: string,
+  messageId: string,
+  overrides: {
+    created?: number;
+    completed?: number;
+    model?: Record<string, unknown>;
+    tokens?: Record<string, unknown>;
+  } = {},
+) {
+  const history = projectOpenCodeCacheObserverHistoryMessage(sessionId, {
+    type: "assistant",
+    id: messageId,
+    model: overrides.model ?? { providerID: "anthropic", id: "claude-test" },
+    time: {
+      // Default re-confirms the live step's request start; an explicit
+      // `created: undefined` omits the timestamp entirely.
+      ...("created" in overrides && overrides.created === undefined
+        ? {}
+        : { created: overrides.created ?? 1_000 }),
+      completed: overrides.completed ?? 1_100,
+    },
+    tokens: overrides.tokens ?? { input: 10, cache: { read: 20, write: 0 } },
+  });
+  if (history === undefined) throw new Error("expected the history message to be projected");
+  return history;
 }
 
 describe("cache observer event ingestion", () => {
@@ -185,7 +239,12 @@ describe("cache observer event ingestion", () => {
 
     expect(ingestor.query("ses_one")).toMatchObject({
       color: "yellow",
-      reason: "ttl-unverified",
+      reason: "assumed-route-risk",
+      ttlEstimate: {
+        kind: "documented",
+        dispatchAtMs: 1_000,
+        deadlineAtMs: 301_000,
+      },
     });
     expect(ingestor.query("ses_one")).not.toHaveProperty("configuredTtlDeadlineAtMs");
     expect(ingestor.query("ses_one")).toMatchObject({
@@ -201,8 +260,8 @@ describe("cache observer event ingestion", () => {
     );
     ingestor.ingest(unrelated);
     expect(ingestor.query("ses_other")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
   });
 
@@ -363,8 +422,8 @@ describe("cache observer event ingestion", () => {
       ),
     );
     expect(ingestor.query("ses_message")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
 
     ingestor.ingest(
@@ -379,7 +438,8 @@ describe("cache observer event ingestion", () => {
     );
     expect(ingestor.query("ses_message")).toMatchObject({
       color: "yellow",
-      reason: "ttl-unverified",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000 },
     });
   });
 
@@ -428,7 +488,8 @@ describe("cache observer event ingestion", () => {
 
     expect(ingestor.query("ses_variant")).toMatchObject({
       color: "yellow",
-      reason: "ttl-unverified",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 10_000 },
     });
     expect(ingestor.query("ses_variant")).not.toHaveProperty("configuredTtlDeadlineAtMs");
   });
@@ -469,8 +530,8 @@ describe("cache observer event ingestion", () => {
     });
 
     expect(ingestor.query("ses_parent")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
     expect(ingestor.query("ses_child")).toBeUndefined();
 
@@ -483,8 +544,8 @@ describe("cache observer event ingestion", () => {
       ),
     );
     expect(ingestor.query("ses_child")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
 
     ingestor.ingest({
@@ -496,8 +557,8 @@ describe("cache observer event ingestion", () => {
 
     expect(ingestor.query("ses_parent")).toBeUndefined();
     expect(ingestor.query("ses_child")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
   });
 
@@ -514,8 +575,8 @@ describe("cache observer event ingestion", () => {
     });
 
     expect(ingestor.query("ses_parent")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
     expect(ingestor.query("ses_child")).toBeUndefined();
   });
@@ -532,7 +593,7 @@ describe("cache observer event ingestion", () => {
     expect(parentListener).not.toHaveBeenCalled();
     expect(childListener).toHaveBeenCalledTimes(1);
     expect(childListener).toHaveBeenLastCalledWith(
-      expect.objectContaining({ color: "yellow", reason: "ambiguous-invocation" }),
+      expect.objectContaining({ color: "gray", reason: "insufficient-evidence" }),
     );
 
     releaseParent();
@@ -547,15 +608,15 @@ describe("cache observer event ingestion", () => {
     firstRelease();
 
     expect(ingestor.query("ses_remount")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
 
     const remountedListener = vi.fn();
     const secondRelease = ingestor.subscribe("ses_remount", remountedListener);
     expect(ingestor.query("ses_remount")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
     secondRelease();
   });
@@ -571,8 +632,8 @@ describe("cache observer event ingestion", () => {
 
     expect(ingestor.query("ses_0")).toBeUndefined();
     expect(ingestor.query("ses_139")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
   });
 
@@ -651,5 +712,538 @@ describe("cache observer event ingestion", () => {
       type: "session.forked",
       data: { sessionID: "ses_child", parentID: "ses_parent" },
     });
+  });
+
+  it("classifies timer transitions from dispatch time without simulating invalidation", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const ingestor = createCacheObserverIngestor();
+    const colors: string[] = [];
+    const release = ingestor.subscribe("ses_timer", (value) => {
+      if (value) colors.push(value.color);
+    });
+
+    try {
+      ingestor.ingest(
+        stepStartedEvent(
+          "ses_timer",
+          "msg_timer",
+          { providerID: "anthropic", id: "claude-test" },
+          1_000,
+        ),
+      );
+      ingestor.ingest(
+        stepEndedEvent(
+          "ses_timer",
+          "msg_timer",
+          { input: 10, cache: { read: 20, write: 0 } },
+          1_100,
+        ),
+      );
+
+      expect(ingestor.query("ses_timer")).toMatchObject({
+        color: "yellow",
+        reason: "assumed-route-risk",
+        ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+      });
+      vi.advanceTimersByTime(240_000);
+      expect(ingestor.query("ses_timer")).toMatchObject({
+        color: "yellow",
+        reason: "estimated-ttl-near-expiry",
+      });
+      vi.advanceTimersByTime(60_000);
+      expect(ingestor.query("ses_timer")).toMatchObject({
+        color: "red",
+        reason: "estimated-ttl-expired",
+      });
+      expect(colors).toEqual(["yellow", "yellow", "red"]);
+      expect(ingestor.query("ses_timer")?.primaryCacheReadRatio?.value).toBe(2 / 3);
+    } finally {
+      release();
+      ingestor.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps history without a request-start time from receiving a fabricated TTL timer", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 20_000 });
+    const history = projectOpenCodeCacheObserverHistoryMessage("ses_history_ttl", {
+      type: "assistant",
+      id: "msg_history_ttl",
+      time: { completed: 10_000 },
+      model: { providerID: "anthropic", id: "claude-test" },
+      tokens: { input: 10, cache: { read: 20, write: 0 } },
+    });
+    expect(history).toBeDefined();
+    if (history === undefined) throw new Error("expected the history message to be projected");
+
+    ingestor.ingestHistory([history]);
+
+    expect(ingestor.query("ses_history_ttl")).toMatchObject({
+      color: "gray",
+      reason: "dispatch-time-unavailable",
+      ttlEstimate: { kind: "documented", ttlMs: 300_000 },
+    });
+    expect(ingestor.query("ses_history_ttl")?.ttlEstimate).not.toHaveProperty("deadlineAtMs");
+  });
+
+  it("estimates old history sessions from the message-list request-start time", () => {
+    let now = 2_000;
+    const ingestor = createCacheObserverIngestor({ now: () => now });
+    const history = projectOpenCodeCacheObserverHistoryMessage("ses_history_start", {
+      type: "assistant",
+      id: "msg_history_start",
+      model: { providerID: "anthropic", id: "claude-test" },
+      time: { created: 1_000, completed: 1_500 },
+      tokens: { input: 100, cache: { read: 20, write: 10 } },
+    });
+    expect(history?.dispatchAtMs).toBe(1_000);
+    if (history === undefined) throw new Error("expected the history message to be projected");
+
+    ingestor.ingestHistory([history]);
+
+    expect(ingestor.query("ses_history_start")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { kind: "documented", dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+    expect(ingestor.query("ses_history_start")).not.toHaveProperty("configuredTtlDeadlineAtMs");
+
+    now = 301_000;
+    expect(ingestor.query("ses_history_start")).toMatchObject({
+      color: "red",
+      reason: "estimated-ttl-expired",
+    });
+    ingestor.dispose();
+  });
+
+  it("keeps an orphan live Ended without Started correlation gray instead of ambiguity risk", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          "ses_orphan_live",
+          "msg_orphan_live",
+          { input: 100, cache: { read: 20, write: 10 } },
+          9_500,
+        ),
+      ),
+    );
+
+    expect(ingestor.query("ses_orphan_live")).toMatchObject({
+      color: "gray",
+      reason: "insufficient-evidence",
+    });
+    expect(ingestor.query("ses_orphan_live")).not.toHaveProperty("primaryCacheReadRatio");
+    expect(ingestor.query("ses_orphan_live")).not.toHaveProperty("ttlEstimate");
+    ingestor.dispose();
+  });
+
+  it("keeps unsupported-provider zero telemetry gray through the live ingest path", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(
+          "ses_unsupported_live",
+          "msg_unsupported",
+          { providerID: "openai", id: "gpt-test" },
+          1_000,
+        ),
+      ),
+    );
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          "ses_unsupported_live",
+          "msg_unsupported",
+          { input: 0, cache: { read: 0, write: 0 } },
+          9_500,
+        ),
+      ),
+    );
+
+    expect(ingestor.query("ses_unsupported_live")).toMatchObject({
+      color: "gray",
+      reason: "insufficient-evidence",
+    });
+    ingestor.dispose();
+  });
+
+  it("fences traffic-light estimates across a session gap until a new correlated cache event", () => {
+    let now = 2_000;
+    const ingestor = createCacheObserverIngestor({ now: () => now });
+    const dispatch = (messageId: string, started: number, completed: number) => {
+      ingestor.ingest(
+        stepStartedEvent(
+          "ses_gap_ttl",
+          messageId,
+          { providerID: "anthropic", id: "claude-test" },
+          started,
+        ),
+      );
+      ingestor.ingest(
+        stepEndedEvent(
+          "ses_gap_ttl",
+          messageId,
+          { input: 10, cache: { read: 20, write: 0 } },
+          completed,
+        ),
+      );
+    };
+
+    dispatch("msg_before_gap", 1_000, 1_100);
+    expect(ingestor.query("ses_gap_ttl")?.color).toBe("yellow");
+
+    ingestor.markObservationGap("ses_gap_ttl");
+    expect(ingestor.query("ses_gap_ttl")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+
+    now = 3_000;
+    dispatch("msg_after_gap", 2_900, 2_950);
+    expect(ingestor.query("ses_gap_ttl")?.color).toBe("yellow");
+    ingestor.dispose();
+  });
+
+  it("restores the historical estimate when fresh identical history re-confirms the latest invocation after a gap", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_recover", "msg_recover");
+    expect(ingestor.query("ses_gap_recover")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+
+    ingestor.markObservationGap("ses_gap_recover");
+    expect(ingestor.query("ses_gap_recover")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+    expect(ingestor.query("ses_gap_recover")).not.toHaveProperty("ttlEstimate");
+
+    const history = recoverableHistoryInvocation("ses_gap_recover", "msg_recover");
+    expect(history.dispatchAtMs).toBe(1_000);
+    ingestor.ingestHistory([history]);
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_recover")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+      primaryCacheReadRatio: { messageId: "msg_recover" },
+    });
+    ingestor.dispose();
+  });
+
+  it("keeps the estimate fenced when the fresh history request-start timestamp differs", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_start", "msg_start");
+    ingestor.markObservationGap("ses_gap_start");
+
+    const history = recoverableHistoryInvocation("ses_gap_start", "msg_start", {
+      created: 1_050,
+    });
+    expect(history.dispatchAtMs).toBe(1_050);
+    ingestor.ingestHistory([history]);
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_start")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+    expect(ingestor.query("ses_gap_start")).not.toHaveProperty("ttlEstimate");
+    // The identical counters still re-confirm the ratio telemetry itself.
+    expect(ingestor.query("ses_gap_start")?.primaryCacheReadRatio).toMatchObject({
+      messageId: "msg_start",
+    });
+    ingestor.dispose();
+  });
+
+  it("does not restore the estimate when the fresh history carries no request-start timestamp", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_nostart", "msg_nostart");
+    ingestor.markObservationGap("ses_gap_nostart");
+
+    const history = recoverableHistoryInvocation("ses_gap_nostart", "msg_nostart", {
+      created: undefined,
+    });
+    expect(history.dispatchAtMs).toBeUndefined();
+    ingestor.ingestHistory([history]);
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_nostart")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+    expect(ingestor.query("ses_gap_nostart")).not.toHaveProperty("ttlEstimate");
+    ingestor.dispose();
+  });
+
+  it("keeps the estimate and ratio fenced when the fresh history route differs", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_route", "msg_route");
+    ingestor.markObservationGap("ses_gap_route");
+
+    const history = recoverableHistoryInvocation("ses_gap_route", "msg_route", {
+      model: { providerID: "openai", id: "gpt-test" },
+    });
+    ingestor.ingestHistory([history]);
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_route")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+    expect(ingestor.query("ses_gap_route")).not.toHaveProperty("ttlEstimate");
+    expect(ingestor.query("ses_gap_route")).not.toHaveProperty("primaryCacheReadRatio");
+    ingestor.dispose();
+  });
+
+  it("keeps the estimate and ratio fenced when the fresh history counters differ", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_counts", "msg_counts");
+    ingestor.markObservationGap("ses_gap_counts");
+
+    const history = recoverableHistoryInvocation("ses_gap_counts", "msg_counts", {
+      tokens: { input: 10, cache: { read: 25, write: 0 } },
+    });
+    ingestor.ingestHistory([history]);
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_counts")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+    expect(ingestor.query("ses_gap_counts")).not.toHaveProperty("ttlEstimate");
+    expect(ingestor.query("ses_gap_counts")).not.toHaveProperty("primaryCacheReadRatio");
+    ingestor.dispose();
+  });
+
+  it("does not restore the estimate across a compaction between the history read and its confirm", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_compaction", "msg_compaction");
+    ingestor.markObservationGap("ses_gap_compaction");
+
+    const history = recoverableHistoryInvocation("ses_gap_compaction", "msg_compaction");
+    ingestor.ingestHistory([history]);
+    ingestor.ingest({
+      type: "session.compaction.ended",
+      data: { sessionID: "ses_gap_compaction" },
+    });
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_compaction")).toBeUndefined();
+    ingestor.dispose();
+  });
+
+  it("keeps the estimate fenced when a newer gap follows the history read before its confirm", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_race", "msg_race");
+    ingestor.markObservationGap("ses_gap_race");
+
+    const history = recoverableHistoryInvocation("ses_gap_race", "msg_race");
+    ingestor.ingestHistory([history]);
+    ingestor.markObservationGap("ses_gap_race");
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_race")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+    expect(ingestor.query("ses_gap_race")).not.toHaveProperty("ttlEstimate");
+
+    // The next fresh, gap-free read still recovers the estimate.
+    ingestor.ingestHistory([history]);
+    ingestor.confirmLatestHistory(history);
+    expect(ingestor.query("ses_gap_race")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+    ingestor.dispose();
+  });
+
+  it("recovers a write-only estimate after a gap when fresh history re-confirms the latest qualifying invocation", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    const writeOnly = { input: 10, cache: { read: 0, write: 30 } };
+    ingestLiveRecoverableStep(ingestor, "ses_gap_write", "msg_write", writeOnly);
+    expect(ingestor.query("ses_gap_write")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+      primaryCacheReadTelemetry: "unavailable",
+    });
+    expect(ingestor.query("ses_gap_write")).not.toHaveProperty("primaryCacheReadRatio");
+
+    ingestor.markObservationGap("ses_gap_write");
+    expect(ingestor.query("ses_gap_write")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+
+    const history = recoverableHistoryInvocation("ses_gap_write", "msg_write", {
+      tokens: writeOnly,
+    });
+    ingestor.ingestHistory([history]);
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_write")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+      primaryCacheReadTelemetry: "unavailable",
+    });
+    expect(ingestor.query("ses_gap_write")).not.toHaveProperty("primaryCacheReadRatio");
+    ingestor.dispose();
+  });
+
+  it("recovers an expired write-only estimate after a gap through fresh identical history", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 301_000 });
+    const writeOnly = { input: 10, cache: { read: 0, write: 30 } };
+    ingestLiveRecoverableStep(ingestor, "ses_gap_write_old", "msg_write_old", writeOnly);
+    expect(ingestor.query("ses_gap_write_old")).toMatchObject({
+      color: "red",
+      reason: "estimated-ttl-expired",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+
+    ingestor.markObservationGap("ses_gap_write_old");
+    expect(ingestor.query("ses_gap_write_old")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+
+    const history = recoverableHistoryInvocation("ses_gap_write_old", "msg_write_old", {
+      tokens: writeOnly,
+    });
+    ingestor.ingestHistory([history]);
+    ingestor.confirmLatestHistory(history);
+
+    expect(ingestor.query("ses_gap_write_old")).toMatchObject({
+      color: "red",
+      reason: "estimated-ttl-expired",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+    ingestor.dispose();
+  });
+
+  it("does not retain an observation gap for a session without retained state", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestor.markObservationGap("ses_stateless_gap");
+
+    // Fresh history classifies directly: there is no pre-gap state to hide.
+    const history = recoverableHistoryInvocation("ses_stateless_gap", "msg_stateless");
+    ingestor.ingestHistory([history]);
+    expect(ingestor.query("ses_stateless_gap")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+    // Without a gap, the confirm is a no-op and the estimate stands.
+    ingestor.confirmLatestHistory(history);
+    expect(ingestor.query("ses_stateless_gap")).toMatchObject({ color: "yellow" });
+
+    // A post-gap live orphan classifies on its own merits, not as a gap.
+    ingestor.markObservationGap("ses_stateless_orphan");
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent(
+          "ses_stateless_orphan",
+          "msg_orphan",
+          { input: 10, cache: { read: 20, write: 0 } },
+          1_500,
+        ),
+      ),
+    );
+    expect(ingestor.query("ses_stateless_orphan")).toMatchObject({
+      color: "gray",
+      reason: "insufficient-evidence",
+    });
+    ingestor.dispose();
+  });
+
+  it("resets gap markers with the route epoch on a selection change", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_route_epoch", "msg_old_route");
+    ingestor.markObservationGap("ses_gap_route_epoch");
+    const history = recoverableHistoryInvocation("ses_gap_route_epoch", "msg_old_route");
+    ingestor.ingestHistory([history]);
+
+    // A live Started on a different route replaces the state with a new epoch.
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepStartedEvent(
+          "ses_gap_route_epoch",
+          "msg_new_route",
+          { providerID: "openai", id: "gpt-test" },
+          1_900,
+          1_950,
+        ),
+      ),
+    );
+    expect(ingestor.query("ses_gap_route_epoch")).toMatchObject({
+      color: "gray",
+      reason: "insufficient-evidence",
+    });
+
+    // The stale pre-reset read cannot restore anything into the new epoch.
+    ingestor.confirmLatestHistory(history);
+    expect(ingestor.query("ses_gap_route_epoch")).toMatchObject({
+      reason: "insufficient-evidence",
+    });
+    ingestor.dispose();
+  });
+
+  it("resets the gap markers on session deletion", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestLiveRecoverableStep(ingestor, "ses_gap_deleted", "msg_deleted");
+    ingestor.markObservationGap("ses_gap_deleted");
+    expect(ingestor.query("ses_gap_deleted")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+
+    ingestor.ingest({ type: "session.deleted", data: { sessionID: "ses_gap_deleted" } });
+    expect(ingestor.query("ses_gap_deleted")).toBeUndefined();
+
+    // Re-observation after deletion starts without a stale gap fence.
+    ingestLiveRecoverableStep(ingestor, "ses_gap_deleted", "msg_deleted");
+    expect(ingestor.query("ses_gap_deleted")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+    ingestor.dispose();
+  });
+
+  it("drops gap fences with evicted state and keeps sessions independent across churn", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    for (let index = 0; index < CACHE_OBSERVER_MAX_SESSIONS; index += 1) {
+      const sessionId = `ses_churn_${index}`;
+      const messageId = `msg_churn_${index}`;
+      ingestLiveRecoverableStep(ingestor, sessionId, messageId);
+      ingestor.markObservationGap(sessionId);
+      const history = recoverableHistoryInvocation(sessionId, messageId);
+      ingestor.ingestHistory([history]);
+      ingestor.confirmLatestHistory(history);
+      expect(ingestor.query(sessionId)).toMatchObject({
+        color: "yellow",
+        reason: "assumed-route-risk",
+      });
+    }
+
+    // One more retained state evicts the least-recently-used session.
+    ingestLiveRecoverableStep(ingestor, "ses_churn_new", "msg_churn_new");
+    expect(ingestor.query("ses_churn_0")).toBeUndefined();
+
+    // The evicted session re-observes without a stale gap fence.
+    ingestLiveRecoverableStep(ingestor, "ses_churn_0", "msg_churn_0");
+    expect(ingestor.query("ses_churn_0")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+    ingestor.dispose();
   });
 });

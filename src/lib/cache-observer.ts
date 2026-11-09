@@ -48,6 +48,8 @@ export interface CacheInvocationCounts {
 export interface CacheInvocationObservation {
   sessionId: string;
   order: CacheInvocationOrder;
+  /** Host request-start-side timestamp (step.started), not exact provider acceptance; completion time is not a TTL origin. */
+  dispatchAtMs?: number;
   route?: CacheRouteProvenance;
   primaryClassification: CachePrimaryClassification;
   counts: CacheInvocationCounts;
@@ -82,11 +84,21 @@ export type CacheTtlEvidence =
       protocolId: "anthropic-messages";
       route: CacheRouteProvenance;
       configuredTtlMs: CacheSupportedTtlMs;
-      /** Conservative configured-minimum boundary from request dispatch; not physical eviction. */
-      expiresAtMs: number;
       basis: CacheEvidenceBasis;
     }
   | { kind: "unknown"; basis: string };
+
+export interface CacheTtlEstimate {
+  kind: "configured" | "documented";
+  ttlMs: CacheSupportedTtlMs;
+  source: string;
+  reference: string;
+  assumption: string;
+  /** Omitted when the source has no valid request-start timestamp. */
+  dispatchAtMs?: number;
+  /** Estimated boundary only; this is not proof of physical eviction. */
+  deadlineAtMs?: number;
+}
 
 export interface CacheObserverScope {
   /** Each child session is classified independently; no tree roll-up occurs. */
@@ -121,9 +133,10 @@ export type CacheObserverColor = "gray" | "green" | "yellow" | "red";
 export interface CacheObserverClassification {
   color: CacheObserverColor;
   confidence?: "best-effort";
-  ttlSemantics?: "configured-minimum";
+  ttlSemantics?: "configured-minimum" | "documented-estimate";
   configuredTtlMs?: CacheSupportedTtlMs;
   configuredTtlDeadlineAtMs?: number;
+  ttlEstimate?: CacheTtlEstimate;
   reason:
     | "insufficient-evidence"
     | "observed-reuse-with-active-ttl"
@@ -132,10 +145,18 @@ export interface CacheObserverClassification {
     | "history-truncated"
     | "ttl-unverified"
     | "ttl-expired"
+    | "dispatch-time-unavailable"
+    | "estimated-reuse-within-ttl"
+    | "estimated-write-within-ttl"
+    | "estimated-ttl-near-expiry"
+    | "estimated-ttl-expired"
+    | "out-of-order-invocation"
+    | "observation-gap"
     | "route-unverified"
     | "invalidation-unverified"
     | "known-invalidation"
-    | "compaction-boundary-uncertain";
+    | "compaction-boundary-uncertain"
+    | "assumed-route-risk";
   primaryCacheReadRatio?: CachePrimaryRatio;
   /** Distinguishes received but unusable usage counters from no observed step telemetry. */
   primaryCacheReadTelemetry?: "available" | "unavailable";
@@ -294,14 +315,9 @@ export function classifyCacheObserverState(
           compareOrder(entry.order, boundary.order) <= 0 &&
           isEstablishedReusablePrefix(state.scope.route, entry),
       );
-    if (latestAmbiguous !== undefined) {
-      return {
-        color: "yellow",
-        reason: "ambiguous-invocation",
-        ...telemetryStatus,
-        ...optionalRatio(ratio),
-      };
-    }
+    // Without an established reusable prefix there is nothing to be at risk
+    // about: ambiguous, route-less, or zero-count telemetry is absence of
+    // evidence, not a warning.
     if (hadReuseBeforeBoundary) {
       return {
         color: "yellow",
@@ -349,6 +365,35 @@ export function classifyCacheObserverState(
     };
   }
 
+  // Route and TTL-policy evidence must be evaluable before ambiguity can
+  // escalate to risk; an unsupported or unknown route stays gray.
+  if (!Number.isFinite(nowMs) || !hasValidRouteProvenance(state.scope.route)) {
+    return {
+      color: "gray",
+      reason: "route-unverified",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
+  }
+  if (!hasValidRouteProvenance(latestReuse.route)) {
+    return {
+      color: "gray",
+      reason: "route-unverified",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
+  }
+
+  const policy = cacheTtlPolicy(state.scope.route, state.ttlEvidence);
+  if (policy === undefined) {
+    return {
+      color: "gray",
+      reason: "route-unverified",
+      ...telemetryStatus,
+      ...optionalRatio(ratio),
+    };
+  }
+
   if (latestAmbiguous !== undefined && compareOrder(latestAmbiguous.order, latestReuse.order) > 0) {
     return {
       color: "yellow",
@@ -358,55 +403,90 @@ export function classifyCacheObserverState(
     };
   }
 
-  if (
-    !Number.isFinite(nowMs) ||
-    !hasValidRouteProvenance(state.scope.route) ||
-    !hasValidRouteProvenance(latestReuse.route)
-  ) {
+  const ttlEstimate: CacheTtlEstimate = {
+    kind: policy.kind,
+    ttlMs: policy.ttlMs,
+    source: policy.source,
+    reference: policy.reference,
+    assumption: policy.assumption,
+  };
+  if (!hasValidDispatchTime(latestReuse, nowMs)) {
     return {
-      color: "yellow",
-      reason: "route-unverified",
+      color: "gray",
+      reason: "dispatch-time-unavailable",
+      ttlEstimate,
       ...telemetryStatus,
       ...optionalRatio(ratio),
     };
   }
 
-  const ttl = state.ttlEvidence;
-  if (
-    ttl?.kind !== "configured" ||
-    !hasValidBasis(ttl.basis) ||
-    !hasValidRouteProvenance(ttl.route) ||
-    !sameRoute(state.scope.route, ttl.route) ||
-    !isSupportedAnthropicTtl(state.scope.route, ttl)
-  ) {
+  const previousReuse = reusablePrefixes.at(-2);
+  if (previousReuse !== undefined && hasValidDispatchTime(previousReuse, nowMs)) {
+    const dispatchAtMs = latestReuse.dispatchAtMs;
+    if (dispatchAtMs < previousReuse.dispatchAtMs) {
+      return {
+        color: "yellow",
+        reason: "out-of-order-invocation",
+        ttlEstimate: { ...ttlEstimate, dispatchAtMs },
+        ...telemetryStatus,
+        ...optionalRatio(ratio),
+      };
+    }
+  }
+
+  const dispatchAtMs = latestReuse.dispatchAtMs;
+  const deadlineAtMs = dispatchAtMs + policy.ttlMs;
+  const warningAtMs = dispatchAtMs + Math.floor(policy.ttlMs * 0.8);
+  const completeEstimate: CacheTtlEstimate = {
+    ...ttlEstimate,
+    dispatchAtMs,
+    deadlineAtMs,
+  };
+  const shared = {
+    confidence: "best-effort" as const,
+    ttlEstimate: completeEstimate,
+    ...(policy.kind === "configured"
+      ? {
+          ttlSemantics: "configured-minimum" as const,
+          configuredTtlMs: policy.ttlMs,
+          configuredTtlDeadlineAtMs: deadlineAtMs,
+        }
+      : { ttlSemantics: "documented-estimate" as const }),
+    ...telemetryStatus,
+    ...optionalRatio(ratio),
+  };
+
+  if (deadlineAtMs <= nowMs) {
+    return { color: "red", reason: "estimated-ttl-expired", ...shared };
+  }
+  if (warningAtMs <= nowMs) {
     return {
       color: "yellow",
-      reason: "ttl-unverified",
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
+      reason: "estimated-ttl-near-expiry",
+      recheckAtMs: deadlineAtMs,
+      ...shared,
     };
   }
-  if (!Number.isFinite(ttl.expiresAtMs) || ttl.expiresAtMs <= nowMs) {
+
+  // Green is reserved for explicit invocation-bound evidence (a configured
+  // TTL). A documented provider-ID baseline is a meaningful assumption about
+  // the effective endpoint — report it as yellow risk, never as evidenced reuse.
+  if (policy.kind === "configured") {
     return {
-      color: "yellow",
-      reason: "ttl-expired",
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
+      color: "green",
+      reason: hasObservedRead(latestReuse.counts)
+        ? "estimated-reuse-within-ttl"
+        : "estimated-write-within-ttl",
+      recheckAtMs: warningAtMs,
+      ...shared,
     };
   }
 
   return {
-    color: "green",
-    confidence: "best-effort",
-    ttlSemantics: "configured-minimum",
-    configuredTtlMs: ttl.configuredTtlMs,
-    configuredTtlDeadlineAtMs: ttl.expiresAtMs,
-    reason: hasObservedRead(latestReuse.counts)
-      ? "observed-reuse-with-active-ttl"
-      : "observed-write-with-active-ttl",
-    recheckAtMs: ttl.expiresAtMs,
-    ...telemetryStatus,
-    ...optionalRatio(ratio),
+    color: "yellow",
+    reason: "assumed-route-risk",
+    recheckAtMs: warningAtMs,
+    ...shared,
   };
 }
 
@@ -486,7 +566,13 @@ function isCertainPrimaryForRoute(
   );
 }
 
-function isEstablishedReusablePrefix(
+/**
+ * The estimate-bearing reusable-prefix predicate: a certain primary invocation
+ * on the scoped route with an observed cache read or write. Exported so the
+ * ingestor can identify the latest estimate-qualifying invocation without
+ * depending on ratio availability.
+ */
+export function isEstablishedReusablePrefix(
   route: CacheRouteProvenance | undefined,
   invocation: CacheInvocationObservation,
 ): boolean {
@@ -568,17 +654,110 @@ function isPresentNonNegativeFinite(value: number | undefined): value is number 
 }
 
 function isAuthoritativeAnthropicRoute(route: CacheRouteProvenance | undefined): boolean {
-  return route?.providerId === "anthropic" && route.protocolId === "anthropic-messages";
+  return route?.providerId === "anthropic";
 }
 
-function isSupportedAnthropicTtl(
-  route: CacheRouteProvenance | undefined,
-  evidence: Extract<CacheTtlEvidence, { kind: "configured" }>,
-): boolean {
+interface CacheTtlPolicy {
+  kind: CacheTtlEstimate["kind"];
+  ttlMs: CacheSupportedTtlMs;
+  source: string;
+  reference: string;
+  assumption: string;
+}
+
+const DOCUMENTED_TTL_POLICIES: readonly (CacheTtlPolicy & { providerIds: readonly string[] })[] = [
+  {
+    providerIds: ["anthropic"],
+    kind: "documented",
+    ttlMs: 300_000,
+    source: "Anthropic prompt caching documentation",
+    reference: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+    assumption:
+      "Assumes the direct Anthropic Messages route uses the documented 5-minute default; optional 1-hour TTL and custom or gateway endpoints are not observable, and the effective endpoint may be overridden by a gateway or proxy.",
+  },
+  {
+    providerIds: [
+      "moonshotai",
+      "moonshotai-cn",
+      "kimi-code-plan-global",
+      "kimi-code-plan-cn",
+      "kimi-for-coding",
+      "kimi",
+      "kimi-code",
+    ],
+    kind: "documented",
+    ttlMs: 300_000,
+    source: "Kimi context caching documentation",
+    reference: "https://platform.kimi.ai/docs/guide/context-caching",
+    assumption:
+      "Uses the documented 5-minute Kimi TTL option as a baseline; an optional 1-hour policy and custom or gateway endpoints are not observable, and the effective endpoint may be overridden by a gateway or proxy.",
+  },
+  {
+    providerIds: [
+      "alibaba",
+      "alibaba-cn",
+      "alibaba-coding-plan",
+      "alibaba-coding-plan-cn",
+      "alibaba-token-plan",
+      "alibaba-token-plan-cn",
+    ],
+    kind: "documented",
+    ttlMs: 300_000,
+    source: "Qwen context caching documentation",
+    reference: "https://docs.qwencloud.com/developer-guides/run-and-scale/context-cache",
+    assumption:
+      "Assumes the selected direct Qwen service and model use the documented 5-minute cache; cache eligibility and custom or gateway endpoints are not observable, and the effective endpoint may be overridden by a gateway or proxy.",
+  },
+  {
+    providerIds: ["amazon-bedrock"],
+    kind: "documented",
+    ttlMs: 300_000,
+    source: "Amazon Bedrock prompt caching documentation",
+    reference: "https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html",
+    assumption:
+      "Uses the documented default 5-minute TTL; model-specific 1-hour eligibility and custom or gateway endpoints are not observable, and the effective endpoint may be overridden by a gateway or proxy.",
+  },
+];
+
+function cacheTtlPolicy(
+  route: CacheRouteProvenance,
+  evidence: CacheTtlEvidence | undefined,
+): CacheTtlPolicy | undefined {
+  if (evidence?.kind === "unknown") return undefined;
+  if (evidence?.kind === "configured") {
+    if (
+      !hasValidBasis(evidence.basis) ||
+      !hasValidRouteProvenance(evidence.route) ||
+      !sameRoute(route, evidence.route) ||
+      !isAuthoritativeAnthropicRoute(route) ||
+      evidence.protocolId !== "anthropic-messages" ||
+      (evidence.configuredTtlMs !== 300_000 && evidence.configuredTtlMs !== 3_600_000)
+    ) {
+      return undefined;
+    }
+    return {
+      kind: "configured",
+      ttlMs: evidence.configuredTtlMs,
+      source: evidence.basis.source,
+      reference: evidence.basis.reference,
+      assumption:
+        "Uses the invocation-bound configured TTL; physical provider expiry is not observable.",
+    };
+  }
+  if (!hasValidRouteProvenance(route)) return undefined;
+  return DOCUMENTED_TTL_POLICIES.find((policy) => policy.providerIds.includes(route.providerId));
+}
+
+function hasValidDispatchTime(
+  invocation: CacheInvocationObservation,
+  nowMs: number,
+): invocation is CacheInvocationObservation & { dispatchAtMs: number } {
   return (
-    isAuthoritativeAnthropicRoute(route) &&
-    evidence.protocolId === "anthropic-messages" &&
-    (evidence.configuredTtlMs === 300_000 || evidence.configuredTtlMs === 3_600_000)
+    typeof invocation.dispatchAtMs === "number" &&
+    Number.isFinite(invocation.dispatchAtMs) &&
+    invocation.dispatchAtMs >= 0 &&
+    invocation.dispatchAtMs <= invocation.order.completedAtMs &&
+    invocation.dispatchAtMs <= nowMs
   );
 }
 
@@ -591,7 +770,9 @@ function hasValidBasis(basis: CacheEvidenceBasis | undefined): boolean {
   );
 }
 
-function hasValidRouteProvenance(route: CacheRouteProvenance | undefined): boolean {
+function hasValidRouteProvenance(
+  route: CacheRouteProvenance | undefined,
+): route is CacheRouteProvenance {
   return (
     typeof route?.providerId === "string" &&
     route.providerId.trim().length > 0 &&

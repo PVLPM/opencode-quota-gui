@@ -171,37 +171,39 @@ describe("native cache observer runtime", () => {
   it("invalidates a loaded session when its last observer releases during a cancelled multi-session history batch", async () => {
     const mainSessionId = "ses_history_released_main";
     const childSessionId = "ses_history_released_child";
-    const listMessages = vi.fn((input: { sessionID: string }, options: { signal: AbortSignal }) => {
-      if (input.sessionID === mainSessionId && listMessages.mock.calls.length === 1) {
+    const listMessages = vi.fn(
+      (input: { sessionID: string }, _options: { signal: AbortSignal }) => {
+        if (input.sessionID === mainSessionId && listMessages.mock.calls.length === 1) {
+          return Promise.resolve({
+            data: [
+              {
+                id: "msg_history_before_release",
+                type: "assistant",
+                model: { providerID: "openai", id: "gpt-test" },
+                time: { created: 1_000, completed: 1_100 },
+                tokens: { input: 20, cache: { read: 80, write: 0 } },
+              },
+            ],
+            cursor: { next: null },
+          });
+        }
+        if (input.sessionID === childSessionId) {
+          return new Promise<{ data: unknown[]; cursor: { next: null } }>(() => {});
+        }
         return Promise.resolve({
           data: [
             {
-              id: "msg_history_before_release",
+              id: "msg_history_after_release",
               type: "assistant",
               model: { providerID: "openai", id: "gpt-test" },
-              time: { created: 1_000, completed: 1_100 },
-              tokens: { input: 20, cache: { read: 80, write: 0 } },
+              time: { created: 2_000, completed: 2_100 },
+              tokens: { input: 60, cache: { read: 40, write: 0 } },
             },
           ],
           cursor: { next: null },
         });
-      }
-      if (input.sessionID === childSessionId) {
-        return new Promise<{ data: unknown[]; cursor: { next: null } }>(() => {});
-      }
-      return Promise.resolve({
-        data: [
-          {
-            id: "msg_history_after_release",
-            type: "assistant",
-            model: { providerID: "openai", id: "gpt-test" },
-            time: { created: 2_000, completed: 2_100 },
-            tokens: { input: 60, cache: { read: 40, write: 0 } },
-          },
-        ],
-        cursor: { next: null },
-      });
-    });
+      },
+    );
     const runtime = createNativeCacheObserverRuntime({
       subscribeEvents: () => vi.fn(),
       rpcConnection: () => "live",
@@ -442,6 +444,82 @@ describe("native cache observer runtime", () => {
     runtime.dispose();
   });
 
+  it("recovers the historical estimate on revisit when fresh identical history re-confirms the latest invocation", async () => {
+    let receiveEvent: ((event: never) => void) | undefined;
+    const listMessages = vi.fn(async () => ({
+      data: [
+        {
+          id: "msg_revisit",
+          type: "assistant",
+          model: { providerID: "anthropic", id: "claude-test" },
+          time: { created: 1_000, completed: 1_100 },
+          tokens: { input: 10, cache: { read: 20, write: 0 } },
+        },
+      ],
+      cursor: { next: null },
+    }));
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+      now: () => 2_000,
+    });
+    const release = runtime.subscribe("ses_revisit", vi.fn());
+
+    receiveEvent?.({
+      type: "session.step.started",
+      created: 1_050,
+      data: {
+        sessionID: "ses_revisit",
+        assistantMessageID: "msg_revisit",
+        model: { providerID: "anthropic", id: "claude-test" },
+        started: 1_000,
+      },
+    } as never);
+    receiveEvent?.({
+      type: "session.step.ended",
+      created: 1_100,
+      data: {
+        sessionID: "ses_revisit",
+        assistantMessageID: "msg_revisit",
+        tokens: { input: 10, cache: { read: 20, write: 0 } },
+      },
+    } as never);
+    expect(runtime.query("ses_revisit")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+
+    // Switching away from the session marks an observation gap.
+    release();
+    expect(runtime.query("ses_revisit")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+
+    // Returning to the session re-reads fresh, identical history.
+    const releaseAgain = runtime.subscribe("ses_revisit", vi.fn());
+    expect(runtime.query("ses_revisit")).toMatchObject({
+      color: "gray",
+      reason: "observation-gap",
+    });
+    await runtime.bootstrapHistory(["ses_revisit"]);
+
+    expect(runtime.query("ses_revisit")).toMatchObject({
+      color: "yellow",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+      primaryCacheReadRatio: { messageId: "msg_revisit" },
+    });
+    releaseAgain();
+    runtime.dispose();
+  });
+
   it("stops newest-first pagination at the latest completed compaction boundary", async () => {
     const listMessages = vi.fn(async (input: { cursor?: string }) =>
       input.cursor === undefined
@@ -660,8 +738,8 @@ describe("native cache observer runtime", () => {
     } as never);
 
     expect(runtime.query("ses_child")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
     expect(runtime.query("ses_parent")).toBeUndefined();
     expect(parentListener).not.toHaveBeenCalled();
@@ -672,16 +750,16 @@ describe("native cache observer runtime", () => {
     releaseChild();
     expect(releaseNativeListener).toHaveBeenCalledOnce();
     expect(runtime.query("ses_child")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "observation-gap",
     });
 
     const remountedListener = vi.fn();
     const releaseRemounted = runtime.subscribe("ses_child", remountedListener);
     expect(subscribeEvents).toHaveBeenCalledTimes(2);
     expect(runtime.query("ses_child")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "observation-gap",
     });
     releaseRemounted();
 
@@ -733,16 +811,18 @@ describe("native cache observer runtime", () => {
     ended("msg_default", 1_100);
     expect(runtime.query("ses_route")).toMatchObject({
       color: "yellow",
-      reason: "ttl-unverified",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 900, deadlineAtMs: 300_900 },
       primaryCacheReadRatio: { value: 0.15384615384615385, messageId: "msg_default" },
     });
     expect(runtime.query("ses_route")).not.toHaveProperty("configuredTtlDeadlineAtMs");
 
     started("msg_implicit_default");
-    expect(runtime.query("ses_route")).toMatchObject({ reason: "ttl-unverified" });
+    expect(runtime.query("ses_route")).toMatchObject({ reason: "assumed-route-risk" });
     ended("msg_implicit_default", 1_200);
     expect(runtime.query("ses_route")).toMatchObject({
-      reason: "ttl-unverified",
+      color: "yellow",
+      reason: "assumed-route-risk",
       primaryCacheReadRatio: {
         value: 0.15384615384615385,
         messageId: "msg_implicit_default",
@@ -757,7 +837,8 @@ describe("native cache observer runtime", () => {
     ended("msg_variant_change", 1_300);
     expect(runtime.query("ses_route")).toMatchObject({
       color: "yellow",
-      reason: "ttl-unverified",
+      reason: "assumed-route-risk",
+      ttlEstimate: { dispatchAtMs: 900 },
       primaryCacheReadRatio: {
         value: 0.15384615384615385,
         messageId: "msg_variant_change",
@@ -835,8 +916,8 @@ describe("native cache observer runtime", () => {
     });
 
     expect(runtime.query(parentSessionId)).toMatchObject({
-      color: "yellow",
-      reason: "ttl-unverified",
+      color: "gray",
+      reason: "route-unverified",
       primaryCacheReadRatio: {
         value: 0.15384615384615385,
         messageId: "msg_parent",
@@ -846,8 +927,8 @@ describe("native cache observer runtime", () => {
       },
     });
     expect(runtime.query(childSessionId)).toMatchObject({
-      color: "yellow",
-      reason: "ttl-unverified",
+      color: "gray",
+      reason: "route-unverified",
       primaryCacheReadRatio: {
         value: 0.2727272727272727,
         messageId: "msg_child",
@@ -860,9 +941,12 @@ describe("native cache observer runtime", () => {
       input: 0,
       cache: { read: 0, write: 0 },
     });
+    // openai has no documented TTL policy, so the parent stays gray regardless
+    // of the newer zero-telemetry ambiguity; ambiguity must not outrank the
+    // unevaluable route policy.
     expect(runtime.query(parentSessionId)).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "route-unverified",
     });
     expect(runtime.query(parentSessionId)).not.toHaveProperty("primaryCacheReadRatio");
     expect(runtime.query(childSessionId)).toMatchObject({
@@ -1064,8 +1148,8 @@ describe("native cache observer runtime", () => {
       },
     } as never);
     expect(runtime.query("ses_new")).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "gray",
+      reason: "insufficient-evidence",
     });
 
     receiveEvent?.({

@@ -7,6 +7,7 @@ import {
   type CacheRouteProvenance,
   classifyCacheObserverState,
   createCacheObserverState,
+  isEstablishedReusablePrefix,
   observeCacheInvocation,
 } from "./cache-observer.js";
 
@@ -22,6 +23,13 @@ export interface CacheObserverHistoryInvocation {
   sessionId: string;
   messageId: string;
   completedAtMs: number;
+  /**
+   * OpenCode message.list `time.created` — upstream v2.2.1 copies it from the
+   * runner's step-started timestamp (message-updater.ts:230,254), so it marks
+   * the host request-dispatch side, not exact provider acceptance. Omitted
+   * when absent or invalid; never synthesized from `time.completed`.
+   */
+  dispatchAtMs?: number;
   route: CacheRouteProvenance;
   counts: CacheInvocationObservation["counts"];
 }
@@ -41,7 +49,8 @@ const PRIMARY_STEP_BASIS = {
 interface StartedStepEvidence {
   sessionId: string;
   messageId: string;
-  route?: CacheRouteProvenance;
+  route: CacheRouteProvenance;
+  dispatchAtMs?: number;
 }
 
 interface PendingEndedStep {
@@ -66,7 +75,13 @@ export interface CacheObserverIngestor {
     invocations: readonly CacheObserverHistoryInvocation[],
     options?: { truncatedSessionIds?: readonly string[] },
   ): void;
-  /** Confirm the newest completed message from a fresh, gap-free history read. */
+  /**
+   * Confirm the newest completed message from a fresh, gap-free history read.
+   * An exact match of the latest estimate-qualifying invocation — message id,
+   * completion, route, counters, and request-start timestamp — re-arms the
+   * historical estimate after an observation gap, independently of ratio
+   * availability.
+   */
   confirmLatestHistory(invocation: CacheObserverHistoryInvocation): void;
   /** True when the newest live completion has exact Started/Ended correlation and counters. */
   hasUsableLiveObservation(sessionId: string): boolean;
@@ -226,11 +241,21 @@ export function projectOpenCodeCacheObserverHistoryMessage(
     tokenUsage === undefined ? undefined : ownNonNegativeFiniteNumber(tokenUsage, "input");
   const read = cache === undefined ? undefined : ownNonNegativeFiniteNumber(cache, "read");
   const write = cache === undefined ? undefined : ownNonNegativeFiniteNumber(cache, "write");
+  // The public schema's `time.created` is copied from the runner's
+  // step-started timestamp (upstream v2.2.1 message-updater.ts:230,254): a
+  // host request-dispatch-side time, not exact provider acceptance. Keep it
+  // only as a narrow valid timestamp: finite, non-negative, and not after
+  // completion. Completion is never used as a request start.
+  const rawDispatchAtMs =
+    time === undefined ? undefined : ownNonNegativeFiniteNumber(time, "created");
+  const dispatchAtMs =
+    rawDispatchAtMs === undefined || rawDispatchAtMs > completedAtMs ? undefined : rawDispatchAtMs;
 
   return {
     sessionId,
     messageId,
     completedAtMs,
+    ...(dispatchAtMs === undefined ? {} : { dispatchAtMs }),
     route: {
       providerId,
       modelId,
@@ -267,6 +292,15 @@ export function createCacheObserverIngestor(
   const latestLiveCompletion = new Map<string, LiveCompletionEvidence>();
   const latestUsableLiveCompletion = new Map<string, LiveCompletionEvidence>();
   const ratioFencedSessions = new Set<string>();
+  const observationGapSessions = new Set<string>();
+  /**
+   * Sessions with retained gapped state whose fresh history was merged after
+   * their latest observation gap. Only gapped sessions are marked, and every
+   * gap, lifecycle reset, eviction, and restore clears the marker, so the set
+   * stays bounded by the retained-state bound (CACHE_OBSERVER_MAX_SESSIONS).
+   */
+  const freshHistorySinceGap = new Set<string>();
+  const recheckTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let disposed = false;
 
   function query(sessionId: string): CacheObserverClassification | undefined {
@@ -277,7 +311,22 @@ export function createCacheObserverIngestor(
       states.set(sessionId, state);
     }
     if (state === undefined) return undefined;
-    const classification = classifyCacheObserverState(state, now());
+    let classification = classifyCacheObserverState(state, now());
+    if (observationGapSessions.has(sessionId)) {
+      const {
+        recheckAtMs: _recheckAtMs,
+        ttlEstimate: _ttlEstimate,
+        ttlSemantics: _ttlSemantics,
+        configuredTtlMs: _configuredTtlMs,
+        configuredTtlDeadlineAtMs: _configuredTtlDeadlineAtMs,
+        ...withoutCacheEstimate
+      } = classification;
+      classification = {
+        ...withoutCacheEstimate,
+        color: "gray",
+        reason: "observation-gap",
+      };
+    }
     if (!ratioFencedSessions.has(sessionId) || classification.primaryCacheReadRatio === undefined) {
       return classification;
     }
@@ -287,13 +336,56 @@ export function createCacheObserverIngestor(
 
   function notify(sessionId: string): void {
     const classification = query(sessionId);
-    for (const listener of Array.from(listeners.get(sessionId) ?? [])) {
+    const sessionListeners = listeners.get(sessionId);
+    if (sessionListeners === undefined || sessionListeners.size === 0) {
+      clearRecheckTimer(sessionId);
+      return;
+    }
+    for (const listener of Array.from(sessionListeners)) {
       try {
         listener(classification);
       } catch {
         // A consumer failure must not interrupt host-event ingestion.
       }
     }
+    scheduleRecheck(sessionId, classification);
+  }
+
+  function clearRecheckTimer(sessionId: string): void {
+    const timer = recheckTimers.get(sessionId);
+    if (timer !== undefined) clearTimeout(timer);
+    recheckTimers.delete(sessionId);
+  }
+
+  function scheduleRecheck(
+    sessionId: string,
+    classification: CacheObserverClassification | undefined,
+  ): void {
+    clearRecheckTimer(sessionId);
+    if ((listeners.get(sessionId)?.size ?? 0) === 0 || classification?.recheckAtMs === undefined)
+      return;
+
+    const MAX_TIMEOUT_MS = 2_147_483_647;
+    const delayMs = Math.min(Math.max(1, classification.recheckAtMs - now()), MAX_TIMEOUT_MS);
+    const scheduledAtMs = classification.recheckAtMs;
+    const timer = setTimeout(() => {
+      recheckTimers.delete(sessionId);
+      if (disposed || (listeners.get(sessionId)?.size ?? 0) === 0) return;
+      const updated = query(sessionId);
+      if (scheduledAtMs > now()) {
+        scheduleRecheck(sessionId, updated);
+        return;
+      }
+      for (const listener of Array.from(listeners.get(sessionId) ?? [])) {
+        try {
+          listener(updated);
+        } catch {
+          // A consumer failure cannot interrupt time-driven classification.
+        }
+      }
+      scheduleRecheck(sessionId, updated);
+    }, delayMs);
+    recheckTimers.set(sessionId, timer);
   }
 
   function clearStartedSteps(sessionId: string): void {
@@ -317,7 +409,12 @@ export function createCacheObserverIngestor(
     if (disposed || !sessionId.trim()) return;
     clearPendingSteps(sessionId);
     clearLiveContext(sessionId);
+    freshHistorySinceGap.delete(sessionId);
+    clearRecheckTimer(sessionId);
+    // Without retained state there is no pre-gap estimate or ratio to hide;
+    // later post-gap evidence classifies on its own merits.
     if (!states.has(sessionId)) return;
+    observationGapSessions.add(sessionId);
     ratioFencedSessions.add(sessionId);
     notify(sessionId);
   }
@@ -340,7 +437,7 @@ export function createCacheObserverIngestor(
           latestUsableLiveCompletion.delete(started.sessionId);
         }
         latestLiveRoutes.delete(started.sessionId);
-        latestLiveRoutes.set(started.sessionId, started.route!);
+        latestLiveRoutes.set(started.sessionId, started.route);
         while (latestLiveRoutes.size > CACHE_OBSERVER_MAX_SESSIONS) {
           const oldestSessionId = latestLiveRoutes.keys().next().value;
           if (oldestSessionId === undefined) break;
@@ -362,6 +459,8 @@ export function createCacheObserverIngestor(
         clearStartedSteps(started.sessionId);
         states.delete(started.sessionId);
         ratioFencedSessions.delete(started.sessionId);
+        observationGapSessions.delete(started.sessionId);
+        freshHistorySinceGap.delete(started.sessionId);
         states.set(
           started.sessionId,
           createCacheObserverState({ sessionId: started.sessionId, route: started.route }),
@@ -397,6 +496,9 @@ export function createCacheObserverIngestor(
     if (update.kind !== "invocation") {
       clearPendingSteps(update.sessionId);
       ratioFencedSessions.delete(update.sessionId);
+      observationGapSessions.delete(update.sessionId);
+      freshHistorySinceGap.delete(update.sessionId);
+      clearRecheckTimer(update.sessionId);
       if (source === "live") {
         clearLiveContext(update.sessionId);
       }
@@ -503,14 +605,32 @@ export function createCacheObserverIngestor(
         : undefined;
     state = observeCacheInvocation(state, {
       ...observation,
+      ...(startedEvidence?.dispatchAtMs === undefined
+        ? {}
+        : { dispatchAtMs: startedEvidence.dispatchAtMs }),
       ...(matchedRoute === undefined ? {} : { route: matchedRoute }),
     });
+
+    if (
+      source === "live" &&
+      startedEvidence?.dispatchAtMs !== undefined &&
+      startedEvidence.dispatchAtMs <= observation.order.completedAtMs &&
+      matchedRoute !== undefined &&
+      (isPositiveFinite(update.observation.counts.read) ||
+        isPositiveFinite(update.observation.counts.write))
+    ) {
+      observationGapSessions.delete(sessionId);
+      freshHistorySinceGap.delete(sessionId);
+    }
 
     if (!states.has(sessionId) && states.size >= CACHE_OBSERVER_MAX_SESSIONS) {
       const oldestSessionId = states.keys().next().value;
       if (oldestSessionId !== undefined) {
         states.delete(oldestSessionId);
         ratioFencedSessions.delete(oldestSessionId);
+        observationGapSessions.delete(oldestSessionId);
+        freshHistorySinceGap.delete(oldestSessionId);
+        clearRecheckTimer(oldestSessionId);
         notify(oldestSessionId);
       }
     }
@@ -523,6 +643,11 @@ export function createCacheObserverIngestor(
       ratioFencedSessions.delete(sessionId);
     }
     notify(sessionId);
+  }
+
+  /** Record a merged history read as the restore basis for a gapped session. */
+  function markFreshHistoryIfGapped(sessionId: string): void {
+    if (observationGapSessions.has(sessionId)) freshHistorySinceGap.add(sessionId);
   }
 
   function rememberLiveStep(key: string, sessionId: string): void {
@@ -626,7 +751,7 @@ export function createCacheObserverIngestor(
               ? {}
               : { variant: invocation.route.variantId }),
           },
-          started: invocation.completedAtMs,
+          ...(invocation.dispatchAtMs === undefined ? {} : { started: invocation.dispatchAtMs }),
         },
       };
       const { fresh, read, write } = invocation.counts;
@@ -655,10 +780,12 @@ export function createCacheObserverIngestor(
           event: mergeHistoricalCountersIntoLiveEnd(pendingLiveEnd.event, endedEvent),
         });
         ingestEvent(startedEvent, "history");
+        markFreshHistoryIfGapped(invocation.sessionId);
         continue;
       }
       ingestEvent(startedEvent, "history");
       ingestEvent(endedEvent, "history");
+      markFreshHistoryIfGapped(invocation.sessionId);
     }
 
     for (const sessionId of historyOptions.truncatedSessionIds ?? []) {
@@ -670,17 +797,22 @@ export function createCacheObserverIngestor(
   }
 
   function confirmLatestHistory(invocation: CacheObserverHistoryInvocation): void {
-    if (disposed || !ratioFencedSessions.has(invocation.sessionId)) return;
-    const state = states.get(invocation.sessionId);
-    const latest =
-      state === undefined
-        ? undefined
-        : classifyCacheObserverState(state, now()).primaryCacheReadRatio;
+    if (disposed) return;
+    const sessionId = invocation.sessionId;
+    const wasRatioFenced = ratioFencedSessions.has(sessionId);
+    const wasObservationGapped = observationGapSessions.has(sessionId);
+    if (!wasRatioFenced && !wasObservationGapped) return;
+    const state = states.get(sessionId);
+    // The estimate follows the newest estimate-qualifying invocation (an
+    // established reusable prefix), which exists even when the host reported
+    // no usable read counter — ratio availability must not gate recovery.
+    const latestQualifyingId =
+      state === undefined ? undefined : latestQualifyingInvocationId(state);
     const previous = state?.invocations.find(
       (entry) => entry.order.messageId === invocation.messageId,
     );
     if (
-      latest?.messageId !== invocation.messageId ||
+      latestQualifyingId !== invocation.messageId ||
       previous === undefined ||
       previous.order.completedAtMs !== invocation.completedAtMs ||
       !sameRouteProvenance(previous.route, invocation.route) ||
@@ -689,8 +821,21 @@ export function createCacheObserverIngestor(
       previous.counts.write !== invocation.counts.write
     )
       return;
-    ratioFencedSessions.delete(invocation.sessionId);
-    notify(invocation.sessionId);
+    if (wasRatioFenced) ratioFencedSessions.delete(sessionId);
+    // The historical estimate is restored only when the fresh, gap-free read
+    // re-confirms the exact latest qualifying invocation — including its
+    // request-start timestamp — and that read was merged after the newest
+    // gap. Unchecked pre-gap estimates stay hidden.
+    if (
+      wasObservationGapped &&
+      previous.dispatchAtMs !== undefined &&
+      previous.dispatchAtMs === invocation.dispatchAtMs &&
+      freshHistorySinceGap.has(sessionId)
+    ) {
+      observationGapSessions.delete(sessionId);
+      freshHistorySinceGap.delete(sessionId);
+    }
+    notify(sessionId);
   }
 
   function subscribe(sessionId: string, listener: CacheObserverListener): () => void {
@@ -701,10 +846,12 @@ export function createCacheObserverIngestor(
       listeners.set(sessionId, sessionListeners);
     }
     sessionListeners.add(listener);
+    if (sessionListeners.size === 1) scheduleRecheck(sessionId, query(sessionId));
     return () => {
       sessionListeners?.delete(listener);
       if (sessionListeners?.size === 0) {
         listeners.delete(sessionId);
+        clearRecheckTimer(sessionId);
       }
     };
   }
@@ -721,6 +868,10 @@ export function createCacheObserverIngestor(
     latestLiveCompletion.clear();
     latestUsableLiveCompletion.clear();
     ratioFencedSessions.clear();
+    observationGapSessions.clear();
+    freshHistorySinceGap.clear();
+    for (const timer of recheckTimers.values()) clearTimeout(timer);
+    recheckTimers.clear();
   }
 
   return {
@@ -802,6 +953,7 @@ function startedStepFromDto(event: unknown): StartedStepEvidence | undefined {
     return undefined;
 
   const variantId = normalizedVariantId(event.data.model.variant);
+  const dispatchAtMs = ownFiniteNumber(event.data, "started");
   const basis: CacheEvidenceBasis = {
     source: "OpenCode session.step.started selected model identity",
     reference: messageId,
@@ -815,11 +967,27 @@ function startedStepFromDto(event: unknown): StartedStepEvidence | undefined {
       ...(variantId === undefined ? {} : { variantId }),
       basis,
     },
+    ...(dispatchAtMs === undefined || dispatchAtMs < 0 ? {} : { dispatchAtMs }),
   };
 }
 
 function startedStepKey(sessionId: string, messageId: string): string {
   return JSON.stringify([sessionId, messageId]);
+}
+
+/**
+ * The newest estimate-qualifying invocation's message id — the same
+ * established-reusable-prefix predicate classifyCacheObserverState uses for
+ * its estimate's latestReuse. Ingestor states never carry compaction
+ * boundaries (a compaction resets the whole state), so no boundary filter is
+ * applied here.
+ */
+function latestQualifyingInvocationId(state: CacheObserverState): string | undefined {
+  for (let index = state.invocations.length - 1; index >= 0; index -= 1) {
+    const entry = state.invocations[index];
+    if (isEstablishedReusablePrefix(state.scope.route, entry)) return entry.order.messageId;
+  }
+  return undefined;
 }
 
 function sameRouteProvenance(
@@ -854,6 +1022,10 @@ function ownFiniteNumber(record: Record<string, unknown>, key: string): number |
   if (!Object.hasOwn(record, key)) return undefined;
   const value = record[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isPositiveFinite(value: number | undefined): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 function ownNonNegativeFiniteNumber(

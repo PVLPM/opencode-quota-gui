@@ -281,6 +281,7 @@ it("does not interpret a real configured-minimum classification as verified expi
       sessionId: session.id,
       route,
       order: { completedAtMs: Date.now(), messageId: "msg" },
+      dispatchAtMs: Date.now(),
       primaryClassification: { kind: "primary", basis: { source: "test", reference: "call" } },
       counts: { fresh: 20, read: 80, write: 0 },
     }),
@@ -289,7 +290,6 @@ it("does not interpret a real configured-minimum classification as verified expi
       protocolId: "anthropic-messages",
       route,
       configuredTtlMs: 300_000,
-      expiresAtMs: Date.now() + 61_000,
       basis: { source: "test", reference: "ttl" },
     },
   );
@@ -541,7 +541,7 @@ it("uses neutral, warning and verified tones without guessing a lifetime", () =>
   observed = {
     ...observed,
     color: "green",
-    reason: "observed-reuse-with-active-ttl",
+    reason: "estimated-reuse-within-ttl",
     configuredTtlDeadlineAtMs: Date.now() + 120_000,
     recheckAtMs: Date.now() + 60_000,
   };
