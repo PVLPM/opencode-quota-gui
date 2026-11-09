@@ -279,6 +279,17 @@ export function settingsSnapshot(overrides: Partial<SettingsSnapshot> = {}): Set
     accountingDetail: "summary",
     lowQuotaThresholdRemainingPercent: 10,
     duplicateCooldownMinutes: 30,
+    nativeQuotaNotifications: {
+      enabled: true,
+      low: { enabled: true, thresholdRemainingPercent: 10 },
+      exhausted: { enabled: true },
+      reset: {
+        enabled: true,
+        windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+      },
+      providerError: { enabled: true },
+      duplicateCooldownMinutes: 30,
+    },
     opencodeGoWindows: ["rolling", "weekly", "monthly"],
     "dashboard.hiddenCards": [],
     "dashboard.hiddenRows": [],

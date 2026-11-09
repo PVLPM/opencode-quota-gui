@@ -58,6 +58,27 @@ function fieldFor(key: string) {
 }
 
 describe("native quota alert settings", () => {
+  it("round-trips the complete canonical policy through the revisioned store", async () => {
+    const workspace = makeWorkspace();
+    const store = makeStore(workspace);
+    const before = await store.settings();
+    expect(before.values.nativeQuotaNotifications).toEqual(DEFAULT_CONFIG.nativeQuotaNotifications);
+    const policy = {
+      enabled: false,
+      low: { enabled: false, thresholdRemainingPercent: 25 },
+      exhausted: { enabled: false },
+      reset: { enabled: false, windows: ["daily", "weekly"] },
+      providerError: { enabled: false },
+      duplicateCooldownMinutes: 45,
+    };
+    await store.saveSettings({
+      patch: { nativeQuotaNotifications: policy },
+      expectedRevision: before.revision,
+    });
+    expect((await store.settings()).values.nativeQuotaNotifications).toEqual(policy);
+    expect((await runtimeConfig(workspace)).nativeQuotaNotifications).toEqual(policy);
+    expect(validateValue(fieldFor("nativeQuotaNotifications"), policy)).toBeUndefined();
+  });
   it("defaults to 10% remaining and a 30-minute cooldown", async () => {
     const workspace = makeWorkspace();
     const config = await runtimeConfig(workspace);

@@ -184,7 +184,9 @@ export function elementsNamed(node: TestNode, tag: string): TestNode[] {
  * carries the field's next value.
  */
 export interface TestEvent {
-  readonly currentTarget?: { readonly value: string };
+  readonly currentTarget?: { readonly value?: string; readonly checked?: boolean };
+  readonly target?: { checked: boolean };
+  readonly stopPropagation?: () => void;
   readonly defaultPrevented?: boolean;
   /** Keyboard events: the grip's Alt+Arrow reorder reads `key` and `altKey`. */
   readonly key?: string;

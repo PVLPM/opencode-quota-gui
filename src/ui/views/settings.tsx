@@ -32,9 +32,8 @@ import {
   initialDraft,
   isInheritedProviderHidden,
   keyboardMovedCardOrder,
-  lowQuotaThresholdDisplayValue,
-  lowQuotaThresholdRemainingValue,
   NATIVE_QUOTA_ALERT_KEYS,
+  nativeQuotaPolicyNumericErrors,
   OPENCODE_GO_WINDOWS,
   parseIntegerInput,
   parseNumberInput,
@@ -90,6 +89,8 @@ export function SettingsView(props: {
 }): JSX.Element {
   const [draft, setDraft] = createSignal<SettingsDraft>(initialDraft(props.snapshot.revision));
   const [busy, setBusy] = createSignal(false);
+  const [thresholdText, setThresholdText] = createSignal<string>();
+  const [cooldownText, setCooldownText] = createSignal<string>();
   const [preview, setPreview] = createSignal<ImportPreview | undefined>(undefined);
   const [previewError, setPreviewError] = createSignal<string | undefined>(undefined);
   const [openingFile, setOpeningFile] = createSignal(false);
@@ -121,6 +122,14 @@ export function SettingsView(props: {
       },
     ),
   );
+
+  // Raw text belongs to the current policy draft, including invalid/empty edits.
+  createEffect(() => {
+    if (!("nativeQuotaNotifications" in draft().edits)) {
+      setThresholdText(undefined);
+      setCooldownText(undefined);
+    }
+  });
 
   /**
    * The provider text box mirrors the inherited selection while the field is
@@ -750,118 +759,209 @@ export function SettingsView(props: {
     }
   }
 
-  /**
-   * Native-only quota alert rows. The threshold control follows the current
-   * used/remaining display preference while the draft always stores remaining.
-   */
+  /** Native alerts are edited as one canonical policy, not the legacy scalar keys. */
   function renderQuotaAlertSection(): JSX.Element | undefined {
-    const fields = nativeAlertFields();
-    if (fields.length === 0) return undefined;
-    const threshold = fields.find((field) => field.key === "lowQuotaThresholdRemainingPercent");
-    const cooldown = fields.find((field) => field.key === "duplicateCooldownMinutes");
-
-    const percentMode = () => (valueForKey("percentDisplayMode") === "used" ? "used" : "remaining");
-    const thresholdDisplay = () =>
-      threshold
-        ? lowQuotaThresholdDisplayValue(valueForKey(threshold.key), percentMode())
-        : undefined;
-    const thresholdRemaining = () => (threshold ? valueForKey(threshold.key) : undefined);
-    const showStoredRemaining = () =>
-      threshold !== undefined &&
-      errorFor(threshold.key) === undefined &&
-      percentMode() === "used" &&
-      typeof thresholdRemaining() === "number" &&
-      Number.isFinite(thresholdRemaining());
-    /**
-     * The stored bounds are 1–100 remaining. In used mode that reads as 0–99,
-     * so translate the two boundary errors instead of naming the hidden value.
-     */
-    const thresholdError = () => {
-      if (!threshold) return undefined;
-      const message = errorFor(threshold.key);
-      if (message === undefined || percentMode() !== "used") return message;
-      const remaining = thresholdRemaining();
-      if (typeof remaining !== "number" || !Number.isFinite(remaining)) return message;
-      if (remaining < 1) return `${threshold.label} must be below 100% used.`;
-      if (remaining > 100) return `${threshold.label} must be at least 0% used.`;
-      return message;
+    if (nativeAlertFields().length === 0) return undefined;
+    const key = "nativeQuotaNotifications";
+    type QuotaResetWindow = "fiveHour" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
+    type NativeQuotaNotificationPolicy = {
+      enabled: boolean;
+      low: { enabled: boolean; thresholdRemainingPercent: number };
+      exhausted: { enabled: boolean };
+      reset: { enabled: boolean; windows: QuotaResetWindow[] };
+      providerError: { enabled: boolean };
+      duplicateCooldownMinutes: number;
     };
-
+    if (!valueForKey(key)) return undefined;
+    const policy = () => valueForKey(key) as unknown as NativeQuotaNotificationPolicy;
+    const numericErrors = () => nativeQuotaPolicyNumericErrors(valueForKey(key));
+    const update = (next: NativeQuotaNotificationPolicy) => edit(key, next as unknown as JsonValue);
+    const disabled = () => busy() || !policy().enabled;
+    const windows: readonly { value: QuotaResetWindow; label: string }[] = [
+      { value: "fiveHour", label: "5 hour" },
+      { value: "hourly", label: "Hourly" },
+      { value: "daily", label: "Daily" },
+      { value: "weekly", label: "Weekly" },
+      { value: "monthly", label: "Monthly" },
+      { value: "yearly", label: "Yearly" },
+    ];
+    const row = (
+      label: string,
+      checked: () => boolean,
+      onChange: (checked: boolean) => void,
+      isDisabled: () => boolean,
+      help?: string,
+    ) => (
+      <div class="qg-field">
+        <div class="qg-field__text">
+          <span class="qg-field__label">{label}</span>
+          <Show when={help}>
+            <span class="qg-field__meta">{help}</span>
+          </Show>
+        </div>
+        <div class="qg-field__control">
+          <Switch
+            appearance="compact"
+            hideLabel
+            checked={checked()}
+            disabled={isDisabled()}
+            onChange={onChange}
+          >
+            {label}
+          </Switch>
+          <span class="qg-inherited" aria-hidden="true">
+            {checked() ? "On" : "Off"}
+          </span>
+        </div>
+      </div>
+    );
     return (
       <section class="qg-group" aria-labelledby="qg-settings-alerts">
         <h2 class="qg-group__title" id="qg-settings-alerts">
           Quota alerts
         </h2>
         <p class="qg-group__note">
-          Warn when a visible quota window runs low, and limit how often the same alert can repeat.
+          Choose which desktop alerts to receive and how often they can repeat.
         </p>
-        <Show when={threshold}>
-          {(field) => (
-            <div class="qg-field" data-invalid={thresholdError() ? "true" : undefined}>
-              <div class="qg-field__text">
-                <span class="qg-field__label">{field().label}</span>
-                <span class="qg-field__meta">
-                  <span>
-                    {percentMode() === "used"
-                      ? "Warn when used quota reaches this percent. Saved as remaining."
-                      : "Warn when remaining quota falls to this percent."}
-                  </span>
-                  <Show when={showStoredRemaining()}>
-                    <span>Saved as {String(thresholdRemaining())}% remaining.</span>
-                  </Show>
-                  <Show when={sourceNote(field().key)}>{(note) => <span>{note()}</span>}</Show>
+        {row(
+          "Quota alerts",
+          () => policy().enabled,
+          (enabled) => update({ ...policy(), enabled }),
+          busy,
+        )}
+        {row(
+          "Low quota",
+          () => policy().low.enabled,
+          (enabled) => update({ ...policy(), low: { ...policy().low, enabled } }),
+          disabled,
+        )}
+        <div class="qg-field">
+          <div class="qg-field__text">
+            <span class="qg-field__label">Low quota threshold</span>
+            <span class="qg-field__meta">Alert when remaining quota falls to this percentage.</span>
+            <Show when={numericErrors().threshold}>
+              {(message) => (
+                <span class="qg-field__error" id="qg-alert-threshold-error">
+                  {message()}
                 </span>
-                <Show when={thresholdError()}>
-                  {(message) => <span class="qg-field__error">{message()}</span>}
-                </Show>
-              </div>
-              <div class="qg-field__control">
-                <TextInput
-                  class="qg-input"
-                  aria-label={field().label}
-                  numeric
-                  invalid={thresholdError() !== undefined}
-                  disabled={busy()}
-                  value={
-                    thresholdDisplay() === undefined || thresholdDisplay() === null
-                      ? ""
-                      : String(thresholdDisplay())
-                  }
-                  onInput={(event) =>
-                    edit(
-                      field().key,
-                      lowQuotaThresholdRemainingValue(
-                        parseIntegerInput(event.currentTarget.value),
-                        percentMode(),
-                      ),
-                    )
-                  }
-                />
-                <span class="qg-inherited">% {percentMode()}</span>
-              </div>
-            </div>
-          )}
-        </Show>
-        <Show when={cooldown}>
-          {(field) => (
-            <div class="qg-field" data-invalid={errorFor(field().key) ? "true" : undefined}>
-              <div class="qg-field__text">
-                <span class="qg-field__label">{field().label}</span>
-                <span class="qg-field__meta">
-                  <Show when={field().help}>{(help) => <span>{help()}</span>}</Show>
-                  <Show when={sourceNote(field().key)}>{(note) => <span>{note()}</span>}</Show>
+              )}
+            </Show>
+          </div>
+          <div class="qg-field__control">
+            <TextInput
+              class="qg-input"
+              aria-label="Low quota threshold"
+              numeric
+              invalid={numericErrors().threshold !== undefined}
+              aria-describedby={numericErrors().threshold ? "qg-alert-threshold-error" : undefined}
+              disabled={disabled() || !policy().low.enabled}
+              value={thresholdText() ?? String(policy().low.thresholdRemainingPercent)}
+              onInput={(event) => {
+                setThresholdText(event.currentTarget.value);
+                update({
+                  ...policy(),
+                  low: {
+                    ...policy().low,
+                    thresholdRemainingPercent: (parseIntegerInput(event.currentTarget.value) ??
+                      Number.NaN) as number,
+                  },
+                });
+              }}
+            />
+            <span class="qg-inherited">% remaining</span>
+          </div>
+        </div>
+        {row(
+          "Quota exhausted",
+          () => policy().exhausted.enabled,
+          (enabled) => update({ ...policy(), exhausted: { enabled } }),
+          disabled,
+        )}
+        {row(
+          "Quota reset",
+          () => policy().reset.enabled,
+          (enabled) => update({ ...policy(), reset: { ...policy().reset, enabled } }),
+          disabled,
+        )}
+        <div class="qg-field">
+          <div class="qg-field__text">
+            <span class="qg-field__label">Reset windows</span>
+            <span class="qg-field__meta">Choose which quota windows can send reset alerts.</span>
+          </div>
+          <div class="qg-field__control">
+            <For each={windows}>
+              {(window) => (
+                <label class="qg-checkbox-option">
+                  <input
+                    type="checkbox"
+                    checked={policy().reset.windows.includes(window.value)}
+                    disabled={disabled() || !policy().reset.enabled}
+                    onChange={(event) =>
+                      update({
+                        ...policy(),
+                        reset: {
+                          ...policy().reset,
+                          windows: windows
+                            .filter((item) =>
+                              item.value === window.value
+                                ? event.currentTarget.checked
+                                : policy().reset.windows.includes(item.value),
+                            )
+                            .map((item) => item.value),
+                        },
+                      })
+                    }
+                  />
+                  <span>{window.label}</span>
+                </label>
+              )}
+            </For>
+          </div>
+        </div>
+        {row(
+          "Provider / API failures",
+          () => policy().providerError.enabled,
+          (enabled) => update({ ...policy(), providerError: { enabled } }),
+          disabled,
+        )}
+        <div class="qg-field">
+          <div class="qg-field__text">
+            <span class="qg-field__label">Duplicate alert cooldown</span>
+            <span class="qg-field__meta">
+              Minutes before the same alert can repeat. 0 allows immediate repeats.
+            </span>
+            <Show when={numericErrors().cooldown}>
+              {(message) => (
+                <span class="qg-field__error" id="qg-alert-cooldown-error">
+                  {message()}
                 </span>
-                <Show when={errorFor(field().key)}>
-                  {(message) => <span class="qg-field__error">{message()}</span>}
-                </Show>
-              </div>
-              <div class="qg-field__control">
-                {renderControl(field())}
-                <span class="qg-inherited">minutes</span>
-              </div>
-            </div>
-          )}
-        </Show>
+              )}
+            </Show>
+            <Show when={sourceNote(key)}>
+              {(note) => <span class="qg-inherited">{note()}</span>}
+            </Show>
+          </div>
+          <div class="qg-field__control">
+            <TextInput
+              class="qg-input"
+              aria-label="Duplicate alert cooldown"
+              numeric
+              invalid={numericErrors().cooldown !== undefined}
+              aria-describedby={numericErrors().cooldown ? "qg-alert-cooldown-error" : undefined}
+              disabled={disabled()}
+              value={cooldownText() ?? String(policy().duplicateCooldownMinutes)}
+              onInput={(event) => {
+                setCooldownText(event.currentTarget.value);
+                update({
+                  ...policy(),
+                  duplicateCooldownMinutes: (parseIntegerInput(event.currentTarget.value) ??
+                    Number.NaN) as number,
+                });
+              }}
+            />
+            <span class="qg-inherited">minutes</span>
+          </div>
+        </div>
       </section>
     );
   }
