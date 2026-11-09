@@ -297,6 +297,7 @@ describe("provider presentation catalog", () => {
   it.each([
     ["copilot", "Copilot", "/assets/providers/github-copilot.svg"],
     ["claude", "Anthropic", "/assets/providers/anthropic.svg"],
+    ["claude-agent", "Anthropic", "/assets/providers/anthropic.svg"],
     ["google-gemini-cli", "Gemini CLI", "/assets/providers/google.svg"],
     ["google-agy", "Google AGY", "/assets/providers/google.svg"],
     ["nanogpt", "NanoGPT", "/assets/providers/nano-gpt.svg"],

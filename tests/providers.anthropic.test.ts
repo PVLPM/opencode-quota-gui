@@ -402,7 +402,11 @@ describe("anthropic provider", () => {
     expect(queryAnthropicQuota).not.toHaveBeenCalled();
   });
 
-  it("preserves all Anthropic login accounts in all-provider collection with Claude Code enabled", async () => {
+  it.each([
+    "anthropic",
+    "claude-code",
+    "claude-agent",
+  ])("preserves all Anthropic login accounts in all-provider collection for %s", async (runtimeProviderId) => {
     const { getAnthropicDiagnostics, queryAnthropicQuota, queryAnthropicQuotaWithOAuth } =
       await import("../src/lib/anthropic.js");
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
@@ -434,8 +438,8 @@ describe("anthropic provider", () => {
       .mockResolvedValueOnce({ success: true, five_hour: { percentRemaining: 60 } });
 
     const ctx = createProviderAvailabilityContext({
-      providerIds: ["anthropic", "claude-code"],
-      configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: false },
+      providerIds: ["anthropic", runtimeProviderId],
+      configOverrides: { currentProviderID: runtimeProviderId, onlyCurrentModel: false },
     });
     const out = await anthropicProvider.fetch(ctx);
 
@@ -636,14 +640,14 @@ describe("anthropic provider", () => {
   it.each([
     "claude-agent",
     "claude-code",
-  ])("uses the Claude Code credentials for the %s route without changing provider identity", async (runtimeProviderId) => {
+  ])("uses Claude credentials for the %s route without a CLI version", async (runtimeProviderId) => {
     const { getAnthropicDiagnostics, queryAnthropicQuota } = await import(
       "../src/lib/anthropic.js"
     );
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
     (getAnthropicDiagnostics as any).mockResolvedValueOnce({
-      installed: true,
-      version: "2.1.123",
+      installed: false,
+      version: null,
       authStatus: "authenticated",
       quotaSupported: true,
       quotaSource: "claude-credentials-oauth-api",
@@ -682,6 +686,31 @@ describe("anthropic provider", () => {
         resetTimeIso: undefined,
       },
     ]);
+  });
+
+  it.each([
+    ["5-hour", { five_hour: { percentRemaining: 75 } }, "Claude 5h"],
+    ["weekly", { seven_day: { percentRemaining: 65 } }, "Claude Weekly"],
+  ])("maps a reported %s window without requiring its counterpart", async (_window, quota, name) => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: false,
+      version: null,
+      authStatus: "unknown",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      oauthCredentialSource: "claude-credentials",
+      checkedCommands: [],
+      quota: { success: true, ...quota },
+    });
+
+    const ctx = createProviderAvailabilityContext({
+      providerIds: ["claude-agent"],
+      configOverrides: { currentProviderID: "claude-agent", onlyCurrentModel: true },
+    });
+    const out = await anthropicProvider.fetch(ctx);
+
+    expect(out.entries.map((entry) => entry.name)).toEqual([name]);
   });
 
   it("matches anthropic/ model ids", () => {

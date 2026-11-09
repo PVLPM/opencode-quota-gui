@@ -866,6 +866,28 @@ describe("Claude CLI diagnostics", () => {
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(2);
   });
 
+  it("preserves OAuth quota state through the shared global Symbol across module reloads", async () => {
+    fetchResponseMock.mockResolvedValueOnce(
+      mockJsonResponse({
+        five_hour: { utilization: 20 },
+        seven_day: { utilization: 30 },
+      }),
+    );
+    const first = await queryAnthropicQuotaWithOAuth("shared-state-token");
+    const stateKey = Symbol.for("opencode-quota-gui.anthropic-oauth-shared-state.v1");
+    const globalState = (globalThis as unknown as Record<PropertyKey, unknown>)[stateKey];
+
+    expect(globalState).toBeDefined();
+    vi.resetModules();
+    const reloadedAnthropic = await import("../src/lib/anthropic.js");
+
+    await expect(
+      reloadedAnthropic.queryAnthropicQuotaWithOAuth("shared-state-token"),
+    ).resolves.toEqual(first);
+    expect((globalThis as unknown as Record<PropertyKey, unknown>)[stateKey]).toBe(globalState);
+    expect(fetchResponseMock).toHaveBeenCalledOnce();
+  });
+
   it("labels OAuth authentication failures as credentials", async () => {
     mockExecSequence([
       ...Array.from({ length: 2 }, () => ({

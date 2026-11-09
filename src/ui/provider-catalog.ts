@@ -76,6 +76,7 @@ const MASK_UNSUITABLE_LOGO_IDS: ReadonlySet<string> = new Set([
 const PROVIDER_ALIASES: Readonly<Record<string, ProviderAlias>> = {
   anthropic: { label: "Anthropic", logoKey: "anthropic" },
   claude: { label: "Anthropic", logoKey: "anthropic" },
+  "claude-agent": { label: "Anthropic", logoKey: "anthropic" },
   "claude-code": { label: "Anthropic", logoKey: "anthropic" },
   copilot: { label: "Copilot", logoKey: "github-copilot" },
   "copilot-chat": { label: "Copilot", logoKey: "github-copilot" },
