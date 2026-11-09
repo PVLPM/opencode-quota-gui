@@ -15,6 +15,7 @@ import {
 } from "../src/lib/agent-custom-providers.js";
 import { createLoadConfigMeta, loadConfig } from "../src/lib/config.js";
 import type { QuotaProviderDefinition } from "../src/lib/quota-providers.js";
+import { fetchRemoteQuotaProvider } from "../src/lib/quota-providers-remote.js";
 import {
   createGuiConfigWorkspace,
   type GuiConfigWorkspace,
@@ -44,6 +45,32 @@ function remoteDefinition(
     apiKeyEnv: "ACME_QUOTA_KEY",
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function expectRequestAborted(promise: Promise<unknown>): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await expect(
+      Promise.race([
+        promise,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error("DNS resolution ignored abort")), 250);
+        }),
+      ]),
+    ).rejects.toMatchObject({ code: "request-failed" });
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 afterEach(() => {
@@ -718,6 +745,123 @@ describe("safe agent provider test transport", () => {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
+    }
+  });
+
+  it("does not start DNS resolution or a network request when already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const resolveHost = vi.fn(
+      async (): Promise<readonly SafeProviderAddress[]> => [{ address: "8.8.8.8", family: 4 }],
+    );
+    const requestPinned = vi.fn(
+      async (_request: SafeProviderRequest) => new Response("{}", { status: 200 }),
+    );
+    const safeFetch = createSafeAgentProviderFetch({ resolveHost, requestPinned });
+
+    await expect(
+      safeFetch("https://quota.example.test/v1/quota", { signal: controller.signal }),
+    ).rejects.toMatchObject({ code: "request-failed" });
+    expect(resolveHost).not.toHaveBeenCalled();
+    expect(requestPinned).not.toHaveBeenCalled();
+  });
+
+  it("settles an in-flight request when DNS never resolves and the signal aborts", async () => {
+    const controller = new AbortController();
+    const resolveHost = vi.fn(() => new Promise<readonly SafeProviderAddress[]>(() => {}));
+    const requestPinned = vi.fn(
+      async (_request: SafeProviderRequest) => new Response("{}", { status: 200 }),
+    );
+    const safeFetch = createSafeAgentProviderFetch({ resolveHost, requestPinned });
+    const pending = safeFetch("https://quota.example.test/v1/quota", {
+      signal: controller.signal,
+    });
+
+    expect(resolveHost).toHaveBeenCalledOnce();
+    controller.abort();
+
+    await expectRequestAborted(pending);
+    expect(requestPinned).not.toHaveBeenCalled();
+  });
+
+  it("does not start a pinned request if DNS resolves after abort", async () => {
+    const controller = new AbortController();
+    const lateResolution = deferred<readonly SafeProviderAddress[]>();
+    const resolveHost = vi.fn(() => lateResolution.promise);
+    const requestPinned = vi.fn(
+      async (_request: SafeProviderRequest) => new Response("{}", { status: 200 }),
+    );
+    const safeFetch = createSafeAgentProviderFetch({ resolveHost, requestPinned });
+    const pending = safeFetch("https://quota.example.test/v1/quota", {
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    await expectRequestAborted(pending);
+    lateResolution.resolve([{ address: "8.8.8.8", family: 4 }]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(requestPinned).not.toHaveBeenCalled();
+  });
+
+  it("consumes a DNS rejection that arrives after abort", async () => {
+    const controller = new AbortController();
+    const lateResolution = deferred<readonly SafeProviderAddress[]>();
+    const resolveHost = vi.fn(() => lateResolution.promise);
+    const requestPinned = vi.fn(
+      async (_request: SafeProviderRequest) => new Response("{}", { status: 200 }),
+    );
+    const safeFetch = createSafeAgentProviderFetch({ resolveHost, requestPinned });
+    const pending = safeFetch("https://quota.example.test/v1/quota", {
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    await expectRequestAborted(pending);
+    lateResolution.reject(new Error("late DNS failure"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(requestPinned).not.toHaveBeenCalled();
+  });
+
+  it("maps a resolver failure to an unsafe endpoint when the request was not aborted", async () => {
+    const requestPinned = vi.fn(
+      async (_request: SafeProviderRequest) => new Response("{}", { status: 200 }),
+    );
+    const safeFetch = createSafeAgentProviderFetch({
+      resolveHost: async () => {
+        throw new Error("DNS failure");
+      },
+      requestPinned,
+    });
+
+    await expect(safeFetch("https://quota.example.test/v1/quota")).rejects.toMatchObject({
+      code: "unsafe-endpoint",
+    });
+    expect(requestPinned).not.toHaveBeenCalled();
+  });
+
+  it("settles the remote-provider timeout while DNS resolution is stuck", async () => {
+    vi.useFakeTimers();
+    const resolveHost = vi.fn(() => new Promise<readonly SafeProviderAddress[]>(() => {}));
+    const requestPinned = vi.fn(
+      async (_request: SafeProviderRequest) => new Response("{}", { status: 200 }),
+    );
+    const safeFetch = createSafeAgentProviderFetch({ resolveHost, requestPinned });
+
+    try {
+      const pending = fetchRemoteQuotaProvider(remoteDefinition(), "secret", 1000, safeFetch);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      await expect(pending).resolves.toEqual({
+        success: false,
+        error: "Request timeout after 1s",
+        failureCategory: "provider_api",
+      });
+      expect(resolveHost).toHaveBeenCalledOnce();
+      expect(requestPinned).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
     }
   });
 

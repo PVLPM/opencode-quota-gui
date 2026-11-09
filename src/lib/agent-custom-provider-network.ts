@@ -124,6 +124,53 @@ async function resolveProviderHost(hostname: string): Promise<readonly SafeProvi
   );
 }
 
+type ProviderHostResolution =
+  | { state: "resolved"; addresses: readonly SafeProviderAddress[] }
+  | { state: "aborted" };
+
+function resolveProviderHostWithAbort(
+  resolveHost: NonNullable<SafeProviderFetchDependencies["resolveHost"]>,
+  hostname: string,
+  signal?: AbortSignal,
+): Promise<ProviderHostResolution> {
+  if (!signal) {
+    return resolveHost(hostname).then((addresses) => ({ state: "resolved", addresses }));
+  }
+  if (signal.aborted) return Promise.resolve({ state: "aborted" });
+
+  return new Promise<ProviderHostResolution>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const settle = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      complete();
+    };
+    const onAbort = () => settle(() => resolve({ state: "aborted" }));
+
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+
+    let resolution: Promise<readonly SafeProviderAddress[]>;
+    try {
+      resolution = resolveHost(hostname);
+    } catch (error) {
+      settle(() => reject(error));
+      return;
+    }
+
+    // Keep handlers attached after abort: a late DNS rejection must be consumed.
+    void Promise.resolve(resolution).then(
+      (addresses) => settle(() => resolve({ state: "resolved", addresses })),
+      (error: unknown) => settle(() => reject(error)),
+    );
+  });
+}
+
 function headersForRequest(input: ProviderFetchInput, init?: RequestInit): Record<string, string> {
   const headers = new Headers(input instanceof Request ? input.headers : undefined);
   for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
@@ -282,12 +329,14 @@ export function createSafeAgentProviderFetch(
     const { url, signal } = parseProviderRequest(input, init);
     const hostname = withoutIpv6Brackets(url.hostname);
     const literalFamily = isIP(hostname);
-    let addresses: readonly SafeProviderAddress[];
+    let resolution: ProviderHostResolution;
     try {
-      addresses = await resolveHost(hostname);
+      resolution = await resolveProviderHostWithAbort(resolveHost, hostname, signal);
     } catch {
       throw new AgentProviderNetworkError("unsafe-endpoint");
     }
+    if (resolution.state === "aborted") throw new AgentProviderNetworkError("request-failed");
+    const { addresses } = resolution;
     if (
       addresses.length === 0 ||
       addresses.some((address) => !isPublicAddress(address.address, address.family))
