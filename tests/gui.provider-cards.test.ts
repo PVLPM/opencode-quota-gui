@@ -499,7 +499,7 @@ describe("gui provider cards — account mapping", () => {
     expect(rows.map((row) => row.percentUsed)).toEqual([120.5, -30]);
   });
 
-  it("adds the runway projection only when the config asks for it", () => {
+  it("computes the same runway projection regardless of the legacy config", () => {
     const endsAtIso = new Date(NOW + 12 * HOUR_MS).toISOString();
     const fixedWindow: FixedWindowProjectionEvidence = {
       kind: "fixed_window",
@@ -525,7 +525,10 @@ describe("gui provider cards — account mapping", () => {
     ];
 
     const off = buildProviderCards({ probes, preferences: SUMMARY, nowMs: NOW });
-    expect(off[0]?.rows[0]?.runway).toBeUndefined();
+    expect(off[0]?.rows[0]?.runway).toEqual({
+      kind: "before_reset",
+      projectedAtIso: new Date(NOW).toISOString(),
+    });
 
     const on = buildProviderCards({
       probes,

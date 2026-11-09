@@ -1198,7 +1198,7 @@ describe("home view composition", () => {
     expect(remaining).not.toContain('class="qg-row__value">38%');
     expect(remaining).toContain('aria-valuetext="62% remaining"');
     expect(remaining).not.toContain('aria-valuetext="38%');
-    expect(text(remaining)).toContain("Runs out");
+    expect(text(remaining)).not.toContain("Runs out");
     const used = await renderView(
       "/views/home.tsx",
       "QuotaView",
@@ -1728,11 +1728,18 @@ describe("usage chart", () => {
     expect(formatPercent(undefined)).toBe("—");
     expect(formatPercentExact(96.37)).toBe("96.37%");
     expect(formatPercentExact(null)).toBe("—");
-    expect(formatRunway(undefined, "UTC")).toBeUndefined();
-    expect(formatRunway({ kind: "lasts_past_reset" }, "UTC")).toBe("Lasts past reset");
+    expect(formatRunway(undefined, NOW)).toBeUndefined();
+    expect(formatRunway({ kind: "lasts_past_reset" }, NOW)).toBe("Projected to last until reset");
     expect(
-      formatRunway({ kind: "before_reset", projectedAtIso: new Date(NOW).toISOString() }, "UTC"),
-    ).toContain("Runs out");
+      formatRunway(
+        { kind: "before_reset", projectedAtIso: new Date(NOW + 204 * 60_000).toISOString() },
+        NOW,
+      ),
+    ).toBe("Runs out in ~3h 24m");
+    expect(
+      formatRunway({ kind: "before_reset", projectedAtIso: new Date(NOW).toISOString() }, NOW),
+    ).toBeUndefined();
+    expect(formatRunway({ kind: "before_reset", projectedAtIso: "invalid" }, NOW)).toBeUndefined();
   });
 });
 

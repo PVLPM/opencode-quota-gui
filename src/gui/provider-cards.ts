@@ -261,7 +261,7 @@ function mapEntryRow(params: {
       row.percentUsed = 100 - entry.percentRemaining;
     }
     applyResetFields(row, entry, preferences);
-    if (preferences.quotaProjection === "runway") applyRunway(row, entry, nowMs);
+    applyRunway(row, entry, nowMs);
     if (preferences.accountingDetail === "detailed" && entry.basis) {
       const detailRows = detailRowsFor(entry.basis);
       if (detailRows.length > 0) row.detailRows = detailRows;

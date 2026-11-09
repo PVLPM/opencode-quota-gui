@@ -752,6 +752,16 @@
 }
 
 /* Original quota geometry: two independent 8px segments, not an outer track. */
+.qg-row__bar-tip {
+  grid-column: 1 / -1;
+}
+
+.qg-row__bar-tip:focus-visible,
+.qg-row__value-tip:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
+}
+
 .qg-row__bar {
   --qg-quota-gap: min(
     3px,
