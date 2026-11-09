@@ -104,7 +104,7 @@ describe("agent custom-provider backend", () => {
     await expect(readFile(workspace.guiConfigPath, "utf8")).resolves.toBe(before);
   });
 
-  it("reads useful request and mapping details without resolving credential values", async () => {
+  it("returns the exact normalized remote definition without resolving credential values", async () => {
     const workspace = makeWorkspace();
     writeGuiCanonicalConfig(workspace, { enabledProviders: "auto", quotaProviders: [] });
     const secret = "read-only-secret-marker";
@@ -113,18 +113,36 @@ describe("agent custom-provider backend", () => {
     const definition = remoteDefinition({
       id: "mapped-quota",
       providerId: "mapped",
+      label: "Mapped quota",
+      modelIds: ["private-model-id"],
+      url: "https://quota.example.test/v1/quota/private-path-marker",
       format: "json-v1",
       adapter: {
-        rowsPath: ["data", "rows"],
+        rowsPath: ["data", "private-response-key"],
         mappings: [
           {
             resultType: "quota",
-            name: "Requests",
+            name: "Private display label",
+            label: "Daily requests:",
+            unit: "requests",
+            unitPosition: "suffix",
+            resetTime: { literal: "2025-01-01T00:00:00Z", encoding: "iso-8601" },
+            observedTime: { path: ["timestamps", "observed"], encoding: "iso-8601" },
             metric: {
               type: "remaining-limit",
-              remaining: { path: ["remaining"] },
-              limit: { path: ["limit"] },
+              remaining: { path: ["limits", "remaining"] },
+              limit: { path: ["limits", "total"] },
             },
+          },
+          {
+            resultType: "status",
+            name: "Status",
+            metric: { type: "status", value: { literal: "healthy" } },
+          },
+          {
+            resultType: "usage",
+            name: "Used",
+            metric: { type: "value", valueType: "used", value: { literal: 1.5 } },
           },
         ],
       },
@@ -136,218 +154,13 @@ describe("agent custom-provider backend", () => {
 
     expect(result).toMatchObject({
       id: "mapped-quota",
+      providerId: "mapped",
+      trusted: false,
       enabled: false,
-      definition: {
-        id: "mapped-quota",
-        providerId: "mapped",
-        label: "[redacted]",
-        mode: "remote-api",
-        url: "https://quota.example.test/[redacted]/[redacted]/[redacted]",
-        format: "json-v1",
-        apiKeyEnv: "ACME_QUOTA_KEY",
-        adapter: {
-          rowsPath: ["[redacted]", "[redacted]"],
-          mappings: [
-            {
-              resultType: "quota",
-              name: "[redacted]",
-              metric: {
-                type: "remaining-limit",
-                remaining: { path: ["[redacted]"] },
-                limit: { path: ["[redacted]"] },
-              },
-            },
-          ],
-        },
-      },
     });
+    expect(result.definition).toEqual(definition);
     expect(JSON.stringify(result)).not.toContain(secret);
     expect(getEnv).not.toHaveBeenCalled();
-  });
-
-  it("redacts path and display values while preserving request and mapping structure", async () => {
-    const workspace = makeWorkspace();
-    writeGuiCanonicalConfig(workspace, { enabledProviders: "auto", quotaProviders: [] });
-    const markers = [
-      "url-path-resource",
-      "display-label-value",
-      "adapter-path-field",
-      "adapter-literal-value",
-      "claude-3-7-sonnet-20250219",
-    ];
-    const definition = remoteDefinition({
-      label: markers[1],
-      url: `https://quota.example.test/v1/${markers[0]}`,
-      modelIds: [markers[4]!],
-      format: "json-v1",
-      adapter: {
-        rowsPath: ["data", markers[2]!],
-        mappings: [
-          {
-            resultType: "quota",
-            name: markers[1]!,
-            label: markers[1]!,
-            unit: markers[1]!,
-            unitPosition: "suffix",
-            resetTime: {
-              literal: "2025-01-01T00:00:00Z",
-              encoding: "iso-8601",
-            },
-            observedTime: { path: [markers[2]!, "observed"], encoding: "iso-8601" },
-            metric: {
-              type: "remaining-limit",
-              remaining: { path: [markers[2]!] },
-              limit: { path: ["limit"] },
-            },
-          },
-          {
-            resultType: "status",
-            name: "Status",
-            metric: {
-              type: "status",
-              value: { literal: markers[3]! },
-            },
-          },
-          {
-            resultType: "usage",
-            name: "Usage",
-            metric: { type: "value", valueType: "used", value: { literal: 42 } },
-          },
-        ],
-      },
-    });
-    const store = createAgentCustomProviderStore({ configDir: workspace.configDir });
-    await store.add(definition);
-
-    const result = await store.read("acme-quota");
-    const serialized = JSON.stringify(result);
-
-    for (const marker of markers) expect(serialized).not.toContain(marker);
-    expect(result.definition).toMatchObject({
-      label: "[redacted]",
-      url: "https://quota.example.test/[redacted]/[redacted]",
-      modelIds: ["[redacted]"],
-      apiKeyEnv: "ACME_QUOTA_KEY",
-      adapter: {
-        rowsPath: ["[redacted]", "[redacted]"],
-        mappings: [
-          {
-            name: "[redacted]",
-            label: "[redacted]",
-            unit: "[redacted]",
-            unitPosition: "suffix",
-            resetTime: { literal: "[redacted]", encoding: "iso-8601" },
-            observedTime: {
-              path: ["[redacted]", "[redacted]"],
-              encoding: "iso-8601",
-            },
-            metric: {
-              type: "remaining-limit",
-              remaining: { path: ["[redacted]"] },
-              limit: { path: ["[redacted]"] },
-            },
-          },
-          {
-            name: "[redacted]",
-            metric: { type: "status", value: { literal: "[redacted]" } },
-          },
-          {
-            name: "[redacted]",
-            metric: { type: "value", valueType: "used", value: { literal: 42 } },
-          },
-        ],
-      },
-    });
-  });
-
-  it("redacts path and free-form values without restricting proposals or stored parsing", async () => {
-    const apiKey = "sk-proj-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJ";
-    const workspace = makeWorkspace();
-    writeGuiCanonicalConfig(workspace, { enabledProviders: "auto", quotaProviders: [] });
-    const store = createAgentCustomProviderStore({ configDir: workspace.configDir });
-    const definitions = [
-      remoteDefinition({
-        id: "credential-url-path",
-        url: `https://quota.example.test/v1/${apiKey}`,
-      }),
-      remoteDefinition({
-        id: "credential-encoded-url-path",
-        url: `https://quota.example.test/v1/${apiKey.replace("sk-proj-", "%73k%2Dproj%2D")}`,
-      }),
-      remoteDefinition({
-        id: "credential-literal",
-        format: "json-v1",
-        adapter: {
-          mappings: [
-            {
-              resultType: "status",
-              name: "Status",
-              metric: {
-                type: "status",
-                value: { literal: `Authorization: Bearer ${apiKey}` },
-              },
-            },
-          ],
-        },
-      }),
-      remoteDefinition({
-        id: "simple-secret-fields",
-        label: "plain-secret-value",
-        url: "https://quota.example.test/v1/customer-private-path",
-        modelIds: ["claude-3-7-sonnet-20250219"],
-        format: "json-v1",
-        adapter: {
-          rowsPath: ["data", "private-response-key"],
-          mappings: [
-            {
-              resultType: "status",
-              name: "private-display-label",
-              metric: {
-                type: "status",
-                value: { literal: "plain-secret-literal" },
-              },
-            },
-          ],
-        },
-      }),
-    ];
-
-    for (const definition of definitions) await store.add(definition);
-    await expect(store.list()).resolves.toHaveLength(definitions.length);
-
-    for (const definition of definitions) {
-      const result = await store.read(definition.id);
-      expect(JSON.stringify(result)).not.toContain(apiKey);
-      expect(result.definition.apiKeyEnv).toBe("ACME_QUOTA_KEY");
-    }
-
-    const simpleSecretRead = await store.read("simple-secret-fields");
-    const serialized = JSON.stringify(simpleSecretRead);
-    for (const marker of [
-      "plain-secret-value",
-      "customer-private-path",
-      "claude-3-7-sonnet-20250219",
-      "private-response-key",
-      "private-display-label",
-      "plain-secret-literal",
-    ]) {
-      expect(serialized).not.toContain(marker);
-    }
-    expect(simpleSecretRead.definition).toMatchObject({
-      id: "simple-secret-fields",
-      label: "[redacted]",
-      url: "https://quota.example.test/[redacted]/[redacted]",
-      modelIds: ["[redacted]"],
-      adapter: {
-        rowsPath: ["[redacted]", "[redacted]"],
-        mappings: [
-          {
-            name: "[redacted]",
-            metric: { type: "status", value: { literal: "[redacted]" } },
-          },
-        ],
-      },
-    });
   });
 
   it("reads local estimate windows from the stored definition", async () => {
@@ -365,16 +178,9 @@ describe("agent custom-provider backend", () => {
 
     await store.add(definition);
 
-    await expect(store.read("local-gateway")).resolves.toMatchObject({
-      definition: {
-        ...definition,
-        label: "[redacted]",
-        windows: [{ ...definition.windows[0], label: "[redacted]" }],
-        pricingModelMap: { "[redacted-key-1]": "[redacted]" },
-      },
-    });
     const result = await store.read("local-gateway");
-    expect(JSON.stringify(result)).not.toContain("private-model-id");
+    expect(result).toMatchObject({ trusted: false, enabled: false });
+    expect(result.definition).toEqual(definition);
   });
 
   it("fails closed without echoing unknown stored record or definition fields", async () => {

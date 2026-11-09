@@ -334,7 +334,7 @@ export const QuotaToastPlugin = Plugin.define({
         editor.add({
           name: "quota_custom_provider_read",
           description:
-            "Read a custom quota-provider proposal by id. Output keeps request/mapping/window structure, endpoint origin, identifiers, enums/numbers, and the apiKeyEnv name; URL path values, JSON paths, labels/literals, model IDs, and pricing-map entries are replaced with placeholders. Credential values are never resolved. This is role-based redaction, not semantic secret detection: endpoint origin, identifiers, and env names remain visible and may contain user-chosen text. This does not approve or enable it.",
+            "Read a custom quota-provider proposal by id. Returns its complete normalized definition, including endpoint URLs, mapping paths/literals, labels, model IDs, pricing entries, and the apiKeyEnv name. Definitions are configuration metadata visible to agents; do not put credentials in them. Credential values are never resolved. This does not approve or enable the proposal.",
           input: ID_TOOL_INPUT,
           async execute(input) {
             return customProviderToolResult(() =>
