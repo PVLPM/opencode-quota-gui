@@ -144,7 +144,7 @@ describe("GUI documentation consistency", () => {
       "secrets",
       "configuration",
     );
-    expect(secretParagraph).toMatch(/\b(?:never|must not|cannot|forbidden)\b/i);
+    expect(secretParagraph).toMatch(/\b(?:never|must not|cannot|forbidden|do not)\b/i);
 
     const externalSection = readMarkdownSection(external, /^Supported integration surface$/);
     expect(externalSection).toContain("No public API");

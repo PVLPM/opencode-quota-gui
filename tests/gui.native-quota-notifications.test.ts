@@ -695,6 +695,7 @@ describe("native quota notification subscription", () => {
     const cleanups: Array<() => void> = [];
     const ctx = {
       id: "test-plugin",
+      app: { version: "2.2.1" },
       signal: controller.signal,
       client: {},
       ui: {},
