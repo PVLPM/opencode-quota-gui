@@ -66,6 +66,7 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "enableToast",
   "resetNotifications.enabled",
   "resetNotifications.windows",
+  "nativeQuotaNotifications",
   "lowQuotaThresholdRemainingPercent",
   "duplicateCooldownMinutes",
   "tuiCommandDisplay",
@@ -189,6 +190,17 @@ const NETWORK_SETTING_SOURCE_KEYS = [
 
 type PricingSnapshotPatch = Partial<QuotaToastConfig["pricingSnapshot"]>;
 type QuotaResetNotificationsPatch = Partial<QuotaToastConfig["resetNotifications"]>;
+type NativeQuotaNotificationPolicyPatch = {
+  enabled?: boolean;
+  low?: Partial<QuotaToastConfig["nativeQuotaNotifications"]["low"]>;
+  exhausted?: Partial<QuotaToastConfig["nativeQuotaNotifications"]["exhausted"]>;
+  reset?: Partial<QuotaToastConfig["nativeQuotaNotifications"]["reset"]>;
+  providerError?: Partial<QuotaToastConfig["nativeQuotaNotifications"]["providerError"]>;
+  duplicateCooldownMinutes?: number;
+};
+type NativeQuotaNotificationCanonicalField =
+  | "low.thresholdRemainingPercent"
+  | "duplicateCooldownMinutes";
 type TuiSidebarPanelPatch = Partial<QuotaToastConfig["tuiSidebarPanel"]>;
 type TuiCompactStatusPatch = Partial<QuotaToastConfig["tuiCompactStatus"]>;
 type TuiPromptBarPatch = Partial<QuotaToastConfig["tuiPromptBar"]>;
@@ -202,6 +214,7 @@ type ValidatedQuotaToastPatch = {
   enabled?: boolean;
   enableToast?: boolean;
   resetNotifications?: QuotaResetNotificationsPatch;
+  nativeQuotaNotifications?: NativeQuotaNotificationPolicyPatch;
   lowQuotaThresholdRemainingPercent?: number;
   duplicateCooldownMinutes?: number;
   tuiCommandDisplay?: TuiCommandDisplay;
@@ -407,6 +420,16 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
       ...config.resetNotifications,
       windows: [...config.resetNotifications.windows],
     },
+    nativeQuotaNotifications: {
+      ...config.nativeQuotaNotifications,
+      low: { ...config.nativeQuotaNotifications.low },
+      exhausted: { ...config.nativeQuotaNotifications.exhausted },
+      reset: {
+        ...config.nativeQuotaNotifications.reset,
+        windows: [...config.nativeQuotaNotifications.reset.windows],
+      },
+      providerError: { ...config.nativeQuotaNotifications.providerError },
+    },
     opencodeGoWindows: [...config.opencodeGoWindows],
     opencodeMonthlyLimit: config.opencodeMonthlyLimit,
     pricingSnapshot: { ...config.pricingSnapshot },
@@ -474,6 +497,128 @@ function extractQuotaResetNotificationsPatch(
       reportIssue?.(
         "resetNotifications.windows",
         `expected a non-empty array of: ${QUOTA_RESET_WINDOWS.join(", ")}`,
+      );
+    }
+  }
+
+  return Object.keys(patch).length > 0 ? patch : undefined;
+}
+
+export function isValidNativeQuotaNotificationPolicy(
+  value: unknown,
+): value is QuotaToastConfig["nativeQuotaNotifications"] {
+  if (!isPlainObject(value)) return false;
+  if (typeof value.enabled !== "boolean") return false;
+  if (!isPlainObject(value.low) || typeof value.low.enabled !== "boolean") return false;
+  if (!isValidLowQuotaThresholdRemainingPercent(value.low.thresholdRemainingPercent)) return false;
+  if (!isPlainObject(value.exhausted) || typeof value.exhausted.enabled !== "boolean") return false;
+  if (!isPlainObject(value.reset) || typeof value.reset.enabled !== "boolean") return false;
+  if (
+    !Array.isArray(value.reset.windows) ||
+    !value.reset.windows.every((window) => QUOTA_RESET_WINDOWS.includes(window as QuotaResetWindow))
+  ) {
+    return false;
+  }
+  if (!isPlainObject(value.providerError) || typeof value.providerError.enabled !== "boolean") {
+    return false;
+  }
+  return isValidDuplicateCooldownMinutes(value.duplicateCooldownMinutes);
+}
+
+function extractNativeQuotaNotificationPolicyPatch(
+  value: unknown,
+  reportIssue?: (key: string, message: string) => void,
+): NativeQuotaNotificationPolicyPatch | undefined {
+  if (!isPlainObject(value)) return undefined;
+
+  const patch: NativeQuotaNotificationPolicyPatch = {};
+  if (hasOwnKey(value, "enabled")) {
+    if (typeof value.enabled === "boolean") patch.enabled = value.enabled;
+    else reportIssue?.("nativeQuotaNotifications.enabled", "expected boolean");
+  }
+
+  if (hasOwnKey(value, "low")) {
+    if (!isPlainObject(value.low)) {
+      reportIssue?.("nativeQuotaNotifications.low", "expected object");
+    } else {
+      const low: NonNullable<NativeQuotaNotificationPolicyPatch["low"]> = {};
+      if (hasOwnKey(value.low, "enabled")) {
+        if (typeof value.low.enabled === "boolean") low.enabled = value.low.enabled;
+        else reportIssue?.("nativeQuotaNotifications.low.enabled", "expected boolean");
+      }
+      if (hasOwnKey(value.low, "thresholdRemainingPercent")) {
+        if (isValidLowQuotaThresholdRemainingPercent(value.low.thresholdRemainingPercent)) {
+          low.thresholdRemainingPercent = value.low.thresholdRemainingPercent;
+        } else {
+          reportIssue?.(
+            "nativeQuotaNotifications.low.thresholdRemainingPercent",
+            "expected an integer between 1 and 100",
+          );
+        }
+      }
+      if (Object.keys(low).length > 0) patch.low = low;
+    }
+  }
+
+  if (hasOwnKey(value, "exhausted")) {
+    if (!isPlainObject(value.exhausted)) {
+      reportIssue?.("nativeQuotaNotifications.exhausted", "expected object");
+    } else if (hasOwnKey(value.exhausted, "enabled")) {
+      if (typeof value.exhausted.enabled === "boolean") {
+        patch.exhausted = { enabled: value.exhausted.enabled };
+      } else {
+        reportIssue?.("nativeQuotaNotifications.exhausted.enabled", "expected boolean");
+      }
+    }
+  }
+
+  if (hasOwnKey(value, "reset")) {
+    if (!isPlainObject(value.reset)) {
+      reportIssue?.("nativeQuotaNotifications.reset", "expected object");
+    } else {
+      const reset: NonNullable<NativeQuotaNotificationPolicyPatch["reset"]> = {};
+      if (hasOwnKey(value.reset, "enabled")) {
+        if (typeof value.reset.enabled === "boolean") reset.enabled = value.reset.enabled;
+        else reportIssue?.("nativeQuotaNotifications.reset.enabled", "expected boolean");
+      }
+      if (hasOwnKey(value.reset, "windows")) {
+        if (
+          Array.isArray(value.reset.windows) &&
+          value.reset.windows.every((window): window is QuotaResetWindow =>
+            QUOTA_RESET_WINDOWS.includes(window as QuotaResetWindow),
+          )
+        ) {
+          reset.windows = dedupe(value.reset.windows);
+        } else {
+          reportIssue?.(
+            "nativeQuotaNotifications.reset.windows",
+            `expected an array of: ${QUOTA_RESET_WINDOWS.join(", ")}`,
+          );
+        }
+      }
+      if (Object.keys(reset).length > 0) patch.reset = reset;
+    }
+  }
+
+  if (hasOwnKey(value, "providerError")) {
+    if (!isPlainObject(value.providerError)) {
+      reportIssue?.("nativeQuotaNotifications.providerError", "expected object");
+    } else if (hasOwnKey(value.providerError, "enabled")) {
+      if (typeof value.providerError.enabled === "boolean") {
+        patch.providerError = { enabled: value.providerError.enabled };
+      } else {
+        reportIssue?.("nativeQuotaNotifications.providerError.enabled", "expected boolean");
+      }
+    }
+  }
+
+  if (hasOwnKey(value, "duplicateCooldownMinutes")) {
+    if (isValidDuplicateCooldownMinutes(value.duplicateCooldownMinutes)) {
+      patch.duplicateCooldownMinutes = value.duplicateCooldownMinutes;
+    } else {
+      reportIssue?.(
+        "nativeQuotaNotifications.duplicateCooldownMinutes",
+        "expected an integer of 0 or more",
       );
     }
   }
@@ -831,6 +976,14 @@ function extractValidatedQuotaToastPatch(
     if (resetNotifications) patch.resetNotifications = resetNotifications;
   }
 
+  if (hasOwnKey(quotaToastConfig, "nativeQuotaNotifications")) {
+    const nativeQuotaNotifications = extractNativeQuotaNotificationPolicyPatch(
+      quotaToastConfig.nativeQuotaNotifications,
+      reportIssue,
+    );
+    if (nativeQuotaNotifications) patch.nativeQuotaNotifications = nativeQuotaNotifications;
+  }
+
   if (hasOwnKey(quotaToastConfig, "lowQuotaThresholdRemainingPercent")) {
     if (
       isValidLowQuotaThresholdRemainingPercent(quotaToastConfig.lowQuotaThresholdRemainingPercent)
@@ -1135,6 +1288,7 @@ function applyValidatedQuotaToastPatch(
   patch: ValidatedQuotaToastPatch,
   sourcePath: string,
   settingSources: QuotaToastSettingSources,
+  nativeQuotaNotificationCanonicalFields: Set<NativeQuotaNotificationCanonicalField> = new Set(),
 ): void {
   if (hasOwnKey(patch, "enabled")) {
     config.enabled = patch.enabled!;
@@ -1157,14 +1311,59 @@ function applyValidatedQuotaToastPatch(
     }
   }
 
+  if (patch.nativeQuotaNotifications) {
+    const policy = patch.nativeQuotaNotifications;
+    if (hasOwnKey(policy, "enabled")) {
+      config.nativeQuotaNotifications.enabled = policy.enabled!;
+    }
+    if (policy.low) {
+      if (hasOwnKey(policy.low, "enabled")) {
+        config.nativeQuotaNotifications.low.enabled = policy.low.enabled!;
+      }
+      if (hasOwnKey(policy.low, "thresholdRemainingPercent")) {
+        config.nativeQuotaNotifications.low.thresholdRemainingPercent =
+          policy.low.thresholdRemainingPercent!;
+        nativeQuotaNotificationCanonicalFields.add("low.thresholdRemainingPercent");
+      }
+    }
+    if (policy.exhausted && hasOwnKey(policy.exhausted, "enabled")) {
+      config.nativeQuotaNotifications.exhausted.enabled = policy.exhausted.enabled!;
+    }
+    if (policy.reset) {
+      if (hasOwnKey(policy.reset, "enabled")) {
+        config.nativeQuotaNotifications.reset.enabled = policy.reset.enabled!;
+      }
+      if (hasOwnKey(policy.reset, "windows")) {
+        config.nativeQuotaNotifications.reset.windows = [...policy.reset.windows!];
+      }
+    }
+    if (policy.providerError && hasOwnKey(policy.providerError, "enabled")) {
+      config.nativeQuotaNotifications.providerError.enabled = policy.providerError.enabled!;
+    }
+    if (hasOwnKey(policy, "duplicateCooldownMinutes")) {
+      config.nativeQuotaNotifications.duplicateCooldownMinutes = policy.duplicateCooldownMinutes!;
+      nativeQuotaNotificationCanonicalFields.add("duplicateCooldownMinutes");
+    }
+    applySettingSource(settingSources, "nativeQuotaNotifications", sourcePath);
+  }
+
   if (hasOwnKey(patch, "lowQuotaThresholdRemainingPercent")) {
     config.lowQuotaThresholdRemainingPercent = patch.lowQuotaThresholdRemainingPercent!;
     applySettingSource(settingSources, "lowQuotaThresholdRemainingPercent", sourcePath);
+    if (!nativeQuotaNotificationCanonicalFields.has("low.thresholdRemainingPercent")) {
+      config.nativeQuotaNotifications.low.thresholdRemainingPercent =
+        patch.lowQuotaThresholdRemainingPercent!;
+      applySettingSource(settingSources, "nativeQuotaNotifications", sourcePath);
+    }
   }
 
   if (hasOwnKey(patch, "duplicateCooldownMinutes")) {
     config.duplicateCooldownMinutes = patch.duplicateCooldownMinutes!;
     applySettingSource(settingSources, "duplicateCooldownMinutes", sourcePath);
+    if (!nativeQuotaNotificationCanonicalFields.has("duplicateCooldownMinutes")) {
+      config.nativeQuotaNotifications.duplicateCooldownMinutes = patch.duplicateCooldownMinutes!;
+      applySettingSource(settingSources, "nativeQuotaNotifications", sourcePath);
+    }
   }
 
   if (hasOwnKey(patch, "tuiCommandDisplay")) {
@@ -1614,6 +1813,7 @@ export async function loadConfigLayered(
     const globalConfigPaths: string[] = [];
     const workspaceConfigPaths: string[] = [];
     const settingSources: QuotaToastSettingSources = {};
+    const nativeQuotaNotificationCanonicalFields = new Set<NativeQuotaNotificationCanonicalField>();
     const settingSourceLayers: LoadConfigMeta["settingSourceLayers"] = {};
     const configIssues: LoadConfigIssue[] = [];
     const authoritativeSidecarRoots = new Set<string>();
@@ -1696,6 +1896,7 @@ export async function loadConfigLayered(
         ),
         sourcePath,
         settingSources,
+        nativeQuotaNotificationCanonicalFields,
       );
 
       if (hasOwnKey(extractedQuotaToast, "alibabaCodingPlanTier")) {

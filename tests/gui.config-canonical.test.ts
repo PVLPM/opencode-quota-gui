@@ -91,6 +91,91 @@ describe("canonical dashboard config layer", () => {
     expect(meta.configIssues).toEqual([]);
   });
 
+  it("loads the Native notification policy without replacing legacy reset configuration", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, {
+      nativeQuotaNotifications: {
+        enabled: false,
+        reset: { windows: [] },
+      },
+      resetNotifications: { enabled: true, windows: ["daily"] },
+    });
+
+    const { config, meta } = await load(workspace);
+
+    expect(config.nativeQuotaNotifications).toEqual({
+      enabled: false,
+      low: { enabled: true, thresholdRemainingPercent: 10 },
+      exhausted: { enabled: true },
+      reset: { enabled: true, windows: [] },
+      providerError: { enabled: true },
+      duplicateCooldownMinutes: 30,
+    });
+    expect(config.resetNotifications).toEqual({ enabled: true, windows: ["daily"] });
+    expect(meta.settingSources.nativeQuotaNotifications).toBe(workspace.guiConfigPath);
+    expect(meta.settingSources["resetNotifications.enabled"]).toBe(workspace.guiConfigPath);
+    expect(meta.configIssues).toEqual([]);
+  });
+
+  it("migrates explicit legacy threshold and cooldown aliases unless canonical fields override them", async () => {
+    const legacyWorkspace = makeWorkspace();
+    writeGuiCanonicalConfig(legacyWorkspace, {
+      lowQuotaThresholdRemainingPercent: 20,
+      duplicateCooldownMinutes: 5,
+      nativeQuotaNotifications: { reset: { enabled: false } },
+    });
+
+    const { config: legacyConfig } = await load(legacyWorkspace);
+    expect(legacyConfig.nativeQuotaNotifications).toEqual({
+      enabled: true,
+      low: { enabled: true, thresholdRemainingPercent: 20 },
+      exhausted: { enabled: true },
+      reset: {
+        enabled: false,
+        windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+      },
+      providerError: { enabled: true },
+      duplicateCooldownMinutes: 5,
+    });
+
+    const canonicalWorkspace = makeWorkspace();
+    writeGuiCanonicalConfig(canonicalWorkspace, {
+      lowQuotaThresholdRemainingPercent: 20,
+      duplicateCooldownMinutes: 5,
+      nativeQuotaNotifications: {
+        low: { thresholdRemainingPercent: 25 },
+        duplicateCooldownMinutes: 7,
+      },
+    });
+
+    const { config: canonicalConfig } = await load(canonicalWorkspace);
+    expect(canonicalConfig.nativeQuotaNotifications.low.thresholdRemainingPercent).toBe(25);
+    expect(canonicalConfig.nativeQuotaNotifications.duplicateCooldownMinutes).toBe(7);
+    expect(canonicalConfig.lowQuotaThresholdRemainingPercent).toBe(20);
+    expect(canonicalConfig.duplicateCooldownMinutes).toBe(5);
+  });
+
+  it("keeps explicit Native fields ahead of legacy aliases from higher config layers", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, {
+      nativeQuotaNotifications: {
+        low: { thresholdRemainingPercent: 25 },
+        duplicateCooldownMinutes: 7,
+      },
+    });
+    writeQuotaSidecarConfig(workspace.workspaceRoot, {
+      lowQuotaThresholdRemainingPercent: 20,
+      duplicateCooldownMinutes: 5,
+    });
+
+    const { config } = await load(workspace);
+
+    expect(config.nativeQuotaNotifications.low.thresholdRemainingPercent).toBe(25);
+    expect(config.nativeQuotaNotifications.duplicateCooldownMinutes).toBe(7);
+    expect(config.lowQuotaThresholdRemainingPercent).toBe(20);
+    expect(config.duplicateCooldownMinutes).toBe(5);
+  });
+
   it("lets project values win on keys the canonical file also sets", async () => {
     const workspace = makeWorkspace();
     writeQuotaSidecarConfig(workspace.workspaceRoot, {

@@ -39,6 +39,7 @@ import {
   isPositiveNumber,
   isValidDuplicateCooldownMinutes,
   isValidLowQuotaThresholdRemainingPercent,
+  isValidNativeQuotaNotificationPolicy,
   isValidOpenCodeGoWindows,
   loadConfig,
   loadConfigLayered,
@@ -93,6 +94,7 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "accountingDetail",
   "lowQuotaThresholdRemainingPercent",
   "duplicateCooldownMinutes",
+  "nativeQuotaNotifications",
   "opencodeGoWindows",
   "opencodeMonthlyLimit",
   "dashboard.hiddenCards",
@@ -431,6 +433,18 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return config.lowQuotaThresholdRemainingPercent;
       case "duplicateCooldownMinutes":
         return config.duplicateCooldownMinutes;
+      case "nativeQuotaNotifications":
+        return {
+          enabled: config.nativeQuotaNotifications.enabled,
+          low: { ...config.nativeQuotaNotifications.low },
+          exhausted: { ...config.nativeQuotaNotifications.exhausted },
+          reset: {
+            ...config.nativeQuotaNotifications.reset,
+            windows: [...config.nativeQuotaNotifications.reset.windows],
+          },
+          providerError: { ...config.nativeQuotaNotifications.providerError },
+          duplicateCooldownMinutes: config.nativeQuotaNotifications.duplicateCooldownMinutes,
+        };
       case "opencodeGoWindows":
         return [...config.opencodeGoWindows];
       case "opencodeMonthlyLimit":
@@ -648,6 +662,18 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
           throw invalidSetting(key, "expected an integer of 0 or more");
         }
         return value;
+      case "nativeQuotaNotifications":
+        if (!isValidNativeQuotaNotificationPolicy(value)) {
+          throw invalidSetting(key, "expected a complete Native quota notification policy");
+        }
+        return {
+          enabled: value.enabled,
+          low: { ...value.low },
+          exhausted: { ...value.exhausted },
+          reset: { ...value.reset, windows: [...new Set(value.reset.windows)] },
+          providerError: { ...value.providerError },
+          duplicateCooldownMinutes: value.duplicateCooldownMinutes,
+        };
       case "opencodeGoWindows":
         if (!isValidOpenCodeGoWindows(value)) {
           throw invalidSetting(
