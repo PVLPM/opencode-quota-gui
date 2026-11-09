@@ -936,6 +936,62 @@ describe("native cache observer runtime", () => {
     runtime.dispose();
   });
 
+  it("keeps the final unavailable source state and gap after replayed cache evidence", () => {
+    const sessionId = "ses_replayed_after_failure";
+    let receiveEvent: ((event: never) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      listChildren: async () => [],
+      rpcConnection: () => "live",
+    });
+    const release = runtime.subscribe(sessionId, vi.fn());
+    const gaps: string[] = [];
+    const releaseGaps = runtime.subscribeGaps((gapSessionId) => gaps.push(gapSessionId));
+
+    receiveEvent?.({
+      type: "source.status",
+      created: 1_700_000_000_050,
+      data: { state: "observed" },
+    } as never);
+    receiveEvent?.({
+      type: "session.step.started",
+      created: 1_700_000_000_100,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_replayed_after_failure",
+        model: { providerID: "openai", id: "gpt-test" },
+        started: 1_700_000_000_090,
+      },
+    } as never);
+    receiveEvent?.({
+      type: "session.step.ended",
+      created: 1_700_000_000_200,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_replayed_after_failure",
+        tokens: { input: 20, cache: { read: 10, write: 0 } },
+      },
+    } as never);
+    expect(runtime.query(sessionId)?.primaryCacheReadRatio?.value).toBe(1 / 3);
+
+    receiveEvent?.({
+      type: "source.status",
+      created: 1_700_000_000_300,
+      data: { state: "unavailable" },
+    } as never);
+
+    expect(runtime.transport()).toMatchObject({ rpc: "live", hostEvents: "unavailable" });
+    expect(runtime.query(sessionId)?.primaryCacheReadRatio).toBeUndefined();
+    expect(gaps).toEqual([sessionId]);
+
+    releaseGaps();
+    release();
+    runtime.dispose();
+  });
+
   it("returns only direct child IDs and sanitized display labels", async () => {
     const runtime = createNativeCacheObserverRuntime({
       subscribeEvents: () => vi.fn(),

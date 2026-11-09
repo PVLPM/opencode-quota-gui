@@ -305,14 +305,25 @@ export const QuotaToastPlugin = Plugin.define({
             gapAt,
           );
         }
-        if (hostEventSourceState !== "unverified") {
-          publishHostEventSourceState(
-            hostEventSourceState,
-            hostEventSourceState === "observed" ? (lastHostEventAtMs ?? Date.now()) : Date.now(),
+        const sourceStateAtRegistration = hostEventSourceState;
+        const firstObservedAt = lastHostEventAtMs;
+        // Preserve the source's initial observation before its buffered events. If the stream
+        // stopped while registration was pending, replay those events before the final
+        // unavailable state. Keep this flush synchronous so later live events cannot interleave.
+        if (firstObservedAt !== undefined) {
+          emitCacheObserverEvent(
+            { type: "source.status", created: firstObservedAt, data: { state: "observed" } },
+            firstObservedAt,
           );
         }
         for (const pending of bufferedCacheObserverEvents) {
           emitCacheObserverEvent(pending.event, pending.at);
+        }
+        if (
+          sourceStateAtRegistration !== "unverified" &&
+          sourceStateAtRegistration !== "observed"
+        ) {
+          publishHostEventSourceState(sourceStateAtRegistration, Date.now());
         }
       } catch {
         console.warn(`[opencode-quota-gui] dashboard RPC unavailable: registration-failed`);

@@ -442,6 +442,124 @@ describe("V2 server plugin credential lifecycle", () => {
     nativeObserver.dispose();
   });
 
+  it("replays buffered cache events before publishing a host stream failure to Native", async () => {
+    const ctx = createContext();
+    const created = 1_700_000_000_200;
+    const sessionId = "ses_failed_pre_registration";
+    const messageId = "msg_failed_pre_registration";
+    const subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => ({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "session.step.started",
+          created,
+          data: {
+            sessionID: sessionId,
+            assistantMessageID: messageId,
+            model: { providerID: "openai", id: "gpt-test" },
+            started: created - 10,
+          },
+        };
+        yield {
+          type: "session.step.ended",
+          created: created + 100,
+          data: {
+            sessionID: sessionId,
+            assistantMessageID: messageId,
+            tokens: { input: 20, cache: { read: 10, write: 0 } },
+            content: "private event content must not cross RPC",
+          },
+        };
+        if (!signal.aborted) throw new Error("host stream ended");
+      },
+    }));
+    let receiveNativeEvent: ((event: never) => void) | undefined;
+    const nativeObserver = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveNativeEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+    });
+    const releaseNativeObserver = nativeObserver.subscribe(sessionId, vi.fn());
+    let resolveRegistration!: (registration: {
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }) => void;
+    const registration = new Promise<{
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }>((resolve) => {
+      resolveRegistration = resolve;
+    });
+    const emit = vi.fn(
+      async (
+        _name: string,
+        eventData: {
+          topic?: string;
+          cacheObserverEvent?: { type: string };
+        },
+      ) => {
+        if (eventData.topic === "cache.observer") {
+          receiveNativeEvent?.(eventData.cacheObserverEvent as never);
+        }
+      },
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    vi.mocked(registerDashboardRpc).mockImplementationOnce(async () => registration as never);
+
+    let resolveRegistrationCalled = false;
+    let cleanup: (() => Promise<void> | void) | undefined;
+    const setup = setupPlugin({ ...ctx, rpc: {} as never, event: { subscribe } });
+    try {
+      await vi.waitFor(() => expect(registerDashboardRpc).toHaveBeenCalledOnce());
+      await vi.waitFor(() =>
+        expect(warn).toHaveBeenCalledWith(
+          "[opencode-quota-gui] host event subscription stopped: host stream ended",
+        ),
+      );
+      expect(emit).not.toHaveBeenCalled();
+
+      resolveRegistration({ events: { emit }, dispose: async () => {} });
+      resolveRegistrationCalled = true;
+      cleanup = await setup;
+      await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(4));
+
+      const relayedEvents = emit.mock.calls.map(([, eventData]) => eventData.cacheObserverEvent);
+      expect(relayedEvents.map((event) => event?.type)).toEqual([
+        "source.status",
+        "session.step.started",
+        "session.step.ended",
+        "source.status",
+      ]);
+      expect(relayedEvents[0]).toMatchObject({
+        type: "source.status",
+        data: { state: "observed" },
+      });
+      expect(relayedEvents.at(-1)).toMatchObject({
+        type: "source.status",
+        data: { state: "unavailable" },
+      });
+      expect(JSON.stringify(emit.mock.calls)).not.toContain("private event content");
+      expect(nativeObserver.transport().hostEvents).toBe("unavailable");
+      expect(nativeObserver.query(sessionId)?.primaryCacheReadRatio).toBeUndefined();
+    } finally {
+      if (!resolveRegistrationCalled) {
+        resolveRegistration({ events: { emit }, dispose: async () => {} });
+      }
+      cleanup ??= await setup;
+      await cleanup?.();
+      releaseNativeObserver();
+      nativeObserver.dispose();
+      warn.mockRestore();
+    }
+  });
+
   it("keeps credential events responsive and disposes while a cache emitter remains unresolved", async () => {
     const ctx = createContext();
     const host = createHostEventQueue();
