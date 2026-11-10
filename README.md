@@ -115,7 +115,11 @@ In OpenCode Desktop 2.2.1+, **Quota & Usage** opens the product in the side pane
 
 The panel follows you between sessions: switching sessions reuses the same shared quota and analytics state instead of starting over, and header quota indicators stay in place across OpenCode Desktop's normal dashboard watch rotations.
 
-Native notifications cover low quota, exhausted quota, quota reset, and provider or API failures. The low-quota threshold and duplicate cooldown are configurable in Settings. A focused window shows an in-app toast; a background window asks OpenCode to notify you. Delivery is best effort, not exactly once.
+The Native composer also shows **Cache observation**. Its hit percentage is the cache-read share of the last completed primary call with reliable usage data, not a session average. Green means cache reuse is likely within an estimated retention window; yellow means the estimate is uncertain or in its final 20%; red means estimated expiry, observed invalidation, or a model change; gray means there is insufficient reliable information. Colors estimate future reuse and do not guarantee the next hit or prove what a provider retained. Select a session row to open its Session Analytics in the panel without switching the active chat; its breadcrumbs link back to parent sessions.
+
+For eligible quota windows, hover or focus the percentage or progress bar to see a linear runway estimate. It is available only when the provider data supports a reliable window projection; a reset timestamp alone is not enough. In particular, OpenCode Go's rolling five-hour window does not establish a fixed window start.
+
+Native notifications cover low quota, exhausted quota, quota reset, and provider or API failures. The low-quota threshold and duplicate cooldown are configurable in Settings. A focused window shows an in-app toast; a background window asks OpenCode to notify you. The model-change toast has its own Settings toggle and does not control cache mismatch detection. Delivery is best effort, not exactly once.
 
 ## Optional browser dashboard
 
