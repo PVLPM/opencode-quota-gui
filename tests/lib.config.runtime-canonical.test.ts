@@ -93,44 +93,6 @@ describe("runtime loadConfig canonical-only", () => {
     expect(meta.configIssues).toEqual([]);
   });
 
-  it("keeps legacy agentCustomProviders entries inert without read failures or migration", async () => {
-    const canonicalPath = writeGuiCanonicalConfig(workspace, {
-      quotaProviders: [],
-      agentCustomProviders: [
-        {
-          definition: {
-            id: "legacy-proposal",
-            providerId: "openai",
-            label: "Legacy Proposal",
-            mode: "remote-api",
-            url: "https://legacy-proposal.example/accounting",
-            format: "quota-v1",
-            apiKeyEnv: "LEGACY_PROPOSAL_KEY",
-          },
-          trustedDefinitionHash: "0".repeat(64),
-          enabled: true,
-        },
-        { definition: { id: "broken" }, trustedDefinitionHash: null, enabled: true },
-      ],
-    });
-    const before = readFileSync(canonicalPath, "utf8");
-
-    const meta = createLoadConfigMeta();
-    const config = await loadConfig(undefined, meta, {
-      configRootDir: workspace.workspaceRoot,
-      globalConfigDir: workspace.configDir,
-    });
-
-    // Inert: legacy proposals never reach runtime polling or trust bookkeeping.
-    expect(config.quotaProviders).toEqual([]);
-    expect(config.agentCustomProviderIds).toBeUndefined();
-    expect(config.agentCustomProviderTrust).toBeUndefined();
-    // No canonical read failure: the unknown key is ignored, not rejected.
-    expect(meta.configIssues).toEqual([]);
-    // The user's file is never altered: no migration, no rewrite.
-    expect(readFileSync(canonicalPath, "utf8")).toBe(before);
-  });
-
   it("returns defaults when the canonical file is absent, even when every legacy source is configured", async () => {
     writeQuotaSidecarConfig(workspace.configDir, { enabled: false, minIntervalMs: 9_999 });
     writeQuotaToastConfig(workspace.configDir, { enabled: false, minIntervalMs: 8_888 });

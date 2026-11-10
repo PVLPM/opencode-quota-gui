@@ -5,6 +5,7 @@ import { BUILD_IDENTITY } from "../contracts/build-identity.js";
 import { ErrorCard } from "../ui/components/states";
 import { createToaster, ToastRegion } from "../ui/components/toast";
 import { SettingsRoute } from "../ui/routes";
+import { AgentProviderReview } from "./agent-provider-review.js";
 import { createNativeDashboardClient } from "./dashboard-client.js";
 import { createGuiRpcCaller } from "./rpc.js";
 import {
@@ -135,6 +136,7 @@ export function NativeSettingsPage(props: {
         <Switch>
           <Match when={contentMode() === "settings"}>
             <div class="qg-main" data-settings="true">
+              <AgentProviderReview client={client} stale={state.stale()} />
               <SettingsRoute
                 client={client}
                 query={state.query}
