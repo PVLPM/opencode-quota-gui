@@ -468,23 +468,11 @@ export function classifyCacheObserverState(
     };
   }
 
-  // Green is reserved for explicit invocation-bound evidence (a configured
-  // TTL). A documented provider-ID baseline is a meaningful assumption about
-  // the effective endpoint — report it as yellow risk, never as evidenced reuse.
-  if (policy.kind === "configured") {
-    return {
-      color: "green",
-      reason: hasObservedRead(latestReuse.counts)
-        ? "estimated-reuse-within-ttl"
-        : "estimated-write-within-ttl",
-      recheckAtMs: warningAtMs,
-      ...shared,
-    };
-  }
-
   return {
-    color: "yellow",
-    reason: "assumed-route-risk",
+    color: "green",
+    reason: hasObservedRead(latestReuse.counts)
+      ? "estimated-reuse-within-ttl"
+      : "estimated-write-within-ttl",
     recheckAtMs: warningAtMs,
     ...shared,
   };
@@ -665,6 +653,9 @@ interface CacheTtlPolicy {
   assumption: string;
 }
 
+const DOCUMENTED_ROUTE_ASSUMPTION =
+  "assuming direct standard route/default TTL; custom endpoint, gateway, changed configuration or provider eviction may cause miss";
+
 const DOCUMENTED_TTL_POLICIES: readonly (CacheTtlPolicy & { providerIds: readonly string[] })[] = [
   {
     providerIds: ["anthropic"],
@@ -672,8 +663,7 @@ const DOCUMENTED_TTL_POLICIES: readonly (CacheTtlPolicy & { providerIds: readonl
     ttlMs: 300_000,
     source: "Anthropic prompt caching documentation",
     reference: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
-    assumption:
-      "Assumes the direct Anthropic Messages route uses the documented 5-minute default; optional 1-hour TTL and custom or gateway endpoints are not observable, and the effective endpoint may be overridden by a gateway or proxy.",
+    assumption: DOCUMENTED_ROUTE_ASSUMPTION,
   },
   {
     providerIds: [
@@ -689,8 +679,7 @@ const DOCUMENTED_TTL_POLICIES: readonly (CacheTtlPolicy & { providerIds: readonl
     ttlMs: 300_000,
     source: "Kimi context caching documentation",
     reference: "https://platform.kimi.ai/docs/guide/context-caching",
-    assumption:
-      "Uses the documented 5-minute Kimi TTL option as a baseline; an optional 1-hour policy and custom or gateway endpoints are not observable, and the effective endpoint may be overridden by a gateway or proxy.",
+    assumption: DOCUMENTED_ROUTE_ASSUMPTION,
   },
   {
     providerIds: [
@@ -706,7 +695,7 @@ const DOCUMENTED_TTL_POLICIES: readonly (CacheTtlPolicy & { providerIds: readonl
     source: "Qwen context caching documentation",
     reference: "https://docs.qwencloud.com/developer-guides/run-and-scale/context-cache",
     assumption:
-      "Assumes the selected direct Qwen service and model use the documented 5-minute cache; cache eligibility and custom or gateway endpoints are not observable, and the effective endpoint may be overridden by a gateway or proxy.",
+      "Assumes 5-minute explicit/session caching; implicit cache retention is indeterminate. Custom endpoint, gateway, changed configuration, or provider eviction may cause a miss.",
   },
   {
     providerIds: ["amazon-bedrock"],
@@ -714,8 +703,7 @@ const DOCUMENTED_TTL_POLICIES: readonly (CacheTtlPolicy & { providerIds: readonl
     ttlMs: 300_000,
     source: "Amazon Bedrock prompt caching documentation",
     reference: "https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html",
-    assumption:
-      "Uses the documented default 5-minute TTL; model-specific 1-hour eligibility and custom or gateway endpoints are not observable, and the effective endpoint may be overridden by a gateway or proxy.",
+    assumption: DOCUMENTED_ROUTE_ASSUMPTION,
   },
 ];
 

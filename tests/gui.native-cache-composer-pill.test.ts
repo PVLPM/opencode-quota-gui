@@ -655,6 +655,82 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
   container.remove();
 });
 
+it("renders documented Qwen cache estimates and their explicit-cache condition from the runtime", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  const main = session("ses_qwen");
+  let emit: ((event: unknown) => void) | undefined;
+  const observer = createNativeCacheObserverRuntime({
+    subscribeEvents: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+    rpcConnection: () => "live",
+    listChildren: async () => [],
+    now: () => Date.now(),
+  });
+  const runtime = mockRuntime(observer);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => main } as unknown as Sessions, runtime),
+    dispose: cleanup,
+  }));
+  await flush();
+  renderMenu(pill, () => main, container);
+
+  const startedAt = Date.now() - 100;
+  emit?.(
+    projectOpenCodeCacheObserverEvent({
+      type: "session.step.started",
+      id: "evt_qwen_started",
+      created: startedAt + 25,
+      data: {
+        sessionID: main.id,
+        assistantMessageID: "msg_qwen",
+        model: { providerID: "alibaba", id: "qwen-test" },
+        started: startedAt,
+      },
+    }),
+  );
+  emit?.(
+    projectOpenCodeCacheObserverEvent({
+      type: "session.step.ended",
+      id: "evt_qwen_ended",
+      created: startedAt + 50,
+      data: {
+        sessionID: main.id,
+        assistantMessageID: "msg_qwen",
+        tokens: { input: 20, cache: { read: 80, write: 0 } },
+      },
+    }),
+  );
+
+  expect(observer.query(main.id)).toMatchObject({
+    color: "green",
+    ttlSemantics: "documented-estimate",
+    ttlEstimate: {
+      source: "Qwen context caching documentation",
+      assumption:
+        "Assumes 5-minute explicit/session caching; implicit cache retention is indeterminate. Custom endpoint, gateway, changed configuration, or provider eviction may cause a miss.",
+    },
+  });
+  expect(pill.show({ session: main } as ComposerPillProps)?.tone).toBe("success");
+
+  const dot = container.querySelector<HTMLButtonElement>("button.qg-cache-success");
+  dot?.dispatchEvent(new Event("pointerenter"));
+  const tooltip = container.querySelector<HTMLElement>('[role="tooltip"]');
+  expect(tooltip?.textContent).toContain("Estimated within retention");
+  expect(tooltip?.textContent).toContain("Retention basis · Qwen context caching documentation");
+  expect(tooltip?.textContent).toContain(
+    "Assumes 5-minute explicit/session caching; implicit cache retention is indeterminate. Custom endpoint, gateway, changed configuration, or provider eviction may cause a miss.",
+  );
+
+  dispose();
+  observer.dispose();
+  container.remove();
+});
+
 it("renders the estimated-expiry red state with its historical provenance", async () => {
   vi.useFakeTimers();
   const a = session("a");

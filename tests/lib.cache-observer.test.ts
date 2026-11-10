@@ -522,8 +522,9 @@ describe("observer-only cache state", () => {
     );
 
     expect(classifyCacheObserverState(state, 10_000 + 239_999)).toMatchObject({
-      color: "yellow",
-      reason: "assumed-route-risk",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
+      ttlSemantics: "documented-estimate",
       ttlEstimate: {
         kind: "documented",
         ttlMs: 300_000,
@@ -531,6 +532,8 @@ describe("observer-only cache state", () => {
         deadlineAtMs: 310_000,
         source: "Anthropic prompt caching documentation",
         reference: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+        assumption:
+          "assuming direct standard route/default TTL; custom endpoint, gateway, changed configuration or provider eviction may cause miss",
       },
       recheckAtMs: 250_000,
     });
@@ -560,8 +563,8 @@ describe("observer-only cache state", () => {
     );
 
     expect(classifyCacheObserverState(state, 400_000)).toMatchObject({
-      color: "yellow",
-      reason: "assumed-route-risk",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
       ttlEstimate: {
         dispatchAtMs: 395_000,
         deadlineAtMs: 695_000,
@@ -596,13 +599,43 @@ describe("observer-only cache state", () => {
         dispatchAtMs: 10_000,
       }),
     );
+    const assumption =
+      providerId === "alibaba"
+        ? "Assumes 5-minute explicit/session caching; implicit cache retention is indeterminate. Custom endpoint, gateway, changed configuration, or provider eviction may cause a miss."
+        : "assuming direct standard route/default TTL; custom endpoint, gateway, changed configuration or provider eviction may cause miss";
 
     expect(classifyCacheObserverState(state, 20_000)).toMatchObject({
-      color: "yellow",
-      reason: "assumed-route-risk",
-      ttlEstimate: { kind: "documented", ttlMs: 300_000, source, reference },
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
+      ttlSemantics: "documented-estimate",
+      ttlEstimate: {
+        kind: "documented",
+        ttlMs: 300_000,
+        source,
+        reference,
+        assumption,
+      },
     });
     expect(classifyCacheObserverState(state, 20_000)?.ttlEstimate?.assumption).toBeTruthy();
+  });
+
+  it("classifies a documented primary cache write as a green likely-reuse estimate", () => {
+    const providerRoute = { ...route, providerId: "moonshotai", protocolId: undefined };
+    const state = observeCacheInvocation(
+      createCacheObserverState({ sessionId: "ses-parent", route: providerRoute }),
+      invocation({
+        order: { completedAtMs: 100, messageId: "msg-write" },
+        route: providerRoute,
+        dispatchAtMs: 100,
+        counts: { fresh: 20, read: 0, write: 10 },
+      }),
+    );
+
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+      color: "green",
+      reason: "estimated-write-within-ttl",
+      ttlSemantics: "documented-estimate",
+    });
   });
 
   it("keeps gateways and unknown provider routes gray instead of applying a generic baseline", () => {

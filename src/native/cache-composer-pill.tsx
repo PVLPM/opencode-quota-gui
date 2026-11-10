@@ -74,8 +74,8 @@ function formatTime(ms: number | undefined): string | undefined {
 
 /**
  * The traffic-light presentation of one classification. Colors render as
- * estimated states — green is an estimate bound to a configured retention
- * window, never a claim about the provider's physical cache.
+ * estimated states — green is a best-effort estimate within a configured or
+ * documented retention window, never a claim about the provider's physical cache.
  */
 function presentation(observed: CacheObserverClassification | undefined) {
   const tone =

@@ -490,8 +490,8 @@ describe("native cache observer runtime", () => {
       },
     } as never);
     expect(runtime.query("ses_revisit")).toMatchObject({
-      color: "yellow",
-      reason: "assumed-route-risk",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
       ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
     });
 
@@ -511,8 +511,8 @@ describe("native cache observer runtime", () => {
     await runtime.bootstrapHistory(["ses_revisit"]);
 
     expect(runtime.query("ses_revisit")).toMatchObject({
-      color: "yellow",
-      reason: "assumed-route-risk",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
       ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
       primaryCacheReadRatio: { messageId: "msg_revisit" },
     });
@@ -810,19 +810,19 @@ describe("native cache observer runtime", () => {
     started("msg_default", "default");
     ended("msg_default", 1_100);
     expect(runtime.query("ses_route")).toMatchObject({
-      color: "yellow",
-      reason: "assumed-route-risk",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
       ttlEstimate: { dispatchAtMs: 900, deadlineAtMs: 300_900 },
       primaryCacheReadRatio: { value: 0.15384615384615385, messageId: "msg_default" },
     });
     expect(runtime.query("ses_route")).not.toHaveProperty("configuredTtlDeadlineAtMs");
 
     started("msg_implicit_default");
-    expect(runtime.query("ses_route")).toMatchObject({ reason: "assumed-route-risk" });
+    expect(runtime.query("ses_route")).toMatchObject({ reason: "estimated-reuse-within-ttl" });
     ended("msg_implicit_default", 1_200);
     expect(runtime.query("ses_route")).toMatchObject({
-      color: "yellow",
-      reason: "assumed-route-risk",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
       primaryCacheReadRatio: {
         value: 0.15384615384615385,
         messageId: "msg_implicit_default",
@@ -836,8 +836,8 @@ describe("native cache observer runtime", () => {
     });
     ended("msg_variant_change", 1_300);
     expect(runtime.query("ses_route")).toMatchObject({
-      color: "yellow",
-      reason: "assumed-route-risk",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
       ttlEstimate: { dispatchAtMs: 900 },
       primaryCacheReadRatio: {
         value: 0.15384615384615385,
