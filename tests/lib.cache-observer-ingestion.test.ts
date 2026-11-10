@@ -1246,4 +1246,256 @@ describe("cache observer event ingestion", () => {
     });
     ingestor.dispose();
   });
+
+  it("projects host session status, idle and execution events to the content-free status DTO", () => {
+    const created = 1_700_000_000_000;
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.status",
+        id: "evt_status_busy",
+        created,
+        data: { sessionID: "ses_status", status: { type: "busy" } },
+      }),
+    ).toEqual({
+      type: "session.status",
+      created,
+      data: { sessionID: "ses_status", state: "busy" },
+    });
+    // A retrying session is still executing: confirmed busy, no attempt detail.
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.status",
+        id: "evt_status_retry",
+        created,
+        data: {
+          sessionID: "ses_status",
+          status: { type: "retry", attempt: 2, message: "PRIVATE RETRY DETAIL", next: created + 5 },
+        },
+      }),
+    ).toEqual({
+      type: "session.status",
+      created,
+      data: { sessionID: "ses_status", state: "busy" },
+    });
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.status",
+        id: "evt_status_idle",
+        created,
+        data: { sessionID: "ses_status", status: { type: "idle" } },
+      }),
+    ).toEqual({
+      type: "session.status",
+      created,
+      data: { sessionID: "ses_status", state: "idle" },
+    });
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.idle",
+        id: "evt_idle",
+        created,
+        data: { sessionID: "ses_status" },
+      }),
+    ).toEqual({
+      type: "session.status",
+      created,
+      data: { sessionID: "ses_status", state: "idle" },
+    });
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.execution.started",
+        id: "evt_exec_started",
+        created,
+        data: { sessionID: "ses_status" },
+      }),
+    ).toEqual({
+      type: "session.status",
+      created,
+      data: { sessionID: "ses_status", state: "busy" },
+    });
+    // A failed execution ends execution; its structured error is not carried.
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.execution.failed",
+        id: "evt_exec_failed",
+        created,
+        data: { sessionID: "ses_status", error: { name: "PRIVATE_ERROR", message: "secret" } },
+      }),
+    ).toEqual({
+      type: "session.status",
+      created,
+      data: { sessionID: "ses_status", state: "idle" },
+    });
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.execution.interrupted",
+        id: "evt_exec_interrupted",
+        created,
+        data: { sessionID: "ses_status", reason: "user" },
+      }),
+    ).toEqual({
+      type: "session.status",
+      created,
+      data: { sessionID: "ses_status", state: "idle" },
+    });
+  });
+
+  it("rejects malformed or content-bearing session status projections", () => {
+    const created = 1_700_000_000_000;
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.status",
+        id: "evt_status_unknown",
+        created,
+        data: { sessionID: "ses_status", status: { type: "something-else" } },
+      }),
+    ).toBeUndefined();
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.status",
+        id: "evt_status_no_time",
+        data: { sessionID: "ses_status", status: { type: "busy" } },
+      }),
+    ).toBeUndefined();
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        type: "session.status",
+        created,
+        data: { sessionID: "ses_status", state: "busy" },
+      }),
+    ).toBe(true);
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        type: "session.status",
+        created,
+        data: { sessionID: "ses_status", state: "running" },
+      }),
+    ).toBe(false);
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        type: "session.status",
+        created,
+        data: { sessionID: "ses_status", state: "busy", note: "extra" },
+      }),
+    ).toBe(false);
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        type: "session.status",
+        data: { sessionID: "ses_status", state: "busy" },
+      }),
+    ).toBe(false);
+  });
+
+  it("projects host rename, agent and model selections to the narrow metadata DTO", () => {
+    const created = 1_700_000_000_000;
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.renamed",
+        id: "evt_renamed",
+        created,
+        data: { sessionID: "ses_meta", title: "New  title\u0007here" },
+      }),
+    ).toEqual({
+      type: "session.metadata",
+      created,
+      data: { sessionID: "ses_meta", title: "New title here" },
+    });
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.agent.selected",
+        id: "evt_agent",
+        created,
+        data: { sessionID: "ses_meta", agent: "build", previous: "plan" },
+      }),
+    ).toEqual({
+      type: "session.metadata",
+      created,
+      data: { sessionID: "ses_meta", agent: "build" },
+    });
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.model.selected",
+        id: "evt_model",
+        created,
+        data: {
+          sessionID: "ses_meta",
+          model: { providerID: "zai", id: "glm-test", variant: "max" },
+          previous: { providerID: "zai", id: "glm-old" },
+        },
+      }),
+    ).toEqual({
+      type: "session.metadata",
+      created,
+      data: {
+        sessionID: "ses_meta",
+        model: { providerID: "zai", id: "glm-test", variant: "max" },
+      },
+    });
+    // Over-long titles are truncated to the relay bound, never dropped whole.
+    const longTitle = projectOpenCodeCacheObserverEvent({
+      type: "session.renamed",
+      id: "evt_long",
+      created,
+      data: { sessionID: "ses_meta", title: "x".repeat(500) },
+    });
+    expect(longTitle).toMatchObject({ type: "session.metadata" });
+    if (longTitle?.type !== "session.metadata") throw new Error("Expected metadata DTO");
+    expect(longTitle.data.title?.length).toBe(200);
+  });
+
+  it("rejects malformed or content-bearing metadata projections", () => {
+    const created = 1_700_000_000_000;
+    // A rename to a control-character-only title relays nothing.
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.renamed",
+        id: "evt_blank",
+        created,
+        data: { sessionID: "ses_meta", title: "\u0007\u0008" },
+      }),
+    ).toBeUndefined();
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.model.selected",
+        id: "evt_bad_model",
+        created,
+        data: { sessionID: "ses_meta", model: { providerID: "" } },
+      }),
+    ).toBeUndefined();
+    expect(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.metadata.updated",
+        id: "evt_metadata_updated",
+        created,
+        data: { sessionID: "ses_meta", metadata: { arbitrary: "content" } },
+      }),
+    ).toBeUndefined();
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        type: "session.metadata",
+        created,
+        data: { sessionID: "ses_meta", title: "Fine" },
+      }),
+    ).toBe(true);
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        type: "session.metadata",
+        created,
+        data: { sessionID: "ses_meta", title: "Fine", cost: 12 },
+      }),
+    ).toBe(false);
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        type: "session.metadata",
+        created,
+        data: { sessionID: "ses_meta", title: "has\u0007control" },
+      }),
+    ).toBe(false);
+    expect(
+      isDashboardRpcCacheObserverEvent({
+        type: "session.metadata",
+        data: { sessionID: "ses_meta", title: "Fine" },
+      }),
+    ).toBe(false);
+  });
 });

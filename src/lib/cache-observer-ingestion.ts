@@ -163,7 +163,9 @@ export function projectOpenCodeCacheObserverEvent(
   if (started !== undefined) return started;
 
   const update = cacheObserverUpdateFromOpenCodeEvent(event);
-  if (update === undefined) return undefined;
+  if (update === undefined) {
+    return projectSessionStatusEvent(event) ?? projectSessionMetadataEvent(event);
+  }
 
   if (update.kind === "invocation") {
     const { completedAtMs, messageId } = update.observation.order;
@@ -205,6 +207,127 @@ export function projectOpenCodeCacheObserverEvent(
 
   const type = update.kind === "compaction" ? "session.compaction.ended" : "session.deleted";
   return { type, data: { sessionID: update.sessionId } };
+}
+
+/**
+ * Project the host's authoritative session execution state to the content-free
+ * status DTO. `session.status` busy/retry, `session.idle` and the execution
+ * lifecycle events are the confirmed busy sources; error details, messages and
+ * every other field are neither read nor copied.
+ */
+function projectSessionStatusEvent(
+  event: unknown,
+): Extract<DashboardRpcCacheObserverEvent, { type: "session.status" }> | undefined {
+  if (!isRecord(event) || typeof event.type !== "string" || !isRecord(event.data)) return undefined;
+  if (typeof event.created !== "number" || !Number.isFinite(event.created) || event.created < 0) {
+    return undefined;
+  }
+  const sessionId = nonEmptyString(event.data.sessionID);
+  if (sessionId === undefined) return undefined;
+
+  let state: "busy" | "idle";
+  if (event.type === "session.status") {
+    const status = isRecord(event.data.status) ? event.data.status.type : undefined;
+    if (status === "busy" || status === "retry") state = "busy";
+    else if (status === "idle") state = "idle";
+    else return undefined;
+  } else if (event.type === "session.idle" || event.type === "session.execution.succeeded") {
+    state = "idle";
+  } else if (event.type === "session.execution.started") {
+    state = "busy";
+  } else if (
+    event.type === "session.execution.failed" ||
+    event.type === "session.execution.interrupted"
+  ) {
+    state = "idle";
+  } else {
+    return undefined;
+  }
+  return { type: "session.status", created: event.created, data: { sessionID: sessionId, state } };
+}
+
+const MAX_RELAYED_TITLE_CODEUNITS = 200;
+const MAX_RELAYED_ID_CODEUNITS = 256;
+
+/**
+ * A relayed session title: control characters removed, whitespace collapsed,
+ * bounded to what the event guard accepts. An empty result omits the field.
+ */
+function boundedRelayedTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = Array.from(value.normalize("NFC"), (character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint < 0x20 || codePoint === 0x7f) return " ";
+    return character;
+  })
+    .join("")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!clean) return undefined;
+  return clean.length > MAX_RELAYED_TITLE_CODEUNITS
+    ? clean.slice(0, MAX_RELAYED_TITLE_CODEUNITS)
+    : clean;
+}
+
+function boundedRelayedId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const clean = value.trim();
+  if (!clean || clean.length > MAX_RELAYED_ID_CODEUNITS) return undefined;
+  for (const character of clean) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint < 0x20 || codePoint === 0x7f) return undefined;
+  }
+  return clean;
+}
+
+/**
+ * Project the host's session-identity updates to the content-free metadata
+ * DTO: renames carry the new title, model/agent selections their reference.
+ * `previous` values and every other field are neither read nor copied.
+ */
+function projectSessionMetadataEvent(
+  event: unknown,
+): Extract<DashboardRpcCacheObserverEvent, { type: "session.metadata" }> | undefined {
+  if (!isRecord(event) || typeof event.type !== "string" || !isRecord(event.data)) return undefined;
+  if (typeof event.created !== "number" || !Number.isFinite(event.created) || event.created < 0) {
+    return undefined;
+  }
+  const sessionId = nonEmptyString(event.data.sessionID);
+  if (sessionId === undefined || sessionId.length > MAX_RELAYED_ID_CODEUNITS) return undefined;
+
+  if (event.type === "session.renamed") {
+    const title = boundedRelayedTitle(event.data.title);
+    return title === undefined
+      ? undefined
+      : { type: "session.metadata", created: event.created, data: { sessionID: sessionId, title } };
+  }
+  if (event.type === "session.agent.selected") {
+    const agent = boundedRelayedId(event.data.agent);
+    return agent === undefined
+      ? undefined
+      : { type: "session.metadata", created: event.created, data: { sessionID: sessionId, agent } };
+  }
+  if (event.type === "session.model.selected") {
+    const model = isRecord(event.data.model) ? event.data.model : undefined;
+    if (model === undefined) return undefined;
+    const providerId = boundedRelayedId(model.providerID);
+    const modelId = boundedRelayedId(model.id);
+    if (providerId === undefined || modelId === undefined) return undefined;
+    const variant = boundedRelayedId(model.variant);
+    return {
+      type: "session.metadata",
+      created: event.created,
+      data: {
+        sessionID: sessionId,
+        model: {
+          providerID: providerId,
+          id: modelId,
+          ...(variant === undefined ? {} : { variant }),
+        },
+      },
+    };
+  }
+  return undefined;
 }
 
 /**

@@ -11,9 +11,31 @@ import {
 import type { DashboardRpcCacheObserverEvent } from "../rpc.js";
 import type { NativeDashboardConnection } from "./dashboard-client.js";
 
+export interface NativeCacheObserverChildModel {
+  providerID: string;
+  id: string;
+  variant?: string;
+}
+
 export interface NativeCacheObserverChild {
   sessionId: string;
   label: string;
+}
+
+/**
+ * Public session-identity metadata for any watched session (the selected
+ * session and its children), from `session.get`/`session.list` records and
+ * narrow `session.renamed`/`session.agent.selected`/`session.model.selected`
+ * update events. Display data only; no message or credential content.
+ */
+export interface NativeCacheObserverSessionMeta {
+  title?: string;
+  agent?: string;
+  model?: NativeCacheObserverChildModel;
+  /** Public `time.created`; a recency fallback only, never a cache claim. */
+  createdAtMs?: number;
+  /** Maximum host timestamp observed for identity updates or session activity. */
+  updatedAtMs?: number;
 }
 
 export interface NativeCacheObserverChildrenSnapshot {
@@ -35,9 +57,23 @@ export interface NativeCacheObserverTransport {
   lastHostEventAtMs?: number;
 }
 
+export type NativeCacheObserverSessionStatus = "busy" | "idle" | "unknown";
+
 export interface NativeCacheObserver {
   query(sessionId: string): CacheObserverClassification | undefined;
   subscribe(sessionId: string, listener: CacheObserverListener): () => void;
+  /**
+   * The session's execution state from confirmed host evidence only: relayed
+   * status/idle/execution events and `session.active` reconciliation.
+   * `"unknown"` means no confirmed evidence has arrived yet.
+   */
+  status(sessionId: string): NativeCacheObserverSessionStatus;
+  /**
+   * The session's public identity metadata (title, agent, model, activity
+   * timestamps), kept current from records and update events. Undefined when
+   * nothing authoritative has arrived for this session yet.
+   */
+  metadata(sessionId: string): NativeCacheObserverSessionMeta | undefined;
   /** Notifies exact sessions whose history was invalidated by an observation gap. */
   subscribeGaps(listener: (sessionId: string) => void): () => void;
   /** One-shot direct-child discovery; it does not start or retain a transport. */
@@ -68,9 +104,36 @@ export function createNativeCacheObserverRuntime(options: {
   subscribeRpcConnection?: (listener: (state: NativeDashboardConnection) => void) => () => void;
   subscribeReconnect?: (listener: () => void) => () => void;
   subscribeEventStreamRetire?: (listener: () => void) => () => void;
-  listChildren: (
-    parentSessionId: string,
-  ) => Promise<ReadonlyArray<{ id: string; parentID?: string; title?: string }>>;
+  listChildren: (parentSessionId: string) => Promise<
+    ReadonlyArray<{
+      id: string;
+      parentID?: string;
+      title?: string;
+      agent?: string;
+      model?: NativeCacheObserverChildModel;
+      timeCreatedMs?: number;
+      timeUpdatedMs?: number;
+    }>
+  >;
+  /**
+   * One-shot authoritative busy snapshot from the public `session.active` RPC,
+   * used to reconcile status on (re)connect. Never polled.
+   */
+  listActiveSessions?: () => Promise<ReadonlyArray<string>>;
+  /**
+   * One-shot public `session.get` projection used to seed (on first interest)
+   * and refresh (after reconnect) a watched session's identity metadata.
+   */
+  getSessionMetadata?: (
+    sessionId: string,
+    requestOptions: { signal: AbortSignal },
+  ) => Promise<{
+    title?: string;
+    agent?: string;
+    model?: NativeCacheObserverChildModel;
+    timeCreatedMs?: number;
+    timeUpdatedMs?: number;
+  }>;
   listMessages?: (
     input: NativeCacheObserverMessageListQuery,
     requestOptions: { signal: AbortSignal },
@@ -101,6 +164,24 @@ export function createNativeCacheObserverRuntime(options: {
   const childOwners = new Map<string, string>();
   const transportListeners = new Set<(transport: NativeCacheObserverTransport) => void>();
   const gapListeners = new Set<(sessionId: string) => void>();
+  /** The cache listeners this runtime installed, so confirmed status changes reach them. */
+  const ingestorListeners = new Map<string, Set<CacheObserverListener>>();
+  /** Confirmed execution state, tracked only for sessions a consumer observes. */
+  const sessionStatuses = new Map<string, Exclude<NativeCacheObserverSessionStatus, "unknown">>();
+  /**
+   * Per-session clock of received status-affecting events. A reconciliation
+   * snapshot captured at revision N may not overwrite a session whose clock
+   * has moved past N: the live event is the newer evidence.
+   */
+  const statusEventRevisions = new Map<string, number>();
+  /** Public identity metadata, tracked only for sessions a consumer observes. */
+  const sessionMetas = new Map<string, NativeCacheObserverSessionMeta>();
+  type SessionMetaField = "title" | "agent" | "model";
+  type SessionMetaFieldTimes = Partial<Record<SessionMetaField, number>>;
+  type SessionMetaFieldRevisions = Record<SessionMetaField, number>;
+  /** Identity-event ordering is tracked per field, independently of activity. */
+  const sessionMetaFieldUpdatedAtMs = new Map<string, SessionMetaFieldTimes>();
+  const sessionMetaFieldRevisions = new Map<string, SessionMetaFieldRevisions>();
   const historyLoadedSessions = new Set<string>();
   const historyEpochs = new Map<string, number>();
   let releaseEventListener: (() => void) | undefined;
@@ -112,6 +193,251 @@ export function createNativeCacheObserverRuntime(options: {
 
   function query(sessionId: string): CacheObserverClassification | undefined {
     return ingestor.query(sessionId);
+  }
+
+  function status(sessionId: string): NativeCacheObserverSessionStatus {
+    return sessionStatuses.get(sessionId) ?? "unknown";
+  }
+
+  function metadata(sessionId: string): NativeCacheObserverSessionMeta | undefined {
+    return sessionMetas.get(sessionId);
+  }
+
+  function sessionMetaRevisionSnapshot(sessionId: string): SessionMetaFieldRevisions {
+    const current = sessionMetaFieldRevisions.get(sessionId);
+    return {
+      title: current?.title ?? 0,
+      agent: current?.agent ?? 0,
+      model: current?.model ?? 0,
+    };
+  }
+
+  function noteSessionMetaFieldUpdate(
+    sessionId: string,
+    field: SessionMetaField,
+    atMs: number | undefined,
+  ): void {
+    const revisions = sessionMetaFieldRevisions.get(sessionId) ?? {
+      title: 0,
+      agent: 0,
+      model: 0,
+    };
+    revisions[field] += 1;
+    sessionMetaFieldRevisions.set(sessionId, revisions);
+    if (atMs === undefined) return;
+    const times = sessionMetaFieldUpdatedAtMs.get(sessionId) ?? {};
+    times[field] = Math.max(times[field] ?? atMs, atMs);
+    sessionMetaFieldUpdatedAtMs.set(sessionId, times);
+  }
+
+  function clearSessionMetaFreshness(sessionId: string): void {
+    sessionMetaFieldUpdatedAtMs.delete(sessionId);
+    sessionMetaFieldRevisions.delete(sessionId);
+  }
+
+  /** The sessions this runtime currently observes at all. */
+  function watchedSessions(): Set<string> {
+    return new Set([...ingestorListeners.keys(), ...childWatchers.keys(), ...childOwners.keys()]);
+  }
+
+  function isWatched(sessionId: string): boolean {
+    return (
+      ingestorListeners.has(sessionId) || childWatchers.has(sessionId) || childOwners.has(sessionId)
+    );
+  }
+
+  /**
+   * Bumps the session's status-event clock: live evidence newer than any
+   * reconciliation snapshot captured before this point.
+   */
+  function bumpStatusEventRevision(sessionId: string): void {
+    statusEventRevisions.set(sessionId, (statusEventRevisions.get(sessionId) ?? 0) + 1);
+  }
+
+  /**
+   * Notifies the exact session's consumers after a confirmed status or
+   * metadata change. Consumers re-read `status()`/`metadata()`; the
+   * notification only marks the change.
+   */
+  function notifyConsumers(sessionId: string): void {
+    const sessionListeners = ingestorListeners.get(sessionId);
+    if (sessionListeners === undefined || sessionListeners.size === 0) return;
+    const snapshot = ingestor.query(sessionId);
+    for (const listener of Array.from(sessionListeners)) {
+      try {
+        listener(snapshot);
+      } catch {
+        // A consumer failure cannot interrupt status tracking.
+      }
+    }
+  }
+
+  function setSessionStatus(
+    sessionId: string,
+    value: Exclude<NativeCacheObserverSessionStatus, "unknown">,
+  ): void {
+    if (sessionStatuses.get(sessionId) === value) return;
+    sessionStatuses.set(sessionId, value);
+    notifyConsumers(sessionId);
+  }
+
+  /** A bounded, printable host identity string: control characters become spaces. */
+  function safeMetaText(value: string | undefined): string | undefined {
+    if (value === undefined || value.length === 0 || value.length > MAX_HOST_TEXT_CODEPOINTS) {
+      return undefined;
+    }
+    const clean = Array.from(value.normalize("NFC"), (character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) return " ";
+      if (isSessionLabelFormatCharacter(codePoint)) return "";
+      return character;
+    })
+      .join("")
+      .replace(/\s+/gu, " ")
+      .trim();
+    return clean || undefined;
+  }
+
+  function safeMetaModel(
+    model: NativeCacheObserverChildModel | undefined,
+  ): NativeCacheObserverChildModel | undefined {
+    if (model === undefined) return undefined;
+    const providerID = safeMetaText(model.providerID);
+    const id = safeMetaText(model.id);
+    if (providerID === undefined || id === undefined) return undefined;
+    const variant = safeMetaText(model.variant);
+    return { providerID, id, ...(variant === undefined ? {} : { variant }) };
+  }
+
+  /**
+   * Applies an authoritative record (`session.get`/`session.list`) field by
+   * field. A field event that arrived after this read began wins; otherwise
+   * each field is ordered against its own host timestamp, not activity.
+   */
+  function applySessionMetaRecord(
+    sessionId: string,
+    record: {
+      title?: string;
+      agent?: string;
+      model?: NativeCacheObserverChildModel;
+      timeCreatedMs?: number;
+      timeUpdatedMs?: number;
+    },
+    fieldRevisionsAtStart?: SessionMetaFieldRevisions,
+  ): boolean {
+    const existing = sessionMetas.get(sessionId);
+    const atMs = isNonNegativeFinite(record.timeUpdatedMs) ? record.timeUpdatedMs : undefined;
+    if (existing !== undefined) {
+      // An unorderable record cannot be known to supersede stored evidence.
+      if (atMs === undefined) return false;
+    }
+    const next: NativeCacheObserverSessionMeta = {
+      ...existing,
+      ...(atMs === undefined ? {} : { updatedAtMs: Math.max(existing?.updatedAtMs ?? atMs, atMs) }),
+    };
+    if (isNonNegativeFinite(record.timeCreatedMs)) next.createdAtMs = record.timeCreatedMs;
+    else delete next.createdAtMs;
+
+    const fieldTimes = sessionMetaFieldUpdatedAtMs.get(sessionId);
+    const fieldRevisions = sessionMetaRevisionSnapshot(sessionId);
+    const canApplyField = (field: SessionMetaField): boolean => {
+      if (
+        fieldRevisionsAtStart !== undefined &&
+        fieldRevisions[field] !== fieldRevisionsAtStart[field]
+      ) {
+        return false;
+      }
+      const fieldUpdatedAtMs = fieldTimes?.[field];
+      return atMs === undefined
+        ? fieldUpdatedAtMs === undefined
+        : fieldUpdatedAtMs === undefined || atMs >= fieldUpdatedAtMs;
+    };
+
+    const title = safeMetaText(record.title);
+    if (canApplyField("title")) {
+      if (title === undefined) delete next.title;
+      else next.title = title;
+      noteSessionMetaFieldUpdate(sessionId, "title", atMs);
+    }
+    const agent = safeMetaText(record.agent);
+    if (canApplyField("agent")) {
+      if (agent === undefined) delete next.agent;
+      else next.agent = agent;
+      noteSessionMetaFieldUpdate(sessionId, "agent", atMs);
+    }
+    const model = safeMetaModel(record.model);
+    if (canApplyField("model")) {
+      if (model === undefined) delete next.model;
+      else next.model = model;
+      noteSessionMetaFieldUpdate(sessionId, "model", atMs);
+    }
+    const changed =
+      existing === undefined ||
+      existing.title !== next.title ||
+      existing.agent !== next.agent ||
+      existing.model?.providerID !== next.model?.providerID ||
+      existing.model?.id !== next.model?.id ||
+      existing.model?.variant !== next.model?.variant ||
+      existing.createdAtMs !== next.createdAtMs ||
+      existing.updatedAtMs !== next.updatedAtMs;
+    sessionMetas.set(sessionId, next);
+    return changed;
+  }
+
+  /**
+   * Advances a watched session's activity recency from a host event timestamp.
+   * Only existing identity is dated — an activity event never fabricates a
+   * metadata entry (that would block the record seed) and never regresses.
+   */
+  function advanceSessionActivity(sessionId: string, atMs: number | undefined): void {
+    if (typeof atMs !== "number" || !Number.isFinite(atMs) || atMs < 0) return;
+    const existing = sessionMetas.get(sessionId);
+    if (existing === undefined) return;
+    const current = existing.updatedAtMs;
+    if (current !== undefined && atMs <= current) return;
+    sessionMetas.set(sessionId, { ...existing, updatedAtMs: atMs });
+    notifyConsumers(sessionId);
+  }
+
+  /**
+   * Applies one narrow update event: only the fields it carries change, and
+   * its host timestamp dates identity and activity. Staleness is checked per
+   * field so an event for one field cannot block an unrelated field update.
+   */
+  function applySessionMetaPatch(
+    sessionId: string,
+    patch: { title?: string; agent?: string; model?: NativeCacheObserverChildModel },
+    atMs: number,
+  ): boolean {
+    if (!Number.isFinite(atMs) || atMs < 0) return false;
+    const existing = sessionMetas.get(sessionId);
+    const next: NativeCacheObserverSessionMeta = {
+      ...existing,
+      updatedAtMs: Math.max(existing?.updatedAtMs ?? atMs, atMs),
+    };
+    const title = safeMetaText(patch.title);
+    const fieldTimes = sessionMetaFieldUpdatedAtMs.get(sessionId);
+    let changed = false;
+    if (title !== undefined && (fieldTimes?.title === undefined || atMs >= fieldTimes.title)) {
+      next.title = title;
+      noteSessionMetaFieldUpdate(sessionId, "title", atMs);
+      changed = true;
+    }
+    const agent = safeMetaText(patch.agent);
+    if (agent !== undefined && (fieldTimes?.agent === undefined || atMs >= fieldTimes.agent)) {
+      next.agent = agent;
+      noteSessionMetaFieldUpdate(sessionId, "agent", atMs);
+      changed = true;
+    }
+    const model = safeMetaModel(patch.model);
+    if (model !== undefined && (fieldTimes?.model === undefined || atMs >= fieldTimes.model)) {
+      next.model = model;
+      noteSessionMetaFieldUpdate(sessionId, "model", atMs);
+      changed = true;
+    }
+    if (!changed) return false;
+    sessionMetas.set(sessionId, next);
+    return true;
   }
 
   function notifyChildren(watcher: ChildWatcher): void {
@@ -142,11 +468,12 @@ export function createNativeCacheObserverRuntime(options: {
     let changed = watcher.children.size !== ownedChildren.size;
     for (const [sessionId, oldChild] of watcher.children) {
       const nextChild = ownedChildren.get(sessionId);
-      if (nextChild?.label === oldChild.label) continue;
+      if (nextChild !== undefined && nextChild.label === oldChild.label) continue;
       changed = true;
       if (nextChild === undefined && childOwners.get(sessionId) === watcher.parentSessionId) {
         childOwners.delete(sessionId);
         markObservationGapIfUnobserved(sessionId);
+        if (!isWatched(sessionId)) forgetSessionMetadata(sessionId);
       }
     }
     for (const [sessionId, child] of ownedChildren) {
@@ -161,21 +488,46 @@ export function createNativeCacheObserverRuntime(options: {
     return changed;
   }
 
+  /** A watched child's snapshot label follows a relayed rename. */
+  function renameWatchedChild(sessionId: string, title: string): void {
+    const ownerSessionId = childOwners.get(sessionId);
+    if (ownerSessionId === undefined) return;
+    const watcher = childWatchers.get(ownerSessionId);
+    const child = watcher?.children.get(sessionId);
+    if (watcher === undefined || child === undefined) return;
+    updateWatcherChild(watcher, sessionId, { ...child, label: safeChildLabel(title) });
+  }
+
   function projectChildren(
     parentSessionId: string,
-    records: ReadonlyArray<{ id: string; parentID?: string; title?: string }>,
-  ): Map<string, NativeCacheObserverChild> {
+    records: ReadonlyArray<{
+      id: string;
+      parentID?: string;
+      title?: string;
+      agent?: string;
+      model?: NativeCacheObserverChildModel;
+      timeCreatedMs?: number;
+      timeUpdatedMs?: number;
+    }>,
+  ): { children: Map<string, NativeCacheObserverChild>; changedMetas: string[] } {
     const result = new Map<string, NativeCacheObserverChild>();
+    const changedMetas: string[] = [];
     for (const record of records) {
       if (record.parentID !== parentSessionId || !isSafeSessionId(record.id)) continue;
+      // The record is the session's state at its time.updated; it seeds the
+      // per-session metadata store, with freshness tracked per identity field.
+      if (applySessionMetaRecord(record.id, record)) changedMetas.push(record.id);
       result.set(record.id, {
         sessionId: record.id,
         label: safeChildLabel(record.title),
       });
     }
-    return new Map(
-      [...result.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
-    );
+    return {
+      children: new Map(
+        [...result.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+      ),
+      changedMetas,
+    };
   }
 
   function watcherIsCurrent(watcher: ChildWatcher, version: number): boolean {
@@ -197,7 +549,8 @@ export function createNativeCacheObserverRuntime(options: {
       const records = await options.listChildren(watcher.parentSessionId);
       if (!watcherIsCurrent(watcher, version)) return;
 
-      const children = projectChildren(watcher.parentSessionId, records);
+      const projection = projectChildren(watcher.parentSessionId, records);
+      const children = projection.children;
       const seenIds = new Set(children.keys());
       for (const sessionId of watcher.deletedSessionIds) {
         if (seenIds.has(sessionId)) children.delete(sessionId);
@@ -218,6 +571,9 @@ export function createNativeCacheObserverRuntime(options: {
       setWatcherChildren(watcher, children);
       watcher.status = "ready";
       notifyChildren(watcher);
+      // Identity changes discovered by the refresh reach the session's own
+      // consumers (labels, recency) after the snapshot is consistent.
+      for (const sessionId of projection.changedMetas) notifyConsumers(sessionId);
     } catch {
       if (!watcherIsCurrent(watcher, version)) return;
       watcher.status = "error";
@@ -283,6 +639,14 @@ export function createNativeCacheObserverRuntime(options: {
         notifyChildren(watcher);
       }
     }
+    cancelSessionMetadataRequest(sessionId);
+    if (!ingestorListeners.has(sessionId)) {
+      // No direct consumer remains: a deleted session keeps no tracked state.
+      sessionStatuses.delete(sessionId);
+      statusEventRevisions.delete(sessionId);
+      sessionMetas.delete(sessionId);
+    }
+    clearSessionMetaFreshness(sessionId);
     return wasOwnedChild;
   }
 
@@ -318,6 +682,7 @@ export function createNativeCacheObserverRuntime(options: {
   }
 
   function markObservationGap(sessionId: string): void {
+    cancelSessionMetadataRequest(sessionId);
     bumpHistoryEpoch(sessionId, true);
     ingestor.markObservationGap(sessionId);
     if (activeHistorySessionIds.has(sessionId)) activeHistoryController?.abort();
@@ -331,12 +696,132 @@ export function createNativeCacheObserverRuntime(options: {
   }
 
   function markActiveObservationGaps(): void {
-    const sessionIds = new Set([
-      ...interestedSessions.keys(),
-      ...childWatchers.keys(),
-      ...childOwners.keys(),
-    ]);
+    const sessionIds = watchedSessions();
+    // Invalidate in-flight reconciliation and metadata reads first: their
+    // results may predate the gap.
+    reconcileVersion += 1;
+    metadataGapEpoch += 1;
+    cancelAllMetadataRequests();
+    // Drop confirmed status BEFORE any notification so no listener re-render
+    // can observe the stale value.
+    const clearedStatuses = [...sessionIds].filter((sessionId) =>
+      sessionStatuses.delete(sessionId),
+    );
     for (const sessionId of sessionIds) markObservationGap(sessionId);
+    // The per-session gap notification only fires where retained ingestor
+    // state exists; every session whose status actually cleared re-renders.
+    for (const sessionId of clearedStatuses) notifyConsumers(sessionId);
+  }
+
+  let reconcileVersion = 0;
+  let reconcileQueued = false;
+  /**
+   * Reconcile confirmed execution state from the public `session.active`
+   * snapshot. Coalesced per tick and run on (re)connect — never polled — so a
+   * missed idle/busy transition self-corrects from the authoritative source.
+   * A failed snapshot leaves every status untouched; unknown stays unknown.
+   */
+  function queueReconcile(): void {
+    if (reconcileQueued || disposed || options.listActiveSessions === undefined) return;
+    reconcileQueued = true;
+    queueMicrotask(() => {
+      reconcileQueued = false;
+      void reconcileActive();
+    });
+  }
+
+  async function reconcileActive(): Promise<void> {
+    if (disposed || options.listActiveSessions === undefined) return;
+    const version = ++reconcileVersion;
+    const observed = [...watchedSessions()];
+    // Capture each session's event clock at snapshot start: a status event
+    // that arrives while the snapshot is in flight is newer evidence and must
+    // not be overwritten by the older snapshot.
+    const startRevisions = new Map(
+      observed.map((sessionId) => [sessionId, statusEventRevisions.get(sessionId) ?? 0]),
+    );
+    try {
+      const activeIds = await options.listActiveSessions();
+      if (disposed || version !== reconcileVersion) return;
+      const active = new Set(activeIds);
+      for (const sessionId of observed) {
+        if ((statusEventRevisions.get(sessionId) ?? 0) !== (startRevisions.get(sessionId) ?? 0)) {
+          continue;
+        }
+        setSessionStatus(sessionId, active.has(sessionId) ? "busy" : "idle");
+      }
+    } catch {
+      // An unavailable snapshot is not evidence; statuses keep their last
+      // confirmed value and unknown stays unknown.
+    }
+  }
+
+  const metadataRequests = new Map<
+    string,
+    {
+      controller: AbortController;
+      gapEpoch: number;
+      fieldRevisionsAtStart: SessionMetaFieldRevisions;
+    }
+  >();
+  let metadataGapEpoch = 0;
+  function cancelSessionMetadataRequest(sessionId: string): void {
+    const request = metadataRequests.get(sessionId);
+    if (request === undefined) return;
+    // Remove ownership before aborting: an abort listener can settle the read
+    // synchronously, but its continuation must not affect a later request.
+    metadataRequests.delete(sessionId);
+    request.controller.abort();
+  }
+
+  function cancelAllMetadataRequests(): void {
+    for (const sessionId of metadataRequests.keys()) cancelSessionMetadataRequest(sessionId);
+  }
+
+  function forgetSessionMetadata(sessionId: string): void {
+    cancelSessionMetadataRequest(sessionId);
+    sessionMetas.delete(sessionId);
+    clearSessionMetaFreshness(sessionId);
+  }
+
+  /**
+   * One public `session.get` per request, arbitrated per session: a request
+   * that adds nothing (identity already known) never issues a read nor
+   * disturbs another session's in-flight read. A newer request supersedes an
+   * older one; identity events protect their fields while the read completes.
+   * Release, gap, and disposal cancel outstanding reads.
+   */
+  function requestSessionMetadata(sessionId: string, onlyMissing: boolean): void {
+    if (disposed || options.getSessionMetadata === undefined) return;
+    if (!isSafeSessionId(sessionId) || !isWatched(sessionId)) return;
+    if (onlyMissing && sessionMetas.has(sessionId)) return;
+    cancelSessionMetadataRequest(sessionId);
+    const request = {
+      controller: new AbortController(),
+      gapEpoch: metadataGapEpoch,
+      fieldRevisionsAtStart: sessionMetaRevisionSnapshot(sessionId),
+    };
+    metadataRequests.set(sessionId, request);
+    const getSessionMetadata = options.getSessionMetadata;
+    void (async () => {
+      try {
+        const record = await awaitWithAbort(
+          getSessionMetadata(sessionId, { signal: request.controller.signal }),
+          request.controller.signal,
+        );
+        if (disposed || metadataGapEpoch !== request.gapEpoch) return;
+        if (metadataRequests.get(sessionId) !== request) return;
+        if (!isWatched(sessionId)) return;
+        if (applySessionMetaRecord(sessionId, record, request.fieldRevisionsAtStart)) {
+          notifyConsumers(sessionId);
+        }
+      } catch {
+        // An unavailable or cancelled read keeps stored identity; a later
+        // trigger (reconnect, re-subscribe) retries. No polling.
+      } finally {
+        if (metadataRequests.get(sessionId) === request) metadataRequests.delete(sessionId);
+      }
+    })();
   }
 
   function historyEpoch(sessionId: string): number {
@@ -522,11 +1007,16 @@ export function createNativeCacheObserverRuntime(options: {
     if (state !== "live" || initialTransportReady) return;
     initialTransportReady = true;
     for (const watcher of childWatchers.values()) void refreshChildren(watcher);
+    queueReconcile();
+    for (const sessionId of watchedSessions()) requestSessionMetadata(sessionId, false);
   });
   const releaseReconnect = options.subscribeReconnect?.(() => {
     for (const watcher of childWatchers.values()) {
       void refreshChildren(watcher, { reconcilePendingCreates: true });
     }
+    queueReconcile();
+    // Events lost while the stream was down are recovered from the records.
+    for (const sessionId of watchedSessions()) requestSessionMetadata(sessionId, false);
   });
   const releaseEventStreamRetire = options.subscribeEventStreamRetire?.(markActiveObservationGaps);
 
@@ -535,7 +1025,7 @@ export function createNativeCacheObserverRuntime(options: {
     if (!isSafeSessionId(sessionId)) throw new TypeError("Invalid parent session id");
 
     const records = await options.listChildren(sessionId);
-    return [...projectChildren(sessionId, records).values()];
+    return [...projectChildren(sessionId, records).children.values()];
   }
 
   function subscribeChildren(
@@ -588,6 +1078,13 @@ export function createNativeCacheObserverRuntime(options: {
         if (childOwners.get(childSessionId) === sessionId) {
           childOwners.delete(childSessionId);
           markObservationGapIfUnobserved(childSessionId);
+          if ((ingestorListeners.get(childSessionId)?.size ?? 0) === 0) {
+            sessionStatuses.delete(childSessionId);
+            statusEventRevisions.delete(childSessionId);
+            sessionMetas.delete(childSessionId);
+            clearSessionMetaFreshness(childSessionId);
+          }
+          if (!isWatched(childSessionId)) cancelSessionMetadataRequest(childSessionId);
         }
       }
       watcher.children.clear();
@@ -613,14 +1110,49 @@ export function createNativeCacheObserverRuntime(options: {
         setHostEventState(event.data.state, event.created);
         return;
       }
+      if (event.type === "session.status") {
+        const sessionId = event.data.sessionID;
+        if (isWatched(sessionId)) {
+          bumpStatusEventRevision(sessionId);
+          setSessionStatus(sessionId, event.data.state);
+          // The transition itself dates the session's activity.
+          advanceSessionActivity(sessionId, event.created);
+        }
+        return;
+      }
+      if (event.type === "session.metadata") {
+        const sessionId = event.data.sessionID;
+        if (isWatched(sessionId)) {
+          const patch = {
+            title: event.data.title,
+            agent: event.data.agent,
+            model: event.data.model,
+          };
+          if (applySessionMetaPatch(sessionId, patch, event.created)) {
+            if (patch.title !== undefined) renameWatchedChild(sessionId, patch.title);
+            notifyConsumers(sessionId);
+          }
+        }
+        return;
+      }
       const update = cacheObserverUpdateFromOpenCodeEvent(event);
       const startedSessionId =
         event.type === "session.step.started" ? event.data.sessionID : undefined;
-      if (startedSessionId !== undefined) bumpHistoryEpoch(startedSessionId);
+      const startedEventAtMs = event.type === "session.step.started" ? event.created : undefined;
+      if (startedSessionId !== undefined) {
+        bumpHistoryEpoch(startedSessionId);
+        // A host-published started step is confirmed execution evidence.
+        if (isWatched(startedSessionId)) {
+          bumpStatusEventRevision(startedSessionId);
+          setSessionStatus(startedSessionId, "busy");
+          advanceSessionActivity(startedSessionId, startedEventAtMs);
+        }
+      }
       if (update?.kind === "invocation") {
         bumpHistoryEpoch(update.observation.sessionId);
       } else if (update?.kind === "compaction" || update?.kind === "deleted") {
         bumpHistoryEpoch(update.sessionId, true);
+        if (update.kind === "deleted") sessionStatuses.delete(update.sessionId);
       }
       if (update !== undefined || startedSessionId !== undefined) {
         const timestamp = "created" in event ? event.created : undefined;
@@ -659,14 +1191,33 @@ export function createNativeCacheObserverRuntime(options: {
     if (disposed || !sessionId.trim()) return () => undefined;
 
     interestedSessions.set(sessionId, (interestedSessions.get(sessionId) ?? 0) + 1);
+    let sessionListeners = ingestorListeners.get(sessionId);
+    const isFirstInterest = sessionListeners === undefined;
+    if (sessionListeners === undefined) {
+      sessionListeners = new Set();
+      ingestorListeners.set(sessionId, sessionListeners);
+    }
+    sessionListeners.add(listener);
     const releaseIngestor = ingestor.subscribe(sessionId, listener);
     attachEventListener();
+    queueReconcile();
+    if (isFirstInterest) requestSessionMetadata(sessionId, true);
     let released = false;
 
     return () => {
       if (released) return;
       released = true;
       releaseIngestor();
+      sessionListeners?.delete(listener);
+      if (sessionListeners?.size === 0) {
+        ingestorListeners.delete(sessionId);
+        sessionStatuses.delete(sessionId);
+        statusEventRevisions.delete(sessionId);
+        if (!childOwners.has(sessionId)) {
+          sessionMetas.delete(sessionId);
+          clearSessionMetaFreshness(sessionId);
+        }
+      }
       const count = interestedSessions.get(sessionId) ?? 0;
       if (count <= 1) interestedSessions.delete(sessionId);
       else interestedSessions.set(sessionId, count - 1);
@@ -678,6 +1229,7 @@ export function createNativeCacheObserverRuntime(options: {
       } else {
         markObservationGapIfUnobserved(sessionId);
       }
+      if (!isWatched(sessionId)) cancelSessionMetadataRequest(sessionId);
       if (interestedSessions.size === 0 && childWatchers.size === 0) {
         releaseEventListener?.();
         releaseEventListener = undefined;
@@ -688,6 +1240,7 @@ export function createNativeCacheObserverRuntime(options: {
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    cancelAllMetadataRequests();
     activeHistoryController?.abort();
     activeHistoryController = undefined;
     activeHistorySessionIds.clear();
@@ -698,6 +1251,12 @@ export function createNativeCacheObserverRuntime(options: {
     pendingObservationGaps.clear();
     childWatchers.clear();
     childOwners.clear();
+    ingestorListeners.clear();
+    sessionStatuses.clear();
+    statusEventRevisions.clear();
+    sessionMetas.clear();
+    sessionMetaFieldUpdatedAtMs.clear();
+    sessionMetaFieldRevisions.clear();
     historyLoadedSessions.clear();
     historyEpochs.clear();
     transportListeners.clear();
@@ -724,6 +1283,8 @@ export function createNativeCacheObserverRuntime(options: {
   return {
     query,
     subscribe,
+    status,
+    metadata,
     subscribeGaps(listener) {
       if (disposed) return () => {};
       gapListeners.add(listener);
@@ -772,6 +1333,11 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
 
 const MAX_SESSION_LABEL_CODEPOINTS = 80;
 const MAX_CHILD_DELETION_TOMBSTONES = 128;
+const MAX_HOST_TEXT_CODEPOINTS = 128;
+
+function isNonNegativeFinite(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
 
 function isSafeSessionId(value: string): boolean {
   if (value.length === 0 || value.length > 256) return false;

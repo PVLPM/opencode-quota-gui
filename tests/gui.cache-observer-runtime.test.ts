@@ -1246,4 +1246,846 @@ describe("native cache observer runtime", () => {
     release();
     runtime.dispose();
   });
+
+  it("seeds child metadata into the per-session store and follows record refreshes", async () => {
+    const records: Array<{
+      id: string;
+      parentID?: string;
+      title?: string;
+      agent?: string;
+      model?: { providerID: string; id: string; variant?: string };
+      timeCreatedMs?: number;
+      timeUpdatedMs?: number;
+    }> = [
+      {
+        id: "ses_meta_child",
+        parentID: "ses_meta_root",
+        title: "Worker",
+        agent: "general",
+        model: { providerID: "anthropic", id: "claude-test", variant: "high" },
+        timeCreatedMs: 100,
+        timeUpdatedMs: 200,
+      },
+    ];
+    let onReconnect: (() => void) | undefined;
+    const updates: Array<unknown> = [];
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => () => {},
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => records,
+    });
+    const releaseWatcher = runtime.subscribeChildren("ses_meta_root", () => {});
+    const release = runtime.subscribe("ses_meta_child", (classification) =>
+      updates.push(classification),
+    );
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_meta_child")).toMatchObject({
+        title: "Worker",
+        agent: "general",
+        model: { providerID: "anthropic", id: "claude-test", variant: "high" },
+        createdAtMs: 100,
+        updatedAtMs: 200,
+      }),
+    );
+    const updatesAtSeed = updates.length;
+
+    // A record refresh with newer activity re-notifies the consumer.
+    records[0] = { ...records[0], timeUpdatedMs: 300 };
+    onReconnect?.();
+    await vi.waitFor(() => expect(runtime.metadata("ses_meta_child")?.updatedAtMs).toBe(300));
+    expect(updates.length).toBeGreaterThan(updatesAtSeed);
+    // Unsafe host text is sanitized rather than stored raw.
+    records[0] = {
+      ...records[0],
+      agent: "bad\u0007agent",
+      model: { providerID: "anthropic", id: "claude-test" },
+    };
+    onReconnect?.();
+    await vi.waitFor(() => expect(runtime.metadata("ses_meta_child")?.agent).toBe("bad agent"));
+    // Releasing the last observer drops the tracked metadata.
+    release();
+    releaseWatcher();
+    expect(runtime.metadata("ses_meta_child")).toBeUndefined();
+    runtime.dispose();
+  });
+
+  it("keeps child identity current through narrow rename, agent and model events", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    const records: Array<Record<string, unknown>> = [
+      { id: "ses_meta_child", parentID: "ses_meta_root", title: "Worker", timeUpdatedMs: 100 },
+    ];
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => records as never,
+    });
+    const releaseWatcher = runtime.subscribeChildren("ses_meta_root", () => {});
+    const release = runtime.subscribe("ses_meta_child", () => {});
+    await vi.waitFor(() => expect(runtime.metadata("ses_meta_child")?.title).toBe("Worker"));
+
+    // A relayed rename updates the stored title and the snapshot label.
+    emit?.({
+      type: "session.metadata",
+      created: 150,
+      data: { sessionID: "ses_meta_child", title: "Renamed worker" },
+    });
+    expect(runtime.metadata("ses_meta_child")).toMatchObject({
+      title: "Renamed worker",
+      updatedAtMs: 150,
+    });
+    // Model and agent selections patch their own fields only.
+    emit?.({
+      type: "session.metadata",
+      created: 160,
+      data: {
+        sessionID: "ses_meta_child",
+        model: { providerID: "zai", id: "glm-test", variant: "max" },
+      },
+    });
+    emit?.({
+      type: "session.metadata",
+      created: 170,
+      data: { sessionID: "ses_meta_child", agent: "build" },
+    });
+    expect(runtime.metadata("ses_meta_child")).toMatchObject({
+      title: "Renamed worker",
+      agent: "build",
+      model: { providerID: "zai", id: "glm-test", variant: "max" },
+      updatedAtMs: 170,
+    });
+    // A stale event (older than the stored update) is discarded.
+    emit?.({
+      type: "session.metadata",
+      created: 120,
+      data: { sessionID: "ses_meta_child", title: "Stale" },
+    });
+    expect(runtime.metadata("ses_meta_child")?.title).toBe("Renamed worker");
+    // Unwatched sessions are never stored.
+    emit?.({
+      type: "session.metadata",
+      created: 200,
+      data: { sessionID: "ses_unwatched", title: "Nope" },
+    });
+    expect(runtime.metadata("ses_unwatched")).toBeUndefined();
+    release();
+    releaseWatcher();
+    runtime.dispose();
+  });
+
+  it("seeds the selected session's metadata once per selection and refreshes it after reconnect", async () => {
+    let onReconnect: (() => void) | undefined;
+    let emit: ((event: unknown) => void) | undefined;
+    const getSessionMetadata = vi.fn(async () => ({
+      title: "Main session",
+      agent: "build",
+      model: { providerID: "zai", id: "glm-test" },
+      timeCreatedMs: 10,
+      timeUpdatedMs: 20,
+    }));
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata,
+    });
+    const release = runtime.subscribe("ses_seed_main", () => {});
+    await vi.waitFor(() => expect(runtime.metadata("ses_seed_main")?.title).toBe("Main session"));
+    expect(getSessionMetadata).toHaveBeenCalledTimes(1);
+
+    // A live rename updates without any refetch.
+    emit?.({
+      type: "session.metadata",
+      created: 30,
+      data: { sessionID: "ses_seed_main", title: "Renamed" },
+    });
+    expect(runtime.metadata("ses_seed_main")?.title).toBe("Renamed");
+    expect(getSessionMetadata).toHaveBeenCalledTimes(1);
+
+    // Reconnect refreshes; a newer stored event wins over an older record.
+    getSessionMetadata.mockResolvedValueOnce({ title: "Older record", timeUpdatedMs: 25 });
+    onReconnect?.();
+    await vi.waitFor(() => expect(getSessionMetadata).toHaveBeenCalledTimes(2));
+    expect(runtime.metadata("ses_seed_main")?.title).toBe("Renamed");
+    // A newer record does apply.
+    getSessionMetadata.mockResolvedValueOnce({ title: "Newer record", timeUpdatedMs: 40 });
+    onReconnect?.();
+    await vi.waitFor(() => expect(runtime.metadata("ses_seed_main")?.title).toBe("Newer record"));
+    // A failed refresh keeps the stored identity.
+    getSessionMetadata.mockRejectedValueOnce(new Error("unavailable"));
+    onReconnect?.();
+    await vi.waitFor(() => expect(getSessionMetadata).toHaveBeenCalledTimes(4));
+    expect(runtime.metadata("ses_seed_main")?.title).toBe("Newer record");
+    // Releasing the observer drops the metadata; re-subscribing reseeds it.
+    release();
+    expect(runtime.metadata("ses_seed_main")).toBeUndefined();
+    const secondRelease = runtime.subscribe("ses_seed_main", () => {});
+    await vi.waitFor(() => expect(getSessionMetadata).toHaveBeenCalledTimes(5));
+    await vi.waitFor(() => expect(runtime.metadata("ses_seed_main")?.title).toBe("Main session"));
+    secondRelease();
+    runtime.dispose();
+  });
+
+  it("tracks confirmed status from events and reconciles from session.active, staying unknown on failure", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let activeSessions: readonly string[] = [];
+    let failActive = false;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listActiveSessions: async () => {
+        if (failActive) throw new Error("unavailable");
+        return activeSessions;
+      },
+    });
+    expect(runtime.status("ses_status")).toBe("unknown");
+    const updates: Array<string> = [];
+    const release = runtime.subscribe("ses_status", () =>
+      updates.push(runtime.status("ses_status")),
+    );
+    // The subscribe-time reconcile coalesces into one session.active read and
+    // confirms idle from the authoritative empty snapshot.
+    await vi.waitFor(() => expect(runtime.status("ses_status")).toBe("idle"));
+    expect(updates).toContain("idle");
+
+    // A relayed status event confirms busy; a retrying session is still busy.
+    emit?.({
+      type: "session.status",
+      created: 1,
+      data: { sessionID: "ses_status", state: "busy" },
+    });
+    expect(runtime.status("ses_status")).toBe("busy");
+    emit?.({
+      type: "session.status",
+      created: 2,
+      data: { sessionID: "ses_status", state: "idle" },
+    });
+    expect(runtime.status("ses_status")).toBe("idle");
+    // A hosted started step is confirmed execution evidence.
+    emit?.({
+      type: "session.step.started",
+      created: 3,
+      data: {
+        sessionID: "ses_status",
+        assistantMessageID: "msg_1",
+        model: { providerID: "p", id: "m" },
+      },
+    });
+    expect(runtime.status("ses_status")).toBe("busy");
+
+    // Reconnect reconciles from the snapshot without polling.
+    activeSessions = [];
+    onReconnect?.();
+    await vi.waitFor(() => expect(runtime.status("ses_status")).toBe("idle"));
+    activeSessions = ["ses_status"];
+    onReconnect?.();
+    await vi.waitFor(() => expect(runtime.status("ses_status")).toBe("busy"));
+
+    // A failed snapshot without coverage loss is not evidence either: the last
+    // event-confirmed value stands, and a never-reconciled session stays
+    // unknown.
+    failActive = true;
+    const otherRelease = runtime.subscribe("ses_other", () => {});
+    await vi.waitFor(() => expect(runtime.status("ses_other")).toBe("unknown"));
+    expect(runtime.status("ses_status")).toBe("busy");
+    otherRelease();
+
+    // Releasing the last observer drops the tracked status entirely.
+    release();
+    expect(runtime.status("ses_status")).toBe("unknown");
+    runtime.dispose();
+  });
+
+  it("drops confirmed status when event coverage is lost, and a failed snapshot cannot restore it", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let activeSessions: readonly string[] = [];
+    let failActive = false;
+    const listActiveSessions = vi.fn(async () => {
+      if (failActive) throw new Error("unavailable");
+      return activeSessions;
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listActiveSessions,
+    });
+    const release = runtime.subscribe("ses_gap_status", () => {});
+    activeSessions = ["ses_gap_status"];
+    await vi.waitFor(() => expect(runtime.status("ses_gap_status")).toBe("busy"));
+
+    // Stream retirement is coverage loss: the confirmed busy no longer stands.
+    emit?.({ type: "source.status", created: 1, data: { state: "unavailable" } });
+    expect(runtime.status("ses_gap_status")).toBe("unknown");
+
+    // A reconnect whose snapshot fails cannot restore the stale busy.
+    failActive = true;
+    onReconnect?.();
+    await vi.waitFor(() => expect(listActiveSessions.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(runtime.status("ses_gap_status")).toBe("unknown");
+
+    // A succeeding snapshot after recovery re-establishes confirmed state.
+    failActive = false;
+    activeSessions = [];
+    onReconnect?.();
+    await vi.waitFor(() => expect(runtime.status("ses_gap_status")).toBe("idle"));
+    release();
+    runtime.dispose();
+  });
+
+  it("a pending session.active snapshot never overwrites a newer live status event", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let snapshotMode: "instant" | "deferred" = "instant";
+    let activeSessions: readonly string[] = [];
+    const deferredSnapshots: Array<(ids: readonly string[]) => void> = [];
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listActiveSessions: async () => {
+        if (snapshotMode === "deferred") {
+          return new Promise((resolve) => {
+            deferredSnapshots.push(resolve);
+          });
+        }
+        return activeSessions;
+      },
+    });
+    const release = runtime.subscribe("ses_race", () => {});
+    await vi.waitFor(() => expect(runtime.status("ses_race")).toBe("idle"));
+
+    // A deferred snapshot (taken as busy) starts, then a live idle event lands
+    // first: the live evidence is newer and the snapshot must not overwrite it.
+    snapshotMode = "deferred";
+    activeSessions = ["ses_race"];
+    onReconnect?.();
+    await vi.waitFor(() => expect(deferredSnapshots.length).toBe(1));
+    emit?.({ type: "session.status", created: 50, data: { sessionID: "ses_race", state: "idle" } });
+    expect(runtime.status("ses_race")).toBe("idle");
+    deferredSnapshots[0]?.(activeSessions);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(runtime.status("ses_race")).toBe("idle");
+
+    // A fresh snapshot with no intervening events applies again.
+    snapshotMode = "instant";
+    onReconnect?.();
+    await vi.waitFor(() => expect(runtime.status("ses_race")).toBe("busy"));
+
+    // The reverse direction: a live busy event survives a deferred idle snapshot.
+    snapshotMode = "deferred";
+    onReconnect?.();
+    await vi.waitFor(() => expect(deferredSnapshots.length).toBe(2));
+    emit?.({ type: "session.status", created: 60, data: { sessionID: "ses_race", state: "busy" } });
+    expect(runtime.status("ses_race")).toBe("busy");
+    deferredSnapshots[1]?.([]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(runtime.status("ses_race")).toBe("busy");
+    release();
+    runtime.dispose();
+  });
+
+  it("advances child activity recency from status and started-step events", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    const records: Array<Record<string, unknown>> = [
+      { id: "ses_act_a", parentID: "ses_act_root", title: "Worker A", timeUpdatedMs: 100 },
+      { id: "ses_act_b", parentID: "ses_act_root", title: "Worker B", timeUpdatedMs: 200 },
+    ];
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => records as never,
+    });
+    const releaseWatcher = runtime.subscribeChildren("ses_act_root", () => {});
+    const releaseA = runtime.subscribe("ses_act_a", () => {});
+    const releaseB = runtime.subscribe("ses_act_b", () => {});
+    await vi.waitFor(() => expect(runtime.metadata("ses_act_b")?.updatedAtMs).toBe(200));
+    expect(runtime.metadata("ses_act_a")?.updatedAtMs).toBe(100);
+
+    // A status transition dates the session's activity with its host timestamp.
+    emit?.({
+      type: "session.status",
+      created: 300,
+      data: { sessionID: "ses_act_a", state: "idle" },
+    });
+    expect(runtime.metadata("ses_act_a")?.updatedAtMs).toBe(300);
+    // A started step does the same.
+    emit?.({
+      type: "session.step.started",
+      created: 400,
+      data: {
+        sessionID: "ses_act_b",
+        assistantMessageID: "msg_1",
+        model: { providerID: "p", id: "m" },
+      },
+    });
+    expect(runtime.metadata("ses_act_b")?.updatedAtMs).toBe(400);
+    // An out-of-order or replayed timestamp never regresses recency.
+    emit?.({
+      type: "session.status",
+      created: 50,
+      data: { sessionID: "ses_act_a", state: "busy" },
+    });
+    expect(runtime.metadata("ses_act_a")?.updatedAtMs).toBe(300);
+    // Activity never fabricates identity for a session without a record.
+    emit?.({
+      type: "session.status",
+      created: 500,
+      data: { sessionID: "ses_act_none", state: "busy" },
+    });
+    expect(runtime.metadata("ses_act_none")).toBeUndefined();
+    releaseA();
+    releaseB();
+    releaseWatcher();
+    runtime.dispose();
+  });
+
+  it("a deferred root seed survives child discovery and is discarded after a switch", async () => {
+    const deferred: Array<(record: { title?: string; timeUpdatedMs?: number }) => void> = [];
+    let instantTitle: string | undefined;
+    const getSessionMetadata = vi.fn((sessionId: string) => {
+      if (instantTitle !== undefined) {
+        return Promise.resolve({ title: instantTitle, timeUpdatedMs: 10 });
+      }
+      return new Promise((resolve) => {
+        deferred.push(resolve as (record: { title?: string; timeUpdatedMs?: number }) => void);
+      });
+    });
+    const listChildren = vi.fn(async () => [
+      { id: "ses_defer_child", parentID: "ses_defer_root", title: "Child", timeUpdatedMs: 5 },
+    ]);
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => () => {},
+      rpcConnection: () => "live",
+      listChildren,
+      getSessionMetadata,
+    });
+    const releaseWatcher = runtime.subscribeChildren("ses_defer_root", () => {});
+    const releaseRoot = runtime.subscribe("ses_defer_root", () => {});
+    // The root's seed is deferred; the child's identity arrives by record.
+    await vi.waitFor(() => expect(getSessionMetadata).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runtime.metadata("ses_defer_child")?.title).toBe("Child"));
+    expect(runtime.metadata("ses_defer_root")).toBeUndefined();
+
+    // The child's own subscription is deduped (identity known) and must not
+    // invalidate the root's in-flight read.
+    const releaseChild = runtime.subscribe("ses_defer_child", () => {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(getSessionMetadata).toHaveBeenCalledTimes(1);
+    deferred[0]?.({ title: "Root title", timeUpdatedMs: 10 });
+    await vi.waitFor(() => expect(runtime.metadata("ses_defer_root")?.title).toBe("Root title"));
+
+    // A switch away strands the in-flight read: its late result is discarded.
+    deferred.length = 0;
+    const releaseRoot2 = runtime.subscribe("ses_defer_root2", () => {});
+    await vi.waitFor(() => expect(deferred.length).toBe(1));
+    expect(runtime.metadata("ses_defer_root2")).toBeUndefined();
+    releaseRoot();
+    releaseChild();
+    releaseWatcher();
+    releaseRoot2();
+    deferred[0]?.({ title: "Late root", timeUpdatedMs: 10 });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(runtime.metadata("ses_defer_root2")).toBeUndefined();
+    runtime.dispose();
+  });
+
+  it("applies reconnect identity newer than stored identity despite newer activity recency", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let resolveRefresh:
+      | ((record: {
+          title?: string;
+          model?: { providerID: string; id: string };
+          timeUpdatedMs?: number;
+        }) => void)
+      | undefined;
+    let calls = 0;
+    const getSessionMetadata = vi.fn(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          title: "Session",
+          model: { providerID: "openai", id: "old-model" },
+          timeUpdatedMs: 10,
+        });
+      }
+      return new Promise<{
+        title?: string;
+        model?: { providerID: string; id: string };
+        timeUpdatedMs?: number;
+      }>((resolve) => {
+        resolveRefresh = resolve;
+      });
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata,
+    });
+    const release = runtime.subscribe("ses_meta_activity_race", () => {});
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_meta_activity_race")?.model?.id).toBe("old-model"),
+    );
+
+    // The gap forces a record refresh after recovery. The session's model has
+    // changed at 15, but this get remains pending while newer activity arrives.
+    emit?.({ type: "source.status", created: 11, data: { state: "unavailable" } });
+    onReconnect?.();
+    await vi.waitFor(() => expect(getSessionMetadata).toHaveBeenCalledTimes(2));
+    emit?.({
+      type: "session.status",
+      created: 20,
+      data: { sessionID: "ses_meta_activity_race", state: "idle" },
+    });
+    expect(runtime.metadata("ses_meta_activity_race")?.updatedAtMs).toBe(20);
+
+    resolveRefresh?.({
+      title: "Session",
+      model: { providerID: "openai", id: "new-model" },
+      timeUpdatedMs: 15,
+    });
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_meta_activity_race")).toMatchObject({
+        model: { providerID: "openai", id: "new-model" },
+        updatedAtMs: 20,
+      }),
+    );
+    release();
+    runtime.dispose();
+  });
+
+  it("keeps repeated identity events over a pending get without abort churn", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let resolveRefresh:
+      | ((record: {
+          title?: string;
+          model?: { providerID: string; id: string };
+          timeUpdatedMs?: number;
+        }) => void)
+      | undefined;
+    let refreshSignal: AbortSignal | undefined;
+    let calls = 0;
+    const getSessionMetadata = vi.fn(
+      (_sessionId: string, requestOptions?: { signal: AbortSignal }) => {
+        calls += 1;
+        if (calls === 1) {
+          return Promise.resolve({
+            title: "Session",
+            model: { providerID: "openai", id: "old-model" },
+            timeUpdatedMs: 10,
+          });
+        }
+        refreshSignal = requestOptions?.signal;
+        return new Promise<{
+          title?: string;
+          model?: { providerID: string; id: string };
+          timeUpdatedMs?: number;
+        }>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      },
+    );
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata,
+    });
+    const release = runtime.subscribe("ses_meta_identity_race", () => {});
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_meta_identity_race")?.model?.id).toBe("old-model"),
+    );
+    onReconnect?.();
+    await vi.waitFor(() => expect(getSessionMetadata).toHaveBeenCalledTimes(2));
+
+    emit?.({
+      type: "session.metadata",
+      created: 15,
+      data: {
+        sessionID: "ses_meta_identity_race",
+        model: { providerID: "openai", id: "intermediate-model" },
+      },
+    });
+    emit?.({
+      type: "session.metadata",
+      created: 15,
+      data: {
+        sessionID: "ses_meta_identity_race",
+        model: { providerID: "openai", id: "new-model" },
+      },
+    });
+    expect(runtime.metadata("ses_meta_identity_race")?.model?.id).toBe("new-model");
+    expect(refreshSignal?.aborted).toBe(false);
+    expect(getSessionMetadata).toHaveBeenCalledTimes(2);
+
+    // The pending record has the same timestamp as the events, but must not
+    // replace a field updated since this read began.
+    resolveRefresh?.({
+      title: "Read completed",
+      model: { providerID: "openai", id: "old-model" },
+      timeUpdatedMs: 15,
+    });
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_meta_identity_race")?.title).toBe("Read completed"),
+    );
+    expect(runtime.metadata("ses_meta_identity_race")?.model?.id).toBe("new-model");
+    release();
+    runtime.dispose();
+  });
+
+  it("merges unaffected fields from the initial get after a partial identity event", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let resolveInitial:
+      | ((record: {
+          title?: string;
+          agent?: string;
+          model?: { providerID: string; id: string };
+          timeUpdatedMs?: number;
+        }) => void)
+      | undefined;
+    let initialSignal: AbortSignal | undefined;
+    const getSessionMetadata = vi.fn(
+      (_sessionId: string, requestOptions?: { signal: AbortSignal }) => {
+        initialSignal = requestOptions?.signal;
+        return new Promise<{
+          title?: string;
+          agent?: string;
+          model?: { providerID: string; id: string };
+          timeUpdatedMs?: number;
+        }>((resolve) => {
+          resolveInitial = resolve;
+        });
+      },
+    );
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata,
+    });
+    const release = runtime.subscribe("ses_meta_initial_partial", () => {});
+    await vi.waitFor(() => expect(getSessionMetadata).toHaveBeenCalledTimes(1));
+
+    emit?.({
+      type: "session.metadata",
+      created: 15,
+      data: {
+        sessionID: "ses_meta_initial_partial",
+        model: { providerID: "openai", id: "selected-model" },
+      },
+    });
+    expect(initialSignal?.aborted).toBe(false);
+    resolveInitial?.({
+      title: "Loaded title",
+      agent: "loaded-agent",
+      model: { providerID: "openai", id: "stale-model" },
+      timeUpdatedMs: 15,
+    });
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_meta_initial_partial")).toMatchObject({
+        title: "Loaded title",
+        agent: "loaded-agent",
+        model: { providerID: "openai", id: "selected-model" },
+        updatedAtMs: 15,
+      }),
+    );
+    expect(getSessionMetadata).toHaveBeenCalledTimes(1);
+    release();
+    runtime.dispose();
+  });
+
+  it("preserves a reconnect rename while recovering model and agent from the same get", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let resolveRefresh:
+      | ((record: {
+          title?: string;
+          agent?: string;
+          model?: { providerID: string; id: string };
+          timeUpdatedMs?: number;
+        }) => void)
+      | undefined;
+    let refreshSignal: AbortSignal | undefined;
+    let calls = 0;
+    const getSessionMetadata = vi.fn(
+      (_sessionId: string, requestOptions?: { signal: AbortSignal }) => {
+        calls += 1;
+        if (calls === 1) {
+          return Promise.resolve({
+            title: "Original title",
+            agent: "old-agent",
+            model: { providerID: "openai", id: "old-model" },
+            timeUpdatedMs: 10,
+          });
+        }
+        refreshSignal = requestOptions?.signal;
+        return new Promise<{
+          title?: string;
+          agent?: string;
+          model?: { providerID: string; id: string };
+          timeUpdatedMs?: number;
+        }>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      },
+    );
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata,
+    });
+    const release = runtime.subscribe("ses_meta_reconnect_partial", () => {});
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_meta_reconnect_partial")?.model?.id).toBe("old-model"),
+    );
+
+    emit?.({ type: "source.status", created: 11, data: { state: "unavailable" } });
+    onReconnect?.();
+    await vi.waitFor(() => expect(getSessionMetadata).toHaveBeenCalledTimes(2));
+    emit?.({
+      type: "session.metadata",
+      created: 20,
+      data: { sessionID: "ses_meta_reconnect_partial", title: "Renamed title" },
+    });
+    expect(refreshSignal?.aborted).toBe(false);
+
+    resolveRefresh?.({
+      title: "Original title",
+      agent: "new-agent",
+      model: { providerID: "openai", id: "new-model" },
+      timeUpdatedMs: 15,
+    });
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_meta_reconnect_partial")).toMatchObject({
+        title: "Renamed title",
+        agent: "new-agent",
+        model: { providerID: "openai", id: "new-model" },
+        updatedAtMs: 20,
+      }),
+    );
+    expect(getSessionMetadata).toHaveBeenCalledTimes(2);
+    release();
+    runtime.dispose();
+  });
+
+  it("aborts pending metadata reads on gaps, session switches, and disposal", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    const requests: Array<{ sessionId: string; signal?: AbortSignal }> = [];
+    const getSessionMetadata = vi.fn(
+      (sessionId: string, requestOptions?: { signal: AbortSignal }) => {
+        requests.push({ sessionId, signal: requestOptions?.signal });
+        return new Promise<{
+          title?: string;
+          timeUpdatedMs?: number;
+        }>(() => {});
+      },
+    );
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata,
+    });
+    const releaseGap = runtime.subscribe("ses_meta_gap_cancel", () => {});
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    emit?.({ type: "source.status", created: 1, data: { state: "unavailable" } });
+    expect(requests[0]?.signal?.aborted).toBe(true);
+
+    onReconnect?.();
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    onReconnect?.();
+    await vi.waitFor(() => expect(requests).toHaveLength(3));
+    expect(requests[1]?.signal?.aborted).toBe(true);
+    releaseGap();
+    expect(requests[2]?.signal?.aborted).toBe(true);
+
+    // A selection switch releases the old session's request and starts a
+    // fresh one without accumulating active request records.
+    const releaseNext = runtime.subscribe("ses_meta_switch_next", () => {});
+    await vi.waitFor(() => expect(requests).toHaveLength(4));
+    expect(requests[3]?.sessionId).toBe("ses_meta_switch_next");
+    runtime.dispose();
+    expect(requests[3]?.signal?.aborted).toBe(true);
+    releaseNext();
+  });
 });

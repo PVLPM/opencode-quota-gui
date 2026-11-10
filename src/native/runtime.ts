@@ -6,7 +6,6 @@ import type { Location, Route } from "../ui/routing.js";
 import {
   createNativeCacheObserverRuntime,
   type NativeCacheObserver,
-  type NativeCacheObserverRuntime,
 } from "./cache-observer-runtime.js";
 import { createNativeDashboardClient, type NativeDashboardClient } from "./dashboard-client.js";
 import { initialNativeLocation } from "./navigation.js";
@@ -64,7 +63,15 @@ export function createNativeDashboardRuntime(
     subscribeReconnect: (listener) => client.onReconnect(listener),
     subscribeEventStreamRetire: (listener) => client.onEventStreamRetire(listener),
     listChildren: async (parentSessionId) => {
-      const children: Array<{ id: string; parentID?: string; title?: string }> = [];
+      const children: Array<{
+        id: string;
+        parentID?: string;
+        title?: string;
+        agent?: string;
+        model?: { providerID: string; id: string; variant?: string };
+        timeCreatedMs?: number;
+        timeUpdatedMs?: number;
+      }> = [];
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
 
@@ -75,10 +82,21 @@ export function createNativeDashboardRuntime(
           ...(cursor === undefined ? {} : { cursor }),
         });
         for (const session of page.data) {
+          // Public session-record metadata only: identity, selected agent and
+          // model reference, and activity timestamps. No message, path or
+          // credential content is read.
           children.push({
             id: session.id,
             ...(session.parentID === undefined ? {} : { parentID: session.parentID }),
             ...(session.title === undefined ? {} : { title: session.title }),
+            ...(session.agent === undefined ? {} : { agent: session.agent }),
+            ...(session.model === undefined ? {} : { model: session.model }),
+            ...(Number.isFinite(session.time?.created) && session.time.created >= 0
+              ? { timeCreatedMs: session.time.created }
+              : {}),
+            ...(Number.isFinite(session.time?.updated) && session.time.updated >= 0
+              ? { timeUpdatedMs: session.time.updated }
+              : {}),
           });
         }
 
@@ -95,6 +113,26 @@ export function createNativeDashboardRuntime(
       }
 
       return children;
+    },
+    // Authoritative busy snapshot from the public session.active RPC; used to
+    // reconcile status on (re)connect, never polled.
+    listActiveSessions: async () => Object.keys(await ctx.client.session.active()),
+    // Public session.get projection seeding and refreshing watched-session
+    // identity metadata (once per selection and after reconnects, never
+    // polled). No message, path or credential content is read.
+    getSessionMetadata: async (sessionId: string, requestOptions) => {
+      const info = await ctx.client.session.get({ sessionID: sessionId }, requestOptions);
+      return {
+        ...(info.title === undefined ? {} : { title: info.title }),
+        ...(info.agent === undefined ? {} : { agent: info.agent }),
+        ...(info.model === undefined ? {} : { model: info.model }),
+        ...(Number.isFinite(info.time?.created) && info.time.created >= 0
+          ? { timeCreatedMs: info.time.created }
+          : {}),
+        ...(Number.isFinite(info.time?.updated) && info.time.updated >= 0
+          ? { timeUpdatedMs: info.time.updated }
+          : {}),
+      };
     },
     // Lazy cache-history demand is the only Native path that calls message.list.
     // Forward its cancellation signal directly to the installed public client.

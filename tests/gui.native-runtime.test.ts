@@ -221,6 +221,9 @@ function pushPrimaryInvocation(
   });
 }
 
+/** The pill reads authoritative session metadata through the public client. */
+const sessionGetStub = { get: async () => ({ title: "Session" }) };
+
 function mountRuntime(options: {
   fake: ReturnType<typeof createFakeCaller>;
   connected: () => boolean;
@@ -263,7 +266,7 @@ describe("native window runtime", () => {
       pill = createCacheComposerPill(
         { current, list: () => [session] } as never,
         runtime,
-        {} as never,
+        sessionGetStub as never,
       );
       return disposeRoot;
     });
@@ -331,7 +334,7 @@ describe("native window runtime", () => {
       pill = createCacheComposerPill(
         { current, list: () => [sessionA, sessionB] } as never,
         runtime,
-        {} as never,
+        sessionGetStub as never,
       );
       return disposeRoot;
     });
@@ -402,7 +405,7 @@ describe("native window runtime", () => {
       pill = createCacheComposerPill(
         { current, list: () => [session] } as never,
         runtime,
-        {} as never,
+        sessionGetStub as never,
       );
       return disposeRoot;
     });
@@ -675,7 +678,7 @@ describe("native window runtime", () => {
       pill = createCacheComposerPill(
         { current, list: () => [session] } as never,
         runtime,
-        {} as never,
+        sessionGetStub as never,
       );
       return disposeRoot;
     });

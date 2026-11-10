@@ -248,6 +248,33 @@ export type DashboardRpcCacheObserverEvent =
       data: { sessionID: string };
     }
   | {
+      /**
+       * Authoritative session execution state, projected from the host's own
+       * `session.status`, `session.idle` and `session.execution.*` events.
+       * Carries no message, error or credential content.
+       */
+      type: "session.status";
+      created: number;
+      data: { sessionID: string; state: "busy" | "idle" };
+    }
+  | {
+      /**
+       * Narrow session-identity update, projected from the host's own
+       * `session.renamed`, `session.agent.selected` and `session.model.selected`
+       * events. Only display-identity fields are carried, and only those the
+       * source event contains; `created` is the host timestamp that dates the
+       * change for recency ordering.
+       */
+      type: "session.metadata";
+      created: number;
+      data: {
+        sessionID: string;
+        title?: string;
+        agent?: string;
+        model?: { providerID: string; id: string; variant?: string };
+      };
+    }
+  | {
       type: "source.status";
       created: number;
       data: { state: "observed" | "unavailable" | "stopped" };
@@ -275,6 +302,8 @@ export type DashboardRpcErrorDetails = {
 };
 
 const MAX_RESOURCE_ID_LENGTH = 256;
+/** Bounded relayed session titles; display layers truncate further. */
+const SESSION_METADATA_TITLE_MAX_LENGTH = 200;
 
 const NO_INPUT = schema<DashboardRpcNoInput>(
   (value) =>
@@ -756,6 +785,60 @@ export function isDashboardRpcCacheObserverEvent(
       (value.data.parentID === undefined ||
         (typeof value.data.parentID === "string" && isValidResourceId(value.data.parentID)))
     );
+  }
+
+  if (value.type === "session.status") {
+    return (
+      hasExactKeys(value, ["type", "created", "data"]) &&
+      Number.isFinite(value.created) &&
+      isObject(value.data) &&
+      hasExactKeys(value.data, ["sessionID", "state"]) &&
+      typeof value.data.sessionID === "string" &&
+      isValidResourceId(value.data.sessionID) &&
+      (value.data.state === "busy" || value.data.state === "idle")
+    );
+  }
+
+  if (value.type === "session.metadata") {
+    if (
+      !hasExactKeys(value, ["type", "created", "data"]) ||
+      !Number.isFinite(value.created) ||
+      !isObject(value.data) ||
+      !hasOnlyKeys(value.data, ["sessionID", "title", "agent", "model"])
+    ) {
+      return false;
+    }
+    if (typeof value.data.sessionID !== "string" || !isValidResourceId(value.data.sessionID)) {
+      return false;
+    }
+    if (
+      value.data.title !== undefined &&
+      !isSafeNotificationText(value.data.title, SESSION_METADATA_TITLE_MAX_LENGTH)
+    ) {
+      return false;
+    }
+    if (
+      value.data.agent !== undefined &&
+      (typeof value.data.agent !== "string" || !isValidResourceId(value.data.agent))
+    ) {
+      return false;
+    }
+    if (value.data.model !== undefined) {
+      const model = value.data.model;
+      if (
+        !isObject(model) ||
+        !hasOnlyKeys(model, ["providerID", "id", "variant"]) ||
+        typeof model.providerID !== "string" ||
+        !isValidResourceId(model.providerID) ||
+        typeof model.id !== "string" ||
+        !isValidResourceId(model.id) ||
+        (model.variant !== undefined &&
+          (typeof model.variant !== "string" || !isValidResourceId(model.variant)))
+      ) {
+        return false;
+      }
+    }
+    return true;
   }
 
   if (value.type !== "session.compaction.ended" && value.type !== "session.deleted") return false;
