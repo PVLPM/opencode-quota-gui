@@ -250,7 +250,6 @@ function cardPreferences(config: QuotaToastConfig): ProviderCardPreferences {
     providerOrder: config.dashboard.providerOrder,
     cardOrder: config.dashboard.cardOrder,
   };
-  if (config.quotaProjection !== undefined) preferences.quotaProjection = config.quotaProjection;
   if (config.resetTimeDecimals !== undefined) {
     preferences.resetTimeDecimals = config.resetTimeDecimals;
   }

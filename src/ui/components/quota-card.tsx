@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { ProviderCard, QuotaCardRow } from "../../contracts/dashboard";
 import type { BankedResetAvailability, BankedResetCredit } from "../../contracts/openai-quota";
 import { formatRunway, formatTimestamp } from "../format";
@@ -280,15 +280,10 @@ export function QuotaCardView(props: {
   const displayRows = () =>
     shownRows().filter((row) => !isSuppressedOptionalRow(row, props.card.providerId));
   const [copyStatus, setCopyStatus] = createSignal("");
-  const [clock, setClock] = createSignal(Date.now());
-  onMount(() => {
-    const timer = setInterval(() => setClock(Date.now()), 1_000);
-    onCleanup(() => clearInterval(timer));
-  });
 
   function runwayText(row: QuotaCardRow): string | undefined {
     if (props.stale) return undefined;
-    const now = clock();
+    const now = Date.now();
     if (row.runway?.kind === "lasts_past_reset") {
       const reset = row.resetAtIso;
       if (

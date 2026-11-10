@@ -81,7 +81,6 @@ export const PROVIDER_ERROR_GENERIC_LABEL = "Provider error";
  */
 export interface ProviderCardPreferences {
   accountingDetail: QuotaToastConfig["accountingDetail"];
-  quotaProjection?: QuotaToastConfig["quotaProjection"];
   resetTimeDecimals?: QuotaToastConfig["resetTimeDecimals"];
   resetTimeSpaced?: QuotaToastConfig["resetTimeSpaced"];
   /**

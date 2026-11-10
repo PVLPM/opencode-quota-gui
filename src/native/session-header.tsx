@@ -248,7 +248,6 @@ export function NativeSessionHeader(props: NativeSessionHeaderProps): JSX.Elemen
       // Unreachable while cards are rendered: the model only builds cards from
       // a real settings payload. The direction stays the product's default.
       percentMode: "remaining",
-      showRunway: false,
       detailed: false,
     };
 
