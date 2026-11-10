@@ -13,7 +13,7 @@ Quota, token usage, and analytics inside OpenCode Desktop. OpenCode Quota GUI ad
 
 ## Native OpenCode Desktop
 
-The Native panel is the primary experience in **v1.3.0**. Open **Quota & Usage** for Quota, Analytics, Models, and their detail pages; OpenCode Settings includes the plugin's **Quota & analytics** page. The session header shows a compact quota slot with a combined preview.
+The Native panel is the primary experience in **v1.3.1**. Open **Quota & Usage** for Quota, Analytics, Models, and their detail pages; OpenCode Settings includes the plugin's **Quota & analytics** page. The session header shows a compact quota slot with a combined preview.
 
 The full Native integration ships from **v1.3.0** and requires **OpenCode Desktop 2.2.1 or newer**.
 
@@ -50,7 +50,7 @@ The full Native integration ships from **v1.3.0** and requires **OpenCode Deskto
 
 ## What you get
 
-The Native panel is the primary surface in v1.3.0. Every feature below is available there, and the optional browser dashboard mirrors the same views as a fallback.
+The Native panel is the primary surface in v1.3.1. Every feature below is available there, and the optional browser dashboard mirrors the same views as a fallback.
 
 ## Features
 

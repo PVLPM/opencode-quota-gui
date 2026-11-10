@@ -2,6 +2,27 @@
 
 User-facing release notes for OpenCode Quota GUI.
 
+## 1.3.1
+
+### Added
+
+- **Cache observation.** The Native composer pill shows the most recent reported primary cache-read percentage and independent session observations. Retention colors are estimates based on documented assumptions, not guarantees of a future cache hit; unsupported routes remain unverified.
+- **Quota alert controls.** Configure Native alerts for low quota, exhaustion, reset windows, and provider failures independently, with a master switch and shared cooldown.
+- **Agent provider proposals.** Agents can inspect and propose disabled custom-provider definitions; approval, activation, and credential-bearing tests remain under user control.
+- **China 2027 holidays.** Temporal pricing includes the seven official national holiday intervals without changing weekday or weekend rules.
+
+### Improved
+
+- **Session cache details.** A scrollable composer popover displays session activity and available agent, provider, model, and effort information. A model-selection mismatch warns before the next request without claiming that a prior cache was destroyed.
+- **Runway on demand.** Eligible quota values and bars show a projected exhaustion tooltip without adding a persistent card row.
+- **Provider compatibility.** Alibaba Coding Plan quota uses the official Bailian CLI, and Claude Agent routes through the existing Anthropic integration.
+- **Privacy-safe diagnostics.** Copy operational diagnostics or an account-scoped quota summary without exporting credentials or session content.
+
+### Compatibility
+
+- OpenCode `>= 2.0.16 < 2.3.0`; the full Native integration requires OpenCode Desktop 2.2.1 or newer. Supported older hosts, including 2.2.0, retain the browser-dashboard fallback by default unless explicitly configured otherwise.
+- Cache retention and future reuse cannot be verified from token counts alone; the displayed status and expiry are estimates, not proof of a physical provider cache.
+
 ## 1.3.0
 
 The Native OpenCode Desktop release. Quota, analytics, models, and settings now live inside OpenCode Desktop, with a session-header quota slot and native notifications. The browser dashboard is now a fallback: on by default below OpenCode 2.2.0, off by default at 2.2.0 and newer.

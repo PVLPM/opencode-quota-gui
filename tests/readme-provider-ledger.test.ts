@@ -218,7 +218,7 @@ describe("native-first public documentation", () => {
 
     const hero = readMarkdownSection(readme, "Native OpenCode Desktop");
     expect(hero).toContain("OpenCode Desktop 2.2.1");
-    expect(hero).toContain("v1.3.0");
+    expect(hero).toContain("v1.3.1");
 
     const settings = readMarkdownSection(readme, "Settings and privacy");
     expect(settings).toContain("~/.config/opencode/opencode-quota-gui/config.jsonc");
