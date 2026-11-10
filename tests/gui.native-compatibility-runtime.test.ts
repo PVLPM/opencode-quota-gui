@@ -13,7 +13,10 @@ const mocks = vi.hoisted(() => ({
   },
   createCacheComposerPill: vi.fn(() => ({})),
   createGuiRpcCaller: vi.fn(() => ({ events: { subscribe: vi.fn() }, health: vi.fn() })),
-  createNativeDashboardRuntime: vi.fn(() => ({ cacheObserver: {}, retain: vi.fn() })),
+  createNativeDashboardRuntime: vi.fn(() => ({
+    cacheObserver: { subscribeModelMismatchTransitions: vi.fn(() => () => {}) },
+    retain: vi.fn(),
+  })),
   startQuotaNotificationSubscription: vi.fn(() => ({ setConnected: vi.fn(), stop: vi.fn() })),
   windowHasFocus: vi.fn(),
 }));

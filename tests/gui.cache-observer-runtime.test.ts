@@ -2073,6 +2073,7 @@ describe("native cache observer runtime", () => {
 
     onReconnect?.();
     await vi.waitFor(() => expect(requests).toHaveLength(2));
+    emit?.({ type: "source.status", created: 2, data: { state: "unavailable" } });
     onReconnect?.();
     await vi.waitFor(() => expect(requests).toHaveLength(3));
     expect(requests[1]?.signal?.aborted).toBe(true);
@@ -2087,5 +2088,1035 @@ describe("native cache observer runtime", () => {
     runtime.dispose();
     expect(requests[3]?.signal?.aborted).toBe(true);
     releaseNext();
+  });
+
+  it("tracks model-route mismatch transitions without changing the cached route", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async () => ({
+        model: { providerID: "anthropic", id: "claude-cache" },
+        timeUpdatedMs: 10,
+      }),
+    });
+    const sessionId = "ses_model_route_main";
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    await vi.waitFor(() => expect(runtime.metadata(sessionId)?.model?.id).toBe("claude-cache"));
+
+    emit?.({
+      type: "session.step.started",
+      created: 20,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_cache_route",
+        model: { providerID: "anthropic", id: "claude-cache" },
+        started: 15,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_cache_route",
+        tokens: { input: 100, cache: { read: 40, write: 10 } },
+      },
+    });
+    const classificationBeforeSelection = runtime.query(sessionId);
+
+    const selectModel = (
+      created: number,
+      model: { providerID: string; id: string; variant?: string },
+    ) =>
+      emit?.({
+        type: "session.metadata",
+        created,
+        data: { sessionID: sessionId, model },
+      });
+
+    selectModel(40, { providerID: "openai", id: "gpt-selected" });
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({
+      status: "mismatched",
+      selectedModel: { providerID: "openai", id: "gpt-selected" },
+      cacheRoute: { providerID: "anthropic", id: "claude-cache" },
+    });
+    expect(transitions).toHaveLength(1);
+
+    // Repeated selection events and stale events do not create a new transition.
+    selectModel(41, { providerID: "openai", id: "gpt-selected" });
+    selectModel(35, { providerID: "anthropic", id: "claude-cache" });
+    expect(transitions).toHaveLength(1);
+    expect(runtime.metadata(sessionId)?.model?.id).toBe("gpt-selected");
+
+    // Returning to the observed model restores the existing estimate; it does
+    // not destroy or rewrite the earlier cache observation.
+    selectModel(50, { providerID: "anthropic", id: "claude-cache" });
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({
+      status: "matched",
+      selectedModel: { providerID: "anthropic", id: "claude-cache" },
+      cacheRoute: { providerID: "anthropic", id: "claude-cache" },
+    });
+    expect(runtime.query(sessionId)).toEqual(classificationBeforeSelection);
+
+    selectModel(60, { providerID: "anthropic", id: "claude-cache", variant: "high" });
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({ status: "mismatched" });
+    expect(transitions).toHaveLength(3);
+    selectModel(70, { providerID: "anthropic", id: "claude-cache", variant: "default" });
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({ status: "matched" });
+    expect(transitions).toHaveLength(4);
+    selectModel(80, { providerID: "openai", id: "gpt-selected" });
+    expect(transitions).toHaveLength(5);
+    release();
+    runtime.dispose();
+  });
+
+  it("keeps unknown and other-session routes isolated", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async (sessionId) => ({
+        model: {
+          providerID: "anthropic",
+          id: sessionId === "ses_route_known" ? "known-cache" : "unobserved",
+        },
+        timeUpdatedMs: 10,
+      }),
+    });
+    const knownRelease = runtime.subscribe("ses_route_known", () => {});
+    const unknownRelease = runtime.subscribe("ses_route_unknown", () => {});
+    await vi.waitFor(() =>
+      expect(runtime.metadata("ses_route_unknown")?.model?.id).toBe("unobserved"),
+    );
+
+    emit?.({
+      type: "session.step.started",
+      created: 20,
+      data: {
+        sessionID: "ses_route_known",
+        assistantMessageID: "msg_known_route",
+        model: { providerID: "anthropic", id: "known-cache" },
+        started: 15,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: "ses_route_known",
+        assistantMessageID: "msg_known_route",
+        tokens: { input: 100, cache: { read: 30, write: 0 } },
+      },
+    });
+    expect(runtime.modelMismatch("ses_route_known")).toMatchObject({ status: "matched" });
+    expect(runtime.modelMismatch("ses_route_unknown")).toEqual({ status: "unknown" });
+
+    emit?.({
+      type: "session.metadata",
+      created: 40,
+      data: {
+        sessionID: "ses_route_unknown",
+        model: { providerID: "openai", id: "new-model" },
+      },
+    });
+    expect(runtime.modelMismatch("ses_route_unknown")).toEqual({ status: "unknown" });
+    expect(runtime.modelMismatch("ses_route_known")).toMatchObject({
+      status: "matched",
+      selectedModel: { providerID: "anthropic", id: "known-cache" },
+    });
+    knownRelease();
+    unknownRelease();
+    runtime.dispose();
+  });
+
+  it("does not alert for initial or reconnect metadata and rejects stale model events", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let metadataReads = 0;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async () => {
+        metadataReads += 1;
+        return metadataReads === 1
+          ? { model: { providerID: "openai", id: "initial-model" }, timeUpdatedMs: 20 }
+          : { model: { providerID: "openai", id: "reconnected-model" }, timeUpdatedMs: 40 };
+      },
+    });
+    const sessionId = "ses_model_route_reconnect";
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    await vi.waitFor(() => expect(runtime.metadata(sessionId)?.model?.id).toBe("initial-model"));
+
+    emit?.({
+      type: "session.step.started",
+      created: 25,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_reconnect_route",
+        model: { providerID: "anthropic", id: "cache-route" },
+        started: 21,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_reconnect_route",
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({ status: "mismatched" });
+    expect(transitions).toHaveLength(0);
+
+    onReconnect?.();
+    await vi.waitFor(() => expect(metadataReads).toBe(2));
+    await vi.waitFor(() =>
+      expect(runtime.metadata(sessionId)?.model?.id).toBe("reconnected-model"),
+    );
+    expect(transitions).toHaveLength(0);
+
+    // An older event cannot rewind the selected model or notify.
+    emit?.({
+      type: "session.metadata",
+      created: 35,
+      data: { sessionID: sessionId, model: { providerID: "anthropic", id: "cache-route" } },
+    });
+    expect(runtime.metadata(sessionId)?.model?.id).toBe("reconnected-model");
+    expect(transitions).toHaveLength(0);
+
+    emit?.({
+      type: "session.metadata",
+      created: 50,
+      data: { sessionID: sessionId, model: { providerID: "openai", id: "new-live-model" } },
+    });
+    expect(transitions).toHaveLength(1);
+    release();
+    runtime.dispose();
+  });
+
+  it("treats the first live model event as a baseline when no initial metadata was available", () => {
+    let emit: ((event: unknown) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+    });
+    const sessionId = "ses_model_route_initial_event";
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+
+    emit?.({
+      type: "session.step.started",
+      created: 20,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_initial_event_route",
+        model: { providerID: "anthropic", id: "cache-route" },
+        started: 15,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_initial_event_route",
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+
+    emit?.({
+      type: "session.metadata",
+      created: 40,
+      data: { sessionID: sessionId, model: { providerID: "openai", id: "initial-model" } },
+    });
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({ status: "mismatched" });
+    expect(transitions).toHaveLength(0);
+
+    release();
+    runtime.dispose();
+  });
+
+  it("ends reconnect suppression after an older snapshot without a catch-up alert", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let metadataReads = 0;
+    let resolveReconnectMetadata:
+      | ((record: { model: { providerID: string; id: string }; timeUpdatedMs: number }) => void)
+      | undefined;
+    let reconnectReadSettled = false;
+    const cacheRoute = { providerID: "anthropic", id: "cache-route" };
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async () => {
+        metadataReads += 1;
+        if (metadataReads === 1) return { model: cacheRoute, timeUpdatedMs: 10 };
+        return new Promise<{
+          model: { providerID: string; id: string };
+          timeUpdatedMs: number;
+        }>((resolve) => {
+          resolveReconnectMetadata = resolve;
+        }).finally(() => {
+          reconnectReadSettled = true;
+        });
+      },
+    });
+    const sessionId = "ses_model_route_reconnect_older_snapshot";
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    await vi.waitFor(() => expect(runtime.metadata(sessionId)?.model?.id).toBe(cacheRoute.id));
+
+    emit?.({
+      type: "session.step.started",
+      created: 20,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_reconnect_older_snapshot",
+        model: cacheRoute,
+        started: 15,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_reconnect_older_snapshot",
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({ status: "matched" });
+
+    onReconnect?.();
+    await vi.waitFor(() => expect(metadataReads).toBe(2));
+    emit?.({
+      type: "session.metadata",
+      created: 50,
+      data: { sessionID: sessionId, model: { providerID: "openai", id: "selected-50" } },
+    });
+    expect(transitions).toHaveLength(0);
+
+    resolveReconnectMetadata?.({ model: cacheRoute, timeUpdatedMs: 40 });
+    await vi.waitFor(() => expect(reconnectReadSettled).toBe(true));
+    expect(runtime.metadata(sessionId)?.model?.id).toBe("selected-50");
+    expect(transitions).toHaveLength(0);
+
+    await vi.waitFor(() => {
+      emit?.({
+        type: "session.metadata",
+        created: 60,
+        data: { sessionID: sessionId, model: { providerID: "openai", id: "selected-60" } },
+      });
+      expect(transitions).toHaveLength(1);
+    });
+    emit?.({
+      type: "session.metadata",
+      created: 70,
+      data: { sessionID: sessionId, model: { providerID: "openai", id: "selected-70" } },
+    });
+    expect(transitions).toHaveLength(2);
+
+    release();
+    runtime.dispose();
+  });
+
+  it("ends reconnect suppression after a failed metadata read without catch-up alerts", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let metadataReads = 0;
+    let rejectReconnectMetadata: ((reason: Error) => void) | undefined;
+    let reconnectReadSettled = false;
+    const cacheRoute = { providerID: "anthropic", id: "cache-route" };
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async () => {
+        metadataReads += 1;
+        if (metadataReads === 1) return { model: cacheRoute, timeUpdatedMs: 10 };
+        return new Promise<{
+          model: { providerID: string; id: string };
+          timeUpdatedMs: number;
+        }>((_resolve, reject) => {
+          rejectReconnectMetadata = reject;
+        }).finally(() => {
+          reconnectReadSettled = true;
+        });
+      },
+    });
+    const sessionId = "ses_model_route_reconnect_failed_read";
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    await vi.waitFor(() => expect(runtime.metadata(sessionId)?.model?.id).toBe(cacheRoute.id));
+
+    emit?.({
+      type: "session.step.started",
+      created: 20,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_reconnect_failed_read",
+        model: cacheRoute,
+        started: 15,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_reconnect_failed_read",
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({ status: "matched" });
+
+    onReconnect?.();
+    await vi.waitFor(() => expect(metadataReads).toBe(2));
+    emit?.({
+      type: "session.metadata",
+      created: 50,
+      data: { sessionID: sessionId, model: { providerID: "openai", id: "selected-50" } },
+    });
+    expect(transitions).toHaveLength(0);
+
+    rejectReconnectMetadata?.(new Error("metadata unavailable"));
+    await vi.waitFor(() => expect(reconnectReadSettled).toBe(true));
+    expect(transitions).toHaveLength(0);
+
+    await vi.waitFor(() => {
+      emit?.({
+        type: "session.metadata",
+        created: 60,
+        data: { sessionID: sessionId, model: { providerID: "openai", id: "selected-60" } },
+      });
+      expect(transitions).toHaveLength(1);
+    });
+    emit?.({
+      type: "session.metadata",
+      created: 70,
+      data: { sessionID: sessionId, model: { providerID: "openai", id: "selected-70" } },
+    });
+    expect(transitions).toHaveLength(2);
+
+    release();
+    runtime.dispose();
+  });
+
+  it("starts a fresh model baseline when host events recover while RPC stays live", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let metadataReads = 0;
+    let resolveRecoveryMetadata:
+      | ((record: { model: { providerID: string; id: string }; timeUpdatedMs: number }) => void)
+      | undefined;
+    let recoveryReadSettled = false;
+    const cacheRoute = { providerID: "anthropic", id: "cache-route" };
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async () => {
+        metadataReads += 1;
+        if (metadataReads === 1) return { model: cacheRoute, timeUpdatedMs: 10 };
+        return new Promise<{
+          model: { providerID: string; id: string };
+          timeUpdatedMs: number;
+        }>((resolve) => {
+          resolveRecoveryMetadata = resolve;
+        }).finally(() => {
+          recoveryReadSettled = true;
+        });
+      },
+    });
+    const sessionId = "ses_model_route_source_recovery";
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    await vi.waitFor(() => expect(runtime.metadata(sessionId)?.model?.id).toBe(cacheRoute.id));
+
+    emit?.({
+      type: "session.step.started",
+      created: 20,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_source_recovery_before_gap",
+        model: cacheRoute,
+        started: 15,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_source_recovery_before_gap",
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+
+    emit?.({ type: "source.status", created: 40, data: { state: "unavailable" } });
+    emit?.({ type: "source.status", created: 50, data: { state: "observed" } });
+    await vi.waitFor(() => expect(metadataReads).toBe(2));
+
+    emit?.({
+      type: "session.step.started",
+      created: 55,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_source_recovery_after_gap",
+        model: cacheRoute,
+        started: 52,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 58,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_source_recovery_after_gap",
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    emit?.({
+      type: "session.metadata",
+      created: 60,
+      data: { sessionID: sessionId, model: { providerID: "openai", id: "selected-60" } },
+    });
+    expect(transitions).toHaveLength(0);
+
+    resolveRecoveryMetadata?.({ model: cacheRoute, timeUpdatedMs: 59 });
+    await vi.waitFor(() => expect(recoveryReadSettled).toBe(true));
+    expect(runtime.metadata(sessionId)?.model?.id).toBe("selected-60");
+    expect(transitions).toHaveLength(0);
+
+    await vi.waitFor(() => {
+      emit?.({
+        type: "session.metadata",
+        created: 70,
+        data: { sessionID: sessionId, model: { providerID: "openai", id: "selected-70" } },
+      });
+      expect(transitions).toHaveLength(1);
+    });
+
+    release();
+    runtime.dispose();
+  });
+
+  it("does not notify for metadata that recovers a no-API gap", () => {
+    let emit: ((event: unknown) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+    });
+    const sessionId = "ses_model_route_no_api_recovery_event";
+    const cacheRoute = { providerID: "anthropic", id: "cache-route" };
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+
+    emit?.({
+      type: "session.metadata",
+      created: 10,
+      data: { sessionID: sessionId, model: cacheRoute },
+    });
+    emit?.({
+      type: "session.step.started",
+      created: 20,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_no_api_before_gap",
+        model: cacheRoute,
+        started: 15,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_no_api_before_gap",
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+
+    emit?.({ type: "source.status", created: 40, data: { state: "unavailable" } });
+    emit?.({
+      type: "session.metadata",
+      created: 50,
+      data: {
+        sessionID: sessionId,
+        model: { providerID: "openai", id: "recovery-selection" },
+      },
+    });
+    expect(transitions).toHaveLength(0);
+
+    emit?.({
+      type: "session.step.started",
+      created: 60,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_no_api_after_gap",
+        model: cacheRoute,
+        started: 55,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 70,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_no_api_after_gap",
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    emit?.({
+      type: "session.metadata",
+      created: 80,
+      data: { sessionID: sessionId, model: { providerID: "openai", id: "real-selection" } },
+    });
+    expect(transitions).toHaveLength(1);
+
+    release();
+    runtime.dispose();
+  });
+
+  it.each([
+    "session.status",
+    "session.step.started",
+    "session.step.ended",
+    "session.metadata",
+  ] as const)("recovers a waiting model baseline before applying %s evidence", async (firstEvidenceType) => {
+    let emit: ((event: unknown) => void) | undefined;
+    let metadataReads = 0;
+    let recoveryReadSettled = false;
+    let resolveRecoveryMetadata:
+      | ((record: { model: { providerID: string; id: string }; timeUpdatedMs: number }) => void)
+      | undefined;
+    const cacheRoute = { providerID: "anthropic", id: "cache-route" };
+    const sessionId = `ses_model_route_recovery_${firstEvidenceType.replaceAll(".", "_")}`;
+    const started = (messageId: string, created: number) => ({
+      type: "session.step.started",
+      created,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: messageId,
+        model: cacheRoute,
+        started: created - 5,
+      },
+    });
+    const ended = (messageId: string, created: number) => ({
+      type: "session.step.ended",
+      created,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: messageId,
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    const select = (id: string, created: number) => ({
+      type: "session.metadata",
+      created,
+      data: { sessionID: sessionId, model: { providerID: "openai", id } },
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async () => {
+        metadataReads += 1;
+        if (metadataReads === 1) return { model: cacheRoute, timeUpdatedMs: 10 };
+        return new Promise<{
+          model: { providerID: string; id: string };
+          timeUpdatedMs: number;
+        }>((resolve) => {
+          resolveRecoveryMetadata = resolve;
+        }).finally(() => {
+          recoveryReadSettled = true;
+        });
+      },
+    });
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    await vi.waitFor(() => expect(runtime.metadata(sessionId)?.model?.id).toBe(cacheRoute.id));
+
+    emit?.(started("msg_before_gap", 20));
+    emit?.(ended("msg_before_gap", 30));
+    emit?.({ type: "source.status", created: 40, data: { state: "unavailable" } });
+
+    if (firstEvidenceType === "session.status") {
+      emit?.({
+        type: "session.status",
+        created: 50,
+        data: { sessionID: sessionId, state: "busy" },
+      });
+    } else if (firstEvidenceType === "session.step.started") {
+      emit?.(started("msg_first_after_gap", 50));
+    } else if (firstEvidenceType === "session.step.ended") {
+      emit?.(ended("msg_first_after_gap", 50));
+    } else {
+      emit?.(select("selected-50", 50));
+    }
+    await vi.waitFor(() => expect(metadataReads).toBe(2));
+
+    emit?.(started("msg_after_gap", 60));
+    emit?.(ended("msg_after_gap", 65));
+    emit?.(select("selected-70", 70));
+    expect(transitions).toHaveLength(0);
+
+    resolveRecoveryMetadata?.({ model: cacheRoute, timeUpdatedMs: 69 });
+    await vi.waitFor(() => expect(recoveryReadSettled).toBe(true));
+    expect(runtime.metadata(sessionId)?.model?.id).toBe("selected-70");
+    expect(transitions).toHaveLength(0);
+
+    emit?.(select("selected-80", 80));
+    expect(transitions).toHaveLength(1);
+
+    release();
+    runtime.dispose();
+  });
+
+  it("shares one recovery generation across reconnect and source recovery, and ignores older completions", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let onReconnect: (() => void) | undefined;
+    let metadataReads = 0;
+    let settledReads = 0;
+    const pendingReads: Array<
+      (record: { model: { providerID: string; id: string }; timeUpdatedMs: number }) => void
+    > = [];
+    const cacheRoute = { providerID: "anthropic", id: "cache-route" };
+    const sessionId = "ses_model_route_overlapping_recovery";
+    const started = (messageId: string, created: number) => ({
+      type: "session.step.started",
+      created,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: messageId,
+        model: cacheRoute,
+        started: created - 5,
+      },
+    });
+    const ended = (messageId: string, created: number) => ({
+      type: "session.step.ended",
+      created,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: messageId,
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    const select = (id: string, created: number) => ({
+      type: "session.metadata",
+      created,
+      data: { sessionID: sessionId, model: { providerID: "openai", id } },
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      subscribeReconnect: (listener) => {
+        onReconnect = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async () => {
+        metadataReads += 1;
+        if (metadataReads === 1) return { model: cacheRoute, timeUpdatedMs: 10 };
+        return new Promise<{
+          model: { providerID: string; id: string };
+          timeUpdatedMs: number;
+        }>((resolve) => pendingReads.push(resolve)).finally(() => {
+          settledReads += 1;
+        });
+      },
+    });
+    const transitions: unknown[] = [];
+    const release = runtime.subscribe(sessionId, () => {});
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    await vi.waitFor(() => expect(runtime.metadata(sessionId)?.model?.id).toBe(cacheRoute.id));
+    emit?.(started("msg_before_overlapping_gaps", 20));
+    emit?.(ended("msg_before_overlapping_gaps", 30));
+
+    emit?.({ type: "source.status", created: 40, data: { state: "unavailable" } });
+    emit?.({ type: "source.status", created: 50, data: { state: "observed" } });
+    await vi.waitFor(() => expect(metadataReads).toBe(2));
+    emit?.({ type: "source.status", created: 60, data: { state: "unavailable" } });
+    emit?.({ type: "session.status", created: 70, data: { sessionID: sessionId, state: "busy" } });
+    onReconnect?.();
+    emit?.({ type: "source.status", created: 80, data: { state: "observed" } });
+    await vi.waitFor(() => expect(metadataReads).toBe(3));
+    expect(metadataReads).toBe(3);
+
+    emit?.(started("msg_after_latest_gap", 90));
+    emit?.(ended("msg_after_latest_gap", 95));
+    emit?.(select("selected-100", 100));
+    expect(transitions).toHaveLength(0);
+
+    pendingReads[0]?.({
+      model: { providerID: "openai", id: "stale-old-read" },
+      timeUpdatedMs: 110,
+    });
+    pendingReads[1]?.({ model: cacheRoute, timeUpdatedMs: 99 });
+    await vi.waitFor(() => expect(settledReads).toBe(2));
+    expect(runtime.metadata(sessionId)?.model?.id).toBe("selected-100");
+    expect(transitions).toHaveLength(0);
+
+    emit?.(select("selected-120", 120));
+    expect(transitions).toHaveLength(1);
+    release();
+    runtime.dispose();
+  });
+
+  it("suppresses buffered first-interest model events per session until each baseline settles", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    type MetadataRecord = {
+      model: { providerID: string; id: string };
+      timeUpdatedMs: number;
+    };
+    const resolveMetadata = new Map<string, (record: MetadataRecord) => void>();
+    const settledMetadata = new Set<string>();
+    const requestedSessionIds: string[] = [];
+    const cacheRoute = { providerID: "anthropic", id: "cache-route" };
+    const firstSessionId = "ses_model_route_initial_baseline_first";
+    const secondSessionId = "ses_model_route_initial_baseline_second";
+    const started = (sessionId: string, messageId: string, created: number) => ({
+      type: "session.step.started",
+      created,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: messageId,
+        model: cacheRoute,
+        started: created - 5,
+      },
+    });
+    const ended = (sessionId: string, messageId: string, created: number) => ({
+      type: "session.step.ended",
+      created,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: messageId,
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    const select = (sessionId: string, id: string, created: number) => ({
+      type: "session.metadata",
+      created,
+      data: { sessionID: sessionId, model: { providerID: "openai", id } },
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        // Model events buffered by the relay can arrive synchronously as the
+        // first observer attaches, before its metadata request is started.
+        listener(started(firstSessionId, "msg_initial_buffered", 20) as never);
+        listener(ended(firstSessionId, "msg_initial_buffered", 30) as never);
+        listener(select(firstSessionId, "selected-40", 40) as never);
+        listener(select(firstSessionId, "selected-50", 50) as never);
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async (sessionId) => {
+        requestedSessionIds.push(sessionId);
+        return new Promise<MetadataRecord>((resolve) => {
+          resolveMetadata.set(sessionId, resolve);
+        }).finally(() => settledMetadata.add(sessionId));
+      },
+    });
+    const transitions: unknown[] = [];
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    const releaseFirst = runtime.subscribe(firstSessionId, () => {});
+    const releaseSecond = runtime.subscribe(secondSessionId, () => {});
+    await vi.waitFor(() => expect(requestedSessionIds).toEqual([firstSessionId, secondSessionId]));
+    expect(resolveMetadata.size).toBe(2);
+
+    emit?.(started(secondSessionId, "msg_second_initial", 20));
+    emit?.(ended(secondSessionId, "msg_second_initial", 30));
+    emit?.(select(secondSessionId, "second-selected-40", 40));
+    emit?.(select(secondSessionId, "second-selected-50", 50));
+    expect(transitions).toHaveLength(0);
+
+    resolveMetadata.get(firstSessionId)?.({
+      model: { providerID: "openai", id: "selected-50" },
+      timeUpdatedMs: 60,
+    });
+    await vi.waitFor(() => expect(settledMetadata.has(firstSessionId)).toBe(true));
+    await vi.waitFor(() => {
+      emit?.(select(firstSessionId, "selected-60", 60));
+      expect(transitions).toHaveLength(1);
+    });
+
+    emit?.(select(secondSessionId, "second-selected-60", 60));
+    expect(transitions).toHaveLength(1);
+    resolveMetadata.get(secondSessionId)?.({
+      model: { providerID: "openai", id: "second-selected-60" },
+      timeUpdatedMs: 60,
+    });
+    await vi.waitFor(() => expect(settledMetadata.has(secondSessionId)).toBe(true));
+    expect(transitions).toHaveLength(1);
+
+    await vi.waitFor(() => {
+      emit?.(select(secondSessionId, "second-selected-70", 70));
+      expect(transitions).toHaveLength(2);
+    });
+
+    releaseFirst();
+    releaseSecond();
+    runtime.dispose();
+  });
+
+  it("keeps the reselected session suppressed when an older initial read settles", async () => {
+    let emit: ((event: unknown) => void) | undefined;
+    let metadataReads = 0;
+    let resolveOldMetadata:
+      | ((record: { model: { providerID: string; id: string }; timeUpdatedMs: number }) => void)
+      | undefined;
+    let rejectNewMetadata: ((reason: Error) => void) | undefined;
+    let oldReadSettled = false;
+    let newReadSettled = false;
+    const cacheRoute = { providerID: "anthropic", id: "cache-route" };
+    const sessionId = "ses_model_route_initial_reselected";
+    const started = (messageId: string, created: number) => ({
+      type: "session.step.started",
+      created,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: messageId,
+        model: cacheRoute,
+        started: created - 5,
+      },
+    });
+    const ended = (messageId: string, created: number) => ({
+      type: "session.step.ended",
+      created,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: messageId,
+        tokens: { input: 50, cache: { read: 20, write: 0 } },
+      },
+    });
+    const select = (id: string, created: number) => ({
+      type: "session.metadata",
+      created,
+      data: { sessionID: sessionId, model: { providerID: "openai", id } },
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        emit = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      getSessionMetadata: async () => {
+        metadataReads += 1;
+        if (metadataReads === 1) {
+          return new Promise<{
+            model: { providerID: string; id: string };
+            timeUpdatedMs: number;
+          }>((resolve) => {
+            resolveOldMetadata = resolve;
+          }).finally(() => {
+            oldReadSettled = true;
+          });
+        }
+        return new Promise<{
+          model: { providerID: string; id: string };
+          timeUpdatedMs: number;
+        }>((_resolve, reject) => {
+          rejectNewMetadata = reject;
+        }).finally(() => {
+          newReadSettled = true;
+        });
+      },
+    });
+    const transitions: unknown[] = [];
+    runtime.subscribeModelMismatchTransitions((transition) => transitions.push(transition));
+    const releaseFirst = runtime.subscribe(sessionId, () => {});
+    await vi.waitFor(() => expect(metadataReads).toBe(1));
+    emit?.(started("msg_initial_before_switch", 20));
+    emit?.(ended("msg_initial_before_switch", 30));
+    emit?.(select("selected-40", 40));
+    emit?.(select("selected-50", 50));
+    expect(transitions).toHaveLength(0);
+
+    releaseFirst();
+    const releaseAgain = runtime.subscribe(sessionId, () => {});
+    await vi.waitFor(() => expect(metadataReads).toBe(2));
+    emit?.(started("msg_initial_after_switch", 55));
+    emit?.(ended("msg_initial_after_switch", 58));
+    emit?.(select("selected-60", 60));
+    emit?.(select("selected-70", 70));
+    expect(transitions).toHaveLength(0);
+
+    resolveOldMetadata?.({ model: cacheRoute, timeUpdatedMs: 51 });
+    await vi.waitFor(() => expect(oldReadSettled).toBe(true));
+    emit?.(select("selected-80", 80));
+    expect(transitions).toHaveLength(0);
+
+    rejectNewMetadata?.(new Error("initial metadata unavailable"));
+    await vi.waitFor(() => expect(newReadSettled).toBe(true));
+    expect(transitions).toHaveLength(0);
+    await vi.waitFor(() => {
+      emit?.(select("selected-90", 90));
+      expect(transitions).toHaveLength(1);
+    });
+
+    releaseAgain();
+    runtime.dispose();
   });
 });

@@ -15,6 +15,7 @@ import { createEffect, onCleanup } from "solid-js";
 import { supportsNativeGui } from "../lib/opencode-version-core.js";
 import productCss from "../ui/styles.css?inline";
 import { createCacheComposerPill } from "./cache-composer-pill.js";
+import { startModelMismatchNotificationSubscription } from "./model-mismatch-notifications.js";
 import nativeCss from "./native.css?inline";
 import { DashboardPanel } from "./panel.js";
 import { revealDashboardPanel } from "./panel-open.js";
@@ -112,6 +113,18 @@ export default Plugin.define({
     // One transport and one in-memory navigation map live for the window: a
     // Settings route change unmounts the Panel without ending this setup.
     const runtime = createNativeDashboardRuntime(ctx);
+    const modelMismatchNotifications = startModelMismatchNotificationSubscription({
+      source: runtime.cacheObserver,
+      currentSession: () => {
+        const current = ctx.sessions.current();
+        return current === undefined
+          ? undefined
+          : { id: current.id, builtin: current.server.builtin };
+      },
+      host: ctx,
+      focused: windowHasFocus,
+    });
+    onCleanup(modelMismatchNotifications);
     ctx.add(ComposerPill, createCacheComposerPill(ctx.sessions, runtime));
 
     // Notifications are a window-lifetime concern: setup runs once per window,

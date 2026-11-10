@@ -59,6 +59,23 @@ export interface NativeCacheObserverTransport {
 
 export type NativeCacheObserverSessionStatus = "busy" | "idle" | "unknown";
 
+export type NativeCacheObserverModelMismatch =
+  | { readonly status: "unknown" }
+  | {
+      readonly status: "matched" | "mismatched";
+      readonly selectedModel: Readonly<NativeCacheObserverChildModel>;
+      readonly cacheRoute: Readonly<NativeCacheObserverChildModel>;
+    };
+
+/** A live model-selection event that changed a known cache-route comparison. */
+export interface NativeCacheObserverModelMismatchTransition {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly atMs: number;
+  readonly previous: NativeCacheObserverModelMismatch;
+  readonly current: NativeCacheObserverModelMismatch;
+}
+
 export interface NativeCacheObserver {
   query(sessionId: string): CacheObserverClassification | undefined;
   subscribe(sessionId: string, listener: CacheObserverListener): () => void;
@@ -74,6 +91,12 @@ export interface NativeCacheObserver {
    * nothing authoritative has arrived for this session yet.
    */
   metadata(sessionId: string): NativeCacheObserverSessionMeta | undefined;
+  /** Read-only comparison with the last route observed for this exact session. */
+  modelMismatch(sessionId: string): NativeCacheObserverModelMismatch;
+  /** Live model-selection transitions only; initial and reconnect record reads are baselines. */
+  subscribeModelMismatchTransitions(
+    listener: (transition: NativeCacheObserverModelMismatchTransition) => void,
+  ): () => void;
   /** Notifies exact sessions whose history was invalidated by an observation gap. */
   subscribeGaps(listener: (sessionId: string) => void): () => void;
   /** One-shot direct-child discovery; it does not start or retain a transport. */
@@ -153,6 +176,11 @@ export function createNativeCacheObserverRuntime(options: {
     refreshVersion: number;
   }
 
+  type ModelMismatchLifecycle =
+    | { state: "waiting" }
+    | { state: "baselining"; generation: number }
+    | { state: "armed" };
+
   const ingestor = createCacheObserverIngestor(
     options.now === undefined ? {} : { now: options.now },
   );
@@ -164,6 +192,11 @@ export function createNativeCacheObserverRuntime(options: {
   const childOwners = new Map<string, string>();
   const transportListeners = new Set<(transport: NativeCacheObserverTransport) => void>();
   const gapListeners = new Set<(sessionId: string) => void>();
+  const modelMismatchListeners = new Set<
+    (transition: NativeCacheObserverModelMismatchTransition) => void
+  >();
+  const modelMismatchLifecycles = new Map<string, ModelMismatchLifecycle>();
+  let nextModelMismatchLifecycleGeneration = 0;
   /** The cache listeners this runtime installed, so confirmed status changes reach them. */
   const ingestorListeners = new Map<string, Set<CacheObserverListener>>();
   /** Confirmed execution state, tracked only for sessions a consumer observes. */
@@ -201,6 +234,91 @@ export function createNativeCacheObserverRuntime(options: {
 
   function metadata(sessionId: string): NativeCacheObserverSessionMeta | undefined {
     return sessionMetas.get(sessionId);
+  }
+
+  function modelMismatch(sessionId: string): NativeCacheObserverModelMismatch {
+    const selected = sessionMetas.get(sessionId)?.model;
+    const observed = ingestor.route(sessionId);
+    if (selected === undefined || observed === undefined) return { status: "unknown" };
+
+    const providerID = safeMetaText(observed.providerId);
+    const id = safeMetaText(observed.modelId);
+    const variant = safeMetaText(observed.variantId);
+    if (providerID === undefined || id === undefined) return { status: "unknown" };
+    const cacheRoute = Object.freeze({
+      providerID,
+      id,
+      ...(variant === undefined ? {} : { variant }),
+    });
+    const selectedModel = Object.freeze({ ...selected });
+    return Object.freeze({
+      status: sameModelIdentity(selectedModel, cacheRoute) ? "matched" : "mismatched",
+      selectedModel,
+      cacheRoute,
+    });
+  }
+
+  function subscribeModelMismatchTransitions(
+    listener: (transition: NativeCacheObserverModelMismatchTransition) => void,
+  ): () => void {
+    if (disposed) return () => undefined;
+    modelMismatchListeners.add(listener);
+    return () => modelMismatchListeners.delete(listener);
+  }
+
+  function notifyModelMismatchTransition(
+    sessionId: string,
+    atMs: number,
+    previous: NativeCacheObserverModelMismatch,
+    current: NativeCacheObserverModelMismatch,
+  ): void {
+    if (
+      disposed ||
+      isModelMismatchSuppressed(sessionId) ||
+      sameModelMismatch(previous, current) ||
+      previous.status === "unknown" ||
+      modelMismatchListeners.size === 0
+    ) {
+      return;
+    }
+    const selectedModel = current.status === "unknown" ? undefined : current.selectedModel;
+    const transition: NativeCacheObserverModelMismatchTransition = Object.freeze({
+      id: modelMismatchTransitionId(sessionId, atMs, selectedModel),
+      sessionId,
+      atMs,
+      previous,
+      current,
+    });
+    for (const listener of Array.from(modelMismatchListeners)) {
+      try {
+        listener(transition);
+      } catch {
+        // A transition consumer cannot interrupt host metadata ingestion.
+      }
+    }
+  }
+
+  function isModelMismatchSuppressed(sessionId: string): boolean {
+    const state = modelMismatchLifecycles.get(sessionId)?.state;
+    return state === "waiting" || state === "baselining";
+  }
+
+  function beginModelMismatchBaseline(sessionId: string): number {
+    const generation = ++nextModelMismatchLifecycleGeneration;
+    modelMismatchLifecycles.set(sessionId, { state: "baselining", generation });
+    return generation;
+  }
+
+  function settleModelMismatchBaseline(sessionId: string, generation: number | undefined): void {
+    const lifecycle = modelMismatchLifecycles.get(sessionId);
+    if (
+      generation !== undefined &&
+      lifecycle?.state === "baselining" &&
+      lifecycle.generation === generation &&
+      isWatched(sessionId)
+    ) {
+      modelMismatchLifecycles.set(sessionId, { state: "armed" });
+    }
   }
 
   function sessionMetaRevisionSnapshot(sessionId: string): SessionMetaFieldRevisions {
@@ -645,6 +763,7 @@ export function createNativeCacheObserverRuntime(options: {
       sessionStatuses.delete(sessionId);
       statusEventRevisions.delete(sessionId);
       sessionMetas.delete(sessionId);
+      modelMismatchLifecycles.delete(sessionId);
     }
     clearSessionMetaFreshness(sessionId);
     return wasOwnedChild;
@@ -697,6 +816,10 @@ export function createNativeCacheObserverRuntime(options: {
 
   function markActiveObservationGaps(): void {
     const sessionIds = watchedSessions();
+    // Put every watched session into the gap state before invalidating any
+    // request: an abort completion must never re-arm a pre-gap generation.
+    for (const sessionId of sessionIds)
+      modelMismatchLifecycles.set(sessionId, { state: "waiting" });
     // Invalidate in-flight reconciliation and metadata reads first: their
     // results may predate the gap.
     reconcileVersion += 1;
@@ -748,6 +871,7 @@ export function createNativeCacheObserverRuntime(options: {
         if ((statusEventRevisions.get(sessionId) ?? 0) !== (startRevisions.get(sessionId) ?? 0)) {
           continue;
         }
+        recoverWaitingModelMismatchBaselines(sessionId);
         setSessionStatus(sessionId, active.has(sessionId) ? "busy" : "idle");
       }
     } catch {
@@ -762,6 +886,7 @@ export function createNativeCacheObserverRuntime(options: {
       controller: AbortController;
       gapEpoch: number;
       fieldRevisionsAtStart: SessionMetaFieldRevisions;
+      lifecycleGeneration?: number;
     }
   >();
   let metadataGapEpoch = 0;
@@ -781,6 +906,7 @@ export function createNativeCacheObserverRuntime(options: {
   function forgetSessionMetadata(sessionId: string): void {
     cancelSessionMetadataRequest(sessionId);
     sessionMetas.delete(sessionId);
+    modelMismatchLifecycles.delete(sessionId);
     clearSessionMetaFreshness(sessionId);
   }
 
@@ -791,22 +917,31 @@ export function createNativeCacheObserverRuntime(options: {
    * older one; identity events protect their fields while the read completes.
    * Release, gap, and disposal cancel outstanding reads.
    */
-  function requestSessionMetadata(sessionId: string, onlyMissing: boolean): void {
-    if (disposed || options.getSessionMetadata === undefined) return;
-    if (!isSafeSessionId(sessionId) || !isWatched(sessionId)) return;
-    if (onlyMissing && sessionMetas.has(sessionId)) return;
+  function requestSessionMetadata(sessionId: string, lifecycleGeneration?: number): void {
+    if (disposed || options.getSessionMetadata === undefined) {
+      settleModelMismatchBaseline(sessionId, lifecycleGeneration);
+      return;
+    }
+    if (!isSafeSessionId(sessionId) || !isWatched(sessionId)) {
+      settleModelMismatchBaseline(sessionId, lifecycleGeneration);
+      return;
+    }
     cancelSessionMetadataRequest(sessionId);
     const request = {
       controller: new AbortController(),
       gapEpoch: metadataGapEpoch,
       fieldRevisionsAtStart: sessionMetaRevisionSnapshot(sessionId),
+      lifecycleGeneration,
     };
     metadataRequests.set(sessionId, request);
     const getSessionMetadata = options.getSessionMetadata;
     void (async () => {
       try {
         const record = await awaitWithAbort(
-          getSessionMetadata(sessionId, { signal: request.controller.signal }),
+          Promise.resolve().then(() => {
+            if (request.controller.signal.aborted) throw abortError();
+            return getSessionMetadata(sessionId, { signal: request.controller.signal });
+          }),
           request.controller.signal,
         );
         if (disposed || metadataGapEpoch !== request.gapEpoch) return;
@@ -817,11 +952,36 @@ export function createNativeCacheObserverRuntime(options: {
         }
       } catch {
         // An unavailable or cancelled read keeps stored identity; a later
-        // trigger (reconnect, re-subscribe) retries. No polling.
+        // trigger (reconnect, re-subscribe) retries. No polling. The owning
+        // reconnect generation still settles in finally below.
       } finally {
-        if (metadataRequests.get(sessionId) === request) metadataRequests.delete(sessionId);
+        if (metadataRequests.get(sessionId) === request) {
+          metadataRequests.delete(sessionId);
+          settleModelMismatchBaseline(sessionId, request.lifecycleGeneration);
+        }
       }
     })();
+  }
+
+  function recoverWaitingModelMismatchBaselines(sessionId?: string): void {
+    const candidates = sessionId === undefined ? watchedSessions() : new Set([sessionId]);
+    for (const candidate of candidates) {
+      if (!isWatched(candidate) || modelMismatchLifecycles.get(candidate)?.state !== "waiting") {
+        continue;
+      }
+      const generation = beginModelMismatchBaseline(candidate);
+      requestSessionMetadata(candidate, generation);
+    }
+  }
+
+  function waitForModelMismatchReconnectBaselines(): void {
+    for (const sessionId of watchedSessions()) {
+      const state = modelMismatchLifecycles.get(sessionId)?.state;
+      // Connection/source gap notifications may already have put the session
+      // into a wait or started its baseline. Reconnect is not a new generation.
+      if (state === "waiting" || state === "baselining") continue;
+      modelMismatchLifecycles.set(sessionId, { state: "waiting" });
+    }
   }
 
   function historyEpoch(sessionId: string): number {
@@ -1003,20 +1163,20 @@ export function createNativeCacheObserverRuntime(options: {
   let initialTransportReady = options.rpcConnection() === "live";
   const releaseRpcConnection = options.subscribeRpcConnection?.((state) => {
     if (state === "reconnecting" || state === "closed") markActiveObservationGaps();
+    if (state === "live") recoverWaitingModelMismatchBaselines();
     notifyTransport();
     if (state !== "live" || initialTransportReady) return;
     initialTransportReady = true;
     for (const watcher of childWatchers.values()) void refreshChildren(watcher);
     queueReconcile();
-    for (const sessionId of watchedSessions()) requestSessionMetadata(sessionId, false);
   });
   const releaseReconnect = options.subscribeReconnect?.(() => {
+    waitForModelMismatchReconnectBaselines();
+    recoverWaitingModelMismatchBaselines();
     for (const watcher of childWatchers.values()) {
       void refreshChildren(watcher, { reconcilePendingCreates: true });
     }
     queueReconcile();
-    // Events lost while the stream was down are recovered from the records.
-    for (const sessionId of watchedSessions()) requestSessionMetadata(sessionId, false);
   });
   const releaseEventStreamRetire = options.subscribeEventStreamRetire?.(markActiveObservationGaps);
 
@@ -1084,11 +1244,18 @@ export function createNativeCacheObserverRuntime(options: {
             sessionMetas.delete(childSessionId);
             clearSessionMetaFreshness(childSessionId);
           }
-          if (!isWatched(childSessionId)) cancelSessionMetadataRequest(childSessionId);
+          if (!isWatched(childSessionId)) {
+            cancelSessionMetadataRequest(childSessionId);
+            modelMismatchLifecycles.delete(childSessionId);
+          }
         }
       }
       watcher.children.clear();
       watcher.pendingCreatedChildren.clear();
+      if (!isWatched(sessionId)) {
+        cancelSessionMetadataRequest(sessionId);
+        modelMismatchLifecycles.delete(sessionId);
+      }
       if (interestedSessions.size === 0 && childWatchers.size === 0) {
         releaseEventListener?.();
         releaseEventListener = undefined;
@@ -1107,12 +1274,14 @@ export function createNativeCacheObserverRuntime(options: {
     releaseEventListener = options.subscribeEvents((event) => {
       if (event.type === "source.status") {
         if (event.data.state !== "observed") markActiveObservationGaps();
+        else recoverWaitingModelMismatchBaselines();
         setHostEventState(event.data.state, event.created);
         return;
       }
       if (event.type === "session.status") {
         const sessionId = event.data.sessionID;
         if (isWatched(sessionId)) {
+          recoverWaitingModelMismatchBaselines(sessionId);
           bumpStatusEventRevision(sessionId);
           setSessionStatus(sessionId, event.data.state);
           // The transition itself dates the session's activity.
@@ -1123,12 +1292,29 @@ export function createNativeCacheObserverRuntime(options: {
       if (event.type === "session.metadata") {
         const sessionId = event.data.sessionID;
         if (isWatched(sessionId)) {
+          const wasArmedAtEventEntry = modelMismatchLifecycles.get(sessionId)?.state === "armed";
+          const previousMismatch = modelMismatch(sessionId);
+          const previousModel = sessionMetas.get(sessionId)?.model;
+          recoverWaitingModelMismatchBaselines(sessionId);
           const patch = {
             title: event.data.title,
             agent: event.data.agent,
             model: event.data.model,
           };
           if (applySessionMetaPatch(sessionId, patch, event.created)) {
+            const currentModel = sessionMetas.get(sessionId)?.model;
+            if (
+              wasArmedAtEventEntry &&
+              patch.model !== undefined &&
+              !sameModelIdentity(previousModel, currentModel)
+            ) {
+              notifyModelMismatchTransition(
+                sessionId,
+                event.created,
+                previousMismatch,
+                modelMismatch(sessionId),
+              );
+            }
             if (patch.title !== undefined) renameWatchedChild(sessionId, patch.title);
             notifyConsumers(sessionId);
           }
@@ -1139,6 +1325,16 @@ export function createNativeCacheObserverRuntime(options: {
       const startedSessionId =
         event.type === "session.step.started" ? event.data.sessionID : undefined;
       const startedEventAtMs = event.type === "session.step.started" ? event.created : undefined;
+      const eventSessionId =
+        startedSessionId ??
+        (update === undefined
+          ? undefined
+          : update.kind === "invocation"
+            ? update.observation.sessionId
+            : update.sessionId);
+      if (eventSessionId !== undefined && isWatched(eventSessionId)) {
+        recoverWaitingModelMismatchBaselines(eventSessionId);
+      }
       if (startedSessionId !== undefined) {
         bumpHistoryEpoch(startedSessionId);
         // A host-published started step is confirmed execution evidence.
@@ -1193,15 +1389,44 @@ export function createNativeCacheObserverRuntime(options: {
     interestedSessions.set(sessionId, (interestedSessions.get(sessionId) ?? 0) + 1);
     let sessionListeners = ingestorListeners.get(sessionId);
     const isFirstInterest = sessionListeners === undefined;
+    let initialLifecycleGeneration: number | undefined;
+    let initialMetadataReadStarted = false;
+    if (isFirstInterest) {
+      const lifecycle = modelMismatchLifecycles.get(sessionId);
+      if (lifecycle?.state === "waiting") {
+        initialLifecycleGeneration = beginModelMismatchBaseline(sessionId);
+        initialMetadataReadStarted = options.getSessionMetadata !== undefined;
+      } else if (lifecycle?.state === "baselining") {
+        initialLifecycleGeneration = lifecycle.generation;
+      } else {
+        initialLifecycleGeneration = beginModelMismatchBaseline(sessionId);
+        initialMetadataReadStarted =
+          !sessionMetas.has(sessionId) && options.getSessionMetadata !== undefined;
+      }
+      if (metadataRequests.has(sessionId)) initialMetadataReadStarted = true;
+    }
     if (sessionListeners === undefined) {
       sessionListeners = new Set();
       ingestorListeners.set(sessionId, sessionListeners);
     }
     sessionListeners.add(listener);
     const releaseIngestor = ingestor.subscribe(sessionId, listener);
+    if (initialMetadataReadStarted && !metadataRequests.has(sessionId)) {
+      // Start the authoritative baseline before attaching to a stream that can
+      // synchronously replay buffered model events.
+      requestSessionMetadata(sessionId, initialLifecycleGeneration);
+    }
     attachEventListener();
     queueReconcile();
-    if (isFirstInterest) requestSessionMetadata(sessionId, true);
+    if (
+      isFirstInterest &&
+      !metadataRequests.has(sessionId) &&
+      initialLifecycleGeneration !== undefined
+    ) {
+      // Existing identity or no metadata RPC is available; keep replayed
+      // events baselined through listener attachment, then re-arm notifications.
+      settleModelMismatchBaseline(sessionId, initialLifecycleGeneration);
+    }
     let released = false;
 
     return () => {
@@ -1229,7 +1454,10 @@ export function createNativeCacheObserverRuntime(options: {
       } else {
         markObservationGapIfUnobserved(sessionId);
       }
-      if (!isWatched(sessionId)) cancelSessionMetadataRequest(sessionId);
+      if (!isWatched(sessionId)) {
+        cancelSessionMetadataRequest(sessionId);
+        modelMismatchLifecycles.delete(sessionId);
+      }
       if (interestedSessions.size === 0 && childWatchers.size === 0) {
         releaseEventListener?.();
         releaseEventListener = undefined;
@@ -1255,12 +1483,14 @@ export function createNativeCacheObserverRuntime(options: {
     sessionStatuses.clear();
     statusEventRevisions.clear();
     sessionMetas.clear();
+    modelMismatchLifecycles.clear();
     sessionMetaFieldUpdatedAtMs.clear();
     sessionMetaFieldRevisions.clear();
     historyLoadedSessions.clear();
     historyEpochs.clear();
     transportListeners.clear();
     gapListeners.clear();
+    modelMismatchListeners.clear();
     releaseRpcConnection?.();
     releaseReconnect?.();
     releaseEventStreamRetire?.();
@@ -1285,6 +1515,8 @@ export function createNativeCacheObserverRuntime(options: {
     subscribe,
     status,
     metadata,
+    modelMismatch,
+    subscribeModelMismatchTransitions,
     subscribeGaps(listener) {
       if (disposed) return () => {};
       gapListeners.add(listener);
@@ -1337,6 +1569,50 @@ const MAX_HOST_TEXT_CODEPOINTS = 128;
 
 function isNonNegativeFinite(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function normalizedModelVariant(variant: string | undefined): string | undefined {
+  return variant === "default" ? undefined : variant;
+}
+
+function sameModelIdentity(
+  left: Pick<NativeCacheObserverChildModel, "providerID" | "id" | "variant"> | undefined,
+  right: Pick<NativeCacheObserverChildModel, "providerID" | "id" | "variant"> | undefined,
+): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.providerID === right.providerID &&
+    left.id === right.id &&
+    normalizedModelVariant(left.variant) === normalizedModelVariant(right.variant)
+  );
+}
+
+function sameModelMismatch(
+  left: NativeCacheObserverModelMismatch,
+  right: NativeCacheObserverModelMismatch,
+): boolean {
+  if (left.status !== right.status) return false;
+  if (left.status === "unknown" || right.status === "unknown") return true;
+  return (
+    sameModelIdentity(left.selectedModel, right.selectedModel) &&
+    sameModelIdentity(left.cacheRoute, right.cacheRoute)
+  );
+}
+
+/** Stable across windows, compact, and contains no displayable session/model text. */
+function modelMismatchTransitionId(
+  sessionId: string,
+  atMs: number,
+  model: Readonly<NativeCacheObserverChildModel> | undefined,
+): string {
+  const input = `${sessionId}\0${atMs}\0${model?.providerID ?? ""}\0${model?.id ?? ""}\0${model?.variant ?? ""}`;
+  let hash = 2_166_136_261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `model-mismatch:${atMs.toString(36)}:${(hash >>> 0).toString(36)}`;
 }
 
 function isSafeSessionId(value: string): boolean {

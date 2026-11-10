@@ -66,6 +66,8 @@ interface LiveCompletionEvidence {
 /** Read-only query/subscription seam; each id is an exact session, never a tree aggregate. */
 export interface CacheObserverIngestor {
   query(sessionId: string): CacheObserverClassification | undefined;
+  /** The last observed exact-session route, without its internal evidence basis. */
+  route(sessionId: string): CacheRouteProvenance | undefined;
   subscribe(sessionId: string, listener: CacheObserverListener): () => void;
   /** Hide the reported ratio until this exact session yields a new qualifying primary end. */
   markObservationGap(sessionId: string): void;
@@ -455,6 +457,16 @@ export function createCacheObserverIngestor(
     }
     const { primaryCacheReadRatio: _fencedRatio, ...lastObservedClassification } = classification;
     return { ...lastObservedClassification, primaryCacheReadTelemetry: "unavailable" };
+  }
+
+  function route(sessionId: string): CacheRouteProvenance | undefined {
+    if (!sessionId.trim()) return undefined;
+    const observed = latestLiveRoutes.get(sessionId) ?? states.get(sessionId)?.scope.route;
+    if (observed === undefined) return undefined;
+    return {
+      ...observed,
+      basis: { ...observed.basis },
+    };
   }
 
   function notify(sessionId: string): void {
@@ -999,6 +1011,7 @@ export function createCacheObserverIngestor(
 
   return {
     query,
+    route,
     subscribe,
     markObservationGap,
     ingest,
