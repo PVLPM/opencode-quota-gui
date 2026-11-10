@@ -272,12 +272,86 @@ describe("V2 server plugin credential lifecycle", () => {
       );
 
       const events = cacheEventEmit.mock.calls.map(([, event]) => event.cacheObserverEvent);
-      expect(
-        events.filter((event) => event?.type === "source.status").map((event) => event.data.state),
-      ).toEqual(["observed", "unavailable", "observed"]);
+      const sourceEvents = events.filter((event) => event?.type === "source.status");
+      expect(sourceEvents.map((event) => event.data.state)).toEqual([
+        "observed",
+        "unavailable",
+        "observed",
+      ]);
+      expect(sourceEvents.map((event) => event.data.sourceBinding)).toEqual([
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+      ]);
+      expect(new Set(sourceEvents.map((event) => event.data.sourceBinding)).size).toBe(1);
       expect(JSON.stringify(cacheEventEmit.mock.calls)).not.toContain("private message content");
     } finally {
       await cleanup?.();
+    }
+  });
+
+  it("uses independent source bindings for same-location plugin setups", async () => {
+    const signalSources: Array<{ signal: AbortSignal }> = [];
+    const createLongLivedContext = () => ({
+      ...createContext(),
+      event: {
+        subscribe: ({ signal }: { signal: AbortSignal }) => {
+          signalSources.push({ signal });
+          return {
+            async *[Symbol.asyncIterator]() {
+              await new Promise<void>((resolve) =>
+                signal.addEventListener("abort", () => resolve(), { once: true }),
+              );
+            },
+          };
+        },
+      },
+      rpc: {} as never,
+    });
+    const sourceRuntime = { snapshots: {}, settings: {} } as never;
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: sourceRuntime,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: sourceRuntime,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    cacheEventEmit.mockClear();
+
+    const firstCleanup = await setupPlugin(createLongLivedContext());
+    const secondCleanup = await setupPlugin(createLongLivedContext());
+    try {
+      const firstSnapshot = vi.mocked(registerDashboardRpc).mock.calls[0]?.[2]?.onWatchSnapshot;
+      const secondSnapshot = vi.mocked(registerDashboardRpc).mock.calls[1]?.[2]?.onWatchSnapshot;
+      expect(firstSnapshot).toEqual(expect.any(Function));
+      expect(secondSnapshot).toEqual(expect.any(Function));
+      firstSnapshot?.("attempt-first");
+      firstSnapshot?.("attempt-first");
+      secondSnapshot?.("attempt-second");
+      await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(3));
+
+      const sourceEvents = cacheEventEmit.mock.calls.map(([, event]) => event.cacheObserverEvent);
+      const firstAttemptEvents = sourceEvents.filter(
+        (event) => event.data.attemptNonce === "attempt-first",
+      );
+      const secondAttemptEvents = sourceEvents.filter(
+        (event) => event.data.attemptNonce === "attempt-second",
+      );
+      expect(firstAttemptEvents).toHaveLength(2);
+      expect(secondAttemptEvents).toHaveLength(1);
+      expect(firstAttemptEvents[0]?.data.sourceBinding).toEqual(expect.any(String));
+      expect(firstAttemptEvents[0]?.data.sourceBinding).toBe(
+        firstAttemptEvents[1]?.data.sourceBinding,
+      );
+      expect(secondAttemptEvents[0]?.data.sourceBinding).toEqual(expect.any(String));
+      expect(firstAttemptEvents[0]?.data.sourceBinding).not.toBe(
+        secondAttemptEvents[0]?.data.sourceBinding,
+      );
+    } finally {
+      await secondCleanup();
+      await firstCleanup();
     }
   });
 
@@ -397,7 +471,7 @@ describe("V2 server plugin credential lifecycle", () => {
       cacheObserverEvent: {
         type: "source.status",
         created,
-        data: { state: "observed" },
+        data: { state: "observed", sourceBinding: expect.any(String) },
       },
     });
     expect(cacheEventEmit).toHaveBeenNthCalledWith(2, "invalidated", {
@@ -512,7 +586,7 @@ describe("V2 server plugin credential lifecycle", () => {
       cacheObserverEvent: {
         type: "source.status",
         created,
-        data: { state: "observed" },
+        data: { state: "observed", sourceBinding: expect.any(String) },
       },
     });
     expect(cacheEventEmit).toHaveBeenNthCalledWith(2, "invalidated", {

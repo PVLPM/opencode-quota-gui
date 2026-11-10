@@ -223,6 +223,8 @@ export function createNativeCacheObserverRuntime(options: {
   let activeHistorySessionIds = new Set<string>();
   let hostEventState: NativeCacheObserverHostEventState = "unverified";
   let lastHostEventAtMs: number | undefined;
+  let lastHostEventOrderAtMs: number | undefined;
+  let hostEventConfidenceFenced = false;
   let disposed = false;
 
   function query(sessionId: string): CacheObserverClassification | undefined {
@@ -1150,20 +1152,68 @@ export function createNativeCacheObserverRuntime(options: {
     }
   }
 
-  function setHostEventState(state: NativeCacheObserverHostEventState, atMs?: number): void {
+  function hostEventTimestamp(atMs: number | undefined): number | undefined {
+    return typeof atMs === "number" && Number.isFinite(atMs) && atMs >= 0 ? atMs : undefined;
+  }
+
+  function canSetHostEventState(
+    state: NativeCacheObserverHostEventState,
+    atMs?: number,
+    validatedSourceStatus = false,
+  ): boolean {
+    const timestamp = hostEventTimestamp(atMs);
+    // The client-validated source binding (with the optional matching watch
+    // nonce when present) proves that this snapshot crossed the relay cutover.
+    // Ordinary lifecycle events cannot clear a source-state or stream-gap fence.
+    if (hostEventConfidenceFenced && state === "observed" && !validatedSourceStatus) return false;
+    const conservativeFencedState =
+      hostEventConfidenceFenced && (state === "unavailable" || state === "stopped");
+    if (
+      !validatedSourceStatus &&
+      !conservativeFencedState &&
+      timestamp !== undefined &&
+      lastHostEventOrderAtMs !== undefined &&
+      timestamp < lastHostEventOrderAtMs
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  function setHostEventState(
+    state: NativeCacheObserverHostEventState,
+    atMs?: number,
+    validatedSourceStatus = false,
+  ): boolean {
+    if (!canSetHostEventState(state, atMs, validatedSourceStatus)) return false;
+    if (state !== "observed") hostEventConfidenceFenced = true;
+    else if (validatedSourceStatus) hostEventConfidenceFenced = false;
+    const timestamp = hostEventTimestamp(atMs);
     const nextAt =
-      state === "observed" && typeof atMs === "number" && Number.isFinite(atMs) && atMs >= 0
-        ? Math.max(lastHostEventAtMs ?? 0, atMs)
+      state === "observed" && timestamp !== undefined
+        ? Math.max(lastHostEventAtMs ?? timestamp, timestamp)
         : lastHostEventAtMs;
-    if (hostEventState === state && lastHostEventAtMs === nextAt) return;
+    if (timestamp !== undefined) {
+      lastHostEventOrderAtMs = Math.max(lastHostEventOrderAtMs ?? timestamp, timestamp);
+    }
+    if (hostEventState === state && lastHostEventAtMs === nextAt) return true;
     hostEventState = state;
     lastHostEventAtMs = nextAt;
     notifyTransport();
+    return true;
+  }
+
+  function markRpcEventStreamGap(): void {
+    hostEventConfidenceFenced = true;
+    // Keep the last timestamp as history, but don't treat pre-gap host evidence
+    // as current after the invalidation stream may have dropped source changes.
+    setHostEventState("unverified");
+    markActiveObservationGaps();
   }
 
   let initialTransportReady = options.rpcConnection() === "live";
   const releaseRpcConnection = options.subscribeRpcConnection?.((state) => {
-    if (state === "reconnecting" || state === "closed") markActiveObservationGaps();
+    if (state === "reconnecting" || state === "closed") markRpcEventStreamGap();
     if (state === "live") recoverWaitingModelMismatchBaselines();
     notifyTransport();
     if (state !== "live" || initialTransportReady) return;
@@ -1179,7 +1229,7 @@ export function createNativeCacheObserverRuntime(options: {
     }
     queueReconcile();
   });
-  const releaseEventStreamRetire = options.subscribeEventStreamRetire?.(markActiveObservationGaps);
+  const releaseEventStreamRetire = options.subscribeEventStreamRetire?.(markRpcEventStreamGap);
 
   async function children(sessionId: string): Promise<NativeCacheObserverChild[]> {
     if (disposed) throw new Error("Cache observer runtime is closed");
@@ -1274,12 +1324,17 @@ export function createNativeCacheObserverRuntime(options: {
     }
     releaseEventListener = options.subscribeEvents((event) => {
       if (event.type === "source.status") {
+        // NativeDashboardClient validates the source binding and, when present,
+        // the attempt nonce. The nonce stays optional for legacy compatibility.
+        const validatedSourceStatus = event.data.sourceBinding !== undefined;
+        if (!canSetHostEventState(event.data.state, event.created, validatedSourceStatus)) return;
         if (event.data.state !== "observed") markActiveObservationGaps();
         else recoverWaitingModelMismatchBaselines();
-        setHostEventState(event.data.state, event.created);
+        setHostEventState(event.data.state, event.created, validatedSourceStatus);
         return;
       }
       if (event.type === "session.status") {
+        setHostEventState("observed", event.created);
         const sessionId = event.data.sessionID;
         if (isWatched(sessionId)) {
           recoverWaitingModelMismatchBaselines(sessionId);
@@ -1291,6 +1346,7 @@ export function createNativeCacheObserverRuntime(options: {
         return;
       }
       if (event.type === "session.metadata") {
+        setHostEventState("observed", event.created);
         const sessionId = event.data.sessionID;
         if (isWatched(sessionId)) {
           const wasArmedAtEventEntry = modelMismatchLifecycles.get(sessionId)?.state === "armed";
@@ -1333,6 +1389,10 @@ export function createNativeCacheObserverRuntime(options: {
           : update.kind === "invocation"
             ? update.observation.sessionId
             : update.sessionId);
+      if (update !== undefined || startedSessionId !== undefined) {
+        const timestamp = "created" in event ? event.created : undefined;
+        setHostEventState("observed", timestamp);
+      }
       if (eventSessionId !== undefined && isWatched(eventSessionId)) {
         recoverWaitingModelMismatchBaselines(eventSessionId);
       }
@@ -1350,15 +1410,6 @@ export function createNativeCacheObserverRuntime(options: {
       } else if (update?.kind === "compaction" || update?.kind === "deleted") {
         bumpHistoryEpoch(update.sessionId, true);
         if (update.kind === "deleted") sessionStatuses.delete(update.sessionId);
-      }
-      if (update !== undefined || startedSessionId !== undefined) {
-        const timestamp = "created" in event ? event.created : undefined;
-        setHostEventState(
-          "observed",
-          typeof timestamp === "number" && Number.isFinite(timestamp)
-            ? timestamp
-            : (options.now?.() ?? Date.now()),
-        );
       }
       if (update === undefined) {
         if (startedSessionId === undefined) return;

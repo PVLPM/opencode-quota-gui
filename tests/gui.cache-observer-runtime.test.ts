@@ -3,6 +3,184 @@ import { describe, expect, it, vi } from "vitest";
 import { createNativeCacheObserverRuntime } from "../src/native/cache-observer-runtime.js";
 
 describe("native cache observer runtime", () => {
+  for (const state of ["unavailable", "stopped"] as const) {
+    it(`applies source state ${state} while host-event confidence is fenced`, () => {
+      let receiveEvent: ((event: unknown) => void) | undefined;
+      let retire = () => {};
+      const runtime = createNativeCacheObserverRuntime({
+        subscribeEvents: (listener) => {
+          receiveEvent = listener as (event: unknown) => void;
+          return () => {};
+        },
+        subscribeEventStreamRetire: (listener) => {
+          retire = listener;
+          return () => {};
+        },
+        rpcConnection: () => "live",
+        listChildren: async () => [],
+      });
+      const release = runtime.subscribe("ses_status_fence", () => {});
+      receiveEvent?.({
+        type: "source.status",
+        created: 10,
+        data: { state: "observed" },
+      });
+      retire();
+
+      receiveEvent?.({
+        type: "source.status",
+        created: 1,
+        data: { state },
+      });
+
+      expect(runtime.transport().hostEvents).toBe(state);
+      release();
+      runtime.dispose();
+    });
+  }
+
+  it("requires a bound source status to recover from unavailable host events", () => {
+    let receiveEvent: ((event: unknown) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener as (event: unknown) => void;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+    });
+    const release = runtime.subscribe("ses_bound_source_status", () => {});
+
+    receiveEvent?.({
+      type: "source.status",
+      created: 10,
+      data: { state: "unavailable", sourceBinding: "source-owner-a" },
+    });
+    receiveEvent?.({
+      type: "session.status",
+      created: 20,
+      data: { sessionID: "ses_bound_source_status", state: "idle" },
+    });
+
+    expect(runtime.transport().hostEvents).toBe("unavailable");
+
+    // A source binding is the legacy-compatible proof when no attempt nonce is
+    // present; ordinary lifecycle events above are not proof of recovery.
+    receiveEvent?.({
+      type: "source.status",
+      created: 30,
+      data: { state: "observed", sourceBinding: "source-owner-a" },
+    });
+    expect(runtime.transport().hostEvents).toBe("observed");
+
+    release();
+    runtime.dispose();
+  });
+
+  it("replays the latest bound source state after observer interest lapses", () => {
+    let receiveEvent: ((event: unknown) => void) | undefined;
+    let latestSourceStatus: unknown;
+    let retire = () => {};
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener as (event: unknown) => void;
+        if (latestSourceStatus !== undefined) receiveEvent(latestSourceStatus);
+        return () => {
+          receiveEvent = undefined;
+        };
+      },
+      subscribeEventStreamRetire: (listener) => {
+        retire = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+    });
+    const publishSourceStatus = (event: unknown) => {
+      latestSourceStatus = event;
+      receiveEvent?.(event);
+    };
+    const firstRelease = runtime.subscribe("ses_passive_source_replay", () => {});
+    publishSourceStatus({
+      type: "source.status",
+      created: 10,
+      data: {
+        state: "observed",
+        attemptNonce: "attempt-one",
+        sourceBinding: "source-owner-a",
+      },
+    });
+    firstRelease();
+
+    // A stream transition fences the runtime while no observer is attached;
+    // the shared client continues retaining the latest, binding-validated
+    // source snapshot for passive replay.
+    retire();
+    publishSourceStatus({
+      type: "source.status",
+      created: 20,
+      data: { state: "observed", sourceBinding: "source-owner-a" },
+    });
+    expect(runtime.transport().hostEvents).toBe("unverified");
+
+    const secondRelease = runtime.subscribe("ses_passive_source_replay", () => {});
+    expect(runtime.transport().hostEvents).toBe("observed");
+
+    secondRelease();
+    runtime.dispose();
+  });
+
+  it("accepts a correlated source snapshot without clearing per-session history fences", async () => {
+    let receiveEvent: ((event: unknown) => void) | undefined;
+    let retire = () => {};
+    let subsequent = false;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener as (event: unknown) => void;
+        return () => {};
+      },
+      subscribeEventStreamRetire: (listener) => {
+        retire = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages: async () => ({
+        data: [
+          {
+            id: "msg_snapshot_fence",
+            type: "assistant",
+            model: { providerID: "openai", id: "test" },
+            time: { created: 1_000, completed: 1_100 },
+            tokens: { input: 20, cache: { read: subsequent ? 60 : 80, write: 0 } },
+          },
+        ],
+        cursor: { next: null },
+      }),
+    });
+    const release = runtime.subscribe("ses_snapshot_fence", () => {});
+    await runtime.bootstrapHistory(["ses_snapshot_fence"]);
+    expect(runtime.query("ses_snapshot_fence")?.primaryCacheReadRatio?.value).toBe(0.8);
+
+    retire();
+    receiveEvent?.({
+      type: "source.status",
+      created: 2,
+      data: {
+        state: "observed",
+        attemptNonce: "current-attempt",
+        sourceBinding: "source-owner-a",
+      },
+    });
+    expect(runtime.transport().hostEvents).toBe("observed");
+
+    subsequent = true;
+    await runtime.bootstrapHistory(["ses_snapshot_fence"]);
+    expect(runtime.query("ses_snapshot_fence")?.primaryCacheReadRatio).toBeUndefined();
+    release();
+    runtime.dispose();
+  });
+
   it.each([
     "changed counters",
     "compaction",
@@ -1081,6 +1259,139 @@ describe("native cache observer runtime", () => {
       rpc: "reconnecting",
       hostEvents: "unavailable",
     });
+    release();
+    runtime.dispose();
+  });
+
+  it("keeps host evidence fenced after an RPC gap without a provable stream cutover", async () => {
+    const sessionId = "ses_rpc_gap_history_recovery";
+    const unrelatedParentSessionId = "ses_unrelated_parent";
+    const unrelatedChildSessionId = "ses_unrelated_child";
+    const gapAt = 97_000;
+    let rpcConnection: "connecting" | "live" | "reconnecting" | "closed" = "live";
+    let receiveEvent: ((event: never) => void) | undefined;
+    let onRpcConnection:
+      | ((state: "connecting" | "live" | "reconnecting" | "closed") => void)
+      | undefined;
+    let retireEventStream: (() => void) | undefined;
+    const listMessages = vi.fn(async () => ({
+      data: [
+        {
+          id: "msg_after_rpc_gap",
+          type: "assistant",
+          model: { providerID: "openai", id: "gpt-test" },
+          time: { created: 100, completed: 200 },
+          tokens: { input: 10, cache: { read: 10, write: 0 } },
+        },
+      ],
+      cursor: { next: null },
+    }));
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      subscribeRpcConnection: (listener) => {
+        onRpcConnection = listener;
+        return vi.fn();
+      },
+      subscribeEventStreamRetire: (listener) => {
+        retireEventStream = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => rpcConnection,
+      listChildren: async () => [],
+      listMessages,
+      now: () => gapAt,
+    });
+    const release = runtime.subscribe(sessionId, vi.fn());
+    const childSnapshots: Array<{
+      status: "loading" | "ready" | "error";
+      children: Array<{ sessionId: string; label: string }>;
+    }> = [];
+    const releaseChildren = runtime.subscribeChildren(unrelatedParentSessionId, (snapshot) =>
+      childSnapshots.push(snapshot),
+    );
+    await vi.waitFor(() => expect(childSnapshots.at(-1)?.status).toBe("ready"));
+
+    receiveEvent?.({
+      type: "source.status",
+      created: 96_000,
+      data: { state: "observed" },
+    } as never);
+    expect(runtime.transport()).toMatchObject({
+      rpc: "live",
+      hostEvents: "observed",
+      lastHostEventAtMs: 96_000,
+    });
+
+    retireEventStream?.();
+    expect(runtime.transport()).toEqual({
+      rpc: "live",
+      hostEvents: "unverified",
+      lastHostEventAtMs: 96_000,
+    });
+
+    rpcConnection = "reconnecting";
+    onRpcConnection?.("reconnecting");
+    expect(runtime.transport()).toEqual({
+      rpc: "reconnecting",
+      hostEvents: "unverified",
+      lastHostEventAtMs: 96_000,
+    });
+
+    rpcConnection = "live";
+    onRpcConnection?.("live");
+    await runtime.bootstrapHistory([sessionId]);
+    expect(listMessages).toHaveBeenCalledOnce();
+    expect(runtime.query(sessionId)?.primaryCacheReadRatio).toBeDefined();
+    expect(runtime.transport()).toEqual({
+      rpc: "live",
+      hostEvents: "unverified",
+      lastHostEventAtMs: 96_000,
+    });
+
+    // Lifecycle payloads without event timestamps still apply to their exact
+    // session, but cannot establish post-gap freshness.
+    receiveEvent?.({
+      type: "session.created",
+      data: { sessionID: unrelatedChildSessionId, parentID: unrelatedParentSessionId },
+    } as never);
+    await vi.waitFor(() =>
+      expect(childSnapshots.at(-1)?.children).toContainEqual(
+        expect.objectContaining({ sessionId: unrelatedChildSessionId }),
+      ),
+    );
+    expect(runtime.transport()).toEqual({
+      rpc: "live",
+      hostEvents: "unverified",
+      lastHostEventAtMs: 96_000,
+    });
+
+    // This delayed event is newer than the last one seen, but still before the
+    // gap. No source timestamp or current RPC attempt proves its origin.
+    receiveEvent?.({
+      type: "session.metadata",
+      created: gapAt - 500,
+      data: { sessionID: "ses_unrelated_metadata", title: "delayed" },
+    } as never);
+    receiveEvent?.({
+      type: "source.status",
+      created: gapAt - 500,
+      data: { state: "observed" },
+    } as never);
+    receiveEvent?.({
+      type: "source.status",
+      created: gapAt + 500,
+      data: { state: "observed" },
+    } as never);
+    expect(runtime.transport()).toEqual({
+      rpc: "live",
+      hostEvents: "unverified",
+      lastHostEventAtMs: 96_000,
+    });
+
+    releaseChildren();
     release();
     runtime.dispose();
   });
@@ -2665,8 +2976,16 @@ describe("native cache observer runtime", () => {
       },
     });
 
-    emit?.({ type: "source.status", created: 40, data: { state: "unavailable" } });
-    emit?.({ type: "source.status", created: 50, data: { state: "observed" } });
+    emit?.({
+      type: "source.status",
+      created: 40,
+      data: { state: "unavailable", sourceBinding: "source-owner-a" },
+    });
+    emit?.({
+      type: "source.status",
+      created: 50,
+      data: { state: "observed", sourceBinding: "source-owner-a" },
+    });
     await vi.waitFor(() => expect(metadataReads).toBe(2));
 
     emit?.({
@@ -2957,13 +3276,29 @@ describe("native cache observer runtime", () => {
     emit?.(started("msg_before_overlapping_gaps", 20));
     emit?.(ended("msg_before_overlapping_gaps", 30));
 
-    emit?.({ type: "source.status", created: 40, data: { state: "unavailable" } });
-    emit?.({ type: "source.status", created: 50, data: { state: "observed" } });
+    emit?.({
+      type: "source.status",
+      created: 40,
+      data: { state: "unavailable", sourceBinding: "source-owner-a" },
+    });
+    emit?.({
+      type: "source.status",
+      created: 50,
+      data: { state: "observed", sourceBinding: "source-owner-a" },
+    });
     await vi.waitFor(() => expect(metadataReads).toBe(2));
-    emit?.({ type: "source.status", created: 60, data: { state: "unavailable" } });
+    emit?.({
+      type: "source.status",
+      created: 60,
+      data: { state: "unavailable", sourceBinding: "source-owner-a" },
+    });
     emit?.({ type: "session.status", created: 70, data: { sessionID: sessionId, state: "busy" } });
     onReconnect?.();
-    emit?.({ type: "source.status", created: 80, data: { state: "observed" } });
+    emit?.({
+      type: "source.status",
+      created: 80,
+      data: { state: "observed", sourceBinding: "source-owner-a" },
+    });
     await vi.waitFor(() => expect(metadataReads).toBe(3));
     expect(metadataReads).toBe(3);
 

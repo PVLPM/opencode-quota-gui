@@ -199,7 +199,11 @@ export type DashboardRpcSaveVisibilityInput = {
   expectedRevision: string;
 };
 export type DashboardRpcImportApplyInput = { expectedRevision: string };
-export type DashboardRpcWatchInput = { scope: DashboardRpcViewScope };
+export type DashboardRpcWatchInput = {
+  scope: DashboardRpcViewScope;
+  /** Optional for older callers; Native uses it to correlate the source cutover snapshot. */
+  attemptNonce?: string;
+};
 export type DashboardRpcWatchOutput = { active: boolean };
 export type DashboardRpcOpenSettingsOutput = { opened: true };
 export type DashboardRpcCacheObserverEvent =
@@ -269,7 +273,13 @@ export type DashboardRpcCacheObserverEvent =
   | {
       type: "source.status";
       created: number;
-      data: { state: "observed" | "unavailable" | "stopped" };
+      data: {
+        state: "unverified" | "observed" | "unavailable" | "stopped";
+        /** Present only on a source snapshot requested by an active watch attempt. */
+        attemptNonce?: string;
+        /** Opaque identity of the setup-owned host-event source that emitted this state. */
+        sourceBinding?: string;
+      };
     };
 export type DashboardRpcEventData = {
   topic: DashboardEventTopic | "cache.observer";
@@ -563,12 +573,16 @@ export const DashboardRpc = {
     },
     watch: {
       input: schema<DashboardRpcWatchInput>((value) => {
-        if (!isObject(value) || !hasExactKeys(value, ["scope"])) {
-          return "input must contain only scope";
+        if (!isObject(value) || !hasOnlyKeys(value, ["scope", "attemptNonce"])) {
+          return "input must contain only scope and attemptNonce";
         }
-        return value.scope === "quota" || value.scope === "analytics"
+        if (value.scope !== "quota" && value.scope !== "analytics") {
+          return "scope must be quota or analytics";
+        }
+        return value.attemptNonce === undefined ||
+          (typeof value.attemptNonce === "string" && isValidResourceId(value.attemptNonce))
           ? null
-          : "scope must be quota or analytics";
+          : "attemptNonce must be a non-empty safe string";
       }),
       output: schema<DashboardRpcWatchOutput>((value) =>
         isObject(value) && typeof value.active === "boolean" ? null : "output must report active",
@@ -614,10 +628,17 @@ export function isDashboardRpcCacheObserverEvent(
       hasExactKeys(value, ["type", "created", "data"]) &&
       Number.isFinite(value.created) &&
       isObject(value.data) &&
-      hasExactKeys(value.data, ["state"]) &&
-      (value.data.state === "observed" ||
+      hasOnlyKeys(value.data, ["state", "attemptNonce", "sourceBinding"]) &&
+      (value.data.state === "unverified" ||
+        value.data.state === "observed" ||
         value.data.state === "unavailable" ||
-        value.data.state === "stopped")
+        value.data.state === "stopped") &&
+      (value.data.attemptNonce === undefined ||
+        (typeof value.data.attemptNonce === "string" &&
+          isValidResourceId(value.data.attemptNonce))) &&
+      (value.data.sourceBinding === undefined ||
+        (typeof value.data.sourceBinding === "string" &&
+          isValidResourceId(value.data.sourceBinding)))
     );
   }
 

@@ -121,6 +121,8 @@ export interface NativeDashboardClient extends DashboardDataSource {
   subscribeCacheObserverEvent(
     listener: (event: DashboardRpcCacheObserverEvent) => void,
   ): () => void;
+  /** Observes settings invalidations on the existing stream, without activating transport. */
+  subscribeSettingsChanged(listener: () => void): () => void;
   /** Explicit recovery: re-subscribe, reacquire the viewer and refetch. */
   reconnect(): Promise<void>;
   /** Suspend transport resources while the host server is known to be down. */
@@ -159,11 +161,15 @@ export function createNativeDashboardClient(
   const rpc = options.rpc;
   const listeners = new Set<(event: DashboardEvent) => void>();
   const cacheObserverListeners = new Set<(event: DashboardRpcCacheObserverEvent) => void>();
+  const settingsChangedListeners = new Set<() => void>();
   const stateListeners = new Set<(state: NativeDashboardConnection) => void>();
   const reconnectListeners = new Set<() => void>();
   const eventStreamRetireListeners = new Set<() => void>();
   interface Attempt {
     generation: number;
+    attemptNonce: string;
+    sourceBinding?: string;
+    sourceStatus?: Extract<DashboardRpcCacheObserverEvent, { type: "source.status" }>;
     controller: AbortController;
     scope: DashboardRpcViewScope;
     recovery: boolean;
@@ -263,6 +269,26 @@ export function createNativeDashboardClient(
         const data = event.data;
         if (data.topic === "cache.observer") {
           if (!isDashboardRpcCacheObserverEvent(data.cacheObserverEvent)) continue;
+          if (data.cacheObserverEvent.type === "source.status") {
+            const { attemptNonce, sourceBinding } = data.cacheObserverEvent.data;
+            if (sourceBinding === undefined) continue;
+            if (attemptNonce !== undefined) {
+              if (attemptNonce !== attempt.attemptNonce) continue;
+              if (attempt.sourceBinding !== undefined && attempt.sourceBinding !== sourceBinding) {
+                // A matching nonce can still carry a delayed snapshot from the
+                // previous setup owner. Retire this stream and recover with a
+                // fresh nonce so no later snapshot from this attempt can reclaim
+                // confidence for the old binding.
+                failAttempt(attempt);
+                void reconnect().catch(() => undefined);
+                return;
+              }
+              attempt.sourceBinding = sourceBinding;
+            } else if (sourceBinding !== attempt.sourceBinding) {
+              continue;
+            }
+            attempt.sourceStatus = data.cacheObserverEvent;
+          }
           for (const listener of Array.from(cacheObserverListeners)) {
             try {
               listener(data.cacheObserverEvent);
@@ -278,6 +304,15 @@ export function createNativeDashboardClient(
           at: data.at,
           ...(data.scope === undefined ? {} : { scope: data.scope }),
         };
+        if (dashboardEvent.topic === "settings.changed") {
+          for (const listener of Array.from(settingsChangedListeners)) {
+            try {
+              listener();
+            } catch {
+              // A settings observer failure never breaks the shared event stream.
+            }
+          }
+        }
         for (const listener of Array.from(listeners)) {
           try {
             listener(dashboardEvent);
@@ -296,7 +331,7 @@ export function createNativeDashboardClient(
     const signal = attempt.controller.signal;
     while (isCurrent(attempt)) {
       try {
-        await rpc.watch({ scope: attempt.scope }, { signal });
+        await rpc.watch({ scope: attempt.scope, attemptNonce: attempt.attemptNonce }, { signal });
         if (!isCurrent(attempt)) return;
         // The watch call is a held viewer; any unexpected completion means the
         // viewer was lost.
@@ -359,6 +394,7 @@ export function createNativeDashboardClient(
 
     const attempt: Attempt = {
       generation: ++generation,
+      attemptNonce: globalThis.crypto.randomUUID(),
       controller: new AbortController(),
       scope: viewScope,
       recovery: recovery || recoveryRequired,
@@ -436,7 +472,20 @@ export function createNativeDashboardClient(
 
     subscribeCacheObserverEvent(listener) {
       cacheObserverListeners.add(listener);
+      const sourceStatus = currentAttempt?.sourceStatus;
+      if (sourceStatus !== undefined) {
+        try {
+          listener(sourceStatus);
+        } catch {
+          // A cache observer failure never breaks the shared event stream.
+        }
+      }
       return () => cacheObserverListeners.delete(listener);
+    },
+
+    subscribeSettingsChanged(listener) {
+      settingsChangedListeners.add(listener);
+      return () => settingsChangedListeners.delete(listener);
     },
 
     reconnect,
@@ -503,6 +552,7 @@ export function createNativeDashboardClient(
       retireAttempt();
       listeners.clear();
       cacheObserverListeners.clear();
+      settingsChangedListeners.clear();
       stateListeners.clear();
       reconnectListeners.clear();
       eventStreamRetireListeners.clear();

@@ -44,6 +44,33 @@ async function expectRejected(schema: StandardSchema, value: unknown, message: s
 const methods = DashboardRpc.methods;
 
 describe("dashboard RPC definition", () => {
+  it("keeps watch attempt nonces optional for legacy callers and validates bound snapshots", async () => {
+    await expectAccepted(methods.watch.input, { scope: "analytics" });
+    await expectAccepted(methods.watch.input, {
+      scope: "analytics",
+      attemptNonce: "opaque-attempt-nonce",
+    });
+    await expectRejected(
+      methods.watch.input,
+      { scope: "analytics", attemptNonce: "" },
+      "attemptNonce must be a non-empty safe string",
+    );
+
+    await expectAccepted(DashboardRpc.events.invalidated.schema, {
+      topic: "cache.observer",
+      at: 1,
+      cacheObserverEvent: {
+        type: "source.status",
+        created: 1,
+        data: {
+          state: "unverified",
+          attemptNonce: "opaque-attempt-nonce",
+          sourceBinding: "source-owner-a",
+        },
+      },
+    });
+  });
+
   it("defines explicit typed methods, one invalidation event and no generic call", () => {
     expect(DashboardRpc.id).toBe(DASHBOARD_RPC_ID);
     expect(Object.keys(methods)).toEqual([
@@ -239,17 +266,20 @@ describe("dashboard RPC definition", () => {
   });
 
   it("validates the held viewer scope", async () => {
-    await expectAccepted(methods.watch.input, { scope: "quota" });
-    await expectAccepted(methods.watch.input, { scope: "analytics" });
+    await expectAccepted(methods.watch.input, { scope: "quota", attemptNonce: "nonce-quota" });
+    await expectAccepted(methods.watch.input, {
+      scope: "analytics",
+      attemptNonce: "nonce-analytics",
+    });
     await expectRejected(
       methods.watch.input,
-      { scope: "other" },
+      { scope: "other", attemptNonce: "nonce-other" },
       "scope must be quota or analytics",
     );
     await expectRejected(
       methods.watch.input,
-      { scope: "quota", extra: true },
-      "input must contain only scope",
+      { scope: "quota", attemptNonce: "nonce-quota", extra: true },
+      "input must contain only scope and attemptNonce",
     );
     await expectRejected(methods.watch.output, { active: "yes" }, "output must report active");
   });

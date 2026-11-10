@@ -5,6 +5,8 @@
  * surfaces (commands, tool, the TUI quota RPC and report hooks) are retained in
  * their source modules but are not registered by this product.
  */
+
+import { randomUUID } from "node:crypto";
 import { Plugin } from "@opencode/plugin";
 import { type DashboardLease, startDashboard } from "./gui/lifecycle.js";
 import { scrubLogReason } from "./gui/log.js";
@@ -78,8 +80,10 @@ export const QuotaToastPlugin = Plugin.define({
     let pendingHostEventObservedAtMs: number | undefined;
     const cacheObserverRelayAbort = new AbortController();
     let cacheObserverEmitWorkerRunning = false;
+    const hostEventSourceBinding = randomUUID();
     type HostEventSourceState = "unverified" | "observed" | "unavailable" | "stopped";
     let hostEventSourceState: HostEventSourceState = "unverified";
+    const readHostEventSourceState = (): HostEventSourceState => hostEventSourceState;
     async function waitForHostEventReconnect(signal: AbortSignal): Promise<void> {
       if (signal.aborted) return;
       await new Promise<void>((resolve) => {
@@ -133,7 +137,11 @@ export const QuotaToastPlugin = Plugin.define({
             const gapAt = Date.now();
             await emitCacheObserverEventNow(registration, {
               at: gapAt,
-              event: { type: "source.status", created: gapAt, data: { state: "unavailable" } },
+              event: {
+                type: "source.status",
+                created: gapAt,
+                data: { state: "unavailable", sourceBinding: hostEventSourceBinding },
+              },
             });
             if (hostEventSourceState === "observed") pendingHostEventObservedAtMs = gapAt;
             continue;
@@ -148,7 +156,11 @@ export const QuotaToastPlugin = Plugin.define({
             if (registration) {
               await emitCacheObserverEventNow(registration, {
                 at: observedAt,
-                event: { type: "source.status", created: observedAt, data: { state: "observed" } },
+                event: {
+                  type: "source.status",
+                  created: observedAt,
+                  data: { state: "observed", sourceBinding: hostEventSourceBinding },
+                },
               });
             }
             continue;
@@ -187,7 +199,14 @@ export const QuotaToastPlugin = Plugin.define({
       if (hostEventSourceState === state) return;
       hostEventSourceState = state;
       if (state !== "observed") pendingHostEventObservedAtMs = undefined;
-      emitCacheObserverEvent({ type: "source.status", created: at, data: { state } }, at);
+      emitCacheObserverEvent(
+        {
+          type: "source.status",
+          created: at,
+          data: { state, sourceBinding: hostEventSourceBinding },
+        },
+        at,
+      );
     };
     // Reuse the existing host stream for credential invalidation and narrowly projected cache
     // evidence. No Native-side OpenCode event subscription is opened.
@@ -198,7 +217,7 @@ export const QuotaToastPlugin = Plugin.define({
         try {
           for await (const event of ctx.event.subscribe({ signal })) {
             if (signal.aborted) return;
-            if (hostEventSourceState !== "observed") {
+            if (readHostEventSourceState() !== "observed") {
               publishHostEventSourceState(
                 "observed",
                 typeof event.created === "number" && Number.isFinite(event.created)
@@ -225,7 +244,7 @@ export const QuotaToastPlugin = Plugin.define({
           throw new Error("host event stream ended");
         } catch (error) {
           if (signal.aborted) return;
-          if (hostEventSourceState !== "unavailable") {
+          if (readHostEventSourceState() !== "unavailable") {
             publishHostEventSourceState("unavailable", Date.now());
           }
           console.warn(
@@ -262,6 +281,21 @@ export const QuotaToastPlugin = Plugin.define({
       try {
         dashboardRpc = await registerDashboardRpc(ctx.rpc, dashboardLease.runtime, {
           location: ctx.location,
+          onWatchSnapshot: (attemptNonce) => {
+            const at = Date.now();
+            emitCacheObserverEvent(
+              {
+                type: "source.status",
+                created: at,
+                data: {
+                  state: readHostEventSourceState(),
+                  attemptNonce,
+                  sourceBinding: hostEventSourceBinding,
+                },
+              },
+              at,
+            );
+          },
         });
         startCacheObserverEmitWorker();
       } catch {
