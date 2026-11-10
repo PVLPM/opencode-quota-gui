@@ -116,9 +116,10 @@ export interface NativeCacheObserverRuntime extends NativeCacheObserver {
   dispose(): void;
 }
 
+/** The public message.list API accepts 1..200; scan the ordered cursor with minimum-sized pages. */
 type NativeCacheObserverMessageListQuery =
-  | { sessionID: string; limit: 200; order: "desc"; cursor?: undefined }
-  | { sessionID: string; limit: 200; cursor: string; order?: undefined };
+  | { sessionID: string; limit: 1; order: "desc"; cursor?: undefined }
+  | { sessionID: string; limit: 1; cursor: string; order?: undefined };
 
 /** Fans observer interest into Native's existing shared RPC event subscription. */
 export function createNativeCacheObserverRuntime(options: {
@@ -1097,7 +1098,7 @@ export function createNativeCacheObserverRuntime(options: {
             options.listMessages!(
               {
                 sessionID: sessionId,
-                limit: 200,
+                limit: 1,
                 ...(cursor === undefined ? { order: "desc" as const } : { cursor }),
               },
               { signal: controller.signal },

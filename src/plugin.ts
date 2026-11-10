@@ -26,6 +26,7 @@ function logReason(error: unknown): string {
 }
 
 const MAX_PENDING_CACHE_OBSERVER_EVENTS = 512;
+const HOST_EVENT_RECONNECT_DELAY_MS = 1_000;
 type ProjectedCacheObserverEvent = NonNullable<
   ReturnType<typeof projectOpenCodeCacheObserverEvent>
 >;
@@ -74,11 +75,25 @@ export const QuotaToastPlugin = Plugin.define({
     let cacheObserverEmitChain: Promise<void> = Promise.resolve();
     const pendingCacheObserverEvents: PendingCacheObserverEvent[] = [];
     let pendingCacheObserverEventsDropped = false;
+    let pendingHostEventObservedAtMs: number | undefined;
     const cacheObserverRelayAbort = new AbortController();
     let cacheObserverEmitWorkerRunning = false;
     type HostEventSourceState = "unverified" | "observed" | "unavailable" | "stopped";
     let hostEventSourceState: HostEventSourceState = "unverified";
-    let lastHostEventAtMs: number | undefined;
+    async function waitForHostEventReconnect(signal: AbortSignal): Promise<void> {
+      if (signal.aborted) return;
+      await new Promise<void>((resolve) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = () => {
+          if (timer !== undefined) clearTimeout(timer);
+          signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        timer = setTimeout(finish, HOST_EVENT_RECONNECT_DELAY_MS);
+        signal.addEventListener("abort", finish, { once: true });
+        if (signal.aborted) finish();
+      });
+    }
     async function emitCacheObserverEventNow(
       registration: NonNullable<typeof dashboardRpc>,
       pending: PendingCacheObserverEvent,
@@ -120,10 +135,24 @@ export const QuotaToastPlugin = Plugin.define({
               at: gapAt,
               event: { type: "source.status", created: gapAt, data: { state: "unavailable" } },
             });
+            if (hostEventSourceState === "observed") pendingHostEventObservedAtMs = gapAt;
             continue;
           }
           const pending = pendingCacheObserverEvents.shift();
-          if (!pending) break;
+          if (!pending) {
+            const observedAt = pendingHostEventObservedAtMs;
+            if (observedAt === undefined) break;
+            pendingHostEventObservedAtMs = undefined;
+            if (hostEventSourceState !== "observed") continue;
+            const registration = dashboardRpc;
+            if (registration) {
+              await emitCacheObserverEventNow(registration, {
+                at: observedAt,
+                event: { type: "source.status", created: observedAt, data: { state: "observed" } },
+              });
+            }
+            continue;
+          }
           const registration = dashboardRpc;
           if (registration) await emitCacheObserverEventNow(registration, pending);
         }
@@ -131,71 +160,81 @@ export const QuotaToastPlugin = Plugin.define({
         cacheObserverEmitWorkerRunning = false;
       }
     }
+    const startCacheObserverEmitWorker = (): void => {
+      if (
+        !dashboardRpc ||
+        cacheObserverRelayAbort.signal.aborted ||
+        cacheObserverEmitWorkerRunning
+      ) {
+        return;
+      }
+      cacheObserverEmitWorkerRunning = true;
+      cacheObserverEmitChain = drainCacheObserverEvents().catch(() => undefined);
+    };
     const emitCacheObserverEvent = (event: ProjectedCacheObserverEvent, at: number): void => {
-      const registration = dashboardRpc;
-      if (!registration || cacheObserverRelayAbort.signal.aborted) return;
+      if (cacheObserverRelayAbort.signal.aborted) return;
       if (pendingCacheObserverEvents.length >= MAX_PENDING_CACHE_OBSERVER_EVENTS) {
         pendingCacheObserverEvents.shift();
         pendingCacheObserverEventsDropped = true;
       }
       pendingCacheObserverEvents.push({ at, event });
-      if (!cacheObserverEmitWorkerRunning) {
-        cacheObserverEmitWorkerRunning = true;
-        cacheObserverEmitChain = drainCacheObserverEvents().catch(() => undefined);
-      }
+      startCacheObserverEmitWorker();
     };
     const publishHostEventSourceState = (
       state: Exclude<HostEventSourceState, "unverified">,
       at: number,
     ): void => {
+      if (hostEventSourceState === state) return;
       hostEventSourceState = state;
-      if (state === "observed") lastHostEventAtMs = at;
-      if (!dashboardRpc) return;
+      if (state !== "observed") pendingHostEventObservedAtMs = undefined;
       emitCacheObserverEvent({ type: "source.status", created: at, data: { state } }, at);
     };
     // Reuse the existing host stream for credential invalidation and narrowly projected cache
     // evidence. No Native-side OpenCode event subscription is opened.
     const hostEvents = new AbortController();
     void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: hostEvents.signal })) {
-        if (hostEvents.signal.aborted) return;
-        if (hostEventSourceState === "unverified") {
-          publishHostEventSourceState(
-            "observed",
-            typeof event.created === "number" && Number.isFinite(event.created)
-              ? event.created
-              : Date.now(),
-          );
-        }
-        if (event.type === "credential.updated" || event.type === "credential.switched") {
-          notifyCredentialsChanged();
-        }
-        // The Started event's model identity is available before invocation completion. Do not
-        // enrich it from model.list here: that mutable catalog may no longer match dispatch.
-        const cacheObserverEvent = projectOpenCodeCacheObserverEvent(event);
-        if (
-          cacheObserverEvent !== undefined &&
-          typeof event.created === "number" &&
-          Number.isFinite(event.created) &&
-          event.created >= 0
-        ) {
-          if (dashboardRpc !== undefined) {
-            emitCacheObserverEvent(cacheObserverEvent, event.created);
-          } else {
-            if (pendingCacheObserverEvents.length >= MAX_PENDING_CACHE_OBSERVER_EVENTS) {
-              pendingCacheObserverEvents.shift();
-              pendingCacheObserverEventsDropped = true;
+      const { signal } = hostEvents;
+      while (!signal.aborted) {
+        try {
+          for await (const event of ctx.event.subscribe({ signal })) {
+            if (signal.aborted) return;
+            if (hostEventSourceState !== "observed") {
+              publishHostEventSourceState(
+                "observed",
+                typeof event.created === "number" && Number.isFinite(event.created)
+                  ? event.created
+                  : Date.now(),
+              );
             }
-            pendingCacheObserverEvents.push({ at: event.created, event: cacheObserverEvent });
+            if (event.type === "credential.updated" || event.type === "credential.switched") {
+              notifyCredentialsChanged();
+            }
+            // The Started event's model identity is available before invocation completion. Do not
+            // enrich it from model.list here: that mutable catalog may no longer match dispatch.
+            const cacheObserverEvent = projectOpenCodeCacheObserverEvent(event);
+            if (
+              cacheObserverEvent !== undefined &&
+              typeof event.created === "number" &&
+              Number.isFinite(event.created) &&
+              event.created >= 0
+            ) {
+              emitCacheObserverEvent(cacheObserverEvent, event.created);
+            }
           }
+          if (signal.aborted) return;
+          throw new Error("host event stream ended");
+        } catch (error) {
+          if (signal.aborted) return;
+          if (hostEventSourceState !== "unavailable") {
+            publishHostEventSourceState("unavailable", Date.now());
+          }
+          console.warn(
+            `[opencode-quota-gui] host event subscription failed; retrying: ${logReason(error)}`,
+          );
+          await waitForHostEventReconnect(signal);
         }
       }
-      if (!hostEvents.signal.aborted) throw new Error("host event stream ended");
-    })().catch((error) => {
-      if (hostEvents.signal.aborted) return;
-      publishHostEventSourceState("unavailable", Date.now());
-      console.warn(`[opencode-quota-gui] host event subscription stopped: ${logReason(error)}`);
-    });
+    })();
 
     // The dashboard host binds last — after the retry hook and the credential binding — and it
     // never fails setup: every dashboard error stays a controlled log line and an `unavailable`
@@ -224,35 +263,7 @@ export const QuotaToastPlugin = Plugin.define({
         dashboardRpc = await registerDashboardRpc(ctx.rpc, dashboardLease.runtime, {
           location: ctx.location,
         });
-        const bufferedCacheObserverEvents = pendingCacheObserverEvents.splice(0);
-        if (pendingCacheObserverEventsDropped) {
-          const gapAt = Date.now();
-          pendingCacheObserverEventsDropped = false;
-          emitCacheObserverEvent(
-            { type: "source.status", created: gapAt, data: { state: "unavailable" } },
-            gapAt,
-          );
-        }
-        const sourceStateAtRegistration = hostEventSourceState;
-        const firstObservedAt = lastHostEventAtMs;
-        // Preserve the source's initial observation before its buffered events. If the stream
-        // stopped while registration was pending, replay those events before the final
-        // unavailable state. Keep this flush synchronous so later live events cannot interleave.
-        if (firstObservedAt !== undefined) {
-          emitCacheObserverEvent(
-            { type: "source.status", created: firstObservedAt, data: { state: "observed" } },
-            firstObservedAt,
-          );
-        }
-        for (const pending of bufferedCacheObserverEvents) {
-          emitCacheObserverEvent(pending.event, pending.at);
-        }
-        if (
-          sourceStateAtRegistration !== "unverified" &&
-          sourceStateAtRegistration !== "observed"
-        ) {
-          publishHostEventSourceState(sourceStateAtRegistration, Date.now());
-        }
+        startCacheObserverEmitWorker();
       } catch {
         console.warn(`[opencode-quota-gui] dashboard RPC unavailable: registration-failed`);
       }

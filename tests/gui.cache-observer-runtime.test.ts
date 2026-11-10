@@ -114,8 +114,8 @@ describe("native cache observer runtime", () => {
         ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
       })),
     ).toEqual([
-      { sessionID: sessionId, limit: 200, order: "desc" },
-      { sessionID: childSessionId, limit: 200, order: "desc" },
+      { sessionID: sessionId, limit: 1, order: "desc" },
+      { sessionID: childSessionId, limit: 1, order: "desc" },
     ]);
     expect(runtime.query(sessionId)).toMatchObject({
       primaryCacheReadTelemetry: "unavailable",
@@ -126,6 +126,71 @@ describe("native cache observer runtime", () => {
     });
     expect(JSON.stringify(runtime.query(sessionId))).not.toContain("PRIVATE");
     expect(JSON.stringify(runtime.query(childSessionId))).not.toContain("private content");
+
+    runtime.dispose();
+  });
+
+  it("uses one-message cursor pages and stops at the newest qualifying assistant", async () => {
+    const sessionId = "ses_history_small_pages";
+    const listMessages = vi.fn(async (input: { cursor?: string }) => {
+      if (input.cursor === undefined) {
+        return {
+          data: [
+            {
+              id: "msg_unqualified_newest",
+              type: "assistant",
+              time: { created: 3_000, completed: 3_100 },
+              content: [{ text: "private unqualified content" }],
+            },
+          ],
+          cursor: { next: "latest-qualifying-page" },
+        };
+      }
+      if (input.cursor === "latest-qualifying-page") {
+        return {
+          data: [
+            {
+              id: "msg_latest_qualifying",
+              type: "assistant",
+              model: { providerID: "openai", id: "gpt-test" },
+              time: { created: 2_000, completed: 2_100 },
+              content: [{ text: "private qualifying content" }],
+            },
+          ],
+          cursor: { next: "older-usable-page" },
+        };
+      }
+      return {
+        data: [
+          {
+            id: "msg_older_with_counters",
+            type: "assistant",
+            model: { providerID: "openai", id: "gpt-test" },
+            time: { created: 1_000, completed: 1_100 },
+            tokens: { input: 10, cache: { read: 90, write: 0 } },
+          },
+        ],
+        cursor: { next: null },
+      };
+    });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => vi.fn(),
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+
+    await runtime.bootstrapHistory([sessionId]);
+
+    expect(listMessages.mock.calls.map(([input]) => input)).toEqual([
+      { sessionID: sessionId, limit: 1, order: "desc" },
+      { sessionID: sessionId, limit: 1, cursor: "latest-qualifying-page" },
+    ]);
+    expect(runtime.query(sessionId)).toMatchObject({
+      primaryCacheReadTelemetry: "unavailable",
+    });
+    expect(runtime.query(sessionId)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(JSON.stringify(runtime.query(sessionId))).not.toContain("private");
 
     runtime.dispose();
   });

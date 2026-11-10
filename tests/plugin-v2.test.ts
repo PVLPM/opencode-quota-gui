@@ -85,6 +85,9 @@ function createHostEventQueue() {
       if (resolvePending !== undefined) resolvePending({ done: false, value: event });
       else queued.push(event);
     },
+    end() {
+      resolvePending?.({ done: true, value: undefined });
+    },
     get pulls() {
       return pullCount;
     },
@@ -194,7 +197,91 @@ describe("V2 server plugin credential lifecycle", () => {
     await cleanup?.();
   });
 
-  it("logs why the host event subscription stopped, without tokens", async () => {
+  it.each([
+    "error",
+    "clean end",
+  ] as const)("reconnects the host event stream after %s and publishes the resumed source state", async (termination) => {
+    const ctx = createContext();
+    let attemptCount = 0;
+    let pushReconnectedEvent!: (event: unknown) => void;
+    const subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => {
+      attemptCount += 1;
+      const attempt = attemptCount;
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (attempt === 1) {
+            yield {
+              type: "session.step.ended",
+              created: 10_000,
+              data: {
+                sessionID: "ses_host_reconnect",
+                assistantMessageID: "msg_before_gap",
+                tokens: { input: 10, cache: { read: 5, write: 0 } },
+              },
+            };
+            if (termination === "error") throw new Error("transient stream failure");
+            return;
+          }
+
+          const event = await new Promise<unknown | undefined>((resolve) => {
+            const onAbort = () => resolve(undefined);
+            signal.addEventListener("abort", onAbort, { once: true });
+            pushReconnectedEvent = (value) => {
+              signal.removeEventListener("abort", onAbort);
+              resolve(value);
+            };
+          });
+          if (event !== undefined) yield event;
+          await new Promise<void>((resolve) =>
+            signal.addEventListener("abort", resolve, { once: true }),
+          );
+        },
+      };
+    });
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    cacheEventEmit.mockClear();
+
+    const cleanup = await setupPlugin({ ...ctx, rpc: {} as never, event: { subscribe } });
+    try {
+      await vi.waitFor(() => expect(subscribe).toHaveBeenCalledTimes(2), { timeout: 5_000 });
+      const signals = subscribe.mock.calls.map(([input]) => input.signal);
+      expect(signals[0]).toBe(signals[1]);
+
+      pushReconnectedEvent({
+        type: "session.step.ended",
+        created: 20_000,
+        data: {
+          sessionID: "ses_host_reconnect",
+          assistantMessageID: "msg_after_gap",
+          tokens: { input: 20, cache: { read: 10, write: 0 } },
+          content: "private message content must not cross RPC",
+        },
+      });
+      await vi.waitFor(() =>
+        expect(
+          cacheEventEmit.mock.calls.some(
+            ([, event]) =>
+              event.cacheObserverEvent?.type === "session.step.ended" &&
+              event.cacheObserverEvent.data.assistantMessageID === "msg_after_gap",
+          ),
+        ).toBe(true),
+      );
+
+      const events = cacheEventEmit.mock.calls.map(([, event]) => event.cacheObserverEvent);
+      expect(
+        events.filter((event) => event?.type === "source.status").map((event) => event.data.state),
+      ).toEqual(["observed", "unavailable", "observed"]);
+      expect(JSON.stringify(cacheEventEmit.mock.calls)).not.toContain("private message content");
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  it("logs why the host event stream failed before retrying, without tokens", async () => {
     const ctx = createContext();
     const token = `eyJ${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
     const subscribe = vi.fn(() => ({
@@ -208,10 +295,33 @@ describe("V2 server plugin credential lifecycle", () => {
     const cleanup = await setupPlugin({ ...ctx, event: { subscribe } });
     await vi.waitFor(() =>
       expect(warn).toHaveBeenCalledWith(
-        "[opencode-quota-gui] host event subscription stopped: event stream closed [redacted]",
+        "[opencode-quota-gui] host event subscription failed; retrying: event stream closed [redacted]",
       ),
     );
     await cleanup?.();
+    warn.mockRestore();
+  });
+
+  it("cancels the pending host event retry when the plugin is disposed", async () => {
+    const ctx = createContext();
+    const subscribe = vi.fn(() => ({
+      // biome-ignore lint/correctness/useYield: the stream fails before its first event
+      async *[Symbol.asyncIterator]() {
+        throw new Error("transient stream failure");
+      },
+    }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const cleanup = await setupPlugin({ ...ctx, event: { subscribe } });
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        "[opencode-quota-gui] host event subscription failed; retrying: transient stream failure",
+      ),
+    );
+    await cleanup?.();
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+    expect(subscribe).toHaveBeenCalledOnce();
     warn.mockRestore();
   });
 
@@ -520,7 +630,7 @@ describe("V2 server plugin credential lifecycle", () => {
       await vi.waitFor(() => expect(registerDashboardRpc).toHaveBeenCalledOnce());
       await vi.waitFor(() =>
         expect(warn).toHaveBeenCalledWith(
-          "[opencode-quota-gui] host event subscription stopped: host stream ended",
+          "[opencode-quota-gui] host event subscription failed; retrying: host stream ended",
         ),
       );
       expect(emit).not.toHaveBeenCalled();
@@ -826,6 +936,93 @@ describe("V2 server plugin credential lifecycle", () => {
           data.cacheObserverEvent.data?.state === "unavailable",
       ),
     ).toBe(true);
+    await cleanup?.();
+  });
+
+  it("does not revive the host source after it becomes unavailable during overflow draining", async () => {
+    const ctx = createContext();
+    const host = createHostEventQueue();
+    let resolveRegistration!: (registration: {
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }) => void;
+    const registration = new Promise<{
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }>((resolve) => {
+      resolveRegistration = resolve;
+    });
+    let releaseBacklogEvent!: () => void;
+    const emit = vi.fn(async (_name: string, data: Record<string, any>) => {
+      if (
+        data.cacheObserverEvent?.type === "session.step.started" &&
+        data.cacheObserverEvent.data?.assistantMessageID === "msg_1"
+      ) {
+        await new Promise<void>((resolve) => {
+          releaseBacklogEvent = resolve;
+        });
+      }
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    vi.mocked(registerDashboardRpc).mockImplementationOnce(async () => registration as never);
+
+    const setup = setupPlugin({
+      ...ctx,
+      rpc: {} as never,
+      event: { subscribe: host.subscribe },
+    });
+    await vi.waitFor(() => expect(registerDashboardRpc).toHaveBeenCalledOnce());
+    for (let index = 0; index < 513; index += 1) {
+      host.push({
+        type: "session.step.started",
+        created: 30_000 + index,
+        data: {
+          sessionID: "ses_overflow_source_race",
+          assistantMessageID: `msg_${index}`,
+          model: { providerID: "openai", id: "gpt-test" },
+          started: 29_000 + index,
+        },
+      });
+    }
+    await vi.waitFor(() => expect(host.pulls).toBe(514));
+    resolveRegistration({ events: { emit }, dispose: async () => {} });
+    const cleanup = await setup;
+
+    await vi.waitFor(() => expect(releaseBacklogEvent).toBeTypeOf("function"));
+    host.end();
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        "[opencode-quota-gui] host event subscription failed; retrying: host event stream ended",
+      ),
+    );
+    releaseBacklogEvent();
+
+    await vi.waitFor(() => {
+      expect(
+        emit.mock.calls.filter(
+          ([, data]) => data.cacheObserverEvent?.type === "session.step.started",
+        ),
+      ).toHaveLength(512);
+      expect(
+        emit.mock.calls.filter(
+          ([, data]) =>
+            data.cacheObserverEvent?.type === "source.status" &&
+            data.cacheObserverEvent.data?.state === "unavailable",
+        ),
+      ).toHaveLength(2);
+    });
+    const sourceStates = emit.mock.calls
+      .map(([, data]) => data.cacheObserverEvent)
+      .filter((event) => event?.type === "source.status")
+      .map((event) => event?.data?.state);
+    expect(sourceStates).toEqual(["unavailable", "unavailable"]);
+
+    warn.mockRestore();
     await cleanup?.();
   });
 
