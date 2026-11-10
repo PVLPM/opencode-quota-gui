@@ -1,3 +1,10 @@
+import {
+  type AgentCustomProviderRuntimeTrust,
+  agentCustomProviderTrustFingerprint,
+  isAgentCustomProviderManagedDefinition,
+  isAgentCustomProviderTrustedDefinition,
+  resolveApprovedAgentCustomProviderApiKey,
+} from "../lib/agent-custom-provider-trust.js";
 import { resolveAnthropicAuthIdentity } from "../lib/anthropic.js";
 import { resolveChutesApiKey } from "../lib/chutes-config.js";
 import { resolveCopilotAuthIdentity } from "../lib/copilot.js";
@@ -139,11 +146,33 @@ async function composeAuthIdentities(
 
 export async function resolveQuotaProviderDefinitionAuthIdentity(
   definition: QuotaProviderDefinition,
+  runtimeTrust?: AgentCustomProviderRuntimeTrust,
 ): Promise<ResolvedAuthIdentity | null> {
   if (definition.mode === "local-estimate") {
     return deriveResolvedAuthIdentity({
       providerId: `quota-providers:${definition.id}`,
       principal: { kind: "stable-id", value: "local-estimate" },
+    });
+  }
+
+  if (runtimeTrust && isAgentCustomProviderManagedDefinition(definition, runtimeTrust)) {
+    const approved = isAgentCustomProviderTrustedDefinition(definition, runtimeTrust);
+    const approvalQualifier = approved
+      ? agentCustomProviderTrustFingerprint(definition)
+      : `untrusted:${agentCustomProviderTrustFingerprint(definition)}`;
+    const key = approved
+      ? resolveApprovedAgentCustomProviderApiKey(definition, runtimeTrust)
+      : undefined;
+    return deriveResolvedAuthIdentity({
+      providerId: `quota-providers:${definition.id}`,
+      principal:
+        approved && key
+          ? { kind: "credential", value: key }
+          : {
+              kind: "stable-id",
+              value: approved ? "missing-credential" : "untrusted-managed-definition",
+            },
+      qualifiers: [definition.providerId, approvalQualifier],
     });
   }
 
@@ -159,12 +188,14 @@ export async function resolveQuotaProviderDefinitionAuthIdentity(
 
 const quotaProvidersCachePolicy: QuotaProviderCachePolicy = {
   kind: "resolved-auth",
-  async resolveIdentity(_ctx, cacheContext) {
+  async resolveIdentity(ctx, cacheContext) {
     const definitions = cacheContext.runtimeEligibleQuotaProviders;
     if (!definitions || definitions.length === 0) return null;
 
     const identities = await Promise.all(
-      definitions.map((definition) => resolveQuotaProviderDefinitionAuthIdentity(definition)),
+      definitions.map((definition) =>
+        resolveQuotaProviderDefinitionAuthIdentity(definition, ctx.config),
+      ),
     );
     if (identities.some((identity) => identity === null)) return null;
 

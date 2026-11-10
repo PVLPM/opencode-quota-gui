@@ -54,6 +54,10 @@ describe("dashboard RPC definition", () => {
       "project",
       "session",
       "settings",
+      "agentCustomProviders",
+      "approveAgentCustomProvider",
+      "setAgentCustomProviderEnabled",
+      "testApprovedAgentCustomProvider",
       "saveSettings",
       "saveVisibility",
       "importPreview",
@@ -83,6 +87,7 @@ describe("dashboard RPC definition", () => {
       "health",
       "quota",
       "settings",
+      "agentCustomProviders",
       "importPreview",
       "openSettingsFile",
     ] as const) {
@@ -94,6 +99,51 @@ describe("dashboard RPC definition", () => {
       await expectRejected(input, null, "input must be an empty object");
       await expectRejected(input, { extra: true }, "input must be an empty object");
     }
+  });
+
+  it("validates user-only custom provider review inputs and sanitized outputs", async () => {
+    const revision = "a".repeat(64);
+    const action = { id: "acme-quota", expectedRevision: revision };
+    await expectAccepted(methods.approveAgentCustomProvider.input, action);
+    await expectAccepted(methods.testApprovedAgentCustomProvider.input, action);
+    await expectAccepted(methods.setAgentCustomProviderEnabled.input, {
+      ...action,
+      enabled: true,
+    });
+    await expectRejected(
+      methods.approveAgentCustomProvider.input,
+      { id: "acme-quota", expectedRevision: "stale" },
+      "expectedRevision must be a canonical config revision",
+    );
+    await expectRejected(
+      methods.setAgentCustomProviderEnabled.input,
+      { ...action, enabled: "yes" },
+      "enabled must be a boolean",
+    );
+
+    await expectAccepted(methods.agentCustomProviders.output, {
+      revision,
+      providers: [
+        {
+          id: "acme-quota",
+          definition: {
+            id: "acme-quota",
+            providerId: "acme",
+            mode: "remote-api",
+            url: "https://quota.example.test/v1/quota",
+            format: "quota-v1",
+            apiKeyEnv: "ACME_KEY",
+          },
+          approved: false,
+          enabled: false,
+        },
+      ],
+    });
+    await expectRejected(
+      methods.agentCustomProviders.output,
+      { revision, providers: [{ id: "acme-quota", secret: "must not cross" }] },
+      "output does not match the dashboard contract",
+    );
   });
 
   it("validates home, project and session resource inputs", async () => {

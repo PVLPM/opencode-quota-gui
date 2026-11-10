@@ -77,6 +77,16 @@ function createFakeCaller() {
     settings: vi.fn(async () => ({ marker: "settings" })),
     saveSettings: vi.fn(async () => ({ marker: "saveSettings" })),
     saveVisibility: vi.fn(async () => ({ marker: "saveVisibility" })),
+    agentCustomProviders: vi.fn(async () => ({ revision: "a".repeat(64), providers: [] })),
+    approveAgentCustomProvider: vi.fn(async () => ({ revision: "b".repeat(64), providers: [] })),
+    setAgentCustomProviderEnabled: vi.fn(async () => ({ revision: "c".repeat(64), providers: [] })),
+    testApprovedAgentCustomProvider: vi.fn(async () => ({
+      id: "acme-quota",
+      status: "passed",
+      reason: "provider-responded",
+      trusted: true,
+      enabled: false,
+    })),
     importPreview: vi.fn(async () => ({ marker: "importPreview" })),
     importApply: vi.fn(async () => ({ marker: "importApply" })),
     openSettingsFile: vi.fn(async () => ({ opened: true as const })),
@@ -342,6 +352,23 @@ describe("native dashboard RPC client", () => {
     await expect(
       client.saveVisibility({ hiddenCards: [], hiddenRows: [], expectedRevision: "r" }),
     ).resolves.toEqual({ marker: "saveVisibility" });
+    await expect(client.agentCustomProviders()).resolves.toMatchObject({ providers: [] });
+    await expect(
+      client.approveAgentCustomProvider({ id: "acme-quota", expectedRevision: "a".repeat(64) }),
+    ).resolves.toMatchObject({ revision: "b".repeat(64) });
+    await expect(
+      client.setAgentCustomProviderEnabled({
+        id: "acme-quota",
+        enabled: true,
+        expectedRevision: "a".repeat(64),
+      }),
+    ).resolves.toMatchObject({ revision: "c".repeat(64) });
+    await expect(
+      client.testApprovedAgentCustomProvider({
+        id: "acme-quota",
+        expectedRevision: "a".repeat(64),
+      }),
+    ).resolves.toMatchObject({ status: "passed", trusted: true });
     await expect(client.importPreview()).resolves.toEqual({ marker: "importPreview" });
     await expect(client.importApply({ expectedRevision: "r" })).resolves.toEqual({
       marker: "importApply",

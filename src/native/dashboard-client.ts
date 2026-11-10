@@ -16,6 +16,8 @@
  */
 
 import type {
+  AgentCustomProviderSnapshot,
+  AgentCustomProviderTestResult,
   AnalyticsGroupQuery,
   AnalyticsGroupSnapshot,
   DashboardDataSource,
@@ -33,10 +35,12 @@ import type {
 import { isDashboardEvent } from "../contracts/guards.js";
 import type { RangeKey } from "../contracts/ranges.js";
 import type {
+  DashboardRpcAgentCustomProviderInput,
   DashboardRpcCacheObserverEvent,
   DashboardRpcEventData,
   DashboardRpcNoInput,
   DashboardRpcQuotaNotificationData,
+  DashboardRpcSetAgentCustomProviderEnabledInput,
   DashboardRpcViewScope,
   DashboardRpcWatchInput,
   DashboardRpcWatchOutput,
@@ -93,6 +97,22 @@ export interface DashboardRpcCaller {
     input: DashboardRpcNoInput,
     options?: DashboardRpcCallOptions,
   ): Promise<{ opened: true }>;
+  agentCustomProviders(
+    input: DashboardRpcNoInput,
+    options?: DashboardRpcCallOptions,
+  ): Promise<AgentCustomProviderSnapshot>;
+  approveAgentCustomProvider(
+    input: DashboardRpcAgentCustomProviderInput,
+    options?: DashboardRpcCallOptions,
+  ): Promise<AgentCustomProviderSnapshot>;
+  setAgentCustomProviderEnabled(
+    input: DashboardRpcSetAgentCustomProviderEnabledInput,
+    options?: DashboardRpcCallOptions,
+  ): Promise<AgentCustomProviderSnapshot>;
+  testApprovedAgentCustomProvider(
+    input: DashboardRpcAgentCustomProviderInput,
+    options?: DashboardRpcCallOptions,
+  ): Promise<AgentCustomProviderTestResult>;
   watch(
     input: DashboardRpcWatchInput,
     options?: DashboardRpcCallOptions,
@@ -110,6 +130,17 @@ export interface DashboardRpcCaller {
 }
 
 export interface NativeDashboardClient extends DashboardDataSource {
+  /** User-only proposal review seam: agent tools receive no approval or enable RPC. */
+  agentCustomProviders(): Promise<AgentCustomProviderSnapshot>;
+  approveAgentCustomProvider(
+    input: DashboardRpcAgentCustomProviderInput,
+  ): Promise<AgentCustomProviderSnapshot>;
+  setAgentCustomProviderEnabled(
+    input: DashboardRpcSetAgentCustomProviderEnabledInput,
+  ): Promise<AgentCustomProviderSnapshot>;
+  testApprovedAgentCustomProvider(
+    input: DashboardRpcAgentCustomProviderInput,
+  ): Promise<AgentCustomProviderTestResult>;
   /** Current transport state; last known product data remains usable as stale. */
   connection(): NativeDashboardConnection;
   onConnectionChange(listener: (state: NativeDashboardConnection) => void): () => void;
@@ -415,6 +446,18 @@ export function createNativeDashboardClient(
     },
     async openSettingsFile() {
       await rpc.openSettingsFile({});
+    },
+    async agentCustomProviders() {
+      return rpc.agentCustomProviders({});
+    },
+    async approveAgentCustomProvider(input) {
+      return rpc.approveAgentCustomProvider(input);
+    },
+    async setAgentCustomProviderEnabled(input) {
+      return rpc.setAgentCustomProviderEnabled(input);
+    },
+    async testApprovedAgentCustomProvider(input) {
+      return rpc.testApprovedAgentCustomProvider(input);
     },
 
     connection: () => state,

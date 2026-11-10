@@ -276,6 +276,42 @@ function createHandlers(
     project: (input, context) => guard(context, () => runtime.snapshots.project(input)),
     session: (input, context) => guard(context, () => runtime.snapshots.session(input)),
     settings: (_input, context) => guard(context, () => runtime.settings.settings()),
+    agentCustomProviders: (_input, context) =>
+      guard(context, async () => {
+        const read = runtime.settings.agentCustomProviders;
+        if (!read) {
+          throw new GuiSettingsError("config-target-error", "Provider management is unavailable");
+        }
+        return read();
+      }),
+    approveAgentCustomProvider: (input, context) =>
+      guard(context, async () => {
+        const approve = runtime.settings.approveAgentCustomProvider;
+        if (!approve) {
+          throw new GuiSettingsError("config-target-error", "Provider management is unavailable");
+        }
+        const result = await approve(input);
+        runtime.snapshots.notifySettingsChanged();
+        return result;
+      }),
+    setAgentCustomProviderEnabled: (input, context) =>
+      guard(context, async () => {
+        const setEnabled = runtime.settings.setAgentCustomProviderEnabled;
+        if (!setEnabled) {
+          throw new GuiSettingsError("config-target-error", "Provider management is unavailable");
+        }
+        const result = await setEnabled(input);
+        runtime.snapshots.notifySettingsChanged();
+        return result;
+      }),
+    testApprovedAgentCustomProvider: (input, context) =>
+      guard(context, async () => {
+        const test = runtime.settings.testApprovedAgentCustomProvider;
+        if (!test) {
+          throw new GuiSettingsError("config-target-error", "Provider management is unavailable");
+        }
+        return test(input);
+      }),
     saveSettings: (input, context) =>
       guard(context, async () => {
         const result = await runtime.settings.saveSettings(input);
