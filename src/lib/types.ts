@@ -266,10 +266,6 @@ export interface QuotaToastConfig {
    */
   quotaProviders: QuotaProviderDefinition[];
 
-  /** Runtime-only ids and matching approval fingerprints for agent-managed providers. */
-  agentCustomProviderIds?: string[];
-  agentCustomProviderTrust?: Record<string, string>;
-
   /** Path or command name for the local Claude CLI used by Anthropic probing. */
   anthropicBinaryPath: string;
 

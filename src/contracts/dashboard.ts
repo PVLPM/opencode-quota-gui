@@ -505,29 +505,6 @@ export interface ImportPreview {
   expectedRevision: string;
 }
 
-/** User-reviewed metadata for an agent-proposed custom quota provider. */
-export interface AgentCustomProviderProposal {
-  id: string;
-  /** Validated provider definition; contains env-variable references, never values. */
-  definition: JsonValue;
-  approved: boolean;
-  enabled: boolean;
-}
-
-export interface AgentCustomProviderSnapshot {
-  /** Revision of the canonical GUI config this view was read from. */
-  revision: string;
-  providers: AgentCustomProviderProposal[];
-}
-
-export interface AgentCustomProviderTestResult {
-  id: string;
-  status: "passed" | "failed" | "not-applicable";
-  reason: "provider-responded" | "provider-rejected" | "unsafe-endpoint" | "local-estimate";
-  trusted: boolean;
-  enabled: boolean;
-}
-
 export type DashboardEventTopic = "quota.changed" | "sessions.changed" | "settings.changed";
 
 export interface DashboardEvent {
@@ -574,20 +551,4 @@ export type GuiSettingsStore = Pick<
   | "importPreview"
   | "importApply"
   | "openSettingsFile"
-> & {
-  /** User-owned approval/activation seam; never included in agent RPC tools. */
-  agentCustomProviders?(): Promise<AgentCustomProviderSnapshot>;
-  approveAgentCustomProvider?(input: {
-    id: string;
-    expectedRevision: string;
-  }): Promise<AgentCustomProviderSnapshot>;
-  setAgentCustomProviderEnabled?(input: {
-    id: string;
-    enabled: boolean;
-    expectedRevision: string;
-  }): Promise<AgentCustomProviderSnapshot>;
-  testApprovedAgentCustomProvider?(input: {
-    id: string;
-    expectedRevision: string;
-  }): Promise<AgentCustomProviderTestResult>;
-};
+>;

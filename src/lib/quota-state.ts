@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { isAgentCustomProviderTrustedDefinition } from "./agent-custom-provider-trust.js";
 import { writeJsonAtomic } from "./atomic-json.js";
 import type {
   QuotaProvider,
@@ -239,7 +238,7 @@ async function resolveRuntimeEligibleQuotaProviders(
       onlyCurrentModel: ctx.config.onlyCurrentModel,
       currentModel: ctx.config.currentModel,
       currentProviderID: ctx.config.currentProviderID,
-    }).filter((definition) => isAgentCustomProviderTrustedDefinition(definition, ctx.config));
+    });
   } catch {
     return null;
   }

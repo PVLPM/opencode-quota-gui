@@ -29,13 +29,6 @@ export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCa
     settings: (input, options) => rpc().settings(input, options),
     saveSettings: (input, options) => rpc().saveSettings(input, options),
     saveVisibility: (input, options) => rpc().saveVisibility(input, options),
-    agentCustomProviders: (input, options) => rpc().agentCustomProviders(input, options),
-    approveAgentCustomProvider: (input, options) =>
-      rpc().approveAgentCustomProvider(input, options),
-    setAgentCustomProviderEnabled: (input, options) =>
-      rpc().setAgentCustomProviderEnabled(input, options),
-    testApprovedAgentCustomProvider: (input, options) =>
-      rpc().testApprovedAgentCustomProvider(input, options),
     importPreview: (input, options) => rpc().importPreview(input, options),
     importApply: (input, options) => rpc().importApply(input, options),
     openSettingsFile: (input, options) => rpc().openSettingsFile(input, options),

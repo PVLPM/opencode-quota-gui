@@ -23,10 +23,6 @@ import type {
   SettingsWriteResult,
 } from "../contracts/dashboard.js";
 import { LEGACY_IMPORT_KEYS } from "../contracts/settings.js";
-import {
-  AgentCustomProviderError,
-  createAgentCustomProviderStore,
-} from "../lib/agent-custom-providers.js";
 import { withCanonicalConfigLock } from "../lib/canonical-config-lock.js";
 import {
   buildConfigLayerCandidates,
@@ -310,7 +306,6 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
   const configDir = resolve(options.configDir);
   const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
   const canonicalPath = getGuiConfigPath(configDir);
-  const agentProviderStore = createAgentCustomProviderStore({ configDir });
   const siblingJsonPath = getGuiConfigSiblingJsonPath(configDir);
   const settingsFileOpener = options.settingsFileOpener ?? createSettingsFileOpener();
 
@@ -326,46 +321,6 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       () => undefined,
     );
     return next;
-  }
-
-  function mapAgentProviderError(error: unknown): GuiSettingsError {
-    if (!(error instanceof AgentCustomProviderError)) {
-      return new GuiSettingsError("config-write-error", "Provider settings could not be updated");
-    }
-    switch (error.code) {
-      case "config-changed":
-        return new GuiSettingsError(
-          "config-changed",
-          "Provider settings changed; refresh and retry",
-        );
-      case "config-read-error":
-      case "config-invalid":
-        return new GuiSettingsError("config-read-error", "Provider settings could not be read");
-      case "unsafe-config-target":
-        return new GuiSettingsError("config-target-error", "Provider settings target is not safe");
-      case "approval-required":
-      case "invalid-id":
-      case "not-found":
-      case "invalid-definition":
-      case "duplicate-id":
-        return new GuiSettingsError("invalid-setting", "The provider action is not valid", {
-          key: "agentCustomProviders",
-        });
-      case "provider-enabled":
-        return new GuiSettingsError("invalid-setting", "Disable this provider before removing it", {
-          key: "agentCustomProviders",
-        });
-      case "config-write-error":
-        return new GuiSettingsError("config-write-error", "Provider settings could not be updated");
-    }
-  }
-
-  async function withAgentProviderError<T>(run: () => Promise<T>): Promise<T> {
-    try {
-      return await run();
-    } catch (error) {
-      throw mapAgentProviderError(error);
-    }
   }
 
   function invalidSetting(key: string, message: string): GuiSettingsError {
@@ -1088,46 +1043,5 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     importPreview,
     importApply,
     openSettingsFile,
-    agentCustomProviders: () =>
-      withAgentProviderError(async () => {
-        const snapshot = await agentProviderStore.listForUser();
-        return {
-          revision: snapshot.revision,
-          providers: snapshot.providers.map((provider) => ({
-            ...provider,
-            definition: JSON.parse(JSON.stringify(provider.definition)) as JsonValue,
-          })),
-        };
-      }),
-    approveAgentCustomProvider: (input) =>
-      withAgentProviderError(async () => {
-        const snapshot = await agentProviderStore.approve(input.id, input.expectedRevision);
-        return {
-          revision: snapshot.revision,
-          providers: snapshot.providers.map((provider) => ({
-            ...provider,
-            definition: JSON.parse(JSON.stringify(provider.definition)) as JsonValue,
-          })),
-        };
-      }),
-    setAgentCustomProviderEnabled: (input) =>
-      withAgentProviderError(async () => {
-        const snapshot = await agentProviderStore.setEnabled(
-          input.id,
-          input.enabled,
-          input.expectedRevision,
-        );
-        return {
-          revision: snapshot.revision,
-          providers: snapshot.providers.map((provider) => ({
-            ...provider,
-            definition: JSON.parse(JSON.stringify(provider.definition)) as JsonValue,
-          })),
-        };
-      }),
-    testApprovedAgentCustomProvider: (input) =>
-      withAgentProviderError(() =>
-        agentProviderStore.testApproved(input.id, input.expectedRevision),
-      ),
   };
 }

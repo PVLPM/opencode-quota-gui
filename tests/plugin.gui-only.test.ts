@@ -179,7 +179,7 @@ describe("GUI-only server plugin", () => {
     }
   });
 
-  it("registers only disabled-provider agent tools, attaches dashboard RPC and starts the dashboard", async () => {
+  it("registers no agent tools, attaches dashboard RPC and starts the dashboard", async () => {
     const port = await freePort();
     await writeCanonicalConfig(port);
     const { ctx, hooks, rpc, rpcRegistration, registeredTools, toolRegistration } = createContext();
@@ -187,14 +187,8 @@ describe("GUI-only server plugin", () => {
     const cleanup = await plugin.setup(ctx as never);
     if (cleanup) cleanups.push(cleanup);
 
-    expect(ctx.tool.transform).toHaveBeenCalledOnce();
-    expect([...registeredTools.keys()].sort()).toEqual([
-      "quota_custom_provider_add",
-      "quota_custom_provider_list",
-      "quota_custom_provider_read",
-      "quota_custom_provider_remove",
-      "quota_custom_provider_test",
-    ]);
+    expect(ctx.tool.transform).not.toHaveBeenCalled();
+    expect([...registeredTools.keys()].sort()).toEqual([]);
     expect(ctx.command.transform).not.toHaveBeenCalled();
     expect(rpc.register).toHaveBeenCalledOnce();
     expect(rpc.register.mock.calls[0]?.[0]).toMatchObject({
@@ -211,7 +205,7 @@ describe("GUI-only server plugin", () => {
 
     await cleanup?.();
     expect(rpcRegistration.dispose).toHaveBeenCalledOnce();
-    expect(toolRegistration.dispose).toHaveBeenCalledOnce();
+    expect(toolRegistration.dispose).not.toHaveBeenCalled();
   });
 
   it("attaches dashboard RPC with web disabled and binds no listener", async () => {

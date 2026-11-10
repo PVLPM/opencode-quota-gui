@@ -11,7 +11,6 @@
 
 import { existsSync, realpathSync } from "fs";
 import { join } from "path";
-import { projectTrustedAgentCustomProviders } from "./agent-custom-provider-trust.js";
 import {
   DASHBOARD_HIDDEN_CARDS_VERSION,
   normalizeLegacyDashboardHiddenCards,
@@ -410,12 +409,6 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
       ? [...config.enabledProviders]
       : config.enabledProviders,
     quotaProviders: cloneQuotaProviders(config.quotaProviders),
-    ...(config.agentCustomProviderIds
-      ? { agentCustomProviderIds: [...config.agentCustomProviderIds] }
-      : {}),
-    ...(config.agentCustomProviderTrust
-      ? { agentCustomProviderTrust: { ...config.agentCustomProviderTrust } }
-      : {}),
     resetNotifications: {
       ...config.resetNotifications,
       windows: [...config.resetNotifications.windows],
@@ -2136,17 +2129,6 @@ export async function loadConfig(
           applySettingSource(settingSources, "quotaProviders", canonicalPath);
         }
       }
-
-      const agentCustomProviders = projectTrustedAgentCustomProviders(
-        parsed.agentCustomProviders,
-        config.quotaProviders,
-      );
-      config.agentCustomProviderIds = agentCustomProviders.managedIds;
-      config.agentCustomProviderTrust = agentCustomProviders.fingerprints;
-      config.quotaProviders = [
-        ...config.quotaProviders,
-        ...cloneQuotaProviders(agentCustomProviders.definitions),
-      ];
 
       // Only keys actually applied from the canonical layer acquire its structured scope.
       for (const key of QUOTA_TOAST_SETTING_SOURCE_KEYS) {

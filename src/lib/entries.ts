@@ -460,9 +460,6 @@ export interface QuotaProviderContext {
     currentProviderID?: string;
     enabledProviders: string[] | "auto";
     quotaProviders?: QuotaProviderDefinition[];
-    /** Runtime-only allowlist and approvals for agent-managed definitions. */
-    agentCustomProviderIds?: string[];
-    agentCustomProviderTrust?: Record<string, string>;
     telemetryToken?: QuotaTelemetryToken;
   };
 }

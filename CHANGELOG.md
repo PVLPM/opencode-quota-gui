@@ -8,7 +8,6 @@ User-facing release notes for OpenCode Quota GUI.
 
 - **Cache observation.** The Native composer pill shows the most recent reported primary cache-read percentage and independent session observations. Retention colors are estimates based on documented assumptions, not guarantees of a future cache hit; unsupported routes remain unverified.
 - **Quota alert controls.** Configure Native alerts for low quota, exhaustion, reset windows, and provider failures independently, with a master switch and shared cooldown.
-- **Agent provider proposals.** Agents can inspect and propose disabled custom-provider definitions; approval, activation, and credential-bearing tests remain under user control.
 - **China 2027 holidays.** Temporal pricing includes the seven official national holiday intervals without changing weekday or weekend rules.
 
 ### Improved

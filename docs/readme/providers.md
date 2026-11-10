@@ -102,7 +102,7 @@ Except for Copilot organization and enterprise billing, each integration reports
 
 ## Custom providers
 
-Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Define active providers in the global canonical file from [Configuration](configuration.md#custom-providers). The server plugin also exposes agent tools to list, read, add, test, and remove *proposals* under `agentCustomProviders` in that same canonical file. Proposals are separate from `quotaProviders`: adding one never enables it, even with `enabledProviders: "auto"`, and the agent tools cannot approve or enable it. Testing performs at most one HTTPS request to a public address on port 443, never follows redirects, and returns no credential or response rows; a successful test is not approval. Settings never asks for or stores a credential.
+Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Define active providers in the global canonical file from [Configuration](configuration.md#custom-providers). Settings never asks for or stores a credential.
 
 Provider definitions are configuration metadata and may be visible to agents. Do not place secrets directly in definitions; use `apiKeyEnv` for API credentials.
 

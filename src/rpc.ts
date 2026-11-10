@@ -8,8 +8,6 @@
 import type { Rpc } from "@opencode/plugin/rpc";
 import { isAnalyticsGroupQuery } from "./contracts/analytics-entity.js";
 import {
-  type AgentCustomProviderSnapshot,
-  type AgentCustomProviderTestResult,
   type AnalyticsGroupQuery,
   DASHBOARD_CONTRACT_VERSION,
   type DashboardEventTopic,
@@ -201,12 +199,6 @@ export type DashboardRpcSaveVisibilityInput = {
   expectedRevision: string;
 };
 export type DashboardRpcImportApplyInput = { expectedRevision: string };
-export type DashboardRpcAgentCustomProviderInput = { id: string; expectedRevision: string };
-export type DashboardRpcSetAgentCustomProviderEnabledInput = {
-  id: string;
-  enabled: boolean;
-  expectedRevision: string;
-};
 export type DashboardRpcWatchInput = { scope: DashboardRpcViewScope };
 export type DashboardRpcWatchOutput = { active: boolean };
 export type DashboardRpcOpenSettingsOutput = { opened: true };
@@ -380,54 +372,6 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
-function isAgentCustomProviderSnapshot(value: unknown): value is AgentCustomProviderSnapshot {
-  return (
-    isObject(value) &&
-    hasExactKeys(value, ["revision", "providers"]) &&
-    typeof value.revision === "string" &&
-    /^[0-9a-f]{64}$/.test(value.revision) &&
-    Array.isArray(value.providers) &&
-    value.providers.every(
-      (provider) =>
-        isObject(provider) &&
-        hasExactKeys(provider, ["id", "definition", "approved", "enabled"]) &&
-        typeof provider.id === "string" &&
-        /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(provider.id) &&
-        isJsonValue(provider.definition) &&
-        typeof provider.approved === "boolean" &&
-        typeof provider.enabled === "boolean",
-    )
-  );
-}
-
-function isAgentCustomProviderTestResult(value: unknown): value is AgentCustomProviderTestResult {
-  return (
-    isObject(value) &&
-    hasExactKeys(value, ["id", "status", "reason", "trusted", "enabled"]) &&
-    typeof value.id === "string" &&
-    /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(value.id) &&
-    (value.status === "passed" || value.status === "failed" || value.status === "not-applicable") &&
-    (value.reason === "provider-responded" ||
-      value.reason === "provider-rejected" ||
-      value.reason === "unsafe-endpoint" ||
-      value.reason === "local-estimate") &&
-    typeof value.trusted === "boolean" &&
-    typeof value.enabled === "boolean"
-  );
-}
-
-function checkAgentCustomProviderActionInput(value: unknown): string | null {
-  if (!isObject(value) || !hasExactKeys(value, ["id", "expectedRevision"])) {
-    return "input must contain only id and expectedRevision";
-  }
-  if (typeof value.id !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(value.id)) {
-    return "id must be a provider id";
-  }
-  return typeof value.expectedRevision === "string" && /^[0-9a-f]{64}$/.test(value.expectedRevision)
-    ? null
-    : "expectedRevision must be a canonical config revision";
-}
-
 function checkRange(value: Record<string, unknown>): string | null {
   return isRangeKey(value.range) ? null : "range must be one of 24h, 7d, 30d, lifetime";
 }
@@ -557,35 +501,6 @@ export const DashboardRpc = {
     settings: {
       input: NO_INPUT,
       output: output(isSettingsSnapshot),
-      errors: DASHBOARD_RPC_ERRORS,
-    },
-    agentCustomProviders: {
-      input: NO_INPUT,
-      output: output(isAgentCustomProviderSnapshot),
-      errors: DASHBOARD_RPC_ERRORS,
-    },
-    approveAgentCustomProvider: {
-      input: schema<DashboardRpcAgentCustomProviderInput>(checkAgentCustomProviderActionInput),
-      output: output(isAgentCustomProviderSnapshot),
-      errors: DASHBOARD_RPC_ERRORS,
-    },
-    setAgentCustomProviderEnabled: {
-      input: schema<DashboardRpcSetAgentCustomProviderEnabledInput>((value) => {
-        if (!isObject(value) || !hasExactKeys(value, ["id", "enabled", "expectedRevision"])) {
-          return "input must contain only id, enabled and expectedRevision";
-        }
-        if (typeof value.enabled !== "boolean") return "enabled must be a boolean";
-        return checkAgentCustomProviderActionInput({
-          id: value.id,
-          expectedRevision: value.expectedRevision,
-        });
-      }),
-      output: output(isAgentCustomProviderSnapshot),
-      errors: DASHBOARD_RPC_ERRORS,
-    },
-    testApprovedAgentCustomProvider: {
-      input: schema<DashboardRpcAgentCustomProviderInput>(checkAgentCustomProviderActionInput),
-      output: output(isAgentCustomProviderTestResult),
       errors: DASHBOARD_RPC_ERRORS,
     },
     saveSettings: {
