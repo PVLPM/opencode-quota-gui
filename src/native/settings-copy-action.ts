@@ -1,7 +1,11 @@
 import type { QuotaSnapshot, SettingsSnapshot } from "../contracts/dashboard.js";
+import { isProviderFailureCategory } from "../contracts/provider-failure.js";
+import { getQuotaProviderShape } from "../lib/provider-metadata.js";
 import {
   formatNativeSettingsCopyDiagnostics,
   type NativeSettingsCopyDiagnosticsInput,
+  type NativeSettingsCopyProviderReason,
+  type NativeSettingsCopyProviderStatus,
   projectNativeSettingsCopyDiagnostics,
 } from "./settings-copy-diagnostics.js";
 
@@ -24,6 +28,85 @@ function statusFromCounts(params: {
     return "partial";
   }
   return "success";
+}
+
+function providerStatusesFromSnapshot(
+  quota: QuotaSnapshot,
+): NonNullable<NativeSettingsCopyDiagnosticsInput["providerStatuses"]> {
+  const summaries = new Map<
+    string,
+    {
+      cardCount: number;
+      errorCardCount: number;
+      hasRows: boolean;
+      errorCount: number;
+      reasons: Set<NativeSettingsCopyProviderReason>;
+    }
+  >();
+  const summaryFor = (providerId: string) => {
+    let summary = summaries.get(providerId);
+    if (!summary) {
+      summary = {
+        cardCount: 0,
+        errorCardCount: 0,
+        hasRows: false,
+        errorCount: 0,
+        reasons: new Set(),
+      };
+      summaries.set(providerId, summary);
+    }
+    return summary;
+  };
+
+  for (const card of quota.providers.cards) {
+    const providerId = getQuotaProviderShape(card.providerId)?.id;
+    if (!providerId) continue;
+    const summary = summaryFor(providerId);
+    summary.cardCount += 1;
+    if (Array.isArray(card.rows) && card.rows.length > 0) summary.hasRows = true;
+    const errors = Array.isArray(card.errors) ? card.errors : [];
+    if (errors.length > 0) {
+      summary.errorCardCount += 1;
+      summary.errorCount += errors.length;
+      for (const error of errors) {
+        summary.reasons.add(
+          isProviderFailureCategory(error.failureCategory) ? error.failureCategory : "unknown",
+        );
+      }
+    }
+  }
+
+  const enabledProviders = quota.providers.enabledProviders;
+  if (Array.isArray(enabledProviders)) {
+    for (const configuredId of enabledProviders) {
+      if (typeof configuredId !== "string") continue;
+      const providerId = getQuotaProviderShape(configuredId)?.id;
+      if (providerId) summaryFor(providerId);
+    }
+  }
+
+  return [...summaries].map(([providerId, summary]) => {
+    let status: NativeSettingsCopyProviderStatus;
+    let reasons: NativeSettingsCopyProviderReason[] | undefined;
+    if (summary.cardCount === 0) {
+      status = "unknown";
+      reasons = ["unknown"];
+    } else if (summary.errorCount > 0) {
+      status = summary.hasRows || summary.errorCardCount < summary.cardCount ? "partial" : "error";
+      reasons = [...summary.reasons].sort();
+      if (reasons.length === 0) reasons = ["unknown"];
+    } else if (summary.hasRows) {
+      status = "success";
+    } else {
+      status = "no_data";
+      reasons = ["no_data"];
+    }
+    return {
+      providerId,
+      status,
+      ...(reasons === undefined ? {} : { reasons }),
+    };
+  });
 }
 
 function configurationSource(
@@ -97,6 +180,7 @@ export function settingsDiagnosticsFromSnapshots(
         quotaProjection?.quota ??
         (options.quotaUnavailable ? { status: "unavailable", stale: true } : undefined),
       providerAvailability: quotaProjection?.providerAvailability,
+      providerStatuses: quota ? providerStatusesFromSnapshot(quota) : undefined,
       configuration: settings
         ? {
             source: configurationSource(settings),

@@ -75,6 +75,36 @@ describe("Native Settings Copy diagnostics projection", () => {
     );
   });
 
+  it("keeps provider statuses and reasons to allowlisted identifiers and fixed enums", () => {
+    const diagnostics = projectNativeSettingsCopyDiagnostics({
+      providerStatuses: [
+        { providerId: "openai", status: "error", reasons: ["credentials"] },
+        { providerId: "copilot", status: "unknown", reasons: ["unknown"] },
+        { providerId: "anthropic", status: "error", reasons: ["SENTINEL_PRIVATE_REASON"] },
+        {
+          providerId: "SENTINEL_PRIVATE_PROVIDER",
+          status: "error",
+          reasons: ["SENTINEL_PRIVATE_REASON"],
+        },
+      ],
+    } as never);
+
+    expect(diagnostics.providers?.statuses).toEqual([
+      { providerId: "anthropic", status: "error", reasons: ["unknown"] },
+      { providerId: "copilot", status: "unknown", reasons: ["unknown"] },
+      { providerId: "openai", status: "error", reasons: ["credentials"] },
+    ]);
+    expect(formatNativeSettingsCopyDiagnostics(diagnostics)).toContain(
+      [
+        "Provider diagnostics:",
+        "- anthropic: error; reasons unknown",
+        "- copilot: unknown; reasons unknown",
+        "- openai: error; reasons credentials",
+      ].join("\n"),
+    );
+    expect(JSON.stringify(diagnostics)).not.toContain("SENTINEL");
+  });
+
   it("drops raw status details, freeform strings, identities, paths, and unknown fields", () => {
     const diagnostics = projectNativeSettingsCopyDiagnostics({
       appVersion: "1.3.0",

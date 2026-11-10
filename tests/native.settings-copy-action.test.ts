@@ -119,6 +119,57 @@ describe("Native Settings diagnostics action", () => {
     expect(output).not.toContain("SENTINEL");
   });
 
+  it("reports provider status from existing cards and never copies raw error text", () => {
+    const quota = {
+      stale: false,
+      providers: {
+        enabledProviders: ["openai", "anthropic", "copilot", "gemini", "SENTINEL_PRIVATE_PROVIDER"],
+        cards: [
+          {
+            providerId: "openai",
+            rows: [{ rowId: "quota-row", label: "quota" }],
+            errors: [{ message: "SENTINEL_RAW_CREDENTIAL_ERROR", failureCategory: "credentials" }],
+          },
+          { providerId: "anthropic", rows: [], errors: [] },
+          {
+            providerId: "copilot",
+            rows: [],
+            errors: [{ message: "SENTINEL_DISCOVERY_ERROR", failureCategory: "discovery" }],
+          },
+          {
+            providerId: "SENTINEL_PRIVATE_PROVIDER",
+            rows: [],
+            errors: [{ message: "SENTINEL_PRIVATE_MESSAGE", failureCategory: "provider_api" }],
+          },
+        ],
+      },
+    } as QuotaSnapshot;
+
+    const output = settingsDiagnosticsFromSnapshots(quota, undefined, false);
+
+    expect(output).toContain("- openai: partial; reasons credentials");
+    expect(output).toContain("- anthropic: no_data; reasons no_data");
+    expect(output).toContain("- copilot: error; reasons discovery");
+    expect(output).toContain("- google-gemini-cli: unknown; reasons unknown");
+    expect(output).not.toContain("SENTINEL_PRIVATE_PROVIDER");
+    expect(output).not.toContain("SENTINEL");
+  });
+
+  it("marks a known provider with no errors and quota rows successful, but absent evidence unknown", () => {
+    const quota = {
+      stale: false,
+      providers: {
+        enabledProviders: ["openai", "anthropic"],
+        cards: [{ providerId: "openai", rows: [{ rowId: "quota-row" }], errors: [] }],
+      },
+    } as QuotaSnapshot;
+
+    const output = settingsDiagnosticsFromSnapshots(quota, undefined, false);
+
+    expect(output).toContain("- openai: success");
+    expect(output).toContain("- anthropic: unknown; reasons unknown");
+  });
+
   it("copies once and reports success or a fixed failure without exposing errors", async () => {
     const notify = vi.fn();
     const write = vi.fn().mockResolvedValue(undefined);

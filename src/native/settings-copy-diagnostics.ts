@@ -1,3 +1,10 @@
+import {
+  PROVIDER_FAILURE_CATEGORIES,
+  type ProviderFailureCategory,
+} from "../contracts/provider-failure.js";
+import { getQuotaProviderShape } from "../lib/provider-metadata.js";
+import type { CanonicalQuotaProviderId } from "../lib/provider-registration.js";
+
 /** Closed statuses shared by provider availability and quota probe summaries. */
 export type NativeSettingsCopyProbeStatus =
   | "success"
@@ -6,12 +13,21 @@ export type NativeSettingsCopyProbeStatus =
   | "no_data"
   | "unavailable";
 
+export type NativeSettingsCopyProviderStatus = NativeSettingsCopyProbeStatus | "unknown";
+export type NativeSettingsCopyProviderReason = ProviderFailureCategory | "no_data" | "unknown";
 export type NativeSettingsCopyTemporalPhase = "peak" | "offpeak" | "mixed" | "unknown";
+
+interface NativeSettingsCopyProviderSummary {
+  readonly providerId: CanonicalQuotaProviderId;
+  readonly status: NativeSettingsCopyProviderStatus;
+  readonly reasons?: readonly NativeSettingsCopyProviderReason[];
+}
 
 /**
  * Explicit backend-to-diagnostics seam. Callers supply summaries or temporal
- * phase facts only; identifiers, labels, messages, paths, and raw status details
- * are intentionally not part of this input contract.
+ * phase facts and closed provider status summaries only; labels, messages,
+ * paths, and raw status details are intentionally not part of this input
+ * contract. Provider identifiers are revalidated against the canonical catalog.
  */
 export interface NativeSettingsCopyDiagnosticsInput {
   readonly appVersion?: string | null;
@@ -21,6 +37,11 @@ export interface NativeSettingsCopyDiagnosticsInput {
     readonly availableCount?: number;
     readonly status?: NativeSettingsCopyProbeStatus;
   };
+  readonly providerStatuses?: readonly {
+    readonly providerId: string;
+    readonly status: NativeSettingsCopyProviderStatus;
+    readonly reasons?: readonly NativeSettingsCopyProviderReason[];
+  }[];
   readonly quota?: {
     readonly source?: "remote-api" | "local-estimate" | "mixed";
     readonly status?: NativeSettingsCopyProbeStatus;
@@ -55,6 +76,7 @@ export interface NativeSettingsCopyDiagnostics {
     readonly availableCount?: number;
     readonly availability?: "none" | "partial" | "all";
     readonly status?: NativeSettingsCopyProbeStatus;
+    readonly statuses?: readonly NativeSettingsCopyProviderSummary[];
   };
   readonly quota?: {
     readonly source?: "remote-api" | "local-estimate" | "mixed";
@@ -100,6 +122,17 @@ const TEMPORAL_PHASES: readonly NativeSettingsCopyTemporalPhase[] = [
   "unknown",
 ];
 
+const PROVIDER_STATUSES: readonly NativeSettingsCopyProviderStatus[] = [
+  ...PROBE_STATUSES,
+  "unknown",
+];
+const PROVIDER_REASONS: readonly NativeSettingsCopyProviderReason[] = [
+  ...PROVIDER_FAILURE_CATEGORIES,
+  "no_data",
+  "unknown",
+];
+const MAX_PROVIDER_STATUS_ENTRIES = 256;
+
 type UnknownRecord = Record<string, unknown>;
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
@@ -123,20 +156,79 @@ function validVersion(value: unknown): value is string {
   return typeof value === "string" && value.length <= 32 && VERSION_RE.test(value);
 }
 
+function canonicalProviderId(value: unknown): CanonicalQuotaProviderId | undefined {
+  if (typeof value !== "string" || value.length > 128) return undefined;
+  return getQuotaProviderShape(value)?.id;
+}
+
+function projectProviderStatuses(value: unknown): NativeSettingsCopyProviderSummary[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PROVIDER_STATUS_ENTRIES) {
+    return undefined;
+  }
+
+  const byProvider = new Map<CanonicalQuotaProviderId, NativeSettingsCopyProviderSummary>();
+  for (const rawStatus of value) {
+    const input = asRecord(rawStatus);
+    if (!input) continue;
+    const providerId = canonicalProviderId(input.providerId);
+    if (!providerId) continue;
+    if (byProvider.has(providerId)) {
+      // Duplicate entries are ambiguous and not reliable enough to report as a
+      // successful state or as a provider-supplied reason.
+      byProvider.set(providerId, { providerId, status: "unknown", reasons: ["unknown"] });
+      continue;
+    }
+
+    const rawStatusValue = input.status;
+    const status = isOneOf(rawStatusValue, PROVIDER_STATUSES) ? rawStatusValue : "unknown";
+    let reasons: NativeSettingsCopyProviderReason[] | undefined;
+    if (status === "unknown") {
+      reasons = ["unknown"];
+    } else if (status === "no_data") {
+      reasons = ["no_data"];
+    } else if (status === "error" || status === "partial") {
+      const rawReasons = input.reasons;
+      const safeReasons = new Set<NativeSettingsCopyProviderReason>();
+      if (Array.isArray(rawReasons) && rawReasons.length <= PROVIDER_REASONS.length) {
+        for (const rawReason of rawReasons) {
+          if (isOneOf(rawReason, PROVIDER_FAILURE_CATEGORIES)) safeReasons.add(rawReason);
+          else safeReasons.add("unknown");
+        }
+      }
+      if (safeReasons.size === 0) safeReasons.add("unknown");
+      reasons = [...safeReasons].sort();
+    }
+
+    byProvider.set(providerId, {
+      providerId,
+      status,
+      ...(reasons === undefined ? {} : { reasons }),
+    });
+  }
+
+  if (byProvider.size === 0) return undefined;
+  return [...byProvider.values()].sort((left, right) =>
+    left.providerId < right.providerId ? -1 : left.providerId > right.providerId ? 1 : 0,
+  );
+}
+
 function projectProviders(value: unknown): NativeSettingsCopyDiagnostics["providers"] {
   const input = asRecord(value);
   if (!input) return undefined;
   const rawEnabledCount = input.enabledCount;
   const rawAvailableCount = input.availableCount;
   const rawStatus = input.status;
+  const rawProviderStatuses = input.statuses;
   const enabledCount = validCount(rawEnabledCount) ? rawEnabledCount : undefined;
   const availableCount = validCount(rawAvailableCount) ? rawAvailableCount : undefined;
   const status = isOneOf(rawStatus, PROBE_STATUSES) ? rawStatus : undefined;
+  const statuses = projectProviderStatuses(rawProviderStatuses);
   const projected: {
     enabledCount?: number;
     availableCount?: number;
     availability?: "none" | "partial" | "all";
     status?: NativeSettingsCopyProbeStatus;
+    statuses?: readonly NativeSettingsCopyProviderSummary[];
   } = {};
 
   if (
@@ -150,6 +242,7 @@ function projectProviders(value: unknown): NativeSettingsCopyDiagnostics["provid
       availableCount === 0 ? "none" : availableCount === enabledCount ? "all" : "partial";
   }
   if (status !== undefined) projected.status = status;
+  if (statuses !== undefined) projected.statuses = statuses;
   return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
@@ -292,13 +385,22 @@ export function projectNativeSettingsCopyDiagnostics(
     const appVersion = input.appVersion;
     const hostVersion = input.hostVersion;
     const providerAvailability = input.providerAvailability;
+    const providerStatusesValue = input.providerStatuses;
     const quotaValue = input.quota;
     const configurationValue = input.configuration;
     const pricingValue = input.pricing;
     const temporalValue = input.temporal;
     if (validVersion(appVersion)) projected.appVersion = appVersion;
     if (validVersion(hostVersion)) projected.hostVersion = hostVersion;
-    const providers = projectProviders(providerAvailability);
+    const providerAvailabilitySummary = projectProviders(providerAvailability);
+    const providerStatuses = projectProviderStatuses(providerStatusesValue);
+    const providers =
+      providerAvailabilitySummary === undefined && providerStatuses === undefined
+        ? undefined
+        : {
+            ...providerAvailabilitySummary,
+            ...(providerStatuses === undefined ? {} : { statuses: providerStatuses }),
+          };
     const quota = projectQuota(quotaValue);
     const configuration = projectConfiguration(configurationValue);
     const pricing = projectPricing(pricingValue);
@@ -424,6 +526,17 @@ export function formatNativeSettingsCopyDiagnostics(
       );
     } else if (providers.status !== undefined) {
       lines.push(`Provider status: ${providers.status}`);
+    }
+    if (providers.statuses && providers.statuses.length > 0) {
+      lines.push("Provider diagnostics:");
+      for (const provider of providers.statuses) {
+        const reasons = provider.reasons;
+        lines.push(
+          `- ${provider.providerId}: ${provider.status}${
+            reasons && reasons.length > 0 ? `; reasons ${reasons.join(", ")}` : ""
+          }`,
+        );
+      }
     }
   }
 
