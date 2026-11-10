@@ -2,9 +2,10 @@
  * Quota transport source: independent analytics/quota lifecycles, provider
  * selection, last-good preservation, cycle coalescing and stale fallback.
  *
- * All seams are synthetic: no provider query, database, credentials or worker.
+ * Most seams are synthetic; the delayed OpenAI regression uses its real parser
+ * and provider mapping with fake credentials and HTTP responses.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { CostedTokens, HomeSnapshot } from "../src/contracts/dashboard.js";
 import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts/ranges.js";
@@ -22,8 +23,10 @@ import {
   type DashboardReadSourceOptions,
 } from "../src/gui/sources.js";
 import type { QuotaPercentEntry, QuotaProvider, QuotaProviderResult } from "../src/lib/entries.js";
+import { bindCredentialSource } from "../src/lib/opencode-auth.js";
 import type { QuotaStatusLiveProbe } from "../src/lib/quota-render-data.js";
 import { DEFAULT_CONFIG, type QuotaToastConfig } from "../src/lib/types.js";
+import { openaiProvider } from "../src/providers/openai.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
 
@@ -149,6 +152,104 @@ function harness(
 }
 
 describe("quota read source", () => {
+  it("projects a delayed OpenAI response after collection without changing cycle timestamps", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let startBodyRead!: () => void;
+    const bodyReadStarted = new Promise<void>((resolve) => {
+      startBodyRead = resolve;
+    });
+    let resolveUsage!: (usage: unknown) => void;
+    const usageResponse = new Promise<unknown>((resolve) => {
+      resolveUsage = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).endsWith("/rate-limit-reset-credits")) {
+          return { ok: true, json: async () => ({ available_count: 1 }) };
+        }
+        return {
+          ok: true,
+          json: () => {
+            startBodyRead();
+            return usageResponse;
+          },
+        };
+      }) as unknown as typeof fetch,
+    );
+    const accountId = "openai-runway-test";
+    const resetsRow = openAiOptionalVisibilityRows(buildCardId("openai", accountId))[0]!;
+    const config = baseConfig({
+      enabledProviders: ["openai"],
+      dashboard: {
+        ...DEFAULT_CONFIG.dashboard,
+        hiddenRows: [resetsRow.rowId],
+      },
+    });
+    const unbindCredentials = bindCredentialSource({
+      kind: "opencode-integration-api",
+      async readRows({ integrationIds }) {
+        if (!integrationIds.includes("openai")) return [];
+        return [
+          {
+            id: accountId,
+            integrationId: "openai",
+            label: "Primary",
+            active: true,
+            value: {
+              type: "oauth",
+              access: "a.b.c",
+              expires: NOW + 24 * 60 * 60_000,
+            },
+          },
+        ];
+      },
+    });
+
+    try {
+      const source = createDashboardReadSource({
+        client: {
+          config: {
+            providers: async () => ({ data: { providers: [{ id: "openai" }] } }),
+            get: async () => ({ data: {} }),
+          },
+        },
+        workspaceRoot: "C:/synthetic-workspace",
+        configDir: "C:/synthetic-config",
+        timeZone: "UTC",
+        now: () => Date.now(),
+        loadConfig: async () => config,
+        providers: [openaiProvider],
+      });
+      const snapshotPromise = source.quota();
+      await bodyReadStarted;
+      vi.setSystemTime(NOW + 2 * 60_000);
+      resolveUsage({
+        plan_type: "plus",
+        rate_limit: {
+          limit_reached: false,
+          primary_window: {
+            limit_window_seconds: 18_000,
+            used_percent: 30,
+            reset_at: Math.floor((NOW + 4 * 60 * 60_000) / 1000),
+          },
+        },
+      });
+
+      const snapshot = await snapshotPromise;
+      expect(snapshot.generatedAtMs).toBe(NOW);
+      expect(snapshot.providers.polledAtMs).toBe(NOW);
+      const card = snapshot.providers.cards.find(({ providerId }) => providerId === "openai");
+      const row = card?.rows.find(({ kind }) => kind === "percent");
+      expect(row?.runway?.kind).toBe("before_reset");
+    } finally {
+      unbindCredentials();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
   it("queries every enabled provider even when a provider-level card is hidden and keeps its cards for the browser", async () => {
     const hiddenAccount = buildCardId("anthropic", "acct-1");
     const config = baseConfig({

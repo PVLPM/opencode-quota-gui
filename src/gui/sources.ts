@@ -494,12 +494,16 @@ export function createDashboardReadSource(
       const selected = selectQuotaProviders(config, allProviders);
       const probes = await collect(config, nowMs, selected);
       const merged = mergeProviderResults(probes, selected);
+      // OpenAI's observation timestamp is captured after its usage body is
+      // consumed. Project against collection completion time, but keep snapshot
+      // generation and poll timestamps anchored to the cycle start below.
+      const projectionNowMs = now();
       // No hidden-card id filters this list: hidden cards remain collected and
       // are hidden by the browser. Ordering is still applied to assembled cards.
       const cards = buildProviderCards({
         probes: merged.probes,
         preferences: cardPreferences(config),
-        nowMs,
+        nowMs: projectionNowMs,
         providerLabel: options.providerLabel,
       });
       // A substituted provider is cached data: mark the snapshot stale and do
