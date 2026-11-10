@@ -235,13 +235,46 @@ describe("v4 release gates", () => {
     expect(rejected.stderr).toContain(lookAlike);
   });
 
+  it("accepts a forced-added root AGENTS.md in temporary commit history", async () => {
+    const historyRepo = path.join(tempDir, "root-agents-history");
+    const base = await createHistoryRepo(historyRepo);
+    await writeFiles(historyRepo, ["AGENTS.md"]);
+    git(historyRepo, ["add", "-f", "--", "AGENTS.md"]);
+    git(historyRepo, ["commit", "-qm", "add public root agent instructions"]);
+
+    const result = run(historyScript, [], {
+      V4_HISTORY_BASE: base,
+      V4_HISTORY_REPO: historyRepo,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("V4 history privacy verified");
+  });
+
+  it("accepts a forced-added root AGENTS.md in the current index", async () => {
+    const historyRepo = path.join(tempDir, "root-agents-index");
+    const base = await createHistoryRepo(historyRepo);
+    await writeFiles(historyRepo, ["AGENTS.md"]);
+    git(historyRepo, ["add", "-f", "--", "AGENTS.md"]);
+
+    const result = run(historyScript, [], {
+      V4_HISTORY_BASE: base,
+      V4_HISTORY_REPO: historyRepo,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("V4 history privacy verified");
+  });
+
   it("rejects every forced-added private path from temporary commit history", async () => {
     const historyRepo = path.join(tempDir, "history");
     const base = await createHistoryRepo(historyRepo);
     const forbidden = [
-      "AGENTS.md",
+      "nested/AGENTS.md",
       "src/AGENTS.md",
       "src/lib/AGENTS.md",
+      ".agents/AGENTS.md",
+      ".codex/AGENTS.md",
       ".env.local",
       ".npmrc",
       "nested/.env",
@@ -285,10 +318,10 @@ describe("v4 release gates", () => {
   it("rejects a forced-added private path in the current index", async () => {
     const historyRepo = path.join(tempDir, "index");
     const base = await createHistoryRepo(historyRepo);
-    const forbidden = "references/local/private-report.md";
+    const forbidden = ["references/local/private-report.md", "nested/AGENTS.md"];
 
-    await writeFiles(historyRepo, [forbidden]);
-    git(historyRepo, ["add", "-f", "--", forbidden]);
+    await writeFiles(historyRepo, forbidden);
+    git(historyRepo, ["add", "-f", "--", ...forbidden]);
 
     const result = run(historyScript, [], {
       V4_HISTORY_BASE: base,
@@ -296,7 +329,7 @@ describe("v4 release gates", () => {
     });
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(`index ${forbidden}`);
+    for (const file of forbidden) expect(result.stderr).toContain(`index ${file}`);
   });
 
   it("accepts only required dist output and the three allowed root files", async () => {
@@ -310,6 +343,23 @@ describe("v4 release gates", () => {
     const result = run(packageScript, [manifestPath]);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("npm contents verified");
+  });
+
+  it("keeps root AGENTS.md excluded from npm package contents", async () => {
+    const manifestPath = path.join(tempDir, "with-root-agents.json");
+    await writeFile(
+      manifestPath,
+      JSON.stringify({
+        files: [...requiredPackageFiles(), "AGENTS.md"].map((entry) => ({ path: entry })),
+      }),
+      "utf8",
+    );
+
+    const result = run(packageScript, [manifestPath]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("npm package contains files outside the strict allowlist");
+    expect(result.stderr).toContain("AGENTS.md");
   });
 
   it("rejects a package that omits the runtime temporal pricing snapshot", async () => {
