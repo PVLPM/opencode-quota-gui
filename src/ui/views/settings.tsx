@@ -86,6 +86,8 @@ export function SettingsView(props: {
    * shell keeps its existing field set.
    */
   nativeQuotaAlerts?: boolean;
+  /** Optional host action shown at the bottom of About. */
+  aboutAction?: JSX.Element;
 }): JSX.Element {
   const [draft, setDraft] = createSignal<SettingsDraft>(initialDraft(props.snapshot.revision));
   const [busy, setBusy] = createSignal(false);
@@ -766,6 +768,7 @@ export function SettingsView(props: {
     type QuotaResetWindow = "fiveHour" | "hourly" | "daily" | "weekly" | "monthly" | "yearly";
     type NativeQuotaNotificationPolicy = {
       enabled: boolean;
+      modelChangeToastEnabled: boolean;
       low: { enabled: boolean; thresholdRemainingPercent: number };
       exhausted: { enabled: boolean };
       reset: { enabled: boolean; windows: QuotaResetWindow[] };
@@ -828,6 +831,13 @@ export function SettingsView(props: {
           () => policy().enabled,
           (enabled) => update({ ...policy(), enabled }),
           busy,
+        )}
+        {row(
+          "Model-change toast",
+          () => policy().modelChangeToastEnabled,
+          (enabled) => update({ ...policy(), modelChangeToastEnabled: enabled }),
+          busy,
+          "Show a toast in focused windows when the selected model differs from the last observed cache route. This does not affect background notifications or the quota-alert master switch.",
         )}
         {row(
           "Low quota",
@@ -1184,7 +1194,7 @@ export function SettingsView(props: {
           </Show>
         </section>
 
-        <BuildAbout />
+        <BuildAbout>{props.aboutAction}</BuildAbout>
       </div>
       <div class="qg-savebar">
         <span class="qg-savebar__status" aria-live="polite">

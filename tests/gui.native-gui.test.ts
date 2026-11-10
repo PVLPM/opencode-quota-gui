@@ -107,7 +107,9 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toMatch(/region:\s*"side"/u);
     expect(guiSource).toMatch(/const TAB_ID = "dashboard"/u);
     expect(guiSource).toMatch(/mobile:\s*\{[^}]*kind:\s*"menu"/su);
-    expect(guiSource).toMatch(/render:\s*\(\)\s*=>\s*<NativeDashboardPanel\s+runtime=\{runtime\}/u);
+    expect(guiSource).toMatch(
+      /render:\s*\(\)\s*=>\s*\(?\s*<NativeDashboardPanel\s+runtime=\{runtime\}/u,
+    );
     expect(guiSource).toMatch(/visible=\{panel\.visible\}/u);
     expect(panelSource).toContain("DashboardPanel");
   });
@@ -131,6 +133,13 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toContain(".connected");
     expect(guiSource).toMatch(/hostConnected=\{hostConnected\}/u);
     expect(panelSource).toContain("hostConnected");
+  });
+
+  it("feeds the model-change toast from live settings without gating mismatch detection", () => {
+    expect(guiSource).toContain("createModelChangeToastSetting(runtime.client)");
+    expect(guiSource).toContain("modelChangeToastEnabled: modelChangeToastSetting.enabled");
+    expect(guiSource).toContain("onCleanup(modelChangeToastSetting.stop)");
+    expect(guiSource).toContain("source: runtime.cacheObserver");
   });
 
   it("offers an accessible retry while data is stale", () => {
@@ -235,7 +244,9 @@ describe("Desktop GUI entry", () => {
     // routed session changes, and a Settings remount re-seeds from the same
     // value instead of a session-keyed map.
     expect(guiSource).toContain("initialLocation={props.runtime.location()}");
-    expect(guiSource).toContain("onLocationChange={(next) => props.runtime.setLocation(next)}");
+    expect(guiSource).toContain("onLocationChange={props.setLocation}");
+    expect(guiSource).toContain("runtime.setLocation(next)");
+    expect(panelSource).toContain("props.externalLocation?.()");
     expect(guiSource).not.toContain("sessionKey");
     expect(panelSource).not.toContain("sessionKey");
     expect(runtimeSource).not.toContain("Map<string, Location>");

@@ -12,6 +12,7 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import type { RangeKey } from "../contracts/ranges";
+import { BuildAbout } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { QueryState } from "./components/states";
 import type { Toaster } from "./components/toast";
@@ -592,6 +593,8 @@ export interface SettingsRouteProps {
   webDashboardToggle?: boolean;
   /** Native hosts expose the quota alert threshold and cooldown controls. */
   nativeQuotaAlerts?: boolean;
+  /** Optional host-provided About action. */
+  aboutAction?: JSX.Element;
 }
 
 export function SettingsRoute(props: SettingsRouteProps): JSX.Element {
@@ -617,12 +620,17 @@ export function SettingsRoute(props: SettingsRouteProps): JSX.Element {
       <Show
         when={props.query.data()}
         fallback={
-          <QueryState
-            state={state()}
-            label="Loading settings"
-            render={() => null}
-            onRetry={props.onRetry}
-          />
+          <>
+            <QueryState
+              state={state()}
+              label="Loading settings"
+              render={() => null}
+              onRetry={props.onRetry}
+            />
+            <Show when={props.aboutAction}>
+              <BuildAbout>{props.aboutAction}</BuildAbout>
+            </Show>
+          </>
         }
       >
         {(snapshot) => (
@@ -634,6 +642,7 @@ export function SettingsRoute(props: SettingsRouteProps): JSX.Element {
             temporal={props.temporal}
             webDashboardToggle={props.webDashboardToggle}
             nativeQuotaAlerts={props.nativeQuotaAlerts}
+            aboutAction={props.aboutAction}
             onReload={async () => {
               await props.query.run();
             }}

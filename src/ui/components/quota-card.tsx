@@ -353,6 +353,7 @@ export function QuotaCardView(props: {
           onClick={() => void copySummary()}
         >
           <svg
+            data-copy-icon={copyStatus() === "Quota summary copied." ? "check" : "copy"}
             viewBox="0 0 24 24"
             width="16"
             height="16"
@@ -363,8 +364,17 @@ export function QuotaCardView(props: {
             stroke-linejoin="round"
             aria-hidden="true"
           >
-            <rect x="8" y="8" width="11" height="12" rx="2" />
-            <path d="M16 8V6a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1" />
+            <Show
+              when={copyStatus() === "Quota summary copied."}
+              fallback={
+                <>
+                  <rect x="8" y="8" width="11" height="12" rx="2" />
+                  <path d="M16 8V6a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1" />
+                </>
+              }
+            >
+              <path d="m5 12 4 4L19 6" />
+            </Show>
           </svg>
         </button>
         <output class="sr-only">{copyStatus()}</output>

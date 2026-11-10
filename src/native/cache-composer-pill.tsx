@@ -1,4 +1,4 @@
-import type { ComposerPill, ComposerPillProps, Sessions } from "@opencode/plugin/gui";
+import type { ComposerPill, ComposerPillProps, Sessions, Ui } from "@opencode/plugin/gui";
 import {
   createEffect,
   createMemo,
@@ -18,8 +18,6 @@ import type { NativeDashboardRuntime } from "./runtime.js";
 
 /** One popup-wide detail overlay: at most one row's bubble is ever active. */
 const DETAIL_CLOSE_DELAY_MS = 140;
-/** Longest composed `[Agent] Provider / Model#Effort Name` label, in codepoints. */
-const MAX_LABEL_CODEPOINTS = 80;
 const MISMATCH_DETAIL = "Selected model differs from the route of the last cache observation.";
 const ATTENTION_FLASH_MS = 180;
 
@@ -29,41 +27,28 @@ function safeTitle(title: string | undefined, fallback: string): string {
     .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
-  const chars = Array.from(clean || fallback);
-  return chars.length > 80 ? `${chars.slice(0, 79).join("")}…` : chars.join("");
+  return clean || fallback;
 }
 
-/** One metadata segment (agent, provider, model, effort): sanitized and bounded. */
-function safeSegment(value: string | undefined, maxCodepoints: number): string | undefined {
+/** Sanitize metadata without shortening the accessible value. */
+function safeSegment(value: string | undefined): string | undefined {
   const clean = (value ?? "")
     .normalize("NFC")
     .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
   if (!clean) return undefined;
-  const chars = Array.from(clean);
-  return chars.length > maxCodepoints ? `${chars.slice(0, maxCodepoints - 1).join("")}…` : clean;
+  return clean;
 }
 
-/**
- * `[Agent] Provider / Model#Effort Name` — each part only when authoritative
- * metadata exists, every segment sanitized, the composition bounded.
- */
-function sessionLabel(meta: NativeCacheObserverSessionMeta | undefined, fallback: string): string {
-  const parts: string[] = [];
-  const agent = safeSegment(meta?.agent, 24);
-  if (agent !== undefined) parts.push(`[${agent}]`);
-  const provider = safeSegment(meta?.model?.providerID, 32);
-  const modelId = safeSegment(meta?.model?.id, 48);
+function sessionModel(meta: NativeCacheObserverSessionMeta | undefined): string | undefined {
+  const provider = safeSegment(meta?.model?.providerID);
+  const modelId = safeSegment(meta?.model?.id);
   if (provider !== undefined && modelId !== undefined) {
-    const effort = safeSegment(meta?.model?.variant, 24);
-    parts.push(`${provider} / ${modelId}${effort === undefined ? "" : `#${effort}`}`);
+    const effort = safeSegment(meta?.model?.variant);
+    return `${provider} / ${modelId}${effort === undefined ? "" : `#${effort}`}`;
   }
-  parts.push(safeTitle(meta?.title, fallback));
-  const chars = Array.from(parts.join(" "));
-  return chars.length > MAX_LABEL_CODEPOINTS
-    ? `${chars.slice(0, MAX_LABEL_CODEPOINTS - 1).join("")}…`
-    : chars.join("");
+  return undefined;
 }
 
 function formatTime(ms: number | undefined): string | undefined {
@@ -118,9 +103,9 @@ function presentation(observed: CacheObserverClassification | undefined) {
     if (dispatched !== undefined) {
       estimateLines.push(`Last qualifying call started · ${dispatched}`);
     }
-    const basis = safeSegment(estimate.source, 80);
+    const basis = safeSegment(estimate.source);
     if (basis !== undefined) estimateLines.push(`Retention basis · ${basis}`);
-    const assumption = safeSegment(estimate.assumption, 200);
+    const assumption = safeSegment(estimate.assumption);
     if (assumption !== undefined) estimateLines.push(assumption);
   }
   return { tone, percent, detail, source, estimateLines } as const;
@@ -183,6 +168,8 @@ function compareChildActivity(
 export function createCacheComposerPill(
   sessions: Sessions,
   runtime: NativeDashboardRuntime,
+  ui?: Pick<Ui, "Icon">,
+  openSession?: (session: ComposerPillProps["session"], sessionId: string) => void,
 ): ComposerPill {
   const [transport, setTransport] = createSignal(runtime.cacheObserver.transport());
   const [revision, setRevision] = createSignal(0);
@@ -441,7 +428,7 @@ export function createCacheComposerPill(
       const hasError = selected && history()?.key === session.key && history()?.status === "error";
       return {
         label: loading ? "Cache · Loading…" : `Cache${result.percent ? ` ${result.percent}` : ""}`,
-        icon: hasError ? "warning" : "outline-cookie",
+        icon: hasError ? "warning" : "archive",
         ...(mismatched
           ? { tone: flashKey() === session.key ? ("warning" as const) : ("danger" as const) }
           : result.tone
@@ -458,9 +445,26 @@ export function createCacheComposerPill(
       // blur, scroll or a scheduled hover-out closes it. Moving from the dot
       // into the bubble keeps it open.
       let menuElement: HTMLDivElement | undefined;
+      let childrenElement: HTMLDivElement | undefined;
+      let initialScrollDone = false;
+      let menuDisposed = false;
+      onCleanup(() => {
+        menuDisposed = true;
+      });
+      createEffect(() => {
+        if (initialScrollDone || children()?.status !== "ready") return;
+        initialScrollDone = true;
+        queueMicrotask(() => {
+          if (!menuDisposed && childrenElement)
+            childrenElement.scrollTop = childrenElement.scrollHeight;
+        });
+      });
       const [detailId, setDetailId] = createSignal<string>();
       const [anchor, setAnchor] = createSignal<{ top: number; left: number }>();
       const [pinned, setPinned] = createSignal(false);
+      const [infoPinned, setInfoPinned] = createSignal(false);
+      const infoOpen = () => infoPinned();
+      const infoId = createUniqueId();
       let closeTimer: ReturnType<typeof setTimeout> | undefined;
       const tooltipId = createUniqueId();
       const clearCloseTimer = () => {
@@ -523,6 +527,15 @@ export function createCacheComposerPill(
         onCleanup(() => document.removeEventListener("keydown", dismiss));
       });
       onCleanup(closeDetail);
+      createEffect(() => {
+        if (!infoOpen()) return;
+        const dismiss = (event: KeyboardEvent) => {
+          if (event.key !== "Escape") return;
+          setInfoPinned(false);
+        };
+        document.addEventListener("keydown", dismiss);
+        onCleanup(() => document.removeEventListener("keydown", dismiss));
+      });
 
       // Identity metadata for any row, reactive through the revision signal:
       // the runtime notifies the session's listeners on every confirmed
@@ -569,7 +582,17 @@ export function createCacheComposerPill(
         if (result.detail === undefined && result.source === undefined) closeDetail();
       });
 
-      const row = (id: () => string, label: () => string, child: boolean, busy: () => boolean) => {
+      const row = (
+        id: () => string,
+        fallback: () => string,
+        child: boolean,
+        busy: () => boolean,
+      ) => {
+        const descriptionId = createUniqueId();
+        const rowMeta = () => meta(id());
+        const label = () => safeTitle(rowMeta()?.title, fallback());
+        const agent = () => safeSegment(rowMeta()?.agent);
+        const model = () => sessionModel(rowMeta());
         const result = () => {
           const observed = view(id());
           return !child && mainMismatch()
@@ -583,7 +606,7 @@ export function createCacheComposerPill(
             <div class="qg-cache-row-heading">
               <Show when={child}>
                 <span class="qg-cache-busy" data-busy={busy() ? "true" : "false"}>
-                  <span class="qg-cache-visually-hidden">{busy() ? "Running" : ""}</span>
+                  <Show when={busy()}>Running</Show>
                 </span>
               </Show>
               <Show
@@ -609,8 +632,54 @@ export function createCacheComposerPill(
                   onClick={() => pinDetail(id())}
                 />
               </Show>
-              <span class="qg-cache-title">{label()}</span>
-              <span>{summary(id())}</span>
+              <button
+                type="button"
+                class="qg-cache-identity"
+                disabled={!openSession}
+                aria-label={`Open ${label()} in dashboard`}
+                aria-describedby={descriptionId}
+                onClick={() => {
+                  if (!openSession) return;
+                  openSession(input.session, id());
+                  input.close();
+                }}
+              >
+                <span id={descriptionId} class="qg-cache-visually-hidden">
+                  {agent() ? `Agent: ${agent()}. ` : ""}
+                  {model() ? `Model: ${model()}. ` : ""}
+                  {child && busy() ? "Running. " : ""}
+                  {result().detail ? `${result().detail}. ` : "Cache observation unknown. "}
+                  {summary(id()) ? `${summary(id())} hit. ` : ""}
+                  {result().estimateLines[0] ?? ""}
+                </span>
+                <span class="qg-cache-identity-text">
+                  <span class="qg-cache-primary">
+                    <Show when={agent()}>
+                      {(name) => (
+                        <span class="qg-cache-agent" title={name()}>
+                          {name()}
+                        </span>
+                      )}
+                    </Show>
+                    <span class="qg-cache-title" title={label()}>
+                      {label()}
+                    </span>
+                  </span>
+                  <Show when={model()}>
+                    {(name) => (
+                      <span class="qg-cache-model" title={name()}>
+                        {name()}
+                      </span>
+                    )}
+                  </Show>
+                </span>
+                <span class="qg-cache-metrics">
+                  <Show when={summary(id())}>{(percent) => <span>{percent()} hit</span>}</Show>
+                  <Show when={result().estimateLines[0]}>
+                    {(expiry) => <span>{expiry()}</span>}
+                  </Show>
+                </span>
+              </button>
             </div>
           </div>
         );
@@ -618,7 +687,41 @@ export function createCacheComposerPill(
 
       return (
         <div ref={menuElement} class="qg-cache-menu">
-          <div class="qg-cache-children" onScroll={closeDetail}>
+          <div class="qg-cache-heading">
+            <button
+              type="button"
+              class="qg-cache-info"
+              aria-label="About cache observations"
+              aria-describedby={infoOpen() ? infoId : undefined}
+              aria-expanded={infoOpen()}
+              onBlur={() => {
+                setInfoPinned(false);
+              }}
+              onClick={() => setInfoPinned((value) => !value)}
+            >
+              {ui ? <ui.Icon name="info" size="small" /> : "i"}
+            </button>
+            <Show when={infoOpen()}>
+              <fieldset
+                id={infoId}
+                class="qg-cache-tooltip qg-cache-legend"
+                aria-label="Cache status legend"
+              >
+                <span>
+                  Hit % is the host-reported cache read share of the last completed primary call.
+                </span>
+                <span>
+                  Green: estimated within retention. Yellow: uncertain or in the last 20% of
+                  estimated retention.
+                </span>
+                <span>Red: estimated expiry, invalidation, or model change. Grey: unknown.</span>
+                <span>
+                  Retention and expiry are estimates, not proof of the provider's cache state.
+                </span>
+              </fieldset>
+            </Show>
+          </div>
+          <div ref={childrenElement} class="qg-cache-children" onScroll={closeDetail}>
             <Show
               when={children()?.status === "loading" && (children()?.children.length ?? 0) === 0}
             >
@@ -631,16 +734,7 @@ export function createCacheComposerPill(
               {(child) =>
                 row(
                   () => child.sessionId,
-                  () =>
-                    // The snapshot's label is the runtime's sanitized title;
-                    // the metadata store adds agent/model and any rename.
-                    sessionLabel(
-                      {
-                        ...meta(child.sessionId),
-                        title: meta(child.sessionId)?.title ?? child.label,
-                      },
-                      "Untitled child session",
-                    ),
+                  () => safeTitle(child.label, "Untitled child session"),
                   true,
                   () => childBusy(child.sessionId),
                 )
@@ -650,7 +744,7 @@ export function createCacheComposerPill(
           <hr />
           {row(
             () => input.session.id,
-            () => sessionLabel(meta(input.session.id), "Loading session…"),
+            () => "Loading session…",
             false,
             () => false,
           )}

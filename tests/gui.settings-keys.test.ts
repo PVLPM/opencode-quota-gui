@@ -149,6 +149,7 @@ describe("GUI settings keys", () => {
         enabled: true,
         low: { enabled: true, thresholdRemainingPercent: 10 },
         exhausted: { enabled: true },
+        modelChangeToastEnabled: true,
         reset: {
           enabled: true,
           windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
@@ -194,6 +195,7 @@ describe("GUI settings keys", () => {
       enabled: false,
       low: { enabled: true, thresholdRemainingPercent: 10 },
       exhausted: { enabled: true },
+      modelChangeToastEnabled: true,
       reset: { enabled: true, windows: ["weekly"] },
       providerError: { enabled: true },
       duplicateCooldownMinutes: 30,
@@ -203,6 +205,7 @@ describe("GUI settings keys", () => {
       enabled: true,
       low: { enabled: false, thresholdRemainingPercent: 25 },
       exhausted: { enabled: true },
+      modelChangeToastEnabled: true,
       reset: { enabled: false, windows: ["fiveHour", "weekly"] },
       providerError: { enabled: true },
       duplicateCooldownMinutes: 5,

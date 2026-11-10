@@ -191,6 +191,7 @@ type PricingSnapshotPatch = Partial<QuotaToastConfig["pricingSnapshot"]>;
 type QuotaResetNotificationsPatch = Partial<QuotaToastConfig["resetNotifications"]>;
 type NativeQuotaNotificationPolicyPatch = {
   enabled?: boolean;
+  modelChangeToastEnabled?: boolean;
   low?: Partial<QuotaToastConfig["nativeQuotaNotifications"]["low"]>;
   exhausted?: Partial<QuotaToastConfig["nativeQuotaNotifications"]["exhausted"]>;
   reset?: Partial<QuotaToastConfig["nativeQuotaNotifications"]["reset"]>;
@@ -502,6 +503,7 @@ export function isValidNativeQuotaNotificationPolicy(
 ): value is QuotaToastConfig["nativeQuotaNotifications"] {
   if (!isPlainObject(value)) return false;
   if (typeof value.enabled !== "boolean") return false;
+  if (typeof value.modelChangeToastEnabled !== "boolean") return false;
   if (!isPlainObject(value.low) || typeof value.low.enabled !== "boolean") return false;
   if (!isValidLowQuotaThresholdRemainingPercent(value.low.thresholdRemainingPercent)) return false;
   if (!isPlainObject(value.exhausted) || typeof value.exhausted.enabled !== "boolean") return false;
@@ -528,6 +530,14 @@ function extractNativeQuotaNotificationPolicyPatch(
   if (hasOwnKey(value, "enabled")) {
     if (typeof value.enabled === "boolean") patch.enabled = value.enabled;
     else reportIssue?.("nativeQuotaNotifications.enabled", "expected boolean");
+  }
+
+  if (hasOwnKey(value, "modelChangeToastEnabled")) {
+    if (typeof value.modelChangeToastEnabled === "boolean") {
+      patch.modelChangeToastEnabled = value.modelChangeToastEnabled;
+    } else {
+      reportIssue?.("nativeQuotaNotifications.modelChangeToastEnabled", "expected boolean");
+    }
   }
 
   if (hasOwnKey(value, "low")) {
@@ -1308,6 +1318,9 @@ function applyValidatedQuotaToastPatch(
     const policy = patch.nativeQuotaNotifications;
     if (hasOwnKey(policy, "enabled")) {
       config.nativeQuotaNotifications.enabled = policy.enabled!;
+    }
+    if (hasOwnKey(policy, "modelChangeToastEnabled")) {
+      config.nativeQuotaNotifications.modelChangeToastEnabled = policy.modelChangeToastEnabled!;
     }
     if (policy.low) {
       if (hasOwnKey(policy.low, "enabled")) {

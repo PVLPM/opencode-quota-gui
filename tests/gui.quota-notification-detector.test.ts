@@ -109,6 +109,7 @@ type TestNotificationPolicy = NativeQuotaNotificationPolicy;
 
 interface TestPolicyOverride {
   enabled?: boolean;
+  modelChangeToastEnabled?: boolean;
   low?: Partial<TestNotificationPolicy["low"]>;
   exhausted?: Partial<TestNotificationPolicy["exhausted"]>;
   reset?: Partial<TestNotificationPolicy["reset"]>;
@@ -118,6 +119,7 @@ interface TestPolicyOverride {
 
 const DEFAULT_POLICY: TestNotificationPolicy = {
   enabled: true,
+  modelChangeToastEnabled: true,
   low: { enabled: true, thresholdRemainingPercent: LOW_THRESHOLD },
   exhausted: { enabled: true },
   reset: {

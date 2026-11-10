@@ -61,6 +61,8 @@ export interface DashboardPanelProps {
   client: NativeDashboardClient;
   /** The window's stored location; a Settings remount re-seeds it unchanged. */
   initialLocation: Location;
+  /** External dashboard navigation, such as the cache menu. */
+  externalLocation?: () => Location;
   onLocationChange: (next: Location) => void;
   onScopeChange: (scope: DashboardRpcViewScope) => void;
   /** Live visibility of this panel tab; drives subscriptions and reads. */
@@ -79,6 +81,10 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
     hostConnected: props.hostConnected,
   });
   const [location, setLocationSignal] = createSignal(props.initialLocation);
+  createEffect(() => {
+    const next = props.externalLocation?.();
+    if (next !== undefined) setLocationSignal(next);
+  });
   function setLocation(next: Location): void {
     setLocationSignal(next);
     props.onLocationChange(next);

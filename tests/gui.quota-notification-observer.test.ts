@@ -124,6 +124,7 @@ function effectiveSettings(
   const { policy: policyOverrides, ...settingsOverrides } = overrides;
   const defaultPolicy: NativeQuotaNotificationPolicy = {
     enabled: true,
+    modelChangeToastEnabled: true,
     low: { enabled: true, thresholdRemainingPercent: 10 },
     exhausted: { enabled: true },
     reset: {
@@ -840,6 +841,7 @@ describe("quota notification observer", () => {
     expect(defaults).toEqual({
       policy: {
         enabled: true,
+        modelChangeToastEnabled: true,
         low: { enabled: true, thresholdRemainingPercent: 10 },
         exhausted: { enabled: true },
         reset: {
@@ -876,6 +878,7 @@ describe("quota notification observer", () => {
     expect(configured).toEqual({
       policy: {
         enabled: false,
+        modelChangeToastEnabled: true,
         low: { enabled: false, thresholdRemainingPercent: 20 },
         exhausted: { enabled: true },
         reset: { enabled: true, windows: ["weekly"] },
@@ -941,6 +944,7 @@ describe("quota notification observer", () => {
     );
     expect(legacy.policy).toEqual({
       enabled: true,
+      modelChangeToastEnabled: true,
       low: { enabled: true, thresholdRemainingPercent: 20 },
       exhausted: { enabled: true },
       reset: {
@@ -963,6 +967,7 @@ describe("quota notification observer", () => {
     );
     expect(partial.policy).toEqual({
       enabled: true,
+      modelChangeToastEnabled: true,
       low: { enabled: true, thresholdRemainingPercent: 25 },
       exhausted: { enabled: true },
       reset: { enabled: true, windows: ["weekly"] },

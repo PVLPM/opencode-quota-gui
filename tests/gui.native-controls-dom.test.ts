@@ -1,6 +1,7 @@
-import { createComponent, createSignal } from "solid-js";
+import { createComponent, createEffect, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { expect, it, vi } from "vitest";
+import { NativeSettingsPage } from "../src/native/settings-page";
 import {
   Button,
   NativeUiProvider,
@@ -8,6 +9,70 @@ import {
   SegmentedControlItem,
   Switch,
 } from "../src/native/ui";
+
+vi.mock("../src/native/dashboard-client.js", () => ({
+  createNativeDashboardClient: () => ({ dispose() {} }),
+}));
+vi.mock("../src/native/rpc.js", () => ({ createGuiRpcCaller: () => ({}) }));
+vi.mock("../src/native/settings-page-state.js", () => ({
+  createSettingsPageState: () => ({
+    query: { data: () => undefined, error: () => undefined },
+    quota: () => undefined,
+    quotaStale: () => true,
+    loading: () => false,
+    stale: () => true,
+    connection: () => "live",
+    retryable: () => true,
+    retry() {},
+  }),
+}));
+
+it("keeps diagnostics in About and shows copy, check and failure feedback", async () => {
+  const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const target = document.createElement("div");
+  document.body.append(target);
+  const Icon = (props: { name: string }) => {
+    const element = document.createElement("span");
+    createEffect(() => {
+      element.dataset.icon = props.name;
+    });
+    return element;
+  };
+  const dispose = render(
+    () =>
+      createComponent(NativeSettingsPage, {
+        ctx: {
+          app: { version: "2.2.1" },
+          client: {},
+          servers: { list: () => [] },
+          ui: { Icon },
+        } as never,
+      }),
+    target,
+  );
+  try {
+    const about = target.querySelector('section[aria-labelledby="qg-settings-about"]')!;
+    const button = about.querySelector<HTMLButtonElement>('button[aria-label="Copy diagnostics"]')!;
+    expect(button.querySelector('[data-icon="copy"]')).not.toBeNull();
+    button.focus();
+    expect(document.activeElement).toBe(button);
+    button.click();
+    await vi.waitFor(() => expect(button.querySelector('[data-icon="check"]')).not.toBeNull());
+    expect(document.activeElement).toBe(button);
+    expect(target.textContent).toContain("Diagnostics copied to clipboard.");
+    writeText.mockRejectedValueOnce(new Error("denied"));
+    button.click();
+    await vi.waitFor(() => expect(target.textContent).toContain("Could not copy diagnostics"));
+    expect(button.querySelector('[data-icon="copy"]')).not.toBeNull();
+  } finally {
+    dispose();
+    target.remove();
+    if (original) Object.defineProperty(navigator, "clipboard", original);
+    else Reflect.deleteProperty(navigator, "clipboard");
+  }
+});
 
 it("delegates settings controls to the host with reactive state", () => {
   const changed = vi.fn();

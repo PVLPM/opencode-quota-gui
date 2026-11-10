@@ -4559,6 +4559,52 @@ describe("the settings editor keeps its draft across refetches", () => {
     mounted.dispose();
   });
 
+  it("keeps the model-change toast toggle independent of the quota-alert master", async () => {
+    const base = settingsSnapshot();
+    const original = base.values.nativeQuotaNotifications as Record<string, JsonValue>;
+    const mounted = mountSettings({
+      initial: settingsSnapshot({
+        values: {
+          ...base.values,
+          nativeQuotaNotifications: { ...original, enabled: false },
+        },
+      }),
+      nativeQuotaAlerts: true,
+    });
+    const modelChangeSwitch = () => {
+      const control = findNode(
+        renderGraph.elementsNamed(mounted.root, "div"),
+        (node) =>
+          node.props["data-component"] === "switch" &&
+          renderGraph.textOf(node).includes("Model-change toast"),
+        "switch Model-change toast",
+      );
+      return findNode(
+        renderGraph.elementsNamed(control, "input"),
+        () => true,
+        "switch input Model-change toast",
+      );
+    };
+
+    expect(modelChangeSwitch().props.disabled).not.toBe(true);
+    expect(modelChangeSwitch().props.checked).toBe(true);
+    fire(modelChangeSwitch(), "onChange", {
+      target: { checked: false },
+      stopPropagation: () => {},
+    });
+    await settle();
+    expect(modelChangeSwitch().props.disabled).not.toBe(true);
+    expect(modelChangeSwitch().props.checked).toBe(false);
+
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the model-change toast setting save");
+    expect(mounted.saves[0]?.patch.nativeQuotaNotifications).toMatchObject({
+      enabled: false,
+      modelChangeToastEnabled: false,
+    });
+    mounted.dispose();
+  });
+
   it("preserves raw numeric edits and associates each error with the right input", async () => {
     const mounted = mountSettings({ initial: settingsSnapshot(), nativeQuotaAlerts: true });
     typeInto(inputByLabel(mounted.root, "Low quota threshold"), "");
@@ -4682,6 +4728,7 @@ describe("the settings editor keeps its draft across refetches", () => {
       patch: {
         nativeQuotaNotifications: {
           enabled: true,
+          modelChangeToastEnabled: true,
           low: { enabled: true, thresholdRemainingPercent: 25 },
           exhausted: { enabled: true },
           reset: {

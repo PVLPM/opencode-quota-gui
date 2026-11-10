@@ -107,6 +107,7 @@ describe("canonical dashboard config layer", () => {
       enabled: false,
       low: { enabled: true, thresholdRemainingPercent: 10 },
       exhausted: { enabled: true },
+      modelChangeToastEnabled: true,
       reset: { enabled: true, windows: [] },
       providerError: { enabled: true },
       duplicateCooldownMinutes: 30,
@@ -130,6 +131,7 @@ describe("canonical dashboard config layer", () => {
       enabled: true,
       low: { enabled: true, thresholdRemainingPercent: 20 },
       exhausted: { enabled: true },
+      modelChangeToastEnabled: true,
       reset: {
         enabled: false,
         windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],

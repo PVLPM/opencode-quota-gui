@@ -281,6 +281,7 @@ export function settingsSnapshot(overrides: Partial<SettingsSnapshot> = {}): Set
     duplicateCooldownMinutes: 30,
     nativeQuotaNotifications: {
       enabled: true,
+      modelChangeToastEnabled: true,
       low: { enabled: true, thresholdRemainingPercent: 10 },
       exhausted: { enabled: true },
       reset: {

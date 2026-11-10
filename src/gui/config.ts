@@ -391,6 +391,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       case "nativeQuotaNotifications":
         return {
           enabled: config.nativeQuotaNotifications.enabled,
+          modelChangeToastEnabled: config.nativeQuotaNotifications.modelChangeToastEnabled,
           low: { ...config.nativeQuotaNotifications.low },
           exhausted: { ...config.nativeQuotaNotifications.exhausted },
           reset: {
@@ -623,6 +624,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         }
         return {
           enabled: value.enabled,
+          modelChangeToastEnabled: value.modelChangeToastEnabled,
           low: { ...value.low },
           exhausted: { ...value.exhausted },
           reset: { ...value.reset, windows: [...new Set(value.reset.windows)] },

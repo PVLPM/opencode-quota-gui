@@ -23,6 +23,136 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it("provides an accessible cache legend and uses a native cache icon", () => {
+  const current = session("legend");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((dispose) => ({
+    dispose,
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(mockCacheObserver()),
+      {
+        Icon: ({ name }) => {
+          const icon = document.createElement("span");
+          icon.dataset.nativeIcon = name;
+          return icon;
+        },
+      },
+    ),
+  }));
+  const close = renderMenu(pill, () => current, container);
+  expect(pill.show({ session: current } as ComposerPillProps)?.icon).toBe("archive");
+  const info = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="About cache observations"]',
+  )!;
+  expect(info.textContent).not.toContain("About cache observations");
+  expect(container.querySelector(".qg-cache-heading")?.textContent).not.toBe("Cache observation");
+  expect(info.querySelector('[data-native-icon="info"]')).not.toBeNull();
+  expect(container.querySelector('[aria-label="Cache status legend"]')).toBeNull();
+  info.focus();
+  expect(container.querySelector('[aria-label="Cache status legend"]')).toBeNull();
+  info.parentElement!.dispatchEvent(new Event("pointerenter"));
+  expect(container.querySelector('[aria-label="Cache status legend"]')).toBeNull();
+  info.click();
+  const legend = container.querySelector('[aria-label="Cache status legend"]');
+  expect(legend?.textContent).toMatch(/hit %/i);
+  expect(legend?.textContent).toMatch(/last 20%/i);
+  expect(legend?.textContent).toMatch(/model change/i);
+  expect(legend?.textContent).toMatch(/uncertain/i);
+  expect(info.getAttribute("aria-describedby")).toBe(legend?.id);
+  info.click();
+  expect(container.querySelector('[aria-label="Cache status legend"]')).toBeNull();
+  info.click();
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  expect(container.querySelector('[aria-label="Cache status legend"]')).toBeNull();
+  close();
+  dispose();
+  container.remove();
+});
+
+it("scrolls to the newest child once on open, not on subsequent updates", async () => {
+  const current = session("scroll");
+  let update!: (snapshot: NativeCacheObserverChildrenSnapshot) => void;
+  const observer = mockCacheObserver({
+    subscribeChildren: (_id: string, listener: typeof update) => {
+      update = listener;
+      return () => {};
+    },
+  });
+  const container = document.createElement("div");
+  const { pill, dispose } = createRoot((dispose) => ({
+    dispose,
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(observer),
+    ),
+  }));
+  const close = renderMenu(pill, () => current, container);
+  const list = container.querySelector<HTMLElement>(".qg-cache-children")!;
+  Object.defineProperty(list, "scrollHeight", { value: 500 });
+  update({ status: "ready", children: [{ sessionId: "child", label: "Child" }] });
+  await flush();
+  expect(list.scrollTop).toBe(500);
+  list.scrollTop = 25;
+  update({ status: "ready", children: [{ sessionId: "child", label: "Renamed" }] });
+  await flush();
+  expect(list.scrollTop).toBe(25);
+  close();
+  dispose();
+});
+
+it("opens the chosen dashboard session without navigating from status or info controls", () => {
+  const current = session("main");
+  const open = vi.fn();
+  const close = vi.fn();
+  const observer = mockCacheObserver({
+    query: () => ({ color: "red", reason: "known-invalidation" }),
+    subscribeChildren: (
+      _id: string,
+      listener: (snapshot: NativeCacheObserverChildrenSnapshot) => void,
+    ) => {
+      listener({ status: "ready", children: [{ sessionId: "child", label: "Child" }] });
+      return () => {};
+    },
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((dispose) => ({
+    dispose,
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(observer),
+      undefined,
+      open,
+    ),
+  }));
+  const disposeMenu = render(
+    () => pill.menu!({ session: current, close } as ComposerPillMenuProps),
+    container,
+  );
+  const child = container.querySelector<HTMLButtonElement>(
+    '.qg-cache-child button[aria-label="Open Child in dashboard"]',
+  )!;
+  const main = container.querySelector<HTMLButtonElement>(
+    '.qg-cache-row:not(.qg-cache-child) button[aria-label="Open Loading session… in dashboard"]',
+  )!;
+  expect(child).not.toBeNull();
+  child.focus();
+  child.click(); // Native buttons synthesize click for Enter and Space.
+  expect(open).toHaveBeenCalledWith(current, "child");
+  expect(close).toHaveBeenCalledTimes(1);
+  main.focus();
+  main.click();
+  expect(open).toHaveBeenLastCalledWith(current, "main");
+  container.querySelector<HTMLButtonElement>(".qg-cache-child .qg-cache-indicator")!.click();
+  container.querySelector<HTMLButtonElement>(".qg-cache-info")!.click();
+  expect(open).toHaveBeenCalledTimes(2);
+  disposeMenu();
+  dispose();
+  container.remove();
+});
+
 function session(id: string) {
   return { id, key: `server\n${id}`, server: { builtin: true, connected: true } };
 }
@@ -160,6 +290,13 @@ it("keeps discovery and history with the selection, renders live, and cancels on
   expect(tooltipNode()?.hidden).toBe(false);
   expect(childButton?.getAttribute("aria-describedby")).toBe(tooltipNode()?.id);
   expect(tooltipNode()?.textContent).toBe("Invalidation observed");
+  const info = container.querySelector<HTMLButtonElement>(
+    '[aria-label="About cache observations"]',
+  )!;
+  info.click();
+  expect(container.querySelector('[aria-label="Cache status legend"]')).not.toBeNull();
+  expect(tooltipNode()?.textContent).toBe("Invalidation observed");
+  info.click();
   // Hovering the other dot moves the one overlay; no second bubble appears.
   mainButton?.dispatchEvent(new Event("pointerenter"));
   expect(container.querySelectorAll('[role="tooltip"]').length).toBe(1);
@@ -354,6 +491,12 @@ it("labels rows with agent, provider, model and effort when authoritative metada
   const runtime = mockRuntime(
     mockCacheObserver({
       metadata: (id: string) => metas[id],
+      query: () => ({
+        color: "green",
+        reason: "estimated-reuse-within-ttl",
+        primaryCacheReadRatio: { value: 0.8, observedAtMs: 1000 },
+        ttlEstimate: { deadlineAtMs: 2000 },
+      }),
       subscribeChildren: (
         _id: string,
         listener: (snapshot: NativeCacheObserverChildrenSnapshot) => void,
@@ -378,15 +521,32 @@ it("labels rows with agent, provider, model and effort when authoritative metada
   await flush();
   renderMenu(pill, () => a, container);
   const titles = [...container.querySelectorAll(".qg-cache-title")].map((node) => node.textContent);
-  expect(titles).toContain("[general] anthropic / claude-test#high Worker name");
+  expect(titles).toContain("Worker name");
   expect(titles).toContain("Plain worker");
-  expect(titles).toContain("[build] zai / glm-test#max Main session");
+  expect(titles).toContain("Main session");
+  const rowButton = container.querySelector<HTMLButtonElement>(
+    '.qg-cache-child button[aria-label="Open Worker name in dashboard"]',
+  )!;
+  const description = (rowButton.getAttribute("aria-describedby") ?? "")
+    .split(" ")
+    .map((id) => document.getElementById(id)?.textContent)
+    .join(" ");
+  expect(description).toContain("general");
+  expect(description).toContain("anthropic / claude-test#high");
+  expect(description).toContain("80% hit");
+  expect(description).toContain("Estimated expiry");
+  expect(
+    [...container.querySelectorAll(".qg-cache-agent")].map((node) => node.textContent),
+  ).toEqual(["general", "build"]);
+  expect(
+    [...container.querySelectorAll(".qg-cache-model")].map((node) => node.textContent),
+  ).toEqual(["anthropic / claude-test#high", "zai / glm-test#max"]);
   expect(container.textContent).not.toContain("\u202e");
   dispose();
   container.remove();
 });
 
-it("shows the confirmed-busy spinner only from host status evidence, left of the dot", async () => {
+it("shows running text only from confirmed host status, without a loading spinner", async () => {
   const main = session("ses_main");
   let eventListener: ((event: unknown) => void) | undefined;
   let reconnect = () => {};
@@ -409,7 +569,9 @@ it("shows the confirmed-busy spinner only from host status evidence, left of the
   const container = document.createElement("div");
   document.body.append(container);
   const { pill, dispose } = createRoot((cleanup) => ({
-    pill: createCacheComposerPill({ current: () => main } as unknown as Sessions, runtime),
+    pill: createCacheComposerPill({ current: () => main } as unknown as Sessions, runtime, {
+      Icon: () => document.createElement("span"),
+    }),
     dispose: cleanup,
   }));
   // Before the first authoritative snapshot nothing is known.
@@ -421,7 +583,8 @@ it("shows the confirmed-busy spinner only from host status evidence, left of the
   // The empty public session.active snapshot confirms idle: no spinner.
   expect(observer.status("ses_child")).toBe("idle");
   expect(busySlot()?.getAttribute("data-busy")).toBe("false");
-  // A relayed host status event confirms busy: the spinner draws.
+  expect(busySlot()?.querySelector("[data-native-loader]")).toBeNull();
+  // A relayed host status event confirms busy.
   eventListener?.({
     type: "session.status",
     created: Date.now(),
@@ -429,6 +592,7 @@ it("shows the confirmed-busy spinner only from host status evidence, left of the
   });
   expect(observer.status("ses_child")).toBe("busy");
   expect(busySlot()?.getAttribute("data-busy")).toBe("true");
+  expect(busySlot()?.querySelector("[data-native-loader]")).toBeNull();
   expect(busySlot()?.textContent).toContain("Running");
   // Another relayed event clears it without any polling.
   eventListener?.({
@@ -494,15 +658,16 @@ it("reorders and relabels a child row when a metadata update event lands", async
       model: { providerID: "anthropic", id: "claude-test", variant: "high" },
     },
   });
-  await vi.waitFor(() =>
-    expect(titles()).toEqual(["Newer worker", "anthropic / claude-test#high Promoted worker"]),
+  await vi.waitFor(() => expect(titles()).toEqual(["Newer worker", "Promoted worker"]));
+  expect(container.querySelector(".qg-cache-child:last-child .qg-cache-model")?.textContent).toBe(
+    "anthropic / claude-test#high",
   );
   dispose();
   observer.dispose();
   container.remove();
 });
 
-it("a mounted spinner clears when event coverage is lost, not only in runtime state", async () => {
+it("running status clears when event coverage is lost, not only in runtime state", async () => {
   const main = session("ses_cover_main");
   let reconnect = () => {};
   let notifyConnection: (state: "live" | "reconnecting") => void = () => {};
@@ -648,7 +813,7 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
   expect(pill.show({ session: a } as ComposerPillProps)).toMatchObject({
     label: "Cache 80%",
     tone: "success",
-    icon: "outline-cookie",
+    icon: "archive",
     title: "Cache observation",
   });
   dispose();
@@ -1038,7 +1203,7 @@ it("renders real history bootstrap results independently without exposing messag
   expect(container.textContent).not.toContain("\u202e");
   expect(
     container.querySelector(".qg-cache-child .qg-cache-title")?.textContent?.length,
-  ).toBeLessThanOrEqual(80);
+  ).toBeGreaterThan(80);
   expect(container.textContent).not.toContain("PRIVATE CONTENT");
   expect(listMessages.mock.calls.map(([input]) => input.sessionID)).toEqual(["main", "child"]);
   close();
@@ -1311,7 +1476,7 @@ it("uses neutral, estimated and danger tones with the catalog cache icon", () =>
     dispose: cleanup,
   }));
   const show = () => pill.show({ session: sessionRef } as ComposerPillProps)!;
-  expect(show()).toMatchObject({ icon: "outline-cookie", title: "Cache observation" });
+  expect(show()).toMatchObject({ icon: "archive", title: "Cache observation" });
   expect(show().tone).toBeUndefined();
   expect(show().label).not.toContain("?");
   observed = {

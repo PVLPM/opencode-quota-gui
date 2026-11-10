@@ -68,6 +68,7 @@ describe("quota runway tooltips", () => {
         kind: "before_reset",
         projectedAtIso: new Date(NOW + 60_000).toISOString(),
       });
+      expect(target.querySelector('.qg-card__copy [data-copy-icon="copy"]')).not.toBeNull();
       target.querySelector<HTMLButtonElement>(".qg-card__copy")?.click();
       await Promise.resolve();
       expect(writeText).toHaveBeenCalledOnce();
@@ -77,6 +78,26 @@ describe("quota runway tooltips", () => {
       expect(copied).toContain("Resets in");
       expect(copied).not.toContain("Runs out");
       expect(target.querySelector("output")?.textContent).toBe("Quota summary copied.");
+      expect(target.querySelector('.qg-card__copy [data-copy-icon="check"]')).not.toBeNull();
+      dispose();
+    } finally {
+      if (original) Object.defineProperty(navigator, "clipboard", original);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  it("keeps the copy icon and announces a clipboard failure", async () => {
+    const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+    try {
+      const { target, dispose } = mount(undefined);
+      target.querySelector<HTMLButtonElement>(".qg-card__copy")!.click();
+      await Promise.resolve();
+      expect(target.querySelector('.qg-card__copy [data-copy-icon="copy"]')).not.toBeNull();
+      expect(target.querySelector("output")?.textContent).toBe("Could not copy quota summary.");
       dispose();
     } finally {
       if (original) Object.defineProperty(navigator, "clipboard", original);

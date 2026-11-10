@@ -675,20 +675,45 @@ describe("native quota notification subscription", () => {
   it("uses the RPC health method supplied by Plugin.setup after a stream failure", async () => {
     const source = createWindowEventSource();
     const health = vi.fn<DashboardRpcCaller["health"]>(async () => HEALTH);
+    const connectionListeners = new Set<
+      (state: "connecting" | "live" | "reconnecting" | "closed") => void
+    >();
+    const settingsChangedListeners = new Set<() => void>();
+    const reconnectListeners = new Set<() => void>();
     const nativeClient: Pick<
       NativeDashboardClient,
+      | "settings"
       | "connection"
       | "onConnectionChange"
       | "onReconnect"
       | "onEventStreamRetire"
       | "subscribeCacheObserverEvent"
+      | "subscribeSettingsChanged"
       | "dispose"
     > = {
+      settings: vi.fn(
+        async () =>
+          ({
+            values: { nativeQuotaNotifications: { modelChangeToastEnabled: true } },
+          }) as never,
+      ),
       connection: vi.fn(() => "connecting"),
-      onConnectionChange: vi.fn(() => vi.fn()),
-      onReconnect: vi.fn(() => vi.fn()),
+      onConnectionChange: vi.fn(
+        (listener: (state: "connecting" | "live" | "reconnecting" | "closed") => void) => {
+          connectionListeners.add(listener);
+          return () => connectionListeners.delete(listener);
+        },
+      ),
+      onReconnect: vi.fn((listener: () => void) => {
+        reconnectListeners.add(listener);
+        return () => reconnectListeners.delete(listener);
+      }),
       onEventStreamRetire: vi.fn(() => vi.fn()),
       subscribeCacheObserverEvent: vi.fn(() => vi.fn()),
+      subscribeSettingsChanged: vi.fn((listener: () => void) => {
+        settingsChangedListeners.add(listener);
+        return () => settingsChangedListeners.delete(listener);
+      }),
       dispose: vi.fn(),
     };
     const controller = new AbortController();
@@ -724,7 +749,8 @@ describe("native quota notification subscription", () => {
     vi.doMock("../src/native/cache-composer-pill.js", () => ({
       createCacheComposerPill: vi.fn(() => ({ id: "cache-observer" })),
     }));
-    vi.doMock("solid-js", () => ({
+    vi.doMock("solid-js", async (importOriginal) => ({
+      ...(await importOriginal()),
       createEffect: (effect: () => void) => effect(),
       onCleanup: (cleanup: () => void) => cleanups.push(cleanup),
     }));

@@ -1,5 +1,7 @@
 import type { Attention, Toasts } from "@opencode/plugin/gui";
+import type { SettingsSnapshot } from "../contracts/dashboard.js";
 import type { NativeCacheObserverModelMismatchTransition } from "./cache-observer-runtime.js";
+import type { NativeDashboardConnection } from "./dashboard-client.js";
 
 const MAX_REMEMBERED_TRANSITIONS = 128;
 const TITLE = "Selected model changed";
@@ -17,6 +19,80 @@ export interface ModelMismatchNotificationHost {
   readonly attention: Pick<Attention, "notify">;
 }
 
+export interface ModelChangeToastSettingsSource {
+  settings(): Promise<SettingsSnapshot>;
+  connection(): NativeDashboardConnection;
+  onConnectionChange(listener: (state: NativeDashboardConnection) => void): () => void;
+  subscribeSettingsChanged(listener: () => void): () => void;
+  onReconnect(listener: () => void): () => void;
+}
+
+/** Keeps the focused-toast preference in step with the window's live settings lifecycle. */
+export function createModelChangeToastSetting(source: ModelChangeToastSettingsSource): {
+  enabled: () => boolean;
+  stop: () => void;
+} {
+  let enabled = true;
+  let stopped = false;
+  let pending = false;
+  let readVersion = 0;
+  let hasConnected = source.connection() === "live";
+
+  const refresh = () => {
+    const version = ++readVersion;
+    pending = true;
+    try {
+      void source.settings().then(
+        (snapshot) => {
+          if (stopped || version !== readVersion) return;
+          const policy = snapshot.values.nativeQuotaNotifications;
+          if (
+            typeof policy === "object" &&
+            policy !== null &&
+            !Array.isArray(policy) &&
+            typeof policy.modelChangeToastEnabled === "boolean"
+          ) {
+            enabled = policy.modelChangeToastEnabled;
+          }
+          pending = false;
+        },
+        () => {
+          if (stopped || version !== readVersion) return;
+          pending = false;
+        },
+      );
+    } catch {
+      // A failed settings read keeps the last known policy/default-on behavior.
+      if (!stopped && version === readVersion) pending = false;
+    }
+  };
+
+  const unsubscribe = source.subscribeSettingsChanged(refresh);
+  const unsubscribeConnection = source.onConnectionChange((state) => {
+    if (state !== "live" || hasConnected) return;
+    hasConnected = true;
+    refresh();
+  });
+  const unsubscribeReconnect = source.onReconnect(() => {
+    hasConnected = true;
+    refresh();
+  });
+  refresh();
+
+  return {
+    enabled: () => !pending && enabled,
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      readVersion += 1;
+      pending = false;
+      unsubscribe();
+      unsubscribeConnection();
+      unsubscribeReconnect();
+    },
+  };
+}
+
 /**
  * Delivers only live mismatch transitions for the selected builtin session.
  * Focused windows use a toast; background windows defer to the host's
@@ -27,6 +103,8 @@ export function startModelMismatchNotificationSubscription(options: {
   readonly currentSession: () => { readonly id: string; readonly builtin: boolean } | undefined;
   readonly host: ModelMismatchNotificationHost;
   readonly focused: () => boolean;
+  /** Gates only the focused-window toast; detection and background notifications stay active. */
+  readonly modelChangeToastEnabled?: () => boolean;
 }): () => void {
   let stopped = false;
   const delivered = new Set<string>();
@@ -54,6 +132,11 @@ export function startModelMismatchNotificationSubscription(options: {
       // Unknown focus is treated like background so host notification settings apply.
     }
     if (focused) {
+      try {
+        if (options.modelChangeToastEnabled?.() === false) return;
+      } catch {
+        // Keep the existing default-on toast behavior if settings cannot be read.
+      }
       options.host.toast.show({ title: TITLE, description: DESCRIPTION, variant: "default" });
       return;
     }

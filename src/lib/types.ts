@@ -37,6 +37,8 @@ export interface QuotaResetNotificationsConfig {
 /** Canonical Native desktop notification policy; legacy `resetNotifications` is separate. */
 export interface NativeQuotaNotificationPolicy {
   enabled: boolean;
+  /** Focused-window model mismatch toasts; independent of the quota alert master. */
+  modelChangeToastEnabled: boolean;
   low: {
     enabled: boolean;
     thresholdRemainingPercent: number;
@@ -57,6 +59,7 @@ export interface NativeQuotaNotificationPolicy {
 
 export const DEFAULT_NATIVE_QUOTA_NOTIFICATION_POLICY: NativeQuotaNotificationPolicy = {
   enabled: true,
+  modelChangeToastEnabled: true,
   low: { enabled: true, thresholdRemainingPercent: 10 },
   exhausted: { enabled: true },
   reset: {
