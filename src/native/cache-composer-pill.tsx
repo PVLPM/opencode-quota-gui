@@ -20,6 +20,8 @@ import type { NativeDashboardRuntime } from "./runtime.js";
 const DETAIL_CLOSE_DELAY_MS = 140;
 /** Longest composed `[Agent] Provider / Model#Effort Name` label, in codepoints. */
 const MAX_LABEL_CODEPOINTS = 80;
+const MISMATCH_DETAIL = "Selected model differs from the route of the last cache observation.";
+const ATTENTION_FLASH_MS = 180;
 
 function safeTitle(title: string | undefined, fallback: string): string {
   const clean = (title ?? "")
@@ -185,6 +187,36 @@ export function createCacheComposerPill(
   const [transport, setTransport] = createSignal(runtime.cacheObserver.transport());
   const [revision, setRevision] = createSignal(0);
   const [gapRevision, setGapRevision] = createSignal(0);
+  const [flashKey, setFlashKey] = createSignal<string>();
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearFlash = () => {
+    if (flashTimer !== undefined) clearTimeout(flashTimer);
+    flashTimer = undefined;
+    setFlashKey(undefined);
+  };
+  onCleanup(
+    runtime.cacheObserver.subscribeModelMismatchTransitions((transition) => {
+      const current = sessions.current();
+      if (
+        !current?.server.builtin ||
+        !current.server.connected ||
+        current.id !== transition.sessionId
+      )
+        return;
+      clearFlash();
+      if (
+        transition.current.status !== "mismatched" ||
+        (typeof window !== "undefined" &&
+          window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)
+      )
+        return;
+      flashTimer = setTimeout(() => {
+        setFlashKey(current.key);
+        flashTimer = setTimeout(clearFlash, ATTENTION_FLASH_MS);
+      }, 100);
+    }),
+  );
+  onCleanup(clearFlash);
   const [children, setChildren] = createSignal<NativeCacheObserverChildrenSnapshot>();
   const [history, setHistory] = createSignal<{
     key: string;
@@ -216,6 +248,7 @@ export function createCacheComposerPill(
         ? current.key
         : undefined;
     if (key === mainObservedKey) return;
+    clearFlash();
     mainRelease?.();
     mainRelease = undefined;
     mainObservedKey = key;
@@ -398,6 +431,8 @@ export function createCacheComposerPill(
         session.server.builtin &&
         session.server.connected;
       const result = selected ? view(session.id) : presentation(undefined);
+      const mismatched =
+        selected && runtime.cacheObserver.modelMismatch(session.id).status === "mismatched";
       const loading =
         selected &&
         history()?.key === session.key &&
@@ -407,8 +442,14 @@ export function createCacheComposerPill(
       return {
         label: loading ? "Cache · Loading…" : `Cache${result.percent ? ` ${result.percent}` : ""}`,
         icon: hasError ? "warning" : "outline-cookie",
-        ...(result.tone ? { tone: result.tone } : hasError ? { tone: "warning" as const } : {}),
-        title: "Cache observation",
+        ...(mismatched
+          ? { tone: flashKey() === session.key ? ("warning" as const) : ("danger" as const) }
+          : result.tone
+            ? { tone: result.tone }
+            : hasError
+              ? { tone: "warning" as const }
+              : {}),
+        title: mismatched ? MISMATCH_DETAIL : "Cache observation",
       };
     },
     menu(input) {
@@ -507,7 +548,19 @@ export function createCacheComposerPill(
       });
 
       // The one overlay's content; `detailId()` is always set while rendered.
-      const detailResult = () => view(detailId() ?? "");
+      const mainMismatch = () => {
+        revision();
+        return (
+          sessions.current()?.key === input.session.key &&
+          runtime.cacheObserver.modelMismatch(input.session.id).status === "mismatched"
+        );
+      };
+      const detailResult = () => {
+        const result = view(detailId() ?? "");
+        return detailId() === input.session.id && mainMismatch()
+          ? { ...result, detail: MISMATCH_DETAIL }
+          : result;
+      };
       // A list refresh can remove the row whose bubble is open; the overlay
       // closes instead of lingering on a stale anchor.
       createEffect(() => {
@@ -517,7 +570,12 @@ export function createCacheComposerPill(
       });
 
       const row = (id: () => string, label: () => string, child: boolean, busy: () => boolean) => {
-        const result = () => view(id());
+        const result = () => {
+          const observed = view(id());
+          return !child && mainMismatch()
+            ? { ...observed, tone: "danger" as const, detail: MISMATCH_DETAIL }
+            : observed;
+        };
         const detail = () => result().detail || result().source;
         const open = () => detail() !== undefined && detailId() === id();
         return (

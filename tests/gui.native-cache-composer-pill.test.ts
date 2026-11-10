@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import type { ComposerPillMenuProps, ComposerPillProps, Sessions } from "@opencode/plugin/gui";
-import { createRoot, createSignal } from "solid-js";
+import { createEffect, createRoot, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import type { CacheObserverClassification } from "../src/lib/cache-observer.js";
@@ -10,6 +10,7 @@ import {
   observeCacheInvocation,
   setCacheTtlEvidence,
 } from "../src/lib/cache-observer.js";
+import { projectOpenCodeCacheObserverEvent } from "../src/lib/cache-observer-ingestion.js";
 import { createCacheComposerPill } from "../src/native/cache-composer-pill.js";
 import type {
   NativeCacheObserverChildrenSnapshot,
@@ -31,6 +32,8 @@ function mockCacheObserver(overrides: Record<string, unknown> = {}): Record<stri
     transport: () => ({ rpc: "live", hostEvents: "observed" }),
     subscribeTransport: () => () => {},
     subscribeGaps: () => () => {},
+    subscribeModelMismatchTransitions: () => () => {},
+    modelMismatch: () => ({ status: "unknown" }),
     query: () => undefined,
     subscribe: () => () => {},
     status: () => "unknown" as const,
@@ -966,6 +969,246 @@ it("renders real history bootstrap results independently without exposing messag
   dispose();
   observer.dispose();
   container.remove();
+});
+
+it("reacts to real model selection events without changing the cache estimate", async () => {
+  const a = session("main");
+  const b = session("other");
+  let emit: ((event: unknown) => void) | undefined;
+  const observer = createNativeCacheObserverRuntime({
+    subscribeEvents: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+    rpcConnection: () => "live",
+    listChildren: async () => [],
+    getSessionMetadata: async () => ({
+      model: { providerID: "anthropic", id: "cached" },
+      timeUpdatedMs: 10,
+    }),
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, current, setCurrent, dispose } = createRoot((cleanup) => {
+    const [current, setCurrent] = createSignal(a);
+    return {
+      pill: createCacheComposerPill(
+        { current } as unknown as Sessions,
+        mockRuntime({ ...observer }),
+      ),
+      current,
+      setCurrent,
+      dispose: cleanup,
+    };
+  });
+  await vi.waitFor(() => expect(observer.metadata("main")?.model?.id).toBe("cached"));
+  emit?.({
+    type: "session.step.started",
+    created: 20,
+    data: {
+      sessionID: "main",
+      assistantMessageID: "msg",
+      model: { providerID: "anthropic", id: "cached" },
+      started: 15,
+    },
+  });
+  emit?.({
+    type: "session.step.ended",
+    created: 30,
+    data: {
+      sessionID: "main",
+      assistantMessageID: "msg",
+      tokens: { input: 100, cache: { read: 40, write: 10 } },
+    },
+  });
+  const show = () => {
+    const view = pill.show({ session: current() } as ComposerPillProps);
+    if (!view) throw new Error("Expected a pill");
+    return view;
+  };
+  const mounted = document.createElement("div");
+  const unmountPill = render(() => {
+    const node = document.createElement("span");
+    createEffect(() => {
+      const view = show();
+      node.dataset.tone = view.tone ?? "neutral";
+      node.title = view.title ?? "";
+    });
+    return node;
+  }, mounted);
+  const before = show();
+  const unmount = renderMenu(pill, current, container);
+  const select = (created: number, id: string) =>
+    emit?.(
+      projectOpenCodeCacheObserverEvent({
+        type: "session.model.selected",
+        created,
+        data: { sessionID: "main", model: { providerID: "anthropic", id } },
+      }),
+    );
+  vi.useFakeTimers();
+  select(40, "other");
+  expect(show()).toMatchObject({ tone: "danger", title: expect.stringContaining("differs") });
+  expect(mounted.firstElementChild?.getAttribute("data-tone")).toBe("danger");
+  expect(
+    container.querySelector(".qg-cache-row:not(.qg-cache-child) .qg-cache-danger"),
+  ).not.toBeNull();
+  vi.advanceTimersByTime(100);
+  expect(show().tone).toBe("warning");
+  expect(mounted.firstElementChild?.getAttribute("data-tone")).toBe("warning");
+  select(41, "other");
+  vi.advanceTimersByTime(180);
+  expect(show().tone).toBe("danger");
+  select(50, "cached");
+  expect(show()).toMatchObject({
+    tone: before.tone,
+    title: "Cache observation",
+    label: before.label,
+  });
+  expect(mounted.firstElementChild?.getAttribute("data-tone")).toBe(before.tone ?? "neutral");
+  const media = vi.spyOn(window, "matchMedia").mockReturnValue({ matches: true } as MediaQueryList);
+  select(60, "other");
+  vi.advanceTimersByTime(300);
+  expect(show().tone).toBe("danger");
+  media.mockRestore();
+  setCurrent(b);
+  vi.advanceTimersByTime(500);
+  expect(show().title).toBe("Cache observation");
+  unmount();
+  unmountPill();
+  dispose();
+  observer.dispose();
+  container.remove();
+});
+
+it("keeps baseline and child mismatches isolated and cancels pending attention on disposal", async () => {
+  const main = session("main");
+  let emit: ((event: unknown) => void) | undefined;
+  let reconnect: (() => void) | undefined;
+  let reads = 0;
+  const observer = createNativeCacheObserverRuntime({
+    subscribeEvents: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+    subscribeReconnect: (listener) => {
+      reconnect = listener;
+      return () => {};
+    },
+    rpcConnection: () => "live",
+    listChildren: async () => [
+      {
+        id: "child",
+        parentID: "main",
+        title: "Child",
+        model: { providerID: "openai", id: "selected" },
+      },
+    ],
+    getSessionMetadata: async () => {
+      reads++;
+      return {
+        model: { providerID: "openai", id: reads > 1 ? "reconnect" : "selected" },
+        timeUpdatedMs: reads > 1 ? 100 : 10,
+      };
+    },
+  });
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => main } as unknown as Sessions,
+      mockRuntime({ ...observer }),
+    ),
+    dispose: cleanup,
+  }));
+  const mounted = document.createElement("div");
+  const tones: string[] = [];
+  const unmountPill = render(() => {
+    const node = document.createElement("span");
+    createEffect(() => {
+      const tone = pill.show({ session: main } as ComposerPillProps)?.tone ?? "neutral";
+      tones.push(tone);
+      node.dataset.tone = tone;
+    });
+    return node;
+  }, mounted);
+  const menu = document.createElement("div");
+  const unmountMenu = renderMenu(pill, () => main, menu);
+  await vi.waitFor(() => expect(observer.metadata("main")?.model?.id).toBe("selected"));
+  await vi.waitFor(() => expect(observer.metadata("child")?.model?.id).toBe("selected"));
+  const observe = (id: string) => {
+    emit?.({
+      type: "session.step.started",
+      created: 20,
+      data: {
+        sessionID: id,
+        assistantMessageID: `msg-${id}`,
+        model: { providerID: "anthropic", id: "cached" },
+        started: 15,
+      },
+    });
+    emit?.({
+      type: "session.step.ended",
+      created: 30,
+      data: {
+        sessionID: id,
+        assistantMessageID: `msg-${id}`,
+        tokens: { input: 100, cache: { read: 40, write: 10 } },
+      },
+    });
+  };
+  observe("main");
+  observe("child");
+  expect(mounted.firstElementChild?.getAttribute("data-tone")).toBe("danger");
+  const childTone = observer.query("child")?.color;
+  const childButton = menu.querySelector(".qg-cache-child .qg-cache-indicator");
+  expect(
+    childButton?.classList.contains(
+      `qg-cache-${childTone === "green" ? "success" : childTone === "red" ? "danger" : "warning"}`,
+    ),
+  ).toBe(true);
+  tones.length = 0;
+  vi.useFakeTimers();
+  vi.advanceTimersByTime(500);
+  expect(mounted.firstElementChild?.getAttribute("data-tone")).toBe("danger");
+  expect(tones).not.toContain("warning");
+  reconnect?.();
+  await flush(12);
+  expect(observer.metadata("main")?.model?.id).toBe("reconnect");
+  vi.advanceTimersByTime(500);
+  expect(mounted.firstElementChild?.getAttribute("data-tone")).toBe("danger");
+  expect(tones).not.toContain("warning");
+  emit?.({
+    type: "session.metadata",
+    created: 105,
+    data: { sessionID: "main", model: { providerID: "anthropic", id: "cached" } },
+  });
+  const mainTone = mounted.firstElementChild?.getAttribute("data-tone");
+  emit?.({
+    type: "session.metadata",
+    created: 106,
+    data: { sessionID: "child", model: { providerID: "openai", id: "different" } },
+  });
+  vi.advanceTimersByTime(500);
+  expect(mounted.firstElementChild?.getAttribute("data-tone")).toBe(mainTone);
+  expect(
+    childButton?.classList.contains(
+      `qg-cache-${childTone === "green" ? "success" : childTone === "red" ? "danger" : "warning"}`,
+    ),
+  ).toBe(true);
+  // A real selected-model change schedules a flash; disposal cancels it.
+  emit?.({
+    type: "session.metadata",
+    created: 110,
+    data: { sessionID: "main", model: { providerID: "openai", id: "another" } },
+  });
+  const beforeDispose = tones.length;
+  const timersBeforeDispose = vi.getTimerCount();
+  dispose();
+  expect(vi.getTimerCount()).toBeLessThan(timersBeforeDispose);
+  vi.advanceTimersByTime(500);
+  expect(tones).toHaveLength(beforeDispose);
+  unmountMenu();
+  unmountPill();
+  observer.dispose();
 });
 
 it("uses neutral, estimated and danger tones with the catalog cache icon", () => {
