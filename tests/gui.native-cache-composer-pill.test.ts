@@ -42,7 +42,7 @@ it("provides an accessible cache legend and uses a native cache icon", () => {
     ),
   }));
   const close = renderMenu(pill, () => current, container);
-  expect(pill.show({ session: current } as ComposerPillProps)?.icon).toBe("archive");
+  expect(pill.show({ session: current } as ComposerPillProps)?.icon).toBe("server");
   const info = container.querySelector<HTMLButtonElement>(
     'button[aria-label="About cache observations"]',
   )!;
@@ -813,7 +813,7 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
   expect(pill.show({ session: a } as ComposerPillProps)).toMatchObject({
     label: "Cache 80%",
     tone: "success",
-    icon: "archive",
+    icon: "server",
     title: "Cache observation",
   });
   dispose();
@@ -1476,7 +1476,7 @@ it("uses neutral, estimated and danger tones with the catalog cache icon", () =>
     dispose: cleanup,
   }));
   const show = () => pill.show({ session: sessionRef } as ComposerPillProps)!;
-  expect(show()).toMatchObject({ icon: "archive", title: "Cache observation" });
+  expect(show()).toMatchObject({ icon: "server", title: "Cache observation" });
   expect(show().tone).toBeUndefined();
   expect(show().label).not.toContain("?");
   observed = {
@@ -1506,4 +1506,244 @@ it("uses neutral, estimated and danger tones with the catalog cache icon", () =>
   update();
   expect(show().tone).toBe("danger");
   dispose();
+});
+
+it("marks active positive reads with unknown retention as uncertain without a TTL claim", () => {
+  const current = session("reuse-uncertain");
+  const observed = {
+    color: "gray",
+    reason: "route-unverified",
+    primaryCacheReadTelemetry: "available",
+    primaryCacheReadRatio: {
+      value: 0.99,
+      messageId: "message-1",
+      observedAtMs: 1_700_000_000_000,
+      numerator: "cache-read",
+      denominator: "fresh+read+write",
+      basis: { source: "host usage", reference: "message-1" },
+    },
+  } as CacheObserverClassification;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(
+        mockCacheObserver({
+          query: () => observed,
+          status: () => "busy",
+        }),
+      ),
+    ),
+    dispose: cleanup,
+  }));
+
+  expect(pill.show({ session: current } as ComposerPillProps)).toMatchObject({
+    label: "Cache 99%",
+    tone: "warning",
+  });
+
+  const close = renderMenu(pill, () => current, container);
+  const indicator = container.querySelector<HTMLButtonElement>(
+    ".qg-cache-row:not(.qg-cache-child) button.qg-cache-indicator",
+  );
+  indicator?.dispatchEvent(new Event("pointerenter"));
+  const tooltip = container.querySelector<HTMLElement>('[role="tooltip"]');
+  expect(tooltip?.textContent).toContain("Prior cache reads; reuse uncertain");
+  expect(tooltip?.textContent).not.toMatch(/ttl|expiry|next hit/i);
+  close();
+  dispose();
+  container.remove();
+});
+
+it.each([
+  ["idle", 0.99, "available", "route-unverified", "gray", undefined],
+  ["unknown", 0.99, "available", "route-unverified", "gray", undefined],
+  ["busy", 0, "available", "route-unverified", "gray", undefined],
+  ["busy", undefined, "available", "route-unverified", "gray", undefined],
+  ["busy", 0.99, "unavailable", "route-unverified", "gray", undefined],
+  ["busy", 0.99, "available", "observation-gap", "gray", undefined],
+  ["busy", 0.99, "available", "ambiguous-invocation", "yellow", "warning"],
+] as const)("does not infer uncertain reuse from %s status, %s reads, %s telemetry, or %s evidence", (status, ratio, telemetry, reason, color, expectedTone) => {
+  const current = session("reuse-uncertain-case");
+  const observed = {
+    color,
+    reason,
+    primaryCacheReadTelemetry: telemetry,
+    ...(ratio === undefined
+      ? {}
+      : {
+          primaryCacheReadRatio: {
+            value: ratio,
+            messageId: "message-1",
+            observedAtMs: 1_700_000_000_000,
+            numerator: "cache-read",
+            denominator: "fresh+read+write",
+            basis: { source: "host usage", reference: "message-1" },
+          },
+        }),
+  } as CacheObserverClassification;
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(
+        mockCacheObserver({
+          query: () => observed,
+          status: () => status,
+        }),
+      ),
+    ),
+    dispose: cleanup,
+  }));
+
+  expect(pill.show({ session: current } as ComposerPillProps).tone).toBe(expectedTone);
+  dispose();
+});
+
+it("does not mark prior reads uncertain while transport coverage is unverified", () => {
+  const current = session("reuse-transport");
+  const observed = {
+    color: "gray",
+    reason: "route-unverified",
+    primaryCacheReadTelemetry: "available",
+    primaryCacheReadRatio: {
+      value: 0.99,
+      messageId: "message-1",
+      observedAtMs: 1_700_000_000_000,
+      numerator: "cache-read",
+      denominator: "fresh+read+write",
+      basis: { source: "host usage", reference: "message-1" },
+    },
+  } as CacheObserverClassification;
+  type Transport = { rpc: "live" | "reconnecting"; hostEvents: "observed" | "unverified" };
+  let transport: Transport = { rpc: "live", hostEvents: "unverified" };
+  let notifyTransport: (value: Transport) => void = () => {};
+  const observer = mockCacheObserver({
+    transport: () => transport,
+    subscribeTransport: (listener: (value: Transport) => void) => {
+      notifyTransport = listener;
+      listener(transport);
+      return () => {};
+    },
+    query: () => observed,
+    status: () => "busy",
+  });
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(observer),
+    ),
+    dispose: cleanup,
+  }));
+  const show = () => pill.show({ session: current } as ComposerPillProps);
+
+  expect(show().tone).toBeUndefined();
+  transport = { rpc: "live", hostEvents: "observed" };
+  notifyTransport(transport);
+  expect(show().tone).toBe("warning");
+  dispose();
+});
+
+it.each([
+  ["known invalidation", "red", "known-invalidation", "danger"],
+  ["expired estimate", "red", "estimated-ttl-expired", "danger"],
+  ["verified estimate", "green", "estimated-reuse-within-ttl", "success"],
+] as const)("preserves %s precedence over active reuse uncertainty", (_name, color, reason, tone) => {
+  const current = session("reuse-precedence");
+  const observed = {
+    color,
+    reason,
+    primaryCacheReadTelemetry: "available",
+    primaryCacheReadRatio: {
+      value: 0.99,
+      messageId: "message-1",
+      observedAtMs: 1_700_000_000_000,
+      numerator: "cache-read",
+      denominator: "fresh+read+write",
+      basis: { source: "host usage", reference: "message-1" },
+    },
+    ...(color === "green"
+      ? {
+          ttlEstimate: {
+            kind: "configured",
+            ttlMs: 300_000,
+            source: "configured retention",
+            reference: "policy",
+            assumption: "configured minimum",
+            dispatchAtMs: 1_700_000_000_000,
+            deadlineAtMs: 1_700_000_300_000,
+          },
+        }
+      : {}),
+  } as CacheObserverClassification;
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(
+        mockCacheObserver({
+          query: () => observed,
+          status: () => "busy",
+        }),
+      ),
+    ),
+    dispose: cleanup,
+  }));
+
+  expect(pill.show({ session: current } as ComposerPillProps).tone).toBe(tone);
+  dispose();
+});
+
+it("classifies a child session's uncertain reuse from its own active status", async () => {
+  const main = session("reuse-parent");
+  const statuses = new Map([
+    [main.id, "busy" as const],
+    ["reuse-child", "idle" as const],
+  ]);
+  const classification = {
+    color: "gray",
+    reason: "route-unverified",
+    primaryCacheReadTelemetry: "available",
+    primaryCacheReadRatio: {
+      value: 0.99,
+      messageId: "message-1",
+      observedAtMs: 1_700_000_000_000,
+      numerator: "cache-read",
+      denominator: "fresh+read+write",
+      basis: { source: "host usage", reference: "message-1" },
+    },
+  } as CacheObserverClassification;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => main } as unknown as Sessions,
+      mockRuntime(
+        mockCacheObserver({
+          query: () => classification,
+          status: (id: string) => statuses.get(id) ?? "unknown",
+          subscribeChildren: (
+            _id: string,
+            listener: (snapshot: NativeCacheObserverChildrenSnapshot) => void,
+          ) => {
+            listener({
+              status: "ready",
+              children: [{ sessionId: "reuse-child", label: "Worker" }],
+            });
+            return () => {};
+          },
+        }),
+      ),
+    ),
+    dispose: cleanup,
+  }));
+
+  const close = renderMenu(pill, () => main, container);
+  await flush();
+  expect(pill.show({ session: main } as ComposerPillProps).tone).toBe("warning");
+  expect(
+    container.querySelector<HTMLButtonElement>(".qg-cache-child .qg-cache-indicator")?.className,
+  ).toBe("qg-cache-indicator qg-cache-neutral");
+  close();
+  dispose();
+  container.remove();
 });

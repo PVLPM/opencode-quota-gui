@@ -62,9 +62,10 @@ function formatTime(ms: number | undefined): string | undefined {
  * estimated states — green is a best-effort estimate within a configured or
  * documented retention window, never a claim about the provider's physical cache.
  */
-function presentation(observed: CacheObserverClassification | undefined) {
-  const tone =
-    observed?.color === "green"
+function presentation(observed: CacheObserverClassification | undefined, reuseUncertain = false) {
+  const tone = reuseUncertain
+    ? ("warning" as const)
+    : observed?.color === "green"
       ? ("success" as const)
       : observed?.color === "yellow"
         ? ("warning" as const)
@@ -86,10 +87,10 @@ function presentation(observed: CacheObserverClassification | undefined) {
     percent !== undefined
       ? `Last completed primary call · host-reported cache read · ${formatTime(observedAt)}`
       : undefined;
-  const detail = detailFor(observed);
+  const detail = reuseUncertain ? "Prior cache reads; reuse uncertain" : detailFor(observed);
   // The estimate's provenance: when it expires, when the qualifying call
   // started, which source supplied the retention value, and what it assumes.
-  const estimate = observed?.ttlEstimate;
+  const estimate = reuseUncertain ? undefined : observed?.ttlEstimate;
   const estimateLines: string[] = [];
   if (estimate !== undefined) {
     const expired = observed?.reason === "estimated-ttl-expired";
@@ -397,11 +398,27 @@ export function createCacheComposerPill(
     revision();
     const observed = runtime.cacheObserver.query(id);
     const source = transport();
+    const ratio = observed?.primaryCacheReadRatio;
+    const reuseUncertain =
+      observed?.color === "gray" &&
+      observed.reason === "route-unverified" &&
+      observed.primaryCacheReadTelemetry === "available" &&
+      typeof ratio?.value === "number" &&
+      Number.isFinite(ratio.value) &&
+      ratio.value > 0 &&
+      ratio.value <= 1 &&
+      typeof ratio.observedAtMs === "number" &&
+      Number.isFinite(ratio.observedAtMs) &&
+      ratio.observedAtMs >= 0 &&
+      runtime.cacheObserver.status(id) === "busy" &&
+      source.rpc === "live" &&
+      source.hostEvents === "observed";
     // A past green result is not current proof when event coverage has been lost.
     return presentation(
       observed?.color === "green" && (source.rpc !== "live" || source.hostEvents !== "observed")
         ? { ...observed, color: "yellow" }
         : observed,
+      reuseUncertain,
     );
   }
   function summary(id: string) {
@@ -428,7 +445,7 @@ export function createCacheComposerPill(
       const hasError = selected && history()?.key === session.key && history()?.status === "error";
       return {
         label: loading ? "Cache · Loading…" : `Cache${result.percent ? ` ${result.percent}` : ""}`,
-        icon: hasError ? "warning" : "archive",
+        icon: hasError ? "warning" : "server",
         ...(mismatched
           ? { tone: flashKey() === session.key ? ("warning" as const) : ("danger" as const) }
           : result.tone
@@ -606,7 +623,7 @@ export function createCacheComposerPill(
             <div class="qg-cache-row-heading">
               <Show when={child}>
                 <span class="qg-cache-busy" data-busy={busy() ? "true" : "false"}>
-                  <Show when={busy()}>Running</Show>
+                  <span class="qg-cache-visually-hidden">{busy() ? "Running" : ""}</span>
                 </span>
               </Show>
               <Show

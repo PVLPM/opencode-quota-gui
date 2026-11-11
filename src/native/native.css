@@ -63,14 +63,27 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* The host renders its title immediately before the menu. Reserve the button's
+ * space even if the title wraps; this relationship may change in host updates. */
+:has(> .qg-cache-menu) > :has(+ .qg-cache-menu) {
+  padding-right: 2rem;
+}
 .qg-cache-heading {
-  position: relative;
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  width: 100%;
+  height: 24px;
   display: flex;
   align-items: center;
   gap: 0.375rem;
   color: var(--text-weak, currentColor);
   font-size: 0.875em;
   justify-content: flex-end;
+  pointer-events: none;
+}
+.qg-cache-heading > * {
+  pointer-events: auto;
 }
 .qg-cache-info {
   display: inline-flex;
@@ -147,20 +160,48 @@
   font-size: 11px;
 }
 /*
- * Confirmed-busy spinner. The slot is reserved on every child row and, with
- * the heading gap, reproduces the existing 1rem child indent exactly, so
- * appearing or clearing never shifts the row; the ring draws only while the
- * host independently reports the session busy, left of the dot.
+ * Confirmed-busy spinner. The slot is reserved on every child row so the row
+ * stays aligned when busy state changes; the ring draws only while the host
+ * independently reports the session busy, left of the dot.
  */
 .qg-cache-busy {
   flex: none;
+  position: relative;
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  justify-content: flex-start;
+  width: 0.5rem;
+  height: 1rem;
   color: var(--text-interactive-base, currentColor);
 }
-.qg-cache-busy[data-busy="false"] {
-  display: none;
+.qg-cache-busy::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 0.625rem;
+  height: 0.625rem;
+  margin-top: -0.3125rem;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  opacity: 0;
+}
+.qg-cache-busy[data-busy="true"]::before {
+  opacity: 1;
+  animation: qg-cache-busy-spin 0.9s linear infinite;
+}
+@keyframes qg-cache-busy-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qg-cache-busy[data-busy="true"]::before {
+    /* No motion: a static ring in the interactive color still marks busy. */
+    animation: none;
+    border-top-color: currentColor;
+  }
 }
 .qg-cache-visually-hidden {
   position: absolute;
