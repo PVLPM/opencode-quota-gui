@@ -3085,7 +3085,7 @@ describe("Quota card row geometry", () => {
 
   function cssRule(selector: string): string {
     const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "s").exec(styles)?.[1] ?? "";
+    return new RegExp(`(?:^|[\\n,])\\s*${escaped}\\s*\\{([^}]*)\\}`, "s").exec(styles)?.[1] ?? "";
   }
 
   it("gives every quota row type the same first-line and strip grid tracks", () => {
