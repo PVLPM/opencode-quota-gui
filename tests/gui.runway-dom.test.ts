@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -59,6 +62,30 @@ function tooltipText(trigger: HTMLElement): string | null {
 }
 
 describe("quota runway tooltips", () => {
+  it("keeps the bar expanded inside Native and Web flex-based tooltip triggers", () => {
+    const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+    const styles = readFileSync(path.resolve(testDirectory, "../src/ui/styles.css"), "utf8");
+    const nativeStyles = readFileSync(
+      path.resolve(testDirectory, "../src/native/native.css"),
+      "utf8",
+    );
+    const webStyles = readFileSync(
+      path.resolve(testDirectory, "../node_modules/@opencode/ui/src/overlays/tooltip/tooltip.css"),
+      "utf8",
+    );
+    const { target, dispose } = mount({ kind: "lasts_past_reset" });
+    const trigger = target.querySelector<HTMLElement>(".qg-row__bar-tip");
+
+    expect(trigger?.dataset.component).toBe("tooltip-v2-trigger");
+    expect(trigger?.querySelector(".qg-row__bar")).not.toBeNull();
+    expect(nativeStyles).toMatch(
+      /:where\(\.qg-native\)\s*:where\(\[data-component="tooltip-v2-trigger"\]\)\s*\{\s*display:\s*flex;/,
+    );
+    expect(webStyles).toMatch(/\[data-component="tooltip-v2-trigger"\]\s*\{\s*display:\s*flex;/);
+    expect(styles).toMatch(/\.qg-row__bar-tip\s*>\s*\.qg-row__bar\s*\{[^}]*flex:\s*1\s*;/s);
+    dispose();
+  });
+
   it("copies the quota summary without a runway sentence", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");

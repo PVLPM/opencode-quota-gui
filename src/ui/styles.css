@@ -756,6 +756,10 @@
   grid-column: 1 / -1;
 }
 
+.qg-row__bar-tip > .qg-row__bar {
+  flex: 1;
+}
+
 .qg-row__bar-tip:focus-visible,
 .qg-row__value-tip:focus-visible {
   outline: 1px solid var(--qg-accent-border);
