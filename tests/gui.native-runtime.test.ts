@@ -315,7 +315,7 @@ describe("native window runtime", () => {
     dispose();
   });
 
-  it("fences a switched-away session ratio until a new primary end is observed", async () => {
+  it("retains a switched-away session's last ratio until a new primary end is observed", async () => {
     const fake = createFakeCaller();
     const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
     const sessionA = {
@@ -369,12 +369,15 @@ describe("native window runtime", () => {
       () => runtime.cacheObserver.query(sessionB.id)?.primaryCacheReadRatio?.messageId === "msg_b",
       "session B event-stream barrier",
     );
-    expect(runtime.cacheObserver.query(sessionA.id)).not.toHaveProperty("primaryCacheReadRatio");
+    // The missed session A call is not ingested; the last observed estimate is retained.
+    expect(runtime.cacheObserver.query(sessionA.id)?.primaryCacheReadRatio?.messageId).toBe(
+      "msg_a_initial",
+    );
 
     setCurrent(sessionA);
     await waitFor(
-      () => !/\d+\.\d+%/.test(pill.show({ session: sessionA } as never).label),
-      "session A returns without claiming a latest ratio",
+      () => pill.show({ session: sessionA } as never).label.includes("15.4%"),
+      "session A returns with its retained last observed ratio",
     );
     pushPrimaryInvocation(fake, sessionA.id, "msg_a_new", 1_600, 1_700, {
       input: 100,
@@ -391,7 +394,7 @@ describe("native window runtime", () => {
     dispose();
   });
 
-  it("fences a connected session ratio over a transport reconnect until a new primary end", async () => {
+  it("retains a connected session ratio over a transport reconnect until a new primary end", async () => {
     const fake = createFakeCaller();
     const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
     const session = {
@@ -423,13 +426,17 @@ describe("native window runtime", () => {
 
     fake.streams[0]?.finish();
     await waitFor(() => runtime.client.connection() === "reconnecting", "transport disconnect");
-    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId).toBe(
+      "msg_before_disconnect",
+    );
 
     await runtime.client.reconnect();
     await waitFor(() => runtime.client.connection() === "live", "transport reconnect");
     expect(fake.streams).toHaveLength(2);
-    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
-    expect(pill.show({ session } as never).label).not.toContain("15.4%");
+    expect(runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId).toBe(
+      "msg_before_disconnect",
+    );
+    expect(pill.show({ session } as never).label).toContain("15.4%");
 
     pushPrimaryInvocation(fake, session.id, "msg_after_reconnect", 2_200, 2_300, {
       input: 100,
@@ -664,7 +671,7 @@ describe("native window runtime", () => {
     dispose();
   });
 
-  it("fences the cache ratio during a healthy scope stream replacement without reporting reconnect", async () => {
+  it("retains the cache ratio during a healthy scope stream replacement without reporting reconnect", async () => {
     const fake = createFakeCaller();
     const { runtime, dispose } = mountRuntime({ fake, connected: () => true });
     const session = {
@@ -709,8 +716,10 @@ describe("native window runtime", () => {
       () => fake.streams[0]?.signal.aborted === true,
       "old event stream retirement on scope change",
     );
-    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
-    expect(pill.show({ session } as never).label).not.toContain("15.4%");
+    expect(runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId).toBe(
+      "msg_before_scope_change",
+    );
+    expect(pill.show({ session } as never).label).toContain("15.4%");
 
     // This primary occurs while the replacement health probe is pending. The
     // old stream is already retired, so the host event is not replayed later.
@@ -719,7 +728,9 @@ describe("native window runtime", () => {
       cache: { read: 40, write: 10 },
     });
     expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
-    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId).toBe(
+      "msg_before_scope_change",
+    );
 
     finishScopeHealth();
     await waitFor(() => fake.streams.length === 2, "replacement scope event stream");
@@ -732,7 +743,9 @@ describe("native window runtime", () => {
     expect(runtime.client.connection()).toBe("live");
     expect(reconnected).not.toHaveBeenCalled();
     expect(states).toEqual([]);
-    expect(runtime.cacheObserver.query(session.id)).not.toHaveProperty("primaryCacheReadRatio");
+    expect(runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId).toBe(
+      "msg_before_scope_change",
+    );
 
     pushPrimaryInvocation(fake, session.id, "msg_after_scope_change", 3_400, 3_500, {
       input: 100,

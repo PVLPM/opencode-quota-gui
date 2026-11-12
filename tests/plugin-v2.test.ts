@@ -216,6 +216,7 @@ describe("V2 server plugin credential lifecycle", () => {
               data: {
                 sessionID: "ses_host_reconnect",
                 assistantMessageID: "msg_before_gap",
+                finish: "stop",
                 tokens: { input: 10, cache: { read: 5, write: 0 } },
               },
             };
@@ -257,6 +258,7 @@ describe("V2 server plugin credential lifecycle", () => {
         data: {
           sessionID: "ses_host_reconnect",
           assistantMessageID: "msg_after_gap",
+          finish: "stop",
           tokens: { input: 20, cache: { read: 10, write: 0 } },
           content: "private message content must not cross RPC",
         },
@@ -530,6 +532,7 @@ describe("V2 server plugin credential lifecycle", () => {
       data: {
         sessionID: "ses_pre_registration",
         assistantMessageID: "msg_pre_registration",
+        finish: "stop",
         tokens: { input: 20, cache: { read: 10, write: 0 } },
         content: "private event content must not cross RPC",
       },
@@ -649,6 +652,7 @@ describe("V2 server plugin credential lifecycle", () => {
           data: {
             sessionID: sessionId,
             assistantMessageID: messageId,
+            finish: "stop",
             tokens: { input: 20, cache: { read: 10, write: 0 } },
             content: "private event content must not cross RPC",
           },
@@ -731,7 +735,11 @@ describe("V2 server plugin credential lifecycle", () => {
       });
       expect(JSON.stringify(emit.mock.calls)).not.toContain("private event content");
       expect(nativeObserver.transport().hostEvents).toBe("unavailable");
-      expect(nativeObserver.query(sessionId)?.primaryCacheReadRatio).toBeUndefined();
+      // The replayed successful step is ingested before the stream failure; the failure
+      // marks host events unavailable but keeps the last observed primary estimate.
+      expect(nativeObserver.query(sessionId)).toMatchObject({
+        primaryCacheReadRatio: { value: 1 / 3, messageId },
+      });
     } finally {
       if (!resolveRegistrationCalled) {
         resolveRegistration({ events: { emit }, dispose: async () => {} });
