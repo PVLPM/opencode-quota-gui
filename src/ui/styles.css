@@ -2978,11 +2978,16 @@
   border-color: var(--qg-border-strong);
 }
 
+/* Provider and per-model phase pills share one caps treatment. */
+.qg-temporal-popover__phase,
+.qg-temporal-popover__state {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .qg-temporal-popover__phase {
   margin-left: auto;
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .qg-temporal-popover__note,

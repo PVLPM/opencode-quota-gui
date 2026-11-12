@@ -1435,6 +1435,16 @@ describe("temporal live status server-rendered markup", () => {
     );
     expect(styles).not.toMatch(/\.qg-field\s*\{[^}]*grid-template-columns:\s*1fr\s*;/s);
   });
+
+  it("sets provider and model phase pills in one shared caps treatment", () => {
+    // Both pills render `qg-row__value`; the header pill used to carry the
+    // uppercase rule alone, so per-model Peak/Off-peak boxes stayed mixed case.
+    const sharedPillRule = styles.match(
+      /\.qg-temporal-popover__phase,\s*\.qg-temporal-popover__state\s*\{([^}]*)\}/,
+    );
+    expect(sharedPillRule?.[1]).toMatch(/text-transform:\s*uppercase/);
+    expect(sharedPillRule?.[1]).toMatch(/letter-spacing:\s*0\.04em/);
+  });
 });
 
 function layoutCard(index: number, rowCount: number): ProviderCard {
