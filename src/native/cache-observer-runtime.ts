@@ -234,7 +234,6 @@ export function createNativeCacheObserverRuntime(options: {
   let lastHostEventOrderAtMs: number | undefined;
   let hostEventConfidenceFenced = false;
   let disposed = false;
-  const runtimeNow = options.now ?? Date.now;
 
   function query(sessionId: string): CacheObserverClassification | undefined {
     return ingestor.query(sessionId);
