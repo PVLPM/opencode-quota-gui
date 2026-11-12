@@ -9,6 +9,7 @@ import {
   Show,
 } from "solid-js";
 import type { CacheObserverClassification } from "../lib/cache-observer.js";
+import { formatClock, formatTimestamp, formatTimestampMinutes } from "../ui/format.js";
 import type {
   NativeCacheObserverChild,
   NativeCacheObserverChildrenSnapshot,
@@ -18,7 +19,7 @@ import type { NativeDashboardRuntime } from "./runtime.js";
 
 /** One popup-wide detail overlay: at most one row's bubble is ever active. */
 const DETAIL_CLOSE_DELAY_MS = 140;
-const MISMATCH_DETAIL = "Selected model differs from the route of the last cache observation.";
+const MISMATCH_DETAIL = "Selected model differs from the last observed route.";
 const ATTENTION_FLASH_MS = 180;
 
 function safeTitle(title: string | undefined, fallback: string): string {
@@ -51,10 +52,86 @@ function sessionModel(meta: NativeCacheObserverSessionMeta | undefined): string 
   return undefined;
 }
 
-function formatTime(ms: number | undefined): string | undefined {
+/**
+ * A 24-hour clock time in the host's zone, through the product's en-GB
+ * formatters, never the locale's 12-hour default. A time on another day also
+ * carries its date, so a stale expiry is never read as today's.
+ */
+function formatWallTime(ms: number | undefined, nowMs: number): string | undefined {
   if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return undefined;
-  const date = new Date(ms);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString() : undefined;
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const dayOf = (at: number) => formatTimestamp(at, zone).split(", ")[0];
+  return dayOf(ms) === dayOf(nowMs) ? formatClock(ms, zone) : formatTimestampMinutes(ms, zone);
+}
+
+/**
+ * Whole-second countdown text. A partial second rounds up, so the last second
+ * still reads "1s" until the deadline itself.
+ */
+function formatTtlRemaining(remainingMs: number): string {
+  const totalSeconds = Math.ceil(remainingMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+/**
+ * One value in three forms: `label` for the collapsed pill, `short` for the
+ * popup rows (values only, the legend names them), and `spoken` for assistive
+ * technology. A missing value is a dash in the pill and the word "unknown" in
+ * the rows, so it stays legible without its label.
+ */
+interface Metric {
+  readonly label: string;
+  readonly short: string;
+  readonly spoken: string;
+}
+
+interface TtlMetric extends Metric {
+  readonly expired: boolean;
+}
+
+function ttlMetric(deadlineAtMs: number | undefined, nowMs: number): TtlMetric {
+  if (deadlineAtMs === undefined) {
+    return { label: "TTL —", short: "unknown", spoken: "TTL unavailable", expired: false };
+  }
+  if (deadlineAtMs <= nowMs) {
+    return { label: "TTL Expired", short: "Expired", spoken: "TTL Expired", expired: true };
+  }
+  const remaining = formatTtlRemaining(deadlineAtMs - nowMs);
+  return {
+    label: `TTL ${remaining}`,
+    short: remaining,
+    spoken: `TTL ${remaining}`,
+    expired: false,
+  };
+}
+
+function cacheMetric(percent: string | undefined): Metric {
+  if (percent === undefined) {
+    return { label: "Cache —", short: "unknown", spoken: "Cache unavailable" };
+  }
+  return { label: `Cache ${percent}`, short: percent, spoken: `Cache ${percent}` };
+}
+
+/**
+ * The estimated deadline a countdown shows. It is the observer's last observed
+ * estimate; host-event coverage does not suppress it.
+ */
+function countdownDeadline(observed: CacheObserverClassification | undefined): number | undefined {
+  const deadline = observed?.ttlEstimate?.deadlineAtMs;
+  if (typeof deadline !== "number" || !Number.isFinite(deadline)) return undefined;
+  return deadline;
+}
+
+/** The next instant at which the displayed whole second of a live countdown changes. */
+function nextCountdownBoundary(deadlineAtMs: number, nowMs: number): number | undefined {
+  if (deadlineAtMs <= nowMs) return undefined;
+  const wholeSecondsLeft = Math.ceil((deadlineAtMs - nowMs) / 1000);
+  return deadlineAtMs - (wholeSecondsLeft - 1) * 1000;
 }
 
 /**
@@ -62,16 +139,23 @@ function formatTime(ms: number | undefined): string | undefined {
  * estimated states — green is a best-effort estimate within a configured or
  * documented retention window, never a claim about the provider's physical cache.
  */
-function presentation(observed: CacheObserverClassification | undefined, reuseUncertain = false) {
-  const tone = reuseUncertain
-    ? ("warning" as const)
-    : observed?.color === "green"
-      ? ("success" as const)
-      : observed?.color === "yellow"
-        ? ("warning" as const)
-        : observed?.color === "red"
-          ? ("danger" as const)
-          : undefined;
+function presentation(
+  observed: CacheObserverClassification | undefined,
+  options: { reuseUncertain?: boolean; countdownAtMs?: number; nowMs?: number } = {},
+) {
+  const { reuseUncertain = false, countdownAtMs, nowMs = 0 } = options;
+  const ttl = ttlMetric(countdownAtMs, nowMs);
+  const tone = ttl.expired
+    ? ("danger" as const)
+    : reuseUncertain
+      ? ("warning" as const)
+      : observed?.color === "green"
+        ? ("success" as const)
+        : observed?.color === "yellow"
+          ? ("warning" as const)
+          : observed?.color === "red"
+            ? ("danger" as const)
+            : undefined;
   const ratio = observed?.primaryCacheReadRatio?.value;
   const observedAt = observed?.primaryCacheReadRatio?.observedAtMs;
   const percent =
@@ -83,33 +167,27 @@ function presentation(observed: CacheObserverClassification | undefined, reuseUn
     Number.isFinite(observedAt)
       ? `${Number((ratio * 100).toFixed(1))}%`
       : undefined;
+  const cache = cacheMetric(percent);
+  // The status bubble keeps the state, expiry, basis and cache share. Assumptions
+  // and the start of the qualifying call are general caveats, explained under (i).
+  const observedWhen = formatWallTime(observedAt, nowMs);
   const source =
-    percent !== undefined
-      ? `Last completed primary call · host-reported cache read · ${formatTime(observedAt)}`
-      : undefined;
-  const detail = reuseUncertain ? "Prior cache reads; reuse uncertain" : detailFor(observed);
-  // The estimate's provenance: when it expires, when the qualifying call
-  // started, which source supplied the retention value, and what it assumes.
+    percent === undefined
+      ? undefined
+      : observedWhen === undefined
+        ? cache.label
+        : `${cache.label} · last completed call ${observedWhen}`;
+  const detail = reuseUncertain
+    ? "Prior cache reads; reuse uncertain"
+    : ttl.expired
+      ? "Estimated retention elapsed"
+      : detailFor(observed);
   const estimate = reuseUncertain ? undefined : observed?.ttlEstimate;
-  const estimateLines: string[] = [];
-  if (estimate !== undefined) {
-    const expired = observed?.reason === "estimated-ttl-expired";
-    const deadline = formatTime(estimate.deadlineAtMs);
-    if (deadline !== undefined) {
-      estimateLines.push(
-        expired ? `Estimated expiry elapsed · ${deadline}` : `Estimated expiry · ${deadline}`,
-      );
-    }
-    const dispatched = formatTime(estimate.dispatchAtMs);
-    if (dispatched !== undefined) {
-      estimateLines.push(`Last qualifying call started · ${dispatched}`);
-    }
-    const basis = safeSegment(estimate.source);
-    if (basis !== undefined) estimateLines.push(`Retention basis · ${basis}`);
-    const assumption = safeSegment(estimate.assumption);
-    if (assumption !== undefined) estimateLines.push(assumption);
-  }
-  return { tone, percent, detail, source, estimateLines } as const;
+  const expiryTime = formatWallTime(estimate?.deadlineAtMs, nowMs);
+  const expiry = expiryTime === undefined ? undefined : `Estimated expiry ${expiryTime}`;
+  const basisSource = safeSegment(estimate?.source);
+  const basis = basisSource === undefined ? undefined : `Basis · ${basisSource}`;
+  return { tone, percent, ttl, cache, detail, expiry, basis, source } as const;
 }
 
 function detailFor(observed: CacheObserverClassification | undefined): string | undefined {
@@ -123,6 +201,7 @@ function detailFor(observed: CacheObserverClassification | undefined): string | 
       return "Estimated near expiry";
     case "estimated-reuse-within-ttl":
     case "estimated-write-within-ttl":
+    case "estimated-within-ttl":
       return "Estimated within retention";
     case "assumed-route-risk":
       return "Retention assumed, not verified";
@@ -175,6 +254,9 @@ export function createCacheComposerPill(
   const [transport, setTransport] = createSignal(runtime.cacheObserver.transport());
   const [revision, setRevision] = createSignal(0);
   const [gapRevision, setGapRevision] = createSignal(0);
+  // One shared countdown clock for the whole pill, not one per session or row.
+  const [clock, setClock] = createSignal(Date.now());
+  let clockTimer: ReturnType<typeof setTimeout> | undefined;
   const [flashKey, setFlashKey] = createSignal<string>();
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
   const clearFlash = () => {
@@ -211,6 +293,7 @@ export function createCacheComposerPill(
     status: "loading" | "ready" | "error";
   }>();
   let inFlightHistoryKey: string | undefined;
+  const gapHistory = new Set<string>();
   onCleanup(runtime.cacheObserver.subscribeTransport(setTransport));
   onCleanup(
     runtime.cacheObserver.subscribeGaps((id) => {
@@ -218,8 +301,10 @@ export function createCacheComposerPill(
       if (
         current &&
         (id === current.id || children()?.children.some((child) => child.sessionId === id))
-      )
+      ) {
+        gapHistory.add(id);
         setGapRevision((n) => n + 1);
+      }
     }),
   );
 
@@ -333,12 +418,13 @@ export function createCacheComposerPill(
   // updates that do not change demand leave the active batch alone.
   const historyDemand = createMemo(() => {
     revision();
+    gapRevision();
     const current = sessions.current();
     const snapshot = children();
     if (!current?.server.builtin || !current.server.connected) return "[]";
     const ids = [current.id, ...(snapshot?.children.map((child) => child.sessionId) ?? [])];
     const missing = [...new Set(ids)].filter(
-      (id) => !runtime.cacheObserver.query(id)?.primaryCacheReadRatio,
+      (id) => gapHistory.has(id) || !runtime.cacheObserver.query(id)?.primaryCacheReadRatio,
     );
     return JSON.stringify(missing);
   });
@@ -376,6 +462,7 @@ export function createCacheComposerPill(
         .then(() => {
           if (controller.signal.aborted) return;
           settled = true;
+          for (const id of missing) gapHistory.delete(id);
           setHistory({ key: current.key, status: "ready" });
           setRevision((n) => n + 1);
         })
@@ -394,8 +481,44 @@ export function createCacheComposerPill(
     });
   });
 
+  // Only the selected session and its listed children can show a countdown, so
+  // the next boundary is derived from them alone. One timer serves them all and
+  // stops once no displayed deadline is still ahead.
+  const countdownBoundary = createMemo(() => {
+    const nowMs = clock();
+    revision();
+    const current = sessions.current();
+    if (!current?.server.builtin || !current.server.connected) return undefined;
+    const ids = [current.id, ...(children()?.children.map((child) => child.sessionId) ?? [])];
+    let next: number | undefined;
+    for (const id of [...new Set(ids)]) {
+      const deadline = countdownDeadline(runtime.cacheObserver.query(id));
+      const boundary = deadline === undefined ? undefined : nextCountdownBoundary(deadline, nowMs);
+      if (boundary !== undefined && (next === undefined || boundary < next)) next = boundary;
+    }
+    return next;
+  });
+  createEffect(() => {
+    const boundary = countdownBoundary();
+    if (clockTimer !== undefined) clearTimeout(clockTimer);
+    clockTimer = undefined;
+    if (boundary === undefined) return;
+    clockTimer = setTimeout(
+      () => {
+        clockTimer = undefined;
+        setClock(Date.now());
+      },
+      Math.max(0, boundary - Date.now()),
+    );
+  });
+  onCleanup(() => {
+    if (clockTimer !== undefined) clearTimeout(clockTimer);
+    clockTimer = undefined;
+  });
+
   function view(id: string) {
     revision();
+    const nowMs = clock();
     const observed = runtime.cacheObserver.query(id);
     const source = transport();
     const ratio = observed?.primaryCacheReadRatio;
@@ -413,17 +536,13 @@ export function createCacheComposerPill(
       runtime.cacheObserver.status(id) === "busy" &&
       source.rpc === "live" &&
       source.hostEvents === "observed";
-    // A past green result is not current proof when event coverage has been lost.
-    return presentation(
-      observed?.color === "green" && (source.rpc !== "live" || source.hostEvents !== "observed")
-        ? { ...observed, color: "yellow" }
-        : observed,
+    // Host-event coverage gates only the reuse-uncertain state above; it does not
+    // downgrade a green estimate or hide its countdown.
+    return presentation(observed, {
       reuseUncertain,
-    );
-  }
-  function summary(id: string) {
-    const result = view(id);
-    return result.percent ?? "";
+      countdownAtMs: countdownDeadline(observed),
+      nowMs,
+    });
   }
 
   return {
@@ -444,7 +563,7 @@ export function createCacheComposerPill(
         !result.percent;
       const hasError = selected && history()?.key === session.key && history()?.status === "error";
       return {
-        label: loading ? "Cache · Loading…" : `Cache${result.percent ? ` ${result.percent}` : ""}`,
+        label: `${result.ttl.label} • ${loading ? "Cache · Loading…" : result.cache.label}`,
         icon: hasError ? "warning" : "server",
         ...(mismatched
           ? { tone: flashKey() === session.key ? ("warning" as const) : ("danger" as const) }
@@ -666,8 +785,7 @@ export function createCacheComposerPill(
                   {model() ? `Model: ${model()}. ` : ""}
                   {child && busy() ? "Running. " : ""}
                   {result().detail ? `${result().detail}. ` : "Cache observation unknown. "}
-                  {summary(id()) ? `${summary(id())} hit. ` : ""}
-                  {result().estimateLines[0] ?? ""}
+                  {`${result().ttl.spoken}. ${result().cache.spoken}. `}
                 </span>
                 <span class="qg-cache-identity-text">
                   <span class="qg-cache-primary">
@@ -690,12 +808,7 @@ export function createCacheComposerPill(
                     )}
                   </Show>
                 </span>
-                <span class="qg-cache-metrics">
-                  <Show when={summary(id())}>{(percent) => <span>{percent()} hit</span>}</Show>
-                  <Show when={result().estimateLines[0]}>
-                    {(expiry) => <span>{expiry()}</span>}
-                  </Show>
-                </span>
+                <span class="qg-cache-metrics">{`${result().ttl.short} • ${result().cache.short}`}</span>
               </button>
             </div>
           </div>
@@ -724,16 +837,16 @@ export function createCacheComposerPill(
                 class="qg-cache-tooltip qg-cache-legend"
                 aria-label="Cache status legend"
               >
+                <span>TTL: estimated from current settings, documentation, or observed reuse.</span>
+                <span>Expiry counts from the last qualifying call's start.</span>
+                <span>Cache: observed token share of the last completed primary call.</span>
                 <span>
-                  Hit % is the host-reported cache read share of the last completed primary call.
+                  Current settings may differ from the call's route or settings. Prefix changes,
+                  eviction, or hidden warming can cause a miss.
                 </span>
                 <span>
-                  Green: estimated within retention. Yellow: uncertain or in the last 20% of
-                  estimated retention.
-                </span>
-                <span>Red: estimated expiry, invalidation, or model change. Grey: unknown.</span>
-                <span>
-                  Retention and expiry are estimates, not proof of the provider's cache state.
+                  Colors: green within lifetime, yellow uncertain or near expiry, red expired or
+                  invalidated, grey unknown. Estimates, not guarantees.
                 </span>
               </fieldset>
             </Show>
@@ -790,13 +903,16 @@ export function createCacheComposerPill(
               onPointerLeave={() => scheduleClose()}
             >
               <Show when={detailResult().detail}>
-                <span>{detailResult().detail}</span>
+                {(text) => <span class="qg-cache-tooltip-primary">{text()}</span>}
               </Show>
-              <For each={detailResult().estimateLines}>
-                {(line) => <span class="qg-cache-tooltip-note">{line}</span>}
-              </For>
+              <Show when={detailResult().expiry}>
+                {(text) => <span class="qg-cache-tooltip-primary">{text()}</span>}
+              </Show>
+              <Show when={detailResult().basis}>
+                {(text) => <span class="qg-cache-tooltip-note">{text()}</span>}
+              </Show>
               <Show when={detailResult().source}>
-                <span class="qg-cache-tooltip-note">{detailResult().source}</span>
+                {(text) => <span class="qg-cache-tooltip-note">{text()}</span>}
               </Show>
             </span>
           </Show>

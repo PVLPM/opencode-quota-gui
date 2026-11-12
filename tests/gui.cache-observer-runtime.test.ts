@@ -1,8 +1,73 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { projectOpenCodeCacheObserverEvent } from "../src/lib/cache-observer-ingestion.js";
+import { createHostRouteConfigurationReader } from "../src/native/cache-observer-host-config.js";
 import { createNativeCacheObserverRuntime } from "../src/native/cache-observer-runtime.js";
+import { createGuiRpcCaller } from "../src/native/rpc.js";
 
 describe("native cache observer runtime", () => {
+  it("accepts successful projected RPC events and excludes unsuccessful raw completions", async () => {
+    const sessionID = "ses_rpc_projection";
+    let receiveEvent: ((event: never) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      now: () => 2_000,
+    });
+    const release = runtime.subscribe(sessionID, () => {});
+    const raw = (messageID: string, finish: string, started: number) => [
+      {
+        type: "session.step.started",
+        created: started + 10,
+        data: {
+          sessionID,
+          assistantMessageID: messageID,
+          model: { providerID: "anthropic", id: "claude-test" },
+          started,
+        },
+      },
+      {
+        type: "session.step.ended",
+        created: started + 100,
+        data: {
+          sessionID,
+          assistantMessageID: messageID,
+          finish,
+          tokens: { input: 10, cache: { read: 30, write: 0 } },
+        },
+      },
+    ];
+    const events = [...raw("msg_ok", "stop", 1_000), ...raw("msg_bad", "error", 1_500)];
+    const projected = events.map(projectOpenCodeCacheObserverEvent);
+    expect(projected[3]).toBeUndefined();
+    const caller = createGuiRpcCaller({
+      client: {
+        rpc: () => ({
+          events: {
+            subscribe: async function* () {
+              for (const event of projected)
+                if (event)
+                  yield { data: { topic: "cache.observer", at: 2_000, cacheObserverEvent: event } };
+            },
+          },
+        }),
+      },
+    } as never);
+    for await (const envelope of caller.events.subscribe("invalidated")) {
+      if (envelope.data.topic === "cache.observer")
+        receiveEvent?.(envelope.data.cacheObserverEvent as never);
+    }
+    expect(runtime.query(sessionID)).toMatchObject({
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+      primaryCacheReadRatio: { value: 0.75 },
+    });
+    release();
+    runtime.dispose();
+  });
   for (const state of ["unavailable", "stopped"] as const) {
     it(`applies source state ${state} while host-event confidence is fenced`, () => {
       let receiveEvent: ((event: unknown) => void) | undefined;
@@ -150,6 +215,7 @@ describe("native cache observer runtime", () => {
           {
             id: "msg_snapshot_fence",
             type: "assistant",
+            finish: "stop",
             model: { providerID: "openai", id: "test" },
             time: { created: 1_000, completed: 1_100 },
             tokens: { input: 20, cache: { read: subsequent ? 60 : 80, write: 0 } },
@@ -176,7 +242,8 @@ describe("native cache observer runtime", () => {
 
     subsequent = true;
     await runtime.bootstrapHistory(["ses_snapshot_fence"]);
-    expect(runtime.query("ses_snapshot_fence")?.primaryCacheReadRatio).toBeUndefined();
+    // The last observed share persists through the snapshot; nothing is hidden.
+    expect(runtime.query("ses_snapshot_fence")?.primaryCacheReadRatio?.value).toBe(0.8);
     release();
     runtime.dispose();
   });
@@ -184,12 +251,13 @@ describe("native cache observer runtime", () => {
   it.each([
     "changed counters",
     "compaction",
-  ] as const)("does not unfence old telemetry after a gap when fresh history reports %s", async (scenario) => {
+  ] as const)("keeps the last observed share after a gap when fresh history reports %s", async (scenario) => {
     let retire = () => {};
     let subsequent = false;
     const message = (read: number) => ({
       id: "msg_same",
       type: "assistant",
+      finish: "stop",
       model: { providerID: "openai", id: "test" },
       time: { created: 1000, completed: 1100 },
       tokens: { input: 20, cache: { read, write: 0 } },
@@ -216,7 +284,8 @@ describe("native cache observer runtime", () => {
     retire();
     subsequent = true;
     await runtime.bootstrapHistory(["ses_gap"]);
-    expect(runtime.query("ses_gap")?.primaryCacheReadRatio).toBeUndefined();
+    // An already observed message keeps its counters; the share persists through the gap.
+    expect(runtime.query("ses_gap")?.primaryCacheReadRatio?.value).toBe(0.8);
     release();
     runtime.dispose();
   });
@@ -232,6 +301,7 @@ describe("native cache observer runtime", () => {
               {
                 id: "msg_main_newest_incomplete",
                 type: "assistant",
+                finish: "stop",
                 model: { providerID: "openai", id: "gpt-test" },
                 time: { created: 2_000, completed: 2_100 },
                 content: [{ text: "PRIVATE NEWEST PROMPT MUST NOT BE RETAINED" }],
@@ -263,6 +333,7 @@ describe("native cache observer runtime", () => {
             {
               id: "msg_child_newest",
               type: "assistant",
+              finish: "stop",
               model: { providerID: "anthropic", id: "claude-test" },
               time: { created: 3_000, completed: 3_100 },
               tokens: { input: 40, cache: { read: 60, write: 0 } },
@@ -330,6 +401,7 @@ describe("native cache observer runtime", () => {
             {
               id: "msg_latest_qualifying",
               type: "assistant",
+              finish: "stop",
               model: { providerID: "openai", id: "gpt-test" },
               time: { created: 2_000, completed: 2_100 },
               content: [{ text: "private qualifying content" }],
@@ -422,6 +494,7 @@ describe("native cache observer runtime", () => {
               {
                 id: "msg_history_before_release",
                 type: "assistant",
+                finish: "stop",
                 model: { providerID: "openai", id: "gpt-test" },
                 time: { created: 1_000, completed: 1_100 },
                 tokens: { input: 20, cache: { read: 80, write: 0 } },
@@ -438,6 +511,7 @@ describe("native cache observer runtime", () => {
             {
               id: "msg_history_after_release",
               type: "assistant",
+              finish: "stop",
               model: { providerID: "openai", id: "gpt-test" },
               time: { created: 2_000, completed: 2_100 },
               tokens: { input: 60, cache: { read: 40, write: 0 } },
@@ -465,9 +539,9 @@ describe("native cache observer runtime", () => {
     releaseMain();
     batch.abort();
     await expect(loading).rejects.toMatchObject({ name: "AbortError" });
-    expect(runtime.query(mainSessionId)).not.toHaveProperty("primaryCacheReadRatio");
+    // The last observed share persists through the release; reselection re-reads history.
     expect(runtime.query(mainSessionId)).toMatchObject({
-      primaryCacheReadTelemetry: "unavailable",
+      primaryCacheReadRatio: { value: 0.8, messageId: "msg_history_before_release" },
     });
 
     const releaseReselectedMain = runtime.subscribe(mainSessionId, vi.fn());
@@ -500,6 +574,7 @@ describe("native cache observer runtime", () => {
             {
               id: `msg_child_history_${childHistoryRequests}`,
               type: "assistant",
+              finish: "stop",
               model: { providerID: "openai", id: "gpt-test" },
               time: {
                 created: childHistoryRequests * 1_000,
@@ -548,9 +623,9 @@ describe("native cache observer runtime", () => {
     batch.abort();
     await expect(loading).rejects.toMatchObject({ name: "AbortError" });
 
-    expect(runtime.query(childSessionId)).not.toHaveProperty("primaryCacheReadRatio");
+    // The child's last observed share persists through the released batch.
     expect(runtime.query(childSessionId)).toMatchObject({
-      primaryCacheReadTelemetry: "unavailable",
+      primaryCacheReadRatio: { value: 0.8, messageId: "msg_child_history_1" },
     });
 
     const releaseReselectedChild = runtime.subscribe(childSessionId, vi.fn());
@@ -617,6 +692,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: "ses_history_live",
         assistantMessageID: "msg_live_before_page",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 50, write: 0 } },
       },
     } as never);
@@ -694,6 +770,7 @@ describe("native cache observer runtime", () => {
         {
           id: "msg_revisit",
           type: "assistant",
+          finish: "stop",
           model: { providerID: "anthropic", id: "claude-test" },
           time: { created: 1_000, completed: 1_100 },
           tokens: { input: 10, cache: { read: 20, write: 0 } },
@@ -729,6 +806,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: "ses_revisit",
         assistantMessageID: "msg_revisit",
+        finish: "stop",
         tokens: { input: 10, cache: { read: 20, write: 0 } },
       },
     } as never);
@@ -738,18 +816,19 @@ describe("native cache observer runtime", () => {
       ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
     });
 
-    // Switching away from the session marks an observation gap.
+    // Switching away keeps the last observed estimate: nothing blanket-grays on a gap.
     release();
     expect(runtime.query("ses_revisit")).toMatchObject({
-      color: "gray",
-      reason: "observation-gap",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
     });
 
     // Returning to the session re-reads fresh, identical history.
     const releaseAgain = runtime.subscribe("ses_revisit", vi.fn());
     expect(runtime.query("ses_revisit")).toMatchObject({
-      color: "gray",
-      reason: "observation-gap",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
     });
     await runtime.bootstrapHistory(["ses_revisit"]);
 
@@ -820,6 +899,7 @@ describe("native cache observer runtime", () => {
           {
             id: "msg_child_completed_before_discovery",
             type: "assistant",
+            finish: "stop",
             model: { providerID: "openai", id: "gpt-child" },
             time: { created: 5_000, completed: 5_100 },
             tokens: { input: 25, cache: { read: 75, write: 0 } },
@@ -847,6 +927,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: childSessionId,
         assistantMessageID: "msg_child_completed_before_discovery",
+        finish: "stop",
         tokens: { input: 25, cache: { read: 75, write: 0 } },
       },
     } as never);
@@ -903,6 +984,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: "ses_history_race",
         assistantMessageID: "msg_live",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 50, write: 0 } },
       },
     } as never);
@@ -911,6 +993,7 @@ describe("native cache observer runtime", () => {
         {
           id: "msg_history_stale",
           type: "assistant",
+          finish: "stop",
           model: { providerID: "anthropic", id: "claude-old" },
           time: { created: 4_000, completed: 4_100 },
           tokens: { input: 100, cache: { read: 0, write: 0 } },
@@ -976,13 +1059,15 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: "ses_child",
         assistantMessageID: "msg_child",
+        finish: "stop",
         tokens: { cache: { read: 8 } },
       },
     } as never);
 
+    // An orphan Ended has no selected route, so the estimate stays gray for lack of route.
     expect(runtime.query("ses_child")).toMatchObject({
       color: "gray",
-      reason: "insufficient-evidence",
+      reason: "route-unverified",
     });
     expect(runtime.query("ses_parent")).toBeUndefined();
     expect(parentListener).not.toHaveBeenCalled();
@@ -994,7 +1079,7 @@ describe("native cache observer runtime", () => {
     expect(releaseNativeListener).toHaveBeenCalledOnce();
     expect(runtime.query("ses_child")).toMatchObject({
       color: "gray",
-      reason: "observation-gap",
+      reason: "route-unverified",
     });
 
     const remountedListener = vi.fn();
@@ -1002,7 +1087,7 @@ describe("native cache observer runtime", () => {
     expect(subscribeEvents).toHaveBeenCalledTimes(2);
     expect(runtime.query("ses_child")).toMatchObject({
       color: "gray",
-      reason: "observation-gap",
+      reason: "route-unverified",
     });
     releaseRemounted();
 
@@ -1046,6 +1131,7 @@ describe("native cache observer runtime", () => {
         data: {
           sessionID: "ses_route",
           assistantMessageID: messageId,
+          finish: "stop",
           tokens: { input: 100, cache: { read: 20, write: 10 } },
         },
       } as never);
@@ -1074,8 +1160,9 @@ describe("native cache observer runtime", () => {
 
     started("msg_variant_change", "fast");
     expect(runtime.query("ses_route")).toMatchObject({
-      color: "gray",
-      reason: "insufficient-evidence",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
+      primaryCacheReadRatio: { messageId: "msg_implicit_default" },
     });
     ended("msg_variant_change", 1_300);
     expect(runtime.query("ses_route")).toMatchObject({
@@ -1144,7 +1231,7 @@ describe("native cache observer runtime", () => {
       receiveEvent?.({
         type: "session.step.ended",
         created,
-        data: { sessionID: sessionId, assistantMessageID: messageId, tokens },
+        data: { sessionID: sessionId, assistantMessageID: messageId, finish: "stop", tokens },
       } as never);
 
     started(parentSessionId, "msg_parent", 1_000);
@@ -1158,9 +1245,11 @@ describe("native cache observer runtime", () => {
       cache: { read: 30, write: 10 },
     });
 
+    // OpenAI-family routes use the generic 5-minute fallback, not a gray state.
     expect(runtime.query(parentSessionId)).toMatchObject({
-      color: "gray",
-      reason: "route-unverified",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
+      ttlEstimate: { kind: "fallback", ttlMs: 300_000, dispatchAtMs: 990 },
       primaryCacheReadRatio: {
         value: 0.15384615384615385,
         messageId: "msg_parent",
@@ -1170,8 +1259,9 @@ describe("native cache observer runtime", () => {
       },
     });
     expect(runtime.query(childSessionId)).toMatchObject({
-      color: "gray",
-      reason: "route-unverified",
+      color: "green",
+      reason: "estimated-reuse-within-ttl",
+      ttlEstimate: { kind: "fallback", ttlMs: 300_000, dispatchAtMs: 1_190 },
       primaryCacheReadRatio: {
         value: 0.2727272727272727,
         messageId: "msg_child",
@@ -1184,12 +1274,12 @@ describe("native cache observer runtime", () => {
       input: 0,
       cache: { read: 0, write: 0 },
     });
-    // openai has no documented TTL policy, so the parent stays gray regardless
-    // of the newer zero-telemetry ambiguity; ambiguity must not outrank the
-    // unevaluable route policy.
+    // The newer successful zero-telemetry call restarts the generic fallback estimate from
+    // its own request start (1_400 - 10); its share is unavailable, not carried over.
     expect(runtime.query(parentSessionId)).toMatchObject({
-      color: "gray",
-      reason: "route-unverified",
+      color: "green",
+      reason: "estimated-within-ttl",
+      ttlEstimate: { kind: "fallback", ttlMs: 300_000, dispatchAtMs: 1_390 },
     });
     expect(runtime.query(parentSessionId)).not.toHaveProperty("primaryCacheReadRatio");
     expect(runtime.query(childSessionId)).toMatchObject({
@@ -1279,6 +1369,7 @@ describe("native cache observer runtime", () => {
         {
           id: "msg_after_rpc_gap",
           type: "assistant",
+          finish: "stop",
           model: { providerID: "openai", id: "gpt-test" },
           time: { created: 100, completed: 200 },
           tokens: { input: 10, cache: { read: 10, write: 0 } },
@@ -1432,6 +1523,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_replayed_after_failure",
+        finish: "stop",
         tokens: { input: 20, cache: { read: 10, write: 0 } },
       },
     } as never);
@@ -1444,10 +1536,246 @@ describe("native cache observer runtime", () => {
     } as never);
 
     expect(runtime.transport()).toMatchObject({ rpc: "live", hostEvents: "unavailable" });
-    expect(runtime.query(sessionId)?.primaryCacheReadRatio).toBeUndefined();
+    // Losing the host source clears no retained evidence: the last observed share persists.
+    expect(runtime.query(sessionId)?.primaryCacheReadRatio?.value).toBe(1 / 3);
     expect(gaps).toEqual([sessionId]);
 
     releaseGaps();
+    release();
+    runtime.dispose();
+  });
+
+  it("leaves the last successful estimate and share unchanged when a later raw step fails", () => {
+    const sessionId = "ses_raw_unsuccessful";
+    let receiveEvent: ((event: never) => void) | undefined;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      listChildren: async () => [],
+      rpcConnection: () => "live",
+      now: () => 2_000,
+    });
+    const release = runtime.subscribe(sessionId, vi.fn());
+    const step = (
+      messageId: string,
+      started: number,
+      finish: string,
+      tokens: { input: number; cache: { read: number; write: number } },
+    ) => {
+      receiveEvent?.({
+        type: "session.step.started",
+        created: started + 50,
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: messageId,
+          model: { providerID: "anthropic", id: "claude-test" },
+          started,
+        },
+      } as never);
+      const projectedEnd = projectOpenCodeCacheObserverEvent({
+        type: "session.step.ended",
+        created: started + 100,
+        data: { sessionID: sessionId, assistantMessageID: messageId, finish, tokens },
+      });
+      if (projectedEnd !== undefined) receiveEvent?.(projectedEnd as never);
+    };
+
+    step("msg_ok", 1_000, "stop", { input: 10, cache: { read: 30, write: 0 } });
+    expect(runtime.query(sessionId)).toMatchObject({
+      color: "green",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+    expect(runtime.query(sessionId)?.primaryCacheReadRatio?.value).toBe(0.75);
+
+    // A later errored step is not cache evidence: estimate and share stay at the successful call.
+    step("msg_error", 1_500, "error", { input: 0, cache: { read: 0, write: 0 } });
+    expect(runtime.query(sessionId)).toMatchObject({
+      color: "green",
+      ttlEstimate: { dispatchAtMs: 1_000, deadlineAtMs: 301_000 },
+    });
+    expect(runtime.query(sessionId)?.primaryCacheReadRatio?.value).toBe(0.75);
+
+    release();
+    runtime.dispose();
+  });
+
+  it("binds each live invocation to its own host TTL snapshot", async () => {
+    let receive: ((event: never) => void) | undefined;
+    let ttl: 300_000 | 3_600_000 = 3_600_000;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receive = listener;
+        return vi.fn();
+      },
+      listChildren: async () => [],
+      rpcConnection: () => "live",
+      now: () => 2_000,
+      readRouteConfiguration: async () => ({ configuredTtlMs: ttl }),
+    });
+    const release = runtime.subscribe("ses_snapshot", vi.fn());
+    const start = (id: string, time: number) =>
+      receive?.({
+        type: "session.step.started",
+        created: time + 1,
+        data: {
+          sessionID: "ses_snapshot",
+          assistantMessageID: id,
+          model: { providerID: "anthropic", id: "claude-test" },
+          started: time,
+        },
+      } as never);
+    const end = (id: string, time: number) =>
+      receive?.({
+        type: "session.step.ended",
+        created: time,
+        data: {
+          sessionID: "ses_snapshot",
+          assistantMessageID: id,
+          tokens: { input: 10, cache: { read: 20 } },
+        },
+      } as never);
+    start("one", 1_000);
+    await Promise.resolve();
+    await Promise.resolve();
+    end("one", 1_100);
+    expect(runtime.query("ses_snapshot")?.ttlEstimate).toMatchObject({
+      kind: "configured",
+      ttlMs: 3_600_000,
+    });
+    ttl = 300_000;
+    expect(runtime.query("ses_snapshot")?.ttlEstimate?.ttlMs).toBe(3_600_000);
+    start("two", 1_200);
+    await Promise.resolve();
+    await Promise.resolve();
+    end("two", 1_300);
+    expect(runtime.query("ses_snapshot")?.ttlEstimate).toMatchObject({
+      kind: "configured",
+      ttlMs: 300_000,
+    });
+    release();
+    runtime.dispose();
+  });
+
+  it("reads provider/model TTL for live sessions without letting delayed reads rewrite completed calls", async () => {
+    let receive: ((event: never) => void) | undefined;
+    let resolveSlow!: (value: {
+      data: { id: string; settings: { cache: { ttl: string } } };
+    }) => void;
+    const slow = new Promise<{ data: { id: string; settings: { cache: { ttl: string } } } }>(
+      (resolve) => {
+        resolveSlow = resolve;
+      },
+    );
+    const client = {
+      provider: {
+        get: vi.fn(({ providerID }: { providerID: string }) =>
+          providerID === "anthropic"
+            ? slow
+            : Promise.resolve({ data: { id: providerID, settings: { cache: { ttl: "1h" } } } }),
+        ),
+      },
+      model: { list: vi.fn(async () => ({ data: [] })) },
+    } as unknown as Parameters<typeof createHostRouteConfigurationReader>[0];
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receive = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      now: () => 2_000,
+      readRouteConfiguration: createHostRouteConfigurationReader(client),
+    });
+    const releaseA = runtime.subscribe("ses_slow", vi.fn());
+    const releaseB = runtime.subscribe("ses_fast", vi.fn());
+    const start = (sessionID: string, providerID: string) =>
+      receive?.({
+        type: "session.step.started",
+        created: 1_050,
+        data: {
+          sessionID,
+          assistantMessageID: "msg",
+          model: { providerID, id: "model" },
+          started: 1_000,
+        },
+      } as never);
+    const end = (sessionID: string) =>
+      receive?.({
+        type: "session.step.ended",
+        created: 1_100,
+        data: { sessionID, assistantMessageID: "msg", tokens: { input: 10, cache: { read: 20 } } },
+      } as never);
+    start("ses_slow", "anthropic");
+    start("ses_fast", "moonshotai");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    end("ses_fast");
+    end("ses_slow");
+    expect(runtime.query("ses_fast")?.ttlEstimate).toMatchObject({
+      kind: "configured",
+      ttlMs: 3_600_000,
+    });
+    expect(runtime.query("ses_slow")?.ttlEstimate?.ttlMs).toBe(300_000);
+    resolveSlow({ data: { id: "anthropic", settings: { cache: { ttl: "1h" } } } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runtime.query("ses_slow")?.ttlEstimate?.ttlMs).toBe(300_000);
+    releaseA();
+    releaseB();
+    runtime.dispose();
+  });
+
+  it("does not apply current configuration to prior or subsequent invocations without binding", async () => {
+    const sessionId = "ses_host_ttl";
+    let receiveEvent: ((event: never) => void) | undefined;
+    let now = 2_000;
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      listChildren: async () => [],
+      rpcConnection: () => "live",
+      now: () => now,
+    });
+    const release = runtime.subscribe(sessionId, vi.fn());
+    const step = (messageId: string, started: number) => {
+      receiveEvent?.({
+        type: "session.step.started",
+        created: started + 50,
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: messageId,
+          model: { providerID: "anthropic", id: "claude-test" },
+          started,
+        },
+      } as never);
+      receiveEvent?.({
+        type: "session.step.ended",
+        created: started + 100,
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: messageId,
+          finish: "stop",
+          tokens: { input: 10, cache: { read: 20, write: 0 } },
+        },
+      } as never);
+    };
+
+    step("msg_first", 1_000);
+    await vi.waitFor(() =>
+      expect(runtime.query(sessionId)).toMatchObject({
+        ttlEstimate: { kind: "documented", ttlMs: 300_000 },
+      }),
+    );
+    now = 30_000;
+    step("msg_second", 30_000);
+    expect(runtime.query(sessionId)?.ttlEstimate?.deadlineAtMs).toBe(330_000);
+
+    now = 62_000;
+    step("msg_third", 62_000);
+    expect(runtime.query(sessionId)?.ttlEstimate?.deadlineAtMs).toBe(362_000);
+
     release();
     runtime.dispose();
   });
@@ -1520,12 +1848,13 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: "ses_new",
         assistantMessageID: "msg_new_child",
+        finish: "stop",
         tokens: { cache: { read: 4 } },
       },
     } as never);
     expect(runtime.query("ses_new")).toMatchObject({
       color: "gray",
-      reason: "insufficient-evidence",
+      reason: "route-unverified",
     });
 
     receiveEvent?.({
@@ -2061,7 +2390,7 @@ describe("native cache observer runtime", () => {
   it("a deferred root seed survives child discovery and is discarded after a switch", async () => {
     const deferred: Array<(record: { title?: string; timeUpdatedMs?: number }) => void> = [];
     let instantTitle: string | undefined;
-    const getSessionMetadata = vi.fn((sessionId: string) => {
+    const getSessionMetadata = vi.fn((_sessionId: string) => {
       if (instantTitle !== undefined) {
         return Promise.resolve({ title: instantTitle, timeUpdatedMs: 10 });
       }
@@ -2502,6 +2831,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_cache_route",
+        finish: "stop",
         tokens: { input: 100, cache: { read: 40, write: 10 } },
       },
     });
@@ -2523,6 +2853,34 @@ describe("native cache observer runtime", () => {
       selectedModel: { providerID: "openai", id: "gpt-selected" },
       cacheRoute: { providerID: "anthropic", id: "claude-cache" },
     });
+    expect(transitions).toHaveLength(1);
+
+    emit?.({
+      type: "session.step.started",
+      created: 42,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_failed_switch",
+        model: { providerID: "openai", id: "gpt-selected" },
+        started: 41,
+      },
+    });
+    const failed = projectOpenCodeCacheObserverEvent({
+      type: "session.step.ended",
+      created: 43,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_failed_switch",
+        finish: "error",
+        tokens: { input: 0 },
+      },
+    });
+    if (failed !== undefined) emit?.(failed);
+    expect(runtime.modelMismatch(sessionId)).toMatchObject({
+      status: "mismatched",
+      cacheRoute: { providerID: "anthropic", id: "claude-cache" },
+    });
+    expect(runtime.query(sessionId)).toEqual(classificationBeforeSelection);
     expect(transitions).toHaveLength(1);
 
     // Repeated selection events and stale events do not create a new transition.
@@ -2592,6 +2950,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: "ses_route_known",
         assistantMessageID: "msg_known_route",
+        finish: "stop",
         tokens: { input: 100, cache: { read: 30, write: 0 } },
       },
     });
@@ -2660,6 +3019,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_reconnect_route",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -2723,6 +3083,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_initial_event_route",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -2794,6 +3155,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_reconnect_older_snapshot",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -2885,6 +3247,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_reconnect_failed_read",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -2972,6 +3335,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_source_recovery_before_gap",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -3004,6 +3368,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_source_recovery_after_gap",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -3069,6 +3434,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_no_api_before_gap",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -3100,6 +3466,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: "msg_no_api_after_gap",
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -3144,6 +3511,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: messageId,
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -3239,6 +3607,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: messageId,
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -3350,6 +3719,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: messageId,
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });
@@ -3447,6 +3817,7 @@ describe("native cache observer runtime", () => {
       data: {
         sessionID: sessionId,
         assistantMessageID: messageId,
+        finish: "stop",
         tokens: { input: 50, cache: { read: 20, write: 0 } },
       },
     });

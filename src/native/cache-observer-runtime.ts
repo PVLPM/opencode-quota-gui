@@ -1,4 +1,8 @@
-import type { CacheObserverClassification } from "../lib/cache-observer.js";
+import {
+  type CacheConfiguredTtlMs,
+  type CacheObserverClassification,
+  isCacheConfigurableProviderId,
+} from "../lib/cache-observer.js";
 import {
   CACHE_OBSERVER_MAX_SESSIONS,
   type CacheObserverHistoryInvocation,
@@ -165,6 +169,10 @@ export function createNativeCacheObserverRuntime(options: {
     data: ReadonlyArray<unknown>;
     cursor?: { next?: string | null };
   }>;
+  readRouteConfiguration?: (route: {
+    providerId: string;
+    modelId: string;
+  }) => Promise<{ configuredTtlMs?: CacheConfiguredTtlMs }>;
   now?: () => number;
 }): NativeCacheObserverRuntime {
   interface ChildWatcher {
@@ -226,6 +234,7 @@ export function createNativeCacheObserverRuntime(options: {
   let lastHostEventOrderAtMs: number | undefined;
   let hostEventConfidenceFenced = false;
   let disposed = false;
+  const runtimeNow = options.now ?? Date.now;
 
   function query(sessionId: string): CacheObserverClassification | undefined {
     return ingestor.query(sessionId);
@@ -1050,12 +1059,14 @@ export function createNativeCacheObserverRuntime(options: {
     for (const sessionId of sessionIds) {
       if (!isSafeSessionId(sessionId)) throw new TypeError("Invalid session id");
     }
-    if (sessionIds.length > 0 && options.listMessages === undefined) {
+    const listMessages = options.listMessages;
+    if (sessionIds.length > 0 && listMessages === undefined) {
       throw new Error("Historical cache observer is unavailable");
     }
 
     activeHistoryController?.abort();
-    if (sessionIds.length === 0) return;
+    // Non-empty requests have a listMessages reader here (checked above); this narrows it.
+    if (sessionIds.length === 0 || listMessages === undefined) return;
     const controller = new AbortController();
     activeHistoryController = controller;
     activeHistorySessionIds = new Set(sessionIds);
@@ -1097,7 +1108,7 @@ export function createNativeCacheObserverRuntime(options: {
             break;
           }
           const page = await awaitWithAbort(
-            options.listMessages!(
+            listMessages(
               {
                 sessionID: sessionId,
                 limit: 1,
@@ -1137,9 +1148,6 @@ export function createNativeCacheObserverRuntime(options: {
         ingestor.ingestHistory(history);
         throwIfAborted(controller.signal);
         if (historyEpoch(sessionId) !== expectedEpoch) continue;
-        // This is the first completed assistant after the newest compaction
-        // boundary, fetched with the same epoch throughout pagination.
-        if (history[0] !== undefined) ingestor.confirmLatestHistory(history[0]);
         markHistoryLoaded(sessionId);
       }
     } finally {
@@ -1415,6 +1423,29 @@ export function createNativeCacheObserverRuntime(options: {
         if (startedSessionId === undefined) return;
         if (!interestedSessions.has(startedSessionId) && !childOwners.has(startedSessionId)) return;
         ingestor.ingest(event);
+        if (
+          event.type === "session.step.started" &&
+          isCacheConfigurableProviderId(event.data.model.providerID) &&
+          options.readRouteConfiguration !== undefined
+        ) {
+          const capture = ingestor.captureConfiguration(
+            event.data.sessionID,
+            event.data.assistantMessageID,
+          );
+          try {
+            void options
+              .readRouteConfiguration({
+                providerId: event.data.model.providerID,
+                modelId: event.data.model.id,
+              })
+              .then(
+                (config) => capture(config.configuredTtlMs),
+                () => undefined,
+              );
+          } catch {
+            // Failed reads leave the default estimate intact.
+          }
+        }
         return;
       }
 
@@ -1615,6 +1646,7 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
   });
 }
 
+/** A route's host configuration is re-read at most this often, not per event. */
 const MAX_SESSION_LABEL_CODEPOINTS = 80;
 const MAX_CHILD_DELETION_TOMBSTONES = 128;
 const MAX_HOST_TEXT_CODEPOINTS = 128;

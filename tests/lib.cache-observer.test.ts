@@ -4,12 +4,11 @@ import {
   CACHE_OBSERVER_MAX_INVOCATIONS,
   type CacheInvocationObservation,
   type CacheRouteProvenance,
+  cacheConfiguredTtlMsFromHostValue,
   classifyCacheObserverState,
   createCacheObserverState,
-  observeCacheCompactionBoundary,
-  observeCacheInvalidation,
   observeCacheInvocation,
-  setCacheTtlEvidence,
+  openAiDocumentedTtlMs,
 } from "../src/lib/cache-observer.js";
 
 const route: CacheRouteProvenance = {
@@ -20,10 +19,13 @@ const route: CacheRouteProvenance = {
   basis: { source: "opencode-message-metadata", reference: "msg-1" },
 };
 
-function stateFor(sessionId = "ses-parent") {
-  return createCacheObserverState({ sessionId, route });
+const basis = { source: "successful-primary-step", reference: "msg-1" };
+
+function stateFor(sessionId = "ses-parent", scopeRoute: CacheRouteProvenance = route) {
+  return createCacheObserverState({ sessionId, route: scopeRoute });
 }
 
+/** A successful, eligible primary request: dispatch at 100 ms, completed at 100 ms. */
 function invocation(
   overrides: Partial<CacheInvocationObservation> = {},
 ): CacheInvocationObservation {
@@ -32,27 +34,41 @@ function invocation(
     order: { completedAtMs: 100, messageId: "msg-1" },
     dispatchAtMs: 100,
     route,
-    primaryClassification: {
-      kind: "primary",
-      basis: { source: "existing-runtime-classifier", reference: "msg-1" },
-    },
+    basis,
     counts: { fresh: 20, read: 80, write: 10 },
     ...overrides,
   };
 }
 
-function withActiveTtl(state = stateFor(), configuredTtlMs = 300_000) {
-  return setCacheTtlEvidence(state, {
-    kind: "configured",
-    protocolId: "anthropic-messages",
-    route,
-    configuredTtlMs,
-    basis: { source: "anthropic-messages", reference: "accepted-5m-cache-ttl" },
-  });
+function routeOf(providerId: string, modelId: string): CacheRouteProvenance {
+  return { providerId, modelId, basis: { source: "opencode-message-metadata", reference: "m" } };
 }
 
-describe("primary cache-read ratio telemetry", () => {
-  it("accepts a positive read when present fresh and write counters are legitimately zero", () => {
+/** A state whose newest successful call is `overrides` on the given route. */
+function observed(
+  scopeRoute: CacheRouteProvenance,
+  overrides: Partial<CacheInvocationObservation> = {},
+) {
+  return observeCacheInvocation(
+    stateFor("ses-parent", scopeRoute),
+    invocation({ route: scopeRoute, ...overrides }),
+  );
+}
+
+describe("primary cache-read ratio", () => {
+  it("reports a valid zero read when fresh and write telemetry are present", () => {
+    const state = observeCacheInvocation(
+      stateFor(),
+      invocation({ counts: { fresh: 20, read: 0, write: 10 } }),
+    );
+
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+      primaryCacheReadRatio: { value: 0, messageId: "msg-1" },
+      primaryCacheReadTelemetry: "available",
+    });
+  });
+
+  it("accepts a positive read when fresh and write counters are legitimately zero", () => {
     const state = observeCacheInvocation(
       stateFor(),
       invocation({ counts: { fresh: 0, read: 80, write: 0 } }),
@@ -64,7 +80,7 @@ describe("primary cache-read ratio telemetry", () => {
     });
   });
 
-  it("does not fabricate a zero-read ratio from normalized all-zero counters", () => {
+  it("does not fabricate a ratio from normalized all-zero counters", () => {
     const state = observeCacheInvocation(
       stateFor(),
       invocation({ counts: { fresh: 0, read: 0, write: 0 } }),
@@ -75,645 +91,386 @@ describe("primary cache-read ratio telemetry", () => {
       primaryCacheReadTelemetry: "unavailable",
     });
   });
-});
 
-describe("observer-only cache state", () => {
-  it("stays insufficient without observations, but a primary cache write establishes a prefix", () => {
-    const empty = classifyCacheObserverState(stateFor(), 200);
-    expect(empty.color).toBe("gray");
-
-    const written = observeCacheInvocation(
-      withActiveTtl(),
-      invocation({ counts: { fresh: 20, read: 0, write: 10 } }),
+  it("reports missing telemetry as unavailable when any counter is absent", () => {
+    const state = observeCacheInvocation(
+      stateFor(),
+      invocation({ counts: { read: 80, write: 0 } }),
     );
-    const writtenClassification = classifyCacheObserverState(written, 200);
-    expect(writtenClassification).toMatchObject({
-      color: "green",
-      reason: "estimated-write-within-ttl",
-      confidence: "best-effort",
-      ttlSemantics: "configured-minimum",
-      configuredTtlMs: 300_000,
-      configuredTtlDeadlineAtMs: 300_100,
-    });
-    expect(writtenClassification).not.toHaveProperty("verifiedExpiresAtMs");
-    expect(writtenClassification.primaryCacheReadRatio).toBeUndefined();
-    expect(writtenClassification).not.toHaveProperty("warmingEnabled");
-  });
-
-  it("turns green only for an observed cache read with matching supported configured TTL", () => {
-    const state = observeCacheInvocation(withActiveTtl(), invocation());
 
     expect(classifyCacheObserverState(state, 200)).toMatchObject({
-      color: "green",
-      reason: "estimated-reuse-within-ttl",
-      confidence: "best-effort",
-      ttlSemantics: "configured-minimum",
-      configuredTtlDeadlineAtMs: 300_100,
+      primaryCacheReadTelemetry: "unavailable",
+    });
+    expect(classifyCacheObserverState(state, 200)).not.toHaveProperty("primaryCacheReadRatio");
+  });
+
+  it("computes the share from fresh+read+write independently of the estimate's route policy", () => {
+    const openai = routeOf("openai", "gpt-6.1");
+    const state = observed(openai, { counts: { fresh: 20, read: 80, write: 0 } });
+
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
       primaryCacheReadRatio: {
-        value: 80 / 110,
-        messageId: "msg-1",
+        value: 0.8,
         numerator: "cache-read",
         denominator: "fresh+read+write",
       },
     });
   });
 
-  it("allows best-effort green without an impossible invalidation-coverage horizon", () => {
-    const withTtl = setCacheTtlEvidence(stateFor(), {
-      kind: "configured",
-      protocolId: "anthropic-messages",
-      route,
-      configuredTtlMs: 300_000,
-      basis: { source: "anthropic-messages", reference: "accepted-5m-cache-ttl" },
-    });
-    const state = observeCacheInvocation(withTtl, invocation());
-
-    expect(classifyCacheObserverState(state, 200)).toMatchObject({
-      color: "green",
-      reason: "estimated-reuse-within-ttl",
-      confidence: "best-effort",
-      ttlSemantics: "configured-minimum",
-    });
-  });
-
-  it("does not accept a configured TTL unless the exact supported protocol and route match", () => {
-    const unsupportedProtocol = setCacheTtlEvidence(stateFor(), {
-      kind: "configured",
-      protocolId: "anthropic-messages",
-      route: { ...route, protocolId: undefined },
-      configuredTtlMs: 300_000,
-      basis: { source: "anthropic-messages", reference: "accepted-5m-cache-ttl" },
-    });
-    const state = observeCacheInvocation(unsupportedProtocol, invocation());
-
-    expect(classifyCacheObserverState(state, 200)).toMatchObject({
-      color: "gray",
-      reason: "route-unverified",
-    });
-  });
-
-  it("does not establish reusable evidence from a non-primary or unclassified invocation", () => {
-    const nonPrimary = observeCacheInvocation(
-      withActiveTtl(),
+  it("suppresses an older ratio when the newest successful call has no usable counters", () => {
+    let state = observeCacheInvocation(stateFor(), invocation());
+    state = observeCacheInvocation(
+      state,
       invocation({
-        primaryClassification: {
-          kind: "not-primary",
-          basis: { source: "existing-runtime-classifier", reference: "msg-1" },
-        },
-      }),
-    );
-    const ambiguous = observeCacheInvocation(
-      withActiveTtl(),
-      invocation({
-        primaryClassification: {
-          kind: "unknown",
-          basis: { source: "existing-runtime-classifier", reference: "msg-1" },
-        },
+        order: { completedAtMs: 150, messageId: "msg-zero" },
+        counts: { fresh: 0, read: 0, write: 0 },
       }),
     );
 
-    expect(classifyCacheObserverState(nonPrimary, 200).color).toBe("gray");
-    expect(classifyCacheObserverState(ambiguous, 200)).toMatchObject({
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+      primaryCacheReadTelemetry: "unavailable",
+    });
+    expect(classifyCacheObserverState(state, 200)).not.toHaveProperty("primaryCacheReadRatio");
+  });
+});
+
+describe("retention estimate origin and colors", () => {
+  it("stays gray with insufficient evidence until a successful eligible call exists", () => {
+    expect(classifyCacheObserverState(stateFor(), 200)).toEqual({
       color: "gray",
       reason: "insufficient-evidence",
     });
   });
 
-  it("does not keep an old green status after a newer relevant invocation is ambiguous", () => {
-    let state = observeCacheInvocation(withActiveTtl(), invocation());
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 150, messageId: "msg-uncertain" },
-        primaryClassification: {
-          kind: "unknown",
-          basis: { source: "existing-runtime-classifier", reference: "msg-uncertain" },
-        },
-      }),
+  it("starts the estimate at request start for a cache write as well as a read", () => {
+    const state = observeCacheInvocation(
+      stateFor(),
+      invocation({ counts: { fresh: 20, read: 0, write: 10 } }),
     );
 
     expect(classifyCacheObserverState(state, 200)).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
+      color: "green",
+      reason: "estimated-write-within-ttl",
+      recheckAtMs: 240_100,
+      ttlEstimate: {
+        kind: "documented",
+        ttlMs: 300_000,
+        dispatchAtMs: 100,
+        deadlineAtMs: 300_100,
+      },
     });
   });
 
-  it("does not leave an older prefix green after a newer primary invocation reports no read or write", () => {
-    let state = observeCacheInvocation(withActiveTtl(), invocation());
+  it("keeps the request start as the origin for a successful call with no cache activity", () => {
+    const state = observeCacheInvocation(
+      stateFor(),
+      invocation({ counts: { fresh: 100, read: 0, write: 0 } }),
+    );
+
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+      color: "green",
+      reason: "estimated-within-ttl",
+      ttlEstimate: { deadlineAtMs: 300_100 },
+    });
+  });
+
+  it("is green before 80% of the TTL, yellow in the final 20%, and red once expired", () => {
+    const state = observeCacheInvocation(stateFor(), invocation());
+
+    expect(classifyCacheObserverState(state, 240_099).color).toBe("green");
+    expect(classifyCacheObserverState(state, 240_100)).toMatchObject({
+      color: "yellow",
+      reason: "estimated-ttl-near-expiry",
+      recheckAtMs: 300_100,
+    });
+    expect(classifyCacheObserverState(state, 300_099).color).toBe("yellow");
+    expect(classifyCacheObserverState(state, 300_100)).toMatchObject({
+      color: "red",
+      reason: "estimated-ttl-expired",
+    });
+  });
+
+  it("measures a long successful call from its request start, not its completion", () => {
+    // Dispatched at 100 and completed at 290_100: the 5-minute window is already
+    // anchored to the start, so the call's completion does not extend it.
+    const state = observeCacheInvocation(
+      stateFor(),
+      invocation({ order: { completedAtMs: 290_100, messageId: "msg-long" } }),
+    );
+
+    expect(classifyCacheObserverState(state, 240_100)).toMatchObject({
+      color: "yellow",
+      ttlEstimate: { dispatchAtMs: 100, deadlineAtMs: 300_100 },
+    });
+    expect(classifyCacheObserverState(state, 300_100)).toMatchObject({
+      color: "red",
+      reason: "estimated-ttl-expired",
+    });
+  });
+
+  it("renews the estimate from a newer request start, not from completion time", () => {
+    let state = observeCacheInvocation(stateFor(), invocation());
     state = observeCacheInvocation(
       state,
       invocation({
-        order: { completedAtMs: 150, messageId: "msg-no-cache-activity" },
+        order: { completedAtMs: 250_100, messageId: "msg-2" },
+        dispatchAtMs: 250_000,
         counts: { fresh: 100, read: 0, write: 0 },
       }),
     );
 
-    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+    expect(classifyCacheObserverState(state, 300_200)).toMatchObject({
+      color: "green",
+      ttlEstimate: { dispatchAtMs: 250_000, deadlineAtMs: 550_000 },
+    });
+  });
+
+  it("applies the host-configured 1-hour TTL with 80/20 boundaries on Anthropic", () => {
+    const state = observed(route);
+    const config = { configuredTtlMs: 3_600_000 as const };
+
+    expect(classifyCacheObserverState(state, 300_100, config)).toMatchObject({
+      color: "green",
+      ttlEstimate: { kind: "configured", ttlMs: 3_600_000, deadlineAtMs: 3_600_100 },
+    });
+    expect(classifyCacheObserverState(state, 2_880_100, config)).toMatchObject({
       color: "yellow",
-      reason: "ambiguous-invocation",
+      reason: "estimated-ttl-near-expiry",
+      recheckAtMs: 3_600_100,
     });
-  });
-
-  it("treats a newer primary invocation with unknown route provenance as ambiguous", () => {
-    let state = observeCacheInvocation(withActiveTtl(), invocation());
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 150, messageId: "msg-route-unknown" },
-        route: undefined,
-        counts: { fresh: 20, read: 0, write: 10 },
-      }),
-    );
-
-    expect(classifyCacheObserverState(state, 200)).toMatchObject({
-      color: "yellow",
-      reason: "ambiguous-invocation",
-    });
-  });
-
-  it("matches route identity by observed provider/model while retaining each message's basis", () => {
-    const secondMessageRoute: CacheRouteProvenance = {
-      ...route,
-      basis: { source: "opencode-message-metadata", reference: "msg-2" },
-    };
-    const state = observeCacheInvocation(
-      withActiveTtl(),
-      invocation({
-        order: { completedAtMs: 120, messageId: "msg-2" },
-        route: secondMessageRoute,
-      }),
-    );
-
-    expect(classifyCacheObserverState(state, 200).color).toBe("green");
-  });
-
-  it("uses gray for unknown TTL and red for a likely miss after the estimated TTL", () => {
-    const observed = observeCacheInvocation(stateFor(), invocation());
-    const unverified = setCacheTtlEvidence(observed, {
-      kind: "unknown",
-      basis: "ttl-not-observed",
-    });
-    const expired = withActiveTtl(observed);
-
-    expect(classifyCacheObserverState(unverified, 200).color).toBe("gray");
-    expect(classifyCacheObserverState(expired, 300_100)).toMatchObject({
+    expect(classifyCacheObserverState(state, 3_600_100, config)).toMatchObject({
       color: "red",
       reason: "estimated-ttl-expired",
     });
   });
 
-  it("reports an explicit route-scoped invalidation separately from estimated TTL expiry", () => {
-    const observed = observeCacheInvocation(withActiveTtl(), invocation());
-    const invalidated = observeCacheInvalidation(observed, {
-      sessionId: "ses-parent",
-      route,
-      order: { completedAtMs: 150, messageId: "invalidate-1" },
-      basis: { source: "host-invalidation-metadata", reference: "invalidate-1" },
-    });
+  it("applies the host-configured 1-hour TTL to a Kimi route", () => {
+    const kimi = routeOf("moonshotai", "kimi-k2");
+    const state = observed(kimi);
 
-    expect(classifyCacheObserverState(invalidated, 200).color).toBe("red");
-    expect(classifyCacheObserverState(withActiveTtl(), 200).color).not.toBe("red");
-
-    const noPreviousPrefix = observeCacheInvalidation(withActiveTtl(), {
-      sessionId: "ses-parent",
-      route,
-      order: { completedAtMs: 150, messageId: "invalidate-without-prefix" },
-      basis: { source: "host-invalidation-metadata", reference: "invalidate-without-prefix" },
+    expect(
+      classifyCacheObserverState(state, 300_100, { configuredTtlMs: 3_600_000 }),
+    ).toMatchObject({
+      color: "green",
+      ttlEstimate: { kind: "configured", ttlMs: 3_600_000, deadlineAtMs: 3_600_100 },
     });
-    expect(classifyCacheObserverState(noPreviousPrefix, 200).color).not.toBe("red");
-
-    const writtenPrefix = observeCacheInvocation(
-      withActiveTtl(),
-      invocation({ counts: { fresh: 20, read: 0, write: 10 } }),
-    );
-    const invalidatedWrite = observeCacheInvalidation(writtenPrefix, {
-      sessionId: "ses-parent",
-      route,
-      order: { completedAtMs: 150, messageId: "invalidate-after-write" },
-      basis: { source: "host-invalidation-metadata", reference: "invalidate-after-write" },
-    });
-    expect(classifyCacheObserverState(invalidatedWrite, 200).color).toBe("red");
   });
 
-  it("reports host cache-read ratios from positive counters without protocol identity", () => {
-    let state = withActiveTtl();
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 100, messageId: "msg-primary-old" },
-        counts: { fresh: 10, read: 10, write: 0 },
-      }),
-    );
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 120, messageId: "msg-supplementary" },
-        primaryClassification: {
-          kind: "not-primary",
-          basis: { source: "existing-runtime-classifier", reference: "msg-supplementary" },
-        },
-        counts: { fresh: 99, read: 0, write: 1 },
-      }),
-    );
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 130, messageId: "msg-primary-last" },
-        counts: { fresh: 20, read: 60, write: 20 },
-      }),
-    );
+  it("keeps the documented 5-minute Kimi default when no TTL is configured", () => {
+    const kimi = routeOf("moonshotai", "kimi-k2");
 
-    const classified = classifyCacheObserverState(state, 200);
-    expect(classified.primaryCacheReadRatio).toMatchObject({
-      value: 0.6,
-      messageId: "msg-primary-last",
+    expect(classifyCacheObserverState(observed(kimi), 200)).toMatchObject({
+      color: "green",
+      ttlEstimate: { kind: "documented", ttlMs: 300_000 },
     });
+  });
 
-    const missingWrite = observeCacheInvocation(
-      withActiveTtl(),
-      invocation({ counts: { fresh: 10, read: 10 } }),
-    );
-    expect(classifyCacheObserverState(missingWrite, 200).primaryCacheReadRatio).toBeUndefined();
+  it("ignores a configured TTL on a route without a supported configuration", () => {
+    const other = routeOf("deepseek", "deepseek-chat");
 
-    const missingFresh = observeCacheInvocation(
-      withActiveTtl(),
-      invocation({ counts: { read: 10, write: 10 } }),
-    );
-    const zeroDenominator = observeCacheInvocation(
-      withActiveTtl(),
-      invocation({ counts: { fresh: 0, read: 0, write: 0 } }),
-    );
-    expect(classifyCacheObserverState(missingFresh, 200).primaryCacheReadRatio).toBeUndefined();
-    expect(classifyCacheObserverState(zeroDenominator, 200).primaryCacheReadRatio).toBeUndefined();
-
-    const explicitZeroWrite = observeCacheInvocation(
-      withActiveTtl(),
-      invocation({ counts: { fresh: 20, read: 80, write: 0 } }),
-    );
-    expect(classifyCacheObserverState(explicitZeroWrite, 200)).toMatchObject({
-      primaryCacheReadRatio: { value: 0.8, messageId: "msg-1" },
-      primaryCacheReadTelemetry: "available",
+    expect(
+      classifyCacheObserverState(observed(other), 200, { configuredTtlMs: 3_600_000 }),
+    ).toMatchObject({
+      color: "green",
+      ttlEstimate: { kind: "empirical", ttlMs: 86_400_000 },
     });
+  });
 
-    const nonAnthropicRoute: CacheRouteProvenance = {
-      ...route,
-      providerId: "openai",
-      modelId: "gpt-test",
-      protocolId: undefined,
-    };
-    const nonAnthropic = createCacheObserverState({
-      sessionId: "ses-parent",
-      route: nonAnthropicRoute,
+  it("parses only supported host cache.ttl values", () => {
+    expect(cacheConfiguredTtlMsFromHostValue("5m")).toBe(300_000);
+    expect(cacheConfiguredTtlMsFromHostValue("300s")).toBe(300_000);
+    expect(cacheConfiguredTtlMsFromHostValue("1h")).toBe(3_600_000);
+    expect(cacheConfiguredTtlMsFromHostValue("60m")).toBe(3_600_000);
+    expect(cacheConfiguredTtlMsFromHostValue("24h")).toBeUndefined();
+    expect(cacheConfiguredTtlMsFromHostValue("30m")).toBeUndefined();
+    expect(cacheConfiguredTtlMsFromHostValue("soon")).toBeUndefined();
+    expect(cacheConfiguredTtlMsFromHostValue(3_600_000)).toBeUndefined();
+    expect(cacheConfiguredTtlMsFromHostValue(undefined)).toBeUndefined();
+  });
+
+  it("uses the documented 5-minute default for direct Anthropic without configuration", () => {
+    expect(classifyCacheObserverState(observed(route), 200)).toMatchObject({
+      color: "green",
+      ttlEstimate: { kind: "documented", ttlMs: 300_000 },
     });
-    const nonAnthropicState = observeCacheInvocation(
-      nonAnthropic,
-      invocation({ route: nonAnthropicRoute }),
-    );
-    expect(classifyCacheObserverState(nonAnthropicState, 200)).toMatchObject({
+  });
+
+  it("applies the empirical 24-hour estimate to direct DeepSeek", () => {
+    const deepseek = routeOf("deepseek", "deepseek-chat");
+
+    expect(classifyCacheObserverState(observed(deepseek), 200)).toMatchObject({
+      color: "green",
+      ttlEstimate: {
+        kind: "empirical",
+        ttlMs: 86_400_000,
+        dispatchAtMs: 100,
+        deadlineAtMs: 86_400_100,
+      },
+    });
+  });
+
+  it("applies the empirical 60-minute estimate only to OpenCode Go deepseek-v4.1-flash", () => {
+    expect(
+      classifyCacheObserverState(observed(routeOf("opencode-go", "deepseek-v4.1-flash")), 200),
+    ).toMatchObject({ color: "green", ttlEstimate: { kind: "empirical", ttlMs: 3_600_000 } });
+    expect(
+      classifyCacheObserverState(observed(routeOf("opencode-go", "other")), 200),
+    ).toMatchObject({ color: "green", ttlEstimate: { kind: "fallback", ttlMs: 300_000 } });
+  });
+
+  it("does not infer vendor retention for gateway routes", () => {
+    expect(
+      classifyCacheObserverState(
+        observed(routeOf("openrouter", "deepseek/deepseek-v4.1-flash")),
+        200,
+      ),
+    ).toMatchObject({ color: "green", ttlEstimate: { kind: "fallback", ttlMs: 300_000 } });
+  });
+
+  it("gives OpenAI-family routes the generic 5-minute fallback, not a gray state", () => {
+    for (const providerId of ["openai", "chatgpt", "codex"]) {
+      expect(
+        classifyCacheObserverState(observed(routeOf(providerId, "gpt-6.1")), 200),
+      ).toMatchObject({
+        color: "green",
+        ttlEstimate: { kind: "fallback", ttlMs: 300_000, deadlineAtMs: 300_100 },
+      });
+    }
+  });
+
+  it("stays gray with dispatch-time-unavailable when request start is absent", () => {
+    const state = observeCacheInvocation(stateFor(), invocation({ dispatchAtMs: undefined }));
+
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+      color: "gray",
+      reason: "dispatch-time-unavailable",
+    });
+  });
+
+  it("stays gray with route-unverified when the newest successful call lacks route provenance", () => {
+    const state = observeCacheInvocation(stateFor(), invocation({ route: undefined }));
+
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
       color: "gray",
       reason: "route-unverified",
-      primaryCacheReadRatio: {
-        value: 0.7272727272727273,
-        messageId: "msg-1",
-        numerator: "cache-read",
-        denominator: "fresh+read+write",
-      },
     });
   });
 
-  it("exposes the configured TTL estimate from dispatch without claiming physical eviction", () => {
-    const state = observeCacheInvocation(withActiveTtl(), invocation());
-    expect(classifyCacheObserverState(state, 200)).toMatchObject({
+  it("does not expose confidence, verified-expiry, or TTL-semantics labels", () => {
+    const classification = classifyCacheObserverState(observed(route), 200);
+
+    expect(classification).not.toHaveProperty("confidence");
+    expect(classification).not.toHaveProperty("verifiedExpiresAtMs");
+    expect(classification).not.toHaveProperty("ttlSemantics");
+  });
+});
+
+describe("OpenAI model-specific lifetime", () => {
+  const direct = { directOpenAiApi: true };
+  const openai = (modelId: string) => routeOf("openai", modelId);
+
+  it("identifies the documented 30-minute families by model id", () => {
+    for (const modelId of [
+      "gpt-5.5",
+      "gpt-5.5-pro",
+      "gpt-5.6",
+      "gpt-5.7",
+      "gpt-6.1-sol",
+      "gpt-6.1-terra",
+    ]) {
+      expect(openAiDocumentedTtlMs(modelId)).toBe(1_800_000);
+    }
+    for (const modelId of ["gpt-5.4", "gpt-5.5-codex", "gpt-5.1", "gpt-4.1", "o4-mini", "gpt-5"]) {
+      expect(openAiDocumentedTtlMs(modelId)).toBeUndefined();
+    }
+  });
+
+  it("applies the documented 30-minute lifetime on a confirmed direct API route, with 80/20 boundaries", () => {
+    const state = observed(openai("gpt-6.1-sol"));
+
+    expect(classifyCacheObserverState(state, 200, direct)).toMatchObject({
       color: "green",
-      configuredTtlMs: 300_000,
-      configuredTtlDeadlineAtMs: 300_100,
-      confidence: "best-effort",
-      ttlSemantics: "configured-minimum",
-      recheckAtMs: 240_100,
-      primaryCacheReadRatio: {
-        observedAtMs: 100,
+      ttlEstimate: {
+        kind: "documented",
+        ttlMs: 1_800_000,
+        dispatchAtMs: 100,
+        deadlineAtMs: 1_800_100,
       },
     });
-    const ttlExpired = classifyCacheObserverState(state, 300_100);
-    expect(ttlExpired).toMatchObject({
+    expect(classifyCacheObserverState(state, 1_440_100, direct)).toMatchObject({
+      color: "yellow",
+      reason: "estimated-ttl-near-expiry",
+    });
+    expect(classifyCacheObserverState(state, 1_800_100, direct)).toMatchObject({
       color: "red",
       reason: "estimated-ttl-expired",
     });
-    expect(ttlExpired).toHaveProperty("configuredTtlDeadlineAtMs", 300_100);
   });
 
-  it("uses the host completion-time and message-id ordering, not arrival order", () => {
-    let state = withActiveTtl();
-    state = observeCacheInvocation(
-      state,
+  it("keeps the generic 5-minute fallback when the route is not confirmed as direct", () => {
+    expect(classifyCacheObserverState(observed(openai("gpt-6.1-sol")), 200)).toMatchObject({
+      color: "green",
+      ttlEstimate: { kind: "fallback", ttlMs: 300_000 },
+    });
+  });
+
+  it("does not apply the OpenAI lifetime to a model without one or to ChatGPT-family providers", () => {
+    expect(classifyCacheObserverState(observed(openai("gpt-5.4")), 200, direct)).toMatchObject({
+      ttlEstimate: { kind: "fallback", ttlMs: 300_000 },
+    });
+    expect(
+      classifyCacheObserverState(observed(routeOf("chatgpt", "gpt-6.1-sol")), 200, direct),
+    ).toMatchObject({ ttlEstimate: { kind: "fallback", ttlMs: 300_000 } });
+  });
+});
+
+describe("observer state boundaries", () => {
+  it("orders invocations by completion time and message id, not arrival order", () => {
+    let state = observeCacheInvocation(
+      stateFor(),
       invocation({
-        order: { completedAtMs: 100, messageId: "msg-z" },
-        route: { ...route, basis: { ...route.basis, reference: "msg-z" } },
-        counts: { fresh: 70, read: 20, write: 10 },
+        order: { completedAtMs: 200, messageId: "msg-b" },
+        dispatchAtMs: 150,
       }),
     );
     state = observeCacheInvocation(
       state,
       invocation({
         order: { completedAtMs: 100, messageId: "msg-a" },
-        route: { ...route, basis: { ...route.basis, reference: "msg-a" } },
-        counts: { fresh: 10, read: 90, write: 0 },
+        dispatchAtMs: 10,
       }),
     );
 
-    expect(classifyCacheObserverState(state, 200).primaryCacheReadRatio).toMatchObject({
-      value: 0.2,
-      messageId: "msg-z",
+    expect(classifyCacheObserverState(state, 300)).toMatchObject({
+      ttlEstimate: { dispatchAtMs: 150 },
     });
   });
 
-  it("withholds the last-primary ratio when a later invocation's primary classification is uncertain", () => {
-    let state = withActiveTtl();
-    state = observeCacheInvocation(state, invocation());
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 150, messageId: "msg-unknown" },
-        primaryClassification: {
-          kind: "unknown",
-          basis: { source: "existing-runtime-classifier", reference: "not-classified" },
-        },
-      }),
-    );
-
-    expect(classifyCacheObserverState(state, 200).primaryCacheReadRatio).toBeUndefined();
-  });
-
-  it("does not carry reusable evidence across an observed compaction boundary", () => {
-    let state = observeCacheInvocation(withActiveTtl(), invocation());
-    state = observeCacheCompactionBoundary(state, {
-      sessionId: "ses-parent",
-      order: { completedAtMs: 140, messageId: "compact-1" },
-      basis: { source: "opencode-compaction-marker", reference: "compact-1" },
-    });
-
-    expect(classifyCacheObserverState(state, 200).color).toBe("yellow");
-
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 150, messageId: "msg-after-compact" },
-        counts: { fresh: 20, read: 0, write: 10 },
-      }),
-    );
-    expect(classifyCacheObserverState(state, 200)).toMatchObject({
-      color: "green",
-      reason: "estimated-write-within-ttl",
-    });
-  });
-
-  it("keeps session ownership separate and retains a bounded, ordered invocation window", () => {
+  it("rejects evidence from another session or route", () => {
     expect(() =>
       observeCacheInvocation(stateFor(), invocation({ sessionId: "ses-child" })),
-    ).toThrow();
+    ).toThrow(TypeError);
+    expect(() =>
+      observeCacheInvocation(
+        stateFor(),
+        invocation({ route: { providerId: "anthropic", modelId: "other", basis } }),
+      ),
+    ).toThrow(TypeError);
+  });
 
-    let state = withActiveTtl();
-    for (let index = 0; index < CACHE_OBSERVER_MAX_INVOCATIONS + 3; index += 1) {
+  it("retains a bounded, ordered invocation window", () => {
+    let state = stateFor();
+    for (let index = 0; index <= CACHE_OBSERVER_MAX_INVOCATIONS; index += 1) {
       state = observeCacheInvocation(
         state,
         invocation({
           order: { completedAtMs: 100 + index, messageId: `msg-${index}` },
-          counts: { fresh: 20, read: index + 1, write: 10 },
+          dispatchAtMs: 100 + index,
         }),
       );
     }
 
     expect(state.invocations).toHaveLength(CACHE_OBSERVER_MAX_INVOCATIONS);
-    expect(classifyCacheObserverState(state, 200).primaryCacheReadRatio?.messageId).toBe(
-      `msg-${CACHE_OBSERVER_MAX_INVOCATIONS + 2}`,
-    );
-  });
-
-  it("reports uncertainty rather than gray when truncation removes the established prefix", () => {
-    let state = observeCacheInvocation(withActiveTtl(), invocation());
-    for (let index = 0; index < CACHE_OBSERVER_MAX_INVOCATIONS; index += 1) {
-      state = observeCacheInvocation(
-        state,
-        invocation({
-          order: { completedAtMs: 200 + index, messageId: `msg-nonprimary-${index}` },
-          primaryClassification: {
-            kind: "not-primary",
-            basis: { source: "existing-runtime-classifier", reference: `msg-nonprimary-${index}` },
-          },
-          counts: { fresh: 0, read: 0, write: 0 },
-        }),
-      );
-    }
-
-    expect(state.invocations).toHaveLength(CACHE_OBSERVER_MAX_INVOCATIONS);
-    expect(classifyCacheObserverState(state, 200)).toMatchObject({
-      color: "yellow",
-      reason: "history-truncated",
-    });
-  });
-
-  it("uses the documented 5-minute estimate from dispatch and warns at the final 20%", () => {
-    const state = observeCacheInvocation(
-      stateFor(),
-      invocation({
-        order: { completedAtMs: 10_100, messageId: "msg-1" },
-        dispatchAtMs: 10_000,
-      }),
-    );
-
-    expect(classifyCacheObserverState(state, 10_000 + 239_999)).toMatchObject({
-      color: "green",
-      reason: "estimated-reuse-within-ttl",
-      ttlSemantics: "documented-estimate",
-      ttlEstimate: {
-        kind: "documented",
-        ttlMs: 300_000,
-        dispatchAtMs: 10_000,
-        deadlineAtMs: 310_000,
-        source: "Anthropic prompt caching documentation",
-        reference: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
-        assumption:
-          "assuming direct standard route/default TTL; custom endpoint, gateway, changed configuration or provider eviction may cause miss",
-      },
-      recheckAtMs: 250_000,
-    });
-
-    expect(classifyCacheObserverState(state, 250_000)).toMatchObject({
-      color: "yellow",
-      reason: "estimated-ttl-near-expiry",
-      recheckAtMs: 310_000,
-    });
-    expect(classifyCacheObserverState(state, 309_999).color).toBe("yellow");
-    expect(classifyCacheObserverState(state, 310_000)).toMatchObject({
-      color: "red",
-      reason: "estimated-ttl-expired",
-    });
-    expect(classifyCacheObserverState(state, 310_000)).not.toHaveProperty("verifiedExpiresAtMs");
-  });
-
-  it("renews the estimate from a newer cache-positive dispatch, not completion time", () => {
-    let state = observeCacheInvocation(stateFor(), invocation({ dispatchAtMs: 10_000 }));
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 400_000, messageId: "msg-renewed" },
-        dispatchAtMs: 395_000,
-        counts: { fresh: 20, read: 80, write: 0 },
-      }),
-    );
-
-    expect(classifyCacheObserverState(state, 400_000)).toMatchObject({
-      color: "green",
-      reason: "estimated-reuse-within-ttl",
-      ttlEstimate: {
-        dispatchAtMs: 395_000,
-        deadlineAtMs: 695_000,
-      },
-      recheckAtMs: 635_000,
-    });
-  });
-
-  it.each([
-    [
-      "moonshotai",
-      "Kimi context caching documentation",
-      "https://platform.kimi.ai/docs/guide/context-caching",
-    ],
-    [
-      "alibaba",
-      "Qwen context caching documentation",
-      "https://docs.qwencloud.com/developer-guides/run-and-scale/context-cache",
-    ],
-    [
-      "amazon-bedrock",
-      "Amazon Bedrock prompt caching documentation",
-      "https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html",
-    ],
-  ])("uses documented TTL provenance for supported provider %s", (providerId, source, reference) => {
-    const providerRoute = { ...route, providerId, protocolId: undefined };
-    const state = observeCacheInvocation(
-      createCacheObserverState({ sessionId: "ses-parent", route: providerRoute }),
-      invocation({
-        order: { completedAtMs: 10_100, messageId: "msg-1" },
-        route: providerRoute,
-        dispatchAtMs: 10_000,
-      }),
-    );
-    const assumption =
-      providerId === "alibaba"
-        ? "Assumes 5-minute explicit/session caching; implicit cache retention is indeterminate. Custom endpoint, gateway, changed configuration, or provider eviction may cause a miss."
-        : "assuming direct standard route/default TTL; custom endpoint, gateway, changed configuration or provider eviction may cause miss";
-
-    expect(classifyCacheObserverState(state, 20_000)).toMatchObject({
-      color: "green",
-      reason: "estimated-reuse-within-ttl",
-      ttlSemantics: "documented-estimate",
-      ttlEstimate: {
-        kind: "documented",
-        ttlMs: 300_000,
-        source,
-        reference,
-        assumption,
-      },
-    });
-    expect(classifyCacheObserverState(state, 20_000)?.ttlEstimate?.assumption).toBeTruthy();
-  });
-
-  it("classifies a documented primary cache write as a green likely-reuse estimate", () => {
-    const providerRoute = { ...route, providerId: "moonshotai", protocolId: undefined };
-    const state = observeCacheInvocation(
-      createCacheObserverState({ sessionId: "ses-parent", route: providerRoute }),
-      invocation({
-        order: { completedAtMs: 100, messageId: "msg-write" },
-        route: providerRoute,
-        dispatchAtMs: 100,
-        counts: { fresh: 20, read: 0, write: 10 },
-      }),
-    );
-
-    expect(classifyCacheObserverState(state, 200)).toMatchObject({
-      color: "green",
-      reason: "estimated-write-within-ttl",
-      ttlSemantics: "documented-estimate",
-    });
-  });
-
-  it("keeps gateways and unknown provider routes gray instead of applying a generic baseline", () => {
-    const gatewayRoute = { ...route, providerId: "openrouter", protocolId: undefined };
-    const state = observeCacheInvocation(
-      createCacheObserverState({ sessionId: "ses-parent", route: gatewayRoute }),
-      invocation({
-        order: { completedAtMs: 10_100, messageId: "msg-1" },
-        route: gatewayRoute,
-        dispatchAtMs: 10_000,
-      }),
-    );
-
-    expect(classifyCacheObserverState(state, 20_000)).toMatchObject({
-      color: "gray",
-      reason: "route-unverified",
-    });
-    expect(classifyCacheObserverState(state, 20_000)).not.toHaveProperty("ttlEstimate");
-  });
-
-  it("keeps unsupported-route zero telemetry gray instead of escalating to ambiguity risk", () => {
-    const openaiRoute: CacheRouteProvenance = { ...route, providerId: "openai" };
-    const zeroTelemetry = observeCacheInvocation(
-      createCacheObserverState({ sessionId: "ses-parent", route: openaiRoute }),
-      invocation({ route: openaiRoute, counts: { fresh: 0, read: 0, write: 0 } }),
-    );
-
-    expect(classifyCacheObserverState(zeroTelemetry, 200)).toMatchObject({
-      color: "gray",
-      reason: "insufficient-evidence",
-    });
-    expect(classifyCacheObserverState(zeroTelemetry, 200)).not.toHaveProperty("ttlEstimate");
-    expect(classifyCacheObserverState(zeroTelemetry, 200)).not.toHaveProperty("recheckAtMs");
-  });
-
-  it("reports an orphan invocation without route provenance as insufficient, not ambiguous risk", () => {
-    const orphan = observeCacheInvocation(stateFor(), invocation({ route: undefined, counts: {} }));
-
-    expect(classifyCacheObserverState(orphan, 200)).toMatchObject({
-      color: "gray",
-      reason: "insufficient-evidence",
-    });
-    expect(classifyCacheObserverState(orphan, 200)).not.toHaveProperty("ttlEstimate");
-  });
-
-  it("does not estimate a reuse TTL when dispatch time is absent or follows completion", () => {
-    const noStart = observeCacheInvocation(stateFor(), invocation({ dispatchAtMs: undefined }));
-    const futureStart = observeCacheInvocation(stateFor(), invocation({ dispatchAtMs: 101 }));
-
-    expect(classifyCacheObserverState(noStart, 200)).toMatchObject({
-      color: "gray",
-      reason: "dispatch-time-unavailable",
-    });
-    expect(classifyCacheObserverState(futureStart, 200)).toMatchObject({
-      color: "gray",
-      reason: "dispatch-time-unavailable",
-    });
-  });
-
-  it("does not let an out-of-order dispatch renew a more recent cache activity", () => {
-    let state = observeCacheInvocation(
-      stateFor(),
-      invocation({
-        order: { completedAtMs: 200, messageId: "msg-newer-dispatch" },
-        dispatchAtMs: 190,
-      }),
-    );
-    state = observeCacheInvocation(
-      state,
-      invocation({
-        order: { completedAtMs: 300, messageId: "msg-late-completion" },
-        dispatchAtMs: 150,
-      }),
-    );
-
-    expect(classifyCacheObserverState(state, 310)).toMatchObject({
-      color: "yellow",
-      reason: "out-of-order-invocation",
-    });
+    expect(state.invocations.at(-1)?.order.messageId).toBe(`msg-${CACHE_OBSERVER_MAX_INVOCATIONS}`);
   });
 });

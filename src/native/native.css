@@ -30,7 +30,7 @@
 .qg-cache-menu output {
   display: block;
   margin: 0.5rem 0;
-  color: var(--text-weak, currentColor);
+  color: var(--text-base, currentColor);
 }
 .qg-cache-menu hr {
   border: 0;
@@ -47,21 +47,23 @@
   gap: 0.25rem;
   min-width: 0;
 }
+/*
+ * The popup's values (countdown and share) are the important text: strong and
+ * bold, never the weak token. Tabular figures keep the countdown from shifting.
+ */
 .qg-cache-metrics {
-  display: flex;
+  display: block;
   flex: 0 1 auto;
-  flex-direction: column;
-  align-items: flex-end;
   min-width: 0;
-  max-width: 42%;
-  color: var(--text-weak, currentColor);
-  font-size: 11px;
-  white-space: nowrap;
-}
-.qg-cache-metrics > span {
-  max-width: 100%;
+  max-width: 50%;
   overflow: hidden;
+  color: var(--text-strong, var(--text-base, currentColor));
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* The host renders its title immediately before the menu. Reserve the button's
  * space even if the title wraps; this relationship may change in host updates. */
@@ -77,7 +79,7 @@
   display: flex;
   align-items: center;
   gap: 0.375rem;
-  color: var(--text-weak, currentColor);
+  color: var(--text-base, currentColor);
   font-size: 0.875em;
   justify-content: flex-end;
   pointer-events: none;
@@ -139,7 +141,7 @@
   padding: 0.0625rem 0.375rem;
   border: 1px solid var(--border-weak-base, currentColor);
   border-radius: 0.25rem;
-  color: var(--text-weak, currentColor);
+  color: var(--text-base, currentColor);
   font-size: 10px;
 }
 .qg-cache-title,
@@ -156,7 +158,7 @@
 }
 .qg-cache-model {
   display: block;
-  color: var(--text-weak, currentColor);
+  color: var(--text-base, currentColor);
   font-size: 11px;
 }
 /*
@@ -262,8 +264,14 @@ button.qg-cache-indicator {
   color: var(--text-base, CanvasText);
   font-size: 12px;
 }
+/* Status lines: the state and expiry lead, bold; basis and cache share follow at full text color. */
+.qg-cache-tooltip-primary {
+  display: block;
+  color: var(--text-strong, var(--text-base, CanvasText));
+  font-weight: 600;
+}
 .qg-cache-tooltip-note {
-  color: var(--text-weak, currentColor);
+  color: var(--text-base, CanvasText);
 }
 .qg-cache-tooltip.qg-cache-legend {
   top: 100%;

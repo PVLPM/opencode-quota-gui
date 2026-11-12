@@ -1,11 +1,13 @@
 /**
- * Pure, bounded evidence model for observing cache reuse. This module does not
- * read storage, subscribe to host events, issue requests, or infer cache policy.
+ * Pure, bounded retention-estimate model for cache observation. This module does
+ * not read storage, subscribe to host events, issue requests, or observe provider
+ * cache validity. Every colour is an estimate: the retention window starts at the
+ * request start of the newest successful primary LLM call on the scoped route,
+ * plus a route-scoped retention policy, regardless of its cache read or write
+ * counters.
  */
 
 export const CACHE_OBSERVER_MAX_INVOCATIONS = 128;
-export const CACHE_OBSERVER_MAX_COMPACTION_BOUNDARIES = 64;
-export const CACHE_OBSERVER_MAX_INVALIDATIONS = 64;
 
 export interface CacheEvidenceBasis {
   /** The concrete source that supplied this fact (not a guessed provider rule). */
@@ -30,12 +32,10 @@ export interface CacheInvocationOrder {
   messageId: string;
 }
 
-export type CachePrimaryClassification =
-  | { kind: "primary"; basis: CacheEvidenceBasis }
-  | { kind: "not-primary"; basis: CacheEvidenceBasis }
-  | { kind: "unknown"; basis: CacheEvidenceBasis };
-
-/** Omitted means the category was not present in the pre-normalized source. */
+/**
+ * Omitted means the category was not reported. A reported zero is a real value;
+ * the ingestion layer decides whether an all-zero set is usable telemetry.
+ */
 export interface CacheInvocationCounts {
   /** Host-reported fresh input tokens, distinct from cache reads and writes. */
   fresh?: number;
@@ -45,51 +45,51 @@ export interface CacheInvocationCounts {
   write?: number;
 }
 
+/**
+ * A successful, eligible primary LLM request (finish `stop` or `tool-calls`).
+ * Failed or incomplete requests are excluded by the ingestion layer before they
+ * reach this model.
+ */
 export interface CacheInvocationObservation {
   sessionId: string;
   order: CacheInvocationOrder;
-  /** Host request-start-side timestamp (step.started), not exact provider acceptance; completion time is not a TTL origin. */
+  /** Host request-start timestamp (step.started), not exact provider acceptance; completion time is never a TTL origin. */
   dispatchAtMs?: number;
   route?: CacheRouteProvenance;
-  primaryClassification: CachePrimaryClassification;
+  /** The concrete source that established this invocation as an eligible primary request. */
+  basis: CacheEvidenceBasis;
   counts: CacheInvocationCounts;
+  /** Best-effort current configuration snapshot captured during this live call. */
+  configuredTtlMs?: CacheConfiguredTtlMs;
 }
 
-export interface CacheCompactionBoundary {
-  sessionId: string;
-  order: CacheInvocationOrder;
-  basis: CacheEvidenceBasis;
+/** Host-configured retention values the observer accepts for a configurable route. */
+export type CacheConfiguredTtlMs = 300_000 | 3_600_000;
+
+/** Retention windows an estimate may use. */
+export type CacheSupportedTtlMs = CacheConfiguredTtlMs | 1_800_000 | 86_400_000;
+
+/**
+ * Host-derived facts about one route. Absent fields mean the route's policy default
+ * applies: the observer never assumes a direct OpenAI API route it cannot confirm.
+ */
+export interface CacheRouteConfiguration {
+  /** The host's `cache.ttl` for a configurable route (direct Anthropic or Kimi). */
+  configuredTtlMs?: CacheConfiguredTtlMs;
+  /**
+   * The active credential is an API key and the resolved provider sets no endpoint
+   * override, so the route is the direct OpenAI API (not ChatGPT OAuth or a gateway).
+   */
+  directOpenAiApi?: boolean;
 }
-
-export interface CacheInvalidationObservation {
-  sessionId: string;
-  route: CacheRouteProvenance;
-  order: CacheInvocationOrder;
-  basis: CacheEvidenceBasis;
-}
-
-/** Explicit source assertion that the scoped route has no newer invalidation. */
-export interface CacheInvalidationCoverage {
-  sessionId: string;
-  route: CacheRouteProvenance;
-  verifiedThroughMs: number;
-  basis: CacheEvidenceBasis;
-}
-
-export type CacheSupportedTtlMs = 300_000 | 3_600_000;
-
-export type CacheTtlEvidence =
-  | {
-      kind: "configured";
-      protocolId: "anthropic-messages";
-      route: CacheRouteProvenance;
-      configuredTtlMs: CacheSupportedTtlMs;
-      basis: CacheEvidenceBasis;
-    }
-  | { kind: "unknown"; basis: string };
 
 export interface CacheTtlEstimate {
-  kind: "configured" | "documented";
+  /**
+   * configured: the host-configured `cache.ttl` for a configurable route; documented:
+   * vendor documentation; empirical: owner-approved observed retention; fallback:
+   * the generic 5-minute window for unknown, gateway, and OpenAI-family routes.
+   */
+  kind: "configured" | "documented" | "empirical" | "fallback";
   ttlMs: CacheSupportedTtlMs;
   source: string;
   reference: string;
@@ -110,11 +110,6 @@ export interface CacheObserverScope {
 export interface CacheObserverState {
   readonly scope: CacheObserverScope;
   readonly invocations: readonly CacheInvocationObservation[];
-  readonly invocationsTruncated: boolean;
-  readonly compactionBoundaries: readonly CacheCompactionBoundary[];
-  readonly invalidations: readonly CacheInvalidationObservation[];
-  readonly invalidationCoverage?: CacheInvalidationCoverage;
-  readonly ttlEvidence?: CacheTtlEvidence;
 }
 
 export interface CachePrimaryRatio {
@@ -130,39 +125,41 @@ export interface CachePrimaryRatio {
 
 export type CacheObserverColor = "gray" | "green" | "yellow" | "red";
 
+/**
+ * The reason union is the Native pill's reason vocabulary. Members this model no
+ * longer produces are retained only so the pill's exhaustive reason mapping still
+ * type-checks; they should be pruned with that consumer.
+ */
+export type CacheObserverReason =
+  | "insufficient-evidence"
+  | "observed-reuse-with-active-ttl"
+  | "observed-write-with-active-ttl"
+  | "ambiguous-invocation"
+  | "history-truncated"
+  | "ttl-unverified"
+  | "ttl-expired"
+  | "dispatch-time-unavailable"
+  | "estimated-reuse-within-ttl"
+  | "estimated-write-within-ttl"
+  | "estimated-within-ttl"
+  | "estimated-ttl-near-expiry"
+  | "estimated-ttl-expired"
+  | "out-of-order-invocation"
+  | "observation-gap"
+  | "route-unverified"
+  | "invalidation-unverified"
+  | "known-invalidation"
+  | "compaction-boundary-uncertain"
+  | "assumed-route-risk";
+
 export interface CacheObserverClassification {
   color: CacheObserverColor;
-  confidence?: "best-effort";
-  ttlSemantics?: "configured-minimum" | "documented-estimate";
-  configuredTtlMs?: CacheSupportedTtlMs;
-  configuredTtlDeadlineAtMs?: number;
+  reason: CacheObserverReason;
   ttlEstimate?: CacheTtlEstimate;
-  reason:
-    | "insufficient-evidence"
-    | "observed-reuse-with-active-ttl"
-    | "observed-write-with-active-ttl"
-    | "ambiguous-invocation"
-    | "history-truncated"
-    | "ttl-unverified"
-    | "ttl-expired"
-    | "dispatch-time-unavailable"
-    | "estimated-reuse-within-ttl"
-    | "estimated-write-within-ttl"
-    | "estimated-ttl-near-expiry"
-    | "estimated-ttl-expired"
-    | "out-of-order-invocation"
-    | "observation-gap"
-    | "route-unverified"
-    | "invalidation-unverified"
-    | "known-invalidation"
-    | "compaction-boundary-uncertain"
-    | "assumed-route-risk";
   primaryCacheReadRatio?: CachePrimaryRatio;
   /** Distinguishes received but unusable usage counters from no observed step telemetry. */
   primaryCacheReadTelemetry?: "available" | "unavailable";
-  /** @deprecated Retained for older consumers; configured TTL is not a physical expiry claim. */
-  verifiedExpiresAtMs?: number;
-  /** Earliest instant to reconsider configured-minimum evidence without a newer event. */
+  /** Earliest instant to reconsider the estimate without a newer event. */
   recheckAtMs?: number;
 }
 
@@ -176,9 +173,6 @@ export function createCacheObserverState(scope: CacheObserverScope): CacheObserv
         : { route: { ...scope.route, basis: { ...scope.route.basis } } }),
     },
     invocations: [],
-    invocationsTruncated: false,
-    compactionBoundaries: [],
-    invalidations: [],
   };
 }
 
@@ -187,8 +181,8 @@ export function observeCacheInvocation(
   observation: CacheInvocationObservation,
 ): CacheObserverState {
   assertSession(state, observation.sessionId);
-  // A missing route is retained as ambiguous evidence so a newer unknown
-  // invocation cannot leave an older green result looking current.
+  // A missing route is retained so a newer unrouted invocation cannot leave an
+  // older estimate looking current; it classifies as route-unverified.
   if (observation.route !== undefined) assertRoute(state.scope.route, observation.route);
   assertOrder(observation.order);
 
@@ -198,211 +192,41 @@ export function observeCacheInvocation(
   const invocations = [...withoutRevision, cloneInvocation(observation)].sort((a, b) =>
     compareOrder(a.order, b.order),
   );
-  const invocationsTruncated =
-    state.invocationsTruncated || invocations.length > CACHE_OBSERVER_MAX_INVOCATIONS;
   return {
     ...state,
     invocations: invocations.slice(-CACHE_OBSERVER_MAX_INVOCATIONS),
-    invocationsTruncated,
-  };
-}
-
-export function observeCacheCompactionBoundary(
-  state: CacheObserverState,
-  boundary: CacheCompactionBoundary,
-): CacheObserverState {
-  assertSession(state, boundary.sessionId);
-  assertOrder(boundary.order);
-
-  const boundaries = state.compactionBoundaries
-    .filter((entry) => entry.order.messageId !== boundary.order.messageId)
-    .concat({ ...boundary, basis: { ...boundary.basis }, order: { ...boundary.order } })
-    .sort((a, b) => compareOrder(a.order, b.order));
-  return {
-    ...state,
-    compactionBoundaries: boundaries.slice(-CACHE_OBSERVER_MAX_COMPACTION_BOUNDARIES),
-  };
-}
-
-export function observeCacheInvalidation(
-  state: CacheObserverState,
-  invalidation: CacheInvalidationObservation,
-): CacheObserverState {
-  assertSession(state, invalidation.sessionId);
-  assertRoute(state.scope.route, invalidation.route);
-  assertOrder(invalidation.order);
-
-  const invalidations = state.invalidations
-    .filter((entry) => entry.order.messageId !== invalidation.order.messageId)
-    .concat({
-      ...invalidation,
-      route: { ...invalidation.route, basis: { ...invalidation.route.basis } },
-      basis: { ...invalidation.basis },
-      order: { ...invalidation.order },
-    })
-    .sort((a, b) => compareOrder(a.order, b.order));
-  return {
-    ...state,
-    invalidations: invalidations.slice(-CACHE_OBSERVER_MAX_INVALIDATIONS),
-  };
-}
-
-export function setCacheInvalidationCoverage(
-  state: CacheObserverState,
-  coverage: CacheInvalidationCoverage,
-): CacheObserverState {
-  assertSession(state, coverage.sessionId);
-  assertRoute(state.scope.route, coverage.route);
-  return {
-    ...state,
-    invalidationCoverage: {
-      ...coverage,
-      route: { ...coverage.route, basis: { ...coverage.route.basis } },
-      basis: { ...coverage.basis },
-    },
-  };
-}
-
-export function setCacheTtlEvidence(
-  state: CacheObserverState,
-  ttlEvidence: CacheTtlEvidence,
-): CacheObserverState {
-  return {
-    ...state,
-    ttlEvidence:
-      ttlEvidence.kind === "configured"
-        ? {
-            ...ttlEvidence,
-            route: { ...ttlEvidence.route, basis: { ...ttlEvidence.route.basis } },
-            basis: { ...ttlEvidence.basis },
-          }
-        : { ...ttlEvidence },
   };
 }
 
 export function classifyCacheObserverState(
   state: CacheObserverState,
   nowMs: number,
+  routeConfiguration: CacheRouteConfiguration = {},
 ): CacheObserverClassification {
-  const boundary = latestBoundary(state.compactionBoundaries);
-  const currentInvocations = state.invocations.filter(
-    (entry) => boundary === undefined || compareOrder(entry.order, boundary.order) > 0,
-  );
-  const currentInvalidations = state.invalidations.filter(
-    (entry) =>
-      hasValidBasis(entry.basis) &&
-      hasValidRouteProvenance(entry.route) &&
-      sameRoute(state.scope.route, entry.route) &&
-      (boundary === undefined || compareOrder(entry.order, boundary.order) > 0),
-  );
-  const reusablePrefixes = currentInvocations.filter((entry) =>
-    isEstablishedReusablePrefix(state.scope.route, entry),
-  );
-  const latestReuse = last(reusablePrefixes);
-  const latestInvalidation = last(currentInvalidations);
-  const latestAmbiguous = last(
-    currentInvocations.filter((entry) => isAmbiguousInvocation(state.scope.route, entry)),
-  );
-  const telemetry = lastPrimaryRatio(currentInvocations);
-  const ratio = telemetry?.ratio;
-  const telemetryStatus = optionalPrimaryCacheReadTelemetry(telemetry?.status);
+  const latest = last(state.invocations);
+  if (latest === undefined) return { color: "gray", reason: "insufficient-evidence" };
 
-  if (latestReuse === undefined) {
-    const hadReuseBeforeBoundary =
-      boundary !== undefined &&
-      state.invocations.some(
-        (entry) =>
-          compareOrder(entry.order, boundary.order) <= 0 &&
-          isEstablishedReusablePrefix(state.scope.route, entry),
-      );
-    // Without an established reusable prefix there is nothing to be at risk
-    // about: ambiguous, route-less, or zero-count telemetry is absence of
-    // evidence, not a warning.
-    if (hadReuseBeforeBoundary) {
-      return {
-        color: "yellow",
-        reason: "compaction-boundary-uncertain",
-        ...telemetryStatus,
-        ...optionalRatio(ratio),
-      };
-    }
-    if (state.invocationsTruncated) {
-      return {
-        color: "yellow",
-        reason: "history-truncated",
-        ...telemetryStatus,
-        ...optionalRatio(ratio),
-      };
-    }
-    return {
-      color: "gray",
-      reason: "insufficient-evidence",
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
-    };
-  }
+  // The cache share belongs to the newest successful call and stays independent
+  // of the retention estimate, so a route-unverified estimate still shows it.
+  const telemetry = primaryRatioOf(latest);
+  const reported = {
+    primaryCacheReadTelemetry: telemetry.status,
+    ...optionalRatio(telemetry.ratio),
+  };
 
-  if (
-    latestInvalidation !== undefined &&
-    compareOrder(latestInvalidation.order, latestReuse.order) > 0
-  ) {
-    if (
-      latestAmbiguous !== undefined &&
-      compareOrder(latestAmbiguous.order, latestInvalidation.order) > 0
-    ) {
-      return {
-        color: "yellow",
-        reason: "ambiguous-invocation",
-        ...telemetryStatus,
-        ...optionalRatio(ratio),
-      };
-    }
-    return {
-      color: "red",
-      reason: "known-invalidation",
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
-    };
-  }
-
-  // Route and TTL-policy evidence must be evaluable before ambiguity can
-  // escalate to risk; an unsupported or unknown route stays gray.
   if (!Number.isFinite(nowMs) || !hasValidRouteProvenance(state.scope.route)) {
-    return {
-      color: "gray",
-      reason: "route-unverified",
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
-    };
+    return { color: "gray", reason: "route-unverified", ...reported };
   }
-  if (!hasValidRouteProvenance(latestReuse.route)) {
-    return {
-      color: "gray",
-      reason: "route-unverified",
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
-    };
+  if (!hasValidRouteProvenance(latest.route)) {
+    return { color: "gray", reason: "route-unverified", ...reported };
   }
 
-  const policy = cacheTtlPolicy(state.scope.route, state.ttlEvidence);
-  if (policy === undefined) {
-    return {
-      color: "gray",
-      reason: "route-unverified",
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
-    };
-  }
-
-  if (latestAmbiguous !== undefined && compareOrder(latestAmbiguous.order, latestReuse.order) > 0) {
-    return {
-      color: "yellow",
-      reason: "ambiguous-invocation",
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
-    };
-  }
-
+  const policy = retentionPolicy(
+    latest.route,
+    latest.configuredTtlMs === undefined
+      ? routeConfiguration
+      : { configuredTtlMs: latest.configuredTtlMs },
+  );
   const ttlEstimate: CacheTtlEstimate = {
     kind: policy.kind,
     ttlMs: policy.ttlMs,
@@ -410,72 +234,76 @@ export function classifyCacheObserverState(
     reference: policy.reference,
     assumption: policy.assumption,
   };
-  if (!hasValidDispatchTime(latestReuse, nowMs)) {
-    return {
-      color: "gray",
-      reason: "dispatch-time-unavailable",
-      ttlEstimate,
-      ...telemetryStatus,
-      ...optionalRatio(ratio),
-    };
+  if (!hasValidDispatchTime(latest, nowMs)) {
+    return { color: "gray", reason: "dispatch-time-unavailable", ttlEstimate, ...reported };
   }
 
-  const previousReuse = reusablePrefixes.at(-2);
-  if (previousReuse !== undefined && hasValidDispatchTime(previousReuse, nowMs)) {
-    const dispatchAtMs = latestReuse.dispatchAtMs;
-    if (dispatchAtMs < previousReuse.dispatchAtMs) {
-      return {
-        color: "yellow",
-        reason: "out-of-order-invocation",
-        ttlEstimate: { ...ttlEstimate, dispatchAtMs },
-        ...telemetryStatus,
-        ...optionalRatio(ratio),
-      };
-    }
-  }
-
-  const dispatchAtMs = latestReuse.dispatchAtMs;
+  const dispatchAtMs = latest.dispatchAtMs;
   const deadlineAtMs = dispatchAtMs + policy.ttlMs;
   const warningAtMs = dispatchAtMs + Math.floor(policy.ttlMs * 0.8);
-  const completeEstimate: CacheTtlEstimate = {
-    ...ttlEstimate,
-    dispatchAtMs,
-    deadlineAtMs,
-  };
-  const shared = {
-    confidence: "best-effort" as const,
-    ttlEstimate: completeEstimate,
-    ...(policy.kind === "configured"
-      ? {
-          ttlSemantics: "configured-minimum" as const,
-          configuredTtlMs: policy.ttlMs,
-          configuredTtlDeadlineAtMs: deadlineAtMs,
-        }
-      : { ttlSemantics: "documented-estimate" as const }),
-    ...telemetryStatus,
-    ...optionalRatio(ratio),
-  };
+  const estimate: CacheTtlEstimate = { ...ttlEstimate, dispatchAtMs, deadlineAtMs };
 
   if (deadlineAtMs <= nowMs) {
-    return { color: "red", reason: "estimated-ttl-expired", ...shared };
+    return { color: "red", reason: "estimated-ttl-expired", ttlEstimate: estimate, ...reported };
   }
   if (warningAtMs <= nowMs) {
     return {
       color: "yellow",
       reason: "estimated-ttl-near-expiry",
+      ttlEstimate: estimate,
       recheckAtMs: deadlineAtMs,
-      ...shared,
+      ...reported,
     };
   }
-
   return {
     color: "green",
-    reason: hasObservedRead(latestReuse.counts)
-      ? "estimated-reuse-within-ttl"
-      : "estimated-write-within-ttl",
+    reason: greenReasonFor(latest.counts),
+    ttlEstimate: estimate,
     recheckAtMs: warningAtMs,
-    ...shared,
+    ...reported,
   };
+}
+
+const DURATION_UNIT_MS: Readonly<Record<"ms" | "s" | "m" | "h" | "d", number>> = {
+  ms: 1,
+  s: 1_000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
+
+/**
+ * The host's `cache.ttl` value (`<number><ms|s|m|h|d>`, models.dev duration format)
+ * as one of the windows the observer accepts. Any other value is unsupported and
+ * yields undefined, so the route's default applies.
+ */
+export function cacheConfiguredTtlMsFromHostValue(
+  value: unknown,
+): CacheConfiguredTtlMs | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)$/.exec(value.trim());
+  if (match === null) return undefined;
+  const ttlMs = Number(match[1]) * DURATION_UNIT_MS[match[2] as keyof typeof DURATION_UNIT_MS];
+  return ttlMs === 300_000 || ttlMs === 3_600_000 ? ttlMs : undefined;
+}
+
+/**
+ * The model-specific default prompt-cache lifetime OpenAI documents for direct API
+ * use: 30 minutes for GPT-5.5 (typical) and GPT-5.6 and later (minimum default).
+ * Other models have no documented model-specific lifetime and get undefined.
+ */
+export function openAiDocumentedTtlMs(modelId: string): 1_800_000 | undefined {
+  if (modelId === "gpt-5.5" || modelId === "gpt-5.5-pro") return 1_800_000;
+  const match = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/.exec(modelId);
+  if (match === null) return undefined;
+  const major = Number(match[1]);
+  const minor = Number(match[2] ?? 0);
+  return major > 5 || (major === 5 && minor >= 6) ? 1_800_000 : undefined;
+}
+
+/** Providers whose host `cache.ttl` the observer reads: direct Anthropic and Kimi. */
+export function isCacheConfigurableProviderId(providerId: string): boolean {
+  return providerId === "anthropic" || KIMI_PROVIDER_IDS.has(providerId);
 }
 
 function assertSession(state: CacheObserverState, sessionId: string): void {
@@ -506,10 +334,7 @@ function cloneInvocation(entry: CacheInvocationObservation): CacheInvocationObse
     ...(entry.route === undefined
       ? {}
       : { route: { ...entry.route, basis: { ...entry.route.basis } } }),
-    primaryClassification: {
-      ...entry.primaryClassification,
-      basis: { ...entry.primaryClassification.basis },
-    },
+    basis: { ...entry.basis },
     counts: { ...entry.counts },
   };
 }
@@ -527,125 +352,50 @@ function last<T>(entries: readonly T[]): T | undefined {
   return entries[entries.length - 1];
 }
 
-function latestBoundary(
-  boundaries: readonly CacheCompactionBoundary[],
-): CacheCompactionBoundary | undefined {
-  return last(boundaries.filter((boundary) => hasValidBasis(boundary.basis)));
-}
-
-function hasObservedRead(counts: CacheInvocationCounts): boolean {
-  return isPositiveFinite(counts.read);
+function greenReasonFor(counts: CacheInvocationCounts): CacheObserverReason {
+  if (isPositiveFinite(counts.read)) return "estimated-reuse-within-ttl";
+  if (isPositiveFinite(counts.write)) return "estimated-write-within-ttl";
+  return "estimated-within-ttl";
 }
 
 function isPositiveFinite(value: number | undefined): boolean {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-function isCertainPrimaryForRoute(
-  route: CacheRouteProvenance | undefined,
-  invocation: CacheInvocationObservation,
-): boolean {
-  return (
-    invocation.primaryClassification.kind === "primary" &&
-    hasValidBasis(invocation.primaryClassification.basis) &&
-    hasValidRouteProvenance(route) &&
-    hasValidRouteProvenance(invocation.route) &&
-    sameRoute(route, invocation.route)
-  );
+function isNonNegativeFinite(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 /**
- * The estimate-bearing reusable-prefix predicate: a certain primary invocation
- * on the scoped route with an observed cache read or write. Exported so the
- * ingestor can identify the latest estimate-qualifying invocation without
- * depending on ratio availability.
+ * Cache share of one successful call: read / (fresh + read + write). A reported
+ * zero read is a valid 0%; a call with missing counters, or with no input at
+ * all, has no usable share.
  */
-export function isEstablishedReusablePrefix(
-  route: CacheRouteProvenance | undefined,
-  invocation: CacheInvocationObservation,
-): boolean {
-  return (
-    isCertainPrimaryForRoute(route, invocation) &&
-    (hasObservedRead(invocation.counts) || isPositiveFinite(invocation.counts.write))
-  );
-}
-
-function isAmbiguousInvocation(
-  route: CacheRouteProvenance | undefined,
-  invocation: CacheInvocationObservation,
-): boolean {
-  const classification = invocation.primaryClassification;
-  if (classification.kind === "not-primary" && hasValidBasis(classification.basis)) return false;
-  if (classification.kind !== "primary" || !isCertainPrimaryForRoute(route, invocation))
-    return true;
-
-  if (hasObservedRead(invocation.counts) || isPositiveFinite(invocation.counts.write)) {
-    return false;
-  }
-  // A primary invocation with no observed cache read or write cannot confirm
-  // that an earlier reusable prefix is still valid. Treat it as uncertainty,
-  // including the case where both counters are explicitly zero.
-  return true;
-}
-
-/** Keep only the latest classified primary's host counters; never infer route or cache policy. */
-function lastPrimaryRatio(
-  invocations: readonly CacheInvocationObservation[],
-): { status: "available" | "unavailable"; ratio?: CachePrimaryRatio } | undefined {
-  let lastCandidate: CacheInvocationObservation | undefined;
-  for (const invocation of invocations) {
-    const classification = invocation.primaryClassification;
-    if (classification.kind !== "not-primary" || !hasValidBasis(classification.basis)) {
-      lastCandidate = invocation;
-    }
-  }
-
-  if (
-    lastCandidate === undefined ||
-    lastCandidate.primaryClassification.kind !== "primary" ||
-    !hasValidBasis(lastCandidate.primaryClassification.basis)
-  ) {
-    return undefined;
-  }
-  const { fresh, read, write } = lastCandidate.counts;
-  if (
-    !isPresentNonNegativeFinite(fresh) ||
-    !isPresentPositiveFinite(read) ||
-    !isPresentNonNegativeFinite(write)
-  ) {
+function primaryRatioOf(invocation: CacheInvocationObservation): {
+  status: "available" | "unavailable";
+  ratio?: CachePrimaryRatio;
+} {
+  const { fresh, read, write } = invocation.counts;
+  if (!isNonNegativeFinite(fresh) || !isNonNegativeFinite(read) || !isNonNegativeFinite(write)) {
     return { status: "unavailable" };
   }
   const denominator = fresh + read + write;
-  if (!(denominator > 0) || !Number.isFinite(denominator)) {
-    return { status: "unavailable" };
-  }
+  if (!(denominator > 0) || !Number.isFinite(denominator)) return { status: "unavailable" };
 
   return {
     status: "available",
     ratio: {
       value: read / denominator,
-      messageId: lastCandidate.order.messageId,
-      observedAtMs: lastCandidate.order.completedAtMs,
+      messageId: invocation.order.messageId,
+      observedAtMs: invocation.order.completedAtMs,
       numerator: "cache-read",
       denominator: "fresh+read+write",
-      basis: { ...lastCandidate.primaryClassification.basis },
+      basis: { ...invocation.basis },
     },
   };
 }
 
-function isPresentPositiveFinite(value: number | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0;
-}
-
-function isPresentNonNegativeFinite(value: number | undefined): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
-
-function isAuthoritativeAnthropicRoute(route: CacheRouteProvenance | undefined): boolean {
-  return route?.providerId === "anthropic";
-}
-
-interface CacheTtlPolicy {
+interface RetentionPolicy {
   kind: CacheTtlEstimate["kind"];
   ttlMs: CacheSupportedTtlMs;
   source: string;
@@ -653,87 +403,103 @@ interface CacheTtlPolicy {
   assumption: string;
 }
 
-const DOCUMENTED_ROUTE_ASSUMPTION =
+const ROUTE_DEFAULT_ASSUMPTION =
   "assuming direct standard route/default TTL; custom endpoint, gateway, changed configuration or provider eviction may cause miss";
 
-const DOCUMENTED_TTL_POLICIES: readonly (CacheTtlPolicy & { providerIds: readonly string[] })[] = [
-  {
-    providerIds: ["anthropic"],
-    kind: "documented",
-    ttlMs: 300_000,
-    source: "Anthropic prompt caching documentation",
-    reference: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
-    assumption: DOCUMENTED_ROUTE_ASSUMPTION,
-  },
-  {
-    providerIds: [
-      "moonshotai",
-      "moonshotai-cn",
-      "kimi-code-plan-global",
-      "kimi-code-plan-cn",
-      "kimi-for-coding",
-      "kimi",
-      "kimi-code",
-    ],
-    kind: "documented",
-    ttlMs: 300_000,
-    source: "Kimi context caching documentation",
-    reference: "https://platform.kimi.ai/docs/guide/context-caching",
-    assumption: DOCUMENTED_ROUTE_ASSUMPTION,
-  },
-  {
-    providerIds: [
-      "alibaba",
-      "alibaba-cn",
-      "alibaba-coding-plan",
-      "alibaba-coding-plan-cn",
-      "alibaba-token-plan",
-      "alibaba-token-plan-cn",
-    ],
-    kind: "documented",
-    ttlMs: 300_000,
-    source: "Qwen context caching documentation",
-    reference: "https://docs.qwencloud.com/developer-guides/run-and-scale/context-cache",
-    assumption:
-      "Assumes 5-minute explicit/session caching; implicit cache retention is indeterminate. Custom endpoint, gateway, changed configuration, or provider eviction may cause a miss.",
-  },
-  {
-    providerIds: ["amazon-bedrock"],
-    kind: "documented",
-    ttlMs: 300_000,
-    source: "Amazon Bedrock prompt caching documentation",
-    reference: "https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html",
-    assumption: DOCUMENTED_ROUTE_ASSUMPTION,
-  },
-];
+const GENERIC_FALLBACK_ASSUMPTION =
+  "generic 5-minute fallback; no vendor retention is inferred for this route; gateway, custom endpoint, changed configuration or provider eviction may cause a miss";
 
-function cacheTtlPolicy(
+const KIMI_PROVIDER_IDS: ReadonlySet<string> = new Set([
+  "moonshotai",
+  "moonshotai-cn",
+  "kimi-code-plan-global",
+  "kimi-code-plan-cn",
+  "kimi-for-coding",
+  "kimi",
+  "kimi-code",
+]);
+
+/**
+ * Route-scoped retention policy, matched by exact provider id (and model for the
+ * one empirical OpenCode Go entry), so a gateway never inherits a vendor window.
+ * A host-configured `cache.ttl` applies only to a configurable route; every other
+ * route keeps its policy default.
+ */
+function retentionPolicy(
   route: CacheRouteProvenance,
-  evidence: CacheTtlEvidence | undefined,
-): CacheTtlPolicy | undefined {
-  if (evidence?.kind === "unknown") return undefined;
-  if (evidence?.kind === "configured") {
-    if (
-      !hasValidBasis(evidence.basis) ||
-      !hasValidRouteProvenance(evidence.route) ||
-      !sameRoute(route, evidence.route) ||
-      !isAuthoritativeAnthropicRoute(route) ||
-      evidence.protocolId !== "anthropic-messages" ||
-      (evidence.configuredTtlMs !== 300_000 && evidence.configuredTtlMs !== 3_600_000)
-    ) {
-      return undefined;
-    }
+  routeConfiguration: CacheRouteConfiguration,
+): RetentionPolicy {
+  const configuredTtlMs = routeConfiguration.configuredTtlMs;
+  if (configuredTtlMs !== undefined && isCacheConfigurableProviderId(route.providerId)) {
     return {
       kind: "configured",
-      ttlMs: evidence.configuredTtlMs,
-      source: evidence.basis.source,
-      reference: evidence.basis.reference,
+      ttlMs: configuredTtlMs,
+      source: "Current host settings snapshot",
+      reference: "opencode-config:provider-settings.cache.ttl",
       assumption:
-        "Uses the invocation-bound configured TTL; physical provider expiry is not observable.",
+        "Best-effort current host cache.ttl snapshot; may differ from dispatch settings or effective route. Physical provider expiry is not observable.",
     };
   }
-  if (!hasValidRouteProvenance(route)) return undefined;
-  return DOCUMENTED_TTL_POLICIES.find((policy) => policy.providerIds.includes(route.providerId));
+  if (route.providerId === "anthropic") {
+    return {
+      kind: "documented",
+      ttlMs: 300_000,
+      source: "Anthropic prompt caching documentation",
+      reference: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      assumption: ROUTE_DEFAULT_ASSUMPTION,
+    };
+  }
+  if (KIMI_PROVIDER_IDS.has(route.providerId)) {
+    return {
+      kind: "documented",
+      ttlMs: 300_000,
+      source: "Kimi context caching documentation",
+      reference: "https://platform.kimi.ai/docs/guide/context-caching",
+      assumption: ROUTE_DEFAULT_ASSUMPTION,
+    };
+  }
+  if (route.providerId === "deepseek") {
+    return {
+      kind: "empirical",
+      ttlMs: 86_400_000,
+      source: "DeepSeek direct retention (owner-approved empirical policy)",
+      reference: "cache-observer-policy:deepseek-direct-24h",
+      assumption:
+        "Empirical 24-hour estimate for direct DeepSeek; physical retention is not observable and provider eviction may cause a miss.",
+    };
+  }
+  if (route.providerId === "opencode-go" && route.modelId === "deepseek-v4.1-flash") {
+    return {
+      kind: "empirical",
+      ttlMs: 3_600_000,
+      source: "OpenCode Go deepseek-v4.1-flash retention (owner-approved empirical policy)",
+      reference: "cache-observer-policy:opencode-go-deepseek-v4.1-flash-60m",
+      assumption:
+        "Empirical 60-minute estimate for this OpenCode Go model; physical retention is not observable and provider eviction may cause a miss.",
+    };
+  }
+  const openAiTtlMs = openAiDocumentedTtlMs(route.modelId);
+  if (
+    route.providerId === "openai" &&
+    routeConfiguration.directOpenAiApi &&
+    openAiTtlMs !== undefined
+  ) {
+    return {
+      kind: "documented",
+      ttlMs: openAiTtlMs,
+      source: "OpenAI prompt caching documentation (model-specific default lifetime)",
+      reference: "https://developers.openai.com/api/docs/guides/prompt-caching",
+      assumption:
+        "Documented default 30-minute lifetime for this GPT model family on the direct OpenAI API; the optional 12-hour lifetime and physical eviction are not observable.",
+    };
+  }
+  return {
+    kind: "fallback",
+    ttlMs: 300_000,
+    source: "Generic 5-minute fallback for unknown, gateway, or OpenAI-family routes",
+    reference: "cache-observer-policy:generic-5m-fallback",
+    assumption: GENERIC_FALLBACK_ASSUMPTION,
+  };
 }
 
 function hasValidDispatchTime(
@@ -787,10 +553,4 @@ function optionalRatio(ratio: CachePrimaryRatio | undefined): {
   primaryCacheReadRatio?: CachePrimaryRatio;
 } {
   return ratio === undefined ? {} : { primaryCacheReadRatio: ratio };
-}
-
-function optionalPrimaryCacheReadTelemetry(status: "available" | "unavailable" | undefined): {
-  primaryCacheReadTelemetry?: "available" | "unavailable";
-} {
-  return status === undefined ? {} : { primaryCacheReadTelemetry: status };
 }

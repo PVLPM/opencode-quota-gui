@@ -3,6 +3,7 @@ import { createEffect, onCleanup } from "solid-js";
 import type { DashboardRpcViewScope } from "../rpc.js";
 import { viewScopeForRoute } from "../ui/navigation-model.js";
 import type { Location, Route } from "../ui/routing.js";
+import { createHostRouteConfigurationReader } from "./cache-observer-host-config.js";
 import {
   createNativeCacheObserverRuntime,
   type NativeCacheObserver,
@@ -57,6 +58,7 @@ export function createNativeDashboardRuntime(
     scope: "quota",
   });
   const cacheObserver = createNativeCacheObserverRuntime({
+    readRouteConfiguration: createHostRouteConfigurationReader(ctx.client),
     subscribeEvents: (listener) => client.subscribeCacheObserverEvent(listener),
     rpcConnection: () => client.connection(),
     subscribeRpcConnection: (listener) => client.onConnectionChange(listener),
