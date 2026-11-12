@@ -89,7 +89,13 @@ function context(config: Partial<QuotaProviderContext["config"]> = {}): QuotaPro
     },
     resolveRuntimeProviderIds: async () => [],
     workspaceRoot: tempRoot,
-    config: { cursorPlan: "none", enabledProviders: "auto", ...config },
+    config: {
+      cursorPlan: "none",
+      enabledProviders: "auto",
+      // Points the Claude CLI at a path that does not exist, so no host Claude login is probed.
+      anthropicBinaryPath: join(tempRoot, "no-claude-cli", "claude"),
+      ...config,
+    },
   };
 }
 
@@ -409,6 +415,8 @@ describe("multi-account provider loops", () => {
     const output = await anthropicProvider.fetch(context());
 
     expect(output.attempted).toBe(true);
+    // Guards the isolation in context(): this test must never detect the host's Claude CLI.
+    expect(output.statusDetails).toContainEqual({ key: "cli_installed", value: "false" });
     expect(output.entries).toEqual([
       expect.objectContaining({
         name: "[Claude Work] (active) 5h",
