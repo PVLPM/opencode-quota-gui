@@ -13,11 +13,11 @@ import { createHash } from "crypto";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import { homedir } from "os";
-import { join } from "path";
+import { isAbsolute, join, resolve } from "path";
 
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 
-import { resolveAnthropicOAuthCached } from "./anthropic-auth.js";
+import { type ResolvedAnthropicOAuth, resolveAnthropicOAuthCached } from "./anthropic-auth.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import {
@@ -39,8 +39,21 @@ const ANTHROPIC_BETA_HEADER = "oauth-2025-04-20";
 const CLAUDE_CODE_CREDENTIALS_SERVICE = "Claude Code-credentials";
 const CLAUDE_NO_LOCAL_QUOTA_MESSAGE =
   "Claude CLI auth detected, but local quota windows were not exposed.";
+const OPENCODE_ANTHROPIC_UNUSABLE_MESSAGE =
+  "OpenCode's Anthropic sign-in is expired or unreadable. Run `opencode auth login anthropic`.";
 const ANTHROPIC_NO_QUOTA_MESSAGE =
   "Claude CLI auth detected, but quota was unavailable from the local CLI and OAuth credential sources.";
+const CLAUDE_NON_SUBSCRIPTION_LOGIN_MESSAGE =
+  "Claude CLI is not signed in with a claude.ai subscription. Run `claude auth login` and try again.";
+const CLAUDE_CLI_TOKEN_UNVERIFIED_DETAIL =
+  "Claude CLI did not confirm a first-party claude.ai login, so its stored token is not used.";
+/** Environment variable the Claude CLI reads for its config directory. */
+const CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
+const CLAUDE_CONFIG_DIRECTORY_UNRESOLVED_DETAIL =
+  "The Claude CLI config directory could not be determined, so its login is not used.";
+/** Fixed labels for where a Claude login is kept. They name neither the home folder nor a custom path. */
+const CLAUDE_DEFAULT_CREDENTIALS_LOCATION = "~/.claude/.credentials.json";
+const CLAUDE_CUSTOM_CONFIG_DIRECTORY_LOCATION = "the Claude CLI config directory";
 
 export interface AnthropicQuotaWindow {
   utilization?: number;
@@ -113,6 +126,8 @@ export interface AnthropicDiagnostics {
   /** Source-assigned category for a failed OAuth usage request; absent otherwise. */
   failureCategory?: ProviderFailureCategory;
   quota?: AnthropicQuotaResult;
+  /** sha256 of the OAuth token that answered the usage probe. Used only to avoid showing one login twice. */
+  credentialFingerprint?: string;
 }
 
 export interface AnthropicProbeOptions {
@@ -135,6 +150,8 @@ export type ClaudeCommandInvocation = {
   file: string;
   args: string[];
   display: string;
+  /** Set for cmd.exe bridges: the command line is already quoted, so Node must not re-quote it. */
+  windowsVerbatimArguments?: boolean;
 };
 
 type AnthropicLocalDiagnostics = {
@@ -145,7 +162,27 @@ type AnthropicLocalDiagnostics = {
   checkedCommands: string[];
   message?: string;
   localQuota?: AnthropicQuotaResult;
+  /** The exact binary the probe ran (configured path, bare `claude`, or install-folder path). */
+  effectiveBinary?: string;
+  /** The directory the Claude CLI's login is read from. Set once the CLI reports a signed-in state. */
+  configDirectory?: ClaudeConfigDirectory;
+  /**
+   * True only when the CLI's JSON status positively reports a first-party claude.ai login. Only then
+   * may the Claude CLI's stored token be used; an absent field or non-JSON status is not proof.
+   */
+  claudeAiLoginVerified?: boolean;
 };
+
+type ResolvedClaudeConfigDirectory = {
+  state: "resolved";
+  /** Absolute, normalized directory the login is read from. It is never shown to the user. */
+  path: string;
+  /** True for `~/.claude`, the only directory whose login is also kept in the macOS Keychain. */
+  isDefault: boolean;
+};
+
+/** Where the Claude CLI keeps its login. "unresolved" names no directory, so nothing is read. */
+type ClaudeConfigDirectory = ResolvedClaudeConfigDirectory | { state: "unresolved" };
 
 type AnthropicOAuthCooldown = {
   failureCount: number;
@@ -197,6 +234,7 @@ type ParsedAuthProbe = {
   message?: string;
   jsonPayload?: unknown;
   unsupportedCommand?: boolean;
+  claudeAiLoginVerified?: boolean;
 };
 
 type AnthropicOAuthSharedState = {
@@ -258,9 +296,19 @@ function formatCommandDisplay(parts: string[]): string {
   return parts.map(formatCommandDisplayArg).join(" ");
 }
 
+/**
+ * cmd.exe cannot escape `"` inside a quoted argument, and `%` and `!` expand even inside
+ * quotes, so a path containing any of these is refused rather than handed to the shell.
+ */
+const WINDOWS_CMD_UNSAFE_ARG = /[%!^&|<>"\r\n]/u;
+
 function quoteWindowsCmdArg(value: string): string {
-  const escaped = value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, "$1$1");
-  return `"${escaped}"`;
+  if (WINDOWS_CMD_UNSAFE_ARG.test(value)) {
+    throw new Error(
+      "Claude CLI path contains characters that cannot be passed safely through cmd.exe.",
+    );
+  }
+  return `"${value}"`;
 }
 
 function shouldBridgeClaudeCommandThroughWindowsShell(binaryPath: string): boolean {
@@ -284,10 +332,13 @@ export function buildClaudeCommandInvocation(
     (runtime.platform ?? process.platform) === "win32" &&
     shouldBridgeClaudeCommandThroughWindowsShell(resolvedBinaryPath)
   ) {
+    // `/s` strips only the outermost quote pair, so the quoted command line is wrapped once more.
+    const commandLine = [resolvedBinaryPath, ...args].map(quoteWindowsCmdArg).join(" ");
     return {
       file: runtime.comspec?.trim() || process.env["ComSpec"]?.trim() || "cmd.exe",
-      args: ["/d", "/s", "/c", [resolvedBinaryPath, ...args].map(quoteWindowsCmdArg).join(" ")],
+      args: ["/d", "/s", "/c", `"${commandLine}"`],
       display,
+      windowsVerbatimArguments: true,
     };
   }
 
@@ -575,8 +626,61 @@ function parseOAuthUsageResponse(data: unknown): AnthropicQuotaResult | null {
   };
 }
 
-function getClaudeCredentialsPath(): string {
-  return join(homedir(), ".claude", ".credentials.json");
+/**
+ * Parses one candidate config directory. `undefined` means the value is absent, which is not an
+ * error. `null` means it is present but cannot name a directory (not a string, empty, padded with
+ * whitespace, or relative), so the caller must fail closed rather than read another login.
+ */
+function parseClaudeConfigDirectoryCandidate(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") return null;
+  if (!value || value.trim() !== value || !isAbsolute(value)) return null;
+  return resolve(value);
+}
+
+function isSameConfigDirectory(left: string, right: string): boolean {
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/**
+ * The directory the Claude CLI reads its login from. A directory the CLI reports is authoritative;
+ * otherwise CLAUDE_CONFIG_DIR names it, and with neither set it is the default `~/.claude`. An
+ * invalid value, or a reported directory that disagrees with CLAUDE_CONFIG_DIR, is unresolved, so
+ * no login is read in its place.
+ */
+function resolveClaudeConfigDirectory(
+  reported: unknown,
+  environment: string | undefined,
+): ClaudeConfigDirectory {
+  const fromReport = parseClaudeConfigDirectoryCandidate(reported);
+  const fromEnvironment = parseClaudeConfigDirectoryCandidate(environment);
+  if (fromReport === null || fromEnvironment === null) return { state: "unresolved" };
+  if (fromReport && fromEnvironment && !isSameConfigDirectory(fromReport, fromEnvironment)) {
+    return { state: "unresolved" };
+  }
+
+  const defaultDirectory = resolve(join(homedir(), ".claude"));
+  const path = fromReport ?? fromEnvironment ?? defaultDirectory;
+  return {
+    state: "resolved",
+    path,
+    // An explicit config directory may use a different macOS Keychain service,
+    // even when it names the default path; never guess that service's identity.
+    isDefault: fromEnvironment === undefined && isSameConfigDirectory(path, defaultDirectory),
+  };
+}
+
+/** The identity qualifier for a config directory: its resolved path, or a fixed word when none is bound. */
+function claudeConfigDirectoryQualifier(
+  configDirectory: ClaudeConfigDirectory | undefined,
+): string {
+  return configDirectory?.state === "resolved" ? configDirectory.path : "unresolved";
+}
+
+function claudeCredentialsLocation(directory: ResolvedClaudeConfigDirectory): string {
+  return directory.isDefault
+    ? CLAUDE_DEFAULT_CREDENTIALS_LOCATION
+    : CLAUDE_CUSTOM_CONFIG_DIRECTORY_LOCATION;
 }
 
 function getClaudeKeychainLocation(): string {
@@ -642,10 +746,9 @@ function parseClaudeCredentialsAccessToken(
     const parsed = JSON.parse(trimmed) as unknown;
     const accessToken = extractClaudeCredentialsAccessToken(parsed);
     return accessToken ? { accessToken } : { error: "missing" };
-  } catch (error) {
-    return {
-      error: sanitizeDisplayText(error instanceof Error ? error.message : String(error)),
-    };
+  } catch {
+    // The parser's own message can quote a fragment of the token, so only a fixed reason is kept.
+    return { error: "invalid JSON" };
   }
 }
 
@@ -728,11 +831,12 @@ async function readClaudeCredentialsAccessTokenFromMacOSKeychain(): Promise<Clau
   };
 }
 
-async function readClaudeCredentialsAccessTokenFromFile(): Promise<ClaudeCredentialSourceResult> {
-  const credentialsPath = getClaudeCredentialsPath();
-
+async function readClaudeCredentialsAccessTokenFromFile(
+  directory: ResolvedClaudeConfigDirectory,
+): Promise<ClaudeCredentialSourceResult> {
+  const location = claudeCredentialsLocation(directory);
   try {
-    const content = await readFile(credentialsPath, "utf8");
+    const content = await readFile(join(directory.path, ".credentials.json"), "utf8");
     const parsed = parseClaudeCredentialsAccessToken(content, { allowPlainText: false });
     const accessToken = parsed.accessToken?.trim() ?? "";
 
@@ -741,8 +845,8 @@ async function readClaudeCredentialsAccessTokenFromFile(): Promise<ClaudeCredent
         state: "unavailable",
         detail:
           parsed.error && parsed.error !== "missing"
-            ? `Could not parse Claude credentials file ${sanitizeDisplayText(credentialsPath)}: ${parsed.error}.`
-            : `Claude OAuth access token missing in ${sanitizeDisplayText(credentialsPath)}.`,
+            ? `Could not parse Claude credentials in ${location}: ${parsed.error}.`
+            : `Claude OAuth access token missing in ${location}.`,
       };
     }
 
@@ -753,29 +857,38 @@ async function readClaudeCredentialsAccessTokenFromFile(): Promise<ClaudeCredent
   } catch (error) {
     const code =
       error && typeof error === "object" && "code" in error
-        ? (error as { code?: string | number }).code
+        ? (error as { code?: unknown }).code
         : undefined;
 
     if (code === "ENOENT") {
       return {
         state: "not-found",
-        location: sanitizeDisplayText(credentialsPath),
+        location,
       };
     }
 
+    // Only a system error code is shown: a file system message can name the path it failed on.
+    const shownCode = typeof code === "string" && /^E[A-Z0-9]+$/u.test(code) ? code : "unknown";
     return {
       state: "unavailable",
-      detail: `Could not read Claude credentials file: ${sanitizeDisplayText(
-        error instanceof Error ? error.message : String(error),
-      )}`,
+      detail: `Could not read Claude credentials in ${location}: ${shownCode} error.`,
     };
   }
 }
 
-async function readClaudeOAuthAccessToken(): Promise<AnthropicCredentialsAccess> {
+async function readClaudeOAuthAccessToken(
+  configDirectory: ClaudeConfigDirectory,
+): Promise<AnthropicCredentialsAccess> {
+  if (configDirectory.state !== "resolved") {
+    return { state: "unavailable", detail: CLAUDE_CONFIG_DIRECTORY_UNRESOLVED_DETAIL };
+  }
+
   const locationsChecked: string[] = [];
   const unavailableDetails: string[] = [];
-  const keychainCredentials = await readClaudeCredentialsAccessTokenFromMacOSKeychain();
+  // Only the default directory has a macOS Keychain entry, so a custom directory never reads it.
+  const keychainCredentials = configDirectory.isDefault
+    ? await readClaudeCredentialsAccessTokenFromMacOSKeychain()
+    : null;
   if (keychainCredentials?.state === "configured") {
     return { ...keychainCredentials, source: "claude-credentials" };
   }
@@ -786,7 +899,7 @@ async function readClaudeOAuthAccessToken(): Promise<AnthropicCredentialsAccess>
     locationsChecked.push(keychainCredentials.location);
   }
 
-  const fileCredentials = await readClaudeCredentialsAccessTokenFromFile();
+  const fileCredentials = await readClaudeCredentialsAccessTokenFromFile(configDirectory);
   if (fileCredentials.state === "configured") {
     return { ...fileCredentials, source: "claude-credentials" };
   }
@@ -802,24 +915,34 @@ async function readClaudeOAuthAccessToken(): Promise<AnthropicCredentialsAccess>
   };
 }
 
-async function readAnthropicOAuthAccessToken(options: {
-  includeClaudeCredentials: boolean;
-}): Promise<AnthropicCredentialsAccess> {
-  const opencodeCredentials = await resolveAnthropicOAuthCached();
-  if (opencodeCredentials.state === "configured") {
-    return {
-      state: "configured",
-      accessToken: opencodeCredentials.accessToken,
-      source: "opencode-auth",
-    };
+/**
+ * The Claude CLI's stored subscription token. It is read only when the CLI positively reports a
+ * first-party claude.ai login, because an absent or non-JSON status cannot prove whose token it is.
+ */
+async function readClaudeCliSubscriptionToken(
+  localDiagnostics: AnthropicLocalDiagnostics,
+): Promise<AnthropicCredentialsAccess> {
+  if (localDiagnostics.claudeAiLoginVerified !== true) {
+    return { state: "unavailable", detail: CLAUDE_CLI_TOKEN_UNVERIFIED_DETAIL };
   }
-
-  return options.includeClaudeCredentials
-    ? await readClaudeOAuthAccessToken()
-    : { state: "unavailable" };
+  return await readClaudeOAuthAccessToken(
+    localDiagnostics.configDirectory ?? { state: "unresolved" },
+  );
 }
 
-function fingerprintAccessToken(accessToken: string): string {
+/**
+ * OpenCode's Anthropic login. A login that exists but cannot be used (expired, unreadable) is
+ * reported as such, so the caller never answers for it with the Claude CLI account instead.
+ */
+async function readOpenCodeAnthropicLogin(): Promise<ResolvedAnthropicOAuth> {
+  try {
+    return await resolveAnthropicOAuthCached();
+  } catch {
+    return { state: "failed", error: "OpenCode auth could not be read" };
+  }
+}
+
+export function fingerprintAccessToken(accessToken: string): string {
   return createHash("sha256").update(accessToken).digest("hex");
 }
 
@@ -1117,6 +1240,42 @@ function extractAuthBoolean(data: unknown): boolean | undefined {
   return undefined;
 }
 
+/**
+ * `auth status --json` reports how the login was made. Only a claude.ai subscription login on
+ * Anthropic's first-party API is the Claude Code account; any other reported method or provider is
+ * stale or unrelated. A field that is absent is not evidence either way.
+ */
+/**
+ * Positive evidence that the Claude CLI login is a first-party claude.ai subscription. Both fields
+ * must be reported; an absent field proves nothing, so a login without them cannot prove its identity.
+ */
+function hasFirstPartyClaudeAiLogin(payload: unknown): boolean {
+  const record = asRecord(payload);
+  if (!record) return false;
+  const method = record["authMethod"];
+  const provider = record["apiProvider"];
+  return (
+    typeof method === "string" &&
+    method.trim().toLowerCase() === "claude.ai" &&
+    typeof provider === "string" &&
+    provider.trim().toLowerCase() === "firstparty"
+  );
+}
+
+function hasNonSubscriptionLogin(payload: unknown): boolean {
+  const record = asRecord(payload);
+  if (!record) return false;
+  const method = record["authMethod"];
+  if (method !== undefined && method !== null) {
+    if (typeof method !== "string" || method.trim().toLowerCase() !== "claude.ai") return true;
+  }
+  const provider = record["apiProvider"];
+  if (provider !== undefined && provider !== null) {
+    if (typeof provider !== "string" || provider.trim().toLowerCase() !== "firstparty") return true;
+  }
+  return false;
+}
+
 function hasUnsupportedCommandText(output: string): boolean {
   const normalized = output.toLowerCase();
   return (
@@ -1180,6 +1339,7 @@ async function runClaudeCommand(invocation: ClaudeCommandInvocation): Promise<Cl
           encoding: "utf8",
           timeout: CLAUDE_COMMAND_TIMEOUT_MS,
           maxBuffer: 1024 * 1024,
+          ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         },
         (error: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
           const stdoutText = typeof stdout === "string" ? stdout : stdout.toString("utf8");
@@ -1237,9 +1397,16 @@ function parseClaudeAuthStatusResult(result: ClaudeCommandResult): ParsedAuthPro
       const auth = extractAuthBoolean(payload);
 
       if (auth === true) {
+        if (hasNonSubscriptionLogin(payload)) {
+          return {
+            authStatus: "unknown",
+            message: CLAUDE_NON_SUBSCRIPTION_LOGIN_MESSAGE,
+          };
+        }
         return {
           authStatus: "authenticated",
           jsonPayload: payload,
+          claudeAiLoginVerified: hasFirstPartyClaudeAiLogin(payload),
         };
       }
 
@@ -1387,6 +1554,12 @@ async function probeAnthropicLocalDiagnostics(
     };
   }
 
+  // The CLI's report wins; otherwise CLAUDE_CONFIG_DIR, then the default. The CLI inherits this
+  // environment, so this is the directory it reads its login from.
+  const configDirectory = resolveClaudeConfigDirectory(
+    asRecord(parsedAuth.jsonPayload)?.["configDirectory"],
+    process.env[CLAUDE_CONFIG_DIR_ENV],
+  );
   const quota = parsedAuth.jsonPayload ? parseUsageResponse(parsedAuth.jsonPayload) : null;
   if (quota) {
     return {
@@ -1396,6 +1569,9 @@ async function probeAnthropicLocalDiagnostics(
       binaryPath: binaryPathDisplay,
       checkedCommands,
       localQuota: quota,
+      effectiveBinary: binaryPath,
+      configDirectory,
+      claudeAiLoginVerified: parsedAuth.claudeAiLoginVerified === true,
     };
   }
 
@@ -1406,6 +1582,9 @@ async function probeAnthropicLocalDiagnostics(
     binaryPath: binaryPathDisplay,
     checkedCommands,
     message: CLAUDE_NO_LOCAL_QUOTA_MESSAGE,
+    effectiveBinary: binaryPath,
+    configDirectory,
+    claudeAiLoginVerified: parsedAuth.claudeAiLoginVerified === true,
   };
 }
 
@@ -1425,7 +1604,13 @@ export async function getAnthropicDiagnostics(
   options: AnthropicProbeOptions = {},
 ): Promise<AnthropicDiagnostics> {
   const localDiagnostics = await getAnthropicLocalDiagnostics(options);
-  if (localDiagnostics.localQuota) {
+  // The OpenCode route answers only from OpenCode's own login. When that login is present, the
+  // Claude CLI quota and token are never used in its place (that would mix two accounts).
+  const openCodeLogin = options.useClaudeCodeCredentials
+    ? null
+    : await readOpenCodeAnthropicLogin();
+  const openCodeLoginPresent = openCodeLogin !== null && openCodeLogin.state !== "none";
+  if (localDiagnostics.localQuota && !openCodeLoginPresent) {
     return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
   }
 
@@ -1433,11 +1618,32 @@ export async function getAnthropicDiagnostics(
     return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
   }
 
-  let credentials = options.useClaudeCodeCredentials
-    ? await readClaudeOAuthAccessToken()
-    : await readAnthropicOAuthAccessToken({
-        includeClaudeCredentials: localDiagnostics.authStatus === "authenticated",
-      });
+  if (openCodeLogin && openCodeLogin.state !== "none" && openCodeLogin.state !== "configured") {
+    return {
+      installed: localDiagnostics.installed,
+      version: localDiagnostics.version,
+      authStatus: localDiagnostics.authStatus,
+      quotaSupported: false,
+      quotaSource: "none",
+      oauthCredentialSource: "opencode-auth",
+      binaryPath: localDiagnostics.binaryPath,
+      checkedCommands: localDiagnostics.checkedCommands,
+      message: OPENCODE_ANTHROPIC_UNUSABLE_MESSAGE,
+      failureCategory: "credentials",
+    };
+  }
+
+  const credentials: AnthropicCredentialsAccess = options.useClaudeCodeCredentials
+    ? await readClaudeCliSubscriptionToken(localDiagnostics)
+    : openCodeLogin?.state === "configured"
+      ? {
+          state: "configured",
+          accessToken: openCodeLogin.accessToken,
+          source: "opencode-auth",
+        }
+      : localDiagnostics.authStatus === "authenticated"
+        ? await readClaudeCliSubscriptionToken(localDiagnostics)
+        : { state: "unavailable" };
   if (credentials.state !== "configured") {
     if (localDiagnostics.authStatus !== "authenticated") {
       return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
@@ -1455,25 +1661,10 @@ export async function getAnthropicDiagnostics(
     };
   }
 
-  let fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
+  const fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
     credentials.accessToken,
     options.requestTimeoutMs,
   );
-  if (
-    fallbackQuota.state === "unavailable" &&
-    fallbackQuota.failureKind === "authentication" &&
-    credentials.source === "opencode-auth" &&
-    localDiagnostics.authStatus === "authenticated"
-  ) {
-    const claudeCredentials = await readClaudeOAuthAccessToken();
-    if (claudeCredentials.state === "configured") {
-      credentials = claudeCredentials;
-      fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
-        claudeCredentials.accessToken,
-        options.requestTimeoutMs,
-      );
-    }
-  }
   if (fallbackQuota.state !== "success") {
     return {
       installed: localDiagnostics.installed,
@@ -1485,6 +1676,7 @@ export async function getAnthropicDiagnostics(
       binaryPath: localDiagnostics.binaryPath,
       checkedCommands: localDiagnostics.checkedCommands,
       message: buildAnthropicNoQuotaDiagnosticsMessage(fallbackQuota.detail),
+      credentialFingerprint: fingerprintAccessToken(credentials.accessToken),
       ...(fallbackQuota.failureCategory !== undefined
         ? { failureCategory: fallbackQuota.failureCategory }
         : {}),
@@ -1504,7 +1696,30 @@ export async function getAnthropicDiagnostics(
     binaryPath: localDiagnostics.binaryPath,
     checkedCommands: localDiagnostics.checkedCommands,
     quota: fallbackQuota.quota,
+    credentialFingerprint: fingerprintAccessToken(credentials.accessToken),
   };
+}
+
+/**
+ * The Claude Code login shown beside OpenCode's Anthropic accounts. It is shown only when the CLI
+ * is reliably signed in and its token is not already one of the OpenCode accounts shown.
+ * `reportUnready` (for a detected Claude Code runtime) returns why an unready CLI is not signed in,
+ * so the caller can show that reason instead of dropping the account.
+ */
+export async function getClaudeCodeAccountDiagnostics(
+  options: AnthropicProbeOptions,
+  excludedCredentialFingerprints: readonly string[],
+  account: { reportUnready?: boolean } = {},
+): Promise<AnthropicDiagnostics | null> {
+  const diagnostics = await getAnthropicDiagnostics({ ...options, useClaudeCodeCredentials: true });
+  if (diagnostics.authStatus !== "authenticated") return account.reportUnready ? diagnostics : null;
+  if (
+    diagnostics.credentialFingerprint !== undefined &&
+    excludedCredentialFingerprints.includes(diagnostics.credentialFingerprint)
+  ) {
+    return null;
+  }
+  return diagnostics;
 }
 
 export async function hasAnthropicCredentialsConfigured(
@@ -1544,6 +1759,22 @@ export async function resolveAnthropicAuthIdentity(
   // path process-local rather than risking reuse after a CLI account switch.
   if (localDiagnostics.localQuota) return null;
 
+  if (options.useClaudeCodeCredentials) {
+    // The Claude Code route is identified by its Claude CLI login alone, scoped to the binary and
+    // config directory that answered. It never takes the OpenCode login into its identity.
+    if (localDiagnostics.authStatus !== "authenticated") return null;
+    const claudeCodeCredentials = await readClaudeCliSubscriptionToken(localDiagnostics);
+    if (claudeCodeCredentials.state !== "configured") return null;
+    return deriveResolvedAuthIdentity({
+      providerId: "anthropic:claude-code-route",
+      principal: { kind: "credential", value: claudeCodeCredentials.accessToken },
+      qualifiers: [
+        localDiagnostics.effectiveBinary ?? "",
+        claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
+      ],
+    });
+  }
+
   const opencodeCredentials = await resolveAnthropicOAuthCached();
   const opencodeIdentity =
     opencodeCredentials.state === "configured"
@@ -1557,7 +1788,7 @@ export async function resolveAnthropicAuthIdentity(
     return opencodeIdentity;
   }
 
-  const claudeCredentials = await readClaudeOAuthAccessToken();
+  const claudeCredentials = await readClaudeCliSubscriptionToken(localDiagnostics);
   const claudeIdentity =
     claudeCredentials.state === "configured"
       ? await deriveResolvedAuthIdentity({
@@ -1574,6 +1805,107 @@ export async function resolveAnthropicAuthIdentity(
   }
 
   return opencodeIdentity ?? claudeIdentity;
+}
+
+/** One OpenCode Anthropic login row, as the OpenCode route lists it. */
+export type AnthropicOpenCodeAccount = {
+  sourceId: string;
+  label: string;
+  active: boolean;
+  state: ResolvedAnthropicOAuth["state"];
+  /** Present only when `state` is "configured". */
+  accessToken?: string;
+};
+
+/**
+ * Identity of the whole account set the OpenCode route emits: every OpenCode login row (failed and
+ * expired rows change what is shown too) plus the Claude CLI row. Null when the set cannot be bound
+ * to an identity, so the caller must not cache it.
+ */
+export async function resolveAnthropicAccountSetIdentity(params: {
+  binaryPath?: string;
+  openCodeAccounts: readonly AnthropicOpenCodeAccount[];
+  onlyCurrentModel: boolean;
+  claudeCodeRuntimeDetected: boolean;
+}): Promise<ResolvedAuthIdentity | null> {
+  let localDiagnostics: AnthropicLocalDiagnostics;
+  try {
+    localDiagnostics = await getAnthropicLocalDiagnostics({ binaryPath: params.binaryPath });
+  } catch {
+    return null;
+  }
+  // Claude CLI quota does not expose an account identity (see resolveAnthropicAuthIdentity).
+  if (localDiagnostics.localQuota) return null;
+
+  const identities: ResolvedAuthIdentity[] = [];
+  for (const account of params.openCodeAccounts) {
+    const identity = await deriveResolvedAuthIdentity({
+      providerId: "anthropic:opencode-account",
+      principal:
+        account.state === "configured" && account.accessToken
+          ? { kind: "credential", value: account.accessToken }
+          : { kind: "stable-id", value: account.sourceId },
+      qualifiers: [
+        account.sourceId,
+        account.label,
+        account.active ? "active" : "idle",
+        account.state,
+      ],
+    });
+    if (!identity) return null;
+    identities.push(identity);
+  }
+
+  const claudeCliIdentity = await claudeCliAccountIdentity(
+    localDiagnostics,
+    params.claudeCodeRuntimeDetected,
+  );
+  if (!claudeCliIdentity) return null;
+  identities.push(claudeCliIdentity);
+
+  // The selected-route flag changes which Claude CLI quota the route probes, so it is part of the set.
+  return await composeResolvedAuthIdentities({
+    providerId: "anthropic",
+    identities,
+    qualifiers: [params.onlyCurrentModel ? "only-current-model" : "all-models"],
+  });
+}
+
+/**
+ * The Claude CLI row's identity. A readable first-party CLI token keys it, because its quota and its
+ * duplicate check depend on that token. Otherwise the row shows only the CLI's install and sign-in
+ * state, so that state keys it.
+ */
+async function claudeCliAccountIdentity(
+  localDiagnostics: AnthropicLocalDiagnostics,
+  claudeCodeRuntimeDetected: boolean,
+): Promise<ResolvedAuthIdentity | null> {
+  if (localDiagnostics.authStatus === "authenticated") {
+    const credentials = await readClaudeCliSubscriptionToken(localDiagnostics);
+    if (credentials.state === "configured") {
+      return await deriveResolvedAuthIdentity({
+        providerId: "anthropic:claude-cli-account",
+        principal: { kind: "credential", value: credentials.accessToken },
+        qualifiers: [
+          localDiagnostics.effectiveBinary ?? "",
+          claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
+        ],
+      });
+    }
+  }
+  return await deriveResolvedAuthIdentity({
+    providerId: "anthropic:claude-cli-state",
+    principal: { kind: "stable-id", value: "claude-cli-state" },
+    qualifiers: [
+      localDiagnostics.installed ? "installed" : "missing",
+      localDiagnostics.version ?? "",
+      localDiagnostics.authStatus,
+      localDiagnostics.effectiveBinary ?? "",
+      claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
+      localDiagnostics.claudeAiLoginVerified === true ? "verified" : "unverified",
+      claudeCodeRuntimeDetected ? "detected" : "undetected",
+    ],
+  });
 }
 
 export async function queryAnthropicQuota(

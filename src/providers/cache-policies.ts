@@ -1,8 +1,11 @@
-import { resolveAnthropicAuthIdentity } from "../lib/anthropic.js";
+import {
+  resolveAnthropicAccountSetIdentity,
+  resolveAnthropicAuthIdentity,
+} from "../lib/anthropic.js";
 import { resolveChutesApiKey } from "../lib/chutes-config.js";
 import { resolveCopilotAuthIdentity } from "../lib/copilot.js";
 import { resolveDeepSeekApiKey } from "../lib/deepseek-auth.js";
-import type { QuotaProviderCachePolicy } from "../lib/entries.js";
+import type { QuotaProviderCachePolicy, QuotaProviderContext } from "../lib/entries.js";
 import { resolveGoogleAgyAuthIdentity } from "../lib/google-agy.js";
 import { resolveGeminiCliAuthIdentity } from "../lib/google-gemini-cli.js";
 import { resolveKiloApiKey } from "../lib/kilo-config.js";
@@ -48,6 +51,11 @@ import { resolveSyntheticApiKey } from "../lib/synthetic-config.js";
 import { resolveXaiAuthIdentity } from "../lib/xai.js";
 import { DEFAULT_ZAI_AUTH_CACHE_MAX_AGE_MS, resolveZaiAuthCached } from "../lib/zai-auth.js";
 import { DEFAULT_ZHIPU_AUTH_CACHE_MAX_AGE_MS, resolveZhipuAuthCached } from "../lib/zhipu-auth.js";
+import {
+  getClaudeCodeRuntimeProviderId,
+  isClaudeCodeRuntimeDetected,
+  readOpenCodeAnthropicLogins,
+} from "./anthropic.js";
 
 const UNCACHED = { kind: "uncached" } as const satisfies QuotaProviderCachePolicy;
 
@@ -175,11 +183,39 @@ const quotaProvidersCachePolicy: QuotaProviderCachePolicy = {
   },
 };
 
+/**
+ * The Claude Code route is identified by its Claude CLI login alone. The OpenCode route is identified
+ * by every OpenCode Anthropic login row plus the Claude CLI row, because the route emits all of them.
+ */
+async function anthropicRouteIdentity(
+  ctx: QuotaProviderContext,
+): Promise<ResolvedAuthIdentity | null> {
+  if (getClaudeCodeRuntimeProviderId(ctx)) {
+    return resolveAnthropicAuthIdentity({
+      binaryPath: ctx.config.anthropicBinaryPath,
+      useClaudeCodeCredentials: true,
+    });
+  }
+
+  const logins = await readOpenCodeAnthropicLogins();
+  return resolveAnthropicAccountSetIdentity({
+    binaryPath: ctx.config.anthropicBinaryPath,
+    openCodeAccounts: logins.map(({ row, auth }) => ({
+      sourceId: row.id,
+      label: row.label,
+      active: row.active,
+      state: auth.state,
+      ...(auth.state === "configured" ? { accessToken: auth.accessToken } : {}),
+    })),
+    onlyCurrentModel: ctx.config.onlyCurrentModel === true,
+    claudeCodeRuntimeDetected: await isClaudeCodeRuntimeDetected(ctx),
+  });
+}
+
 export const PROVIDER_CACHE_POLICIES = {
   anthropic: {
     kind: "resolved-auth",
-    resolveIdentity: (ctx) =>
-      resolveAnthropicAuthIdentity({ binaryPath: ctx.config.anthropicBinaryPath }),
+    resolveIdentity: (ctx) => anthropicRouteIdentity(ctx),
   },
   copilot: {
     kind: "resolved-auth",

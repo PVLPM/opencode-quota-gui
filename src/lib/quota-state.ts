@@ -34,9 +34,12 @@ const QUOTA_PROVIDER_CACHE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 const inMemoryCache = new Map<string, PersistedQuotaProviderCacheEntry>();
 const inFlightByKey = new Map<string, Promise<QuotaProviderResult>>();
 type ProcessLocalLatestEntry = { result: QuotaProviderResult; timestamp: number };
+// Scoped per runtime client, then per provider, then per full route key (provider id, current
+// route, model, binary path, and runtime-eligible sources) so a result from one route or
+// account setup is never served to another when the account identity is unknown.
 let processLocalLatestByRuntime = new WeakMap<
   object,
-  WeakMap<QuotaProvider, ProcessLocalLatestEntry>
+  WeakMap<QuotaProvider, Map<string, ProcessLocalLatestEntry>>
 >();
 let lastPruneAtMs = 0;
 
@@ -290,10 +293,22 @@ function getProcessLocalRuntimeOwner(ctx: QuotaProviderContext): object | null {
   return owner && (typeof owner === "object" || typeof owner === "function") ? owner : null;
 }
 
+/** Full route key without the account identity: a process-local result is only reusable on the same route. */
+function buildProcessLocalRouteKey(params: {
+  provider: QuotaProvider;
+  ctx: QuotaProviderContext;
+  runtimeEligibleQuotaProviders?: readonly QuotaProviderDefinition[];
+}): string {
+  return buildQuotaProviderStateCacheKey(params.provider.id, params.ctx, {
+    runtimeEligibleQuotaProviders: params.runtimeEligibleQuotaProviders,
+  });
+}
+
 function rememberProcessLocalLatest(params: {
   provider: QuotaProvider;
   ctx: QuotaProviderContext;
   result: QuotaProviderResult;
+  runtimeEligibleQuotaProviders?: readonly QuotaProviderDefinition[];
 }): void {
   const runtimeOwner = getProcessLocalRuntimeOwner(params.ctx);
   if (!runtimeOwner) return;
@@ -302,7 +317,12 @@ function rememberProcessLocalLatest(params: {
     runtimeSnapshots = new WeakMap();
     processLocalLatestByRuntime.set(runtimeOwner, runtimeSnapshots);
   }
-  runtimeSnapshots.set(params.provider, {
+  let routeSnapshots = runtimeSnapshots.get(params.provider);
+  if (!routeSnapshots) {
+    routeSnapshots = new Map();
+    runtimeSnapshots.set(params.provider, routeSnapshots);
+  }
+  routeSnapshots.set(buildProcessLocalRouteKey(params), {
     result: cloneQuotaProviderResult(params.result),
     timestamp: Date.now(),
   });
@@ -311,10 +331,14 @@ function rememberProcessLocalLatest(params: {
 function readProcessLocalLatest(params: {
   provider: QuotaProvider;
   ctx: QuotaProviderContext;
+  runtimeEligibleQuotaProviders?: readonly QuotaProviderDefinition[];
 }): CachedProviderRead {
   const runtimeOwner = getProcessLocalRuntimeOwner(params.ctx);
   if (!runtimeOwner) return { hit: false };
-  const entry = processLocalLatestByRuntime.get(runtimeOwner)?.get(params.provider);
+  const entry = processLocalLatestByRuntime
+    .get(runtimeOwner)
+    ?.get(params.provider)
+    ?.get(buildProcessLocalRouteKey(params));
   if (!entry) return { hit: false };
   return {
     hit: true,
@@ -356,7 +380,12 @@ export async function fetchQuotaProviderResult(params: {
     cacheContext: QuotaProviderCacheContext = {},
   ): Promise<QuotaProviderResult> => {
     const snapshot = await fetchValidatedProviderResult(provider, ctx, cacheContext);
-    rememberProcessLocalLatest({ provider, ctx, result: snapshot });
+    rememberProcessLocalLatest({
+      provider,
+      ctx,
+      result: snapshot,
+      runtimeEligibleQuotaProviders: cacheContext.runtimeEligibleQuotaProviders,
+    });
     publishQuotaTelemetry({
       ctx,
       providerId: provider.id,
@@ -546,9 +575,14 @@ export async function readCachedProviderResult(params: {
   const cacheContext: QuotaProviderCacheContext = { runtimeEligibleQuotaProviders };
   const scope = await resolveProviderCacheScope(params.provider, params.ctx, cacheContext);
   if (!scope) {
+    // Only uncached providers may reuse the route-scoped process-local latest. A
+    // resolved-auth provider without an identity cannot prove the snapshot belongs
+    // to the current account, so it fails closed.
+    if (params.provider.cachePolicy?.kind === "resolved-auth") return { hit: false };
     return readProcessLocalLatest({
       provider: params.provider,
       ctx: params.ctx,
+      runtimeEligibleQuotaProviders,
     });
   }
 

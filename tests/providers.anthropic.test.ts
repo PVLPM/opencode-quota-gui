@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getQuotaProviderIdsForRuntimeId } from "../src/lib/provider-metadata.js";
+import { matchesQuotaProviderCurrentSelection } from "../src/lib/quota-render-data.js";
 import { anthropicProvider } from "../src/providers/anthropic.js";
 import {
   expectAttemptedWithErrorLabel,
@@ -8,8 +10,12 @@ import {
 } from "./helpers/provider-assertions.js";
 import { createProviderAvailabilityContext } from "./helpers/provider-test-harness.js";
 
-vi.mock("../src/lib/anthropic.js", () => ({
+vi.mock("../src/lib/anthropic.js", async (importOriginal) => ({
+  // The real redaction helper stays in place so provider error text is checked end to end.
+  ...(await importOriginal<typeof import("../src/lib/anthropic.js")>()),
+  fingerprintAccessToken: vi.fn((token: string) => `fp:${token}`),
   getAnthropicDiagnostics: vi.fn(),
+  getClaudeCodeAccountDiagnostics: vi.fn(),
   hasAnthropicCredentialsConfigured: vi.fn(),
   queryAnthropicQuota: vi.fn(),
   queryAnthropicQuotaWithOAuth: vi.fn(),
@@ -24,16 +30,43 @@ describe("anthropic provider", () => {
   beforeEach(async () => {
     const {
       getAnthropicDiagnostics,
+      getClaudeCodeAccountDiagnostics,
       hasAnthropicCredentialsConfigured,
       queryAnthropicQuota,
       queryAnthropicQuotaWithOAuth,
     } = await import("../src/lib/anthropic.js");
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
     (getAnthropicDiagnostics as any).mockReset();
+    (getClaudeCodeAccountDiagnostics as any).mockReset();
     (hasAnthropicCredentialsConfigured as any).mockReset();
     (queryAnthropicQuota as any).mockReset();
     (queryAnthropicQuotaWithOAuth as any).mockReset();
     (readCredentialRows as any).mockReset().mockResolvedValue([]);
+  });
+
+  it("does not expose CLI quota anywhere on a selected OpenCode Anthropic route", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "1.2.3",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-auth-status-json",
+      checkedCommands: [],
+      quota: {
+        success: true,
+        five_hour: { percentRemaining: 17 },
+        seven_day: { percentRemaining: 23 },
+      },
+    });
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: true },
+      }),
+    );
+    expect(JSON.stringify(out)).not.toMatch(/17%|23%|percentRemaining/);
+    expect(out.errors).toHaveLength(1);
   });
 
   it("fans out to a valid inactive database credential when the active credential is expired", async () => {
@@ -101,6 +134,7 @@ describe("anthropic provider", () => {
       binaryPath: null,
       checkedCommands: [],
       message: "Anthropic API returned 500",
+      oauthCredentialSource: "opencode-auth",
       failureCategory: "provider_api",
     });
 
@@ -109,7 +143,7 @@ describe("anthropic provider", () => {
     expect(getAnthropicDiagnostics).toHaveBeenCalledOnce();
     expect(queryAnthropicQuota).not.toHaveBeenCalled();
     expect(out.errors[0]?.failureCategory).toBe("provider_api");
-    expect(out.errors[0]?.message).toBe("Anthropic API returned 500");
+    expect(out.errors[0]?.message).toBe("Anthropic quota request failed.");
   });
 
   it("does not repeat diagnostics after the initial probe throws", async () => {
@@ -122,7 +156,7 @@ describe("anthropic provider", () => {
 
     expect(getAnthropicDiagnostics).toHaveBeenCalledOnce();
     expect(queryAnthropicQuota).not.toHaveBeenCalled();
-    expect(out.errors[0]?.message).toBe("Claude CLI probe failed: probe failed");
+    expect(out.errors[0]?.message).toBe("Claude CLI probe failed.");
   });
 
   it("shows a login OpenCode could not read as its own error row", async () => {
@@ -167,8 +201,7 @@ describe("anthropic provider", () => {
     expect(out.errors).toEqual([
       {
         label: "[Claude] (active)",
-        message:
-          "Anthropic sign-in could not be read: refresh_failed: HTTP 500. Run `opencode auth login anthropic`.",
+        message: "Anthropic sign-in could not be used. Run `opencode auth login anthropic`.",
         sourceId: "failed-active",
         failureCategory: "credentials",
       },
@@ -205,7 +238,7 @@ describe("anthropic provider", () => {
     });
     expect(out.statusDetails).toContainEqual({
       key: "binary_path",
-      value: "/opt/homebrew/bin/claude",
+      value: "(detected)",
     });
     expect(out.statusDetails).toContainEqual({
       key: "quota_source",
@@ -347,7 +380,12 @@ describe("anthropic provider", () => {
         seven_day: { percentRemaining: 88 },
       },
     });
-    const out = await anthropicProvider.fetch({} as any);
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
     expectAttemptedWithNoErrors(out);
     expect(visibleEntries(out.entries, "anthropic")).toEqual([
       {
@@ -394,7 +432,12 @@ describe("anthropic provider", () => {
     });
     (queryAnthropicQuota as any).mockClear();
 
-    const out = await anthropicProvider.fetch({} as any);
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
 
     expect(visibleEntries(out.entries, "anthropic").map((entry) => entry.percentRemaining)).toEqual(
       [43, 88],
@@ -514,7 +557,7 @@ describe("anthropic provider", () => {
       expect.objectContaining({
         sourceId: "anthropic-personal",
         failureCategory: "provider_api",
-        message: "Anthropic OAuth usage probe paused after HTTP 429; retry in 900s.",
+        message: "Anthropic quota request failed.",
       }),
     ]);
     expect(out.entries.map((entry) => [entry.accounting.sourceId, entry.percentRemaining])).toEqual(
@@ -595,7 +638,12 @@ describe("anthropic provider", () => {
       },
     });
 
-    const out = await anthropicProvider.fetch({} as any);
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
     expectAttemptedWithNoErrors(out);
     expect(out.entries).toHaveLength(2);
     expect(visibleEntries(out.entries, "anthropic")).toEqual([
@@ -618,6 +666,32 @@ describe("anthropic provider", () => {
     ]);
   });
 
+  it("does not emit private diagnostic free text or paths with spaces", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "1.2.3",
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: "C:\\Users\\Alice Smith\\secret.exe",
+      checkedCommands: ["/home/Alice Smith/private credentials --version"],
+      message:
+        "Alice Smith secret-token C:\\Users\\Alice Smith\\private credentials /home/Alice Smith/private credentials",
+    });
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
+    const emitted = JSON.stringify({ errors: out.errors, statusDetails: out.statusDetails });
+    expect(emitted).not.toContain("Alice");
+    expect(emitted).not.toContain("secret");
+    expect(emitted).not.toContain("private");
+    expect(out.errors.length).toBeGreaterThan(0);
+  });
+
   it("maps errors into toast errors", async () => {
     const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
     (getAnthropicDiagnostics as any).mockResolvedValueOnce({
@@ -633,7 +707,12 @@ describe("anthropic provider", () => {
         "Invalid or expired Anthropic token; re-authenticate Claude Code or update CLAUDE_CODE_OAUTH_TOKEN",
     });
 
-    const out = await anthropicProvider.fetch({} as any);
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
     expectAttemptedWithErrorLabel(out, "Claude");
   });
 
@@ -748,19 +827,605 @@ describe("anthropic provider", () => {
   it.each([
     "claude-agent",
     "claude-code",
-  ])("is available for the selected %s runtime when Claude CLI auth is ready", async (runtimeProviderId) => {
+  ])("keeps the selected %s route available so a failed CLI probe is shown as an error", async (runtimeProviderId) => {
     const { hasAnthropicCredentialsConfigured } = await import("../src/lib/anthropic.js");
-    (hasAnthropicCredentialsConfigured as any).mockResolvedValue(true);
+    (hasAnthropicCredentialsConfigured as any).mockResolvedValue(false);
     const ctx = createProviderAvailabilityContext({
-      providerIds: [runtimeProviderId],
+      providerIds: [],
       configOverrides: { currentProviderID: runtimeProviderId, onlyCurrentModel: true },
     });
 
     await expect(anthropicProvider.isAvailable(ctx)).resolves.toBe(true);
-    expect(hasAnthropicCredentialsConfigured).toHaveBeenCalledWith({
+  });
+
+  it("re-reads the Claude CLI on every refresh so a new connection replaces an earlier error", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any)
+      .mockResolvedValueOnce({
+        installed: true,
+        version: "2.1.123",
+        authStatus: "unauthenticated",
+        quotaSupported: false,
+        quotaSource: "none",
+        checkedCommands: [],
+        message: "Claude is not authenticated. Run `claude auth login` and try again.",
+      })
+      .mockResolvedValueOnce({
+        installed: true,
+        version: "2.1.123",
+        authStatus: "authenticated",
+        quotaSupported: true,
+        quotaSource: "claude-credentials-oauth-api",
+        oauthCredentialSource: "claude-credentials",
+        checkedCommands: [],
+        quota: { success: true, five_hour: { percentRemaining: 70 } },
+      });
+    const ctx = createProviderAvailabilityContext({
+      providerIds: [],
+      configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+    });
+
+    expectAttemptedWithErrorLabel(await anthropicProvider.fetch(ctx), "Claude");
+    const second = await anthropicProvider.fetch(ctx);
+
+    expect(
+      visibleEntries(second.entries, "anthropic").map((entry) => entry.percentRemaining),
+    ).toEqual([70]);
+    expect(getAnthropicDiagnostics).toHaveBeenNthCalledWith(2, {
       binaryPath: undefined,
+      requestTimeoutMs: undefined,
       useClaudeCodeCredentials: true,
     });
+  });
+
+  it("shows a Claude Code route rejected by the usage endpoint as a credentials error without an OpenCode fallback", async () => {
+    const { getAnthropicDiagnostics, queryAnthropicQuota } = await import(
+      "../src/lib/anthropic.js"
+    );
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      oauthCredentialSource: "claude-credentials",
+      checkedCommands: [],
+      message: "Claude Code sign-in was rejected by the usage endpoint; run `claude auth login`.",
+      failureCategory: "credentials",
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
+
+    expectAttemptedWithErrorLabel(out, "Claude");
+    expect(out.errors?.[0]).toMatchObject({ failureCategory: "credentials" });
+    expect(visibleEntries(out.entries, "anthropic")).toEqual([]);
+    expect(readCredentialRows).not.toHaveBeenCalled();
+    expect(queryAnthropicQuota).not.toHaveBeenCalled();
+  });
+
+  it("presents a reliably connected Claude Code account beside OpenCode's Anthropic account", async () => {
+    const {
+      getAnthropicDiagnostics,
+      getClaudeCodeAccountDiagnostics,
+      queryAnthropicQuotaWithOAuth,
+    } = await import("../src/lib/anthropic.js");
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "anthropic-personal",
+        integrationId: "anthropic",
+        label: "Personal",
+        active: true,
+        value: { type: "oauth", access: "personal-token" },
+      },
+    ]);
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+    });
+    (queryAnthropicQuotaWithOAuth as any).mockResolvedValueOnce({
+      success: true,
+      five_hour: { percentRemaining: 80 },
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      oauthCredentialSource: "claude-credentials",
+      checkedCommands: [],
+      quota: { success: true, five_hour: { percentRemaining: 55 } },
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: false },
+      }),
+    );
+
+    expect(getClaudeCodeAccountDiagnostics).toHaveBeenCalledWith(
+      expect.anything(),
+      ["fp:personal-token"],
+      { reportUnready: false },
+    );
+    expect(out.accounts?.map((account) => account.sourceId)).toEqual([
+      "anthropic-personal",
+      "claude-code-cli",
+    ]);
+    expect(out.entries.filter((entry) => entry.group === "Claude Code")).toEqual([
+      expect.objectContaining({
+        name: "Claude Code 5h",
+        percentRemaining: 55,
+        accounting: expect.objectContaining({ sourceId: "claude-code-cli" }),
+      }),
+    ]);
+    expect(out.entries.some((entry) => entry.percentRemaining === 80)).toBe(true);
+  });
+
+  it("keeps a detected Claude Code route visible as an error when its usage probe fails", async () => {
+    const { getAnthropicDiagnostics, queryAnthropicQuota } = await import(
+      "../src/lib/anthropic.js"
+    );
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: "claude (PATH)",
+      checkedCommands: [],
+      message: "Claude Code usage request failed with HTTP 500.",
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-agent"],
+        configOverrides: { currentProviderID: "claude-agent", onlyCurrentModel: true },
+      }),
+    );
+
+    expectAttemptedWithErrorLabel(out, "Claude");
+    expect(visibleEntries(out.entries, "anthropic")).toEqual([]);
+    expect(queryAnthropicQuota).not.toHaveBeenCalled();
+  });
+
+  it("keeps a Claude Code route that lost its CLI login visible with the CLI's status message", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "unauthenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: "claude (PATH)",
+      checkedCommands: [],
+      message: "Claude is not authenticated. Run `claude auth login` and try again.",
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
+
+    expectAttemptedWithErrorLabel(out, "Claude");
+    expect(out.errors?.[0]?.message).toContain("Claude is not authenticated");
+  });
+
+  it("reports a Claude Code route whose CLI probe throws as an error row instead of dropping it", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockRejectedValueOnce(
+      new Error(
+        "Claude CLI path contains characters that cannot be passed safely through cmd.exe.",
+      ),
+    );
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
+
+    expectAttemptedWithErrorLabel(out, "Claude");
+    expect(out.errors?.[0]?.message).toBe("Claude CLI probe failed.");
+  });
+
+  it("does not append the Claude Code account to the selected anthropic route under onlyCurrentModel", async () => {
+    const {
+      getAnthropicDiagnostics,
+      getClaudeCodeAccountDiagnostics,
+      queryAnthropicQuotaWithOAuth,
+    } = await import("../src/lib/anthropic.js");
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "anthropic-personal",
+        integrationId: "anthropic",
+        label: "Personal",
+        active: true,
+        value: { type: "oauth", access: "personal-token" },
+      },
+    ]);
+    (queryAnthropicQuotaWithOAuth as any).mockResolvedValueOnce({
+      success: true,
+      five_hour: { percentRemaining: 80 },
+    });
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: true },
+      }),
+    );
+
+    expect(getClaudeCodeAccountDiagnostics).not.toHaveBeenCalled();
+    expect(out.entries.some((entry) => entry.percentRemaining === 80)).toBe(true);
+    expect(out.entries.filter((entry) => entry.group === "Claude Code")).toEqual([]);
+  });
+
+  it("does not present a Claude CLI login without OpenCode's login as the anthropic route", async () => {
+    const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
+      "../src/lib/anthropic.js"
+    );
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-auth-status-json",
+      binaryPath: "claude (PATH)",
+      checkedCommands: [],
+      quota: { success: true, five_hour: { percentRemaining: 70 } },
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-auth-status-json",
+      checkedCommands: [],
+      quota: { success: true, five_hour: { percentRemaining: 55 } },
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: false },
+      }),
+    );
+
+    expect(out.entries.some((entry) => entry.percentRemaining === 70)).toBe(false);
+    expect(out.entries.filter((entry) => entry.group === "Claude")).toEqual([]);
+    expect(out.entries.filter((entry) => entry.group === "Claude Code")).toEqual([
+      expect.objectContaining({
+        name: "Claude Code 5h",
+        percentRemaining: 55,
+        accounting: expect.objectContaining({ sourceId: "claude-code-cli" }),
+      }),
+    ]);
+    expect(getClaudeCodeAccountDiagnostics).toHaveBeenCalledWith(expect.anything(), [], {
+      reportUnready: false,
+    });
+    expect(out.errors ?? []).toEqual([]);
+  });
+
+  it("tells a selected anthropic route without OpenCode's login why it has no data", async () => {
+    const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
+      "../src/lib/anthropic.js"
+    );
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-auth-status-json",
+      binaryPath: "claude (PATH)",
+      checkedCommands: [],
+      quota: { success: true, five_hour: { percentRemaining: 70 } },
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: true },
+      }),
+    );
+
+    expectAttemptedWithErrorLabel(out, "Claude");
+    expect(out.errors?.[0]).toMatchObject({
+      message: expect.stringContaining("opencode auth login anthropic"),
+      failureCategory: "credentials",
+    });
+    expect(out.entries).toEqual([]);
+    expect(getClaudeCodeAccountDiagnostics).not.toHaveBeenCalled();
+  });
+
+  it("shows a selected Claude Code route with no probe message as an error row", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-agent"],
+        configOverrides: { currentProviderID: "claude-agent", onlyCurrentModel: true },
+      }),
+    );
+
+    expectAttemptedWithErrorLabel(out, "Claude");
+    expect(out.errors?.[0]?.message).toBe("Claude Code usage is unavailable.");
+  });
+
+  it("keeps OpenCode's rows when the separate Claude Code account probe throws", async () => {
+    const {
+      getAnthropicDiagnostics,
+      getClaudeCodeAccountDiagnostics,
+      queryAnthropicQuotaWithOAuth,
+    } = await import("../src/lib/anthropic.js");
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "anthropic-personal",
+        integrationId: "anthropic",
+        label: "Personal",
+        active: true,
+        value: { type: "oauth", access: "personal-token" },
+      },
+    ]);
+    (queryAnthropicQuotaWithOAuth as any).mockResolvedValueOnce({
+      success: true,
+      five_hour: { percentRemaining: 80 },
+    });
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockRejectedValueOnce(new Error("spawn failed"));
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: false },
+      }),
+    );
+
+    expect(out.entries.some((entry) => entry.percentRemaining === 80)).toBe(true);
+    expect(out.errors).toEqual([
+      expect.objectContaining({
+        label: "Claude Code",
+        sourceId: "claude-code-cli",
+        message: "Claude CLI probe failed.",
+      }),
+    ]);
+  });
+
+  it("keeps the custom Claude binary path, the username, and credential paths out of errors and statusDetails", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    const customBinary = "C:\\Users\\alice\\tools\\claude-custom.exe";
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: customBinary,
+      checkedCommands: [`${customBinary} --version`],
+      message: `Claude CLI (\`${customBinary}\`) failed; credentials read from C:\\Users\\alice\\.claude\\.credentials.json`,
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: {
+          currentProviderID: "claude-code",
+          onlyCurrentModel: true,
+          anthropicBinaryPath: customBinary,
+        },
+      }),
+    );
+
+    const emitted = JSON.stringify({ errors: out.errors, statusDetails: out.statusDetails });
+    expect(emitted).toContain("(detected)");
+    expect(emitted).not.toContain("alice");
+    expect(emitted).not.toContain("claude-custom.exe");
+    expect(emitted).not.toContain(".credentials.json");
+  });
+
+  it("redacts a probe exception that names the custom binary", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    const customBinary = "C:\\Users\\alice\\tools\\claude-custom.exe";
+    (getAnthropicDiagnostics as any).mockRejectedValueOnce(
+      new Error(`spawn ${customBinary} /home/Alice Smith/private key secret-token ENOENT`),
+    );
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: {
+          currentProviderID: "claude-code",
+          onlyCurrentModel: true,
+          anthropicBinaryPath: customBinary,
+        },
+      }),
+    );
+
+    const emitted = JSON.stringify({ errors: out.errors, statusDetails: out.statusDetails });
+    expect(emitted).toContain("Claude CLI probe failed.");
+    expect(emitted).not.toContain("alice");
+    expect(emitted).not.toContain("Alice");
+    expect(emitted).not.toContain("secret-token");
+    expect(emitted).not.toContain("private key");
+  });
+
+  it("keeps OpenCode account rows free of raw identities, paths, and fingerprints, but still distinct", async () => {
+    const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
+      "../src/lib/anthropic.js"
+    );
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    const customBinary = "C:\\Users\\alice\\tools\\claude-custom.exe";
+    const fingerprint = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "row-work",
+        integrationId: "anthropic",
+        label: "Work",
+        active: true,
+        value: { type: "oauth", access: "work-access-token" },
+      },
+      {
+        id: "row-home",
+        integrationId: "anthropic",
+        label: "Home",
+        active: false,
+        value: { type: "oauth", access: "home-access-token" },
+      },
+    ]);
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: customBinary,
+      checkedCommands: [`${customBinary} --version`],
+      message: `Claude CLI for alice@example.com (org Acme Corp) failed; read C:\\Users\\alice\\.claude\\.credentials.json`,
+      oauthCredentialSource: "opencode-auth",
+      credentialFingerprint: fingerprint,
+    });
+    (queryAnthropicQuotaWithOAuth as any)
+      .mockResolvedValueOnce({ success: true, five_hour: { percentRemaining: 80 } })
+      .mockResolvedValueOnce({ success: true, five_hour: { percentRemaining: 40 } });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", anthropicBinaryPath: customBinary },
+      }),
+    );
+
+    // Each OpenCode login stays its own account row, so the rows still tell accounts apart.
+    expect(out.accounts?.map((account) => account.sourceId)).toEqual(["row-work", "row-home"]);
+    expect(new Set(out.accounts?.map((account) => account.label)).size).toBe(2);
+
+    const emitted = JSON.stringify({
+      accounts: out.accounts,
+      entries: out.entries,
+      errors: out.errors,
+      statusDetails: out.statusDetails,
+    });
+    expect(emitted).toContain("(detected)");
+    for (const leaked of [
+      customBinary,
+      "claude-custom.exe",
+      "alice",
+      "example.com",
+      "Acme",
+      ".credentials.json",
+      fingerprint,
+      "work-access-token",
+      "home-access-token",
+    ]) {
+      expect(emitted).not.toContain(leaked);
+    }
+  });
+
+  it("keeps the Claude CLI account row free of its identity, paths, and fingerprint", async () => {
+    const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
+      "../src/lib/anthropic.js"
+    );
+    const customBinary = "C:\\Users\\alice\\tools\\claude-custom.exe";
+    const fingerprint = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: customBinary,
+      checkedCommands: [],
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: customBinary,
+      checkedCommands: [`${customBinary} --version`],
+      message: `Claude CLI for alice@example.com (org Acme Corp) failed; read C:\\Users\\alice\\.claude\\.credentials.json`,
+      credentialFingerprint: fingerprint,
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", anthropicBinaryPath: customBinary },
+      }),
+    );
+
+    expect(out.errors).toEqual([
+      expect.objectContaining({
+        label: "Claude Code",
+        sourceId: "claude-code-cli",
+        message:
+          "Claude authentication could not be verified. Run `claude auth login` and try again.",
+      }),
+    ]);
+    const emitted = JSON.stringify({ errors: out.errors, statusDetails: out.statusDetails });
+    expect(emitted).toContain("(detected)");
+    for (const leaked of [
+      customBinary,
+      "claude-custom.exe",
+      "alice",
+      "example.com",
+      "Acme",
+      ".credentials.json",
+      fingerprint,
+    ]) {
+      expect(emitted).not.toContain(leaked);
+    }
+  });
+
+  it.each([
+    "anthropic",
+    "claude-agent",
+    "claude-code",
+  ])("selects the Anthropic provider for the %s runtime id under onlyCurrentModel", (runtimeId) => {
+    expect(getQuotaProviderIdsForRuntimeId(runtimeId)).toEqual(["anthropic"]);
+    expect(
+      matchesQuotaProviderCurrentSelection({
+        provider: anthropicProvider,
+        currentModel: `${runtimeId}/claude-sonnet-4-6`,
+        currentProviderID: runtimeId,
+      }),
+    ).toBe(true);
   });
 
   it("passes the configured Claude binary path through Anthropic probes", async () => {
@@ -795,6 +1460,74 @@ describe("anthropic provider", () => {
       requestTimeoutMs: undefined,
     });
     expect(queryAnthropicQuota).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "claude-agent",
+    "claude-code",
+  ])("keeps a dashboard-detected %s runtime discovered while its CLI is not ready", async (runtimeProviderId) => {
+    const { hasAnthropicCredentialsConfigured } = await import("../src/lib/anthropic.js");
+    (hasAnthropicCredentialsConfigured as any).mockResolvedValue(false);
+    const ctx = createProviderAvailabilityContext({
+      providerIds: [runtimeProviderId],
+      configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: false },
+    });
+
+    await expect(anthropicProvider.isAvailable(ctx)).resolves.toBe(false);
+    await expect(anthropicProvider.isDiscovered?.(ctx)).resolves.toBe(true);
+  });
+
+  it("does not discover a Claude Code runtime on a selected anthropic route", async () => {
+    const { hasAnthropicCredentialsConfigured } = await import("../src/lib/anthropic.js");
+    (hasAnthropicCredentialsConfigured as any).mockResolvedValue(false);
+    const ctx = createProviderAvailabilityContext({
+      providerIds: ["claude-code"],
+      configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: true },
+    });
+
+    await expect(anthropicProvider.isDiscovered?.(ctx)).resolves.toBe(false);
+  });
+
+  it("shows a dashboard-detected Claude Code runtime with a missing CLI as a safe error row", async () => {
+    const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
+      "../src/lib/anthropic.js"
+    );
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: false,
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: false,
+      version: null,
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      binaryPath: null,
+      checkedCommands: [],
+      message: "Claude CLI (`claude`) is not installed or not on PATH.",
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: false },
+      }),
+    );
+
+    expect(getClaudeCodeAccountDiagnostics).toHaveBeenCalledWith(expect.anything(), [], {
+      reportUnready: true,
+    });
+    expect(out.errors).toEqual([
+      expect.objectContaining({
+        label: "Claude Code",
+        sourceId: "claude-code-cli",
+        message: "Claude CLI is unavailable.",
+      }),
+    ]);
+    expect(JSON.stringify(out)).not.toContain("not installed or not on PATH");
   });
 
   it("is not available when Claude CLI auth is missing even if provider id exists", async () => {

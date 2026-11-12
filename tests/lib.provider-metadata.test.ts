@@ -257,7 +257,11 @@ describe("provider-metadata", () => {
       "copilot-chat",
       "github-copilot-chat",
     ]);
-    expect(QUOTA_PROVIDER_RUNTIME_IDS.anthropic).toEqual(["anthropic"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS.anthropic).toEqual([
+      "anthropic",
+      "claude-agent",
+      "claude-code",
+    ]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.openai).toEqual(["openai", "chatgpt", "codex"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.kilo).toEqual(["kilo"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.cursor).toEqual(["cursor", "cursor-acp"]);
@@ -319,7 +323,11 @@ describe("provider-metadata", () => {
       "copilot-chat",
       "github-copilot-chat",
     ]);
-    expect(getQuotaProviderRuntimeIds("claude")).toEqual(["anthropic"]);
+    expect(getQuotaProviderRuntimeIds("claude")).toEqual([
+      "anthropic",
+      "claude-agent",
+      "claude-code",
+    ]);
     expect(getQuotaProviderRuntimeIds("openai")).toEqual(["openai", "chatgpt", "codex"]);
     expect(getQuotaProviderRuntimeIds("kilo")).toEqual(["kilo"]);
     expect(getQuotaProviderRuntimeIds("kilo-gateway")).toEqual([]);

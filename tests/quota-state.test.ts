@@ -2334,6 +2334,86 @@ describe("readCachedProviderResult", () => {
     });
   });
 
+  it("keeps the uncached process-local result scoped to its full route, not just the provider", async () => {
+    const { __resetQuotaStateForTests, fetchQuotaProviderResult, readCachedProviderResult } =
+      await import("../src/lib/quota-state.js");
+    __resetQuotaStateForTests();
+
+    const provider = {
+      id: "anthropic",
+      cachePolicy: { kind: "uncached" },
+      isAvailable: vi.fn(),
+      fetch: vi.fn().mockResolvedValue({
+        attempted: true,
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 60 }],
+        errors: [],
+      }),
+    } as any;
+    const base = createTestContext();
+    const withConfig = (config: Record<string, unknown>) => ({
+      ...base,
+      config: { ...base.config, ...config },
+    });
+    const openCodeRoute = withConfig({ currentProviderID: "anthropic", onlyCurrentModel: true });
+
+    await fetchQuotaProviderResult({ provider, ctx: openCodeRoute, ttlMs: 60_000 });
+
+    await expect(
+      readCachedProviderResult({ provider, ctx: openCodeRoute, ttlMs: 60_000 }),
+    ).resolves.toMatchObject({ hit: true });
+    await expect(
+      readCachedProviderResult({
+        provider,
+        ctx: withConfig({ currentProviderID: "claude-agent", onlyCurrentModel: true }),
+        ttlMs: 60_000,
+      }),
+    ).resolves.toEqual({ hit: false });
+    await expect(
+      readCachedProviderResult({
+        provider,
+        ctx: withConfig({
+          currentProviderID: "anthropic",
+          onlyCurrentModel: true,
+          anthropicBinaryPath: "C:\\other\\claude.exe",
+        }),
+        ttlMs: 60_000,
+      }),
+    ).resolves.toEqual({ hit: false });
+  });
+
+  it("fails closed for resolved-auth providers whose identity is unavailable instead of serving the route's process-local latest", async () => {
+    const { __resetQuotaStateForTests, fetchQuotaProviderResult, readCachedProviderResult } =
+      await import("../src/lib/quota-state.js");
+    __resetQuotaStateForTests();
+
+    // A null identity (e.g. Claude CLI quota with no account token) stores a
+    // process-local latest. After a same-route login switch, that snapshot may
+    // belong to the previous account, so the export read must not serve it.
+    const resolveIdentity = vi.fn().mockResolvedValue(null);
+    const provider = {
+      id: "anthropic",
+      cachePolicy: { kind: "resolved-auth", resolveIdentity },
+      isAvailable: vi.fn(),
+      fetch: vi.fn().mockResolvedValue({
+        attempted: true,
+        entries: [{ accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 60 }],
+        errors: [],
+      }),
+    } as any;
+    const ctx = createTestContext();
+
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+
+    await expect(readCachedProviderResult({ provider, ctx, ttlMs: 60_000 })).resolves.toEqual({
+      hit: false,
+    });
+
+    resolveIdentity.mockRejectedValue(new Error("identity unreadable"));
+    await expect(readCachedProviderResult({ provider, ctx, ttlMs: 60_000 })).resolves.toEqual({
+      hit: false,
+    });
+  });
+
   it("populates inMemoryCache from disk entry on first read", async () => {
     const quotaStateA = await import("../src/lib/quota-state.js");
     quotaStateA.__resetQuotaStateForTests();

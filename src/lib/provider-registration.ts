@@ -41,7 +41,7 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
   {
     id: "anthropic",
     label: "Anthropic",
-    runtimeIds: ["anthropic"],
+    runtimeIds: ["anthropic", "claude-agent", "claude-code"],
     synonyms: ["claude", "claude-code"],
     shape: {
       autoSetup: "needs_quick_setup",
