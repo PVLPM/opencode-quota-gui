@@ -17,10 +17,10 @@ import type {
  * keeps the browser-only formatters testable without the tooltip portal.
  *
  * Locale and time zone are explicit seams for tests. Production passes neither,
- * so the browser's zone is resolved once. Clock convention follows that zone,
- * not the locale: Istanbul stays 24-hour even in an en-US browser, while US
- * zones keep 12-hour time. A server-proven weekly descriptor is rendered in the
- * browser's zone; without it, the exact dated windows are shown instead.
+ * so the browser's zone is resolved once. Clock times are always 24-hour, in
+ * every zone and whatever the browser locale. A server-proven weekly descriptor
+ * is rendered in the browser's zone; without it, the exact dated windows are
+ * shown instead.
  */
 
 export interface TemporalFormatOptions {
@@ -365,81 +365,11 @@ interface ZonedParts {
 type FormatterKind = "parts" | "date" | "time" | "dateTime" | "clock";
 
 /**
- * Clock convention belongs to the zone whose wall clock is shown, not to the
- * browser locale. Without this, an en-US browser renders Istanbul's 14:00 as
- * "2:00 PM". US zones keep a 12-hour clock; every other zone uses 24-hour time,
- * so a locale can never force a 12-hour clock onto Istanbul.
+ * Clock times are 24-hour by default in every zone. The clock is fixed rather
+ * than taken from the browser locale or the zone, so an en-US browser never
+ * renders 14:00 as "2:00 PM" and midnight reads "00:00", not "12:00 AM".
  */
-const TWELVE_HOUR_ZONES: ReadonlySet<string> = new Set([
-  "America/New_York",
-  "America/Detroit",
-  "America/Chicago",
-  "America/Denver",
-  "America/Boise",
-  "America/Phoenix",
-  "America/Los_Angeles",
-  "America/Anchorage",
-  "America/Juneau",
-  "America/Sitka",
-  "America/Metlakatla",
-  "America/Yakutat",
-  "America/Nome",
-  "America/Adak",
-  "America/Atka",
-  "America/Aleutian",
-  "America/Indianapolis",
-  "America/Fort_Wayne",
-  "America/Louisville",
-  "America/Puerto_Rico",
-  "America/St_Thomas",
-  "America/Charlotte_Amalie",
-  "America/Virgin",
-  "Pacific/Honolulu",
-  "Pacific/Johnston",
-  "Pacific/Midway",
-  "Pacific/Wake",
-  "Pacific/Guam",
-  "Pacific/Saipan",
-  "Pacific/Pago_Pago",
-  "Pacific/Samoa",
-]);
-
-const TWELVE_HOUR_ZONE_PREFIXES = [
-  "America/Indiana/",
-  "America/Kentucky/",
-  "America/North_Dakota/",
-] as const;
-
-function resolvedTimeZone(timeZone: string | undefined): string | undefined {
-  if (timeZone !== undefined && timeZone.length > 0) return timeZone;
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone;
-  } catch {
-    return undefined;
-  }
-}
-
-function isTwelveHourZone(zone: string): boolean {
-  if (TWELVE_HOUR_ZONES.has(zone)) return true;
-  return TWELVE_HOUR_ZONE_PREFIXES.some((prefix) => zone.startsWith(prefix));
-}
-
-function hourCycleFor(timeZone: string | undefined): "h12" | "h23" {
-  const requested = resolvedTimeZone(timeZone);
-  if (requested === undefined) return "h23";
-  if (isTwelveHourZone(requested)) return "h12";
-  // `Intl` canonicalizes aliases (US/Eastern -> America/New_York), so check the
-  // normalized name too; otherwise a valid US alias would fall back to 24-hour.
-  try {
-    const canonical = new Intl.DateTimeFormat("en-US", {
-      timeZone: requested,
-    }).resolvedOptions().timeZone;
-    if (canonical !== undefined && isTwelveHourZone(canonical)) return "h12";
-  } catch {
-    // An invalid zone is handled by the formatter constructor below.
-  }
-  return "h23";
-}
+const CLOCK_HOUR_CYCLE = "h23" as const;
 
 const formatterCache = new Map<string, Intl.DateTimeFormat>();
 
@@ -451,7 +381,6 @@ function cachedFormatter(
   const key = `${kind}|${locale ?? ""}|${timeZone ?? ""}`;
   const cached = formatterCache.get(key);
   if (cached) return cached;
-  const hourCycle = hourCycleFor(timeZone);
   const options: Intl.DateTimeFormatOptions =
     kind === "parts"
       ? {
@@ -462,21 +391,26 @@ function cachedFormatter(
           hour: "2-digit",
           minute: "2-digit",
           second: "2-digit",
-          hourCycle: "h23",
+          hourCycle: CLOCK_HOUR_CYCLE,
         }
       : kind === "date"
         ? { timeZone, month: "numeric", day: "numeric" }
         : kind === "time"
-          ? { timeZone, hour: "numeric", minute: "2-digit", hourCycle }
+          ? { timeZone, hour: "numeric", minute: "2-digit", hourCycle: CLOCK_HOUR_CYCLE }
           : kind === "clock"
-            ? { timeZone: "UTC", hour: "numeric", minute: "2-digit", hourCycle }
+            ? {
+                timeZone: "UTC",
+                hour: "numeric",
+                minute: "2-digit",
+                hourCycle: CLOCK_HOUR_CYCLE,
+              }
             : {
                 timeZone,
                 month: "numeric",
                 day: "numeric",
                 hour: "numeric",
                 minute: "2-digit",
-                hourCycle,
+                hourCycle: CLOCK_HOUR_CYCLE,
               };
   const formatter = new Intl.DateTimeFormat(locale, options);
   if (formatterCache.size >= 64) {
@@ -566,9 +500,8 @@ function localOffsetChanges(nowMs: number, options: TemporalFormatOptions): bool
 }
 
 function formatClockMinute(minute: number, options: TemporalFormatOptions): string {
-  if (minute === 1440) {
-    return hourCycleFor(options.timeZone) === "h23" ? "24:00" : formatClockMinute(0, options);
-  }
+  // The end of a local day reads "24:00" on the 24-hour clock, never midnight.
+  if (minute === 1440) return "24:00";
   const normalized = ((minute % 1440) + 1440) % 1440;
   return cachedFormatter("clock", options.locale, options.timeZone).format(
     Date.UTC(2026, 0, 1, 0, normalized),
