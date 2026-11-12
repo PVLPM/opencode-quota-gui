@@ -406,6 +406,11 @@ export interface QuotaProviderResult {
   errors: QuotaToastError[];
   /** Additive discovered-account descriptors; absent when no account identity exists. */
   accounts?: readonly QuotaProviderAccount[];
+  /**
+   * Optional display-only plan for a provider-scope result with no discovered accounts (the Claude CLI
+   * login shown alone). Never an identity input and never set beside OpenCode account descriptors.
+   */
+  planLabel?: string;
   /** Internal provider diagnostics; not projected into normal presentation/export surfaces. */
   diagnostics?: QuotaProviderDiagnostic[];
   /**

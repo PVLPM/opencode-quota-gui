@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { FixedWindowProjectionEvidence } from "../src/lib/entries.js";
 import {
+  buildFixedWindowEvidence,
   compareQuotaRunwayUrgency,
   formatQuotaRunway,
   isFixedWindowProjectionEvidence,
@@ -23,6 +24,64 @@ function evidence(
     ...overrides,
   };
 }
+
+describe("shared fixed-window evidence builder", () => {
+  const DURATION_MS = RESET - START;
+  const RESET_ISO = new Date(RESET).toISOString();
+
+  it("derives the window start from the known duration and reset time", () => {
+    const built = buildFixedWindowEvidence({
+      durationMs: DURATION_MS,
+      resetTimeIso: RESET_ISO,
+      observedAtMs: OBSERVED,
+    });
+
+    expect(built).toEqual(evidence());
+    expect(
+      projectQuotaRunway({
+        percentRemaining: 55,
+        fixedWindow: built,
+        resetTimeIso: RESET_ISO,
+        nowMs: OBSERVED,
+      }),
+    ).not.toBeNull();
+  });
+
+  it("returns nothing when the observation falls outside the derived window", () => {
+    const base = { durationMs: DURATION_MS, resetTimeIso: RESET_ISO };
+
+    expect(buildFixedWindowEvidence({ ...base, observedAtMs: START })).toBeUndefined();
+    expect(buildFixedWindowEvidence({ ...base, observedAtMs: RESET })).toBeUndefined();
+    expect(buildFixedWindowEvidence({ ...base, observedAtMs: RESET + 1 })).toBeUndefined();
+  });
+
+  it("returns nothing for missing, malformed, or non-positive inputs", () => {
+    expect(
+      buildFixedWindowEvidence({
+        durationMs: DURATION_MS,
+        resetTimeIso: undefined,
+        observedAtMs: OBSERVED,
+      }),
+    ).toBeUndefined();
+    expect(
+      buildFixedWindowEvidence({
+        durationMs: DURATION_MS,
+        resetTimeIso: "not-a-date",
+        observedAtMs: OBSERVED,
+      }),
+    ).toBeUndefined();
+    expect(
+      buildFixedWindowEvidence({ durationMs: 0, resetTimeIso: RESET_ISO, observedAtMs: OBSERVED }),
+    ).toBeUndefined();
+    expect(
+      buildFixedWindowEvidence({
+        durationMs: Number.NaN,
+        resetTimeIso: RESET_ISO,
+        observedAtMs: OBSERVED,
+      }),
+    ).toBeUndefined();
+  });
+});
 
 describe("fixed-window quota runway projection", () => {
   it("uses average usage since the fixed window began and formats exact typography", () => {

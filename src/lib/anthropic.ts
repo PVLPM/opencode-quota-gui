@@ -19,7 +19,9 @@ import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 
 import { type ResolvedAnthropicOAuth, resolveAnthropicOAuthCached } from "./anthropic-auth.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
+import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { fetchWithTimeout } from "./http.js";
+import { buildFixedWindowEvidence } from "./quota-exhaustion-projection.js";
 import {
   composeResolvedAuthIdentities,
   deriveResolvedAuthIdentity,
@@ -83,14 +85,31 @@ export interface AnthropicUsageResponse {
 
 export interface AnthropicQuotaResult {
   success: true;
-  five_hour?: { percentRemaining: number; resetTimeIso?: string };
-  seven_day?: { percentRemaining: number; resetTimeIso?: string };
+  five_hour?: {
+    percentRemaining: number;
+    resetTimeIso?: string;
+    fixedWindow?: FixedWindowProjectionEvidence;
+  };
+  seven_day?: {
+    percentRemaining: number;
+    resetTimeIso?: string;
+    fixedWindow?: FixedWindowProjectionEvidence;
+  };
   extra_usage?: { percentRemaining: number };
-  fable_weekly?: { percentRemaining: number; resetTimeIso?: string };
+  /**
+   * The Fable scope is `weekly_scoped` with a reset time only. No fixed cycle or duration is
+   * supplied, so it carries no fixed-window evidence and gets no runway.
+   */
+  fable_weekly?: {
+    percentRemaining: number;
+    resetTimeIso?: string;
+  };
 }
 
 export interface AnthropicUsageParseOptions {
   includeExtraUsage?: boolean;
+  /** When the usage payload was observed; defaults to now. Used only for fixed-window evidence. */
+  observedAtMs?: number;
 }
 
 export interface AnthropicQuotaError {
@@ -128,6 +147,8 @@ export interface AnthropicDiagnostics {
   quota?: AnthropicQuotaResult;
   /** sha256 of the OAuth token that answered the usage probe. Used only to avoid showing one login twice. */
   credentialFingerprint?: string;
+  /** Display-only plan (e.g. `Claude (Max)`) of the verified Claude CLI login that answered the quota probe. */
+  planLabel?: string;
 }
 
 export interface AnthropicProbeOptions {
@@ -171,6 +192,8 @@ type AnthropicLocalDiagnostics = {
    * may the Claude CLI's stored token be used; an absent field or non-JSON status is not proof.
    */
   claudeAiLoginVerified?: boolean;
+  /** Display-only plan, set only for a verified login whose `subscriptionType` is a known plan. */
+  planLabel?: string;
 };
 
 type ResolvedClaudeConfigDirectory = {
@@ -592,6 +615,28 @@ function findUsageWindows(
   return null;
 }
 
+/** Anthropic's 5-hour session window and its weekly windows (including the Fable weekly scope). */
+const FIVE_HOUR_WINDOW_MS = 5 * 60 * 60_000;
+const SEVEN_DAY_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * Attaches fixed-window evidence derived from the window length and its reset. The 5h and weekly
+ * windows are assumed to reset on a fixed cycle; that is not verified against the provider. A
+ * window without a valid reset, or observed outside its inferred span, gets no evidence.
+ */
+function windowWithFixedEvidence<T extends { resetTimeIso?: string }>(
+  window: T,
+  durationMs: number,
+  observedAtMs: number,
+): T {
+  const fixedWindow = buildFixedWindowEvidence({
+    durationMs,
+    resetTimeIso: window.resetTimeIso,
+    observedAtMs,
+  });
+  return fixedWindow ? { ...window, fixedWindow } : window;
+}
+
 function parseUsageResponse(
   data: unknown,
   options: AnthropicUsageParseOptions = {},
@@ -602,16 +647,20 @@ function parseUsageResponse(
   const extraUsage = options.includeExtraUsage
     ? parseExtraUsageQuota(windows.root["extra_usage"])
     : undefined;
+  const observedAtMs = options.observedAtMs ?? Date.now();
 
   return {
     success: true,
-    five_hour: windows.fiveHour,
-    seven_day: windows.sevenDay,
+    five_hour: windowWithFixedEvidence(windows.fiveHour, FIVE_HOUR_WINDOW_MS, observedAtMs),
+    seven_day: windowWithFixedEvidence(windows.sevenDay, SEVEN_DAY_WINDOW_MS, observedAtMs),
     ...(extraUsage ? { extra_usage: extraUsage } : {}),
   };
 }
 
-function parseOAuthUsageResponse(data: unknown): AnthropicQuotaResult | null {
+function parseOAuthUsageResponse(
+  data: unknown,
+  observedAtMs = Date.now(),
+): AnthropicQuotaResult | null {
   const windows = findUsageWindows(data, { allowSupplementalOnly: true });
   if (!windows) return null;
 
@@ -619,8 +668,16 @@ function parseOAuthUsageResponse(data: unknown): AnthropicQuotaResult | null {
   const fableWeekly = parseFableWeeklyWindow(windows.root["limits"]);
   return {
     success: true,
-    ...(windows.fiveHour ? { five_hour: windows.fiveHour } : {}),
-    ...(windows.sevenDay ? { seven_day: windows.sevenDay } : {}),
+    ...(windows.fiveHour
+      ? {
+          five_hour: windowWithFixedEvidence(windows.fiveHour, FIVE_HOUR_WINDOW_MS, observedAtMs),
+        }
+      : {}),
+    ...(windows.sevenDay
+      ? {
+          seven_day: windowWithFixedEvidence(windows.sevenDay, SEVEN_DAY_WINDOW_MS, observedAtMs),
+        }
+      : {}),
     ...(extraUsage ? { extra_usage: extraUsage } : {}),
     ...(fableWeekly ? { fable_weekly: fableWeekly } : {}),
   };
@@ -1262,6 +1319,27 @@ function hasFirstPartyClaudeAiLogin(payload: unknown): boolean {
   );
 }
 
+/** The only plan names shown. The CLI's `subscriptionType` is undocumented, so anything else is omitted. */
+const CLAUDE_PLAN_LABELS: ReadonlyMap<string, string> = new Map([
+  ["free", "Free"],
+  ["pro", "Pro"],
+  ["max", "Max"],
+  ["team", "Team"],
+  ["enterprise", "Enterprise"],
+  ["ultra", "Ultra"],
+]);
+
+/**
+ * Display-only plan name from a verified login's `subscriptionType`; absent, null, or unknown gives none.
+ * Bare name (e.g. "Max"): the card already names the provider, so the header reads `Anthropic · Max`,
+ * the same shape as OpenAI's account header (`OpenAI · Pro`).
+ */
+function deriveClaudePlanLabel(payload: unknown): string | undefined {
+  const subscriptionType = asRecord(payload)?.["subscriptionType"];
+  if (typeof subscriptionType !== "string") return undefined;
+  return CLAUDE_PLAN_LABELS.get(subscriptionType.trim().toLowerCase());
+}
+
 function hasNonSubscriptionLogin(payload: unknown): boolean {
   const record = asRecord(payload);
   if (!record) return false;
@@ -1461,6 +1539,9 @@ function mapLocalDiagnosticsToAnthropicDiagnostics(
       binaryPath: localDiagnostics.binaryPath,
       checkedCommands: localDiagnostics.checkedCommands,
       quota: localDiagnostics.localQuota,
+      ...(localDiagnostics.planLabel === undefined
+        ? {}
+        : { planLabel: localDiagnostics.planLabel }),
     };
   }
 
@@ -1561,6 +1642,11 @@ async function probeAnthropicLocalDiagnostics(
     process.env[CLAUDE_CONFIG_DIR_ENV],
   );
   const quota = parsedAuth.jsonPayload ? parseUsageResponse(parsedAuth.jsonPayload) : null;
+  // Only a verified first-party login may name its plan; the same login answers the quota above.
+  const planLabel =
+    parsedAuth.claudeAiLoginVerified === true
+      ? deriveClaudePlanLabel(parsedAuth.jsonPayload)
+      : undefined;
   if (quota) {
     return {
       installed: true,
@@ -1572,6 +1658,7 @@ async function probeAnthropicLocalDiagnostics(
       effectiveBinary: binaryPath,
       configDirectory,
       claudeAiLoginVerified: parsedAuth.claudeAiLoginVerified === true,
+      ...(planLabel === undefined ? {} : { planLabel }),
     };
   }
 
@@ -1585,6 +1672,7 @@ async function probeAnthropicLocalDiagnostics(
     effectiveBinary: binaryPath,
     configDirectory,
     claudeAiLoginVerified: parsedAuth.claudeAiLoginVerified === true,
+    ...(planLabel === undefined ? {} : { planLabel }),
   };
 }
 
@@ -1697,6 +1785,10 @@ export async function getAnthropicDiagnostics(
     checkedCommands: localDiagnostics.checkedCommands,
     quota: fallbackQuota.quota,
     credentialFingerprint: fingerprintAccessToken(credentials.accessToken),
+    // The plan belongs to the CLI login only when this quota came from that login's own token.
+    ...(credentials.source === "claude-credentials" && localDiagnostics.planLabel !== undefined
+      ? { planLabel: localDiagnostics.planLabel }
+      : {}),
   };
 }
 

@@ -36,6 +36,34 @@ export function isFixedWindowProjectionEvidence(
   return true;
 }
 
+/**
+ * Builds fixed-window evidence for a provider window whose length is known and whose reset is
+ * observed. The start is inferred as `reset - duration`, which is only valid for windows that
+ * reset on a fixed cycle; callers must pass a duration that matches that window kind. Returns
+ * nothing unless the observation falls strictly inside the inferred window.
+ */
+export function buildFixedWindowEvidence(params: {
+  durationMs: number;
+  resetTimeIso?: string;
+  observedAtMs: number;
+}): FixedWindowProjectionEvidence | undefined {
+  if (!(Number.isFinite(params.durationMs) && params.durationMs > 0)) return undefined;
+  if (!Number.isFinite(params.observedAtMs)) return undefined;
+
+  const endsAt = parseIsoTimestamp(params.resetTimeIso);
+  if (endsAt === null) return undefined;
+  const startedAt = endsAt - params.durationMs;
+  if (!(startedAt < params.observedAtMs && params.observedAtMs < endsAt)) return undefined;
+
+  return {
+    kind: "fixed_window",
+    startedAtIso: new Date(startedAt).toISOString(),
+    observedAtIso: new Date(params.observedAtMs).toISOString(),
+    endsAtIso: new Date(endsAt).toISOString(),
+    fullReset: true,
+  };
+}
+
 export function projectQuotaRunway(params: {
   percentRemaining: number;
   fixedWindow?: FixedWindowProjectionEvidence;

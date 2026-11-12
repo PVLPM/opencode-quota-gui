@@ -342,6 +342,51 @@ describe("anthropic provider", () => {
     );
   });
 
+  it("carries fixed-window evidence onto the 5h and weekly rows, never the Fable row", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    const fixedWindow = (startedAtIso: string, endsAtIso: string) => ({
+      kind: "fixed_window",
+      startedAtIso,
+      observedAtIso: "2026-07-21T10:00:00.000Z",
+      endsAtIso,
+      fullReset: true,
+    });
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.258",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "opencode-auth-oauth-api",
+      oauthCredentialSource: "opencode-auth",
+      checkedCommands: ["claude --version"],
+      quota: {
+        success: true,
+        five_hour: {
+          percentRemaining: 58,
+          resetTimeIso: "2026-07-21T14:10:00.000Z",
+          fixedWindow: fixedWindow("2026-07-21T09:10:00.000Z", "2026-07-21T14:10:00.000Z"),
+        },
+        seven_day: {
+          percentRemaining: 72,
+          resetTimeIso: "2026-07-27T07:00:00.000Z",
+          fixedWindow: fixedWindow("2026-07-20T07:00:00.000Z", "2026-07-27T07:00:00.000Z"),
+        },
+        fable_weekly: {
+          percentRemaining: 98,
+          resetTimeIso: "2026-07-27T07:00:00.000Z",
+        },
+      },
+    });
+    const out = await anthropicProvider.fetch({} as any);
+
+    expect(out.entries.map((entry) => (entry as any).fixedWindow)).toEqual([
+      fixedWindow("2026-07-21T09:10:00.000Z", "2026-07-21T14:10:00.000Z"),
+      fixedWindow("2026-07-20T07:00:00.000Z", "2026-07-27T07:00:00.000Z"),
+      undefined,
+    ]);
+    expect(out.entries[2]).not.toHaveProperty("fixedWindow");
+  });
+
   it("returns attempted:false when Anthropic quota is unavailable locally", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuota } = await import(
       "../src/lib/anthropic.js"
@@ -1224,6 +1269,187 @@ describe("anthropic provider", () => {
         message: "Claude CLI probe failed.",
       }),
     ]);
+  });
+
+  it.each([
+    ["a known plan", "Max"],
+    ["no plan", undefined],
+  ])("puts the Claude CLI plan on the Claude Code row only, with %s", async (_case, planLabel) => {
+    const {
+      getAnthropicDiagnostics,
+      getClaudeCodeAccountDiagnostics,
+      queryAnthropicQuotaWithOAuth,
+    } = await import("../src/lib/anthropic.js");
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "anthropic-personal",
+        integrationId: "anthropic",
+        label: "Personal",
+        active: true,
+        value: { type: "oauth", access: "personal-token" },
+      },
+    ]);
+    (queryAnthropicQuotaWithOAuth as any).mockResolvedValueOnce({
+      success: true,
+      five_hour: { percentRemaining: 80 },
+    });
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      oauthCredentialSource: "opencode-auth",
+      checkedCommands: [],
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      checkedCommands: [],
+      quota: { five_hour: { percentRemaining: 50 } },
+      credentialFingerprint: "claude-cli-fingerprint",
+      ...(planLabel === undefined ? {} : { planLabel }),
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: false },
+      }),
+    );
+
+    const [personal, claudeCode] = out.accounts ?? [];
+    expect(personal).toEqual(expect.objectContaining({ sourceId: "anthropic-personal" }));
+    expect(personal).not.toHaveProperty("planLabel");
+    expect(claudeCode).toEqual({
+      sourceId: "claude-code-cli",
+      label: "Claude Code",
+      active: false,
+      ...(planLabel === undefined ? {} : { planLabel }),
+    });
+    if (planLabel === undefined) expect(claudeCode).not.toHaveProperty("planLabel");
+  });
+
+  it.each([
+    ["a known plan", "Max"],
+    ["no plan", undefined],
+  ])("forwards the CLI plan on a selected Claude Code route, with %s", async (_case, planLabel) => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      oauthCredentialSource: "claude-credentials",
+      checkedCommands: [],
+      quota: { success: true, five_hour: { percentRemaining: 75 } },
+      ...(planLabel === undefined ? {} : { planLabel }),
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-agent"],
+        configOverrides: { currentProviderID: "claude-agent", onlyCurrentModel: true },
+      }),
+    );
+
+    expect(out.entries.map((entry) => entry.name)).toEqual(["Claude 5h"]);
+    expect(out.planLabel).toBe(planLabel);
+    if (planLabel === undefined) expect(out).not.toHaveProperty("planLabel");
+  });
+
+  it("shows the Claude CLI plan on the provider result when the CLI login is the only account", async () => {
+    const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
+      "../src/lib/anthropic.js"
+    );
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-auth-status-json",
+      checkedCommands: [],
+      quota: { five_hour: { percentRemaining: 50 } },
+      planLabel: "Max",
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: false },
+      }),
+    );
+
+    expect(out.planLabel).toBe("Max");
+    expect(out.accounts ?? []).toEqual([]);
+    expect(out.entries.map((entry) => entry.name)).toEqual(["Claude Code 5h"]);
+  });
+
+  it("never forwards a CLI plan on an onlyCurrentModel OpenCode route", async () => {
+    const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
+      "../src/lib/anthropic.js"
+    );
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-auth-status-json",
+      checkedCommands: [],
+      quota: { success: true, five_hour: { percentRemaining: 50 } },
+      planLabel: "Max",
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-auth-status-json",
+      checkedCommands: [],
+      quota: { five_hour: { percentRemaining: 50 } },
+      planLabel: "Max",
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: true },
+      }),
+    );
+
+    expect(out).not.toHaveProperty("planLabel");
+    expect(getClaudeCodeAccountDiagnostics).not.toHaveBeenCalled();
+  });
+
+  it("never forwards a plan from the probe while OpenCode's login is the route's account", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      oauthCredentialSource: "opencode-auth",
+      credentialFingerprint: "opencode-fingerprint",
+      checkedCommands: [],
+      quota: { success: true, five_hour: { percentRemaining: 60 } },
+      planLabel: "Max",
+    });
+
+    const out = await anthropicProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["anthropic"],
+        configOverrides: { currentProviderID: "anthropic", onlyCurrentModel: false },
+      }),
+    );
+
+    expect(out).not.toHaveProperty("planLabel");
   });
 
   it("keeps the custom Claude binary path, the username, and credential paths out of errors and statusDetails", async () => {

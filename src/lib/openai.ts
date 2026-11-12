@@ -12,6 +12,7 @@ import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
 import { readAuthFileCached } from "./opencode-auth.js";
+import { buildFixedWindowEvidence } from "./quota-exhaustion-projection.js";
 import { deriveResolvedAuthIdentity, type ResolvedAuthIdentity } from "./resolved-auth-identity.js";
 import type { AuthData, OpenAIOAuthData, QuotaError } from "./types.js";
 
@@ -159,17 +160,12 @@ function parseRateLimitWindow(
   const value = parseWindowValue(window, observedAtMs);
   if (!value) return null;
 
-  const endsAtMs = value.resetTimeIso ? Date.parse(value.resetTimeIso) : Number.NaN;
-  const startedAtMs = endsAtMs - raw.limit_window_seconds * 1000;
-  if (Number.isFinite(startedAtMs) && startedAtMs < observedAtMs && observedAtMs < endsAtMs) {
-    value.fixedWindow = {
-      kind: "fixed_window",
-      startedAtIso: new Date(startedAtMs).toISOString(),
-      observedAtIso: new Date(observedAtMs).toISOString(),
-      endsAtIso: new Date(endsAtMs).toISOString(),
-      fullReset: true,
-    };
-  }
+  const fixedWindow = buildFixedWindowEvidence({
+    durationMs: raw.limit_window_seconds * 1000,
+    resetTimeIso: value.resetTimeIso,
+    observedAtMs,
+  });
+  if (fixedWindow) value.fixedWindow = fixedWindow;
   return { kind, value };
 }
 

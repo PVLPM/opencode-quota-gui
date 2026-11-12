@@ -239,6 +239,12 @@ export function formatAccountingComponentLabel(component: AccountingComponent): 
   return COMPONENT_LABELS[component];
 }
 
+/**
+ * Named metrics whose visible label is exact, not "<name> <result type>". Keyed by the semantic
+ * metric name, which stays unchanged so codecs and DTO guards keep their keys.
+ */
+const EXACT_NAMED_METRIC_LABELS: ReadonlyMap<string, string> = new Map([["Fable weekly", "Fable"]]);
+
 export function formatAccountingSemanticLabel(
   resultType: AccountingResultType,
   semantic: AccountingSemantic,
@@ -255,6 +261,8 @@ export function formatAccountingSemanticLabel(
     return COMPONENT_LABELS[metric.component];
   }
   if (resultType === "status") return metric.name;
+  const exactLabel = EXACT_NAMED_METRIC_LABELS.get(metric.name);
+  if (exactLabel !== undefined) return exactLabel;
   return `${metric.name} ${resultLabel.toLowerCase()}`;
 }
 

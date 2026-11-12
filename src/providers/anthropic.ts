@@ -108,6 +108,7 @@ function claudeCodeAccountEntries(
       rowKey,
       percentRemaining: window.percentRemaining,
       resetTimeIso: window.resetTimeIso,
+      ...(window.fixedWindow ? { fixedWindow: { ...window.fixedWindow } } : {}),
     });
   }
   if (quota.extra_usage) {
@@ -170,7 +171,11 @@ async function readClaudeCodeAccount(
   options: { binaryPath?: string; requestTimeoutMs?: number },
   excludedFingerprints: readonly string[],
   reportUnready: boolean,
-): Promise<{ entries: QuotaToastEntry[]; errors: QuotaProviderResult["errors"] } | null> {
+): Promise<{
+  entries: QuotaToastEntry[];
+  errors: QuotaProviderResult["errors"];
+  planLabel?: string;
+} | null> {
   let diagnostics: AnthropicDiagnostics | null;
   try {
     diagnostics = await getClaudeCodeAccountDiagnostics(options, excludedFingerprints, {
@@ -196,6 +201,7 @@ async function readClaudeCodeAccount(
     return {
       entries: claudeCodeAccountEntries(diagnostics.quota, acquisitionMethod),
       errors: [],
+      ...(diagnostics.planLabel === undefined ? {} : { planLabel: diagnostics.planLabel }),
     };
   }
   return {
@@ -276,6 +282,8 @@ export const anthropicProvider: QuotaProvider = {
     // beside it as a separate account rather than replacing or merging into it.
     let openCodeLoginPresent = false;
     let openCodeFingerprints: string[] = [];
+    // The Claude CLI login's plan from the probe; forwarded only when that login is the route's account.
+    let cliPlanLabel: string | undefined;
     // A failed login stays in the list so it shows as its own error row.
     const databaseCredentials = claudeCodeRuntimeId
       ? []
@@ -288,6 +296,7 @@ export const anthropicProvider: QuotaProvider = {
       if (openCodeLoginPresent && diagnostics.credentialFingerprint !== undefined) {
         openCodeFingerprints = [diagnostics.credentialFingerprint];
       }
+      cliPlanLabel = diagnostics.planLabel;
       const quota = diagnostics.quotaSupported ? diagnostics.quota : undefined;
       // On a selected OpenCode route without OpenCode's login, the probe answered for the Claude CLI
       // login, which is not this route's account. Its quota and credential details are never reported
@@ -427,6 +436,7 @@ export const anthropicProvider: QuotaProvider = {
             rowKey,
             percentRemaining: window.percentRemaining,
             resetTimeIso: window.resetTimeIso,
+            ...(window.fixedWindow ? { fixedWindow: { ...window.fixedWindow } } : {}),
           })),
         );
         if (result.extra_usage) {
@@ -481,6 +491,7 @@ export const anthropicProvider: QuotaProvider = {
           sourceId: CLAUDE_CODE_ACCOUNT_ID,
           label: CLAUDE_CODE_ACCOUNT_GROUP,
           active: false,
+          ...(claudeCode.planLabel ? { planLabel: claudeCode.planLabel } : {}),
         });
       }
       return withStatusDetails(
@@ -499,8 +510,13 @@ export const anthropicProvider: QuotaProvider = {
         );
     const result = quotaResult;
     if (!result) {
+      // With no OpenCode login the Claude CLI login is the only account, so its plan is shown on this
+      // provider-scope result. Never set beside OpenCode accounts.
+      const cliOnly = withClaudeCodeAccount(notAttemptedResult(), claudeCode);
       return withStatusDetails(
-        withClaudeCodeAccount(notAttemptedResult(), claudeCode),
+        claudeCode?.planLabel && !openCodeLoginPresent
+          ? { ...cliOnly, planLabel: claudeCode.planLabel }
+          : cliOnly,
         statusDetails,
       );
     }
@@ -532,6 +548,9 @@ export const anthropicProvider: QuotaProvider = {
         rowKey: "window:five_hour",
         percentRemaining: result.five_hour.percentRemaining,
         resetTimeIso: result.five_hour.resetTimeIso,
+        ...(result.five_hour.fixedWindow
+          ? { fixedWindow: { ...result.five_hour.fixedWindow } }
+          : {}),
       });
     }
     if (result.seven_day) {
@@ -548,6 +567,9 @@ export const anthropicProvider: QuotaProvider = {
         rowKey: "window:week",
         percentRemaining: result.seven_day.percentRemaining,
         resetTimeIso: result.seven_day.resetTimeIso,
+        ...(result.seven_day.fixedWindow
+          ? { fixedWindow: { ...result.seven_day.fixedWindow } }
+          : {}),
       });
     }
 
@@ -587,8 +609,15 @@ export const anthropicProvider: QuotaProvider = {
       });
     }
 
+    // A selected Claude Code route answers only for the CLI login, so its plan is that login's. With
+    // OpenCode's login present the probe belongs to that login, so no plan is forwarded here.
+    const routePlanLabel =
+      claudeCodeRuntimeId !== undefined && !openCodeLoginPresent ? cliPlanLabel : undefined;
+    const successResult = withClaudeCodeAccount(attemptedResult(entries), claudeCode);
     return withStatusDetails(
-      withClaudeCodeAccount(attemptedResult(entries), claudeCode),
+      routePlanLabel === undefined
+        ? successResult
+        : { ...successResult, planLabel: routePlanLabel },
       statusDetails,
     );
   },

@@ -3,10 +3,28 @@ import { fileURLToPath } from "node:url";
 import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildProviderCards } from "../src/gui/provider-cards.js";
+import { parseOAuthUsageResponse } from "../src/lib/anthropic.js";
+import { anthropicProvider } from "../src/providers/anthropic.js";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
 import { NOW, percentRow, providerCard } from "./fixtures/gui-ui-fixtures.js";
 import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
+
+vi.mock("../src/lib/anthropic.js", async (importOriginal) => ({
+  // The real parser stays in place so the copied rows come from the provider's own parsing.
+  ...(await importOriginal<typeof import("../src/lib/anthropic.js")>()),
+  getAnthropicDiagnostics: vi.fn(),
+  getClaudeCodeAccountDiagnostics: vi.fn(),
+  hasAnthropicCredentialsConfigured: vi.fn(),
+  queryAnthropicQuota: vi.fn(),
+  queryAnthropicQuotaWithOAuth: vi.fn(),
+}));
+
+vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/opencode-auth.js")>()),
+  readCredentialRows: vi.fn().mockResolvedValue([]),
+}));
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rendererPath = fileURLToPath(new URL("./fixtures/gui-test-renderer.ts", import.meta.url));
@@ -298,5 +316,197 @@ describe("quota card clipboard runway and banked resets", () => {
       }),
     );
     expect(rowLines(copied)).toEqual(["Banked resets: 2 available · Expiry unknown"]);
+  });
+
+  it("copies Anthropic's provider rows with exact labels and runway from the provider payload", async () => {
+    const HOUR_MS = 60 * 60_000;
+    const DAY_MS = 24 * HOUR_MS;
+    const isoAt = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.258",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "opencode-auth-oauth-api",
+      oauthCredentialSource: "opencode-auth",
+      checkedCommands: ["claude --version"],
+      quota: parseOAuthUsageResponse(
+        {
+          five_hour: { utilization: 60, resets_at: isoAt(3 * HOUR_MS) },
+          seven_day: { utilization: 28, resets_at: isoAt(3 * DAY_MS) },
+          limits: [
+            {
+              kind: "weekly_scoped",
+              percent: 2,
+              resets_at: isoAt(3 * DAY_MS),
+              scope: { model: { display_name: "Fable" } },
+            },
+          ],
+        },
+        NOW,
+      ),
+    });
+    const result = await anthropicProvider.fetch({} as any);
+    const [card] = buildProviderCards({
+      probes: [{ providerId: "anthropic", result }],
+      preferences: { accountingDetail: "summary" },
+      nowMs: NOW,
+    });
+
+    expect(card).toBeDefined();
+    expect(rowLines(await copiedSummary(card!))).toEqual([
+      "5h: 40% remaining · Resets in 3h0m · Runs out in ~1h 20m",
+      "Weekly: 72% remaining · Resets in 3d0h0m · Projected to last until reset",
+      "Fable: 98% remaining · Resets in 3d0h0m",
+    ]);
+  });
+
+  it("shows the Claude CLI plan in the header and clipboard of only its own account card", async () => {
+    const {
+      getAnthropicDiagnostics,
+      getClaudeCodeAccountDiagnostics,
+      queryAnthropicQuotaWithOAuth,
+    } = await import("../src/lib/anthropic.js");
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "anthropic-personal",
+        integrationId: "anthropic",
+        label: "Personal",
+        active: true,
+        value: { type: "oauth", access: "personal-token" },
+      },
+    ]);
+    (queryAnthropicQuotaWithOAuth as any).mockResolvedValueOnce({
+      success: true,
+      five_hour: { percentRemaining: 80 },
+    });
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.258",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      oauthCredentialSource: "opencode-auth",
+      checkedCommands: ["claude --version"],
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.258",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      checkedCommands: ["claude --version"],
+      quota: { five_hour: { percentRemaining: 50 } },
+      credentialFingerprint: "claude-cli-fingerprint",
+      planLabel: "Max",
+    });
+
+    const result = await anthropicProvider.fetch({} as any);
+    const cards = buildProviderCards({
+      probes: [{ providerId: "anthropic", result }],
+      preferences: { accountingDetail: "summary" },
+      nowMs: NOW,
+    });
+    expect(cards).toHaveLength(2);
+    const claudeCodeCard = cards.find((card) => card.planLabel !== undefined);
+    const openCodeCard = cards.find((card) => card !== claudeCodeCard);
+    expect(claudeCodeCard?.planLabel).toBe("Max");
+    expect(openCodeCard?.planLabel).toBeUndefined();
+
+    const copied = await copiedSummary(claudeCodeCard!);
+    expect(copied.split("\n")[0]).toBe("Anthropic · Max · Claude Code");
+    expect(rowLines(copied)).toEqual(["5h: 50% remaining"]);
+    expect(await copiedSummary(openCodeCard!)).not.toContain("Max");
+
+    const root = graph.createTestRoot();
+    const dispose = graph.mount(
+      () =>
+        graph.createComponent(cardView, {
+          card: claudeCodeCard!,
+          preferences: { percentMode: "remaining", showRunway: false, detailed: false },
+          hiddenRows: [],
+          stale: false,
+          timeZone: "UTC",
+        }),
+      root,
+    );
+    try {
+      expect(headerText(root)).toBe("Anthropic · Max · Claude Code");
+    } finally {
+      dispose();
+    }
+  });
+
+  /** The rendered identity line (provider · plan · account), with separator spacing normalized. */
+  function headerText(root: ReturnType<typeof graph.createTestRoot>): string {
+    const identity = graph
+      .elementsNamed(root, "div")
+      .find((node) => node.props.class === "qg-card__identity");
+    expect(identity).toBeDefined();
+    return graph.textOf(identity!).replace(/\s*·\s*/g, " · ");
+  }
+
+  it.each([
+    ["a known plan", "Max", "Anthropic · Max"],
+    ["no plan", undefined, "Anthropic"],
+  ])("shows the Claude CLI-only plan in the header and clipboard, with %s", async (_case, planLabel, expectedIdentity) => {
+    const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
+      "../src/lib/anthropic.js"
+    );
+    // No OpenCode Anthropic login: the verified Claude CLI login is the only account.
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.258",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: ["claude --version"],
+    });
+    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.258",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      checkedCommands: ["claude --version"],
+      quota: { five_hour: { percentRemaining: 50 } },
+      credentialFingerprint: "claude-cli-fingerprint",
+      ...(planLabel === undefined ? {} : { planLabel }),
+    });
+
+    const result = await anthropicProvider.fetch({} as any);
+    const cards = buildProviderCards({
+      probes: [{ providerId: "anthropic", result }],
+      preferences: { accountingDetail: "summary" },
+      nowMs: NOW,
+    });
+    expect(cards).toHaveLength(1);
+    const [card] = cards;
+    expect(card!.planLabel).toBe(planLabel);
+    expect(card!.accountLabel).toBeUndefined();
+
+    const copied = await copiedSummary(card!);
+    expect(copied.split("\n")[0]).toBe(expectedIdentity);
+    expect(rowLines(copied)).toEqual(["5h: 50% remaining"]);
+
+    const root = graph.createTestRoot();
+    const dispose = graph.mount(
+      () =>
+        graph.createComponent(cardView, {
+          card: card!,
+          preferences: { percentMode: "remaining", showRunway: false, detailed: false },
+          hiddenRows: [],
+          stale: false,
+          timeZone: "UTC",
+        }),
+      root,
+    );
+    try {
+      expect(headerText(root)).toBe(expectedIdentity);
+    } finally {
+      dispose();
+    }
   });
 });

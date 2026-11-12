@@ -41,6 +41,7 @@ import {
   resolveAnthropicAuthIdentity,
 } from "../src/lib/anthropic.js";
 import { fetchWithTimeout } from "../src/lib/http.js";
+import { projectQuotaRunway } from "../src/lib/quota-exhaustion-projection.js";
 import fableWeeklyUsage from "./fixtures/anthropic/fable-weekly.sanitized.json";
 
 vi.mock("child_process", () => ({
@@ -314,7 +315,8 @@ describe("parseUsageResponse", () => {
   });
 
   it("parses the exact Fable weekly_scoped window from a sanitized response", () => {
-    const result = parseOAuthUsageResponse(fableWeeklyUsage);
+    const observedAtMs = Date.parse("2026-07-21T10:00:00.000Z");
+    const result = parseOAuthUsageResponse(fableWeeklyUsage, observedAtMs);
 
     expect(parseUsageResponse(fableWeeklyUsage)).not.toHaveProperty("fable_weekly");
     expect(result).toEqual({
@@ -322,16 +324,86 @@ describe("parseUsageResponse", () => {
       five_hour: {
         percentRemaining: 58,
         resetTimeIso: "2026-07-21T14:10:00.268Z",
+        fixedWindow: {
+          kind: "fixed_window",
+          startedAtIso: "2026-07-21T09:10:00.268Z",
+          observedAtIso: "2026-07-21T10:00:00.000Z",
+          endsAtIso: "2026-07-21T14:10:00.268Z",
+          fullReset: true,
+        },
       },
       seven_day: {
         percentRemaining: 72,
         resetTimeIso: "2026-07-27T07:00:00.268Z",
+        fixedWindow: {
+          kind: "fixed_window",
+          startedAtIso: "2026-07-20T07:00:00.268Z",
+          observedAtIso: "2026-07-21T10:00:00.000Z",
+          endsAtIso: "2026-07-27T07:00:00.268Z",
+          fullReset: true,
+        },
       },
+      // weekly_scoped carries only a reset time: no fixed cycle or duration is supplied, so the
+      // Fable window gets no fixed-window evidence.
       fable_weekly: {
         percentRemaining: 98,
         resetTimeIso: "2026-07-27T07:00:00.268Z",
       },
     });
+    expect(result?.fable_weekly).not.toHaveProperty("fixedWindow");
+  });
+
+  it("attaches 5h and 7d fixed-window evidence on the CLI payload path", () => {
+    const result = parseUsageResponse(
+      {
+        five_hour: { utilization: 20, resets_at: "2026-07-21T14:10:00.000Z" },
+        seven_day: { utilization: 30, resets_at: "2026-07-27T07:00:00.000Z" },
+      },
+      { observedAtMs: Date.parse("2026-07-21T10:00:00.000Z") },
+    );
+
+    expect(result?.five_hour?.fixedWindow?.startedAtIso).toBe("2026-07-21T09:10:00.000Z");
+    expect(result?.seven_day?.fixedWindow?.startedAtIso).toBe("2026-07-20T07:00:00.000Z");
+  });
+
+  it("omits fixed-window evidence for a window whose reset has already passed", () => {
+    const result = parseOAuthUsageResponse(
+      {
+        five_hour: { utilization: 20, resets_at: "2026-07-21T14:10:00.000Z" },
+        seven_day: { utilization: 30, resets_at: "2026-07-27T07:00:00.000Z" },
+      },
+      Date.parse("2026-07-21T15:00:00.000Z"),
+    );
+
+    // The 5h reset (14:10) has passed at the observation (15:00), so no evidence. The weekly
+    // window still spans the observation, so it keeps its evidence.
+    expect(result?.five_hour).not.toHaveProperty("fixedWindow");
+    expect(result?.seven_day?.fixedWindow?.startedAtIso).toBe("2026-07-20T07:00:00.000Z");
+  });
+
+  it("gives an Anthropic window runway while live and none once its reset has passed", () => {
+    const observedAtMs = Date.parse("2026-07-21T10:00:00.000Z");
+    const result = parseUsageResponse(
+      {
+        five_hour: { utilization: 20, resets_at: "2026-07-21T14:10:00.000Z" },
+        seven_day: { utilization: 30, resets_at: "2026-07-27T07:00:00.000Z" },
+      },
+      { observedAtMs },
+    );
+    const fiveHour = result?.five_hour;
+    expect(fiveHour?.fixedWindow).toBeDefined();
+
+    const runwayAt = (nowMs: number) =>
+      projectQuotaRunway({
+        percentRemaining: fiveHour?.percentRemaining ?? Number.NaN,
+        fixedWindow: fiveHour?.fixedWindow,
+        resetTimeIso: fiveHour?.resetTimeIso,
+        nowMs,
+      });
+
+    expect(runwayAt(observedAtMs)?.kind).toBe("before_reset");
+    expect(runwayAt(Date.parse("2026-07-21T14:10:00.000Z"))).toBeNull();
+    expect(runwayAt(Date.parse("2026-07-21T15:00:00.000Z"))).toBeNull();
   });
 
   it("keeps the existing windows when Fable scoped data is absent or malformed", () => {
@@ -1015,6 +1087,124 @@ describe("Claude CLI diagnostics", () => {
     expect((await getAnthropicDiagnostics({ useClaudeCodeCredentials: true })).authStatus).toBe(
       "authenticated",
     );
+  });
+
+  it("shows a known subscription plan on the verified Claude CLI login", async () => {
+    setProcessPlatform("linux");
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "claude-login-token" } }),
+    );
+    fetchResponseMock.mockResolvedValue(
+      mockJsonResponse({ five_hour: { utilization: 10 }, seven_day: { utilization: 20 } }),
+    );
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      {
+        stdout: JSON.stringify({
+          loggedIn: true,
+          subscriptionType: "max",
+          ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+        }),
+      },
+    ]);
+
+    const diagnostics = await getClaudeCodeAccountDiagnostics({}, []);
+    expect(diagnostics?.quotaSupported).toBe(true);
+    expect(diagnostics?.planLabel).toBe("Max");
+    expect(diagnostics?.credentialFingerprint).toBe(fingerprintAccessToken("claude-login-token"));
+  });
+
+  it("omits a subscription plan that is absent, null, malformed, or not on the known list", async () => {
+    setProcessPlatform("linux");
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "claude-login-token" } }),
+    );
+    fetchResponseMock.mockResolvedValue(mockJsonResponse({ five_hour: { utilization: 10 } }));
+
+    for (const plan of [
+      {},
+      { subscriptionType: null },
+      { subscriptionType: "max_20x" },
+      { subscriptionType: "constructor" },
+      { subscriptionType: 5 },
+    ]) {
+      mockExecSequence([
+        { stdout: "claude 1.2.3\n" },
+        { stdout: JSON.stringify({ loggedIn: true, ...plan, ...FIRST_PARTY_CLAUDE_AI_LOGIN }) },
+      ]);
+      const diagnostics = await getClaudeCodeAccountDiagnostics({}, []);
+      expect(diagnostics?.quotaSupported).toBe(true);
+      expect(diagnostics?.planLabel).toBeUndefined();
+    }
+  });
+
+  it("shows the exact Ultra plan and omits guessed aliases of it", async () => {
+    setProcessPlatform("linux");
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "claude-login-token" } }),
+    );
+    fetchResponseMock.mockResolvedValue(mockJsonResponse({ five_hour: { utilization: 10 } }));
+
+    for (const [subscriptionType, expected] of [
+      ["ultra", "Ultra"],
+      ["ultra_20x", undefined],
+      ["ultra-20x", undefined],
+      ["max_ultra", undefined],
+    ] as const) {
+      mockExecSequence([
+        { stdout: "claude 1.2.3\n" },
+        {
+          stdout: JSON.stringify({
+            loggedIn: true,
+            subscriptionType,
+            ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+          }),
+        },
+      ]);
+      const diagnostics = await getClaudeCodeAccountDiagnostics({}, []);
+      expect(diagnostics?.planLabel).toBe(expected);
+    }
+  });
+
+  it("never takes a plan from a Claude CLI login not verified as first-party claude.ai", async () => {
+    setProcessPlatform("linux");
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "claude-login-token" } }),
+    );
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ loggedIn: true, subscriptionType: "pro" }) },
+    ]);
+
+    const diagnostics = await getClaudeCodeAccountDiagnostics({}, []);
+    expect(diagnostics?.quotaSupported).toBe(false);
+    expect(diagnostics?.planLabel).toBeUndefined();
+    expect(fetchWithTimeoutMock).not.toHaveBeenCalled();
+  });
+
+  it("never gives the Claude CLI plan to a diagnostics answer from OpenCode's login", async () => {
+    setProcessPlatform("linux");
+    readFileMock.mockRejectedValue(new Error("ENOENT"));
+    readAuthFileCachedMock.mockResolvedValue({
+      anthropic: { type: "oauth", access: "opencode-access-token", expires: Date.now() + 60_000 },
+    });
+    fetchResponseMock.mockResolvedValue(
+      mockJsonResponse({ five_hour: { utilization: 20 }, seven_day: { utilization: 30 } }),
+    );
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      {
+        stdout: JSON.stringify({
+          loggedIn: true,
+          subscriptionType: "max",
+          ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+        }),
+      },
+    ]);
+
+    const diagnostics = await getAnthropicDiagnostics();
+    expect(diagnostics.oauthCredentialSource).toBe("opencode-auth");
+    expect(diagnostics.planLabel).toBeUndefined();
   });
 
   it("reports missing Claude CLI as unavailable without quota data", async () => {
