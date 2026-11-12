@@ -1645,7 +1645,6 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
   });
 }
 
-/** A route's host configuration is re-read at most this often, not per event. */
 const MAX_SESSION_LABEL_CODEPOINTS = 80;
 const MAX_CHILD_DELETION_TOMBSTONES = 128;
 const MAX_HOST_TEXT_CODEPOINTS = 128;
