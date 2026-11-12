@@ -557,6 +557,53 @@ describe("GUI snapshot service", () => {
     expect(calls).toBe(2);
   });
 
+  it("revalidates stale quota payloads returned by scheduled polls until recovery", async () => {
+    vi.useFakeTimers();
+    let calls = 0;
+    let stale = false;
+    const { source } = fakeSource({
+      quota: async () => {
+        calls += 1;
+        return quota(stale, stale ? 40 : 50);
+      },
+    });
+    const service = createSnapshotService({ source, logger: quiet(), quotaIntervalMs: 50 });
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    const release = service.addViewer();
+    await service.quota();
+    stale = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toBe(3);
+    expect(events.map((event) => event.topic)).toEqual(["quota.changed"]);
+    expect((await service.quota()).stale).toBe(true);
+    expect(calls).toBe(4);
+    stale = false;
+    expect((await service.quota()).stale).toBe(false);
+    expect(calls).toBe(5);
+    await service.quota();
+    expect(calls).toBe(5);
+    release();
+  });
+
+  it("invalidates quota when an otherwise unchanged stale poll recovers", async () => {
+    vi.useFakeTimers();
+    let stale = true;
+    const { source } = fakeSource({ quota: async () => quota(stale) });
+    const service = createSnapshotService({ source, logger: quiet(), quotaIntervalMs: 50 });
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    const release = service.addViewer();
+    expect((await service.quota()).stale).toBe(true);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(events).toEqual([]);
+    stale = false;
+    await vi.advanceTimersByTimeAsync(50);
+    expect(events.map((event) => event.topic)).toEqual(["quota.changed"]);
+    expect((await service.quota()).stale).toBe(false);
+    release();
+  });
+
   it("treats a project payload whose usage reports stale as stale", async () => {
     let usageStale = true;
     let calls = 0;

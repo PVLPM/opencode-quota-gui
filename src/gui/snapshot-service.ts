@@ -628,8 +628,15 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     if (tracked.get(key) !== version || computes.get(key) !== compute) return true;
     const substantive = substantiveOf(snapshot);
     const entry = cache.get(key);
-    const changedNow = entry === undefined || entry.stale || entry.substantive !== substantive;
-    cache.set(key, { snapshot, substantive, stale: false, sourceGeneration: generation });
+    const stale = payloadIsStale(snapshot);
+    const changedNow =
+      entry === undefined || entry.stale !== stale || entry.substantive !== substantive;
+    cache.set(key, {
+      snapshot,
+      substantive,
+      stale,
+      sourceGeneration: generation,
+    });
     if (changedNow) changed.add(topicFor(key));
     return true;
   }
