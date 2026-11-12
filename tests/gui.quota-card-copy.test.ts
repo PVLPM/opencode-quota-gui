@@ -2,10 +2,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
-import { percentRow, providerCard } from "./fixtures/gui-ui-fixtures.js";
+import { NOW, percentRow, providerCard } from "./fixtures/gui-ui-fixtures.js";
 import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -174,5 +174,129 @@ describe("quota card clipboard", () => {
     } finally {
       dispose();
     }
+  });
+});
+
+describe("quota card clipboard runway and banked resets", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  async function copiedSummary(
+    card: ReturnType<typeof providerCard>,
+    stale = false,
+  ): Promise<string> {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const root = graph.createTestRoot();
+    const dispose = graph.mount(
+      () =>
+        graph.createComponent(cardView, {
+          card,
+          preferences: { percentMode: "remaining", showRunway: true, detailed: false },
+          hiddenRows: [],
+          stale,
+          timeZone: "UTC",
+        }),
+      root,
+    );
+    try {
+      const button = graph
+        .elementsNamed(root, "button")
+        .find((node) => node.props.class === "qg-card__copy");
+      expect(button).toBeDefined();
+      graph.listenerOf(button!, "onClick")?.({});
+      await Promise.resolve();
+      expect(writeText).toHaveBeenCalledOnce();
+      return writeText.mock.calls[0]?.[0] as string;
+    } finally {
+      dispose();
+    }
+  }
+
+  /** Summary body without the identity line, so row text is asserted exactly. */
+  function rowLines(copied: string): string[] {
+    return copied.split("\n").slice(1);
+  }
+
+  it("adds a valid before-reset runway to the same row as its quota and reset", async () => {
+    const copied = await copiedSummary(
+      providerCard({
+        accountLabel: "Alice",
+        rows: [
+          percentRow({
+            label: "First quota",
+            countdown: "1h",
+            runway: { kind: "before_reset", projectedAtIso: new Date(NOW + 60_000).toISOString() },
+          }),
+        ],
+      }),
+    );
+    expect(copied).toBe(
+      "Synthetic Provider · Alice\nFirst quota: 62% remaining · Resets in 1h · Runs out in ~1m",
+    );
+  });
+
+  it("adds lasts-past-reset only while its reset is a valid future time", async () => {
+    const cases: Array<{ resetAtIso: string | undefined; runway: string | undefined }> = [
+      { resetAtIso: new Date(NOW + 2_000).toISOString(), runway: "Projected to last until reset" },
+      { resetAtIso: undefined, runway: undefined },
+      { resetAtIso: "invalid", runway: undefined },
+      { resetAtIso: new Date(NOW - 1).toISOString(), runway: undefined },
+    ];
+    for (const { resetAtIso, runway } of cases) {
+      const copied = await copiedSummary(
+        providerCard({
+          rows: [
+            percentRow({
+              label: "Quota",
+              countdown: undefined,
+              resetAtIso,
+              runway: { kind: "lasts_past_reset" },
+            }),
+          ],
+        }),
+      );
+      expect(rowLines(copied)).toEqual([
+        runway === undefined ? "Quota: 62% remaining" : `Quota: 62% remaining · ${runway}`,
+      ]);
+    }
+  });
+
+  it("omits runway from stale cards while keeping quota and reset text", async () => {
+    const copied = await copiedSummary(
+      providerCard({
+        rows: [
+          percentRow({
+            label: "Quota",
+            countdown: "1h",
+            runway: { kind: "before_reset", projectedAtIso: new Date(NOW + 60_000).toISOString() },
+          }),
+        ],
+      }),
+      true,
+    );
+    expect(rowLines(copied)).toEqual(["Quota: 62% remaining · Resets in 1h"]);
+  });
+
+  it("keeps banked-reset summaries unchanged", async () => {
+    const copied = await copiedSummary(
+      providerCard({
+        providerId: "openai",
+        providerLabel: "OpenAI",
+        rows: [
+          percentRow({
+            label: "Banked resets",
+            kind: "value",
+            bankedResets: { availableCount: 2, credits: [] },
+            runway: undefined,
+            countdown: undefined,
+          }),
+        ],
+      }),
+    );
+    expect(rowLines(copied)).toEqual(["Banked resets: 2 available · Expiry unknown"]);
   });
 });

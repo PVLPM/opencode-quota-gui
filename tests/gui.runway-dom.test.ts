@@ -86,7 +86,7 @@ describe("quota runway tooltips", () => {
     dispose();
   });
 
-  it("copies the quota summary without a runway sentence", async () => {
+  it("copies the same runway sentence that the value tooltip shows", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -95,15 +95,18 @@ describe("quota runway tooltips", () => {
         kind: "before_reset",
         projectedAtIso: new Date(NOW + 60_000).toISOString(),
       });
+      const valueTrigger = target.querySelector<HTMLElement>(".qg-row__value-tip");
+      valueTrigger?.focus();
+      expect(tooltipText(valueTrigger!)).toBe("Runs out in ~1m");
       expect(target.querySelector('.qg-card__copy [data-copy-icon="copy"]')).not.toBeNull();
       target.querySelector<HTMLButtonElement>(".qg-card__copy")?.click();
       await Promise.resolve();
       expect(writeText).toHaveBeenCalledOnce();
       const copied = writeText.mock.calls[0]?.[0] as string;
       expect(copied).toContain("Synthetic Provider");
-      expect(copied).toContain("Five hour window: 62% remaining");
-      expect(copied).toContain("Resets in");
-      expect(copied).not.toContain("Runs out");
+      expect(copied).toContain(
+        "Five hour window: 62% remaining · Resets in 2h 59m · Runs out in ~1m",
+      );
       expect(target.querySelector("output")?.textContent).toBe("Quota summary copied.");
       expect(target.querySelector('.qg-card__copy [data-copy-icon="check"]')).not.toBeNull();
       dispose();

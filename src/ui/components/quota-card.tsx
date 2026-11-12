@@ -312,7 +312,10 @@ export function QuotaCardView(props: {
         return `${row.label}: ${segments.length} available · ${resetSummary(segments)}`;
       }
       const countdown = row.countdown ? ` · Resets in ${row.countdown}` : "";
-      return `${row.label}: ${rowValueText(row, props.preferences)}${countdown}`;
+      // Same gate and text as the value tooltip, so the copy never invents runway.
+      const runway = row.kind === "percent" ? runwayText(row) : undefined;
+      const runwayPart = runway ? ` · ${runway}` : "";
+      return `${row.label}: ${rowValueText(row, props.preferences)}${countdown}${runwayPart}`;
     });
     try {
       await navigator.clipboard.writeText([identity, ...lines].join("\n"));
