@@ -145,7 +145,7 @@ export interface AnthropicDiagnostics {
   /** Source-assigned category for a failed OAuth usage request; absent otherwise. */
   failureCategory?: ProviderFailureCategory;
   quota?: AnthropicQuotaResult;
-  /** sha256 of the OAuth token that answered the usage probe. Used only to avoid showing one login twice. */
+  /** sha256 of the OAuth token bound to this probe, used only to avoid showing one login twice. */
   credentialFingerprint?: string;
   /** Display-only plan (e.g. `Claude (Max)`) of the verified Claude CLI login that answered the quota probe. */
   planLabel?: string;
@@ -819,6 +819,7 @@ async function runCredentialCommand(file: string, args: string[]): Promise<Claud
           encoding: "utf8",
           timeout: CLAUDE_COMMAND_TIMEOUT_MS,
           maxBuffer: 1024 * 1024,
+          windowsHide: true,
         },
         (error: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
           const stdoutText = typeof stdout === "string" ? stdout : stdout.toString("utf8");
@@ -1417,6 +1418,7 @@ async function runClaudeCommand(invocation: ClaudeCommandInvocation): Promise<Cl
           encoding: "utf8",
           timeout: CLAUDE_COMMAND_TIMEOUT_MS,
           maxBuffer: 1024 * 1024,
+          windowsHide: true,
           ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         },
         (error: Error | null, stdout: string | Buffer, stderr: string | Buffer) => {
@@ -1690,6 +1692,7 @@ async function getAnthropicLocalDiagnostics(
 
 export async function getAnthropicDiagnostics(
   options: AnthropicProbeOptions = {},
+  excludedClaudeFingerprints: readonly string[] = [],
 ): Promise<AnthropicDiagnostics> {
   const localDiagnostics = await getAnthropicLocalDiagnostics(options);
   // The OpenCode route answers only from OpenCode's own login. When that login is present, the
@@ -1699,6 +1702,7 @@ export async function getAnthropicDiagnostics(
     : await readOpenCodeAnthropicLogin();
   const openCodeLoginPresent = openCodeLogin !== null && openCodeLogin.state !== "none";
   if (localDiagnostics.localQuota && !openCodeLoginPresent) {
+    // The status payload does not bind its quota to the stored token; do not deduplicate by it.
     return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
   }
 
@@ -1749,6 +1753,17 @@ export async function getAnthropicDiagnostics(
     };
   }
 
+  const credentialFingerprint = fingerprintAccessToken(credentials.accessToken);
+  if (
+    options.useClaudeCodeCredentials &&
+    excludedClaudeFingerprints.includes(credentialFingerprint)
+  ) {
+    return {
+      ...mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics),
+      credentialFingerprint,
+    };
+  }
+
   const fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
     credentials.accessToken,
     options.requestTimeoutMs,
@@ -1764,7 +1779,7 @@ export async function getAnthropicDiagnostics(
       binaryPath: localDiagnostics.binaryPath,
       checkedCommands: localDiagnostics.checkedCommands,
       message: buildAnthropicNoQuotaDiagnosticsMessage(fallbackQuota.detail),
-      credentialFingerprint: fingerprintAccessToken(credentials.accessToken),
+      credentialFingerprint,
       ...(fallbackQuota.failureCategory !== undefined
         ? { failureCategory: fallbackQuota.failureCategory }
         : {}),
@@ -1784,7 +1799,7 @@ export async function getAnthropicDiagnostics(
     binaryPath: localDiagnostics.binaryPath,
     checkedCommands: localDiagnostics.checkedCommands,
     quota: fallbackQuota.quota,
-    credentialFingerprint: fingerprintAccessToken(credentials.accessToken),
+    credentialFingerprint,
     // The plan belongs to the CLI login only when this quota came from that login's own token.
     ...(credentials.source === "claude-credentials" && localDiagnostics.planLabel !== undefined
       ? { planLabel: localDiagnostics.planLabel }
@@ -1803,7 +1818,10 @@ export async function getClaudeCodeAccountDiagnostics(
   excludedCredentialFingerprints: readonly string[],
   account: { reportUnready?: boolean } = {},
 ): Promise<AnthropicDiagnostics | null> {
-  const diagnostics = await getAnthropicDiagnostics({ ...options, useClaudeCodeCredentials: true });
+  const diagnostics = await getAnthropicDiagnostics(
+    { ...options, useClaudeCodeCredentials: true },
+    excludedCredentialFingerprints,
+  );
   if (diagnostics.authStatus !== "authenticated") return account.reportUnready ? diagnostics : null;
   if (
     diagnostics.credentialFingerprint !== undefined &&

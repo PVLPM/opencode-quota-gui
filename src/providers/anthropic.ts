@@ -138,8 +138,36 @@ function claudeCodeAccountEntries(
   return entries;
 }
 
-/** Whether OpenCode itself detects a Claude Code runtime (the dashboard's discovery signal). */
+/**
+ * OpenCode registers Claude Agent independently of the external login; provider presence alone
+ * cannot report its auth or quota. The independent CLI probe supplies what it can; it does not
+ * establish account equivalence from a matching email or plan.
+ */
 export async function isClaudeCodeRuntimeDetected(ctx: QuotaProviderContext): Promise<boolean> {
+  if (ctx.client?.integration) {
+    try {
+      const { data } = await ctx.client.integration.list();
+      if (Array.isArray(data)) {
+        const agent = data.find((integration) => integration.id === "claude-agent");
+        if (agent && Array.isArray(agent.connections)) {
+          if (
+            agent.connections.some(
+              (connection) => connection.type === "credential" && connection.method === "external",
+            )
+          ) {
+            return true;
+          }
+          return await isAnyProviderIdAvailable({
+            ctx,
+            candidateIds: ["claude-code"],
+            fallbackOnError: false,
+          });
+        }
+      }
+    } catch {
+      // Older hosts or an unavailable integration service use legacy provider detection.
+    }
+  }
   return await isAnyProviderIdAvailable({
     ctx,
     candidateIds: CLAUDE_CODE_RUNTIME_IDS,

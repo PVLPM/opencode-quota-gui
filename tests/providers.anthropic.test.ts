@@ -1714,6 +1714,69 @@ describe("anthropic provider", () => {
     await expect(anthropicProvider.isDiscovered?.(ctx)).resolves.toBe(false);
   });
 
+  it.each([
+    { connections: [{ type: "credential", method: "external" }], discovered: true },
+    {
+      connections: [{ type: "credential", method: "external", status: { status: "needs_auth" } }],
+      discovered: true,
+    },
+    { connections: [], discovered: false },
+    { connections: [{ type: "credential", method: "oauth" }], discovered: false },
+    { connections: [{ type: "env", name: "ANTHROPIC_API_KEY" }], discovered: false },
+  ])("uses the host's Claude Agent connections for discovery: $connections", async ({
+    connections,
+    discovered,
+  }) => {
+    const ctx = createProviderAvailabilityContext({ providerIds: ["claude-agent"] });
+    Object.assign(ctx.client, {
+      integration: { list: async () => ({ data: [{ id: "claude-agent", connections }] }) },
+    });
+    await expect(anthropicProvider.isDiscovered?.(ctx)).resolves.toBe(discovered);
+  });
+
+  it("discovers a host-connected Claude Agent before provider models appear", async () => {
+    const ctx = createProviderAvailabilityContext({ providerIds: [] });
+    Object.assign(ctx.client, {
+      integration: {
+        list: async () => ({
+          data: [{ id: "claude-agent", connections: [{ type: "credential", method: "external" }] }],
+        }),
+      },
+    });
+    await expect(anthropicProvider.isDiscovered?.(ctx)).resolves.toBe(true);
+  });
+
+  it("falls back to provider detection when integration listing fails", async () => {
+    const ctx = createProviderAvailabilityContext({ providerIds: ["claude-agent"] });
+    Object.assign(ctx.client, {
+      integration: {
+        list: async () => {
+          throw new Error("unavailable");
+        },
+      },
+    });
+    await expect(anthropicProvider.isDiscovered?.(ctx)).resolves.toBe(true);
+  });
+
+  it("keeps a legacy Claude Code provider when the host's Claude Agent has no connection", async () => {
+    const ctx = createProviderAvailabilityContext({ providerIds: ["claude-code"] });
+    Object.assign(ctx.client, {
+      integration: { list: async () => ({ data: [{ id: "claude-agent", connections: [] }] }) },
+    });
+    await expect(anthropicProvider.isDiscovered?.(ctx)).resolves.toBe(true);
+  });
+
+  it("keeps a separately verified CLI login available without a host external connection", async () => {
+    const { hasAnthropicCredentialsConfigured } = await import("../src/lib/anthropic.js");
+    (hasAnthropicCredentialsConfigured as any).mockResolvedValue(true);
+    const ctx = createProviderAvailabilityContext({ providerIds: ["claude-agent"] });
+    Object.assign(ctx.client, {
+      integration: { list: async () => ({ data: [{ id: "claude-agent", connections: [] }] }) },
+    });
+    await expect(anthropicProvider.isDiscovered?.(ctx)).resolves.toBe(false);
+    await expect(anthropicProvider.isAvailable(ctx)).resolves.toBe(true);
+  });
+
   it("shows a dashboard-detected Claude Code runtime with a missing CLI as a safe error row", async () => {
     const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
       "../src/lib/anthropic.js"

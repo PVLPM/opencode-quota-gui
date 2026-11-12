@@ -45,6 +45,7 @@ export const QuotaToastPlugin = Plugin.define({
     // does not expose a mutable global config to plugins; runtime settings are
     // read from the canonical GUI config file by the collector.
     const client = {
+      integration: { list: () => ctx.integration.list() },
       config: {
         get: async () => ({ data: {} }),
         providers: async () => ({

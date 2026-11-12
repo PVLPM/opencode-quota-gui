@@ -431,6 +431,11 @@ export interface QuotaProviderMatchContext {
 
 export interface QuotaProviderContext {
   client: {
+    integration?: {
+      list: () => Promise<{
+        data: Array<{ id: string; connections: Array<{ type: string; method?: string }> }>;
+      }>;
+    };
     config: {
       providers: () => Promise<{ data?: { providers: Array<{ id: string }> } }>;
       get: () => Promise<{ data?: { model?: string } }>;
