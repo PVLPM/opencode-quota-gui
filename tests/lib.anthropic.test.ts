@@ -691,6 +691,31 @@ describe("Claude CLI diagnostics", () => {
     expect(fetchWithTimeoutMock).not.toHaveBeenCalled();
   });
 
+  it("rechecks the CLI credential after an account switch between refreshes", async () => {
+    setProcessPlatform("linux");
+    mockExecSequence(authenticatedWithoutQuotaSteps(3));
+    readFileMock
+      .mockResolvedValueOnce(JSON.stringify({ claudeAiOauth: { accessToken: "shared-token" } }))
+      .mockResolvedValueOnce(JSON.stringify({ claudeAiOauth: { accessToken: "other-token" } }))
+      .mockResolvedValueOnce(JSON.stringify({ claudeAiOauth: { accessToken: "shared-token" } }));
+    fetchResponseMock.mockResolvedValue(mockOAuthResponse(429, "rate limited", "30"));
+    const excluded = [fingerprintAccessToken("shared-token")];
+
+    expect(
+      await getClaudeCodeAccountDiagnostics({ operationCache: new Map() }, excluded),
+    ).toBeNull();
+    const other = await getClaudeCodeAccountDiagnostics({ operationCache: new Map() }, excluded);
+    expect(other).toMatchObject({
+      quotaSupported: false,
+      failureCategory: "provider_api",
+      credentialFingerprint: fingerprintAccessToken("other-token"),
+    });
+    expect(
+      await getClaudeCodeAccountDiagnostics({ operationCache: new Map() }, excluded),
+    ).toBeNull();
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
+  });
+
   it("derives the Claude Code route identity from the Claude CLI login only, scoped to the binary", async () => {
     setProcessPlatform("linux");
     mockExecSequence([
