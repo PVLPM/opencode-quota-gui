@@ -681,6 +681,8 @@ describe("native dashboard RPC client", () => {
 
     await expect(client.health()).resolves.toMatchObject({ app: "opencode-quota-gui" });
     await expect(client.quota()).resolves.toEqual({ marker: "quota" });
+    await expect(client.quota({ refresh: true })).resolves.toEqual({ marker: "quota" });
+    expect(fake.raw.quota).toHaveBeenLastCalledWith({ refresh: true });
     await expect(client.home({ range: "7d" })).resolves.toEqual({ marker: "home" });
     await expect(client.groups({ range: "7d", dimension: "model" })).resolves.toEqual({
       marker: "groups",

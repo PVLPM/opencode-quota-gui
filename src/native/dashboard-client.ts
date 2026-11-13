@@ -55,7 +55,7 @@ export interface DashboardRpcCallOptions {
  */
 export interface DashboardRpcCaller {
   health(input: DashboardRpcNoInput, options?: DashboardRpcCallOptions): Promise<DashboardHealth>;
-  quota(input: DashboardRpcNoInput, options?: DashboardRpcCallOptions): Promise<QuotaSnapshot>;
+  quota(input: { refresh?: boolean }, options?: DashboardRpcCallOptions): Promise<QuotaSnapshot>;
   home(input: { range: RangeKey }, options?: DashboardRpcCallOptions): Promise<HomeSnapshot>;
   groups(
     input: AnalyticsGroupQuery,
@@ -419,8 +419,8 @@ export function createNativeDashboardClient(
     async health() {
       return rpc.health({});
     },
-    async quota() {
-      return rpc.quota({});
+    async quota(input) {
+      return rpc.quota(input ?? {});
     },
     async home(input) {
       return rpc.home(input);

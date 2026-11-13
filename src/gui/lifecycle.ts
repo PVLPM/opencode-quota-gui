@@ -81,7 +81,7 @@ export type DashboardReadSource = Pick<
   DashboardDataSource,
   "home" | "project" | "session" | "groups"
 > & {
-  quota?(): Promise<QuotaSnapshot>;
+  quota?(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   /** One shared analytics refresh per transport tick, when the owner loaded analytics. */
   refreshAnalytics?(): Promise<void>;
   /** Owner dispose / host close: releases lazily created analytics resources. */
@@ -413,7 +413,7 @@ function createDelegatingSource(
     project: async (input) => (await requireSource()).project(input),
     session: async (input) => (await requireSource()).session(input),
     groups: async (query) => (await requireSource()).groups(query),
-    quota: async () => {
+    quota: async (input) => {
       // Capture the source generation before resolving the owner and before the
       // asynchronous provider read. A handoff during either step changes the
       // token, and the observer drops the old source's snapshot instead of
@@ -424,7 +424,7 @@ function createDelegatingSource(
       const source = await requireSource();
       // Mirrors `SnapshotService`: a source without quota answers as unavailable.
       if (!source.quota) throw new Error("Quota source unavailable");
-      const snapshot = await source.quota();
+      const snapshot = await source.quota(input);
       if (observer !== undefined && delegation.activeOwner === owner) {
         observer.observe(snapshot, epoch);
       }

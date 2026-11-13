@@ -308,6 +308,30 @@ describe("native dashboard panel state", () => {
     expect(state.connection()).toBe("live");
   });
 
+  it("retries quota, settings and health on a live transport", async () => {
+    const fake = recordingClient();
+    const requests: unknown[] = [];
+    fake.client.quota = async (input) => {
+      requests.push(input);
+      return {} as any;
+    };
+    const [visible] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible });
+    const settings = fake.counts.settings;
+    const health = fake.counts.health;
+    state.retry();
+    await flush();
+    expect(requests).toEqual([{ refresh: true }]);
+    expect(fake.counts.settings).toBe(settings + 1);
+    expect(fake.counts.health).toBe(health + 1);
+    expect(fake.counts.reconnects).toBe(0);
+    state.retry({ refreshQuota: false });
+    await flush();
+    expect(requests).toEqual([{ refresh: true }]);
+    expect(fake.counts.settings).toBe(settings + 2);
+    expect(fake.counts.health).toBe(health + 2);
+  });
+
   it("marks cached data stale on host loss and clears it only after recovery and a read land", async () => {
     const fake = recordingClient();
     const [visible] = createSignal(true);

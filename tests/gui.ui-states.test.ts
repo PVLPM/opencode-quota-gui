@@ -1056,6 +1056,22 @@ describe("home view composition", () => {
     expect(emptyRange).toContain("No activity in this range");
   });
 
+  it("shows an error instead of claiming no accounts when an empty quota snapshot is stale", async () => {
+    const html = await renderView(
+      "/views/home.tsx",
+      "QuotaView",
+      homeProps({
+        snapshot: homeSnapshot({
+          stale: true,
+          providers: { cards: [], enabledProviders: "auto", polledAtMs: NOW },
+        }),
+        stale: true,
+      }),
+    );
+    expect(html).toContain("Quota data is unavailable");
+    expect(html).not.toContain("No provider accounts are available");
+  });
+
   it("reports every card as hidden rather than pretending there are none", async () => {
     const html = await renderView(
       "/views/home.tsx",

@@ -583,6 +583,32 @@ describe("parseUsageResponse", () => {
 });
 
 describe("Claude CLI diagnostics", () => {
+  it("reuses local diagnostics only within an operation and for the same binary", async () => {
+    mockExecSequence([
+      { stdout: "claude 1.2.3" },
+      { stdout: JSON.stringify({ authenticated: false }) },
+      { stdout: "claude 2.0.0" },
+      { stdout: JSON.stringify({ authenticated: false }) },
+      { stdout: "claude 3.0.0" },
+      { stdout: JSON.stringify({ authenticated: false }) },
+    ]);
+    const operationCache = new Map<symbol, unknown>();
+    const first = await getAnthropicDiagnostics({ binaryPath: "first", operationCache });
+    const reused = await getAnthropicDiagnostics({
+      binaryPath: "first",
+      operationCache,
+      useClaudeCodeCredentials: true,
+    });
+    const otherBinary = await getAnthropicDiagnostics({ binaryPath: "second", operationCache });
+    const next = await getAnthropicDiagnostics({ binaryPath: "first", operationCache: new Map() });
+    expect([first.version, reused.version, otherBinary.version, next.version]).toEqual([
+      "1.2.3",
+      "1.2.3",
+      "2.0.0",
+      "3.0.0",
+    ]);
+    expect(execFileMock).toHaveBeenCalledTimes(6);
+  });
   it("keeps selected Claude Code CLI quota uncached without an Anthropic account identity", async () => {
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },

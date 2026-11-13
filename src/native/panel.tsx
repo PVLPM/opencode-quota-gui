@@ -370,6 +370,7 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                         hiddenRows={settings().visibility.hiddenRows}
                         onSnapshot={setHomeSnapshot}
                         onStale={setRouteStale}
+                        onRetryShell={() => panel.retry({ refreshQuota: false })}
                       />
                     )}
                   </Show>

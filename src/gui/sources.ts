@@ -397,6 +397,7 @@ export function createDashboardReadSource(
     config: QuotaToastConfig,
     nowMs: number,
     providers: QuotaProvider[],
+    refresh = false,
   ): Promise<QuotaStatusLiveProbe[]> {
     const openaiResetDetailsVisible = createOpenAiResetDetailsVisibility(config);
     if (options.collectProviderResults) {
@@ -414,13 +415,14 @@ export function createDashboardReadSource(
       config,
       workspaceRoot: options.workspaceRoot,
       providers,
+      forceProviderRefresh: refresh,
       openaiResetDetailsVisible,
     });
   }
 
   interface MergedCycle {
     probes: QuotaStatusLiveProbe[];
-    /** True when at least one provider served last-good rather than new data. */
+    /** True when a provider failed, was missing, or used last-good data. */
     substituted: boolean;
   }
 
@@ -432,10 +434,9 @@ export function createDashboardReadSource(
    *   taken from the measurement snapshot, never from a descriptor-only result.
    * - A provider without new measurements keeps its last-good entries/accounts
    *   but surfaces the *current* cycle's errors.
-   * - A selected provider missing from the cycle (slow/unavailable probe) keeps
-   *   its last-good probe.
-   * - Any substitution is reported so the snapshot can be marked stale and the
-   *   last successful poll timestamp is not advanced.
+   * - A missing provider cannot prove its account scope, so its last-good is dropped.
+   * - Failures and substitutions mark the snapshot stale and preserve the prior
+   *   poll timestamp, or use the current attempt time on the first cycle.
    */
   function mergeProviderResults(
     probes: readonly QuotaStatusLiveProbe[],
@@ -452,6 +453,8 @@ export function createDashboardReadSource(
     for (const probe of probes) {
       seen.add(probe.providerId);
       if (hasMeasurements(probe)) {
+        if (probe.result.errors.some((error) => error.kind !== "intentional-filter"))
+          substituted = true;
         lastGoodProbes.set(probe.providerId, probe);
         merged.push(probe);
         continue;
@@ -464,7 +467,13 @@ export function createDashboardReadSource(
         continue;
       }
       const lastGood = lastGoodProbes.get(probe.providerId);
-      if (!lastGood) {
+      if (!lastGood || !probe.cacheScope || probe.cacheScope !== lastGood.cacheScope) {
+        if (probe.result.errors.some((error) => error.kind !== "intentional-filter"))
+          substituted = true;
+        if (lastGood) {
+          lastGoodProbes.delete(probe.providerId);
+          substituted = true;
+        }
         // Nothing was ever measured for this provider: expose the current
         // error/no-data result as-is.
         merged.push(probe);
@@ -478,21 +487,18 @@ export function createDashboardReadSource(
     }
     for (const provider of selected) {
       if (seen.has(provider.id)) continue;
-      const lastGood = lastGoodProbes.get(provider.id);
-      if (!lastGood) continue;
-      substituted = true;
-      merged.push(lastGood);
+      if (lastGoodProbes.delete(provider.id)) substituted = true;
     }
     return { probes: merged, substituted };
   }
 
-  async function runQuotaCycle(): Promise<QuotaSnapshot> {
+  async function runQuotaCycle(refresh = false): Promise<QuotaSnapshot> {
     const nowMs = now();
     try {
       const config = await loadDashboardConfig();
       const allProviders = options.providers ?? getProviders();
       const selected = selectQuotaProviders(config, allProviders);
-      const probes = await collect(config, nowMs, selected);
+      const probes = await collect(config, nowMs, selected, refresh);
       const merged = mergeProviderResults(probes, selected);
       // OpenAI's observation timestamp is captured after its usage body is
       // consumed. Project against collection completion time, but keep snapshot
@@ -506,8 +512,8 @@ export function createDashboardReadSource(
         nowMs: projectionNowMs,
         providerLabel: options.providerLabel,
       });
-      // A substituted provider is cached data: mark the snapshot stale and do
-      // not advance the successful poll timestamp (checkpoint review finding 9).
+      // Keep the previous poll time on a partial cycle. With no previous cycle,
+      // the required numeric field can only report this attempt time, not success.
       const polledAtMs = merged.substituted
         ? (lastQuotaSnapshot?.providers.polledAtMs ?? nowMs)
         : nowMs;
@@ -527,14 +533,36 @@ export function createDashboardReadSource(
       return snapshot;
     } catch (error) {
       if (lastQuotaSnapshot) {
-        return { ...lastQuotaSnapshot, generatedAtMs: nowMs, stale: true };
+        return {
+          ...lastQuotaSnapshot,
+          generatedAtMs: nowMs,
+          stale: true,
+          temporal: undefined,
+          providers: { ...lastQuotaSnapshot.providers, cards: [] },
+        };
       }
       throw error;
     }
   }
 
-  function quota(): Promise<QuotaSnapshot> {
+  let quotaRefresh: Promise<QuotaSnapshot> | undefined;
+  function quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot> {
+    if (input?.refresh) {
+      if (quotaRefresh) return quotaRefresh;
+      const refresh = (async () => {
+        await quotaCycle?.catch(() => undefined);
+        return runQuotaCycle(true);
+      })();
+      quotaRefresh = refresh;
+      void refresh
+        .finally(() => {
+          if (quotaRefresh === refresh) quotaRefresh = undefined;
+        })
+        .catch(() => undefined);
+      return refresh;
+    }
     // Every selected provider starts in one cycle; concurrent readers share it.
+    if (quotaRefresh) return quotaRefresh;
     if (quotaCycle) return quotaCycle;
     const cycle = runQuotaCycle().finally(() => {
       if (quotaCycle === cycle) quotaCycle = undefined;

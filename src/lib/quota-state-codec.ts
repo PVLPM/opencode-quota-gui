@@ -340,9 +340,19 @@ function isQuotaToastEntry(value: unknown, safeText: boolean): value is QuotaToa
 function isQuotaToastError(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(value, ["label", "message", "retryable", "failureCategory", "kind", "sourceId"]) &&
+    hasOnlyKeys(value, [
+      "label",
+      "message",
+      "retryable",
+      "failureCategory",
+      "kind",
+      "sourceId",
+      "retryAtMs",
+    ]) &&
     typeof value.label === "string" &&
     typeof value.message === "string" &&
+    (value.retryAtMs === undefined ||
+      (Number.isSafeInteger(value.retryAtMs) && (value.retryAtMs as number) >= 0)) &&
     (value.retryable === undefined || typeof value.retryable === "boolean") &&
     (value.failureCategory === undefined || isProviderFailureCategory(value.failureCategory)) &&
     (value.kind === undefined || value.kind === "intentional-filter") &&

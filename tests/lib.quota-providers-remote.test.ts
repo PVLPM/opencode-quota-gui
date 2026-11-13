@@ -92,6 +92,92 @@ afterEach(() => {
 });
 
 describe("quota provider remote runtime", () => {
+  it("coalesces equivalent successful in-flight requests", async () => {
+    let release!: (response: Response) => void;
+    const fetcher = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            release = resolve;
+          }),
+      )
+      .mockImplementation(async () =>
+        jsonResponse({
+          version: "quota-v1",
+          entries: [{ kind: "value", name: "Balance", value: "ok" }],
+        }),
+      );
+    const definition = source({ url: "https://coalesce.example/quota" });
+    const first = fetchRemoteQuotaProvider(definition, "coalesce-key", undefined, fetcher);
+    const second = fetchRemoteQuotaProvider(definition, "coalesce-key", undefined, fetcher);
+    release(
+      jsonResponse({
+        version: "quota-v1",
+        entries: [{ kind: "value", name: "Balance", value: "ok" }],
+      }),
+    );
+    expect(await first).toEqual(await second);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("honors observed 429 deadlines per actual key until expiry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    const fetcher = vi
+      .fn()
+      .mockImplementation(
+        async () => new Response(null, { status: 429, headers: { "Retry-After": "30" } }),
+      );
+    const provider = source({ id: "retry-deadline-test" });
+    const first = await fetchRemoteQuotaProvider(provider, "key-one", undefined, fetcher);
+    expect(first).toMatchObject({ success: false, error: "HTTP 429" });
+    await fetchRemoteQuotaProvider(provider, "key-one", undefined, fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await fetchRemoteQuotaProvider(provider, "key-two", undefined, fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(30_000);
+    await fetchRemoteQuotaProvider(provider, "key-one", undefined, fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("honors an HTTP-date and coalesces concurrent rate-limited requests", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-02-01T00:00:00Z"));
+    let release!: (response: Response) => void;
+    const fetcher = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const provider = source({ url: "https://date.example/quota" });
+    const one = fetchRemoteQuotaProvider(provider, "date-key", undefined, fetcher);
+    const two = fetchRemoteQuotaProvider(provider, "date-key", undefined, fetcher);
+    release(
+      new Response(null, {
+        status: 429,
+        headers: { "Retry-After": "Sun, 01 Feb 2026 00:00:10 GMT" },
+      }),
+    );
+    const results = await Promise.all([one, two]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(results).toEqual([
+      expect.objectContaining({ success: false, error: "HTTP 429" }),
+      expect.objectContaining({ success: false, error: "HTTP 429" }),
+    ]);
+  });
+
+  it("does not invent a deadline for an invalid header", async () => {
+    const fetcher = vi
+      .fn()
+      .mockImplementation(
+        async () => new Response(null, { status: 429, headers: { "Retry-After": "nonsense" } }),
+      );
+    const provider = source({ url: "https://invalid-header.example/quota" });
+    await fetchRemoteQuotaProvider(provider, "invalid-key", undefined, fetcher);
+    await fetchRemoteQuotaProvider(provider, "invalid-key", undefined, fetcher);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
   it("maps strict quota-v1 percent and value rows with local metadata and grouping", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({

@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from "node:crypto";
 import {
   type ProviderFailureCategory,
   providerFailureCategoryForHttpStatus,
@@ -56,7 +57,12 @@ export interface QuotaProviderAuthResolution {
 
 export type RemoteQuotaProviderResult =
   | { success: true; entries: QuotaToastEntry[]; rowErrors?: string[] }
-  | { success: false; error: string; failureCategory?: ProviderFailureCategory };
+  | {
+      success: false;
+      error: string;
+      failureCategory?: ProviderFailureCategory;
+      retryAtMs?: number;
+    };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -896,6 +902,65 @@ export async function fetchRemoteQuotaProvider(
   requestTimeoutMs?: number,
   fetcher: typeof fetch = fetch,
 ): Promise<RemoteQuotaProviderResult> {
+  const identity = createHmac("sha256", remoteIdentityKey)
+    .update(JSON.stringify([source.url, apiKey ?? null]))
+    .digest("base64url");
+  const now = Date.now();
+  for (const [key, deadline] of remoteRetryDeadlines) {
+    if (deadline <= now) remoteRetryDeadlines.delete(key);
+  }
+  const deadline = remoteRetryDeadlines.get(identity);
+  if (deadline !== undefined)
+    return {
+      success: false,
+      error: "HTTP 429",
+      failureCategory: "provider_api",
+      retryAtMs: deadline,
+    };
+  const previous = remoteInFlight.get(identity);
+  if (previous) {
+    if (
+      previous.source === JSON.stringify(source) &&
+      previous.fetcher === fetcher &&
+      previous.timeout === requestTimeoutMs
+    ) {
+      return structuredClone(await previous.request);
+    }
+    await previous.request;
+    return fetchRemoteQuotaProvider(source, apiKey, requestTimeoutMs, fetcher);
+  }
+  const request = fetchRemoteQuotaProviderUncached(source, apiKey, requestTimeoutMs, fetcher);
+  const pending = { request, source: JSON.stringify(source), fetcher, timeout: requestTimeoutMs };
+  remoteInFlight.set(identity, pending);
+  try {
+    const result = await request;
+    if (!result.success && result.retryAtMs !== undefined && result.retryAtMs > Date.now()) {
+      remoteRetryDeadlines.set(identity, result.retryAtMs);
+    }
+    return result;
+  } finally {
+    if (remoteInFlight.get(identity) === pending) remoteInFlight.delete(identity);
+  }
+}
+
+const remoteRetryDeadlines = new Map<string, number>();
+const remoteInFlight = new Map<
+  string,
+  {
+    request: Promise<RemoteQuotaProviderResult>;
+    source: string;
+    fetcher: typeof fetch;
+    timeout: number | undefined;
+  }
+>();
+const remoteIdentityKey = randomBytes(32);
+
+async function fetchRemoteQuotaProviderUncached(
+  source: RemoteApiQuotaProviderDefinition,
+  apiKey: string | undefined,
+  requestTimeoutMs?: number,
+  fetcher: typeof fetch = fetch,
+): Promise<RemoteQuotaProviderResult> {
   const timeoutMs = requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -915,10 +980,19 @@ export async function fetchRemoteQuotaProvider(
       return { success: false, error: "Redirect rejected", failureCategory: "provider_api" };
     }
     if (!response.ok) {
+      const header =
+        response.status === 429 ? response.headers.get("retry-after")?.trim() : undefined;
+      const retryAtMs =
+        header && /^\d+$/.test(header)
+          ? Date.now() + Number(header) * 1000
+          : header && /^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(header)
+            ? Date.parse(header)
+            : NaN;
       return {
         success: false,
         error: `HTTP ${response.status}`,
         failureCategory: providerFailureCategoryForHttpStatus(response.status),
+        ...(Number.isSafeInteger(retryAtMs) && retryAtMs > Date.now() ? { retryAtMs } : {}),
       };
     }
 

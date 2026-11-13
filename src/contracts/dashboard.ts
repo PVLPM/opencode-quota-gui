@@ -377,6 +377,7 @@ export interface HomeSnapshot {
   generatedAtMs: number;
   range: RangeKey;
   stale: boolean;
+  /** `polledAtMs` is a poll time, not a guarantee that every provider succeeded. */
   providers: { cards: ProviderCard[]; enabledProviders: string[] | "auto"; polledAtMs: number };
   usage: Usage;
   projects: ProjectActivityRow[];
@@ -517,7 +518,7 @@ export interface DashboardEvent {
 export interface DashboardDataSource {
   health(): Promise<DashboardHealth>;
   home(input: { range: RangeKey }): Promise<HomeSnapshot>;
-  quota(): Promise<QuotaSnapshot>;
+  quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
   /** Range-certified grouped model/provider analytics (one exact query). */

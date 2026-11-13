@@ -153,6 +153,8 @@ export interface AnthropicDiagnostics {
 
 export interface AnthropicProbeOptions {
   binaryPath?: string;
+  operationCache?: Map<symbol, unknown>;
+  forceRefresh?: boolean;
   requestTimeoutMs?: number;
   /** Use the local Claude Code/Agent OAuth account, not OpenCode's Anthropic login. */
   useClaudeCodeCredentials?: boolean;
@@ -263,6 +265,7 @@ type ParsedAuthProbe = {
 type AnthropicOAuthSharedState = {
   cooldowns: Map<string, AnthropicOAuthCooldown>;
   inFlight: Map<string, Promise<AnthropicFallbackQuota>>;
+  forcedInFlight?: Map<string, Promise<AnthropicFallbackQuota>>;
   recent: Map<string, { quota: AnthropicQuotaResult; checkedAtMs: number }>;
 };
 
@@ -288,7 +291,10 @@ if (anthropicOAuthSharedState === undefined) {
 
 const anthropicOAuthCooldowns = anthropicOAuthSharedState.cooldowns;
 const anthropicOAuthInFlight = anthropicOAuthSharedState.inFlight;
+anthropicOAuthSharedState.forcedInFlight ??= new Map();
+const anthropicOAuthForcedInFlight = anthropicOAuthSharedState.forcedInFlight;
 const anthropicOAuthRecent = anthropicOAuthSharedState.recent;
+const anthropicForcedResultsKey = Symbol("anthropic forced results");
 
 export function resolveAnthropicBinaryPath(binaryPath?: string): string {
   const trimmed = binaryPath?.trim();
@@ -1099,6 +1105,7 @@ async function performAnthropicOAuthUsageRequest(
       timeoutMs: requestTimeoutMs,
       consume: async (response, timeoutSignal): Promise<AnthropicFallbackQuota> => {
         if (response.status === 429) {
+          anthropicOAuthRecent.delete(tokenFingerprint);
           const nowMs = Date.now();
           const previousFailureCount =
             anthropicOAuthCooldowns.get(tokenFingerprint)?.failureCount ?? 0;
@@ -1194,6 +1201,7 @@ async function performAnthropicOAuthUsageRequest(
 async function queryAnthropicQuotaFromOAuthAccessToken(
   accessToken: string,
   requestTimeoutMs?: number,
+  forcedOperationCache?: Map<symbol, unknown>,
 ): Promise<AnthropicFallbackQuota> {
   const tokenFingerprint = fingerprintAccessToken(accessToken);
   retainAnthropicOAuthCooldownForToken(tokenFingerprint);
@@ -1208,7 +1216,7 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
     };
   }
 
-  const recent = anthropicOAuthRecent.get(tokenFingerprint);
+  const recent = forcedOperationCache ? undefined : anthropicOAuthRecent.get(tokenFingerprint);
   if (
     recent &&
     nowMs >= recent.checkedAtMs &&
@@ -1217,37 +1225,74 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
     return { state: "success", quota: recent.quota };
   }
 
-  const existingInFlight = anthropicOAuthInFlight.get(tokenFingerprint);
-  if (existingInFlight) {
-    return await existingInFlight;
+  let forcedResults: Map<string, Promise<AnthropicFallbackQuota>> | undefined;
+  if (forcedOperationCache) {
+    forcedResults = forcedOperationCache.get(anthropicForcedResultsKey) as
+      | Map<string, Promise<AnthropicFallbackQuota>>
+      | undefined;
+    if (!forcedResults) {
+      forcedResults = new Map();
+      forcedOperationCache.set(anthropicForcedResultsKey, forcedResults);
+    }
+    const existing = forcedResults.get(tokenFingerprint);
+    if (existing) return await existing;
   }
 
-  const inFlight = performAnthropicOAuthUsageRequest(
-    accessToken,
-    tokenFingerprint,
-    requestTimeoutMs,
-  ).then((result) => {
-    if (result.state === "success") {
-      rememberAnthropicOAuthQuota(tokenFingerprint, result.quota);
+  if (forcedResults) {
+    const existingForced = anthropicOAuthForcedInFlight.get(tokenFingerprint);
+    if (existingForced) {
+      forcedResults.set(tokenFingerprint, existingForced);
+      return await existingForced;
     }
-    return result;
-  });
-  anthropicOAuthInFlight.set(tokenFingerprint, inFlight);
+  } else {
+    const existing = anthropicOAuthInFlight.get(tokenFingerprint);
+    if (existing) return await existing;
+  }
 
+  const prior = forcedResults ? anthropicOAuthInFlight.get(tokenFingerprint) : undefined;
+  const inFlight = (async (): Promise<AnthropicFallbackQuota> => {
+    if (prior) await prior;
+    const activeCooldown = anthropicOAuthCooldowns.get(tokenFingerprint);
+    const remaining = (activeCooldown?.blockedUntilMs ?? 0) - Date.now();
+    if (remaining > 0)
+      return {
+        state: "unavailable",
+        detail: getAnthropicOAuthCooldownMessage(remaining),
+        failureCategory: "provider_api",
+      };
+    const result = await performAnthropicOAuthUsageRequest(
+      accessToken,
+      tokenFingerprint,
+      requestTimeoutMs,
+    );
+    if (result.state === "success") rememberAnthropicOAuthQuota(tokenFingerprint, result.quota);
+    return result;
+  })();
+  anthropicOAuthInFlight.set(tokenFingerprint, inFlight);
+  if (forcedResults) {
+    forcedResults.set(tokenFingerprint, inFlight);
+    anthropicOAuthForcedInFlight.set(tokenFingerprint, inFlight);
+  }
   try {
     return await inFlight;
   } finally {
-    if (anthropicOAuthInFlight.get(tokenFingerprint) === inFlight) {
+    if (anthropicOAuthInFlight.get(tokenFingerprint) === inFlight)
       anthropicOAuthInFlight.delete(tokenFingerprint);
-    }
+    if (anthropicOAuthForcedInFlight.get(tokenFingerprint) === inFlight)
+      anthropicOAuthForcedInFlight.delete(tokenFingerprint);
   }
 }
 
 export async function queryAnthropicQuotaWithOAuth(
   accessToken: string,
   requestTimeoutMs?: number,
+  forcedOperationCache?: Map<symbol, unknown>,
 ): Promise<AnthropicResult> {
-  const result = await queryAnthropicQuotaFromOAuthAccessToken(accessToken, requestTimeoutMs);
+  const result = await queryAnthropicQuotaFromOAuthAccessToken(
+    accessToken,
+    requestTimeoutMs,
+    forcedOperationCache,
+  );
   return result.state === "success"
     ? result.quota
     : {
@@ -1681,13 +1726,33 @@ async function probeAnthropicLocalDiagnostics(
 export function clearAnthropicDiagnosticsCacheForTests(): void {
   anthropicOAuthCooldowns.clear();
   anthropicOAuthInFlight.clear();
+  anthropicOAuthForcedInFlight.clear();
   anthropicOAuthRecent.clear();
 }
+
+const localDiagnosticsCacheKey = Symbol("anthropic local diagnostics");
 
 async function getAnthropicLocalDiagnostics(
   options: AnthropicProbeOptions = {},
 ): Promise<AnthropicLocalDiagnostics> {
-  return await probeAnthropicLocalDiagnostics(options);
+  if (!options.operationCache) return await probeAnthropicLocalDiagnostics(options);
+  let probes = options.operationCache.get(localDiagnosticsCacheKey) as
+    | Map<string, Promise<AnthropicLocalDiagnostics>>
+    | undefined;
+  if (!probes) {
+    probes = new Map();
+    options.operationCache.set(localDiagnosticsCacheKey, probes);
+  }
+  const key = JSON.stringify([
+    resolveAnthropicBinaryPath(options.binaryPath),
+    process.env[CLAUDE_CONFIG_DIR_ENV],
+  ]);
+  let probe = probes.get(key);
+  if (!probe) {
+    probe = probeAnthropicLocalDiagnostics(options);
+    probes.set(key, probe);
+  }
+  return await probe;
 }
 
 export async function getAnthropicDiagnostics(
@@ -1767,6 +1832,7 @@ export async function getAnthropicDiagnostics(
   const fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
     credentials.accessToken,
     options.requestTimeoutMs,
+    options.forceRefresh ? options.operationCache : undefined,
   );
   if (fallbackQuota.state !== "success") {
     return {
@@ -1934,13 +2000,17 @@ export type AnthropicOpenCodeAccount = {
  */
 export async function resolveAnthropicAccountSetIdentity(params: {
   binaryPath?: string;
+  operationCache?: Map<symbol, unknown>;
   openCodeAccounts: readonly AnthropicOpenCodeAccount[];
   onlyCurrentModel: boolean;
   claudeCodeRuntimeDetected: boolean;
 }): Promise<ResolvedAuthIdentity | null> {
   let localDiagnostics: AnthropicLocalDiagnostics;
   try {
-    localDiagnostics = await getAnthropicLocalDiagnostics({ binaryPath: params.binaryPath });
+    localDiagnostics = await getAnthropicLocalDiagnostics({
+      binaryPath: params.binaryPath,
+      operationCache: params.operationCache,
+    });
   } catch {
     return null;
   }

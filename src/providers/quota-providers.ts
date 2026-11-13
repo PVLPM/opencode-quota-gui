@@ -25,7 +25,7 @@ import {
   QUOTA_PROVIDER_CONCURRENCY,
   resolveQuotaProviderApiKey,
 } from "../lib/quota-providers-remote.js";
-import { fetchQuotaProviderResult } from "../lib/quota-state.js";
+import { fetchQuotaProviderResult, QUOTA_FORCE_REFRESH } from "../lib/quota-state.js";
 import { resolveQuotaProviderDefinitionAuthIdentity } from "./cache-policies.js";
 
 export const QUOTA_PROVIDERS_PROVIDER_ID = QUOTA_PROVIDERS_AGGREGATE_ID;
@@ -155,6 +155,7 @@ async function executeRemote(
         {
           label: definition.label,
           message: result.error,
+          ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
           ...(result.failureCategory !== undefined
             ? { failureCategory: result.failureCategory }
             : {}),
@@ -224,6 +225,7 @@ async function executeRemoteWithCache(
       },
     },
     ttlMs: ctx.config.providerCacheTtlMs ?? 0,
+    forceRefresh: ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true,
   });
   return {
     entries: result.entries,

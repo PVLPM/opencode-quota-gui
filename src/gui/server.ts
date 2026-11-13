@@ -526,10 +526,22 @@ export function createDashboardServer(
     }
 
     if (rest.length === 1 && rest[0] === "quota") {
-      if (!requireMethods(req, res, ["GET", "HEAD"])) return;
+      if (!requireMethods(req, res, ["GET", "HEAD", "POST"])) return;
+      if (method === "POST") {
+        const parsed = await readWriteJson(req, res);
+        if (!parsed.ok) return;
+        if (!isRecord(parsed.value) || !hasExactKeys(parsed.value, [])) {
+          sendError(res, "bad-request");
+          return;
+        }
+      }
       // Inference only; an explicit PUT /api/v1/view signal wins.
       snapshots.setViewScope("quota", "request");
-      sendJson(res, 200, await snapshots.quota());
+      sendJson(
+        res,
+        200,
+        await snapshots.quota(req.method === "POST" ? { refresh: true } : undefined),
+      );
       return;
     }
 

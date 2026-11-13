@@ -151,7 +151,7 @@ describe("gui privacy — outgoing provider errors", () => {
 
   it("keeps human account labels and opaque hashed ids while dropping no card", async () => {
     const quota = await mappedQuota();
-    expect(quota.stale).toBe(false);
+    expect(quota.stale).toBe(true);
     // Provider-scope card (unscoped errors) + the discovered account card.
     expect(quota.providers.cards).toHaveLength(2);
     const card = quota.providers.cards.find((item) => item.accountLabel === HUMAN_LABEL);

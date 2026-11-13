@@ -17,6 +17,7 @@ import {
   PROVIDER_SCOPE_IDENTITY_KEY,
 } from "../src/gui/identity.js";
 import { openAiOptionalVisibilityRows } from "../src/gui/provider-cards.js";
+import { createSnapshotService } from "../src/gui/snapshot-service.js";
 import {
   createDashboardReadSource,
   type DashboardAnalyticsService,
@@ -93,7 +94,7 @@ function result(overrides: Partial<QuotaProviderResult> = {}): QuotaProviderResu
 }
 
 function probe(providerId: string, value: QuotaProviderResult): QuotaStatusLiveProbe {
-  return { providerId, result: value };
+  return { providerId, result: value, cacheScope: `test:${providerId}` };
 }
 
 function baseConfig(overrides: Partial<QuotaToastConfig> = {}): QuotaToastConfig {
@@ -152,6 +153,83 @@ function harness(
 }
 
 describe("quota read source", () => {
+  it("uses the first attempt time when no complete poll exists, then anchors a full poll", async () => {
+    let clock = NOW;
+    let complete = false;
+    const { source } = harness({
+      now: () => clock,
+      collect: async () => [
+        probe(
+          "anthropic",
+          result({
+            entries: [percentEntry(50)],
+            errors: complete ? [] : [{ label: "Account", message: "unavailable" }],
+          }),
+        ),
+      ],
+    });
+    const first = await source.quota();
+    expect(first.stale).toBe(true);
+    expect(first.providers.polledAtMs).toBe(NOW);
+    clock += 60_000;
+    const partial = await source.quota();
+    expect(partial.stale).toBe(true);
+    expect(partial.providers.polledAtMs).toBe(NOW);
+    complete = true;
+    clock += 60_000;
+    const recovered = await source.quota();
+    expect(recovered.stale).toBe(false);
+    expect(recovered.providers.polledAtMs).toBe(clock);
+  });
+  it("propagates an explicit snapshot retry to the provider fetch", async () => {
+    const fetch = vi.fn().mockResolvedValue(result({ entries: [percentEntry(50)] }));
+    const provider: QuotaProvider = {
+      id: "refresh-integration",
+      cachePolicy: { kind: "account-neutral" },
+      isAvailable: async () => true,
+      fetch,
+    };
+    const config = baseConfig({ enabledProviders: [provider.id], minIntervalMs: 0 });
+    const source = createDashboardReadSource({
+      client: CLIENT,
+      workspaceRoot: "C:/synthetic-workspace",
+      configDir: "C:/synthetic-config",
+      providers: [provider],
+      loadConfig: async () => config,
+    });
+    const snapshots = createSnapshotService({ source });
+    await snapshots.quota();
+    config.minIntervalMs = 60_000;
+    await snapshots.quota({ refresh: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    snapshots.close();
+  });
+  it("does not substitute another account's last-good measurement", async () => {
+    let cycle = 0;
+    const { source } = harness({
+      collect: async () =>
+        ++cycle === 1
+          ? [
+              {
+                ...probe("anthropic", result({ entries: [percentEntry(50)] })),
+                cacheScope: "account-a",
+              },
+            ]
+          : [
+              {
+                ...probe(
+                  "anthropic",
+                  result({ errors: [{ label: "Anthropic", message: "failed" }] }),
+                ),
+                cacheScope: "account-b",
+              },
+            ],
+    });
+    expect((await source.quota!()).providers.cards.some((card) => card.rows.length > 0)).toBe(true);
+    const next = await source.quota!();
+    expect(next.providers.cards.every((card) => card.rows.length === 0)).toBe(true);
+    expect(next.stale).toBe(true);
+  });
   it("projects a delayed OpenAI response after collection without changing cycle timestamps", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
@@ -385,13 +463,12 @@ describe("quota read source", () => {
     expect(second.providers.cards[0]?.rows[0]?.percentRemaining).toBe(62.5);
     expect(second.providers.cards[0]?.errors.map((error) => error.label)).toEqual(["Sync"]);
 
-    // A selected provider missing from the cycle (slow/unavailable) also keeps
-    // its last good probe and stays stale.
+    // A missing provider has no current identity proof, so fail closed.
     clock = NOW + 120_000;
     const third = await test.source.quota();
     expect(third.stale).toBe(true);
     expect(third.providers.polledAtMs).toBe(NOW);
-    expect(third.providers.cards[0]?.rows[0]?.percentRemaining).toBe(62.5);
+    expect(third.providers.cards).toEqual([]);
   });
 
   it("treats account descriptors without entries as fallback, not as a measurement", async () => {
@@ -526,7 +603,7 @@ describe("quota read source", () => {
     ).not.toContain(63);
   });
 
-  it("treats a partially measured account set as fresh and surfaces the failed account error", async () => {
+  it("marks a partially measured account set stale without advancing the poll timestamp", async () => {
     let cycle = 0;
     let clock = NOW;
     const accounts = [{ sourceId: "acct-a" }, { sourceId: "acct-b" }];
@@ -561,8 +638,8 @@ describe("quota read source", () => {
     await test.source.quota();
     clock = NOW + 60_000;
     const second = await test.source.quota();
-    expect(second.stale).toBe(false);
-    expect(second.providers.polledAtMs).toBe(NOW + 60_000);
+    expect(second.stale).toBe(true);
+    expect(second.providers.polledAtMs).toBe(NOW);
     const accountA = second.providers.cards.find((card) => card.accountLabel === "Account 1");
     const accountB = second.providers.cards.find((card) => card.accountLabel === "Account 2");
     expect(accountA?.rows.map((row) => row.percentRemaining)).toEqual([55]);
@@ -652,7 +729,7 @@ describe("quota read source", () => {
     expect(second.providers.cards.map((card) => card.providerId)).toEqual(["anthropic"]);
   });
 
-  it("serves the previous quota snapshot as stale when the whole cycle fails", async () => {
+  it("hides unverified account data when the whole cycle fails", async () => {
     let failing = false;
     const test = harness({
       collect: async () => {
@@ -667,7 +744,7 @@ describe("quota read source", () => {
     failing = true;
     const stale = await test.source.quota();
     expect(stale.stale).toBe(true);
-    expect(stale.providers.cards[0]?.rows[0]?.percentRemaining).toBe(42);
+    expect(stale.providers.cards).toEqual([]);
   });
 
   it("rejects when the first cycle fails and no previous snapshot exists", async () => {

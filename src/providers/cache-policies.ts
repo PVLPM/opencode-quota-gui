@@ -193,6 +193,7 @@ async function anthropicRouteIdentity(
   if (getClaudeCodeRuntimeProviderId(ctx)) {
     return resolveAnthropicAuthIdentity({
       binaryPath: ctx.config.anthropicBinaryPath,
+      operationCache: ctx.operationCache,
       useClaudeCodeCredentials: true,
     });
   }
@@ -200,6 +201,7 @@ async function anthropicRouteIdentity(
   const logins = await readOpenCodeAnthropicLogins();
   return resolveAnthropicAccountSetIdentity({
     binaryPath: ctx.config.anthropicBinaryPath,
+    operationCache: ctx.operationCache,
     openCodeAccounts: logins.map(({ row, auth }) => ({
       sourceId: row.id,
       label: row.label,

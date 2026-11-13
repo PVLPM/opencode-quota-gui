@@ -454,7 +454,17 @@ export const DashboardRpc = {
       errors: DASHBOARD_RPC_ERRORS,
     },
     quota: {
-      input: NO_INPUT,
+      input: schema<{ refresh?: boolean }>(
+        (value) => {
+          if (value === undefined) return null;
+          if (!isObject(value) || !hasOnlyKeys(value, ["refresh"]))
+            return "input must be an empty object";
+          return value.refresh === undefined || typeof value.refresh === "boolean"
+            ? null
+            : "refresh must be boolean";
+        },
+        (value) => (value === undefined ? {} : (value as { refresh?: boolean })),
+      ),
       output: output(isQuotaSnapshot),
       errors: DASHBOARD_RPC_ERRORS,
     },

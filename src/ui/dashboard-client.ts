@@ -1474,8 +1474,10 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
       };
     },
 
-    async quota() {
-      return parseQuotaSnapshot(await request("/api/v1/quota"));
+    async quota(input) {
+      return parseQuotaSnapshot(
+        input?.refresh ? await write("/api/v1/quota", {}, "POST") : await request("/api/v1/quota"),
+      );
     },
 
     async home(input) {

@@ -123,6 +123,17 @@ describe("dashboard RPC definition", () => {
     }
   });
 
+  it("accepts only a boolean quota refresh flag", async () => {
+    await expectAccepted(methods.quota.input, { refresh: true });
+    await expectAccepted(methods.quota.input, { refresh: false });
+    await expectRejected(methods.quota.input, { refresh: "true" }, "refresh must be boolean");
+    await expectRejected(
+      methods.quota.input,
+      { refresh: true, extra: true },
+      "input must be an empty object",
+    );
+  });
+
   it("validates home, project and session resource inputs", async () => {
     await expectAccepted(methods.home.input, { range: "30d" });
     await expectRejected(

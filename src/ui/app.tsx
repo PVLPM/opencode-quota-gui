@@ -452,6 +452,16 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   hiddenRows={settingsQuery.data()?.visibility.hiddenRows ?? []}
                   onSnapshot={setHomeSnapshot}
                   onStale={setRouteStale}
+                  onRetryShell={() => {
+                    void settingsQuery.run();
+                    void props.client
+                      .health()
+                      .then((currentHealth) => {
+                        setHealth(currentHealth);
+                        setContractMismatch(contractMismatchMessage(currentHealth.contractVersion));
+                      })
+                      .catch(() => undefined);
+                  }}
                 />
               </Match>
               <Match when={route().name === "analytics"}>

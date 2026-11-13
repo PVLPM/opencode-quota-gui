@@ -110,10 +110,23 @@ export interface QuotaRouteProps extends RouteLifecycleProps {
   hiddenCards: string[];
   hiddenRows: string[];
   onSnapshot: (snapshot: QuotaSnapshot | undefined) => void;
+  onRetryShell?: () => void;
 }
 
 export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
-  const query = createQuery<QuotaSnapshot>(() => props.client.quota());
+  let retry = false;
+  let retryVersion = 0;
+  const query = createQuery<QuotaSnapshot>(() => {
+    const refresh = retry;
+    const version = retryVersion;
+    if (refresh) retry = false;
+    return Promise.resolve()
+      .then(() => props.client.quota(refresh ? { refresh: true } : undefined))
+      .catch((error) => {
+        if (refresh && version === retryVersion) retry = true;
+        throw error;
+      });
+  });
   const [freshEpoch, setFreshEpoch] = createSignal(0);
   const busy = createBusyIndicator();
   createEffect(() => {
@@ -138,6 +151,12 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
   });
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+  const retryQuota = () => {
+    props.onRetryShell?.();
+    retry = true;
+    retryVersion += 1;
+    void query.run();
+  };
   createEffect(() =>
     props.onStale(
       query.data()?.stale === true ||
@@ -152,7 +171,7 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
         state={state()}
         label="Loading providers"
         skeleton={<QuotaLoading />}
-        onRetry={() => void query.run()}
+        onRetry={retryQuota}
         render={(snapshot, stale) => (
           <QuotaView
             snapshot={snapshot}
@@ -160,6 +179,7 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
             hiddenCards={props.hiddenCards}
             hiddenRows={props.hiddenRows}
             stale={stale}
+            onRetry={retryQuota}
           />
         )}
       />

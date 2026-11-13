@@ -23,6 +23,7 @@ import type {
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { QUOTA_FORCE_REFRESH } from "../lib/entries.js";
 import {
   type CredentialRow,
   credentialRowAuthEntry,
@@ -196,7 +197,11 @@ export async function readOpenCodeAnthropicLogins(): Promise<
  * row when its usage probe fails. Null when the login is absent or already shown as an OpenCode account.
  */
 async function readClaudeCodeAccount(
-  options: { binaryPath?: string; requestTimeoutMs?: number },
+  options: {
+    binaryPath?: string;
+    requestTimeoutMs?: number;
+    operationCache?: Map<symbol, unknown>;
+  },
   excludedFingerprints: readonly string[],
   reportUnready: boolean,
 ): Promise<{
@@ -281,7 +286,10 @@ export const anthropicProvider: QuotaProvider = {
       return false;
     }
 
-    return await hasAnthropicCredentialsConfigured({ binaryPath: ctx.config?.anthropicBinaryPath });
+    return await hasAnthropicCredentialsConfigured({
+      binaryPath: ctx.config?.anthropicBinaryPath,
+      operationCache: ctx.operationCache,
+    });
   },
 
   async isDiscovered(ctx: QuotaProviderContext): Promise<boolean> {
@@ -298,9 +306,12 @@ export const anthropicProvider: QuotaProvider = {
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
     const claudeCodeRuntimeId = getClaudeCodeRuntimeProviderId(ctx);
+    const forceRefresh = ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true;
     const options = {
       binaryPath: ctx.config?.anthropicBinaryPath,
+      ...(ctx.operationCache ? { operationCache: ctx.operationCache } : {}),
       requestTimeoutMs: ctx.config?.requestTimeoutMs,
+      ...(forceRefresh ? { forceRefresh: true } : {}),
       ...(claudeCodeRuntimeId ? { useClaudeCodeCredentials: true } : {}),
     };
     let statusDetails;
@@ -411,7 +422,11 @@ export const anthropicProvider: QuotaProvider = {
                     "Anthropic sign-in could not be read. Run `opencode auth login anthropic`.",
                   failureCategory: "credentials" as const,
                 }
-              : await queryAnthropicQuotaWithOAuth(auth.accessToken, options.requestTimeoutMs),
+              : await queryAnthropicQuotaWithOAuth(
+                  auth.accessToken,
+                  options.requestTimeoutMs,
+                  ...(options.forceRefresh ? [options.operationCache] : []),
+                ),
         })),
       );
       const names = formatCredentialDisplayNames(

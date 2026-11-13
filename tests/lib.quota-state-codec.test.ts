@@ -12,6 +12,17 @@ import {
   QUOTA_PROVIDER_CACHE_VERSION,
 } from "../src/lib/quota-state-codec.js";
 
+it("preserves an observed retry deadline on normalized provider errors", () => {
+  const result = {
+    attempted: true,
+    entries: [],
+    errors: [{ label: "Provider", message: "HTTP 429", retryAtMs: 1_800_000_000_000 }],
+  };
+  expect(normalizeQuotaProviderResult(result)?.errors[0]).toMatchObject({
+    retryAtMs: 1_800_000_000_000,
+  });
+});
+
 const EXPECTED_IDENTITY = {
   packageVersion: "4.2.0",
   key: "synthetic|account=test",

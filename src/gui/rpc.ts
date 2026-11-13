@@ -280,7 +280,7 @@ function createHandlers(
       version: BUILD_IDENTITY.version,
       build: BUILD_IDENTITY.build,
     }),
-    quota: (_input, context) => guard(context, () => runtime.snapshots.quota()),
+    quota: (input, context) => guard(context, () => runtime.snapshots.quota(input)),
     home: (input, context) => guard(context, () => runtime.snapshots.home(input)),
     groups: (input, context) => guard(context, () => runtime.snapshots.groups(input)),
     project: (input, context) => guard(context, () => runtime.snapshots.project(input)),

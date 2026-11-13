@@ -18,7 +18,12 @@
  * heartbeat, URL, history entry or `localStorage` key is involved.
  */
 import { type Accessor, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
-import type { DashboardEvent, DashboardHealth, SettingsSnapshot } from "../contracts/dashboard.js";
+import type {
+  DashboardEvent,
+  DashboardHealth,
+  QuotaSnapshot,
+  SettingsSnapshot,
+} from "../contracts/dashboard.js";
 import type { DashboardRpcViewScope } from "../rpc.js";
 import { createQuery } from "../ui/query.js";
 import { displayPreferencesFromValues } from "../ui/settings-model.js";
@@ -40,6 +45,7 @@ export interface DashboardPanelOptions {
 export interface DashboardPanelClient {
   settings(): Promise<SettingsSnapshot>;
   health(): Promise<DashboardHealth>;
+  quota?(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   subscribe(listener: (event: DashboardEvent) => void): () => void;
   onConnectionChange(listener: (state: NativeDashboardConnection) => void): () => void;
   onReconnect(listener: () => void): () => void;
@@ -73,7 +79,7 @@ export interface DashboardPanelState {
   /** Anchors the current routed payload as fresh for the current host epoch. */
   markFresh: () => void;
   /** Explicit recovery after a transport or host failure. */
-  retry: () => void;
+  retry: (options?: { refreshQuota?: boolean }) => void;
   /** Reasserts the scope this window needs from the shared runtime. */
   setScope: (scope: DashboardRpcViewScope) => void;
 }
@@ -218,20 +224,23 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
       if (hostEpoch() > recoveredHostEpoch()) return;
       setFreshHostEpoch(hostEpoch());
     },
-    retry: () => {
+    retry: (retryOptions) => {
       if (options.hostConnected?.() === false) return;
-      // A failed shell read on a healthy transport is retried locally; only a
-      // dropped host or transport needs the connection reopened.
-      if (
-        settingsQuery.error() !== undefined &&
-        options.hostConnected?.() !== false &&
-        connection() === "live"
-      ) {
+      const retryReads = () => {
         refreshSettings();
-        refreshHealth();
-        return;
-      }
-      void client.reconnect();
+        void refreshHealth();
+        if (retryOptions?.refreshQuota !== false)
+          void client.quota?.({ refresh: true }).catch(() => undefined);
+        setReloadToken((token) => token + 1);
+      };
+      if (connection() === "live") retryReads();
+      else
+        void client
+          .reconnect()
+          .then(() =>
+            retryOptions?.refreshQuota === false ? undefined : client.quota?.({ refresh: true }),
+          )
+          .catch(() => undefined);
     },
     setScope: (scope) => {
       const result = client.setActiveView?.(scope);

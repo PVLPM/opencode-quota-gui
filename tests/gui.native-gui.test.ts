@@ -314,7 +314,7 @@ describe("Desktop GUI entry", () => {
 
   it("keeps settings capabilities in the shared view, not a native copy", () => {
     expect(settingsStateSource).toContain("client.settings()");
-    expect(settingsStateSource).toContain("client.quota()");
+    expect(settingsStateSource).toContain("client.quota(refresh ? { refresh: true } : undefined)");
     expect(settingsStateSource).toContain("client.onReconnect");
     expect(settingsStateSource).toContain("visibilityCatalogEquals");
     expect(settingsStateSource).not.toContain("localStorage");

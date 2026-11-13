@@ -1099,8 +1099,7 @@ describe("GUI HTTP routes", () => {
       expect(postHome.headers.get("allow") ?? "").toContain("GET");
 
       const postQuota = await post(handle.port, "/api/v1/quota", {});
-      expect(postQuota.status).toBe(405);
-      expect(postQuota.headers.get("allow") ?? "").toContain("GET");
+      expect(postQuota.status).toBe(200);
 
       const deleteSettings = await fetch(`${base(handle.port)}/api/v1/settings`, {
         method: "DELETE",

@@ -9,6 +9,9 @@ import {
   SegmentedControlItem,
   Switch,
 } from "../src/native/ui";
+import { QuotaRoute } from "../src/ui/routes";
+import { displayPreferencesFromValues } from "../src/ui/settings-model";
+import { homeSnapshot } from "./fixtures/gui-ui-fixtures";
 
 vi.mock("../src/native/dashboard-client.js", () => ({
   createNativeDashboardClient: () => ({ dispose() {} }),
@@ -26,6 +29,180 @@ vi.mock("../src/native/settings-page-state.js", () => ({
     retry() {},
   }),
 }));
+
+it("applies the forced quota response even when its invalidation event is missed", async () => {
+  const home = homeSnapshot();
+  const stale = {
+    generatedAtMs: 1,
+    stale: true,
+    timeZone: "UTC",
+    providers: { ...home.providers, cards: [] },
+  };
+  const fresh = { ...stale, generatedAtMs: 2, stale: false };
+  let resolveRefresh!: (snapshot: typeof fresh) => void;
+  let pending: Promise<typeof fresh> | undefined;
+  let upstream = 0;
+  const requests: Array<boolean> = [];
+  const client = {
+    quota: (input?: { refresh?: boolean }) => {
+      requests.push(input?.refresh === true);
+      if (!input?.refresh) return Promise.resolve(stale);
+      if (!pending) {
+        upstream += 1;
+        pending = new Promise((resolve) => {
+          resolveRefresh = resolve;
+        });
+      }
+      return pending;
+    },
+  };
+  const target = document.createElement("div");
+  document.body.append(target);
+  const snapshots: number[] = [];
+  const dispose = render(
+    () =>
+      createComponent(QuotaRoute, {
+        client: client as never,
+        preferences: displayPreferencesFromValues({}),
+        hiddenCards: [],
+        hiddenRows: [],
+        reloadToken: 0,
+        reconnectEpoch: 0,
+        onSnapshot: (snapshot) => {
+          if (snapshot) snapshots.push(snapshot.generatedAtMs);
+        },
+        onStale: () => {},
+        onRetryShell: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() => expect(target.textContent).toContain("Quota data is unavailable"));
+    target.querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(requests.filter(Boolean)).toHaveLength(1));
+    expect(upstream).toBe(1);
+    resolveRefresh(fresh);
+    await vi.waitFor(() => expect(snapshots).toContain(2));
+  } finally {
+    dispose();
+    target.remove();
+  }
+});
+
+it("does not force again when quota invalidation arrives before the retry response", async () => {
+  const home = homeSnapshot();
+  const stale = {
+    generatedAtMs: 1,
+    stale: true,
+    timeZone: "UTC",
+    providers: { ...home.providers, cards: [] },
+  };
+  const fresh = { ...stale, generatedAtMs: 2, stale: false };
+  let resolveRefresh!: (snapshot: typeof fresh) => void;
+  const forced = new Promise<typeof fresh>((resolve) => {
+    resolveRefresh = resolve;
+  });
+  const requests: boolean[] = [];
+  const [reload, setReload] = createSignal(0);
+  const snapshots: number[] = [];
+  const client = {
+    quota: (input?: { refresh?: boolean }) => {
+      requests.push(input?.refresh === true);
+      if (input?.refresh) return forced;
+      return Promise.resolve(requests.length === 1 ? stale : fresh);
+    },
+  };
+  const target = document.createElement("div");
+  document.body.append(target);
+  const dispose = render(
+    () =>
+      createComponent(QuotaRoute, {
+        client: client as never,
+        preferences: displayPreferencesFromValues({}),
+        hiddenCards: [],
+        hiddenRows: [],
+        get reloadToken() {
+          return reload();
+        },
+        reconnectEpoch: 0,
+        onSnapshot: (snapshot) => {
+          if (snapshot) snapshots.push(snapshot.generatedAtMs);
+        },
+        onStale: () => {},
+        onRetryShell: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() => expect(target.textContent).toContain("Quota data is unavailable"));
+    target.querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(requests).toEqual([false, true]));
+    setReload(1);
+    await vi.waitFor(() => expect(requests).toEqual([false, true, false]));
+    resolveRefresh(fresh);
+    await vi.waitFor(() => expect(snapshots).toContain(2));
+    expect(requests.filter(Boolean)).toHaveLength(1);
+  } finally {
+    dispose();
+    target.remove();
+  }
+});
+
+it("retries a disconnected manual refresh once after native reconnect", async () => {
+  const home = homeSnapshot();
+  const stale = {
+    generatedAtMs: 1,
+    stale: true,
+    timeZone: "UTC",
+    providers: { ...home.providers, cards: [] },
+  };
+  const fresh = { ...stale, generatedAtMs: 2, stale: false };
+  let connected = false;
+  const requests: boolean[] = [];
+  const client = {
+    quota: async (input?: { refresh?: boolean }) => {
+      requests.push(input?.refresh === true);
+      if (!input?.refresh) return stale;
+      if (!connected) throw new Error("disconnected");
+      return fresh;
+    },
+  };
+  const [epoch, setEpoch] = createSignal(0);
+  const snapshots: number[] = [];
+  const target = document.createElement("div");
+  document.body.append(target);
+  const dispose = render(
+    () =>
+      createComponent(QuotaRoute, {
+        client: client as never,
+        preferences: displayPreferencesFromValues({}),
+        hiddenCards: [],
+        hiddenRows: [],
+        reloadToken: 0,
+        get reconnectEpoch() {
+          return epoch();
+        },
+        onSnapshot: (snapshot) => {
+          if (snapshot) snapshots.push(snapshot.generatedAtMs);
+        },
+        onStale: () => {},
+        onRetryShell: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() => expect(target.textContent).toContain("Quota data is unavailable"));
+    target.querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(requests).toEqual([false, true]));
+    connected = true;
+    setEpoch(1);
+    await vi.waitFor(() => expect(snapshots).toContain(2));
+    expect(requests).toEqual([false, true, true]);
+  } finally {
+    dispose();
+    target.remove();
+  }
+});
 
 it("keeps diagnostics in About and shows copy, check and failure feedback", async () => {
   const original = Object.getOwnPropertyDescriptor(navigator, "clipboard");

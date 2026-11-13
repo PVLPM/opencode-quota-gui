@@ -5,7 +5,7 @@ import type { HomeSnapshot, QuotaSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
 import { type DisplayPreferences, QuotaCardView } from "../components/quota-card";
 import { SortControl } from "../components/sort-control";
-import { EmptyNotice, Skeleton } from "../components/states";
+import { EmptyNotice, ErrorCard, Skeleton } from "../components/states";
 import { UsageChart } from "../components/usage-chart";
 import {
   formatExactCount,
@@ -39,6 +39,7 @@ export function QuotaView(props: {
   hiddenCards: string[];
   hiddenRows: string[];
   stale: boolean;
+  onRetry?: () => void;
 }): JSX.Element {
   const shown = () =>
     orderCardsByPreference(
@@ -52,13 +53,21 @@ export function QuotaView(props: {
       <Show
         when={shown().length > 0}
         fallback={
-          <EmptyNotice
-            message={
-              props.snapshot.providers.cards.length > 0
-                ? "Every provider card is hidden. Use the eye toggles in Settings to bring one back."
-                : describeNoProviders(props.snapshot.providers.enabledProviders)
-            }
-          />
+          props.snapshot.providers.cards.length === 0 && props.snapshot.stale ? (
+            <ErrorCard
+              message="Quota data is unavailable."
+              retryable={props.onRetry !== undefined}
+              onRetry={() => props.onRetry?.()}
+            />
+          ) : (
+            <EmptyNotice
+              message={
+                props.snapshot.providers.cards.length > 0
+                  ? "Every provider card is hidden. Use the eye toggles in Settings to bring one back."
+                  : describeNoProviders(props.snapshot.providers.enabledProviders)
+              }
+            />
+          )
         }
       >
         <div class="qg-card-grid">

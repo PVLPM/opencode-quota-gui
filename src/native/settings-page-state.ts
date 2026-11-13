@@ -25,7 +25,7 @@ import type { NativeDashboardConnection } from "./dashboard-client.js";
 
 export interface SettingsPageClient {
   settings(): Promise<SettingsSnapshot>;
-  quota(): Promise<QuotaSnapshot>;
+  quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   subscribe(listener: (event: DashboardEvent) => void): () => void;
   onConnectionChange(listener: (state: NativeDashboardConnection) => void): () => void;
   onReconnect(listener: () => void): () => void;
@@ -71,7 +71,19 @@ export function createSettingsPageState(
   options: SettingsPageOptions = {},
 ): SettingsPageState {
   const settingsQuery = createQuery<SettingsSnapshot>(() => client.settings());
-  const quotaQuery = createQuery<QuotaSnapshot>(() => client.quota());
+  let retryQuota = false;
+  let retryQuotaVersion = 0;
+  const quotaQuery = createQuery<QuotaSnapshot>(() => {
+    const refresh = retryQuota;
+    const version = retryQuotaVersion;
+    retryQuota = false;
+    return Promise.resolve()
+      .then(() => client.quota(refresh ? { refresh: true } : undefined))
+      .catch((error) => {
+        if (refresh && version === retryQuotaVersion) retryQuota = true;
+        throw error;
+      });
+  });
   const [connection, setConnection] = createSignal<NativeDashboardConnection>(client.connection());
   const [reconnectEpoch, setReconnectEpoch] = createSignal(0);
   const [freshEpoch, setFreshEpoch] = createSignal(0);
@@ -221,8 +233,10 @@ export function createSettingsPageState(
       // Host or transport loss needs the transport reopened; recovery then
       // re-reads both payloads through `onReconnect`. A live transport with a
       // failed read is retried locally.
+      retryQuota = true;
+      retryQuotaVersion += 1;
       if (hostKnownDown() || connection() !== "live") {
-        void client.reconnect();
+        void client.reconnect().catch(() => undefined);
         return;
       }
       refreshSettings();
