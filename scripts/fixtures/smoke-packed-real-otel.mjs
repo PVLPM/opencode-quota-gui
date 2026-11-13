@@ -458,15 +458,23 @@ async function runSeedProductionOpenRouter() {
       sourceId: "openrouter",
     });
 
-  await quotaState.fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+  const fetched = await quotaState.fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+  assert.equal(fetched.entries[0].percentRemaining, 67);
+  const cached = await quotaState.readCachedProviderResult({ provider, ctx, ttlMs: 60_000 });
   const exported = await buildQuotaExport({
     providers: [provider],
     ctx,
     ttlMs: 60_000,
     fromCache: true,
   });
-  assert.equal(exported.providers.openrouter.status, "ok");
-  assert.equal(exported.providers.openrouter.entries[0].percentRemaining, 67);
+  if (process.platform === "win32") {
+    assert.equal(cached.hit, false);
+    assert.equal(exported.providers.openrouter.status, "unavailable");
+  } else {
+    assert.equal(cached.hit, true);
+    assert.equal(exported.providers.openrouter.status, "ok");
+    assert.equal(exported.providers.openrouter.entries[0].percentRemaining, 67);
+  }
   assert.ok(!JSON.stringify(exported).includes(secret));
 }
 
