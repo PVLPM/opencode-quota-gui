@@ -12,6 +12,7 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import type { RangeKey } from "../contracts/ranges";
+import { BuildAbout } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { QueryState } from "./components/states";
 import type { Toaster } from "./components/toast";
@@ -19,6 +20,7 @@ import type { ConnectionState } from "./dashboard-client";
 import { RANGE_LABELS } from "./format";
 import { sameIdentity } from "./model-analytics";
 import { createQuery, type Query } from "./query";
+import { createQuotaQuery, type QuotaQuery } from "./quota-query";
 import type { displayPreferencesFromValues } from "./settings-model";
 import { describeError, isStaleAfterReconnect, resolveLoadState } from "./view-model";
 import { HomeView, QuotaLoading, QuotaView } from "./views/home";
@@ -105,15 +107,22 @@ function RangeFailureNotice(props: { failure: RangeFailure; onRetry: () => void 
 
 export interface QuotaRouteProps extends RouteLifecycleProps {
   client: DashboardDataSource;
+  quotaQuery?: QuotaQuery;
   preferences: ReturnType<typeof displayPreferencesFromValues>;
   hiddenCards: string[];
   hiddenRows: string[];
   onSnapshot: (snapshot: QuotaSnapshot | undefined) => void;
+  onRetryShell?: () => boolean | void;
 }
 
 export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
-  const query = createQuery<QuotaSnapshot>(() => props.client.quota());
+  const query =
+    props.quotaQuery ??
+    createQuotaQuery((refresh) => props.client.quota(refresh ? { refresh: true } : undefined));
   const [freshEpoch, setFreshEpoch] = createSignal(0);
+  let previousEpoch = props.reconnectEpoch;
+  let previousToken = props.reloadToken;
+  let initialRead = true;
   const busy = createBusyIndicator();
   createEffect(() => {
     busy.update({
@@ -125,8 +134,20 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
   createEffect(() => {
     if (!routeEnabled(props)) return;
     const epoch = props.reconnectEpoch;
-    void props.reloadToken;
-    void query.run().then((applied) => {
+    const token = props.reloadToken;
+    const changed = token !== previousToken;
+    previousToken = token;
+    const reconnected = epoch !== previousEpoch;
+    previousEpoch = epoch;
+    if (reconnected && !props.quotaQuery) query.reconnected();
+    if (initialRead && !reconnected && query.consumeRefresh()) {
+      initialRead = false;
+      setFreshEpoch(epoch);
+      props.onFresh?.();
+      return;
+    }
+    initialRead = false;
+    void (reconnected ? query.afterReconnect() : query.read({ changed })).then((applied) => {
       if (!applied) return;
       setFreshEpoch(epoch);
       props.onFresh?.();
@@ -137,6 +158,17 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
   });
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+  const retryQuota = () => {
+    if (query.isRefreshing()) return;
+    if (props.onRetryShell?.() !== true) {
+      const epoch = props.reconnectEpoch;
+      void query.refresh().then((applied) => {
+        if (!applied || epoch !== props.reconnectEpoch || query.data()?.stale !== false) return;
+        setFreshEpoch(epoch);
+        props.onFresh?.();
+      });
+    }
+  };
   createEffect(() =>
     props.onStale(
       query.data()?.stale === true ||
@@ -151,7 +183,7 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
         state={state()}
         label="Loading providers"
         skeleton={<QuotaLoading />}
-        onRetry={() => void query.run()}
+        onRetry={retryQuota}
         render={(snapshot, stale) => (
           <QuotaView
             snapshot={snapshot}
@@ -159,6 +191,7 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
             hiddenCards={props.hiddenCards}
             hiddenRows={props.hiddenRows}
             stale={stale}
+            onRetry={retryQuota}
           />
         )}
       />
@@ -592,6 +625,8 @@ export interface SettingsRouteProps {
   webDashboardToggle?: boolean;
   /** Native hosts expose the quota alert threshold and cooldown controls. */
   nativeQuotaAlerts?: boolean;
+  /** Optional host-provided About action. */
+  aboutAction?: JSX.Element;
 }
 
 export function SettingsRoute(props: SettingsRouteProps): JSX.Element {
@@ -617,12 +652,17 @@ export function SettingsRoute(props: SettingsRouteProps): JSX.Element {
       <Show
         when={props.query.data()}
         fallback={
-          <QueryState
-            state={state()}
-            label="Loading settings"
-            render={() => null}
-            onRetry={props.onRetry}
-          />
+          <>
+            <QueryState
+              state={state()}
+              label="Loading settings"
+              render={() => null}
+              onRetry={props.onRetry}
+            />
+            <Show when={props.aboutAction}>
+              <BuildAbout>{props.aboutAction}</BuildAbout>
+            </Show>
+          </>
         }
       >
         {(snapshot) => (
@@ -634,6 +674,7 @@ export function SettingsRoute(props: SettingsRouteProps): JSX.Element {
             temporal={props.temporal}
             webDashboardToggle={props.webDashboardToggle}
             nativeQuotaAlerts={props.nativeQuotaAlerts}
+            aboutAction={props.aboutAction}
             onReload={async () => {
               await props.query.run();
             }}

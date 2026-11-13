@@ -17,7 +17,7 @@ export interface Query<T> {
   run: () => Promise<boolean>;
 }
 
-export function createQuery<T>(fetcher: () => Promise<T>): Query<T> {
+export function createQuery<T>(fetcher: () => Promise<T>): Query<T> & { invalidate: () => void } {
   const [data, setData] = createSignal<T | undefined>(undefined);
   const [error, setError] = createSignal<unknown>(undefined);
   const [loading, setLoading] = createSignal(false);
@@ -41,5 +41,10 @@ export function createQuery<T>(fetcher: () => Promise<T>): Query<T> {
     }
   }
 
-  return { data, error, loading, run };
+  function invalidate(): void {
+    requestId++;
+    setLoading(false);
+  }
+
+  return { data, error, loading, run, invalidate };
 }

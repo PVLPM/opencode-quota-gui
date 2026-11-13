@@ -101,7 +101,7 @@ describe("provider cache policies", () => {
       .filter(([, policy]) => policy.kind === "uncached")
       .map(([id]) => id)
       .sort();
-    expect(uncached).toEqual(["alibaba-token-plan", "cursor"]);
+    expect(uncached).toEqual(["alibaba-coding-plan", "alibaba-token-plan", "cursor"]);
 
     expect(PROVIDER_CACHE_POLICIES["kimi-code-plan-global"].kind).toBe("resolved-auth");
     expect(PROVIDER_CACHE_POLICIES["kimi-code-plan-cn"].kind).toBe("resolved-auth");

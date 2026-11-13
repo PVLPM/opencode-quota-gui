@@ -25,7 +25,7 @@ import {
   QUOTA_PROVIDER_CONCURRENCY,
   resolveQuotaProviderApiKey,
 } from "../lib/quota-providers-remote.js";
-import { fetchQuotaProviderResult } from "../lib/quota-state.js";
+import { fetchQuotaProviderResult, QUOTA_FORCE_REFRESH } from "../lib/quota-state.js";
 import { resolveQuotaProviderDefinitionAuthIdentity } from "./cache-policies.js";
 
 export const QUOTA_PROVIDERS_PROVIDER_ID = QUOTA_PROVIDERS_AGGREGATE_ID;
@@ -51,6 +51,19 @@ function matchesConfiguredCurrentSelection(
 
 async function getAvailableProviderIds(ctx: QuotaProviderContext): Promise<ReadonlySet<string>> {
   return ctx.resolveRuntimeProviderIds();
+}
+
+function configuredDefinitions(ctx: QuotaProviderContext): QuotaProviderDefinition[] {
+  return ctx.config.quotaProviders ?? [];
+}
+
+function selectedDefinitionsStillCurrent(
+  selected: readonly QuotaProviderDefinition[],
+  current: readonly QuotaProviderDefinition[],
+): QuotaProviderDefinition[] {
+  return selected.filter((definition) =>
+    current.some((candidate) => candidate.id === definition.id),
+  );
 }
 
 type InstanceResult = {
@@ -142,6 +155,7 @@ async function executeRemote(
         {
           label: definition.label,
           message: result.error,
+          ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
           ...(result.failureCategory !== undefined
             ? { failureCategory: result.failureCategory }
             : {}),
@@ -189,7 +203,7 @@ async function executeRemoteWithCache(
     isAvailable: async () => true,
     cachePolicy: {
       kind: "resolved-auth",
-      resolveIdentity: () => resolveQuotaProviderDefinitionAuthIdentity(definition),
+      resolveIdentity: (_cacheCtx) => resolveQuotaProviderDefinitionAuthIdentity(definition),
     },
     fetch: async () => {
       const result = await executeRemote(definition, ctx.config.requestTimeoutMs);
@@ -211,6 +225,7 @@ async function executeRemoteWithCache(
       },
     },
     ttlMs: ctx.config.providerCacheTtlMs ?? 0,
+    forceRefresh: ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true,
   });
   return {
     entries: result.entries,
@@ -287,7 +302,7 @@ export const quotaProvidersProvider: QuotaProvider = {
   id: QUOTA_PROVIDERS_PROVIDER_ID,
 
   async isAvailable(ctx): Promise<boolean> {
-    const definitions = ctx.config.quotaProviders ?? [];
+    const definitions = configuredDefinitions(ctx);
     if (customQuotaProviderDefinitions(definitions).length === 0) return false;
     const availableProviderIds = await getAvailableProviderIds(ctx);
     return (
@@ -306,13 +321,15 @@ export const quotaProvidersProvider: QuotaProvider = {
   },
 
   async fetch(ctx, cacheContext): Promise<QuotaProviderResult> {
-    const definitions = ctx.config.quotaProviders ?? [];
+    const definitions = configuredDefinitions(ctx);
     if (customQuotaProviderDefinitions(definitions).length === 0) {
       return { attempted: false, entries: [], errors: [] };
     }
 
     let selected = cacheContext?.runtimeEligibleQuotaProviders;
-    if (!selected) {
+    if (selected) {
+      selected = selectedDefinitionsStillCurrent(selected, definitions);
+    } else {
       let availableProviderIds: ReadonlySet<string>;
       try {
         availableProviderIds = await getAvailableProviderIds(ctx);

@@ -67,6 +67,8 @@ export interface DashboardRpcLocation {
 
 export interface RegisterDashboardRpcOptions {
   logger?: GuiLogger;
+  /** Enqueues a source-state snapshot through this registration's owner relay. */
+  onWatchSnapshot?: (attemptNonce: string) => void;
   /**
    * The complete location this setup serves. OpenCode's event bus filters on
    * both `directory` and `workspaceID`, so sharing is keyed by both: setups at
@@ -240,6 +242,7 @@ function waitForAbort(signal: AbortSignal, onStop: (stop: () => void) => void): 
 function createHandlers(
   runtime: DashboardRpcRuntime,
   heldWatches: Set<() => void>,
+  onWatchSnapshot?: (attemptNonce: string) => void,
 ): RpcHandlers<typeof DashboardRpc> {
   async function watch(
     input: DashboardRpcWatchInput,
@@ -247,6 +250,13 @@ function createHandlers(
   ): Promise<DashboardRpcWatchOutput | Rpc.HandlerError<typeof DashboardRpc.methods.watch>> {
     return guard(context, async () => {
       const viewer = runtime.snapshots.addScopedViewer(input.scope);
+      if (!context.signal.aborted && input.attemptNonce !== undefined) {
+        try {
+          onWatchSnapshot?.(input.attemptNonce);
+        } catch {
+          // Snapshot relay failure cannot interrupt this held viewer's lifecycle.
+        }
+      }
       let stopped = false;
       let stop = () => {};
       await waitForAbort(context.signal, (finish) => {
@@ -270,7 +280,7 @@ function createHandlers(
       version: BUILD_IDENTITY.version,
       build: BUILD_IDENTITY.build,
     }),
-    quota: (_input, context) => guard(context, () => runtime.snapshots.quota()),
+    quota: (input, context) => guard(context, () => runtime.snapshots.quota(input)),
     home: (input, context) => guard(context, () => runtime.snapshots.home(input)),
     groups: (input, context) => guard(context, () => runtime.snapshots.groups(input)),
     project: (input, context) => guard(context, () => runtime.snapshots.project(input)),
@@ -411,7 +421,10 @@ export async function registerDashboardRpc(
   const logger = options.logger ?? createGuiLogger();
   const key = locationKey(options.location);
   const heldWatches = new Set<() => void>();
-  const registration = await rpc.register(DashboardRpc, createHandlers(runtime, heldWatches));
+  const registration = await rpc.register(
+    DashboardRpc,
+    createHandlers(runtime, heldWatches, options.onWatchSnapshot),
+  );
   const member: SharedMember = { registration, heldWatches, alive: true };
   const entry = joinSharedEntry(runtime.snapshots, key, member, runtime.quotaNotifications);
 

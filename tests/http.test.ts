@@ -82,6 +82,42 @@ describe("fetchWithTimeout", () => {
     expect(requestSignal?.aborted).toBe(true);
   });
 
+  it("keeps a valid Retry-After deadline observed before the body timeout", async () => {
+    vi.useFakeTimers();
+    const retryAtMs = Date.now() + 60_000;
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string | URL | Request, options?: RequestInit) => {
+        requestSignal = options?.signal ?? undefined;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            requestSignal?.addEventListener("abort", () => {
+              controller.error(new Error("body aborted"));
+            });
+          },
+        });
+        return Promise.resolve(
+          new Response(body, { status: 429, headers: { "Retry-After": "60" } }),
+        );
+      }),
+    );
+
+    const request = fetchWithTimeout("https://example.test/quota", {
+      request: {},
+      timeoutMs: 3000,
+      consume: (response) => response.text(),
+    });
+    const assertion = expect(request).rejects.toMatchObject({
+      message: "Request timeout after 3s",
+      retryAtMs,
+    });
+
+    await vi.advanceTimersByTimeAsync(3000);
+    await assertion;
+    expect(requestSignal?.aborted).toBe(true);
+  });
+
   it("rejects at the deadline when an injected fetch ignores abort", async () => {
     vi.useFakeTimers();
     let requestSignal: AbortSignal | undefined;

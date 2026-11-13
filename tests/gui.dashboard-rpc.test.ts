@@ -323,6 +323,84 @@ describe("dashboard RPC handlers", () => {
     expect(fake.released).toEqual(["quota"]);
   });
 
+  it("keeps legacy scope-only watches and skips an uncorrelated snapshot", async () => {
+    const registrar = createFakeRegistrar();
+    const fake = createFakeRuntime();
+    const onWatchSnapshot = vi.fn();
+    const registration = await registerDashboardRpc(
+      { register: registrar.register },
+      fake.runtime,
+      { onWatchSnapshot },
+    );
+    const controller = new AbortController();
+    const pending = call(registrar.read(), "watch", { scope: "quota" }, controller.signal);
+
+    try {
+      expect(fake.snapshots.addScopedViewer).toHaveBeenCalledWith("quota");
+      expect(onWatchSnapshot).not.toHaveBeenCalled();
+      controller.abort();
+      await expect(pending).resolves.toEqual({ active: false });
+      expect(fake.released).toEqual(["quota"]);
+    } finally {
+      controller.abort();
+      await registration.dispose();
+    }
+  });
+
+  it("keeps attempt snapshot callbacks scoped to the owning RPC registration", async () => {
+    const registrar = createFakeRegistrar();
+    const fake = createFakeRuntime();
+    const duplicateRuntime = {
+      snapshots: fake.runtime.snapshots,
+      settings: fake.runtime.settings,
+    };
+    const firstSnapshot = vi.fn();
+    const secondSnapshot = vi.fn();
+    const firstLease = await registerDashboardRpc({ register: registrar.register }, fake.runtime, {
+      location: { directory: "/workspace" },
+      onWatchSnapshot: firstSnapshot,
+    });
+    const secondLease = await registerDashboardRpc(
+      { register: registrar.register },
+      duplicateRuntime,
+      { location: { directory: "/workspace" }, onWatchSnapshot: secondSnapshot },
+    );
+    const firstRegistration = registrar.registrations[0];
+    const secondRegistration = registrar.registrations[1];
+    if (!firstRegistration || !secondRegistration) {
+      throw new Error("expected both watch registrations");
+    }
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const firstWatch = call(
+      firstRegistration,
+      "watch",
+      { scope: "quota", attemptNonce: "nonce-first" },
+      firstController.signal,
+    );
+    const secondWatch = call(
+      secondRegistration,
+      "watch",
+      { scope: "analytics", attemptNonce: "nonce-second" },
+      secondController.signal,
+    );
+
+    try {
+      expect(firstSnapshot).toHaveBeenCalledOnce();
+      expect(firstSnapshot).toHaveBeenCalledWith("nonce-first");
+      expect(secondSnapshot).toHaveBeenCalledOnce();
+      expect(secondSnapshot).toHaveBeenCalledWith("nonce-second");
+      expect(fake.snapshots.addScopedViewer).toHaveBeenNthCalledWith(1, "quota");
+      expect(fake.snapshots.addScopedViewer).toHaveBeenNthCalledWith(2, "analytics");
+    } finally {
+      firstController.abort();
+      secondController.abort();
+      await Promise.all([firstWatch, secondWatch]);
+      await firstLease.dispose();
+      await secondLease.dispose();
+    }
+  });
+
   it("releases held viewers and the event subscription when the registration disposes", async () => {
     const { captured, fake, registration } = await setup();
     const pending = call(captured, "watch", { scope: "analytics" }, new AbortController().signal);

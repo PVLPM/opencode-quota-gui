@@ -2,9 +2,10 @@
  * Quota transport source: independent analytics/quota lifecycles, provider
  * selection, last-good preservation, cycle coalescing and stale fallback.
  *
- * All seams are synthetic: no provider query, database, credentials or worker.
+ * Most seams are synthetic; the delayed OpenAI regression uses its real parser
+ * and provider mapping with fake credentials and HTTP responses.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { CostedTokens, HomeSnapshot } from "../src/contracts/dashboard.js";
 import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts/ranges.js";
@@ -16,14 +17,17 @@ import {
   PROVIDER_SCOPE_IDENTITY_KEY,
 } from "../src/gui/identity.js";
 import { openAiOptionalVisibilityRows } from "../src/gui/provider-cards.js";
+import { createSnapshotService } from "../src/gui/snapshot-service.js";
 import {
   createDashboardReadSource,
   type DashboardAnalyticsService,
   type DashboardReadSourceOptions,
 } from "../src/gui/sources.js";
 import type { QuotaPercentEntry, QuotaProvider, QuotaProviderResult } from "../src/lib/entries.js";
+import { bindCredentialSource } from "../src/lib/opencode-auth.js";
 import type { QuotaStatusLiveProbe } from "../src/lib/quota-render-data.js";
 import { DEFAULT_CONFIG, type QuotaToastConfig } from "../src/lib/types.js";
+import { openaiProvider } from "../src/providers/openai.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
 
@@ -90,7 +94,7 @@ function result(overrides: Partial<QuotaProviderResult> = {}): QuotaProviderResu
 }
 
 function probe(providerId: string, value: QuotaProviderResult): QuotaStatusLiveProbe {
-  return { providerId, result: value };
+  return { providerId, result: value, cacheScope: `test:${providerId}` };
 }
 
 function baseConfig(overrides: Partial<QuotaToastConfig> = {}): QuotaToastConfig {
@@ -149,6 +153,181 @@ function harness(
 }
 
 describe("quota read source", () => {
+  it("uses the first attempt time when no complete poll exists, then anchors a full poll", async () => {
+    let clock = NOW;
+    let complete = false;
+    const { source } = harness({
+      now: () => clock,
+      collect: async () => [
+        probe(
+          "anthropic",
+          result({
+            entries: [percentEntry(50)],
+            errors: complete ? [] : [{ label: "Account", message: "unavailable" }],
+          }),
+        ),
+      ],
+    });
+    const first = await source.quota();
+    expect(first.stale).toBe(true);
+    expect(first.providers.polledAtMs).toBe(NOW);
+    clock += 60_000;
+    const partial = await source.quota();
+    expect(partial.stale).toBe(true);
+    expect(partial.providers.polledAtMs).toBe(NOW);
+    complete = true;
+    clock += 60_000;
+    const recovered = await source.quota();
+    expect(recovered.stale).toBe(false);
+    expect(recovered.providers.polledAtMs).toBe(clock);
+  });
+  it("propagates an explicit snapshot retry to the provider fetch", async () => {
+    const fetch = vi.fn().mockResolvedValue(result({ entries: [percentEntry(50)] }));
+    const provider: QuotaProvider = {
+      id: "refresh-integration",
+      cachePolicy: { kind: "account-neutral" },
+      isAvailable: async () => true,
+      fetch,
+    };
+    const config = baseConfig({ enabledProviders: [provider.id], minIntervalMs: 0 });
+    const source = createDashboardReadSource({
+      client: CLIENT,
+      workspaceRoot: "C:/synthetic-workspace",
+      configDir: "C:/synthetic-config",
+      providers: [provider],
+      loadConfig: async () => config,
+    });
+    const snapshots = createSnapshotService({ source });
+    await snapshots.quota();
+    config.minIntervalMs = 60_000;
+    await snapshots.quota({ refresh: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    snapshots.close();
+  });
+  it("does not substitute another account's last-good measurement", async () => {
+    let cycle = 0;
+    const { source } = harness({
+      collect: async () =>
+        ++cycle === 1
+          ? [
+              {
+                ...probe("anthropic", result({ entries: [percentEntry(50)] })),
+                cacheScope: "account-a",
+              },
+            ]
+          : [
+              {
+                ...probe(
+                  "anthropic",
+                  result({ errors: [{ label: "Anthropic", message: "failed" }] }),
+                ),
+                cacheScope: "account-b",
+              },
+            ],
+    });
+    expect((await source.quota!()).providers.cards.some((card) => card.rows.length > 0)).toBe(true);
+    const next = await source.quota!();
+    expect(next.providers.cards.every((card) => card.rows.length === 0)).toBe(true);
+    expect(next.stale).toBe(true);
+  });
+  it("projects a delayed OpenAI response after collection without changing cycle timestamps", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let startBodyRead!: () => void;
+    const bodyReadStarted = new Promise<void>((resolve) => {
+      startBodyRead = resolve;
+    });
+    let resolveUsage!: (usage: unknown) => void;
+    const usageResponse = new Promise<unknown>((resolve) => {
+      resolveUsage = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).endsWith("/rate-limit-reset-credits")) {
+          return { ok: true, json: async () => ({ available_count: 1 }) };
+        }
+        return {
+          ok: true,
+          json: () => {
+            startBodyRead();
+            return usageResponse;
+          },
+        };
+      }) as unknown as typeof fetch,
+    );
+    const accountId = "openai-runway-test";
+    const resetsRow = openAiOptionalVisibilityRows(buildCardId("openai", accountId))[0]!;
+    const config = baseConfig({
+      enabledProviders: ["openai"],
+      dashboard: {
+        ...DEFAULT_CONFIG.dashboard,
+        hiddenRows: [resetsRow.rowId],
+      },
+    });
+    const unbindCredentials = bindCredentialSource({
+      kind: "opencode-integration-api",
+      async readRows({ integrationIds }) {
+        if (!integrationIds.includes("openai")) return [];
+        return [
+          {
+            id: accountId,
+            integrationId: "openai",
+            label: "Primary",
+            active: true,
+            value: {
+              type: "oauth",
+              access: "a.b.c",
+              expires: NOW + 24 * 60 * 60_000,
+            },
+          },
+        ];
+      },
+    });
+
+    try {
+      const source = createDashboardReadSource({
+        client: {
+          config: {
+            providers: async () => ({ data: { providers: [{ id: "openai" }] } }),
+            get: async () => ({ data: {} }),
+          },
+        },
+        workspaceRoot: "C:/synthetic-workspace",
+        configDir: "C:/synthetic-config",
+        timeZone: "UTC",
+        now: () => Date.now(),
+        loadConfig: async () => config,
+        providers: [openaiProvider],
+      });
+      const snapshotPromise = source.quota();
+      await bodyReadStarted;
+      vi.setSystemTime(NOW + 2 * 60_000);
+      resolveUsage({
+        plan_type: "plus",
+        rate_limit: {
+          limit_reached: false,
+          primary_window: {
+            limit_window_seconds: 18_000,
+            used_percent: 30,
+            reset_at: Math.floor((NOW + 4 * 60 * 60_000) / 1000),
+          },
+        },
+      });
+
+      const snapshot = await snapshotPromise;
+      expect(snapshot.generatedAtMs).toBe(NOW);
+      expect(snapshot.providers.polledAtMs).toBe(NOW);
+      const card = snapshot.providers.cards.find(({ providerId }) => providerId === "openai");
+      const row = card?.rows.find(({ kind }) => kind === "percent");
+      expect(row?.runway?.kind).toBe("before_reset");
+    } finally {
+      unbindCredentials();
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
   it("queries every enabled provider even when a provider-level card is hidden and keeps its cards for the browser", async () => {
     const hiddenAccount = buildCardId("anthropic", "acct-1");
     const config = baseConfig({
@@ -284,13 +463,12 @@ describe("quota read source", () => {
     expect(second.providers.cards[0]?.rows[0]?.percentRemaining).toBe(62.5);
     expect(second.providers.cards[0]?.errors.map((error) => error.label)).toEqual(["Sync"]);
 
-    // A selected provider missing from the cycle (slow/unavailable) also keeps
-    // its last good probe and stays stale.
+    // A missing provider has no current identity proof, so fail closed.
     clock = NOW + 120_000;
     const third = await test.source.quota();
     expect(third.stale).toBe(true);
     expect(third.providers.polledAtMs).toBe(NOW);
-    expect(third.providers.cards[0]?.rows[0]?.percentRemaining).toBe(62.5);
+    expect(third.providers.cards).toEqual([]);
   });
 
   it("treats account descriptors without entries as fallback, not as a measurement", async () => {
@@ -425,7 +603,7 @@ describe("quota read source", () => {
     ).not.toContain(63);
   });
 
-  it("treats a partially measured account set as fresh and surfaces the failed account error", async () => {
+  it("marks a partially measured account set stale without advancing the poll timestamp", async () => {
     let cycle = 0;
     let clock = NOW;
     const accounts = [{ sourceId: "acct-a" }, { sourceId: "acct-b" }];
@@ -460,8 +638,8 @@ describe("quota read source", () => {
     await test.source.quota();
     clock = NOW + 60_000;
     const second = await test.source.quota();
-    expect(second.stale).toBe(false);
-    expect(second.providers.polledAtMs).toBe(NOW + 60_000);
+    expect(second.stale).toBe(true);
+    expect(second.providers.polledAtMs).toBe(NOW);
     const accountA = second.providers.cards.find((card) => card.accountLabel === "Account 1");
     const accountB = second.providers.cards.find((card) => card.accountLabel === "Account 2");
     expect(accountA?.rows.map((row) => row.percentRemaining)).toEqual([55]);
@@ -551,7 +729,7 @@ describe("quota read source", () => {
     expect(second.providers.cards.map((card) => card.providerId)).toEqual(["anthropic"]);
   });
 
-  it("serves the previous quota snapshot as stale when the whole cycle fails", async () => {
+  it("hides unverified account data when the whole cycle fails", async () => {
     let failing = false;
     const test = harness({
       collect: async () => {
@@ -566,7 +744,7 @@ describe("quota read source", () => {
     failing = true;
     const stale = await test.source.quota();
     expect(stale.stale).toBe(true);
-    expect(stale.providers.cards[0]?.rows[0]?.percentRemaining).toBe(42);
+    expect(stale.providers.cards).toEqual([]);
   });
 
   it("rejects when the first cycle fails and no previous snapshot exists", async () => {

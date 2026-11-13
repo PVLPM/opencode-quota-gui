@@ -63,10 +63,10 @@ describe("provider-metadata", () => {
       },
       {
         id: "alibaba-coding-plan",
-        autoSetup: "yes",
-        authentication: "opencode_auth_api_key",
-        authFallbacks: ["env_api_key", "global_opencode_config"],
-        quota: "local_estimation",
+        autoSetup: "needs_quick_setup",
+        authentication: "local_cli_auth",
+        quota: "local_cli_report",
+        quickSetupAnchor: "alibaba-coding-plan",
       },
       {
         id: "alibaba-token-plan",
@@ -257,7 +257,11 @@ describe("provider-metadata", () => {
       "copilot-chat",
       "github-copilot-chat",
     ]);
-    expect(QUOTA_PROVIDER_RUNTIME_IDS.anthropic).toEqual(["anthropic"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS.anthropic).toEqual([
+      "anthropic",
+      "claude-agent",
+      "claude-code",
+    ]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.openai).toEqual(["openai", "chatgpt", "codex"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.kilo).toEqual(["kilo"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.cursor).toEqual(["cursor", "cursor-acp"]);
@@ -319,7 +323,11 @@ describe("provider-metadata", () => {
       "copilot-chat",
       "github-copilot-chat",
     ]);
-    expect(getQuotaProviderRuntimeIds("claude")).toEqual(["anthropic"]);
+    expect(getQuotaProviderRuntimeIds("claude")).toEqual([
+      "anthropic",
+      "claude-agent",
+      "claude-code",
+    ]);
     expect(getQuotaProviderRuntimeIds("openai")).toEqual(["openai", "chatgpt", "codex"]);
     expect(getQuotaProviderRuntimeIds("kilo")).toEqual(["kilo"]);
     expect(getQuotaProviderRuntimeIds("kilo-gateway")).toEqual([]);
@@ -400,10 +408,10 @@ describe("provider-metadata", () => {
     });
     expect(getQuotaProviderShape("alibaba")).toEqual({
       id: "alibaba-coding-plan",
-      autoSetup: "yes",
-      authentication: "opencode_auth_api_key",
-      authFallbacks: ["env_api_key", "global_opencode_config"],
-      quota: "local_estimation",
+      autoSetup: "needs_quick_setup",
+      authentication: "local_cli_auth",
+      quota: "local_cli_report",
+      quickSetupAnchor: "alibaba-coding-plan",
     });
     expect(getQuotaProviderShape("alibaba-token-plan")).toEqual({
       id: "alibaba-token-plan",

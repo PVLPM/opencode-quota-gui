@@ -9,8 +9,9 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
-import { fetchWithTimeout } from "./http.js";
+import { fetchWithTimeout, RequestTimeoutError } from "./http.js";
 import { readAuthFile } from "./opencode-auth.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { deriveResolvedAuthIdentity, type ResolvedAuthIdentity } from "./resolved-auth-identity.js";
@@ -214,6 +215,8 @@ interface AiCreditTotals {
   billedAmountUsd?: number;
   authority: "provider_reported" | "locally_derived";
 }
+
+type CopilotResultValue = NonNullable<CopilotResult>;
 
 const LEGACY_PREMIUM_REQUEST_TOTALS: Partial<Record<CopilotTier, number>> = {
   pro: 300,
@@ -724,6 +727,7 @@ class CopilotRequestError extends Error {
   constructor(
     message: string,
     readonly failureCategory: ProviderFailureCategory,
+    readonly retryAtMs?: number,
   ) {
     super(message);
     this.name = "CopilotRequestError";
@@ -733,6 +737,23 @@ class CopilotRequestError extends Error {
 function requestFailureCategory(error: unknown): ProviderFailureCategory {
   return error instanceof CopilotRequestError ? error.failureCategory : "provider_api";
 }
+
+function requestRetryAtMs(error: unknown): number | undefined {
+  if (error instanceof CopilotRequestError) return error.retryAtMs;
+  return error instanceof RequestTimeoutError ? error.retryAtMs : undefined;
+}
+
+function preserveRetryAtOnTimeout(error: unknown, retryAtMs: number | undefined): unknown {
+  return error instanceof RequestTimeoutError &&
+    error.retryAtMs === undefined &&
+    retryAtMs !== undefined
+    ? new RequestTimeoutError(error.message, retryAtMs)
+    : error;
+}
+
+const guard = createApiKeyRetryGuard<CopilotResultValue>((retryAtMs) =>
+  toQuotaError("GitHub API error 429", "provider_api", retryAtMs),
+);
 
 async function readGitHubRestErrorMessage(
   response: Response,
@@ -769,35 +790,67 @@ async function readGitHubRestErrorMessageForClassification(
   }
 }
 
+/**
+ * A 429, or a 403 GitHub itself marks as a rate limit (exhausted primary limit
+ * or the documented secondary-limit message). Only then is Retry-After read,
+ * so a permission 403 never gets a cooldown.
+ */
+function classifyGitHubRateLimit(
+  response: Response,
+  message: string,
+): { limited: boolean; retryAtMs?: number } {
+  const limited =
+    response.status === 429 ||
+    (response.status === 403 &&
+      (response.headers.get("x-ratelimit-remaining") === "0" ||
+        /secondary rate limit/iu.test(message)));
+  if (!limited) return { limited };
+  // retryAfterDeadline only accepts 429; re-present the same headers as one.
+  const retryAtMs = retryAfterDeadline(
+    new Response(null, { status: 429, headers: response.headers }),
+  );
+  return { limited, ...(retryAtMs !== undefined ? { retryAtMs } : {}) };
+}
+
 async function fetchGitHubRestJson<T>(
   url: string,
   token: string,
   requestTimeoutMs?: number,
 ): Promise<T> {
-  return await fetchWithTimeout(url, {
-    request: { headers: buildGitHubRestHeaders(token) },
-    timeoutMs: requestTimeoutMs,
-    consume: async (response) => {
-      if (!response.ok) {
-        const message = await readGitHubRestErrorMessageForClassification(response, [token]);
-        const rateLimited =
-          response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0";
-        const rateLimit = rateLimited ? " (GitHub API rate limit exhausted)" : "";
-        throw new CopilotRequestError(
-          `GitHub API error ${response.status}: ${message}${rateLimit}`,
-          response.status === 401 || (response.status === 403 && !rateLimited)
-            ? "credentials"
-            : "provider_api",
-        );
-      }
+  let observedRetryAtMs: number | undefined;
+  try {
+    return await fetchWithTimeout(url, {
+      request: { headers: buildGitHubRestHeaders(token) },
+      timeoutMs: requestTimeoutMs,
+      consume: async (response) => {
+        if (!response.ok) {
+          if (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0") {
+            // Snapshot a confirmed primary limit before its body can stall.
+            observedRetryAtMs = classifyGitHubRateLimit(response, "").retryAtMs;
+          }
+          const message = await readGitHubRestErrorMessageForClassification(response, [token]);
+          const limit = classifyGitHubRateLimit(response, message);
+          const rateLimit =
+            response.status === 403 && limit.limited ? " (GitHub API rate limit exhausted)" : "";
+          throw new CopilotRequestError(
+            `GitHub API error ${response.status}: ${message}${rateLimit}`,
+            response.status === 401 || (response.status === 403 && !limit.limited)
+              ? "credentials"
+              : "provider_api",
+            limit.retryAtMs,
+          );
+        }
 
-      try {
-        return (await response.json()) as T;
-      } catch {
-        throw new CopilotRequestError("GitHub API returned malformed JSON", "provider_api");
-      }
-    },
-  });
+        try {
+          return (await response.json()) as T;
+        } catch {
+          throw new CopilotRequestError("GitHub API returned malformed JSON", "provider_api");
+        }
+      },
+    });
+  } catch (error) {
+    throw preserveRetryAtOnTimeout(error, observedRetryAtMs);
+  }
 }
 
 async function resolveGitHubUsername(
@@ -1141,6 +1194,17 @@ async function fetchApplicableBudget(params: {
   };
 }
 
+type BudgetFetch =
+  | { success: true; budget?: CopilotBudgetResult }
+  | { success: false; error: string; retryAtMs?: number };
+
+// Separate from the usage guard: a limited budget report must not block usage.
+const budgetGuard = createApiKeyRetryGuard<BudgetFetch>((retryAtMs) => ({
+  success: false,
+  error: `GitHub API error 429: budget report rate limited until ${new Date(retryAtMs).toISOString()}`,
+  retryAtMs,
+}));
+
 function makeBudgetWarning(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return `AI Credit usage loaded, but the budget report failed: ${message}`;
@@ -1159,17 +1223,36 @@ async function toAiCreditResult(params: {
   const warnings: string[] = [];
 
   if (params.target.scope !== "user") {
-    try {
-      budget = await fetchApplicableBudget({
-        apiBaseUrl: params.apiBaseUrl,
-        token: params.token,
-        target: params.target,
-        spentUsd: totals.billedAmountUsd,
-        requestTimeoutMs: params.requestTimeoutMs,
-      });
-    } catch (error) {
-      warnings.push(makeBudgetWarning(error));
-    }
+    const target = params.target;
+    const fetched = await budgetGuard(
+      `budget\0${params.apiBaseUrl}\0${params.token}`,
+      async (): Promise<BudgetFetch> => {
+        try {
+          return {
+            success: true,
+            budget: await fetchApplicableBudget({
+              apiBaseUrl: params.apiBaseUrl,
+              token: params.token,
+              target,
+              spentUsd: totals.billedAmountUsd,
+              requestTimeoutMs: params.requestTimeoutMs,
+            }),
+          };
+        } catch (error) {
+          const retryAtMs = requestRetryAtMs(error);
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+          };
+        }
+      },
+      params.requestTimeoutMs,
+      undefined,
+      JSON.stringify({ target, spentUsd: totals.billedAmountUsd }),
+    );
+    if (fetched.success) budget = fetched.budget;
+    else warnings.push(makeBudgetWarning(new Error(fetched.error)));
   }
 
   if (params.target.scope === "organization") {
@@ -1229,11 +1312,16 @@ function toLegacyResult(
   };
 }
 
-function toQuotaError(message: string, failureCategory?: ProviderFailureCategory): QuotaError {
+function toQuotaError(
+  message: string,
+  failureCategory?: ProviderFailureCategory,
+  retryAtMs?: number,
+): QuotaError {
   return {
     success: false,
     error: message,
     ...(failureCategory !== undefined ? { failureCategory } : {}),
+    ...(retryAtMs !== undefined ? { retryAtMs } : {}),
   };
 }
 
@@ -1370,30 +1458,51 @@ async function fetchCopilotInternalUser(params: {
   token: string;
   requestTimeoutMs?: number;
 }): Promise<CopilotQuotaResult | CopilotPlanResult> {
-  return await fetchWithTimeout(`${params.apiBaseUrl}${COPILOT_INTERNAL_USER_PATH}`, {
-    request: { headers: buildCopilotInternalHeaders(params.token) },
-    timeoutMs: params.requestTimeoutMs,
-    consume: async (response) => {
-      if (!response.ok) {
-        const message = await readGitHubRestErrorMessageForClassification(response, [params.token]);
-        throw new CopilotRequestError(
-          `GitHub Copilot API error ${response.status}: ${message}`,
-          response.status === 401 || response.status === 403 ? "credentials" : "provider_api",
-        );
-      }
+  let observedRetryAtMs: number | undefined;
+  try {
+    return await fetchWithTimeout(`${params.apiBaseUrl}${COPILOT_INTERNAL_USER_PATH}`, {
+      request: { headers: buildCopilotInternalHeaders(params.token) },
+      timeoutMs: params.requestTimeoutMs,
+      consume: async (response) => {
+        if (!response.ok) {
+          if (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0") {
+            // Snapshot a confirmed primary limit before its body can stall.
+            observedRetryAtMs = classifyGitHubRateLimit(response, "").retryAtMs;
+          }
+          const message = await readGitHubRestErrorMessageForClassification(response, [
+            params.token,
+          ]);
+          const limit = classifyGitHubRateLimit(response, message);
+          throw new CopilotRequestError(
+            `GitHub Copilot API error ${response.status}: ${message}`,
+            response.status === 401 || (response.status === 403 && !limit.limited)
+              ? "credentials"
+              : "provider_api",
+            limit.retryAtMs,
+          );
+        }
 
-      let parsed: CopilotInternalUserResponse;
-      try {
-        parsed = (await response.json()) as CopilotInternalUserResponse;
-      } catch {
-        throw new CopilotRequestError("GitHub Copilot API returned malformed JSON", "provider_api");
-      }
-      if (!parsed || typeof parsed !== "object") {
-        throw new CopilotRequestError("GitHub Copilot API returned malformed JSON", "provider_api");
-      }
-      return parseCopilotInternalUser(parsed);
-    },
-  });
+        let parsed: CopilotInternalUserResponse;
+        try {
+          parsed = (await response.json()) as CopilotInternalUserResponse;
+        } catch {
+          throw new CopilotRequestError(
+            "GitHub Copilot API returned malformed JSON",
+            "provider_api",
+          );
+        }
+        if (!parsed || typeof parsed !== "object") {
+          throw new CopilotRequestError(
+            "GitHub Copilot API returned malformed JSON",
+            "provider_api",
+          );
+        }
+        return parseCopilotInternalUser(parsed);
+      },
+    });
+  } catch (error) {
+    throw preserveRetryAtOnTimeout(error, observedRetryAtMs);
+  }
 }
 
 /**
@@ -1428,18 +1537,26 @@ export async function queryCopilotQuota(
     if (enterpriseHost.error) {
       return toQuotaError(`Invalid OpenCode Copilot enterpriseUrl: ${enterpriseHost.error}`);
     }
-    try {
-      return await fetchCopilotInternalUser({
-        apiBaseUrl: getApiBaseUrl(enterpriseHost.host),
-        token,
-        requestTimeoutMs: options.requestTimeoutMs,
-      });
-    } catch (error) {
-      return toQuotaError(
-        error instanceof Error ? error.message : String(error),
-        requestFailureCategory(error),
-      );
-    }
+    const apiBaseUrl = getApiBaseUrl(enterpriseHost.host);
+    return await guard(
+      `oauth\0${apiBaseUrl}\0${token}`,
+      async () => {
+        try {
+          return await fetchCopilotInternalUser({
+            apiBaseUrl,
+            token,
+            requestTimeoutMs: options.requestTimeoutMs,
+          });
+        } catch (error) {
+          return toQuotaError(
+            error instanceof Error ? error.message : String(error),
+            requestFailureCategory(error),
+            requestRetryAtMs(error),
+          );
+        }
+      },
+      options.requestTimeoutMs,
+    );
   }
 
   const resolved = resolvePatBillingTarget(pat.config);
@@ -1450,32 +1567,42 @@ export async function queryCopilotQuota(
   const compatibilityError = validatePatTargetCompatibility(resolved.target, pat.tokenKind);
   if (compatibilityError) return toQuotaError(compatibilityError);
 
-  try {
-    const billingModel = pat.config.billingModel ?? "ai_credits";
-    const apiBaseUrl = getApiBaseUrl(pat.config.enterpriseUrl);
-    const { response, target } = await fetchBillingUsage({
-      apiBaseUrl,
-      token: pat.config.token,
-      target: resolved.target,
-      billingModel,
-      requestTimeoutMs: options.requestTimeoutMs,
-    });
-
-    return billingModel === "legacy_premium_requests"
-      ? toLegacyResult(response, pat.config)
-      : await toAiCreditResult({
+  const config = pat.config;
+  const apiBaseUrl = getApiBaseUrl(config.enterpriseUrl);
+  const billingModel = config.billingModel ?? "ai_credits";
+  return await guard(
+    `pat\0${apiBaseUrl}\0${config.token}`,
+    async () => {
+      try {
+        const { response, target } = await fetchBillingUsage({
           apiBaseUrl,
-          response,
-          target,
-          token: pat.config.token,
+          token: config.token,
+          target: resolved.target!,
+          billingModel,
           requestTimeoutMs: options.requestTimeoutMs,
         });
-  } catch (error) {
-    return toQuotaError(
-      error instanceof Error ? error.message : String(error),
-      requestFailureCategory(error),
-    );
-  }
+
+        return billingModel === "legacy_premium_requests"
+          ? toLegacyResult(response, config)
+          : await toAiCreditResult({
+              apiBaseUrl,
+              response,
+              target,
+              token: config.token,
+              requestTimeoutMs: options.requestTimeoutMs,
+            });
+      } catch (error) {
+        return toQuotaError(
+          error instanceof Error ? error.message : String(error),
+          requestFailureCategory(error),
+          requestRetryAtMs(error),
+        );
+      }
+    },
+    options.requestTimeoutMs,
+    undefined,
+    JSON.stringify({ billingModel, tier: config.tier, target: resolved.target }),
+  );
 }
 
 export async function resolveCopilotAuthIdentity(): Promise<ResolvedAuthIdentity | null> {

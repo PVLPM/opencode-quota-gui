@@ -6,7 +6,7 @@
 
 1. Confirm the `opencode-quota-gui` entry is in the `plugins` list of `~/.config/opencode/opencode.json(c)`, or in a project `opencode.json(c)` / `.opencode/opencode.json(c)`.
 2. Restart OpenCode after changing the plugin entry, a login, the canonical settings file, or `dashboard.enabled`.
-3. Confirm browser access is on for your host: it is on by default below OpenCode 2.2.0 and off by default at 2.2.0 and newer. At 2.2.0+, `~/.config/opencode/opencode-quota-gui/config.jsonc` must contain `"dashboard": { "enabled": true }`; an explicit `false` turns it off on any host.
+3. Confirm browser access is on for your host: it is on by default below OpenCode 2.2.1 (including 2.2.0) and off by default at 2.2.1 and newer. At 2.2.1+, `~/.config/opencode/opencode-quota-gui/config.jsonc` must contain `"dashboard": { "enabled": true }`; an explicit `false` turns it off on any host. If the host version cannot be detected, an absent switch fails closed; a valid explicit value still works.
 4. Open <http://localhost:4144/quota>. If the page is blank or stale, reload it and check the connection state in the top bar.
 5. Open <http://localhost:4144/settings> and read the configuration issues and the Version, Build, and Contract in the About block.
 6. Find the failing provider card and read its card-local error. One card failing does not hide the others.
@@ -17,8 +17,8 @@ If every provider is missing, check the plugin entry first. The plugin must load
 
 | Problem | Try this |
 | --- | --- |
-| Dashboard does not open | Confirm OpenCode loaded the plugin and that web access is on for your host (on by default below 2.2.0; at 2.2.0+ only when `dashboard.enabled` is `true` in the canonical file), then restart OpenCode. Check that nothing else uses the configured port. The server does not choose a fallback port. |
-| Dashboard page cannot connect after an upgrade | At OpenCode 2.2.0 and newer, browser access is off by default after an upgrade. Add `"dashboard": { "enabled": true }` to the canonical file and restart OpenCode. Below 2.2.0 it is on by default, so check that nothing else uses the configured port and review the `[opencode-quota-gui]` log. |
+| Dashboard does not open | Confirm OpenCode loaded the plugin and that web access is on for your host (on by default below 2.2.1, including 2.2.0; at 2.2.1+ only when `dashboard.enabled` is `true` in the canonical file), then restart OpenCode. An absent switch with an unknown host version or malformed canonical config fails closed. Check that nothing else uses the configured port. The server does not choose a fallback port. |
+| Dashboard page cannot connect after an upgrade | At OpenCode 2.2.1 and newer, browser access is off by default after an upgrade. Add `"dashboard": { "enabled": true }` to the canonical file and restart OpenCode. Below 2.2.1, including 2.2.0, it is on by default, so check that nothing else uses the configured port and review the `[opencode-quota-gui]` log. |
 | `dashboard server unavailable` in the log | Another process owns the port. The shared quota runtime and retry handling still run. Stop the other process, or change `dashboard.port` in the canonical file and restart OpenCode. |
 | Page says `Data may be stale` or `Reconnecting…` | The browser lost the local event stream. Reload the page; if it persists, restart OpenCode. |
 | Settings will not save | The canonical file changed elsewhere, or the file is malformed. Reopen Settings, review the reported issue, and save again. |
@@ -123,10 +123,10 @@ Custom definitions live in the canonical `quotaProviders` array. See [Configurat
 
 | Symptom | Fix |
 | --- | --- |
-| API key not detected | See [API keys](providers.md#api-keys). Repo-local provider secrets are ignored. |
-| Limits need tuning | Define a local estimate with the reserved `alibaba-coding-plan` id in the canonical `quotaProviders` array. |
-| Counters do not move | Make sure the current model is `alibaba/*` or `alibaba-cn/*`. |
-| Quota seems stale | Check the state path under `~/.local/state/opencode/opencode-quota-gui/quota-providers/` and restart OpenCode. |
+| CLI not detected | Install `bailian-cli` and make sure `bl` is on an absolute, non-project folder in the OpenCode service's [PATH](#service-environment). Coding Plan supports macOS, Linux, and Windows. See [setup](providers.md#alibaba-coding-plan). |
+| Not authenticated | Run `bl auth login --console` manually for the intended Model Studio account, then restart OpenCode or wait for the next live check. |
+| Wrong account or usage | Coding Plan uses the Bailian CLI's Console account, which is independent of OpenCode API-key identity. Sign in to the intended account with `bl auth login --console`. |
+| No quota data | Run `bl usage coding-plan --output json` and check the CLI response. An empty `{}` means that CLI account has no Coding Plan subscription; the plugin does not substitute a local estimate. |
 
 </details>
 

@@ -1,44 +1,128 @@
+import { isAlibabaModelId } from "../lib/alibaba-auth.js";
 import {
-  DEFAULT_ALIBABA_AUTH_CACHE_MAX_AGE_MS,
-  getAlibabaCodingPlanAuthDiagnostics,
-  isAlibabaModelId,
-  resolveAlibabaCodingPlanAuthCached,
-} from "../lib/alibaba-auth.js";
-import {
-  ALIBABA_CODING_PLAN_STATE_VERSION,
-  computeAlibabaCodingPlanQuota,
-  getAlibabaCodingPlanQuotaPath,
-  readAlibabaCodingPlanQuotaState,
-} from "../lib/alibaba-coding-plan-local-quota.js";
-import type {
-  QuotaProvider,
-  QuotaProviderContext,
-  QuotaProviderResult,
-  QuotaToastEntry,
-} from "../lib/entries.js";
-import { findQuotaProviderDefinition } from "../lib/quota-providers.js";
+  type AlibabaCodingPlanQuotaResult,
+  type AlibabaCodingPlanUsageWindow,
+  queryAlibabaCodingPlanQuota,
+} from "../lib/alibaba-coding-plan-cli.js";
+import { sanitizeSingleLineDisplayText } from "../lib/display-sanitize.js";
+import type { QuotaProvider, QuotaProviderContext, QuotaToastEntry } from "../lib/entries.js";
+import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
 import {
   attemptedErrorResult,
   attemptedResult,
-  inspectGeneratedCounterFile,
-  notAttemptedResult,
   statusDetailsFromRecord,
   withStatusDetails,
 } from "./result-helpers.js";
 
-function tierLabel(tier: "lite" | "pro"): string {
-  return tier === "pro" ? "Pro" : "Lite";
+const CLI_LABEL = "Bailian CLI";
+
+const QUOTA_ACCOUNTING = {
+  resultType: "quota",
+  acquisitionMethod: "local_cli",
+  ownership: "maintained",
+  authority: "provider_reported",
+} as const satisfies QuotaToastEntry["accounting"];
+
+const STATUS_ACCOUNTING = {
+  ...QUOTA_ACCOUNTING,
+  resultType: "status",
+} as const satisfies QuotaToastEntry["accounting"];
+
+function windowEntry(
+  window: AlibabaCodingPlanUsageWindow | undefined,
+  params: { group: string; suffix: string; label: string },
+): QuotaToastEntry | undefined {
+  if (!window) return undefined;
+
+  const name = `${params.group} ${params.suffix}`;
+  const resetTime = window.resetTimeIso ? { resetTimeIso: window.resetTimeIso } : {};
+  if (window.percentage !== undefined) {
+    const hasCounts = window.used !== undefined && window.total !== undefined && window.total > 0;
+    return {
+      accounting: { ...QUOTA_ACCOUNTING },
+      name,
+      group: params.group,
+      label: params.label,
+      ...(hasCounts ? { right: `${window.used}/${window.total}` } : {}),
+      percentRemaining: Math.max(0, Math.min(100, (1 - window.percentage) * 100)),
+      ...resetTime,
+    };
+  }
+
+  if (window.resetTimeIso) {
+    return {
+      kind: "value",
+      accounting: { ...STATUS_ACCOUNTING },
+      name,
+      group: params.group,
+      label: params.label,
+      value: "Quota details unavailable",
+      ...resetTime,
+    };
+  }
+
+  return undefined;
+}
+
+function entriesFromUsage(
+  result: Extract<AlibabaCodingPlanQuotaResult, { state: "success" }>,
+): QuotaToastEntry[] {
+  const instanceType = result.usage.instanceType
+    ? sanitizeSingleLineDisplayText(result.usage.instanceType).trim().slice(0, 40)
+    : "";
+  const group = `Alibaba Coding Plan${instanceType ? ` (${instanceType})` : ""} (CLI)`;
+  return [
+    windowEntry(result.usage.fiveHour, { group, suffix: "5h", label: "5h:" }),
+    windowEntry(result.usage.weekly, { group, suffix: "Weekly", label: "Weekly:" }),
+    windowEntry(result.usage.monthly, { group, suffix: "Monthly", label: "Monthly:" }),
+  ].filter((entry): entry is QuotaToastEntry => entry !== undefined);
+}
+
+function failureCategoryFor(kind: string): "credentials" | "local" | "provider_api" {
+  if (kind === "not_authenticated") return "credentials";
+  if (
+    kind === "invalid_json" ||
+    kind === "invalid_schema" ||
+    kind === "nonzero_exit" ||
+    kind === "output_truncated" ||
+    kind === "no_quota_data"
+  ) {
+    return "provider_api";
+  }
+  return "local";
+}
+
+function resultWithCliStatus(
+  result: ReturnType<typeof attemptedResult>,
+  statusDetails: ReturnType<typeof statusDetailsFromRecord>,
+  status: string,
+) {
+  return withStatusDetails(result, [
+    ...statusDetails,
+    ...statusDetailsFromRecord({ alibaba_coding_plan_cli_status: status }),
+  ]);
 }
 
 export const alibabaCodingPlanProvider: QuotaProvider = {
   id: "alibaba-coding-plan",
 
-  async isAvailable(_ctx: QuotaProviderContext): Promise<boolean> {
-    const plan = await resolveAlibabaCodingPlanAuthCached({
-      maxAgeMs: DEFAULT_ALIBABA_AUTH_CACHE_MAX_AGE_MS,
-      fallbackTier: "lite",
+  async isAvailable(ctx: QuotaProviderContext): Promise<boolean> {
+    const selected = await isCanonicalProviderAvailable({
+      ctx,
+      providerId: "alibaba-coding-plan",
+      fallbackOnError: false,
     });
-    return plan.state === "configured" || plan.state === "invalid";
+    if (selected) return true;
+    if (
+      ctx.config.currentProviderID === "alibaba-coding-plan" ||
+      ctx.config.currentProviderID === "alibaba"
+    ) {
+      return true;
+    }
+    const currentModel = ctx.config.currentModel;
+    return typeof currentModel === "string" && currentModel.length > 0
+      ? isAlibabaModelId(currentModel)
+      : false;
   },
 
   matchesCurrentModel(model: string, context): boolean {
@@ -48,118 +132,42 @@ export const alibabaCodingPlanProvider: QuotaProvider = {
       : isAlibabaModelId(model);
   },
 
-  async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
-    const diagnostics = await getAlibabaCodingPlanAuthDiagnostics({
-      maxAgeMs: DEFAULT_ALIBABA_AUTH_CACHE_MAX_AGE_MS,
-      fallbackTier: "lite",
+  async fetch(ctx: QuotaProviderContext) {
+    const result = await queryAlibabaCodingPlanQuota({
+      requestTimeoutMs: ctx.config?.requestTimeoutMs,
+      runtime: { cwd: ctx.workspaceRoot },
     });
-    const plan = await resolveAlibabaCodingPlanAuthCached({
-      maxAgeMs: DEFAULT_ALIBABA_AUTH_CACHE_MAX_AGE_MS,
-      fallbackTier: "lite",
-    });
-    const statePath = getAlibabaCodingPlanQuotaPath();
-    const state = await inspectGeneratedCounterFile(statePath, ALIBABA_CODING_PLAN_STATE_VERSION);
-    const lastUpdate =
-      state.lastUpdatedAt === null ? "(none)" : new Date(state.lastUpdatedAt).toISOString();
-    const authError = diagnostics.state === "invalid" ? diagnostics.error : undefined;
     const statusDetails = statusDetailsFromRecord({
-      "alibaba auth configured": diagnostics.state === "none" ? "false" : "true",
-      alibaba_api_key_source: diagnostics.source ?? "(none)",
-      alibaba_api_key_checked_paths: diagnostics.checkedPaths.join(" | ") || "(none)",
-      alibaba_api_key_credential_database_paths:
-        diagnostics.credentialDatabasePaths.join(" | ") || "(none)",
-      alibaba_coding_plan:
-        diagnostics.state === "configured"
-          ? diagnostics.tier
-          : diagnostics.state === "invalid"
-            ? "invalid"
-            : "(none)",
-      alibaba_auth_error: authError,
-      "alibaba coding plan error": authError,
-      "alibaba coding plan local quota": `path=${statePath} exists=${state.exists ? "true" : "false"} health=${state.health} version=${state.version ?? "(none)"} last_update=${lastUpdate}`,
-      local_state_path: statePath,
-      local_state_exists: state.exists ? "true" : "false",
-      local_state_health: state.health,
-      local_state_version: String(state.version ?? "(none)"),
-      local_state_last_update: lastUpdate,
+      alibaba_coding_plan_source: "bl usage coding-plan --output json",
     });
-    if (plan.state === "none") {
-      return withStatusDetails(notAttemptedResult(), statusDetails);
-    }
-
-    if (plan.state === "invalid") {
-      return withStatusDetails(
-        attemptedErrorResult("Alibaba Coding Plan", plan.error, {
-          failureCategory: "credentials",
+    if (result.state === "error") {
+      return resultWithCliStatus(
+        attemptedErrorResult(`${CLI_LABEL} Coding Plan usage`, result.error.message, {
+          retryable: result.error.retryable,
+          failureCategory: failureCategoryFor(result.error.kind),
         }),
         statusDetails,
+        result.error.kind,
       );
     }
+    if (result.state === "no-subscription") {
+      return resultWithCliStatus(attemptedResult([]), statusDetails, "no-subscription");
+    }
 
-    const tuning = findQuotaProviderDefinition(
-      ctx.config.quotaProviders ?? [],
-      "alibaba-coding-plan",
-    );
-    const limits =
-      tuning?.mode === "local-estimate"
-        ? {
-            fiveHour: tuning.windows.find((window) => window.id === "five-hour")!.requestLimit,
-            weekly: tuning.windows.find((window) => window.id === "weekly")!.requestLimit,
-            monthly: tuning.windows.find((window) => window.id === "monthly")!.requestLimit,
-          }
-        : undefined;
-    const quota = computeAlibabaCodingPlanQuota({
-      state: await readAlibabaCodingPlanQuotaState(),
-      tier: plan.tier,
-      ...(limits ? { limits } : {}),
-    });
-    const label = `Alibaba Coding Plan (${tierLabel(plan.tier)})`;
-
-    const entries: QuotaToastEntry[] = [
-      {
-        accounting: {
-          resultType: "quota",
-          acquisitionMethod: "local_estimation",
-          ownership: "maintained",
-          authority: "locally_derived",
-        },
-        name: `${label} 5h`,
-        group: label,
-        label: "5h:",
-        right: `${quota.fiveHour.used}/${quota.fiveHour.limit}`,
-        percentRemaining: quota.fiveHour.percentRemaining,
-        resetTimeIso: quota.fiveHour.resetTimeIso,
-      },
-      {
-        accounting: {
-          resultType: "quota",
-          acquisitionMethod: "local_estimation",
-          ownership: "maintained",
-          authority: "locally_derived",
-        },
-        name: `${label} Weekly`,
-        group: label,
-        label: "Weekly:",
-        right: `${quota.weekly.used}/${quota.weekly.limit}`,
-        percentRemaining: quota.weekly.percentRemaining,
-        resetTimeIso: quota.weekly.resetTimeIso,
-      },
-      {
-        accounting: {
-          resultType: "quota",
-          acquisitionMethod: "local_estimation",
-          ownership: "maintained",
-          authority: "locally_derived",
-        },
-        name: `${label} Monthly`,
-        group: label,
-        label: "Monthly:",
-        right: `${quota.monthly.used}/${quota.monthly.limit}`,
-        percentRemaining: quota.monthly.percentRemaining,
-        resetTimeIso: quota.monthly.resetTimeIso,
-      },
-    ];
-
-    return withStatusDetails(attemptedResult(entries), statusDetails);
+    const entries = entriesFromUsage(result);
+    if (entries.length === 0) {
+      return resultWithCliStatus(
+        attemptedErrorResult(
+          `${CLI_LABEL} Coding Plan usage`,
+          "Bailian CLI returned no usable Coding Plan quota data.",
+          {
+            failureCategory: "provider_api",
+          },
+        ),
+        statusDetails,
+        "no-quota-data",
+      );
+    }
+    return resultWithCliStatus(attemptedResult(entries), statusDetails, "success");
   },
 };

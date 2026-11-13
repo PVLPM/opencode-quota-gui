@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { createMemo, For, Show } from "solid-js";
+import { createMemo, createSignal, For, Show } from "solid-js";
 import type { ProviderCard, QuotaCardRow } from "../../contracts/dashboard";
 import type { BankedResetAvailability, BankedResetCredit } from "../../contracts/openai-quota";
 import { formatRunway, formatTimestamp } from "../format";
@@ -32,8 +32,7 @@ export {
  * One provider account card (design spec §10 "Home").
  *
  * Rows map the four entry kinds 1:1: label left, value right, a compact percent
- * bar for percent rows, a muted countdown, the runway sentence when the user
- * enabled it, and detail rows only when `accountingDetail` is `detailed`. Errors
+ * bar for percent rows, a muted countdown, and optional detail rows. Errors
  * stay card-local, and a card with no account label reports a provider-level
  * error rather than inventing an account.
  *
@@ -280,6 +279,51 @@ export function QuotaCardView(props: {
   const shownRows = () => visibleRows(props.card.rows, props.hiddenRows);
   const displayRows = () =>
     shownRows().filter((row) => !isSuppressedOptionalRow(row, props.card.providerId));
+  const [copyStatus, setCopyStatus] = createSignal("");
+
+  function runwayText(row: QuotaCardRow): string | undefined {
+    if (props.stale) return undefined;
+    const now = Date.now();
+    if (row.runway?.kind === "lasts_past_reset") {
+      const reset = row.resetAtIso;
+      if (
+        !reset ||
+        !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(reset) ||
+        !(Date.parse(reset) > now)
+      )
+        return undefined;
+    }
+    return formatRunway(row.runway, now);
+  }
+
+  async function copySummary(): Promise<void> {
+    const identity = [
+      props.card.providerLabel,
+      props.card.planLabel,
+      props.card.accountLabel
+        ? inlineAccountLabel(props.card.providerLabel, props.card.accountLabel)
+        : undefined,
+    ]
+      .filter((part) => part !== undefined && part.length > 0)
+      .join(" · ");
+    const lines = displayRows().map((row) => {
+      if (isOpenAiProvider(props.card.providerId) && isOpenAiResetsRow(row)) {
+        const segments = resetSegments(row.bankedResets);
+        return `${row.label}: ${segments.length} available · ${resetSummary(segments)}`;
+      }
+      const countdown = row.countdown ? ` · Resets in ${row.countdown}` : "";
+      // Same gate and text as the value tooltip, so the copy never invents runway.
+      const runway = row.kind === "percent" ? runwayText(row) : undefined;
+      const runwayPart = runway ? ` · ${runway}` : "";
+      return `${row.label}: ${rowValueText(row, props.preferences)}${countdown}${runwayPart}`;
+    });
+    try {
+      await navigator.clipboard.writeText([identity, ...lines].join("\n"));
+      setCopyStatus("Quota summary copied.");
+    } catch {
+      setCopyStatus("Could not copy quota summary.");
+    }
+  }
 
   return (
     <article class="qg-card" data-error={props.card.errors.length > 0 ? "true" : undefined}>
@@ -304,6 +348,39 @@ export function QuotaCardView(props: {
             )}
           </Show>
         </div>
+        <button
+          type="button"
+          class="qg-card__copy"
+          aria-label={`Copy quota summary for ${props.card.providerLabel}${props.card.accountLabel ? `, ${inlineAccountLabel(props.card.providerLabel, props.card.accountLabel)}` : ""}`}
+          title="Copy quota summary"
+          onClick={() => void copySummary()}
+        >
+          <svg
+            data-copy-icon={copyStatus() === "Quota summary copied." ? "check" : "copy"}
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <Show
+              when={copyStatus() === "Quota summary copied."}
+              fallback={
+                <>
+                  <rect x="8" y="8" width="11" height="12" rx="2" />
+                  <path d="M16 8V6a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h1" />
+                </>
+              }
+            >
+              <path d="m5 12 4 4L19 6" />
+            </Show>
+          </svg>
+        </button>
+        <output class="sr-only">{copyStatus()}</output>
       </header>
 
       <Show when={props.card.errors.length > 0}>
@@ -362,35 +439,52 @@ export function QuotaCardView(props: {
                       {(info) => <RowInfo label={row.label} info={info()} />}
                     </Show>
                   </span>
-                  <span class="qg-row__value">{rowValueText(row, props.preferences)}</span>
+                  <Show
+                    when={row.kind === "percent" && runwayText(row)}
+                    fallback={
+                      <span class="qg-row__value">{rowValueText(row, props.preferences)}</span>
+                    }
+                  >
+                    {(runway) => (
+                      <Tooltip
+                        class="qg-row__value-tip"
+                        value={runway()}
+                        triggerTabIndex={0}
+                        contentClass="qg-row__tooltip"
+                      >
+                        <span class="qg-row__value">{rowValueText(row, props.preferences)}</span>
+                      </Tooltip>
+                    )}
+                  </Show>
                   <Show when={row.countdown}>
                     <span class="qg-row__reset">Resets in {row.countdown}</span>
                   </Show>
                   <Show when={rowPercent(row, props.preferences) !== undefined}>
-                    <QuotaBar
-                      label={row.label}
-                      displayPercent={rowPercent(row, props.preferences) ?? 0}
-                      displayMode={props.preferences.percentMode}
-                    />
-                  </Show>
-                  <Show
-                    when={
-                      props.preferences.showRunway
-                        ? formatRunway(row.runway, props.timeZone)
-                        : undefined
-                    }
-                  >
-                    <span class="qg-row__meta">
-                      <Show
-                        when={
-                          props.preferences.showRunway
-                            ? formatRunway(row.runway, props.timeZone)
-                            : undefined
-                        }
-                      >
-                        {(runway) => <span>{runway()}</span>}
-                      </Show>
-                    </span>
+                    <Show
+                      when={runwayText(row)}
+                      fallback={
+                        <QuotaBar
+                          label={row.label}
+                          displayPercent={rowPercent(row, props.preferences) ?? 0}
+                          displayMode={props.preferences.percentMode}
+                        />
+                      }
+                    >
+                      {(runway) => (
+                        <Tooltip
+                          class="qg-row__bar-tip"
+                          value={runway()}
+                          triggerTabIndex={0}
+                          contentClass="qg-row__tooltip"
+                        >
+                          <QuotaBar
+                            label={row.label}
+                            displayPercent={rowPercent(row, props.preferences) ?? 0}
+                            displayMode={props.preferences.percentMode}
+                          />
+                        </Tooltip>
+                      )}
+                    </Show>
                   </Show>
                   <Show when={props.preferences.detailed && (row.detailRows?.length ?? 0) > 0}>
                     <table class="qg-detail-rows">

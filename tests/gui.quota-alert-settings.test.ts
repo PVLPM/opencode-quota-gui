@@ -58,6 +58,58 @@ function fieldFor(key: string) {
 }
 
 describe("native quota alert settings", () => {
+  it("round-trips the complete canonical policy through the revisioned store", async () => {
+    const workspace = makeWorkspace();
+    const store = makeStore(workspace);
+    const before = await store.settings();
+    expect(before.values.nativeQuotaNotifications).toEqual(DEFAULT_CONFIG.nativeQuotaNotifications);
+    const policy = {
+      enabled: false,
+      modelChangeToastEnabled: false,
+      low: { enabled: false, thresholdRemainingPercent: 25 },
+      exhausted: { enabled: false },
+      reset: { enabled: false, windows: ["daily", "weekly"] },
+      providerError: { enabled: false },
+      duplicateCooldownMinutes: 45,
+    };
+    await store.saveSettings({
+      patch: { nativeQuotaNotifications: policy },
+      expectedRevision: before.revision,
+    });
+    expect((await store.settings()).values.nativeQuotaNotifications).toEqual(policy);
+    expect((await runtimeConfig(workspace)).nativeQuotaNotifications).toEqual(policy);
+    expect(validateValue(fieldFor("nativeQuotaNotifications"), policy)).toBeUndefined();
+  });
+
+  it("defaults model-change toast independently of the quota-alert master switch", async () => {
+    const workspace = makeWorkspace();
+    const store = makeStore(workspace);
+    const before = await store.settings();
+    const defaultPolicy = before.values.nativeQuotaNotifications as Record<string, JsonValue>;
+
+    expect(DEFAULT_CONFIG.nativeQuotaNotifications.modelChangeToastEnabled).toBe(true);
+    expect(defaultPolicy.modelChangeToastEnabled).toBe(true);
+
+    const policy = {
+      ...defaultPolicy,
+      enabled: false,
+      modelChangeToastEnabled: false,
+    };
+    await store.saveSettings({
+      patch: { nativeQuotaNotifications: policy },
+      expectedRevision: before.revision,
+    });
+
+    const after = await store.settings();
+    expect(after.values.nativeQuotaNotifications).toMatchObject({
+      enabled: false,
+      modelChangeToastEnabled: false,
+    });
+    expect((await runtimeConfig(workspace)).nativeQuotaNotifications).toMatchObject({
+      enabled: false,
+      modelChangeToastEnabled: false,
+    });
+  });
   it("defaults to 10% remaining and a 30-minute cooldown", async () => {
     const workspace = makeWorkspace();
     const config = await runtimeConfig(workspace);

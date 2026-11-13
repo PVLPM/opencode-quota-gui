@@ -16,7 +16,7 @@ Behavior settings are always global. A project install selects only the project 
 
 The Settings page writes only this canonical file. A project or workspace setting does not become effective by being present in an OpenCode config file: only the canonical file and defaults are read by the dashboard.
 
-Settings values, provenance, the dashboard port, and visibility lists come only from the canonical file and defaults. The web dashboard switch is stored in the same file as `dashboard.enabled`: an absent value follows the OpenCode host version (on below 2.2.0, off at 2.2.0 and newer), and an explicit `true` or `false` always wins. When on, it serves the fixed loopback port. The separate import preview is the only path that reads inherited legacy values.
+Settings values, provenance, the dashboard port, and visibility lists come only from the canonical file and defaults. The web dashboard switch is stored in the same file as `dashboard.enabled`: an absent value follows the OpenCode host version (on below 2.2.1, including 2.2.0; off at 2.2.1 and newer), and a valid explicit `true` or `false` always wins. A missing or unparseable host version fails closed if the switch is absent. When on, it serves the fixed loopback port. The separate import preview is the only path that reads inherited legacy values.
 
 Provider credential sidecars are separate files in the same GUI namespace. For example, Xiaomi MiMo may use `opencode-quota-gui/mimo.json`; that file supplies only a provider cookie and is not part of the canonical behavior config. No sidecar is merged into `config.jsonc`.
 
@@ -49,7 +49,7 @@ Older `dashboard.hiddenCards` lists had no semantics marker, so a full provider-
 
 ### Web dashboard
 
-The browser dashboard default follows the OpenCode host version. On hosts below 2.2.0 it is on by default, including after an upgrade from `1.2.0` or earlier, because the Native panel requires 2.2.0 or newer. At 2.2.0 and newer it is off by default. An explicit `dashboard.enabled: true` or `false` always wins. When on, it starts the optional HTTP/SSE/static transport; when off, none starts.
+The browser dashboard default follows the OpenCode host version. On supported hosts below 2.2.1, including 2.2.0, it is on by default, including after an upgrade from `1.2.0` or earlier, because the full Native panel requires 2.2.1 or newer. At 2.2.1 and newer it is off by default. A valid explicit `dashboard.enabled: true` or `false` always wins. If the host version is missing or unparseable and the switch is absent, web access fails closed. A malformed canonical file or invalid `dashboard.enabled` also fails closed. When on, it starts the optional HTTP/SSE/static transport; when off, none starts.
 
 To force it on (or off), edit the canonical file and restart OpenCode:
 

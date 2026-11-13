@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // Keep the plugin's runtime dirs synthetic: the dashboard setup reads the global
 // config dir, and no test may touch the user's real config or state.
 const TEST_RUNTIME_ROOT = vi.hoisted(() => "/tmp/opencode-quota-plugin-v2-tests");
+const cacheEventEmit = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => ({
     dataDir: `${TEST_RUNTIME_ROOT}/data`,
@@ -16,13 +17,22 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
 vi.mock("../src/gui/lifecycle.js", () => ({
   startDashboard: vi.fn(async () => ({ dispose: async () => {} })),
 }));
+vi.mock("../src/gui/rpc.js", () => ({
+  registerDashboardRpc: vi.fn(async () => ({
+    events: { emit: cacheEventEmit },
+    dispose: async () => {},
+  })),
+}));
 
+import { startDashboard } from "../src/gui/lifecycle.js";
+import { registerDashboardRpc } from "../src/gui/rpc.js";
 import {
   clearReadAuthFileCacheForTests,
   getCredentialSourceDiagnostics,
   readAuthFile,
   readAuthFileCached,
 } from "../src/lib/opencode-auth.js";
+import { createNativeCacheObserverRuntime } from "../src/native/cache-observer-runtime.js";
 import plugin from "../src/plugin.js";
 import { createFakeIntegration } from "./helpers/fake-integration.js";
 
@@ -35,6 +45,55 @@ function createContext() {
     },
     integration: createFakeIntegration([]),
     event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
+  };
+}
+
+function createHostEventQueue() {
+  let signal: AbortSignal | undefined;
+  let resolvePending: ((result: IteratorResult<unknown>) => void) | undefined;
+  let pullCount = 0;
+  const queued: unknown[] = [];
+  const subscribe = vi.fn((input: { signal: AbortSignal }) => {
+    signal = input.signal;
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          next(): Promise<IteratorResult<unknown>> {
+            if (input.signal.aborted) return Promise.resolve({ done: true, value: undefined });
+            pullCount += 1;
+            return new Promise((resolve) => {
+              const finish = (result: IteratorResult<unknown>) => {
+                if (resolvePending === finish) resolvePending = undefined;
+                input.signal.removeEventListener("abort", onAbort);
+                resolve(result);
+              };
+              const onAbort = () => finish({ done: true, value: undefined });
+              input.signal.addEventListener("abort", onAbort, { once: true });
+              resolvePending = finish;
+              const next = queued.shift();
+              if (next !== undefined) finish({ done: false, value: next });
+            });
+          },
+        };
+      },
+    };
+  });
+
+  return {
+    subscribe,
+    push(event: unknown) {
+      if (resolvePending !== undefined) resolvePending({ done: false, value: event });
+      else queued.push(event);
+    },
+    end() {
+      resolvePending?.({ done: true, value: undefined });
+    },
+    get pulls() {
+      return pullCount;
+    },
+    get signal() {
+      return signal;
+    },
   };
 }
 
@@ -138,7 +197,167 @@ describe("V2 server plugin credential lifecycle", () => {
     await cleanup?.();
   });
 
-  it("logs why the credential event subscription stopped, without tokens", async () => {
+  it.each([
+    "error",
+    "clean end",
+  ] as const)("reconnects the host event stream after %s and publishes the resumed source state", async (termination) => {
+    const ctx = createContext();
+    let attemptCount = 0;
+    let pushReconnectedEvent!: (event: unknown) => void;
+    const subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => {
+      attemptCount += 1;
+      const attempt = attemptCount;
+      return {
+        async *[Symbol.asyncIterator]() {
+          if (attempt === 1) {
+            yield {
+              type: "session.step.ended",
+              created: 10_000,
+              data: {
+                sessionID: "ses_host_reconnect",
+                assistantMessageID: "msg_before_gap",
+                finish: "stop",
+                tokens: { input: 10, cache: { read: 5, write: 0 } },
+              },
+            };
+            if (termination === "error") throw new Error("transient stream failure");
+            return;
+          }
+
+          const event = await new Promise<unknown | undefined>((resolve) => {
+            const onAbort = () => resolve(undefined);
+            signal.addEventListener("abort", onAbort, { once: true });
+            pushReconnectedEvent = (value) => {
+              signal.removeEventListener("abort", onAbort);
+              resolve(value);
+            };
+          });
+          if (event !== undefined) yield event;
+          await new Promise<void>((resolve) =>
+            signal.addEventListener("abort", resolve, { once: true }),
+          );
+        },
+      };
+    });
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    cacheEventEmit.mockClear();
+
+    const cleanup = await setupPlugin({ ...ctx, rpc: {} as never, event: { subscribe } });
+    try {
+      await vi.waitFor(() => expect(subscribe).toHaveBeenCalledTimes(2), { timeout: 5_000 });
+      const signals = subscribe.mock.calls.map(([input]) => input.signal);
+      expect(signals[0]).toBe(signals[1]);
+
+      pushReconnectedEvent({
+        type: "session.step.ended",
+        created: 20_000,
+        data: {
+          sessionID: "ses_host_reconnect",
+          assistantMessageID: "msg_after_gap",
+          finish: "stop",
+          tokens: { input: 20, cache: { read: 10, write: 0 } },
+          content: "private message content must not cross RPC",
+        },
+      });
+      await vi.waitFor(() =>
+        expect(
+          cacheEventEmit.mock.calls.some(
+            ([, event]) =>
+              event.cacheObserverEvent?.type === "session.step.ended" &&
+              event.cacheObserverEvent.data.assistantMessageID === "msg_after_gap",
+          ),
+        ).toBe(true),
+      );
+
+      const events = cacheEventEmit.mock.calls.map(([, event]) => event.cacheObserverEvent);
+      const sourceEvents = events.filter((event) => event?.type === "source.status");
+      expect(sourceEvents.map((event) => event.data.state)).toEqual([
+        "observed",
+        "unavailable",
+        "observed",
+      ]);
+      expect(sourceEvents.map((event) => event.data.sourceBinding)).toEqual([
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+      ]);
+      expect(new Set(sourceEvents.map((event) => event.data.sourceBinding)).size).toBe(1);
+      expect(JSON.stringify(cacheEventEmit.mock.calls)).not.toContain("private message content");
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  it("uses independent source bindings for same-location plugin setups", async () => {
+    const signalSources: Array<{ signal: AbortSignal }> = [];
+    const createLongLivedContext = () => ({
+      ...createContext(),
+      event: {
+        subscribe: ({ signal }: { signal: AbortSignal }) => {
+          signalSources.push({ signal });
+          return {
+            async *[Symbol.asyncIterator]() {
+              await new Promise<void>((resolve) =>
+                signal.addEventListener("abort", () => resolve(), { once: true }),
+              );
+            },
+          };
+        },
+      },
+      rpc: {} as never,
+    });
+    const sourceRuntime = { snapshots: {}, settings: {} } as never;
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: sourceRuntime,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: sourceRuntime,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    cacheEventEmit.mockClear();
+
+    const firstCleanup = await setupPlugin(createLongLivedContext());
+    const secondCleanup = await setupPlugin(createLongLivedContext());
+    try {
+      const firstSnapshot = vi.mocked(registerDashboardRpc).mock.calls[0]?.[2]?.onWatchSnapshot;
+      const secondSnapshot = vi.mocked(registerDashboardRpc).mock.calls[1]?.[2]?.onWatchSnapshot;
+      expect(firstSnapshot).toEqual(expect.any(Function));
+      expect(secondSnapshot).toEqual(expect.any(Function));
+      firstSnapshot?.("attempt-first");
+      firstSnapshot?.("attempt-first");
+      secondSnapshot?.("attempt-second");
+      await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(3));
+
+      const sourceEvents = cacheEventEmit.mock.calls.map(([, event]) => event.cacheObserverEvent);
+      const firstAttemptEvents = sourceEvents.filter(
+        (event) => event.data.attemptNonce === "attempt-first",
+      );
+      const secondAttemptEvents = sourceEvents.filter(
+        (event) => event.data.attemptNonce === "attempt-second",
+      );
+      expect(firstAttemptEvents).toHaveLength(2);
+      expect(secondAttemptEvents).toHaveLength(1);
+      expect(firstAttemptEvents[0]?.data.sourceBinding).toEqual(expect.any(String));
+      expect(firstAttemptEvents[0]?.data.sourceBinding).toBe(
+        firstAttemptEvents[1]?.data.sourceBinding,
+      );
+      expect(secondAttemptEvents[0]?.data.sourceBinding).toEqual(expect.any(String));
+      expect(firstAttemptEvents[0]?.data.sourceBinding).not.toBe(
+        secondAttemptEvents[0]?.data.sourceBinding,
+      );
+    } finally {
+      await secondCleanup();
+      await firstCleanup();
+    }
+  });
+
+  it("logs why the host event stream failed before retrying, without tokens", async () => {
     const ctx = createContext();
     const token = `eyJ${"a".repeat(24)}.${"b".repeat(24)}.${"c".repeat(24)}`;
     const subscribe = vi.fn(() => ({
@@ -152,10 +371,33 @@ describe("V2 server plugin credential lifecycle", () => {
     const cleanup = await setupPlugin({ ...ctx, event: { subscribe } });
     await vi.waitFor(() =>
       expect(warn).toHaveBeenCalledWith(
-        "[opencode-quota-gui] credential event subscription stopped: event stream closed [redacted]",
+        "[opencode-quota-gui] host event subscription failed; retrying: event stream closed [redacted]",
       ),
     );
     await cleanup?.();
+    warn.mockRestore();
+  });
+
+  it("cancels the pending host event retry when the plugin is disposed", async () => {
+    const ctx = createContext();
+    const subscribe = vi.fn(() => ({
+      // biome-ignore lint/correctness/useYield: the stream fails before its first event
+      async *[Symbol.asyncIterator]() {
+        throw new Error("transient stream failure");
+      },
+    }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const cleanup = await setupPlugin({ ...ctx, event: { subscribe } });
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        "[opencode-quota-gui] host event subscription failed; retrying: transient stream failure",
+      ),
+    );
+    await cleanup?.();
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+    expect(subscribe).toHaveBeenCalledOnce();
     warn.mockRestore();
   });
 
@@ -175,5 +417,763 @@ describe("V2 server plugin credential lifecycle", () => {
 
     expect(warn.mock.calls.flat().join("\n")).not.toContain("credential event subscription");
     warn.mockRestore();
+  });
+
+  it("forwards minimal assistant-step cache evidence over the existing host and RPC lifecycles", async () => {
+    const ctx = createContext();
+    let pushHostEvent!: (event: unknown) => void;
+    let signal: AbortSignal | undefined;
+    const nextEvent = () =>
+      new Promise<unknown>((resolve) => {
+        pushHostEvent = resolve;
+      });
+    const subscribe = vi.fn(({ signal: nextSignal }: { signal: AbortSignal }) => {
+      signal = nextSignal;
+      return {
+        async *[Symbol.asyncIterator]() {
+          while (!nextSignal.aborted) yield await nextEvent();
+        },
+      };
+    });
+    const created = 1_700_000_000_000;
+    const hostEvent = {
+      type: "session.step.ended",
+      id: "evt_step_1",
+      created,
+      data: {
+        sessionID: "ses_opaque",
+        assistantMessageID: "msg_opaque",
+        finish: "stop",
+        cost: 1.25,
+        tokens: { input: 10, output: 99, reasoning: 8, cache: { read: 0, write: 4 } },
+        model: { providerID: "must-not-cross", modelID: "must-not-cross" },
+      },
+      metadata: { prompt: "must-not-cross" },
+    };
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    cacheEventEmit.mockClear();
+
+    const cleanup = await setupPlugin({
+      ...ctx,
+      rpc: {} as never,
+      event: { subscribe },
+    });
+    expect(subscribe).toHaveBeenCalledOnce();
+    expect(registerDashboardRpc).toHaveBeenCalledOnce();
+
+    pushHostEvent(hostEvent);
+    await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(2));
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(1, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "source.status",
+        created,
+        data: { state: "observed", sourceBinding: expect.any(String) },
+      },
+    });
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(2, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "session.step.ended",
+        created,
+        data: {
+          sessionID: "ses_opaque",
+          assistantMessageID: "msg_opaque",
+          tokens: { input: 10, cache: { read: 0, write: 4 } },
+        },
+      },
+    });
+
+    await cleanup?.();
+    expect(signal?.aborted).toBe(true);
+    expect(subscribe).toHaveBeenCalledOnce();
+  });
+
+  it("relays projected cache events received before RPC registration without retaining content", async () => {
+    const ctx = createContext();
+    let pushHostEvent!: (event: unknown) => void;
+    let waitingForHostEvent = false;
+    const nextEvent = () =>
+      new Promise<unknown>((resolve) => {
+        waitingForHostEvent = true;
+        pushHostEvent = (event) => {
+          waitingForHostEvent = false;
+          resolve(event);
+        };
+      });
+    const subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => ({
+      async *[Symbol.asyncIterator]() {
+        while (!signal.aborted) {
+          const event = await nextEvent();
+          yield event;
+        }
+      },
+    }));
+    const created = 1_700_000_000_100;
+    const startedEvent = {
+      type: "session.step.started",
+      created,
+      data: {
+        sessionID: "ses_pre_registration",
+        assistantMessageID: "msg_pre_registration",
+        model: { providerID: "openai", id: "gpt-test" },
+        started: created - 10,
+      },
+    };
+    const hostEvent = {
+      type: "session.step.ended",
+      created,
+      data: {
+        sessionID: "ses_pre_registration",
+        assistantMessageID: "msg_pre_registration",
+        finish: "stop",
+        tokens: { input: 20, cache: { read: 10, write: 0 } },
+        content: "private event content must not cross RPC",
+      },
+    };
+    let receiveNativeEvent: ((event: never) => void) | undefined;
+    const nativeObserver = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveNativeEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+    });
+    const releaseNativeObserver = nativeObserver.subscribe("ses_pre_registration", vi.fn());
+    let resolveRegistration!: (registration: {
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }) => void;
+    const registration = new Promise<{
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }>((resolve) => {
+      resolveRegistration = resolve;
+    });
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    vi.mocked(registerDashboardRpc).mockImplementationOnce(async () => registration as never);
+    cacheEventEmit.mockClear();
+    cacheEventEmit.mockImplementation(async (_name, eventData) => {
+      if (eventData.topic === "cache.observer") {
+        receiveNativeEvent?.(eventData.cacheObserverEvent as never);
+      }
+    });
+
+    const setup = setupPlugin({ ...ctx, rpc: {} as never, event: { subscribe } });
+    await vi.waitFor(() => expect(subscribe).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(waitingForHostEvent).toBe(true));
+    pushHostEvent(startedEvent);
+    await vi.waitFor(() => expect(waitingForHostEvent).toBe(true));
+    pushHostEvent(hostEvent);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cacheEventEmit).not.toHaveBeenCalled();
+
+    resolveRegistration({ events: { emit: cacheEventEmit }, dispose: async () => {} });
+    const cleanup = await setup;
+    await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(3));
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(1, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "source.status",
+        created,
+        data: { state: "observed", sourceBinding: expect.any(String) },
+      },
+    });
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(2, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "session.step.started",
+        created,
+        data: {
+          sessionID: "ses_pre_registration",
+          assistantMessageID: "msg_pre_registration",
+          model: { providerID: "openai", id: "gpt-test" },
+          started: created - 10,
+        },
+      },
+    });
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(3, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "session.step.ended",
+        created,
+        data: {
+          sessionID: "ses_pre_registration",
+          assistantMessageID: "msg_pre_registration",
+          tokens: { input: 20, cache: { read: 10, write: 0 } },
+        },
+      },
+    });
+    expect(JSON.stringify(cacheEventEmit.mock.calls)).not.toContain("private event content");
+    expect(nativeObserver.query("ses_pre_registration")).toMatchObject({
+      primaryCacheReadRatio: { value: 1 / 3, messageId: "msg_pre_registration" },
+    });
+
+    await cleanup?.();
+    releaseNativeObserver();
+    nativeObserver.dispose();
+  });
+
+  it("replays buffered cache events before publishing a host stream failure to Native", async () => {
+    const ctx = createContext();
+    const created = 1_700_000_000_200;
+    const sessionId = "ses_failed_pre_registration";
+    const messageId = "msg_failed_pre_registration";
+    const subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => ({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "session.step.started",
+          created,
+          data: {
+            sessionID: sessionId,
+            assistantMessageID: messageId,
+            model: { providerID: "openai", id: "gpt-test" },
+            started: created - 10,
+          },
+        };
+        yield {
+          type: "session.step.ended",
+          created: created + 100,
+          data: {
+            sessionID: sessionId,
+            assistantMessageID: messageId,
+            finish: "stop",
+            tokens: { input: 20, cache: { read: 10, write: 0 } },
+            content: "private event content must not cross RPC",
+          },
+        };
+        if (!signal.aborted) throw new Error("host stream ended");
+      },
+    }));
+    let receiveNativeEvent: ((event: never) => void) | undefined;
+    const nativeObserver = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveNativeEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+    });
+    const releaseNativeObserver = nativeObserver.subscribe(sessionId, vi.fn());
+    let resolveRegistration!: (registration: {
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }) => void;
+    const registration = new Promise<{
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }>((resolve) => {
+      resolveRegistration = resolve;
+    });
+    const emit = vi.fn(
+      async (
+        _name: string,
+        eventData: {
+          topic?: string;
+          cacheObserverEvent?: { type: string };
+        },
+      ) => {
+        if (eventData.topic === "cache.observer") {
+          receiveNativeEvent?.(eventData.cacheObserverEvent as never);
+        }
+      },
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    vi.mocked(registerDashboardRpc).mockImplementationOnce(async () => registration as never);
+
+    let resolveRegistrationCalled = false;
+    let cleanup: (() => Promise<void> | void) | undefined;
+    const setup = setupPlugin({ ...ctx, rpc: {} as never, event: { subscribe } });
+    try {
+      await vi.waitFor(() => expect(registerDashboardRpc).toHaveBeenCalledOnce());
+      await vi.waitFor(() =>
+        expect(warn).toHaveBeenCalledWith(
+          "[opencode-quota-gui] host event subscription failed; retrying: host stream ended",
+        ),
+      );
+      expect(emit).not.toHaveBeenCalled();
+
+      resolveRegistration({ events: { emit }, dispose: async () => {} });
+      resolveRegistrationCalled = true;
+      cleanup = await setup;
+      await vi.waitFor(() => expect(emit).toHaveBeenCalledTimes(4));
+
+      const relayedEvents = emit.mock.calls.map(([, eventData]) => eventData.cacheObserverEvent);
+      expect(relayedEvents.map((event) => event?.type)).toEqual([
+        "source.status",
+        "session.step.started",
+        "session.step.ended",
+        "source.status",
+      ]);
+      expect(relayedEvents[0]).toMatchObject({
+        type: "source.status",
+        data: { state: "observed" },
+      });
+      expect(relayedEvents.at(-1)).toMatchObject({
+        type: "source.status",
+        data: { state: "unavailable" },
+      });
+      expect(JSON.stringify(emit.mock.calls)).not.toContain("private event content");
+      expect(nativeObserver.transport().hostEvents).toBe("unavailable");
+      // The replayed successful step is ingested before the stream failure; the failure
+      // marks host events unavailable but keeps the last observed primary estimate.
+      expect(nativeObserver.query(sessionId)).toMatchObject({
+        primaryCacheReadRatio: { value: 1 / 3, messageId },
+      });
+    } finally {
+      if (!resolveRegistrationCalled) {
+        resolveRegistration({ events: { emit }, dispose: async () => {} });
+      }
+      cleanup ??= await setup;
+      await cleanup?.();
+      releaseNativeObserver();
+      nativeObserver.dispose();
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps credential events responsive and disposes while a cache emitter remains unresolved", async () => {
+    const ctx = createContext();
+    const host = createHostEventQueue();
+    const deepseek = {
+      integrationId: "deepseek",
+      id: "cred_deepseek",
+      label: "default",
+      registered: true,
+      method: "key" as const,
+      value: { type: "key", key: "old-key" } as Record<string, unknown>,
+    };
+    const integration = createFakeIntegration([deepseek]);
+    let finishStartedEmission!: () => void;
+    const startedEmission = new Promise<void>((resolve) => {
+      finishStartedEmission = resolve;
+    });
+    const emit = vi.fn(
+      async (
+        _name: string,
+        data: {
+          cacheObserverEvent?: {
+            type: string;
+            data?: { assistantMessageID?: string; state?: string };
+          };
+        },
+      ) => {
+        if (data.cacheObserverEvent?.type === "session.step.started") await startedEmission;
+      },
+    );
+    const rpcDispose = vi.fn(async () => {});
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    vi.mocked(registerDashboardRpc).mockImplementationOnce(
+      async () =>
+        ({
+          events: { emit },
+          dispose: rpcDispose,
+        }) as never,
+    );
+
+    const cleanup = await setupPlugin({
+      ...ctx,
+      integration,
+      rpc: {} as never,
+      event: { subscribe: host.subscribe },
+    });
+    let stopping: Promise<void> | undefined;
+    try {
+      const read = () => readAuthFileCached({ maxAgeMs: 60_000, integrationIds: ["deepseek"] });
+      await expect(read()).resolves.toEqual({ deepseek: { type: "api", key: "old-key" } });
+      host.push({
+        type: "session.step.started",
+        created: 10_000,
+        data: {
+          sessionID: "ses_slow_emitter",
+          assistantMessageID: "msg_slow_first",
+          model: { providerID: "openai", id: "gpt-test" },
+          started: 9_900,
+        },
+      });
+      await vi.waitFor(() =>
+        expect(
+          emit.mock.calls.some(
+            ([, data]) => data.cacheObserverEvent?.type === "session.step.started",
+          ),
+        ).toBe(true),
+      );
+
+      deepseek.value = { type: "key", key: "new-key" };
+      host.push({
+        type: "credential.updated",
+        data: { integrationID: "deepseek", credentialID: "cred_deepseek" },
+      });
+      await vi.waitFor(async () =>
+        expect(await read()).toEqual({ deepseek: { type: "api", key: "new-key" } }),
+      );
+
+      stopping = Promise.resolve(cleanup?.());
+      const disposedBeforeEmitterSettled = await Promise.race([
+        stopping.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+      ]);
+      expect(disposedBeforeEmitterSettled).toBe(true);
+      expect(host.signal?.aborted).toBe(true);
+      expect(rpcDispose).toHaveBeenCalledOnce();
+    } finally {
+      finishStartedEmission();
+      if (stopping !== undefined) await stopping;
+      else await cleanup?.();
+    }
+
+    expect(
+      emit.mock.calls.filter(
+        ([, data]) => data.cacheObserverEvent?.type === "session.step.started",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("bounds the registered cache relay and reports a gap after a stalled emitter recovers", async () => {
+    const ctx = createContext();
+    const host = createHostEventQueue();
+    let finishFirstEmission!: () => void;
+    const firstEmission = new Promise<void>((resolve) => {
+      finishFirstEmission = resolve;
+    });
+    const emit = vi.fn(
+      async (
+        _name: string,
+        data: {
+          cacheObserverEvent?: {
+            type: string;
+            data?: { assistantMessageID?: string; state?: string };
+          };
+        },
+      ) => {
+        if (
+          data.cacheObserverEvent?.type === "session.step.started" &&
+          data.cacheObserverEvent.data?.assistantMessageID === "msg_stalled_first"
+        ) {
+          await firstEmission;
+        }
+      },
+    );
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    vi.mocked(registerDashboardRpc).mockImplementationOnce(
+      async () =>
+        ({
+          events: { emit },
+          dispose: vi.fn(async () => {}),
+        }) as never,
+    );
+
+    const cleanup = await setupPlugin({
+      ...ctx,
+      rpc: {} as never,
+      event: { subscribe: host.subscribe },
+    });
+    host.push({
+      type: "session.step.started",
+      created: 30_000,
+      data: {
+        sessionID: "ses_stalled_relay",
+        assistantMessageID: "msg_stalled_first",
+        model: { providerID: "openai", id: "gpt-test" },
+        started: 29_900,
+      },
+    });
+    await vi.waitFor(() =>
+      expect(
+        emit.mock.calls.some(
+          ([, data]) =>
+            data.cacheObserverEvent?.type === "session.step.started" &&
+            data.cacheObserverEvent.data?.assistantMessageID === "msg_stalled_first",
+        ),
+      ).toBe(true),
+    );
+    await vi.waitFor(() => expect(host.pulls).toBe(2));
+
+    for (let index = 0; index < 513; index += 1) {
+      host.push({
+        type: "session.step.started",
+        created: 30_100 + index,
+        data: {
+          sessionID: "ses_stalled_relay",
+          assistantMessageID: `msg_stalled_${index}`,
+          model: { providerID: "openai", id: "gpt-test" },
+          started: 30_000 + index,
+        },
+      });
+    }
+    await vi.waitFor(() => expect(host.pulls).toBe(515));
+    finishFirstEmission();
+
+    await vi.waitFor(() =>
+      expect(
+        emit.mock.calls.filter(
+          ([, data]) => data.cacheObserverEvent?.type === "session.step.started",
+        ),
+      ).toHaveLength(513),
+    );
+    const relayedMessageIds = emit.mock.calls
+      .map(([, data]) => data.cacheObserverEvent)
+      .filter((event) => event?.type === "session.step.started")
+      .map((event) => event?.data?.assistantMessageID);
+    expect(relayedMessageIds[0]).toBe("msg_stalled_first");
+    expect(relayedMessageIds[1]).toBe("msg_stalled_1");
+    expect(relayedMessageIds.at(-1)).toBe("msg_stalled_512");
+    expect(
+      emit.mock.calls.some(
+        ([, data]) =>
+          data.cacheObserverEvent?.type === "source.status" &&
+          data.cacheObserverEvent.data?.state === "unavailable",
+      ),
+    ).toBe(true);
+    await cleanup?.();
+  });
+
+  it("bounds cache events buffered before RPC registration and reports a dropped-event gap", async () => {
+    const ctx = createContext();
+    const host = createHostEventQueue();
+    let resolveRegistration!: (registration: {
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }) => void;
+    const registration = new Promise<{
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }>((resolve) => {
+      resolveRegistration = resolve;
+    });
+    const emit = vi.fn(async () => {});
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    vi.mocked(registerDashboardRpc).mockImplementationOnce(async () => registration as never);
+
+    const setup = setupPlugin({
+      ...ctx,
+      rpc: {} as never,
+      event: { subscribe: host.subscribe },
+    });
+    await vi.waitFor(() => expect(registerDashboardRpc).toHaveBeenCalledOnce());
+    for (let index = 0; index < 513; index += 1) {
+      host.push({
+        type: "session.step.started",
+        created: 20_000 + index,
+        data: {
+          sessionID: "ses_bounded_relay",
+          assistantMessageID: `msg_${index}`,
+          model: { providerID: "openai", id: "gpt-test" },
+          started: 19_000 + index,
+        },
+      });
+    }
+    await vi.waitFor(() => expect(host.pulls).toBe(514));
+    resolveRegistration({ events: { emit }, dispose: async () => {} });
+    const cleanup = await setup;
+    await vi.waitFor(() =>
+      expect(
+        emit.mock.calls.filter(
+          ([, data]) => data.cacheObserverEvent?.type === "session.step.started",
+        ),
+      ).toHaveLength(512),
+    );
+
+    const startedEvents = emit.mock.calls
+      .map(([, data]) => data.cacheObserverEvent)
+      .filter((event) => event?.type === "session.step.started");
+    expect(startedEvents[0]?.data).toMatchObject({ assistantMessageID: "msg_1" });
+    expect(startedEvents.at(-1)?.data).toMatchObject({ assistantMessageID: "msg_512" });
+    expect(
+      emit.mock.calls.some(
+        ([, data]) =>
+          data.cacheObserverEvent?.type === "source.status" &&
+          data.cacheObserverEvent.data?.state === "unavailable",
+      ),
+    ).toBe(true);
+    await cleanup?.();
+  });
+
+  it("does not revive the host source after it becomes unavailable during overflow draining", async () => {
+    const ctx = createContext();
+    const host = createHostEventQueue();
+    let resolveRegistration!: (registration: {
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }) => void;
+    const registration = new Promise<{
+      events: { emit: typeof cacheEventEmit };
+      dispose: () => Promise<void>;
+    }>((resolve) => {
+      resolveRegistration = resolve;
+    });
+    let releaseBacklogEvent!: () => void;
+    const emit = vi.fn(async (_name: string, data: Record<string, any>) => {
+      if (
+        data.cacheObserverEvent?.type === "session.step.started" &&
+        data.cacheObserverEvent.data?.assistantMessageID === "msg_1"
+      ) {
+        await new Promise<void>((resolve) => {
+          releaseBacklogEvent = resolve;
+        });
+      }
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    vi.mocked(registerDashboardRpc).mockImplementationOnce(async () => registration as never);
+
+    const setup = setupPlugin({
+      ...ctx,
+      rpc: {} as never,
+      event: { subscribe: host.subscribe },
+    });
+    await vi.waitFor(() => expect(registerDashboardRpc).toHaveBeenCalledOnce());
+    for (let index = 0; index < 513; index += 1) {
+      host.push({
+        type: "session.step.started",
+        created: 30_000 + index,
+        data: {
+          sessionID: "ses_overflow_source_race",
+          assistantMessageID: `msg_${index}`,
+          model: { providerID: "openai", id: "gpt-test" },
+          started: 29_000 + index,
+        },
+      });
+    }
+    await vi.waitFor(() => expect(host.pulls).toBe(514));
+    resolveRegistration({ events: { emit }, dispose: async () => {} });
+    const cleanup = await setup;
+
+    await vi.waitFor(() => expect(releaseBacklogEvent).toBeTypeOf("function"));
+    host.end();
+    await vi.waitFor(() =>
+      expect(warn).toHaveBeenCalledWith(
+        "[opencode-quota-gui] host event subscription failed; retrying: host event stream ended",
+      ),
+    );
+    releaseBacklogEvent();
+
+    await vi.waitFor(() => {
+      expect(
+        emit.mock.calls.filter(
+          ([, data]) => data.cacheObserverEvent?.type === "session.step.started",
+        ),
+      ).toHaveLength(512);
+      expect(
+        emit.mock.calls.filter(
+          ([, data]) =>
+            data.cacheObserverEvent?.type === "source.status" &&
+            data.cacheObserverEvent.data?.state === "unavailable",
+        ),
+      ).toHaveLength(2);
+    });
+    const sourceStates = emit.mock.calls
+      .map(([, data]) => data.cacheObserverEvent)
+      .filter((event) => event?.type === "source.status")
+      .map((event) => event?.data?.state);
+    expect(sourceStates).toEqual(["unavailable", "unavailable"]);
+
+    warn.mockRestore();
+    await cleanup?.();
+  });
+
+  it("does not treat model.list settings at Started-event arrival as dispatch-bound TTL evidence", async () => {
+    const ctx = createContext();
+    let pushHostEvent!: (event: unknown) => void;
+    const nextEvent = () =>
+      new Promise<unknown>((resolve) => {
+        pushHostEvent = resolve;
+      });
+    const subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => ({
+      async *[Symbol.asyncIterator]() {
+        while (!signal.aborted) yield await nextEvent();
+      },
+    }));
+    const modelList = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: "claude-test",
+          providerID: "anthropic",
+          package: "@opencode/ai/providers/anthropic",
+          settings: { cache: { ttl: "1h" } },
+        },
+      ],
+    });
+    const created = 1_700_000_000_000;
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    vi.mocked(registerDashboardRpc).mockClear();
+    cacheEventEmit.mockClear();
+
+    const cleanup = await setupPlugin({
+      ...ctx,
+      model: { list: modelList },
+      rpc: {} as never,
+      event: { subscribe },
+    });
+    pushHostEvent({
+      type: "session.step.started",
+      id: "evt_started",
+      created,
+      data: {
+        sessionID: "ses_started",
+        assistantMessageID: "msg_started",
+        agent: "build",
+        model: { providerID: "anthropic", id: "claude-test", variant: "default" },
+        started: created - 100,
+      },
+    });
+
+    await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(2));
+    expect(modelList).not.toHaveBeenCalled();
+    expect(cacheEventEmit).toHaveBeenNthCalledWith(2, "invalidated", {
+      topic: "cache.observer",
+      at: created,
+      cacheObserverEvent: {
+        type: "session.step.started",
+        created,
+        data: {
+          sessionID: "ses_started",
+          assistantMessageID: "msg_started",
+          model: { providerID: "anthropic", id: "claude-test" },
+          started: created - 100,
+        },
+      },
+    });
+
+    await cleanup?.();
   });
 });

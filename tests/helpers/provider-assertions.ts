@@ -120,9 +120,9 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
   "alibaba-coding-plan": [
     {
       resultType: "quota",
-      acquisitionMethod: "local_estimation",
+      acquisitionMethod: "local_cli",
       ownership: "maintained",
-      authority: "locally_derived",
+      authority: "provider_reported",
     },
   ],
   "alibaba-token-plan": [

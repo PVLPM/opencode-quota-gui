@@ -41,7 +41,7 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
   {
     id: "anthropic",
     label: "Anthropic",
-    runtimeIds: ["anthropic"],
+    runtimeIds: ["anthropic", "claude-agent", "claude-code"],
     synonyms: ["claude", "claude-code"],
     shape: {
       autoSetup: "needs_quick_setup",
@@ -120,10 +120,10 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     synonyms: ["alibaba"],
     liveLocalUsage: true,
     shape: {
-      autoSetup: "yes",
-      authentication: "opencode_auth_api_key",
-      authFallbacks: ["env_api_key", "global_opencode_config"],
-      quota: "local_estimation",
+      autoSetup: "needs_quick_setup",
+      authentication: "local_cli_auth",
+      quota: "local_cli_report",
+      quickSetupAnchor: "alibaba-coding-plan",
     },
   },
   {

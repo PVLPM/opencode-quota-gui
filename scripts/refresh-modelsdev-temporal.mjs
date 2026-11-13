@@ -21,6 +21,8 @@ export const TEMPORAL_COMMITS_ATOM_URL = `https://github.com/${TEMPORAL_REPOSITO
 const ARCHIVE_ROOT = `https://codeload.github.com/${TEMPORAL_REPOSITORY}/tar.gz`;
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
 const CN_SOURCE = "https://www.gov.cn/gongbao/2025/issue_12406/202511/content_7048922.html";
+const CN_2027_SOURCE =
+  "https://english.www.gov.cn/policies/latestreleases/202611/06/content_WS6aed74dcc6d00ca5f9a0e22e.html";
 const CN_UTC_OFFSET_MS = 8 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 15_000;
 const BUNDLED_SNAPSHOT_URL = new URL("../src/data/modelsdev-temporal.min.json", import.meta.url);
@@ -129,6 +131,24 @@ const CN_2026 = {
     "2026-09-20",
     "2026-10-10",
   ],
+};
+
+// State Council of the People's Republic of China. National 2027 public-holiday
+// intervals; compensatory working days are not used by weekday pricing.
+const CN_2027 = {
+  timeZone: "Asia/Shanghai",
+  source: CN_2027_SOURCE,
+  published: "2026-11-06",
+  intervals: [
+    cnInterval("new-year", "2027-01-01", "2027-01-04"),
+    cnInterval("spring-festival", "2027-02-05", "2027-02-14"),
+    cnInterval("qingming", "2027-04-03", "2027-04-06"),
+    cnInterval("labour-day", "2027-05-01", "2027-05-06"),
+    cnInterval("dragon-boat-festival", "2027-06-09", "2027-06-10"),
+    cnInterval("mid-autumn-festival", "2027-09-15", "2027-09-16"),
+    cnInterval("national-day", "2027-10-01", "2027-10-08"),
+  ],
+  makeupWorkdays: [],
 };
 
 function stripComment(line) {
@@ -875,7 +895,7 @@ export async function buildTemporalSnapshot(files, options = {}) {
     revision,
     source: temporalSourceUrl(revision),
     generatedAt,
-    jurisdictions: { CN: { 2026: cloneJson(CN_2026) } },
+    jurisdictions: { CN: { 2026: cloneJson(CN_2026), 2027: cloneJson(CN_2027) } },
     providers: sortedProviders,
   });
   await assertRuntimeTemporalSnapshot(snapshot);

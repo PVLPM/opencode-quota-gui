@@ -26,6 +26,7 @@ import {
   quotaNotificationSettingsFromSnapshot,
 } from "../src/gui/quota-notification-observer.js";
 import { writeJsonAtomic } from "../src/lib/atomic-json.js";
+import type { NativeQuotaNotificationPolicy } from "../src/lib/types.js";
 
 const NOW = Date.parse("2026-11-02T12:00:00.000Z");
 const RESET_AT = "2026-11-02T17:00:00.000Z";
@@ -49,6 +50,7 @@ function row(percentRemaining: number, rowId = "row-1", resetAtIso = RESET_AT): 
     label: "5-hour window",
     kind: "percent",
     resultType: "quota",
+    metric: { kind: "window", window: "five_hour" },
     percentRemaining,
     resetAtIso,
   };
@@ -108,16 +110,43 @@ function twoRowsSnapshot(percentRemaining: number): QuotaSnapshot {
   ]);
 }
 
+type NativePolicyOverrides = {
+  [Key in keyof NativeQuotaNotificationPolicy]?: NativeQuotaNotificationPolicy[Key] extends object
+    ? Partial<NativeQuotaNotificationPolicy[Key]>
+    : NativeQuotaNotificationPolicy[Key];
+};
+
 function effectiveSettings(
-  overrides: Partial<QuotaNotificationSettings> = {},
+  overrides: Omit<Partial<QuotaNotificationSettings>, "policy"> & {
+    policy?: NativePolicyOverrides;
+  } = {},
 ): QuotaNotificationSettings {
+  const { policy: policyOverrides, ...settingsOverrides } = overrides;
+  const defaultPolicy: NativeQuotaNotificationPolicy = {
+    enabled: true,
+    modelChangeToastEnabled: true,
+    low: { enabled: true, thresholdRemainingPercent: 10 },
+    exhausted: { enabled: true },
+    reset: {
+      enabled: true,
+      windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+    },
+    providerError: { enabled: true },
+    duplicateCooldownMinutes: 30,
+  };
   return {
-    lowThresholdPercent: 10,
-    cooldownMs: 30 * 60_000,
+    policy: {
+      ...defaultPolicy,
+      ...policyOverrides,
+      low: { ...defaultPolicy.low, ...policyOverrides?.low },
+      exhausted: { ...defaultPolicy.exhausted, ...policyOverrides?.exhausted },
+      reset: { ...defaultPolicy.reset, ...policyOverrides?.reset },
+      providerError: { ...defaultPolicy.providerError, ...policyOverrides?.providerError },
+    },
     hiddenCards: [],
     hiddenRows: [],
     percentDisplayMode: "remaining",
-    ...overrides,
+    ...settingsOverrides,
   };
 }
 
@@ -213,7 +242,7 @@ describe("quota notification observer", () => {
     });
     const { observer } = createObserver({
       statePath,
-      settings: effectiveSettings({ cooldownMs }),
+      settings: effectiveSettings({ policy: { duplicateCooldownMinutes: cooldownMs / 60_000 } }),
     });
 
     observer.observe(snapshot(50));
@@ -367,7 +396,7 @@ describe("quota notification observer", () => {
     const statePath = makeStatePath();
     const { observer, events } = createObserver({
       statePath,
-      settings: effectiveSettings({ cooldownMs: 5 * 60_000 }),
+      settings: effectiveSettings({ policy: { duplicateCooldownMinutes: 5 } }),
     });
     const rawMessage = "provider body sk-secret-value";
 
@@ -489,7 +518,7 @@ describe("quota notification observer", () => {
     await observer.flush();
     expect(events).toHaveLength(1);
 
-    settings = effectiveSettings({ cooldownMs: 5 * 60_000 });
+    settings = effectiveSettings({ policy: { duplicateCooldownMinutes: 5 } });
     now += 10 * 60_000;
     observer.observe(snapshot(5));
     await observer.flush();
@@ -513,7 +542,7 @@ describe("quota notification observer", () => {
     });
     const { observer, events } = createObserver({
       statePath,
-      settings: effectiveSettings({ cooldownMs: 0 }),
+      settings: effectiveSettings({ policy: { duplicateCooldownMinutes: 0 } }),
     });
 
     observer.observe(snapshot(50));
@@ -529,7 +558,10 @@ describe("quota notification observer", () => {
 
   it("keeps sequential reset transitions while pruning their old cooldowns", async () => {
     let now = NOW;
-    const settings = effectiveSettings({ cooldownMs: 5 * 60_000, percentDisplayMode: "used" });
+    const settings = effectiveSettings({
+      policy: { duplicateCooldownMinutes: 5 },
+      percentDisplayMode: "used",
+    });
     const statePath = makeStatePath();
     const { observer, events } = createObserver({
       statePath,
@@ -555,7 +587,7 @@ describe("quota notification observer", () => {
     // Advance beyond the configured horizon without changing the reset
     // boundary; the transition baseline remains in memory while its persisted
     // cooldown is pruned.
-    now += settings.cooldownMs + 1;
+    now += settings.policy.duplicateCooldownMinutes * 60_000 + 1;
     observer.observe(snapshot(70, { resetAtIso: new Date(firstResetAtMs).toISOString() }));
     await observer.flush();
     expect(events).toHaveLength(1);
@@ -592,7 +624,7 @@ describe("quota notification observer", () => {
     const { observer, events } = createObserver({
       statePath,
       now: () => now,
-      settings: effectiveSettings({ cooldownMs }),
+      settings: effectiveSettings({ policy: { duplicateCooldownMinutes: cooldownMs / 60_000 } }),
     });
 
     observer.observe(snapshot(50));
@@ -780,11 +812,45 @@ describe("quota notification observer", () => {
     expect(events).toEqual([]);
   });
 
+  it("keeps observing while Native notifications are disabled and never catches up", async () => {
+    let settings = effectiveSettings();
+    settings = { ...settings, policy: { ...settings.policy, enabled: false } };
+    const { observer, events } = createObserver({ loadSettings: async () => settings });
+
+    observer.observe(snapshot(50));
+    await observer.flush();
+    observer.observe(snapshot(5));
+    await observer.flush();
+    expect(events).toEqual([]);
+
+    settings = { ...settings, policy: { ...settings.policy, enabled: true } };
+    observer.observe(snapshot(5));
+    await observer.flush();
+    expect(events).toEqual([]);
+
+    observer.observe(snapshot(50));
+    observer.observe(snapshot(5));
+    await observer.flush();
+    expect(events).toHaveLength(1);
+    expect(events[0]?.kind).toBe("low");
+    await observer.close();
+  });
+
   it("derives canonical settings and defaults from the settings snapshot", () => {
     const defaults = quotaNotificationSettingsFromSnapshot(settingsSnapshot({}));
     expect(defaults).toEqual({
-      lowThresholdPercent: 10,
-      cooldownMs: 30 * 60_000,
+      policy: {
+        enabled: true,
+        modelChangeToastEnabled: true,
+        low: { enabled: true, thresholdRemainingPercent: 10 },
+        exhausted: { enabled: true },
+        reset: {
+          enabled: true,
+          windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+        },
+        providerError: { enabled: true },
+        duplicateCooldownMinutes: 30,
+      },
       hiddenCards: [],
       hiddenRows: [],
       percentDisplayMode: "remaining",
@@ -793,31 +859,49 @@ describe("quota notification observer", () => {
     const configured = quotaNotificationSettingsFromSnapshot(
       settingsSnapshot(
         {
-          lowQuotaThresholdRemainingPercent: 20,
-          duplicateCooldownMinutes: 5,
+          lowQuotaThresholdRemainingPercent: 99,
+          duplicateCooldownMinutes: 1,
+          resetNotifications: { enabled: false, windows: ["weekly"] },
+          nativeQuotaNotifications: {
+            enabled: false,
+            low: { enabled: false, thresholdRemainingPercent: 20 },
+            exhausted: { enabled: true },
+            reset: { enabled: true, windows: ["weekly"] },
+            providerError: { enabled: false },
+            duplicateCooldownMinutes: 5,
+          },
           percentDisplayMode: "used",
         },
         { hiddenCards: ["openai"], hiddenRows: ["row-1"] },
       ),
     );
     expect(configured).toEqual({
-      lowThresholdPercent: 20,
-      cooldownMs: 5 * 60_000,
+      policy: {
+        enabled: false,
+        modelChangeToastEnabled: true,
+        low: { enabled: false, thresholdRemainingPercent: 20 },
+        exhausted: { enabled: true },
+        reset: { enabled: true, windows: ["weekly"] },
+        providerError: { enabled: false },
+        duplicateCooldownMinutes: 5,
+      },
       hiddenCards: ["openai"],
       hiddenRows: ["row-1"],
       percentDisplayMode: "used",
     });
 
     expect(() =>
-      quotaNotificationSettingsFromSnapshot(
-        settingsSnapshot({ lowQuotaThresholdRemainingPercent: "high" }),
-      ),
-    ).toThrow(/config unavailable/u);
-    expect(() =>
-      quotaNotificationSettingsFromSnapshot(settingsSnapshot({ duplicateCooldownMinutes: -1 })),
-    ).toThrow(/config unavailable/u);
-    expect(() =>
       quotaNotificationSettingsFromSnapshot(settingsSnapshot({ percentDisplayMode: "percent" })),
+    ).toThrow(/config unavailable/u);
+    expect(() =>
+      quotaNotificationSettingsFromSnapshot(
+        settingsSnapshot({
+          nativeQuotaNotifications: {
+            enabled: true,
+            low: { enabled: true, thresholdRemainingPercent: "high" },
+          },
+        }),
+      ),
     ).toThrow(/config unavailable/u);
 
     // Visibility is authoritative. Missing or malformed values must fail
@@ -848,6 +932,56 @@ describe("quota notification observer", () => {
         values: {},
         visibility: { hiddenCards: [""], hiddenRows: [] },
       } as unknown as SettingsSnapshot),
+    ).toThrow(/config unavailable/u);
+  });
+
+  it("uses legacy threshold and cooldown aliases for absent or partial policy snapshots", () => {
+    const legacy = quotaNotificationSettingsFromSnapshot(
+      settingsSnapshot({
+        lowQuotaThresholdRemainingPercent: 20,
+        duplicateCooldownMinutes: 5,
+      }),
+    );
+    expect(legacy.policy).toEqual({
+      enabled: true,
+      modelChangeToastEnabled: true,
+      low: { enabled: true, thresholdRemainingPercent: 20 },
+      exhausted: { enabled: true },
+      reset: {
+        enabled: true,
+        windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+      },
+      providerError: { enabled: true },
+      duplicateCooldownMinutes: 5,
+    });
+
+    const partial = quotaNotificationSettingsFromSnapshot(
+      settingsSnapshot({
+        lowQuotaThresholdRemainingPercent: 20,
+        duplicateCooldownMinutes: 5,
+        nativeQuotaNotifications: {
+          low: { thresholdRemainingPercent: 25 },
+          reset: { windows: ["weekly"] },
+        },
+      }),
+    );
+    expect(partial.policy).toEqual({
+      enabled: true,
+      modelChangeToastEnabled: true,
+      low: { enabled: true, thresholdRemainingPercent: 25 },
+      exhausted: { enabled: true },
+      reset: { enabled: true, windows: ["weekly"] },
+      providerError: { enabled: true },
+      duplicateCooldownMinutes: 5,
+    });
+
+    expect(() =>
+      quotaNotificationSettingsFromSnapshot(
+        settingsSnapshot({ lowQuotaThresholdRemainingPercent: "high" }),
+      ),
+    ).toThrow(/config unavailable/u);
+    expect(() =>
+      quotaNotificationSettingsFromSnapshot(settingsSnapshot({ duplicateCooldownMinutes: -1 })),
     ).toThrow(/config unavailable/u);
   });
 

@@ -430,7 +430,7 @@ describe("dashboard RPC lifecycle", () => {
     if (!lease.runtime) throw new Error("expected the shared runtime");
     const registrar = createFakeRegistrar();
     const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
-    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
+    const watchInputs: Array<{ scope: "quota" | "analytics"; attemptNonce: string }> = [];
     let healthCalls = 0;
     let releaseTimeoutHealth: ((health: DashboardHealth) => void) | undefined;
     const timeoutWatches: Array<(error: Error) => void> = [];
@@ -457,7 +457,10 @@ describe("dashboard RPC lifecycle", () => {
         // RPC schema, whose health output guard validates a DashboardHealth.
         return registrar.call("health", {}, options?.signal) as Promise<DashboardHealth>;
       },
-      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+      watch: (
+        input: { scope: "quota" | "analytics"; attemptNonce: string },
+        options?: { signal?: AbortSignal },
+      ) => {
         watchInputs.push(input);
         // Keep the RPC server's held viewer distinct from the Desktop client's
         // signal: a host deadline cancels that request, not the live session.
@@ -511,7 +514,7 @@ describe("dashboard RPC lifecycle", () => {
       client.subscribe(() => {});
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "quota" }]);
+          expect(watchInputs).toEqual([{ scope: "quota", attemptNonce: expect.any(String) }]);
           expect(snapshots.scopedScopes).toEqual(["quota", "quota"]);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
@@ -545,7 +548,11 @@ describe("dashboard RPC lifecycle", () => {
       });
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "quota" }, { scope: "quota" }]);
+          expect(watchInputs).toEqual([
+            { scope: "quota", attemptNonce: expect.any(String) },
+            { scope: "quota", attemptNonce: expect.any(String) },
+          ]);
+          expect(watchInputs[1]?.attemptNonce).toBe(watchInputs[0]?.attemptNonce);
           expect(snapshots.scopedScopes).toEqual(["quota", "quota", "quota"]);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
@@ -569,7 +576,11 @@ describe("dashboard RPC lifecycle", () => {
         () => {
           expect(healthCalls).toBe(3);
           expect(watchInputs).toHaveLength(3);
-          expect(watchInputs[2]).toEqual({ scope: "quota" });
+          expect(watchInputs[2]).toMatchObject({
+            scope: "quota",
+            attemptNonce: expect.any(String),
+          });
+          expect(watchInputs[2]?.attemptNonce).toBe(watchInputs[0]?.attemptNonce);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
         },
@@ -624,7 +635,7 @@ describe("dashboard RPC lifecycle", () => {
     if (!lease.runtime) throw new Error("expected the shared runtime");
     const registrar = createFakeRegistrar();
     const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
-    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
+    const watchInputs: Array<{ scope: "quota" | "analytics"; attemptNonce: string }> = [];
     const timeoutWatches: Array<(error: Error) => void> = [];
     let activeWatches = 0;
     let maxActiveWatches = 0;
@@ -670,7 +681,10 @@ describe("dashboard RPC lifecycle", () => {
         registrar.call("groups", input, options?.signal),
       session: (input: { sessionId: string }, options?: { signal?: AbortSignal }) =>
         registrar.call("session", input, options?.signal),
-      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+      watch: (
+        input: { scope: "quota" | "analytics"; attemptNonce: string },
+        options?: { signal?: AbortSignal },
+      ) => {
         watchInputs.push(input);
         activeWatches += 1;
         maxActiveWatches = Math.max(maxActiveWatches, activeWatches);
@@ -730,7 +744,7 @@ describe("dashboard RPC lifecycle", () => {
       unsubscribe = client.subscribe(() => {});
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "analytics" }]);
+          expect(watchInputs).toEqual([{ scope: "analytics", attemptNonce: expect.any(String) }]);
           expect(snapshots.scopedScopes).toEqual(["quota", "analytics"]);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
@@ -769,7 +783,11 @@ describe("dashboard RPC lifecycle", () => {
       });
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "analytics" }, { scope: "analytics" }]);
+          expect(watchInputs).toEqual([
+            { scope: "analytics", attemptNonce: expect.any(String) },
+            { scope: "analytics", attemptNonce: expect.any(String) },
+          ]);
+          expect(watchInputs[1]?.attemptNonce).toBe(watchInputs[0]?.attemptNonce);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
         },
@@ -800,7 +818,11 @@ describe("dashboard RPC lifecycle", () => {
         () => {
           expect(healthCalls).toBe(3);
           expect(watchInputs).toHaveLength(3);
-          expect(watchInputs[2]).toEqual({ scope: "analytics" });
+          expect(watchInputs[2]).toMatchObject({
+            scope: "analytics",
+            attemptNonce: expect.any(String),
+          });
+          expect(watchInputs[2]?.attemptNonce).toBe(watchInputs[0]?.attemptNonce);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
         },
@@ -862,7 +884,7 @@ describe("dashboard RPC lifecycle", () => {
     if (!lease.runtime) throw new Error("expected the shared runtime");
     const registrar = createFakeRegistrar();
     const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
-    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
+    const watchInputs: Array<{ scope: "quota" | "analytics"; attemptNonce: string }> = [];
     const timeoutWatches: Array<(error: Error) => void> = [];
     let holdNextHealth = false;
     let releaseHealth: (() => void) | undefined;
@@ -900,7 +922,10 @@ describe("dashboard RPC lifecycle", () => {
         homeReads += 1;
         return registrar.call("home", input, options?.signal);
       },
-      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+      watch: (
+        input: { scope: "quota" | "analytics"; attemptNonce: string },
+        options?: { signal?: AbortSignal },
+      ) => {
         watchInputs.push(input);
         // Keep the RPC server's held viewer distinct from the Desktop client's
         // signal: a host deadline cancels that request, not the live session.
@@ -956,7 +981,7 @@ describe("dashboard RPC lifecycle", () => {
       unsubscribeAnalytics = analyticsClient.subscribe(() => {});
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "analytics" }]);
+          expect(watchInputs).toEqual([{ scope: "analytics", attemptNonce: expect.any(String) }]);
           expect(analyticsClient.connection()).toBe("live");
           expect(snapshots.scopedViewers).toBe(2);
         },
@@ -965,7 +990,11 @@ describe("dashboard RPC lifecycle", () => {
       unsubscribeQuota = quotaClient.subscribe(() => {});
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "analytics" }, { scope: "quota" }]);
+          expect(watchInputs).toEqual([
+            { scope: "analytics", attemptNonce: expect.any(String) },
+            { scope: "quota", attemptNonce: expect.any(String) },
+          ]);
+          expect(watchInputs[1]?.attemptNonce).not.toBe(watchInputs[0]?.attemptNonce);
           expect(quotaClient.connection()).toBe("live");
           expect(snapshots.scopedViewers).toBe(3);
         },
@@ -999,10 +1028,11 @@ describe("dashboard RPC lifecycle", () => {
       await vi.waitFor(
         () => {
           expect(watchInputs).toEqual([
-            { scope: "analytics" },
-            { scope: "quota" },
-            { scope: "quota" },
+            { scope: "analytics", attemptNonce: expect.any(String) },
+            { scope: "quota", attemptNonce: expect.any(String) },
+            { scope: "quota", attemptNonce: expect.any(String) },
           ]);
+          expect(watchInputs[2]?.attemptNonce).toBe(watchInputs[1]?.attemptNonce);
           expect(snapshots.scopedViewers).toBe(3);
           expect(quotaClient.connection()).toBe("live");
         },

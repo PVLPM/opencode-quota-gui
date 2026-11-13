@@ -577,6 +577,7 @@ describe("google agy logic", () => {
           email: "google-agy",
           error: "Quota summary API unavailable",
           failureCategory: "provider_api",
+          accountIndex: 0,
         },
       ],
     });
@@ -828,11 +829,13 @@ describe("google agy logic", () => {
           email: "alice@example.com",
           error: "Google AGY quota API error: 500",
           failureCategory: "provider_api",
+          accountIndex: 0,
         },
         {
           email: "bob@example.com",
           error: "Google AGY quota API error: 500",
           failureCategory: "provider_api",
+          accountIndex: 1,
         },
       ],
     });

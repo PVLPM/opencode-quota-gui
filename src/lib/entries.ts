@@ -286,6 +286,8 @@ export function cloneQuotaToastEntry(entry: QuotaToastEntry): QuotaToastEntry {
 }
 
 export interface QuotaToastError {
+  /** Deadline observed in an upstream Retry-After response. */
+  retryAtMs?: number;
   /** Short label that will be rendered as "label: message". */
   label: string;
   message: string;
@@ -406,6 +408,11 @@ export interface QuotaProviderResult {
   errors: QuotaToastError[];
   /** Additive discovered-account descriptors; absent when no account identity exists. */
   accounts?: readonly QuotaProviderAccount[];
+  /**
+   * Optional display-only plan for a provider-scope result with no discovered accounts (the Claude CLI
+   * login shown alone). Never an identity input and never set beside OpenCode account descriptors.
+   */
+  planLabel?: string;
   /** Internal provider diagnostics; not projected into normal presentation/export surfaces. */
   diagnostics?: QuotaProviderDiagnostic[];
   /**
@@ -424,8 +431,18 @@ export interface QuotaProviderMatchContext {
   currentProviderID?: string;
 }
 
+/** Marks a single provider operation as an explicit freshness request. */
+export const QUOTA_FORCE_REFRESH = Symbol("quota-force-refresh");
+
 export interface QuotaProviderContext {
+  /** Ephemeral memoization shared only within one quota refresh operation. */
+  operationCache?: Map<symbol, unknown>;
   client: {
+    integration?: {
+      list: () => Promise<{
+        data: Array<{ id: string; connections: Array<{ type: string; method?: string }> }>;
+      }>;
+    };
     config: {
       providers: () => Promise<{ data?: { providers: Array<{ id: string }> } }>;
       get: () => Promise<{ data?: { model?: string } }>;

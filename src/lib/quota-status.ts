@@ -35,7 +35,6 @@ import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { getOpenCodeDbStats } from "./opencode-storage.js";
 import { getQuotaProviderDisplayLabel } from "./provider-metadata.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
-import { isMaintainedQuotaProviderTuning } from "./quota-providers.js";
 import { aggregateUsage } from "./quota-stats.js";
 import {
   commandHeading,
@@ -196,22 +195,6 @@ function appendProviderStatusDetailRows(
       rows.push({ key: detail.key, value: detail.value });
     }
   }
-}
-
-function findProviderStatusDetail(
-  providerId: string,
-  key: string,
-  probes?: ProviderLiveProbe[],
-): string | undefined {
-  return getProviderStatusDetails(providerId, probes)?.find((detail) => detail.key === key)?.value;
-}
-
-function getLiveProbeState(probe?: ProviderLiveProbe): string {
-  if (!probe) return "unavailable";
-  if (probe.result.entries.length > 0 && probe.result.errors.length > 0) return "partial";
-  if (probe.result.entries.length > 0) return "success";
-  if (probe.result.errors.length > 0) return "error";
-  return "no_data";
 }
 
 function appendProviderCompactLiveProbeRows(
@@ -381,49 +364,6 @@ function createQuotaProvidersSection(params: {
   for (const definition of params.definitions) {
     const diagnostic = diagnosticsBySource.get(definition.id);
     const coverage = definition.modelIds ? definition.modelIds.join(",") : "all_models";
-    if (definition.mode === "local-estimate" && isMaintainedQuotaProviderTuning(definition)) {
-      const probe = findProviderLiveProbe(definition.id, params.probes);
-      const statePath = findProviderStatusDetail(definition.id, "local_state_path", params.probes);
-      const stateExists = findProviderStatusDetail(
-        definition.id,
-        "local_state_exists",
-        params.probes,
-      );
-      const stateHealth = findProviderStatusDetail(
-        definition.id,
-        "local_state_health",
-        params.probes,
-      );
-      const stateVersion = findProviderStatusDetail(
-        definition.id,
-        "local_state_version",
-        params.probes,
-      );
-      const stateLastUpdate = findProviderStatusDetail(
-        definition.id,
-        "local_state_last_update",
-        params.probes,
-      );
-      rows.push({
-        key: `provider_${definition.id}`,
-        value: [
-          `provider_id=${definition.providerId}`,
-          "mode=local-estimate",
-          `coverage=${coverage}`,
-          `outcome=${getLiveProbeState(probe)}`,
-          `limits=${definition.windows.map((window) => `${window.id}:${window.requestLimit}`).join(",")}`,
-          `state_path=${statePath ?? "(none)"}`,
-          `state_exists=${stateExists ?? "false"}`,
-          `state_health=${stateHealth ?? "missing"}`,
-          `state_version=${stateVersion ?? "(none)"}`,
-          `state_last_update=${stateLastUpdate ?? "(none)"}`,
-        ]
-          .map((part) => sanitizeSingleLineDisplayText(part))
-          .join(" "),
-      });
-      continue;
-    }
-
     if (definition.mode === "local-estimate") {
       const stateHealth = diagnostic?.stateHealth ?? "missing";
       rows.push({
@@ -586,7 +526,7 @@ function supportedProviderPricingRow(params: {
     return {
       id,
       pricing: "no",
-      notes: "local request-count estimate (tiered rolling windows, no token pricing API)",
+      notes: "official Bailian CLI Coding Plan quota (not token-priced)",
     };
   }
 
@@ -828,14 +768,7 @@ export async function buildQuotaStatusReportDocument(
     pathsRows,
     "alibaba-coding-plan",
     params.providerLiveProbes,
-    new Set([
-      "alibaba auth configured",
-      "alibaba_api_key_source",
-      "alibaba_api_key_checked_paths",
-      "alibaba_api_key_credential_database_paths",
-      "alibaba_coding_plan",
-      "alibaba_auth_error",
-    ]),
+    new Set(["alibaba_coding_plan_source", "alibaba_coding_plan_cli_status"]),
   );
   sections.push(createKvSection("paths", "paths:", pathsRows));
 
@@ -881,12 +814,6 @@ export async function buildQuotaStatusReportDocument(
   const cursorRows: ReportKvRow[] = [];
   appendProviderStatusDetailRows(cursorRows, "cursor", params.providerLiveProbes);
 
-  appendProviderStatusDetailRows(
-    cursorRows,
-    "alibaba-coding-plan",
-    params.providerLiveProbes,
-    new Set(["alibaba coding plan local quota", "alibaba coding plan error"]),
-  );
   appendProviderCompactLiveProbeRows(
     cursorRows,
     "cursor",

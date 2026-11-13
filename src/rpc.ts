@@ -199,13 +199,93 @@ export type DashboardRpcSaveVisibilityInput = {
   expectedRevision: string;
 };
 export type DashboardRpcImportApplyInput = { expectedRevision: string };
-export type DashboardRpcWatchInput = { scope: DashboardRpcViewScope };
+export type DashboardRpcWatchInput = {
+  scope: DashboardRpcViewScope;
+  /** Optional for older callers; Native uses it to correlate the source cutover snapshot. */
+  attemptNonce?: string;
+};
 export type DashboardRpcWatchOutput = { active: boolean };
 export type DashboardRpcOpenSettingsOutput = { opened: true };
+export type DashboardRpcCacheObserverEvent =
+  | {
+      type: "session.step.started";
+      created: number;
+      data: {
+        sessionID: string;
+        assistantMessageID: string;
+        /** OpenCode's selected model identity, not the resolved HTTP request route. */
+        model: { providerID: string; id: string; variant?: string };
+        /** Captured before `llm.stream`; event.created is emitted at first output instead. */
+        started?: number;
+      };
+    }
+  | {
+      type: "session.step.ended";
+      created: number;
+      data: {
+        sessionID: string;
+        assistantMessageID: string;
+        tokens: {
+          input?: number;
+          cache?: { read?: number; write?: number };
+        };
+      };
+    }
+  | {
+      type: "session.created";
+      data: { sessionID: string; parentID: string };
+    }
+  | {
+      type: "session.forked";
+      data: { sessionID: string; parentID?: string };
+    }
+  | {
+      type: "session.compaction.ended" | "session.deleted";
+      data: { sessionID: string };
+    }
+  | {
+      /**
+       * Authoritative session execution state, projected from the host's own
+       * `session.status`, `session.idle` and `session.execution.*` events.
+       * Carries no message, error or credential content.
+       */
+      type: "session.status";
+      created: number;
+      data: { sessionID: string; state: "busy" | "idle" };
+    }
+  | {
+      /**
+       * Narrow session-identity update, projected from the host's own
+       * `session.renamed`, `session.agent.selected` and `session.model.selected`
+       * events. Only display-identity fields are carried, and only those the
+       * source event contains; `created` is the host timestamp that dates the
+       * change for recency ordering.
+       */
+      type: "session.metadata";
+      created: number;
+      data: {
+        sessionID: string;
+        title?: string;
+        agent?: string;
+        model?: { providerID: string; id: string; variant?: string };
+      };
+    }
+  | {
+      type: "source.status";
+      created: number;
+      data: {
+        state: "unverified" | "observed" | "unavailable" | "stopped";
+        /** Present only on a source snapshot requested by an active watch attempt. */
+        attemptNonce?: string;
+        /** Opaque identity of the setup-owned host-event source that emitted this state. */
+        sourceBinding?: string;
+      };
+    };
 export type DashboardRpcEventData = {
-  topic: DashboardEventTopic;
+  topic: DashboardEventTopic | "cache.observer";
   at: number;
   scope?: "visibility";
+  cacheObserverEvent?: DashboardRpcCacheObserverEvent;
 };
 export type DashboardRpcQuotaNotificationKind = "low" | "exhausted" | "reset" | "provider-error";
 /**
@@ -224,6 +304,8 @@ export type DashboardRpcErrorDetails = {
 };
 
 const MAX_RESOURCE_ID_LENGTH = 256;
+/** Bounded relayed session titles; display layers truncate further. */
+const SESSION_METADATA_TITLE_MAX_LENGTH = 200;
 
 const NO_INPUT = schema<DashboardRpcNoInput>(
   (value) =>
@@ -305,9 +387,8 @@ function checkRange(value: Record<string, unknown>): string | null {
 }
 
 /**
- * The explicit typed dashboard RPC. Every method maps to one `DashboardDataSource`
- * operation (plus the transport-lifecycle `watch` method); there is deliberately
- * no generic dispatch/call method.
+ * The explicit typed dashboard RPC. Methods map to a dashboard data-source or
+ * user settings-store operation (plus `watch`); there is no generic dispatch.
  */
 export const DashboardRpc = {
   id: DASHBOARD_RPC_ID,
@@ -315,8 +396,15 @@ export const DashboardRpc = {
     invalidated: {
       schema: eventSchema<DashboardRpcEventData>((value) => {
         if (!isObject(value)) return "event must be an object";
-        if (!hasOnlyKeys(value, ["topic", "at", "scope"])) {
-          return "event must contain only topic, at and scope";
+        if (!hasOnlyKeys(value, ["topic", "at", "scope", "cacheObserverEvent"])) {
+          return "event must contain only topic, at, scope and cacheObserverEvent";
+        }
+        if (!Number.isFinite(value.at)) return "at must be a finite number";
+        if (value.topic === "cache.observer") {
+          if (value.scope !== undefined) return "cache observer events cannot have a scope";
+          return isDashboardRpcCacheObserverEvent(value.cacheObserverEvent)
+            ? null
+            : "cache.observer topic requires a valid cache observer payload";
         }
         if (
           value.topic !== "quota.changed" &&
@@ -325,9 +413,11 @@ export const DashboardRpc = {
         ) {
           return "topic must be a dashboard event topic";
         }
-        if (!Number.isFinite(value.at)) return "at must be a finite number";
         if (value.scope !== undefined && value.scope !== "visibility") {
           return "scope must be visibility";
+        }
+        if (value.cacheObserverEvent !== undefined) {
+          return "cache observer payload requires the cache.observer topic";
         }
         return null;
       }),
@@ -364,7 +454,17 @@ export const DashboardRpc = {
       errors: DASHBOARD_RPC_ERRORS,
     },
     quota: {
-      input: NO_INPUT,
+      input: schema<{ refresh?: boolean }>(
+        (value) => {
+          if (value === undefined) return null;
+          if (!isObject(value) || !hasOnlyKeys(value, ["refresh"]))
+            return "input must be an empty object";
+          return value.refresh === undefined || typeof value.refresh === "boolean"
+            ? null
+            : "refresh must be boolean";
+        },
+        (value) => (value === undefined ? {} : (value as { refresh?: boolean })),
+      ),
       output: output(isQuotaSnapshot),
       errors: DASHBOARD_RPC_ERRORS,
     },
@@ -483,12 +583,16 @@ export const DashboardRpc = {
     },
     watch: {
       input: schema<DashboardRpcWatchInput>((value) => {
-        if (!isObject(value) || !hasExactKeys(value, ["scope"])) {
-          return "input must contain only scope";
+        if (!isObject(value) || !hasOnlyKeys(value, ["scope", "attemptNonce"])) {
+          return "input must contain only scope and attemptNonce";
         }
-        return value.scope === "quota" || value.scope === "analytics"
+        if (value.scope !== "quota" && value.scope !== "analytics") {
+          return "scope must be quota or analytics";
+        }
+        return value.attemptNonce === undefined ||
+          (typeof value.attemptNonce === "string" && isValidResourceId(value.attemptNonce))
           ? null
-          : "scope must be quota or analytics";
+          : "attemptNonce must be a non-empty safe string";
       }),
       output: schema<DashboardRpcWatchOutput>((value) =>
         isObject(value) && typeof value.active === "boolean" ? null : "output must report active",
@@ -521,4 +625,192 @@ export function isDashboardRpcQuotaNotificationData(
   }
   if (!isSafeNotificationText(value.title, 200)) return false;
   return value.description === undefined || isSafeNotificationText(value.description, 1024);
+}
+
+/** Strict runtime validation for the narrow, content-free cache observer event DTO. */
+export function isDashboardRpcCacheObserverEvent(
+  value: unknown,
+): value is DashboardRpcCacheObserverEvent {
+  if (!isObject(value) || typeof value.type !== "string") return false;
+
+  if (value.type === "source.status") {
+    return (
+      hasExactKeys(value, ["type", "created", "data"]) &&
+      Number.isFinite(value.created) &&
+      isObject(value.data) &&
+      hasOnlyKeys(value.data, ["state", "attemptNonce", "sourceBinding"]) &&
+      (value.data.state === "unverified" ||
+        value.data.state === "observed" ||
+        value.data.state === "unavailable" ||
+        value.data.state === "stopped") &&
+      (value.data.attemptNonce === undefined ||
+        (typeof value.data.attemptNonce === "string" &&
+          isValidResourceId(value.data.attemptNonce))) &&
+      (value.data.sourceBinding === undefined ||
+        (typeof value.data.sourceBinding === "string" &&
+          isValidResourceId(value.data.sourceBinding)))
+    );
+  }
+
+  if (value.type === "session.step.started") {
+    if (
+      !hasExactKeys(value, ["type", "created", "data"]) ||
+      !Number.isFinite(value.created) ||
+      !isObject(value.data) ||
+      !hasOnlyKeys(value.data, ["sessionID", "assistantMessageID", "model", "started"]) ||
+      typeof value.data.sessionID !== "string" ||
+      !isValidResourceId(value.data.sessionID) ||
+      typeof value.data.assistantMessageID !== "string" ||
+      !isValidResourceId(value.data.assistantMessageID) ||
+      !isObject(value.data.model) ||
+      !hasOnlyKeys(value.data.model, ["providerID", "id", "variant"]) ||
+      typeof value.data.model.providerID !== "string" ||
+      !isValidResourceId(value.data.model.providerID) ||
+      typeof value.data.model.id !== "string" ||
+      !isValidResourceId(value.data.model.id) ||
+      (value.data.model.variant !== undefined &&
+        (typeof value.data.model.variant !== "string" ||
+          !isValidResourceId(value.data.model.variant))) ||
+      (value.data.started !== undefined &&
+        (typeof value.data.started !== "number" ||
+          !Number.isFinite(value.data.started) ||
+          value.data.started < 0))
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  if (value.type === "session.step.ended") {
+    if (!hasExactKeys(value, ["type", "created", "data"]) || !isObject(value.data)) return false;
+    if (
+      !Number.isFinite(value.created) ||
+      !hasExactKeys(value.data, ["sessionID", "assistantMessageID", "tokens"]) ||
+      typeof value.data.sessionID !== "string" ||
+      !isValidResourceId(value.data.sessionID) ||
+      typeof value.data.assistantMessageID !== "string" ||
+      !isValidResourceId(value.data.assistantMessageID) ||
+      !isObject(value.data.tokens) ||
+      !hasOnlyKeys(value.data.tokens, ["input", "cache"])
+    ) {
+      return false;
+    }
+    const tokens = value.data.tokens;
+    if (
+      tokens.input !== undefined &&
+      (!Number.isFinite(tokens.input) || (tokens.input as number) < 0)
+    ) {
+      return false;
+    }
+    if (tokens.cache === undefined) return true;
+    if (!isObject(tokens.cache) || !hasOnlyKeys(tokens.cache, ["read", "write"])) return false;
+    return [tokens.cache.read, tokens.cache.write].every(
+      (count) => count === undefined || (Number.isFinite(count) && (count as number) >= 0),
+    );
+  }
+
+  if (value.type === "session.created") {
+    return (
+      hasExactKeys(value, ["type", "data"]) &&
+      isObject(value.data) &&
+      hasExactKeys(value.data, ["sessionID", "parentID"]) &&
+      typeof value.data.sessionID === "string" &&
+      isValidResourceId(value.data.sessionID) &&
+      typeof value.data.parentID === "string" &&
+      isValidResourceId(value.data.parentID)
+    );
+  }
+
+  if (value.type === "session.forked") {
+    return (
+      hasExactKeys(value, ["type", "data"]) &&
+      isObject(value.data) &&
+      hasOnlyKeys(value.data, ["sessionID", "parentID"]) &&
+      typeof value.data.sessionID === "string" &&
+      isValidResourceId(value.data.sessionID) &&
+      (value.data.parentID === undefined ||
+        (typeof value.data.parentID === "string" && isValidResourceId(value.data.parentID)))
+    );
+  }
+
+  if (value.type === "session.status") {
+    return (
+      hasExactKeys(value, ["type", "created", "data"]) &&
+      Number.isFinite(value.created) &&
+      isObject(value.data) &&
+      hasExactKeys(value.data, ["sessionID", "state"]) &&
+      typeof value.data.sessionID === "string" &&
+      isValidResourceId(value.data.sessionID) &&
+      (value.data.state === "busy" || value.data.state === "idle")
+    );
+  }
+
+  if (value.type === "session.metadata") {
+    if (
+      !hasExactKeys(value, ["type", "created", "data"]) ||
+      !Number.isFinite(value.created) ||
+      !isObject(value.data) ||
+      !hasOnlyKeys(value.data, ["sessionID", "title", "agent", "model"])
+    ) {
+      return false;
+    }
+    if (typeof value.data.sessionID !== "string" || !isValidResourceId(value.data.sessionID)) {
+      return false;
+    }
+    if (
+      value.data.title !== undefined &&
+      !isSafeNotificationText(value.data.title, SESSION_METADATA_TITLE_MAX_LENGTH)
+    ) {
+      return false;
+    }
+    if (
+      value.data.agent !== undefined &&
+      (typeof value.data.agent !== "string" || !isValidResourceId(value.data.agent))
+    ) {
+      return false;
+    }
+    if (value.data.model !== undefined) {
+      const model = value.data.model;
+      if (
+        !isObject(model) ||
+        !hasOnlyKeys(model, ["providerID", "id", "variant"]) ||
+        typeof model.providerID !== "string" ||
+        !isValidResourceId(model.providerID) ||
+        typeof model.id !== "string" ||
+        !isValidResourceId(model.id) ||
+        (model.variant !== undefined &&
+          (typeof model.variant !== "string" || !isValidResourceId(model.variant)))
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (value.type !== "session.compaction.ended" && value.type !== "session.deleted") return false;
+  return (
+    hasExactKeys(value, ["type", "data"]) &&
+    isObject(value.data) &&
+    hasExactKeys(value.data, ["sessionID"]) &&
+    typeof value.data.sessionID === "string" &&
+    isValidResourceId(value.data.sessionID)
+  );
+}
+
+/** Strict guard for cache observer DTOs wrapped in the existing invalidation event envelope. */
+export function isDashboardRpcCacheObserverEventData(
+  value: unknown,
+): value is DashboardRpcEventData & {
+  topic: "cache.observer";
+  cacheObserverEvent: DashboardRpcCacheObserverEvent;
+} {
+  return (
+    isObject(value) &&
+    hasExactKeys(value, ["topic", "at", "cacheObserverEvent"]) &&
+    value.topic === "cache.observer" &&
+    typeof value.at === "number" &&
+    Number.isFinite(value.at) &&
+    value.at >= 0 &&
+    isDashboardRpcCacheObserverEvent(value.cacheObserverEvent)
+  );
 }

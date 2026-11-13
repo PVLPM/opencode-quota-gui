@@ -98,6 +98,7 @@ function mapNanoGptSuccess(result: NanoGptQuotaSuccess): QuotaProviderResult {
     result.endpointErrors?.map((entry) => ({
       label: entry.endpoint === "usage" ? "NanoGPT Usage" : "NanoGPT Balance",
       message: entry.message,
+      ...(entry.retryAtMs !== undefined ? { retryAtMs: entry.retryAtMs } : {}),
       ...(entry.failureCategory !== undefined ? { failureCategory: entry.failureCategory } : {}),
     })) ?? [];
 

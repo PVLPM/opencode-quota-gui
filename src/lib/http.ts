@@ -2,7 +2,18 @@
  * HTTP utilities for provider API calls.
  */
 
+import { retryAfterDeadline } from "./api-key-retry-after.js";
 import { REQUEST_TIMEOUT_MS } from "./types.js";
+
+export class RequestTimeoutError extends Error {
+  readonly retryAtMs?: number;
+
+  constructor(message: string, retryAtMs?: number) {
+    super(message);
+    this.name = "RequestTimeoutError";
+    if (retryAtMs !== undefined) this.retryAtMs = retryAtMs;
+  }
+}
 
 export type FetchWithTimeoutOptions<T> = {
   request: Omit<RequestInit, "signal">;
@@ -26,13 +37,16 @@ export async function fetchWithTimeout<T>(
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
   let timedOut = false;
+  let observedRetryAtMs: number | undefined;
+  let timeoutError: RequestTimeoutError | undefined;
   const timeoutErrorMessage = `Request timeout after ${Math.round(timeoutMs / 1000)}s`;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timeoutId = setTimeout(() => {
       timedOut = true;
       controller.abort();
-      reject(new Error(timeoutErrorMessage));
+      timeoutError = new RequestTimeoutError(timeoutErrorMessage, observedRetryAtMs);
+      reject(timeoutError);
     }, timeoutMs);
   });
 
@@ -43,12 +57,13 @@ export async function fetchWithTimeout<T>(
         ...options.request,
         signal: controller.signal,
       });
+      observedRetryAtMs = retryAfterDeadline(response);
       return await options.consume(response, controller.signal);
     })();
     return await Promise.race([transaction, timeout]);
   } catch (err) {
     if (timedOut) {
-      throw new Error(timeoutErrorMessage);
+      throw timeoutError ?? new RequestTimeoutError(timeoutErrorMessage, observedRetryAtMs);
     }
     throw err;
   } finally {

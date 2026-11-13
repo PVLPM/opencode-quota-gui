@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { DashboardEvent } from "../src/contracts/dashboard.js";
+import { createNativeCacheObserverRuntime } from "../src/native/cache-observer-runtime.js";
 import {
   createNativeDashboardClient,
   type DashboardRpcCaller,
@@ -54,6 +55,7 @@ function createEventStream(signal: AbortSignal) {
 
 interface ActiveWatch {
   scope: string;
+  attemptNonce?: string;
   signal: AbortSignal;
   resolve: (value: { active: boolean }) => void;
   reject: (error: unknown) => void;
@@ -81,7 +83,7 @@ function createFakeCaller() {
     importApply: vi.fn(async () => ({ marker: "importApply" })),
     openSettingsFile: vi.fn(async () => ({ opened: true as const })),
     watch: vi.fn(
-      (input: { scope: string }, options?: { signal?: AbortSignal }) =>
+      (input: { scope: string; attemptNonce?: string }, options?: { signal?: AbortSignal }) =>
         new Promise<{ active: boolean }>((resolve, reject) => {
           const signal = options?.signal ?? new AbortController().signal;
           pendingWatches += 1;
@@ -95,6 +97,7 @@ function createFakeCaller() {
           };
           activeWatches.push({
             scope: input.scope,
+            attemptNonce: input.attemptNonce,
             signal,
             resolve: (value) => settle(() => resolve(value)),
             reject: (error) => settle(() => reject(error)),
@@ -151,7 +154,7 @@ describe("native dashboard RPC client", () => {
 
     expect(fake.raw.health).toHaveBeenCalledOnce();
     expect(fake.raw.watch).toHaveBeenCalledWith(
-      { scope: "quota" },
+      { scope: "quota", attemptNonce: expect.any(String) },
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
@@ -166,6 +169,413 @@ describe("native dashboard RPC client", () => {
     await waitFor(() => fake.activeWatches.every((watch) => watch.signal.aborted), "watch abort");
     client.dispose();
     expect(client.connection()).toBe("closed");
+  });
+
+  it("only delivers source snapshots correlated to the current Native attempt", async () => {
+    const fake = createFakeCaller();
+    const client = createNativeDashboardClient({ rpc: fake.caller, scope: "quota" });
+    const received: unknown[] = [];
+    const releaseCache = client.subscribeCacheObserverEvent((event) => received.push(event));
+    const releaseDashboard = client.subscribe(() => {});
+    try {
+      await waitFor(() => client.connection() === "live", "initial live connection");
+
+      const firstNonce = fake.activeWatches[0]?.attemptNonce;
+      expect(firstNonce).toEqual(expect.any(String));
+      if (firstNonce === undefined) throw new Error("first watch did not include an attempt nonce");
+      await client.reconnect();
+      const currentNonce = fake.activeWatches[1]?.attemptNonce;
+      expect(currentNonce).toEqual(expect.any(String));
+      if (currentNonce === undefined)
+        throw new Error("current watch did not include an attempt nonce");
+      expect(currentNonce).not.toBe(firstNonce);
+
+      const sourceSnapshot = (attemptNonce: string) => ({
+        topic: "cache.observer",
+        at: 10,
+        cacheObserverEvent: {
+          type: "source.status",
+          created: 10,
+          data: { state: "observed", attemptNonce, sourceBinding: "source-owner-a" },
+        },
+      });
+      fake.streams[1]?.pushEvent(sourceSnapshot(firstNonce));
+      fake.streams[1]?.pushEvent(sourceSnapshot(currentNonce));
+      await waitFor(() => received.length > 0, "current-attempt source snapshot");
+
+      expect(received).toEqual([
+        {
+          type: "source.status",
+          created: 10,
+          data: {
+            state: "observed",
+            attemptNonce: currentNonce,
+            sourceBinding: "source-owner-a",
+          },
+        },
+      ]);
+    } finally {
+      releaseDashboard();
+      releaseCache();
+      client.dispose();
+    }
+  });
+
+  it("rejects unbound or foreign setup source states after binding the current snapshot", async () => {
+    const fake = createFakeCaller();
+    const client = createNativeDashboardClient({ rpc: fake.caller, scope: "quota" });
+    const received: unknown[] = [];
+    const dashboardEvents: DashboardEvent[] = [];
+    const releaseCache = client.subscribeCacheObserverEvent((event) => received.push(event));
+    const releaseDashboard = client.subscribe((event) => dashboardEvents.push(event));
+    try {
+      await waitFor(() => client.connection() === "live", "live connection");
+      const attemptNonce = fake.activeWatches[0]?.attemptNonce;
+      if (attemptNonce === undefined) throw new Error("watch did not include an attempt nonce");
+
+      const status = (state: string, sourceBinding?: string, nonce?: string) => ({
+        topic: "cache.observer",
+        at: 10,
+        cacheObserverEvent: {
+          type: "source.status",
+          created: 10,
+          data: {
+            state,
+            ...(sourceBinding === undefined ? {} : { sourceBinding }),
+            ...(nonce === undefined ? {} : { attemptNonce: nonce }),
+          },
+        },
+      });
+      fake.streams[0]?.pushEvent(status("unavailable", "source-owner-b", "stale-attempt"));
+      fake.streams[0]?.pushEvent(status("unavailable"));
+      fake.streams[0]?.pushEvent(status("observed", "source-owner-a", attemptNonce));
+      fake.streams[0]?.pushEvent(status("stopped", "source-owner-b"));
+      fake.streams[0]?.pushEvent(status("unavailable"));
+      fake.streams[0]?.pushEvent(status("observed", "source-owner-a"));
+      fake.streams[0]?.pushEvent({ topic: "quota.changed", at: 11 });
+      await waitFor(() => dashboardEvents.length === 1, "invalidation ordering barrier");
+
+      expect(received).toEqual([
+        {
+          type: "source.status",
+          created: 10,
+          data: {
+            state: "observed",
+            attemptNonce,
+            sourceBinding: "source-owner-a",
+          },
+        },
+        {
+          type: "source.status",
+          created: 10,
+          data: { state: "observed", sourceBinding: "source-owner-a" },
+        },
+      ]);
+      expect(dashboardEvents).toEqual([{ topic: "quota.changed", at: 11 }]);
+    } finally {
+      releaseDashboard();
+      releaseCache();
+      client.dispose();
+    }
+  });
+
+  it("recovers a missed first snapshot on watch renewal after event subscription readiness", async () => {
+    const fake = createFakeCaller();
+    let allowStreamReady!: () => void;
+    const streamReady = new Promise<void>((resolve) => {
+      allowStreamReady = resolve;
+    });
+    let isStreamReady = false;
+    fake.raw.events.subscribe.mockImplementationOnce((_name, options) => {
+      const stream = createEventStream(options?.signal ?? new AbortController().signal);
+      fake.streams.push(stream);
+      return {
+        async *[Symbol.asyncIterator]() {
+          // The public SDK returns an AsyncIterable, not a readiness promise;
+          // connecting the underlying event stream can lag the watch request.
+          await streamReady;
+          isStreamReady = true;
+          yield* stream.stream;
+        },
+      };
+    });
+
+    const client = createNativeDashboardClient({ rpc: fake.caller, scope: "quota" });
+    const observer = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => client.subscribeCacheObserverEvent(listener),
+      rpcConnection: () => client.connection(),
+      listChildren: async () => [],
+    });
+    const releaseObserver = observer.subscribe("ses_delayed_source_snapshot", () => {});
+    const received: unknown[] = [];
+    const releaseCache = client.subscribeCacheObserverEvent((event) => received.push(event));
+    const releaseDashboard = client.subscribe(() => {});
+    try {
+      await waitFor(() => client.connection() === "live", "initial live connection");
+      await waitFor(() => fake.activeWatches.length === 1, "initial watch");
+
+      const sourceSnapshot = (attemptNonce: string) => ({
+        topic: "cache.observer",
+        at: 10,
+        cacheObserverEvent: {
+          type: "source.status",
+          created: 10,
+          data: { state: "observed", attemptNonce, sourceBinding: "setup-owner-a" },
+        },
+      });
+      const emitWatchSnapshot = (watch: ActiveWatch) => {
+        if (watch.attemptNonce === undefined) throw new Error("watch has no attempt nonce");
+        // Model a host event emitted before the RPC event-stream subscription
+        // is established: that live-only event is lost, not buffered.
+        if (isStreamReady) fake.streams[0]?.pushEvent(sourceSnapshot(watch.attemptNonce));
+      };
+
+      const initialWatch = fake.activeWatches[0];
+      if (initialWatch === undefined) throw new Error("initial watch was not created");
+      emitWatchSnapshot(initialWatch);
+      expect(received).toEqual([]);
+      expect(observer.transport().hostEvents).toBe("unverified");
+
+      allowStreamReady();
+      await waitFor(() => isStreamReady, "event stream readiness");
+      initialWatch.reject(hostWatchTimeout());
+      await waitFor(() => fake.activeWatches.length === 2, "renewed watch");
+
+      const renewedWatch = fake.activeWatches[1];
+      if (renewedWatch === undefined) throw new Error("renewed watch was not created");
+      expect(renewedWatch.attemptNonce).toBe(initialWatch.attemptNonce);
+      emitWatchSnapshot(renewedWatch);
+      await waitFor(() => received.length === 1, "snapshot replayed by watch renewal");
+
+      expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+      expect(fake.raw.watch).toHaveBeenCalledTimes(2);
+      expect(fake.raw.health).toHaveBeenCalledTimes(2);
+      expect(client.connection()).toBe("live");
+      expect(observer.transport().hostEvents).toBe("observed");
+      expect(received).toEqual([
+        {
+          type: "source.status",
+          created: 10,
+          data: {
+            state: "observed",
+            attemptNonce: initialWatch.attemptNonce,
+            sourceBinding: "setup-owner-a",
+          },
+        },
+      ]);
+    } finally {
+      releaseObserver();
+      observer.dispose();
+      releaseDashboard();
+      releaseCache();
+      client.dispose();
+    }
+  });
+
+  it("rotates the attempt after a binding change to fence delayed old-owner snapshots", async () => {
+    const fake = createFakeCaller();
+    const client = createNativeDashboardClient({ rpc: fake.caller, scope: "quota" });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => client.subscribeCacheObserverEvent(listener),
+      rpcConnection: () => client.connection(),
+      subscribeEventStreamRetire: (listener) => client.onEventStreamRetire(listener),
+      listChildren: async () => [],
+    });
+    const releaseSession = runtime.subscribe("ses_binding_handoff", () => {});
+    const received: unknown[] = [];
+    const dashboardEvents: DashboardEvent[] = [];
+    const releaseCache = client.subscribeCacheObserverEvent((event) => received.push(event));
+    const releaseDashboard = client.subscribe((event) => dashboardEvents.push(event));
+    try {
+      await waitFor(() => client.connection() === "live", "initial live connection");
+      const firstWatch = fake.activeWatches[0];
+      if (firstWatch?.attemptNonce === undefined) throw new Error("initial watch has no nonce");
+
+      const status = (attemptNonce: string, sourceBinding: string) => ({
+        topic: "cache.observer",
+        at: 10,
+        cacheObserverEvent: {
+          type: "source.status",
+          created: 10,
+          data: { state: "observed", attemptNonce, sourceBinding },
+        },
+      });
+      fake.streams[0]?.pushEvent(status(firstWatch.attemptNonce, "setup-owner-a"));
+      await waitFor(() => received.length === 1, "first setup binding");
+      expect(runtime.transport().hostEvents).toBe("observed");
+
+      firstWatch.reject(hostWatchTimeout());
+      await waitFor(() => fake.activeWatches.length === 2, "same-attempt watch renewal");
+      const renewedWatch = fake.activeWatches[1];
+      if (renewedWatch === undefined) throw new Error("renewed watch was not created");
+      expect(renewedWatch.attemptNonce).toBe(firstWatch.attemptNonce);
+
+      // A different window's source status cannot fence this attempt.
+      fake.streams[0]?.pushEvent(status("other-window-attempt", "setup-owner-b"));
+      fake.streams[0]?.pushEvent(status(firstWatch.attemptNonce, "setup-owner-a"));
+      await waitFor(() => received.length === 2, "current-window status after unrelated event");
+      expect(runtime.transport().hostEvents).toBe("observed");
+
+      // A matching nonce with a replacement owner fences this stream and gets
+      // a fresh attempt nonce before accepting any new owner status.
+      fake.streams[0]?.pushEvent(status(firstWatch.attemptNonce, "setup-owner-b"));
+      await waitFor(() => fake.activeWatches.length === 3, "new watch attempt after owner change");
+      const replacementWatch = fake.activeWatches[2];
+      if (replacementWatch?.attemptNonce === undefined)
+        throw new Error("replacement watch has no nonce");
+      expect(replacementWatch.attemptNonce).not.toBe(firstWatch.attemptNonce);
+      await waitFor(() => client.connection() === "live", "replacement attempt live");
+      expect(renewedWatch.signal.aborted).toBe(true);
+      expect(runtime.transport().hostEvents).toBe("unverified");
+
+      // A delayed snapshot from owner A still carries the retired nonce and
+      // must not restore confidence after owner B has taken over.
+      fake.streams[1]?.pushEvent(status(firstWatch.attemptNonce, "setup-owner-a"));
+      fake.streams[1]?.pushEvent({ topic: "quota.changed", at: 11 });
+      await waitFor(() => dashboardEvents.length === 1, "delayed old-owner snapshot consumed");
+      expect(received).toHaveLength(2);
+      expect(runtime.transport().hostEvents).toBe("unverified");
+
+      fake.streams[1]?.pushEvent(status(replacementWatch.attemptNonce, "setup-owner-b"));
+      await waitFor(() => received.length === 3, "replacement owner status");
+      expect(runtime.transport().hostEvents).toBe("observed");
+
+      expect(
+        received.map((event) => (event as { data: { sourceBinding: string } }).data.sourceBinding),
+      ).toEqual(["setup-owner-a", "setup-owner-a", "setup-owner-b"]);
+    } finally {
+      releaseSession();
+      runtime.dispose();
+      releaseDashboard();
+      releaseCache();
+      client.dispose();
+    }
+  });
+
+  it("replays the current attempt source snapshot after zero observer interest", async () => {
+    const fake = createFakeCaller();
+    const client = createNativeDashboardClient({ rpc: fake.caller, scope: "quota" });
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => client.subscribeCacheObserverEvent(listener),
+      rpcConnection: () => client.connection(),
+      listChildren: async () => [],
+    });
+    const dashboardEvents: DashboardEvent[] = [];
+    const releaseDashboard = client.subscribe((event) => dashboardEvents.push(event));
+    try {
+      await waitFor(() => client.connection() === "live", "live connection");
+      const attemptNonce = fake.activeWatches[0]?.attemptNonce;
+      if (attemptNonce === undefined) throw new Error("watch did not include an attempt nonce");
+      fake.streams[0]?.pushEvent({
+        topic: "cache.observer",
+        at: 10,
+        cacheObserverEvent: {
+          type: "source.status",
+          created: 10,
+          data: {
+            state: "observed",
+            attemptNonce,
+            sourceBinding: "source-owner-a",
+          },
+        },
+      });
+      fake.streams[0]?.pushEvent({ topic: "quota.changed", at: 11 });
+      await waitFor(() => dashboardEvents.length === 1, "snapshot consumption barrier");
+      expect(runtime.transport().hostEvents).toBe("unverified");
+
+      const releaseSession = runtime.subscribe("ses_source_snapshot_replay", () => {});
+      expect(runtime.transport().hostEvents).toBe("observed");
+      expect(fake.raw.health).toHaveBeenCalledOnce();
+      expect(fake.raw.watch).toHaveBeenCalledOnce();
+      expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+      releaseSession();
+    } finally {
+      releaseDashboard();
+      runtime.dispose();
+      client.dispose();
+    }
+  });
+
+  it("delivers isolated cache observations through the existing Native event stream", async () => {
+    const fake = createFakeCaller();
+    const client = createNativeDashboardClient({ rpc: fake.caller, scope: "quota" });
+    const observed: unknown[] = [];
+    const dashboardEvents: DashboardEvent[] = [];
+
+    const releaseCache = client.subscribeCacheObserverEvent((event) => observed.push(event));
+    expect(fake.raw.health).not.toHaveBeenCalled();
+    expect(fake.raw.events.subscribe).not.toHaveBeenCalled();
+
+    const releaseDashboard = client.subscribe((event) => dashboardEvents.push(event));
+    await waitFor(() => client.connection() === "live", "live connection");
+    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+
+    fake.streams[0]?.pushEvent({
+      topic: "cache.observer",
+      at: 1_700_000_000_000,
+      cacheObserverEvent: {
+        type: "session.step.ended",
+        created: 1_700_000_000_000,
+        data: {
+          sessionID: "ses-1",
+          assistantMessageID: "msg-1",
+          tokens: { cache: { read: 8 } },
+        },
+      },
+    });
+    await waitFor(() => observed.length === 1, "cache observation");
+
+    expect(observed[0]).toEqual({
+      type: "session.step.ended",
+      created: 1_700_000_000_000,
+      data: {
+        sessionID: "ses-1",
+        assistantMessageID: "msg-1",
+        tokens: { cache: { read: 8 } },
+      },
+    });
+    expect(dashboardEvents).toEqual([]);
+    expect(fake.raw.events.subscribe).toHaveBeenCalledOnce();
+
+    releaseCache();
+    releaseDashboard();
+    client.dispose();
+  });
+
+  it("does not start a Native transport for a cache-only listener", () => {
+    const fake = createFakeCaller();
+    const client = createNativeDashboardClient({ rpc: fake.caller });
+    const releaseCache = client.subscribeCacheObserverEvent(() => {});
+
+    expect(fake.raw.health).not.toHaveBeenCalled();
+    expect(fake.raw.watch).not.toHaveBeenCalled();
+    expect(fake.raw.events.subscribe).not.toHaveBeenCalled();
+
+    releaseCache();
+    client.dispose();
+  });
+
+  it("observes settings changes without activating the Native transport", async () => {
+    const fake = createFakeCaller();
+    const client = createNativeDashboardClient({ rpc: fake.caller });
+    const onSettingsChanged = vi.fn();
+    const releaseSettings = client.subscribeSettingsChanged(onSettingsChanged);
+
+    expect(fake.raw.health).not.toHaveBeenCalled();
+    expect(fake.raw.events.subscribe).not.toHaveBeenCalled();
+
+    const releaseDashboard = client.subscribe(() => {});
+    await waitFor(() => client.connection() === "live", "live connection");
+    fake.streams[0]?.pushEvent({ topic: "settings.changed", at: 1 });
+    await waitFor(() => onSettingsChanged.mock.calls.length === 1, "settings change event");
+
+    releaseSettings();
+    fake.streams[0]?.pushEvent({ topic: "settings.changed", at: 2 });
+    await Promise.resolve();
+    expect(onSettingsChanged).toHaveBeenCalledOnce();
+
+    releaseDashboard();
+    client.dispose();
   });
 
   it("supersedes an immediate startup with an immutable latest scope", async () => {
@@ -215,7 +625,10 @@ describe("native dashboard RPC client", () => {
     expect(fake.raw.health).toHaveBeenCalledTimes(2);
     expect(fake.raw.events.subscribe).toHaveBeenCalledTimes(2);
     expect(fake.raw.watch).toHaveBeenCalledTimes(2);
-    expect(fake.raw.watch.mock.calls[1]?.[0]).toEqual({ scope: "analytics" });
+    expect(fake.raw.watch.mock.calls[1]?.[0]).toEqual({
+      scope: "analytics",
+      attemptNonce: expect.any(String),
+    });
     expect(fake.activeWatches[1]?.scope).toBe("analytics");
     expect(client.connection()).toBe("live");
     expect(refetch).toHaveBeenCalledOnce();
@@ -268,6 +681,8 @@ describe("native dashboard RPC client", () => {
 
     await expect(client.health()).resolves.toMatchObject({ app: "opencode-quota-gui" });
     await expect(client.quota()).resolves.toEqual({ marker: "quota" });
+    await expect(client.quota({ refresh: true })).resolves.toEqual({ marker: "quota" });
+    expect(fake.raw.quota).toHaveBeenLastCalledWith({ refresh: true });
     await expect(client.home({ range: "7d" })).resolves.toEqual({ marker: "home" });
     await expect(client.groups({ range: "7d", dimension: "model" })).resolves.toEqual({
       marker: "groups",
@@ -432,8 +847,8 @@ describe("native dashboard RPC client", () => {
     await waitFor(() => fake.raw.watch.mock.calls.length === 2, "first renewed watch");
 
     const firstInput = fake.raw.watch.mock.calls[0]?.[0];
-    expect(firstInput).toEqual({ scope: "analytics" });
-    expect(fake.raw.watch.mock.calls[1]?.[0]).toEqual({ scope: "analytics" });
+    expect(firstInput).toEqual({ scope: "analytics", attemptNonce: expect.any(String) });
+    expect(fake.raw.watch.mock.calls[1]?.[0]).toEqual(firstInput);
     expect(fake.raw.home).toHaveBeenCalledOnce();
     expect(fake.raw.project).toHaveBeenCalledOnce();
     expect(fake.raw.health).toHaveBeenCalledTimes(2);

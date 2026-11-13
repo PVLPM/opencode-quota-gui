@@ -1,5 +1,6 @@
 import {
   Command,
+  ComposerPill,
   MenuItem,
   Panel,
   Plugin,
@@ -10,9 +11,17 @@ import {
   usePlugin,
 } from "@opencode/plugin/gui";
 import type { JSX } from "solid-js";
-import { createEffect, onCleanup } from "solid-js";
+import { createEffect, createSignal, onCleanup } from "solid-js";
+import { supportsNativeGui } from "../lib/opencode-version-core.js";
+import type { Location } from "../ui/routing.js";
 import productCss from "../ui/styles.css?inline";
+import { createCacheComposerPill } from "./cache-composer-pill.js";
+import {
+  createModelChangeToastSetting,
+  startModelMismatchNotificationSubscription,
+} from "./model-mismatch-notifications.js";
 import nativeCss from "./native.css?inline";
+import { navigateNative } from "./navigation.js";
 import { DashboardPanel } from "./panel.js";
 import { revealDashboardPanel } from "./panel-open.js";
 import { startQuotaNotificationSubscription, windowHasFocus } from "./quota-notifications.js";
@@ -42,7 +51,11 @@ const TAB_ID = "dashboard";
 /** Stable objects: the host re-renders tab labels only when a new object appears. */
 const DASHBOARD_TAB = { id: TAB_ID, title: "Quota & Usage" } as const;
 
-function NativeDashboardPanel(props: { runtime: NativeDashboardRuntime }): JSX.Element {
+function NativeDashboardPanel(props: {
+  runtime: NativeDashboardRuntime;
+  location: () => Location;
+  setLocation: (next: Location) => void;
+}): JSX.Element {
   const ctx = usePlugin();
   const panel = usePanel();
   // The first Panel open starts the window transport; later mounts reuse it.
@@ -63,7 +76,8 @@ function NativeDashboardPanel(props: { runtime: NativeDashboardRuntime }): JSX.E
       <DashboardPanel
         client={props.runtime.client}
         initialLocation={props.runtime.location()}
-        onLocationChange={(next) => props.runtime.setLocation(next)}
+        externalLocation={props.location}
+        onLocationChange={props.setLocation}
         onScopeChange={(scope) => props.runtime.setScope(scope)}
         visible={panel.visible}
         hostConnected={hostConnected}
@@ -94,6 +108,11 @@ function openDashboardPanel(ctx: ReturnType<typeof usePlugin>): void {
 
 export default Plugin.define({
   setup(ctx) {
+    // The GUI host exposes its version through the public app context. Older
+    // hosts may not provide it; unknown versions fail closed without affecting
+    // the separate server-plugin browser fallback.
+    if (!supportsNativeGui(ctx.app?.version)) return;
+
     // Contribution order is cascade order: the product sheet first, then the
     // host-only additions. Both are inert outside `.qg-native`/`.qg-panel-root`
     // except for the namespaced `--qg-*` custom properties on `:root`.
@@ -104,6 +123,38 @@ export default Plugin.define({
     // One transport and one in-memory navigation map live for the window: a
     // Settings route change unmounts the Panel without ending this setup.
     const runtime = createNativeDashboardRuntime(ctx);
+    const [location, setLocationSignal] = createSignal(runtime.location());
+    const setLocation = (next: Location) => {
+      runtime.setLocation(next);
+      setLocationSignal(next);
+    };
+    const modelChangeToastSetting = createModelChangeToastSetting(runtime.client);
+    const modelMismatchNotifications = startModelMismatchNotificationSubscription({
+      source: runtime.cacheObserver,
+      currentSession: () => {
+        const current = ctx.sessions.current();
+        return current === undefined
+          ? undefined
+          : { id: current.id, builtin: current.server.builtin };
+      },
+      host: ctx,
+      focused: windowHasFocus,
+      modelChangeToastEnabled: modelChangeToastSetting.enabled,
+    });
+    onCleanup(modelMismatchNotifications);
+    onCleanup(modelChangeToastSetting.stop);
+    ctx.add(
+      ComposerPill,
+      createCacheComposerPill(ctx.sessions, runtime, ctx.ui, (session, sessionId) => {
+        const next = navigateNative(
+          runtime.location(),
+          `/session/${encodeURIComponent(sessionId)}`,
+        );
+        if (next === undefined) return;
+        setLocation(next);
+        revealPanel(ctx, session);
+      }),
+    );
 
     // Notifications are a window-lifetime concern: setup runs once per window,
     // so alerts keep arriving while the panel, slot and settings page are
@@ -138,7 +189,9 @@ export default Plugin.define({
       region: "side",
       mobile: { title: "Quota & Usage", order: 20, kind: "menu", icon: "sliders" },
       list: ({ open }) => (open.includes(TAB_ID) ? [DASHBOARD_TAB] : []),
-      render: () => <NativeDashboardPanel runtime={runtime} />,
+      render: () => (
+        <NativeDashboardPanel runtime={runtime} location={location} setLocation={setLocation} />
+      ),
     });
 
     ctx.add(SettingsPage, {

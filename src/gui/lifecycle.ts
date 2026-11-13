@@ -12,7 +12,7 @@
  * shared by every transport attached to that host. The host closes with the
  * last lease, releasing the snapshot service and every source it created. The
  * web transport is optional and follows the host version when `dashboard.enabled`
- * is absent (on below OpenCode 2.2.0, off from 2.2.0): when it is off, or when
+ * is absent (on below OpenCode 2.2.1, off from 2.2.1): when it is off, or when
  * its fixed port cannot bind, the shared runtime stays available for the
  * remaining leases and no HTTP/SSE/static surface is started.
  *
@@ -44,7 +44,8 @@ import {
 import type { QuotaProviderContext } from "../lib/entries.js";
 import { parseConfigDocument } from "../lib/opencode-config-editor.js";
 import { getOpencodeRuntimeDirs } from "../lib/opencode-runtime-paths.js";
-import { detectOpenCodeVersion, type OpenCodeVersion } from "../lib/opencode-version.js";
+import { detectOpenCodeVersion } from "../lib/opencode-version.js";
+import type { OpenCodeVersion } from "../lib/opencode-version-core.js";
 import {
   createGuiSettingsStore,
   type GuiSettingsStoreOptions,
@@ -80,7 +81,7 @@ export type DashboardReadSource = Pick<
   DashboardDataSource,
   "home" | "project" | "session" | "groups"
 > & {
-  quota?(): Promise<QuotaSnapshot>;
+  quota?(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   /** One shared analytics refresh per transport tick, when the owner loaded analytics. */
   refreshAnalytics?(): Promise<void>;
   /** Owner dispose / host close: releases lazily created analytics resources. */
@@ -412,7 +413,7 @@ function createDelegatingSource(
     project: async (input) => (await requireSource()).project(input),
     session: async (input) => (await requireSource()).session(input),
     groups: async (query) => (await requireSource()).groups(query),
-    quota: async () => {
+    quota: async (input) => {
       // Capture the source generation before resolving the owner and before the
       // asynchronous provider read. A handoff during either step changes the
       // token, and the observer drops the old source's snapshot instead of
@@ -423,7 +424,7 @@ function createDelegatingSource(
       const source = await requireSource();
       // Mirrors `SnapshotService`: a source without quota answers as unavailable.
       if (!source.quota) throw new Error("Quota source unavailable");
-      const snapshot = await source.quota();
+      const snapshot = await source.quota(input);
       if (observer !== undefined && delegation.activeOwner === owner) {
         observer.observe(snapshot, epoch);
       }

@@ -74,5 +74,6 @@ export function formatGoogleAccountErrors(
       (error.email && labels?.get(error.email)) ?? formatGoogleAccountLabel(error.email, style),
     message: error.error,
     ...(error.failureCategory !== undefined ? { failureCategory: error.failureCategory } : {}),
+    ...(error.retryAtMs !== undefined ? { retryAtMs: error.retryAtMs } : {}),
   }));
 }

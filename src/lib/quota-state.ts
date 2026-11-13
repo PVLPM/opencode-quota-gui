@@ -8,6 +8,10 @@ import type {
   QuotaProviderContext,
   QuotaProviderResult,
 } from "./entries.js";
+import { QUOTA_FORCE_REFRESH } from "./entries.js";
+
+export { QUOTA_FORCE_REFRESH } from "./entries.js";
+
 import { getGuiPrivateCacheDir } from "./private-state-paths.js";
 import { getQuotaProviderDisplayLabel, isLiveLocalUsageProviderId } from "./provider-metadata.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
@@ -31,12 +35,13 @@ const QUOTA_PROVIDER_CACHE_DIRNAME = "quota-provider-state";
 const QUOTA_PROVIDER_CACHE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const QUOTA_PROVIDER_CACHE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
-const inMemoryCache = new Map<string, PersistedQuotaProviderCacheEntry>();
+const inMemoryCache = new Map<string, PersistedQuotaProviderCacheEntry & { stale?: boolean }>();
 const inFlightByKey = new Map<string, Promise<QuotaProviderResult>>();
+const refreshByKey = new Map<string, Promise<QuotaProviderResult>>();
 type ProcessLocalLatestEntry = { result: QuotaProviderResult; timestamp: number };
 let processLocalLatestByRuntime = new WeakMap<
   object,
-  WeakMap<QuotaProvider, ProcessLocalLatestEntry>
+  WeakMap<QuotaProvider, Map<string, ProcessLocalLatestEntry>>
 >();
 let lastPruneAtMs = 0;
 
@@ -263,6 +268,26 @@ async function resolveProviderCacheScope(
   }
 }
 
+/** Private, opaque identity for server-side last-good matching; never a DTO field. */
+export async function getQuotaProviderResultScope(
+  provider: QuotaProvider,
+  ctx: QuotaProviderContext,
+): Promise<string | undefined> {
+  const runtimeEligibleQuotaProviders = await resolveRuntimeEligibleQuotaProviders(
+    provider.id,
+    ctx,
+  );
+  if (runtimeEligibleQuotaProviders === null) return undefined;
+  const scope = await resolveProviderCacheScope(provider, ctx, { runtimeEligibleQuotaProviders });
+  if (!scope) return undefined;
+  return getQuotaProviderStateCacheLocator(
+    buildQuotaProviderStateCacheKey(provider.id, ctx, {
+      runtimeEligibleQuotaProviders,
+      resolvedAuthIdentity: scope.resolvedAuthIdentity,
+    }),
+  );
+}
+
 async function isProviderCacheScopeCurrent(
   provider: QuotaProvider,
   ctx: QuotaProviderContext,
@@ -277,8 +302,10 @@ async function isProviderCacheScopeCurrent(
     );
     if (runtimeEligibleQuotaProviders === null) return false;
     return (
-      (await provider.cachePolicy.resolveIdentity(ctx, { runtimeEligibleQuotaProviders })) ===
-      scope.resolvedAuthIdentity
+      (await provider.cachePolicy.resolveIdentity(
+        { ...ctx, operationCache: undefined },
+        { runtimeEligibleQuotaProviders },
+      )) === scope.resolvedAuthIdentity
     );
   } catch {
     return false;
@@ -290,19 +317,35 @@ function getProcessLocalRuntimeOwner(ctx: QuotaProviderContext): object | null {
   return owner && (typeof owner === "object" || typeof owner === "function") ? owner : null;
 }
 
+function buildProcessLocalRouteKey(params: {
+  provider: QuotaProvider;
+  ctx: QuotaProviderContext;
+  runtimeEligibleQuotaProviders?: readonly QuotaProviderDefinition[];
+}): string {
+  return buildQuotaProviderStateCacheKey(params.provider.id, params.ctx, {
+    runtimeEligibleQuotaProviders: params.runtimeEligibleQuotaProviders,
+  });
+}
+
 function rememberProcessLocalLatest(params: {
   provider: QuotaProvider;
   ctx: QuotaProviderContext;
   result: QuotaProviderResult;
+  runtimeEligibleQuotaProviders?: readonly QuotaProviderDefinition[];
 }): void {
-  const runtimeOwner = getProcessLocalRuntimeOwner(params.ctx);
-  if (!runtimeOwner) return;
-  let runtimeSnapshots = processLocalLatestByRuntime.get(runtimeOwner);
-  if (!runtimeSnapshots) {
-    runtimeSnapshots = new WeakMap();
-    processLocalLatestByRuntime.set(runtimeOwner, runtimeSnapshots);
+  const owner = getProcessLocalRuntimeOwner(params.ctx);
+  if (!owner) return;
+  let runtime = processLocalLatestByRuntime.get(owner);
+  if (!runtime) {
+    runtime = new WeakMap();
+    processLocalLatestByRuntime.set(owner, runtime);
   }
-  runtimeSnapshots.set(params.provider, {
+  let routes = runtime.get(params.provider);
+  if (!routes) {
+    routes = new Map();
+    runtime.set(params.provider, routes);
+  }
+  routes.set(buildProcessLocalRouteKey(params), {
     result: cloneQuotaProviderResult(params.result),
     timestamp: Date.now(),
   });
@@ -311,16 +354,17 @@ function rememberProcessLocalLatest(params: {
 function readProcessLocalLatest(params: {
   provider: QuotaProvider;
   ctx: QuotaProviderContext;
+  runtimeEligibleQuotaProviders?: readonly QuotaProviderDefinition[];
 }): CachedProviderRead {
-  const runtimeOwner = getProcessLocalRuntimeOwner(params.ctx);
-  if (!runtimeOwner) return { hit: false };
-  const entry = processLocalLatestByRuntime.get(runtimeOwner)?.get(params.provider);
-  if (!entry) return { hit: false };
-  return {
-    hit: true,
-    result: cloneQuotaProviderResult(entry.result),
-    timestamp: entry.timestamp,
-  };
+  const owner = getProcessLocalRuntimeOwner(params.ctx);
+  if (!owner) return { hit: false };
+  const entry = processLocalLatestByRuntime
+    .get(owner)
+    ?.get(params.provider)
+    ?.get(buildProcessLocalRouteKey(params));
+  return entry
+    ? { hit: true, result: cloneQuotaProviderResult(entry.result), timestamp: entry.timestamp }
+    : { hit: false };
 }
 
 function publishQuotaTelemetry(params: {
@@ -349,14 +393,24 @@ export async function fetchQuotaProviderResult(params: {
   ctx: QuotaProviderContext;
   ttlMs: number;
   bypassCache?: boolean;
+  forceRefresh?: boolean;
 }): Promise<QuotaProviderResult> {
-  const { provider, ctx, ttlMs, bypassCache = false } = params;
+  const { provider, ttlMs, bypassCache = false } = params;
+  const ctx = params.forceRefresh
+    ? { ...params.ctx, operationCache: new Map(params.ctx.operationCache) }
+    : params.ctx;
+  if (params.forceRefresh) ctx.operationCache!.set(QUOTA_FORCE_REFRESH, true);
 
   const fetchUncached = async (
     cacheContext: QuotaProviderCacheContext = {},
   ): Promise<QuotaProviderResult> => {
     const snapshot = await fetchValidatedProviderResult(provider, ctx, cacheContext);
-    rememberProcessLocalLatest({ provider, ctx, result: snapshot });
+    rememberProcessLocalLatest({
+      provider,
+      ctx,
+      result: snapshot,
+      runtimeEligibleQuotaProviders: cacheContext.runtimeEligibleQuotaProviders,
+    });
     publishQuotaTelemetry({
       ctx,
       providerId: provider.id,
@@ -382,6 +436,23 @@ export async function fetchQuotaProviderResult(params: {
     runtimeEligibleQuotaProviders,
     resolvedAuthIdentity: scope.resolvedAuthIdentity,
   });
+
+  if (params.forceRefresh && !isLiveLocalUsageProviderId(provider.id)) {
+    const existing = refreshByKey.get(key);
+    if (existing) return cloneQuotaProviderResult(await existing);
+    const refresh = (async () => {
+      // An earlier ordinary request is not a refresh; wait for it to settle
+      // before retrying so its result cannot overwrite the newer measurement.
+      await inFlightByKey.get(key)?.catch(() => undefined);
+      return fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    })();
+    refreshByKey.set(key, refresh);
+    try {
+      return cloneQuotaProviderResult(await refresh);
+    } finally {
+      if (refreshByKey.get(key) === refresh) refreshByKey.delete(key);
+    }
+  }
 
   if (isLiveLocalUsageProviderId(provider.id)) {
     const snapshot = await fetchValidatedProviderResult(provider, ctx, cacheContext);
@@ -420,6 +491,7 @@ export async function fetchQuotaProviderResult(params: {
   const inMemory = forceAggregateRefresh ? undefined : inMemoryCache.get(key);
   if (
     inMemory &&
+    !inMemory.stale &&
     inMemory.packageVersion === packageVersion &&
     ttlMs > 0 &&
     now - inMemory.timestamp < ttlMs
@@ -436,6 +508,10 @@ export async function fetchQuotaProviderResult(params: {
 
   const inFlight = inFlightByKey.get(key);
   if (inFlight) {
+    if (ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true) {
+      await inFlight.catch(() => undefined);
+      return fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    }
     const snapshot = await inFlight;
     publishQuotaTelemetry({
       ctx,
@@ -456,7 +532,7 @@ export async function fetchQuotaProviderResult(params: {
         ttlMs,
         now,
       });
-  if (persisted) {
+  if (persisted && !inMemoryCache.has(key)) {
     inMemoryCache.set(key, {
       ...persisted,
       result: cloneQuotaProviderResult(persisted.result),
@@ -473,6 +549,10 @@ export async function fetchQuotaProviderResult(params: {
 
   const inFlightAfterDiskRead = inFlightByKey.get(key);
   if (inFlightAfterDiskRead) {
+    if (ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true) {
+      await inFlightAfterDiskRead.catch(() => undefined);
+      return fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    }
     const snapshot = await inFlightAfterDiskRead;
     publishQuotaTelemetry({
       ctx,
@@ -485,7 +565,68 @@ export async function fetchQuotaProviderResult(params: {
   }
 
   const fetchPromise = (async () => {
-    const snapshot = await fetchValidatedProviderResult(provider, ctx, cacheContext);
+    let snapshot: QuotaProviderResult;
+    try {
+      snapshot = await fetchValidatedProviderResult(provider, ctx, cacheContext);
+    } catch (error) {
+      if (ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true) {
+        const previous =
+          inMemoryCache.get(key) ??
+          (await readPersistedQuotaProviderCacheEntry({
+            key,
+            providerId: provider.id,
+            packageVersion,
+            ttlMs,
+            now: Date.now(),
+            ignoreExpiry: true,
+          }));
+        if (previous && (await isProviderCacheScopeCurrent(provider, ctx, scope))) {
+          inMemoryCache.set(key, { ...previous, stale: true });
+        } else {
+          inMemoryCache.delete(key);
+        }
+        await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
+      }
+      throw error;
+    }
+
+    const rateLimited = snapshot.errors.filter((error) => error.retryAtMs !== undefined);
+    const previous = inMemoryCache.get(key);
+    if (
+      rateLimited.length > 0 &&
+      previous &&
+      (await isProviderCacheScopeCurrent(provider, ctx, scope))
+    ) {
+      const failedAccounts = new Set(
+        rateLimited.map((error) => error.sourceId).filter((id) => id !== undefined),
+      );
+      const accountsWithFreshEntries = new Set(
+        snapshot.entries
+          .map((entry) => entry.accounting.sourceId)
+          .filter((id): id is string => id !== undefined),
+      );
+      const fallback =
+        snapshot.entries.length === 0 && rateLimited.some((error) => error.sourceId === undefined)
+          ? provider.id === "openrouter"
+            ? previous.result.entries.filter((entry) => entry.accounting.sourceId === undefined)
+            : previous.result.entries
+          : previous.result.entries.filter(
+              (entry) =>
+                entry.accounting.sourceId !== undefined &&
+                failedAccounts.has(entry.accounting.sourceId) &&
+                !accountsWithFreshEntries.has(entry.accounting.sourceId),
+            );
+      if (fallback.length > 0) {
+        const stale = { ...snapshot, entries: [...snapshot.entries, ...fallback] };
+        inMemoryCache.set(key, {
+          ...previous,
+          stale: true,
+          result: cloneQuotaProviderResult(stale),
+        });
+        await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
+        return stale;
+      }
+    }
 
     if (
       !snapshot.attempted ||
@@ -504,6 +645,12 @@ export async function fetchQuotaProviderResult(params: {
       timestamp: Date.now(),
       result: snapshot,
     });
+
+    if (snapshot.errors.some((error) => error.kind !== "intentional-filter")) {
+      inMemoryCache.set(key, { ...entry, stale: true, result: cloneQuotaProviderResult(snapshot) });
+      await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
+      return snapshot;
+    }
 
     inMemoryCache.set(key, {
       ...entry,
@@ -541,13 +688,16 @@ export async function readCachedProviderResult(params: {
     params.ctx,
   );
   if (runtimeEligibleQuotaProviders === null) return { hit: false };
+  if (runtimeEligibleQuotaProviders?.length === 0) return { hit: false };
 
   const cacheContext: QuotaProviderCacheContext = { runtimeEligibleQuotaProviders };
   const scope = await resolveProviderCacheScope(params.provider, params.ctx, cacheContext);
   if (!scope) {
+    if (params.provider.cachePolicy?.kind === "resolved-auth") return { hit: false };
     return readProcessLocalLatest({
       provider: params.provider,
       ctx: params.ctx,
+      runtimeEligibleQuotaProviders,
     });
   }
 
@@ -584,21 +734,28 @@ export async function readCachedProviderResult(params: {
   });
 
   if (persisted) {
-    inMemoryCache.set(key, {
-      ...persisted,
-      result: cloneQuotaProviderResult(persisted.result),
-    });
+    if (!(await isProviderCacheScopeCurrent(params.provider, params.ctx, scope))) {
+      return { hit: false };
+    }
+    const current = inMemoryCache.get(key);
+    const selected = current ?? persisted;
+    if (!current) {
+      inMemoryCache.set(key, {
+        ...persisted,
+        result: cloneQuotaProviderResult(persisted.result),
+      });
+    }
     publishQuotaTelemetry({
       ctx: params.ctx,
       providerId: params.provider.id,
       snapshotId: key,
-      result: persisted.result,
-      cacheTimestamp: persisted.timestamp,
+      result: selected.result,
+      cacheTimestamp: selected.timestamp,
     });
     return {
       hit: true,
-      result: cloneQuotaProviderResult(persisted.result),
-      timestamp: persisted.timestamp,
+      result: cloneQuotaProviderResult(selected.result),
+      timestamp: selected.timestamp,
     };
   }
 
@@ -608,6 +765,7 @@ export async function readCachedProviderResult(params: {
 export function __resetQuotaStateForTests(): void {
   inMemoryCache.clear();
   inFlightByKey.clear();
+  refreshByKey.clear();
   processLocalLatestByRuntime = new WeakMap();
   lastPruneAtMs = 0;
 }

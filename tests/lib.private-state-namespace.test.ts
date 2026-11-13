@@ -136,7 +136,6 @@ describe("GUI private-state namespace", () => {
     const quotaState = await import("../src/lib/quota-state.js");
     const pricing = await import("../src/lib/modelsdev-pricing.js");
     const local = await import("../src/lib/quota-providers-local.js");
-    const alibaba = await import("../src/lib/alibaba-coding-plan-local-quota.js");
     const identity = await import("../src/lib/resolved-auth-identity.js");
     const quotaExport = await import("../src/lib/quota-export.js");
     const privatePaths = await import("../src/lib/private-state-paths.js");
@@ -152,9 +151,6 @@ describe("GUI private-state namespace", () => {
     );
     expect(local.getLocalQuotaProviderStatePath("custom")).toMatch(
       /[\\/]state[\\/]opencode-quota-gui[\\/]quota-providers[\\/]custom\.json$/u,
-    );
-    expect(alibaba.getAlibabaCodingPlanQuotaPath()).toMatch(
-      /[\\/]state[\\/]opencode-quota-gui[\\/]alibaba-coding-plan-local-quota\.json$/u,
     );
     expect(identity.getResolvedAuthIdentityKeyPath()).toMatch(
       /[\\/]state[\\/]opencode-quota-gui[\\/]resolved-auth-key-v1$/u,
@@ -220,15 +216,6 @@ describe("GUI private-state namespace", () => {
     pricing.__resetPricingSnapshotForTests();
     pricing.setPricingSnapshotSelection("runtime");
     expect(pricing.lookupCost("openai", "gui-model")).toEqual({ input: 1.25, output: 2.5 });
-
-    const alibaba = await import("../src/lib/alibaba-coding-plan-local-quota.js");
-    await alibaba.readAlibabaCodingPlanQuotaState({
-      nowMs: Date.now(),
-      readMessages: async () => [],
-    });
-    await expect(
-      access(`${STATE_DIR}/opencode-quota-gui/alibaba-coding-plan-local-quota.json`),
-    ).resolves.toBe(undefined);
 
     const local = await import("../src/lib/quota-providers-local.js");
     await local.syncLocalQuotaProviderState(

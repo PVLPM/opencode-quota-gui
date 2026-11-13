@@ -1,6 +1,19 @@
 import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 
+it("places the native-only diagnostics action at the bottom of About", () => {
+  const settings = readFileSync("src/ui/views/settings.tsx", "utf8");
+  const about = readFileSync("src/ui/components/build-info.tsx", "utf8");
+  const native = readFileSync("src/native/settings-page.tsx", "utf8");
+  const route = readFileSync("src/ui/routes.tsx", "utf8");
+  expect(settings).toContain("<BuildAbout>{props.aboutAction}</BuildAbout>");
+  expect(about).toMatch(/Contract.*[\s\S]*props\.children[\s\S]*<\/section>/);
+  expect(route).toContain("aboutAction={props.aboutAction}");
+  expect(native).toContain("aboutAction=");
+  expect(native).toContain('name={copied() ? "check" : "copy"}');
+  expect(native).not.toMatch(/qg-settings-page__status[\s\S]{0,150}Copy diagnostics/);
+});
+
 it("lets the Desktop settings panel own scrolling while the save bar sticks", () => {
   const css = readFileSync("src/native/native.css", "utf8");
   expect(css).toMatch(/\.qg-native\.qg-settings-page\s*\{[^}]*min-height:\s*100%/s);

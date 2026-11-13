@@ -7,6 +7,10 @@ const DOM_TESTS = [
   "tests/gui.native-session-header-measure-dom.test.ts",
   "tests/gui.native-session-header-mount-dom.test.ts",
   "tests/gui.native-controls-dom.test.ts",
+  "tests/gui.runway-dom.test.ts",
+  "tests/gui.runway-web-dom.test.ts",
+  "tests/gui.native-compatibility-runtime.test.ts",
+  "tests/gui.native-cache-composer-pill.test.ts",
 ];
 const SOLID_DEV = fileURLToPath(new URL("./node_modules/solid-js/dist/dev.js", import.meta.url));
 const SOLID_WEB_DEV = fileURLToPath(
@@ -45,7 +49,16 @@ export default defineConfig({
         // Only the native header's presentational modules need the Solid DOM
         // compiler and browser condition; the rest of the suite keeps the Node
         // runtime.
-        plugins: [solid({ include: [/src\/native\/.*\.tsx$/, /src\/ui\/.*\.tsx$/] })],
+        plugins: [
+          solid({
+            include: [
+              /src\/native\/.*\.tsx$/,
+              /src\/ui\/.*\.tsx$/,
+              /node_modules\/.*@opencode\/ui\/.*\.tsx$/,
+              /node_modules\/.*@kobalte\/.*\.jsx$/,
+            ],
+          }),
+        ],
         resolve: { conditions: ["browser", "development"], alias: solidAliases },
         test: {
           name: "native-header-dom",
@@ -56,7 +69,9 @@ export default defineConfig({
           // `inline` wins over `external` in Vitest. The external entry is
           // present only so vite-plugin-solid does not replace this block with
           // its own external-only default and pull in a second Solid copy.
-          server: { deps: { inline: [/solid-js/], external: [/solid-js/] } },
+          server: {
+            deps: { inline: [/solid-js/, /@opencode\/ui/, /@kobalte/], external: [/solid-js/] },
+          },
         },
       },
     ],

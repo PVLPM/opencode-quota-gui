@@ -30,9 +30,45 @@ export type QuotaResetWindow = "fiveHour" | "hourly" | "daily" | "weekly" | "mon
 export interface QuotaResetNotificationsConfig {
   /** Whether successful quota-window resets emit a one-shot toast. */
   enabled: boolean;
-  /** Window classes eligible for reset notifications. */
+  /** Windows whose verified reset transitions may produce a one-shot notification. */
   windows: QuotaResetWindow[];
 }
+
+/** Canonical Native desktop notification policy; legacy `resetNotifications` is separate. */
+export interface NativeQuotaNotificationPolicy {
+  enabled: boolean;
+  /** Focused-window model mismatch toasts; independent of the quota alert master. */
+  modelChangeToastEnabled: boolean;
+  low: {
+    enabled: boolean;
+    thresholdRemainingPercent: number;
+  };
+  exhausted: {
+    enabled: boolean;
+  };
+  reset: {
+    enabled: boolean;
+    windows: QuotaResetWindow[];
+  };
+  providerError: {
+    enabled: boolean;
+  };
+  /** Shared cooldown for every Native quota notification fingerprint. */
+  duplicateCooldownMinutes: number;
+}
+
+export const DEFAULT_NATIVE_QUOTA_NOTIFICATION_POLICY: NativeQuotaNotificationPolicy = {
+  enabled: true,
+  modelChangeToastEnabled: true,
+  low: { enabled: true, thresholdRemainingPercent: 10 },
+  exhausted: { enabled: true },
+  reset: {
+    enabled: true,
+    windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+  },
+  providerError: { enabled: true },
+  duplicateCooldownMinutes: 30,
+};
 
 export interface PricingSnapshotConfig {
   source: PricingSnapshotSource;
@@ -157,6 +193,9 @@ export interface QuotaToastConfig {
 
   /** Opt-in, persisted notifications when selected quota windows reset. */
   resetNotifications: QuotaResetNotificationsConfig;
+
+  /** Master/category policy for Native quota notifications. */
+  nativeQuotaNotifications: NativeQuotaNotificationPolicy;
 
   /**
    * Percent of a quota window remaining at or below which quota is considered
@@ -312,6 +351,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
     enabled: false,
     windows: ["weekly"],
   },
+  nativeQuotaNotifications: DEFAULT_NATIVE_QUOTA_NOTIFICATION_POLICY,
   lowQuotaThresholdRemainingPercent: 10,
   duplicateCooldownMinutes: 30,
   tuiCommandDisplay: "dialog",
@@ -778,6 +818,10 @@ export interface GoogleAccountError {
   email: string;
   error: string;
   failureCategory?: ProviderFailureCategory;
+  /** Deadline observed in an upstream Retry-After response. */
+  retryAtMs?: number;
+  /** Position of the failed account, matching its buckets' `accountIndex`. */
+  accountIndex?: number;
 }
 
 export interface GeminiCliQuotaBucket {
@@ -848,6 +892,7 @@ export type GoogleAgyResult = GoogleAgyQuotaResult | QuotaError | null;
 export interface QuotaError {
   success: false;
   error: string;
+  retryAtMs?: number;
   /** Whether retrying later may succeed without changing credentials or configuration. */
   retryable?: boolean;
   /** Source-assigned safe category; absence means unknown and consumers fail closed. */

@@ -1,5 +1,6 @@
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import {
@@ -61,6 +62,8 @@ export interface OpenCodeZenBillingData {
 export type OpenCodeZenOptionalError = {
   message: string;
   failureCategory?: ProviderFailureCategory;
+  /** Deadline observed in an upstream Retry-After response. */
+  retryAtMs?: number;
 };
 
 export type OpenCodeZenResult =
@@ -70,7 +73,12 @@ export type OpenCodeZenResult =
       errors: string[];
       optionalErrors?: OpenCodeZenOptionalError[];
     }
-  | { success: false; error: string; failureCategory?: ProviderFailureCategory };
+  | {
+      success: false;
+      error: string;
+      failureCategory?: ProviderFailureCategory;
+      retryAtMs?: number;
+    };
 
 type ConsoleRoute =
   | "billing/status"
@@ -81,7 +89,27 @@ type ConsoleRoute =
 
 type ConsoleRouteResult<T> =
   | { success: true; data: T }
-  | { success: false; error: string; failureCategory?: ProviderFailureCategory };
+  | {
+      success: false;
+      error: string;
+      failureCategory?: ProviderFailureCategory;
+      retryAtMs?: number;
+    };
+
+const routeGuard = createApiKeyRetryGuard<ConsoleRouteResult<unknown>>((retryAtMs) => ({
+  success: false,
+  error: "OpenCode Console request error 429",
+  failureCategory: providerFailureCategoryForHttpStatus(429),
+  retryAtMs,
+}));
+// Coalesce whole queries so a waiter cannot resend optional routes that settled
+// while it was waiting for the required balance route.
+const quotaQueryGuard = createApiKeyRetryGuard<OpenCodeZenResult>((retryAtMs) => ({
+  success: false,
+  error: "OpenCode Console billing/status error 429",
+  failureCategory: providerFailureCategoryForHttpStatus(429),
+  retryAtMs,
+}));
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -309,7 +337,7 @@ function sanitizeMessage(
   return (sanitized || "unknown").slice(0, maxLength);
 }
 
-async function fetchConsoleRoute<T>(params: {
+type ConsoleRouteParams<T> = {
   /** Names the route in error text. */
   route: ConsoleRoute;
   /** URL path after `/api/` when it adds an id to `route`; the id stays out of error text. */
@@ -317,7 +345,38 @@ async function fetchConsoleRoute<T>(params: {
   credential: OpenCodeConsoleCredential;
   timeoutMs: number;
   parse: (json: unknown) => T;
-}): Promise<ConsoleRouteResult<T>> {
+  /** Called synchronously when the guard actually issues the request. */
+  onRequest?: () => void;
+};
+
+/** One cooldown per workspace credential and route; other workspaces are unaffected. */
+function fetchConsoleRoute<T>(params: ConsoleRouteParams<T>): Promise<ConsoleRouteResult<T>> {
+  const { credential } = params;
+  const identity = JSON.stringify([
+    credential.accessToken,
+    credential.orgId ?? null,
+    consoleBaseUrl(credential),
+    params.path ?? params.route,
+  ]);
+  return routeGuard(
+    identity,
+    () => {
+      params.onRequest?.();
+      return requestConsoleRoute(params);
+    },
+    params.timeoutMs,
+    (retryAtMs) => ({
+      success: false,
+      error: `OpenCode Console ${params.route} error 429`,
+      failureCategory: providerFailureCategoryForHttpStatus(429),
+      retryAtMs,
+    }),
+  ) as Promise<ConsoleRouteResult<T>>;
+}
+
+async function requestConsoleRoute<T>(
+  params: ConsoleRouteParams<T>,
+): Promise<ConsoleRouteResult<T>> {
   const path = params.path ?? params.route;
   try {
     return await fetchWithTimeout(`${consoleBaseUrl(params.credential)}/api/${path}`, {
@@ -335,10 +394,12 @@ async function fetchConsoleRoute<T>(params: {
           return { success: false, error: SESSION_ERROR, failureCategory: "credentials" };
         }
         if (!response.ok) {
+          const retryAtMs = retryAfterDeadline(response);
           return {
             success: false,
             error: `OpenCode Console ${params.route} error ${response.status}`,
             failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
         if (response.headers.get("content-type")?.includes("text/html")) {
@@ -396,17 +457,54 @@ function memberBudgetRequest(request: {
   });
 }
 
-export async function queryOpenCodeZenQuota(
+export function queryOpenCodeZenQuota(
   credential: OpenCodeConsoleCredential,
   options: { requestTimeoutMs?: number } = {},
 ): Promise<OpenCodeZenResult> {
+  const timeoutMs = options.requestTimeoutMs ?? CONSOLE_TIMEOUT_MS;
+  const now = new Date();
+  const identity = JSON.stringify([
+    credential.accessToken,
+    credential.orgId ?? null,
+    consoleBaseUrl(credential),
+    credential.accountId?.trim() ?? null,
+    currentUtcMonth(now),
+  ]);
+  return quotaQueryGuard(
+    identity,
+    () => queryOpenCodeZenQuotaOnce(credential, timeoutMs, now),
+    timeoutMs,
+  );
+}
+
+async function queryOpenCodeZenQuotaOnce(
+  credential: OpenCodeConsoleCredential,
+  timeoutMs: number,
+  now: Date,
+): Promise<OpenCodeZenResult> {
   const request = {
     credential,
-    timeoutMs: options.requestTimeoutMs ?? CONSOLE_TIMEOUT_MS,
+    timeoutMs,
   };
-  const now = new Date();
+  // A fresh attempt sends every route concurrently. When billing/status did not
+  // start a request (an observed Retry-After block, or another in-flight
+  // request), settle it first: a cooldown result makes the optional routes
+  // pointless, so they are not sent.
+  let billingStarted = false;
+  const balancePending = fetchConsoleRoute({
+    ...request,
+    route: "billing/status",
+    parse: parseBalance,
+    onRequest: () => {
+      billingStarted = true;
+    },
+  });
+  if (!billingStarted) {
+    const early = await balancePending;
+    if (!early.success && early.retryAtMs !== undefined) return early;
+  }
   const [balance, creditLimit, autoRecharge, member, monthlyUsage] = await Promise.all([
-    fetchConsoleRoute({ ...request, route: "billing/status", parse: parseBalance }),
+    balancePending,
     fetchConsoleRoute({ ...request, route: "billing/account", parse: parseCreditLimit }),
     fetchConsoleRoute({ ...request, route: "billing/auto-recharge", parse: parseAutoRecharge }),
     memberBudgetRequest(request),
@@ -453,6 +551,7 @@ export async function queryOpenCodeZenQuota(
             ...(result.failureCategory !== undefined
               ? { failureCategory: result.failureCategory }
               : {}),
+            ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
           },
         ],
   );

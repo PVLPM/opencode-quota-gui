@@ -166,7 +166,7 @@ describe("verify-v4-history: public performance docs allowlist", () => {
   });
 
   it.each([
-    "AGENTS.md",
+    "nested/AGENTS.md",
     "docs/readme/v4-release-readiness.md",
     "local-live-tests/raw.txt",
   ])("keeps the existing privacy rejection for %s", (relativePath) => {

@@ -173,7 +173,7 @@ describe("native-first public documentation", () => {
     expect(quickStart).toContain("opencode plugin add opencode-quota-gui");
     expect(quickStart).toContain('"plugins": ["opencode-quota-gui"]');
     expect(quickStart).toContain("Quota & Usage");
-    expect(quickStart).toContain("OpenCode Desktop 2.2.0");
+    expect(quickStart).toContain("OpenCode Desktop 2.2.1");
     expect(quickStart).toContain("installs the configured npm plugin");
     expect(quickStart).toContain("http://localhost:4144/quota");
     expect(quickStart).not.toContain("npx opencode-quota-gui init");
@@ -186,13 +186,14 @@ describe("native-first public documentation", () => {
     const compatibility = readMarkdownSection(readme, "OpenCode and upstream compatibility");
 
     for (const section of [quickStart, browser, settings, compatibility]) {
-      expect(section).toContain("2.2.0");
+      expect(section).toContain("2.2.1");
       expect(section).toContain("by default");
       expect(section).not.toMatch(/off by default for (?:new and upgraded|every) installs?/i);
     }
 
-    expect(browser).toContain("on hosts below **2.2.0**");
-    expect(browser).toContain("at **2.2.0 or newer** it is off by default");
+    expect(browser).toContain("below **2.2.1**");
+    expect(browser).toContain("including **2.2.0**");
+    expect(browser).toContain("at **2.2.1 or newer** it is off by default");
     expect(browser).toContain("dashboard.enabled");
     expect(browser).toContain("always wins");
     expect(browser).toContain("4144");
@@ -216,8 +217,8 @@ describe("native-first public documentation", () => {
     expect(browser).toContain("fallback");
 
     const hero = readMarkdownSection(readme, "Native OpenCode Desktop");
-    expect(hero).toContain("OpenCode Desktop 2.2.0");
-    expect(hero).toContain("v1.3.0");
+    expect(hero).toContain("OpenCode Desktop 2.2.1");
+    expect(hero).toContain("v1.3.1");
 
     const settings = readMarkdownSection(readme, "Settings and privacy");
     expect(settings).toContain("~/.config/opencode/opencode-quota-gui/config.jsonc");

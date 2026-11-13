@@ -18,6 +18,7 @@ import type {
 import {
   combineTemporalPhases,
   describeTemporalSchedule,
+  formatClockRange,
   formatLocalInterval,
   formatTemporalHoliday,
   groupTemporalModels,
@@ -403,38 +404,80 @@ describe("temporal formatting helpers", () => {
     );
   });
 
-  it("resolves the clock from the zone: Istanbul 24-hour, US 12-hour", () => {
+  it("uses a 24-hour clock in every zone, US zones included, whatever the browser locale", () => {
     const start = Date.parse("2026-11-02T11:00:00.000Z");
     const end = Date.parse("2026-11-02T14:00:00.000Z");
     const istanbul = formatLocalInterval(start, end, {
       locale: "tr-TR",
       timeZone: "Europe/Istanbul",
     });
-    // The browser locale must not force a 12-hour clock on Istanbul.
     const enUsIstanbul = formatLocalInterval(start, end, {
       locale: "en-US",
       timeZone: "Europe/Istanbul",
     });
     expect(istanbul).toContain("14:00");
-    expect(istanbul).not.toContain("PM");
     expect(enUsIstanbul).toContain("14:00");
-    expect(enUsIstanbul).not.toContain("2:00 PM");
 
+    // 11:00Z is 06:00 in New York (UTC-5 after the 2026-11-01 fall-back).
     const enUsNewYork = formatLocalInterval(start, end, {
       locale: "en-US",
       timeZone: "America/New_York",
     });
-    expect(enUsNewYork).toContain("6:00 AM");
-    expect(enUsNewYork).not.toContain("06:00");
-    expect(enUsNewYork).not.toContain("14:00");
+    expect(enUsNewYork).toContain("06:00");
+    expect(enUsNewYork).toContain("09:00");
+    expect(enUsNewYork).not.toMatch(/\b(AM|PM)\b/);
 
-    // An IANA alias normalizes to a US zone and keeps the 12-hour clock.
     const alias = formatLocalInterval(start, end, {
       locale: "en-US",
       timeZone: "US/Eastern",
     });
-    expect(alias).toContain("6:00 AM");
-    expect(alias).not.toContain("14:00");
+    expect(alias).toContain("06:00");
+    expect(alias).not.toMatch(/\b(AM|PM)\b/);
+  });
+
+  it("renders midnight as 00:00 and noon as 12:00, never 12 AM or 12 PM", () => {
+    const newYork = { locale: "en-US", timeZone: "America/New_York" };
+    // 2026-11-02 00:00 and 12:00 local in New York (UTC-5).
+    const midnight = formatLocalInterval(
+      Date.parse("2026-11-02T05:00:00.000Z"),
+      Date.parse("2026-11-02T06:00:00.000Z"),
+      newYork,
+    );
+    expect(midnight).toContain("00:00");
+    expect(midnight).toContain("01:00");
+    expect(midnight).not.toMatch(/\b(AM|PM)\b/);
+
+    const noon = formatLocalInterval(
+      Date.parse("2026-11-02T17:00:00.000Z"),
+      Date.parse("2026-11-02T18:00:00.000Z"),
+      newYork,
+    );
+    expect(noon).toContain("12:00");
+    expect(noon).toContain("13:00");
+    expect(noon).not.toMatch(/\b(AM|PM)\b/);
+
+    expect(formatClockRange(0, 720, newYork)).toBe("00:00–12:00");
+    expect(formatClockRange(720, 1440, newYork)).toBe("12:00–24:00");
+    expect(formatClockRange(1380, 1440, newYork)).toBe("23:00–24:00");
+    expect(formatClockRange(0, 1440, newYork)).toBe("all day");
+  });
+
+  it("keeps the 24-hour clock across half-hour and UTC zones", () => {
+    expect(formatClockRange(0, 60, { locale: "en-US", timeZone: "Europe/Istanbul" })).toBe(
+      "00:00–01:00",
+    );
+    expect(formatClockRange(330, 690, { locale: "en-US", timeZone: "Asia/Kolkata" })).toBe(
+      "05:30–11:30",
+    );
+    expect(formatClockRange(720, 780, { locale: "en-US", timeZone: "UTC" })).toBe("12:00–13:00");
+  });
+
+  it("uses 24-hour time with no explicit locale or zone, as production calls it", () => {
+    const start = Date.parse("2026-11-02T05:00:00.000Z");
+    const end = Date.parse("2026-11-02T06:00:00.000Z");
+    expect(formatLocalInterval(start, end)).not.toMatch(/\b(AM|PM)\b/);
+    expect(formatClockRange(0, 720)).not.toMatch(/\b(AM|PM)\b/);
+    expect(formatClockRange(720, 1440)).not.toMatch(/\b(AM|PM)\b/);
   });
 
   it("uses the nearest holiday's actual instants and omits jurisdiction, names and lists", () => {
@@ -1162,8 +1205,9 @@ describe("temporal live status server-rendered markup", () => {
       formatOptions: { timeZone: "America/New_York", locale: "en-US" },
     });
     const text = visibleText(html);
-    expect(text).toContain("Peak: Mon–Fri · 1:00 AM–5:00 AM");
-    expect(text).toContain("Peak: Sun–Thu · 8:00 PM–11:00 PM");
+    expect(text).toContain("Peak: Mon–Fri · 01:00–05:00");
+    expect(text).toContain("Peak: Sun–Thu · 20:00–23:00");
+    expect(text).not.toMatch(/\b(AM|PM)\b/);
     expect((html.match(/qg-temporal-popover__schedule-line/g) ?? []).length).toBe(2);
   });
 
@@ -1434,6 +1478,16 @@ describe("temporal live status server-rendered markup", () => {
       /\.qg-field\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(220px, 320px\)/s,
     );
     expect(styles).not.toMatch(/\.qg-field\s*\{[^}]*grid-template-columns:\s*1fr\s*;/s);
+  });
+
+  it("sets provider and model phase pills in one shared caps treatment", () => {
+    // Both pills render `qg-row__value`; the header pill used to carry the
+    // uppercase rule alone, so per-model Peak/Off-peak boxes stayed mixed case.
+    const sharedPillRule = styles.match(
+      /\.qg-temporal-popover__phase,\s*\.qg-temporal-popover__state\s*\{([^}]*)\}/,
+    );
+    expect(sharedPillRule?.[1]).toMatch(/text-transform:\s*uppercase/);
+    expect(sharedPillRule?.[1]).toMatch(/letter-spacing:\s*0\.04em/);
   });
 });
 

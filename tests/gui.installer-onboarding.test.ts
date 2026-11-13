@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { runInitInstaller } from "../src/lib/init-installer.js";
 import { parseJsonOrJsonc } from "../src/lib/jsonc.js";
 
-const hostVersion = vi.hoisted(() => ({ value: "2.2.0" }));
+const hostVersion = vi.hoisted(() => ({ value: "2.2.1" }));
 vi.mock("../src/lib/opencode-version.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../src/lib/opencode-version.js")>();
   return {
@@ -17,7 +17,7 @@ vi.mock("../src/lib/opencode-version.js", async (importOriginal) => {
 });
 const dirs: string[] = [];
 afterEach(() => {
-  hostVersion.value = "2.2.0";
+  hostVersion.value = "2.2.1";
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 function fixture() {
@@ -75,9 +75,9 @@ describe("GUI-first onboarding", () => {
     expect(outro).toContain(`Restart OpenCode, then open http://localhost:${port}/quota`);
     expect(outro).not.toContain(" show`");
   });
-  it("reports the version-gated default-off web policy on 2.2.0 and newer", async () => {
+  it("reports the version-gated default-off web policy on 2.2.1 and newer", async () => {
     const dir = fixture();
-    hostVersion.value = "2.2.0";
+    hostVersion.value = "2.2.1";
     const { prompts, transcript } = adapter();
     expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
     const outro = transcript.at(-1) ?? "";
@@ -86,9 +86,9 @@ describe("GUI-first onboarding", () => {
     expect(outro).toContain("http://localhost:4144/quota");
     expect(outro).not.toContain("Restart OpenCode, then open http://localhost:4144/quota");
   });
-  it("promises the default web URL on a host below 2.2.0", async () => {
+  it("promises the default web URL on OpenCode 2.2.0", async () => {
     const dir = fixture();
-    hostVersion.value = "2.1.4";
+    hostVersion.value = "2.2.0";
     const { prompts, transcript } = adapter();
     expect(await runInitInstaller({ cwd: dir, env: {}, prompts })).toBe(0);
     const outro = transcript.at(-1) ?? "";

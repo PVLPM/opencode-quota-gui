@@ -7,11 +7,13 @@
 
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota.js";
 import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeDisplayText, sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { clampPercent } from "./format-utils.js";
-import { fetchWithTimeout } from "./http.js";
+import { fetchWithTimeout, RequestTimeoutError } from "./http.js";
 import { readAuthFileCached } from "./opencode-auth.js";
+import { buildFixedWindowEvidence } from "./quota-exhaustion-projection.js";
 import { deriveResolvedAuthIdentity, type ResolvedAuthIdentity } from "./resolved-auth-identity.js";
 import type { AuthData, OpenAIOAuthData, QuotaError } from "./types.js";
 
@@ -159,17 +161,12 @@ function parseRateLimitWindow(
   const value = parseWindowValue(window, observedAtMs);
   if (!value) return null;
 
-  const endsAtMs = value.resetTimeIso ? Date.parse(value.resetTimeIso) : Number.NaN;
-  const startedAtMs = endsAtMs - raw.limit_window_seconds * 1000;
-  if (Number.isFinite(startedAtMs) && startedAtMs < observedAtMs && observedAtMs < endsAtMs) {
-    value.fixedWindow = {
-      kind: "fixed_window",
-      startedAtIso: new Date(startedAtMs).toISOString(),
-      observedAtIso: new Date(observedAtMs).toISOString(),
-      endsAtIso: new Date(endsAtMs).toISOString(),
-      fullReset: true,
-    };
-  }
+  const fixedWindow = buildFixedWindowEvidence({
+    durationMs: raw.limit_window_seconds * 1000,
+    resetTimeIso: value.resetTimeIso,
+    observedAtMs,
+  });
+  if (fixedWindow) value.fixedWindow = fixedWindow;
   return { kind, value };
 }
 
@@ -183,6 +180,12 @@ function derivePlanLabel(planType: string | undefined): string {
 }
 
 const OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const guard = createApiKeyRetryGuard<NonNullable<OpenAIResult>>((retryAtMs) => ({
+  success: false,
+  error: "OpenAI API error 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+}));
 const OPENAI_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 export const DEFAULT_OPENAI_AUTH_CACHE_MAX_AGE_MS = 5_000;
 // Not `opencode`: in OpenCode 2 its OAuth entry is the Console login, which
@@ -373,26 +376,60 @@ function parseAvailableResetCredits(payload: unknown): BankedResetCredit[] {
 }
 
 /** Detail failures degrade to no known expiry metadata; ordinary data stays. */
+type ResetCreditsFetch = {
+  success: boolean;
+  credits: BankedResetCredit[];
+  retryAtMs?: number;
+};
+
+// Separate from the usage guard: a limited detail endpoint must not block usage.
+const resetCreditsGuard = createApiKeyRetryGuard<ResetCreditsFetch>((retryAtMs) => ({
+  success: false,
+  credits: [],
+  retryAtMs,
+}));
+
 async function fetchOpenAIResetCredits(
   headers: Record<string, string>,
   timeoutMs: number | undefined,
+  cooldownKey: string,
 ): Promise<BankedResetCredit[]> {
-  try {
-    return await fetchWithTimeout(OPENAI_RESET_CREDITS_URL, {
-      request: { headers },
-      timeoutMs,
-      consume: async (resp) => {
-        if (!resp.ok) return [];
-        try {
-          return parseAvailableResetCredits(await resp.json());
-        } catch {
-          return [];
-        }
-      },
-    });
-  } catch {
-    return [];
-  }
+  const result = await resetCreditsGuard(
+    cooldownKey,
+    async (): Promise<ResetCreditsFetch> => {
+      try {
+        return await fetchWithTimeout(OPENAI_RESET_CREDITS_URL, {
+          request: { headers },
+          timeoutMs,
+          consume: async (resp): Promise<ResetCreditsFetch> => {
+            if (!resp.ok) {
+              const retryAtMs = retryAfterDeadline(resp);
+              return {
+                success: false,
+                credits: [],
+                ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+              };
+            }
+            try {
+              return { success: true, credits: parseAvailableResetCredits(await resp.json()) };
+            } catch {
+              return { success: false, credits: [] };
+            }
+          },
+        });
+      } catch (error) {
+        return {
+          success: false,
+          credits: [],
+          ...(error instanceof RequestTimeoutError && error.retryAtMs !== undefined
+            ? { retryAtMs: error.retryAtMs }
+            : {}),
+        };
+      }
+    },
+    timeoutMs,
+  );
+  return result.credits;
 }
 
 export async function queryOpenAIQuota(
@@ -444,103 +481,135 @@ export async function queryOpenAIQuota(
       headers["ChatGPT-Account-Id"] = accountId;
     }
 
-    const result = await fetchWithTimeout(OPENAI_USAGE_URL, {
-      request: { headers },
-      timeoutMs: options.requestTimeoutMs,
-      consume: async (resp): Promise<OpenAIResult> => {
-        if (!resp.ok) {
-          const code = await readOpenAIErrorCode(resp);
+    // The ChatGPT account id names a workspace shared by its members, so it
+    // cannot identify a credential (and an email claim does not prove identity
+    // either). Key on the credential itself: the refresh token survives access
+    // token rotation, the access token is the fallback when there is none. The
+    // guard hashes the key and never retains it.
+    const cooldownKey = `${accountId ?? ""}\0${resolvedAuth.refreshToken ?? resolvedAuth.accessToken}`;
+    const result = await guard(
+      cooldownKey,
+      () =>
+        fetchWithTimeout(OPENAI_USAGE_URL, {
+          request: { headers },
+          timeoutMs: options.requestTimeoutMs,
+          consume: async (resp): Promise<NonNullable<OpenAIResult>> => {
+            if (!resp.ok) {
+              const retryAtMs = retryAfterDeadline(resp);
+              const code = await readOpenAIErrorCode(resp);
+              return {
+                success: false,
+                error: `OpenAI API error ${resp.status}${code ? ` (${code})` : ""}`,
+                failureCategory: providerFailureCategoryForHttpStatus(resp.status),
+                ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+              };
+            }
+
+            const data = (await resp.json()) as OpenAIUsageResponse;
+            const observedAtMs = Date.now();
+            const primary = parseRateLimitWindow(data.rate_limit?.primary_window, observedAtMs);
+            const secondary = parseRateLimitWindow(data.rate_limit?.secondary_window, observedAtMs);
+            const individualLimit = parseRemainingWindowValue(
+              data.spend_control?.individual_limit,
+              observedAtMs,
+            );
+            const codeReview = parseWindowValue(
+              data.code_review_rate_limit?.primary_window,
+              observedAtMs,
+            );
+            const credits = data.credits ?? null;
+            const windows: {
+              hourly?: OpenAIWindowValue;
+              weekly?: OpenAIWindowValue;
+              monthly?: OpenAIWindowValue;
+              codeReview?: OpenAIWindowValue;
+            } = {};
+
+            const conflictingKinds = new Set<OpenAIWindowKind>();
+            for (const parsed of [primary, secondary]) {
+              if (!parsed || conflictingKinds.has(parsed.kind)) continue;
+
+              const existing = windows[parsed.kind];
+              if (!existing) {
+                windows[parsed.kind] = parsed.value;
+              } else if (
+                existing.percentRemaining !== parsed.value.percentRemaining ||
+                existing.resetTimeIso !== parsed.value.resetTimeIso
+              ) {
+                delete windows[parsed.kind];
+                conflictingKinds.add(parsed.kind);
+              }
+            }
+            if (!windows.monthly && individualLimit) windows.monthly = individualLimit;
+            if (codeReview) windows.codeReview = codeReview;
+
+            const availableResetCount = parseAvailableResetCount(
+              data.rate_limit_reset_credits?.available_count,
+            );
+            const mappedCredits = credits
+              ? {
+                  hasCredits: Boolean(credits.has_credits),
+                  unlimited: Boolean(credits.unlimited),
+                  balance: credits.balance ?? null,
+                }
+              : undefined;
+            const positiveCredits =
+              mappedCredits !== undefined &&
+              (mappedCredits.unlimited ||
+                (typeof mappedCredits.balance === "string" &&
+                  Number.isFinite(Number(mappedCredits.balance)) &&
+                  Number(mappedCredits.balance) > 0));
+
+            // Empty bodies stay invalid; a useful Credits-only/reset-count-only
+            // payload is a real measurement even without a percent window.
+            if (
+              Object.keys(windows).length === 0 &&
+              !positiveCredits &&
+              availableResetCount === null
+            ) {
+              return { success: false, error: "No quota data", failureCategory: "provider_api" };
+            }
+
+            return {
+              success: true,
+              label: derivePlanLabel(data.plan_type),
+              email: resolvedAuth.email,
+              windows,
+              credits: mappedCredits,
+              ...(availableResetCount !== null
+                ? { bankedResets: { availableCount: availableResetCount, credits: [] } }
+                : {}),
+            };
+          },
+        }).catch((err: unknown) => {
+          if (!(err instanceof RequestTimeoutError) || err.retryAtMs === undefined) throw err;
           return {
             success: false,
-            error: `OpenAI API error ${resp.status}${code ? ` (${code})` : ""}`,
-            failureCategory: providerFailureCategoryForHttpStatus(resp.status),
+            error: sanitizeDisplayText(err.message),
+            failureCategory: "provider_api",
+            retryAtMs: err.retryAtMs,
           };
-        }
+        }),
+      options.requestTimeoutMs,
+    );
 
-        const data = (await resp.json()) as OpenAIUsageResponse;
-        const observedAtMs = Date.now();
-        const primary = parseRateLimitWindow(data.rate_limit?.primary_window, observedAtMs);
-        const secondary = parseRateLimitWindow(data.rate_limit?.secondary_window, observedAtMs);
-        const individualLimit = parseRemainingWindowValue(
-          data.spend_control?.individual_limit,
-          observedAtMs,
-        );
-        const codeReview = parseWindowValue(
-          data.code_review_rate_limit?.primary_window,
-          observedAtMs,
-        );
-        const credits = data.credits ?? null;
-        const windows: {
-          hourly?: OpenAIWindowValue;
-          weekly?: OpenAIWindowValue;
-          monthly?: OpenAIWindowValue;
-          codeReview?: OpenAIWindowValue;
-        } = {};
-
-        const conflictingKinds = new Set<OpenAIWindowKind>();
-        for (const parsed of [primary, secondary]) {
-          if (!parsed || conflictingKinds.has(parsed.kind)) continue;
-
-          const existing = windows[parsed.kind];
-          if (!existing) {
-            windows[parsed.kind] = parsed.value;
-          } else if (
-            existing.percentRemaining !== parsed.value.percentRemaining ||
-            existing.resetTimeIso !== parsed.value.resetTimeIso
-          ) {
-            delete windows[parsed.kind];
-            conflictingKinds.add(parsed.kind);
-          }
-        }
-        if (!windows.monthly && individualLimit) windows.monthly = individualLimit;
-        if (codeReview) windows.codeReview = codeReview;
-
-        const availableResetCount = parseAvailableResetCount(
-          data.rate_limit_reset_credits?.available_count,
-        );
-        const mappedCredits = credits
-          ? {
-              hasCredits: Boolean(credits.has_credits),
-              unlimited: Boolean(credits.unlimited),
-              balance: credits.balance ?? null,
-            }
-          : undefined;
-        const positiveCredits =
-          mappedCredits !== undefined &&
-          (mappedCredits.unlimited ||
-            (typeof mappedCredits.balance === "string" &&
-              Number.isFinite(Number(mappedCredits.balance)) &&
-              Number(mappedCredits.balance) > 0));
-
-        // Empty bodies stay invalid; a useful Credits-only/reset-count-only
-        // payload is a real measurement even without a percent window.
-        if (Object.keys(windows).length === 0 && !positiveCredits && availableResetCount === null) {
-          return { success: false, error: "No quota data", failureCategory: "provider_api" };
-        }
-
-        return {
-          success: true,
-          label: derivePlanLabel(data.plan_type),
-          email: resolvedAuth.email,
-          windows,
-          credits: mappedCredits,
-          ...(availableResetCount !== null
-            ? { bankedResets: { availableCount: availableResetCount, credits: [] } }
-            : {}),
-        };
-      },
-    });
-
-    if (!result || !result.success || !result.bankedResets || !options.includeResetDetails) {
+    if (!result.success || !result.bankedResets || !options.includeResetDetails) {
       return result;
     }
-    result.bankedResets.credits = await fetchOpenAIResetCredits(headers, options.requestTimeoutMs);
+    result.bankedResets.credits = await fetchOpenAIResetCredits(
+      headers,
+      options.requestTimeoutMs,
+      `reset-credits:${cooldownKey}`,
+    );
     return result;
   } catch (err) {
     return {
       success: false,
       error: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
       failureCategory: "provider_api",
+      ...(err instanceof RequestTimeoutError && err.retryAtMs !== undefined
+        ? { retryAtMs: err.retryAtMs }
+        : {}),
     };
   }
 }

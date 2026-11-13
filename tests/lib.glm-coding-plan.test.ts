@@ -83,6 +83,54 @@ afterEach(() => {
 });
 
 describe("GLM coding plan quota contract", () => {
+  it("keeps the same credential isolated between endpoints and attributes cooldown errors", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T12:00:00Z"));
+    const fetcher = vi.fn(
+      async () =>
+        new Response("limited", {
+          status: 429,
+          headers: { "Retry-After": "36000" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const options = { apiKey: "shared-endpoint-test-secret" };
+    await queryZaiQuota(options);
+    await queryZhipuQuota(options);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(await queryZaiQuota(options)).toMatchObject({
+      error: "Z.ai API error 429",
+      retryAtMs: Date.now() + 36_000_000,
+    });
+    expect(await queryZhipuQuota(options)).toMatchObject({
+      error: "Zhipu API error 429",
+      retryAtMs: Date.now() + 36_000_000,
+    });
+  });
+  it.each(providers)("honors $label 429 per account and endpoint", async (provider) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T12:00:00Z"));
+    const fetcher = vi.fn(
+      async () =>
+        new Response("slow down", {
+          status: 429,
+          headers: { "Retry-After": "60" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const retryAtMs = Date.now() + 60_000;
+    const key = `retry-${provider.label}`;
+    expect(
+      await Promise.all([provider.query({ apiKey: key }), provider.query({ apiKey: key })]),
+    ).toMatchObject([{ retryAtMs }, { retryAtMs }]);
+    expect(await provider.query({ apiKey: key })).toMatchObject({ retryAtMs });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await provider.query({ apiKey: `${key}-other` });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(retryAtMs);
+    await provider.query({ apiKey: key });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
   it("preserves unconfigured and invalid auth behavior", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

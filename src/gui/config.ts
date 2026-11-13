@@ -23,6 +23,7 @@ import type {
   SettingsWriteResult,
 } from "../contracts/dashboard.js";
 import { LEGACY_IMPORT_KEYS } from "../contracts/settings.js";
+import { withCanonicalConfigLock } from "../lib/canonical-config-lock.js";
 import {
   buildConfigLayerCandidates,
   type ConfigLayerCandidate,
@@ -34,6 +35,7 @@ import {
   isPositiveNumber,
   isValidDuplicateCooldownMinutes,
   isValidLowQuotaThresholdRemainingPercent,
+  isValidNativeQuotaNotificationPolicy,
   isValidOpenCodeGoWindows,
   loadConfig,
   loadConfigLayered,
@@ -60,7 +62,7 @@ import {
   parseConfigDocument,
   planConfigDocumentEdit,
 } from "../lib/opencode-config-editor.js";
-import type { OpenCodeVersion } from "../lib/opencode-version.js";
+import type { OpenCodeVersion } from "../lib/opencode-version-core.js";
 import { isQuotaFormatStyle, resolveQuotaFormatStyle } from "../lib/quota-format-style.js";
 import {
   DASHBOARD_HIDDEN_ID_LIMIT,
@@ -88,6 +90,7 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "accountingDetail",
   "lowQuotaThresholdRemainingPercent",
   "duplicateCooldownMinutes",
+  "nativeQuotaNotifications",
   "opencodeGoWindows",
   "opencodeMonthlyLimit",
   "dashboard.hiddenCards",
@@ -311,7 +314,8 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
 
   /** One serialized queue for all writers: the loser's stale revision yields 409. */
   function withLock<T>(run: () => Promise<T>): Promise<T> {
-    const next = lockTail.then(run, run);
+    const write = () => withCanonicalConfigLock(canonicalPath, run);
+    const next = lockTail.then(write, write);
     lockTail = next.then(
       () => undefined,
       () => undefined,
@@ -384,6 +388,19 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return config.lowQuotaThresholdRemainingPercent;
       case "duplicateCooldownMinutes":
         return config.duplicateCooldownMinutes;
+      case "nativeQuotaNotifications":
+        return {
+          enabled: config.nativeQuotaNotifications.enabled,
+          modelChangeToastEnabled: config.nativeQuotaNotifications.modelChangeToastEnabled,
+          low: { ...config.nativeQuotaNotifications.low },
+          exhausted: { ...config.nativeQuotaNotifications.exhausted },
+          reset: {
+            ...config.nativeQuotaNotifications.reset,
+            windows: [...config.nativeQuotaNotifications.reset.windows],
+          },
+          providerError: { ...config.nativeQuotaNotifications.providerError },
+          duplicateCooldownMinutes: config.nativeQuotaNotifications.duplicateCooldownMinutes,
+        };
       case "opencodeGoWindows":
         return [...config.opencodeGoWindows];
       case "opencodeMonthlyLimit":
@@ -601,6 +618,19 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
           throw invalidSetting(key, "expected an integer of 0 or more");
         }
         return value;
+      case "nativeQuotaNotifications":
+        if (!isValidNativeQuotaNotificationPolicy(value)) {
+          throw invalidSetting(key, "expected a complete Native quota notification policy");
+        }
+        return {
+          enabled: value.enabled,
+          modelChangeToastEnabled: value.modelChangeToastEnabled,
+          low: { ...value.low },
+          exhausted: { ...value.exhausted },
+          reset: { ...value.reset, windows: [...new Set(value.reset.windows)] },
+          providerError: { ...value.providerError },
+          duplicateCooldownMinutes: value.duplicateCooldownMinutes,
+        };
       case "opencodeGoWindows":
         if (!isValidOpenCodeGoWindows(value)) {
           throw invalidSetting(

@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DashboardHealth } from "../src/contracts/dashboard.js";
-import type { DashboardRpcCaller } from "../src/native/dashboard-client.js";
+import type { DashboardRpcCaller, NativeDashboardClient } from "../src/native/dashboard-client.js";
 import {
   type QuotaNotificationSubscription,
   startQuotaNotificationSubscription,
@@ -675,10 +675,52 @@ describe("native quota notification subscription", () => {
   it("uses the RPC health method supplied by Plugin.setup after a stream failure", async () => {
     const source = createWindowEventSource();
     const health = vi.fn<DashboardRpcCaller["health"]>(async () => HEALTH);
+    const connectionListeners = new Set<
+      (state: "connecting" | "live" | "reconnecting" | "closed") => void
+    >();
+    const settingsChangedListeners = new Set<() => void>();
+    const reconnectListeners = new Set<() => void>();
+    const nativeClient: Pick<
+      NativeDashboardClient,
+      | "settings"
+      | "connection"
+      | "onConnectionChange"
+      | "onReconnect"
+      | "onEventStreamRetire"
+      | "subscribeCacheObserverEvent"
+      | "subscribeSettingsChanged"
+      | "dispose"
+    > = {
+      settings: vi.fn(
+        async () =>
+          ({
+            values: { nativeQuotaNotifications: { modelChangeToastEnabled: true } },
+          }) as never,
+      ),
+      connection: vi.fn(() => "connecting"),
+      onConnectionChange: vi.fn(
+        (listener: (state: "connecting" | "live" | "reconnecting" | "closed") => void) => {
+          connectionListeners.add(listener);
+          return () => connectionListeners.delete(listener);
+        },
+      ),
+      onReconnect: vi.fn((listener: () => void) => {
+        reconnectListeners.add(listener);
+        return () => reconnectListeners.delete(listener);
+      }),
+      onEventStreamRetire: vi.fn(() => vi.fn()),
+      subscribeCacheObserverEvent: vi.fn(() => vi.fn()),
+      subscribeSettingsChanged: vi.fn((listener: () => void) => {
+        settingsChangedListeners.add(listener);
+        return () => settingsChangedListeners.delete(listener);
+      }),
+      dispose: vi.fn(),
+    };
     const controller = new AbortController();
     const cleanups: Array<() => void> = [];
     const ctx = {
       id: "test-plugin",
+      app: { version: "2.2.1" },
       signal: controller.signal,
       client: {},
       ui: {},
@@ -695,6 +737,7 @@ describe("native quota notification subscription", () => {
     vi.doMock("@opencode/plugin/gui", () => ({
       Plugin: { define: (definition: unknown) => definition },
       Command: Symbol("Command"),
+      ComposerPill: Symbol("ComposerPill"),
       MenuItem: Symbol("MenuItem"),
       Panel: Symbol("Panel"),
       SettingsPage: Symbol("SettingsPage"),
@@ -703,7 +746,11 @@ describe("native quota notification subscription", () => {
       usePanel: vi.fn(),
       usePlugin: vi.fn(),
     }));
-    vi.doMock("solid-js", () => ({
+    vi.doMock("../src/native/cache-composer-pill.js", () => ({
+      createCacheComposerPill: vi.fn(() => ({ id: "cache-observer" })),
+    }));
+    vi.doMock("solid-js", async (importOriginal) => ({
+      ...(await importOriginal()),
       createEffect: (effect: () => void) => effect(),
       onCleanup: (cleanup: () => void) => cleanups.push(cleanup),
     }));
@@ -711,7 +758,7 @@ describe("native quota notification subscription", () => {
       createGuiRpcCaller: vi.fn(() => ({ health, events: source.events })),
     }));
     vi.doMock("../src/native/dashboard-client.js", () => ({
-      createNativeDashboardClient: vi.fn(() => ({ dispose: vi.fn() })),
+      createNativeDashboardClient: vi.fn(() => nativeClient),
     }));
     vi.doMock("../src/native/panel.js", () => ({ DashboardPanel: () => null }));
     vi.doMock("../src/native/panel-open.js", () => ({ revealDashboardPanel: vi.fn() }));
@@ -738,6 +785,7 @@ describe("native quota notification subscription", () => {
       vi.doUnmock("@opencode/plugin/gui");
       vi.doUnmock("solid-js");
       vi.doUnmock("../src/native/rpc.js");
+      vi.doUnmock("../src/native/cache-composer-pill.js");
       vi.doUnmock("../src/native/dashboard-client.js");
       vi.doUnmock("../src/native/panel.js");
       vi.doUnmock("../src/native/panel-open.js");

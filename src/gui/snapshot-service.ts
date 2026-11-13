@@ -125,7 +125,7 @@ export interface SnapshotViewer {
 
 export interface SnapshotService {
   home(input: { range: RangeKey }): Promise<HomeSnapshot>;
-  quota(): Promise<QuotaSnapshot>;
+  quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
   groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
@@ -170,6 +170,7 @@ interface CacheEntry {
   snapshot: unknown;
   substantive: string;
   stale: boolean;
+  invalidated?: boolean;
   /** Source identity that produced this entry; old entries are only last-good. */
   sourceGeneration: number;
 }
@@ -305,6 +306,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   const logger = options.logger ?? createGuiLogger();
   const now = options.now ?? Date.now;
   const cache = new Map<string, CacheEntry>();
+  let quotaRefresh: Promise<QuotaSnapshot> | undefined;
   const computes = new Map<string, () => Promise<unknown>>();
   const inflight = new Map<string, InflightTask>();
   const listeners = new Set<(event: DashboardEvent) => void>();
@@ -486,7 +488,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     return version;
   }
 
-  function load<T>(key: string, compute: () => Promise<T>): Promise<T> {
+  function load<T>(key: string, compute: () => Promise<T>, force = false): Promise<T> {
     const epoch = viewerEpoch;
     const generation = sourceGeneration;
     // A closed service does not track, register, or cache: the caller still
@@ -495,7 +497,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     const version = closed ? 0 : touch(key);
     if (!closed) computes.set(key, compute);
     const existing = cache.get(key);
-    if (existing && !existing.stale && existing.sourceGeneration === sourceGeneration) {
+    if (
+      !force &&
+      existing &&
+      existing.sourceGeneration === sourceGeneration &&
+      (!existing.stale ||
+        (isQuotaKey(key) && !existing.invalidated && payloadIsStale(existing.snapshot)))
+    ) {
       // SAFETY: `load<T>` is only called with a key built from `(kind, resourceId,
       // range)`, and the entry under this key was stored by a compute of that key.
       return Promise.resolve(existing.snapshot as T);
@@ -628,8 +636,15 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     if (tracked.get(key) !== version || computes.get(key) !== compute) return true;
     const substantive = substantiveOf(snapshot);
     const entry = cache.get(key);
-    const changedNow = entry === undefined || entry.stale || entry.substantive !== substantive;
-    cache.set(key, { snapshot, substantive, stale: false, sourceGeneration: generation });
+    const stale = payloadIsStale(snapshot);
+    const changedNow =
+      entry === undefined || entry.stale !== stale || entry.substantive !== substantive;
+    cache.set(key, {
+      snapshot,
+      substantive,
+      stale,
+      sourceGeneration: generation,
+    });
     if (changedNow) changed.add(topicFor(key));
     return true;
   }
@@ -739,18 +754,45 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   }
 
   function dirty(): void {
-    for (const entry of cache.values()) entry.stale = true;
+    for (const entry of cache.values()) {
+      entry.stale = true;
+      entry.invalidated = true;
+    }
   }
 
   return {
     home: (input) => load(homeKey(input.range), () => options.source.home({ range: input.range })),
-    quota: () =>
-      load(quotaKey(), () => {
+    quota: (input) => {
+      const compute = () => {
         if (!options.source.quota) {
           return Promise.reject(new Error("Quota source unavailable"));
         }
         return options.source.quota();
-      }),
+      };
+      if (!input?.refresh) return load(quotaKey(), compute);
+      if (quotaRefresh) return quotaRefresh;
+      const refresh = (async () => {
+        await inflight.get(quotaKey())?.promise.catch(() => undefined);
+        const cached = cache.get(quotaKey());
+        if (cached) cached.stale = true;
+        const forcedCompute = () => options.source.quota!({ refresh: true });
+        try {
+          const result = await load(quotaKey(), forcedCompute, true);
+          if (!closed) emit({ topic: "quota.changed", at: now() });
+          return result;
+        } finally {
+          if (!closed && computes.get(quotaKey()) === forcedCompute)
+            computes.set(quotaKey(), compute);
+        }
+      })();
+      quotaRefresh = refresh;
+      void refresh
+        .finally(() => {
+          if (quotaRefresh === refresh) quotaRefresh = undefined;
+        })
+        .catch(() => undefined);
+      return refresh;
+    },
     project: (input) =>
       load(projectKey(input.projectId, input.range), () =>
         options.source.project({ projectId: input.projectId, range: input.range }),
@@ -805,7 +847,10 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       if (settingsOptions?.scope !== "visibility") {
         for (const [key, entry] of cache) {
           const kind = kindOf(key);
-          if (kind === "quota" || kind === "home" || kind === "project") entry.stale = true;
+          if (kind === "quota" || kind === "home" || kind === "project") {
+            entry.stale = true;
+            entry.invalidated = true;
+          }
         }
         // Re-read both interval getters from live settings (R16).
         restartPollers();

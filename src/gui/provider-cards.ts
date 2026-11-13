@@ -81,7 +81,6 @@ export const PROVIDER_ERROR_GENERIC_LABEL = "Provider error";
  */
 export interface ProviderCardPreferences {
   accountingDetail: QuotaToastConfig["accountingDetail"];
-  quotaProjection?: QuotaToastConfig["quotaProjection"];
   resetTimeDecimals?: QuotaToastConfig["resetTimeDecimals"];
   resetTimeSpaced?: QuotaToastConfig["resetTimeSpaced"];
   /**
@@ -261,7 +260,7 @@ function mapEntryRow(params: {
       row.percentUsed = 100 - entry.percentRemaining;
     }
     applyResetFields(row, entry, preferences);
-    if (preferences.quotaProjection === "runway") applyRunway(row, entry, nowMs);
+    applyRunway(row, entry, nowMs);
     if (preferences.accountingDetail === "detailed" && entry.basis) {
       const detailRows = detailRowsFor(entry.basis);
       if (detailRows.length > 0) row.detailRows = detailRows;
@@ -404,6 +403,8 @@ function buildProviderCard(params: {
   providerLabel: string;
   providerScopeId: CardId;
   providerScopeHash: string;
+  /** Display-only plan for a provider-scope card with no account descriptor. */
+  planLabel?: string;
   entries: readonly QuotaToastEntry[];
   errors: readonly QuotaToastError[];
   secrets: readonly string[];
@@ -418,12 +419,14 @@ function buildProviderCard(params: {
     preferences: params.preferences,
     nowMs: params.nowMs,
   });
+  const planLabel = params.planLabel ? sanitizeSingleLineDisplayText(params.planLabel).trim() : "";
   const card: ProviderCard = {
     cardId,
     providerId: params.providerId,
     providerLabel: params.providerLabel,
     providerScopeId: params.providerScopeId,
     providerScopeHash: params.providerScopeHash,
+    ...(planLabel ? { planLabel } : {}),
     labelSource: "provider",
     rows: mapped.rows,
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
@@ -541,6 +544,8 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
         providerLabel,
         providerScopeId,
         providerScopeHash,
+        // A plan belongs to this card only when the provider has no account cards of its own.
+        planLabel: accounts.length === 0 ? probe.result.planLabel : undefined,
         entries: unscopedEntries,
         errors: unscopedErrors,
         secrets,

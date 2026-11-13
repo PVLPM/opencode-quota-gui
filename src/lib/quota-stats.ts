@@ -246,6 +246,13 @@ function parseModelIdHint(rawModelId?: string): { providerHint?: string; modelPa
  * literal instead of deriving nearby versions.
  */
 const PROVIDER_MODEL_PRICING_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  // Claude Code Anthropic API family aliases, current list-price estimates only:
+  // https://code.claude.com/docs/en/model-config#model-aliases
+  anthropic: {
+    haiku: "claude-haiku-5-5",
+    sonnet: "claude-sonnet-5-5",
+    opus: "claude-opus-5-5",
+  },
   "opencode-go": {
     "deepseek-v4-flash": "deepseek-v4.1-flash",
   },
@@ -271,6 +278,7 @@ function resolveExplicitPricingAlias(
 }
 
 const SOURCE_PROVIDER_ALIASES: Record<string, string> = {
+  "claude-agent": "anthropic",
   cursor: "cursor",
   "cursor-acp": "cursor",
   "github-copilot": "openai",
@@ -509,7 +517,6 @@ export function resolvePricingKey(source: {
       method: "source_provider",
     };
   }
-
   // The source catalog is authoritative for presence. Consult it BEFORE any
   // heuristic fallback (free-suffix stripping, -thinking, preview aliases, ...)
   // so a catalog-listed model without a cost cannot inherit a different priced
@@ -530,6 +537,22 @@ export function resolvePricingKey(source: {
       ok: true,
       key: { provider: sourceProviderHint, model: sourceCatalogModel },
       method: "source_provider",
+    };
+  }
+
+  // Family aliases require an Anthropic source and its concrete price; do not
+  // infer another route from an alias or from an Anthropic model prefix alone.
+  if (
+    (sourceProviderHint === "anthropic" || modelProviderHint === "anthropic") &&
+    Object.hasOwn(PROVIDER_MODEL_PRICING_ALIASES.anthropic!, normalizedModel)
+  ) {
+    return {
+      ok: false,
+      unknown: {
+        sourceProviderID: srcProvider,
+        sourceModelID: srcModel,
+        reason: "missing_provider",
+      },
     };
   }
 
