@@ -157,7 +157,14 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
   const retryQuota = () => {
     if (query.isRefreshing()) return;
-    if (props.onRetryShell?.() !== true) void query.refresh();
+    if (props.onRetryShell?.() !== true) {
+      const epoch = props.reconnectEpoch;
+      void query.refresh().then((applied) => {
+        if (!applied || epoch !== props.reconnectEpoch || query.data()?.stale !== false) return;
+        setFreshEpoch(epoch);
+        props.onFresh?.();
+      });
+    }
   };
   createEffect(() =>
     props.onStale(

@@ -203,7 +203,7 @@ describe("Desktop GUI entry", () => {
     expect(routesSource).toContain("function routeEnabled");
     expect(routesSource).toContain("props.enabled?.() !== false");
     for (const [route, count] of [
-      ["QuotaRoute", 2],
+      ["QuotaRoute", 3],
       ["AnalyticsRoute", 1],
       ["ModelsRoute", 1],
       ["GroupDetailRoute", 1],

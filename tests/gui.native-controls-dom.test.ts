@@ -91,6 +91,139 @@ it("applies the forced quota response even when its invalidation event is missed
   }
 });
 
+it("marks a successful manual retry fresh when it replaces a reconnect read", async () => {
+  const snapshot = {
+    generatedAtMs: 1,
+    stale: true,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  };
+  let resolveRead!: (value: typeof snapshot) => void;
+  const requests: boolean[] = [];
+  const client = {
+    quota: (input?: { refresh?: boolean }) => {
+      requests.push(input?.refresh === true);
+      if (input?.refresh) return Promise.resolve({ ...snapshot, generatedAtMs: 2, stale: false });
+      if (requests.length === 1) return Promise.resolve(snapshot);
+      return new Promise<typeof snapshot>((resolve) => {
+        resolveRead = resolve;
+      });
+    },
+  };
+  const target = document.createElement("div");
+  document.body.append(target);
+  let setEpoch!: (value: number) => number;
+  let stale = false;
+  const onFresh = vi.fn();
+  const dispose = render(() => {
+    const [epoch, set] = createSignal(0);
+    setEpoch = set;
+    return createComponent(QuotaRoute, {
+      client: client as never,
+      preferences: displayPreferencesFromValues({}),
+      hiddenCards: [],
+      hiddenRows: [],
+      reloadToken: 0,
+      get reconnectEpoch() {
+        return epoch();
+      },
+      onSnapshot: () => {},
+      onStale: (value) => {
+        stale = value;
+      },
+      onFresh,
+    });
+  }, target);
+  try {
+    await vi.waitFor(() => expect(onFresh).toHaveBeenCalledOnce());
+    setEpoch(1);
+    await vi.waitFor(() => expect(requests).toEqual([false, false]));
+    expect(stale).toBe(true);
+    target.querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(requests).toEqual([false, false, true]));
+    await vi.waitFor(() => expect(stale).toBe(false));
+    expect(onFresh).toHaveBeenCalledTimes(2);
+    resolveRead(snapshot);
+    await Promise.resolve();
+    expect(stale).toBe(false);
+  } finally {
+    dispose();
+    target.remove();
+  }
+});
+
+it.each([
+  "failure",
+  "stale",
+  "new epoch",
+] as const)("does not mark a manual retry fresh after %s", async (outcome) => {
+  const snapshot = {
+    generatedAtMs: 1,
+    stale: true,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  };
+  let resolveRefresh!: (value: typeof snapshot) => void;
+  let rejectRefresh!: (reason: Error) => void;
+  const requests: boolean[] = [];
+  const client = {
+    quota: (input?: { refresh?: boolean }) => {
+      requests.push(input?.refresh === true);
+      if (input?.refresh) {
+        return new Promise<typeof snapshot>((resolve, reject) => {
+          resolveRefresh = resolve;
+          rejectRefresh = reject;
+        });
+      }
+      if (requests.length === 1) return Promise.resolve(snapshot);
+      return new Promise<typeof snapshot>(() => {});
+    },
+  };
+  const target = document.createElement("div");
+  document.body.append(target);
+  let setEpoch!: (value: number) => number;
+  const onFresh = vi.fn();
+  const dispose = render(() => {
+    const [epoch, set] = createSignal(0);
+    setEpoch = set;
+    return createComponent(QuotaRoute, {
+      client: client as never,
+      preferences: displayPreferencesFromValues({}),
+      hiddenCards: [],
+      hiddenRows: [],
+      reloadToken: 0,
+      get reconnectEpoch() {
+        return epoch();
+      },
+      onSnapshot: () => {},
+      onStale: () => {},
+      onFresh,
+    });
+  }, target);
+  try {
+    await vi.waitFor(() => expect(onFresh).toHaveBeenCalledOnce());
+    setEpoch(1);
+    await vi.waitFor(() => expect(requests).toEqual([false, false]));
+    target.querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(requests).toEqual([false, false, true]));
+    const resolveOriginal = resolveRefresh;
+    if (outcome === "new epoch") setEpoch(2);
+    if (outcome === "failure") rejectRefresh(new Error("failed"));
+    else resolveOriginal({ ...snapshot, stale: outcome === "stale" });
+    await vi.waitFor(() => {
+      if (outcome === "failure") expect(target.textContent).toContain("Retry");
+      else if (outcome === "stale")
+        expect(target.textContent).toContain("Quota data is unavailable");
+      else expect(requests).toEqual([false, false, true, true]);
+    });
+    await Promise.resolve();
+    expect(onFresh).toHaveBeenCalledOnce();
+  } finally {
+    dispose();
+    target.remove();
+  }
+});
+
 it("shows a shell refresh that finished before the quota route mounted", async () => {
   const stale = {
     generatedAtMs: 1,
