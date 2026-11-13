@@ -1,5 +1,6 @@
 import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
 import type { InvalidAwareAuthResult } from "./api-key-resolver.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
@@ -32,91 +33,120 @@ export async function queryGlmCodingPlanQuota(
     return { success: false, error: auth.error, failureCategory: "credentials" };
   }
 
-  let responseStatus: number | undefined;
-  try {
-    return await fetchWithTimeout(descriptor.endpoint, {
-      request: {
-        headers: {
-          Authorization: auth.apiKey,
-          "User-Agent": "opencode-quota-gui/1.0",
-          "Content-Type": "application/json",
-        },
-      },
-      timeoutMs: options.requestTimeoutMs,
-      consume: async (response) => {
-        responseStatus = response.status;
-        if (!response.ok) {
-          const body = sanitizeDisplaySnippet(await response.text(), 120);
-          return {
-            success: false,
-            error: `${descriptor.httpErrorPrefix} ${response.status}: ${body}`,
-            failureCategory: providerFailureCategoryForHttpStatus(response.status),
-          };
-        }
+  return guard(
+    JSON.stringify([descriptor.endpoint, auth.apiKey]),
+    async () => {
+      let responseStatus: number | undefined;
+      try {
+        return await fetchWithTimeout(descriptor.endpoint, {
+          request: {
+            headers: {
+              Authorization: auth.apiKey,
+              "User-Agent": "opencode-quota-gui/1.0",
+              "Content-Type": "application/json",
+            },
+          },
+          timeoutMs: options.requestTimeoutMs,
+          consume: async (response) => {
+            responseStatus = response.status;
+            if (!response.ok) {
+              const retryAtMs = retryAfterDeadline(response);
+              const body = sanitizeDisplaySnippet(await response.text().catch(() => ""), 120);
+              return {
+                success: false,
+                error: `${descriptor.httpErrorPrefix} ${response.status}: ${body}`,
+                failureCategory: providerFailureCategoryForHttpStatus(response.status),
+                ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+              };
+            }
 
-        const body = (await response.json()) as GlmEnvelope;
-        if (
-          descriptor.envelope === "zai" &&
-          (body.success === false || (typeof body.code === "number" && body.code >= 400))
-        ) {
-          const message = typeof body.msg === "string" ? sanitizeDisplayText(body.msg) : "";
-          return {
-            success: false,
-            error:
-              message ||
-              (typeof body.code === "number"
-                ? `${descriptor.apiErrorPrefix} ${body.code}`
-                : descriptor.apiErrorPrefix),
-            failureCategory: "provider_api",
-          };
-        }
+            const body = (await response.json()) as GlmEnvelope;
+            if (
+              descriptor.envelope === "zai" &&
+              (body.success === false || (typeof body.code === "number" && body.code >= 400))
+            ) {
+              const message = typeof body.msg === "string" ? sanitizeDisplayText(body.msg) : "";
+              return {
+                success: false,
+                error:
+                  message ||
+                  (typeof body.code === "number"
+                    ? `${descriptor.apiErrorPrefix} ${body.code}`
+                    : descriptor.apiErrorPrefix),
+                failureCategory: "provider_api",
+              };
+            }
 
-        const limits =
-          descriptor.envelope === "zai" ? (body.data?.limits ?? body.limits) : body.data?.limits;
-        if (!Array.isArray(limits)) {
-          return { success: false, error: "Invalid quota data", failureCategory: "provider_api" };
-        }
+            const limits =
+              descriptor.envelope === "zai"
+                ? (body.data?.limits ?? body.limits)
+                : body.data?.limits;
+            if (!Array.isArray(limits)) {
+              return {
+                success: false,
+                error: "Invalid quota data",
+                failureCategory: "provider_api",
+              };
+            }
 
-        const windows: ZaiQuotaResult["windows"] = {};
-        for (const limit of limits as ZaiQuotaLimit[]) {
-          const resetDate = limit.nextResetTime ? new Date(Math.round(limit.nextResetTime)) : null;
-          const resetTimeIso =
-            resetDate && Number.isFinite(resetDate.valueOf()) && resetDate.valueOf() > 0
-              ? resetDate.toISOString()
-              : undefined;
-          let percentRemaining = clampPercent(100 - limit.percentage);
-          if (
-            limit.type === "CREDIT_LIMIT" &&
-            typeof limit.usage === "number" &&
-            Number.isFinite(limit.usage) &&
-            limit.usage > 0 &&
-            typeof limit.currentValue === "number" &&
-            Number.isFinite(limit.currentValue) &&
-            limit.currentValue >= 0
-          ) {
-            percentRemaining = clampPercent(
-              ((limit.usage - limit.currentValue) / limit.usage) * 100,
-            );
-          }
-          const window = { percentRemaining, resetTimeIso };
+            const windows: ZaiQuotaResult["windows"] = {};
+            for (const limit of limits as ZaiQuotaLimit[]) {
+              const resetDate = limit.nextResetTime
+                ? new Date(Math.round(limit.nextResetTime))
+                : null;
+              const resetTimeIso =
+                resetDate && Number.isFinite(resetDate.valueOf()) && resetDate.valueOf() > 0
+                  ? resetDate.toISOString()
+                  : undefined;
+              let percentRemaining = clampPercent(100 - limit.percentage);
+              if (
+                limit.type === "CREDIT_LIMIT" &&
+                typeof limit.usage === "number" &&
+                Number.isFinite(limit.usage) &&
+                limit.usage > 0 &&
+                typeof limit.currentValue === "number" &&
+                Number.isFinite(limit.currentValue) &&
+                limit.currentValue >= 0
+              ) {
+                percentRemaining = clampPercent(
+                  ((limit.usage - limit.currentValue) / limit.usage) * 100,
+                );
+              }
+              const window = { percentRemaining, resetTimeIso };
 
-          const isQuotaWindow = limit.type === "TOKENS_LIMIT" || limit.type === "CREDIT_LIMIT";
-          if (isQuotaWindow && limit.unit === 3) windows.fiveHour = window;
-          else if (isQuotaWindow && limit.unit === 6) windows.weekly = window;
-          else if (limit.type === "TIME_LIMIT") windows.mcp = window;
-        }
+              const isQuotaWindow = limit.type === "TOKENS_LIMIT" || limit.type === "CREDIT_LIMIT";
+              if (isQuotaWindow && limit.unit === 3) windows.fiveHour = window;
+              else if (isQuotaWindow && limit.unit === 6) windows.weekly = window;
+              else if (limit.type === "TIME_LIMIT") windows.mcp = window;
+            }
 
-        return { success: true, label: descriptor.label, windows };
-      },
-    });
-  } catch (error) {
-    return {
+            return { success: true, label: descriptor.label, windows };
+          },
+        });
+      } catch (error) {
+        return {
+          success: false,
+          error: sanitizeDisplayText(error instanceof Error ? error.message : String(error)),
+          failureCategory:
+            responseStatus === undefined
+              ? "provider_api"
+              : providerFailureCategoryForHttpStatus(responseStatus),
+        };
+      }
+    },
+    options.requestTimeoutMs,
+    (retryAtMs) => ({
       success: false,
-      error: sanitizeDisplayText(error instanceof Error ? error.message : String(error)),
-      failureCategory:
-        responseStatus === undefined
-          ? "provider_api"
-          : providerFailureCategoryForHttpStatus(responseStatus),
-    };
-  }
+      error: `${descriptor.httpErrorPrefix} 429`,
+      failureCategory: "provider_api",
+      retryAtMs,
+    }),
+  );
 }
+
+const guard = createApiKeyRetryGuard<Exclude<ZaiResult, null>>((retryAtMs) => ({
+  success: false,
+  error: "HTTP 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+}));
