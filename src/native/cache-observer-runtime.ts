@@ -1,8 +1,4 @@
-import {
-  type CacheConfiguredTtlMs,
-  type CacheObserverClassification,
-  isCacheConfigurableProviderId,
-} from "../lib/cache-observer.js";
+import type { CacheObserverClassification } from "../lib/cache-observer.js";
 import {
   CACHE_OBSERVER_MAX_SESSIONS,
   type CacheObserverHistoryInvocation,
@@ -169,10 +165,6 @@ export function createNativeCacheObserverRuntime(options: {
     data: ReadonlyArray<unknown>;
     cursor?: { next?: string | null };
   }>;
-  readRouteConfiguration?: (route: {
-    providerId: string;
-    modelId: string;
-  }) => Promise<{ configuredTtlMs?: CacheConfiguredTtlMs }>;
   now?: () => number;
 }): NativeCacheObserverRuntime {
   interface ChildWatcher {
@@ -1422,29 +1414,7 @@ export function createNativeCacheObserverRuntime(options: {
         if (startedSessionId === undefined) return;
         if (!interestedSessions.has(startedSessionId) && !childOwners.has(startedSessionId)) return;
         ingestor.ingest(event);
-        if (
-          event.type === "session.step.started" &&
-          isCacheConfigurableProviderId(event.data.model.providerID) &&
-          options.readRouteConfiguration !== undefined
-        ) {
-          const capture = ingestor.captureConfiguration(
-            event.data.sessionID,
-            event.data.assistantMessageID,
-          );
-          try {
-            void options
-              .readRouteConfiguration({
-                providerId: event.data.model.providerID,
-                modelId: event.data.model.id,
-              })
-              .then(
-                (config) => capture(config.configuredTtlMs),
-                () => undefined,
-              );
-          } catch {
-            // Failed reads leave the default estimate intact.
-          }
-        }
+        // Current settings read after Started cannot establish dispatch settings.
         return;
       }
 

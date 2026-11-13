@@ -1601,9 +1601,10 @@ describe("native cache observer runtime", () => {
     runtime.dispose();
   });
 
-  it("binds each live invocation to its own host TTL snapshot", async () => {
+  it("does not bind mutable host TTL snapshots to live invocations", async () => {
     let receive: ((event: never) => void) | undefined;
     let ttl: 300_000 | 3_600_000 = 3_600_000;
+    const readRouteConfiguration = vi.fn(async () => ({ configuredTtlMs: ttl }));
     const runtime = createNativeCacheObserverRuntime({
       subscribeEvents: (listener) => {
         receive = listener;
@@ -1612,7 +1613,7 @@ describe("native cache observer runtime", () => {
       listChildren: async () => [],
       rpcConnection: () => "live",
       now: () => 2_000,
-      readRouteConfiguration: async () => ({ configuredTtlMs: ttl }),
+      ...{ readRouteConfiguration },
     });
     const release = runtime.subscribe("ses_snapshot", vi.fn());
     const start = (id: string, time: number) =>
@@ -1641,24 +1642,25 @@ describe("native cache observer runtime", () => {
     await Promise.resolve();
     end("one", 1_100);
     expect(runtime.query("ses_snapshot")?.ttlEstimate).toMatchObject({
-      kind: "configured",
-      ttlMs: 3_600_000,
+      kind: "documented",
+      ttlMs: 300_000,
     });
+    expect(readRouteConfiguration).not.toHaveBeenCalled();
     ttl = 300_000;
-    expect(runtime.query("ses_snapshot")?.ttlEstimate?.ttlMs).toBe(3_600_000);
+    expect(runtime.query("ses_snapshot")?.ttlEstimate?.ttlMs).toBe(300_000);
     start("two", 1_200);
     await Promise.resolve();
     await Promise.resolve();
     end("two", 1_300);
     expect(runtime.query("ses_snapshot")?.ttlEstimate).toMatchObject({
-      kind: "configured",
+      kind: "documented",
       ttlMs: 300_000,
     });
     release();
     runtime.dispose();
   });
 
-  it("reads provider/model TTL for live sessions without letting delayed reads rewrite completed calls", async () => {
+  it("never queries mutable host settings across simultaneous sessions and completions", async () => {
     let receive: ((event: never) => void) | undefined;
     let resolveSlow!: (value: {
       data: { id: string; settings: { cache: { ttl: string } } };
@@ -1686,7 +1688,7 @@ describe("native cache observer runtime", () => {
       rpcConnection: () => "live",
       listChildren: async () => [],
       now: () => 2_000,
-      readRouteConfiguration: createHostRouteConfigurationReader(client),
+      ...{ readRouteConfiguration: createHostRouteConfigurationReader(client) },
     });
     const releaseA = runtime.subscribe("ses_slow", vi.fn());
     const releaseB = runtime.subscribe("ses_fast", vi.fn());
@@ -1713,10 +1715,12 @@ describe("native cache observer runtime", () => {
     end("ses_fast");
     end("ses_slow");
     expect(runtime.query("ses_fast")?.ttlEstimate).toMatchObject({
-      kind: "configured",
-      ttlMs: 3_600_000,
+      kind: "documented",
+      ttlMs: 300_000,
     });
     expect(runtime.query("ses_slow")?.ttlEstimate?.ttlMs).toBe(300_000);
+    expect(client.provider.get).not.toHaveBeenCalled();
+    expect(client.model.list).not.toHaveBeenCalled();
     resolveSlow({ data: { id: "anthropic", settings: { cache: { ttl: "1h" } } } });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(runtime.query("ses_slow")?.ttlEstimate?.ttlMs).toBe(300_000);
