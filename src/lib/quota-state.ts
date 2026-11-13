@@ -508,6 +508,10 @@ export async function fetchQuotaProviderResult(params: {
 
   const inFlight = inFlightByKey.get(key);
   if (inFlight) {
+    if (ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true) {
+      await inFlight.catch(() => undefined);
+      return fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    }
     const snapshot = await inFlight;
     publishQuotaTelemetry({
       ctx,
@@ -545,6 +549,10 @@ export async function fetchQuotaProviderResult(params: {
 
   const inFlightAfterDiskRead = inFlightByKey.get(key);
   if (inFlightAfterDiskRead) {
+    if (ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true) {
+      await inFlightAfterDiskRead.catch(() => undefined);
+      return fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    }
     const snapshot = await inFlightAfterDiskRead;
     publishQuotaTelemetry({
       ctx,

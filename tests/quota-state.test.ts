@@ -1234,6 +1234,69 @@ describe("quota-state shared cache", () => {
     expect(ctx.operationCache).toBeUndefined();
   });
 
+  it("does not let an ordinary request overtake a waiting forced refresh", async () => {
+    const { __resetQuotaStateForTests, fetchQuotaProviderResult } = await import(
+      "../src/lib/quota-state.js"
+    );
+    const { QUOTA_FORCE_REFRESH } = await import("../src/lib/entries.js");
+    __resetQuotaStateForTests();
+    let releaseFirst!: (value: any) => void;
+    let releaseSecond!: (value: any) => void;
+    let releaseScope!: () => void;
+    let forcedScopes = 0;
+    const provider = {
+      id: "refresh-overtake",
+      cachePolicy: {
+        kind: "resolved-auth",
+        resolveIdentity: async (ctx: any) => {
+          if (ctx.operationCache?.get(QUOTA_FORCE_REFRESH) && ++forcedScopes === 2) {
+            await new Promise<void>((resolve) => {
+              releaseScope = resolve;
+            });
+          }
+          return "account-a";
+        },
+      },
+      fetch: vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseFirst = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              releaseSecond = resolve;
+            }),
+        )
+        .mockImplementation(async (ctx: any) => ({
+          attempted: true,
+          entries: [],
+          errors: [],
+          forced: ctx.operationCache?.get(QUOTA_FORCE_REFRESH),
+        })),
+    } as any;
+    const ctx = createTestContext();
+    const result = { attempted: true, entries: [], errors: [] };
+    const first = fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    await vi.waitFor(() => expect(releaseFirst).toBeDefined());
+    const forced = fetchQuotaProviderResult({ provider, ctx, ttlMs: 0, forceRefresh: true });
+    await vi.waitFor(() => expect(forcedScopes).toBe(1));
+    releaseFirst(result);
+    await first;
+    await vi.waitFor(() => expect(releaseScope).toBeDefined());
+    const ordinary = fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    await vi.waitFor(() => expect(releaseSecond).toBeDefined());
+    releaseScope();
+    releaseSecond(result);
+    await ordinary;
+    await forced;
+    expect(provider.fetch).toHaveBeenCalledTimes(3);
+    expect(provider.fetch.mock.calls[2][0].operationCache.get(QUOTA_FORCE_REFRESH)).toBe(true);
+  });
+
   it("retains a thrown forced refresh's last good measurement as stale and retries", async () => {
     const { fetchQuotaProviderResult, readCachedProviderResult, __resetQuotaStateForTests } =
       await import("../src/lib/quota-state.js");
