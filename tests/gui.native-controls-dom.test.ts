@@ -91,6 +91,68 @@ it("applies the forced quota response even when its invalidation event is missed
   }
 });
 
+it("rereads once and shows the newer quota when a change arrives during the route's read", async () => {
+  const stale = {
+    generatedAtMs: 1,
+    stale: true,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  };
+  const fresh = { ...stale, generatedAtMs: 2, stale: false };
+  const resolvers: Array<(value: typeof stale) => void> = [];
+  const requests: boolean[] = [];
+  const client = {
+    quota: (input?: { refresh?: boolean }) => {
+      requests.push(input?.refresh === true);
+      return new Promise<typeof stale>((resolve) => resolvers.push(resolve));
+    },
+  };
+  const [token, setToken] = createSignal(0);
+  const snapshots: number[] = [];
+  let routeStale = false;
+  const target = document.createElement("div");
+  document.body.append(target);
+  const dispose = render(
+    () =>
+      createComponent(QuotaRoute, {
+        client: client as never,
+        preferences: displayPreferencesFromValues({}),
+        hiddenCards: [],
+        hiddenRows: [],
+        get reloadToken() {
+          return token();
+        },
+        reconnectEpoch: 0,
+        onSnapshot: (snapshot) => {
+          if (snapshot) snapshots.push(snapshot.generatedAtMs);
+        },
+        onStale: (value) => {
+          routeStale = value;
+        },
+        onRetryShell: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() => expect(requests).toEqual([false]));
+    // The event lands while the first read is still pending.
+    setToken(1);
+    await Promise.resolve();
+    expect(requests).toEqual([false]);
+    resolvers[0]?.(stale);
+    await vi.waitFor(() => expect(requests).toEqual([false, false]));
+    expect(snapshots).toContain(1);
+    resolvers[1]?.(fresh);
+    await vi.waitFor(() => expect(snapshots.at(-1)).toBe(2));
+    await vi.waitFor(() => expect(routeStale).toBe(false));
+    expect(target.textContent).not.toContain("Quota data is unavailable");
+    expect(requests).toEqual([false, false]);
+  } finally {
+    dispose();
+    target.remove();
+  }
+});
+
 it("marks a successful manual retry fresh when it replaces a reconnect read", async () => {
   const snapshot = {
     generatedAtMs: 1,
@@ -430,6 +492,58 @@ it("does not surface a retired failure before a replacement request starts", asy
   expect(await pending).toBe(false);
   expect(query.error()).toBeUndefined();
   expect(query.loading()).toBe(false);
+});
+
+it("rereads once when a quota change arrives during an ordinary in-flight read", async () => {
+  const snapshot = (generatedAtMs: number) => ({
+    generatedAtMs,
+    stale: false,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  });
+  const resolvers: Array<(value: ReturnType<typeof snapshot>) => void> = [];
+  const requests: boolean[] = [];
+  const query = createQuotaQuery((refresh) => {
+    requests.push(refresh);
+    return new Promise<ReturnType<typeof snapshot>>((resolve) => resolvers.push(resolve));
+  });
+  const first = query.read();
+  const joined = query.read();
+  const changed = query.read({ changed: true });
+  const changedAgain = query.read({ changed: true });
+  expect(requests).toEqual([false]);
+  resolvers[0]?.(snapshot(1));
+  expect(await first).toBe(true);
+  expect(await joined).toBe(true);
+  await vi.waitFor(() => expect(requests).toEqual([false, false]));
+  resolvers[1]?.(snapshot(2));
+  expect(await changed).toBe(true);
+  expect(await changedAgain).toBe(true);
+  expect(query.data()?.generatedAtMs).toBe(2);
+  expect(requests).toEqual([false, false]);
+});
+
+it("does not reread after a quota change during a forced refresh or a retired read", async () => {
+  const requests: boolean[] = [];
+  const resolvers: Array<(value: never) => void> = [];
+  const query = createQuotaQuery((refresh) => {
+    requests.push(refresh);
+    return new Promise<never>((resolve) => resolvers.push(resolve));
+  });
+  const forced = query.refresh();
+  void query.read({ changed: true });
+  resolvers[0]?.({ generatedAtMs: 1 } as never);
+  await forced;
+  await Promise.resolve();
+  expect(requests).toEqual([true]);
+
+  const ordinary = query.read();
+  const changed = query.read({ changed: true });
+  query.invalidate();
+  resolvers[1]?.({ generatedAtMs: 2 } as never);
+  expect(await ordinary).toBe(false);
+  expect(await changed).toBe(false);
+  expect(requests).toEqual([true, false]);
 });
 
 it("does not force again when quota invalidation arrives before the retry response", async () => {

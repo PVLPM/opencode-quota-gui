@@ -108,10 +108,14 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
 
   let settingsInFlight: Promise<boolean> | undefined;
   let settingsReadEpoch = 0;
-  function refreshSettings(): void {
+  // `changed` is an invalidation event: the in-flight read may predate it, so
+  // one follow-up read is owed. A plain retry just joins the in-flight read.
+  function refreshSettings(changed = false): void {
     const epoch = reconnectEpoch();
     if (settingsInFlight) {
-      if (settingsReadEpoch !== epoch) void settingsInFlight.then(() => refreshSettings());
+      if (changed || settingsReadEpoch !== epoch) {
+        void settingsInFlight.then(() => refreshSettings());
+      }
       return;
     }
     settingsReadEpoch = epoch;
@@ -139,7 +143,7 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
 
   function handleEvent(event: DashboardEvent): void {
     if (event.topic === "settings.changed") {
-      refreshSettings();
+      refreshSettings(true);
       return;
     }
     if (event.topic === "quota.changed") {

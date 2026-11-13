@@ -569,6 +569,36 @@ describe("native dashboard panel state", () => {
     expect(state.settingsStale()).toBe(false);
   });
 
+  it("rereads settings once after an event arrives mid-flight, but dedupes a plain retry", async () => {
+    const pending: Array<(value: SettingsSnapshot) => void> = [];
+    const fake = recordingClient();
+    const [visible] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible });
+    fake.setSettings(
+      () =>
+        new Promise<SettingsSnapshot>((resolve) => {
+          pending.push(resolve);
+        }),
+    );
+    const base = fake.counts.settings;
+
+    state.retry();
+    await flush();
+    state.retry();
+    await flush();
+    expect(fake.counts.settings).toBe(base + 1);
+
+    // The event may postdate the in-flight read, so one follow-up read is owed.
+    fake.emit({ topic: "settings.changed", at: 9 });
+    await flush();
+    pending[0]?.(settingsSnapshot({ revision: "old" }));
+    await flush();
+    expect(fake.counts.settings).toBe(base + 2);
+    pending[1]?.(settingsSnapshot({ revision: "new" }));
+    await flush();
+    expect(state.settings()?.revision).toBe("new");
+  });
+
   it("exposes the settings payload that drives display preferences and visibility", async () => {
     const fake = recordingClient({
       settings: async () =>

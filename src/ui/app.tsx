@@ -165,7 +165,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
       // tick while Settings is open refreshes it so temporal rows stay live.
       const tokenChanged = previous !== undefined && previous[1] !== token;
       if (!tokenChanged && homeSnapshot()) return;
-      void quotaQuery.read();
+      void quotaQuery.read({ changed: tokenChanged });
     }),
   );
 

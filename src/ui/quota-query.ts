@@ -11,6 +11,27 @@ export function createQuotaQuery(fetchQuota: (refresh: boolean) => Promise<Quota
   let unconsumedRefresh = false;
   let active: { forced: boolean; epoch: number; promise: Promise<boolean> } | undefined;
   let readsHeld: Promise<void> | undefined;
+  let followUp: { after: Promise<boolean>; promise: Promise<boolean> } | undefined;
+
+  /**
+   * A quota change during an ordinary in-flight read may postdate that read, so
+   * one follow-up read is owed after it. A forced refresh already asked the
+   * provider, and a retired read is superseded, so neither owes one.
+   */
+  function readChanged(): Promise<boolean> {
+    const current = active;
+    if (!current || current.forced) return run();
+    if (followUp?.after === current.promise) return followUp.promise;
+    const requestEpoch = epoch;
+    const promise = current.promise.then((applied) => (requestEpoch === epoch ? run() : applied));
+    followUp = { after: current.promise, promise };
+    return promise;
+  }
+
+  function read(options?: { changed?: boolean }): Promise<boolean> {
+    const go = options?.changed ? readChanged : run;
+    return readsHeld ? readsHeld.then(() => go()) : go();
+  }
   const query = createQuery(async () => {
     const forced = forceNext;
     const requestEpoch = epoch;
@@ -57,7 +78,7 @@ export function createQuotaQuery(fetchQuota: (refresh: boolean) => Promise<Quota
     data: query.data,
     error: query.error,
     loading: query.loading,
-    read: () => (readsHeld ? readsHeld.then(() => run()) : run()),
+    read,
     refresh: () => run(true),
     afterReconnect: () => (readsHeld ? readsHeld.then(() => run(false, true)) : run(false, true)),
     isRefreshing: () => active?.forced === true,

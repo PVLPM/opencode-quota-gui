@@ -121,6 +121,7 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
     createQuotaQuery((refresh) => props.client.quota(refresh ? { refresh: true } : undefined));
   const [freshEpoch, setFreshEpoch] = createSignal(0);
   let previousEpoch = props.reconnectEpoch;
+  let previousToken = props.reloadToken;
   let initialRead = true;
   const busy = createBusyIndicator();
   createEffect(() => {
@@ -133,7 +134,9 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
   createEffect(() => {
     if (!routeEnabled(props)) return;
     const epoch = props.reconnectEpoch;
-    void props.reloadToken;
+    const token = props.reloadToken;
+    const changed = token !== previousToken;
+    previousToken = token;
     const reconnected = epoch !== previousEpoch;
     previousEpoch = epoch;
     if (reconnected && !props.quotaQuery) query.reconnected();
@@ -144,7 +147,7 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
       return;
     }
     initialRead = false;
-    void (reconnected ? query.afterReconnect() : query.read()).then((applied) => {
+    void (reconnected ? query.afterReconnect() : query.read({ changed })).then((applied) => {
       if (!applied) return;
       setFreshEpoch(epoch);
       props.onFresh?.();
