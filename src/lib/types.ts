@@ -818,6 +818,10 @@ export interface GoogleAccountError {
   email: string;
   error: string;
   failureCategory?: ProviderFailureCategory;
+  /** Deadline observed in an upstream Retry-After response. */
+  retryAtMs?: number;
+  /** Position of the failed account, matching its buckets' `accountIndex`. */
+  accountIndex?: number;
 }
 
 export interface GeminiCliQuotaBucket {

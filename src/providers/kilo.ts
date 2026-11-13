@@ -177,6 +177,7 @@ export const kiloProvider: QuotaProvider = {
             {
               label: "Kilo Gateway",
               message: stateResult.error,
+              ...(stateResult.retryAtMs !== undefined ? { retryAtMs: stateResult.retryAtMs } : {}),
               ...(stateResult.failureCategory !== undefined
                 ? { failureCategory: stateResult.failureCategory }
                 : {}),

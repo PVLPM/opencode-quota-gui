@@ -600,6 +600,11 @@ export async function fetchQuotaProviderResult(params: {
       const failedAccounts = new Set(
         rateLimited.map((error) => error.sourceId).filter((id) => id !== undefined),
       );
+      const accountsWithFreshEntries = new Set(
+        snapshot.entries
+          .map((entry) => entry.accounting.sourceId)
+          .filter((id): id is string => id !== undefined),
+      );
       const fallback =
         snapshot.entries.length === 0 && rateLimited.some((error) => error.sourceId === undefined)
           ? provider.id === "openrouter"
@@ -608,7 +613,8 @@ export async function fetchQuotaProviderResult(params: {
           : previous.result.entries.filter(
               (entry) =>
                 entry.accounting.sourceId !== undefined &&
-                failedAccounts.has(entry.accounting.sourceId),
+                failedAccounts.has(entry.accounting.sourceId) &&
+                !accountsWithFreshEntries.has(entry.accounting.sourceId),
             );
       if (fallback.length > 0) {
         const stale = { ...snapshot, entries: [...snapshot.entries, ...fallback] };

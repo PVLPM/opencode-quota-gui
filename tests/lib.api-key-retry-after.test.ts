@@ -67,4 +67,37 @@ describe("API key retry guard", () => {
     await first;
     expect(secondRequest).not.toHaveBeenCalled();
   });
+
+  it("keeps requests distinct while sharing Retry-After cooldown per credential", async () => {
+    const retryAtMs = Date.now() + 60_000;
+    const guard = createApiKeyRetryGuard<{ success: boolean; retryAtMs?: number }>((deadline) => ({
+      success: false,
+      retryAtMs: deadline,
+    }));
+    let resolveFirst!: (value: { success: false; retryAtMs: number }) => void;
+    const firstRequest = vi.fn(
+      () =>
+        new Promise<{ success: false; retryAtMs: number }>((resolve) => {
+          resolveFirst = resolve;
+        }),
+    );
+    const secondRequest = vi.fn(async () => ({ success: true as const }));
+
+    const first = guard("credential", firstRequest, 1000, undefined, "target-a");
+    const second = guard("credential", secondRequest, 1000, undefined, "target-b");
+    expect(secondRequest).toHaveBeenCalledOnce();
+
+    resolveFirst({ success: false, retryAtMs });
+    expect(await Promise.all([first, second])).toEqual([
+      { success: false, retryAtMs },
+      { success: true },
+    ]);
+
+    const blockedRequest = vi.fn(async () => ({ success: true as const }));
+    expect(await guard("credential", blockedRequest, 1000, undefined, "target-c")).toEqual({
+      success: false,
+      retryAtMs,
+    });
+    expect(blockedRequest).not.toHaveBeenCalled();
+  });
 });

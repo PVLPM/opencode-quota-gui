@@ -2,6 +2,7 @@ import {
   type ProviderFailureCategory,
   providerFailureCategoryForHttpStatus,
 } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
@@ -266,7 +267,19 @@ function parseKimiUsagePayload(payload: Record<string, unknown>): {
 
 type FetchResult =
   | { ok: true; windows: KimiQuotaWindowWithTechnicalKey[]; topLevelKeys: string[] }
-  | { ok: false; error: string; failureCategory?: ProviderFailureCategory };
+  | {
+      ok: false;
+      error: string;
+      failureCategory?: ProviderFailureCategory;
+      retryAtMs?: number;
+    };
+
+const guard = createApiKeyRetryGuard<KimiResultWithTechnicalKeys>((retryAtMs) => ({
+  success: false,
+  error: "Kimi API error 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+}));
 
 async function fetchKimiQuotaFromUrl(
   url: string,
@@ -274,6 +287,7 @@ async function fetchKimiQuotaFromUrl(
   requestTimeoutMs?: number,
 ): Promise<FetchResult> {
   let responseStatus: number | undefined;
+  let retryAtMs: number | undefined;
   try {
     return await fetchWithTimeout(url, {
       request: {
@@ -286,11 +300,13 @@ async function fetchKimiQuotaFromUrl(
       consume: async (resp): Promise<FetchResult> => {
         responseStatus = resp.status;
         if (!resp.ok) {
+          retryAtMs = retryAfterDeadline(resp);
           const text = await resp.text();
           return {
             ok: false,
             error: `Kimi API error ${resp.status}: ${sanitizeDisplaySnippet(text, 120)}`,
             failureCategory: providerFailureCategoryForHttpStatus(resp.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 
@@ -307,6 +323,7 @@ async function fetchKimiQuotaFromUrl(
         responseStatus === undefined
           ? "provider_api"
           : providerFailureCategoryForHttpStatus(responseStatus),
+      ...(retryAtMs !== undefined ? { retryAtMs } : {}),
     };
   }
 }
@@ -318,31 +335,41 @@ export async function queryKimiQuota(options: {
   requestTimeoutMs?: number;
 }): Promise<KimiResultWithTechnicalKeys> {
   const endpoint = getKimiQuotaEndpoint(options.endpoint);
-  const result = await fetchKimiQuotaFromUrl(
-    endpoint.quotaUrl,
-    options.apiKey,
+  // Endpoint is part of the guarded identity so one key on global/cn stays isolated.
+  return guard(
+    `${options.endpoint}\0${options.apiKey}`,
+    async (): Promise<KimiResultWithTechnicalKeys> => {
+      const result = await fetchKimiQuotaFromUrl(
+        endpoint.quotaUrl,
+        options.apiKey,
+        options.requestTimeoutMs,
+      );
+      if (result.ok && result.windows.length > 0) {
+        return {
+          success: true,
+          label: options.label ?? endpoint.label,
+          windows: result.windows,
+        };
+      }
+
+      if (!result.ok) {
+        return {
+          success: false,
+          error: result.error,
+          ...(result.failureCategory !== undefined
+            ? { failureCategory: result.failureCategory }
+            : {}),
+          ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
+        };
+      }
+
+      // Succeeded structurally but had no usable windows.
+      return {
+        success: false,
+        error: describeUnexpectedPayload(result.topLevelKeys),
+        failureCategory: "provider_api",
+      };
+    },
     options.requestTimeoutMs,
   );
-  if (result.ok && result.windows.length > 0) {
-    return {
-      success: true,
-      label: options.label ?? endpoint.label,
-      windows: result.windows,
-    };
-  }
-
-  if (!result.ok) {
-    return {
-      success: false,
-      error: result.error,
-      ...(result.failureCategory !== undefined ? { failureCategory: result.failureCategory } : {}),
-    };
-  }
-
-  // Succeeded structurally but had no usable windows.
-  return {
-    success: false,
-    error: describeUnexpectedPayload(result.topLevelKeys),
-    failureCategory: "provider_api",
-  };
 }

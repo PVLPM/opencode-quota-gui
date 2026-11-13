@@ -1,4 +1,5 @@
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeSingleLineDisplaySnippet } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 
@@ -30,7 +31,30 @@ export interface MimoBalance {
 
 export type MimoEndpointResult<T> =
   | { state: "success"; data: T }
-  | { state: "error"; error: string; failureCategory: ProviderFailureCategory };
+  | {
+      state: "error";
+      error: string;
+      failureCategory: ProviderFailureCategory;
+      /** Deadline observed in an upstream Retry-After response. */
+      retryAtMs?: number;
+    };
+
+// The shared guard keys on `success`; carry the endpoint result alongside it.
+type GuardedEndpoint = {
+  success: boolean;
+  retryAtMs?: number;
+  endpoint: MimoEndpointResult<unknown>;
+};
+const endpointGuard = createApiKeyRetryGuard<GuardedEndpoint>((retryAtMs) => ({
+  success: false,
+  retryAtMs,
+  endpoint: {
+    state: "error",
+    error: "Xiaomi MiMo request failed (HTTP 429)",
+    failureCategory: "provider_api",
+    retryAtMs,
+  },
+}));
 
 export interface MimoDashboardResult {
   usage: MimoEndpointResult<MimoMonthlyQuota>;
@@ -193,14 +217,47 @@ function sanitizeRequestError(error: unknown, cookie: string): string {
   return sanitizeSingleLineDisplaySnippet(message, 120) || "request failed";
 }
 
-async function fetchMimoEndpoint<T>(params: {
+type MimoEndpointParams<T> = {
   name: "usage" | "detail" | "balance";
   url: string;
   cookie: string;
   requestTimeoutMs: number;
   timeZone: string;
   parse: (json: unknown) => T;
-}): Promise<MimoEndpointResult<T>> {
+};
+
+/** One cooldown per session cookie and endpoint; other cookies are unaffected. */
+async function fetchMimoEndpoint<T>(params: MimoEndpointParams<T>): Promise<MimoEndpointResult<T>> {
+  const guarded = await endpointGuard(
+    JSON.stringify([params.cookie, params.name]),
+    async () => {
+      const endpoint = await requestMimoEndpoint(params);
+      return {
+        success: endpoint.state === "success",
+        ...(endpoint.state === "error" && endpoint.retryAtMs !== undefined
+          ? { retryAtMs: endpoint.retryAtMs }
+          : {}),
+        endpoint,
+      };
+    },
+    params.requestTimeoutMs,
+    (retryAtMs) => ({
+      success: false,
+      retryAtMs,
+      endpoint: {
+        state: "error",
+        error: `Xiaomi MiMo ${params.name} request failed (HTTP 429)`,
+        failureCategory: "provider_api",
+        retryAtMs,
+      },
+    }),
+  );
+  return guarded.endpoint as MimoEndpointResult<T>;
+}
+
+async function requestMimoEndpoint<T>(
+  params: MimoEndpointParams<T>,
+): Promise<MimoEndpointResult<T>> {
   try {
     return await fetchWithTimeout(params.url, {
       request: {
@@ -226,11 +283,13 @@ async function fetchMimoEndpoint<T>(params: {
           };
         }
         if (!response.ok) {
+          const retryAtMs = retryAfterDeadline(response);
           return {
             state: "error",
             error: `Xiaomi MiMo ${params.name} request failed (HTTP ${response.status})`,
             failureCategory:
               response.status === 401 || response.status === 403 ? "credentials" : "provider_api",
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 

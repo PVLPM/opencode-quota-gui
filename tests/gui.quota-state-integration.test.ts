@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createSnapshotService } from "../src/gui/snapshot-service.js";
 import { createDashboardReadSource } from "../src/gui/sources.js";
-import type { QuotaProvider } from "../src/lib/entries.js";
+import type { QuotaProvider, QuotaProviderResult, QuotaToastEntry } from "../src/lib/entries.js";
+import { collectQuotaDashboardProviderResults } from "../src/lib/quota-render-data.js";
 import { __resetQuotaStateForTests } from "../src/lib/quota-state.js";
 import { DEFAULT_CONFIG } from "../src/lib/types.js";
 
@@ -121,4 +122,168 @@ it("retries an initially partial provider on scheduled polls without substitutin
     removeViewer();
     snapshots.close();
   }
+});
+
+it("keeps partial 429 account rows fresh and bounded across repeated dashboard polls", async () => {
+  const accountSourceIds = ["workspace-a", "workspace-b", "workspace-c"] as const;
+  const accounts = accountSourceIds.map((sourceId) => ({
+    sourceId,
+    label: `Workspace ${sourceId.slice(-1).toUpperCase()}`,
+    active: true,
+  }));
+  const balance = (sourceId: string, decimal: string): QuotaToastEntry => ({
+    accounting: {
+      resultType: "balance",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+      sourceId,
+    },
+    kind: "quantity",
+    name: "zen-current-balance",
+    group: "OpenCode Zen",
+    semantic: {
+      metric: { kind: "component", component: "current_balance" },
+      prominence: "primary",
+    },
+    quantity: { decimal, unit: { kind: "currency", code: "USD" } },
+  });
+  const monthlyBudget = (sourceId: string, percentRemaining: number): QuotaToastEntry => ({
+    accounting: {
+      resultType: "budget",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "locally_derived",
+      sourceId,
+    },
+    kind: "percent",
+    name: "zen-monthly-budget",
+    group: "OpenCode Zen",
+    percentRemaining,
+    semantic: {
+      metric: { kind: "window", window: "month" },
+      prominence: "primary",
+    },
+  });
+  const previous: QuotaProviderResult = {
+    attempted: true,
+    accounts,
+    entries: [
+      balance("workspace-a", "42.00"),
+      monthlyBudget("workspace-a", 65),
+      balance("workspace-b", "12.00"),
+      monthlyBudget("workspace-b", 75),
+      balance("workspace-c", "8.00"),
+      monthlyBudget("workspace-c", 25),
+    ],
+    errors: [],
+  };
+  const partial: QuotaProviderResult = {
+    attempted: true,
+    accounts,
+    entries: [
+      balance("workspace-a", "99.00"),
+      balance("workspace-b", "15.00"),
+      monthlyBudget("workspace-b", 55),
+    ],
+    errors: [
+      {
+        label: "Workspace A",
+        message: "Optional monthly route is rate limited",
+        sourceId: "workspace-a",
+        failureCategory: "provider_api",
+        retryAtMs: Date.now() + 60_000,
+      },
+      {
+        label: "Workspace C",
+        message: "Workspace request is rate limited",
+        sourceId: "workspace-c",
+        failureCategory: "provider_api",
+        retryAtMs: Date.now() + 60_000,
+      },
+    ],
+  };
+  let fetchCount = 0;
+  const provider: QuotaProvider = {
+    id: "opencode",
+    cachePolicy: { kind: "account-neutral" },
+    isAvailable: async () => true,
+    fetch: async () => (fetchCount++ === 0 ? previous : partial),
+  };
+  const client = {
+    config: {
+      providers: async () => ({ data: { providers: [] } }),
+      get: async () => ({ data: {} }),
+    },
+  };
+  const normalizedPolls: QuotaProviderResult[] = [];
+  const source = createDashboardReadSource({
+    client,
+    workspaceRoot: "C:/synthetic-workspace",
+    providers: [provider],
+    loadConfig: async () => ({
+      ...DEFAULT_CONFIG,
+      enabledProviders: [provider.id],
+      minIntervalMs: 0,
+    }),
+    collectProviderResults: async ({ config, providers }) => {
+      const probes = await collectQuotaDashboardProviderResults({
+        client,
+        config,
+        workspaceRoot: "C:/synthetic-workspace",
+        providers,
+      });
+      const normalizedResult = probes[0]?.result;
+      if (normalizedResult) normalizedPolls.push(normalizedResult);
+      return probes;
+    },
+  });
+
+  const first = await source.quota();
+  const second = await source.quota();
+  const third = await source.quota();
+
+  expect(fetchCount).toBe(3);
+  const partialEntries = normalizedPolls[1]?.entries ?? [];
+  const normalizedRows = partialEntries.map((entry) => [
+    entry.accounting.sourceId,
+    entry.accounting.resultType,
+    entry.name,
+  ]);
+  expect(normalizedRows).toEqual([
+    ["workspace-a", "balance", "zen-current-balance"],
+    ["workspace-b", "balance", "zen-current-balance"],
+    ["workspace-b", "budget", "zen-monthly-budget"],
+    ["workspace-c", "balance", "zen-current-balance"],
+    ["workspace-c", "budget", "zen-monthly-budget"],
+  ]);
+  expect(normalizedPolls[2]?.entries).toEqual(partialEntries);
+  expect(normalizedPolls.map((poll) => poll.entries.length)).toEqual([6, 5, 5]);
+
+  const visibleRows = (snapshot: typeof second, label: string) =>
+    snapshot.providers.cards
+      .find((card) => card.accountLabel === label)
+      ?.rows.map((row) => ({
+        resultType: row.resultType,
+        kind: row.kind,
+        quantity: row.quantity?.decimal,
+        percentRemaining: row.percentRemaining,
+        booleanValue: row.booleanValue,
+      })) ?? [];
+  expect(first.stale).toBe(false);
+  expect(second.stale).toBe(true);
+  expect(visibleRows(second, "Workspace A")).toEqual([
+    { resultType: "balance", kind: "quantity", quantity: "99.00" },
+  ]);
+  expect(visibleRows(second, "Workspace B")).toEqual([
+    { resultType: "balance", kind: "quantity", quantity: "15.00" },
+    { resultType: "budget", kind: "percent", percentRemaining: 55 },
+  ]);
+  expect(visibleRows(second, "Workspace C")).toEqual([
+    { resultType: "balance", kind: "quantity", quantity: "8.00" },
+    { resultType: "budget", kind: "percent", percentRemaining: 25 },
+  ]);
+  expect(visibleRows(third, "Workspace A")).toEqual(visibleRows(second, "Workspace A"));
+  expect(visibleRows(third, "Workspace B")).toEqual(visibleRows(second, "Workspace B"));
+  expect(visibleRows(third, "Workspace C")).toEqual(visibleRows(second, "Workspace C"));
 });

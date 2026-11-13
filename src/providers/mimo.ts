@@ -106,6 +106,7 @@ function endpointErrors(result: MimoDashboardResult): QuotaToastError[] {
         label: MIMO_LABEL,
         message: endpoint.error,
         failureCategory: endpoint.failureCategory,
+        ...(endpoint.retryAtMs !== undefined ? { retryAtMs: endpoint.retryAtMs } : {}),
       });
     }
   }
