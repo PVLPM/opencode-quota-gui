@@ -42,6 +42,35 @@ function createTestContext() {
 }
 
 describe("quota-state shared cache", () => {
+  it("retries partial failures without a retry deadline instead of caching them as fresh", async () => {
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+    const row = (sourceId: string) => ({
+      accounting: { ...TEST_ACCOUNTING, sourceId },
+      name: sourceId,
+      percentRemaining: 55,
+    });
+    const failure = { label: "B", message: "request failed", sourceId: "b" };
+    const provider = {
+      id: "partial-error-test",
+      cachePolicy: { kind: "account-neutral" },
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce({ attempted: true, entries: [row("a")], errors: [failure] })
+        .mockResolvedValueOnce({ attempted: true, entries: [row("a")], errors: [failure] })
+        .mockResolvedValueOnce({ attempted: true, entries: [row("a"), row("b")], errors: [] }),
+    } as any;
+    const ctx = createTestContext();
+    for (let i = 0; i < 2; i++) {
+      const result = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+      expect(result.entries).toEqual([row("a")]);
+      expect(result.errors).toEqual([failure]);
+    }
+    const recovered = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    expect(recovered.entries).toEqual([row("a"), row("b")]);
+    expect(recovered.errors).toEqual([]);
+    expect(provider.fetch).toHaveBeenCalledTimes(3);
+  });
+
   it("returns a scoped last-good result with the observed rate-limit error, never as fresh", async () => {
     const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
     const entry = { accounting: TEST_ACCOUNTING, name: "Previous", percentRemaining: 72 };
@@ -1205,6 +1234,113 @@ describe("quota-state shared cache", () => {
     expect(ctx.operationCache).toBeUndefined();
   });
 
+  it("retains a thrown forced refresh's last good measurement as stale and retries", async () => {
+    const { fetchQuotaProviderResult, readCachedProviderResult, __resetQuotaStateForTests } =
+      await import("../src/lib/quota-state.js");
+    let identity = "account-a";
+    const provider = {
+      id: "thrown-forced-failure",
+      cachePolicy: { kind: "resolved-auth", resolveIdentity: async () => identity },
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce({
+          attempted: true,
+          entries: [{ accounting: TEST_ACCOUNTING, name: "A", percentRemaining: 80 }],
+          errors: [],
+        })
+        .mockRejectedValueOnce(new Error("provider failed"))
+        .mockResolvedValueOnce({
+          attempted: true,
+          entries: [{ accounting: TEST_ACCOUNTING, name: "A recovered", percentRemaining: 40 }],
+          errors: [],
+        }),
+    } as any;
+    const ctx = createTestContext();
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+    __resetQuotaStateForTests();
+    await expect(
+      fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000, forceRefresh: true }),
+    ).rejects.toThrow("provider failed");
+    expect(await readCachedProviderResult({ provider, ctx, ttlMs: 60_000 })).toMatchObject({
+      hit: true,
+      result: { entries: [{ name: "A", percentRemaining: 80 }] },
+    });
+    identity = "account-b";
+    expect(await readCachedProviderResult({ provider, ctx, ttlMs: 60_000 })).toEqual({
+      hit: false,
+    });
+    identity = "account-a";
+    expect(
+      (await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 })).entries[0],
+    ).toMatchObject({ name: "A recovered" });
+    expect(provider.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not let a delayed disk read overwrite a failed refresh's stale cache", async () => {
+    let pauseRead = false;
+    let releaseRead!: () => void;
+    let signalRead!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      signalRead = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    vi.doMock("node:fs/promises", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs/promises")>();
+      return {
+        ...actual,
+        readFile: async (...args: Parameters<typeof actual.readFile>) => {
+          const data = await actual.readFile(...args);
+          if (pauseRead && String(args[0]).includes("delayed-disk-read-")) {
+            pauseRead = false;
+            signalRead();
+            await resume;
+          }
+          return data;
+        },
+      };
+    });
+    try {
+      const { fetchQuotaProviderResult, readCachedProviderResult, __resetQuotaStateForTests } =
+        await import("../src/lib/quota-state.js");
+      const provider = {
+        id: "delayed-disk-read",
+        cachePolicy: { kind: "account-neutral" },
+        fetch: vi
+          .fn()
+          .mockResolvedValueOnce({
+            attempted: true,
+            entries: [{ accounting: TEST_ACCOUNTING, name: "old", percentRemaining: 80 }],
+            errors: [],
+          })
+          .mockRejectedValueOnce(new Error("failed"))
+          .mockResolvedValueOnce({
+            attempted: true,
+            entries: [{ accounting: TEST_ACCOUNTING, name: "new", percentRemaining: 40 }],
+            errors: [],
+          }),
+      } as any;
+      const ctx = createTestContext();
+      await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+      __resetQuotaStateForTests();
+      pauseRead = true;
+      const pendingRead = readCachedProviderResult({ provider, ctx, ttlMs: 60_000 });
+      await paused;
+      await expect(
+        fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000, forceRefresh: true }),
+      ).rejects.toThrow("failed");
+      releaseRead();
+      await pendingRead;
+      const result = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+      expect(result.entries[0]?.name).toBe("new");
+      expect(provider.fetch).toHaveBeenCalledTimes(3);
+    } finally {
+      releaseRead();
+      vi.doUnmock("node:fs/promises");
+    }
+  });
+
   it("removes a failed forced refresh's fresh provider cache without writing an unused stale file", async () => {
     const {
       fetchQuotaProviderResult,
@@ -1956,7 +2092,7 @@ describe("quota-state shared cache", () => {
     });
   });
 
-  it("caches entry-bearing partial aggregates including internal diagnostics", async () => {
+  it("retries entry-bearing partial aggregates while preserving internal diagnostics", async () => {
     const { __resetQuotaStateForTests, fetchQuotaProviderResult } = await import(
       "../src/lib/quota-state.js"
     );
@@ -2025,7 +2161,7 @@ describe("quota-state shared cache", () => {
     first.rawDetails![0]!.value = "mutated";
     const second = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
 
-    expect(provider.fetch).toHaveBeenCalledTimes(1);
+    expect(provider.fetch).toHaveBeenCalledTimes(2);
     expect(second.errors).toEqual([{ label: "Other", message: "request failed" }]);
     expect(second.diagnostics?.[0]?.checkedPaths).toEqual(["env:EXPLICIT_KEY"]);
     expect(second.statusDetails).toEqual([{ key: "balance_usd", value: "$42.50" }]);

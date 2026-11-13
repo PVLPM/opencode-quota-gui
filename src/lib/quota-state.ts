@@ -528,7 +528,7 @@ export async function fetchQuotaProviderResult(params: {
         ttlMs,
         now,
       });
-  if (persisted) {
+  if (persisted && !inMemoryCache.has(key)) {
     inMemoryCache.set(key, {
       ...persisted,
       result: cloneQuotaProviderResult(persisted.result),
@@ -562,7 +562,21 @@ export async function fetchQuotaProviderResult(params: {
       snapshot = await fetchValidatedProviderResult(provider, ctx, cacheContext);
     } catch (error) {
       if (ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true) {
-        inMemoryCache.delete(key);
+        const previous =
+          inMemoryCache.get(key) ??
+          (await readPersistedQuotaProviderCacheEntry({
+            key,
+            providerId: provider.id,
+            packageVersion,
+            ttlMs,
+            now: Date.now(),
+            ignoreExpiry: true,
+          }));
+        if (previous && (await isProviderCacheScopeCurrent(provider, ctx, scope))) {
+          inMemoryCache.set(key, { ...previous, stale: true });
+        } else {
+          inMemoryCache.delete(key);
+        }
         await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
       }
       throw error;
@@ -618,7 +632,7 @@ export async function fetchQuotaProviderResult(params: {
       result: snapshot,
     });
 
-    if (rateLimited.length > 0) {
+    if (snapshot.errors.some((error) => error.kind !== "intentional-filter")) {
       inMemoryCache.set(key, { ...entry, stale: true, result: cloneQuotaProviderResult(snapshot) });
       await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
       return snapshot;
@@ -706,21 +720,28 @@ export async function readCachedProviderResult(params: {
   });
 
   if (persisted) {
-    inMemoryCache.set(key, {
-      ...persisted,
-      result: cloneQuotaProviderResult(persisted.result),
-    });
+    if (!(await isProviderCacheScopeCurrent(params.provider, params.ctx, scope))) {
+      return { hit: false };
+    }
+    const current = inMemoryCache.get(key);
+    const selected = current ?? persisted;
+    if (!current) {
+      inMemoryCache.set(key, {
+        ...persisted,
+        result: cloneQuotaProviderResult(persisted.result),
+      });
+    }
     publishQuotaTelemetry({
       ctx: params.ctx,
       providerId: params.provider.id,
       snapshotId: key,
-      result: persisted.result,
-      cacheTimestamp: persisted.timestamp,
+      result: selected.result,
+      cacheTimestamp: selected.timestamp,
     });
     return {
       hit: true,
-      result: cloneQuotaProviderResult(persisted.result),
-      timestamp: persisted.timestamp,
+      result: cloneQuotaProviderResult(selected.result),
+      timestamp: selected.timestamp,
     };
   }
 
