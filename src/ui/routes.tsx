@@ -20,6 +20,7 @@ import type { ConnectionState } from "./dashboard-client";
 import { RANGE_LABELS } from "./format";
 import { sameIdentity } from "./model-analytics";
 import { createQuery, type Query } from "./query";
+import { createQuotaQuery, type QuotaQuery } from "./quota-query";
 import type { displayPreferencesFromValues } from "./settings-model";
 import { describeError, isStaleAfterReconnect, resolveLoadState } from "./view-model";
 import { HomeView, QuotaLoading, QuotaView } from "./views/home";
@@ -106,28 +107,21 @@ function RangeFailureNotice(props: { failure: RangeFailure; onRetry: () => void 
 
 export interface QuotaRouteProps extends RouteLifecycleProps {
   client: DashboardDataSource;
+  quotaQuery?: QuotaQuery;
   preferences: ReturnType<typeof displayPreferencesFromValues>;
   hiddenCards: string[];
   hiddenRows: string[];
   onSnapshot: (snapshot: QuotaSnapshot | undefined) => void;
-  onRetryShell?: () => void;
+  onRetryShell?: () => boolean | void;
 }
 
 export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
-  let retry = false;
-  let retryVersion = 0;
-  const query = createQuery<QuotaSnapshot>(() => {
-    const refresh = retry;
-    const version = retryVersion;
-    if (refresh) retry = false;
-    return Promise.resolve()
-      .then(() => props.client.quota(refresh ? { refresh: true } : undefined))
-      .catch((error) => {
-        if (refresh && version === retryVersion) retry = true;
-        throw error;
-      });
-  });
+  const query =
+    props.quotaQuery ??
+    createQuotaQuery((refresh) => props.client.quota(refresh ? { refresh: true } : undefined));
   const [freshEpoch, setFreshEpoch] = createSignal(0);
+  let previousEpoch = props.reconnectEpoch;
+  let initialRead = true;
   const busy = createBusyIndicator();
   createEffect(() => {
     busy.update({
@@ -140,7 +134,17 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
     if (!routeEnabled(props)) return;
     const epoch = props.reconnectEpoch;
     void props.reloadToken;
-    void query.run().then((applied) => {
+    const reconnected = epoch !== previousEpoch;
+    previousEpoch = epoch;
+    if (reconnected && !props.quotaQuery) query.reconnected();
+    if (initialRead && !reconnected && query.consumeRefresh()) {
+      initialRead = false;
+      setFreshEpoch(epoch);
+      props.onFresh?.();
+      return;
+    }
+    initialRead = false;
+    void (reconnected ? query.afterReconnect() : query.read()).then((applied) => {
       if (!applied) return;
       setFreshEpoch(epoch);
       props.onFresh?.();
@@ -152,10 +156,8 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
   const state = () =>
     resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
   const retryQuota = () => {
-    props.onRetryShell?.();
-    retry = true;
-    retryVersion += 1;
-    void query.run();
+    if (query.isRefreshing()) return;
+    if (props.onRetryShell?.() !== true) void query.refresh();
   };
   createEffect(() =>
     props.onStale(

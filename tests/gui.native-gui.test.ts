@@ -202,7 +202,19 @@ describe("Desktop GUI entry", () => {
     expect(panelSource.match(/enabled=\{props\.visible\}/gu)?.length).toBe(7);
     expect(routesSource).toContain("function routeEnabled");
     expect(routesSource).toContain("props.enabled?.() !== false");
-    expect(routesSource.match(/props\.onFresh\?\.\(\)/gu)?.length).toBe(6);
+    for (const [route, count] of [
+      ["QuotaRoute", 2],
+      ["AnalyticsRoute", 1],
+      ["ModelsRoute", 1],
+      ["GroupDetailRoute", 1],
+      ["ProjectRoute", 1],
+      ["SessionRoute", 1],
+    ] as const) {
+      const start = routesSource.indexOf(`export function ${route}(`);
+      const end = routesSource.indexOf("\nexport interface ", start);
+      expect(start, `missing ${route}`).toBeGreaterThanOrEqual(0);
+      expect(routesSource.slice(start, end).match(/props\.onFresh\?\.\(\)/gu)?.length).toBe(count);
+    }
     expect(stateSource).toContain('from "../ui/query.js"');
 
     for (const view of [

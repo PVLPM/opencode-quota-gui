@@ -91,6 +91,10 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
   }
   const [navTooltip, setNavTooltip] = createSignal<NavTarget>();
   const [homeSnapshot, setHomeSnapshot] = createSignal<QuotaSnapshot>();
+  createEffect(() => {
+    const snapshot = panel.quotaQuery.data();
+    if (snapshot) setHomeSnapshot(snapshot);
+  });
   const [routeStale, setRouteStale] = createSignal(false);
   const [rememberedModelsDimension, setRememberedModelsDimension] =
     createSignal<AnalyticsDimension>("provider");
@@ -190,7 +194,13 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
         ? "Display settings unavailable"
         : "Display settings may be stale";
     }
-    if (panel.connection() !== "live" || panel.hostStale() || routeStale()) {
+    if (
+      panel.connection() !== "live" ||
+      panel.hostStale() ||
+      routeStale() ||
+      panel.quotaQuery.error() !== undefined ||
+      panel.healthError() !== undefined
+    ) {
       return "Data may be stale";
     }
     return undefined;
@@ -361,6 +371,7 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                     {(settings) => (
                       <QuotaRoute
                         client={props.client}
+                        quotaQuery={panel.quotaQuery}
                         reloadToken={panel.quotaReloadToken()}
                         reconnectEpoch={panel.reconnectEpoch()}
                         enabled={props.visible}
@@ -370,7 +381,10 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                         hiddenRows={settings().visibility.hiddenRows}
                         onSnapshot={setHomeSnapshot}
                         onStale={setRouteStale}
-                        onRetryShell={() => panel.retry({ refreshQuota: false })}
+                        onRetryShell={() => {
+                          panel.retry();
+                          return true;
+                        }}
                       />
                     )}
                   </Show>

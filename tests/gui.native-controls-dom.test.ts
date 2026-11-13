@@ -1,6 +1,7 @@
-import { createComponent, createEffect, createSignal } from "solid-js";
+import { createComponent, createEffect, createRoot, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { expect, it, vi } from "vitest";
+import { createDashboardPanelState } from "../src/native/panel-state";
 import { NativeSettingsPage } from "../src/native/settings-page";
 import {
   Button,
@@ -9,6 +10,7 @@ import {
   SegmentedControlItem,
   Switch,
 } from "../src/native/ui";
+import { createQuotaQuery } from "../src/ui/quota-query";
 import { QuotaRoute } from "../src/ui/routes";
 import { displayPreferencesFromValues } from "../src/ui/settings-model";
 import { homeSnapshot } from "./fixtures/gui-ui-fixtures";
@@ -89,6 +91,214 @@ it("applies the forced quota response even when its invalidation event is missed
   }
 });
 
+it("shows a shell refresh that finished before the quota route mounted", async () => {
+  const stale = {
+    generatedAtMs: 1,
+    stale: true,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  };
+  const fresh = { ...stale, generatedAtMs: 2, stale: false };
+  const requests: boolean[] = [];
+  const client = {
+    quota: async (input?: { refresh?: boolean }) => {
+      requests.push(input?.refresh === true);
+      return input?.refresh ? fresh : stale;
+    },
+  };
+  const query = createQuotaQuery((refresh) =>
+    client.quota(refresh ? { refresh: true } : undefined),
+  );
+  await query.refresh();
+  const target = document.createElement("div");
+  document.body.append(target);
+  const snapshots: number[] = [];
+  const onFresh = vi.fn();
+  const dispose = render(
+    () =>
+      createComponent(QuotaRoute, {
+        client: client as never,
+        quotaQuery: query,
+        preferences: displayPreferencesFromValues({}),
+        hiddenCards: [],
+        hiddenRows: [],
+        reloadToken: 0,
+        reconnectEpoch: 0,
+        onFresh,
+        onSnapshot: (snapshot) => {
+          if (snapshot) snapshots.push(snapshot.generatedAtMs);
+        },
+        onStale: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() => expect(snapshots).toContain(2));
+    await Promise.resolve();
+    expect(requests).toEqual([true]);
+    expect(snapshots.at(-1)).toBe(2);
+    expect(onFresh).toHaveBeenCalledOnce();
+  } finally {
+    dispose();
+    target.remove();
+  }
+});
+
+it("revalidates a shell refresh after host recovery before marking the route fresh", async () => {
+  const snapshot = {
+    generatedAtMs: 42,
+    stale: false,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  };
+  let reconnect = () => {};
+  let resolveRead!: (value: typeof snapshot) => void;
+  const requests: boolean[] = [];
+  const client = {
+    quota: (input?: { refresh?: boolean }) => {
+      requests.push(input?.refresh === true);
+      return input?.refresh
+        ? Promise.resolve(snapshot)
+        : new Promise<typeof snapshot>((resolve) => {
+            resolveRead = resolve;
+          });
+    },
+    settings: async () => ({ values: {}, visibility: { hiddenCards: [], hiddenRows: [] } }),
+    health: async () => ({}),
+    connection: () => "live" as const,
+    subscribe: () => () => {},
+    onConnectionChange: () => () => {},
+    onReconnect: (listener: () => void) => {
+      reconnect = listener;
+      return () => {};
+    },
+    reconnect: async () => {
+      reconnect();
+    },
+  };
+  let setHost!: (value: boolean) => boolean;
+  let disposeState!: () => void;
+  const panel = createRoot((dispose) => {
+    disposeState = dispose;
+    const [host, set] = createSignal(true);
+    setHost = set;
+    return createDashboardPanelState({
+      client: client as never,
+      visible: () => true,
+      hostConnected: host,
+    });
+  });
+  const target = document.createElement("div");
+  document.body.append(target);
+  let disposeRoute = () => {};
+  try {
+    panel.retry();
+    await vi.waitFor(() => expect(panel.quotaQuery.data()?.generatedAtMs).toBe(42));
+    setHost(false);
+    setHost(true);
+    disposeRoute = render(
+      () =>
+        createComponent(QuotaRoute, {
+          client: client as never,
+          quotaQuery: panel.quotaQuery,
+          preferences: displayPreferencesFromValues({}),
+          hiddenCards: [],
+          hiddenRows: [],
+          reloadToken: 0,
+          get reconnectEpoch() {
+            return panel.reconnectEpoch();
+          },
+          onFresh: panel.markFresh,
+          onSnapshot: () => {},
+          onStale: () => {},
+        }),
+      target,
+    );
+    await vi.waitFor(() => expect(requests).toEqual([true, false]));
+    expect(panel.hostStale()).toBe(true);
+    resolveRead(snapshot);
+    await vi.waitFor(() => expect(panel.hostStale()).toBe(false));
+  } finally {
+    disposeRoute();
+    disposeState();
+    target.remove();
+  }
+});
+
+it("does not force again on an ordinary invalidation after a failed refresh", async () => {
+  const snapshot = {
+    generatedAtMs: 1,
+    stale: false,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  };
+  const requests: boolean[] = [];
+  const query = createQuotaQuery(async (refresh) => {
+    requests.push(refresh);
+    if (refresh && requests.length === 1) throw new Error("failed");
+    return snapshot;
+  });
+  expect(await query.refresh()).toBe(false);
+  expect(await query.read()).toBe(true);
+  expect(requests).toEqual([true, false]);
+  query.invalidate();
+  query.reconnected();
+  expect(await query.read()).toBe(true);
+  expect(requests).toEqual([true, false, true]);
+});
+
+it("starts a fresh read without waiting for a retired request and ignores its late failure", async () => {
+  const snapshot = {
+    generatedAtMs: 42,
+    stale: false,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  };
+  let rejectOld!: (error: Error) => void;
+  let resolveNew!: (value: typeof snapshot) => void;
+  const requests: boolean[] = [];
+  const query = createQuotaQuery((refresh) => {
+    requests.push(refresh);
+    return requests.length === 1
+      ? new Promise<typeof snapshot>((_, reject) => {
+          rejectOld = reject;
+        })
+      : new Promise<typeof snapshot>((resolve) => {
+          resolveNew = resolve;
+        });
+  });
+  const old = query.refresh();
+  query.invalidate();
+  query.reconnected();
+  expect(query.isRefreshing()).toBe(false);
+  const current = query.afterReconnect();
+  const joined = query.read();
+  expect(requests).toEqual([true, true]);
+  resolveNew(snapshot);
+  expect(await current).toBe(true);
+  expect(await joined).toBe(true);
+  rejectOld(new Error("old failure"));
+  expect(await old).toBe(false);
+  expect(query.data()).toBe(snapshot);
+  expect(query.error()).toBeUndefined();
+});
+
+it("does not surface a retired failure before a replacement request starts", async () => {
+  let reject!: (error: Error) => void;
+  const query = createQuotaQuery(
+    () =>
+      new Promise((_, fail) => {
+        reject = fail;
+      }),
+  );
+  const pending = query.read();
+  query.invalidate();
+  reject(new Error("old failure"));
+  expect(await pending).toBe(false);
+  expect(query.error()).toBeUndefined();
+  expect(query.loading()).toBe(false);
+});
+
 it("does not force again when quota invalidation arrives before the retry response", async () => {
   const home = homeSnapshot();
   const stale = {
@@ -109,7 +319,7 @@ it("does not force again when quota invalidation arrives before the retry respon
     quota: (input?: { refresh?: boolean }) => {
       requests.push(input?.refresh === true);
       if (input?.refresh) return forced;
-      return Promise.resolve(requests.length === 1 ? stale : fresh);
+      return Promise.resolve(stale);
     },
   };
   const target = document.createElement("div");
@@ -138,9 +348,11 @@ it("does not force again when quota invalidation arrives before the retry respon
     target.querySelector<HTMLButtonElement>("button")!.click();
     await vi.waitFor(() => expect(requests).toEqual([false, true]));
     setReload(1);
-    await vi.waitFor(() => expect(requests).toEqual([false, true, false]));
+    await Promise.resolve();
+    expect(requests).toEqual([false, true]);
     resolveRefresh(fresh);
     await vi.waitFor(() => expect(snapshots).toContain(2));
+    expect(snapshots.at(-1)).toBe(2);
     expect(requests.filter(Boolean)).toHaveLength(1);
   } finally {
     dispose();
@@ -196,6 +408,62 @@ it("retries a disconnected manual refresh once after native reconnect", async ()
     await vi.waitFor(() => expect(requests).toEqual([false, true]));
     connected = true;
     setEpoch(1);
+    await vi.waitFor(() => expect(snapshots).toContain(2));
+    expect(requests).toEqual([false, true, true]);
+  } finally {
+    dispose();
+    target.remove();
+  }
+});
+
+it("retries a failed forced read when reconnect arrives before its rejection", async () => {
+  const stale = {
+    generatedAtMs: 1,
+    stale: true,
+    timeZone: "UTC",
+    providers: { ...homeSnapshot().providers, cards: [] },
+  };
+  const fresh = { ...stale, generatedAtMs: 2, stale: false };
+  let reject!: (error: Error) => void;
+  const requests: boolean[] = [];
+  const [epoch, setEpoch] = createSignal(0);
+  const snapshots: number[] = [];
+  const target = document.createElement("div");
+  document.body.append(target);
+  const dispose = render(
+    () =>
+      createComponent(QuotaRoute, {
+        client: {
+          quota: (input?: { refresh?: boolean }) => {
+            requests.push(input?.refresh === true);
+            if (requests.length === 1) return Promise.resolve(stale);
+            if (requests.length === 2)
+              return new Promise<typeof fresh>((_, fail) => {
+                reject = fail;
+              });
+            return Promise.resolve(fresh);
+          },
+        } as never,
+        preferences: displayPreferencesFromValues({}),
+        hiddenCards: [],
+        hiddenRows: [],
+        reloadToken: 0,
+        get reconnectEpoch() {
+          return epoch();
+        },
+        onSnapshot: (snapshot) => {
+          if (snapshot) snapshots.push(snapshot.generatedAtMs);
+        },
+        onStale: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() => expect(target.textContent).toContain("Quota data is unavailable"));
+    target.querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(requests).toEqual([false, true]));
+    setEpoch(1);
+    reject(new Error("connection lost"));
     await vi.waitFor(() => expect(snapshots).toContain(2));
     expect(requests).toEqual([false, true, true]);
   } finally {
