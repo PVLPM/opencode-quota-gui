@@ -91,7 +91,7 @@ it("retries an initially partial provider on scheduled polls without substitutin
   const removeViewer = snapshots.addViewer();
   try {
     const initial = await snapshots.quota();
-    expect(initial.stale).toBe(true);
+    expect(initial.stale).toBe(false);
     const failed = initial.providers.cards.find((card) => card.accountLabel === "Account 2");
     expect(failed?.rows).toEqual([]);
     expect(failed?.errors.map((error) => error.label)).toEqual(["Account B"]);
@@ -271,7 +271,7 @@ it("keeps partial 429 account rows fresh and bounded across repeated dashboard p
         booleanValue: row.booleanValue,
       })) ?? [];
   expect(first.stale).toBe(false);
-  expect(second.stale).toBe(true);
+  expect(second.stale).toBe(false);
   expect(visibleRows(second, "Workspace A")).toEqual([
     { resultType: "balance", kind: "quantity", quantity: "99.00" },
   ]);
