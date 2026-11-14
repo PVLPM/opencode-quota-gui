@@ -522,7 +522,7 @@ export function buildSessionHeaderView(input: SessionHeaderModelInput): SessionH
   const providers = new Map<string, TemporalProviderStatus | undefined>();
   let nextUpdateAtMs: number | undefined;
   for (const card of ordered) {
-    if (card.stale) continue;
+    if (card.stale || card.errors.length > 0) continue;
     const header = toHeaderCard(snapshot, card, input);
     if (header === undefined) continue;
     cards.push(header);

@@ -29,7 +29,8 @@ import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
  *
  * The Slot must reuse the shared runtime: no read or subscription while the
  * timeline is inactive, one settings read and one quota read on activation,
- * fail-closed settings/visibility, no rings from a stale or failed quota read,
+ * fail-closed settings/visibility and stale snapshots; a failed read retains a
+ * previously fresh snapshot only while the other freshness gates remain open,
  * and a refetch after reconnect or re-entry. No DOM, timer or polling is
  * involved.
  *
@@ -390,6 +391,23 @@ afterEach(() => {
 /* ------------------------------------------------------------------- tests */
 
 describe("native session header source", () => {
+  it("keeps healthy snapshot rings on a refresh error only while connection, host and settings remain fresh", async () => {
+    const fake = recordingClient();
+    const [active] = createSignal(true);
+    const [hostConnected, setHostConnected] = createSignal(true);
+    const source = await mount({ client: fake.client, active, hostConnected });
+    expect(source.view().cards).toHaveLength(1);
+    fake.setQuota(async () => {
+      throw new Error("refresh failed");
+    });
+    fake.emit({ topic: "quota.changed", at: Date.now() });
+    await flush();
+    expect(source.quotaError()).toBeDefined();
+    expect(source.view().cards[0]?.rings.map((ring) => ring.label)).toEqual(["5h", "Weekly"]);
+    setHostConnected(false);
+    await flush();
+    expect(source.view().cards).toEqual([]);
+  });
   it("shows the forced retry result without an invalidation event or duplicate quota read", async () => {
     const fake = recordingClient();
     const [active] = createSignal(true);

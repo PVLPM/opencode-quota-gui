@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { orderCardsByPreference } from "../src/contracts/card-order.js";
 import type {
   PrimaryQuotaWindowRef,
   PrimaryQuotaWindowSlot,
@@ -33,6 +34,7 @@ import {
   previewShouldClose,
 } from "../src/native/session-header-preview.js";
 import type { DisplayPreferences } from "../src/ui/quota-semantics.js";
+import { visibleCards } from "../src/ui/view-model.js";
 import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
@@ -230,6 +232,66 @@ function viewFor(
 /* ------------------------------------------------------- ring semantics */
 
 describe("session.header rings", () => {
+  it("matches the ordered visible Panel cards with healthy primary rings per account", () => {
+    const a = row("a", "five");
+    const aWeekly = row("a", "weekly");
+    const b = row("b", "five");
+    const c = row("c", "five");
+    const d = row("d", "five");
+    const hidden = row("hidden", "five");
+    const panelCards = [
+      card({
+        cardId: "a",
+        providerId: "openai",
+        accountLabel: "A",
+        rows: [a, aWeekly],
+        windows: [windowRef(a, 0), windowRef(aWeekly, 1)],
+      }),
+      {
+        ...card({
+          cardId: "b",
+          providerId: "openai",
+          accountLabel: "B",
+          rows: [b],
+          windows: [windowRef(b, 0)],
+        }),
+        stale: true,
+      },
+      card({
+        cardId: "c",
+        providerId: "anthropic",
+        rows: [c],
+        windows: [windowRef(c, 0)],
+        errors: [{ label: "Error", message: "Failed" }],
+      }),
+      card({ cardId: "d", providerId: "other", rows: [d], windows: [windowRef(d, 2)] }),
+      card({
+        cardId: "error",
+        providerId: "error",
+        rows: [],
+        errors: [{ label: "Error", message: "Failed" }],
+      }),
+      card({
+        cardId: "hidden",
+        providerId: "hidden",
+        rows: [hidden],
+        windows: [windowRef(hidden, 0)],
+      }),
+    ];
+    const prefs = { ...preferences, cardOrder: ["d", "a"], providerOrder: ["anthropic", "openai"] };
+    const panel = orderCardsByPreference(
+      visibleCards(panelCards, ["hidden"]),
+      prefs.cardOrder,
+      prefs.providerOrder,
+    );
+    expect(panel.map((item) => item.cardId)).toEqual(["d", "a", "b", "c", "error"]);
+    const header = viewFor(panelCards, { hiddenCards: ["hidden"], hiddenRows: [a.rowId], prefs });
+    expect(header.cards.map((item) => item.cardId)).toEqual(["d", "a"]);
+    expect(header.cards.map((item) => item.rings.map((ring) => [ring.rowId, ring.slot]))).toEqual([
+      [[d.rowId, 2]],
+      [[aWeekly.rowId, 1]],
+    ]);
+  });
   it("shows fresh account rings while omitting retained account rings", () => {
     const a = row("a", "weekly");
     const b = row("b", "weekly");

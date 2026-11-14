@@ -36,6 +36,8 @@ import type {
 import type { OpenCodeRawAssistantRow } from "../src/lib/opencode-storage.js";
 import type { QuotaStatusLiveProbe } from "../src/lib/quota-render-data.js";
 import { DEFAULT_CONFIG, type QuotaToastConfig } from "../src/lib/types.js";
+import { buildSessionHeaderView } from "../src/native/session-header-model.js";
+import { visibleCards } from "../src/ui/view-model.js";
 
 const NOW = Date.UTC(2026, 9, 18, 12, 0, 0); // 2026-10-18T12:00:00Z
 const DAY_MS = 86_400_000;
@@ -201,6 +203,61 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe("gui provider cards — account mapping", () => {
+  it("projects Panel accounts in provider order, omitting failed and hidden cards but keeping healthy unmapped tokens", () => {
+    const panelCards = buildProviderCards({
+      probes: [
+        probe(
+          "anthropic",
+          result({
+            accounts: [
+              { sourceId: "a", label: "A" },
+              { sourceId: "b", label: "B" },
+            ],
+            entries: [
+              percentEntry({
+                sourceId: "a",
+                name: "5h",
+                window: "five_hour",
+                rowKey: "window:five_hour",
+              }),
+              percentEntry({
+                sourceId: "b",
+                name: "5h",
+                window: "five_hour",
+                rowKey: "window:five_hour",
+              }),
+            ],
+            errors: [{ sourceId: "b", label: "Error", message: "Failed" }],
+          }),
+        ),
+        probe("openai", result({ entries: [percentEntry({ rowKey: "window:weekly" })] })),
+      ],
+      preferences: { ...SUMMARY, providerOrder: ["openai", "anthropic"] },
+      nowMs: NOW,
+    });
+    expect(panelCards.map((card) => [card.providerId, card.accountLabel])).toEqual([
+      ["openai", undefined],
+      ["anthropic", "A"],
+      ["anthropic", "B"],
+    ]);
+    const hiddenCards = [panelCards[0]!.cardId];
+    const panel = visibleCards(panelCards, hiddenCards);
+    const view = buildSessionHeaderView({
+      snapshot: {
+        generatedAtMs: NOW,
+        stale: false,
+        timeZone: "UTC",
+        providers: { cards: panelCards, enabledProviders: "auto", polledAtMs: NOW },
+      },
+      hiddenCards,
+      hiddenRows: [],
+      preferences: { percentMode: "used", detailed: false, providerOrder: ["openai", "anthropic"] },
+      nowMs: NOW,
+    });
+    expect(panel.map((card) => card.accountLabel)).toEqual(["A", "B"]);
+    expect(view.cards.map((card) => card.cardId)).toEqual([panel[0]!.cardId]);
+    expect(view.cards[0]?.rings).toEqual([]);
+  });
   it("maps a sanitized plan separately without changing account, card, or row identity", () => {
     const mapped = (label: string, planLabel?: string) =>
       cardsFor([

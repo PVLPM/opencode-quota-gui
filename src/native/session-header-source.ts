@@ -106,13 +106,10 @@ export function createSessionHeaderSource(options: {
     const preferences = panel.preferences();
     if (settings === undefined || preferences === undefined) return EMPTY_VIEW;
     const snapshot = quotaQuery.data();
-    // The Panel keeps last-known data on screen with a stale badge. The Slot
-    // has no room for that badge, so it fails closed rather than painting old
-    // values as fresh, healthy or zero rings.
+    // A read error alone does not invalidate an otherwise fresh snapshot.
     const stale =
       snapshot === undefined ||
       snapshot.stale === true ||
-      quotaQuery.error() !== undefined ||
       panel.connection() !== "live" ||
       panel.hostStale() ||
       panel.settingsStale() ||
