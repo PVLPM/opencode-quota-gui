@@ -4,6 +4,151 @@ import { createDashboardReadSource } from "../src/gui/sources.js";
 import type { QuotaPercentEntry } from "../src/lib/entries.js";
 import { DEFAULT_CONFIG } from "../src/lib/types.js";
 import { buildSessionHeaderView } from "../src/native/session-header-model.js";
+import { createQuotaQuery } from "../src/ui/quota-query.js";
+
+it("serializes Retry behind a poll and updates both account views without the event", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(Date.UTC(2026, 10, 1));
+  let releasePoll!: () => void;
+  const pollGate = new Promise<void>((resolve) => {
+    releasePoll = resolve;
+  });
+  let cycle = 0;
+  const collect = vi.fn(async () => {
+    const current = ++cycle;
+    if (current === 2) await pollGate;
+    return [
+      {
+        providerId: "anthropic",
+        cacheScope: "same-scope",
+        result: {
+          attempted: true,
+          accounts: [
+            { sourceId: "a", label: "A" },
+            { sourceId: "b", label: "B" },
+          ],
+          entries: ["a", "b"].map(
+            (sourceId, index): QuotaPercentEntry => ({
+              kind: "percent",
+              name: "5h",
+              rowKey: "window:five_hour",
+              percentRemaining: current * 10 + index,
+              accounting: {
+                resultType: "quota",
+                acquisitionMethod: "remote_api",
+                ownership: "maintained",
+                authority: "provider_reported",
+                sourceId,
+              },
+            }),
+          ),
+          errors: [],
+        },
+      },
+    ];
+  });
+  const source = createDashboardReadSource({
+    client: {
+      config: {
+        providers: async () => ({ data: { providers: [] } }),
+        get: async () => ({ data: {} }),
+      },
+    },
+    workspaceRoot: "C:/synthetic-workspace",
+    loadConfig: async () => ({ ...DEFAULT_CONFIG, enabledProviders: ["anthropic"] }),
+    collectProviderResults: collect,
+    now: () => Date.now(),
+  });
+  const snapshots = createSnapshotService({
+    source,
+    quotaIntervalMs: 60_000,
+    now: () => Date.now(),
+  });
+  const removeViewer = snapshots.addViewer();
+  const query = createQuotaQuery((refresh) =>
+    snapshots.quota(refresh ? { refresh: true } : undefined),
+  );
+  const values = () =>
+    query
+      .data()
+      ?.providers.cards.map((card) => [card.accountLabel, card.rows[0]?.percentRemaining]);
+  try {
+    await query.read();
+    expect(values()).toEqual([
+      ["A", 10],
+      ["B", 11],
+    ]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(collect).toHaveBeenCalledTimes(2);
+    const retry = query.refresh();
+    const retryAgain = query.refresh();
+    await Promise.resolve();
+    expect(collect).toHaveBeenCalledTimes(2);
+    releasePoll();
+    await Promise.all([retry, retryAgain]);
+    expect(collect).toHaveBeenCalledTimes(3);
+    expect(values()).toEqual([
+      ["A", 30],
+      ["B", 31],
+    ]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    // Deliberately do not subscribe to quota.changed: the next read gets the poll.
+    await query.read();
+    expect(values()).toEqual([
+      ["A", 40],
+      ["B", 41],
+    ]);
+    const snapshot = query.data();
+    if (!snapshot) throw new Error("expected quota snapshot");
+    const header = buildSessionHeaderView({
+      snapshot,
+      hiddenCards: [],
+      hiddenRows: [],
+      preferences: { percentMode: "used", showRunway: false, detailed: false },
+      nowMs: Date.now(),
+    });
+    expect(header.cards).toHaveLength(2);
+
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    let reads = 0;
+    const reconnecting = createQuotaQuery(async () => {
+      const snapshot = await snapshots.quota();
+      if (++reads === 1) await oldGate;
+      return snapshot;
+    });
+    const oldRead = reconnecting.read();
+    await vi.advanceTimersByTimeAsync(60_000);
+    reconnecting.invalidate();
+    reconnecting.reconnected();
+    await reconnecting.afterReconnect();
+    expect(
+      reconnecting
+        .data()
+        ?.providers.cards.map((card) => [card.accountLabel, card.rows[0]?.percentRemaining]),
+    ).toEqual([
+      ["A", 50],
+      ["B", 51],
+    ]);
+    releaseOld();
+    expect(await oldRead).toBe(false);
+    expect(
+      reconnecting
+        .data()
+        ?.providers.cards.map((card) => [card.accountLabel, card.rows[0]?.percentRemaining]),
+    ).toEqual([
+      ["A", 50],
+      ["B", 51],
+    ]);
+  } finally {
+    releasePoll();
+    removeViewer();
+    snapshots.close();
+    vi.useRealTimers();
+  }
+});
 
 it("keeps healthy account rings during a failed poll and restores the failed account on recovery", async () => {
   const start = Date.UTC(2026, 10, 1);
