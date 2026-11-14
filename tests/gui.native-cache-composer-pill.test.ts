@@ -1565,6 +1565,101 @@ it("counts child rows down in the same format and names missing parts as unavail
   container.remove();
 });
 
+it("keeps main and child timers independent across tool events and successful primary calls without polling", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  const now = Date.now();
+  const main = session("timer-main");
+  const child = "timer-child";
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  const listChildren = vi.fn(async () => [{ id: child, parentID: main.id, title: "Worker" }]);
+  const listMessages = vi.fn(async () => ({ data: [], cursor: { next: null } }));
+  let emit: ((event: unknown) => void) | undefined;
+  const observer = createNativeCacheObserverRuntime({
+    subscribeEvents: (listener) => {
+      emit = listener;
+      return () => {};
+    },
+    rpcConnection: () => "live",
+    listChildren,
+    listMessages,
+    now: () => Date.now(),
+  });
+  const runtime = mockRuntime({ ...observer });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => main } as unknown as Sessions, runtime),
+    dispose: cleanup,
+  }));
+  await flush(12);
+  const close = renderMenu(pill, () => main, container);
+  const publish = (event: unknown) => {
+    const projected = projectOpenCodeCacheObserverEvent(event);
+    if (projected) emit?.(projected);
+    return projected;
+  };
+  const primary = (id: string, message: string, started: number, completed: number) => {
+    publish({
+      type: "session.step.started",
+      created: started,
+      data: {
+        sessionID: id,
+        assistantMessageID: message,
+        model: { providerID: "anthropic", id: "claude-test" },
+        started,
+      },
+    });
+    publish({
+      type: "session.step.ended",
+      created: completed,
+      data: {
+        sessionID: id,
+        assistantMessageID: message,
+        finish: "stop",
+        tokens: { input: 20, cache: { read: 80, write: 0 } },
+      },
+    });
+  };
+  primary(child, "child-old", now - 301_000, now - 300_000);
+  primary(main.id, "main-new", now - 10_000, now);
+  const mainRow = () => container.querySelector(".qg-cache-row:not(.qg-cache-child)");
+  const childRow = () => container.querySelector(".qg-cache-child");
+  expect(mainRow()?.querySelector(".qg-cache-success")).not.toBeNull();
+  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe("4m 50s • 80%");
+  expect(childRow()?.querySelector(".qg-cache-danger")).not.toBeNull();
+  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("+1s");
+  await flush(12);
+  const childrenCalls = listChildren.mock.calls.length;
+  const historyCalls = listMessages.mock.calls.length;
+  vi.advanceTimersByTime(2_000);
+  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe("4m 48s • 80%");
+  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("+3s");
+  expect(fetchSpy).not.toHaveBeenCalled();
+  expect(listChildren).toHaveBeenCalledTimes(childrenCalls);
+  expect(listMessages).toHaveBeenCalledTimes(historyCalls);
+
+  expect(
+    publish({
+      type: "tool.execute.after",
+      created: Date.now(),
+      data: { sessionID: child, assistantMessageID: "tool-only" },
+    }),
+  ).toBeUndefined();
+  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("+3s");
+
+  // The request began one second before completion; completion must not anchor TTL.
+  primary(child, "child-new", Date.now() - 1_000, Date.now());
+  expect(childRow()?.querySelector(".qg-cache-success")).not.toBeNull();
+  expect(childRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe("4m 59s • 80%");
+  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe("4m 48s • 80%");
+  close();
+  dispose();
+  observer.dispose();
+  container.remove();
+  fetchSpy.mockRestore();
+});
+
 it("keeps a valid green TTL estimate and its countdown when host-event coverage is unverified", () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
