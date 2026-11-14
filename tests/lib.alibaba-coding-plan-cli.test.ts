@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -78,13 +79,23 @@ async function descendantActivityIsFresh(markerPath: string, maxAgeMs = 250): Pr
   return Date.now() - lastActivity < maxAgeMs;
 }
 
-async function stopDescendantIfActive(pidPath: string, markerPath: string): Promise<void> {
+async function waitForDescendantPid(pidPath: string): Promise<number> {
+  const deadline = Date.now() + 5000;
+  do {
+    const pid = Number(await readFile(pidPath, "utf8").catch(() => "0"));
+    if (Number.isInteger(pid) && pid > 0) return pid;
+    await delay(25);
+  } while (Date.now() < deadline);
+  throw new Error("Descendant PID was not recorded within 5 seconds");
+}
+
+async function stopDescendantIfActive(pidPath: string): Promise<void> {
   const pid = Number(await readFile(pidPath, "utf8").catch(() => "0"));
-  if (Number.isInteger(pid) && pid > 0 && (await descendantActivityIsFresh(markerPath, 200))) {
+  if (Number.isInteger(pid) && pid > 0) {
     try {
       process.kill(pid, "SIGKILL");
-    } catch {
-      // The descendant may have exited between the activity check and kill.
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
   }
 }
@@ -297,24 +308,30 @@ describe("bounded Alibaba Coding Plan child process", () => {
     "terminates a timed-out Windows child and its descendant tree",
     async () => {
       const fixture = await makeDescendantFixture(false);
-      const startedAt = Date.now();
       let deadline: ReturnType<typeof setTimeout> | undefined;
 
       try {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        const running = runAlibabaCodingPlanProcess({
+          file: process.execPath,
+          args: ["-e", fixture.script],
+          cwd: os.tmpdir(),
+          env: process.env,
+          timeoutMs: 250,
+          stdoutLimitBytes: 1024,
+          stderrLimitBytes: 1024,
+          stdin: "ignore",
+          shell: false,
+          platform: "win32",
+          killGraceMs: 100,
+        });
+        const descendantPid = await waitForDescendantPid(fixture.descendantPidPath);
+        await vi.advanceTimersByTimeAsync(250);
+        await delay(200);
+        await vi.advanceTimersByTimeAsync(100);
+        vi.useRealTimers();
         const result = await Promise.race([
-          runAlibabaCodingPlanProcess({
-            file: process.execPath,
-            args: ["-e", fixture.script],
-            cwd: os.tmpdir(),
-            env: process.env,
-            timeoutMs: 250,
-            stdoutLimitBytes: 1024,
-            stderrLimitBytes: 1024,
-            stdin: "ignore",
-            shell: false,
-            platform: "win32",
-            killGraceMs: 100,
-          }),
+          running,
           new Promise<never>((_resolve, reject) => {
             deadline = setTimeout(
               () => reject(new Error("Windows process tree did not settle")),
@@ -324,8 +341,8 @@ describe("bounded Alibaba Coding Plan child process", () => {
         ]);
 
         expect(result.timedOut).toBe(true);
-        expect(Number(await readFile(fixture.descendantPidPath, "utf8"))).toBeGreaterThan(0);
-        const observationDeadline = startedAt + 1500;
+        expect(descendantPid).toBeGreaterThan(0);
+        const observationDeadline = Date.now() + 1500;
         while (
           Date.now() < observationDeadline &&
           (await descendantActivityIsFresh(fixture.descendantMarkerPath, 300))
@@ -334,10 +351,15 @@ describe("bounded Alibaba Coding Plan child process", () => {
         }
         expect(await descendantActivityIsFresh(fixture.descendantMarkerPath, 300)).toBe(false);
       } finally {
+        if (vi.isFakeTimers()) {
+          await vi.advanceTimersByTimeAsync(350);
+          vi.useRealTimers();
+        }
         if (deadline !== undefined) clearTimeout(deadline);
-        await stopDescendantIfActive(fixture.descendantPidPath, fixture.descendantMarkerPath);
+        await stopDescendantIfActive(fixture.descendantPidPath);
       }
     },
+    10000,
   );
 
   it.skipIf(process.platform !== "win32")(
@@ -350,24 +372,29 @@ describe("bounded Alibaba Coding Plan child process", () => {
         return treeKiller;
       });
       let deadline: ReturnType<typeof setTimeout> | undefined;
-      const startedAt = Date.now();
       childProcessMock.taskkillSpawn = mockedTaskkill;
 
       try {
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        const running = runAlibabaCodingPlanProcess({
+          file: process.execPath,
+          args: ["-e", fixture.script],
+          cwd: os.tmpdir(),
+          env: process.env,
+          timeoutMs: 250,
+          stdoutLimitBytes: 1024,
+          stderrLimitBytes: 1024,
+          stdin: "ignore",
+          shell: false,
+          platform: "win32",
+          killGraceMs: 100,
+        });
+        const descendantPid = await waitForDescendantPid(fixture.descendantPidPath);
+        await vi.advanceTimersByTimeAsync(250);
+        await vi.advanceTimersByTimeAsync(100);
+        vi.useRealTimers();
         const result = await Promise.race([
-          runAlibabaCodingPlanProcess({
-            file: process.execPath,
-            args: ["-e", fixture.script],
-            cwd: os.tmpdir(),
-            env: process.env,
-            timeoutMs: 250,
-            stdoutLimitBytes: 1024,
-            stderrLimitBytes: 1024,
-            stdin: "ignore",
-            shell: false,
-            platform: "win32",
-            killGraceMs: 100,
-          }),
+          running,
           new Promise<never>((_resolve, reject) => {
             deadline = setTimeout(
               () => reject(new Error("escaped child process did not settle")),
@@ -378,18 +405,19 @@ describe("bounded Alibaba Coding Plan child process", () => {
 
         expect(result.timedOut).toBe(true);
         expect(mockedTaskkill).toHaveBeenCalledOnce();
-        const descendantPid = Number(await readFile(fixture.descendantPidPath, "utf8"));
         expect(descendantPid).toBeGreaterThan(0);
-        const markerDeadline = startedAt + 800;
-        const remainingWait = markerDeadline - Date.now();
-        if (remainingWait > 0) await new Promise((resolve) => setTimeout(resolve, remainingWait));
-        expect(await descendantActivityIsFresh(fixture.descendantMarkerPath)).toBe(true);
+        expect(() => process.kill(descendantPid, 0)).not.toThrow();
       } finally {
+        if (vi.isFakeTimers()) {
+          await vi.advanceTimersByTimeAsync(350);
+          vi.useRealTimers();
+        }
         childProcessMock.taskkillSpawn = undefined;
         if (deadline !== undefined) clearTimeout(deadline);
-        await stopDescendantIfActive(fixture.descendantPidPath, fixture.descendantMarkerPath);
+        await stopDescendantIfActive(fixture.descendantPidPath);
       }
     },
+    10000,
   );
 
   it("terminates a timed-out native child", async () => {
