@@ -99,7 +99,8 @@ function ttlMetric(deadlineAtMs: number | undefined, nowMs: number): TtlMetric {
     return { label: "TTL —", short: "unknown", spoken: "TTL unavailable", expired: false };
   }
   if (deadlineAtMs <= nowMs) {
-    return { label: "TTL Expired", short: "Expired", spoken: "TTL Expired", expired: true };
+    const elapsed = `+${formatTtlRemaining(Math.floor((nowMs - deadlineAtMs) / 1000) * 1000)}`;
+    return { label: `TTL ${elapsed}`, short: elapsed, spoken: `TTL ${elapsed}`, expired: true };
   }
   const remaining = formatTtlRemaining(deadlineAtMs - nowMs);
   return {
@@ -128,8 +129,9 @@ function countdownDeadline(observed: CacheObserverClassification | undefined): n
 }
 
 /** The next instant at which the displayed whole second of a live countdown changes. */
-function nextCountdownBoundary(deadlineAtMs: number, nowMs: number): number | undefined {
-  if (deadlineAtMs <= nowMs) return undefined;
+function nextCountdownBoundary(deadlineAtMs: number, nowMs: number): number {
+  if (deadlineAtMs <= nowMs)
+    return deadlineAtMs + (Math.floor((nowMs - deadlineAtMs) / 1000) + 1) * 1000;
   const wholeSecondsLeft = Math.ceil((deadlineAtMs - nowMs) / 1000);
   return deadlineAtMs - (wholeSecondsLeft - 1) * 1000;
 }
@@ -483,7 +485,7 @@ export function createCacheComposerPill(
 
   // Only the selected session and its listed children can show a countdown, so
   // the next boundary is derived from them alone. One timer serves them all and
-  // stops once no displayed deadline is still ahead.
+  // stops when no displayed estimate remains.
   const countdownBoundary = createMemo(() => {
     const nowMs = clock();
     revision();
@@ -506,7 +508,7 @@ export function createCacheComposerPill(
     clockTimer = setTimeout(
       () => {
         clockTimer = undefined;
-        setClock(Date.now());
+        setClock(Math.max(Date.now(), boundary));
       },
       Math.max(0, boundary - Date.now()),
     );
@@ -808,7 +810,12 @@ export function createCacheComposerPill(
                     )}
                   </Show>
                 </span>
-                <span class="qg-cache-metrics">{`${result().ttl.short} • ${result().cache.short}`}</span>
+                <span class="qg-cache-metrics">
+                  <span class={result().ttl.expired ? "qg-cache-elapsed" : undefined}>
+                    {result().ttl.short}
+                  </span>
+                  {` • ${result().cache.short}`}
+                </span>
               </button>
             </div>
           </div>

@@ -92,6 +92,36 @@ function recoverableHistoryInvocation(
 }
 
 describe("cache observer event ingestion", () => {
+  it("freezes each recorded active method across later invocations", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    const started = (id: string, method: "oauth" | "key", at: number) => ({
+      type: "session.step.started",
+      created: at,
+      data: {
+        sessionID: "ses_methods",
+        assistantMessageID: id,
+        model: { providerID: "openai", id: "gpt-6.1" },
+        started: at,
+        connectionMethod: method,
+      },
+    });
+    ingestor.ingest(started("one", "oauth", 1_000));
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent("ses_methods", "one", { input: 1, cache: { read: 2, write: 0 } }, 1_100),
+      ),
+    );
+    expect(ingestor.query("ses_methods")?.ttlEstimate?.ttlMs).toBe(1_800_000);
+    ingestor.ingest(started("two", "key", 1_200));
+    expect(ingestor.query("ses_methods")?.ttlEstimate?.ttlMs).toBe(1_800_000);
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(
+        stepEndedEvent("ses_methods", "two", { input: 1, cache: { read: 2, write: 0 } }, 1_300),
+      ),
+    );
+    expect(ingestor.query("ses_methods")?.ttlEstimate?.ttlMs).toBe(300_000);
+    ingestor.dispose();
+  });
   it("does not expose mutable route configuration that changes existing sessions", () => {
     const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
     ingestLiveRecoverableStep(ingestor, "ses_one", "one");

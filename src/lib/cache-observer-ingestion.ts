@@ -52,6 +52,7 @@ interface StartedStepEvidence {
   route: CacheRouteProvenance;
   dispatchAtMs?: number;
   configuredTtlMs?: CacheConfiguredTtlMs;
+  connectionMethod?: CacheInvocationObservation["connectionMethod"];
 }
 
 interface PendingEndedStep {
@@ -730,6 +731,9 @@ export function createCacheObserverIngestor(
       ...(startedEvidence?.configuredTtlMs === undefined
         ? {}
         : { configuredTtlMs: startedEvidence.configuredTtlMs }),
+      ...(startedEvidence?.connectionMethod === undefined
+        ? {}
+        : { connectionMethod: startedEvidence.connectionMethod }),
     });
 
     if (!states.has(sessionId) && states.size >= CACHE_OBSERVER_MAX_SESSIONS) {
@@ -1008,6 +1012,11 @@ function startedStepFromDto(event: unknown): StartedStepEvidence | undefined {
       basis,
     },
     ...(dispatchAtMs === undefined || dispatchAtMs < 0 ? {} : { dispatchAtMs }),
+    ...(event.data.connectionMethod === "oauth" ||
+    event.data.connectionMethod === "key" ||
+    event.data.connectionMethod === "external"
+      ? { connectionMethod: event.data.connectionMethod }
+      : {}),
   };
 }
 

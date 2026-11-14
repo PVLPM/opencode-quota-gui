@@ -8,7 +8,6 @@ import {
   classifyCacheObserverState,
   createCacheObserverState,
   observeCacheInvocation,
-  openAiDocumentedTtlMs,
 } from "../src/lib/cache-observer.js";
 
 const route: CacheRouteProvenance = {
@@ -20,6 +19,51 @@ const route: CacheRouteProvenance = {
 };
 
 const basis = { source: "successful-primary-step", reference: "msg-1" };
+
+describe("active OpenAI connection estimate", () => {
+  it.each([
+    "gpt-5.6",
+    "gpt-6",
+    "gpt-6.1",
+    "gpt-6.10-codex",
+    "gpt-5.6-mini-2026-01-01",
+  ])("uses thirty minutes for OAuth %s", (model) => {
+    const openai = routeOf("openai", model);
+    const state = observed(openai, { connectionMethod: "oauth" });
+    expect(classifyCacheObserverState(state, 200).ttlEstimate?.ttlMs).toBe(1_800_000);
+  });
+  it.each([
+    "gpt-5.5",
+    "gpt-5.1",
+    "gpt-4.1",
+    "o3",
+    "other-gpt-6",
+    "gpt-6.1x",
+  ])("keeps the fallback for %s", (model) => {
+    expect(
+      classifyCacheObserverState(
+        observed(routeOf("openai", model), { connectionMethod: "oauth" }),
+        200,
+      ).ttlEstimate?.ttlMs,
+    ).toBe(300_000);
+  });
+  it.each(["key", "external", undefined] as const)("keeps the fallback for %s", (method) => {
+    expect(
+      classifyCacheObserverState(
+        observed(routeOf("openai", "gpt-6.1"), { connectionMethod: method }),
+        200,
+      ).ttlEstimate?.ttlMs,
+    ).toBe(300_000);
+  });
+  it("does not grant the estimate to a gateway", () => {
+    expect(
+      classifyCacheObserverState(
+        observed(routeOf("openrouter", "gpt-6.1"), { connectionMethod: "oauth" }),
+        200,
+      ).ttlEstimate?.ttlMs,
+    ).toBe(300_000);
+  });
+});
 
 function stateFor(sessionId = "ses-parent", scopeRoute: CacheRouteProvenance = route) {
   return createCacheObserverState({ sessionId, route: scopeRoute });
@@ -365,43 +409,39 @@ describe("retention estimate origin and colors", () => {
   });
 });
 
-describe("OpenAI model-specific lifetime", () => {
-  const direct = { directOpenAiApi: true };
+describe("OpenAI route lifetime", () => {
   const openai = (modelId: string) => routeOf("openai", modelId);
 
-  it("identifies the documented 30-minute families by model id", () => {
+  it("uses five minutes on direct API routes regardless of model", () => {
     for (const modelId of [
       "gpt-5.5",
-      "gpt-5.5-pro",
       "gpt-5.6",
-      "gpt-5.7",
-      "gpt-6.1-sol",
-      "gpt-6.1-terra",
+      "gpt-5.6-pro",
+      "gpt-6",
+      "gpt-6.1",
+      "gpt-4.1",
+      "o4-mini",
     ]) {
-      expect(openAiDocumentedTtlMs(modelId)).toBe(1_800_000);
+      expect(classifyCacheObserverState(observed(openai(modelId)), 200).ttlEstimate?.ttlMs).toBe(
+        300_000,
+      );
     }
-    for (const modelId of ["gpt-5.4", "gpt-5.5-codex", "gpt-5.1", "gpt-4.1", "o4-mini", "gpt-5"]) {
-      expect(openAiDocumentedTtlMs(modelId)).toBeUndefined();
-    }
-  });
+    const state = observed(openai("gpt-6.1"));
 
-  it("applies the documented 30-minute lifetime on a confirmed direct API route, with 80/20 boundaries", () => {
-    const state = observed(openai("gpt-6.1-sol"));
-
-    expect(classifyCacheObserverState(state, 200, direct)).toMatchObject({
+    expect(classifyCacheObserverState(state, 200)).toMatchObject({
       color: "green",
       ttlEstimate: {
-        kind: "documented",
-        ttlMs: 1_800_000,
+        kind: "fallback",
+        ttlMs: 300_000,
         dispatchAtMs: 100,
-        deadlineAtMs: 1_800_100,
+        deadlineAtMs: 300_100,
       },
     });
-    expect(classifyCacheObserverState(state, 1_440_100, direct)).toMatchObject({
+    expect(classifyCacheObserverState(state, 240_100)).toMatchObject({
       color: "yellow",
       reason: "estimated-ttl-near-expiry",
     });
-    expect(classifyCacheObserverState(state, 1_800_100, direct)).toMatchObject({
+    expect(classifyCacheObserverState(state, 300_100)).toMatchObject({
       color: "red",
       reason: "estimated-ttl-expired",
     });
@@ -415,11 +455,11 @@ describe("OpenAI model-specific lifetime", () => {
   });
 
   it("does not apply the OpenAI lifetime to a model without one or to ChatGPT-family providers", () => {
-    expect(classifyCacheObserverState(observed(openai("gpt-5.4")), 200, direct)).toMatchObject({
+    expect(classifyCacheObserverState(observed(openai("gpt-5.4")), 200)).toMatchObject({
       ttlEstimate: { kind: "fallback", ttlMs: 300_000 },
     });
     expect(
-      classifyCacheObserverState(observed(routeOf("chatgpt", "gpt-6.1-sol")), 200, direct),
+      classifyCacheObserverState(observed(routeOf("chatgpt", "gpt-6.1-sol")), 200),
     ).toMatchObject({ ttlEstimate: { kind: "fallback", ttlMs: 300_000 } });
   });
 });
