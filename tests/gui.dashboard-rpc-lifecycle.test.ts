@@ -423,6 +423,7 @@ describe("dashboard RPC lifecycle", () => {
     writeGuiCanonicalConfig(workspace, { dashboard: { port }, minIntervalMs: 40 });
     const fixture = buildSource();
     const snapshots = captureSnapshots();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const lease = await open({
       ...optionsFor(workspace, fixture.source),
       createSnapshots: snapshots.createSnapshots,
@@ -499,9 +500,20 @@ describe("dashboard RPC lifecycle", () => {
     const client = createNativeDashboardClient({ rpc: caller, scope: "quota" });
     client.onReconnect(refetch);
 
+    const waitForCondition = async (check: () => void, _options?: unknown) => {
+      for (let attempt = 0; attempt < 1000; attempt++) {
+        try {
+          check();
+          return;
+        } catch (error) {
+          if (attempt === 999) throw error;
+          await Promise.resolve();
+        }
+      }
+    };
     try {
       // Exactly one host monitor: quota polls, analytics remains lazy.
-      await vi.waitFor(
+      await waitForCondition(
         () => {
           expect(snapshots.scopedViewers).toBe(1);
           expect(snapshots.scopedScopes).toEqual(["quota"]);
@@ -512,7 +524,7 @@ describe("dashboard RPC lifecycle", () => {
         { timeout: 1000, interval: 5 },
       );
       client.subscribe(() => {});
-      await vi.waitFor(
+      await waitForCondition(
         () => {
           expect(watchInputs).toEqual([{ scope: "quota", attemptNonce: expect.any(String) }]);
           expect(snapshots.scopedScopes).toEqual(["quota", "quota"]);
@@ -524,9 +536,11 @@ describe("dashboard RPC lifecycle", () => {
       await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
       expect(fixture.calls.quota).toBe(1);
       const initialMonitorQuotaReads = fixture.calls.quota;
+      await vi.advanceTimersByTimeAsync(39);
+      expect(fixture.calls.quota).toBe(initialMonitorQuotaReads);
 
       timeoutWatches[0]?.(hostTimeout());
-      await vi.waitFor(
+      await waitForCondition(
         () => {
           expect(healthCalls).toBe(2);
           expect(releaseTimeoutHealth).toBeDefined();
@@ -536,7 +550,7 @@ describe("dashboard RPC lifecycle", () => {
       expect(client.connection()).toBe("live");
       expect(eventSubscriptions).toBe(1);
       expect(eventSignals[0]?.aborted).toBe(false);
-      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
+      await waitForCondition(() => expect(snapshots.scopedViewers).toBe(1), {
         timeout: 1000,
         interval: 5,
       });
@@ -546,7 +560,7 @@ describe("dashboard RPC lifecycle", () => {
         version: "lifecycle-test",
         build: "lifecycle-test",
       });
-      await vi.waitFor(
+      await waitForCondition(
         () => {
           expect(watchInputs).toEqual([
             { scope: "quota", attemptNonce: expect.any(String) },
@@ -563,16 +577,15 @@ describe("dashboard RPC lifecycle", () => {
       // The monitor and its quota interest survive: the poller keeps reading
       // the same cached slot without a stale marker or a reset.
       await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
-      await vi.waitFor(
-        () => expect(fixture.calls.quota).toBeGreaterThan(initialMonitorQuotaReads),
-        { timeout: 1000, interval: 5 },
-      );
+      expect(fixture.calls.quota).toBe(initialMonitorQuotaReads);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fixture.calls.quota).toBe(initialMonitorQuotaReads + 1);
       expect(refetch).not.toHaveBeenCalled();
 
       // A second Desktop deadline repeats the same in-place renewal with no
       // stream replacement, overlapping viewer, or analytics read.
       timeoutWatches[1]?.(hostTimeout());
-      await vi.waitFor(
+      await waitForCondition(
         () => {
           expect(healthCalls).toBe(3);
           expect(watchInputs).toHaveLength(3);
@@ -587,7 +600,7 @@ describe("dashboard RPC lifecycle", () => {
         { timeout: 1000, interval: 5 },
       );
       await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
-      await vi.waitFor(
+      await waitForCondition(
         () => expect(fixture.calls.home + fixture.calls.project + fixture.calls.groups).toBe(0),
         { timeout: 1000, interval: 5 },
       );
@@ -596,15 +609,13 @@ describe("dashboard RPC lifecycle", () => {
       expect(refetch).not.toHaveBeenCalled();
 
       client.dispose();
-      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
+      await waitForCondition(() => expect(snapshots.scopedViewers).toBe(1), {
         timeout: 1000,
         interval: 5,
       });
       const pollReadsAfterWindowClosed = fixture.calls.quota;
-      await vi.waitFor(
-        () => expect(fixture.calls.quota).toBeGreaterThan(pollReadsAfterWindowClosed),
-        { timeout: 1000, interval: 5 },
-      );
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fixture.calls.quota).toBe(pollReadsAfterWindowClosed + 1);
       expect(eventSignals[0]?.aborted).toBe(true);
     } finally {
       releaseTimeoutHealth?.({
@@ -616,6 +627,7 @@ describe("dashboard RPC lifecycle", () => {
       client.dispose();
       await registration.dispose();
       await lease.dispose();
+      vi.useRealTimers();
       expect(snapshots.scopedViewers).toBe(0);
     }
   });
