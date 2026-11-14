@@ -641,7 +641,13 @@ export async function collectQuotaRenderData(params: {
   const finalScopes = params.includeProviderScope
     ? await Promise.all(
         active.map((provider) =>
-          getQuotaProviderResultScope(provider, { ...selection.ctx, operationCache: undefined }),
+          getQuotaProviderResultScope(
+            provider,
+            provider.cachePolicy?.kind === "resolved-auth" &&
+              provider.cachePolicy.revalidateWithCycleCache
+              ? selection.ctx
+              : { ...selection.ctx, operationCache: undefined },
+          ),
         ),
       )
     : [];

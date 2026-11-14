@@ -220,6 +220,8 @@ export const PROVIDER_CACHE_POLICIES = {
   },
   "claude-agent": {
     kind: "resolved-auth",
+    // Identity uses this cycle's CLI probe; repeating it only spawns more processes.
+    revalidateWithCycleCache: true,
     resolveIdentity: (ctx) => claudeAgentIdentity(ctx),
   },
   copilot: {

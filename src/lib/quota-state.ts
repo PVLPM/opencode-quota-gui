@@ -303,7 +303,7 @@ async function isProviderCacheScopeCurrent(
     if (runtimeEligibleQuotaProviders === null) return false;
     return (
       (await provider.cachePolicy.resolveIdentity(
-        { ...ctx, operationCache: undefined },
+        provider.cachePolicy.revalidateWithCycleCache ? ctx : { ...ctx, operationCache: undefined },
         { runtimeEligibleQuotaProviders },
       )) === scope.resolvedAuthIdentity
     );

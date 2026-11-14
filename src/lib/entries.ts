@@ -490,6 +490,7 @@ export type QuotaProviderCachePolicy =
   | { kind: "uncached" }
   | {
       kind: "resolved-auth";
+      revalidateWithCycleCache?: true;
       resolveIdentity: (
         ctx: QuotaProviderContext,
         cacheContext: QuotaProviderCacheContext,
