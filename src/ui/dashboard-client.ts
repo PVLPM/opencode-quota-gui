@@ -476,6 +476,19 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
         `${detail}.errors[].retryable`,
       );
       if (retryable !== undefined) parsedError.retryable = retryable;
+      const retryAtMs = readOptionalNumber(
+        error.retryAtMs,
+        endpoint,
+        `${detail}.errors[].retryAtMs`,
+      );
+      if (retryAtMs !== undefined) parsedError.retryAtMs = retryAtMs;
+      const kind = readOptionalEnum(
+        error.kind,
+        ["intentional-filter"] as const,
+        endpoint,
+        `${detail}.errors[].kind`,
+      );
+      if (kind !== undefined) parsedError.kind = kind;
       const failureCategory = readOptionalEnum(
         error.failureCategory,
         PROVIDER_FAILURE_CATEGORIES,

@@ -354,6 +354,8 @@ export interface ProviderCard {
     label: string;
     message: string;
     retryable?: boolean;
+    retryAtMs?: number;
+    kind?: "intentional-filter";
     /** Source-assigned safe category; absence means unknown and consumers fail closed. */
     failureCategory?: ProviderFailureCategory;
   }[];

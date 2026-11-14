@@ -270,6 +270,8 @@ function isProviderCard(value: unknown): value is ProviderCard {
         label: string;
         message: string;
         retryable?: boolean;
+        retryAtMs?: number;
+        kind?: "intentional-filter";
         failureCategory?: ProviderFailureCategory;
       }[] =>
         isArrayOf(
@@ -279,6 +281,11 @@ function isProviderCard(value: unknown): value is ProviderCard {
             isText(entry.label) &&
             isText(entry.message) &&
             isOptional(entry.retryable, isBoolean) &&
+            isOptional(entry.retryAtMs, isFiniteNumber) &&
+            isOptional(
+              entry.kind,
+              (kind): kind is "intentional-filter" => kind === "intentional-filter",
+            ) &&
             isOptional(entry.failureCategory, isProviderFailureCategory),
         ),
     )

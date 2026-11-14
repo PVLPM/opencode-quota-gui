@@ -203,6 +203,37 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe("gui provider cards — account mapping", () => {
+  it("preserves structured retry deadline and intentional-filter provenance", () => {
+    const cards = buildProviderCards({
+      probes: [
+        probe(
+          "anthropic",
+          result({
+            errors: [
+              {
+                label: "Filtered",
+                message: "Skipped",
+                kind: "intentional-filter",
+                retryAtMs: NOW + 60_000,
+                failureCategory: "provider_api",
+              },
+            ],
+          }),
+        ),
+      ],
+      preferences: SUMMARY,
+      nowMs: NOW,
+    });
+    expect(cards[0]?.errors).toEqual([
+      {
+        label: "Filtered",
+        message: "Skipped",
+        kind: "intentional-filter",
+        retryAtMs: NOW + 60_000,
+        failureCategory: "provider_api",
+      },
+    ]);
+  });
   it("projects Panel accounts in provider order, omitting failed and hidden cards but keeping healthy unmapped tokens", () => {
     const panelCards = buildProviderCards({
       probes: [

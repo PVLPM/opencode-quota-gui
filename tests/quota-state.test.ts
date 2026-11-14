@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { access, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import { createSnapshotService } from "../src/gui/snapshot-service.js";
 import type { QuotaProvider } from "../src/lib/entries.js";
 import { validateQuotaProviders } from "../src/lib/quota-providers.js";
 import { PROVIDER_CACHE_POLICIES } from "../src/providers/cache-policies.js";
@@ -42,6 +42,65 @@ function createTestContext() {
 }
 
 describe("quota-state shared cache", () => {
+  it("retries only the failed provider once while another provider remains cached", async () => {
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+    const entry = { accounting: TEST_ACCOUNTING, name: "Quota", percentRemaining: 55 };
+    const healthy = {
+      id: "early-retry-healthy-test",
+      cachePolicy: { kind: "account-neutral" },
+      fetch: vi.fn(async () => ({ attempted: true, entries: [entry], errors: [] })),
+    } as any;
+    const failed = {
+      id: "early-retry-failed-test",
+      cachePolicy: { kind: "account-neutral" },
+      fetch: vi.fn(async () => ({
+        attempted: true,
+        entries: [entry],
+        errors: [{ label: "Failed", message: "unavailable", failureCategory: "provider_api" }],
+      })),
+    } as any;
+    const ctx = createTestContext();
+    const source = {
+      quota: async () => {
+        const results = await Promise.all(
+          [healthy, failed].map((provider) =>
+            fetchQuotaProviderResult({ provider, ctx, ttlMs: 600_000 }),
+          ),
+        );
+        return {
+          generatedAtMs: Date.now(),
+          stale: true,
+          providers: {
+            cards: results.map((result, index) => ({
+              cardId: `provider-${index}`,
+              providerId: `provider-${index}`,
+              providerLabel: "Provider",
+              labelSource: "provider",
+              rows: [],
+              errors: result.errors,
+            })),
+            enabledProviders: "auto",
+            polledAtMs: Date.now(),
+          },
+        };
+      },
+    } as any;
+    const service = createSnapshotService({ source, quotaIntervalMs: 60_000 });
+    await service.quota();
+    vi.useFakeTimers();
+    const release = service.addViewer();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => expect(failed.fetch).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() => expect(failed.fetch).toHaveBeenCalledTimes(3));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(failed.fetch).toHaveBeenCalledTimes(3);
+    expect(healthy.fetch).toHaveBeenCalledTimes(1);
+    release();
+    service.close();
+    vi.useRealTimers();
+  });
+
   it("retries partial failures without a retry deadline instead of caching them as fresh", async () => {
     const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
     const row = (sourceId: string) => ({

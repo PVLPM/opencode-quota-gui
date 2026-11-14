@@ -338,6 +338,9 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   /** Explicit UI signal outranks read-request inference for this viewer session. */
   let viewScopeExplicit = false;
   let quotaTimer: NodeJS.Timeout | undefined;
+  let quotaRetryTimer: NodeJS.Timeout | undefined;
+  let quotaRetried = false;
+  let pollerEpoch = 0;
   let analyticsTimer: NodeJS.Timeout | undefined;
   let quotaTicking = false;
   let analyticsTicking = false;
@@ -606,6 +609,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     compute: () => Promise<unknown>,
     epoch: number,
     changed: Set<DashboardEventTopic>,
+    onSnapshot?: (snapshot: unknown) => void,
   ): Promise<boolean> {
     const generation = sourceGeneration;
     if (closed || viewerEpoch !== epoch || viewers === 0) return false;
@@ -646,21 +650,32 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       stale,
       sourceGeneration: generation,
     });
+    onSnapshot?.(snapshot);
     if (changedNow) changed.add(topicFor(key));
     return true;
   }
 
-  async function tickQuota(): Promise<void> {
+  async function tickQuota(earlyRetry = false): Promise<void> {
     if (quotaTicking || quotaRefresh || closed || viewers === 0) return;
+    if (!earlyRetry && quotaRetryTimer) {
+      clearTimeout(quotaRetryTimer);
+      quotaRetryTimer = undefined;
+      quotaRetried = true;
+    }
     quotaTicking = true;
     const epoch = viewerEpoch;
+    const tickPollerEpoch = pollerEpoch;
+    const generation = sourceGeneration;
     const changed = new Set<DashboardEventTopic>();
+    let polledSnapshot: QuotaSnapshot | undefined;
     try {
       // Copy before the async body: `load` can register new computes while a
       // tick awaits, and one tick must not grow while it runs.
       for (const [key, compute] of Array.from(computes)) {
         if (kindOf(key) !== "quota") continue;
-        const poll = pollOne(key, compute, epoch, changed);
+        const poll = pollOne(key, compute, epoch, changed, (snapshot) => {
+          polledSnapshot = snapshot as QuotaSnapshot;
+        });
         quotaPoll = poll;
         try {
           if (!(await poll)) break;
@@ -672,7 +687,36 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       quotaTicking = false;
     }
 
-    if (closed || viewerEpoch !== epoch) return;
+    if (closed || viewerEpoch !== epoch || pollerEpoch !== tickPollerEpoch) return;
+    if (sourceGeneration !== generation) return;
+    if (polledSnapshot) {
+      const eligible = polledSnapshot.providers.cards.some((card) =>
+        card.errors.some(
+          (error) =>
+            error.kind !== "intentional-filter" &&
+            (error.failureCategory === "provider_api" ||
+              error.failureCategory === "discovery" ||
+              error.failureCategory === "local") &&
+            !(error.retryAtMs !== undefined && error.retryAtMs > now()),
+        ),
+      );
+      if (!eligible) {
+        quotaRetried = false;
+        if (quotaRetryTimer) clearTimeout(quotaRetryTimer);
+        quotaRetryTimer = undefined;
+      } else if (!earlyRetry && !quotaRetried && !quotaRetryTimer && !quotaRefresh) {
+        // quota-state caches per provider, so healthy accounts within the failed provider may also be re-requested once per episode.
+        quotaRetryTimer = setTimeout(
+          () => {
+            quotaRetryTimer = undefined;
+            quotaRetried = true;
+            void tickQuota(true);
+          },
+          Math.min(10_000, quotaIntervalMs()),
+        );
+        quotaRetryTimer.unref();
+      }
+    }
     if (changed.has("quota.changed")) emit({ topic: "quota.changed", at: now() });
   }
 
@@ -743,6 +787,10 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   }
 
   function stopPollers(): void {
+    pollerEpoch += 1;
+    if (quotaRetryTimer) clearTimeout(quotaRetryTimer);
+    quotaRetryTimer = undefined;
+    quotaRetried = false;
     if (quotaTimer) {
       clearInterval(quotaTimer);
       quotaTimer = undefined;
@@ -878,6 +926,9 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
     sourceChanged(): void {
       if (closed) return;
+      if (quotaRetryTimer) clearTimeout(quotaRetryTimer);
+      quotaRetryTimer = undefined;
+      quotaRetried = false;
       // The cached payloads remain useful as last-good fallback, but they must
       // never be served as fresh data from the previous owner.
       sourceGeneration += 1;

@@ -177,6 +177,8 @@ function mapProviderError(
     message: safeProviderText(error.message, secrets) ?? PROVIDER_ERROR_GENERIC_MESSAGE,
   };
   if (error.retryable === true) mapped.retryable = true;
+  if (error.retryAtMs !== undefined) mapped.retryAtMs = error.retryAtMs;
+  if (error.kind !== undefined) mapped.kind = error.kind;
   if (error.failureCategory !== undefined) mapped.failureCategory = error.failureCategory;
   return mapped;
 }
