@@ -118,7 +118,7 @@ const packedRealOtelFixture = await readFile(
 );
 
 const VERIFY_COMMAND =
-  "pnpm run check && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm run verify:native-gui-bundle && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents";
+  "pnpm run check && pnpm run dup:check && pnpm run verify:typescript-version && pnpm run verify:v4-history && pnpm run typecheck && pnpm run build && pnpm run verify:native-gui-bundle && pnpm test && pnpm run test:four-surfaces && pnpm run verify:package-contents";
 const NPM_PUBLISH_GUARD = "${{ vars.NPM_PUBLISH_ENABLED == 'true' && inputs.publish == true }}";
 const TAG_REF = "refs/tags/${{ inputs.tag }}";
 // Use Git Bash on Windows, not the WSL launcher that can reinterpret native paths.
@@ -133,6 +133,7 @@ const bash =
     : "bash";
 const VERIFY_COMPONENT_COMMANDS = [
   "pnpm run check",
+  "pnpm run dup:check",
   "pnpm run verify:typescript-version",
   "pnpm run verify:v4-history",
   "pnpm run typecheck",

@@ -25,6 +25,8 @@ pnpm install
 
 Run `pnpm verify` before opening a PR. It runs lint and formatting, typecheck, build, all tests, the supported cross-surface contract test, and package checks. CI runs the same command, then installs the packed package on Node 22 and 24 as a smoke test.
 
+`pnpm run dup:check` checks for new exact TypeScript clones against `.jscpd-baseline.json` and runs as part of `pnpm verify`. After deliberately reviewing accepted duplication, regenerate the baseline with `pnpm run dup:baseline` and include the updated baseline in the change.
+
 Upstream plugin snapshots are reviewed by hand. `pnpm run upstream:check` reports drift against `references/upstream-plugins/lock.json` without writing. `pnpm run upstream:prepare-review` rewrites the snapshots and lock before building the review handoff, so run it only for a deliberate snapshot update. No scheduled workflow opens or closes upstream update issues; commit snapshots only after that review.
 
 For quick iteration: `pnpm run test:watch`.
