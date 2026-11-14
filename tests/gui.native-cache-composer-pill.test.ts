@@ -550,7 +550,7 @@ it("labels rows with agent, provider, model and effort when authoritative metada
   expect(description).toContain("general");
   expect(description).toContain("anthropic / claude-test#high");
   expect(description).toContain("Cache 80%.");
-  expect(description).toContain("TTL Expired.");
+  expect(description).toMatch(/TTL \+.*\./);
   expect(
     [...container.querySelectorAll(".qg-cache-agent")].map((node) => node.textContent),
   ).toEqual(["general", "build"]);
@@ -911,6 +911,7 @@ it("renders the generic fallback for Qwen from the runtime", async () => {
 
 it("renders the estimated-expiry red state with its historical provenance", async () => {
   vi.useFakeTimers();
+  vi.setSystemTime(86_401_000);
   const a = session("a");
   const observed = {
     color: "red",
@@ -937,7 +938,7 @@ it("renders the estimated-expiry red state with its historical provenance", asyn
   await flush();
   renderMenu(pill, () => a, container);
   expect(pill.show({ session: a } as ComposerPillProps)).toMatchObject({
-    label: "TTL Expired • Cache 80%",
+    label: "TTL +23h 55m 0s • Cache 80%",
     tone: "danger",
   });
   const dot = container.querySelector<HTMLButtonElement>("button.qg-cache-danger");
@@ -1150,16 +1151,16 @@ it("reboots history after a shared stream gap without an RPC disconnect", async 
     dispose: cleanup,
   }));
   await vi.waitFor(() =>
-    expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toBe(
-      "TTL Expired • Cache 80%",
+    expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
+      /^TTL \+.* • Cache 80%$/,
     ),
   );
   expect(listMessages).toHaveBeenCalledTimes(1);
   retire();
   await vi.waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
   await vi.waitFor(() =>
-    expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toBe(
-      "TTL Expired • Cache 80%",
+    expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
+      /^TTL \+.* • Cache 80%$/,
     ),
   );
   dispose();
@@ -1264,8 +1265,8 @@ it("renders real history bootstrap results independently without exposing messag
     dispose: cleanup,
   }));
   await vi.waitFor(() =>
-    expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toBe(
-      "TTL Expired • Cache 82%",
+    expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
+      /^TTL \+.* • Cache 82%$/,
     ),
   );
   // Child history now loads with the selection, so both reads happen up front.
@@ -1508,9 +1509,11 @@ it("counts the TTL down each second through the reactive label and shows expiry 
   vi.advanceTimersByTime(1);
   // The backend still reports green until its own recheck; the pill shows
   // expiry as soon as the estimated deadline passes.
-  expect(shown.at(-1)).toBe("TTL Expired • Cache 98.7%|danger");
-  // One shared tick, stopped at expiry: no loop, no transport work.
-  expect(vi.getTimerCount()).toBe(0);
+  expect(shown.at(-1)).toBe("TTL +0s • Cache 98.7%|danger");
+  vi.advanceTimersByTime(72_000);
+  expect(shown.at(-1)).toBe("TTL +1m 12s • Cache 98.7%|danger");
+  // One shared tick, with no transport work.
+  expect(vi.getTimerCount()).toBe(1);
   expect(subscribeTransport).toHaveBeenCalledTimes(1);
   unmount();
   dispose();
@@ -1609,8 +1612,8 @@ it.each([
     name: "an expired estimate",
     ttl: -1_000,
     ratio: 0.993,
-    values: "Expired • 99.3%",
-    spoken: "TTL Expired. Cache 99.3%.",
+    values: "+1s • 99.3%",
+    spoken: "TTL +1s. Cache 99.3%.",
   },
   {
     name: "an estimate without a share",
@@ -1740,7 +1743,9 @@ it("keeps the popup's important values bold on the strong text token, off the we
   expect(ruleFor(".qg-cache-metrics")?.body).toMatch(/color:\s*var\(--text-strong/);
   expect(ruleFor(".qg-cache-metrics")?.body).toMatch(/font-weight:\s*600/);
   expect(ruleFor(".qg-cache-tooltip-primary")?.body).toMatch(/font-weight:\s*600/);
-  expect(cacheRules.filter((rule) => rule.body.includes("--text-weak"))).toEqual([]);
+  expect(
+    cacheRules.filter((rule) => rule.body.includes("--text-weak")).map((rule) => rule.selector),
+  ).toEqual([".qg-cache-elapsed"]);
 });
 
 it("keeps baseline and child mismatches isolated and cancels pending attention on disposal", async () => {

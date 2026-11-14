@@ -65,6 +65,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.qg-cache-elapsed {
+  color: var(--text-weak, var(--text-base, currentColor));
+}
 /* The host renders its title immediately before the menu. Reserve the button's
  * space even if the title wraps; this relationship may change in host updates. */
 :has(> .qg-cache-menu) > :has(+ .qg-cache-menu) {
