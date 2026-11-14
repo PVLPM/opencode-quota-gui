@@ -8,7 +8,6 @@ import {
   classifyCacheObserverState,
   createCacheObserverState,
   observeCacheInvocation,
-  openAiDocumentedTtlMs,
 } from "../src/lib/cache-observer.js";
 
 const route: CacheRouteProvenance = {
@@ -365,43 +364,40 @@ describe("retention estimate origin and colors", () => {
   });
 });
 
-describe("OpenAI model-specific lifetime", () => {
+describe("OpenAI route lifetime", () => {
   const direct = { directOpenAiApi: true };
   const openai = (modelId: string) => routeOf("openai", modelId);
 
-  it("identifies the documented 30-minute families by model id", () => {
+  it("uses five minutes on direct API routes regardless of model", () => {
     for (const modelId of [
       "gpt-5.5",
-      "gpt-5.5-pro",
       "gpt-5.6",
-      "gpt-5.7",
-      "gpt-6.1-sol",
-      "gpt-6.1-terra",
+      "gpt-5.6-pro",
+      "gpt-6",
+      "gpt-6.1",
+      "gpt-4.1",
+      "o4-mini",
     ]) {
-      expect(openAiDocumentedTtlMs(modelId)).toBe(1_800_000);
+      expect(
+        classifyCacheObserverState(observed(openai(modelId)), 200, direct).ttlEstimate?.ttlMs,
+      ).toBe(300_000);
     }
-    for (const modelId of ["gpt-5.4", "gpt-5.5-codex", "gpt-5.1", "gpt-4.1", "o4-mini", "gpt-5"]) {
-      expect(openAiDocumentedTtlMs(modelId)).toBeUndefined();
-    }
-  });
-
-  it("applies the documented 30-minute lifetime on a confirmed direct API route, with 80/20 boundaries", () => {
-    const state = observed(openai("gpt-6.1-sol"));
+    const state = observed(openai("gpt-6.1"));
 
     expect(classifyCacheObserverState(state, 200, direct)).toMatchObject({
       color: "green",
       ttlEstimate: {
-        kind: "documented",
-        ttlMs: 1_800_000,
+        kind: "fallback",
+        ttlMs: 300_000,
         dispatchAtMs: 100,
-        deadlineAtMs: 1_800_100,
+        deadlineAtMs: 300_100,
       },
     });
-    expect(classifyCacheObserverState(state, 1_440_100, direct)).toMatchObject({
+    expect(classifyCacheObserverState(state, 240_100, direct)).toMatchObject({
       color: "yellow",
       reason: "estimated-ttl-near-expiry",
     });
-    expect(classifyCacheObserverState(state, 1_800_100, direct)).toMatchObject({
+    expect(classifyCacheObserverState(state, 300_100, direct)).toMatchObject({
       color: "red",
       reason: "estimated-ttl-expired",
     });

@@ -287,20 +287,6 @@ export function cacheConfiguredTtlMsFromHostValue(
   return ttlMs === 300_000 || ttlMs === 3_600_000 ? ttlMs : undefined;
 }
 
-/**
- * The model-specific default prompt-cache lifetime OpenAI documents for direct API
- * use: 30 minutes for GPT-5.5 (typical) and GPT-5.6 and later (minimum default).
- * Other models have no documented model-specific lifetime and get undefined.
- */
-export function openAiDocumentedTtlMs(modelId: string): 1_800_000 | undefined {
-  if (modelId === "gpt-5.5" || modelId === "gpt-5.5-pro") return 1_800_000;
-  const match = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/.exec(modelId);
-  if (match === null) return undefined;
-  const major = Number(match[1]);
-  const minor = Number(match[2] ?? 0);
-  return major > 5 || (major === 5 && minor >= 6) ? 1_800_000 : undefined;
-}
-
 /** Providers whose host `cache.ttl` the observer reads: direct Anthropic and Kimi. */
 export function isCacheConfigurableProviderId(providerId: string): boolean {
   return providerId === "anthropic" || KIMI_PROVIDER_IDS.has(providerId);
@@ -478,21 +464,8 @@ function retentionPolicy(
         "Empirical 60-minute estimate for this OpenCode Go model; physical retention is not observable and provider eviction may cause a miss.",
     };
   }
-  const openAiTtlMs = openAiDocumentedTtlMs(route.modelId);
-  if (
-    route.providerId === "openai" &&
-    routeConfiguration.directOpenAiApi &&
-    openAiTtlMs !== undefined
-  ) {
-    return {
-      kind: "documented",
-      ttlMs: openAiTtlMs,
-      source: "OpenAI prompt caching documentation (model-specific default lifetime)",
-      reference: "https://developers.openai.com/api/docs/guides/prompt-caching",
-      assumption:
-        "Documented default 30-minute lifetime for this GPT model family on the direct OpenAI API; the optional 12-hour lifetime and physical eviction are not observable.",
-    };
-  }
+  // Host step events do not bind an auth route to an invocation; OpenAI stays
+  // on the conservative fallback until subscription OAuth can be established.
   return {
     kind: "fallback",
     ttlMs: 300_000,
