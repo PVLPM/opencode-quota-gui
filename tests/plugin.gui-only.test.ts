@@ -194,7 +194,7 @@ describe("GUI-only server plugin", () => {
     expect(rpc.register.mock.calls[0]?.[0]).toMatchObject({
       id: "opencode-quota-gui.dashboard",
     });
-    expect([...hooks.keys()]).toEqual(["retry"]);
+    expect([...hooks.keys()]).toEqual(["retry", "model.request"]);
     expect(ctx.session.get).not.toHaveBeenCalled();
     expect(ctx.session.wait).not.toHaveBeenCalled();
     expect(ctx.session.prompt).not.toHaveBeenCalled();

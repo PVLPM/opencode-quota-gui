@@ -41,7 +41,9 @@ function createContext() {
     location: { directory: "/tmp/opencode/quota-plugin-v2" },
     provider: { list: vi.fn().mockResolvedValue({ data: [{ id: "openai" }] }) },
     session: {
-      hook: vi.fn(async () => ({ dispose: async () => {} })),
+      hook: vi.fn(async (_name: string, _callback: (event: never) => unknown) => ({
+        dispose: async () => {},
+      })),
     },
     integration: createFakeIntegration([]),
     event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
@@ -123,6 +125,50 @@ afterEach(async () => {
 });
 
 describe("V2 server plugin credential lifecycle", () => {
+  it("samples only the active OpenAI method and relays no credential metadata", async () => {
+    const ctx = createContext();
+    const queue = createHostEventQueue();
+    const integration = createFakeIntegration([
+      {
+        integrationId: "openai",
+        id: "private-id",
+        label: "private-email",
+        registered: true,
+        method: "oauth",
+        value: { type: "oauth", access: "private-token" },
+      },
+    ]);
+    vi.mocked(startDashboard).mockResolvedValueOnce({
+      runtime: {} as never,
+      dispose: async () => {},
+    } as never);
+    cacheEventEmit.mockClear();
+    await setupPlugin({ ...ctx, integration, rpc: {}, event: { subscribe: queue.subscribe } });
+    const hook = ctx.session.hook.mock.calls.find(
+      ([name]) => name === "model.request",
+    )?.[1] as unknown as (event: unknown) => Promise<void>;
+    await hook({
+      kind: "primary",
+      sessionID: "ses_test",
+      model: { providerID: "openai", id: "gpt-6.1" },
+    });
+    queue.push({
+      type: "session.step.started",
+      created: 1200,
+      data: {
+        sessionID: "ses_test",
+        assistantMessageID: "msg_test",
+        started: 1000,
+        model: { providerID: "openai", id: "gpt-6.1" },
+      },
+    });
+    await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(2));
+    const payload = JSON.stringify(cacheEventEmit.mock.calls);
+    expect(payload).toContain('"connectionMethod":"oauth"');
+    expect(payload).not.toContain("private-");
+    expect(integration.connection.active).toHaveBeenCalledWith("openai");
+    expect(integration.connection.resolve).not.toHaveBeenCalled();
+  });
   it("reads logins through ctx.integration from setup until cleanup", async () => {
     const ctx = createContext();
     const integration = createFakeIntegration([

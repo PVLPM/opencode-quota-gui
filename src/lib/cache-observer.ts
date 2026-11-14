@@ -61,6 +61,7 @@ export interface CacheInvocationObservation {
   counts: CacheInvocationCounts;
   /** Best-effort current configuration snapshot captured during this live call. */
   configuredTtlMs?: CacheConfiguredTtlMs;
+  connectionMethod?: "oauth" | "key" | "external" | "unknown";
 }
 
 /** Host-configured retention values the observer accepts for a configurable route. */
@@ -226,6 +227,7 @@ export function classifyCacheObserverState(
     latest.configuredTtlMs === undefined
       ? routeConfiguration
       : { configuredTtlMs: latest.configuredTtlMs },
+    latest.connectionMethod,
   );
   const ttlEstimate: CacheTtlEstimate = {
     kind: policy.kind,
@@ -414,6 +416,7 @@ const KIMI_PROVIDER_IDS: ReadonlySet<string> = new Set([
 function retentionPolicy(
   route: CacheRouteProvenance,
   routeConfiguration: CacheRouteConfiguration,
+  connectionMethod: CacheInvocationObservation["connectionMethod"],
 ): RetentionPolicy {
   const configuredTtlMs = routeConfiguration.configuredTtlMs;
   if (configuredTtlMs !== undefined && isCacheConfigurableProviderId(route.providerId)) {
@@ -464,8 +467,22 @@ function retentionPolicy(
         "Empirical 60-minute estimate for this OpenCode Go model; physical retention is not observable and provider eviction may cause a miss.",
     };
   }
-  // Host step events do not bind an auth route to an invocation; OpenAI stays
-  // on the conservative fallback until subscription OAuth can be established.
+  const version = /^gpt-(\d+)(?:\.(\d+))?(?:-[a-z0-9]+)*$/i.exec(route.modelId);
+  if (
+    route.providerId === "openai" &&
+    connectionMethod === "oauth" &&
+    version !== null &&
+    (Number(version[1]) > 5 || (Number(version[1]) === 5 && Number(version[2] ?? 0) >= 6))
+  ) {
+    return {
+      kind: "empirical",
+      ttlMs: 1_800_000,
+      source: "Estimated ChatGPT subscription sign-in retention",
+      reference: "cache-observer-policy:chatgpt-oauth-30m",
+      assumption:
+        "Owner-approved estimate based on the active OpenAI connection, not per-request proof or a retention guarantee.",
+    };
+  }
   return {
     kind: "fallback",
     ttlMs: 300_000,

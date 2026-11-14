@@ -68,6 +68,24 @@ export const QuotaToastPlugin = Plugin.define({
       }
     });
 
+    let openaiMethod: "oauth" | "key" | "external" | "unknown" = "unknown";
+    let openaiSample = 0;
+    await ctx.session.hook("model.request", async (event) => {
+      if (event.kind !== "primary" || event.model.providerID !== "openai") return;
+      const sample = ++openaiSample;
+      openaiMethod = "unknown";
+      try {
+        const connection = await ctx.integration.connection.active("openai");
+        const method = connection?.type === "credential" ? connection.method : undefined;
+        if (sample === openaiSample) {
+          openaiMethod =
+            method === "oauth" || method === "key" || method === "external" ? method : "unknown";
+        }
+      } catch {
+        // Missing or unavailable metadata retains the conservative fallback.
+      }
+    });
+
     // Every login read in this process goes through this location's `ctx.integration`. Bound
     // last, so a setup that fails part way leaves no binding behind. OpenCode routes the
     // retained hooks only after setup, so no read comes earlier.
@@ -227,6 +245,8 @@ export const QuotaToastPlugin = Plugin.define({
               );
             }
             if (event.type === "credential.updated" || event.type === "credential.switched") {
+              openaiSample++;
+              openaiMethod = "unknown";
               notifyCredentialsChanged();
             }
             // The Started event's model identity is available before invocation completion. Do not
@@ -238,7 +258,17 @@ export const QuotaToastPlugin = Plugin.define({
               Number.isFinite(event.created) &&
               event.created >= 0
             ) {
-              emitCacheObserverEvent(cacheObserverEvent, event.created);
+              // Owner-approved approximation: active connection is not proof of this request's route.
+              const projected =
+                cacheObserverEvent.type === "session.step.started" &&
+                cacheObserverEvent.data.model.providerID === "openai" &&
+                openaiMethod !== "unknown"
+                  ? {
+                      ...cacheObserverEvent,
+                      data: { ...cacheObserverEvent.data, connectionMethod: openaiMethod },
+                    }
+                  : cacheObserverEvent;
+              emitCacheObserverEvent(projected, event.created);
             }
           }
           if (signal.aborted) return;

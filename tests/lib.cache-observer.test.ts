@@ -20,6 +20,51 @@ const route: CacheRouteProvenance = {
 
 const basis = { source: "successful-primary-step", reference: "msg-1" };
 
+describe("active OpenAI connection estimate", () => {
+  it.each([
+    "gpt-5.6",
+    "gpt-6",
+    "gpt-6.1",
+    "gpt-6.10-codex",
+    "gpt-5.6-mini-2026-01-01",
+  ])("uses thirty minutes for OAuth %s", (model) => {
+    const openai = routeOf("openai", model);
+    const state = observed(openai, { connectionMethod: "oauth" });
+    expect(classifyCacheObserverState(state, 200).ttlEstimate?.ttlMs).toBe(1_800_000);
+  });
+  it.each([
+    "gpt-5.5",
+    "gpt-5.1",
+    "gpt-4.1",
+    "o3",
+    "other-gpt-6",
+    "gpt-6.1x",
+  ])("keeps the fallback for %s", (model) => {
+    expect(
+      classifyCacheObserverState(
+        observed(routeOf("openai", model), { connectionMethod: "oauth" }),
+        200,
+      ).ttlEstimate?.ttlMs,
+    ).toBe(300_000);
+  });
+  it.each(["key", "external", "unknown"] as const)("keeps the fallback for %s", (method) => {
+    expect(
+      classifyCacheObserverState(
+        observed(routeOf("openai", "gpt-6.1"), { connectionMethod: method }),
+        200,
+      ).ttlEstimate?.ttlMs,
+    ).toBe(300_000);
+  });
+  it("does not grant the estimate to a gateway", () => {
+    expect(
+      classifyCacheObserverState(
+        observed(routeOf("openrouter", "gpt-6.1"), { connectionMethod: "oauth" }),
+        200,
+      ).ttlEstimate?.ttlMs,
+    ).toBe(300_000);
+  });
+});
+
 function stateFor(sessionId = "ses-parent", scopeRoute: CacheRouteProvenance = route) {
   return createCacheObserverState({ sessionId, route: scopeRoute });
 }
