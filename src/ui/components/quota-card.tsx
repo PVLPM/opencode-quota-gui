@@ -318,7 +318,9 @@ export function QuotaCardView(props: {
       return `${row.label}: ${rowValueText(row, props.preferences)}${countdown}${runwayPart}`;
     });
     try {
-      await navigator.clipboard.writeText([identity, ...lines].join("\n"));
+      await navigator.clipboard.writeText(
+        [identity, ...(props.stale ? ["Data may be stale"] : []), ...lines].join("\n"),
+      );
       setCopyStatus("Quota summary copied.");
     } catch {
       setCopyStatus("Could not copy quota summary.");
@@ -382,6 +384,10 @@ export function QuotaCardView(props: {
         </button>
         <output class="sr-only">{copyStatus()}</output>
       </header>
+
+      <Show when={props.card.stale === true}>
+        <p class="qg-stale">Data may be stale</p>
+      </Show>
 
       <Show when={props.card.errors.length > 0}>
         <div class="qg-card__errors">

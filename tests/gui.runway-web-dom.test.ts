@@ -4,10 +4,58 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { buildProviderCards } from "../src/gui/provider-cards";
 import type { QuotaPercentEntry } from "../src/lib/entries";
 import { QuotaCardView } from "../src/ui/components/quota-card";
+import { QuotaView } from "../src/ui/views/home";
 import { percentRow, providerCard } from "./fixtures/gui-ui-fixtures";
 
 const NOW = Date.UTC(2026, 9, 18, 12, 0, 0);
 const HOUR_MS = 60 * 60 * 1_000;
+
+it("marks only retained account values stale and excludes their runway and copy it as last known", async () => {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const row = percentRow({
+    percentRemaining: 50,
+    runway: { kind: "before_reset", projectedAtIso: new Date(Date.now() + HOUR_MS).toISOString() },
+  });
+  const a = providerCard({ accountLabel: "A", rows: [row], errors: [] });
+  const b = providerCard({
+    cardId: "b" as typeof a.cardId,
+    accountLabel: "B",
+    rows: [row],
+    stale: true,
+    errors: [{ label: "B", message: "offline" }],
+  });
+  const target = document.createElement("div");
+  document.body.append(target);
+  const dispose = render(
+    () =>
+      createComponent(QuotaView, {
+        snapshot: {
+          generatedAtMs: Date.now(),
+          stale: false,
+          timeZone: "UTC",
+          providers: { cards: [a, b], enabledProviders: "auto", polledAtMs: Date.now() },
+        },
+        preferences: { percentMode: "remaining", detailed: false },
+        hiddenCards: [],
+        hiddenRows: [],
+        stale: false,
+      }),
+    target,
+  );
+  const cards = target.querySelectorAll("article");
+  expect(cards).toHaveLength(2);
+  expect(cards[0]?.textContent).not.toContain("Data may be stale");
+  expect(cards[0]?.querySelector(".qg-row__value-tip")).not.toBeNull();
+  expect(cards[1]?.textContent).toContain("Data may be stale");
+  expect(cards[1]?.textContent).toContain("offline");
+  expect(cards[1]?.textContent).toContain("50%");
+  expect(cards[1]?.querySelector(".qg-row__value-tip")).toBeNull();
+  cards[1]?.querySelector("button")?.click();
+  await Promise.resolve();
+  expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Data may be stale"));
+  dispose();
+});
 
 beforeEach(() => {
   vi.useFakeTimers();

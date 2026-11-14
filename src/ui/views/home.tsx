@@ -77,7 +77,7 @@ export function QuotaView(props: {
                 card={card}
                 preferences={props.preferences}
                 hiddenRows={props.hiddenRows}
-                stale={props.stale}
+                stale={props.stale || card.stale === true}
                 timeZone={props.snapshot.timeZone}
               />
             )}

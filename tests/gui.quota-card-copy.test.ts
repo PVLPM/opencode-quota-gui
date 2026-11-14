@@ -296,7 +296,7 @@ describe("quota card clipboard runway and banked resets", () => {
       }),
       true,
     );
-    expect(rowLines(copied)).toEqual(["Quota: 62% remaining · Resets in 1h"]);
+    expect(rowLines(copied)).toEqual(["Data may be stale", "Quota: 62% remaining · Resets in 1h"]);
   });
 
   it("keeps banked-reset summaries unchanged", async () => {
