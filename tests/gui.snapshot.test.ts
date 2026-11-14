@@ -1571,6 +1571,67 @@ describe("GUI snapshot service", () => {
     expect(reads).toEqual([undefined, { refresh: true }]);
   });
 
+  it("serializes a forced retry behind an in-flight quota poll and keeps the refreshed cache", async () => {
+    vi.useFakeTimers();
+    let finishPoll!: (value: QuotaSnapshot) => void;
+    const calls: boolean[] = [];
+    const { source } = fakeSource({
+      quota: (input?: { refresh?: boolean }) => {
+        calls.push(input?.refresh === true);
+        if (calls.length === 2) {
+          return new Promise((resolve) => {
+            finishPoll = resolve;
+          });
+        }
+        return Promise.resolve({ ...quota(), generatedAtMs: calls.length });
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 50 });
+    const viewer = service.addViewer();
+    await service.quota();
+    await vi.advanceTimersByTimeAsync(50);
+    const retry = service.quota({ refresh: true });
+    await Promise.resolve();
+    expect(calls).toEqual([false, false]);
+    finishPoll({ ...quota(), generatedAtMs: 2 });
+    const refreshed = await retry;
+    expect(calls).toEqual([false, false, true]);
+    expect(refreshed.generatedAtMs).toBe(3);
+    expect((await service.quota()).generatedAtMs).toBe(3);
+    viewer();
+  });
+
+  it("skips poll ticks during retry and exposes a failed refresh as stale without events", async () => {
+    vi.useFakeTimers();
+    let rejectRefresh!: (reason: Error) => void;
+    let calls = 0;
+    let failed = false;
+    const { source } = fakeSource({
+      quota: (input?: { refresh?: boolean }) => {
+        calls++;
+        if (input?.refresh) {
+          return new Promise((_resolve, reject) => {
+            rejectRefresh = reject;
+          });
+        }
+        return failed ? Promise.reject(new Error("provider failed")) : Promise.resolve(quota());
+      },
+    });
+    const service = makeService(source, { quotaIntervalMs: 50 });
+    const viewer = service.addViewer();
+    await service.quota();
+    const retry = service.quota({ refresh: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(calls).toBe(2);
+    failed = true;
+    rejectRefresh(new Error("provider failed"));
+    expect((await retry).stale).toBe(true);
+    expect((await service.quota()).stale).toBe(true);
+    viewer();
+  });
+
   it("coalesces concurrent manual quota refreshes", async () => {
     let complete!: (value: QuotaSnapshot) => void;
     const reads: unknown[] = [];

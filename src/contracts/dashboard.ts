@@ -323,6 +323,8 @@ export interface PrimaryQuotaWindowRef {
 }
 
 export interface ProviderCard {
+  /** Rows are retained from the last successful measurement. */
+  stale?: true;
   cardId: CardId;
   providerId: string;
   providerLabel: string;

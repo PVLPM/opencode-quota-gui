@@ -99,8 +99,23 @@ export interface ProviderCardPreferences {
   cardOrder?: readonly string[];
 }
 
+export const UNSCOPED = Symbol("unscoped");
+export type SourceKey = string | typeof UNSCOPED;
+
+export function cardSourceKey(
+  sourceId: string | undefined,
+  accountSourceIds: ReadonlySet<string>,
+): SourceKey {
+  return sourceId !== undefined && accountSourceIds.has(sourceId) ? sourceId : UNSCOPED;
+}
+
+export type MergedProbe = QuotaStatusLiveProbe & {
+  retainedSourceIds?: ReadonlySet<string>;
+  retainedUnscoped?: boolean;
+};
+
 export interface BuildProviderCardsInput {
-  probes: readonly QuotaStatusLiveProbe[];
+  probes: readonly MergedProbe[];
   preferences: ProviderCardPreferences;
   nowMs: number;
   /** Provider display label resolver; defaults to the registration table. */
@@ -522,7 +537,7 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
 
     for (const entry of probe.result.entries) {
       const sourceId = entry.accounting.sourceId;
-      if (sourceId !== undefined && accountSourceIds.has(sourceId)) {
+      if (cardSourceKey(sourceId, accountSourceIds) !== UNSCOPED && sourceId !== undefined) {
         pushInto(entriesBySource, sourceId, entry);
       } else {
         unscopedEntries.push(entry);
@@ -530,7 +545,7 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
     }
     for (const error of probe.result.errors) {
       const sourceId = error.sourceId;
-      if (sourceId !== undefined && accountSourceIds.has(sourceId)) {
+      if (cardSourceKey(sourceId, accountSourceIds) !== UNSCOPED && sourceId !== undefined) {
         pushInto(errorsBySource, sourceId, error);
       } else {
         unscopedErrors.push(error);
@@ -552,6 +567,7 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
         preferences,
         nowMs,
       });
+      if (probe.retainedUnscoped) card.stale = true;
       if (!seenCardIds.has(card.cardId)) {
         seenCardIds.add(card.cardId);
         cards.push(card);
@@ -572,6 +588,7 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
         preferences,
         nowMs,
       });
+      if (probe.retainedSourceIds?.has(account.sourceId)) card.stale = true;
       if (seenCardIds.has(card.cardId)) continue;
       seenCardIds.add(card.cardId);
       cards.push(card);

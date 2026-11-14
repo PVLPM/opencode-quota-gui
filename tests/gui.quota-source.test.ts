@@ -169,11 +169,11 @@ describe("quota read source", () => {
       ],
     });
     const first = await source.quota();
-    expect(first.stale).toBe(true);
+    expect(first.stale).toBe(false);
     expect(first.providers.polledAtMs).toBe(NOW);
     clock += 60_000;
     const partial = await source.quota();
-    expect(partial.stale).toBe(true);
+    expect(partial.stale).toBe(false);
     expect(partial.providers.polledAtMs).toBe(clock);
     complete = true;
     clock += 60_000;
@@ -603,7 +603,7 @@ describe("quota read source", () => {
     ).not.toContain(63);
   });
 
-  it("marks a partially measured account set stale while advancing the poll timestamp", async () => {
+  it("retains failed account measurements without staling a fresh account", async () => {
     let cycle = 0;
     let clock = NOW;
     const accounts = [{ sourceId: "acct-a" }, { sourceId: "acct-b" }];
@@ -638,12 +638,67 @@ describe("quota read source", () => {
     await test.source.quota();
     clock = NOW + 60_000;
     const second = await test.source.quota();
-    expect(second.stale).toBe(true);
+    expect(second.stale).toBe(false);
     expect(second.providers.polledAtMs).toBe(clock);
     const accountA = second.providers.cards.find((card) => card.accountLabel === "Account 1");
     const accountB = second.providers.cards.find((card) => card.accountLabel === "Account 2");
     expect(accountA?.rows.map((row) => row.percentRemaining)).toEqual([55]);
+    expect(accountA?.stale).toBeUndefined();
+    expect(accountB?.rows.map((row) => row.percentRemaining)).toEqual([40]);
+    expect(accountB?.stale).toBe(true);
     expect(accountB?.errors.map((error) => error.label)).toEqual(["Account B"]);
+  });
+
+  it("does not transfer removed or unlisted account measurements to another account", async () => {
+    let cycle = 0;
+    const test = harness({
+      collect: async () => [
+        probe(
+          "anthropic",
+          ++cycle === 1
+            ? result({
+                accounts: [{ sourceId: "a" }, { sourceId: "b" }],
+                entries: [percentEntry(70, "A", "a"), percentEntry(40, "B", "b")],
+              })
+            : result({
+                accounts: [{ sourceId: "a" }],
+                entries: [percentEntry(55, "A", "a")],
+                errors: [{ label: "B", message: "failed", sourceId: "b" }],
+              }),
+        ),
+      ],
+    });
+    await test.source.quota();
+    const next = await test.source.quota();
+    expect(
+      next.providers.cards.flatMap((card) => card.rows.map((row) => row.percentRemaining)),
+    ).toEqual([55]);
+    expect(next.providers.cards.find((card) => card.rows.length === 0)?.errors?.[0]?.label).toBe(
+      "B",
+    );
+  });
+
+  it("marks quota-state rate limited rows as retained without staling another account", async () => {
+    const test = harness({
+      collect: async () => [
+        probe(
+          "anthropic",
+          result({
+            accounts: [{ sourceId: "a" }, { sourceId: "b" }],
+            entries: [percentEntry(55, "A", "a"), percentEntry(40, "B", "b")],
+            errors: [{ label: "B", message: "limited", sourceId: "b", retryAtMs: NOW + 120_000 }],
+          }),
+        ),
+      ],
+    });
+    const next = await test.source.quota();
+    expect(next.stale).toBe(false);
+    expect(
+      next.providers.cards.find((card) => card.accountLabel === "Account 1")?.stale,
+    ).toBeUndefined();
+    expect(next.providers.cards.find((card) => card.accountLabel === "Account 2")?.stale).toBe(
+      true,
+    );
   });
 
   it("updates measured providers while preserving a failed provider in the same cycle", async () => {
@@ -671,12 +726,13 @@ describe("quota read source", () => {
 
     clock = NOW + 60_000;
     const second = await test.source.quota();
-    expect(second.stale).toBe(true);
+    expect(second.stale).toBe(false);
     expect(second.providers.polledAtMs).toBe(clock);
     const anthropic = second.providers.cards.find((card) => card.providerId === "anthropic");
     const copilot = second.providers.cards.find((card) => card.providerId === "copilot");
     expect(anthropic?.rows[0]?.percentRemaining).toBe(35);
     expect(copilot?.rows[0]?.percentRemaining).toBe(90);
+    expect(copilot?.stale).toBe(true);
     expect(copilot?.errors.map((error) => error.label)).toEqual(["Copilot"]);
   });
 

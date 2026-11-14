@@ -31,7 +31,7 @@ import type {
 } from "../contracts/dashboard.js";
 import type { RangeKey } from "../contracts/ranges.js";
 import { createLoadConfigMeta, loadConfig } from "../lib/config.js";
-import type { QuotaProvider, QuotaProviderContext } from "../lib/entries.js";
+import type { QuotaProvider, QuotaProviderContext, QuotaToastEntry } from "../lib/entries.js";
 import { rawAssistantRowHasTokenUsage } from "../lib/opencode-storage.js";
 import {
   collectQuotaDashboardProviderResults,
@@ -50,8 +50,12 @@ import { type AnalyticsReadService, createAnalyticsReadService } from "./analyti
 import { buildCardId, hashQuotaCardIdentity } from "./identity.js";
 import {
   buildProviderCards,
+  cardSourceKey,
+  type MergedProbe,
   openAiOptionalVisibilityRows,
   type ProviderCardPreferences,
+  type SourceKey,
+  UNSCOPED,
 } from "./provider-cards.js";
 import { TEMPORAL_QUOTA_POLICIES } from "./temporal-quota-policy-data.js";
 import {
@@ -151,14 +155,6 @@ function translateAnalyticsError(error: unknown): unknown {
  */
 function createDefaultAnalyticsService(): DashboardAnalyticsService {
   return createAnalyticsReadService();
-}
-
-/**
- * A successful measurement is at least one quota entry. Discovered account
- * descriptors alone (an error-only account list) are not a measurement.
- */
-function hasMeasurements(probe: QuotaStatusLiveProbe): boolean {
-  return probe.result.entries.length > 0;
 }
 
 /**
@@ -383,7 +379,10 @@ export function createDashboardReadSource(
 
   let lastQuotaSnapshot: QuotaSnapshot | undefined;
   let quotaCycle: Promise<QuotaSnapshot> | undefined;
-  const lastGoodProbes = new Map<string, QuotaStatusLiveProbe>();
+  const lastGoodProbes = new Map<
+    string,
+    { cacheScope: string; bySource: Map<SourceKey, QuotaToastEntry[]> }
+  >();
 
   async function loadDashboardConfig(): Promise<QuotaToastConfig> {
     if (options.loadConfig) return options.loadConfig();
@@ -421,23 +420,12 @@ export function createDashboardReadSource(
   }
 
   interface MergedCycle {
-    probes: QuotaStatusLiveProbe[];
-    /** True when a provider failed, was missing, or used last-good data. */
+    probes: MergedProbe[];
+    /** No fresh measurement was available and data failed or was retained. */
     substituted: boolean;
   }
 
-  /**
-   * Merge one cycle with the per-provider last-good map (checkpoint review
-   * finding 9):
-   *
-   * - New entries are the only successful measurement; refreshed accounts are
-   *   taken from the measurement snapshot, never from a descriptor-only result.
-   * - A provider without new measurements keeps its last-good entries/accounts
-   *   but surfaces the *current* cycle's errors.
-   * - A missing provider cannot prove its account scope, so its last-good is dropped.
-   * - Failures and substitutions mark the snapshot stale and preserve the prior
-   *   poll timestamp, or use the current attempt time on the first cycle.
-   */
+  /** Keep last-good entries scoped to the current credential and card identity. */
   function mergeProviderResults(
     probes: readonly QuotaStatusLiveProbe[],
     selected: readonly QuotaProvider[],
@@ -447,49 +435,81 @@ export function createDashboardReadSource(
       if (!selectedIds.has(providerId)) lastGoodProbes.delete(providerId);
     }
 
-    const merged: QuotaStatusLiveProbe[] = [];
+    const merged: MergedProbe[] = [];
     const seen = new Set<string>();
-    let substituted = false;
+    let anyFresh = false;
+    let anyError = false;
+    let dropped = false;
+    let anyRetained = false;
     for (const probe of probes) {
       seen.add(probe.providerId);
-      if (hasMeasurements(probe)) {
-        if (probe.result.errors.some((error) => error.kind !== "intentional-filter"))
-          substituted = true;
-        lastGoodProbes.set(probe.providerId, probe);
-        merged.push(probe);
-        continue;
-      }
       if (hasRevokedOpenCodeGoEntitlement(probe)) {
         // A revoked entitlement replaces the measurement instead of falling
         // back to it; the current result (possibly descriptor-only) is fresh.
         lastGoodProbes.delete(probe.providerId);
+        anyFresh = true;
         merged.push(probe);
         continue;
       }
-      const lastGood = lastGoodProbes.get(probe.providerId);
-      if (!lastGood || !probe.cacheScope || probe.cacheScope !== lastGood.cacheScope) {
-        if (probe.result.errors.some((error) => error.kind !== "intentional-filter"))
-          substituted = true;
-        if (lastGood) {
-          lastGoodProbes.delete(probe.providerId);
-          substituted = true;
+      let store = lastGoodProbes.get(probe.providerId);
+      if (!probe.cacheScope || store?.cacheScope !== probe.cacheScope) {
+        lastGoodProbes.delete(probe.providerId);
+        store = undefined;
+      }
+      const accountIds = new Set((probe.result.accounts ?? []).map((account) => account.sourceId));
+      const entries = new Map<SourceKey, QuotaToastEntry[]>();
+      for (const entry of probe.result.entries) {
+        const key = cardSourceKey(entry.accounting.sourceId, accountIds);
+        const group = entries.get(key) ?? [];
+        group.push(entry);
+        entries.set(key, group);
+      }
+      const errors = probe.result.errors.filter((error) => error.kind !== "intentional-filter");
+      anyError ||= errors.length > 0;
+      const failed = new Set(errors.map((error) => cardSourceKey(error.sourceId, accountIds)));
+      const rateLimited = new Set(
+        errors
+          .filter((error) => error.retryAtMs !== undefined)
+          .map((error) => cardSourceKey(error.sourceId, accountIds)),
+      );
+      const freshKeys = [...entries.keys()].filter((key) => !rateLimited.has(key));
+      anyFresh ||= freshKeys.length > 0;
+      const next = new Map<SourceKey, QuotaToastEntry[]>();
+      const retained = new Set<SourceKey>();
+      for (const key of freshKeys) next.set(key, entries.get(key)!);
+      for (const key of rateLimited)
+        if (entries.has(key)) {
+          retained.add(key);
+          const old = store?.bySource.get(key);
+          if (old) next.set(key, old);
         }
-        // Nothing was ever measured for this provider: expose the current
-        // error/no-data result as-is.
-        merged.push(probe);
-        continue;
+      for (const [key, old] of store?.bySource ?? []) {
+        if (entries.has(key) || (freshKeys.length > 0 && !failed.has(key))) continue;
+        if (key !== UNSCOPED && !accountIds.has(key)) continue;
+        const safe = old.filter(
+          (entry) => cardSourceKey(entry.accounting.sourceId, accountIds) === key,
+        );
+        if (safe.length === 0) continue;
+        entries.set(key, safe);
+        next.set(key, safe);
+        retained.add(key);
       }
-      substituted = true;
+      if (probe.cacheScope)
+        lastGoodProbes.set(probe.providerId, { cacheScope: probe.cacheScope, bySource: next });
+      anyRetained ||= retained.size > 0;
       merged.push({
-        providerId: probe.providerId,
-        result: { ...lastGood.result, errors: probe.result.errors },
+        ...probe,
+        result: { ...probe.result, entries: [...entries.values()].flat() },
+        retainedSourceIds: new Set([...retained].filter((key): key is string => key !== UNSCOPED)),
+        retainedUnscoped: retained.has(UNSCOPED),
       });
     }
     for (const provider of selected) {
       if (seen.has(provider.id)) continue;
-      if (lastGoodProbes.delete(provider.id)) substituted = true;
+      lastGoodProbes.delete(provider.id);
+      dropped = true;
     }
-    return { probes: merged, substituted };
+    return { probes: merged, substituted: !anyFresh && (anyRetained || anyError || dropped) };
   }
 
   async function runQuotaCycle(refresh = false): Promise<QuotaSnapshot> {

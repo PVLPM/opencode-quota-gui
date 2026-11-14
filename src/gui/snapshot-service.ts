@@ -307,6 +307,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   const now = options.now ?? Date.now;
   const cache = new Map<string, CacheEntry>();
   let quotaRefresh: Promise<QuotaSnapshot> | undefined;
+  let quotaPoll: Promise<boolean> | undefined;
   const computes = new Map<string, () => Promise<unknown>>();
   const inflight = new Map<string, InflightTask>();
   const listeners = new Set<(event: DashboardEvent) => void>();
@@ -650,7 +651,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   }
 
   async function tickQuota(): Promise<void> {
-    if (quotaTicking || closed || viewers === 0) return;
+    if (quotaTicking || quotaRefresh || closed || viewers === 0) return;
     quotaTicking = true;
     const epoch = viewerEpoch;
     const changed = new Set<DashboardEventTopic>();
@@ -659,7 +660,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       // tick awaits, and one tick must not grow while it runs.
       for (const [key, compute] of Array.from(computes)) {
         if (kindOf(key) !== "quota") continue;
-        if (!(await pollOne(key, compute, epoch, changed))) break;
+        const poll = pollOne(key, compute, epoch, changed);
+        quotaPoll = poll;
+        try {
+          if (!(await poll)) break;
+        } finally {
+          if (quotaPoll === poll) quotaPoll = undefined;
+        }
       }
     } finally {
       quotaTicking = false;
@@ -772,6 +779,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       if (!input?.refresh) return load(quotaKey(), compute);
       if (quotaRefresh) return quotaRefresh;
       const refresh = (async () => {
+        await quotaPoll;
         await inflight.get(quotaKey())?.promise.catch(() => undefined);
         const cached = cache.get(quotaKey());
         if (cached) cached.stale = true;
