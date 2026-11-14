@@ -41,19 +41,32 @@ it("keeps healthy account rings during a failed poll and restores the failed acc
         result: {
           attempted: true,
           accounts,
-          entries: [
-            row("a", "5h", "window:five_hour", cycle === 1 ? 80 : 70),
-            row("a", "Weekly", "window:week", 60),
-            {
-              ...row("a", "Fable", "fable", 50),
-              semantic: {
-                metric: { kind: "named" as const, name: "Fable weekly" },
-                prominence: "primary" as const,
-              },
-            },
-            ...(cycle === 2 ? [] : [row("b", "5h", "window:five_hour", cycle === 1 ? 30 : 40)]),
-          ],
-          errors: cycle === 2 ? [{ sourceId: "b", label: "B", message: "temporary" }] : [],
+          entries:
+            cycle >= 4
+              ? []
+              : [
+                  row("a", "5h", "window:five_hour", cycle === 1 ? 80 : 70),
+                  row("a", "Weekly", "window:week", 60),
+                  {
+                    ...row("a", "Fable", "fable", 50),
+                    semantic: {
+                      metric: { kind: "named" as const, name: "Fable weekly" },
+                      prominence: "primary" as const,
+                    },
+                  },
+                  ...(cycle === 2
+                    ? []
+                    : [row("b", "5h", "window:five_hour", cycle === 1 ? 30 : 40)]),
+                ],
+          errors:
+            cycle === 2
+              ? [{ sourceId: "b", label: "B", message: "temporary" }]
+              : cycle >= 4
+                ? [
+                    { sourceId: "a", label: "A", message: "offline" },
+                    { sourceId: "b", label: "B", message: "offline" },
+                  ]
+                : [],
         },
       },
     ];
@@ -109,6 +122,8 @@ it("keeps healthy account rings during a failed poll and restores the failed acc
     expect(
       recovered.providers.cards.find((card) => card.accountLabel === "B")?.stale,
     ).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect((await snapshots.quota()).stale).toBe(true);
   } finally {
     removeViewer();
     snapshots.close();
