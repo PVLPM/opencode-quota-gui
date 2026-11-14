@@ -643,7 +643,12 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     const entry = cache.get(key);
     const stale = payloadIsStale(snapshot);
     const changedNow =
-      entry === undefined || entry.stale !== stale || entry.substantive !== substantive;
+      entry === undefined ||
+      entry.stale !== stale ||
+      entry.substantive !== substantive ||
+      (isQuotaKey(key) &&
+        (entry.snapshot as QuotaSnapshot).providers.polledAtMs !==
+          (snapshot as QuotaSnapshot).providers.polledAtMs);
     cache.set(key, {
       snapshot,
       substantive,

@@ -6,6 +6,166 @@ import { DEFAULT_CONFIG } from "../src/lib/types.js";
 import { buildSessionHeaderView } from "../src/native/session-header-model.js";
 import { createQuotaQuery } from "../src/ui/quota-query.js";
 
+it("updates the query's Polled time on an unchanged scheduled collection without recollecting", async () => {
+  vi.useFakeTimers();
+  const start = Date.UTC(2026, 10, 1);
+  vi.setSystemTime(start);
+  const collect = vi.fn(async () => ({
+    generatedAtMs: Date.now(),
+    stale: false,
+    timeZone: "UTC",
+    providers: { cards: [], enabledProviders: "auto" as const, polledAtMs: Date.now() },
+  }));
+  const unused = async (): Promise<never> => {
+    throw new Error("not used");
+  };
+  const source = { quota: collect, home: unused, project: unused, session: unused };
+  const snapshots = createSnapshotService({ source, quotaIntervalMs: 60_000 });
+  const release = snapshots.addViewer();
+  const query = createQuotaQuery((refresh) =>
+    snapshots.quota(refresh ? { refresh: true } : undefined),
+  );
+  const events: string[] = [];
+  const unsubscribe = snapshots.subscribe((event) => {
+    events.push(event.topic);
+    if (event.topic === "quota.changed") void query.read({ changed: true });
+  });
+  try {
+    await query.read();
+    expect(query.data()?.providers.polledAtMs).toBe(start);
+    await query.read();
+    expect(collect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(events).toEqual(["quota.changed"]);
+    expect(query.data()?.providers.polledAtMs).toBe(start + 60_000);
+    expect(collect).toHaveBeenCalledTimes(2);
+    await query.read();
+    expect(query.data()?.providers.polledAtMs).toBe(start + 60_000);
+    expect(collect).toHaveBeenCalledTimes(2);
+  } finally {
+    unsubscribe();
+    release();
+    snapshots.close();
+    vi.useRealTimers();
+  }
+});
+
+it.each([
+  "viewer",
+  "source",
+] as const)("discards an obsolete %s poll without updating the query", async (reason) => {
+  vi.useFakeTimers();
+  const start = Date.UTC(2026, 10, 1);
+  vi.setSystemTime(start);
+  const initial = {
+    generatedAtMs: start,
+    stale: false,
+    timeZone: "UTC",
+    providers: { cards: [], enabledProviders: "auto" as const, polledAtMs: start },
+  };
+  let finish!: (value: typeof initial) => void;
+  const collect = vi
+    .fn()
+    .mockResolvedValueOnce(initial)
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+  const unused = async (): Promise<never> => {
+    throw new Error("not used");
+  };
+  const snapshots = createSnapshotService({
+    source: { quota: collect, home: unused, project: unused, session: unused },
+    quotaIntervalMs: 60_000,
+  });
+  const release = snapshots.addViewer();
+  const query = createQuotaQuery((refresh) =>
+    snapshots.quota(refresh ? { refresh: true } : undefined),
+  );
+  const events: string[] = [];
+  let handoff = false;
+  const unsubscribe = snapshots.subscribe((event) => {
+    if (handoff) return;
+    events.push(event.topic);
+    if (event.topic === "quota.changed") void query.read({ changed: true });
+  });
+  try {
+    await query.read();
+    await vi.advanceTimersByTimeAsync(60_000);
+    if (reason === "viewer") release();
+    else {
+      handoff = true;
+      snapshots.sourceChanged();
+      handoff = false;
+    }
+    finish({ ...initial, providers: { ...initial.providers, polledAtMs: start + 60_000 } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([]);
+    expect(query.data()?.providers.polledAtMs).toBe(start);
+  } finally {
+    unsubscribe();
+    release();
+    snapshots.close();
+    vi.useRealTimers();
+  }
+});
+
+it("propagates Polled through early retry and manual refresh", async () => {
+  vi.useFakeTimers();
+  const start = Date.UTC(2026, 10, 1);
+  vi.setSystemTime(start);
+  const collect = vi.fn(async () => ({
+    generatedAtMs: Date.now(),
+    stale: false,
+    timeZone: "UTC",
+    providers: {
+      cards: [
+        {
+          cardId: "test" as import("../src/contracts/identity.js").CardId,
+          providerId: "test",
+          providerLabel: "Test",
+          labelSource: "provider" as const,
+          rows: [],
+          errors: [{ label: "Test", message: "failed", failureCategory: "provider_api" as const }],
+        },
+      ],
+      enabledProviders: "auto" as const,
+      polledAtMs: Date.now(),
+    },
+  }));
+  const unused = async (): Promise<never> => {
+    throw new Error("not used");
+  };
+  const snapshots = createSnapshotService({
+    source: { quota: collect, home: unused, project: unused, session: unused },
+    quotaIntervalMs: 60_000,
+  });
+  const release = snapshots.addViewer();
+  const query = createQuotaQuery((refresh) =>
+    snapshots.quota(refresh ? { refresh: true } : undefined),
+  );
+  const unsubscribe = snapshots.subscribe((event) => {
+    if (event.topic === "quota.changed") void query.read({ changed: true });
+  });
+  try {
+    await query.read();
+    await vi.advanceTimersByTimeAsync(70_000);
+    expect(query.data()?.providers.polledAtMs).toBe(start + 70_000);
+    expect(collect).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1000);
+    await query.refresh();
+    expect(query.data()?.providers.polledAtMs).toBe(start + 71_000);
+    expect(collect).toHaveBeenCalledTimes(4);
+  } finally {
+    unsubscribe();
+    release();
+    snapshots.close();
+    vi.useRealTimers();
+  }
+});
+
 it("serializes Retry behind a poll and updates both account views without the event", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(Date.UTC(2026, 10, 1));
