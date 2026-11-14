@@ -230,6 +230,16 @@ function viewFor(
 /* ------------------------------------------------------- ring semantics */
 
 describe("session.header rings", () => {
+  it("shows fresh account rings while omitting retained account rings", () => {
+    const a = row("a", "weekly");
+    const b = row("b", "weekly");
+    const cards = viewFor([
+      card({ cardId: "a", rows: [a], windows: [windowRef(a, 0)] }),
+      { ...card({ cardId: "b", rows: [b], windows: [windowRef(b, 0)] }), stale: true },
+    ]).cards;
+    expect(cards.map((item) => item.cardId)).toEqual(["a"]);
+    expect(cards[0]?.rings).toHaveLength(1);
+  });
   it("uses the server's explicit slots, capped at three", () => {
     const fiveHour = row("card-openai", "five", {
       label: "5h",
@@ -1231,7 +1241,7 @@ describe("Native Slot wiring", () => {
     expect(headerSource).toContain('scope: "quota"');
     expect(headerSource).toContain("createSessionHeaderSource");
     expect(sourceSource).toContain("createDashboardPanelState");
-    expect(sourceSource).toContain("client.quota()");
+    expect(sourceSource).toContain("panel.quotaQuery");
     expect(sourceSource).not.toContain("setActiveView");
     expect(sourceSource).not.toContain("setInterval");
     expect(sourceSource).not.toContain("EventSource");

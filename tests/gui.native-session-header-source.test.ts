@@ -390,6 +390,24 @@ afterEach(() => {
 /* ------------------------------------------------------------------- tests */
 
 describe("native session header source", () => {
+  it("shows the forced retry result without an invalidation event or duplicate quota read", async () => {
+    const fake = recordingClient();
+    const [active] = createSignal(true);
+    const source = await mount({ client: fake.client, active });
+    const before = fake.counts.quota;
+    fake.setQuota(async () => {
+      const snapshot = quotaSnapshot();
+      snapshot.providers.cards[0]!.rows[0]!.label = "Updated";
+      return snapshot;
+    });
+
+    source.retry();
+    await flush();
+
+    expect(fake.counts.quota).toBe(before + 1);
+    expect(source.view().cards[0]?.rings[0]?.label).toBe("Updated");
+  });
+
   it("reads nothing while the timeline is inactive", async () => {
     const fake = recordingClient();
     const [active] = createSignal(false);
