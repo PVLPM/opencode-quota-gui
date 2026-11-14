@@ -125,122 +125,9 @@ afterEach(async () => {
 });
 
 describe("V2 server plugin credential lifecycle", () => {
-  it("does not block the request hook on an unresolved active connection", async () => {
-    const ctx = createContext();
-    ctx.integration.connection.active.mockImplementation(() => new Promise(() => {}));
-    await setupPlugin(ctx);
-    const hook = ctx.session.hook.mock.calls.find(
-      ([name]) => name === "model.request",
-    )?.[1] as unknown as (event: unknown) => Promise<void>;
-    const outcome = await Promise.race([
-      Promise.resolve(
-        hook({ kind: "primary", model: { providerID: "openai", id: "gpt-6.1" } }),
-      ).then(() => "returned"),
-      new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50)),
-    ]);
-    expect(outcome).toBe("returned");
-  });
-  it.each([
-    "credential.switched",
-    "credential.updated",
-  ])("clears the method on %s", async (type) => {
-    const ctx = createContext();
-    const queue = createHostEventQueue();
-    ctx.integration.connection.active.mockResolvedValue({
-      type: "credential",
-      id: "id",
-      label: "label",
-      method: "oauth",
-    });
-    vi.mocked(startDashboard).mockResolvedValueOnce({
-      runtime: {} as never,
-      dispose: async () => {},
-    } as never);
-    cacheEventEmit.mockClear();
-    await setupPlugin({ ...ctx, rpc: {}, event: { subscribe: queue.subscribe } });
-    const hook = ctx.session.hook.mock.calls.find(
-      ([name]) => name === "model.request",
-    )?.[1] as unknown as (event: unknown) => Promise<void>;
-    await hook({ kind: "primary", model: { providerID: "openai", id: "gpt-6.1" } });
-    await Promise.resolve();
-    queue.push({
-      type: "session.step.started",
-      created: 900,
-      data: {
-        sessionID: "ses_test",
-        assistantMessageID: "msg_before",
-        started: 800,
-        model: { providerID: "openai", id: "gpt-6.1" },
-      },
-    });
-    await vi.waitFor(() =>
-      expect(JSON.stringify(cacheEventEmit.mock.calls)).toContain('"connectionMethod":"oauth"'),
-    );
-    cacheEventEmit.mockClear();
-    queue.push({ type, created: 1000, data: {} });
-    await vi.waitFor(() => expect(queue.pulls).toBeGreaterThanOrEqual(3));
-    queue.push({
-      type: "session.step.started",
-      created: 1200,
-      data: {
-        sessionID: "ses_test",
-        assistantMessageID: "msg_test",
-        started: 1000,
-        model: { providerID: "openai", id: "gpt-6.1" },
-      },
-    });
-    await vi.waitFor(() => expect(JSON.stringify(cacheEventEmit.mock.calls)).toContain("msg_test"));
-    expect(JSON.stringify(cacheEventEmit.mock.calls)).not.toContain("connectionMethod");
-  });
-  it("ignores an older active lookup that resolves after the newer lookup", async () => {
-    const ctx = createContext();
-    const queue = createHostEventQueue();
-    let resolveOld!: (value: {
-      type: "credential";
-      id: string;
-      label: string;
-      method: "oauth";
-    }) => void;
-    ctx.integration.connection.active.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveOld = resolve;
-        }),
-    );
-    ctx.integration.connection.active.mockResolvedValueOnce({
-      type: "credential",
-      id: "id",
-      label: "label",
-      method: "key",
-    });
-    vi.mocked(startDashboard).mockResolvedValueOnce({
-      runtime: {} as never,
-      dispose: async () => {},
-    } as never);
-    cacheEventEmit.mockClear();
-    await setupPlugin({ ...ctx, rpc: {}, event: { subscribe: queue.subscribe } });
-    const hook = ctx.session.hook.mock.calls.find(
-      ([name]) => name === "model.request",
-    )?.[1] as unknown as (event: unknown) => Promise<void>;
-    const event = { kind: "primary", model: { providerID: "openai", id: "gpt-6.1" } };
-    void hook(event);
-    await hook(event);
-    resolveOld({ type: "credential", id: "id", label: "label", method: "oauth" });
-    await Promise.resolve();
-    queue.push({
-      type: "session.step.started",
-      created: 1200,
-      data: {
-        sessionID: "ses_test",
-        assistantMessageID: "msg_test",
-        started: 1000,
-        model: { providerID: "openai", id: "gpt-6.1" },
-      },
-    });
-    await vi.waitFor(() => expect(JSON.stringify(cacheEventEmit.mock.calls)).toContain("msg_test"));
-    expect(JSON.stringify(cacheEventEmit.mock.calls)).toContain('"connectionMethod":"key"');
-  });
-  it("samples only the active OpenAI method and relays no credential metadata", async () => {
+  it("registers no model.request hook and never attributes an OpenAI connection method", async () => {
+    // Host contract (@opencode/plugin SessionModelRequest vs @opencode/client session.step.started):
+    // no per-invocation id is shared, so the 5-minute fallback is kept for every invocation.
     const ctx = createContext();
     const queue = createHostEventQueue();
     const integration = createFakeIntegration([
@@ -259,14 +146,7 @@ describe("V2 server plugin credential lifecycle", () => {
     } as never);
     cacheEventEmit.mockClear();
     await setupPlugin({ ...ctx, integration, rpc: {}, event: { subscribe: queue.subscribe } });
-    const hook = ctx.session.hook.mock.calls.find(
-      ([name]) => name === "model.request",
-    )?.[1] as unknown as (event: unknown) => Promise<void>;
-    await hook({
-      kind: "primary",
-      sessionID: "ses_test",
-      model: { providerID: "openai", id: "gpt-6.1" },
-    });
+    expect(ctx.session.hook.mock.calls.some(([name]) => name === "model.request")).toBe(false);
     queue.push({
       type: "session.step.started",
       created: 1200,
@@ -279,9 +159,10 @@ describe("V2 server plugin credential lifecycle", () => {
     });
     await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(2));
     const payload = JSON.stringify(cacheEventEmit.mock.calls);
-    expect(payload).toContain('"connectionMethod":"oauth"');
+    expect(payload).toContain("msg_test");
+    expect(payload).not.toContain("connectionMethod");
     expect(payload).not.toContain("private-");
-    expect(integration.connection.active).toHaveBeenCalledWith("openai");
+    expect(integration.connection.active).not.toHaveBeenCalled();
     expect(integration.connection.resolve).not.toHaveBeenCalled();
   });
   it("reads logins through ctx.integration from setup until cleanup", async () => {

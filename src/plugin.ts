@@ -68,26 +68,11 @@ export const QuotaToastPlugin = Plugin.define({
       }
     });
 
-    let openaiMethod: "oauth" | "key" | "external" | "unknown" = "unknown";
-    let openaiSample = 0;
-    await ctx.session.hook("model.request", (event) => {
-      if (event.kind !== "primary" || event.model.providerID !== "openai") return;
-      const sample = ++openaiSample;
-      openaiMethod = "unknown";
-      void (async () => {
-        try {
-          const connection = await ctx.integration.connection.active("openai");
-          const method = connection?.type === "credential" ? connection.method : undefined;
-          if (sample === openaiSample) {
-            openaiMethod =
-              method === "oauth" || method === "key" || method === "external" ? method : "unknown";
-          }
-        } catch {
-          // Missing or unavailable metadata retains the conservative fallback.
-        }
-      })();
-    });
-
+    // OpenAI connection method is deliberately NOT attributed to invocations: the host's
+    // `model.request` hook carries {sessionID, agent, model, kind, headers} and
+    // `session.step.started` carries {sessionID, assistantMessageID, agent, model, started};
+    // no field is shared per invocation, so any pairing would be a timing/active-state guess.
+    // Unverified OpenAI invocations keep the conservative 5-minute TTL fallback.
     // Every login read in this process goes through this location's `ctx.integration`. Bound
     // last, so a setup that fails part way leaves no binding behind. OpenCode routes the
     // retained hooks only after setup, so no read comes earlier.
@@ -247,8 +232,6 @@ export const QuotaToastPlugin = Plugin.define({
               );
             }
             if (event.type === "credential.updated" || event.type === "credential.switched") {
-              openaiSample++;
-              openaiMethod = "unknown";
               notifyCredentialsChanged();
             }
             // The Started event's model identity is available before invocation completion. Do not
@@ -260,17 +243,7 @@ export const QuotaToastPlugin = Plugin.define({
               Number.isFinite(event.created) &&
               event.created >= 0
             ) {
-              // Owner-approved approximation: active connection is not proof of this request's route.
-              const projected =
-                cacheObserverEvent.type === "session.step.started" &&
-                cacheObserverEvent.data.model.providerID === "openai" &&
-                openaiMethod !== "unknown"
-                  ? {
-                      ...cacheObserverEvent,
-                      data: { ...cacheObserverEvent.data, connectionMethod: openaiMethod },
-                    }
-                  : cacheObserverEvent;
-              emitCacheObserverEvent(projected, event.created);
+              emitCacheObserverEvent(cacheObserverEvent, event.created);
             }
           }
           if (signal.aborted) return;
