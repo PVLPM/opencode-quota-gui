@@ -46,7 +46,10 @@ export const OPENCODE_SPRITE_SHA256 =
   "90c22219a2aeff3ea489625156530ea0fa8a072a1b934a52a9192074d39237df";
 export const OPENCODE_LICENSE_SHA256 =
   "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b";
-export const EXPECTED_LOCAL_LOGO_COUNT = 1;
+export const EXPECTED_LOCAL_LOGO_COUNT = 2;
+const CLAUDE_AGENT_COMMIT = "850504188198976c668bd3b514c3e8de21b9e0e2";
+const CLAUDE_AGENT_SPRITE_SHA256 =
+  "9f17db4e21f4450b000c2e105ad137c775172135eb31d8441940a45e567d0792";
 
 const SAFE_PROVIDER_ID = /^[a-z0-9][a-z0-9.-]*$/u;
 const SAFE_LOGO_URL = /^\/assets\/providers\/[a-z0-9][a-z0-9.-]*\.svg$/u;
@@ -490,7 +493,7 @@ Provider logo assets in this directory are vendored from [models.dev](${MODELS_D
 - **Upstream license:** MIT. The copyright and permission notice is preserved verbatim in \`UPSTREAM-MIT.txt\`.
 - **Source path:** \`providers/<provider-id>/logo.svg\` in the pinned models.dev archive.
 - **Normalization:** each SVG is stored as UTF-8 with XML/DTD declarations removed, trailing horizontal whitespace outside whitespace-sensitive text content stripped, and a final newline added; the artwork itself is unchanged.
-- **Local use:** ${logoCount} upstream provider logos, the local neutral \`${GENERIC_LOGO_FILE}\` fallback and the local OpenCode Go G mark are copied into the package at build time and served from same-origin \`/assets/providers/\`. The dashboard never hotlinks a remote logo.
+- **Local use:** ${logoCount} upstream provider logos, the local neutral \`${GENERIC_LOGO_FILE}\` fallback and the local OpenCode Go G and Claude Agent marks are copied into the package at build time and served from same-origin \`/assets/providers/\`. The dashboard never hotlinks a remote logo.
 - **OpenCode identities:** the upstream \`opencode\` and \`opencode-go\` entries in models.dev both contain the O artwork and remain vendored unchanged. Presentation overrides only \`opencode-go\` with a dedicated G mark extracted from [OpenCode](${OPENCODE_REPOSITORY}) at \`${OPENCODE_COMMIT}\`; see \`${OPENCODE_NOTICE_FILE}\` and \`${OPENCODE_LICENSE_FILE}\`. \`opencode\` and OpenCode Zen keep the O mark. Raw analytics identities are never rewritten.
 - **Brand rights:** the MIT license covers the models.dev repository and the assets as distributed there. It does not establish or grant rights in any provider's name, logo, or other trademark, and individual brand-use terms may still apply. The logos identify the corresponding providers in a local dashboard; no affiliation or endorsement is implied.
 - **Mask-incompatible marks:** a small number of upstream marks use an opaque raster or full-bleed background and would collapse to a solid block under a one-colour mask. The catalog shows the local neutral fallback for those while keeping the vendored file and attribution.
@@ -649,7 +652,16 @@ function validateLocalOverrides(assetDir) {
     if (entry.url !== `/assets/providers/${id}.svg` || !SAFE_LOGO_URL.test(entry.url)) {
       throw new Error(`${id}: local logo URL is not the allowlisted local path`);
     }
-    if (entry.sourcePath !== OPENCODE_SOURCE_PATH || entry.sourceSymbol !== "opencode-go") {
+    const validSymbol =
+      (id === "opencode-go-g" &&
+        entry.sourceSymbol === "opencode-go" &&
+        entry.sourceCommit === undefined &&
+        entry.sourceSpriteSha256 === undefined) ||
+      (id === "claude-agent" &&
+        entry.sourceSymbol === "claude-agent" &&
+        entry.sourceCommit === CLAUDE_AGENT_COMMIT &&
+        entry.sourceSpriteSha256 === CLAUDE_AGENT_SPRITE_SHA256);
+    if (entry.sourcePath !== OPENCODE_SOURCE_PATH || !validSymbol) {
       throw new Error(`${id}: local artwork provenance is not the pinned OpenCode symbol`);
     }
     if (!Number.isInteger(entry.bytes) || entry.bytes <= 0) {
@@ -667,8 +679,14 @@ function validateLocalOverrides(assetDir) {
     logos.set(id, entry);
   }
 
-  if (logos.size !== EXPECTED_LOCAL_LOGO_COUNT || !logos.has("opencode-go-g")) {
-    throw new Error(`Expected the local OpenCode Go mark, found ${logos.size} local logos`);
+  if (
+    logos.size !== EXPECTED_LOCAL_LOGO_COUNT ||
+    !logos.has("opencode-go-g") ||
+    !logos.has("claude-agent")
+  ) {
+    throw new Error(
+      `Expected the local OpenCode Go and Claude Agent marks, found ${logos.size} local logos`,
+    );
   }
 
   const licensePath = join(assetDir, OPENCODE_LICENSE_FILE);
@@ -680,7 +698,11 @@ function validateLocalOverrides(assetDir) {
   const noticePath = join(assetDir, OPENCODE_NOTICE_FILE);
   if (!existsSync(noticePath)) throw new Error(`Missing OpenCode artwork notice ${noticePath}`);
   const notice = readFileSync(noticePath, "utf8");
-  if (!notice.includes(OPENCODE_COMMIT) || !notice.includes(OPENCODE_SOURCE_PATH)) {
+  if (
+    !notice.includes(OPENCODE_COMMIT) ||
+    !notice.includes(CLAUDE_AGENT_COMMIT) ||
+    !notice.includes(OPENCODE_SOURCE_PATH)
+  ) {
     throw new Error("The OpenCode artwork notice is missing its pinned provenance");
   }
   return { logos, metadata };

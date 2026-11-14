@@ -244,10 +244,10 @@ describe("init installer planning and merge behavior", () => {
       {
         providerId: "anthropic",
         label: "Anthropic",
-        anchor: "anthropic-claude",
+        anchor: "anthropic",
       },
     ]);
-    expect(plan.summaryLines).toContain("  - Anthropic: docs/readme/providers.md#anthropic-claude");
+    expect(plan.summaryLines).toContain("  - Anthropic: docs/readme/providers.md#anthropic");
 
     const result = await applyInitInstallerPlan(plan);
     expect(result.writtenPaths).toEqual([

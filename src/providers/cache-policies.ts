@@ -1,6 +1,6 @@
 import {
   resolveAnthropicAccountSetIdentity,
-  resolveAnthropicAuthIdentity,
+  resolveClaudeAgentAccountIdentity,
 } from "../lib/anthropic.js";
 import { resolveChutesApiKey } from "../lib/chutes-config.js";
 import { resolveCopilotAuthIdentity } from "../lib/copilot.js";
@@ -51,11 +51,12 @@ import { resolveSyntheticApiKey } from "../lib/synthetic-config.js";
 import { resolveXaiAuthIdentity } from "../lib/xai.js";
 import { DEFAULT_ZAI_AUTH_CACHE_MAX_AGE_MS, resolveZaiAuthCached } from "../lib/zai-auth.js";
 import { DEFAULT_ZHIPU_AUTH_CACHE_MAX_AGE_MS, resolveZhipuAuthCached } from "../lib/zhipu-auth.js";
+import { readOpenCodeAnthropicLogins } from "./anthropic.js";
 import {
-  getClaudeCodeRuntimeProviderId,
-  isClaudeCodeRuntimeDetected,
-  readOpenCodeAnthropicLogins,
-} from "./anthropic.js";
+  claudeAgentExcludedFingerprints,
+  getClaudeAgentRuntimeProviderId,
+  isClaudeAgentRuntimeDetected,
+} from "./claude-agent.js";
 
 const UNCACHED = { kind: "uncached" } as const satisfies QuotaProviderCachePolicy;
 
@@ -183,25 +184,10 @@ const quotaProvidersCachePolicy: QuotaProviderCachePolicy = {
   },
 };
 
-/**
- * The Claude Code route is identified by its Claude CLI login alone. The OpenCode route is identified
- * by every OpenCode Anthropic login row plus the Claude CLI row, because the route emits all of them.
- */
-async function anthropicRouteIdentity(
-  ctx: QuotaProviderContext,
-): Promise<ResolvedAuthIdentity | null> {
-  if (getClaudeCodeRuntimeProviderId(ctx)) {
-    return resolveAnthropicAuthIdentity({
-      binaryPath: ctx.config.anthropicBinaryPath,
-      operationCache: ctx.operationCache,
-      useClaudeCodeCredentials: true,
-    });
-  }
-
+/** Every OpenCode Anthropic login row; never the Claude CLI, which is Claude Agent's. */
+async function anthropicIdentity(ctx: QuotaProviderContext): Promise<ResolvedAuthIdentity | null> {
   const logins = await readOpenCodeAnthropicLogins();
   return resolveAnthropicAccountSetIdentity({
-    binaryPath: ctx.config.anthropicBinaryPath,
-    operationCache: ctx.operationCache,
     openCodeAccounts: logins.map(({ row, auth }) => ({
       sourceId: row.id,
       label: row.label,
@@ -210,14 +196,31 @@ async function anthropicRouteIdentity(
       ...(auth.state === "configured" ? { accessToken: auth.accessToken } : {}),
     })),
     onlyCurrentModel: ctx.config.onlyCurrentModel === true,
-    claudeCodeRuntimeDetected: await isClaudeCodeRuntimeDetected(ctx),
+  });
+}
+
+/** The Claude CLI login alone, plus whether the Anthropic provider already shows its token. */
+async function claudeAgentIdentity(
+  ctx: QuotaProviderContext,
+): Promise<ResolvedAuthIdentity | null> {
+  const selected = getClaudeAgentRuntimeProviderId(ctx) !== undefined;
+  return resolveClaudeAgentAccountIdentity({
+    binaryPath: ctx.config.anthropicBinaryPath,
+    operationCache: ctx.operationCache,
+    onlyCurrentModel: ctx.config.onlyCurrentModel === true,
+    runtimeDetected: selected ? false : await isClaudeAgentRuntimeDetected(ctx),
+    excludedCredentialFingerprints: await claudeAgentExcludedFingerprints(ctx),
   });
 }
 
 export const PROVIDER_CACHE_POLICIES = {
   anthropic: {
     kind: "resolved-auth",
-    resolveIdentity: (ctx) => anthropicRouteIdentity(ctx),
+    resolveIdentity: (ctx) => anthropicIdentity(ctx),
+  },
+  "claude-agent": {
+    kind: "resolved-auth",
+    resolveIdentity: (ctx) => claudeAgentIdentity(ctx),
   },
   copilot: {
     kind: "resolved-auth",

@@ -1,4 +1,5 @@
 import { getAnthropicNoDataMessage } from "../providers/anthropic.js";
+import { getClaudeAgentNoDataMessage } from "../providers/claude-agent.js";
 import { getProviders } from "../providers/registry.js";
 import type { LoadConfigMeta } from "./config.js";
 import type {
@@ -451,6 +452,9 @@ function getExplicitNoDataMessage(provider: QuotaProvider): string {
   if (provider.id === "anthropic") {
     return getAnthropicNoDataMessage();
   }
+  if (provider.id === "claude-agent") {
+    return getClaudeAgentNoDataMessage();
+  }
   return "Not configured";
 }
 
@@ -469,7 +473,10 @@ function shouldSurfaceNoDataMessage(params: {
     return true;
   }
 
-  return activeProviderCount === 1 && (provider.id === "anthropic" || provider.id === "cursor");
+  return (
+    activeProviderCount === 1 &&
+    (provider.id === "anthropic" || provider.id === "claude-agent" || provider.id === "cursor")
+  );
 }
 
 function buildExplicitProviderIssues(params: {

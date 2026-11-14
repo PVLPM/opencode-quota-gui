@@ -38,7 +38,7 @@ import {
   clearAnthropicDiagnosticsCacheForTests,
   getAnthropicDiagnostics,
   hasAnthropicCredentialsConfigured,
-  resolveAnthropicAuthIdentity,
+  resolveClaudeAgentAccountIdentity,
 } from "../src/lib/anthropic.js";
 import { deriveResolvedAuthIdentity } from "../src/lib/resolved-auth-identity.js";
 
@@ -129,7 +129,6 @@ describe.runIf(process.platform === "win32")(
 
       const diagnostics = await getAnthropicDiagnostics({
         binaryPath: shim,
-        useClaudeCodeCredentials: true,
       });
 
       expect(diagnostics.installed).toBe(true);
@@ -141,7 +140,7 @@ describe.runIf(process.platform === "win32")(
     it("resolves the default bare claude command through PATH inside cmd.exe", async () => {
       process.env.PATH = `${pathBin};${originalPath ?? ""}`;
 
-      const diagnostics = await getAnthropicDiagnostics({ useClaudeCodeCredentials: true });
+      const diagnostics = await getAnthropicDiagnostics();
 
       expect(diagnostics.installed).toBe(true);
       expect(diagnostics.version).toBe("1.0.0");
@@ -153,7 +152,6 @@ describe.runIf(process.platform === "win32")(
 
       const diagnostics = await getAnthropicDiagnostics({
         binaryPath: join(spacedBin, "claude.cmd"),
-        useClaudeCodeCredentials: true,
       });
 
       expect(diagnostics.version).toBe("9.9.9");
@@ -163,9 +161,9 @@ describe.runIf(process.platform === "win32")(
       const sentinel = join(root, "pwned.txt");
       const hostile = `${join(spacedBin, "claude.cmd")}" & echo pwned> "${sentinel}" & "x.cmd`;
 
-      await expect(
-        getAnthropicDiagnostics({ binaryPath: hostile, useClaudeCodeCredentials: true }),
-      ).rejects.toThrow(/cannot be passed safely through cmd\.exe/u);
+      await expect(getAnthropicDiagnostics({ binaryPath: hostile })).rejects.toThrow(
+        /cannot be passed safely through cmd\.exe/u,
+      );
       await expect(access(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
     });
 
@@ -184,14 +182,16 @@ describe.runIf(process.platform === "win32")(
         claudeShimReportingConfigDirectory(configDirectory),
       );
 
-      await resolveAnthropicAuthIdentity({
+      await resolveClaudeAgentAccountIdentity({
         binaryPath: join(shimDirectory, "claude.cmd"),
-        useClaudeCodeCredentials: true,
+        onlyCurrentModel: false,
+        runtimeDetected: false,
+        excludedCredentialFingerprints: [],
       });
 
       expect(deriveResolvedAuthIdentity).toHaveBeenCalledWith(
         expect.objectContaining({
-          providerId: "anthropic:claude-code-route",
+          providerId: "anthropic:claude-cli-account",
           principal: { kind: "credential", value: "reported-dir-token" },
         }),
       );
@@ -209,13 +209,15 @@ describe.runIf(process.platform === "win32")(
         claudeShimReportingConfigDirectory(configDirectory),
       );
 
-      await expect(
-        resolveAnthropicAuthIdentity({
-          binaryPath: join(shimDirectory, "claude.cmd"),
-          useClaudeCodeCredentials: true,
-        }),
-      ).resolves.toBeNull();
-      expect(deriveResolvedAuthIdentity).not.toHaveBeenCalled();
+      await resolveClaudeAgentAccountIdentity({
+        binaryPath: join(shimDirectory, "claude.cmd"),
+        onlyCurrentModel: false,
+        runtimeDetected: false,
+        excludedCredentialFingerprints: [],
+      });
+      expect(deriveResolvedAuthIdentity).not.toHaveBeenCalledWith(
+        expect.objectContaining({ providerId: "anthropic:claude-cli-account" }),
+      );
       expect(readFile).not.toHaveBeenCalledWith(
         join(homedir(), ".claude", ".credentials.json"),
         "utf8",
@@ -236,14 +238,16 @@ describe.runIf(process.platform === "win32")(
       await writeFile(join(shimDirectory, "claude.cmd"), claudeShimReportingConfigDirectory());
       process.env["CLAUDE_CONFIG_DIR"] = envConfigDirectory;
 
-      await resolveAnthropicAuthIdentity({
+      await resolveClaudeAgentAccountIdentity({
         binaryPath: join(shimDirectory, "claude.cmd"),
-        useClaudeCodeCredentials: true,
+        onlyCurrentModel: false,
+        runtimeDetected: false,
+        excludedCredentialFingerprints: [],
       });
 
       expect(deriveResolvedAuthIdentity).toHaveBeenCalledWith(
         expect.objectContaining({
-          providerId: "anthropic:claude-code-route",
+          providerId: "anthropic:claude-cli-account",
           principal: { kind: "credential", value: "env-config-token" },
         }),
       );
@@ -259,15 +263,11 @@ describe.runIf(process.platform === "win32")(
       const shim = join(freshBin, "claude.cmd");
       await writeFile(shim, claudeShim("9.9.9", false));
 
-      await expect(
-        hasAnthropicCredentialsConfigured({ binaryPath: shim, useClaudeCodeCredentials: true }),
-      ).resolves.toBe(false);
+      await expect(hasAnthropicCredentialsConfigured({ binaryPath: shim })).resolves.toBe(false);
 
       await writeFile(shim, claudeShim("9.9.9", true));
 
-      await expect(
-        hasAnthropicCredentialsConfigured({ binaryPath: shim, useClaudeCodeCredentials: true }),
-      ).resolves.toBe(true);
+      await expect(hasAnthropicCredentialsConfigured({ binaryPath: shim })).resolves.toBe(true);
     });
   },
 );

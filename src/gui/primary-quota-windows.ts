@@ -39,6 +39,14 @@ interface PrimaryQuotaWindowRule {
   readonly untypedSlot?: PrimaryQuotaWindowSlot;
 }
 
+const ANTHROPIC_SUBSCRIPTION_WINDOWS: PrimaryQuotaWindowRule = {
+  rowKeys: [
+    { value: "window:five_hour", slot: 0 },
+    { value: "window:week", slot: 1 },
+  ],
+  namedMetrics: [{ value: "Fable weekly", slot: 2 }],
+};
+
 /**
  * Explicit, evidence-backed mapping. Omitted providers intentionally have no
  * defensible primary/auxiliary split in their current source (see the Stage 6
@@ -46,14 +54,10 @@ interface PrimaryQuotaWindowRule {
  */
 const PRIMARY_QUOTA_WINDOW_RULES: Readonly<Record<string, PrimaryQuotaWindowRule>> = {
   // 5h, weekly, and the provider's explicit Fable weekly slot; `window:month`
-  // is Usage Credits (`src/providers/anthropic.ts` 160-195, 240-274).
-  anthropic: {
-    rowKeys: [
-      { value: "window:five_hour", slot: 0 },
-      { value: "window:week", slot: 1 },
-    ],
-    namedMetrics: [{ value: "Fable weekly", slot: 2 }],
-  },
+  // is Usage Credits (`anthropicQuotaEntries` in `src/providers/anthropic.ts`).
+  anthropic: ANTHROPIC_SUBSCRIPTION_WINDOWS,
+  // Claude Agent emits the same subscription rows from its Claude CLI login.
+  "claude-agent": ANTHROPIC_SUBSCRIPTION_WINDOWS,
   // 5h/weekly/monthly ChatGPT windows; Code Review is a special secondary
   // window (`src/providers/openai.ts` 56-75, 239-261).
   openai: {

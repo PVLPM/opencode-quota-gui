@@ -1586,6 +1586,10 @@ describe("buildQuotaStatusReport", () => {
           account_id: "(none)",
         }),
         makeProviderSuccessProbe("anthropic", {
+          oauth_credential_source: "opencode-auth",
+          opencode_logins: "1",
+        }),
+        makeProviderSuccessProbe("claude-agent", {
           cli_installed: "true",
           cli_version: "1.2.3",
           binary_path: "claude (PATH)",
@@ -1610,7 +1614,7 @@ describe("buildQuotaStatusReport", () => {
     );
     expect(blank).toBe("");
 
-    const excerpt = body.slice(0, 53).join("\n");
+    const excerpt = body.slice(0, 55).join("\n");
     expect(excerpt).toMatchInlineSnapshot(`
       "toast:
       - configSource: defaults
@@ -1645,6 +1649,10 @@ describe("buildQuotaStatusReport", () => {
       - account_id: (none)
 
       anthropic:
+      - oauth_credential_source: opencode-auth
+      - opencode_logins: 1
+
+      claude-agent:
       - cli_installed: true
       - cli_version: 1.2.3
       - binary_path: claude (PATH)
@@ -1662,8 +1670,6 @@ describe("buildQuotaStatusReport", () => {
       minimax:
 
       minimax_china:
-
-      kimi:
       "
     `);
 

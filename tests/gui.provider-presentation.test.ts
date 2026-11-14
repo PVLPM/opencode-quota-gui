@@ -192,9 +192,10 @@ describe("provider presentation catalog", () => {
     expect(manifest.upstreamBytes).toBe(623_957);
     expect(manifest.logoBytes).toBeGreaterThan(600_000);
     expect(manifest.logoBytes).toBeLessThan(650_000);
-    expect(providerLogoFiles).toHaveLength(224);
+    expect(providerLogoFiles).toHaveLength(225);
     expect(providerLogoFiles).toContain("generic.svg");
     expect(providerLogoFiles).toContain("opencode-go-g.svg");
+    expect(providerLogoFiles).toContain("claude-agent.svg");
 
     for (const [id, entry] of Object.entries(runtimeCatalog.logos)) {
       expect(id).toMatch(/^[a-z0-9][a-z0-9.-]*$/u);
@@ -297,7 +298,8 @@ describe("provider presentation catalog", () => {
   it.each([
     ["copilot", "Copilot", "/assets/providers/github-copilot.svg"],
     ["claude", "Anthropic", "/assets/providers/anthropic.svg"],
-    ["claude-agent", "Anthropic", "/assets/providers/anthropic.svg"],
+    ["claude-agent", "Claude Agent", "/assets/providers/claude-agent.svg"],
+    ["claude-code", "Claude Agent", "/assets/providers/claude-agent.svg"],
     ["google-gemini-cli", "Gemini CLI", "/assets/providers/google.svg"],
     ["google-agy", "Google AGY", "/assets/providers/google.svg"],
     ["nanogpt", "NanoGPT", "/assets/providers/nano-gpt.svg"],
@@ -312,6 +314,42 @@ describe("provider presentation catalog", () => {
     expect(presentation.logoSrc).toBe(logoSrc);
     expect(presentation.logoKey).toBe(logoSrc.slice("/assets/providers/".length, -".svg".length));
     expect(presentation.hasSpecificLogo).toBe(true);
+  });
+
+  it("keeps Anthropic and Claude Agent artwork distinct", () => {
+    const anthropic = resolveProviderPresentation("anthropic");
+    const agent = resolveProviderPresentation("claude-agent");
+    expect(anthropic.label).toBe("Anthropic");
+    expect(anthropic.logoSrc).toBe("/assets/providers/anthropic.svg");
+    expect(anthropic.hasSpecificLogo).toBe(true);
+    expect(agent.logoSrc).not.toBe(anthropic.logoSrc);
+  });
+
+  it("pins the Claude Agent sprite extraction", () => {
+    const overrides = readJson<{
+      logos: Record<
+        string,
+        {
+          bytes: number;
+          sha256: string;
+          sourceSymbol: string;
+          sourceCommit: string;
+          sourceSpriteSha256: string;
+        }
+      >;
+    }>(path.join(logoDir, "local-overrides.json"));
+    const entry = overrides.logos["claude-agent"];
+    const svg = readFileSync(path.join(logoDir, "claude-agent.svg"));
+    expect(entry?.sourceSymbol).toBe("claude-agent");
+    expect(entry?.sourceCommit).toBe("850504188198976c668bd3b514c3e8de21b9e0e2");
+    expect(entry?.sourceSpriteSha256).toBe(
+      "9f17db4e21f4450b000c2e105ad137c775172135eb31d8441940a45e567d0792",
+    );
+    expect(svg.length).toBe(entry?.bytes);
+    expect(sha256(svg)).toBe(entry?.sha256);
+    expect(svg.toString()).toContain('viewBox="-11.5 -11.5 123 123"');
+    expect(svg.toString()).toContain('fill="currentColor"');
+    expect(svg.toString().match(/<path\b/gu)).toHaveLength(1);
   });
 
   it("resolves the canonical zhipu registration id through the zhipuai mark", () => {

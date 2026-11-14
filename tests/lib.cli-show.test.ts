@@ -126,14 +126,14 @@ describe("runCliShowCommand", () => {
     const cnOnly = await createCliQuotaClient({
       configRootDir: workspaceDir,
     }).config.providers();
-    expect(cnOnly.data?.providers).toEqual([{ id: "anthropic" }, { id: "kimi-code-plan-cn" }]);
+    expect(cnOnly.data?.providers).toEqual([{ id: "claude-agent" }, { id: "kimi-code-plan-cn" }]);
 
     authMocks.kimiGlobalState = "configured";
     const bothRegions = await createCliQuotaClient({
       configRootDir: workspaceDir,
     }).config.providers();
     expect(bothRegions.data?.providers).toEqual([
-      { id: "anthropic" },
+      { id: "claude-agent" },
       { id: "kimi-code-plan-global" },
       { id: "kimi-code-plan-cn" },
     ]);

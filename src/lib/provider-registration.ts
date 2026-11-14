@@ -41,13 +41,25 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
   {
     id: "anthropic",
     label: "Anthropic",
-    runtimeIds: ["anthropic", "claude-agent", "claude-code"],
-    synonyms: ["claude", "claude-code"],
+    runtimeIds: ["anthropic"],
+    synonyms: ["claude"],
+    shape: {
+      autoSetup: "needs_quick_setup",
+      authentication: "opencode_auth_oauth_token",
+      quota: "remote_api",
+      quickSetupAnchor: "anthropic",
+    },
+  },
+  {
+    id: "claude-agent",
+    label: "Claude Agent",
+    runtimeIds: ["claude-agent", "claude-code"],
+    synonyms: ["claude-code"],
     shape: {
       autoSetup: "needs_quick_setup",
       authentication: "local_cli_auth",
       quota: "local_cli_report",
-      quickSetupAnchor: "anthropic-claude",
+      quickSetupAnchor: "claude-agent",
     },
   },
   {

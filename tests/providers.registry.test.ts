@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { QUOTA_PROVIDER_RUNTIME_IDS } from "../src/lib/provider-metadata.js";
+import {
+  getQuotaProviderIdsForRuntimeId,
+  normalizeQuotaProviderId,
+  QUOTA_PROVIDER_RUNTIME_IDS,
+} from "../src/lib/provider-metadata.js";
 import { QUOTA_PROVIDER_REGISTRATION_SOURCE } from "../src/lib/provider-registration.js";
 import { getProviders } from "../src/providers/registry.js";
 
 const EXPECTED_PROVIDER_ORDER = [
   "anthropic",
+  "claude-agent",
   "copilot",
   "openai",
   "openrouter",
@@ -34,6 +39,20 @@ const EXPECTED_PROVIDER_ORDER = [
 ] as const;
 
 describe("provider registry", () => {
+  it.each([
+    ["anthropic", "anthropic"],
+    ["claude-agent", "claude-agent"],
+    ["claude-code", "claude-agent"],
+  ])("routes %s models and runtime IDs only to %s", (runtimeId, providerId) => {
+    expect(getQuotaProviderIdsForRuntimeId(runtimeId)).toEqual([providerId]);
+    expect(
+      getProviders()
+        .filter((provider) => provider.matchesCurrentModel(`${runtimeId}/model`))
+        .map((provider) => provider.id),
+    ).toEqual([providerId]);
+    expect(normalizeQuotaProviderId(runtimeId)).toBe(providerId);
+  });
+
   it("keeps every catalog provider exactly once in observable display order", () => {
     const first = getProviders();
     const second = getProviders();

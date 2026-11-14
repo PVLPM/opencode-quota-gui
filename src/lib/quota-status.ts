@@ -797,6 +797,7 @@ export async function buildQuotaStatusReportDocument(
   for (const [id, providerId] of [
     ["openai", "openai"],
     ["anthropic", "anthropic"],
+    ["claude-agent", "claude-agent"],
   ] as const) {
     sections.push(
       createProviderStatusSection({

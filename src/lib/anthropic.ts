@@ -4,8 +4,7 @@
  * Uses the local Claude CLI/runtime to detect install/auth state first. When
  * Claude auth is confirmed but local quota windows are missing, it falls back
  * to Anthropic's OAuth usage endpoint using the first usable OAuth access
- * token: OpenCode's own Anthropic login, then Claude OAuth credentials (macOS
- * Keychain first, then the local credentials file).
+ * token from Claude OAuth credentials (macOS Keychain first, then the local credentials file).
  */
 
 import { execFile } from "child_process";
@@ -17,7 +16,7 @@ import { isAbsolute, join, resolve } from "path";
 
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 
-import { type ResolvedAnthropicOAuth, resolveAnthropicOAuthCached } from "./anthropic-auth.js";
+import type { ResolvedAnthropicOAuth } from "./anthropic-auth.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { fetchWithTimeout } from "./http.js";
@@ -41,8 +40,6 @@ const ANTHROPIC_BETA_HEADER = "oauth-2025-04-20";
 const CLAUDE_CODE_CREDENTIALS_SERVICE = "Claude Code-credentials";
 const CLAUDE_NO_LOCAL_QUOTA_MESSAGE =
   "Claude CLI auth detected, but local quota windows were not exposed.";
-const OPENCODE_ANTHROPIC_UNUSABLE_MESSAGE =
-  "OpenCode's Anthropic sign-in is expired or unreadable. Run `opencode auth login anthropic`.";
 const ANTHROPIC_NO_QUOTA_MESSAGE =
   "Claude CLI auth detected, but quota was unavailable from the local CLI and OAuth credential sources.";
 const CLAUDE_NON_SUBSCRIPTION_LOGIN_MESSAGE =
@@ -124,7 +121,6 @@ export type AnthropicAuthStatus = "authenticated" | "unauthenticated" | "unknown
 export type AnthropicQuotaSource =
   | "claude-auth-status-json"
   | "claude-credentials-oauth-api"
-  | "opencode-auth-oauth-api"
   | "none";
 
 export interface AnthropicDiagnostics {
@@ -156,8 +152,6 @@ export interface AnthropicProbeOptions {
   operationCache?: Map<symbol, unknown>;
   forceRefresh?: boolean;
   requestTimeoutMs?: number;
-  /** Use the local Claude Code/Agent OAuth account, not OpenCode's Anthropic login. */
-  useClaudeCodeCredentials?: boolean;
 }
 
 type ClaudeCommandResult = {
@@ -215,7 +209,7 @@ type AnthropicOAuthCooldown = {
 };
 
 /** Which credential store provided the OAuth access token used for the usage probe. */
-export type AnthropicCredentialSource = "opencode-auth" | "claude-credentials";
+export type AnthropicCredentialSource = "claude-credentials";
 
 type AnthropicCredentialsAccess =
   | {
@@ -994,18 +988,6 @@ async function readClaudeCliSubscriptionToken(
   );
 }
 
-/**
- * OpenCode's Anthropic login. A login that exists but cannot be used (expired, unreadable) is
- * reported as such, so the caller never answers for it with the Claude CLI account instead.
- */
-async function readOpenCodeAnthropicLogin(): Promise<ResolvedAnthropicOAuth> {
-  try {
-    return await resolveAnthropicOAuthCached();
-  } catch {
-    return { state: "failed", error: "OpenCode auth could not be read" };
-  }
-}
-
 export function fingerprintAccessToken(accessToken: string): string {
   return createHash("sha256").update(accessToken).digest("hex");
 }
@@ -1760,52 +1742,17 @@ export async function getAnthropicDiagnostics(
   excludedClaudeFingerprints: readonly string[] = [],
 ): Promise<AnthropicDiagnostics> {
   const localDiagnostics = await getAnthropicLocalDiagnostics(options);
-  // The OpenCode route answers only from OpenCode's own login. When that login is present, the
-  // Claude CLI quota and token are never used in its place (that would mix two accounts).
-  const openCodeLogin = options.useClaudeCodeCredentials
-    ? null
-    : await readOpenCodeAnthropicLogin();
-  const openCodeLoginPresent = openCodeLogin !== null && openCodeLogin.state !== "none";
-  if (localDiagnostics.localQuota && !openCodeLoginPresent) {
+  if (localDiagnostics.localQuota) {
     // The status payload does not bind its quota to the stored token; do not deduplicate by it.
     return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
   }
 
-  if (options.useClaudeCodeCredentials && localDiagnostics.authStatus !== "authenticated") {
+  if (localDiagnostics.authStatus !== "authenticated") {
     return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
   }
 
-  if (openCodeLogin && openCodeLogin.state !== "none" && openCodeLogin.state !== "configured") {
-    return {
-      installed: localDiagnostics.installed,
-      version: localDiagnostics.version,
-      authStatus: localDiagnostics.authStatus,
-      quotaSupported: false,
-      quotaSource: "none",
-      oauthCredentialSource: "opencode-auth",
-      binaryPath: localDiagnostics.binaryPath,
-      checkedCommands: localDiagnostics.checkedCommands,
-      message: OPENCODE_ANTHROPIC_UNUSABLE_MESSAGE,
-      failureCategory: "credentials",
-    };
-  }
-
-  const credentials: AnthropicCredentialsAccess = options.useClaudeCodeCredentials
-    ? await readClaudeCliSubscriptionToken(localDiagnostics)
-    : openCodeLogin?.state === "configured"
-      ? {
-          state: "configured",
-          accessToken: openCodeLogin.accessToken,
-          source: "opencode-auth",
-        }
-      : localDiagnostics.authStatus === "authenticated"
-        ? await readClaudeCliSubscriptionToken(localDiagnostics)
-        : { state: "unavailable" };
+  const credentials = await readClaudeCliSubscriptionToken(localDiagnostics);
   if (credentials.state !== "configured") {
-    if (localDiagnostics.authStatus !== "authenticated") {
-      return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
-    }
-
     return {
       installed: localDiagnostics.installed,
       version: localDiagnostics.version,
@@ -1819,10 +1766,7 @@ export async function getAnthropicDiagnostics(
   }
 
   const credentialFingerprint = fingerprintAccessToken(credentials.accessToken);
-  if (
-    options.useClaudeCodeCredentials &&
-    excludedClaudeFingerprints.includes(credentialFingerprint)
-  ) {
+  if (excludedClaudeFingerprints.includes(credentialFingerprint)) {
     return {
       ...mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics),
       credentialFingerprint,
@@ -1857,10 +1801,7 @@ export async function getAnthropicDiagnostics(
     version: localDiagnostics.version,
     authStatus: localDiagnostics.authStatus,
     quotaSupported: true,
-    quotaSource:
-      credentials.source === "opencode-auth"
-        ? "opencode-auth-oauth-api"
-        : "claude-credentials-oauth-api",
+    quotaSource: "claude-credentials-oauth-api",
     oauthCredentialSource: credentials.source,
     binaryPath: localDiagnostics.binaryPath,
     checkedCommands: localDiagnostics.checkedCommands,
@@ -1873,114 +1814,15 @@ export async function getAnthropicDiagnostics(
   };
 }
 
-/**
- * The Claude Code login shown beside OpenCode's Anthropic accounts. It is shown only when the CLI
- * is reliably signed in and its token is not already one of the OpenCode accounts shown.
- * `reportUnready` (for a detected Claude Code runtime) returns why an unready CLI is not signed in,
- * so the caller can show that reason instead of dropping the account.
- */
-export async function getClaudeCodeAccountDiagnostics(
-  options: AnthropicProbeOptions,
-  excludedCredentialFingerprints: readonly string[],
-  account: { reportUnready?: boolean } = {},
-): Promise<AnthropicDiagnostics | null> {
-  const diagnostics = await getAnthropicDiagnostics(
-    { ...options, useClaudeCodeCredentials: true },
-    excludedCredentialFingerprints,
-  );
-  if (diagnostics.authStatus !== "authenticated") return account.reportUnready ? diagnostics : null;
-  if (
-    diagnostics.credentialFingerprint !== undefined &&
-    excludedCredentialFingerprints.includes(diagnostics.credentialFingerprint)
-  ) {
-    return null;
-  }
-  return diagnostics;
-}
-
 export async function hasAnthropicCredentialsConfigured(
   options: AnthropicProbeOptions = {},
 ): Promise<boolean> {
-  if (!options.useClaudeCodeCredentials) {
-    try {
-      const opencodeCredentials = await resolveAnthropicOAuthCached();
-      // A login OpenCode could not return still counts, so it shows as an error.
-      if (opencodeCredentials.state === "configured" || opencodeCredentials.state === "failed") {
-        return true;
-      }
-    } catch {
-      // Fall back to the existing local Claude CLI probe.
-    }
-  }
-
   try {
     const diagnostics = await getAnthropicLocalDiagnostics(options);
     return diagnostics.installed && diagnostics.authStatus === "authenticated";
   } catch {
     return false;
   }
-}
-
-export async function resolveAnthropicAuthIdentity(
-  options: AnthropicProbeOptions = {},
-): Promise<ResolvedAuthIdentity | null> {
-  let localDiagnostics: AnthropicLocalDiagnostics;
-  try {
-    localDiagnostics = await getAnthropicLocalDiagnostics(options);
-  } catch {
-    return null;
-  }
-
-  // Claude CLI quota does not expose an account identity. Keep that winning
-  // path process-local rather than risking reuse after a CLI account switch.
-  if (localDiagnostics.localQuota) return null;
-
-  if (options.useClaudeCodeCredentials) {
-    // The Claude Code route is identified by its Claude CLI login alone, scoped to the binary and
-    // config directory that answered. It never takes the OpenCode login into its identity.
-    if (localDiagnostics.authStatus !== "authenticated") return null;
-    const claudeCodeCredentials = await readClaudeCliSubscriptionToken(localDiagnostics);
-    if (claudeCodeCredentials.state !== "configured") return null;
-    return deriveResolvedAuthIdentity({
-      providerId: "anthropic:claude-code-route",
-      principal: { kind: "credential", value: claudeCodeCredentials.accessToken },
-      qualifiers: [
-        localDiagnostics.effectiveBinary ?? "",
-        claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
-      ],
-    });
-  }
-
-  const opencodeCredentials = await resolveAnthropicOAuthCached();
-  const opencodeIdentity =
-    opencodeCredentials.state === "configured"
-      ? await deriveResolvedAuthIdentity({
-          providerId: "anthropic:opencode-auth",
-          principal: { kind: "credential", value: opencodeCredentials.accessToken },
-        })
-      : null;
-
-  if (localDiagnostics.authStatus !== "authenticated") {
-    return opencodeIdentity;
-  }
-
-  const claudeCredentials = await readClaudeCliSubscriptionToken(localDiagnostics);
-  const claudeIdentity =
-    claudeCredentials.state === "configured"
-      ? await deriveResolvedAuthIdentity({
-          providerId: "anthropic:claude-credentials",
-          principal: { kind: "credential", value: claudeCredentials.accessToken },
-        })
-      : null;
-
-  if (opencodeIdentity && claudeIdentity) {
-    return composeResolvedAuthIdentities({
-      providerId: "anthropic",
-      identities: [opencodeIdentity, claudeIdentity],
-    });
-  }
-
-  return opencodeIdentity ?? claudeIdentity;
 }
 
 /** One OpenCode Anthropic login row, as the OpenCode route lists it. */
@@ -1994,29 +1836,14 @@ export type AnthropicOpenCodeAccount = {
 };
 
 /**
- * Identity of the whole account set the OpenCode route emits: every OpenCode login row (failed and
- * expired rows change what is shown too) plus the Claude CLI row. Null when the set cannot be bound
- * to an identity, so the caller must not cache it.
+ * Identity of the whole account set the Anthropic provider emits: every OpenCode login row (failed
+ * and expired rows change what is shown too). It never probes the Claude CLI, which belongs to the
+ * separate Claude Agent provider. Null when the set cannot be bound to an identity.
  */
 export async function resolveAnthropicAccountSetIdentity(params: {
-  binaryPath?: string;
-  operationCache?: Map<symbol, unknown>;
   openCodeAccounts: readonly AnthropicOpenCodeAccount[];
   onlyCurrentModel: boolean;
-  claudeCodeRuntimeDetected: boolean;
 }): Promise<ResolvedAuthIdentity | null> {
-  let localDiagnostics: AnthropicLocalDiagnostics;
-  try {
-    localDiagnostics = await getAnthropicLocalDiagnostics({
-      binaryPath: params.binaryPath,
-      operationCache: params.operationCache,
-    });
-  } catch {
-    return null;
-  }
-  // Claude CLI quota does not expose an account identity (see resolveAnthropicAuthIdentity).
-  if (localDiagnostics.localQuota) return null;
-
   const identities: ResolvedAuthIdentity[] = [];
   for (const account of params.openCodeAccounts) {
     const identity = await deriveResolvedAuthIdentity({
@@ -2035,18 +1862,50 @@ export async function resolveAnthropicAccountSetIdentity(params: {
     if (!identity) return null;
     identities.push(identity);
   }
+  if (identities.length === 0) return null;
 
-  const claudeCliIdentity = await claudeCliAccountIdentity(
-    localDiagnostics,
-    params.claudeCodeRuntimeDetected,
-  );
-  if (!claudeCliIdentity) return null;
-  identities.push(claudeCliIdentity);
-
-  // The selected-route flag changes which Claude CLI quota the route probes, so it is part of the set.
+  // The selected-route flag changes whether a missing login is reported, so it is part of the set.
   return await composeResolvedAuthIdentities({
     providerId: "anthropic",
     identities,
+    qualifiers: [params.onlyCurrentModel ? "only-current-model" : "all-models"],
+  });
+}
+
+/**
+ * Identity of the Claude Agent provider's single Claude CLI login. `excludedCredentialFingerprints`
+ * are OpenCode Anthropic tokens already shown by the Anthropic provider; whether the CLI token is one
+ * of them changes what this provider shows, so it is part of the identity. Null when the CLI reports
+ * quota itself (no account binding) or cannot be probed, so the caller must not cache it.
+ */
+export async function resolveClaudeAgentAccountIdentity(params: {
+  binaryPath?: string;
+  operationCache?: Map<symbol, unknown>;
+  onlyCurrentModel: boolean;
+  runtimeDetected: boolean;
+  excludedCredentialFingerprints: readonly string[];
+}): Promise<ResolvedAuthIdentity | null> {
+  let localDiagnostics: AnthropicLocalDiagnostics;
+  try {
+    localDiagnostics = await getAnthropicLocalDiagnostics({
+      binaryPath: params.binaryPath,
+      operationCache: params.operationCache,
+    });
+  } catch {
+    return null;
+  }
+  // Claude CLI quota does not expose an account identity.
+  if (localDiagnostics.localQuota) return null;
+
+  const identity = await claudeCliAccountIdentity(
+    localDiagnostics,
+    params.runtimeDetected,
+    params.excludedCredentialFingerprints,
+  );
+  if (!identity) return null;
+  return await composeResolvedAuthIdentities({
+    providerId: "claude-agent",
+    identities: [identity],
     qualifiers: [params.onlyCurrentModel ? "only-current-model" : "all-models"],
   });
 }
@@ -2059,6 +1918,7 @@ export async function resolveAnthropicAccountSetIdentity(params: {
 async function claudeCliAccountIdentity(
   localDiagnostics: AnthropicLocalDiagnostics,
   claudeCodeRuntimeDetected: boolean,
+  excludedCredentialFingerprints: readonly string[],
 ): Promise<ResolvedAuthIdentity | null> {
   if (localDiagnostics.authStatus === "authenticated") {
     const credentials = await readClaudeCliSubscriptionToken(localDiagnostics);
@@ -2069,6 +1929,9 @@ async function claudeCliAccountIdentity(
         qualifiers: [
           localDiagnostics.effectiveBinary ?? "",
           claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
+          excludedCredentialFingerprints.includes(fingerprintAccessToken(credentials.accessToken))
+            ? "shown-by-anthropic"
+            : "distinct",
         ],
       });
     }
@@ -2086,40 +1949,6 @@ async function claudeCliAccountIdentity(
       claudeCodeRuntimeDetected ? "detected" : "undetected",
     ],
   });
-}
-
-export async function queryAnthropicQuota(
-  options: AnthropicProbeOptions = {},
-): Promise<AnthropicResult> {
-  try {
-    const diagnostics = await getAnthropicDiagnostics(options);
-    if (diagnostics.quotaSupported) {
-      return diagnostics.quota ?? null;
-    }
-
-    if (
-      (diagnostics.authStatus === "authenticated" ||
-        diagnostics.oauthCredentialSource !== undefined) &&
-      diagnostics.message
-    ) {
-      return {
-        success: false,
-        error: diagnostics.message,
-        ...(diagnostics.failureCategory !== undefined
-          ? { failureCategory: diagnostics.failureCategory }
-          : {}),
-      };
-    }
-
-    return null;
-  } catch (err) {
-    return {
-      success: false,
-      error: `Claude CLI probe failed: ${sanitizeDisplayText(
-        err instanceof Error ? err.message : String(err),
-      )}`,
-    };
-  }
 }
 
 export { parseOAuthUsageResponse, parseUsageResponse };

@@ -20,9 +20,16 @@ describe("provider-metadata", () => {
       {
         id: "anthropic",
         autoSetup: "needs_quick_setup",
+        authentication: "opencode_auth_oauth_token",
+        quota: "remote_api",
+        quickSetupAnchor: "anthropic",
+      },
+      {
+        id: "claude-agent",
+        autoSetup: "needs_quick_setup",
         authentication: "local_cli_auth",
         quota: "local_cli_report",
-        quickSetupAnchor: "anthropic-claude",
+        quickSetupAnchor: "claude-agent",
       },
       {
         id: "copilot",
@@ -257,11 +264,8 @@ describe("provider-metadata", () => {
       "copilot-chat",
       "github-copilot-chat",
     ]);
-    expect(QUOTA_PROVIDER_RUNTIME_IDS.anthropic).toEqual([
-      "anthropic",
-      "claude-agent",
-      "claude-code",
-    ]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS.anthropic).toEqual(["anthropic"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS["claude-agent"]).toEqual(["claude-agent", "claude-code"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.openai).toEqual(["openai", "chatgpt", "codex"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.kilo).toEqual(["kilo"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.cursor).toEqual(["cursor", "cursor-acp"]);
@@ -323,11 +327,8 @@ describe("provider-metadata", () => {
       "copilot-chat",
       "github-copilot-chat",
     ]);
-    expect(getQuotaProviderRuntimeIds("claude")).toEqual([
-      "anthropic",
-      "claude-agent",
-      "claude-code",
-    ]);
+    expect(getQuotaProviderRuntimeIds("claude")).toEqual(["anthropic"]);
+    expect(getQuotaProviderRuntimeIds("claude-code")).toEqual(["claude-agent", "claude-code"]);
     expect(getQuotaProviderRuntimeIds("openai")).toEqual(["openai", "chatgpt", "codex"]);
     expect(getQuotaProviderRuntimeIds("kilo")).toEqual(["kilo"]);
     expect(getQuotaProviderRuntimeIds("kilo-gateway")).toEqual([]);

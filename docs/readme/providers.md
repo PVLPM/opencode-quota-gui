@@ -15,7 +15,8 @@ The dashboard reads provider results through the same OpenCode host process that
 
 | Provider           | Auth/setup                                                     | Data from          | Reports            |
 | ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic (Claude) | [Needs setup](#anthropic-claude)                               | Local CLI/OAuth    | Quota              |
+| Anthropic          | [Needs setup](#anthropic)                                      | Remote API         | Quota              |
+| Claude Agent       | [Needs setup](#claude-agent)                                   | Local CLI/OAuth    | Quota              |
 | Chutes AI          | Automatic                                                      | Remote API         | Quota              |
 | Cursor             | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
 | GitHub Copilot     | Automatic                                                      | Remote API         | Budget and usage   |
@@ -37,7 +38,8 @@ The dashboard reads provider results through the same OpenCode host process that
 
 | Provider                | Auth/setup                                                     | Data from          | Reports            |
 | ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic (Claude)      | [Needs setup](#anthropic-claude)                               | Local CLI/OAuth    | Quota              |
+| Anthropic               | [Needs setup](#anthropic)                                      | Remote API         | Quota              |
+| Claude Agent            | [Needs setup](#claude-agent)                                   | Local CLI/OAuth    | Quota              |
 | Chutes AI               | Automatic                                                      | Remote API         | Quota              |
 | Cursor                  | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
 | Gemini CLI              | [Needs setup](#gemini-cli)                                     | Remote API         | Quota              |
@@ -362,11 +364,18 @@ Totals come from the configured tier. The remaining percentage and next-month re
 
 GitHub references: [AI Credit billing reports](https://docs.github.com/en/rest/billing/usage?apiVersion=2026-03-10), [billing budgets](https://docs.github.com/en/rest/billing/budgets?apiVersion=2026-03-10), [GHE.com REST hostnames](https://docs.github.com/en/enterprise-cloud@latest/rest/meta/meta), [individual AI Credit allowances](https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-individuals), [organization and enterprise pools](https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-organizations-and-enterprises), and [legacy annual plans](https://docs.github.com/en/copilot/reference/copilot-billing/request-based-billing-legacy/what-changed-with-billing).
 
+<a id="anthropic"></a>
 <a id="anthropic-claude"></a>
 
-### Anthropic (Claude)
+### Anthropic
 
-OpenCode's Anthropic login is enough; Claude Code is optional. To also use Claude Code as the quota source and credential fallback, install it and sign in:
+Uses only OpenCode's own `anthropic` sign-in (`opencode auth login anthropic`); it never runs the Claude CLI. Each OpenCode Anthropic subscription login gets its own card with quota from Anthropic's OAuth usage endpoint. An API-key connection exposes no comparable quota, so it shows no card.
+
+<a id="claude-agent"></a>
+
+### Claude Agent
+
+OpenCode's native Claude Agent integration (`claude-agent`, legacy `claude-code`) runs your installed Claude CLI, so this card reads that CLI's login. Install Claude Code and sign in:
 
 ```bash
 claude auth login
@@ -374,7 +383,10 @@ claude auth status
 ```
 
 - The plugin runs `claude` from OpenCode's `PATH`, or else the first working one of `~/.claude/local/claude`, `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, and `/usr/local/bin/claude` (not on Windows). If Claude lives elsewhere, or on Windows when `claude` is not on OpenCode's `PATH`, set `anthropicBinaryPath`.
-- When Claude Code does not expose quota windows itself, quota comes from Anthropic's OAuth usage endpoint, using the first usable token: OpenCode's own `anthropic` login, then Claude Code's credentials.
+- When the CLI does not report quota windows itself, quota comes from Anthropic's OAuth usage endpoint with the CLI's own first-party claude.ai token. If that token is the same one as an OpenCode Anthropic login, the account is shown once, on the Anthropic card.
+
+These rows apply to both cards:
+
 - **Claude Usage Credits:** a separate monthly group when that response includes enabled Usage Credits with numeric utilization. Missing or invalid credit data never changes the regular 5-hour and weekly rows.
 - **Fable:** a separate weekly row when Anthropic returns that model-scoped window. It is never guessed from your plan name. See [Claude Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
 

@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { buildProviderCards } from "../src/gui/provider-cards.js";
 import { parseOAuthUsageResponse } from "../src/lib/anthropic.js";
 import { anthropicProvider } from "../src/providers/anthropic.js";
+import { claudeAgentProvider } from "../src/providers/claude-agent.js";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
 import { NOW, percentRow, providerCard } from "./fixtures/gui-ui-fixtures.js";
@@ -15,9 +16,7 @@ vi.mock("../src/lib/anthropic.js", async (importOriginal) => ({
   // The real parser stays in place so the copied rows come from the provider's own parsing.
   ...(await importOriginal<typeof import("../src/lib/anthropic.js")>()),
   getAnthropicDiagnostics: vi.fn(),
-  getClaudeCodeAccountDiagnostics: vi.fn(),
   hasAnthropicCredentialsConfigured: vi.fn(),
-  queryAnthropicQuota: vi.fn(),
   queryAnthropicQuotaWithOAuth: vi.fn(),
 }));
 
@@ -318,7 +317,7 @@ describe("quota card clipboard runway and banked resets", () => {
     expect(rowLines(copied)).toEqual(["Banked resets: 2 available · Expiry unknown"]);
   });
 
-  it("copies Anthropic's provider rows with exact labels and runway from the provider payload", async () => {
+  it("copies Claude Agent's provider rows with exact labels and runway from the provider payload", async () => {
     const HOUR_MS = 60 * 60_000;
     const DAY_MS = 24 * HOUR_MS;
     const isoAt = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
@@ -328,8 +327,8 @@ describe("quota card clipboard runway and banked resets", () => {
       version: "2.1.258",
       authStatus: "authenticated",
       quotaSupported: true,
-      quotaSource: "opencode-auth-oauth-api",
-      oauthCredentialSource: "opencode-auth",
+      quotaSource: "claude-credentials-oauth-api",
+      oauthCredentialSource: "claude-credentials",
       checkedCommands: ["claude --version"],
       quota: parseOAuthUsageResponse(
         {
@@ -347,9 +346,9 @@ describe("quota card clipboard runway and banked resets", () => {
         NOW,
       ),
     });
-    const result = await anthropicProvider.fetch({} as any);
+    const result = await claudeAgentProvider.fetch({} as any);
     const [card] = buildProviderCards({
-      probes: [{ providerId: "anthropic", result }],
+      probes: [{ providerId: "claude-agent", result }],
       preferences: { accountingDetail: "summary" },
       nowMs: NOW,
     });
@@ -363,11 +362,9 @@ describe("quota card clipboard runway and banked resets", () => {
   });
 
   it("shows the Claude CLI plan in the header and clipboard of only its own account card", async () => {
-    const {
-      getAnthropicDiagnostics,
-      getClaudeCodeAccountDiagnostics,
-      queryAnthropicQuotaWithOAuth,
-    } = await import("../src/lib/anthropic.js");
+    const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
+      "../src/lib/anthropic.js"
+    );
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
     (readCredentialRows as any).mockResolvedValueOnce([
       {
@@ -386,15 +383,6 @@ describe("quota card clipboard runway and banked resets", () => {
       installed: true,
       version: "2.1.258",
       authStatus: "authenticated",
-      quotaSupported: false,
-      quotaSource: "none",
-      oauthCredentialSource: "opencode-auth",
-      checkedCommands: ["claude --version"],
-    });
-    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
-      installed: true,
-      version: "2.1.258",
-      authStatus: "authenticated",
       quotaSupported: true,
       quotaSource: "claude-credentials-oauth-api",
       checkedCommands: ["claude --version"],
@@ -404,8 +392,12 @@ describe("quota card clipboard runway and banked resets", () => {
     });
 
     const result = await anthropicProvider.fetch({} as any);
+    const claudeResult = await claudeAgentProvider.fetch({} as any);
     const cards = buildProviderCards({
-      probes: [{ providerId: "anthropic", result }],
+      probes: [
+        { providerId: "anthropic", result },
+        { providerId: "claude-agent", result: claudeResult },
+      ],
       preferences: { accountingDetail: "summary" },
       nowMs: NOW,
     });
@@ -416,7 +408,7 @@ describe("quota card clipboard runway and banked resets", () => {
     expect(openCodeCard?.planLabel).toBeUndefined();
 
     const copied = await copiedSummary(claudeCodeCard!);
-    expect(copied.split("\n")[0]).toBe("Anthropic · Max · Claude Code");
+    expect(copied.split("\n")[0]).toBe("Claude Agent · Max");
     expect(rowLines(copied)).toEqual(["5h: 50% remaining"]);
     expect(await copiedSummary(openCodeCard!)).not.toContain("Max");
 
@@ -433,7 +425,7 @@ describe("quota card clipboard runway and banked resets", () => {
       root,
     );
     try {
-      expect(headerText(root)).toBe("Anthropic · Max · Claude Code");
+      expect(headerText(root)).toBe("Claude Agent · Max");
     } finally {
       dispose();
     }
@@ -449,22 +441,12 @@ describe("quota card clipboard runway and banked resets", () => {
   }
 
   it.each([
-    ["a known plan", "Max", "Anthropic · Max"],
-    ["no plan", undefined, "Anthropic"],
+    ["a known plan", "Max", "Claude Agent · Max"],
+    ["no plan", undefined, "Claude Agent"],
   ])("shows the Claude CLI-only plan in the header and clipboard, with %s", async (_case, planLabel, expectedIdentity) => {
-    const { getAnthropicDiagnostics, getClaudeCodeAccountDiagnostics } = await import(
-      "../src/lib/anthropic.js"
-    );
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
     // No OpenCode Anthropic login: the verified Claude CLI login is the only account.
     (getAnthropicDiagnostics as any).mockResolvedValueOnce({
-      installed: true,
-      version: "2.1.258",
-      authStatus: "authenticated",
-      quotaSupported: false,
-      quotaSource: "none",
-      checkedCommands: ["claude --version"],
-    });
-    (getClaudeCodeAccountDiagnostics as any).mockResolvedValueOnce({
       installed: true,
       version: "2.1.258",
       authStatus: "authenticated",
@@ -476,9 +458,9 @@ describe("quota card clipboard runway and banked resets", () => {
       ...(planLabel === undefined ? {} : { planLabel }),
     });
 
-    const result = await anthropicProvider.fetch({} as any);
+    const result = await claudeAgentProvider.fetch({} as any);
     const cards = buildProviderCards({
-      probes: [{ providerId: "anthropic", result }],
+      probes: [{ providerId: "claude-agent", result }],
       preferences: { accountingDetail: "summary" },
       nowMs: NOW,
     });

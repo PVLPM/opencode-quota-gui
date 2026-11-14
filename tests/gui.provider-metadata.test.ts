@@ -415,8 +415,8 @@ describe("multi-account provider loops", () => {
     const output = await anthropicProvider.fetch(context());
 
     expect(output.attempted).toBe(true);
-    // Guards the isolation in context(): this test must never detect the host's Claude CLI.
-    expect(output.statusDetails).toContainEqual({ key: "cli_installed", value: "false" });
+    expect(output.statusDetails).toContainEqual({ key: "opencode_logins", value: "2" });
+    expect(output.statusDetails?.some(({ key }) => key === "cli_installed")).toBe(false);
     expect(output.entries).toEqual([
       expect.objectContaining({
         name: "[Claude Work] (active) 5h",

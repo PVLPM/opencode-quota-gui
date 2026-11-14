@@ -161,7 +161,8 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 
 | Provider           | Auth/setup                                                     | Data from          | Reports            |
 | ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic (Claude) | [Needs setup](docs/readme/providers.md#anthropic-claude)       | Local CLI/OAuth    | Quota              |
+| Anthropic          | [Needs setup](docs/readme/providers.md#anthropic)              | Remote API         | Quota              |
+| Claude Agent       | [Needs setup](docs/readme/providers.md#claude-agent)           | Local CLI/OAuth    | Quota              |
 | Chutes AI          | Automatic                                                      | Remote API         | Quota              |
 | Cursor             | [Needs setup](docs/readme/providers.md#cursor)                 | Local estimate     | Budget and spend   |
 | GitHub Copilot     | Automatic                                                      | Remote API         | Budget and usage   |
@@ -183,7 +184,8 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 
 | Provider                | Auth/setup                                                     | Data from          | Reports            |
 | ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic (Claude)      | [Needs setup](docs/readme/providers.md#anthropic-claude)       | Local CLI/OAuth    | Quota              |
+| Anthropic               | [Needs setup](docs/readme/providers.md#anthropic)              | Remote API         | Quota              |
+| Claude Agent            | [Needs setup](docs/readme/providers.md#claude-agent)           | Local CLI/OAuth    | Quota              |
 | Chutes AI               | Automatic                                                      | Remote API         | Quota              |
 | Cursor                  | [Needs setup](docs/readme/providers.md#cursor)                 | Local estimate     | Budget and spend   |
 | Gemini CLI              | [Needs setup](docs/readme/providers.md#gemini-cli)             | Remote API         | Quota              |
