@@ -153,7 +153,7 @@ function harness(
 }
 
 describe("quota read source", () => {
-  it("uses the first attempt time when no complete poll exists, then anchors a full poll", async () => {
+  it("advances the poll time after each completed partial collection", async () => {
     let clock = NOW;
     let complete = false;
     const { source } = harness({
@@ -174,7 +174,7 @@ describe("quota read source", () => {
     clock += 60_000;
     const partial = await source.quota();
     expect(partial.stale).toBe(true);
-    expect(partial.providers.polledAtMs).toBe(NOW);
+    expect(partial.providers.polledAtMs).toBe(clock);
     complete = true;
     clock += 60_000;
     const recovered = await source.quota();
@@ -230,7 +230,7 @@ describe("quota read source", () => {
     expect(next.providers.cards.every((card) => card.rows.length === 0)).toBe(true);
     expect(next.stale).toBe(true);
   });
-  it("projects a delayed OpenAI response after collection without changing cycle timestamps", async () => {
+  it("timestamps a delayed OpenAI poll at completion while retaining generation time", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     let startBodyRead!: () => void;
@@ -317,7 +317,7 @@ describe("quota read source", () => {
 
       const snapshot = await snapshotPromise;
       expect(snapshot.generatedAtMs).toBe(NOW);
-      expect(snapshot.providers.polledAtMs).toBe(NOW);
+      expect(snapshot.providers.polledAtMs).toBe(NOW + 2 * 60_000);
       const card = snapshot.providers.cards.find(({ providerId }) => providerId === "openai");
       const row = card?.rows.find(({ kind }) => kind === "percent");
       expect(row?.runway?.kind).toBe("before_reset");
@@ -426,7 +426,7 @@ describe("quota read source", () => {
     expect(test.collectorCalls[1]?.providers.map((provider) => provider.id)).toEqual(["copilot"]);
   });
 
-  it("keeps last-good measurements, surfaces current errors, and marks stale without advancing polledAt", async () => {
+  it("keeps last-good measurements and surfaces errors while advancing polledAt", async () => {
     let cycle = 0;
     let clock = NOW;
     const test = harness({
@@ -459,7 +459,7 @@ describe("quota read source", () => {
     clock = NOW + 60_000;
     const second = await test.source.quota();
     expect(second.stale).toBe(true);
-    expect(second.providers.polledAtMs).toBe(NOW);
+    expect(second.providers.polledAtMs).toBe(clock);
     expect(second.providers.cards[0]?.rows[0]?.percentRemaining).toBe(62.5);
     expect(second.providers.cards[0]?.errors.map((error) => error.label)).toEqual(["Sync"]);
 
@@ -467,7 +467,7 @@ describe("quota read source", () => {
     clock = NOW + 120_000;
     const third = await test.source.quota();
     expect(third.stale).toBe(true);
-    expect(third.providers.polledAtMs).toBe(NOW);
+    expect(third.providers.polledAtMs).toBe(clock);
     expect(third.providers.cards).toEqual([]);
   });
 
@@ -512,7 +512,7 @@ describe("quota read source", () => {
     clock = NOW + 60_000;
     const second = await test.source.quota();
     expect(second.stale).toBe(true);
-    expect(second.providers.polledAtMs).toBe(NOW);
+    expect(second.providers.polledAtMs).toBe(clock);
     // Both measurements survive; the fresh accounts descriptor did not replace
     // the measured account set.
     expect(second.providers.cards.map((card) => card.accountLabel)).toEqual([
@@ -585,7 +585,7 @@ describe("quota read source", () => {
     clock = NOW + 60_000;
     const second = await test.source.quota();
     expect(second.stale).toBe(true);
-    expect(second.providers.polledAtMs).toBe(NOW);
+    expect(second.providers.polledAtMs).toBe(clock);
     const failed = second.providers.cards.find((card) => card.providerId === "opencode-go");
     expect(failed?.rows[0]?.percentRemaining).toBe(63);
     expect(failed?.errors.map((error) => error.label)).toEqual(["Account 1"]);
@@ -603,7 +603,7 @@ describe("quota read source", () => {
     ).not.toContain(63);
   });
 
-  it("marks a partially measured account set stale without advancing the poll timestamp", async () => {
+  it("marks a partially measured account set stale while advancing the poll timestamp", async () => {
     let cycle = 0;
     let clock = NOW;
     const accounts = [{ sourceId: "acct-a" }, { sourceId: "acct-b" }];
@@ -639,7 +639,7 @@ describe("quota read source", () => {
     clock = NOW + 60_000;
     const second = await test.source.quota();
     expect(second.stale).toBe(true);
-    expect(second.providers.polledAtMs).toBe(NOW);
+    expect(second.providers.polledAtMs).toBe(clock);
     const accountA = second.providers.cards.find((card) => card.accountLabel === "Account 1");
     const accountB = second.providers.cards.find((card) => card.accountLabel === "Account 2");
     expect(accountA?.rows.map((row) => row.percentRemaining)).toEqual([55]);
@@ -672,7 +672,7 @@ describe("quota read source", () => {
     clock = NOW + 60_000;
     const second = await test.source.quota();
     expect(second.stale).toBe(true);
-    expect(second.providers.polledAtMs).toBe(NOW);
+    expect(second.providers.polledAtMs).toBe(clock);
     const anthropic = second.providers.cards.find((card) => card.providerId === "anthropic");
     const copilot = second.providers.cards.find((card) => card.providerId === "copilot");
     expect(anthropic?.rows[0]?.percentRemaining).toBe(35);

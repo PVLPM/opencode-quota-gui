@@ -501,8 +501,7 @@ export function createDashboardReadSource(
       const probes = await collect(config, nowMs, selected, refresh);
       const merged = mergeProviderResults(probes, selected);
       // OpenAI's observation timestamp is captured after its usage body is
-      // consumed. Project against collection completion time, but keep snapshot
-      // generation and poll timestamps anchored to the cycle start below.
+      // consumed. Project and timestamp the completed collection together.
       const projectionNowMs = now();
       // No hidden-card id filters this list: hidden cards remain collected and
       // are hidden by the browser. Ordering is still applied to assembled cards.
@@ -512,11 +511,6 @@ export function createDashboardReadSource(
         nowMs: projectionNowMs,
         providerLabel: options.providerLabel,
       });
-      // Keep the previous poll time on a partial cycle. With no previous cycle,
-      // the required numeric field can only report this attempt time, not success.
-      const polledAtMs = merged.substituted
-        ? (lastQuotaSnapshot?.providers.polledAtMs ?? nowMs)
-        : nowMs;
       const snapshot: QuotaSnapshot = {
         generatedAtMs: nowMs,
         stale: merged.substituted,
@@ -524,7 +518,7 @@ export function createDashboardReadSource(
         providers: {
           cards,
           enabledProviders: config.enabledProviders,
-          polledAtMs,
+          polledAtMs: projectionNowMs,
         },
       };
       const temporal = temporalStatusForCards(cards, nowMs);
