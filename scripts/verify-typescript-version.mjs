@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 
 const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";
-// The Desktop GUI builds against the 2.2.1 SDK; keep the server peer range
+// The Desktop GUI builds against the 2.3.0 SDK; keep the server peer range
 // independently bounded to the host versions supported by this package.
-const EXPECTED_PLUGIN_SDK_VERSION = "2.2.1";
-const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";
+const EXPECTED_PLUGIN_SDK_VERSION = "2.3.0";
+const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.4.0";
 const PLUGIN_PACKAGE = "@opencode/plugin";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
