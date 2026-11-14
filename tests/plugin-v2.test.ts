@@ -125,9 +125,22 @@ afterEach(async () => {
 });
 
 describe("V2 server plugin credential lifecycle", () => {
-  it("registers no model.request hook and never attributes an OpenAI connection method", async () => {
-    // Host contract (@opencode/plugin SessionModelRequest vs @opencode/client session.step.started):
-    // no per-invocation id is shared, so the 5-minute fallback is kept for every invocation.
+  // Owner-approved per-session approximation: the method is sampled once per session.
+  type Active = { type: "credential"; id: string; label: string; method: string } | undefined;
+  type StepProbe = {
+    data?: { sessionID?: string; assistantMessageID?: string; connectionMethod?: string };
+  };
+  const step = (sessionID: string, messageID: string, providerID = "openai") => ({
+    type: "session.step.started",
+    created: 1200,
+    data: {
+      sessionID,
+      assistantMessageID: messageID,
+      started: 1000,
+      model: { providerID, id: "gpt-6.1" },
+    },
+  });
+  async function setupSampling(active: (id: string) => Promise<Active>) {
     const ctx = createContext();
     const queue = createHostEventQueue();
     const integration = createFakeIntegration([
@@ -140,30 +153,111 @@ describe("V2 server plugin credential lifecycle", () => {
         value: { type: "oauth", access: "private-token" },
       },
     ]);
+    integration.connection.active.mockImplementation(active as never);
     vi.mocked(startDashboard).mockResolvedValueOnce({
       runtime: {} as never,
       dispose: async () => {},
     } as never);
     cacheEventEmit.mockClear();
     await setupPlugin({ ...ctx, integration, rpc: {}, event: { subscribe: queue.subscribe } });
-    expect(ctx.session.hook.mock.calls.some(([name]) => name === "model.request")).toBe(false);
-    queue.push({
-      type: "session.step.started",
-      created: 1200,
-      data: {
-        sessionID: "ses_test",
-        assistantMessageID: "msg_test",
-        started: 1000,
-        model: { providerID: "openai", id: "gpt-6.1" },
-      },
-    });
-    await vi.waitFor(() => expect(cacheEventEmit).toHaveBeenCalledTimes(2));
-    const payload = JSON.stringify(cacheEventEmit.mock.calls);
-    expect(payload).toContain("msg_test");
-    expect(payload).not.toContain("connectionMethod");
-    expect(payload).not.toContain("private-");
-    expect(integration.connection.active).not.toHaveBeenCalled();
+    const relayed = () => JSON.stringify(cacheEventEmit.mock.calls);
+    const method = (sessionID: string, messageID: string) => {
+      const call = cacheEventEmit.mock.calls
+        .map(([, payload]) => (payload as { cacheObserverEvent?: StepProbe }).cacheObserverEvent)
+        .find((event) => event?.data?.assistantMessageID === messageID);
+      expect(call?.data?.sessionID).toBe(sessionID);
+      return call?.data?.connectionMethod;
+    };
+    return { integration, queue, relayed, method };
+  }
+  const cred = (method: string): Active => ({
+    type: "credential",
+    id: "private-id",
+    label: "private-email",
+    method,
+  });
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  it("samples once per session at creation and reuses it for later steps", async () => {
+    const { integration, queue, relayed, method } = await setupSampling(async () => cred("oauth"));
+    queue.push({ type: "session.created", created: 1, data: { sessionID: "ses_a" } });
+    await flush();
+    queue.push(step("ses_a", "msg_1"));
+    queue.push(step("ses_a", "msg_2"));
+    await vi.waitFor(() => expect(relayed()).toContain("msg_2"));
+    expect(method("ses_a", "msg_1")).toBe("oauth");
+    expect(method("ses_a", "msg_2")).toBe("oauth");
+    expect(integration.connection.active).toHaveBeenCalledTimes(1);
+    expect(integration.connection.active).toHaveBeenCalledWith("openai");
     expect(integration.connection.resolve).not.toHaveBeenCalled();
+    expect(relayed()).not.toContain("private-");
+  });
+  it("keeps sessions independent", async () => {
+    const methods = ["oauth", "key"];
+    const { queue, relayed, method } = await setupSampling(async () =>
+      cred(methods.shift() as string),
+    );
+    queue.push({ type: "session.created", created: 1, data: { sessionID: "ses_a" } });
+    queue.push({ type: "session.created", created: 2, data: { sessionID: "ses_b" } });
+    await flush();
+    queue.push(step("ses_a", "msg_a"));
+    queue.push(step("ses_b", "msg_b"));
+    await vi.waitFor(() => expect(relayed()).toContain("msg_b"));
+    expect(method("ses_a", "msg_a")).toBe("oauth");
+    expect(method("ses_b", "msg_b")).toBe("key");
+  });
+  it("relays a step without a method while the lookup is pending, later steps get it", async () => {
+    let resolveLookup!: (value: Active) => void;
+    const { queue, relayed, method } = await setupSampling(
+      () =>
+        new Promise<Active>((resolve) => {
+          resolveLookup = resolve;
+        }),
+    );
+    queue.push(step("ses_a", "msg_1"));
+    await vi.waitFor(() => expect(relayed()).toContain("msg_1"));
+    resolveLookup(cred("oauth"));
+    await flush();
+    queue.push(step("ses_a", "msg_2"));
+    await vi.waitFor(() => expect(relayed()).toContain("msg_2"));
+    expect(method("ses_a", "msg_1")).toBeUndefined();
+    expect(method("ses_a", "msg_2")).toBe("oauth");
+  });
+  it("relays no method when the lookup rejects", async () => {
+    const { queue, relayed, method } = await setupSampling(async () => {
+      throw new Error("down");
+    });
+    queue.push({ type: "session.created", created: 1, data: { sessionID: "ses_a" } });
+    await flush();
+    queue.push(step("ses_a", "msg_1"));
+    await vi.waitFor(() => expect(relayed()).toContain("msg_1"));
+    expect(method("ses_a", "msg_1")).toBeUndefined();
+  });
+  it("relays no method for a non-allowlisted method", async () => {
+    const { queue, relayed, method } = await setupSampling(async () => cred("weird"));
+    queue.push({ type: "session.created", created: 1, data: { sessionID: "ses_a" } });
+    await flush();
+    queue.push(step("ses_a", "msg_1"));
+    await vi.waitFor(() => expect(relayed()).toContain("msg_1"));
+    expect(method("ses_a", "msg_1")).toBeUndefined();
+  });
+  it("attaches no method to non-OpenAI steps", async () => {
+    const { queue, relayed, method } = await setupSampling(async () => cred("oauth"));
+    queue.push({ type: "session.created", created: 1, data: { sessionID: "ses_a" } });
+    await flush();
+    queue.push(step("ses_a", "msg_1", "anthropic"));
+    await vi.waitFor(() => expect(relayed()).toContain("msg_1"));
+    expect(method("ses_a", "msg_1")).toBeUndefined();
+  });
+  it("drops the session entry on deletion, so a recreated session samples again", async () => {
+    const { integration, queue, relayed } = await setupSampling(async () => cred("oauth"));
+    queue.push({ type: "session.created", created: 1, data: { sessionID: "ses_a" } });
+    await flush();
+    queue.push({ type: "session.deleted", created: 2, data: { sessionID: "ses_a" } });
+    await flush();
+    queue.push(step("ses_a", "msg_after"));
+    await vi.waitFor(() => expect(relayed()).toContain("msg_after"));
+    expect(integration.connection.active).toHaveBeenCalledTimes(2);
   });
   it("reads logins through ctx.integration from setup until cleanup", async () => {
     const ctx = createContext();

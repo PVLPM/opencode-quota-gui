@@ -28,6 +28,7 @@ function logReason(error: unknown): string {
 }
 
 const MAX_PENDING_CACHE_OBSERVER_EVENTS = 512;
+const MAX_SAMPLED_SESSIONS = 1_024;
 const HOST_EVENT_RECONNECT_DELAY_MS = 1_000;
 type ProjectedCacheObserverEvent = NonNullable<
   ReturnType<typeof projectOpenCodeCacheObserverEvent>
@@ -68,11 +69,36 @@ export const QuotaToastPlugin = Plugin.define({
       }
     });
 
-    // OpenAI connection method is deliberately NOT attributed to invocations: the host's
-    // `model.request` hook carries {sessionID, agent, model, kind, headers} and
-    // `session.step.started` carries {sessionID, assistantMessageID, agent, model, started};
-    // no field is shared per invocation, so any pairing would be a timing/active-state guess.
-    // Unverified OpenAI invocations keep the conservative 5-minute TTL fallback.
+    // Owner-approved per-session approximation (not per-request proof): the host shares no
+    // per-invocation id between `model.request` and `session.step.started`, and connections
+    // rarely change, so the active OpenAI connection METHOD is sampled once per session — on
+    // its `session.created` event, or on its first step for a session that predates this
+    // plugin — and reused for that session's OpenAI steps. A lookup still pending (or failed)
+    // leaves the step without a method, i.e. the conservative 5-minute TTL fallback; relayed
+    // steps are never rewritten and a mid-session credential change is not reflected.
+    // Only the allowlisted method is kept; credential values, ids and labels are never read.
+    const openaiMethodBySession = new Map<string, { method?: "oauth" | "key" | "external" }>();
+    const sampleOpenAiMethod = (sessionID: unknown): void => {
+      if (typeof sessionID !== "string" || sessionID === "") return;
+      if (openaiMethodBySession.has(sessionID)) return;
+      if (openaiMethodBySession.size >= MAX_SAMPLED_SESSIONS) {
+        const oldest = openaiMethodBySession.keys().next().value;
+        if (oldest !== undefined) openaiMethodBySession.delete(oldest);
+      }
+      const entry: { method?: "oauth" | "key" | "external" } = {};
+      openaiMethodBySession.set(sessionID, entry);
+      void (async () => {
+        try {
+          const connection = await ctx.integration.connection.active("openai");
+          const method = connection?.type === "credential" ? connection.method : undefined;
+          if (method === "oauth" || method === "key" || method === "external") {
+            entry.method = method;
+          }
+        } catch {
+          // Unavailable metadata keeps the 5-minute fallback.
+        }
+      })();
+    };
     // Every login read in this process goes through this location's `ctx.integration`. Bound
     // last, so a setup that fails part way leaves no binding behind. OpenCode routes the
     // retained hooks only after setup, so no read comes earlier.
@@ -236,7 +262,25 @@ export const QuotaToastPlugin = Plugin.define({
             }
             // The Started event's model identity is available before invocation completion. Do not
             // enrich it from model.list here: that mutable catalog may no longer match dispatch.
-            const cacheObserverEvent = projectOpenCodeCacheObserverEvent(event);
+            const sessionID = (event.data as { sessionID?: unknown } | undefined)?.sessionID;
+            if (event.type === "session.created") sampleOpenAiMethod(sessionID);
+            else if (event.type === "session.deleted" && typeof sessionID === "string") {
+              openaiMethodBySession.delete(sessionID);
+            }
+            let cacheObserverEvent = projectOpenCodeCacheObserverEvent(event);
+            if (
+              cacheObserverEvent?.type === "session.step.started" &&
+              cacheObserverEvent.data.model.providerID === "openai"
+            ) {
+              sampleOpenAiMethod(cacheObserverEvent.data.sessionID);
+              const method = openaiMethodBySession.get(cacheObserverEvent.data.sessionID)?.method;
+              if (method !== undefined) {
+                cacheObserverEvent = {
+                  ...cacheObserverEvent,
+                  data: { ...cacheObserverEvent.data, connectionMethod: method },
+                };
+              }
+            }
             if (
               cacheObserverEvent !== undefined &&
               typeof event.created === "number" &&
@@ -311,6 +355,7 @@ export const QuotaToastPlugin = Plugin.define({
 
     return async () => {
       hostEvents.abort();
+      openaiMethodBySession.clear();
       pendingCacheObserverEvents.length = 0;
       publishHostEventSourceState("stopped", Date.now());
       unbindCredentialSource();
