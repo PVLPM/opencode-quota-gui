@@ -61,7 +61,7 @@ export interface CacheInvocationObservation {
   counts: CacheInvocationCounts;
   /** Best-effort current configuration snapshot captured during this live call. */
   configuredTtlMs?: CacheConfiguredTtlMs;
-  connectionMethod?: "oauth" | "key" | "external" | "unknown";
+  connectionMethod?: "oauth" | "key" | "external";
 }
 
 /** Host-configured retention values the observer accepts for a configurable route. */
@@ -77,11 +77,6 @@ export type CacheSupportedTtlMs = CacheConfiguredTtlMs | 1_800_000 | 86_400_000;
 export interface CacheRouteConfiguration {
   /** The host's `cache.ttl` for a configurable route (direct Anthropic or Kimi). */
   configuredTtlMs?: CacheConfiguredTtlMs;
-  /**
-   * The active credential is an API key and the resolved provider sets no endpoint
-   * override, so the route is the direct OpenAI API (not ChatGPT OAuth or a gateway).
-   */
-  directOpenAiApi?: boolean;
 }
 
 export interface CacheTtlEstimate {

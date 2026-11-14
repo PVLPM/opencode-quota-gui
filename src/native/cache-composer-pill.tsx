@@ -508,7 +508,7 @@ export function createCacheComposerPill(
     clockTimer = setTimeout(
       () => {
         clockTimer = undefined;
-        setClock(Date.now());
+        setClock(Math.max(Date.now(), boundary));
       },
       Math.max(0, boundary - Date.now()),
     );

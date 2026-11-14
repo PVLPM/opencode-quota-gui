@@ -70,20 +70,22 @@ export const QuotaToastPlugin = Plugin.define({
 
     let openaiMethod: "oauth" | "key" | "external" | "unknown" = "unknown";
     let openaiSample = 0;
-    await ctx.session.hook("model.request", async (event) => {
+    await ctx.session.hook("model.request", (event) => {
       if (event.kind !== "primary" || event.model.providerID !== "openai") return;
       const sample = ++openaiSample;
       openaiMethod = "unknown";
-      try {
-        const connection = await ctx.integration.connection.active("openai");
-        const method = connection?.type === "credential" ? connection.method : undefined;
-        if (sample === openaiSample) {
-          openaiMethod =
-            method === "oauth" || method === "key" || method === "external" ? method : "unknown";
+      void (async () => {
+        try {
+          const connection = await ctx.integration.connection.active("openai");
+          const method = connection?.type === "credential" ? connection.method : undefined;
+          if (sample === openaiSample) {
+            openaiMethod =
+              method === "oauth" || method === "key" || method === "external" ? method : "unknown";
+          }
+        } catch {
+          // Missing or unavailable metadata retains the conservative fallback.
         }
-      } catch {
-        // Missing or unavailable metadata retains the conservative fallback.
-      }
+      })();
     });
 
     // Every login read in this process goes through this location's `ctx.integration`. Bound

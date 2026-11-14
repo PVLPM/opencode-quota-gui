@@ -217,7 +217,7 @@ export type DashboardRpcCacheObserverEvent =
         model: { providerID: string; id: string; variant?: string };
         /** Captured before `llm.stream`; event.created is emitted at first output instead. */
         started?: number;
-        connectionMethod?: "oauth" | "key" | "external" | "unknown";
+        connectionMethod?: "oauth" | "key" | "external";
       };
     }
   | {
@@ -668,8 +668,7 @@ export function isDashboardRpcCacheObserverEvent(
       (value.data.connectionMethod !== undefined &&
         value.data.connectionMethod !== "oauth" &&
         value.data.connectionMethod !== "key" &&
-        value.data.connectionMethod !== "external" &&
-        value.data.connectionMethod !== "unknown") ||
+        value.data.connectionMethod !== "external") ||
       typeof value.data.sessionID !== "string" ||
       !isValidResourceId(value.data.sessionID) ||
       typeof value.data.assistantMessageID !== "string" ||

@@ -1014,8 +1014,7 @@ function startedStepFromDto(event: unknown): StartedStepEvidence | undefined {
     ...(dispatchAtMs === undefined || dispatchAtMs < 0 ? {} : { dispatchAtMs }),
     ...(event.data.connectionMethod === "oauth" ||
     event.data.connectionMethod === "key" ||
-    event.data.connectionMethod === "external" ||
-    event.data.connectionMethod === "unknown"
+    event.data.connectionMethod === "external"
       ? { connectionMethod: event.data.connectionMethod }
       : {}),
   };
