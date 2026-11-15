@@ -161,7 +161,7 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 
 | Provider           | Auth/setup                                                     | Data from          | Reports            |
 | ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic          | [Needs setup](docs/readme/providers.md#anthropic)              | Remote API         | Quota              |
+| Anthropic          | [Unavailable](docs/readme/providers.md#anthropic)              | —                  | —                  |
 | Claude Agent       | [Needs setup](docs/readme/providers.md#claude-agent)           | Local CLI/OAuth    | Quota              |
 | Chutes AI          | Automatic                                                      | Remote API         | Quota              |
 | Cursor             | [Needs setup](docs/readme/providers.md#cursor)                 | Local estimate     | Budget and spend   |
@@ -184,7 +184,7 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 
 | Provider                | Auth/setup                                                     | Data from          | Reports            |
 | ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic               | [Needs setup](docs/readme/providers.md#anthropic)              | Remote API         | Quota              |
+| Anthropic               | [Unavailable](docs/readme/providers.md#anthropic)              | —                  | —                  |
 | Claude Agent            | [Needs setup](docs/readme/providers.md#claude-agent)           | Local CLI/OAuth    | Quota              |
 | Chutes AI               | Automatic                                                      | Remote API         | Quota              |
 | Cursor                  | [Needs setup](docs/readme/providers.md#cursor)                 | Local estimate     | Budget and spend   |

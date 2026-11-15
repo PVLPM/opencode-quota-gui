@@ -35,7 +35,6 @@ import {
   parseOAuthUsageResponse,
   parseUsageResponse,
   queryAnthropicQuotaWithOAuth,
-  resolveAnthropicAccountSetIdentity,
   resolveClaudeAgentAccountIdentity,
 } from "../src/lib/anthropic.js";
 import { fetchWithTimeout } from "../src/lib/http.js";
@@ -594,7 +593,6 @@ describe("Claude CLI diagnostics", () => {
       binaryPath: "claude",
       onlyCurrentModel: false,
       runtimeDetected: false,
-      excludedCredentialFingerprints: [],
     };
     const first = await resolveClaudeAgentAccountIdentity(options);
     const second = await resolveClaudeAgentAccountIdentity(options);
@@ -620,7 +618,6 @@ describe("Claude CLI diagnostics", () => {
       binaryPath: "claude",
       onlyCurrentModel: false,
       runtimeDetected: false,
-      excludedCredentialFingerprints: [],
     };
     const firstDirectory = join(homedir(), "claude-first");
     const secondDirectory = join(homedir(), "claude-second");
@@ -680,13 +677,12 @@ describe("Claude CLI diagnostics", () => {
       resolveClaudeAgentAccountIdentity({
         onlyCurrentModel: false,
         runtimeDetected: false,
-        excludedCredentialFingerprints: [],
       }),
     ).resolves.toBeNull();
     expect(identityMocks.deriveResolvedAuthIdentity).not.toHaveBeenCalled();
   });
 
-  it("does not deduplicate CLI-reported quota using a token the quota did not identify", async () => {
+  it("uses CLI-reported quota without reading a stored token", async () => {
     setProcessPlatform("linux");
     readFileMock.mockResolvedValue(
       JSON.stringify({ claudeAiOauth: { accessToken: "stored-token" } }),
@@ -702,66 +698,12 @@ describe("Claude CLI diagnostics", () => {
       },
     ]);
 
-    const diagnostics = await getAnthropicDiagnostics({}, [fingerprintAccessToken("stored-token")]);
+    const diagnostics = await getAnthropicDiagnostics({});
 
     expect(diagnostics?.quotaSource).toBe("claude-auth-status-json");
     expect(diagnostics?.credentialFingerprint).toBeUndefined();
     expect(readFileMock).not.toHaveBeenCalled();
     expect(fetchWithTimeoutMock).not.toHaveBeenCalled();
-  });
-
-  it("passes every OpenCode login row with its state into the account-set identity", async () => {
-    setProcessPlatform("linux");
-    mockExecSequence([
-      { stdout: "claude 1.2.3\n" },
-      { stdout: JSON.stringify({ loggedIn: false }) },
-    ]);
-
-    await resolveAnthropicAccountSetIdentity({
-      openCodeAccounts: [
-        {
-          sourceId: "row-active",
-          label: "Work",
-          active: true,
-          state: "configured",
-          accessToken: "work-token",
-        },
-        {
-          sourceId: "row-idle",
-          label: "Home",
-          active: false,
-          state: "configured",
-          accessToken: "home-token",
-        },
-        { sourceId: "row-broken", label: "Old", active: false, state: "failed" },
-      ],
-      onlyCurrentModel: false,
-    });
-
-    expect(identityMocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
-      providerId: "anthropic:opencode-account",
-      principal: { kind: "credential", value: "work-token" },
-      qualifiers: ["row-active", "Work", "active", "configured"],
-    });
-    expect(identityMocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
-      providerId: "anthropic:opencode-account",
-      principal: { kind: "credential", value: "home-token" },
-      qualifiers: ["row-idle", "Home", "idle", "configured"],
-    });
-    expect(identityMocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith({
-      providerId: "anthropic:opencode-account",
-      principal: { kind: "stable-id", value: "row-broken" },
-      qualifiers: ["row-broken", "Old", "idle", "failed"],
-    });
-    expect(identityMocks.composeResolvedAuthIdentities).toHaveBeenCalledWith({
-      providerId: "anthropic",
-      identities: [
-        "identity:anthropic:opencode-account",
-        "identity:anthropic:opencode-account",
-        "identity:anthropic:opencode-account",
-      ],
-      qualifiers: ["all-models"],
-    });
   });
 
   it("keys the Claude CLI row by its stored token, without any network call", async () => {
@@ -778,7 +720,6 @@ describe("Claude CLI diagnostics", () => {
         binaryPath: "claude",
         onlyCurrentModel: false,
         runtimeDetected: false,
-        excludedCredentialFingerprints: [],
       });
     }
 
@@ -803,7 +744,6 @@ describe("Claude CLI diagnostics", () => {
         binaryPath: "claude",
         onlyCurrentModel: false,
         runtimeDetected: claudeCodeRuntimeDetected,
-        excludedCredentialFingerprints: [],
       });
     };
 
@@ -859,29 +799,26 @@ describe("Claude CLI diagnostics", () => {
         binaryPath: "claude",
         onlyCurrentModel: false,
         runtimeDetected: false,
-        excludedCredentialFingerprints: [],
       }),
     ).resolves.toBeNull();
     expect(identityMocks.deriveResolvedAuthIdentity).not.toHaveBeenCalled();
   });
 
-  it("keys the whole account set by the selected-route flag", async () => {
+  it("keys the Claude Agent identity by the selected-route flag", async () => {
     setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
       { stdout: JSON.stringify({ loggedIn: false }) },
     ]);
 
-    await resolveAnthropicAccountSetIdentity({
-      openCodeAccounts: [
-        { sourceId: "row", label: "Work", active: true, state: "configured", accessToken: "token" },
-      ],
+    await resolveClaudeAgentAccountIdentity({
       onlyCurrentModel: true,
+      runtimeDetected: false,
     });
 
     expect(identityMocks.composeResolvedAuthIdentities).toHaveBeenCalledWith({
-      providerId: "anthropic",
-      identities: ["identity:anthropic:opencode-account"],
+      providerId: "claude-agent",
+      identities: ["identity:anthropic:claude-cli-state"],
       qualifiers: ["only-current-model"],
     });
   });

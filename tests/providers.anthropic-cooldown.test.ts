@@ -20,7 +20,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-it("cools down a rate-limited OpenCode login without spawning Claude CLI", async () => {
+it("does not query OpenCode OAuth quota or spawn Claude CLI on repeated refresh", async () => {
   vi.mocked(readCredentialRows).mockResolvedValue([
     {
       id: "personal",
@@ -41,8 +41,8 @@ it("cools down a rate-limited OpenCode login without spawning Claude CLI", async
   const first = await anthropicProvider.fetch(ctx);
   const second = await anthropicProvider.fetch(ctx);
 
-  expect(first.errors[0]?.failureCategory).toBe("provider_api");
-  expect(second.errors[0]?.failureCategory).toBe("provider_api");
-  expect(fetch).toHaveBeenCalledOnce();
+  expect(first.entries).toEqual([]);
+  expect(second.entries).toEqual([]);
+  expect(fetch).not.toHaveBeenCalled();
   expect(execFile).not.toHaveBeenCalled();
 });

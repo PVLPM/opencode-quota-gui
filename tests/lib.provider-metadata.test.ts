@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { normalizeEnabledProviders } from "../src/lib/config.js";
 
 import {
   getQuotaProviderDisplayLabel,
@@ -19,10 +20,9 @@ describe("provider-metadata", () => {
     expect(QUOTA_PROVIDER_SHAPES).toEqual([
       {
         id: "anthropic",
-        autoSetup: "needs_quick_setup",
-        authentication: "opencode_auth_oauth_token",
-        quota: "remote_api",
-        quickSetupAnchor: "anthropic",
+        autoSetup: "unavailable",
+        authentication: "unavailable",
+        quota: "unavailable",
       },
       {
         id: "claude-agent",
@@ -250,6 +250,13 @@ describe("provider-metadata", () => {
   });
 
   it("normalizes provider synonyms to canonical ids", () => {
+    expect(normalizeQuotaProviderId("claude")).toBe("claude-agent");
+    expect(normalizeQuotaProviderId("anthropic")).toBe("anthropic");
+    expect(normalizeEnabledProviders(["claude", "claude-code", "anthropic"])).toEqual({
+      value: ["claude-agent", "anthropic"],
+      issues: [],
+      invalidEmpty: false,
+    });
     expect(normalizeQuotaProviderId("  openai  ")).toBe("openai");
 
     for (const [alias, canonicalId] of Object.entries(QUOTA_PROVIDER_ID_SYNONYMS)) {
@@ -327,7 +334,7 @@ describe("provider-metadata", () => {
       "copilot-chat",
       "github-copilot-chat",
     ]);
-    expect(getQuotaProviderRuntimeIds("claude")).toEqual(["anthropic"]);
+    expect(getQuotaProviderRuntimeIds("claude")).toEqual(["claude-agent", "claude-code"]);
     expect(getQuotaProviderRuntimeIds("claude-code")).toEqual(["claude-agent", "claude-code"]);
     expect(getQuotaProviderRuntimeIds("openai")).toEqual(["openai", "chatgpt", "codex"]);
     expect(getQuotaProviderRuntimeIds("kilo")).toEqual(["kilo"]);

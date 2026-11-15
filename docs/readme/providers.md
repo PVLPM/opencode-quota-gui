@@ -15,7 +15,7 @@ The dashboard reads provider results through the same OpenCode host process that
 
 | Provider           | Auth/setup                                                     | Data from          | Reports            |
 | ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic          | [Needs setup](#anthropic)                                      | Remote API         | Quota              |
+| Anthropic          | [Unavailable](#anthropic)                                      | —                  | —                  |
 | Claude Agent       | [Needs setup](#claude-agent)                                   | Local CLI/OAuth    | Quota              |
 | Chutes AI          | Automatic                                                      | Remote API         | Quota              |
 | Cursor             | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
@@ -38,7 +38,7 @@ The dashboard reads provider results through the same OpenCode host process that
 
 | Provider                | Auth/setup                                                     | Data from          | Reports            |
 | ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic               | [Needs setup](#anthropic)                                      | Remote API         | Quota              |
+| Anthropic               | [Unavailable](#anthropic)                                      | —                  | —                  |
 | Claude Agent            | [Needs setup](#claude-agent)                                   | Local CLI/OAuth    | Quota              |
 | Chutes AI               | Automatic                                                      | Remote API         | Quota              |
 | Cursor                  | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
@@ -369,7 +369,9 @@ GitHub references: [AI Credit billing reports](https://docs.github.com/en/rest/b
 
 ### Anthropic
 
-Uses only OpenCode's own `anthropic` sign-in (`opencode auth login anthropic`); it never runs the Claude CLI. Each OpenCode Anthropic subscription login gets its own card with quota from Anthropic's OAuth usage endpoint. An API-key connection exposes no comparable quota, so it shows no card.
+The Anthropic route is API-only and does not report Claude subscription quota. OpenCode Anthropic OAuth sign-ins are not queried for subscription quota, and API-key connections expose no comparable quota here. For Claude subscription quota, use [Claude Agent](#claude-agent) with its own Claude CLI login.
+
+In `enabledProviders`, the legacy `claude` alias now selects `claude-agent`. Use the canonical `anthropic` ID for the Anthropic API route, and `claude-agent` for Claude subscription quota.
 
 <a id="claude-agent"></a>
 
@@ -383,9 +385,9 @@ claude auth status
 ```
 
 - The plugin runs `claude` from OpenCode's `PATH`, or else the first working one of `~/.claude/local/claude`, `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, and `/usr/local/bin/claude` (not on Windows). If Claude lives elsewhere, or on Windows when `claude` is not on OpenCode's `PATH`, set `anthropicBinaryPath`.
-- When the CLI does not report quota windows itself, quota comes from Anthropic's OAuth usage endpoint with the CLI's own first-party claude.ai token. If that token is the same one as an OpenCode Anthropic login, the account is shown once, on the Anthropic card.
+- When the CLI does not report quota windows itself, quota comes from Anthropic's OAuth usage endpoint with the CLI's own first-party claude.ai token. Claude Agent reports that subscription even if its token matches an OpenCode Anthropic login; the Anthropic route does not report subscription quota.
 
-These rows apply to both cards:
+The Claude Agent card can also show:
 
 - **Claude Usage Credits:** a separate monthly group when that response includes enabled Usage Credits with numeric utilization. Missing or invalid credit data never changes the regular 5-hour and weekly rows.
 - **Fable:** a separate weekly row when Anthropic returns that model-scoped window. It is never guessed from your plan name. See [Claude Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).

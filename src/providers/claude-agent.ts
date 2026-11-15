@@ -5,11 +5,7 @@
  */
 
 import type { AnthropicDiagnostics } from "../lib/anthropic.js";
-import {
-  fingerprintAccessToken,
-  getAnthropicDiagnostics,
-  hasAnthropicCredentialsConfigured,
-} from "../lib/anthropic.js";
+import { getAnthropicDiagnostics, hasAnthropicCredentialsConfigured } from "../lib/anthropic.js";
 import type {
   QuotaProvider,
   QuotaProviderContext,
@@ -19,11 +15,10 @@ import type {
 import { QUOTA_FORCE_REFRESH } from "../lib/entries.js";
 import { isAnyProviderIdAvailable } from "../lib/provider-availability.js";
 import { resolveQuotaProviderSessionModelIdentity } from "../lib/quota-providers.js";
-import { anthropicQuotaEntries, readOpenCodeAnthropicLogins } from "./anthropic.js";
+import { anthropicQuotaEntries } from "./anthropic.js";
 import {
   attemptedErrorResult,
   attemptedResult,
-  notAttemptedResult,
   statusDetailsFromRecord,
   withStatusDetails,
 } from "./result-helpers.js";
@@ -107,31 +102,6 @@ export async function isClaudeAgentRuntimeDetected(ctx: QuotaProviderContext): P
   });
 }
 
-/**
- * Fingerprints of OpenCode Anthropic tokens the Anthropic provider already shows. A Claude CLI login
- * holding the very same token is that account, so it is not collected a second time here. Only
- * token equality counts; matching emails or plans never merge accounts. A selected
- * `onlyCurrentModel` route shows only this provider, so nothing is excluded there.
- */
-export async function claudeAgentExcludedFingerprints(
-  ctx: QuotaProviderContext,
-): Promise<string[]> {
-  if (ctx.config?.onlyCurrentModel === true) return [];
-  const enabled = ctx.config?.enabledProviders;
-  if (enabled !== undefined && enabled !== "auto" && !enabled.includes("anthropic")) return [];
-  if (
-    !(await isAnyProviderIdAvailable({ ctx, candidateIds: ["anthropic"], fallbackOnError: false }))
-  )
-    return [];
-  try {
-    return (await readOpenCodeAnthropicLogins()).flatMap(({ auth }) =>
-      auth.state === "configured" ? [fingerprintAccessToken(auth.accessToken)] : [],
-    );
-  } catch {
-    return [];
-  }
-}
-
 export const claudeAgentProvider: QuotaProvider = {
   id: "claude-agent",
 
@@ -167,18 +137,14 @@ export const claudeAgentProvider: QuotaProvider = {
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
     const forceRefresh = ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true;
-    const excluded = await claudeAgentExcludedFingerprints(ctx);
     let diagnostics: AnthropicDiagnostics;
     try {
-      diagnostics = await getAnthropicDiagnostics(
-        {
-          binaryPath: ctx.config?.anthropicBinaryPath,
-          ...(ctx.operationCache ? { operationCache: ctx.operationCache } : {}),
-          requestTimeoutMs: ctx.config?.requestTimeoutMs,
-          ...(forceRefresh ? { forceRefresh: true } : {}),
-        },
-        excluded,
-      );
+      diagnostics = await getAnthropicDiagnostics({
+        binaryPath: ctx.config?.anthropicBinaryPath,
+        ...(ctx.operationCache ? { operationCache: ctx.operationCache } : {}),
+        requestTimeoutMs: ctx.config?.requestTimeoutMs,
+        ...(forceRefresh ? { forceRefresh: true } : {}),
+      });
     } catch {
       return withStatusDetails(
         attemptedErrorResult(CLAUDE_AGENT_GROUP, "Claude CLI probe failed."),
@@ -209,14 +175,6 @@ export const claudeAgentProvider: QuotaProvider = {
         ? `${diagnostics.quota.fable_weekly.percentRemaining}% reset_at=${diagnostics.quota.fable_weekly.resetTimeIso ?? "(none)"}`
         : undefined,
     });
-
-    if (
-      diagnostics.credentialFingerprint !== undefined &&
-      excluded.includes(diagnostics.credentialFingerprint)
-    ) {
-      // The same token is an OpenCode Anthropic login, already reported by the Anthropic provider.
-      return withStatusDetails(notAttemptedResult(), statusDetails);
-    }
 
     if (diagnostics.quotaSupported && diagnostics.quota) {
       const acquisitionMethod: QuotaToastEntry["accounting"]["acquisitionMethod"] =

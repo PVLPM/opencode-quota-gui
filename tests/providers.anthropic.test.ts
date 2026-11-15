@@ -2,9 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { anthropicProvider } from "../src/providers/anthropic.js";
 import {
   expectAttemptedWithErrorLabel,
-  expectAttemptedWithNoErrors,
   expectNotAttempted,
-  visibleEntries,
 } from "./helpers/provider-assertions.js";
 import { createProviderAvailabilityContext } from "./helpers/provider-test-harness.js";
 
@@ -41,7 +39,7 @@ describe("anthropic provider", () => {
     (readCredentialRows as any).mockReset().mockResolvedValue([]);
   });
 
-  it("uses OpenCode login without launching the CLI, even when it is missing", async () => {
+  it("does not report OpenCode OAuth subscription quota or launch the CLI", async () => {
     const { execFile } = await import("child_process");
     const {
       queryAnthropicQuotaWithOAuth,
@@ -64,11 +62,33 @@ describe("anthropic provider", () => {
     });
     const ctx = createProviderAvailabilityContext({ providerIds: ["anthropic"] });
 
-    expect(await anthropicProvider.isAvailable(ctx)).toBe(true);
-    expect((await anthropicProvider.fetch(ctx)).entries).toHaveLength(1);
+    expect(await anthropicProvider.isAvailable(ctx)).toBe(false);
+    expect((await anthropicProvider.fetch(ctx)).entries).toHaveLength(0);
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
     expect(execFile).not.toHaveBeenCalled();
     expect(getAnthropicDiagnostics).not.toHaveBeenCalled();
     expect(hasAnthropicCredentialsConfigured).not.toHaveBeenCalled();
+  });
+
+  it("does not invent API quota for an Anthropic API key", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    const { queryAnthropicQuotaWithOAuth, getAnthropicDiagnostics } = await import(
+      "../src/lib/anthropic.js"
+    );
+    vi.mocked(readCredentialRows).mockResolvedValue([
+      {
+        id: "api",
+        integrationId: "anthropic",
+        label: "API",
+        active: true,
+        value: { type: "api", key: "api-key" },
+      },
+    ] as never);
+    const ctx = createProviderAvailabilityContext({ providerIds: ["anthropic"] });
+    expect(await anthropicProvider.isAvailable(ctx)).toBe(false);
+    expectNotAttempted(await anthropicProvider.fetch(ctx));
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
+    expect(getAnthropicDiagnostics).not.toHaveBeenCalled();
   });
 
   it("never includes a Claude CLI plan or account in an OpenCode login result", async () => {
@@ -98,7 +118,8 @@ describe("anthropic provider", () => {
     const result = await anthropicProvider.fetch(
       createProviderAvailabilityContext({ providerIds: ["anthropic"] }),
     );
-    expect(result.accounts?.map((account) => account.sourceId)).toEqual(["opencode-personal"]);
+    expect(result.accounts ?? []).toEqual([]);
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
     expect(result.planLabel).toBeUndefined();
     expect(JSON.stringify(result)).not.toMatch(/CLI-private-plan|cli-private-account/);
     expect(getAnthropicDiagnostics).not.toHaveBeenCalled();
@@ -134,7 +155,7 @@ describe("anthropic provider", () => {
     expect(out.errors).toHaveLength(1);
   });
 
-  it("fans out to a valid inactive database credential when the active credential is expired", async () => {
+  it("ignores active and inactive OAuth credentials, including expired credentials", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"
     );
@@ -177,15 +198,11 @@ describe("anthropic provider", () => {
 
     const out = await anthropicProvider.fetch({} as any);
 
-    expect(queryAnthropicQuotaWithOAuth).toHaveBeenCalledWith("valid", undefined);
-    expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([
-      ["[Claude Work]", "valid-inactive"],
-      ["[Claude Work]", "valid-inactive"],
-      ["[Claude Work] Usage Credits", "valid-inactive"],
-      ["[Claude Work]", "valid-inactive"],
-    ]);
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
+    expect(getAnthropicDiagnostics).not.toHaveBeenCalled();
+    expectNotAttempted(out);
   });
-  it("shows a login OpenCode could not read as its own error row", async () => {
+  it("does not report unreadable or valid OAuth login rows as API quota", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"
     );
@@ -222,26 +239,15 @@ describe("anthropic provider", () => {
 
     const out = await anthropicProvider.fetch({} as any);
 
-    expect(queryAnthropicQuotaWithOAuth).toHaveBeenCalledOnce();
-    expect(queryAnthropicQuotaWithOAuth).toHaveBeenCalledWith("valid", undefined);
-    expect(out.errors).toEqual([
-      {
-        label: "[Claude] (active)",
-        message: "Anthropic sign-in could not be used. Run `opencode auth login anthropic`.",
-        sourceId: "failed-active",
-        failureCategory: "credentials",
-      },
-    ]);
-    expect(out.entries.map((entry) => [entry.group, entry.accounting.sourceId])).toEqual([
-      ["[Claude Work]", "valid-inactive"],
-      ["[Claude Work]", "valid-inactive"],
-    ]);
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
+    expect(getAnthropicDiagnostics).not.toHaveBeenCalled();
+    expectNotAttempted(out);
   });
   it.each([
     "anthropic",
     "claude-code",
     "claude-agent",
-  ])("preserves all Anthropic login accounts in all-provider collection for %s", async (runtimeProviderId) => {
+  ])("does not report Anthropic OAuth accounts in all-provider collection for %s", async (runtimeProviderId) => {
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"
     );
@@ -279,19 +285,13 @@ describe("anthropic provider", () => {
     });
     const out = await anthropicProvider.fetch(ctx);
 
-    expect(readCredentialRows).toHaveBeenCalledWith(["anthropic"], { methods: ["oauth"] });
-    expect(queryAnthropicQuotaWithOAuth).toHaveBeenCalledTimes(2);
-    expect(out.accounts?.map((account) => account.sourceId)).toEqual([
-      "anthropic-personal",
-      "anthropic-work",
-    ]);
-    expect(visibleEntries(out.entries, "anthropic").map((entry) => entry.percentRemaining)).toEqual(
-      [80, 60],
-    );
+    expect(readCredentialRows).not.toHaveBeenCalled();
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
+    expectNotAttempted(out);
     expect(getAnthropicDiagnostics).not.toHaveBeenCalled();
   });
 
-  it("keeps per-account OAuth failures and quota rows separate in Claude Code all-provider mode", async () => {
+  it("does not query OAuth accounts in Claude Code all-provider mode", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"
     );
@@ -336,22 +336,8 @@ describe("anthropic provider", () => {
     });
     const out = await anthropicProvider.fetch(ctx);
 
-    expect(queryAnthropicQuotaWithOAuth).toHaveBeenNthCalledWith(1, "personal-token", undefined);
-    expect(queryAnthropicQuotaWithOAuth).toHaveBeenNthCalledWith(2, "work-token", undefined);
-    expect(out.accounts?.map((account) => account.sourceId)).toEqual([
-      "anthropic-personal",
-      "anthropic-work",
-    ]);
-    expect(out.errors).toEqual([
-      expect.objectContaining({
-        sourceId: "anthropic-personal",
-        failureCategory: "provider_api",
-        message: "Anthropic quota request failed.",
-      }),
-    ]);
-    expect(out.entries.map((entry) => [entry.accounting.sourceId, entry.percentRemaining])).toEqual(
-      [["anthropic-work", 60]],
-    );
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
+    expectNotAttempted(out);
     expect(getAnthropicDiagnostics).not.toHaveBeenCalled();
   });
   it("does not append the Claude Code account to the selected anthropic route under onlyCurrentModel", async () => {
@@ -389,7 +375,8 @@ describe("anthropic provider", () => {
     );
 
     expect(execFile).not.toHaveBeenCalled();
-    expect(out.entries.some((entry) => entry.percentRemaining === 80)).toBe(true);
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
+    expect(out.entries).toEqual([]);
     expect(out.entries.filter((entry) => entry.group === "Claude Code")).toEqual([]);
   });
   it("tells a selected anthropic route without OpenCode's login why it has no data", async () => {
@@ -413,15 +400,14 @@ describe("anthropic provider", () => {
       }),
     );
 
-    expectAttemptedWithErrorLabel(out, "Claude");
+    expectAttemptedWithErrorLabel(out, "Anthropic");
     expect(out.errors?.[0]).toMatchObject({
-      message: expect.stringContaining("opencode auth login anthropic"),
-      failureCategory: "credentials",
+      message: "Anthropic API quota is unavailable.",
     });
     expect(out.entries).toEqual([]);
     expect(execFile).not.toHaveBeenCalled();
   });
-  it("keeps OpenCode account rows free of raw identities, paths, and fingerprints, but still distinct", async () => {
+  it("keeps raw identities, paths, and fingerprints out of the unavailable result", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"
     );
@@ -467,9 +453,8 @@ describe("anthropic provider", () => {
       }),
     );
 
-    // Each OpenCode login stays its own account row, so the rows still tell accounts apart.
-    expect(out.accounts?.map((account) => account.sourceId)).toEqual(["row-work", "row-home"]);
-    expect(new Set(out.accounts?.map((account) => account.label)).size).toBe(2);
+    expect(out.accounts ?? []).toEqual([]);
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
 
     const emitted = JSON.stringify({
       accounts: out.accounts,

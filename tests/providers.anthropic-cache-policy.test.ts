@@ -48,10 +48,6 @@ vi.mock("../src/lib/anthropic.js", async (importOriginal) => ({
     (await importOriginal<typeof import("../src/lib/anthropic.js")>())
       .resolveClaudeAgentAccountIdentity,
   ),
-  resolveAnthropicAccountSetIdentity: vi.fn(
-    (await importOriginal<typeof import("../src/lib/anthropic.js")>())
-      .resolveAnthropicAccountSetIdentity,
-  ),
 }));
 
 vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
@@ -92,13 +88,11 @@ describe("anthropic cache policy route identity", () => {
       operationCache: undefined,
       onlyCurrentModel: true,
       runtimeDetected: false,
-      excludedCredentialFingerprints: [],
     });
   });
 
-  it("scopes the OpenCode route identity to every OpenCode login row, not only the active one", async () => {
+  it("does not cache retired OpenCode OAuth quota", async () => {
     const { PROVIDER_CACHE_POLICIES } = await import("../src/providers/cache-policies.js");
-    const { resolveAnthropicAccountSetIdentity } = await import("../src/lib/anthropic.js");
     opencodeAuth.readCredentialRows.mockResolvedValueOnce([
       {
         id: "row-active",
@@ -124,29 +118,9 @@ describe("anthropic cache policy route identity", () => {
       },
     ]);
 
-    await PROVIDER_CACHE_POLICIES.anthropic.resolveIdentity(
-      {
-        config: {
-          anthropicBinaryPath: "claude",
-          onlyCurrentModel: false,
-          currentProviderID: "anthropic",
-        },
-      } as any,
-      {},
-    );
-
-    expect(resolveAnthropicAccountSetIdentity).toHaveBeenLastCalledWith({
-      openCodeAccounts: [
-        expect.objectContaining({
-          sourceId: "row-active",
-          active: true,
-          accessToken: "work-token",
-        }),
-        expect.objectContaining({ sourceId: "row-idle", active: false, accessToken: "home-token" }),
-        expect.objectContaining({ sourceId: "row-broken", active: false }),
-      ],
-      onlyCurrentModel: false,
-    });
+    expect(PROVIDER_CACHE_POLICIES.anthropic.kind).toBe("uncached");
+    expect(opencodeAuth.readCredentialRows).not.toHaveBeenCalled();
+    expect(cli.execFile).not.toHaveBeenCalled();
   });
 
   it("passes the selected route flag and whether OpenCode detects a Claude Code runtime", async () => {
@@ -173,7 +147,7 @@ describe("anthropic cache policy route identity", () => {
 });
 
 describe("separate provider cache identities", () => {
-  it("isolates login changes, deduplication, namespaces, and never probes the CLI for Anthropic", async () => {
+  it("keeps Claude CLI identity independent of OpenCode OAuth credentials", async () => {
     const { PROVIDER_CACHE_POLICIES } = await import("../src/providers/cache-policies.js");
     const configDirectory = join(process.cwd(), "test-claude-config");
     vi.stubEnv("CLAUDE_CONFIG_DIR", configDirectory);
@@ -199,34 +173,27 @@ describe("separate provider cache identities", () => {
           value: { type: "oauth", access: token },
         },
       ]);
-    const identities = async () => ({
-      anthropic: await PROVIDER_CACHE_POLICIES.anthropic.resolveIdentity(ctx, {}),
-      agent: await PROVIDER_CACHE_POLICIES["claude-agent"].resolveIdentity(ctx, {}),
-    });
+    const identity = () => PROVIDER_CACHE_POLICIES["claude-agent"].resolveIdentity(ctx, {});
 
     cli.token = "cli-token-a";
     setOpenCode("open-token-a");
-    const anthropic = await PROVIDER_CACHE_POLICIES.anthropic.resolveIdentity(ctx, {});
-    expect(anthropic).not.toBeNull();
+    expect(PROVIDER_CACHE_POLICIES.anthropic.kind).toBe("uncached");
     expect(cli.execFile).not.toHaveBeenCalled();
     expect(cli.spawn).not.toHaveBeenCalled();
-    const initial = await identities();
-    expect(initial.agent).not.toBeNull();
-    expect(initial.agent).not.toBe(initial.anthropic);
+    const initial = await identity();
+    expect(initial).not.toBeNull();
 
     cli.token = "cli-token-b";
-    const changedCli = await identities();
-    expect(changedCli.anthropic).toBe(initial.anthropic);
-    expect(changedCli.agent).not.toBe(initial.agent);
+    const changedCli = await identity();
+    expect(changedCli).not.toBe(initial);
 
     setOpenCode("open-token-b");
-    const changedOpenCode = await identities();
-    expect(changedOpenCode.anthropic).not.toBe(changedCli.anthropic);
-    expect(changedOpenCode.agent).toBe(changedCli.agent);
+    const changedOpenCode = await identity();
+    expect(changedOpenCode).toBe(changedCli);
 
     setOpenCode("cli-token-b");
-    const duplicate = await identities();
-    expect(duplicate.agent).not.toBe(changedOpenCode.agent);
-    expect(duplicate.agent).not.toBe(duplicate.anthropic);
+    const duplicate = await identity();
+    expect(duplicate).toBe(changedOpenCode);
+    expect(opencodeAuth.readCredentialRows).not.toHaveBeenCalled();
   });
 });
