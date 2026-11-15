@@ -287,6 +287,16 @@ describe("GUI snapshot service", () => {
       name: "future cooldown",
       error: { failureCategory: "provider_api" as const, retryAtMs: NOW + 500_000 },
     },
+    {
+      name: "retryable Claude Agent 429 backoff",
+      error: {
+        label: "Claude Agent",
+        message: "Claude quota request failed.",
+        failureCategory: "provider_api" as const,
+        retryable: true,
+        retryAtMs: NOW + 500_000,
+      },
+    },
   ])("does not schedule an early retry for $name", async ({ error }) => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);

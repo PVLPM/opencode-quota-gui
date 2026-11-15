@@ -195,6 +195,9 @@ export const claudeAgentProvider: QuotaProvider = {
         ...(diagnostics.failureCategory !== undefined
           ? { failureCategory: diagnostics.failureCategory }
           : {}),
+        ...(diagnostics.retryAtMs !== undefined
+          ? { retryable: true, retryAtMs: diagnostics.retryAtMs }
+          : {}),
       }),
       statusDetails,
     );

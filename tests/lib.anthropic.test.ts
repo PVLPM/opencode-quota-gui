@@ -1502,6 +1502,7 @@ describe("Claude CLI diagnostics", () => {
         headers: {
           Authorization: "Bearer oauth-access-token",
           "anthropic-beta": "oauth-2025-04-20",
+          "User-Agent": "claude-code/1.2.3",
         },
       },
       timeoutMs: undefined,
@@ -1736,6 +1737,7 @@ describe("Claude CLI diagnostics", () => {
         headers: {
           Authorization: "Bearer oauth-access-token-from-keychain",
           "anthropic-beta": "oauth-2025-04-20",
+          "User-Agent": "claude-code/1.2.3",
         },
       },
       timeoutMs: undefined,
@@ -1808,6 +1810,7 @@ describe("Claude CLI diagnostics", () => {
         headers: {
           Authorization: "Bearer oauth-access-token-from-keychain",
           "anthropic-beta": "oauth-2025-04-20",
+          "User-Agent": "claude-code/1.2.3",
         },
       },
       timeoutMs: undefined,
@@ -1859,6 +1862,7 @@ describe("Claude CLI diagnostics", () => {
         headers: {
           Authorization: "Bearer oauth-access-token-from-file",
           "anthropic-beta": "oauth-2025-04-20",
+          "User-Agent": "claude-code/1.2.3",
         },
       },
       timeoutMs: undefined,
@@ -2069,6 +2073,53 @@ describe("Claude CLI diagnostics", () => {
     const retried = await getAnthropicDiagnostics();
     expect(retried.quotaSupported).toBe(true);
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("exposes the cooldown deadline as retryAtMs on a 429 and while paused", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
+    setProcessPlatform("linux");
+    mockExecSequence(authenticatedWithoutQuotaSteps(2));
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "oauth-secret-token" } }),
+    );
+    fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(429, "rate limited", "45"));
+
+    const deadline = Date.parse("2026-07-10T12:00:45.000Z");
+    const first = await getAnthropicDiagnostics();
+    expect(first.retryAtMs).toBe(deadline);
+    const paused = await getAnthropicDiagnostics();
+    expect(paused.retryAtMs).toBe(deadline);
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
+  });
+
+  async function sendUsageRequestWithCliOutput(versionOutput: string): Promise<unknown> {
+    setProcessPlatform("linux");
+    mockExecSequence([
+      { stdout: versionOutput },
+      { stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY_CLAUDE_AI_LOGIN }) },
+    ]);
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "oauth-access-token" } }),
+    );
+    fetchResponseMock.mockResolvedValue(
+      mockJsonResponse({ five_hour: { utilization: 10 }, seven_day: { utilization: 20 } }),
+    );
+    await getAnthropicDiagnostics();
+    const request = fetchWithTimeoutMock.mock.calls[0]?.[1] as {
+      request: { headers: Record<string, string> };
+    };
+    return request.request.headers["User-Agent"];
+  }
+
+  it("sends bare claude-code as the usage User-Agent when the CLI version is unknown", async () => {
+    await expect(sendUsageRequestWithCliOutput("claude\n")).resolves.toBe("claude-code");
+  });
+
+  it("bounds the CLI version placed in the usage User-Agent", async () => {
+    const userAgent = (await sendUsageRequestWithCliOutput(`1.2.3-${"a".repeat(300)}\n`)) as string;
+    expect(userAgent).toMatch(/^claude-code\/1\.2\.3-a+$/u);
+    expect(userAgent.length).toBeLessThanOrEqual(64);
   });
 
   it("redacts an access token reconstructed while sanitizing a request error", async () => {

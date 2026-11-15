@@ -251,6 +251,39 @@ describe("quota-state shared cache", () => {
     expect(result.errors[0]?.message).toBe("HTTP 429");
   });
 
+  it("keeps last-good Claude Agent rows with a retryable error after a later 429", async () => {
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+    const lastGood = { accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 58 };
+    const retryAtMs = Date.now() + 45_000;
+    const provider = {
+      id: "claude-agent",
+      cachePolicy: { kind: "account-neutral" },
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce({ attempted: true, entries: [lastGood], errors: [] })
+        .mockResolvedValueOnce({
+          attempted: true,
+          entries: [],
+          errors: [
+            {
+              label: "Claude Agent",
+              message: "Claude quota request failed.",
+              failureCategory: "provider_api",
+              retryable: true,
+              retryAtMs,
+            },
+          ],
+        }),
+    } as any;
+    const ctx = createTestContext();
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    const result = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    expect(result.entries).toEqual([lastGood]);
+    expect(result.errors).toEqual([
+      expect.objectContaining({ retryable: true, retryAtMs, failureCategory: "provider_api" }),
+    ]);
+  });
+
   it("revalidates partial rate-limit results even without matching old rows", async () => {
     const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
     const provider = {
