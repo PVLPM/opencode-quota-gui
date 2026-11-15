@@ -47,10 +47,12 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
 
 import { createCliQuotaClient, runCliShowCommand } from "../src/lib/cli-show.js";
 import {
+  bindCredentialSource,
   clearReadAuthFileCacheForTests,
   getCredentialSourceDiagnostics,
   readCredentialRows,
 } from "../src/lib/opencode-auth.js";
+import { createSqliteCredentialSource } from "../src/lib/opencode-auth-sqlite.js";
 import { __resetQuotaStateForTests } from "../src/lib/quota-state.js";
 import { writeCredentialDatabase } from "./helpers/credential-database.js";
 
@@ -137,6 +139,27 @@ describe("runCliShowCommand", () => {
       { id: "kimi-code-plan-global" },
       { id: "kimi-code-plan-cn" },
     ]);
+  });
+
+  it("does not synthesize a quota provider from a legacy Anthropic OAuth login", async () => {
+    writeCredentialDatabase(join(tempDir, "opencode.db"), [
+      {
+        id: "cred_anthropic",
+        integrationId: "anthropic",
+        active: 1,
+        updated: 1,
+        value: { type: "oauth", access: "test-token", expires: Date.now() + 60_000 },
+      },
+    ]);
+    const unbind = bindCredentialSource(createSqliteCredentialSource());
+    try {
+      const result = await createCliQuotaClient({
+        configRootDir: workspaceDir,
+      }).config.providers();
+      expect(result.data?.providers).toEqual([]);
+    } finally {
+      unbind();
+    }
   });
 
   it("renders a compact quota glance and returns zero when quota rows are available", async () => {

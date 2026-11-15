@@ -101,7 +101,7 @@ The browser dashboard default follows the OpenCode host version. On supported ho
 
 `true` forces web access on and `false` keeps it off. Then open <http://localhost:4144/quota>. The first page may show an empty dashboard until OpenCode has loaded the plugin and discovered a provider account. The path and platform overrides are in [Configuration](docs/readme/configuration.md#web-dashboard).
 
-Requirements: OpenCode `>= 2.0.16 < 2.4.0` and Node.js `22.13+` or `23.4+` (OpenCode 2.3 itself requires Node.js 22.19 or newer). The full Native Desktop integration ships from v1.3.0 and requires OpenCode Desktop 2.2.1+. On supported older hosts, the browser dashboard is the automatic fallback. This package does not support OpenCode 1.
+Requirements: OpenCode `>= 2.0.16 < 2.3.0` and Node.js `22.13+` or `23.4+`. The full Native Desktop integration ships from v1.3.0 and requires OpenCode Desktop 2.2.1+. On supported older hosts, the browser dashboard is the automatic fallback. This package does not support OpenCode 1.
 
 ## Native panel
 
@@ -161,7 +161,7 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 
 | Provider           | Auth/setup                                                     | Data from          | Reports            |
 | ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic          | [Needs setup](docs/readme/providers.md#anthropic)              | Remote API         | Quota              |
+| Anthropic          | [Unavailable](docs/readme/providers.md#anthropic)              | —                  | —                  |
 | Claude Agent       | [Needs setup](docs/readme/providers.md#claude-agent)           | Local CLI/OAuth    | Quota              |
 | Chutes AI          | Automatic                                                      | Remote API         | Quota              |
 | Cursor             | [Needs setup](docs/readme/providers.md#cursor)                 | Local estimate     | Budget and spend   |
@@ -184,7 +184,7 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 
 | Provider                | Auth/setup                                                     | Data from          | Reports            |
 | ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic               | [Needs setup](docs/readme/providers.md#anthropic)              | Remote API         | Quota              |
+| Anthropic               | [Unavailable](docs/readme/providers.md#anthropic)              | —                  | —                  |
 | Claude Agent            | [Needs setup](docs/readme/providers.md#claude-agent)           | Local CLI/OAuth    | Quota              |
 | Chutes AI               | Automatic                                                      | Remote API         | Quota              |
 | Cursor                  | [Needs setup](docs/readme/providers.md#cursor)                 | Local estimate     | Budget and spend   |

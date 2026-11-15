@@ -60,7 +60,6 @@ describe("claude agent provider", () => {
     );
     expect(getAnthropicDiagnostics).toHaveBeenCalledWith(
       expect.objectContaining({ binaryPath: "/custom/claude" }),
-      [],
     );
   });
 
@@ -202,10 +201,9 @@ describe("claude agent provider", () => {
     const ctx = createProviderAvailabilityContext({ providerIds: ["anthropic", "claude-agent"] });
     const anthropic = await anthropicProvider.fetch(ctx);
     const agent = await claudeAgentProvider.fetch(ctx);
-    expect(anthropic.accounts?.map((account) => account.sourceId)).toEqual(["personal"]);
-    expect(
-      anthropic.entries.map((entry) => [entry.accounting.sourceId, entry.percentRemaining]),
-    ).toEqual([["personal", 80]]);
+    expect(anthropic.accounts ?? []).toEqual([]);
+    expect(anthropic.entries).toEqual([]);
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
     expect(anthropic.entries.some((entry) => entry.group === "Claude Code")).toBe(false);
     expect(agent.accounts ?? []).toEqual([]);
     expect(
@@ -224,13 +222,13 @@ describe("claude agent provider", () => {
     });
     expect(await anthropicProvider.isAvailable(ctx)).toBe(true);
     expect((await anthropicProvider.fetch(ctx)).errors[0]?.message).toContain(
-      "sign-in is not configured",
+      "API quota is unavailable",
     );
   });
 
   it.each([
     [false, true, false, true],
-    [true, false, true, false],
+    [true, false, false, false],
   ])("gates availability independently for OpenCode login=%s and CLI auth=%s", async (login, cli, expectedAnthropic, expectedAgent) => {
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
     const {
@@ -267,14 +265,14 @@ describe("claude agent provider", () => {
     const ctx = createProviderAvailabilityContext({ providerIds: ["anthropic", "claude-agent"] });
     expect(await anthropicProvider.isAvailable(ctx)).toBe(expectedAnthropic);
     expect(await claudeAgentProvider.isAvailable(ctx)).toBe(expectedAgent);
-    if (login) expect((await anthropicProvider.fetch(ctx)).entries).toHaveLength(1);
+    if (login) expect((await anthropicProvider.fetch(ctx)).entries).toHaveLength(0);
     if (cli) expect((await claudeAgentProvider.fetch(ctx)).entries).toHaveLength(1);
   });
 
   it.each([
-    ["token", true],
-    ["different", false],
-  ])("deduplicates only equal tokens (%s)", async (cliToken, duplicate) => {
+    ["token"],
+    ["different"],
+  ])("reports Claude Agent quota regardless of OpenCode token equality (%s)", async (cliToken) => {
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"
@@ -302,10 +300,10 @@ describe("claude agent provider", () => {
       quota: { success: true, five_hour: { percentRemaining: 55 } },
     } as never);
     const all = createProviderAvailabilityContext({ providerIds: ["anthropic", "claude-agent"] });
-    expect((await anthropicProvider.fetch(all)).entries).toHaveLength(1);
+    expect((await anthropicProvider.fetch(all)).entries).toHaveLength(0);
     const agent = await claudeAgentProvider.fetch(all);
-    if (duplicate) expectNotAttempted(agent);
-    else expect(agent.entries).toHaveLength(1);
+    expect(agent.entries).toHaveLength(1);
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
     const selected = createProviderAvailabilityContext({
       providerIds: ["claude-agent"],
       configOverrides: { onlyCurrentModel: true, currentProviderID: "claude-agent" },
@@ -355,9 +353,9 @@ describe("claude agent provider", () => {
       anthropicProvider.fetch(ctx),
       claudeAgentProvider.fetch(ctx),
     ]);
-    expect(anthropic.errors).toHaveLength(failure === "opencode" ? 1 : 0);
+    expect(anthropic.errors).toHaveLength(0);
     expect(agent.errors).toHaveLength(failure === "cli" ? 1 : 0);
-    expect(anthropic.entries).toHaveLength(failure === "opencode" ? 0 : 1);
+    expect(anthropic.entries).toHaveLength(0);
     expect(agent.entries).toHaveLength(failure === "cli" ? 0 : 1);
   });
   it("does not repeat diagnostics after the initial probe throws", async () => {
@@ -748,13 +746,10 @@ describe("claude agent provider", () => {
     const out = await claudeAgentProvider.fetch(ctx);
 
     expect(claudeAgentProvider.id).toBe("claude-agent");
-    expect(getAnthropicDiagnostics).toHaveBeenCalledWith(
-      {
-        binaryPath: undefined,
-        requestTimeoutMs: undefined,
-      },
-      [],
-    );
+    expect(getAnthropicDiagnostics).toHaveBeenCalledWith({
+      binaryPath: undefined,
+      requestTimeoutMs: undefined,
+    });
     expect(getAnthropicDiagnostics).toHaveBeenCalledOnce();
     expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
     expect(readCredentialRows).not.toHaveBeenCalled();
@@ -841,14 +836,10 @@ describe("claude agent provider", () => {
     expect(
       visibleEntries(second.entries, "claude-agent").map((entry) => entry.percentRemaining),
     ).toEqual([70]);
-    expect(getAnthropicDiagnostics).toHaveBeenNthCalledWith(
-      2,
-      {
-        binaryPath: undefined,
-        requestTimeoutMs: undefined,
-      },
-      [],
-    );
+    expect(getAnthropicDiagnostics).toHaveBeenNthCalledWith(2, {
+      binaryPath: undefined,
+      requestTimeoutMs: undefined,
+    });
   });
 
   it("shows a Claude Code route rejected by the usage endpoint as a credentials error without an OpenCode fallback", async () => {

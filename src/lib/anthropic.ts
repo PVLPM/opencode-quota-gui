@@ -16,7 +16,6 @@ import { isAbsolute, join, resolve } from "path";
 
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 
-import type { ResolvedAnthropicOAuth } from "./anthropic-auth.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { fetchWithTimeout } from "./http.js";
@@ -141,7 +140,7 @@ export interface AnthropicDiagnostics {
   /** Source-assigned category for a failed OAuth usage request; absent otherwise. */
   failureCategory?: ProviderFailureCategory;
   quota?: AnthropicQuotaResult;
-  /** sha256 of the OAuth token bound to this probe, used only to avoid showing one login twice. */
+  /** sha256 of the OAuth token bound to this probe, when a CLI token was used. */
   credentialFingerprint?: string;
   /** Display-only plan (e.g. `Claude (Max)`) of the verified Claude CLI login that answered the quota probe. */
   planLabel?: string;
@@ -1739,11 +1738,10 @@ async function getAnthropicLocalDiagnostics(
 
 export async function getAnthropicDiagnostics(
   options: AnthropicProbeOptions = {},
-  excludedClaudeFingerprints: readonly string[] = [],
 ): Promise<AnthropicDiagnostics> {
   const localDiagnostics = await getAnthropicLocalDiagnostics(options);
   if (localDiagnostics.localQuota) {
-    // The status payload does not bind its quota to the stored token; do not deduplicate by it.
+    // Local quota does not require reading the stored token.
     return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
   }
 
@@ -1766,13 +1764,6 @@ export async function getAnthropicDiagnostics(
   }
 
   const credentialFingerprint = fingerprintAccessToken(credentials.accessToken);
-  if (excludedClaudeFingerprints.includes(credentialFingerprint)) {
-    return {
-      ...mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics),
-      credentialFingerprint,
-    };
-  }
-
   const fallbackQuota = await queryAnthropicQuotaFromOAuthAccessToken(
     credentials.accessToken,
     options.requestTimeoutMs,
@@ -1825,65 +1816,15 @@ export async function hasAnthropicCredentialsConfigured(
   }
 }
 
-/** One OpenCode Anthropic login row, as the OpenCode route lists it. */
-export type AnthropicOpenCodeAccount = {
-  sourceId: string;
-  label: string;
-  active: boolean;
-  state: ResolvedAnthropicOAuth["state"];
-  /** Present only when `state` is "configured". */
-  accessToken?: string;
-};
-
 /**
- * Identity of the whole account set the Anthropic provider emits: every OpenCode login row (failed
- * and expired rows change what is shown too). It never probes the Claude CLI, which belongs to the
- * separate Claude Agent provider. Null when the set cannot be bound to an identity.
- */
-export async function resolveAnthropicAccountSetIdentity(params: {
-  openCodeAccounts: readonly AnthropicOpenCodeAccount[];
-  onlyCurrentModel: boolean;
-}): Promise<ResolvedAuthIdentity | null> {
-  const identities: ResolvedAuthIdentity[] = [];
-  for (const account of params.openCodeAccounts) {
-    const identity = await deriveResolvedAuthIdentity({
-      providerId: "anthropic:opencode-account",
-      principal:
-        account.state === "configured" && account.accessToken
-          ? { kind: "credential", value: account.accessToken }
-          : { kind: "stable-id", value: account.sourceId },
-      qualifiers: [
-        account.sourceId,
-        account.label,
-        account.active ? "active" : "idle",
-        account.state,
-      ],
-    });
-    if (!identity) return null;
-    identities.push(identity);
-  }
-  if (identities.length === 0) return null;
-
-  // The selected-route flag changes whether a missing login is reported, so it is part of the set.
-  return await composeResolvedAuthIdentities({
-    providerId: "anthropic",
-    identities,
-    qualifiers: [params.onlyCurrentModel ? "only-current-model" : "all-models"],
-  });
-}
-
-/**
- * Identity of the Claude Agent provider's single Claude CLI login. `excludedCredentialFingerprints`
- * are OpenCode Anthropic tokens already shown by the Anthropic provider; whether the CLI token is one
- * of them changes what this provider shows, so it is part of the identity. Null when the CLI reports
- * quota itself (no account binding) or cannot be probed, so the caller must not cache it.
+ * Identity of the Claude Agent provider's single Claude CLI login. Null when the CLI reports quota
+ * itself (no account binding) or cannot be probed, so the caller must not cache it.
  */
 export async function resolveClaudeAgentAccountIdentity(params: {
   binaryPath?: string;
   operationCache?: Map<symbol, unknown>;
   onlyCurrentModel: boolean;
   runtimeDetected: boolean;
-  excludedCredentialFingerprints: readonly string[];
 }): Promise<ResolvedAuthIdentity | null> {
   let localDiagnostics: AnthropicLocalDiagnostics;
   try {
@@ -1897,11 +1838,7 @@ export async function resolveClaudeAgentAccountIdentity(params: {
   // Claude CLI quota does not expose an account identity.
   if (localDiagnostics.localQuota) return null;
 
-  const identity = await claudeCliAccountIdentity(
-    localDiagnostics,
-    params.runtimeDetected,
-    params.excludedCredentialFingerprints,
-  );
+  const identity = await claudeCliAccountIdentity(localDiagnostics, params.runtimeDetected);
   if (!identity) return null;
   return await composeResolvedAuthIdentities({
     providerId: "claude-agent",
@@ -1912,13 +1849,12 @@ export async function resolveClaudeAgentAccountIdentity(params: {
 
 /**
  * The Claude CLI row's identity. A readable first-party CLI token keys it, because its quota and its
- * duplicate check depend on that token. Otherwise the row shows only the CLI's install and sign-in
+ * quota depends on that token. Otherwise the row shows only the CLI's install and sign-in
  * state, so that state keys it.
  */
 async function claudeCliAccountIdentity(
   localDiagnostics: AnthropicLocalDiagnostics,
   claudeCodeRuntimeDetected: boolean,
-  excludedCredentialFingerprints: readonly string[],
 ): Promise<ResolvedAuthIdentity | null> {
   if (localDiagnostics.authStatus === "authenticated") {
     const credentials = await readClaudeCliSubscriptionToken(localDiagnostics);
@@ -1929,9 +1865,8 @@ async function claudeCliAccountIdentity(
         qualifiers: [
           localDiagnostics.effectiveBinary ?? "",
           claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
-          excludedCredentialFingerprints.includes(fingerprintAccessToken(credentials.accessToken))
-            ? "shown-by-anthropic"
-            : "distinct",
+          // Preserve the existing cache identity for the previously non-excluded CLI login.
+          "distinct",
         ],
       });
     }

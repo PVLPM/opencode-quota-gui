@@ -1,9 +1,8 @@
 /**
  * OpenCode-managed Anthropic OAuth credentials.
  *
- * Reads the `anthropic` OAuth entry from OpenCode's own opencode.db. This is the
- * credential OpenCode refreshes for Anthropic subscription models, so it stays
- * usable even when a separately installed Claude Code has stale credentials.
+ * Reads the `anthropic` OAuth entry from OpenCode's own opencode.db for provider
+ * discovery. This credential is not used to report Claude subscription quota.
  */
 
 import { readAuthFileCached } from "./opencode-auth.js";

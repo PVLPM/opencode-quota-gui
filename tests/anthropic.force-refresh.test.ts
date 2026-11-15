@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -8,8 +8,8 @@ import {
 } from "../src/lib/anthropic.js";
 import { bindCredentialSource, notifyCredentialsChanged } from "../src/lib/opencode-auth.js";
 import { __resetQuotaStateForTests, fetchQuotaProviderResult } from "../src/lib/quota-state.js";
-import { anthropicProvider } from "../src/providers/anthropic.js";
 import { PROVIDER_CACHE_POLICIES } from "../src/providers/cache-policies.js";
+import { claudeAgentProvider } from "../src/providers/claude-agent.js";
 import { createProviderAvailabilityContext } from "./helpers/provider-test-harness.js";
 
 const mocks = vi.hoisted(() => ({ cacheDir: "", request: vi.fn() }));
@@ -20,11 +20,17 @@ vi.mock("../src/lib/private-state-paths.js", () => ({
 vi.mock("child_process", () => ({
   execFile: (
     _file: unknown,
-    _args: unknown,
+    args: string[],
     _options: unknown,
-    callback: (error: Error, stdout: string, stderr: string) => void,
+    callback: (error: Error | null, stdout: string, stderr: string) => void,
   ) => {
-    callback(Object.assign(new Error("missing"), { code: "ENOENT" }), "", "");
+    callback(
+      null,
+      args.join(" ").includes("--version")
+        ? "2.1.123"
+        : JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty" }),
+      "",
+    );
   },
 }));
 vi.mock("../src/lib/http.js", () => ({
@@ -36,6 +42,7 @@ vi.mock("../src/lib/http.js", () => ({
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   clearAnthropicDiagnosticsCacheForTests();
   __resetQuotaStateForTests();
   notifyCredentialsChanged();
@@ -83,8 +90,15 @@ it("does not issue a forced request when the preceding normal probe establishes 
   expect(mocks.request).toHaveBeenCalledTimes(1);
 });
 
-it("forced refresh fetches a new Anthropic OAuth result instead of recent quota", async () => {
+it("forced refresh fetches a new Claude Agent subscription result instead of recent quota", async () => {
   mocks.cacheDir = await mkdtemp(join(tmpdir(), "anthropic-refresh-"));
+  vi.stubEnv("CLAUDE_CONFIG_DIR", mocks.cacheDir);
+  await writeFile(
+    join(mocks.cacheDir, ".credentials.json"),
+    JSON.stringify({
+      claudeAiOauth: { accessToken: "force-account-token" },
+    }),
+  );
   const unbind = bindCredentialSource({
     kind: "opencode-integration-api",
     readRows: async () => [
@@ -104,10 +118,10 @@ it("forced refresh fetches a new Anthropic OAuth result instead of recent quota"
     .mockResolvedValueOnce(
       new Response(JSON.stringify({ five_hour: { utilization: 40 } }), { status: 200 }),
     );
-  const provider = { ...anthropicProvider, cachePolicy: PROVIDER_CACHE_POLICIES.anthropic };
+  const provider = { ...claudeAgentProvider, cachePolicy: PROVIDER_CACHE_POLICIES["claude-agent"] };
   const ctx = createProviderAvailabilityContext({
-    providerIds: ["anthropic"],
-    configOverrides: { onlyCurrentModel: true, currentProviderID: "anthropic" },
+    providerIds: ["anthropic", "claude-agent"],
+    configOverrides: { onlyCurrentModel: false },
   });
   try {
     const first = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
@@ -157,8 +171,15 @@ it("invalidates only the rate-limited token's earlier quota after its cooldown",
   expect(mocks.request).toHaveBeenCalledTimes(4);
 });
 
-it("manual refresh respects Anthropic OAuth Retry-After until the cooldown expires", async () => {
+it("manual Claude Agent refresh respects subscription Retry-After until the cooldown expires", async () => {
   mocks.cacheDir = await mkdtemp(join(tmpdir(), "anthropic-refresh-"));
+  vi.stubEnv("CLAUDE_CONFIG_DIR", mocks.cacheDir);
+  await writeFile(
+    join(mocks.cacheDir, ".credentials.json"),
+    JSON.stringify({
+      claudeAiOauth: { accessToken: "test-refresh-token" },
+    }),
+  );
   const unbind = bindCredentialSource({
     kind: "opencode-integration-api",
     readRows: async () => [
@@ -180,10 +201,10 @@ it("manual refresh respects Anthropic OAuth Retry-After until the cooldown expir
     .mockResolvedValueOnce(
       new Response(JSON.stringify({ five_hour: { utilization: 20 } }), { status: 200 }),
     );
-  const provider = { ...anthropicProvider, cachePolicy: PROVIDER_CACHE_POLICIES.anthropic };
+  const provider = { ...claudeAgentProvider, cachePolicy: PROVIDER_CACHE_POLICIES["claude-agent"] };
   const ctx = createProviderAvailabilityContext({
-    providerIds: ["anthropic"],
-    configOverrides: { onlyCurrentModel: true, currentProviderID: "anthropic" },
+    providerIds: ["anthropic", "claude-agent"],
+    configOverrides: { onlyCurrentModel: false },
   });
   const read = (forceRefresh = false) =>
     fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000, forceRefresh });

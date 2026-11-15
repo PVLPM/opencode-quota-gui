@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyInitInstallerPlan,
+  getInstallerProviderPromptOptions,
   getQuotaPluginSpecForVersion,
   type InitInstallerSelections,
   planInitInstaller,
@@ -240,14 +241,8 @@ describe("init installer planning and merge behavior", () => {
     expect(plan.baseDir).toBe(projectDir);
     expect(plan.summaryLines).toContain("Session token scope: Current session and descendants");
     expect(plan.edits.map((edit) => edit.kind)).toEqual(["opencode", "quota"]);
-    expect(plan.quickSetupNotes).toEqual([
-      {
-        providerId: "anthropic",
-        label: "Anthropic",
-        anchor: "anthropic",
-      },
-    ]);
-    expect(plan.summaryLines).toContain("  - Anthropic: docs/readme/providers.md#anthropic");
+    expect(plan.quickSetupNotes).toEqual([]);
+    expect(plan.summaryLines).not.toContain("  - Anthropic: docs/readme/providers.md#anthropic");
 
     const result = await applyInitInstallerPlan(plan);
     expect(result.writtenPaths).toEqual([
@@ -279,6 +274,31 @@ describe("init installer planning and merge behavior", () => {
       "// OpenCode Quota GUI: loads the server plugin for the local dashboard.",
     );
     expect(hostRaw).not.toContain("tuiCommandDisplay");
+  });
+
+  it("labels Anthropic quota unavailable without a quick-setup claim", () => {
+    expect(getInstallerProviderPromptOptions()).toContainEqual({
+      value: "anthropic",
+      label: "Anthropic (quota unavailable)",
+    });
+    expect(getInstallerProviderPromptOptions()).toContainEqual({
+      value: "claude-agent",
+      label: "Claude Agent (quick setup)",
+    });
+  });
+
+  it("migrates the legacy claude configuration alias to Claude Agent", async () => {
+    const plan = await planInitInstaller({
+      cwd: tempDir,
+      selections: installerSelections({
+        providerMode: "manual",
+        manualProviders: ["claude", "anthropic"],
+      }),
+    });
+    expect(plan.selections.manualProviders).toEqual(["claude-agent", "anthropic"]);
+    expect(plan.quickSetupNotes).toEqual([
+      { providerId: "claude-agent", label: "Claude Agent", anchor: "claude-agent" },
+    ]);
   });
 
   it("keeps the host JSON strict while the dashboard config stays canonical JSONC", async () => {

@@ -361,7 +361,7 @@ describe("quota card clipboard runway and banked resets", () => {
     ]);
   });
 
-  it("shows the Claude CLI plan in the header and clipboard of only its own account card", async () => {
+  it("shows only the Claude Agent card and its plan when OpenCode OAuth also exists", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"
     );
@@ -401,16 +401,14 @@ describe("quota card clipboard runway and banked resets", () => {
       preferences: { accountingDetail: "summary" },
       nowMs: NOW,
     });
-    expect(cards).toHaveLength(2);
+    expect(cards).toHaveLength(1);
     const claudeCodeCard = cards.find((card) => card.planLabel !== undefined);
-    const openCodeCard = cards.find((card) => card !== claudeCodeCard);
     expect(claudeCodeCard?.planLabel).toBe("Max");
-    expect(openCodeCard?.planLabel).toBeUndefined();
+    expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
 
     const copied = await copiedSummary(claudeCodeCard!);
     expect(copied.split("\n")[0]).toBe("Claude Agent · Max");
     expect(rowLines(copied)).toEqual(["5h: 50% remaining"]);
-    expect(await copiedSummary(openCodeCard!)).not.toContain("Max");
 
     const root = graph.createTestRoot();
     const dispose = graph.mount(

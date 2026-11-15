@@ -1051,9 +1051,11 @@ function buildPlanSummary(plan: InitInstallerPlan): string[] {
 export function getInstallerProviderPromptOptions(): PromptOption[] {
   return QUOTA_PROVIDER_SHAPES.map((shape) => ({
     label:
-      shape.autoSetup === "needs_quick_setup"
-        ? `${getQuotaProviderDisplayLabel(shape.id)} (quick setup)`
-        : getQuotaProviderDisplayLabel(shape.id),
+      shape.autoSetup === "unavailable"
+        ? `${getQuotaProviderDisplayLabel(shape.id)} (quota unavailable)`
+        : shape.autoSetup === "needs_quick_setup"
+          ? `${getQuotaProviderDisplayLabel(shape.id)} (quick setup)`
+          : getQuotaProviderDisplayLabel(shape.id),
     value: shape.id,
   }));
 }

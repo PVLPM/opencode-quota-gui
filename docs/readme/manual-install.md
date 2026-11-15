@@ -61,8 +61,8 @@ A fresh setup works with defaults. The browser dashboard follows the OpenCode ho
 
 ## Requirements
 
-- OpenCode `>= 2.0.16 < 2.4.0`. The full Native Desktop integration ships from v1.3.0 and requires OpenCode Desktop 2.2.1+; supported older hosts use the browser dashboard fallback. This package does not support OpenCode 1.
-- Node.js `22.13+` (or `23.4+` on Node 23) to run the published package, including with `npx`. A local checkout needs Node.js `^22.19.0 || >=23.4.0` because its OpenCode 2.3 development packages require it; `pnpm install` stops on older versions.
+- OpenCode `>= 2.0.16 < 2.3.0`. The full Native Desktop integration ships from v1.3.0 and requires OpenCode Desktop 2.2.1+; supported older hosts use the browser dashboard fallback. This package does not support OpenCode 1.
+- Node.js `22.13+` (or `23.4+` on Node 23), whether you run the package with `npx` or from a local checkout.
 
 ## Local checkout (development)
 

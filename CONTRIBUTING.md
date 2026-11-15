@@ -11,7 +11,7 @@ Thanks for contributing. Please read this before you open an issue or pull reque
 
 ## Setup
 
-Node.js `^22.19.0 || >=23.4.0` and pnpm 11: OpenCode 2.3 development packages need this Node version, while the published plugin still supports `^22.13.0 || >=23.4.0`.
+Node.js `^22.13.0 || >=23.4.0` and pnpm 11:
 
 ```sh
 corepack enable

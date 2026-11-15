@@ -15,13 +15,13 @@ User-facing release notes for OpenCode Quota GUI.
 - **Session cache details.** A scrollable composer popover displays session activity and available agent, provider, model, and effort information. A model-selection mismatch warns before the next request without claiming that a prior cache was destroyed.
 - **Runway on demand.** Eligible quota values and bars show a projected exhaustion tooltip without adding a persistent card row.
 - **Provider compatibility.** Alibaba Coding Plan quota uses the official Bailian CLI.
-- **Separate Anthropic and Claude Agent providers.** Anthropic now reports only OpenCode's own `anthropic` sign-ins and never runs the Claude CLI. Claude Agent (`claude-agent`, legacy `claude-code`) is its own provider with the Claude mark, reporting the installed Claude CLI login. Each has independent availability, caching, retry, errors and stale state; an account whose token is the same in both is shown once, on the Anthropic card.
+- **Separate Anthropic and Claude Agent providers.** Anthropic is API-only and does not report subscription quota or invent API quota. Claude Agent reports the installed Claude CLI's subscription quota independently, including when its token matches an OpenCode Anthropic OAuth login.
 - **Privacy-safe diagnostics.** Copy operational diagnostics or an account-scoped quota summary without exporting credentials or session content.
 
 ### Compatibility
 
-- Supports OpenCode `>= 2.0.16 < 2.4.0`, adding OpenCode 2.3. OpenCode 2.3 itself requires Node.js 22.19 or newer. The full Native integration requires OpenCode Desktop 2.2.1 or newer. Supported older hosts, including 2.2.0, retain the browser-dashboard fallback by default unless explicitly configured otherwise.
-- **Upgrading with the provider split:** `enabledProviders: ["anthropic"]` no longer includes the Claude CLI login; add `"claude-agent"` to keep it. `"claude-code"` now means Claude Agent only. A hidden or reordered Claude Code card from an earlier version may reappear once in its default position as the new Claude Agent card, its first poll starts without cached data, and one reset notice may be missed or repeated.
+- OpenCode `>= 2.0.16 < 2.3.0`; the full Native integration requires OpenCode Desktop 2.2.1 or newer. Supported older hosts, including 2.2.0, retain the browser-dashboard fallback by default unless explicitly configured otherwise.
+- **Upgrading with the provider split:** `enabledProviders: ["anthropic"]` no longer includes the Claude CLI login; add `"claude-agent"` to keep it. The legacy `"claude"` and `"claude-code"` aliases now select Claude Agent; use `"anthropic"` explicitly for the Anthropic API route. OpenCode Anthropic OAuth-only logins no longer produce subscription quota cards. A hidden or reordered Claude Code card may reappear once in its default position as the new Claude Agent card, its first poll starts without cached data, and one reset notice may be missed or repeated.
 - Cache retention and future reuse cannot be verified from token counts alone; the displayed status and expiry are estimates, not proof of a physical provider cache.
 
 ## 1.3.0

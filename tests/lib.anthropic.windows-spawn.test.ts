@@ -186,7 +186,6 @@ describe.runIf(process.platform === "win32")(
         binaryPath: join(shimDirectory, "claude.cmd"),
         onlyCurrentModel: false,
         runtimeDetected: false,
-        excludedCredentialFingerprints: [],
       });
 
       expect(deriveResolvedAuthIdentity).toHaveBeenCalledWith(
@@ -213,7 +212,6 @@ describe.runIf(process.platform === "win32")(
         binaryPath: join(shimDirectory, "claude.cmd"),
         onlyCurrentModel: false,
         runtimeDetected: false,
-        excludedCredentialFingerprints: [],
       });
       expect(deriveResolvedAuthIdentity).not.toHaveBeenCalledWith(
         expect.objectContaining({ providerId: "anthropic:claude-cli-account" }),
@@ -242,7 +240,6 @@ describe.runIf(process.platform === "win32")(
         binaryPath: join(shimDirectory, "claude.cmd"),
         onlyCurrentModel: false,
         runtimeDetected: false,
-        excludedCredentialFingerprints: [],
       });
 
       expect(deriveResolvedAuthIdentity).toHaveBeenCalledWith(

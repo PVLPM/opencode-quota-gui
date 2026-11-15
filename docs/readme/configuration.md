@@ -121,6 +121,8 @@ The import never edits, moves, or deletes the source files; they stay byte-for-b
 
 `enabledProviders: "auto"` discovers providers from OpenCode. A manual list must include `quota-providers` when you use custom definitions, plus every built-in provider you still want.
 
+The legacy `claude` alias now selects `claude-agent`; use `anthropic` explicitly for the Anthropic API route. Anthropic API quota is unavailable, and Claude subscription quota requires the Claude Agent CLI login.
+
 ## Optional OpenTelemetry
 
 `telemetry.enabled` defaults to `false`. Set it in the canonical file; the Settings page does not expose this control. When enabled, the plugin publishes `opencode.quota.consumed` and `opencode.quota.cache.age` through the global `@opentelemetry/api` meter provider supplied by the host. The package does not create a provider, exporter, collector, or metrics endpoint, and it makes no extra provider requests. Host-owned setup and the limits of this integration are in [External integration](external-integration.md#optional-opentelemetry-advanced-host-owned).

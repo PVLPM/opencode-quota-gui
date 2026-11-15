@@ -1,7 +1,4 @@
-import {
-  resolveAnthropicAccountSetIdentity,
-  resolveClaudeAgentAccountIdentity,
-} from "../lib/anthropic.js";
+import { resolveClaudeAgentAccountIdentity } from "../lib/anthropic.js";
 import { resolveChutesApiKey } from "../lib/chutes-config.js";
 import { resolveCopilotAuthIdentity } from "../lib/copilot.js";
 import { resolveDeepSeekApiKey } from "../lib/deepseek-auth.js";
@@ -51,12 +48,7 @@ import { resolveSyntheticApiKey } from "../lib/synthetic-config.js";
 import { resolveXaiAuthIdentity } from "../lib/xai.js";
 import { DEFAULT_ZAI_AUTH_CACHE_MAX_AGE_MS, resolveZaiAuthCached } from "../lib/zai-auth.js";
 import { DEFAULT_ZHIPU_AUTH_CACHE_MAX_AGE_MS, resolveZhipuAuthCached } from "../lib/zhipu-auth.js";
-import { readOpenCodeAnthropicLogins } from "./anthropic.js";
-import {
-  claudeAgentExcludedFingerprints,
-  getClaudeAgentRuntimeProviderId,
-  isClaudeAgentRuntimeDetected,
-} from "./claude-agent.js";
+import { getClaudeAgentRuntimeProviderId, isClaudeAgentRuntimeDetected } from "./claude-agent.js";
 
 const UNCACHED = { kind: "uncached" } as const satisfies QuotaProviderCachePolicy;
 
@@ -184,22 +176,7 @@ const quotaProvidersCachePolicy: QuotaProviderCachePolicy = {
   },
 };
 
-/** Every OpenCode Anthropic login row; never the Claude CLI, which is Claude Agent's. */
-async function anthropicIdentity(ctx: QuotaProviderContext): Promise<ResolvedAuthIdentity | null> {
-  const logins = await readOpenCodeAnthropicLogins();
-  return resolveAnthropicAccountSetIdentity({
-    openCodeAccounts: logins.map(({ row, auth }) => ({
-      sourceId: row.id,
-      label: row.label,
-      active: row.active,
-      state: auth.state,
-      ...(auth.state === "configured" ? { accessToken: auth.accessToken } : {}),
-    })),
-    onlyCurrentModel: ctx.config.onlyCurrentModel === true,
-  });
-}
-
-/** The Claude CLI login alone, plus whether the Anthropic provider already shows its token. */
+/** The Claude CLI login alone. */
 async function claudeAgentIdentity(
   ctx: QuotaProviderContext,
 ): Promise<ResolvedAuthIdentity | null> {
@@ -209,15 +186,11 @@ async function claudeAgentIdentity(
     operationCache: ctx.operationCache,
     onlyCurrentModel: ctx.config.onlyCurrentModel === true,
     runtimeDetected: selected ? false : await isClaudeAgentRuntimeDetected(ctx),
-    excludedCredentialFingerprints: await claudeAgentExcludedFingerprints(ctx),
   });
 }
 
 export const PROVIDER_CACHE_POLICIES = {
-  anthropic: {
-    kind: "resolved-auth",
-    resolveIdentity: (ctx) => anthropicIdentity(ctx),
-  },
+  anthropic: UNCACHED,
   "claude-agent": {
     kind: "resolved-auth",
     // Identity uses this cycle's CLI probe; repeating it only spawns more processes.
