@@ -16,6 +16,7 @@ User-facing release notes for OpenCode Quota GUI.
 - **Runway on demand.** Eligible quota values and bars show a projected exhaustion tooltip without adding a persistent card row.
 - **Provider compatibility.** Alibaba Coding Plan quota uses the official Bailian CLI.
 - **Separate Anthropic and Claude Agent providers.** Anthropic is API-only and does not report subscription quota or invent API quota. Claude Agent reports the installed Claude CLI's subscription quota independently, including when its token matches an OpenCode Anthropic OAuth login.
+- **Clearer cache pill.** The TTL countdown is marked `~` as an estimate, and the cache share shows `Hit`, `Miss` or `Unknown` (for example `TTL ~4m 30s · Cache 99.70% · Hit`). Per-route findings on why no provider-observed TTL is used yet are in [Cache TTL evidence](docs/cache-ttl-evidence.md).
 - **Privacy-safe diagnostics.** Copy operational diagnostics or an account-scoped quota summary without exporting credentials or session content.
 
 ### Compatibility

@@ -100,22 +100,33 @@ function ttlMetric(deadlineAtMs: number | undefined, nowMs: number): TtlMetric {
   }
   if (deadlineAtMs <= nowMs) {
     const elapsed = `+${formatTtlRemaining(Math.floor((nowMs - deadlineAtMs) / 1000) * 1000)}`;
-    return { label: `TTL ${elapsed}`, short: elapsed, spoken: `TTL ${elapsed}`, expired: true };
+    return {
+      label: `TTL ~${elapsed}`,
+      short: `~${elapsed}`,
+      spoken: `TTL about ${elapsed}, estimated`,
+      expired: true,
+    };
   }
   const remaining = formatTtlRemaining(deadlineAtMs - nowMs);
   return {
-    label: `TTL ${remaining}`,
-    short: remaining,
-    spoken: `TTL ${remaining}`,
+    label: `TTL ~${remaining}`,
+    short: `~${remaining}`,
+    spoken: `TTL about ${remaining}, estimated`,
     expired: false,
   };
 }
 
-function cacheMetric(percent: string | undefined): Metric {
+/** Hit: positive confirmed cache reads. Miss: confirmed zero. Missing telemetry stays unknown. */
+function cacheMetric(percent: string | undefined, hit: boolean): Metric {
   if (percent === undefined) {
-    return { label: "Cache —", short: "unknown", spoken: "Cache unavailable" };
+    return { label: "Cache unknown", short: "unknown", spoken: "Cache unknown" };
   }
-  return { label: `Cache ${percent}`, short: percent, spoken: `Cache ${percent}` };
+  const word = hit ? "Hit" : "Miss";
+  return {
+    label: `Cache ${percent} · ${word}`,
+    short: `${percent} · ${word}`,
+    spoken: `Cache ${percent}, ${word.toLowerCase()}`,
+  };
 }
 
 /**
@@ -167,9 +178,9 @@ function presentation(
     ratio <= 1 &&
     typeof observedAt === "number" &&
     Number.isFinite(observedAt)
-      ? `${Number((ratio * 100).toFixed(1))}%`
+      ? `${(ratio * 100).toFixed(2)}%`
       : undefined;
-  const cache = cacheMetric(percent);
+  const cache = cacheMetric(percent, typeof ratio === "number" && ratio > 0);
   // The status bubble keeps the state, expiry, basis and cache share. Assumptions
   // and the start of the qualifying call are general caveats, explained under (i).
   const observedWhen = formatWallTime(observedAt, nowMs);
@@ -188,7 +199,14 @@ function presentation(
   const expiryTime = formatWallTime(estimate?.deadlineAtMs, nowMs);
   const expiry = expiryTime === undefined ? undefined : `Estimated expiry ${expiryTime}`;
   const basisSource = safeSegment(estimate?.source);
-  const basis = basisSource === undefined ? undefined : `Basis · ${basisSource}`;
+  const basis =
+    basisSource === undefined
+      ? undefined
+      : `Basis · ${basisSource}${
+          estimate?.kind === undefined
+            ? ""
+            : ` (${estimate.kind === "fallback" ? "fallback estimate" : estimate.kind})`
+        }`;
   return { tone, percent, ttl, cache, detail, expiry, basis, source } as const;
 }
 
@@ -565,7 +583,7 @@ export function createCacheComposerPill(
         !result.percent;
       const hasError = selected && history()?.key === session.key && history()?.status === "error";
       return {
-        label: `${result.ttl.label} • ${loading ? "Cache · Loading…" : result.cache.label}`,
+        label: `${result.ttl.label} · ${loading ? "Cache · Loading…" : result.cache.label}`,
         icon: hasError ? "warning" : "server",
         ...(mismatched
           ? { tone: flashKey() === session.key ? ("warning" as const) : ("danger" as const) }
@@ -814,7 +832,7 @@ export function createCacheComposerPill(
                   <span class={result().ttl.expired ? "qg-cache-elapsed" : undefined}>
                     {result().ttl.short}
                   </span>
-                  {` • ${result().cache.short}`}
+                  {` · ${result().cache.short}`}
                 </span>
               </button>
             </div>
@@ -844,9 +862,16 @@ export function createCacheComposerPill(
                 class="qg-cache-tooltip qg-cache-legend"
                 aria-label="Cache status legend"
               >
-                <span>TTL: estimated from current settings, documentation, or observed reuse.</span>
+                <span>
+                  TTL ~: estimated countdown from current settings, documentation, or observed
+                  reuse; not an authoritative expiry.
+                </span>
                 <span>Expiry counts from the last qualifying call's start.</span>
                 <span>Cache: observed token share of the last completed primary call.</span>
+                <span>
+                  Hit: cache-read tokens reported. Miss: zero cache-read tokens reported. Unknown:
+                  telemetry missing.
+                </span>
                 <span>
                   Current settings may differ from the call's route or settings. Prefix changes,
                   eviction, or hidden warming can cause a miss.
