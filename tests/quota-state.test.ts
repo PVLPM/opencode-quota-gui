@@ -60,6 +60,11 @@ describe("quota-state shared cache", () => {
       })),
     } as any;
     const ctx = createTestContext();
+    let completeFirstPoll!: () => void;
+    let quotaCalls = 0;
+    const firstPollCompletion = new Promise<void>((resolve) => {
+      completeFirstPoll = resolve;
+    });
     const source = {
       quota: async () => {
         const results = await Promise.all(
@@ -67,6 +72,7 @@ describe("quota-state shared cache", () => {
             fetchQuotaProviderResult({ provider, ctx, ttlMs: 600_000 }),
           ),
         );
+        if (++quotaCalls === 2) await firstPollCompletion;
         return {
           generatedAtMs: Date.now(),
           stale: true,
@@ -88,17 +94,29 @@ describe("quota-state shared cache", () => {
     const service = createSnapshotService({ source, quotaIntervalMs: 60_000 });
     await service.quota();
     vi.useFakeTimers();
+    let quotaChangedEvents = 0;
+    const unsubscribe = service.subscribe((event) => {
+      if (event.topic === "quota.changed") quotaChangedEvents += 1;
+    });
     const release = service.addViewer();
-    await vi.advanceTimersByTimeAsync(60_000);
-    await vi.waitFor(() => expect(failed.fetch).toHaveBeenCalledTimes(2));
-    await vi.advanceTimersByTimeAsync(10_000);
-    await vi.waitFor(() => expect(failed.fetch).toHaveBeenCalledTimes(3));
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(failed.fetch).toHaveBeenCalledTimes(3);
-    expect(healthy.fetch).toHaveBeenCalledTimes(1);
-    release();
-    service.close();
-    vi.useRealTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => expect(failed.fetch).toHaveBeenCalledTimes(2));
+      completeFirstPoll();
+      await vi.waitFor(() => expect(quotaChangedEvents).toBe(1));
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() => expect(failed.fetch).toHaveBeenCalledTimes(3));
+      await vi.waitFor(() => expect(quotaChangedEvents).toBe(2));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(failed.fetch).toHaveBeenCalledTimes(3);
+      expect(healthy.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      completeFirstPoll();
+      unsubscribe();
+      release();
+      service.close();
+      vi.useRealTimers();
+    }
   });
 
   it("retries partial failures without a retry deadline instead of caching them as fresh", async () => {
