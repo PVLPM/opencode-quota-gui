@@ -116,12 +116,12 @@ function ttlMetric(deadlineAtMs: number | undefined, nowMs: number): TtlMetric {
   };
 }
 
-/** Hit: positive confirmed cache reads. Miss: confirmed zero. Missing telemetry stays unknown. */
+/** Hit: positive cache reads. The host reports missing cache usage as zero, so zero is Unknown, never Miss. */
 function cacheMetric(percent: string | undefined, hit: boolean): Metric {
   if (percent === undefined) {
     return { label: "Cache unknown", short: "unknown", spoken: "Cache unknown" };
   }
-  const word = hit ? "Hit" : "Miss";
+  const word = hit ? "Hit" : "Unknown";
   return {
     label: `Cache ${percent} · ${word}`,
     short: `${percent} · ${word}`,
@@ -869,8 +869,9 @@ export function createCacheComposerPill(
                 <span>Expiry counts from the last qualifying call's start.</span>
                 <span>Cache: observed token share of the last completed primary call.</span>
                 <span>
-                  Hit: cache-read tokens reported. Miss: zero cache-read tokens reported. Unknown:
-                  telemetry missing.
+                  Hit: cache-read tokens reported. Unknown: no cache reads reported or telemetry
+                  missing; the host reports a missing cache-read count as zero, so zero is not
+                  treated as a confirmed miss.
                 </span>
                 <span>
                   Current settings may differ from the call's route or settings. Prefix changes,

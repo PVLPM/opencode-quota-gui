@@ -68,7 +68,7 @@ it("provides an accessible cache legend and uses a native cache icon", () => {
   );
   expect(legend?.textContent).not.toMatch(/not (an? )?empirical/i);
   expect(legend?.textContent).toMatch(
-    /Hit: cache-read tokens reported\. Miss: zero cache-read tokens reported\. Unknown: telemetry missing\./,
+    /Hit: cache-read tokens reported\. Unknown: no cache reads reported or telemetry missing; the host reports a missing cache-read count as zero, so zero is not treated as a confirmed miss\./,
   );
   expect(legend?.textContent).toMatch(/Expiry counts from the last qualifying call/);
   expect(legend?.textContent).toMatch(
@@ -1067,7 +1067,7 @@ it("shows a useful estimate when a successful call has zero cache reads and writ
     dispose: cleanup,
   }));
   expect(pill.show({ session: main } as ComposerPillProps)).toMatchObject({
-    label: "TTL ~5m 0s · Cache 0.00% · Miss",
+    label: "TTL ~5m 0s · Cache 0.00% · Unknown",
     tone: "success",
   });
   const close = renderMenu(pill, () => main, container);
@@ -1077,7 +1077,9 @@ it("shows a useful estimate when a successful call has zero cache reads and writ
   expect(container.querySelector('[role="tooltip"]')?.textContent).toContain(
     "Estimated within retention",
   );
-  expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("Cache 0.00% · Miss");
+  expect(container.querySelector('[role="tooltip"]')?.textContent).toContain(
+    "Cache 0.00% · Unknown",
+  );
   close();
   dispose();
   container.remove();
@@ -1467,7 +1469,7 @@ it("keeps the cache share and TTL independent, with a valid 0% share and dashes 
   await flush();
   const label = () => pill.show({ session: sessionRef } as ComposerPillProps)?.label;
   observed = greenCountdown(Date.now(), 0);
-  expect(label()).toBe("TTL ~4m 30s · Cache 0.00% · Miss");
+  expect(label()).toBe("TTL ~4m 30s · Cache 0.00% · Unknown");
   observed = {
     ...greenCountdown(Date.now(), 0.82),
     color: "yellow",
@@ -1483,13 +1485,17 @@ it("keeps the cache share and TTL independent, with a valid 0% share and dashes 
 it.each([
   { name: "a large hit", ratio: 0.997, label: "TTL ~4m 30s · Cache 99.70% · Hit" },
   { name: "a small positive hit", ratio: 0.07, label: "TTL ~4m 30s · Cache 7.00% · Hit" },
-  { name: "a reported zero read", ratio: 0, label: "TTL ~4m 30s · Cache 0.00% · Miss" },
+  {
+    name: "a reported zero read, unknown since the host maps missing usage to zero",
+    ratio: 0,
+    label: "TTL ~4m 30s · Cache 0.00% · Unknown",
+  },
   {
     name: "missing telemetry, never a miss",
     ratio: undefined,
     label: "TTL ~4m 30s · Cache unknown",
   },
-])("labels $name with an estimated TTL and a Hit, Miss or unknown cache word", async ({
+])("labels $name with an estimated TTL and a Hit or unknown cache word", async ({
   ratio,
   label,
 }) => {
@@ -1510,7 +1516,9 @@ it.each([
     dispose: cleanup,
   }));
   await flush();
-  expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toBe(label);
+  const shown = pill.show({ session: sessionRef } as ComposerPillProps)?.label;
+  expect(shown).toBe(label);
+  expect(shown).not.toContain("Miss");
   dispose();
 });
 
@@ -1809,6 +1817,13 @@ it.each([
     ratio: 0.993,
     values: "~+1s · 99.30% · Hit",
     spoken: "TTL about +1s, estimated. Cache 99.30%, hit.",
+  },
+  {
+    name: "an estimate and zero reported reads",
+    ttl: 225_000,
+    ratio: 0,
+    values: "~3m 45s · 0.00% · Unknown",
+    spoken: "TTL about 3m 45s, estimated. Cache 0.00%, unknown.",
   },
   {
     name: "an estimate without a share",
