@@ -12,6 +12,8 @@ import { type DashboardLease, startDashboard } from "./gui/lifecycle.js";
 import { scrubLogReason } from "./gui/log.js";
 import { registerDashboardRpc } from "./gui/rpc.js";
 import { projectOpenCodeCacheObserverEvent } from "./lib/cache-observer-ingestion.js";
+import { readClaudeObservedTtl } from "./lib/claude-agent-transcript-ttl.js";
+import { createClaudeAgentTtlTracker } from "./lib/claude-agent-ttl-tracker.js";
 import { resolveOpenCodeLocationRoots } from "./lib/config-file-utils.js";
 import {
   bindCredentialSource,
@@ -240,6 +242,11 @@ export const QuotaToastPlugin = Plugin.define({
         at,
       );
     };
+    const claudeTtl = createClaudeAgentTtlTracker({
+      directory: ctx.location.directory,
+      read: readClaudeObservedTtl,
+      emit: emitCacheObserverEvent,
+    });
     // Reuse the existing host stream for credential invalidation and narrowly projected cache
     // evidence. No Native-side OpenCode event subscription is opened.
     const hostEvents = new AbortController();
@@ -289,6 +296,7 @@ export const QuotaToastPlugin = Plugin.define({
             ) {
               emitCacheObserverEvent(cacheObserverEvent, event.created);
             }
+            claudeTtl.observe(event, cacheObserverEvent);
           }
           if (signal.aborted) return;
           throw new Error("host event stream ended");
@@ -355,6 +363,7 @@ export const QuotaToastPlugin = Plugin.define({
 
     return async () => {
       hostEvents.abort();
+      claudeTtl.dispose();
       openaiMethodBySession.clear();
       pendingCacheObserverEvents.length = 0;
       publishHostEventSourceState("stopped", Date.now());

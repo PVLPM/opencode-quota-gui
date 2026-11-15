@@ -178,6 +178,77 @@ describe("V2 server plugin credential lifecycle", () => {
   });
   const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+  it("relays a minimal session.cache.ttl DTO for a 1h-only Claude Agent step", async () => {
+    const { mkdir, mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const configDir = await mkdtemp(join(tmpdir(), "ocq-plugin-ttl-"));
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    try {
+      const nativeSession = "123e4567-e89b-42d3-a456-426614174000";
+      const nativeUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const dir = join(configDir, "projects", "-tmp-opencode-quota-plugin-v2");
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, `${nativeSession}.jsonl`),
+        `${JSON.stringify({
+          type: "assistant",
+          uuid: nativeUuid,
+          message: {
+            id: "msg_native",
+            usage: {
+              input_tokens: 3,
+              cache_read_input_tokens: 100,
+              cache_creation_input_tokens: 50,
+              cache_creation: { ephemeral_1h_input_tokens: 50, ephemeral_5m_input_tokens: 0 },
+            },
+          },
+        })}\n`,
+      );
+      const { queue, relayed } = await setupSampling(async () => undefined);
+      queue.push(step("ses_c", "msg_c", "claude-agent"));
+      queue.push({
+        type: "session.text.ended",
+        created: 1250,
+        data: {
+          sessionID: "ses_c",
+          assistantMessageID: "msg_c",
+          text: "x",
+          native: { sessionID: nativeSession, messageID: nativeUuid },
+        },
+      });
+      queue.push({
+        type: "session.step.ended",
+        created: 1300,
+        data: {
+          sessionID: "ses_c",
+          assistantMessageID: "msg_c",
+          finish: "stop",
+          cost: 0,
+          tokens: { input: 3, cache: { read: 100, write: 50 } },
+        },
+      });
+      await vi.waitFor(() => expect(relayed()).toContain("session.cache.ttl"));
+      const dto = cacheEventEmit.mock.calls
+        .map(
+          ([, payload]) =>
+            (payload as { cacheObserverEvent?: { type?: string } }).cacheObserverEvent,
+        )
+        .find((event) => event?.type === "session.cache.ttl");
+      expect(dto).toEqual({
+        type: "session.cache.ttl",
+        created: 1300,
+        data: { sessionID: "ses_c", assistantMessageID: "msg_c", ttlMs: 3_600_000 },
+      });
+      expect(relayed()).not.toContain(nativeSession);
+      expect(relayed()).not.toContain(nativeUuid);
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+      await rm(configDir, { recursive: true, force: true });
+    }
+  });
   it("samples once per session at creation and reuses it for later steps", async () => {
     const { integration, queue, relayed, method } = await setupSampling(async () => cred("oauth"));
     queue.push({ type: "session.created", created: 1, data: { sessionID: "ses_a" } });

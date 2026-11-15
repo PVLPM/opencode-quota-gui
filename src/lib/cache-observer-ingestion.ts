@@ -565,6 +565,10 @@ export function createCacheObserverIngestor(
 
   function ingestEvent(event: unknown, source: "live" | "history"): void {
     if (disposed) return;
+    if (isRecord(event) && event.type === "session.cache.ttl") {
+      if (source === "live") applyObservedTtl(event.data);
+      return;
+    }
     const started = startedStepFromDto(event);
     if (started !== undefined) {
       const key = startedStepKey(started.sessionId, started.messageId);
@@ -746,6 +750,30 @@ export function createCacheObserverIngestor(
     }
     states.delete(sessionId);
     states.set(sessionId, state);
+    notify(sessionId);
+  }
+
+  /** Applies only to the newest retained, claude-agent-routed invocation with this exact message id. */
+  function applyObservedTtl(data: unknown): void {
+    if (!isRecord(data) || data.ttlMs !== 3_600_000) return;
+    const sessionId = nonEmptyString(data.sessionID);
+    const messageId = nonEmptyString(data.assistantMessageID);
+    const state = sessionId === undefined ? undefined : states.get(sessionId);
+    const latest = state?.invocations.at(-1);
+    if (
+      sessionId === undefined ||
+      state === undefined ||
+      latest === undefined ||
+      latest.order.messageId !== messageId ||
+      latest.route?.providerId !== "claude-agent" ||
+      latest.observedTtlMs !== undefined
+    ) {
+      return;
+    }
+    states.set(sessionId, {
+      ...state,
+      invocations: [...state.invocations.slice(0, -1), { ...latest, observedTtlMs: 3_600_000 }],
+    });
     notify(sessionId);
   }
 

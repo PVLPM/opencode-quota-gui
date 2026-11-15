@@ -1377,6 +1377,11 @@ export function createNativeCacheObserverRuntime(options: {
         }
         return;
       }
+      if (event.type === "session.cache.ttl") {
+        const sessionId = event.data.sessionID;
+        if (interestedSessions.has(sessionId) || childOwners.has(sessionId)) ingestor.ingest(event);
+        return;
+      }
       const update = cacheObserverUpdateFromOpenCodeEvent(event);
       const startedSessionId =
         event.type === "session.step.started" ? event.data.sessionID : undefined;
