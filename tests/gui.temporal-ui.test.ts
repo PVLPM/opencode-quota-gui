@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProviderCard, QuotaSnapshot, SettingsSnapshot } from "../src/contracts/dashboard.js";
 import type {
   TemporalModelInterval,
@@ -48,11 +48,11 @@ const chromium = [
   "/usr/bin/chromium-browser",
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 ].find((candidate): candidate is string => Boolean(candidate) && existsSync(candidate));
-const NOW = Date.now();
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 const FUTURE_HOLIDAY_START = Date.parse("2026-11-15T16:00:00.000Z");
 const FUTURE_HOLIDAY_END = Date.parse("2026-11-18T16:00:00.000Z");
+const NOW = FUTURE_HOLIDAY_START - DAY;
 
 interface SsrGraph {
   renderToString: (fn: () => unknown) => string;
@@ -99,6 +99,15 @@ beforeAll(async () => {
     load: (modulePath) => created.ssrLoadModule(modulePath) as Promise<Record<string, unknown>>,
   };
 }, 60_000);
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 afterAll(async () => {
   await server?.close();
