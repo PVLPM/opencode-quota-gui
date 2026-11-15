@@ -230,7 +230,7 @@ describe("runCliStatusCommand", () => {
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
     expect(buildStatusReportData).toHaveBeenCalledWith(
-      expect.objectContaining({ providerFilterId: "anthropic" }),
+      expect.objectContaining({ providerFilterId: "claude-agent" }),
     );
   });
 

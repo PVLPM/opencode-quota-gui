@@ -4,13 +4,13 @@ import type { ResolvedAuthIdentity } from "../src/lib/resolved-auth-identity.js"
 
 const TEST_RUNTIME_ROOT = "/tmp/opencode-quota-export-production-policy-tests";
 const RESOLVED_AUTH_PROVIDER_IDS = [
-  "anthropic",
+  "claude-agent",
   "copilot",
   "google-gemini-cli",
   "openrouter",
   "xai",
 ] as const;
-const UNCACHED_CANONICAL_PROVIDER_IDS = ["cursor", "alibaba-token-plan"] as const;
+const UNCACHED_CANONICAL_PROVIDER_IDS = ["anthropic", "cursor", "alibaba-token-plan"] as const;
 
 vi.mock("../src/lib/opencode-runtime-paths.js", () => ({
   getOpencodeRuntimeDirs: () => ({
@@ -158,6 +158,11 @@ describe("quota export production cache policy", () => {
     ).rejects.toMatchObject({
       code: "ENOENT",
     });
+    __resetQuotaStateForTests();
+    const afterReset = await buildQuotaExport({ providers, ctx, ttlMs: 60_000, fromCache: true });
+    for (const id of UNCACHED_CANONICAL_PROVIDER_IDS) {
+      expect(afterReset.providers[id]).toEqual({ status: "unavailable" });
+    }
   });
 
   it("keeps cache-only OpenCode export network-free across Console rename and failure", async () => {
