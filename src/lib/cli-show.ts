@@ -1,6 +1,5 @@
 import { resolve } from "path";
 import { hasAnthropicCredentialsConfigured } from "./anthropic.js";
-import { resolveAnthropicOAuthCached } from "./anthropic-auth.js";
 import { buildCliShowJson, buildCliShowText, type CliReport } from "./cli-reports.js";
 import { findGitWorktreeRoot } from "./config-file-utils.js";
 import {
@@ -145,8 +144,7 @@ async function loadCliAuthenticatedProviderIds(config: Record<string, unknown>):
     typeof quotaToast?.anthropicBinaryPath === "string"
       ? quotaToast.anthropicBinaryPath
       : undefined;
-  const [anthropicLogin, claudeCliConfigured, kimiGlobalAuth, kimiCnAuth] = await Promise.all([
-    resolveAnthropicOAuthCached().catch(() => ({ state: "none" as const })),
+  const [claudeCliConfigured, kimiGlobalAuth, kimiCnAuth] = await Promise.all([
     hasAnthropicCredentialsConfigured({
       binaryPath: anthropicBinaryPath,
     }),
@@ -155,9 +153,6 @@ async function loadCliAuthenticatedProviderIds(config: Record<string, unknown>):
   ]);
 
   return [
-    ...(anthropicLogin.state === "configured" || anthropicLogin.state === "failed"
-      ? ["anthropic"]
-      : []),
     ...(claudeCliConfigured ? ["claude-agent"] : []),
     ...(kimiGlobalAuth.state === "configured" ? ["kimi-code-plan-global"] : []),
     ...(kimiCnAuth.state === "configured" ? ["kimi-code-plan-cn"] : []),
