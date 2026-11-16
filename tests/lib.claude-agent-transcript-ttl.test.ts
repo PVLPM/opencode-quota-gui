@@ -167,9 +167,34 @@ describe("readClaudeObservedTtl", () => {
       deps,
     );
 
-  it("upgrades 1h-only writes", async () => {
+  const FRESH_1H = {
+    input_tokens: 3,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 50,
+    cache_creation: { ephemeral_1h_input_tokens: 50, ephemeral_5m_input_tokens: 0 },
+  };
+  const FRESH_TOKENS = { input: 3, read: 0, write: 50 };
+
+  it("upgrades 1h-only writes with confirmed zero cache reads", async () => {
+    await write(`${record({ usage: FRESH_1H })}\n`);
+    expect(await read(FRESH_TOKENS)).toBe("1h");
+  });
+
+  it("does not promote 1h writes that accompany cache reads of unknown TTL", async () => {
+    // A large read of earlier (possibly 5-minute) entries beside a small new 1h write.
     await write(`${record()}\n`);
-    expect(await read()).toBe("1h");
+    expect(await read()).toBe("unchanged");
+  });
+
+  it("does not trust a host-normalized zero read when the SDK record shows reads", async () => {
+    await write(`${record()}\n`);
+    expect(await read({ input: 3, read: 0, write: 50 })).toBe("unchanged");
+  });
+
+  it("does not promote when the SDK record lacks a read counter", async () => {
+    const { cache_read_input_tokens: _omit, ...withoutRead } = FRESH_1H;
+    await write(`${record({ usage: withoutRead })}\n`);
+    expect(await read(FRESH_TOKENS)).toBe("unchanged");
   });
 
   it.each([
@@ -232,8 +257,8 @@ describe("readClaudeObservedTtl", () => {
     const filler = `${record({ uuid: "22222222-2222-4222-8222-222222222222", id: "msg_0", usage: { input_tokens: 1 } }).replace("SECRET-SYNTHETIC-CONTENT", "日本語😀日本語")}\n`;
     // Pad so the 256 KiB boundary falls inside a 3/4-byte character at several offsets.
     for (const pad of ["", "a", "ab", "abc"]) {
-      await write(`${pad}${filler.repeat(4000)}${record()}\n`);
-      expect(await read()).toBe("1h");
+      await write(`${pad}${filler.repeat(4000)}${record({ usage: FRESH_1H })}\n`);
+      expect(await read(FRESH_TOKENS)).toBe("1h");
     }
   });
 
@@ -323,9 +348,9 @@ describe("readClaudeObservedTtl", () => {
   });
 
   it("opens exactly the one computed path", async () => {
-    const path = await write(`${record()}\n`);
+    const path = await write(`${record({ usage: FRESH_1H })}\n`);
     const openSpy = vi.fn(open);
-    expect(await read(TOKENS, { open: openSpy as typeof open })).toBe("1h");
+    expect(await read(FRESH_TOKENS, { open: openSpy as typeof open })).toBe("1h");
     expect(openSpy).toHaveBeenCalledTimes(1);
     expect(openSpy.mock.calls[0]?.[0]).toBe(path);
   });
@@ -333,7 +358,7 @@ describe("readClaudeObservedTtl", () => {
   it("reads only the tail of a large file and ignores the cut first line", async () => {
     const filler =
       `${record({ uuid: "22222222-2222-4222-8222-222222222222", id: "msg_0" })}\n`.repeat(3000);
-    await write(`${filler}${record()}\n`);
-    expect(await read()).toBe("1h");
+    await write(`${filler}${record({ usage: FRESH_1H })}\n`);
+    expect(await read(FRESH_TOKENS)).toBe("1h");
   });
 });

@@ -199,7 +199,7 @@ describe("V2 server plugin credential lifecycle", () => {
             id: "msg_native",
             usage: {
               input_tokens: 3,
-              cache_read_input_tokens: 100,
+              cache_read_input_tokens: 0,
               cache_creation_input_tokens: 50,
               cache_creation: { ephemeral_1h_input_tokens: 50, ephemeral_5m_input_tokens: 0 },
             },
@@ -226,7 +226,7 @@ describe("V2 server plugin credential lifecycle", () => {
           assistantMessageID: "msg_c",
           finish: "stop",
           cost: 0,
-          tokens: { input: 3, cache: { read: 100, write: 50 } },
+          tokens: { input: 3, cache: { read: 0, write: 50 } },
         },
       });
       await vi.waitFor(() => expect(relayed()).toContain("session.cache.ttl"));

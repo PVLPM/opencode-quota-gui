@@ -171,8 +171,12 @@ export async function readClaudeObservedTtl(
   if (usage === undefined) return "retry";
   const { input, read, write } = query.tokens;
   if (usage.input !== input || usage.read !== read || usage.write !== write) return "unchanged";
-  // 1h-only: no 5m writes and the 1h count equals the total writes.
-  return usage.fiveMinute === 0 &&
+  // 1h-only: no 5m writes and the 1h count equals the total writes. Any cache read, or a
+  // missing read counter, means older segments of unknown TTL are in play, so the session
+  // estimate must not be promoted from the new writes' TTL; the SDK's own read field is
+  // required (OpenCode may normalize unavailable reads to 0).
+  return usage.read === 0 &&
+    usage.fiveMinute === 0 &&
     usage.oneHour !== undefined &&
     usage.oneHour > 0 &&
     usage.oneHour === usage.write
