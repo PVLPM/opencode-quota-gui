@@ -12,7 +12,7 @@ import {
   observeCacheInvocation,
 } from "../src/lib/cache-observer.js";
 import { projectOpenCodeCacheObserverEvent } from "../src/lib/cache-observer-ingestion.js";
-import { createCacheComposerPill } from "../src/native/cache-composer-pill.js";
+import { classifyCacheReuse, createCacheComposerPill } from "../src/native/cache-composer-pill.js";
 import type {
   NativeCacheObserverChildrenSnapshot,
   NativeCacheObserverSessionMeta,
@@ -68,7 +68,7 @@ it("provides an accessible cache legend and uses a native cache icon", () => {
   );
   expect(legend?.textContent).not.toMatch(/not (an? )?empirical/i);
   expect(legend?.textContent).toMatch(
-    /Hit: cache-read tokens reported\. Unknown: no cache reads reported or telemetry missing; the host reports a missing cache-read count as zero, so zero is not treated as a confirmed miss\./,
+    /Reuse share: Low reuse up to 50%, Partial reuse above 50% to under 90%, Hit 90% or more, Miss only for a confirmed zero\. Unknown: missing, invalid, or a reported zero, which the host cannot tell from missing data\./,
   );
   expect(legend?.textContent).toMatch(/Expiry counts from the last qualifying call/);
   expect(legend?.textContent).toMatch(
@@ -289,7 +289,9 @@ it("keeps discovery and history with the selection, renders live, and cancels on
     primaryCacheReadRatio: { value: 0.82, observedAtMs: Date.now() },
   } as CacheObserverClassification);
   listeners.get("a")?.();
-  expect(pill.show({ session: a } as ComposerPillProps)?.label).toBe("TTL — · Cache 82.00% · Hit");
+  expect(pill.show({ session: a } as ComposerPillProps)?.label).toBe(
+    "TTL — · Cache 82.00% · Partial reuse",
+  );
   observations.set("child", { color: "red", reason: "known-invalidation" });
   listeners.get("child")?.();
 
@@ -337,7 +339,7 @@ it("keeps discovery and history with the selection, renders live, and cancels on
   mainButton?.dispatchEvent(new Event("pointerenter"));
   expect(tooltipNode()?.hidden).toBe(false);
   expect(tooltipNode()?.textContent).toMatch(
-    /Cache 82.00% · Hit · last completed call \d{2}:\d{2}$/,
+    /Cache 82.00% · Partial reuse · last completed call \d{2}:\d{2}$/,
   );
   mainButton?.blur();
   expect(tooltipNode()).toBeNull();
@@ -554,7 +556,7 @@ it("labels rows with agent, provider, model and effort when authoritative metada
     .join(" ");
   expect(description).toContain("general");
   expect(description).toContain("anthropic / claude-test#high");
-  expect(description).toContain("Cache 80.00%, hit.");
+  expect(description).toContain("Cache 80.00%, partial reuse.");
   expect(description).toMatch(/TTL about \+.*, estimated\./);
   expect(
     [...container.querySelectorAll(".qg-cache-agent")].map((node) => node.textContent),
@@ -823,7 +825,7 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
     "Estimated within retention",
     expect.stringMatching(/^Estimated expiry \d{2}:\d{2}$/),
     "Basis · Current host settings snapshot (configured)",
-    expect.stringMatching(/^Cache 80.00% · Hit · last completed call \d{2}:\d{2}$/),
+    expect.stringMatching(/^Cache 80.00% · Partial reuse · last completed call \d{2}:\d{2}$/),
   ]);
   expect(tooltip?.children[0]?.className).toBe("qg-cache-tooltip-primary");
   expect(tooltip?.children[1]?.className).toBe("qg-cache-tooltip-primary");
@@ -833,7 +835,7 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
   expect(tooltip?.textContent).not.toContain("Last qualifying call");
   // The pill renders the estimate as its own tone without asserting physical cache.
   expect(pill.show({ session: a } as ComposerPillProps)).toMatchObject({
-    label: "TTL ~5m 0s · Cache 80.00% · Hit",
+    label: "TTL ~5m 0s · Cache 80.00% · Partial reuse",
     tone: "success",
     icon: "server",
     title: "Cache observation",
@@ -943,7 +945,7 @@ it("renders the estimated-expiry red state with its historical provenance", asyn
   await flush();
   renderMenu(pill, () => a, container);
   expect(pill.show({ session: a } as ComposerPillProps)).toMatchObject({
-    label: "TTL ~+23h 55m 0s · Cache 80.00% · Hit",
+    label: "TTL ~+23h 55m 0s · Cache 80.00% · Partial reuse",
     tone: "danger",
   });
   const dot = container.querySelector<HTMLButtonElement>("button.qg-cache-danger");
@@ -1115,7 +1117,7 @@ it("does not interpret a real configured-minimum classification as verified expi
     dispose: cleanup,
   }));
   expect(pill.show({ session: sessionRef } as ComposerPillProps)).toMatchObject({
-    label: "TTL ~5m 0s · Cache 80.00% · Hit",
+    label: "TTL ~5m 0s · Cache 80.00% · Partial reuse",
     tone: "success",
   });
   // The only timer is the shared countdown tick; it is not an expiry verdict and
@@ -1159,7 +1161,7 @@ it("reboots history after a shared stream gap without an RPC disconnect", async 
   }));
   await vi.waitFor(() =>
     expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
-      /^TTL ~\+.* · Cache 80.00% · Hit$/,
+      /^TTL ~\+.* · Cache 80.00% · Partial reuse$/,
     ),
   );
   expect(listMessages).toHaveBeenCalledTimes(1);
@@ -1167,7 +1169,7 @@ it("reboots history after a shared stream gap without an RPC disconnect", async 
   await vi.waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
   await vi.waitFor(() =>
     expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
-      /^TTL ~\+.* · Cache 80.00% · Hit$/,
+      /^TTL ~\+.* · Cache 80.00% · Partial reuse$/,
     ),
   );
   dispose();
@@ -1228,7 +1230,7 @@ it.each([
   if (scenario === "in-flight") expect(firstSignal?.aborted).toBe(true);
   await vi.waitFor(() =>
     expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toBe(
-      "TTL — · Cache 80.00% · Hit",
+      "TTL — · Cache 80.00% · Partial reuse",
     ),
   );
   expect(calls).toBe(2);
@@ -1273,7 +1275,7 @@ it("renders real history bootstrap results independently without exposing messag
   }));
   await vi.waitFor(() =>
     expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
-      /^TTL ~\+.* · Cache 82.00% · Hit$/,
+      /^TTL ~\+.* · Cache 82.00% · Partial reuse$/,
     ),
   );
   // Child history now loads with the selection, so both reads happen up front.
@@ -1476,7 +1478,7 @@ it("keeps the cache share and TTL independent, with a valid 0% share and dashes 
     reason: "ttl-unverified",
     ttlEstimate: undefined,
   } as CacheObserverClassification;
-  expect(label()).toBe("TTL — · Cache 82.00% · Hit");
+  expect(label()).toBe("TTL — · Cache 82.00% · Partial reuse");
   observed = undefined;
   expect(label()).toBe("TTL — · Cache unknown");
   dispose();
@@ -1484,7 +1486,16 @@ it("keeps the cache share and TTL independent, with a valid 0% share and dashes 
 
 it.each([
   { name: "a large hit", ratio: 0.997, label: "TTL ~4m 30s · Cache 99.70% · Hit" },
-  { name: "a small positive hit", ratio: 0.07, label: "TTL ~4m 30s · Cache 7.00% · Hit" },
+  { name: "a small positive read", ratio: 0.07, label: "TTL ~4m 30s · Cache 7.00% · Low reuse" },
+  { name: "a tiny positive read", ratio: 0.00001, label: "TTL ~4m 30s · Cache <0.01% · Low reuse" },
+  { name: "just under 50%", ratio: 0.4999, label: "TTL ~4m 30s · Cache 49.99% · Low reuse" },
+  { name: "exactly 50%", ratio: 0.5, label: "TTL ~4m 30s · Cache 50.00% · Low reuse" },
+  { name: "just over 50%", ratio: 0.5001, label: "TTL ~4m 30s · Cache 50.01% · Partial reuse" },
+  { name: "just under 90%", ratio: 0.8999, label: "TTL ~4m 30s · Cache 89.99% · Partial reuse" },
+  { name: "exactly 90%", ratio: 0.9, label: "TTL ~4m 30s · Cache 90.00% · Hit" },
+  { name: "exactly 100%", ratio: 1, label: "TTL ~4m 30s · Cache 100.00% · Hit" },
+  { name: "an invalid ratio above 1", ratio: 1.5, label: "TTL ~4m 30s · Cache unknown" },
+  { name: "an invalid negative ratio", ratio: -0.1, label: "TTL ~4m 30s · Cache unknown" },
   {
     name: "a reported zero read, unknown since the host maps missing usage to zero",
     ratio: 0,
@@ -1522,6 +1533,20 @@ it.each([
   dispose();
 });
 
+it("classifies cache reuse bands, and only a confirmed zero is a Miss", () => {
+  expect(classifyCacheReuse(0)).toBe("Unknown");
+  expect(classifyCacheReuse(0, true)).toBe("Miss");
+  expect(classifyCacheReuse(Number.MIN_VALUE)).toBe("Low reuse");
+  expect(classifyCacheReuse(0.5)).toBe("Low reuse");
+  expect(classifyCacheReuse(0.5000001)).toBe("Partial reuse");
+  expect(classifyCacheReuse(0.8999999)).toBe("Partial reuse");
+  expect(classifyCacheReuse(0.9)).toBe("Hit");
+  expect(classifyCacheReuse(1)).toBe("Hit");
+  for (const bad of [-0.01, 1.01, Number.NaN, Number.POSITIVE_INFINITY, undefined, "0.5"]) {
+    expect(classifyCacheReuse(bad)).toBe("Unknown");
+  }
+});
+
 it("marks an elapsed count-up as estimated too", () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
@@ -1536,7 +1561,7 @@ it("marks an elapsed count-up as estimated too", () => {
     dispose: cleanup,
   }));
   expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
-    /^TTL ~\+\d+m \d+s · Cache 50\.00% · Hit$/,
+    /^TTL ~\+\d+m \d+s · Cache 50\.00% · Low reuse$/,
   );
   dispose();
 });
@@ -1575,7 +1600,7 @@ it.each([
     ?.dispatchEvent(new Event("pointerenter"));
   const text = container.querySelector<HTMLElement>('[role="tooltip"]')?.textContent ?? "";
   expect(text).toContain(`Basis · basis source (${words})`);
-  expect(text).toMatch(/Cache 80\.00% · Hit · last completed call/);
+  expect(text).toMatch(/Cache 80\.00% · Partial reuse · last completed call/);
   expect(text).not.toMatch(/prompt|token|secret|authorization/i);
   dispose();
   container.remove();
@@ -1732,14 +1757,18 @@ it("keeps main and child timers independent across tool events and successful pr
   const mainRow = () => container.querySelector(".qg-cache-row:not(.qg-cache-child)");
   const childRow = () => container.querySelector(".qg-cache-child");
   expect(mainRow()?.querySelector(".qg-cache-success")).not.toBeNull();
-  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe("~4m 50s · 80.00% · Hit");
+  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe(
+    "~4m 50s · 80.00% · Partial reuse",
+  );
   expect(childRow()?.querySelector(".qg-cache-danger")).not.toBeNull();
   expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("~+1s");
   await flush(12);
   const childrenCalls = listChildren.mock.calls.length;
   const historyCalls = listMessages.mock.calls.length;
   vi.advanceTimersByTime(2_000);
-  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe("~4m 48s · 80.00% · Hit");
+  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe(
+    "~4m 48s · 80.00% · Partial reuse",
+  );
   expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("~+3s");
   expect(fetchSpy).not.toHaveBeenCalled();
   expect(listChildren).toHaveBeenCalledTimes(childrenCalls);
@@ -1758,9 +1787,11 @@ it("keeps main and child timers independent across tool events and successful pr
   primary(child, "child-new", Date.now() - 1_000, Date.now());
   expect(childRow()?.querySelector(".qg-cache-success")).not.toBeNull();
   expect(childRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe(
-    "~4m 59s · 80.00% · Hit",
+    "~4m 59s · 80.00% · Partial reuse",
   );
-  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe("~4m 48s · 80.00% · Hit");
+  expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe(
+    "~4m 48s · 80.00% · Partial reuse",
+  );
   close();
   dispose();
   observer.dispose();
@@ -2122,7 +2153,7 @@ it("uses neutral, estimated and danger tones with the catalog cache icon", () =>
     primaryCacheReadRatio: { value: 0.82, observedAtMs: Date.now() },
   } as CacheObserverClassification;
   update();
-  expect(show()).toMatchObject({ label: "TTL — · Cache 82.00% · Hit", tone: "warning" });
+  expect(show()).toMatchObject({ label: "TTL — · Cache 82.00% · Partial reuse", tone: "warning" });
   observed = {
     ...observed,
     color: "green",
@@ -2134,11 +2165,11 @@ it("uses neutral, estimated and danger tones with the catalog cache icon", () =>
   // Green is an estimate bound to a configured window; it renders as success,
   // never as a physical-cache claim.
   expect(show().tone).toBe("success");
-  expect(show().label).toBe("TTL — · Cache 82.00% · Hit");
+  expect(show().label).toBe("TTL — · Cache 82.00% · Partial reuse");
   updateTransport({ rpc: "live", hostEvents: "unavailable" });
   // Owner spec: host-event coverage does not suppress a valid green estimate.
   expect(show().tone).toBe("success");
-  expect(show().label).toBe("TTL — · Cache 82.00% · Hit");
+  expect(show().label).toBe("TTL — · Cache 82.00% · Partial reuse");
   observed = { color: "red", reason: "known-invalidation" } as CacheObserverClassification;
   update();
   expect(show().tone).toBe("danger");

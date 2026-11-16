@@ -116,12 +116,35 @@ function ttlMetric(deadlineAtMs: number | undefined, nowMs: number): TtlMetric {
   };
 }
 
-/** Hit: positive cache reads. The host reports missing cache usage as zero, so zero is Unknown, never Miss. */
-function cacheMetric(percent: string | undefined, hit: boolean): Metric {
+export type CacheReuseWord = "Miss" | "Low reuse" | "Partial reuse" | "Hit" | "Unknown";
+
+/**
+ * Cache reuse efficiency category from the unrounded cache-read share (0..1) of the last
+ * completed primary call. These are reuse bands, not provider cache-hit semantics: a small
+ * positive read is a technical hit but is labelled Low reuse. `Miss` needs an independently
+ * confirmed zero; OpenCode reports missing cache usage as 0, so no caller can confirm one
+ * today and a plain zero stays Unknown.
+ */
+export function classifyCacheReuse(ratio: unknown, confirmedZero = false): CacheReuseWord {
+  if (typeof ratio !== "number" || !Number.isFinite(ratio) || ratio < 0 || ratio > 1) {
+    return "Unknown";
+  }
+  if (ratio === 0) return confirmedZero ? "Miss" : "Unknown";
+  if (ratio <= 0.5) return "Low reuse";
+  if (ratio < 0.9) return "Partial reuse";
+  return "Hit";
+}
+
+/** Percent text; a positive share that would round to a false 0.00% shows as <0.01%. */
+function formatCachePercent(ratio: number): string {
+  const text = (ratio * 100).toFixed(2);
+  return ratio > 0 && text === "0.00" ? "<0.01%" : `${text}%`;
+}
+
+function cacheMetric(percent: string | undefined, word: CacheReuseWord): Metric {
   if (percent === undefined) {
     return { label: "Cache unknown", short: "unknown", spoken: "Cache unknown" };
   }
-  const word = hit ? "Hit" : "Unknown";
   return {
     label: `Cache ${percent} · ${word}`,
     short: `${percent} · ${word}`,
@@ -178,9 +201,9 @@ function presentation(
     ratio <= 1 &&
     typeof observedAt === "number" &&
     Number.isFinite(observedAt)
-      ? `${(ratio * 100).toFixed(2)}%`
+      ? formatCachePercent(ratio)
       : undefined;
-  const cache = cacheMetric(percent, typeof ratio === "number" && ratio > 0);
+  const cache = cacheMetric(percent, classifyCacheReuse(ratio));
   // The status bubble keeps the state, expiry, basis and cache share. Assumptions
   // and the start of the qualifying call are general caveats, explained under (i).
   const observedWhen = formatWallTime(observedAt, nowMs);
@@ -869,9 +892,9 @@ export function createCacheComposerPill(
                 <span>Expiry counts from the last qualifying call's start.</span>
                 <span>Cache: observed token share of the last completed primary call.</span>
                 <span>
-                  Hit: cache-read tokens reported. Unknown: no cache reads reported or telemetry
-                  missing; the host reports a missing cache-read count as zero, so zero is not
-                  treated as a confirmed miss.
+                  Reuse share: Low reuse up to 50%, Partial reuse above 50% to under 90%, Hit 90% or
+                  more, Miss only for a confirmed zero. Unknown: missing, invalid, or a reported
+                  zero, which the host cannot tell from missing data.
                 </span>
                 <span>
                   Current settings may differ from the call's route or settings. Prefix changes,
