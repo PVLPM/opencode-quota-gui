@@ -787,16 +787,29 @@ describe("package manifest compatibility", () => {
       path: "package-artifacts",
     });
     expect(stepIndex(publish, "Choose npm dist-tag")).toBeLessThan(
-      stepIndex(publish, "Verify and publish exact release artifact"),
+      stepIndex(publish, "Verify and submit exact release artifact to npm staging"),
     );
-    const publishStep = namedStep(publish, "Verify and publish exact release artifact");
+    const publishStep = namedStep(
+      publish,
+      "Verify and submit exact release artifact to npm staging",
+    );
     expect(publishStep.env).toEqual({ DIST_TAG: "${{ steps.dist-tag.outputs.dist-tag }}" });
     const publishRun = publishStep.run ?? "";
     expect(publishRun).toContain("node scripts/verify-release-artifact.mjs package-artifacts");
     expect(publishRun).toContain(
-      'npm publish "./${TARBALLS[0]}" --tag "$DIST_TAG" --access public --provenance --ignore-scripts',
+      'npm stage publish "./${TARBALLS[0]}" --tag "$DIST_TAG" --access public --provenance --ignore-scripts',
     );
-    expect(publishRun).not.toContain('npm publish "${TARBALLS[0]}"');
+    expect(publishRun).not.toMatch(/\bnpm publish\b/u);
+    expect(publishRun).not.toMatch(/\bdist-tag\b/u);
+    const stageInstall = namedStep(
+      publish,
+      "Require npm CLI 11.15.0 or newer for staged publishing",
+    );
+    expect(stageInstall.run).toContain("npm install --global npm@11");
+    expect(stageInstall.run).toContain("minor < 15");
+    expect(
+      stepIndex(publish, "Require npm CLI 11.15.0 or newer for staged publishing"),
+    ).toBeLessThan(stepIndex(publish, "Verify and submit exact release artifact to npm staging"));
     expect(publishRun).not.toContain("pnpm pack");
     expect(publishRun).not.toContain("pnpm run build");
 

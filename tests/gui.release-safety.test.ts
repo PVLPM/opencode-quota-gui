@@ -118,12 +118,13 @@ describe("GUI release safety", () => {
     }
   });
 
-  it("keeps npm publish inside the guarded publish job and repository writes out of every job", () => {
-    const jobsWithNpmPublish = Object.entries(workflow.jobs)
-      .filter(([, job]) => jobRunLines(job).some((line) => /\bnpm publish\b/u.test(line)))
+  it("keeps npm staging inside the guarded publish job, never publishes directly, and keeps repository writes out of every job", () => {
+    const jobsWithNpmStage = Object.entries(workflow.jobs)
+      .filter(([, job]) => jobRunLines(job).some((line) => /\bnpm stage publish\b/u.test(line)))
       .map(([name]) => name);
 
-    expect(jobsWithNpmPublish).toEqual(["publish"]);
+    expect(jobsWithNpmStage).toEqual(["publish"]);
+    expect(workflowSource).not.toMatch(/\bnpm publish\b/u);
 
     for (const [jobName, job] of Object.entries(workflow.jobs)) {
       expect(job.permissions?.contents, `${jobName} must not write contents`).not.toBe("write");
@@ -221,13 +222,14 @@ describe("GUI release safety", () => {
       path: "package-artifacts",
     });
     expect(stepIndex(publish, "Choose npm dist-tag")).toBeLessThan(
-      stepIndex(publish, "Verify and publish exact release artifact"),
+      stepIndex(publish, "Verify and submit exact release artifact to npm staging"),
     );
 
-    const publishRun = namedStep(publish, "Verify and publish exact release artifact").run ?? "";
+    const publishRun =
+      namedStep(publish, "Verify and submit exact release artifact to npm staging").run ?? "";
     expect(publishRun).toContain("node scripts/verify-release-artifact.mjs package-artifacts");
     expect(publishRun).toContain(
-      'npm publish "./${TARBALLS[0]}" --tag "$DIST_TAG" --access public --provenance --ignore-scripts',
+      'npm stage publish "./${TARBALLS[0]}" --tag "$DIST_TAG" --access public --provenance --ignore-scripts',
     );
     expect(publishRun).not.toContain("pnpm pack");
     expect(publishRun).not.toContain("pack:release-package");
