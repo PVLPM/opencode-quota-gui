@@ -126,6 +126,7 @@ export function sanitizeQuotaToastError(error: QuotaToastError): QuotaToastError
   return {
     label: sanitizeDisplayText(error.label),
     message: sanitizeDisplayText(error.message),
+    ...(error.retryAtMs !== undefined ? { retryAtMs: error.retryAtMs } : {}),
     ...(error.retryable === true ? { retryable: true } : {}),
     ...(error.failureCategory !== undefined ? { failureCategory: error.failureCategory } : {}),
     ...(error.kind ? { kind: error.kind } : {}),

@@ -148,8 +148,11 @@ function sidecarManagedComments(
 
 export async function planProviderAdd(options: ProviderAddOptions): Promise<ProviderAddPlan> {
   const single = validateQuotaProviders([options.definition]);
-  if (!single.value) {
-    throw new Error(single.issues.map((issue) => issue.key + ": " + issue.message).join("\n"));
+  if (!single.value || single.value.length !== 1) {
+    const validationMessage = single.issues
+      .map((issue) => issue.key + ": " + issue.message)
+      .join("\n");
+    throw new Error(validationMessage || "definition is not a supported quota provider");
   }
   const definition = single.value[0]!;
   const configDir = options.configDir ?? getOpencodeRuntimeDirs().configDir;

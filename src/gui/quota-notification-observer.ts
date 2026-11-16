@@ -20,9 +20,18 @@ import { readFile } from "node:fs/promises";
 
 import type { QuotaSnapshot, SettingsSnapshot } from "../contracts/dashboard.js";
 import { writeJsonAtomic } from "../lib/atomic-json.js";
+import {
+  isValidDuplicateCooldownMinutes,
+  isValidLowQuotaThresholdRemainingPercent,
+  isValidNativeQuotaNotificationPolicy,
+} from "../lib/config.js";
 import { formatResetCountdown } from "../lib/format-utils.js";
 import { getGuiPrivateStatePath } from "../lib/private-state-paths.js";
-import { DEFAULT_CONFIG, type PercentDisplayMode } from "../lib/types.js";
+import {
+  DEFAULT_CONFIG,
+  type NativeQuotaNotificationPolicy,
+  type PercentDisplayMode,
+} from "../lib/types.js";
 import type { DashboardRpcQuotaNotificationData } from "../rpc.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 import {
@@ -39,8 +48,7 @@ const CONFIG_UNAVAILABLE = "config unavailable";
 
 /** Effective settings for one observation. */
 export interface QuotaNotificationSettings {
-  readonly lowThresholdPercent: number;
-  readonly cooldownMs: number;
+  readonly policy: NativeQuotaNotificationPolicy;
   readonly hiddenCards: readonly string[];
   readonly hiddenRows: readonly string[];
   readonly percentDisplayMode: PercentDisplayMode;
@@ -95,21 +103,6 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-function numberSetting(
-  values: Record<string, unknown>,
-  key: string,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  const value = values[key];
-  if (value === undefined || value === null) return fallback;
-  if (!isFiniteNumber(value) || value < min || value > max) {
-    throw new Error(CONFIG_UNAVAILABLE);
-  }
-  return value;
-}
-
 function displayModeSetting(values: Record<string, unknown>): PercentDisplayMode {
   const value = values.percentDisplayMode;
   if (value === undefined || value === null) return DEFAULT_CONFIG.percentDisplayMode;
@@ -129,6 +122,71 @@ function hiddenIds(value: unknown): string[] {
   return result;
 }
 
+function nativeQuotaNotificationPolicyFromValues(
+  values: Record<string, unknown>,
+): NativeQuotaNotificationPolicy {
+  const rawPolicy = values.nativeQuotaNotifications;
+  if (rawPolicy !== undefined && !isRecord(rawPolicy)) throw new Error(CONFIG_UNAVAILABLE);
+  const fields = isRecord(rawPolicy) ? rawPolicy : {};
+  const defaults = DEFAULT_CONFIG.nativeQuotaNotifications;
+  const candidate: unknown = {
+    ...defaults,
+    ...fields,
+    low: Object.hasOwn(fields, "low")
+      ? isRecord(fields.low)
+        ? { ...defaults.low, ...fields.low }
+        : fields.low
+      : { ...defaults.low },
+    exhausted: Object.hasOwn(fields, "exhausted")
+      ? isRecord(fields.exhausted)
+        ? { ...defaults.exhausted, ...fields.exhausted }
+        : fields.exhausted
+      : { ...defaults.exhausted },
+    reset: Object.hasOwn(fields, "reset")
+      ? isRecord(fields.reset)
+        ? { ...defaults.reset, ...fields.reset }
+        : fields.reset
+      : { ...defaults.reset, windows: [...defaults.reset.windows] },
+    providerError: Object.hasOwn(fields, "providerError")
+      ? isRecord(fields.providerError)
+        ? { ...defaults.providerError, ...fields.providerError }
+        : fields.providerError
+      : { ...defaults.providerError },
+  };
+  if (!isValidNativeQuotaNotificationPolicy(candidate)) throw new Error(CONFIG_UNAVAILABLE);
+
+  const policy: NativeQuotaNotificationPolicy = {
+    ...candidate,
+    low: { ...candidate.low },
+    exhausted: { ...candidate.exhausted },
+    reset: { ...candidate.reset, windows: [...candidate.reset.windows] },
+    providerError: { ...candidate.providerError },
+  };
+
+  const hasCanonicalLowThreshold =
+    isRecord(fields.low) && Object.hasOwn(fields.low, "thresholdRemainingPercent");
+  const legacyLowThreshold = values.lowQuotaThresholdRemainingPercent;
+  if (
+    !hasCanonicalLowThreshold &&
+    legacyLowThreshold !== undefined &&
+    legacyLowThreshold !== null
+  ) {
+    if (!isValidLowQuotaThresholdRemainingPercent(legacyLowThreshold)) {
+      throw new Error(CONFIG_UNAVAILABLE);
+    }
+    policy.low.thresholdRemainingPercent = legacyLowThreshold;
+  }
+
+  const hasCanonicalCooldown = Object.hasOwn(fields, "duplicateCooldownMinutes");
+  const legacyCooldown = values.duplicateCooldownMinutes;
+  if (!hasCanonicalCooldown && legacyCooldown !== undefined && legacyCooldown !== null) {
+    if (!isValidDuplicateCooldownMinutes(legacyCooldown)) throw new Error(CONFIG_UNAVAILABLE);
+    policy.duplicateCooldownMinutes = legacyCooldown;
+  }
+
+  return policy;
+}
+
 /**
  * Maps the canonical settings snapshot to the observer's effective values.
  * Missing keys use the product defaults; malformed values and malformed or
@@ -140,22 +198,9 @@ export function quotaNotificationSettingsFromSnapshot(
 ): QuotaNotificationSettings {
   if (!isRecord(snapshot.values)) throw new Error(CONFIG_UNAVAILABLE);
   if (!isRecord(snapshot.visibility)) throw new Error(CONFIG_UNAVAILABLE);
-  const cooldownMinutes = numberSetting(
-    snapshot.values,
-    "duplicateCooldownMinutes",
-    DEFAULT_CONFIG.duplicateCooldownMinutes,
-    0,
-    Number.MAX_SAFE_INTEGER,
-  );
+  const policy = nativeQuotaNotificationPolicyFromValues(snapshot.values);
   return {
-    lowThresholdPercent: numberSetting(
-      snapshot.values,
-      "lowQuotaThresholdRemainingPercent",
-      DEFAULT_CONFIG.lowQuotaThresholdRemainingPercent,
-      0,
-      100,
-    ),
-    cooldownMs: cooldownMinutes * 60_000,
+    policy,
     hiddenCards: hiddenIds(snapshot.visibility.hiddenCards),
     hiddenRows: hiddenIds(snapshot.visibility.hiddenRows),
     percentDisplayMode: displayModeSetting(snapshot.values),
@@ -396,17 +441,18 @@ export function createQuotaNotificationObserver(
     if (closed || epoch !== sourceEpoch) return;
 
     const nowMs = now();
+    const cooldownMs = settings.policy.duplicateCooldownMinutes * 60_000;
     if (!cooldownsLoaded) {
       cooldowns = mergeCooldowns(cooldowns, await readCooldowns(statePath));
       cooldownsLoaded = true;
       if (closed || epoch !== sourceEpoch) return;
     }
 
-    const prunedCooldowns = pruneCooldowns(cooldowns, nowMs, settings.cooldownMs);
+    const prunedCooldowns = pruneCooldowns(cooldowns, nowMs, cooldownMs);
     const cooldownsWerePruned = !sameCooldowns(cooldowns, prunedCooldowns);
     cooldowns = prunedCooldowns;
     if (cooldownsWerePruned) {
-      const persisted = await persist(cooldowns, nowMs, settings.cooldownMs);
+      const persisted = await persist(cooldowns, nowMs, cooldownMs);
       cooldowns = persisted ?? cooldowns;
       if (closed || epoch !== sourceEpoch) return;
     }
@@ -418,8 +464,7 @@ export function createQuotaNotificationObserver(
       ...(needsBaseline || detectorState === undefined ? {} : { state: detectorState }),
       cooldowns,
       nowMs,
-      lowThresholdPercent: settings.lowThresholdPercent,
-      cooldownMs: settings.cooldownMs,
+      policy: settings.policy,
     });
     if (closed || epoch !== sourceEpoch) return;
 
@@ -429,11 +474,11 @@ export function createQuotaNotificationObserver(
       providers: result.state.providers,
     };
     needsBaseline = false;
-    cooldowns = pruneCooldowns(result.cooldowns, nowMs, settings.cooldownMs);
+    cooldowns = pruneCooldowns(result.cooldowns, nowMs, cooldownMs);
 
     if (result.notifications.length === 0) return;
 
-    const persisted = await persist(cooldowns, nowMs, settings.cooldownMs);
+    const persisted = await persist(cooldowns, nowMs, cooldownMs);
     cooldowns = persisted ?? cooldowns;
     // A handoff can land while the cooldown write is in flight. Fence before
     // publishing so the old source's event never reaches the new generation.

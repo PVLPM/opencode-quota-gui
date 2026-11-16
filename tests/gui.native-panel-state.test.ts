@@ -308,6 +308,110 @@ describe("native dashboard panel state", () => {
     expect(state.connection()).toBe("live");
   });
 
+  it("retries quota, settings and health on a live transport", async () => {
+    const fake = recordingClient();
+    const requests: unknown[] = [];
+    fake.client.quota = async (input) => {
+      requests.push(input);
+      return {} as any;
+    };
+    const [visible] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible });
+    const settings = fake.counts.settings;
+    const health = fake.counts.health;
+    state.retry();
+    await flush();
+    expect(requests).toEqual([{ refresh: true }]);
+    expect(fake.counts.settings).toBe(settings + 1);
+    expect(fake.counts.health).toBe(health + 1);
+    expect(fake.counts.reconnects).toBe(0);
+    state.retry({ refreshQuota: false });
+    await flush();
+    expect(requests).toEqual([{ refresh: true }]);
+    expect(fake.counts.settings).toBe(settings + 2);
+    expect(fake.counts.health).toBe(health + 2);
+  });
+
+  it("retains the forced quota response for the visible route", async () => {
+    const fake = recordingClient();
+    const snapshot = { generatedAtMs: 42 } as any;
+    fake.client.quota = async () => snapshot;
+    const [visible] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible });
+    state.retry();
+    await flush();
+    expect(state.quotaQuery.data()).toBe(snapshot);
+  });
+
+  it("does not reuse an off-route refresh across a host disconnect", async () => {
+    const fake = recordingClient();
+    fake.client.quota = async () => ({ generatedAtMs: 42 }) as any;
+    const [visible] = createSignal(true);
+    const [hostConnected, setHostConnected] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible, hostConnected });
+    state.retry();
+    await flush();
+    setHostConnected(false);
+    await flush();
+    expect(state.quotaQuery.consumeRefresh()).toBe(false);
+  });
+
+  it("does not reuse a forced response that finishes after host loss", async () => {
+    const fake = recordingClient();
+    let resolve!: (value: any) => void;
+    fake.client.quota = () =>
+      new Promise((done) => {
+        resolve = done;
+      });
+    const [visible] = createSignal(true);
+    const [hostConnected, setHostConnected] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible, hostConnected });
+    state.retry();
+    setHostConnected(false);
+    resolve({ generatedAtMs: 42 });
+    await flush();
+    expect(state.quotaQuery.consumeRefresh()).toBe(false);
+  });
+
+  it("retains a manual quota failure and deduplicates repeated retries", async () => {
+    const fake = recordingClient();
+    let reject!: (error: Error) => void;
+    let calls = 0;
+    fake.client.quota = () => {
+      calls++;
+      return new Promise((_, fail) => {
+        reject = fail;
+      });
+    };
+    const [visible] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible });
+    state.retry();
+    state.retry();
+    expect(calls).toBe(1);
+    reject(new Error("refresh failed"));
+    await flush();
+    expect(state.quotaQuery.error()).toEqual(new Error("refresh failed"));
+  });
+
+  it("holds reconnect reads until the forced retry starts", async () => {
+    const fake = recordingClient();
+    const requests: unknown[] = [];
+    fake.client.quota = async (input) => {
+      requests.push(input);
+      return { generatedAtMs: 42 } as any;
+    };
+    const [visible] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible });
+    fake.setConnection("reconnecting");
+    state.retry();
+    state.retry();
+    void state.quotaQuery.afterReconnect();
+    await flush();
+    expect(fake.counts.reconnects).toBe(1);
+    expect(requests).toEqual([{ refresh: true }]);
+    expect(state.quotaQuery.data()?.generatedAtMs).toBe(42);
+  });
+
   it("marks cached data stale on host loss and clears it only after recovery and a read land", async () => {
     const fake = recordingClient();
     const [visible] = createSignal(true);
@@ -463,6 +567,36 @@ describe("native dashboard panel state", () => {
     expect(fake.counts.settings).toBe(3);
     expect(state.settings()?.revision).toBe("revision-2");
     expect(state.settingsStale()).toBe(false);
+  });
+
+  it("rereads settings once after an event arrives mid-flight, but dedupes a plain retry", async () => {
+    const pending: Array<(value: SettingsSnapshot) => void> = [];
+    const fake = recordingClient();
+    const [visible] = createSignal(true);
+    const state = await mountPanel({ client: fake.client, visible });
+    fake.setSettings(
+      () =>
+        new Promise<SettingsSnapshot>((resolve) => {
+          pending.push(resolve);
+        }),
+    );
+    const base = fake.counts.settings;
+
+    state.retry();
+    await flush();
+    state.retry();
+    await flush();
+    expect(fake.counts.settings).toBe(base + 1);
+
+    // The event may postdate the in-flight read, so one follow-up read is owed.
+    fake.emit({ topic: "settings.changed", at: 9 });
+    await flush();
+    pending[0]?.(settingsSnapshot({ revision: "old" }));
+    await flush();
+    expect(fake.counts.settings).toBe(base + 2);
+    pending[1]?.(settingsSnapshot({ revision: "new" }));
+    await flush();
+    expect(state.settings()?.revision).toBe("new");
   });
 
   it("exposes the settings payload that drives display preferences and visibility", async () => {

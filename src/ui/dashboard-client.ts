@@ -476,6 +476,19 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
         `${detail}.errors[].retryable`,
       );
       if (retryable !== undefined) parsedError.retryable = retryable;
+      const retryAtMs = readOptionalNumber(
+        error.retryAtMs,
+        endpoint,
+        `${detail}.errors[].retryAtMs`,
+      );
+      if (retryAtMs !== undefined) parsedError.retryAtMs = retryAtMs;
+      const kind = readOptionalEnum(
+        error.kind,
+        ["intentional-filter"] as const,
+        endpoint,
+        `${detail}.errors[].kind`,
+      );
+      if (kind !== undefined) parsedError.kind = kind;
       const failureCategory = readOptionalEnum(
         error.failureCategory,
         PROVIDER_FAILURE_CATEGORIES,
@@ -1474,8 +1487,10 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
       };
     },
 
-    async quota() {
-      return parseQuotaSnapshot(await request("/api/v1/quota"));
+    async quota(input) {
+      return parseQuotaSnapshot(
+        input?.refresh ? await write("/api/v1/quota", {}, "POST") : await request("/api/v1/quota"),
+      );
     },
 
     async home(input) {

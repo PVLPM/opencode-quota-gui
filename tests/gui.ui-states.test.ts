@@ -88,7 +88,7 @@ import type { VisibilityCatalog } from "../src/ui/views/settings";
 import { readVisibilityCatalog } from "../src/ui/visibility-catalog";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { SettingsQuerySeam } from "./fixtures/gui-live-settings.js";
-import type { TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
+import type { TestEvent, TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
 import {
   costed,
   DAY_MS,
@@ -1056,6 +1056,22 @@ describe("home view composition", () => {
     expect(emptyRange).toContain("No activity in this range");
   });
 
+  it("shows an error instead of claiming no accounts when an empty quota snapshot is stale", async () => {
+    const html = await renderView(
+      "/views/home.tsx",
+      "QuotaView",
+      homeProps({
+        snapshot: homeSnapshot({
+          stale: true,
+          providers: { cards: [], enabledProviders: "auto", polledAtMs: NOW },
+        }),
+        stale: true,
+      }),
+    );
+    expect(html).toContain("Quota data is unavailable");
+    expect(html).not.toContain("No provider accounts are available");
+  });
+
   it("reports every card as hidden rather than pretending there are none", async () => {
     const html = await renderView(
       "/views/home.tsx",
@@ -1198,7 +1214,7 @@ describe("home view composition", () => {
     expect(remaining).not.toContain('class="qg-row__value">38%');
     expect(remaining).toContain('aria-valuetext="62% remaining"');
     expect(remaining).not.toContain('aria-valuetext="38%');
-    expect(text(remaining)).toContain("Runs out");
+    expect(text(remaining)).not.toContain("Runs out");
     const used = await renderView(
       "/views/home.tsx",
       "QuotaView",
@@ -1728,11 +1744,18 @@ describe("usage chart", () => {
     expect(formatPercent(undefined)).toBe("—");
     expect(formatPercentExact(96.37)).toBe("96.37%");
     expect(formatPercentExact(null)).toBe("—");
-    expect(formatRunway(undefined, "UTC")).toBeUndefined();
-    expect(formatRunway({ kind: "lasts_past_reset" }, "UTC")).toBe("Lasts past reset");
+    expect(formatRunway(undefined, NOW)).toBeUndefined();
+    expect(formatRunway({ kind: "lasts_past_reset" }, NOW)).toBe("Projected to last until reset");
     expect(
-      formatRunway({ kind: "before_reset", projectedAtIso: new Date(NOW).toISOString() }, "UTC"),
-    ).toContain("Runs out");
+      formatRunway(
+        { kind: "before_reset", projectedAtIso: new Date(NOW + 204 * 60_000).toISOString() },
+        NOW,
+      ),
+    ).toBe("Runs out in ~3h 24m");
+    expect(
+      formatRunway({ kind: "before_reset", projectedAtIso: new Date(NOW).toISOString() }, NOW),
+    ).toBeUndefined();
+    expect(formatRunway({ kind: "before_reset", projectedAtIso: "invalid" }, NOW)).toBeUndefined();
   });
 });
 
@@ -2189,6 +2212,7 @@ describe("settings page", () => {
         "formatStyle",
         "lowQuotaThresholdRemainingPercent",
         "minIntervalMs",
+        "nativeQuotaNotifications",
         "opencodeGoWindows",
         "opencodeMonthlyLimit",
         "percentDisplayMode",
@@ -2241,7 +2265,7 @@ describe("settings page", () => {
     expect(nativeHtml).toContain('role="switch"');
   });
 
-  it("shows quota alert controls only on the native surface and follows the percent display", async () => {
+  it("shows canonical quota alert controls only on the native surface", async () => {
     const snapshot = settingsSnapshot();
     const props = {
       snapshot,
@@ -2250,38 +2274,24 @@ describe("settings page", () => {
       catalog: { cards: [] },
       onReload: noop,
     };
-
     const webHtml = await renderView("/views/settings.tsx", "SettingsView", props);
     expect(text(webHtml)).not.toContain("Quota alerts");
-    expect(webHtml).not.toContain('aria-label="Low quota threshold"');
-    expect(webHtml).not.toContain('aria-label="Duplicate alert cooldown"');
-
     const nativeHtml = await renderView("/views/settings.tsx", "SettingsView", {
       ...props,
       nativeQuotaAlerts: true,
     });
-    expect(text(nativeHtml)).toContain("Quota alerts");
-    expect(nativeHtml).toContain('aria-label="Low quota threshold"');
-    expect(nativeHtml).toContain('aria-label="Duplicate alert cooldown"');
+    for (const label of [
+      "Quota alerts",
+      "Low quota",
+      "Quota exhausted",
+      "Quota reset",
+      "Provider / API failures",
+      "Reset windows",
+    ])
+      expect(text(nativeHtml)).toContain(label);
     expect(nativeHtml).toContain('value="10"');
-    expect(text(nativeHtml)).toContain("% remaining");
     expect(nativeHtml).toContain('value="30"');
-    expect(text(nativeHtml)).toContain("Minutes before the same quota alert can repeat.");
-
-    // The display preference only changes the control; the stored value remains
-    // the remaining percentage.
-    const usedHtml = await renderView("/views/settings.tsx", "SettingsView", {
-      ...props,
-      nativeQuotaAlerts: true,
-      snapshot: {
-        ...snapshot,
-        values: { ...snapshot.values, percentDisplayMode: "used" },
-      },
-    });
-    expect(usedHtml).toContain('value="90"');
-    expect(text(usedHtml)).toContain("% used");
-    expect(usedHtml).not.toContain("% remaining</span>");
-    expect(text(usedHtml)).toContain("Saved as 10% remaining.");
+    expect(text(nativeHtml)).toContain("% remaining");
   });
 
   it("drafts the host-opted Web switch through the revision-checked patch", () => {
@@ -2317,6 +2327,7 @@ describe("settings page", () => {
 
   it("leaves telemetry, toast groups, and reset notifications out of the page", () => {
     for (const field of SETTINGS_FIELDS) {
+      if (field.key === "nativeQuotaNotifications") continue;
       expect(field.key).not.toMatch(/telemetry|analytics|toast|notification/i);
     }
   });
@@ -3090,7 +3101,7 @@ describe("Quota card row geometry", () => {
 
   function cssRule(selector: string): string {
     const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "s").exec(styles)?.[1] ?? "";
+    return new RegExp(`(?:^|[\\n,])\\s*${escaped}\\s*\\{([^}]*)\\}`, "s").exec(styles)?.[1] ?? "";
   }
 
   it("gives every quota row type the same first-line and strip grid tracks", () => {
@@ -4531,34 +4542,218 @@ describe("the settings editor keeps its draft across refetches", () => {
     throw new Error(`probe: ${what} never happened`);
   }
 
-  it("saves the low-quota threshold as remaining when the control shows used percentages", async () => {
+  it("keeps dependent values visible and disabled when alerts or events are off", async () => {
     const base = settingsSnapshot();
+    const original = base.values.nativeQuotaNotifications as Record<string, JsonValue>;
     const mounted = mountSettings({
       initial: settingsSnapshot({
-        values: { ...base.values, percentDisplayMode: "used" },
+        values: {
+          ...base.values,
+          nativeQuotaNotifications: {
+            ...original,
+            enabled: false,
+            low: { enabled: false, thresholdRemainingPercent: 25 },
+            reset: { enabled: false, windows: ["daily"] },
+            duplicateCooldownMinutes: 45,
+          },
+        },
       }),
       nativeQuotaAlerts: true,
     });
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.value).toBe("25");
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.disabled).toBe(true);
+    expect(inputByLabel(mounted.root, "Duplicate alert cooldown").props.disabled).toBe(true);
+    const checks = renderGraph
+      .elementsNamed(mounted.root, "input")
+      .filter(
+        (node) =>
+          node.props.type === "checkbox" && node.parent?.props.class === "qg-checkbox-option",
+      );
+    expect(checks).toHaveLength(6);
+    expect(checks.every((node) => node.props.disabled === true)).toBe(true);
+    expect(checks.filter((node) => node.props.checked === true)).toHaveLength(1);
+    mounted.dispose();
+  });
 
+  it("keeps the model-change toast toggle independent of the quota-alert master", async () => {
+    const base = settingsSnapshot();
+    const original = base.values.nativeQuotaNotifications as Record<string, JsonValue>;
+    const mounted = mountSettings({
+      initial: settingsSnapshot({
+        values: {
+          ...base.values,
+          nativeQuotaNotifications: { ...original, enabled: false },
+        },
+      }),
+      nativeQuotaAlerts: true,
+    });
+    const modelChangeSwitch = () => {
+      const control = findNode(
+        renderGraph.elementsNamed(mounted.root, "div"),
+        (node) =>
+          node.props["data-component"] === "switch" &&
+          renderGraph.textOf(node).includes("Model-change toast"),
+        "switch Model-change toast",
+      );
+      return findNode(
+        renderGraph.elementsNamed(control, "input"),
+        () => true,
+        "switch input Model-change toast",
+      );
+    };
+
+    expect(modelChangeSwitch().props.disabled).not.toBe(true);
+    expect(modelChangeSwitch().props.checked).toBe(true);
+    fire(modelChangeSwitch(), "onChange", {
+      target: { checked: false },
+      stopPropagation: () => {},
+    });
+    await settle();
+    expect(modelChangeSwitch().props.disabled).not.toBe(true);
+    expect(modelChangeSwitch().props.checked).toBe(false);
+
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the model-change toast setting save");
+    expect(mounted.saves[0]?.patch.nativeQuotaNotifications).toMatchObject({
+      enabled: false,
+      modelChangeToastEnabled: false,
+    });
+    mounted.dispose();
+  });
+
+  it("preserves raw numeric edits and associates each error with the right input", async () => {
+    const mounted = mountSettings({ initial: settingsSnapshot(), nativeQuotaAlerts: true });
+    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "");
+    await settle();
+    typeInto(inputByLabel(mounted.root, "Duplicate alert cooldown"), "1.5");
+    await settle();
     const threshold = inputByLabel(mounted.root, "Low quota threshold");
-    expect(threshold.props.value).toBe("90");
-    typeInto(threshold, "100");
+    const cooldown = inputByLabel(mounted.root, "Duplicate alert cooldown");
+    expect(threshold.props.value).toBe("");
+    expect(cooldown.props.value).toBe("1.5");
+    expect(threshold.props["aria-invalid"]).toBe(true);
+    expect(cooldown.props["aria-invalid"]).toBe(true);
+    for (const [input, id, text] of [
+      [threshold, "qg-alert-threshold-error", "Low quota threshold"],
+      [cooldown, "qg-alert-cooldown-error", "Duplicate alert cooldown"],
+    ] as const) {
+      expect(input.props["aria-describedby"]).toBe(id);
+      const error = findNode(
+        renderGraph.elementsNamed(mounted.root, "span"),
+        (node) => node.props.id === id,
+        id,
+      );
+      expect(renderGraph.textOf(error)).toContain(text);
+    }
+    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "abc");
     await settle();
-    expect(renderGraph.textOf(mounted.root)).toContain("must be below 100% used.");
-    expect(buttonByText(mounted.root, "Save").props.disabled).toBe(true);
-    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "95");
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.value).toBe("abc");
+    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "25");
     await settle();
-    expect(inputByLabel(mounted.root, "Low quota threshold").props.value).toBe("95");
+    typeInto(inputByLabel(mounted.root, "Duplicate alert cooldown"), "45");
+    await settle();
+    expect(inputByLabel(mounted.root, "Low quota threshold").props["aria-invalid"]).toBeUndefined();
+    expect(
+      inputByLabel(mounted.root, "Duplicate alert cooldown").props["aria-describedby"],
+    ).toBeUndefined();
+    mounted.dispose();
+  });
 
+  it("retains threshold and windows when event switches are toggled off and on", async () => {
+    const mounted = mountSettings({ initial: settingsSnapshot(), nativeQuotaAlerts: true });
+    const switchInput = (label: string) => {
+      const node = findNode(
+        renderGraph.elementsNamed(mounted.root, "div"),
+        (entry) =>
+          entry.props["data-component"] === "switch" && renderGraph.textOf(entry).includes(label),
+        `switch ${label}`,
+      );
+      return findNode(
+        renderGraph.elementsNamed(node, "input"),
+        () => true,
+        `switch input ${label}`,
+      );
+    };
+    const toggle = (label: string, checked: boolean) =>
+      fire(switchInput(label), "onChange", { target: { checked }, stopPropagation: () => {} });
+    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "25");
+    const checks = () =>
+      renderGraph
+        .elementsNamed(mounted.root, "input")
+        .filter(
+          (node) =>
+            node.props.type === "checkbox" && node.parent?.props.class === "qg-checkbox-option",
+        );
+    fire(
+      findNode(checks(), () => true, "first reset window"),
+      "onChange",
+      {
+        currentTarget: { checked: false },
+      },
+    );
+    toggle("Low quota", false);
+    await settle();
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.disabled).toBe(true);
+    expect(checks().every((node) => node.props.disabled !== true)).toBe(true);
+    toggle("Low quota", true);
+    await settle();
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.disabled).not.toBe(true);
+    toggle("Quota reset", false);
+    await settle();
+    expect(checks().every((node) => node.props.disabled === true)).toBe(true);
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.disabled).not.toBe(true);
+    expect(checks()[0]?.props.checked).toBe(false);
+    toggle("Quota reset", true);
+    await settle();
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.disabled).not.toBe(true);
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.value).toBe("25");
+    expect(checks()[0]?.props.checked).toBe(false);
+    expect(checks().every((node) => node.props.disabled !== true)).toBe(true);
+    toggle("Quota alerts", false);
+    await settle();
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.disabled).toBe(true);
+    expect(checks().every((node) => node.props.disabled === true)).toBe(true);
+    toggle("Quota alerts", true);
+    await settle();
+    expect(inputByLabel(mounted.root, "Low quota threshold").props.value).toBe("25");
+    expect(checks()[0]?.props.checked).toBe(false);
+    toggle("Low quota", false);
+    toggle("Quota reset", false);
+    await settle();
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "retained policy save");
+    expect(mounted.saves[0]?.patch.nativeQuotaNotifications).toMatchObject({
+      enabled: true,
+      low: { enabled: false, thresholdRemainingPercent: 25 },
+      reset: { enabled: false, windows: ["hourly", "daily", "weekly", "monthly", "yearly"] },
+    });
+    mounted.dispose();
+  });
+
+  it("saves edits as one canonical quota notification policy", async () => {
+    const mounted = mountSettings({ initial: settingsSnapshot(), nativeQuotaAlerts: true });
+    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "0");
+    await settle();
+    expect(buttonByText(mounted.root, "Save").props.disabled).toBe(true);
+    typeInto(inputByLabel(mounted.root, "Low quota threshold"), "25");
     typeInto(inputByLabel(mounted.root, "Duplicate alert cooldown"), "45");
     await settle();
     click(buttonByText(mounted.root, "Save"));
     await until(() => mounted.saves.length === 1, "the alert settings save");
-
     expect(mounted.saves[0]).toEqual({
       patch: {
-        lowQuotaThresholdRemainingPercent: 5,
-        duplicateCooldownMinutes: 45,
+        nativeQuotaNotifications: {
+          enabled: true,
+          modelChangeToastEnabled: true,
+          low: { enabled: true, thresholdRemainingPercent: 25 },
+          exhausted: { enabled: true },
+          reset: {
+            enabled: true,
+            windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+          },
+          providerError: { enabled: true },
+          duplicateCooldownMinutes: 45,
+        },
       },
       expectedRevision: "revision-1",
     });

@@ -2,6 +2,30 @@
 
 User-facing release notes for OpenCode Quota GUI.
 
+## 1.3.1
+
+### Added
+
+- **Cache observation.** The Native composer pill shows the most recent reported primary cache-read percentage and independent session observations. Retention colors are estimates based on documented assumptions, not guarantees of a future cache hit; unsupported routes remain unverified.
+- **Quota alert controls.** Configure Native alerts for low quota, exhaustion, reset windows, and provider failures independently, with a master switch and shared cooldown.
+- **China 2027 holidays.** Temporal pricing includes the seven official national holiday intervals without changing weekday or weekend rules.
+
+### Improved
+
+- **Session cache details.** A scrollable composer popover displays session activity and available agent, provider, model, and effort information. A model-selection mismatch warns before the next request without claiming that a prior cache was destroyed.
+- **Runway on demand.** Eligible quota values and bars show a projected exhaustion tooltip without adding a persistent card row.
+- **Provider compatibility.** Alibaba Coding Plan quota uses the official Bailian CLI.
+- **Separate Anthropic and Claude Agent providers.** Anthropic is API-only and does not report subscription quota or invent API quota. Claude Agent reports the installed Claude CLI's subscription quota independently, including when its token matches an OpenCode Anthropic OAuth login.
+- **Claude Agent quota polling.** The subscription usage request now identifies as Claude Code (`claude-code/<version>`); without it Anthropic's usage endpoint answered every poll with HTTP 429, so the card always showed "Claude quota request failed." A rate-limited poll now carries its retry time, so the last good quota stays visible instead of being replaced by an error.
+- **Clearer cache pill.** The TTL countdown is marked `~` as an estimate, and the cache share is labelled `Low reuse` (up to 50%), `Partial reuse` (above 50% to under 90%) or `Hit` (90% or more); a zero stays `Unknown` because OpenCode reports missing cache-read data as zero (for example `TTL ~4m 30s · Cache 99.70% · Hit`). For Claude Agent, a call whose cache writes are recorded as 1-hour-only with zero cache reads in its session record is estimated at 60 minutes instead of 5. Per-route findings are in [Cache TTL evidence](docs/readme/cache-ttl-evidence.md).
+- **Privacy-safe diagnostics.** Copy operational diagnostics or an account-scoped quota summary without exporting credentials or session content.
+
+### Compatibility
+
+- OpenCode `>= 2.0.16 < 2.3.0`; the full Native integration requires OpenCode Desktop 2.2.1 or newer. Supported older hosts, including 2.2.0, retain the browser-dashboard fallback by default unless explicitly configured otherwise.
+- **Upgrading with the provider split:** `enabledProviders: ["anthropic"]` no longer includes the Claude CLI login; add `"claude-agent"` to keep it. The legacy `"claude"` and `"claude-code"` aliases now select Claude Agent; use `"anthropic"` explicitly for the Anthropic API route. OpenCode Anthropic OAuth-only logins no longer produce subscription quota cards. A hidden or reordered Claude Code card may reappear once in its default position as the new Claude Agent card, its first poll starts without cached data, and one reset notice may be missed or repeated.
+- Cache retention and future reuse cannot be verified from token counts alone; the displayed status and expiry are estimates, not proof of a physical provider cache.
+
 ## 1.3.0
 
 The Native OpenCode Desktop release. Quota, analytics, models, and settings now live inside OpenCode Desktop, with a session-header quota slot and native notifications. The browser dashboard is now a fallback: on by default below OpenCode 2.2.0, off by default at 2.2.0 and newer.

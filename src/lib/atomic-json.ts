@@ -8,6 +8,8 @@ export interface WriteJsonAtomicOptions {
   trailingNewline?: boolean;
   directoryMode?: number;
   fileMode?: number;
+  /** Runs after staging and immediately before rename. */
+  beforeRename?: () => Promise<void>;
   /** Default ordinary. Configuration never deletes the destination; it only removes the temp file. */
   policy?: AtomicWritePolicy;
 }
@@ -68,6 +70,7 @@ export async function writeTextAtomic(
   }
 
   try {
+    await opts.beforeRename?.();
     await rename(tmp, path);
   } catch (renameError) {
     if (policy === "configuration") {

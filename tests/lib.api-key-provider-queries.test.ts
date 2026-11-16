@@ -5,9 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { queryChutesQuota } from "../src/lib/chutes.js";
 import { queryDeepSeekBalance } from "../src/lib/deepseek.js";
+import type { QuotaProviderContext } from "../src/lib/entries.js";
 import { queryNanoGptQuota } from "../src/lib/nanogpt.js";
 import { resolveNanoGptApiKey } from "../src/lib/nanogpt-config.js";
 import { querySyntheticQuota } from "../src/lib/synthetic.js";
+import { chutesProvider } from "../src/providers/chutes.js";
+import { deepseekProvider } from "../src/providers/deepseek.js";
+import { syntheticProvider } from "../src/providers/synthetic.js";
 
 vi.mock("../src/lib/opencode-auth.js", () => ({
   readAuthFile: vi.fn(async () => ({})),
@@ -79,6 +83,90 @@ describe("simple API-key provider queries", () => {
     vi.useRealTimers();
     process.env = originalEnv;
     rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("honors DeepSeek Retry-After per credential until the deadline", async () => {
+    process.env.DEEPSEEK_API_KEY = "retry-account-a";
+    const fetcher = vi.fn(
+      async () =>
+        new Response("slow down", {
+          status: 429,
+          headers: { "Retry-After": "60" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const retryAtMs = Date.now() + 60_000;
+    const results = await Promise.all([queryDeepSeekBalance(), queryDeepSeekBalance()]);
+    expect(results).toMatchObject([
+      { success: false, retryAtMs },
+      { success: false, retryAtMs },
+    ]);
+    expect(await queryDeepSeekBalance()).toMatchObject({ success: false, retryAtMs });
+    expect((await deepseekProvider.fetch({} as QuotaProviderContext)).errors).toMatchObject([
+      { retryAtMs },
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    process.env.DEEPSEEK_API_KEY = "retry-account-b";
+    await queryDeepSeekBalance();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(retryAtMs);
+    process.env.DEEPSEEK_API_KEY = "retry-account-a";
+    await queryDeepSeekBalance();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["Chutes", "CHUTES_API_KEY", queryChutesQuota, chutesProvider],
+    ["Synthetic", "SYNTHETIC_API_KEY", querySyntheticQuota, syntheticProvider],
+  ] as const)("honors %s Retry-After per credential", async (_name, env, query, provider) => {
+    process.env[env] = `retry-${env}-a`;
+    const fetcher = vi.fn(
+      async () =>
+        new Response("slow down", {
+          status: 429,
+          headers: { "Retry-After": "60" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+    const retryAtMs = Date.now() + 60_000;
+    expect(await Promise.all([query(), query()])).toMatchObject([
+      { success: false, retryAtMs },
+      { success: false, retryAtMs },
+    ]);
+    expect(await query()).toMatchObject({ success: false, retryAtMs });
+    expect((await provider.fetch({} as QuotaProviderContext)).errors).toMatchObject([
+      { retryAtMs },
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    process.env[env] = `retry-${env}-b`;
+    await query();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(retryAtMs);
+    process.env[env] = `retry-${env}-a`;
+    await query();
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    [429, "Thu, 01 Jan 2026 12:01:00 GMT", true],
+    [429, "not a date", false],
+    [503, "60", false],
+  ])("accepts only valid 429 Retry-After values (%s, %s)", async (status, header, valid) => {
+    process.env.DEEPSEEK_API_KEY = `header-${status}-${header}`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("error", {
+            status,
+            headers: { "Retry-After": header },
+          }),
+      ),
+    );
+    const result = await queryDeepSeekBalance();
+    expect(result && !result.success ? result.retryAtMs : undefined).toBe(
+      valid ? Date.now() + 60_000 : undefined,
+    );
   });
 
   it.each([

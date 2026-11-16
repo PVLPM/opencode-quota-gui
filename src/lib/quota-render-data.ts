@@ -1,4 +1,5 @@
 import { getAnthropicNoDataMessage } from "../providers/anthropic.js";
+import { getClaudeAgentNoDataMessage } from "../providers/claude-agent.js";
 import { getProviders } from "../providers/registry.js";
 import type { LoadConfigMeta } from "./config.js";
 import type {
@@ -18,7 +19,11 @@ import {
 import { projectQuotaProviderResults } from "./quota-accounting-projection.js";
 import type { QuotaFormatStyle } from "./quota-format-style.js";
 import { createQuotaProviderRuntimeContext } from "./quota-runtime-context.js";
-import { fetchQuotaProviderResult } from "./quota-state.js";
+import {
+  fetchQuotaProviderResult,
+  getQuotaProviderResultScope,
+  QUOTA_FORCE_REFRESH,
+} from "./quota-state.js";
 import type { SessionTokenError } from "./quota-status.js";
 import { retainQuotaTelemetryProviders } from "./quota-telemetry.js";
 import {
@@ -129,6 +134,8 @@ export type CollectQuotaRenderDataResult = {
 export type QuotaStatusLiveProbe = {
   providerId: string;
   result: QuotaProviderResult;
+  /** Server-only opaque scope, never projected into dashboard DTOs. */
+  cacheScope?: string;
 };
 
 export function matchesQuotaProviderCurrentSelection(params: {
@@ -209,23 +216,26 @@ export async function resolveQuotaRenderSelection(params: {
     currentProviderID = request.sessionMeta.providerID;
   }
 
-  const ctx = createQuotaProviderRuntimeContext({
-    client,
-    config,
-    configMeta: params.configMeta,
-    resolveRuntimeProviderIds:
-      params.resolveRuntimeProviderIds ?? createRuntimeProviderIdResolver(client),
-    workspaceRoot: params.workspaceRoot,
-    ...(params.openaiResetDetailsVisible
-      ? { openaiResetDetailsVisible: params.openaiResetDetailsVisible }
-      : {}),
-    session: {
-      sessionMeta: {
-        modelID: currentModel,
-        providerID: currentProviderID,
+  const ctx = {
+    ...createQuotaProviderRuntimeContext({
+      client,
+      config,
+      configMeta: params.configMeta,
+      resolveRuntimeProviderIds:
+        params.resolveRuntimeProviderIds ?? createRuntimeProviderIdResolver(client),
+      workspaceRoot: params.workspaceRoot,
+      ...(params.openaiResetDetailsVisible
+        ? { openaiResetDetailsVisible: params.openaiResetDetailsVisible }
+        : {}),
+      session: {
+        sessionMeta: {
+          modelID: currentModel,
+          providerID: currentProviderID,
+        },
       },
-    },
-  });
+    }),
+    operationCache: new Map<symbol, unknown>(),
+  };
   if (!config.enabled) return null;
 
   const allProviders = params.providers ?? getProviders();
@@ -273,6 +283,7 @@ async function fetchProviderWithCache(params: {
   ctx: QuotaProviderContext;
   ttlMs: number;
   bypassCache?: boolean;
+  forceRefresh?: boolean;
 }): Promise<QuotaProviderResult> {
   const { provider, ctx, ttlMs } = params;
 
@@ -281,6 +292,7 @@ async function fetchProviderWithCache(params: {
     ctx,
     ttlMs,
     bypassCache: params.bypassCache,
+    forceRefresh: params.forceRefresh,
   });
 }
 
@@ -303,6 +315,7 @@ export async function fetchProviderResults(params: {
   ctx: QuotaProviderContext;
   ttlMs: number;
   bypassCache?: boolean;
+  forceRefresh?: boolean;
 }): Promise<QuotaProviderResult[]> {
   const settled = await Promise.allSettled(
     params.providers.map((provider) =>
@@ -311,6 +324,7 @@ export async function fetchProviderResults(params: {
         ctx: params.ctx,
         ttlMs: params.ttlMs,
         bypassCache: params.bypassCache,
+        forceRefresh: params.forceRefresh,
       }),
     ),
   );
@@ -415,6 +429,7 @@ export async function collectQuotaDashboardProviderResults(params: {
   configMeta?: Pick<LoadConfigMeta, "settingSources">;
   providers?: QuotaProvider[];
   bypassProviderCache?: boolean;
+  forceProviderRefresh?: boolean;
   resolveRuntimeProviderIds?: RuntimeProviderIdResolver;
   /** Dashboard-only OpenAI reset-detail visibility callback. */
   openaiResetDetailsVisible?: (sourceId?: string) => boolean;
@@ -425,6 +440,7 @@ export async function collectQuotaDashboardProviderResults(params: {
     config: { ...params.config, onlyCurrentModel: false },
     request: undefined,
     surfaceExplicitProviderIssues: false,
+    includeProviderScope: true,
   });
   return result.providerResults;
 }
@@ -435,6 +451,9 @@ function getExplicitNoDataMessage(provider: QuotaProvider): string {
   }
   if (provider.id === "anthropic") {
     return getAnthropicNoDataMessage();
+  }
+  if (provider.id === "claude-agent") {
+    return getClaudeAgentNoDataMessage();
   }
   return "Not configured";
 }
@@ -454,7 +473,10 @@ function shouldSurfaceNoDataMessage(params: {
     return true;
   }
 
-  return activeProviderCount === 1 && (provider.id === "anthropic" || provider.id === "cursor");
+  return (
+    activeProviderCount === 1 &&
+    (provider.id === "anthropic" || provider.id === "claude-agent" || provider.id === "cursor")
+  );
 }
 
 function buildExplicitProviderIssues(params: {
@@ -524,6 +546,8 @@ export async function collectQuotaRenderData(params: {
   formatStyle?: QuotaFormatStyle;
   configMeta?: Pick<LoadConfigMeta, "settingSources">;
   bypassProviderCache?: boolean;
+  forceProviderRefresh?: boolean;
+  includeProviderScope?: boolean;
   providers?: QuotaProvider[];
   includeAllWindowsData?: boolean;
   /**
@@ -550,6 +574,7 @@ export async function collectQuotaRenderData(params: {
       data: null,
     };
   }
+  if (params.forceProviderRefresh) selection.ctx.operationCache?.set(QUOTA_FORCE_REFRESH, true);
 
   if (selection.waitingForCurrentSelection) {
     retainQuotaTelemetryProviders({
@@ -601,12 +626,31 @@ export async function collectQuotaRenderData(params: {
     };
   }
 
+  const initialScopes = params.includeProviderScope
+    ? await Promise.all(
+        active.map((provider) => getQuotaProviderResultScope(provider, selection.ctx)),
+      )
+    : [];
   const results = await fetchProviderResults({
     providers: active,
     ctx: selection.ctx,
     ttlMs: params.config.minIntervalMs,
     bypassCache: params.bypassProviderCache,
+    forceRefresh: params.forceProviderRefresh,
   });
+  const finalScopes = params.includeProviderScope
+    ? await Promise.all(
+        active.map((provider) =>
+          getQuotaProviderResultScope(
+            provider,
+            provider.cachePolicy?.kind === "resolved-auth" &&
+              provider.cachePolicy.revalidateWithCycleCache
+              ? selection.ctx
+              : { ...selection.ctx, operationCache: undefined },
+          ),
+        ),
+      )
+    : [];
 
   const style = params.formatStyle ?? params.config.formatStyle;
   const projectionOptions = {
@@ -703,6 +747,9 @@ export async function collectQuotaRenderData(params: {
     providerResults: active.map((provider, index) => ({
       providerId: provider.id,
       result: results[index]!,
+      ...(initialScopes[index] && initialScopes[index] === finalScopes[index]
+        ? { cacheScope: initialScopes[index] }
+        : {}),
     })),
     attemptedAny,
     hasExplicitProviderIssues,

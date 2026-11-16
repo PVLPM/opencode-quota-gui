@@ -86,6 +86,8 @@ describe("packaged provider logo assets", () => {
     expect(opencodeNotice).toContain(localOverrides.commit);
     expect(opencodeNotice).toContain("packages/ui/src/components/provider-icons/sprite.svg");
     expect(opencodeNotice).toContain("opencode-go");
+    expect(opencodeNotice).toContain("claude-agent");
+    expect(localOverrides.logos["claude-agent"]?.url).toBe("/assets/providers/claude-agent.svg");
   });
 
   it("passes the release-content verifier with the logos and notices in the manifest", () => {
@@ -97,6 +99,6 @@ describe("packaged provider logo assets", () => {
       encoding: "utf8",
     });
     expect(output).toContain("npm contents verified");
-    expect(output).toContain("224 provider logos");
+    expect(output).toContain("225 provider logos");
   });
 });

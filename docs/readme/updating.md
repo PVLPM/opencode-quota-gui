@@ -16,7 +16,7 @@ Use a full OpenCode process restart when changing package versions. A cross-vers
 
 ## Web dashboard after upgrade
 
-Browser access now follows the OpenCode host version. Below 2.2.0 it stays on by default, including after an upgrade from `1.2.0` or earlier where no `dashboard.enabled` value exists, because the Native panel requires 2.2.0 or newer. At 2.2.0 and newer it is off by default. An explicit `dashboard.enabled` value always wins. The plugin, retry handling, credentials, and shared dashboard runtime still load; only the HTTP/SSE/static web transport follows this setting.
+Browser access now follows the OpenCode host version. Below 2.2.1 it stays on by default, including on 2.2.0 and after an upgrade from `1.2.0` or earlier where no `dashboard.enabled` value exists, because the full Native panel requires 2.2.1 or newer. At 2.2.1 and newer it is off by default. A valid explicit `dashboard.enabled` value always wins; a missing or unparseable host version fails closed only when the setting is absent. A malformed canonical file or invalid setting also fails closed. The plugin, retry handling, credentials, and shared dashboard runtime still load; only the HTTP/SSE/static web transport follows this setting.
 
 To override the default by editing canonical JSONC manually:
 

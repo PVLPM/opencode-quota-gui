@@ -12,6 +12,17 @@ import {
   QUOTA_PROVIDER_CACHE_VERSION,
 } from "../src/lib/quota-state-codec.js";
 
+it("preserves an observed retry deadline on normalized provider errors", () => {
+  const result = {
+    attempted: true,
+    entries: [],
+    errors: [{ label: "Provider", message: "HTTP 429", retryAtMs: 1_800_000_000_000 }],
+  };
+  expect(normalizeQuotaProviderResult(result)?.errors[0]).toMatchObject({
+    retryAtMs: 1_800_000_000_000,
+  });
+});
+
 const EXPECTED_IDENTITY = {
   packageVersion: "4.2.0",
   key: "synthetic|account=test",
@@ -333,6 +344,25 @@ describe("quota-state codec", () => {
       active: true,
     });
     expect(normalized?.accounts?.[0]).not.toHaveProperty("planLabel");
+  });
+
+  it("normalizes and cache-round-trips a provider-scope plan label, and rejects a nonstring one", () => {
+    const input = createValidResult();
+    input.planLabel = "  Max\u001b[31m  ";
+
+    const normalized = normalizeQuotaProviderResult(input);
+    expect(normalized?.planLabel).toBe("Max");
+
+    const decoded = decodePersistedQuotaProviderCacheEntry(
+      cloneJson(createEnvelope(input)),
+      EXPECTED_IDENTITY,
+    );
+    expect(decoded?.result.planLabel).toBe("Max");
+
+    const invalid = createValidResult() as any;
+    invalid.planLabel = 7;
+    expectInvalidResult(invalid);
+    expectInvalidEnvelope(cloneJson(createEnvelope(invalid)));
   });
 
   it("accepts and sanitizes optional info text on quantity and percent entries", () => {

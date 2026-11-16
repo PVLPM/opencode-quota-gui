@@ -14,6 +14,8 @@ import {
 } from "./helpers/provider-assertions.js";
 import { createProviderAvailabilityContext } from "./helpers/provider-test-harness.js";
 
+const codingPlanCliMocks = vi.hoisted(() => ({ query: vi.fn() }));
+
 vi.mock("../src/lib/alibaba-token-plan.js", async () => {
   const actual = await vi.importActual<typeof import("../src/lib/alibaba-token-plan.js")>(
     "../src/lib/alibaba-token-plan.js",
@@ -25,14 +27,9 @@ vi.mock("../src/lib/alibaba-token-plan.js", async () => {
   };
 });
 
-vi.mock("../src/lib/alibaba-coding-plan-local-quota.js", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../src/lib/alibaba-coding-plan-local-quota.js")>();
-  return {
-    ...actual,
-    readAlibabaCodingPlanQuotaState: vi.fn(actual.readAlibabaCodingPlanQuotaState),
-  };
-});
+vi.mock("../src/lib/alibaba-coding-plan-cli.js", () => ({
+  queryAlibabaCodingPlanQuota: codingPlanCliMocks.query,
+}));
 
 const accounting = {
   resultType: "quota" as const,
@@ -238,13 +235,14 @@ describe("alibaba-token-plan provider", () => {
       const tokenOut = await alibabaTokenPlanProvider.fetch({ config: {} } as any);
       expectAttemptedWithErrorLabel(tokenOut, "Alibaba Personal Token Plan");
 
-      const { readAlibabaCodingPlanQuotaState } = await import(
-        "../src/lib/alibaba-coding-plan-local-quota.js"
-      );
-      vi.mocked(readAlibabaCodingPlanQuotaState).mockResolvedValue({
-        version: 1,
-        recent: [],
-        updatedAt: Date.now(),
+      codingPlanCliMocks.query.mockResolvedValue({
+        state: "success",
+        usage: {
+          instanceType: "lite",
+          fiveHour: { used: 2, total: 1200, percentage: 2 / 1200 },
+          weekly: { used: 10, total: 8000, percentage: 10 / 8000 },
+          monthly: { used: 10, total: 16000, percentage: 10 / 16000 },
+        },
       });
       const codingOut = await alibabaCodingPlanProvider.fetch({
         config: { quotaProviders: [] },

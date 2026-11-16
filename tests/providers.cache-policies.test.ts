@@ -101,13 +101,13 @@ describe("provider cache policies", () => {
       .filter(([, policy]) => policy.kind === "uncached")
       .map(([id]) => id)
       .sort();
-    expect(uncached).toEqual(["alibaba-token-plan", "cursor"]);
+    expect(uncached).toEqual(["alibaba-coding-plan", "alibaba-token-plan", "anthropic", "cursor"]);
 
     expect(PROVIDER_CACHE_POLICIES["kimi-code-plan-global"].kind).toBe("resolved-auth");
     expect(PROVIDER_CACHE_POLICIES["kimi-code-plan-cn"].kind).toBe("resolved-auth");
     expect(PROVIDER_CACHE_POLICIES).not.toHaveProperty("kimi-for-coding");
 
-    for (const id of ["anthropic", "copilot", "google-gemini-cli", "openrouter", "xai"] as const) {
+    for (const id of ["copilot", "google-gemini-cli", "openrouter", "xai"] as const) {
       expect(PROVIDER_CACHE_POLICIES[id].kind).toBe("resolved-auth");
     }
   });

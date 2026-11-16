@@ -487,6 +487,8 @@ describe("openai auth resolution", () => {
     ["team_workspace", "OpenAI (team_workspace)"],
     ["plus", "OpenAI (Plus)"],
     ["pro", "OpenAI (Pro)"],
+    [undefined, "OpenAI"],
+    [null, "OpenAI"],
   ])("derives the plan label for %j", async (planType, expectedLabel) => {
     mocks.readAuthFileCached.mockResolvedValueOnce({
       openai: { type: "oauth", access: "a.b.c", expires: Date.now() + 60_000 },

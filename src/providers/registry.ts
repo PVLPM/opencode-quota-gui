@@ -15,6 +15,7 @@ import { alibabaTokenPlanProvider } from "./alibaba-token-plan.js";
 import { anthropicProvider } from "./anthropic.js";
 import { PROVIDER_CACHE_POLICIES } from "./cache-policies.js";
 import { chutesProvider } from "./chutes.js";
+import { claudeAgentProvider } from "./claude-agent.js";
 import { copilotProvider } from "./copilot.js";
 import { cursorProvider } from "./cursor.js";
 import { deepseekProvider } from "./deepseek.js";
@@ -41,6 +42,7 @@ import { zhipuProvider } from "./zhipu.js";
 
 const PROVIDERS_BY_ID = {
   anthropic: anthropicProvider,
+  "claude-agent": claudeAgentProvider,
   copilot: copilotProvider,
   openai: openaiProvider,
   openrouter: openRouterProvider,

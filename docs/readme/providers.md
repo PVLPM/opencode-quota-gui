@@ -15,7 +15,8 @@ The dashboard reads provider results through the same OpenCode host process that
 
 | Provider           | Auth/setup                                                     | Data from          | Reports            |
 | ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic (Claude) | [Needs setup](#anthropic-claude)                               | Local CLI/OAuth    | Quota              |
+| Anthropic          | [Unavailable](#anthropic)                                      | —                  | —                  |
+| Claude Agent       | [Needs setup](#claude-agent)                                   | Local CLI/OAuth    | Quota              |
 | Chutes AI          | Automatic                                                      | Remote API         | Quota              |
 | Cursor             | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
 | GitHub Copilot     | Automatic                                                      | Remote API         | Budget and usage   |
@@ -37,7 +38,8 @@ The dashboard reads provider results through the same OpenCode host process that
 
 | Provider                | Auth/setup                                                     | Data from          | Reports            |
 | ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic (Claude)      | [Needs setup](#anthropic-claude)                               | Local CLI/OAuth    | Quota              |
+| Anthropic               | [Unavailable](#anthropic)                                      | —                  | —                  |
+| Claude Agent            | [Needs setup](#claude-agent)                                   | Local CLI/OAuth    | Quota              |
 | Chutes AI               | Automatic                                                      | Remote API         | Quota              |
 | Cursor                  | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
 | Gemini CLI              | [Needs setup](#gemini-cli)                                     | Remote API         | Quota              |
@@ -61,7 +63,7 @@ Gemini CLI works only with Gemini Code Assist Standard or Enterprise (organizati
 
 | Provider                      | Auth/setup                                                                   | Data from      | Reports            |
 | ----------------------------- | ---------------------------------------------------------------------------- | -------------- | ------------------ |
-| Alibaba Coding Plan           | Automatic                                                                    | Local estimate | Quota              |
+| Alibaba Coding Plan           | [Needs setup](#alibaba-coding-plan)                                           | Official CLI   | Quota              |
 | Alibaba Personal Token Plan   | [Needs setup](#alibaba-personal-token-plan)                                  | Official CLI   | Quota              |
 | DeepSeek                      | Automatic                                                                    | Remote API     | Balance and status |
 | Kimi Code                     | Automatic                                                                    | Remote API     | Quota              |
@@ -102,7 +104,9 @@ Except for Copilot organization and enterprise billing, each integration reports
 
 ## Custom providers
 
-Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Define them in the global canonical file from [Configuration](configuration.md#custom-providers). There is no provider-definition command in the dashboard-only release, and Settings never asks for or stores a credential.
+Custom providers can report quota, rate limit, usage, spend, budget, balance, or status. Define active providers in the global canonical file from [Configuration](configuration.md#custom-providers). Settings never asks for or stores a credential.
+
+Provider definitions are configuration metadata and may be visible to agents. Do not place secrets directly in definitions; use `apiKeyEnv` for API credentials.
 
 - **Remote API:** real quota data from a supported endpoint.
 - **Local estimate:** counts matching completed OpenCode requests in 1–16 windows, with optional spend estimates. `utc-day` resets at UTC midnight; `rolling` uses `durationMinutes` (up to 366 days). Every window needs `requestLimit`; `usdBudget` is optional.
@@ -110,7 +114,7 @@ Custom providers can report quota, rate limit, usage, spend, budget, balance, or
 - With `enabledProviders: "auto"`, definitions run automatically. A manual list must include `quota-providers` plus every built-in provider you still want.
 - A custom model provider still needs its normal OpenCode provider/model config.
 - OpenRouter is built in. A custom OpenRouter definition only helps if you need a different endpoint or label.
-- Alibaba Personal Token Plan uses the reserved `alibaba-token-plan` ID and stays a separate official-CLI provider; it is not a local-estimate tuning target.
+- Alibaba Coding Plan and Personal Token Plan are separate official-CLI providers with reserved IDs `alibaba-coding-plan` and `alibaba-token-plan`; neither is a local-estimate tuning target.
 
 <details>
 <summary><strong>Recipes: Vercel AI Gateway, Moonshot, Poe</strong></summary>
@@ -265,7 +269,6 @@ These providers read an API key from, in order: an environment variable, then tr
 
 | Provider                | Environment variables (first match wins)              | Notes |
 | ----------------------- | ----------------------------------------------------- | ----- |
-| Alibaba Coding Plan     | `ALIBABA_CODING_PLAN_API_KEY`, `ALIBABA_API_KEY`       | |
 | Chutes AI               | `CHUTES_API_KEY`                                       | |
 | DeepSeek                | `DEEPSEEK_API_KEY`                                     | See [DeepSeek](#deepseek). |
 | Kilo Gateway            | `KILO_API_KEY`                                         | See [Kilo Gateway](#kilo-gateway). |
@@ -361,11 +364,20 @@ Totals come from the configured tier. The remaining percentage and next-month re
 
 GitHub references: [AI Credit billing reports](https://docs.github.com/en/rest/billing/usage?apiVersion=2026-03-10), [billing budgets](https://docs.github.com/en/rest/billing/budgets?apiVersion=2026-03-10), [GHE.com REST hostnames](https://docs.github.com/en/enterprise-cloud@latest/rest/meta/meta), [individual AI Credit allowances](https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-individuals), [organization and enterprise pools](https://docs.github.com/en/copilot/concepts/billing/usage-based-billing-for-organizations-and-enterprises), and [legacy annual plans](https://docs.github.com/en/copilot/reference/copilot-billing/request-based-billing-legacy/what-changed-with-billing).
 
+<a id="anthropic"></a>
 <a id="anthropic-claude"></a>
 
-### Anthropic (Claude)
+### Anthropic
 
-OpenCode's Anthropic login is enough; Claude Code is optional. To also use Claude Code as the quota source and credential fallback, install it and sign in:
+The Anthropic route is API-only and does not report Claude subscription quota. OpenCode Anthropic OAuth sign-ins are not queried for subscription quota, and API-key connections expose no comparable quota here. For Claude subscription quota, use [Claude Agent](#claude-agent) with its own Claude CLI login.
+
+In `enabledProviders`, the legacy `claude` alias now selects `claude-agent`. Use the canonical `anthropic` ID for the Anthropic API route, and `claude-agent` for Claude subscription quota.
+
+<a id="claude-agent"></a>
+
+### Claude Agent
+
+OpenCode's native Claude Agent integration (`claude-agent`, legacy `claude-code`) runs your installed Claude CLI, so this card reads that CLI's login. Install Claude Code and sign in:
 
 ```bash
 claude auth login
@@ -373,7 +385,10 @@ claude auth status
 ```
 
 - The plugin runs `claude` from OpenCode's `PATH`, or else the first working one of `~/.claude/local/claude`, `~/.local/bin/claude`, `/opt/homebrew/bin/claude`, and `/usr/local/bin/claude` (not on Windows). If Claude lives elsewhere, or on Windows when `claude` is not on OpenCode's `PATH`, set `anthropicBinaryPath`.
-- When Claude Code does not expose quota windows itself, quota comes from Anthropic's OAuth usage endpoint, using the first usable token: OpenCode's own `anthropic` login, then Claude Code's credentials.
+- When the CLI does not report quota windows itself, quota comes from Anthropic's OAuth usage endpoint with the CLI's own first-party claude.ai token. Claude Agent reports that subscription even if its token matches an OpenCode Anthropic login; the Anthropic route does not report subscription quota.
+
+The Claude Agent card can also show:
+
 - **Claude Usage Credits:** a separate monthly group when that response includes enabled Usage Credits with numeric utilization. Missing or invalid credit data never changes the regular 5-hour and weekly rows.
 - **Fable:** a separate weekly row when Anthropic returns that model-scoped window. It is never guessed from your plan name. See [Claude Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
 
@@ -399,6 +414,22 @@ Cursor estimates the current billing cycle from your local OpenCode history:
 - **Auto+Composer spend** is a supplementary row shown in detailed mode when there is room.
 - Set `cursorBillingCycleStartDay` to your billing day; otherwise the cycle is the local calendar month.
 
+<a id="alibaba-coding-plan"></a>
+
+### Alibaba Coding Plan
+
+Install and sign in to Alibaba Cloud Model Studio's official Bailian CLI yourself:
+
+```bash
+npm install -g bailian-cli
+bl auth login --console
+```
+
+- The plugin runs only `bl usage coding-plan --output json`; it never installs the CLI or opens a login.
+- Coding Plan is supported on macOS, Linux, and Windows. Keep `bl` in an absolute folder on the OpenCode service's `PATH`, outside the project folder. Windows native executables and `.cmd`/`.bat` shims are supported.
+- The CLI's Console account is independent and is not matched to the OpenCode API-key identity. The plugin uses only quota reported by the CLI and does not infer an account from an API key. Missing CLI, authentication failures, or unavailable quota data are errors; the plugin does not fall back to local estimates. An empty `{}` response means there is no Coding Plan subscription for that CLI account.
+- With a manual provider list, include `alibaba-coding-plan` in `enabledProviders`.
+
 <a id="alibaba-personal-token-plan"></a>
 
 ### Alibaba Personal Token Plan
@@ -412,7 +443,7 @@ bl auth login --console
 
 - The plugin runs only `bl usage token-plan --output json`. It never installs `bl`, opens a login, reads console cookies, or runs a custom command.
 - On macOS and Linux, `bl` must be in an absolute folder on the `PATH` (the OpenCode service's inside OpenCode, your shell's in the terminal). Relative entries are ignored, and so is anything inside the project folder, including a `bl` that links into it. Your home folder is not a project, so `~/.local/bin` and nvm folders work.
-- On Windows, use WSL. Native `bl.exe` and `.cmd` shims are not supported in this release.
+- This Token Plan integration supports macOS and Linux only. On Windows, use WSL; native `bl.exe` and `.cmd` shims are not supported. This differs from Coding Plan, which supports Windows.
 - Team plans, China-only `alibaba-token-plan-cn` runtimes, and cookie-based console scraping are not supported.
 - After switching the CLI's console account, restart OpenCode or wait for the next live check.
 - With a manual provider list, include `alibaba-token-plan` in `enabledProviders`.

@@ -11,6 +11,7 @@ import {
   providerFailureCategoryForHttpStatus,
 } from "../contracts/provider-failure.js";
 import { isCanonicalAccountingDecimal } from "./accounting-format.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
@@ -58,6 +59,7 @@ export type NanoGptResult =
         endpoint: NanoGptEndpoint;
         message: string;
         failureCategory?: ProviderFailureCategory;
+        retryAtMs?: number;
       }>;
     }
   | QuotaError
@@ -97,6 +99,19 @@ interface NanoGptBalanceResponse {
 const USER_AGENT = "opencode-quota-gui/1.0";
 const NANOGPT_USAGE_URL = "https://nano-gpt.com/api/subscription/v1/usage";
 const NANOGPT_BALANCE_URL = "https://nano-gpt.com/api/check-balance";
+
+// Per-endpoint cooldown: a limited endpoint must not block the healthy one.
+const blockedEndpoint = (retryAtMs: number) => ({
+  success: false as const,
+  message: "NanoGPT API error 429",
+  retryable: true,
+  failureCategory: "provider_api" as const,
+  retryAtMs,
+});
+const usageGuard =
+  createApiKeyRetryGuard<Awaited<ReturnType<typeof fetchNanoGptUsage>>>(blockedEndpoint);
+const balanceGuard =
+  createApiKeyRetryGuard<Awaited<ReturnType<typeof fetchNanoGptBalance>>>(blockedEndpoint);
 
 function isRetryableHttpStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
@@ -252,6 +267,7 @@ async function fetchNanoGptUsage(
       message: string;
       retryable: boolean;
       failureCategory: ProviderFailureCategory;
+      retryAtMs?: number;
     }
 > {
   try {
@@ -263,6 +279,7 @@ async function fetchNanoGptUsage(
       timeoutMs: requestTimeoutMs,
       consume: async (response) => {
         if (!response.ok) {
+          const retryAtMs = retryAfterDeadline(response);
           let text: string;
           try {
             text = await response.text();
@@ -274,6 +291,7 @@ async function fetchNanoGptUsage(
             message: `NanoGPT API error ${response.status}: ${sanitizeDisplaySnippet(text, 120)}`,
             retryable: isRetryableHttpStatus(response.status),
             failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 
@@ -303,6 +321,7 @@ async function fetchNanoGptBalance(
       message: string;
       retryable: boolean;
       failureCategory: ProviderFailureCategory;
+      retryAtMs?: number;
     }
 > {
   try {
@@ -314,6 +333,7 @@ async function fetchNanoGptBalance(
       timeoutMs: requestTimeoutMs,
       consume: async (response) => {
         if (!response.ok) {
+          const retryAtMs = retryAfterDeadline(response);
           let text: string;
           try {
             text = await response.text();
@@ -325,6 +345,7 @@ async function fetchNanoGptBalance(
             message: `NanoGPT API error ${response.status}: ${sanitizeDisplaySnippet(text, 120)}`,
             retryable: isRetryableHttpStatus(response.status),
             failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 
@@ -356,26 +377,37 @@ export async function queryNanoGptQuota(
   const resolved = await resolveNanoGptApiKey();
   if (!resolved) return null;
 
+  const key = resolved.key;
   const headers = {
-    "x-api-key": resolved.key,
+    "x-api-key": key,
     "User-Agent": USER_AGENT,
   };
 
   const [usageResult, balanceResult] = await Promise.all([
-    fetchNanoGptUsage(headers, options.requestTimeoutMs),
-    fetchNanoGptBalance(headers, options.requestTimeoutMs),
+    usageGuard(
+      key,
+      () => fetchNanoGptUsage(headers, options.requestTimeoutMs),
+      options.requestTimeoutMs,
+    ),
+    balanceGuard(
+      key,
+      () => fetchNanoGptBalance(headers, options.requestTimeoutMs),
+      options.requestTimeoutMs,
+    ),
   ]);
 
   const endpointErrors: Array<{
     endpoint: NanoGptEndpoint;
     message: string;
     failureCategory?: ProviderFailureCategory;
+    retryAtMs?: number;
   }> = [];
   if (!usageResult.success) {
     endpointErrors.push({
       endpoint: "usage",
       message: usageResult.message,
       failureCategory: usageResult.failureCategory,
+      ...(usageResult.retryAtMs !== undefined ? { retryAtMs: usageResult.retryAtMs } : {}),
     });
   }
   if (!balanceResult.success) {
@@ -383,6 +415,7 @@ export async function queryNanoGptQuota(
       endpoint: "balance",
       message: balanceResult.message,
       failureCategory: balanceResult.failureCategory,
+      ...(balanceResult.retryAtMs !== undefined ? { retryAtMs: balanceResult.retryAtMs } : {}),
     });
   } else if (balanceResult.fieldErrors.length > 0) {
     endpointErrors.push({
@@ -393,7 +426,13 @@ export async function queryNanoGptQuota(
   }
 
   if (!usageResult.success && !balanceResult.success) {
+    // A whole-query deadline exists only when both endpoints reported one.
+    const retryAtMs =
+      usageResult.retryAtMs !== undefined && balanceResult.retryAtMs !== undefined
+        ? Math.max(usageResult.retryAtMs, balanceResult.retryAtMs)
+        : undefined;
     return {
+      ...(retryAtMs !== undefined ? { retryAtMs } : {}),
       success: false,
       error: endpointErrors
         .map((entry) => `${entry.endpoint === "usage" ? "Usage" : "Balance"}: ${entry.message}`)

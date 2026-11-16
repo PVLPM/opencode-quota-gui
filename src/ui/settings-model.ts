@@ -56,6 +56,7 @@ export type SettingsControl =
   | "windows"
   | "list"
   | "map"
+  | "native-policy"
   | "readonly";
 
 export interface SettingsField {
@@ -92,16 +93,20 @@ export function isPositiveNumberValue(value: JsonValue | undefined): boolean {
 export const OPENCODE_GO_WINDOWS = ["rolling", "weekly", "monthly"] as const;
 
 /** Native-only quota alert controls; hidden from the shared generic renderer. */
-export const NATIVE_QUOTA_ALERT_KEYS = [
-  "lowQuotaThresholdRemainingPercent",
-  "duplicateCooldownMinutes",
-] as const;
+export const NATIVE_QUOTA_ALERT_KEYS = ["nativeQuotaNotifications"] as const;
 
 function withImportEligibility(fields: SettingsField[]): readonly SettingsField[] {
   return fields.map((field) => ({ ...field, importable: isLegacyImportKey(field.key) }));
 }
 
 export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
+  {
+    key: "nativeQuotaNotifications",
+    hidden: true,
+    group: "advanced",
+    control: "native-policy",
+    label: "Quota alerts",
+  },
   {
     key: "waitForQuotaReset",
     group: "wait",
@@ -276,7 +281,7 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     group: "dashboard",
     control: "switch",
     label: "Web dashboard",
-    help: "Serve the browser dashboard on 127.0.0.1 at dashboard.port. When unset, it follows the OpenCode host version: on below 2.2.0 and off at 2.2.0 or newer. Changing it requires an OpenCode restart.",
+    help: "Serve the browser dashboard on 127.0.0.1 at dashboard.port. When unset, it follows the OpenCode host version: on below 2.2.1 (including 2.2.0) and off at 2.2.1 or newer. Changing it requires an OpenCode restart.",
     hidden: true,
   },
   {
@@ -307,6 +312,33 @@ export function settingProvenanceNote(
   }
 }
 
+/** Validate both numeric policy fields independently so each input owns its error. */
+export function nativeQuotaPolicyNumericErrors(value: JsonValue | undefined): {
+  threshold?: string;
+  cooldown?: string;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const low = value.low;
+  const threshold =
+    low && typeof low === "object" && !Array.isArray(low)
+      ? low.thresholdRemainingPercent
+      : undefined;
+  const cooldown = value.duplicateCooldownMinutes;
+  return {
+    ...(!(
+      typeof threshold === "number" &&
+      Number.isInteger(threshold) &&
+      threshold >= 1 &&
+      threshold <= 100
+    )
+      ? { threshold: "Low quota threshold must be a whole number from 1 to 100% remaining." }
+      : {}),
+    ...(!(typeof cooldown === "number" && Number.isInteger(cooldown) && cooldown >= 0)
+      ? { cooldown: "Duplicate alert cooldown must be a whole number of minutes, 0 or greater." }
+      : {}),
+  };
+}
+
 /** Validates one value; `undefined` means the key is unset, which is valid for clearable fields. */
 export function validateValue(
   field: SettingsField,
@@ -317,6 +349,21 @@ export function validateValue(
     return field.clearable ? undefined : `${field.label} needs a value.`;
   }
   switch (field.control) {
+    case "native-policy": {
+      if (typeof value !== "object" || Array.isArray(value))
+        return "Quota alerts need a valid policy.";
+      const reset = value.reset;
+      const numericErrors = nativeQuotaPolicyNumericErrors(value);
+      if (numericErrors.threshold) return numericErrors.threshold;
+      if (
+        !reset ||
+        typeof reset !== "object" ||
+        Array.isArray(reset) ||
+        !Array.isArray(reset.windows)
+      )
+        return "Choose valid reset windows.";
+      return numericErrors.cooldown;
+    }
     case "switch": {
       // A plain switch is a boolean. A clearable switch stores its documented
       // on-value (`"runway"`) and is cleared with `null`, so both have to pass —

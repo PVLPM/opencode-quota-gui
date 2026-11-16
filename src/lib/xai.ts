@@ -15,6 +15,7 @@ import {
   type ProviderFailureCategory,
   providerFailureCategoryForHttpStatus,
 } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeSingleLineDisplaySnippet } from "./display-sanitize.js";
 import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { clampPercent } from "./format-utils.js";
@@ -50,6 +51,20 @@ export type XaiResult =
     }
   | QuotaError
   | null;
+
+const guard = createApiKeyRetryGuard<Exclude<XaiResult, null>>((retryAtMs) => ({
+  success: false,
+  error: "xAI API error 429",
+  failureCategory: providerFailureCategoryForHttpStatus(429),
+  retryAtMs,
+}));
+type SubscriptionTierResult =
+  | { success: true; tier: XaiSubscriptionTier | null }
+  | { success: false; retryAtMs?: number };
+const subscriptionGuard = createApiKeyRetryGuard<SubscriptionTierResult>((retryAtMs) => ({
+  success: false,
+  retryAtMs,
+}));
 
 export type ResolvedXaiOAuth =
   | { state: "none" }
@@ -239,21 +254,36 @@ async function queryXaiSubscriptionTier(
   accessToken: string,
   requestTimeoutMs?: number,
 ): Promise<XaiSubscriptionTier | null> {
-  try {
-    return await fetchWithTimeout(SUBSCRIPTIONS_URL, {
-      request: {
-        method: "GET",
-        headers: xaiHeaders(accessToken),
-      },
-      timeoutMs: Math.min(requestTimeoutMs ?? SUBSCRIPTIONS_TIMEOUT_MS, SUBSCRIPTIONS_TIMEOUT_MS),
-      consume: async (response) => {
-        if (!response.ok) return null;
-        return parseXaiSubscriptionTier(await response.json());
-      },
-    });
-  } catch {
-    return null;
-  }
+  const result = await subscriptionGuard(
+    accessToken,
+    async (): Promise<SubscriptionTierResult> => {
+      try {
+        return await fetchWithTimeout(SUBSCRIPTIONS_URL, {
+          request: {
+            method: "GET",
+            headers: xaiHeaders(accessToken),
+          },
+          timeoutMs: Math.min(
+            requestTimeoutMs ?? SUBSCRIPTIONS_TIMEOUT_MS,
+            SUBSCRIPTIONS_TIMEOUT_MS,
+          ),
+          consume: async (response) => {
+            if (!response.ok) {
+              const retryAtMs = retryAfterDeadline(response);
+              return retryAtMs === undefined
+                ? { success: true, tier: null }
+                : { success: false, retryAtMs };
+            }
+            return { success: true, tier: parseXaiSubscriptionTier(await response.json()) };
+          },
+        });
+      } catch {
+        return { success: true, tier: null };
+      }
+    },
+    Math.min(requestTimeoutMs ?? SUBSCRIPTIONS_TIMEOUT_MS, SUBSCRIPTIONS_TIMEOUT_MS),
+  );
+  return result.success ? result.tier : null;
 }
 
 function safeErrorText(message: string, accessToken: string): string {
@@ -286,25 +316,45 @@ export async function queryXaiQuota(
     };
   }
 
+  const accessToken = resolvedAuth.accessToken;
+  return guard(
+    accessToken,
+    () => fetchXaiQuota(accessToken, options.requestTimeoutMs),
+    options.requestTimeoutMs,
+  );
+}
+
+async function fetchXaiQuota(
+  accessToken: string,
+  requestTimeoutMs: number | undefined,
+): Promise<Exclude<XaiResult, null>> {
   let responseStatus: number | undefined;
+  let retryAtMs: number | undefined;
   try {
     const creditsResult = await fetchWithTimeout<
       | { success: true; window: XaiWindowValue }
-      | { success: false; error: string; failureCategory?: ProviderFailureCategory }
+      | {
+          success: false;
+          error: string;
+          failureCategory?: ProviderFailureCategory;
+          retryAtMs?: number;
+        }
     >(CREDITS_URL, {
       request: {
         method: "GET",
-        headers: xaiHeaders(resolvedAuth.accessToken),
+        headers: xaiHeaders(accessToken),
       },
-      timeoutMs: options.requestTimeoutMs,
+      timeoutMs: requestTimeoutMs,
       consume: async (response) => {
         responseStatus = response.status;
         if (!response.ok) {
+          retryAtMs = retryAfterDeadline(response);
           const body = await response.text();
           return {
             success: false,
-            error: `xAI API error ${response.status}: ${safeErrorText(body, resolvedAuth.accessToken)}`,
+            error: `xAI API error ${response.status}: ${safeErrorText(body, accessToken)}`,
             failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 
@@ -323,19 +373,17 @@ export async function queryXaiQuota(
     });
     if (!creditsResult.success) return creditsResult;
 
-    const tier = await queryXaiSubscriptionTier(resolvedAuth.accessToken, options.requestTimeoutMs);
+    const tier = await queryXaiSubscriptionTier(accessToken, requestTimeoutMs);
     return { success: true, label: xaiLabelForTier(tier), window: creditsResult.window };
   } catch (error) {
     return {
       success: false,
-      error: safeErrorText(
-        error instanceof Error ? error.message : String(error),
-        resolvedAuth.accessToken,
-      ),
+      error: safeErrorText(error instanceof Error ? error.message : String(error), accessToken),
       failureCategory:
         responseStatus === undefined
           ? "provider_api"
           : providerFailureCategoryForHttpStatus(responseStatus),
+      ...(retryAtMs !== undefined ? { retryAtMs } : {}),
     };
   }
 }

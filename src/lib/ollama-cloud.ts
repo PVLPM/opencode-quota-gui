@@ -7,6 +7,7 @@
  */
 
 import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import { resolveOllamaCloudApiKey } from "./ollama-cloud-config.js";
@@ -14,6 +15,12 @@ import type { OllamaCloudIncludedCredits, OllamaCloudResult, OllamaCloudWindow }
 
 const OLLAMA_CLOUD_BALANCE_URL = "https://ollama.com/api/balance";
 const MAX_RESPONSE_BYTES = 256 * 1024;
+const guard = createApiKeyRetryGuard<Exclude<OllamaCloudResult, null>>((retryAtMs) => ({
+  success: false,
+  error: "Ollama Cloud balance API error 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+}));
 
 type JsonRecord = Record<string, unknown>;
 
@@ -115,7 +122,7 @@ function parsePurchasedUsd(value: unknown): number | undefined {
   return isFiniteNumber(balanceUsd) && balanceUsd >= 0 ? balanceUsd : undefined;
 }
 
-function parseOllamaCloudBalance(payload: unknown): OllamaCloudResult {
+function parseOllamaCloudBalance(payload: unknown): Exclude<OllamaCloudResult, null> {
   if (!isRecord(payload)) {
     return {
       success: false,
@@ -175,43 +182,56 @@ export async function queryOllamaCloudQuota(
   const resolved = await resolveOllamaCloudApiKey();
   if (!resolved) return null;
 
-  let responseStatus: number | undefined;
-  try {
-    return await fetchWithTimeout(OLLAMA_CLOUD_BALANCE_URL, {
-      request: {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${resolved.key}`,
-        },
-        redirect: "manual",
-      },
-      timeoutMs: options.requestTimeoutMs,
-      consume: async (response) => {
-        responseStatus = response.status;
-        const text = await readBoundedText(response, MAX_RESPONSE_BYTES);
-        if (!response.ok) {
-          const snippet = sanitizeMessage(text, resolved.key);
-          return {
-            success: false,
-            error: `Ollama Cloud balance API error ${response.status}: ${snippet}`,
-            failureCategory: providerFailureCategoryForHttpStatus(response.status),
-          };
-        }
+  return guard(
+    resolved.key,
+    async (): Promise<Exclude<OllamaCloudResult, null>> => {
+      let responseStatus: number | undefined;
+      let retryAtMs: number | undefined;
+      try {
+        return await fetchWithTimeout(OLLAMA_CLOUD_BALANCE_URL, {
+          request: {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              Authorization: `Bearer ${resolved.key}`,
+            },
+            redirect: "manual",
+          },
+          timeoutMs: options.requestTimeoutMs,
+          consume: async (response): Promise<Exclude<OllamaCloudResult, null>> => {
+            responseStatus = response.status;
+            retryAtMs = retryAfterDeadline(response);
+            const text = await readBoundedText(response, MAX_RESPONSE_BYTES);
+            if (!response.ok) {
+              const snippet = sanitizeMessage(text, resolved.key);
+              return {
+                success: false,
+                error: `Ollama Cloud balance API error ${response.status}: ${snippet}`,
+                failureCategory: providerFailureCategoryForHttpStatus(response.status),
+                ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+              };
+            }
 
-        return parseOllamaCloudBalance(JSON.parse(text) as unknown);
-      },
-    });
-  } catch (error) {
-    return {
-      success: false,
-      error: sanitizeMessage(error instanceof Error ? error.message : String(error), resolved.key),
-      failureCategory:
-        responseStatus === undefined
-          ? "provider_api"
-          : providerFailureCategoryForHttpStatus(responseStatus),
-    };
-  }
+            return parseOllamaCloudBalance(JSON.parse(text) as unknown);
+          },
+        });
+      } catch (error) {
+        return {
+          success: false,
+          error: sanitizeMessage(
+            error instanceof Error ? error.message : String(error),
+            resolved.key,
+          ),
+          failureCategory:
+            responseStatus === undefined
+              ? "provider_api"
+              : providerFailureCategoryForHttpStatus(responseStatus),
+          ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+        };
+      }
+    },
+    options.requestTimeoutMs,
+  );
 }
 
 export { parseOllamaCloudBalance as _parseOllamaCloudBalance };

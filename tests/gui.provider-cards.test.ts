@@ -36,6 +36,8 @@ import type {
 import type { OpenCodeRawAssistantRow } from "../src/lib/opencode-storage.js";
 import type { QuotaStatusLiveProbe } from "../src/lib/quota-render-data.js";
 import { DEFAULT_CONFIG, type QuotaToastConfig } from "../src/lib/types.js";
+import { buildSessionHeaderView } from "../src/native/session-header-model.js";
+import { visibleCards } from "../src/ui/view-model.js";
 
 const NOW = Date.UTC(2026, 9, 18, 12, 0, 0); // 2026-10-18T12:00:00Z
 const DAY_MS = 86_400_000;
@@ -201,6 +203,92 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe("gui provider cards — account mapping", () => {
+  it("preserves structured retry deadline and intentional-filter provenance", () => {
+    const cards = buildProviderCards({
+      probes: [
+        probe(
+          "anthropic",
+          result({
+            errors: [
+              {
+                label: "Filtered",
+                message: "Skipped",
+                kind: "intentional-filter",
+                retryAtMs: NOW + 60_000,
+                failureCategory: "provider_api",
+              },
+            ],
+          }),
+        ),
+      ],
+      preferences: SUMMARY,
+      nowMs: NOW,
+    });
+    expect(cards[0]?.errors).toEqual([
+      {
+        label: "Filtered",
+        message: "Skipped",
+        kind: "intentional-filter",
+        retryAtMs: NOW + 60_000,
+        failureCategory: "provider_api",
+      },
+    ]);
+  });
+  it("projects Panel accounts in provider order, omitting failed and hidden cards but keeping healthy unmapped tokens", () => {
+    const panelCards = buildProviderCards({
+      probes: [
+        probe(
+          "anthropic",
+          result({
+            accounts: [
+              { sourceId: "a", label: "A" },
+              { sourceId: "b", label: "B" },
+            ],
+            entries: [
+              percentEntry({
+                sourceId: "a",
+                name: "5h",
+                window: "five_hour",
+                rowKey: "window:five_hour",
+              }),
+              percentEntry({
+                sourceId: "b",
+                name: "5h",
+                window: "five_hour",
+                rowKey: "window:five_hour",
+              }),
+            ],
+            errors: [{ sourceId: "b", label: "Error", message: "Failed" }],
+          }),
+        ),
+        probe("openai", result({ entries: [percentEntry({ rowKey: "window:weekly" })] })),
+      ],
+      preferences: { ...SUMMARY, providerOrder: ["openai", "anthropic"] },
+      nowMs: NOW,
+    });
+    expect(panelCards.map((card) => [card.providerId, card.accountLabel])).toEqual([
+      ["openai", undefined],
+      ["anthropic", "A"],
+      ["anthropic", "B"],
+    ]);
+    const hiddenCards = [panelCards[0]!.cardId];
+    const panel = visibleCards(panelCards, hiddenCards);
+    const view = buildSessionHeaderView({
+      snapshot: {
+        generatedAtMs: NOW,
+        stale: false,
+        timeZone: "UTC",
+        providers: { cards: panelCards, enabledProviders: "auto", polledAtMs: NOW },
+      },
+      hiddenCards,
+      hiddenRows: [],
+      preferences: { percentMode: "used", detailed: false, providerOrder: ["openai", "anthropic"] },
+      nowMs: NOW,
+    });
+    expect(panel.map((card) => card.accountLabel)).toEqual(["A", "B"]);
+    expect(view.cards.map((card) => card.cardId)).toEqual([panel[0]!.cardId]);
+    expect(view.cards[0]?.rings).toEqual([]);
+  });
   it("maps a sanitized plan separately without changing account, card, or row identity", () => {
     const mapped = (label: string, planLabel?: string) =>
       cardsFor([
@@ -499,7 +587,7 @@ describe("gui provider cards — account mapping", () => {
     expect(rows.map((row) => row.percentUsed)).toEqual([120.5, -30]);
   });
 
-  it("adds the runway projection only when the config asks for it", () => {
+  it("projects GUI runway from validated fixed-window evidence without a preference", () => {
     const endsAtIso = new Date(NOW + 12 * HOUR_MS).toISOString();
     const fixedWindow: FixedWindowProjectionEvidence = {
       kind: "fixed_window",
@@ -524,15 +612,8 @@ describe("gui provider cards — account mapping", () => {
       ),
     ];
 
-    const off = buildProviderCards({ probes, preferences: SUMMARY, nowMs: NOW });
-    expect(off[0]?.rows[0]?.runway).toBeUndefined();
-
-    const on = buildProviderCards({
-      probes,
-      preferences: { ...SUMMARY, quotaProjection: "runway" },
-      nowMs: NOW,
-    });
-    expect(on[0]?.rows[0]?.runway).toEqual({
+    const card = buildProviderCards({ probes, preferences: SUMMARY, nowMs: NOW })[0];
+    expect(card?.rows[0]?.runway).toEqual({
       kind: "before_reset",
       projectedAtIso: new Date(NOW).toISOString(),
     });
@@ -1244,6 +1325,34 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
     expect(card.rows[1]).not.toHaveProperty("info");
     expect(resetsVisibility?.info).toBe(OPENAI_RESETS_INFO);
     expect(creditsVisibility?.info).toBe(OPENAI_CREDITS_INFO);
+  });
+
+  it("seeds only a Resets row for Claude Agent that matches its runtime row id, and none for anthropic", () => {
+    const cards = cardsFor([
+      probe(
+        "claude-agent",
+        result({
+          accounts: [{ sourceId: "raw-claude", label: "Work" }],
+          entries: [
+            valueEntry({
+              sourceId: "raw-claude",
+              name: "Resets",
+              label: "Resets:",
+              rowKey: "claude-agent:resets",
+              value: "1 available",
+              resultType: "status",
+              bankedResets: { availableCount: 1, credits: [{ expiresAtIso: null }] },
+            }),
+          ],
+        }),
+      ),
+      probe("anthropic", result({ accounts: [{ sourceId: "raw-anthropic" }] })),
+    ]);
+    const claude = cards.find((card) => card.providerId === "claude-agent")!;
+    expect(claude.visibilityRows?.map(({ label }) => label)).toEqual(["Resets"]);
+    expect(claude.visibilityRows?.[0]?.rowId).toBe(claude.rows[0]?.rowId);
+    expect(JSON.stringify(claude.visibilityRows)).not.toContain("raw-claude");
+    expect(cards.find((card) => card.providerId === "anthropic")?.visibilityRows).toBeUndefined();
   });
 
   it("keeps account-specific ids separate and adds no optional rows to other providers", () => {

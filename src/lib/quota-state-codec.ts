@@ -34,6 +34,7 @@ export function cloneQuotaProviderResult(result: QuotaProviderResult): QuotaProv
     entries: result.entries.map(cloneQuotaToastEntry),
     errors: result.errors.map((error) => ({ ...error })),
     ...(result.accounts ? { accounts: result.accounts.map((account) => ({ ...account })) } : {}),
+    ...(result.planLabel === undefined ? {} : { planLabel: result.planLabel }),
     ...(result.diagnostics
       ? {
           diagnostics: result.diagnostics.map((diagnostic) => ({
@@ -339,9 +340,19 @@ function isQuotaToastEntry(value: unknown, safeText: boolean): value is QuotaToa
 function isQuotaToastError(value: unknown): boolean {
   if (!isRecord(value)) return false;
   return (
-    hasOnlyKeys(value, ["label", "message", "retryable", "failureCategory", "kind", "sourceId"]) &&
+    hasOnlyKeys(value, [
+      "label",
+      "message",
+      "retryable",
+      "failureCategory",
+      "kind",
+      "sourceId",
+      "retryAtMs",
+    ]) &&
     typeof value.label === "string" &&
     typeof value.message === "string" &&
+    (value.retryAtMs === undefined ||
+      (Number.isSafeInteger(value.retryAtMs) && (value.retryAtMs as number) >= 0)) &&
     (value.retryable === undefined || typeof value.retryable === "boolean") &&
     (value.failureCategory === undefined || isProviderFailureCategory(value.failureCategory)) &&
     (value.kind === undefined || value.kind === "intentional-filter") &&
@@ -477,6 +488,7 @@ function isQuotaProviderResult(value: unknown, safeText: boolean): value is Quot
       "entries",
       "errors",
       "accounts",
+      "planLabel",
       "diagnostics",
       "statusDetails",
       "rawDetails",
@@ -489,6 +501,7 @@ function isQuotaProviderResult(value: unknown, safeText: boolean): value is Quot
     value.errors.every(isQuotaToastError) &&
     (value.accounts === undefined ||
       (isDenseArray(value.accounts) && value.accounts.every(isQuotaProviderAccount))) &&
+    (value.planLabel === undefined || typeof value.planLabel === "string") &&
     (value.diagnostics === undefined ||
       (isDenseArray(value.diagnostics) && value.diagnostics.every(isQuotaProviderDiagnostic))) &&
     (value.statusDetails === undefined ||
@@ -525,6 +538,9 @@ export function normalizeQuotaProviderResult(value: unknown): QuotaProviderResul
               : {}),
           })),
         }
+      : {}),
+    ...(value.planLabel !== undefined
+      ? { planLabel: sanitizeSingleLineDisplayText(value.planLabel) }
       : {}),
   };
   return isQuotaProviderResult(preserved, true) ? cloneQuotaProviderResult(preserved) : null;

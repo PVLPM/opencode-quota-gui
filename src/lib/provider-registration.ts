@@ -1,4 +1,9 @@
-export type QuotaProviderAutoSetup = "yes" | "usually" | "manual_env_config" | "needs_quick_setup";
+export type QuotaProviderAutoSetup =
+  | "yes"
+  | "usually"
+  | "manual_env_config"
+  | "needs_quick_setup"
+  | "unavailable";
 
 export type QuotaProviderAuthentication =
   | "opencode_auth_oauth_token"
@@ -7,7 +12,8 @@ export type QuotaProviderAuthentication =
   | "local_cli_auth"
   | "github_oauth_or_pat"
   | "external_api_key"
-  | "state_only";
+  | "state_only"
+  | "unavailable";
 
 export type QuotaProviderAuthFallback = "env_api_key" | "global_opencode_config";
 
@@ -15,7 +21,8 @@ export type QuotaProviderQuotaSource =
   | "remote_api"
   | "local_estimation"
   | "local_runtime_accounting"
-  | "local_cli_report";
+  | "local_cli_report"
+  | "unavailable";
 
 export interface QuotaProviderShapeSource {
   recommendedReplacementId?: string;
@@ -42,12 +49,23 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     id: "anthropic",
     label: "Anthropic",
     runtimeIds: ["anthropic"],
-    synonyms: ["claude", "claude-code"],
+    synonyms: [],
+    shape: {
+      autoSetup: "unavailable",
+      authentication: "unavailable",
+      quota: "unavailable",
+    },
+  },
+  {
+    id: "claude-agent",
+    label: "Claude Agent",
+    runtimeIds: ["claude-agent", "claude-code"],
+    synonyms: ["claude-code", "claude"],
     shape: {
       autoSetup: "needs_quick_setup",
       authentication: "local_cli_auth",
       quota: "local_cli_report",
-      quickSetupAnchor: "anthropic-claude",
+      quickSetupAnchor: "claude-agent",
     },
   },
   {
@@ -120,10 +138,10 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     synonyms: ["alibaba"],
     liveLocalUsage: true,
     shape: {
-      autoSetup: "yes",
-      authentication: "opencode_auth_api_key",
-      authFallbacks: ["env_api_key", "global_opencode_config"],
-      quota: "local_estimation",
+      autoSetup: "needs_quick_setup",
+      authentication: "local_cli_auth",
+      quota: "local_cli_report",
+      quickSetupAnchor: "alibaba-coding-plan",
     },
   },
   {

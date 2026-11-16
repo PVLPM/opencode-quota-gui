@@ -6,18 +6,20 @@
  */
 
 import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { clampPercent } from "./format-utils.js";
 import { fetchWithTimeout } from "./http.js";
-import {
-  getSyntheticKeyDiagnostics,
-  hasSyntheticApiKey,
-  resolveSyntheticApiKey,
-  type SyntheticKeySource,
-} from "./synthetic-config.js";
+import { resolveSyntheticApiKey } from "./synthetic-config.js";
 import type { QuotaError, SyntheticQuotaWindow, SyntheticResult } from "./types.js";
 
 const SYNTHETIC_QUOTA_URL = "https://api.synthetic.new/v2/quotas";
+const guard = createApiKeyRetryGuard<Exclude<SyntheticResult, null>>((retryAtMs) => ({
+  success: false,
+  error: "Synthetic API error 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+}));
 const SYNTHETIC_CREDIT_AMOUNT_PATTERN = /^\$(\d+)(?:\.(\d{1,2}))?$/;
 
 export {
@@ -174,67 +176,75 @@ export async function querySyntheticQuota(
   const resolved = await resolveSyntheticApiKey();
   if (!resolved) return null;
 
-  let responseStatus: number | undefined;
-  try {
-    return await fetchWithTimeout(SYNTHETIC_QUOTA_URL, {
-      request: {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${resolved.key}`,
-          "User-Agent": "opencode-quota-gui/1.0",
-        },
-      },
-      timeoutMs: options.requestTimeoutMs,
-      consume: async (resp) => {
-        responseStatus = resp.status;
-        if (!resp.ok) {
-          const text = await resp.text();
-          return {
-            success: false,
-            error: `Synthetic API error ${resp.status}: ${sanitizeDisplaySnippet(text, 120)}`,
-            failureCategory: providerFailureCategoryForHttpStatus(resp.status),
-          };
-        }
-
-        const data = (await resp.json()) as unknown;
-        if (isEmptyPlainObject(data)) {
-          return invalidSyntheticResponse("Synthetic returned no quota data for this account.");
-        }
-
-        const record = asRecord(data);
-        if (!record) {
-          return invalidSyntheticResponse(
-            "Synthetic API response missing rollingFiveHourLimit quota window",
-          );
-        }
-
-        const rollingFiveHour = buildRollingFiveHourWindow(record);
-        if (!("limit" in rollingFiveHour)) {
-          return rollingFiveHour;
-        }
-
-        const weekly = buildWeeklyTokenWindow(record);
-        if (!("limit" in weekly)) {
-          return weekly;
-        }
-
-        return {
-          success: true,
-          windows: {
-            fiveHour: rollingFiveHour,
-            weekly,
+  return guard(
+    resolved.key,
+    async () => {
+      let responseStatus: number | undefined;
+      try {
+        return await fetchWithTimeout(SYNTHETIC_QUOTA_URL, {
+          request: {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${resolved.key}`,
+              "User-Agent": "opencode-quota-gui/1.0",
+            },
           },
+          timeoutMs: options.requestTimeoutMs,
+          consume: async (resp) => {
+            responseStatus = resp.status;
+            if (!resp.ok) {
+              const retryAtMs = retryAfterDeadline(resp);
+              const text = await resp.text().catch(() => "");
+              return {
+                success: false,
+                error: `Synthetic API error ${resp.status}: ${sanitizeDisplaySnippet(text, 120)}`,
+                failureCategory: providerFailureCategoryForHttpStatus(resp.status),
+                ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+              };
+            }
+
+            const data = (await resp.json()) as unknown;
+            if (isEmptyPlainObject(data)) {
+              return invalidSyntheticResponse("Synthetic returned no quota data for this account.");
+            }
+
+            const record = asRecord(data);
+            if (!record) {
+              return invalidSyntheticResponse(
+                "Synthetic API response missing rollingFiveHourLimit quota window",
+              );
+            }
+
+            const rollingFiveHour = buildRollingFiveHourWindow(record);
+            if (!("limit" in rollingFiveHour)) {
+              return rollingFiveHour;
+            }
+
+            const weekly = buildWeeklyTokenWindow(record);
+            if (!("limit" in weekly)) {
+              return weekly;
+            }
+
+            return {
+              success: true,
+              windows: {
+                fiveHour: rollingFiveHour,
+                weekly,
+              },
+            };
+          },
+        });
+      } catch (err) {
+        return {
+          success: false,
+          error: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
+          failureCategory:
+            responseStatus === undefined
+              ? "provider_api"
+              : providerFailureCategoryForHttpStatus(responseStatus),
         };
-      },
-    });
-  } catch (err) {
-    return {
-      success: false,
-      error: sanitizeDisplayText(err instanceof Error ? err.message : String(err)),
-      failureCategory:
-        responseStatus === undefined
-          ? "provider_api"
-          : providerFailureCategoryForHttpStatus(responseStatus),
-    };
-  }
+      }
+    },
+    options.requestTimeoutMs,
+  );
 }

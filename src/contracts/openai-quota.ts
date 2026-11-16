@@ -37,5 +37,9 @@ export const OPENAI_CREDITS_ROW_LABEL = "Credits";
 /** Exact owner-approved info copy, shown immediately next to the row label. */
 export const OPENAI_RESETS_INFO =
   "Shown only when OpenAI reports one or more available banked resets.";
+/** Claude Agent reuses the same Resets row; only its stable key and info copy differ. */
+export const CLAUDE_AGENT_RESETS_ROW_KEY = "claude-agent:resets";
+export const CLAUDE_AGENT_RESETS_INFO =
+  "Shown only when Claude Agent reports one or more available saved resets.";
 export const OPENAI_CREDITS_INFO =
   "Shown only when OpenAI reports a positive credit balance or unlimited credits.";

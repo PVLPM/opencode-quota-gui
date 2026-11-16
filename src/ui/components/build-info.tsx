@@ -29,7 +29,7 @@ export function BuildMismatchStatus(props: { message: string | undefined }): JSX
 }
 
 /** Quiet metadata at the bottom of Settings; no status action is implied. */
-export function BuildAbout(): JSX.Element {
+export function BuildAbout(props: { children?: JSX.Element }): JSX.Element {
   return (
     <section class="qg-group" aria-labelledby="qg-settings-about">
       <h2 class="qg-group__title" id="qg-settings-about">
@@ -38,6 +38,7 @@ export function BuildAbout(): JSX.Element {
       <div class="qg-inherited">
         {`Version ${BUILD_IDENTITY.version} · Build ${BUILD_IDENTITY.build} · Contract ${DASHBOARD_CONTRACT_VERSION}`}
       </div>
+      {props.children}
     </section>
   );
 }

@@ -1,11 +1,17 @@
 import type { Context } from "@opencode/plugin/gui";
 import type { JSX } from "solid-js";
-import { Match, onCleanup, Show, Switch } from "solid-js";
+import { createSignal, Match, onCleanup, Show, Switch } from "solid-js";
+import { BUILD_IDENTITY } from "../contracts/build-identity.js";
+import { BuildAbout } from "../ui/components/build-info";
 import { ErrorCard } from "../ui/components/states";
 import { createToaster, ToastRegion } from "../ui/components/toast";
 import { SettingsRoute } from "../ui/routes";
 import { createNativeDashboardClient } from "./dashboard-client.js";
 import { createGuiRpcCaller } from "./rpc.js";
+import {
+  copySettingsDiagnostics,
+  settingsDiagnosticsFromSnapshots,
+} from "./settings-copy-action.js";
 import { createSettingsPageState } from "./settings-page-state.js";
 import { NativeUiProvider } from "./ui.js";
 
@@ -25,7 +31,7 @@ type SettingsContent = "settings" | "quota-error" | "waiting";
  * page frame and the native read lifecycle are new.
  */
 export function NativeSettingsPage(props: {
-  ctx: Pick<Context, "client" | "servers" | "ui">;
+  ctx: Pick<Context, "app" | "client" | "servers" | "ui">;
 }): JSX.Element {
   const client = createNativeDashboardClient({
     rpc: createGuiRpcCaller(props.ctx),
@@ -40,6 +46,7 @@ export function NativeSettingsPage(props: {
       .find((server) => server?.builtin)?.connected ?? true;
   const state = createSettingsPageState(client, { hostConnected });
   const toaster = createToaster();
+  const [copied, setCopied] = createSignal(false);
   onCleanup(() => client.dispose());
 
   /**
@@ -76,6 +83,38 @@ export function NativeSettingsPage(props: {
     return "Data may be stale";
   };
   const showStatus = () => state.loading() || state.stale();
+  const diagnosticsAction = () => (
+    <button
+      type="button"
+      class="qg-button qg-button--ghost-muted qg-button--small"
+      aria-label="Copy diagnostics"
+      title="Copy diagnostics"
+      onClick={() => {
+        setCopied(false);
+        const clipboard = globalThis.navigator?.clipboard;
+        const appVersion =
+          BUILD_IDENTITY.version === "unknown" ? undefined : BUILD_IDENTITY.version;
+        void copySettingsDiagnostics(
+          () =>
+            settingsDiagnosticsFromSnapshots(state.quota(), state.query.data(), state.stale(), {
+              appVersion,
+              hostVersion: props.ctx.app.version,
+              quotaUnavailable: state.quota() === undefined && state.quotaStale(),
+              settingsUnavailable:
+                state.query.data() === undefined && state.query.error() !== undefined,
+            }),
+          clipboard?.writeText?.bind(clipboard),
+          (tone, message) => {
+            setCopied(tone === "success");
+            toaster.push(tone, message);
+          },
+        );
+      }}
+    >
+      <props.ctx.ui.Icon name={copied() ? "check" : "copy"} size="small" />
+      <span>Copy diagnostics</span>
+    </button>
+  );
 
   return (
     <NativeUiProvider ui={props.ctx.ui}>
@@ -109,6 +148,7 @@ export function NativeSettingsPage(props: {
                 stale={state.stale()}
                 webDashboardToggle
                 nativeQuotaAlerts
+                aboutAction={diagnosticsAction()}
                 onRetry={state.retry}
               />
             </div>
@@ -120,6 +160,12 @@ export function NativeSettingsPage(props: {
                 retryable
                 onRetry={() => state.retry()}
               />
+              <BuildAbout>{diagnosticsAction()}</BuildAbout>
+            </div>
+          </Match>
+          <Match when={contentMode() === "waiting"}>
+            <div class="qg-main" data-settings="true">
+              <BuildAbout>{diagnosticsAction()}</BuildAbout>
             </div>
           </Match>
         </Switch>

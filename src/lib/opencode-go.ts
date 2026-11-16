@@ -1,4 +1,5 @@
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import {
@@ -160,9 +161,30 @@ function isNotSubscribedResponse(status: number, text: string): boolean {
   }
 }
 
-export async function queryOpenCodeGoQuota(
+const rateLimited = (retryAtMs: number): OpenCodeGoResult => ({
+  success: false,
+  error: "OpenCode Go API error 429",
+  retryable: true,
+  failureCategory: "provider_api",
+  retryAtMs,
+});
+const apiKeyGuard = createApiKeyRetryGuard<OpenCodeGoResult>(rateLimited);
+const consoleGuard = createApiKeyRetryGuard<OpenCodeGoResult>(rateLimited);
+
+export function queryOpenCodeGoQuota(
   accessToken: string,
   options: { requestTimeoutMs?: number } = {},
+): Promise<OpenCodeGoResult> {
+  return apiKeyGuard(
+    accessToken,
+    () => fetchOpenCodeGoQuota(accessToken, options),
+    options.requestTimeoutMs,
+  );
+}
+
+async function fetchOpenCodeGoQuota(
+  accessToken: string,
+  options: { requestTimeoutMs?: number },
 ): Promise<OpenCodeGoResult> {
   try {
     return await fetchWithTimeout(OPENCODE_GO_USAGE_URL, {
@@ -176,6 +198,7 @@ export async function queryOpenCodeGoQuota(
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
         if (!response.ok) {
+          const retryAtMs = retryAfterDeadline(response);
           let text: string;
           try {
             text = await response.text();
@@ -185,6 +208,7 @@ export async function queryOpenCodeGoQuota(
               error: `OpenCode Go API error ${response.status}: ${errorMessage(error, accessToken)}`,
               retryable: isRetryableHttpStatus(response.status),
               failureCategory: httpFailureCategory(response.status),
+              ...(retryAtMs !== undefined ? { retryAtMs } : {}),
             };
           }
           if (isNotSubscribedResponse(response.status, text)) {
@@ -200,6 +224,7 @@ export async function queryOpenCodeGoQuota(
             error: `OpenCode Go API error ${response.status}: ${sanitizeMessage(text, accessToken)}`,
             retryable: isRetryableHttpStatus(response.status),
             failureCategory: httpFailureCategory(response.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 
@@ -272,9 +297,26 @@ function normalizeConsoleMeter(
  * accounts without any pre-2.0 workspace API key. The request goes to the
  * login's Console server, scoped to the login's org when it has one.
  */
-export async function queryOpenCodeGoConsoleStatus(
+export function queryOpenCodeGoConsoleStatus(
   credential: OpenCodeConsoleCredential,
   options: { requestTimeoutMs?: number } = {},
+): Promise<OpenCodeGoResult> {
+  // Same token under another org or server is a different account.
+  const identity = JSON.stringify([
+    credential.accessToken,
+    credential.orgId ?? null,
+    consoleBaseUrl(credential),
+  ]);
+  return consoleGuard(
+    identity,
+    () => fetchOpenCodeGoConsoleStatus(credential, options),
+    options.requestTimeoutMs,
+  );
+}
+
+async function fetchOpenCodeGoConsoleStatus(
+  credential: OpenCodeConsoleCredential,
+  options: { requestTimeoutMs?: number },
 ): Promise<OpenCodeGoResult> {
   try {
     return await fetchWithTimeout(`${consoleBaseUrl(credential)}/api/go/status`, {
@@ -296,11 +338,13 @@ export async function queryOpenCodeGoConsoleStatus(
               notSubscribed: true,
             };
           }
+          const retryAtMs = retryAfterDeadline(response);
           return {
             success: false,
             error: `OpenCode Console API error ${response.status} (/api/go/status)`,
             retryable: isRetryableHttpStatus(response.status),
             failureCategory: httpFailureCategory(response.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 

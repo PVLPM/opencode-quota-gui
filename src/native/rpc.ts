@@ -9,7 +9,11 @@
 import type { Context } from "@opencode/plugin/gui";
 import { isDashboardEvent } from "../contracts/guards.js";
 import type { DashboardRpcQuotaNotificationData } from "../rpc.js";
-import { DashboardRpc, isDashboardRpcQuotaNotificationData } from "../rpc.js";
+import {
+  DashboardRpc,
+  isDashboardRpcCacheObserverEventData,
+  isDashboardRpcQuotaNotificationData,
+} from "../rpc.js";
 import type { DashboardRpcCaller } from "./dashboard-client.js";
 
 export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCaller {
@@ -40,7 +44,12 @@ export function createGuiRpcCaller(ctx: Pick<Context, "client">): DashboardRpcCa
         (async function* () {
           for await (const event of rpc().events.subscribe(name, options)) {
             if (name === "invalidated") {
-              if (!isDashboardEvent(event.data)) continue;
+              if (
+                !isDashboardEvent(event.data) &&
+                !isDashboardRpcCacheObserverEventData(event.data)
+              ) {
+                continue;
+              }
               yield { data: event.data };
             } else {
               if (!isDashboardRpcQuotaNotificationData(event.data)) continue;

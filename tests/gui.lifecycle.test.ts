@@ -491,8 +491,8 @@ afterEach(async () => {
 
 describe("dashboard production lifecycle", () => {
   it.each([
-    ["absent on a 2.2.0+ host", {}, "2.2.0"],
-    ["explicitly false on a pre-2.2.0 host", { enabled: false }, "2.1.4"],
+    ["absent on a 2.2.1+ host", {}, "2.2.1"],
+    ["explicitly false on a pre-2.2.1 host", { enabled: false }, "2.1.4"],
   ] as const)("keeps the shared runtime available and starts no web transport when enabled is %s", async (_label, dashboard, hostVersion) => {
     const workspace = makeWorkspace();
     const port = await freePort();
@@ -548,7 +548,7 @@ describe("dashboard production lifecycle", () => {
     expect(owner.closes).toBe(1);
   });
 
-  it("starts the web transport for an absent key on a pre-2.2.0 host", async () => {
+  it("starts the web transport for an absent key on OpenCode 2.2.0", async () => {
     const workspace = makeWorkspace();
     const port = await freePort();
     writeGuiCanonicalConfig(workspace, { dashboard: { port } });
@@ -559,7 +559,7 @@ describe("dashboard production lifecycle", () => {
       client: dashboardClient,
       workspaceRoot: workspace.workspaceRoot,
       configDir: workspace.configDir,
-      hostVersion: "2.1.4",
+      hostVersion: "2.2.0",
       createSource: () => source,
       createServer: async (options) => {
         ports.push(options.port);
@@ -584,7 +584,7 @@ describe("dashboard production lifecycle", () => {
       client: dashboardClient,
       workspaceRoot: workspace.workspaceRoot,
       configDir: workspace.configDir,
-      detectHostVersion: async () => ({ major: 2, minor: 1, patch: 4 }),
+      detectHostVersion: async () => ({ major: 2, minor: 2, patch: 0 }),
       createSource: () => source,
       createServer: async (options) => fakeHandle(options.port),
       logger: silent,
@@ -640,7 +640,7 @@ describe("dashboard production lifecycle", () => {
   it("keeps the web-less runtime and owner handoff alive while a lease remains", async () => {
     const workspace = makeWorkspace();
     const port = await freePort();
-    // `dashboard.enabled` absent on a 2.2.0+ host: the version-gated off path.
+    // `dashboard.enabled` absent on a 2.2.1+ host: the version-gated off path.
     writeGuiCanonicalConfig(workspace, { dashboard: { port } });
     const owners = [buildOwnerSource(1), buildOwnerSource(2)];
     let createdSources = 0;
@@ -649,7 +649,7 @@ describe("dashboard production lifecycle", () => {
       client: dashboardClient,
       workspaceRoot: workspace.workspaceRoot,
       configDir: workspace.configDir,
-      hostVersion: "2.2.0",
+      hostVersion: "2.2.1",
       createSource: () => {
         const owner = owners[createdSources];
         createdSources += 1;

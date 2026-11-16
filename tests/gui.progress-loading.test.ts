@@ -108,10 +108,10 @@ function render(component: unknown, props: unknown): string {
   return graph.renderToString(() => graph.createComponent(component, props));
 }
 
-/** First exact CSS rule body for a selector; an absent selector is an empty body. */
+/** First CSS rule body whose selector is a complete list entry. */
 function cssRule(source: string, selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, "s").exec(source);
+  const match = new RegExp(`(?:^|[\\n,])\\s*${escaped}\\s*\\{([^}]*)\\}`, "s").exec(source);
   return match?.[1] ?? "";
 }
 

@@ -263,6 +263,7 @@ async function fetchOpenCodeGoConsoleAccounts(
       retryable: result.retryable,
       sourceId: account.sourceId,
       failureCategory: result.failureCategory,
+      ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
     });
     fetchErrorsBySourceId.set(account.sourceId, result.error);
     accounts.push(consoleAccountDescriptor(account));
@@ -451,6 +452,7 @@ async function fetchOpenCodeGoLegacy(
             retryable: result.retryable,
             sourceId: row.id,
             failureCategory: result.failureCategory,
+            ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
           });
       }
       const attemptedSourceIds = new Set([
@@ -511,6 +513,7 @@ async function fetchOpenCodeGoLegacy(
       attemptedErrorResult(OPENCODE_GO_PROVIDER_LABEL, result.error, {
         retryable: result.retryable,
         failureCategory: result.failureCategory,
+        ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
       }),
       [...baseStatusDetails, { key: "live_fetch_error", value: result.error }],
     );

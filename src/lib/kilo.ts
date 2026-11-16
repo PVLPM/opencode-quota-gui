@@ -7,6 +7,7 @@
  */
 
 import { providerFailureCategoryForHttpStatus } from "../contracts/provider-failure.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
 import { resolveKiloApiKey } from "./kilo-config.js";
@@ -39,6 +40,14 @@ type NoActiveKiloPassResult = QuotaError & { reason: "no_active_subscription" };
 type ParsedKiloPassState = KiloPassStateSuccess | QuotaError | NoActiveKiloPassResult;
 type KiloBalanceResult = { success: true; balanceUsd: number } | QuotaError;
 type KiloRequestOptions = { requestTimeoutMs?: number };
+
+const kiloBlocked = (retryAtMs: number): QuotaError => ({
+  success: false,
+  error: "Kilo Gateway API error 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+});
+const quotaGuard = createApiKeyRetryGuard<Exclude<KiloQuotaResult, null>>(kiloBlocked);
 
 function invalidKiloResponse(error: string): QuotaError {
   return { success: false, error, failureCategory: "provider_api" };
@@ -208,6 +217,7 @@ async function requestKiloPassState(
   });
 
   let responseStatus: number | undefined;
+  let retryAtMs: number | undefined;
   try {
     return await fetchWithTimeout(`${KILO_PASS_STATE_ENDPOINT}?${query.toString()}`, {
       request: {
@@ -222,12 +232,14 @@ async function requestKiloPassState(
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
         responseStatus = response.status;
+        retryAtMs = retryAfterDeadline(response);
         const text = await readResponseText(response, "state");
         if (!response.ok) {
           return {
             success: false,
             error: `Kilo Gateway state API error ${response.status}: ${sanitizeMessage(text, key)}`,
             failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 
@@ -242,6 +254,7 @@ async function requestKiloPassState(
         responseStatus === undefined
           ? "provider_api"
           : providerFailureCategoryForHttpStatus(responseStatus),
+      ...(retryAtMs !== undefined ? { retryAtMs } : {}),
     };
   }
 }
@@ -251,6 +264,7 @@ async function requestKiloBalance(
   options: KiloRequestOptions,
 ): Promise<KiloBalanceResult> {
   let responseStatus: number | undefined;
+  let retryAtMs: number | undefined;
   try {
     return await fetchWithTimeout(KILO_BALANCE_ENDPOINT, {
       request: {
@@ -265,12 +279,14 @@ async function requestKiloBalance(
       timeoutMs: options.requestTimeoutMs,
       consume: async (response) => {
         responseStatus = response.status;
+        retryAtMs = retryAfterDeadline(response);
         const text = await readResponseText(response, "balance");
         if (!response.ok) {
           return {
             success: false,
             error: `Kilo Gateway balance API error ${response.status}: ${sanitizeMessage(text, key)}`,
             failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            ...(retryAtMs !== undefined ? { retryAtMs } : {}),
           };
         }
 
@@ -285,6 +301,7 @@ async function requestKiloBalance(
         responseStatus === undefined
           ? "provider_api"
           : providerFailureCategoryForHttpStatus(responseStatus),
+      ...(retryAtMs !== undefined ? { retryAtMs } : {}),
     };
   }
 }
@@ -306,24 +323,31 @@ export async function queryKiloQuota(options: KiloRequestOptions = {}): Promise<
   const resolved = await resolveKiloApiKey();
   if (!resolved) return null;
 
-  const passResult = await requestKiloPassState(resolved.key, options);
-  if (passResult.success) {
-    return { ...passResult, mode: "kilo_pass" };
-  }
-  if (!isNoActiveKiloPassResult(passResult)) {
-    return passResult;
-  }
+  return quotaGuard(
+    resolved.key,
+    async (): Promise<Exclude<KiloQuotaResult, null>> => {
+      const passResult = await requestKiloPassState(resolved.key, options);
+      if (passResult.success) {
+        return { ...passResult, mode: "kilo_pass" };
+      }
+      if (!isNoActiveKiloPassResult(passResult)) {
+        return passResult;
+      }
 
-  const balanceResult = await requestKiloBalance(resolved.key, options);
-  if (balanceResult.success) {
-    return { ...balanceResult, mode: "gateway_balance" };
-  }
+      const balanceResult = await requestKiloBalance(resolved.key, options);
+      if (balanceResult.success) {
+        return { ...balanceResult, mode: "gateway_balance" };
+      }
 
-  return {
-    success: false,
-    error: `Kilo Gateway has no active Kilo Pass subscription; balance fallback failed: ${balanceResult.error}`,
-    ...(balanceResult.failureCategory !== undefined
-      ? { failureCategory: balanceResult.failureCategory }
-      : {}),
-  };
+      return {
+        success: false,
+        error: `Kilo Gateway has no active Kilo Pass subscription; balance fallback failed: ${balanceResult.error}`,
+        ...(balanceResult.failureCategory !== undefined
+          ? { failureCategory: balanceResult.failureCategory }
+          : {}),
+        ...(balanceResult.retryAtMs !== undefined ? { retryAtMs: balanceResult.retryAtMs } : {}),
+      };
+    },
+    options.requestTimeoutMs,
+  );
 }

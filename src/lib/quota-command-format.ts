@@ -90,7 +90,7 @@ const DIALOG_TIME_WINDOWS: ReadonlySet<AccountingWindow> = new Set([
 /**
  * The TUI dialog's label for a row: a time window's quota drops "quota" ("5h quota" is
  * "5h", "Weekly quota" is "Weekly"), since the dialog's table heads that column "window".
- * Other labels, such as "Month spend" or "Fable weekly quota", stay whole.
+ * Other labels, such as "Month spend" or "Fable", stay whole.
  */
 function getDialogMetricLabel(entry: QuotaToastEntry, metricLabel: string): string {
   const metric = entry.semantic?.metric;

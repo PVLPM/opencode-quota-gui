@@ -87,6 +87,60 @@ describe("collectQuotaRenderData shared quota state", () => {
     await rm(TEST_RUNTIME_ROOT, { recursive: true, force: true });
   });
 
+  it("shares operation state only within a refresh and rechecks identity without it", async () => {
+    const contexts: Array<{ stage: string; cache: unknown }> = [];
+    const provider = {
+      id: "operation-test",
+      isAvailable: async (ctx: any) => {
+        contexts.push({ stage: "available", cache: ctx.operationCache });
+        return true;
+      },
+      cachePolicy: {
+        kind: "resolved-auth" as const,
+        resolveIdentity: async (ctx: any) => {
+          contexts.push({ stage: "identity", cache: ctx.operationCache });
+          return "identity" as any;
+        },
+      },
+      fetch: async (ctx: any) => {
+        contexts.push({ stage: "fetch", cache: ctx.operationCache });
+        return {
+          attempted: true,
+          entries: [{ accounting: TEST_ACCOUNTING, name: "Test", percentRemaining: 50 }],
+          errors: [],
+        };
+      },
+    };
+    const params = {
+      client: TEST_CLIENT,
+      config: renderConfig({ enabledProviders: [provider.id], minIntervalMs: 0 }),
+      workspaceRoot: "",
+      surfaceExplicitProviderIssues: false,
+      providers: [provider],
+    };
+    await collectQuotaRenderData(params);
+    await collectQuotaRenderData(params);
+    expect(contexts.map(({ stage }) => stage)).toEqual([
+      "available",
+      "identity",
+      "fetch",
+      "identity",
+      "available",
+      "identity",
+      "fetch",
+      "identity",
+    ]);
+    expect(contexts[0]!.cache).toBeInstanceOf(Map);
+    expect(contexts[1]!.cache).toBe(contexts[0]!.cache);
+    expect(contexts[2]!.cache).toBe(contexts[0]!.cache);
+    expect(contexts[3]!.cache).toBeUndefined();
+    expect(contexts[4]!.cache).toBeInstanceOf(Map);
+    expect(contexts[4]!.cache).not.toBe(contexts[0]!.cache);
+    expect(contexts[5]!.cache).toBe(contexts[4]!.cache);
+    expect(contexts[6]!.cache).toBe(contexts[4]!.cache);
+    expect(contexts[7]!.cache).toBeUndefined();
+  });
+
   it("uses explicitly provided providers instead of the global registry", async () => {
     const runtimeProvider = testProvider("custom-runtime", {
       entries: [

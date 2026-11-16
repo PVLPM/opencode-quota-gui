@@ -29,6 +29,7 @@ import { RANGE_LABELS } from "./format";
 import { analyticsTabForRoute, viewScopeForRoute } from "./navigation-model";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
 import { createQuery } from "./query";
+import { createQuotaQuery } from "./quota-query";
 import {
   AnalyticsRoute,
   GroupDetailRoute,
@@ -100,10 +101,18 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const [connection, setConnection] = createSignal<ConnectionState>(props.client.connection());
   const [navTooltip, setNavTooltip] = createSignal<"home" | "analytics" | "settings" | undefined>();
   const [health, setHealth] = createSignal<DashboardHealth | undefined>(undefined);
+  const [healthError, setHealthError] = createSignal<unknown>();
   const [contractMismatch, setContractMismatch] = createSignal<string | undefined>(undefined);
   const [reloadToken, setReloadToken] = createSignal(0);
   const [quotaReloadToken, setQuotaReloadToken] = createSignal(0);
   const [homeSnapshot, setHomeSnapshot] = createSignal<QuotaSnapshot | undefined>(undefined);
+  const quotaQuery = createQuotaQuery((refresh) =>
+    props.client.quota(refresh ? { refresh: true } : undefined),
+  );
+  createEffect(() => {
+    const snapshot = quotaQuery.data();
+    if (snapshot) setHomeSnapshot(snapshot);
+  });
   const [routeStale, setRouteStale] = createSignal(false);
   /** Bumped on every reconnection: it refetches each route and anchors staleness. */
   const [reconnectEpoch, setReconnectEpoch] = createSignal(0);
@@ -156,12 +165,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
       // tick while Settings is open refreshes it so temporal rows stay live.
       const tokenChanged = previous !== undefined && previous[1] !== token;
       if (!tokenChanged && homeSnapshot()) return;
-      void props.client
-        .quota()
-        .then(setHomeSnapshot)
-        .catch(() => {
-          // Settings remain usable if the optional catalog or temporal status is unavailable.
-        });
+      void quotaQuery.read({ changed: tokenChanged });
     }),
   );
 
@@ -254,7 +258,9 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     if (previousConnection === state) return;
     const previous = previousConnection;
     previousConnection = state;
+    if (previous === "live" && state !== "live") quotaQuery.invalidate();
     if (!shouldRefetchOnReconnect(previous, state)) return;
+    quotaQuery.reconnected();
     const epoch = reconnectEpoch() + 1;
     setReconnectEpoch(epoch);
     void settingsQuery.run().then((applied) => {
@@ -291,8 +297,8 @@ export function App(props: { client: DashboardClient }): JSX.Element {
         const currentHealth = await props.client.health();
         setHealth(currentHealth);
         setContractMismatch(contractMismatchMessage(currentHealth.contractVersion));
-      } catch {
-        // A missing health endpoint is not fatal; route queries report failures.
+      } catch (error) {
+        setHealthError(error);
       }
       await settingsQuery.run();
     })();
@@ -350,6 +356,8 @@ export function App(props: { client: DashboardClient }): JSX.Element {
           <Show
             when={
               connection() !== "live" ||
+              quotaQuery.error() !== undefined ||
+              healthError() !== undefined ||
               (route().name === "settings"
                 ? isStaleAfterReconnect(reconnectEpoch(), settingsFreshEpoch()) ||
                   settingsQuery.error() !== undefined
@@ -445,6 +453,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
               <Match when={route().name === "home"}>
                 <QuotaRoute
                   client={props.client}
+                  quotaQuery={quotaQuery}
                   reloadToken={quotaReloadToken()}
                   reconnectEpoch={reconnectEpoch()}
                   preferences={preferences()}
@@ -452,6 +461,18 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   hiddenRows={settingsQuery.data()?.visibility.hiddenRows ?? []}
                   onSnapshot={setHomeSnapshot}
                   onStale={setRouteStale}
+                  onRetryShell={() => {
+                    void settingsQuery.run();
+                    setReloadToken((token) => token + 1);
+                    void props.client
+                      .health()
+                      .then((currentHealth) => {
+                        setHealth(currentHealth);
+                        setHealthError(undefined);
+                        setContractMismatch(contractMismatchMessage(currentHealth.contractVersion));
+                      })
+                      .catch(setHealthError);
+                  }}
                 />
               </Match>
               <Match when={route().name === "analytics"}>

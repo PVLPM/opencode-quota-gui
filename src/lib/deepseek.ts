@@ -10,6 +10,7 @@ import {
   providerFailureCategoryForHttpStatus,
 } from "../contracts/provider-failure.js";
 import { isCanonicalAccountingDecimal } from "./accounting-format.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import { resolveDeepSeekApiKey } from "./deepseek-auth.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import { fetchWithTimeout } from "./http.js";
@@ -49,6 +50,12 @@ export type DeepSeekResult =
 const DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
 const USER_AGENT = "opencode-quota-gui/1.0";
 const MAX_PARSE_ISSUES = 6;
+const guard = createApiKeyRetryGuard<Exclude<DeepSeekResult, null>>((retryAtMs) => ({
+  success: false,
+  error: "DeepSeek API error 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+}));
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -114,7 +121,12 @@ async function fetchDeepSeekBalance(
   requestTimeoutMs?: number,
 ): Promise<
   | { success: true; data: DeepSeekBalanceResult }
-  | { success: false; message: string; failureCategory: ProviderFailureCategory }
+  | {
+      success: false;
+      message: string;
+      failureCategory: ProviderFailureCategory;
+      retryAtMs?: number;
+    }
 > {
   let responseStatus: number | undefined;
   try {
@@ -130,11 +142,13 @@ async function fetchDeepSeekBalance(
       consume: async (response) => {
         responseStatus = response.status;
         if (!response.ok) {
-          const text = await response.text();
+          const deadline = retryAfterDeadline(response);
+          const text = await response.text().catch(() => "");
           return {
             success: false as const,
             message: `DeepSeek API error ${response.status}: ${sanitizeDisplaySnippet(text, 120)}`,
             failureCategory: providerFailureCategoryForHttpStatus(response.status),
+            ...(deadline !== undefined ? { retryAtMs: deadline } : {}),
           };
         }
 
@@ -167,22 +181,29 @@ export async function queryDeepSeekBalance(
   const resolved = await resolveDeepSeekApiKey();
   if (!resolved) return null;
 
-  const result = await fetchDeepSeekBalance(resolved.key, options.requestTimeoutMs);
+  return guard(
+    resolved.key,
+    async () => {
+      const result = await fetchDeepSeekBalance(resolved.key, options.requestTimeoutMs);
 
-  if (!result.success) {
-    return {
-      success: false,
-      error: result.message,
-      failureCategory: result.failureCategory,
-    };
-  }
+      if (!result.success) {
+        return {
+          success: false,
+          error: result.message,
+          failureCategory: result.failureCategory,
+          ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
+        };
+      }
 
-  return {
-    success: true,
-    isAvailable: result.data.isAvailable,
-    balanceInfos: result.data.balanceInfos,
-    parseIssues: result.data.parseIssues,
-  };
+      return {
+        success: true,
+        isAvailable: result.data.isAvailable,
+        balanceInfos: result.data.balanceInfos,
+        parseIssues: result.data.parseIssues,
+      };
+    },
+    options.requestTimeoutMs,
+  );
 }
 
 export {

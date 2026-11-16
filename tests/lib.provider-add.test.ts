@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -285,22 +285,23 @@ describe("provider add global config workflow", () => {
     expect(await readFile(sidecarPath, "utf8")).toContain("// preserve");
   });
 
-  it("does not require a normal provider block for maintained Alibaba tuning", async () => {
+  it("rejects obsolete Alibaba local-estimate tuning", async () => {
     const dir = await configDir();
-    const plan = await planProviderAdd({
-      configDir: dir,
-      definition: {
-        id: "alibaba-coding-plan",
-        mode: "local-estimate",
-        windows: [
-          { id: "five-hour", type: "rolling", durationMinutes: 300, requestLimit: 2000 },
-          { id: "weekly", type: "rolling", durationMinutes: 10080, requestLimit: 10000 },
-          { id: "monthly", type: "rolling", durationMinutes: 43200, requestLimit: 20000 },
-        ],
-      },
-    });
-    expect(plan.ordinaryProviderRequired).toBe(false);
-    expect(plan.updated).not.toContain('"provider":');
+    await expect(
+      planProviderAdd({
+        configDir: dir,
+        definition: {
+          id: "alibaba-coding-plan",
+          mode: "local-estimate",
+          windows: [
+            { id: "five-hour", type: "rolling", durationMinutes: 300, requestLimit: 2000 },
+            { id: "weekly", type: "rolling", durationMinutes: 10080, requestLimit: 10000 },
+            { id: "monthly", type: "rolling", durationMinutes: 43200, requestLimit: 20000 },
+          ],
+        },
+      }),
+    ).rejects.toThrow("definition is not a supported quota provider");
+    expect(await readdir(dir)).toEqual([]);
   });
 
   it("rejects old customSources instead of migrating or aliasing it", async () => {

@@ -437,6 +437,70 @@ factor = { text = 0.5 }
     expect(() => normalizeTemporalSnapshot(first)).not.toThrow();
   });
 
+  it("bundles the official CN 2027 holidays without makeup workdays and preserves 2026", async () => {
+    const snapshot = await buildTemporalSnapshot(files, BUILD_OPTIONS);
+
+    expect(snapshot.jurisdictions.CN["2026"]).toEqual(BUNDLED_SNAPSHOT.jurisdictions.CN["2026"]);
+    expect(snapshot.jurisdictions.CN["2027"]).toEqual({
+      timeZone: "Asia/Shanghai",
+      source:
+        "https://english.www.gov.cn/policies/latestreleases/202611/06/content_WS6aed74dcc6d00ca5f9a0e22e.html",
+      published: "2026-11-06",
+      intervals: [
+        {
+          id: "new-year",
+          localStart: "2027-01-01",
+          localEnd: "2027-01-04",
+          startMs: 1_798_732_800_000,
+          endMs: 1_798_992_000_000,
+        },
+        {
+          id: "spring-festival",
+          localStart: "2027-02-05",
+          localEnd: "2027-02-14",
+          startMs: 1_801_756_800_000,
+          endMs: 1_802_534_400_000,
+        },
+        {
+          id: "qingming",
+          localStart: "2027-04-03",
+          localEnd: "2027-04-06",
+          startMs: 1_806_681_600_000,
+          endMs: 1_806_940_800_000,
+        },
+        {
+          id: "labour-day",
+          localStart: "2027-05-01",
+          localEnd: "2027-05-06",
+          startMs: 1_809_100_800_000,
+          endMs: 1_809_532_800_000,
+        },
+        {
+          id: "dragon-boat-festival",
+          localStart: "2027-06-09",
+          localEnd: "2027-06-10",
+          startMs: 1_812_470_400_000,
+          endMs: 1_812_556_800_000,
+        },
+        {
+          id: "mid-autumn-festival",
+          localStart: "2027-09-15",
+          localEnd: "2027-09-16",
+          startMs: 1_820_937_600_000,
+          endMs: 1_821_024_000_000,
+        },
+        {
+          id: "national-day",
+          localStart: "2027-10-01",
+          localEnd: "2027-10-08",
+          startMs: 1_822_320_000_000,
+          endMs: 1_822_924_800_000,
+        },
+      ],
+      makeupWorkdays: [],
+    });
+  });
+
   it("derives source from a new revision and requires matching generatedAt", async () => {
     const revision = "a".repeat(40);
     const built = await buildTemporalSnapshot(files, {
@@ -1101,9 +1165,9 @@ describe("bundled modelsdev temporal data", () => {
     expect(() => temporalSnapshotProvenance({ ...valid, generatedAt: 0 })).toThrow(/generatedAt/);
   });
 
-  it("retains only authoritative CN 2026", () => {
+  it("retains the authoritative CN 2026 and 2027 calendars", () => {
     expect(Object.keys(snapshot.jurisdictions)).toEqual(["CN"]);
-    expect(Object.keys(snapshot.jurisdictions.CN)).toEqual(["2026"]);
+    expect(Object.keys(snapshot.jurisdictions.CN)).toEqual(["2026", "2027"]);
     expect(snapshot.jurisdictions.CN["2026"].intervals).toHaveLength(7);
     expect(snapshot.jurisdictions.CN["2026"].makeupWorkdays).toEqual([
       "2026-01-04",
@@ -1113,6 +1177,8 @@ describe("bundled modelsdev temporal data", () => {
       "2026-09-20",
       "2026-10-10",
     ]);
+    expect(snapshot.jurisdictions.CN["2027"].intervals).toHaveLength(7);
+    expect(snapshot.jurisdictions.CN["2027"].makeupWorkdays).toEqual([]);
   });
 
   it("retains route provenance for every bundled temporal entry", () => {
@@ -1170,7 +1236,7 @@ describe("bundled modelsdev temporal data", () => {
       resolveTemporalRates(
         "deepseek",
         "deepseek-v4-pro",
-        Date.parse("2027-01-04T02:00:00.000Z"),
+        Date.parse("2028-01-03T02:00:00.000Z"),
         deepSeekBase,
       ).status,
     ).toBe("unresolved");

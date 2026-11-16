@@ -32,7 +32,11 @@ export function attemptedResult(
 export function attemptedErrorResult(
   label: string,
   message: string,
-  options: { retryable?: boolean; failureCategory?: ProviderFailureCategory } = {},
+  options: {
+    retryable?: boolean;
+    failureCategory?: ProviderFailureCategory;
+    retryAtMs?: number;
+  } = {},
 ): QuotaProviderResult {
   return attemptedResult(
     [],
@@ -41,6 +45,7 @@ export function attemptedErrorResult(
         label,
         message,
         ...(options.retryable === true ? { retryable: true } : {}),
+        ...(options.retryAtMs !== undefined ? { retryAtMs: options.retryAtMs } : {}),
         ...(options.failureCategory !== undefined
           ? { failureCategory: options.failureCategory }
           : {}),
@@ -165,6 +170,7 @@ export function mapNullableProviderResult<
         success: false;
         error: string;
         retryable?: boolean;
+        retryAtMs?: number;
         failureCategory?: ProviderFailureCategory;
       }
     | null,
@@ -183,6 +189,7 @@ export function mapNullableProviderResult<
   if (!result.success) {
     return attemptedErrorResult(params.errorLabel, result.error, {
       ...(result.retryable === true ? { retryable: true } : {}),
+      ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
       ...((result.failureCategory ?? params.failureCategory) !== undefined
         ? { failureCategory: result.failureCategory ?? params.failureCategory }
         : {}),

@@ -225,7 +225,8 @@ describe("legacy config compatibility beside the canonical layer", () => {
       });
 
     expect((await store("2.1.4").settings()).values["dashboard.enabled"]).toBe(true);
-    expect((await store("2.2.0").settings()).values["dashboard.enabled"]).toBe(false);
+    expect((await store("2.2.0").settings()).values["dashboard.enabled"]).toBe(true);
+    expect((await store("2.2.1").settings()).values["dashboard.enabled"]).toBe(false);
     expect((await store().settings()).values["dashboard.enabled"]).toBe(false);
 
     writeGuiCanonicalConfig(workspace, { dashboard: { enabled: false, port: 4567 } });

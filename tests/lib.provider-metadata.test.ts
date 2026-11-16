@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { normalizeEnabledProviders } from "../src/lib/config.js";
 
 import {
   getQuotaProviderDisplayLabel,
@@ -19,10 +20,16 @@ describe("provider-metadata", () => {
     expect(QUOTA_PROVIDER_SHAPES).toEqual([
       {
         id: "anthropic",
+        autoSetup: "unavailable",
+        authentication: "unavailable",
+        quota: "unavailable",
+      },
+      {
+        id: "claude-agent",
         autoSetup: "needs_quick_setup",
         authentication: "local_cli_auth",
         quota: "local_cli_report",
-        quickSetupAnchor: "anthropic-claude",
+        quickSetupAnchor: "claude-agent",
       },
       {
         id: "copilot",
@@ -63,10 +70,10 @@ describe("provider-metadata", () => {
       },
       {
         id: "alibaba-coding-plan",
-        autoSetup: "yes",
-        authentication: "opencode_auth_api_key",
-        authFallbacks: ["env_api_key", "global_opencode_config"],
-        quota: "local_estimation",
+        autoSetup: "needs_quick_setup",
+        authentication: "local_cli_auth",
+        quota: "local_cli_report",
+        quickSetupAnchor: "alibaba-coding-plan",
       },
       {
         id: "alibaba-token-plan",
@@ -243,6 +250,13 @@ describe("provider-metadata", () => {
   });
 
   it("normalizes provider synonyms to canonical ids", () => {
+    expect(normalizeQuotaProviderId("claude")).toBe("claude-agent");
+    expect(normalizeQuotaProviderId("anthropic")).toBe("anthropic");
+    expect(normalizeEnabledProviders(["claude", "claude-code", "anthropic"])).toEqual({
+      value: ["claude-agent", "anthropic"],
+      issues: [],
+      invalidEmpty: false,
+    });
     expect(normalizeQuotaProviderId("  openai  ")).toBe("openai");
 
     for (const [alias, canonicalId] of Object.entries(QUOTA_PROVIDER_ID_SYNONYMS)) {
@@ -258,6 +272,7 @@ describe("provider-metadata", () => {
       "github-copilot-chat",
     ]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.anthropic).toEqual(["anthropic"]);
+    expect(QUOTA_PROVIDER_RUNTIME_IDS["claude-agent"]).toEqual(["claude-agent", "claude-code"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.openai).toEqual(["openai", "chatgpt", "codex"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.kilo).toEqual(["kilo"]);
     expect(QUOTA_PROVIDER_RUNTIME_IDS.cursor).toEqual(["cursor", "cursor-acp"]);
@@ -319,7 +334,8 @@ describe("provider-metadata", () => {
       "copilot-chat",
       "github-copilot-chat",
     ]);
-    expect(getQuotaProviderRuntimeIds("claude")).toEqual(["anthropic"]);
+    expect(getQuotaProviderRuntimeIds("claude")).toEqual(["claude-agent", "claude-code"]);
+    expect(getQuotaProviderRuntimeIds("claude-code")).toEqual(["claude-agent", "claude-code"]);
     expect(getQuotaProviderRuntimeIds("openai")).toEqual(["openai", "chatgpt", "codex"]);
     expect(getQuotaProviderRuntimeIds("kilo")).toEqual(["kilo"]);
     expect(getQuotaProviderRuntimeIds("kilo-gateway")).toEqual([]);
@@ -400,10 +416,10 @@ describe("provider-metadata", () => {
     });
     expect(getQuotaProviderShape("alibaba")).toEqual({
       id: "alibaba-coding-plan",
-      autoSetup: "yes",
-      authentication: "opencode_auth_api_key",
-      authFallbacks: ["env_api_key", "global_opencode_config"],
-      quota: "local_estimation",
+      autoSetup: "needs_quick_setup",
+      authentication: "local_cli_auth",
+      quota: "local_cli_report",
+      quickSetupAnchor: "alibaba-coding-plan",
     });
     expect(getQuotaProviderShape("alibaba-token-plan")).toEqual({
       id: "alibaba-token-plan",

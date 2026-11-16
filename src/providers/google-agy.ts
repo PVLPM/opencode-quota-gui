@@ -16,7 +16,7 @@ import {
 import { inspectAgyCompanionPresence } from "../lib/google-agy-companion.js";
 import { formatCredentialDisplayNames, readCredentialRows } from "../lib/opencode-auth.js";
 import { parseProviderModelRef } from "../lib/provider-model-matching.js";
-import type { AuthData, GoogleAgyQuotaBucket } from "../lib/types.js";
+import type { AuthData, GoogleAccountError, GoogleAgyQuotaBucket } from "../lib/types.js";
 import {
   createGoogleAccountLabelMap,
   formatGoogleAccountErrors,
@@ -109,27 +109,48 @@ export function agyBucketRowKey(bucket: Pick<GoogleAgyQuotaBucket, "family" | "w
 }
 
 /**
- * Accounts of the legacy companion path (no `CredentialRow`). `sourceId` keeps
- * the historical `account-N` ordinal byte-identical for reset/cache
- * compatibility; when the bucket carries an email the descriptor adds a
- * server-only email digest as `identityKey`. No key is derived from an ordinal.
+ * Legacy companion accounts have no `CredentialRow`. `sourceId` keeps the
+ * historical `account-N` value for reset/cache compatibility; email-backed
+ * descriptors use a server-only digest identity, while missing emails retain
+ * the existing source-id identity fallback.
  */
 export function buildAgyLegacyAccounts(params: {
   buckets: readonly GoogleAgyQuotaBucket[];
+  errors?: readonly GoogleAccountError[];
   accountLabels: ReadonlyMap<string, string>;
 }): QuotaProviderAccount[] {
-  const accounts = new Map<string, QuotaProviderAccount>();
+  const accounts = new Map<number, { accountEmail?: string; accountIndex: number }>();
   for (const bucket of [...params.buckets].sort(compareBuckets)) {
-    const sourceId = `account-${bucket.accountIndex + 1}`;
-    if (accounts.has(sourceId)) continue;
-    const email = bucket.accountEmail;
-    accounts.set(sourceId, {
-      sourceId,
-      ...(email ? { identityKey: deriveStableAccountIdentityKey(email) } : {}),
-      label: formatAgyAccountLabel(bucket, params.accountLabels),
+    if (!accounts.has(bucket.accountIndex)) accounts.set(bucket.accountIndex, bucket);
+  }
+  for (const error of params.errors ?? []) {
+    const accountIndex = error.accountIndex;
+    if (
+      accountIndex === undefined ||
+      !Number.isInteger(accountIndex) ||
+      accountIndex < 0 ||
+      accounts.has(accountIndex)
+    ) {
+      continue;
+    }
+    accounts.set(accountIndex, {
+      ...(AGY_AUTH_KEYS.some((sourceKey) => sourceKey === error.email)
+        ? {}
+        : { accountEmail: error.email }),
+      accountIndex,
     });
   }
-  return [...accounts.values()];
+  return [...accounts.values()]
+    .sort((left, right) => left.accountIndex - right.accountIndex)
+    .map((account) => {
+      const sourceId = `account-${account.accountIndex + 1}`;
+      const email = account.accountEmail;
+      return {
+        sourceId,
+        ...(email ? { identityKey: deriveStableAccountIdentityKey(email) } : {}),
+        label: formatAgyAccountLabel(account, params.accountLabels),
+      };
+    });
 }
 
 export function formatAgyCredentialGroup(credentialName: string, familyLabel: string): string {
@@ -257,6 +278,7 @@ export const googleAgyProvider: QuotaProvider = {
             ...(error.failureCategory !== undefined
               ? { failureCategory: error.failureCategory }
               : {}),
+            ...(error.retryAtMs !== undefined ? { retryAtMs: error.retryAtMs } : {}),
           })),
         );
       }
@@ -292,7 +314,11 @@ export const googleAgyProvider: QuotaProvider = {
       ],
       "domainHint",
     );
-    const legacyAccounts = buildAgyLegacyAccounts({ buckets: sortedBuckets, accountLabels });
+    const legacyAccounts = buildAgyLegacyAccounts({
+      buckets: sortedBuckets,
+      errors: result.errors,
+      accountLabels,
+    });
     const sourceIdByEmail = new Map(
       sortedBuckets.flatMap((bucket) =>
         bucket.accountEmail
@@ -324,8 +350,14 @@ export const googleAgyProvider: QuotaProvider = {
     });
     const errors = formatGoogleAccountErrors(result.errors, "domainHint", accountLabels).map(
       (error, index) => {
-        const email = result.errors?.[index]?.email;
-        const sourceId = email ? sourceIdByEmail.get(email) : undefined;
+        const failed = result.errors?.[index];
+        // Same `account-N` ids the entries use, so a failed account keeps its previous rows.
+        const sourceId =
+          failed?.accountIndex !== undefined
+            ? `account-${failed.accountIndex + 1}`
+            : failed?.email
+              ? sourceIdByEmail.get(failed.email)
+              : undefined;
         return sourceId ? { ...error, sourceId } : error;
       },
     );

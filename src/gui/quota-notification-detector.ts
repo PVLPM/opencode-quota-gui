@@ -57,6 +57,7 @@ import {
   type ResetObservation,
   updateObservation as updateLegacyResetObservation,
 } from "../lib/quota-reset-notifications.js";
+import type { NativeQuotaNotificationPolicy, QuotaResetWindow } from "../lib/types.js";
 
 export const QUOTA_NOTIFICATION_DETECTOR_STATE_VERSION = 1 as const;
 
@@ -137,6 +138,7 @@ export interface QuotaNotificationRowObservation {
   label: string;
   kind: QuotaCardRow["kind"];
   resultType: QuotaCardRow["resultType"];
+  metric?: QuotaCardRow["metric"];
   percentRemaining?: number;
   resetAtIso?: string;
 }
@@ -204,10 +206,8 @@ export interface DetectQuotaNotificationsInput {
   cooldowns?: Readonly<Record<string, number>>;
   /** Injectable clock supplied by the caller. */
   nowMs: number;
-  /** Caller/settings-supplied low threshold. The detector owns no default. */
-  lowThresholdPercent: number;
-  /** Caller/settings-supplied cooldown. The detector owns no default. */
-  cooldownMs: number;
+  /** Canonical Native notification policy. The detector owns no settings defaults. */
+  policy: NativeQuotaNotificationPolicy;
 }
 
 export interface DetectQuotaNotificationsResult {
@@ -321,6 +321,26 @@ function isEligiblePercentRow(
   );
 }
 
+function resetWindowForRow(row: QuotaNotificationRowObservation): QuotaResetWindow | undefined {
+  if (row.metric?.kind !== "window") return undefined;
+  switch (row.metric.window) {
+    case "five_hour":
+      return "fiveHour";
+    case "hour":
+      return "hourly";
+    case "day":
+      return "daily";
+    case "week":
+      return "weekly";
+    case "month":
+      return "monthly";
+    case "year":
+      return "yearly";
+    default:
+      return undefined;
+  }
+}
+
 export function detectQuotaNotifications(
   input: DetectQuotaNotificationsInput,
 ): DetectQuotaNotificationsResult {
@@ -331,13 +351,15 @@ export function detectQuotaNotifications(
     input.state?.version === QUOTA_NOTIFICATION_DETECTOR_STATE_VERSION ? input.state : undefined;
   const cooldowns: Record<string, number> = { ...(input.cooldowns ?? {}) };
   const notifications: QuotaNotification[] = [];
+  const { policy } = input;
+  const cooldownMs = policy.duplicateCooldownMinutes * 60_000;
   const nextRows = new Map<string, QuotaNotificationRowState>();
   const nextProviders = new Map<string, QuotaNotificationProviderState>();
   const seenCards = new Set<string>();
 
   const emit = (fingerprint: string, notification: QuotaNotification): boolean => {
     const lastAtMs = cooldowns[fingerprint];
-    if (lastAtMs !== undefined && nowMs - lastAtMs < input.cooldownMs) return false;
+    if (lastAtMs !== undefined && nowMs - lastAtMs < cooldownMs) return false;
     notifications.push(notification);
     cooldowns[fingerprint] = nowMs;
     return true;
@@ -410,45 +432,57 @@ export function detectQuotaNotifications(
 
       if (resetEvent) {
         const resetAtIso = new Date(resetEvent.resetAtMs).toISOString();
-        const fingerprint = quotaNotificationFingerprint({
-          kind: "reset",
-          cardId: card.cardId,
-          rowId: row.rowId,
-          resetAtIso,
-        });
-        emit(fingerprint, {
-          ...notificationBase(card, fingerprint, nowMs),
-          kind: "reset",
-          rowId: row.rowId,
-          rowLabel: row.label,
-          percentRemaining: currentPercent,
-          resetAtIso,
-          previousResetAtIso: new Date(resetEvent.previousResetAtMs).toISOString(),
-        });
+        const resetWindow = resetWindowForRow(row);
+        if (
+          policy.enabled &&
+          policy.reset.enabled &&
+          resetWindow !== undefined &&
+          policy.reset.windows.includes(resetWindow)
+        ) {
+          const fingerprint = quotaNotificationFingerprint({
+            kind: "reset",
+            cardId: card.cardId,
+            rowId: row.rowId,
+            resetAtIso,
+          });
+          emit(fingerprint, {
+            ...notificationBase(card, fingerprint, nowMs),
+            kind: "reset",
+            rowId: row.rowId,
+            rowLabel: row.label,
+            percentRemaining: currentPercent,
+            resetAtIso,
+            previousResetAtIso: new Date(resetEvent.previousResetAtMs).toISOString(),
+          });
+        }
         continue;
       }
 
       const previousPercent = previousRow.percentRemaining;
       if (previousPercent > 0 && currentPercent <= 0) {
-        const fingerprint = quotaNotificationFingerprint({
-          kind: "exhausted",
-          cardId: card.cardId,
-          rowId: row.rowId,
-        });
-        emit(fingerprint, {
-          ...notificationBase(card, fingerprint, nowMs),
-          kind: "exhausted",
-          rowId: row.rowId,
-          rowLabel: row.label,
-          percentRemaining: currentPercent,
-          ...(normalizedResetAtIso !== undefined ? { resetAtIso: normalizedResetAtIso } : {}),
-        });
+        if (policy.enabled && policy.exhausted.enabled) {
+          const fingerprint = quotaNotificationFingerprint({
+            kind: "exhausted",
+            cardId: card.cardId,
+            rowId: row.rowId,
+          });
+          emit(fingerprint, {
+            ...notificationBase(card, fingerprint, nowMs),
+            kind: "exhausted",
+            rowId: row.rowId,
+            rowLabel: row.label,
+            percentRemaining: currentPercent,
+            ...(normalizedResetAtIso !== undefined ? { resetAtIso: normalizedResetAtIso } : {}),
+          });
+        }
         continue;
       }
 
       if (
-        previousPercent > input.lowThresholdPercent &&
-        currentPercent <= input.lowThresholdPercent
+        policy.enabled &&
+        policy.low.enabled &&
+        previousPercent > policy.low.thresholdRemainingPercent &&
+        currentPercent <= policy.low.thresholdRemainingPercent
       ) {
         const fingerprint = quotaNotificationFingerprint({
           kind: "low",
@@ -460,7 +494,7 @@ export function detectQuotaNotifications(
           kind: "low",
           rowId: row.rowId,
           rowLabel: row.label,
-          thresholdPercent: input.lowThresholdPercent,
+          thresholdPercent: policy.low.thresholdRemainingPercent,
           percentRemaining: currentPercent,
           ...(normalizedResetAtIso !== undefined ? { resetAtIso: normalizedResetAtIso } : {}),
         });
@@ -481,16 +515,18 @@ export function detectQuotaNotifications(
       continue;
     }
 
-    const fingerprint = quotaNotificationFingerprint({
-      kind: "provider-error",
-      cardId: card.cardId,
-      category: QUOTA_NOTIFICATION_PROVIDER_ERROR_CATEGORY,
-    });
-    emit(fingerprint, {
-      ...notificationBase(card, fingerprint, nowMs),
-      kind: "provider-error",
-      category: QUOTA_NOTIFICATION_PROVIDER_ERROR_CATEGORY,
-    });
+    if (policy.enabled && policy.providerError.enabled) {
+      const fingerprint = quotaNotificationFingerprint({
+        kind: "provider-error",
+        cardId: card.cardId,
+        category: QUOTA_NOTIFICATION_PROVIDER_ERROR_CATEGORY,
+      });
+      emit(fingerprint, {
+        ...notificationBase(card, fingerprint, nowMs),
+        kind: "provider-error",
+        category: QUOTA_NOTIFICATION_PROVIDER_ERROR_CATEGORY,
+      });
+    }
   }
 
   return {

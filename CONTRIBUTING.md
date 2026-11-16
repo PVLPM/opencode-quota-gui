@@ -25,6 +25,8 @@ pnpm install
 
 Run `pnpm verify` before opening a PR. It runs lint and formatting, typecheck, build, all tests, the supported cross-surface contract test, and package checks. CI runs the same command, then installs the packed package on Node 22 and 24 as a smoke test.
 
+`pnpm run dup:check` checks for new exact TypeScript clones against `.jscpd-baseline.json` and runs as part of `pnpm verify`. After deliberately reviewing accepted duplication, regenerate the baseline with `pnpm run dup:baseline` and include the updated baseline in the change.
+
 Upstream plugin snapshots are reviewed by hand. `pnpm run upstream:check` reports drift against `references/upstream-plugins/lock.json` without writing. `pnpm run upstream:prepare-review` rewrites the snapshots and lock before building the review handoff, so run it only for a deliberate snapshot update. No scheduled workflow opens or closes upstream update issues; commit snapshots only after that review.
 
 For quick iteration: `pnpm run test:watch`.
@@ -33,7 +35,7 @@ For quick iteration: `pnpm run test:watch`.
 
 - **No AI calls.** Never send a request to an AI model to produce anything the plugin shows. Calling a provider's quota or billing API is fine.
 - **OpenCode 2 only.** No OpenCode 1 code, APIs, or tables.
-- **GUI-only activation.** The server plugin provides the shared dashboard runtime and internal Native GUI RPC, and keeps the credential and reset-retry lifecycle working. It does not register slash commands, tools, report hooks, TUI surfaces, toasts, terminal quota interfaces, or terminal reports. The separate `init` and `update` CLI commands are maintenance only, not a quota surface. This release has no TUI entry or artifact, and no TUI surface is a supported product path.
+- **GUI-only activation.** The server plugin provides the shared dashboard runtime and internal Native GUI RPC, and keeps the credential and reset-retry lifecycle working. It registers no agent tools. It does not register slash commands, report hooks, TUI surfaces, toasts, terminal quota interfaces, or terminal reports. The separate `init` and `update` CLI commands are maintenance only, not a quota surface. This release has no TUI entry or artifact, and no TUI surface is a supported product path.
 - **Canonical settings.** Runtime code reads the global canonical GUI config plus defaults. Legacy settings are available only through the explicit read-only import preview. Do not add a runtime fallback to upstream private state.
 - **Private namespace.** GUI caches, state, locks, and reset observations stay under the GUI-owned `opencode-quota-gui` namespace. Never read, copy, overwrite, or delete upstream `opencode-quota` private state.
 - **Credentials.** Read OpenCode logins only through `ctx.integration` in `src/lib/opencode-auth.ts`. Do not read `auth.json`, a project secret, or an upstream credential cache.

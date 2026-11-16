@@ -1,0 +1,6 @@
+{
+  "reporters": ["ai"],
+  "format": ["typescript", "tsx"],
+  "pattern": "**/*.{ts,tsx}",
+  "ignore": ["**/data/**", "**/*.generated.json", "**/*.min.json", "**/*.svg"]
+}

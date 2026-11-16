@@ -39,6 +39,14 @@ interface PrimaryQuotaWindowRule {
   readonly untypedSlot?: PrimaryQuotaWindowSlot;
 }
 
+const ANTHROPIC_SUBSCRIPTION_WINDOWS: PrimaryQuotaWindowRule = {
+  rowKeys: [
+    { value: "window:five_hour", slot: 0 },
+    { value: "window:week", slot: 1 },
+  ],
+  namedMetrics: [{ value: "Fable weekly", slot: 2 }],
+};
+
 /**
  * Explicit, evidence-backed mapping. Omitted providers intentionally have no
  * defensible primary/auxiliary split in their current source (see the Stage 6
@@ -46,14 +54,10 @@ interface PrimaryQuotaWindowRule {
  */
 const PRIMARY_QUOTA_WINDOW_RULES: Readonly<Record<string, PrimaryQuotaWindowRule>> = {
   // 5h, weekly, and the provider's explicit Fable weekly slot; `window:month`
-  // is Usage Credits (`src/providers/anthropic.ts` 160-195, 240-274).
-  anthropic: {
-    rowKeys: [
-      { value: "window:five_hour", slot: 0 },
-      { value: "window:week", slot: 1 },
-    ],
-    namedMetrics: [{ value: "Fable weekly", slot: 2 }],
-  },
+  // is Usage Credits (`anthropicQuotaEntries` in `src/providers/anthropic.ts`).
+  anthropic: ANTHROPIC_SUBSCRIPTION_WINDOWS,
+  // Claude Agent emits the same subscription rows from its Claude CLI login.
+  "claude-agent": ANTHROPIC_SUBSCRIPTION_WINDOWS,
   // 5h/weekly/monthly ChatGPT windows; Code Review is a special secondary
   // window (`src/providers/openai.ts` 56-75, 239-261).
   openai: {
@@ -130,12 +134,11 @@ const PRIMARY_QUOTA_WINDOW_RULES: Readonly<Record<string, PrimaryQuotaWindowRule
       { value: "named:period", slot: 0 },
     ],
   },
-  // These providers always emit the same single surviving row, so its window
-  // meaning cannot move with availability. Synthetic always emits 5h then
-  // weekly; Alibaba Coding Plan always emits 5h/weekly/monthly in that order;
-  // Chutes emits one daily-reset quota window (`src/providers/synthetic.ts`
-  // 84-103, `src/providers/alibaba-coding-plan.ts` 116-159,
-  // `src/providers/chutes.ts` 43-55).
+  // These provider cards compact their quota entries into one aggregate row.
+  // Synthetic returns 5h before weekly; Bailian CLI Coding Plan may return any
+  // of 5h/weekly/monthly in that order; Chutes returns one daily-reset window
+  // (`src/providers/synthetic.ts` 84-103, `src/providers/alibaba-coding-plan.ts`
+  // 116-159, `src/providers/chutes.ts` 43-55).
   //
   // Deliberately omitted untyped providers:
   // - Alibaba Token Plan emits optional 5h/weekly

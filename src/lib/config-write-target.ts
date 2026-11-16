@@ -227,8 +227,12 @@ async function configurationWriteOptions(
 export async function writeResolvedConfigText(
   snapshot: ConfigWriteTargetSnapshot,
   content: string,
+  beforeRename?: () => Promise<void>,
 ): Promise<void> {
-  await writeTextAtomic(snapshot.writePath, content, await configurationWriteOptions(snapshot));
+  await writeTextAtomic(snapshot.writePath, content, {
+    ...(await configurationWriteOptions(snapshot)),
+    beforeRename,
+  });
 }
 
 export async function writeConfiguredJsonAtomic(

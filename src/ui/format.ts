@@ -220,13 +220,21 @@ export function formatRunway(
     | { kind: "before_reset"; projectedAtIso: string }
     | { kind: "lasts_past_reset" }
     | undefined,
-  timeZone: string,
+  nowMs: number = Date.now(),
 ): string | undefined {
   if (!runway) return undefined;
-  if (runway.kind === "lasts_past_reset") return "Lasts past reset";
+  if (runway.kind === "lasts_past_reset") return "Projected to last until reset";
   const projected = Date.parse(runway.projectedAtIso);
-  if (!Number.isFinite(projected)) return "Runs out before reset";
-  return `Runs out ${formatTimestamp(projected, timeZone)}`;
+  if (!Number.isFinite(projected) || !Number.isFinite(nowMs) || projected <= nowMs)
+    return undefined;
+  const minutes = Math.ceil((projected - nowMs) / 60_000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const remainder = minutes % 60;
+  const duration = [days && `${days}d`, hours && `${hours}h`, remainder && `${remainder}m`]
+    .filter(Boolean)
+    .join(" ");
+  return `Runs out in ~${duration}`;
 }
 
 /** Concise, truthful title: Lifetime is day-bucketed too. */

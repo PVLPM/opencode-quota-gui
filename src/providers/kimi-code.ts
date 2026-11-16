@@ -150,6 +150,7 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
                 message: result.error,
                 sourceId: row.id,
                 failureCategory: result.failureCategory,
+                ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
               });
               continue;
             }
@@ -194,6 +195,7 @@ function createKimiProvider(spec: KimiProviderSpec): QuotaProvider {
         return withStatusDetails(
           attemptedErrorResult(spec.label, result.error, {
             failureCategory: result.failureCategory,
+            ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
           }),
           [...authDetails, { key: "live_fetch_error", value: result.error }],
         );

@@ -61,7 +61,7 @@ const publicImageFiles = new Set([
 function isForbidden(file) {
   const basename = path.posix.basename(file);
   if (
-    basename === "AGENTS.md" ||
+    (basename === "AGENTS.md" && file !== "AGENTS.md") ||
     basename === ".npmrc" ||
     basename === "opencode.json" ||
     basename === "tui.json" ||

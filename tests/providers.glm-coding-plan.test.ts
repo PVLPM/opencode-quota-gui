@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
+import type { QuotaProviderContext } from "../src/lib/entries.js";
 import { formatQuotaCommand } from "../src/lib/quota-command-format.js";
 import type { QuotaRenderData } from "../src/lib/quota-render-data.js";
 import { formatQuotaRowsGrouped } from "../src/lib/toast-format-grouped.js";
@@ -206,6 +206,48 @@ describe.each(PROVIDERS)("$label GLM provider", (descriptor) => {
 describe("GLM database credential rows", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("preserves the deadline on only the rate-limited account without exposing keys", async () => {
+    const actual =
+      await vi.importActual<typeof import("../src/lib/zai-auth.js")>("../src/lib/zai-auth.js");
+    vi.mocked(resolveZaiAuth).mockImplementation(actual.resolveZaiAuth);
+    vi.mocked(getZaiAuthDiagnostics).mockResolvedValueOnce({
+      state: "configured",
+      source: "opencode.db",
+      checkedPaths: [],
+      credentialDatabasePaths: [],
+    });
+    vi.mocked(readCredentialRows).mockResolvedValueOnce([
+      {
+        id: "limited-id",
+        integrationId: "zai-coding-plan",
+        label: "Work",
+        active: true,
+        value: { type: "api", key: "private-limited-key" },
+      },
+      {
+        id: "working-id",
+        integrationId: "zai-coding-plan",
+        label: "Home",
+        active: false,
+        value: { type: "api", key: "private-working-key" },
+      },
+    ]);
+    mocks.queryZaiQuota.mockImplementation(async ({ apiKey }) =>
+      apiKey === "private-limited-key"
+        ? {
+            success: false,
+            error: "Z.ai API error 429",
+            failureCategory: "provider_api",
+            retryAtMs: 1767268860000,
+          }
+        : { success: true, label: "Z.ai", windows: { fiveHour: { percentRemaining: 80 } } },
+    );
+    const out = await zaiProvider.fetch({ config: {} } as QuotaProviderContext);
+    expect(out.errors).toMatchObject([{ sourceId: "limited-id", retryAtMs: 1767268860000 }]);
+    expect(out.entries.map((entry) => entry.accounting.sourceId)).toEqual(["working-id"]);
+    expect(JSON.stringify(out)).not.toContain("private-");
   });
 
   it("shows a login OpenCode could not return as its own error row next to working rows", async () => {

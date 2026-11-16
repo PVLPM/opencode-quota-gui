@@ -44,6 +44,33 @@ async function expectRejected(schema: StandardSchema, value: unknown, message: s
 const methods = DashboardRpc.methods;
 
 describe("dashboard RPC definition", () => {
+  it("keeps watch attempt nonces optional for legacy callers and validates bound snapshots", async () => {
+    await expectAccepted(methods.watch.input, { scope: "analytics" });
+    await expectAccepted(methods.watch.input, {
+      scope: "analytics",
+      attemptNonce: "opaque-attempt-nonce",
+    });
+    await expectRejected(
+      methods.watch.input,
+      { scope: "analytics", attemptNonce: "" },
+      "attemptNonce must be a non-empty safe string",
+    );
+
+    await expectAccepted(DashboardRpc.events.invalidated.schema, {
+      topic: "cache.observer",
+      at: 1,
+      cacheObserverEvent: {
+        type: "source.status",
+        created: 1,
+        data: {
+          state: "unverified",
+          attemptNonce: "opaque-attempt-nonce",
+          sourceBinding: "source-owner-a",
+        },
+      },
+    });
+  });
+
   it("defines explicit typed methods, one invalidation event and no generic call", () => {
     expect(DashboardRpc.id).toBe(DASHBOARD_RPC_ID);
     expect(Object.keys(methods)).toEqual([
@@ -94,6 +121,17 @@ describe("dashboard RPC definition", () => {
       await expectRejected(input, null, "input must be an empty object");
       await expectRejected(input, { extra: true }, "input must be an empty object");
     }
+  });
+
+  it("accepts only a boolean quota refresh flag", async () => {
+    await expectAccepted(methods.quota.input, { refresh: true });
+    await expectAccepted(methods.quota.input, { refresh: false });
+    await expectRejected(methods.quota.input, { refresh: "true" }, "refresh must be boolean");
+    await expectRejected(
+      methods.quota.input,
+      { refresh: true, extra: true },
+      "input must be an empty object",
+    );
   });
 
   it("validates home, project and session resource inputs", async () => {
@@ -239,17 +277,20 @@ describe("dashboard RPC definition", () => {
   });
 
   it("validates the held viewer scope", async () => {
-    await expectAccepted(methods.watch.input, { scope: "quota" });
-    await expectAccepted(methods.watch.input, { scope: "analytics" });
+    await expectAccepted(methods.watch.input, { scope: "quota", attemptNonce: "nonce-quota" });
+    await expectAccepted(methods.watch.input, {
+      scope: "analytics",
+      attemptNonce: "nonce-analytics",
+    });
     await expectRejected(
       methods.watch.input,
-      { scope: "other" },
+      { scope: "other", attemptNonce: "nonce-other" },
       "scope must be quota or analytics",
     );
     await expectRejected(
       methods.watch.input,
-      { scope: "quota", extra: true },
-      "input must contain only scope",
+      { scope: "quota", attemptNonce: "nonce-quota", extra: true },
+      "input must contain only scope and attemptNonce",
     );
     await expectRejected(methods.watch.output, { active: "yes" }, "output must report active");
   });
@@ -273,7 +314,88 @@ describe("dashboard RPC definition", () => {
     await expectRejected(
       schema,
       { topic: "quota.changed", at: 1, extra: true },
-      "event must contain only topic, at and scope",
+      "event must contain only topic, at, scope and cacheObserverEvent",
+    );
+  });
+
+  it("validates minimal cache observer payloads on their isolated event topic", async () => {
+    const schema = DashboardRpc.events.invalidated.schema;
+    const cacheObserverEvent = {
+      type: "session.step.ended",
+      created: 3,
+      data: {
+        sessionID: "ses-1",
+        assistantMessageID: "msg-1",
+        tokens: { input: 0, cache: { read: 0 } },
+      },
+    };
+
+    await expectAccepted(schema, {
+      topic: "cache.observer",
+      at: 3,
+      cacheObserverEvent,
+    });
+    await expectAccepted(schema, {
+      topic: "cache.observer",
+      at: 4,
+      cacheObserverEvent: {
+        type: "source.status",
+        created: 4,
+        data: { state: "observed" },
+      },
+    });
+    await expectAccepted(schema, {
+      topic: "cache.observer",
+      at: 5,
+      cacheObserverEvent: {
+        type: "session.created",
+        data: { sessionID: "ses-child", parentID: "ses-root" },
+      },
+    });
+    await expectAccepted(schema, {
+      topic: "cache.observer",
+      at: 6,
+      cacheObserverEvent: {
+        type: "session.forked",
+        data: { sessionID: "ses-fork", parentID: "ses-root" },
+      },
+    });
+    await expectRejected(
+      schema,
+      { topic: "cache.observer", at: 3 },
+      "cache.observer topic requires a valid cache observer payload",
+    );
+    await expectRejected(
+      schema,
+      { topic: "sessions.changed", at: 3, cacheObserverEvent },
+      "cache observer payload requires the cache.observer topic",
+    );
+    await expectRejected(
+      schema,
+      {
+        topic: "cache.observer",
+        at: 3,
+        cacheObserverEvent: {
+          ...cacheObserverEvent,
+          data: { ...cacheObserverEvent.data, prompt: "must never cross the RPC boundary" },
+        },
+      },
+      "cache.observer topic requires a valid cache observer payload",
+    );
+    await expectRejected(
+      schema,
+      {
+        topic: "cache.observer",
+        at: 3,
+        cacheObserverEvent: {
+          ...cacheObserverEvent,
+          data: {
+            ...cacheObserverEvent.data,
+            tokens: { ...cacheObserverEvent.data.tokens, output: 99 },
+          },
+        },
+      },
+      "cache.observer topic requires a valid cache observer payload",
     );
   });
 

@@ -357,6 +357,7 @@ export const copilotProvider: QuotaProvider = {
               message: result.error,
               sourceId: row.id,
               failureCategory: result.failureCategory,
+              ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
             });
             continue;
           }
@@ -392,6 +393,7 @@ export const copilotProvider: QuotaProvider = {
       return withStatusDetails(
         attemptedErrorResult("Copilot", result.error, {
           failureCategory: result.failureCategory,
+          ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
         }),
         statusDetails,
       );

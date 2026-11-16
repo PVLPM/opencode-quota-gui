@@ -256,6 +256,42 @@ describe("resolvePricingKey snapshot coverage", () => {
     });
   });
 
+  it("prices Claude Agent family aliases at current Anthropic rates without changing source ids", () => {
+    const tokens = {
+      input: 1000,
+      output: 2000,
+      reasoning: 300,
+      cache_read: 4000,
+      cache_write: 5000,
+    };
+    for (const modelID of ["haiku", "sonnet", "opus"]) {
+      const source = { providerID: "claude-agent", modelID };
+      const concrete = `claude-${modelID}-5-5`;
+      const expected = priceTokenBuckets({ providerID: "anthropic", modelID: concrete, tokens });
+      expect(expected.status).toBe("priced");
+      expect(priceTokenBuckets({ ...source, tokens, atMs: 1 })).toEqual(expected);
+      expect(source).toEqual({ providerID: "claude-agent", modelID });
+      expect(resolvePricingKey({ providerID: "anthropic", modelID })).toMatchObject({
+        ok: true,
+        key: { provider: "anthropic", model: concrete },
+      });
+      expect(resolvePricingKey({ providerID: "openai", modelID }).ok).toBe(false);
+      expect(resolvePricingKey({ providerID: "openai", modelID: `anthropic/${modelID}` }).ok).toBe(
+        false,
+      );
+    }
+    expect(
+      resolvePricingKey({ providerID: "claude-agent", modelID: "claude-sonnet-4-6" }),
+    ).toMatchObject({
+      ok: true,
+      key: { provider: "anthropic", model: "claude-sonnet-4-6" },
+    });
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "unknown-family" }).ok).toBe(
+      false,
+    );
+    expect(resolvePricingKey({ modelID: "anthropic/opus" }).ok).toBe(false);
+  });
+
   it("still resolves an arbitrary non-listed provider from an explicit model prefix", () => {
     expect(
       resolvePricingKey({

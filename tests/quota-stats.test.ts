@@ -227,6 +227,7 @@ vi.mock("../src/lib/token-cost.js", () => ({
   ),
 }));
 
+import * as pricing from "../src/lib/modelsdev-pricing.js";
 import {
   __resetTemporalSnapshotForTests,
   normalizeTemporalSnapshot,
@@ -248,6 +249,50 @@ describe("shared priceTokenBuckets primitive", () => {
   });
 
   const tokens = { input: 2, output: 3, reasoning: 4, cache_read: 5, cache_write: 6 };
+
+  it("does not invent a price for a Claude family when its concrete model is unavailable", () => {
+    for (const modelID of ["haiku", "sonnet", "opus"]) {
+      const outcome = priceTokenBuckets({ providerID: "claude-agent", modelID, tokens });
+      expect(["unknown", "unpriced"]).toContain(outcome.status);
+    }
+  });
+
+  it("does not use another provider's sonnet when Anthropic lacks its concrete price", () => {
+    const provider = vi
+      .spyOn(pricing, "isModelsDevProviderId")
+      .mockImplementation((id) => id === "anthropic" || id === "other");
+    const models = vi.spyOn(pricing, "listProvidersForModelId").mockReturnValue(["other"]);
+    const costs = vi
+      .spyOn(pricing, "hasCost")
+      .mockImplementation((id, model) => id === "other" && model === "sonnet");
+    try {
+      expect(priceTokenBuckets({ providerID: "anthropic", modelID: "sonnet", tokens }).status).toBe(
+        "unknown",
+      );
+    } finally {
+      provider.mockRestore();
+      models.mockRestore();
+      costs.mockRestore();
+    }
+  });
+
+  it("preserves an exact catalog-only gateway route with an Anthropic family prefix", () => {
+    const catalog = vi
+      .spyOn(pricing, "hasCatalogModel")
+      .mockImplementation(
+        (provider, model) => provider === "gateway" && model === "anthropic/sonnet",
+      );
+    try {
+      expect(
+        priceTokenBuckets({ providerID: "gateway", modelID: "anthropic/sonnet", tokens }),
+      ).toMatchObject({
+        status: "unpriced",
+        key: { provider: "gateway", model: "anthropic/sonnet" },
+      });
+    } finally {
+      catalog.mockRestore();
+    }
+  });
 
   it("returns a priced outcome with the resolved key and cost", () => {
     expect(priceTokenBuckets({ providerID: "openai", modelID: "gpt-5", tokens })).toEqual({

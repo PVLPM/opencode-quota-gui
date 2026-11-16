@@ -579,6 +579,42 @@
   border-bottom: 1px solid var(--qg-border);
 }
 
+.qg-card__copy {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: -5px -5px -5px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--qg-text-muted);
+  background: transparent;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 120ms ease;
+}
+
+.qg-card:hover .qg-card__copy,
+.qg-card:focus-within .qg-card__copy {
+  opacity: 1;
+}
+
+.qg-card__copy:hover {
+  color: var(--qg-text);
+}
+.qg-card__copy:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+@media (hover: none) {
+  .qg-card__copy {
+    opacity: 1;
+  }
+}
+
 .qg-card__identity {
   display: flex;
   flex-direction: row;
@@ -716,6 +752,20 @@
 }
 
 /* Original quota geometry: two independent 8px segments, not an outer track. */
+.qg-row__bar-tip {
+  grid-column: 1 / -1;
+}
+
+.qg-row__bar-tip > .qg-row__bar {
+  flex: 1;
+}
+
+.qg-row__bar-tip:focus-visible,
+.qg-row__value-tip:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
+}
+
 .qg-row__bar {
   --qg-quota-gap: min(
     3px,
@@ -2928,11 +2978,16 @@
   border-color: var(--qg-border-strong);
 }
 
+/* Provider and per-model phase pills share one caps treatment. */
+.qg-temporal-popover__phase,
+.qg-temporal-popover__state {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .qg-temporal-popover__phase {
   margin-left: auto;
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .qg-temporal-popover__note,

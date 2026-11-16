@@ -86,6 +86,7 @@ const EXPECTED_KEYS = [
   "accountingDetail",
   "lowQuotaThresholdRemainingPercent",
   "duplicateCooldownMinutes",
+  "nativeQuotaNotifications",
   "opencodeGoWindows",
   "opencodeMonthlyLimit",
   "dashboard.hiddenCards",
@@ -144,6 +145,18 @@ describe("GUI settings keys", () => {
       accountingDetail: "summary",
       lowQuotaThresholdRemainingPercent: 10,
       duplicateCooldownMinutes: 30,
+      nativeQuotaNotifications: {
+        enabled: true,
+        low: { enabled: true, thresholdRemainingPercent: 10 },
+        exhausted: { enabled: true },
+        modelChangeToastEnabled: true,
+        reset: {
+          enabled: true,
+          windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+        },
+        providerError: { enabled: true },
+        duplicateCooldownMinutes: 30,
+      },
       opencodeGoWindows: ["rolling", "weekly", "monthly"],
       opencodeMonthlyLimit: null,
       "dashboard.hiddenCards": [],
@@ -163,6 +176,56 @@ describe("GUI settings keys", () => {
     expect(snapshot.visibility).toEqual({ hiddenCards: [], hiddenRows: [] });
     expect(snapshot.import).toEqual({ available: false, issues: [] });
     expect(snapshot.issues).toEqual([]);
+  });
+
+  it("reads and writes one canonical Native quota notification policy", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, {
+      nativeQuotaNotifications: {
+        enabled: false,
+        reset: { windows: ["weekly"] },
+      },
+      // The legacy setting remains parseable for the upstream notifier, but it
+      // does not override Native notification policy.
+      resetNotifications: { enabled: false, windows: ["weekly"] },
+    });
+    const store = makeStore(workspace);
+    const before = await store.settings();
+    expect(before.values.nativeQuotaNotifications).toEqual({
+      enabled: false,
+      low: { enabled: true, thresholdRemainingPercent: 10 },
+      exhausted: { enabled: true },
+      modelChangeToastEnabled: true,
+      reset: { enabled: true, windows: ["weekly"] },
+      providerError: { enabled: true },
+      duplicateCooldownMinutes: 30,
+    });
+
+    const updatedPolicy = {
+      enabled: true,
+      low: { enabled: false, thresholdRemainingPercent: 25 },
+      exhausted: { enabled: true },
+      modelChangeToastEnabled: true,
+      reset: { enabled: false, windows: ["fiveHour", "weekly"] },
+      providerError: { enabled: true },
+      duplicateCooldownMinutes: 5,
+    };
+    const saved = await store.saveSettings({
+      patch: { nativeQuotaNotifications: updatedPolicy },
+      expectedRevision: before.revision,
+    });
+    expect(saved.applied).toEqual({ nativeQuotaNotifications: updatedPolicy });
+    expect((await store.settings()).values.nativeQuotaNotifications).toEqual(updatedPolicy);
+    expect(readDotted(workspace, "nativeQuotaNotifications")).toEqual(updatedPolicy);
+
+    const after = await store.settings();
+    await expectGuiError(
+      store.saveSettings({
+        patch: { nativeQuotaNotifications: { enabled: false } },
+        expectedRevision: after.revision,
+      }),
+      "invalid-setting",
+    );
   });
 
   it("reads dashboard.port from the canonical file and keeps it read-only", async () => {

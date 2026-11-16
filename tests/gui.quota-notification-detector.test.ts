@@ -34,6 +34,7 @@ import {
   type ResetObservation,
   updateObservation as updateLegacyObservation,
 } from "../src/lib/quota-reset-notifications.js";
+import type { NativeQuotaNotificationPolicy } from "../src/lib/types.js";
 
 const NOW = Date.UTC(2026, 10, 2, 12, 0, 0);
 const OLD_RESET_AT = "2026-11-02T13:00:00.000Z";
@@ -52,6 +53,7 @@ function percentRow(
     resultType?: QuotaNotificationRowObservation["resultType"];
     kind?: QuotaNotificationRowObservation["kind"];
     label?: string;
+    metric?: QuotaNotificationRowObservation["metric"];
   } = {},
 ): QuotaNotificationRowObservation {
   const row: QuotaNotificationRowObservation = {
@@ -60,6 +62,7 @@ function percentRow(
     kind: options.kind ?? "percent",
     resultType: options.resultType ?? "quota",
     percentRemaining,
+    metric: options.metric ?? { kind: "window", window: "five_hour" },
   };
   const resetAtIso = options.resetAtIso === undefined ? RESET_AT : options.resetAtIso;
   if (resetAtIso !== null) row.resetAtIso = resetAtIso;
@@ -99,17 +102,60 @@ interface DetectOverrides {
   nowMs?: number;
   lowThresholdPercent?: number;
   cooldownMs?: number;
+  policy?: TestPolicyOverride;
 }
+
+type TestNotificationPolicy = NativeQuotaNotificationPolicy;
+
+interface TestPolicyOverride {
+  enabled?: boolean;
+  modelChangeToastEnabled?: boolean;
+  low?: Partial<TestNotificationPolicy["low"]>;
+  exhausted?: Partial<TestNotificationPolicy["exhausted"]>;
+  reset?: Partial<TestNotificationPolicy["reset"]>;
+  providerError?: Partial<TestNotificationPolicy["providerError"]>;
+  duplicateCooldownMinutes?: number;
+}
+
+const DEFAULT_POLICY: TestNotificationPolicy = {
+  enabled: true,
+  modelChangeToastEnabled: true,
+  low: { enabled: true, thresholdRemainingPercent: LOW_THRESHOLD },
+  exhausted: { enabled: true },
+  reset: {
+    enabled: true,
+    windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+  },
+  providerError: { enabled: true },
+  duplicateCooldownMinutes: COOLDOWN_MS / 60_000,
+};
 
 function detect(
   cards: readonly QuotaNotificationCardObservation[],
   overrides: DetectOverrides = {},
 ): DetectQuotaNotificationsResult {
+  const policy: TestNotificationPolicy = {
+    ...DEFAULT_POLICY,
+    ...overrides.policy,
+    low: {
+      ...DEFAULT_POLICY.low,
+      ...overrides.policy?.low,
+      ...(overrides.lowThresholdPercent === undefined
+        ? {}
+        : { thresholdRemainingPercent: overrides.lowThresholdPercent }),
+    },
+    exhausted: { ...DEFAULT_POLICY.exhausted, ...overrides.policy?.exhausted },
+    reset: { ...DEFAULT_POLICY.reset, ...overrides.policy?.reset },
+    providerError: { ...DEFAULT_POLICY.providerError, ...overrides.policy?.providerError },
+    duplicateCooldownMinutes:
+      overrides.cooldownMs === undefined
+        ? (overrides.policy?.duplicateCooldownMinutes ?? DEFAULT_POLICY.duplicateCooldownMinutes)
+        : overrides.cooldownMs / 60_000,
+  };
   const input: DetectQuotaNotificationsInput = {
     cards,
     nowMs: overrides.nowMs ?? NOW,
-    lowThresholdPercent: overrides.lowThresholdPercent ?? LOW_THRESHOLD,
-    cooldownMs: overrides.cooldownMs ?? COOLDOWN_MS,
+    policy,
   };
   if (overrides.state !== undefined) input.state = overrides.state;
   if (overrides.cooldowns !== undefined) input.cooldowns = overrides.cooldowns;
@@ -625,6 +671,154 @@ describe("quota notification detector", () => {
     expect(secondReset.notifications[0]?.fingerprint).not.toBe(
       firstReset.notifications[0]?.fingerprint,
     );
+  });
+
+  it.each([
+    {
+      name: "master",
+      policy: { enabled: false },
+      suppressedKinds: ["low", "exhausted", "reset", "provider-error"],
+    },
+    { name: "low", policy: { low: { enabled: false } }, suppressedKinds: ["low"] },
+    {
+      name: "exhausted",
+      policy: { exhausted: { enabled: false } },
+      suppressedKinds: ["exhausted"],
+    },
+    { name: "reset", policy: { reset: { enabled: false } }, suppressedKinds: ["reset"] },
+    {
+      name: "provider-error",
+      policy: { providerError: { enabled: false } },
+      suppressedKinds: ["provider-error"],
+    },
+  ])("suppresses the $name category while continuing to track transitions", ({
+    policy,
+    suppressedKinds,
+  }) => {
+    const baseline = detect([
+      card({
+        rows: [
+          percentRow("low-row", 30),
+          percentRow("exhausted-row", 30),
+          percentRow("reset-row", 20, { resetAtIso: OLD_RESET_AT }),
+        ],
+      }),
+    ]);
+    const resetObservedAt = Date.parse(OLD_RESET_AT) + 60_000;
+    const observed = next(
+      baseline,
+      [
+        card({
+          rows: [
+            percentRow("low-row", 5),
+            percentRow("exhausted-row", 0),
+            percentRow("reset-row", 80, { resetAtIso: RESET_AT }),
+          ],
+          errors: [{ failureCategory: "provider_api" }],
+        }),
+      ],
+      { nowMs: resetObservedAt, policy },
+    );
+
+    expect(observed.notifications.some(({ kind }) => suppressedKinds.includes(kind))).toBe(false);
+    if (policy.enabled === false) expect(observed.notifications).toEqual([]);
+    expect(observed.state.rows[`${CARD_ID}\u001flow-row`]?.percentRemaining).toBe(5);
+    expect(observed.state.rows[`${CARD_ID}\u001fexhausted-row`]?.percentRemaining).toBe(0);
+    expect(observed.state.rows[`${CARD_ID}\u001freset-row`]?.reset?.resetAtMs).toBe(
+      Date.parse(RESET_AT),
+    );
+    expect(observed.state.providers[CARD_ID]?.status).toBe("error");
+
+    const reenabled = next(
+      observed,
+      [
+        card({
+          rows: [
+            percentRow("low-row", 5),
+            percentRow("exhausted-row", 0),
+            percentRow("reset-row", 80, { resetAtIso: RESET_AT }),
+          ],
+          errors: [{ failureCategory: "provider_api" }],
+        }),
+      ],
+      { nowMs: resetObservedAt + 1 },
+    );
+    expect(reenabled.notifications).toEqual([]);
+  });
+
+  it("applies reset-window selection without stopping reset baseline tracking", () => {
+    const selectedPolicy = {
+      low: { enabled: false },
+      exhausted: { enabled: false },
+      providerError: { enabled: false },
+      reset: { enabled: true, windows: ["fiveHour"] },
+    };
+    const baseline = detect(
+      [
+        card({
+          rows: [
+            percentRow("five-hour", 20, {
+              resetAtIso: OLD_RESET_AT,
+              metric: { kind: "window", window: "five_hour" },
+            }),
+            percentRow("weekly", 20, {
+              resetAtIso: OLD_RESET_AT,
+              metric: { kind: "window", window: "week" },
+            }),
+          ],
+        }),
+      ],
+      { policy: selectedPolicy },
+    );
+    const resetAt = Date.parse(OLD_RESET_AT) + 60_000;
+    const observed = next(
+      baseline,
+      [
+        card({
+          rows: [
+            percentRow("five-hour", 80, {
+              resetAtIso: RESET_AT,
+              metric: { kind: "window", window: "five_hour" },
+            }),
+            percentRow("weekly", 80, {
+              resetAtIso: RESET_AT,
+              metric: { kind: "window", window: "week" },
+            }),
+          ],
+        }),
+      ],
+      { nowMs: resetAt, policy: selectedPolicy },
+    );
+
+    expect(observed.notifications.map(({ rowId }) => rowId)).toEqual(["five-hour"]);
+    expect(observed.state.rows[`${CARD_ID}\u001fweekly`]?.reset?.resetAtMs).toBe(
+      Date.parse(RESET_AT),
+    );
+    const reenabled = next(
+      observed,
+      [
+        card({
+          rows: [
+            percentRow("five-hour", 80, {
+              resetAtIso: RESET_AT,
+              metric: { kind: "window", window: "five_hour" },
+            }),
+            percentRow("weekly", 80, {
+              resetAtIso: RESET_AT,
+              metric: { kind: "window", window: "week" },
+            }),
+          ],
+        }),
+      ],
+      {
+        nowMs: resetAt + 1,
+        policy: {
+          ...selectedPolicy,
+          reset: { enabled: true, windows: ["fiveHour", "weekly"] },
+        },
+      },
+    );
+    expect(reenabled.notifications).toEqual([]);
   });
 
   it("emits provider-error only for a healthy -> error transition with structured provenance", () => {

@@ -63,7 +63,6 @@ const TEST_ACCOUNTING = {
   authority: "provider_reported" as const,
 };
 
-const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const XAI_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const COPILOT_USER_URL = "https://api.github.com/copilot_internal/user";
 const OPENAI_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -89,7 +88,13 @@ function context(config: Partial<QuotaProviderContext["config"]> = {}): QuotaPro
     },
     resolveRuntimeProviderIds: async () => [],
     workspaceRoot: tempRoot,
-    config: { cursorPlan: "none", enabledProviders: "auto", ...config },
+    config: {
+      cursorPlan: "none",
+      enabledProviders: "auto",
+      // Points the Claude CLI at a path that does not exist, so no host Claude login is probed.
+      anthropicBinaryPath: join(tempRoot, "no-claude-cli", "claude"),
+      ...config,
+    },
   };
 }
 
@@ -382,7 +387,7 @@ describe("provider account metadata contract", () => {
 });
 
 describe("multi-account provider loops", () => {
-  it("anthropic: describes both logins and associates the known failure", async () => {
+  it("anthropic: does not report subscription quota for OpenCode OAuth logins", async () => {
     bindCredentials([
       oauthCredential({
         integrationId: "anthropic",
@@ -397,9 +402,7 @@ describe("multi-account provider loops", () => {
         resolveError: "refresh_failed: HTTP 401",
       }),
     ]);
-    stubFetch((url, init) => {
-      expect(String(url)).toBe(ANTHROPIC_USAGE_URL);
-      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer claude-work-token");
+    const request = stubFetch(() => {
       return jsonResponse({
         five_hour: { utilization: 20, resets_at: "2026-10-18T20:00:00.000Z" },
         seven_day: { utilization: 30, resets_at: "2026-10-25T00:00:00.000Z" },
@@ -408,26 +411,12 @@ describe("multi-account provider loops", () => {
 
     const output = await anthropicProvider.fetch(context());
 
-    expect(output.attempted).toBe(true);
-    expect(output.entries).toEqual([
-      expect.objectContaining({
-        name: "[Claude Work] (active) 5h",
-        rowKey: "window:five_hour",
-        accounting: expect.objectContaining({ sourceId: "cred-claude-work" }),
-      }),
-      expect.objectContaining({
-        name: "[Claude Work] (active) Weekly",
-        rowKey: "window:week",
-        accounting: expect.objectContaining({ sourceId: "cred-claude-work" }),
-      }),
-    ]);
-    expect(output.errors).toEqual([
-      expect.objectContaining({ label: "[Claude Home]", sourceId: "cred-claude-home" }),
-    ]);
-    expect(output.accounts).toEqual([
-      { sourceId: "cred-claude-work", label: "[Claude Work] (active)", active: true },
-      { sourceId: "cred-claude-home", label: "[Claude Home]", active: false },
-    ]);
+    expect(output.attempted).toBe(false);
+    expect(request).not.toHaveBeenCalled();
+    expect(output.statusDetails?.some(({ key }) => key === "cli_installed")).toBe(false);
+    expect(output.entries).toEqual([]);
+    expect(output.errors).toEqual([]);
+    expect(output.accounts ?? []).toEqual([]);
   });
 
   it("xai: keeps row keys stable across a credential label rename", async () => {

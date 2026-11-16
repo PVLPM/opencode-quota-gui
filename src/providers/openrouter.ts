@@ -98,6 +98,7 @@ export const openRouterProvider: QuotaProvider = {
         errors.push({
           label: account.label,
           message: result.error,
+          ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
           failureCategory: result.failureCategory,
           ...(account.sourceId ? { sourceId: account.sourceId } : {}),
         });

@@ -478,6 +478,12 @@ describe("native SettingsPage state", () => {
 
   it("refreshes both reads after an explicit reconnect", async () => {
     const fake = recordingClient();
+    const inputs: Array<{ refresh?: boolean } | undefined> = [];
+    const quota = fake.client.quota;
+    fake.client.quota = (input) => {
+      inputs.push(input);
+      return quota(input);
+    };
     const state = await mountState(fake.client);
 
     fake.setConnection("reconnecting");
@@ -488,6 +494,7 @@ describe("native SettingsPage state", () => {
     expect(fake.counts.reconnects).toBe(1);
     expect(fake.counts.settings).toBe(2);
     expect(fake.counts.quota).toBe(2);
+    expect(inputs).toEqual([undefined, { refresh: true }]);
     expect(state.connection()).toBe("live");
     expect(state.stale()).toBe(false);
   });
@@ -501,6 +508,53 @@ describe("native SettingsPage state", () => {
     expect(fake.counts.reconnects).toBe(0);
     expect(fake.counts.settings).toBe(2);
     expect(fake.counts.quota).toBe(2);
+  });
+
+  it("retries a failed live forced quota read once on reconnect", async () => {
+    const fake = recordingClient();
+    const inputs: Array<{ refresh?: boolean } | undefined> = [];
+    let fail = true;
+    const quota = fake.client.quota;
+    fake.client.quota = (input) => {
+      inputs.push(input);
+      if (input?.refresh && fail) return Promise.reject(new Error("transport lost"));
+      return quota(input);
+    };
+    const state = await mountState(fake.client);
+    state.retry();
+    await flush();
+    expect(state.quotaStale()).toBe(true);
+    fail = false;
+    fake.fireReconnect();
+    await flush();
+    expect(inputs).toEqual([undefined, { refresh: true }, { refresh: true }]);
+    expect(state.quotaStale()).toBe(false);
+  });
+
+  it("does not restore an older failed retry after a newer retry succeeds", async () => {
+    const fake = recordingClient();
+    const inputs: Array<{ refresh?: boolean } | undefined> = [];
+    let rejectOlder!: (error: Error) => void;
+    let forced = 0;
+    const quota = fake.client.quota;
+    fake.client.quota = (input) => {
+      inputs.push(input);
+      if (input?.refresh && ++forced === 1)
+        return new Promise((_, reject) => {
+          rejectOlder = reject;
+        });
+      return quota(input);
+    };
+    const state = await mountState(fake.client);
+    state.retry();
+    await flush();
+    state.retry();
+    await flush();
+    rejectOlder(new Error("old failure"));
+    await flush();
+    fake.fireReconnect();
+    await flush();
+    expect(inputs).toEqual([undefined, { refresh: true }, { refresh: true }, undefined]);
   });
 
   it("keeps the reconnect marker when the quota refetch fails after settings succeeds", async () => {
@@ -589,6 +643,12 @@ describe("native SettingsPage state", () => {
 
   it("retries the transport, not a local read, while the host is down", async () => {
     const fake = recordingClient();
+    const inputs: Array<{ refresh?: boolean } | undefined> = [];
+    const quota = fake.client.quota;
+    fake.client.quota = (input) => {
+      inputs.push(input);
+      return quota(input);
+    };
     const [hostConnected, setHostConnected] = createSignal(true);
     const state = await mountState(fake.client, { hostConnected });
 
@@ -602,6 +662,11 @@ describe("native SettingsPage state", () => {
     expect(fake.counts.settings).toBe(1);
     expect(fake.counts.quota).toBe(1);
     expect(state.stale()).toBe(true);
+    fake.setReconnectSucceeds(true);
+    setHostConnected(true);
+    await flush();
+    expect(inputs).toEqual([undefined, { refresh: true }]);
+    expect(fake.counts.quota).toBe(2);
   });
 
   it("marks the page stale when the quota read fails and keeps the prior catalog", async () => {

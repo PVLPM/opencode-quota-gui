@@ -13,7 +13,8 @@ export interface DisplayPreferences {
   /** The frontend picks the shown percent; both numbers arrive in the row. */
   percentMode: "used" | "remaining";
   percentLabelStyle?: "full" | "bare";
-  showRunway: boolean;
+  /** Legacy config snapshot field; quota cards always show sound projections as tooltips. */
+  showRunway?: boolean;
   detailed: boolean;
   /** Saved presentation order from `dashboard.cardOrder`; non-empty is authoritative. */
   cardOrder?: readonly string[];

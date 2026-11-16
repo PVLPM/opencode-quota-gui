@@ -99,12 +99,14 @@ export function createGlmCodingPlanProvider(params: {
     credentialDatabasePaths: string[];
     error?: string;
   }>;
-  queryQuota: (params: {
-    requestTimeoutMs?: number;
-    apiKey?: string;
-  }) => Promise<
+  queryQuota: (params: { requestTimeoutMs?: number; apiKey?: string }) => Promise<
     | GlmQuotaResult
-    | { success: false; error: string; failureCategory?: ProviderFailureCategory }
+    | {
+        success: false;
+        error: string;
+        failureCategory?: ProviderFailureCategory;
+        retryAtMs?: number;
+      }
     | null
   >;
   matchesCurrentModel: (model: string) => boolean;

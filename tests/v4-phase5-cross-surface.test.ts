@@ -49,7 +49,7 @@ const mocks = vi.hoisted(() => ({
   getMiniMaxChinaAuthDiagnostics: vi.fn(),
   getAnthropicDiagnostics: vi.fn(),
   hasAnthropicCredentialsConfigured: vi.fn(),
-  queryAnthropicQuota: vi.fn(),
+  fingerprintAccessToken: vi.fn(),
   fetchSessionTokensForDisplay: vi.fn(),
 }));
 
@@ -105,7 +105,11 @@ vi.mock("../src/lib/minimax-auth.js", () => ({
 vi.mock("../src/lib/anthropic.js", () => ({
   getAnthropicDiagnostics: mocks.getAnthropicDiagnostics,
   hasAnthropicCredentialsConfigured: mocks.hasAnthropicCredentialsConfigured,
-  queryAnthropicQuota: mocks.queryAnthropicQuota,
+  fingerprintAccessToken: mocks.fingerprintAccessToken,
+}));
+vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/opencode-auth.js")>()),
+  readCredentialRows: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("../src/lib/opencode-runtime-paths.js", () =>
   createPluginRuntimePathsMockModule(TEST_RUNTIME_ROOT),
@@ -568,8 +572,8 @@ describe("v1 supported backend release evidence", () => {
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the optional Anthropic Fable weekly row", async () => {
-    currentConfig = configForSingleProvider("anthropic");
+  it("keeps the optional Claude Agent Fable weekly row", async () => {
+    currentConfig = configForSingleProvider("claude-agent");
     mocks.loadConfig.mockImplementation(async () => currentConfig);
     mocks.hasAnthropicCredentialsConfigured.mockResolvedValue(true);
     const quota = {
@@ -586,28 +590,29 @@ describe("v1 supported backend release evidence", () => {
       version: "2.1.258",
       authStatus: "authenticated",
       quotaSupported: true,
-      quotaSource: "opencode-auth-oauth-api",
-      oauthCredentialSource: "opencode-auth",
+      quotaSource: "claude-credentials-oauth-api",
+      oauthCredentialSource: "claude-credentials",
       checkedCommands: ["claude --version"],
       quota,
     });
-    mocks.queryAnthropicQuota.mockResolvedValue(quota);
 
-    const { anthropicProvider } = await import("../src/providers/anthropic.js");
-    anthropicProvider.cachePolicy = { kind: "account-neutral" };
-    mocks.getProviders.mockReturnValue([anthropicProvider]);
+    const { claudeAgentProvider } = await import("../src/providers/claude-agent.js");
+    claudeAgentProvider.cachePolicy = { kind: "account-neutral" };
+    mocks.getProviders.mockReturnValue([claudeAgentProvider]);
 
     const client = createClient();
     client.config.providers.mockResolvedValue({
-      data: { providers: [{ id: "anthropic" }] },
+      data: { providers: [{ id: "claude-agent" }] },
     });
 
     const collected = await collectFor({
       client,
       config: currentConfig,
-      providers: [anthropicProvider],
+      providers: [claudeAgentProvider],
     });
-    const fable = collected.data?.entries.find((entry) => entry.name === "Claude Fable Weekly");
+    const fable = collected.data?.entries.find(
+      (entry) => entry.name === "Claude Agent Fable Weekly",
+    );
     expect(fable?.percentRemaining).toBe(98);
   });
 

@@ -81,13 +81,72 @@ const CN_2026 = {
   ],
 };
 
+const CN_2027 = {
+  timeZone: "Asia/Shanghai",
+  source:
+    "https://english.www.gov.cn/policies/latestreleases/202611/06/content_WS6aed74dcc6d00ca5f9a0e22e.html",
+  published: "2026-11-06",
+  intervals: [
+    {
+      id: "new-year",
+      localStart: "2027-01-01",
+      localEnd: "2027-01-04",
+      startMs: 1_798_732_800_000,
+      endMs: 1_798_992_000_000,
+    },
+    {
+      id: "spring-festival",
+      localStart: "2027-02-05",
+      localEnd: "2027-02-14",
+      startMs: 1_801_756_800_000,
+      endMs: 1_802_534_400_000,
+    },
+    {
+      id: "qingming",
+      localStart: "2027-04-03",
+      localEnd: "2027-04-06",
+      startMs: 1_806_681_600_000,
+      endMs: 1_806_940_800_000,
+    },
+    {
+      id: "labour-day",
+      localStart: "2027-05-01",
+      localEnd: "2027-05-06",
+      startMs: 1_809_100_800_000,
+      endMs: 1_809_532_800_000,
+    },
+    {
+      id: "dragon-boat-festival",
+      localStart: "2027-06-09",
+      localEnd: "2027-06-10",
+      startMs: 1_812_470_400_000,
+      endMs: 1_812_556_800_000,
+    },
+    {
+      id: "mid-autumn-festival",
+      localStart: "2027-09-15",
+      localEnd: "2027-09-16",
+      startMs: 1_820_937_600_000,
+      endMs: 1_821_024_000_000,
+    },
+    {
+      id: "national-day",
+      localStart: "2027-10-01",
+      localEnd: "2027-10-08",
+      startMs: 1_822_320_000_000,
+      endMs: 1_822_924_800_000,
+    },
+  ],
+  makeupWorkdays: [],
+};
+
 function makeSnapshot(providers: Record<string, Record<string, unknown>>) {
   return {
     version: 1,
     revision: REVISION,
     source: `https://github.com/anomalyco/models.dev/tree/${REVISION}`,
     generatedAt: GENERATED_AT,
-    jurisdictions: { CN: { "2026": CN_2026 } },
+    jurisdictions: { CN: { "2026": CN_2026, "2027": CN_2027 } },
     providers,
   };
 }
@@ -318,7 +377,7 @@ describe("modelsdev temporal condition evaluation", () => {
     expect(evaluateTemporalCondition(holiday, at("2026-01-03T16:00:00.000Z")).value).toBe(false);
     expect(evaluateTemporalCondition(holiday, at("2026-10-01T02:00:00.000Z")).value).toBe(true);
 
-    const unknownYear = evaluateTemporalCondition(holiday, at("2027-01-01T00:00:00.000Z"));
+    const unknownYear = evaluateTemporalCondition(holiday, at("2028-01-01T00:00:00.000Z"));
     expect(unknownYear.value).toBeNull();
     expect(unknownYear.status).toBe("unresolved");
 
@@ -328,6 +387,42 @@ describe("modelsdev temporal condition evaluation", () => {
     );
     expect(unknownJurisdiction.value).toBeNull();
     expect(unknownJurisdiction.status).toBe("unresolved");
+  });
+
+  it("resolves CN 2027 boundaries and one-day holidays without changing weekday pricing", () => {
+    loadFixture();
+    const holiday = { type: "holiday" as const, op: "equals" as const, value: "CN" as const };
+
+    expect(evaluateTemporalCondition(holiday, at("2026-12-31T15:59:59.999Z")).value).toBe(false);
+    expect(evaluateTemporalCondition(holiday, at("2026-12-31T16:00:00.000Z")).value).toBe(true);
+    expect(evaluateTemporalCondition(holiday, at("2027-01-03T15:59:59.999Z")).value).toBe(true);
+    expect(evaluateTemporalCondition(holiday, at("2027-01-03T16:00:00.000Z")).value).toBe(false);
+
+    // Dragon Boat Festival is exactly one local civil day: [June 9, June 10).
+    expect(evaluateTemporalCondition(holiday, at("2027-06-08T15:59:59.999Z")).value).toBe(false);
+    expect(evaluateTemporalCondition(holiday, at("2027-06-08T16:00:00.000Z")).value).toBe(true);
+    expect(evaluateTemporalCondition(holiday, at("2027-06-09T15:59:59.999Z")).value).toBe(true);
+    expect(evaluateTemporalCondition(holiday, at("2027-06-09T16:00:00.000Z")).value).toBe(false);
+
+    // The real OpenRouter policy keys off literal UTC weekdays, not government
+    // workday designations: Jan 1 is Friday despite being a public holiday.
+    const base = { input: 0.15, output: 0.6, cache_read: 0.003 };
+    expect(
+      resolveTemporalRates(
+        "openrouter",
+        "deepseek/deepseek-v4.1-flash-1017",
+        at("2027-01-01T02:00:00.000Z"),
+        base,
+      ).rates,
+    ).toEqual({ input: 0.3, output: 1.2, cache_read: 0.006 });
+    expect(
+      resolveTemporalRates(
+        "openrouter",
+        "deepseek/deepseek-v4.1-flash-1017",
+        at("2027-01-02T02:00:00.000Z"),
+        base,
+      ).rates,
+    ).toEqual(base);
   });
 
   it("propagates three-valued logic through all, any and not", () => {
@@ -440,7 +535,7 @@ describe("modelsdev temporal pricing runtime", () => {
     const future = resolveTemporalRates(
       "deepseek",
       "deepseek-v4-pro",
-      at("2027-01-04T02:00:00.000Z"),
+      at("2028-01-03T02:00:00.000Z"),
       base,
     );
     expect(future.status).toBe("unresolved");
@@ -507,7 +602,7 @@ describe("modelsdev temporal pricing runtime", () => {
     expect(
       getNextTemporalTransition("deepseek", "deepseek-v4-pro", at("2026-12-31T15:00:00.000Z"))
         ?.atMs,
-    ).toBe(at("2027-01-01T01:00:00.000Z"));
+    ).toBe(at("2027-01-04T01:00:00.000Z"));
     expect(
       getNextTemporalTransition("openai", "gpt-5.5", at("2026-01-05T13:59:00.000Z")),
     ).toBeNull();
@@ -547,8 +642,8 @@ describe("modelsdev temporal pricing runtime", () => {
     const unresolved = listTemporalIntervals(
       "deepseek",
       "deepseek-v4-pro",
-      at("2027-01-01T00:00:00.000Z"),
-      at("2027-01-01T02:00:00.000Z"),
+      at("2028-01-03T00:00:00.000Z"),
+      at("2028-01-03T02:00:00.000Z"),
     );
     expect(unresolved.map((interval) => interval.status)).toEqual(["resolved", "unresolved"]);
   });
@@ -610,7 +705,7 @@ describe("modelsdev temporal pricing runtime", () => {
   it("reports unresolved instant state without inventing active rules", () => {
     loadFixture();
     expect(
-      getTemporalInstantState("deepseek", "deepseek-v4-pro", at("2027-01-04T02:00:00.000Z")),
+      getTemporalInstantState("deepseek", "deepseek-v4-pro", at("2028-01-03T02:00:00.000Z")),
     ).toMatchObject({ status: "unresolved", activeRuleIds: [] });
     expect(
       getTemporalInstantState("opencode-go", "deepseek-v4-pro", at("2026-01-05T02:00:00.000Z")),

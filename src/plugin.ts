@@ -5,10 +5,15 @@
  * surfaces (commands, tool, the TUI quota RPC and report hooks) are retained in
  * their source modules but are not registered by this product.
  */
+
+import { randomUUID } from "node:crypto";
 import { Plugin } from "@opencode/plugin";
 import { type DashboardLease, startDashboard } from "./gui/lifecycle.js";
 import { scrubLogReason } from "./gui/log.js";
 import { registerDashboardRpc } from "./gui/rpc.js";
+import { projectOpenCodeCacheObserverEvent } from "./lib/cache-observer-ingestion.js";
+import { readClaudeObservedTtl } from "./lib/claude-agent-transcript-ttl.js";
+import { createClaudeAgentTtlTracker } from "./lib/claude-agent-ttl-tracker.js";
 import { resolveOpenCodeLocationRoots } from "./lib/config-file-utils.js";
 import {
   bindCredentialSource,
@@ -24,6 +29,17 @@ function logReason(error: unknown): string {
   return scrubCredentialErrorText(error instanceof Error ? error.message : String(error));
 }
 
+const MAX_PENDING_CACHE_OBSERVER_EVENTS = 512;
+const MAX_SAMPLED_SESSIONS = 1_024;
+const HOST_EVENT_RECONNECT_DELAY_MS = 1_000;
+type ProjectedCacheObserverEvent = NonNullable<
+  ReturnType<typeof projectOpenCodeCacheObserverEvent>
+>;
+interface PendingCacheObserverEvent {
+  at: number;
+  event: ProjectedCacheObserverEvent;
+}
+
 export const QuotaToastPlugin = Plugin.define({
   id: "opencode-quota-gui",
   async setup(ctx) {
@@ -32,6 +48,7 @@ export const QuotaToastPlugin = Plugin.define({
     // does not expose a mutable global config to plugins; runtime settings are
     // read from the canonical GUI config file by the collector.
     const client = {
+      integration: { list: () => ctx.integration.list() },
       config: {
         get: async () => ({ data: {} }),
         providers: async () => ({
@@ -54,28 +71,247 @@ export const QuotaToastPlugin = Plugin.define({
       }
     });
 
+    // Owner-approved per-session approximation (not per-request proof): the host shares no
+    // per-invocation id between `model.request` and `session.step.started`, and connections
+    // rarely change, so the active OpenAI connection METHOD is sampled once per session — on
+    // its `session.created` event, or on its first step for a session that predates this
+    // plugin — and reused for that session's OpenAI steps. A lookup still pending (or failed)
+    // leaves the step without a method, i.e. the conservative 5-minute TTL fallback; relayed
+    // steps are never rewritten and a mid-session credential change is not reflected.
+    // Only the allowlisted method is kept; credential values, ids and labels are never read.
+    const openaiMethodBySession = new Map<string, { method?: "oauth" | "key" | "external" }>();
+    const sampleOpenAiMethod = (sessionID: unknown): void => {
+      if (typeof sessionID !== "string" || sessionID === "") return;
+      if (openaiMethodBySession.has(sessionID)) return;
+      if (openaiMethodBySession.size >= MAX_SAMPLED_SESSIONS) {
+        const oldest = openaiMethodBySession.keys().next().value;
+        if (oldest !== undefined) openaiMethodBySession.delete(oldest);
+      }
+      const entry: { method?: "oauth" | "key" | "external" } = {};
+      openaiMethodBySession.set(sessionID, entry);
+      void (async () => {
+        try {
+          const connection = await ctx.integration.connection.active("openai");
+          const method = connection?.type === "credential" ? connection.method : undefined;
+          if (method === "oauth" || method === "key" || method === "external") {
+            entry.method = method;
+          }
+        } catch {
+          // Unavailable metadata keeps the 5-minute fallback.
+        }
+      })();
+    };
     // Every login read in this process goes through this location's `ctx.integration`. Bound
     // last, so a setup that fails part way leaves no binding behind. OpenCode routes the
     // retained hooks only after setup, so no read comes earlier.
     const unbindCredentialSource = bindCredentialSource(
       createIntegrationCredentialSource(ctx.integration),
     );
-    // A login added, changed or switched in OpenCode drops cached logins and failed-login
-    // entries, so the next read asks OpenCode again. If the subscription fails, cached logins
-    // stay until they expire; the log says why. The cleanup's abort ends it silently.
-    const credentialEvents = new AbortController();
+    let dashboardRpc: Awaited<ReturnType<typeof registerDashboardRpc>> | undefined;
+    let cacheObserverEmitChain: Promise<void> = Promise.resolve();
+    const pendingCacheObserverEvents: PendingCacheObserverEvent[] = [];
+    let pendingCacheObserverEventsDropped = false;
+    let pendingHostEventObservedAtMs: number | undefined;
+    const cacheObserverRelayAbort = new AbortController();
+    let cacheObserverEmitWorkerRunning = false;
+    const hostEventSourceBinding = randomUUID();
+    type HostEventSourceState = "unverified" | "observed" | "unavailable" | "stopped";
+    let hostEventSourceState: HostEventSourceState = "unverified";
+    const readHostEventSourceState = (): HostEventSourceState => hostEventSourceState;
+    async function waitForHostEventReconnect(signal: AbortSignal): Promise<void> {
+      if (signal.aborted) return;
+      await new Promise<void>((resolve) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finish = () => {
+          if (timer !== undefined) clearTimeout(timer);
+          signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        timer = setTimeout(finish, HOST_EVENT_RECONNECT_DELAY_MS);
+        signal.addEventListener("abort", finish, { once: true });
+        if (signal.aborted) finish();
+      });
+    }
+    async function emitCacheObserverEventNow(
+      registration: NonNullable<typeof dashboardRpc>,
+      pending: PendingCacheObserverEvent,
+    ): Promise<void> {
+      const { signal } = cacheObserverRelayAbort;
+      if (signal.aborted) return;
+      const emission = Promise.resolve()
+        .then(() => {
+          if (signal.aborted) return;
+          return registration.events.emit("invalidated", {
+            topic: "cache.observer",
+            at: pending.at,
+            cacheObserverEvent: pending.event,
+          });
+        })
+        .then(
+          () => undefined,
+          () => undefined,
+        );
+      if (signal.aborted) return;
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        signal.addEventListener("abort", finish, { once: true });
+        void emission.then(finish);
+      });
+    }
+    async function drainCacheObserverEvents(): Promise<void> {
+      try {
+        while (!cacheObserverRelayAbort.signal.aborted) {
+          if (pendingCacheObserverEventsDropped) {
+            pendingCacheObserverEventsDropped = false;
+            const registration = dashboardRpc;
+            if (!registration) continue;
+            const gapAt = Date.now();
+            await emitCacheObserverEventNow(registration, {
+              at: gapAt,
+              event: {
+                type: "source.status",
+                created: gapAt,
+                data: { state: "unavailable", sourceBinding: hostEventSourceBinding },
+              },
+            });
+            if (hostEventSourceState === "observed") pendingHostEventObservedAtMs = gapAt;
+            continue;
+          }
+          const pending = pendingCacheObserverEvents.shift();
+          if (!pending) {
+            const observedAt = pendingHostEventObservedAtMs;
+            if (observedAt === undefined) break;
+            pendingHostEventObservedAtMs = undefined;
+            if (hostEventSourceState !== "observed") continue;
+            const registration = dashboardRpc;
+            if (registration) {
+              await emitCacheObserverEventNow(registration, {
+                at: observedAt,
+                event: {
+                  type: "source.status",
+                  created: observedAt,
+                  data: { state: "observed", sourceBinding: hostEventSourceBinding },
+                },
+              });
+            }
+            continue;
+          }
+          const registration = dashboardRpc;
+          if (registration) await emitCacheObserverEventNow(registration, pending);
+        }
+      } finally {
+        cacheObserverEmitWorkerRunning = false;
+      }
+    }
+    const startCacheObserverEmitWorker = (): void => {
+      if (
+        !dashboardRpc ||
+        cacheObserverRelayAbort.signal.aborted ||
+        cacheObserverEmitWorkerRunning
+      ) {
+        return;
+      }
+      cacheObserverEmitWorkerRunning = true;
+      cacheObserverEmitChain = drainCacheObserverEvents().catch(() => undefined);
+    };
+    const emitCacheObserverEvent = (event: ProjectedCacheObserverEvent, at: number): void => {
+      if (cacheObserverRelayAbort.signal.aborted) return;
+      if (pendingCacheObserverEvents.length >= MAX_PENDING_CACHE_OBSERVER_EVENTS) {
+        pendingCacheObserverEvents.shift();
+        pendingCacheObserverEventsDropped = true;
+      }
+      pendingCacheObserverEvents.push({ at, event });
+      startCacheObserverEmitWorker();
+    };
+    const publishHostEventSourceState = (
+      state: Exclude<HostEventSourceState, "unverified">,
+      at: number,
+    ): void => {
+      if (hostEventSourceState === state) return;
+      hostEventSourceState = state;
+      if (state !== "observed") pendingHostEventObservedAtMs = undefined;
+      emitCacheObserverEvent(
+        {
+          type: "source.status",
+          created: at,
+          data: { state, sourceBinding: hostEventSourceBinding },
+        },
+        at,
+      );
+    };
+    const claudeTtl = createClaudeAgentTtlTracker({
+      directory: ctx.location.directory,
+      read: readClaudeObservedTtl,
+      emit: emitCacheObserverEvent,
+    });
+    // Reuse the existing host stream for credential invalidation and narrowly projected cache
+    // evidence. No Native-side OpenCode event subscription is opened.
+    const hostEvents = new AbortController();
     void (async () => {
-      for await (const event of ctx.event.subscribe({ signal: credentialEvents.signal })) {
-        if (event.type === "credential.updated" || event.type === "credential.switched") {
-          notifyCredentialsChanged();
+      const { signal } = hostEvents;
+      while (!signal.aborted) {
+        try {
+          for await (const event of ctx.event.subscribe({ signal })) {
+            if (signal.aborted) return;
+            if (readHostEventSourceState() !== "observed") {
+              publishHostEventSourceState(
+                "observed",
+                typeof event.created === "number" && Number.isFinite(event.created)
+                  ? event.created
+                  : Date.now(),
+              );
+            }
+            if (event.type === "credential.updated" || event.type === "credential.switched") {
+              notifyCredentialsChanged();
+            }
+            // The Started event's model identity is available before invocation completion. Do not
+            // enrich it from model.list here: that mutable catalog may no longer match dispatch.
+            const sessionID = (event.data as { sessionID?: unknown } | undefined)?.sessionID;
+            if (event.type === "session.created") sampleOpenAiMethod(sessionID);
+            else if (event.type === "session.deleted" && typeof sessionID === "string") {
+              openaiMethodBySession.delete(sessionID);
+            }
+            let cacheObserverEvent = projectOpenCodeCacheObserverEvent(event);
+            if (
+              cacheObserverEvent?.type === "session.step.started" &&
+              cacheObserverEvent.data.model.providerID === "openai"
+            ) {
+              sampleOpenAiMethod(cacheObserverEvent.data.sessionID);
+              const method = openaiMethodBySession.get(cacheObserverEvent.data.sessionID)?.method;
+              if (method !== undefined) {
+                cacheObserverEvent = {
+                  ...cacheObserverEvent,
+                  data: { ...cacheObserverEvent.data, connectionMethod: method },
+                };
+              }
+            }
+            if (
+              cacheObserverEvent !== undefined &&
+              typeof event.created === "number" &&
+              Number.isFinite(event.created) &&
+              event.created >= 0
+            ) {
+              emitCacheObserverEvent(cacheObserverEvent, event.created);
+            }
+            claudeTtl.observe(event, cacheObserverEvent);
+          }
+          if (signal.aborted) return;
+          throw new Error("host event stream ended");
+        } catch (error) {
+          if (signal.aborted) return;
+          if (readHostEventSourceState() !== "unavailable") {
+            publishHostEventSourceState("unavailable", Date.now());
+          }
+          console.warn(
+            `[opencode-quota-gui] host event subscription failed; retrying: ${logReason(error)}`,
+          );
+          await waitForHostEventReconnect(signal);
         }
       }
-    })().catch((error) => {
-      if (credentialEvents.signal.aborted) return;
-      console.warn(
-        `[opencode-quota-gui] credential event subscription stopped: ${logReason(error)}`,
-      );
-    });
+    })();
 
     // The dashboard host binds last — after the retry hook and the credential binding — and it
     // never fails setup: every dashboard error stays a controlled log line and an `unavailable`
@@ -99,20 +335,43 @@ export const QuotaToastPlugin = Plugin.define({
     // Attach the native RPC transport to the same host runtime the web
     // transport receives. It is available when web is disabled or its bind
     // failed, and it never constructs another source/snapshot/service.
-    let dashboardRpc: Awaited<ReturnType<typeof registerDashboardRpc>> | undefined;
     if (dashboardLease?.runtime && ctx.rpc) {
       try {
         dashboardRpc = await registerDashboardRpc(ctx.rpc, dashboardLease.runtime, {
           location: ctx.location,
+          onWatchSnapshot: (attemptNonce) => {
+            const at = Date.now();
+            emitCacheObserverEvent(
+              {
+                type: "source.status",
+                created: at,
+                data: {
+                  state: readHostEventSourceState(),
+                  attemptNonce,
+                  sourceBinding: hostEventSourceBinding,
+                },
+              },
+              at,
+            );
+          },
         });
+        startCacheObserverEmitWorker();
       } catch {
         console.warn(`[opencode-quota-gui] dashboard RPC unavailable: registration-failed`);
       }
     }
 
     return async () => {
-      credentialEvents.abort();
+      hostEvents.abort();
+      claudeTtl.dispose();
+      openaiMethodBySession.clear();
+      pendingCacheObserverEvents.length = 0;
+      publishHostEventSourceState("stopped", Date.now());
       unbindCredentialSource();
+      pendingCacheObserverEvents.length = 0;
+      pendingCacheObserverEventsDropped = false;
+      cacheObserverRelayAbort.abort();
+      await cacheObserverEmitChain;
       if (dashboardRpc) {
         try {
           await dashboardRpc.dispose();

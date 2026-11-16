@@ -19,6 +19,8 @@ import {
 } from "../contracts/dashboard.js";
 import type { CardId } from "../contracts/identity.js";
 import {
+  CLAUDE_AGENT_RESETS_INFO,
+  CLAUDE_AGENT_RESETS_ROW_KEY,
   OPENAI_CREDITS_INFO,
   OPENAI_CREDITS_ROW_KEY,
   OPENAI_CREDITS_ROW_LABEL,
@@ -81,7 +83,6 @@ export const PROVIDER_ERROR_GENERIC_LABEL = "Provider error";
  */
 export interface ProviderCardPreferences {
   accountingDetail: QuotaToastConfig["accountingDetail"];
-  quotaProjection?: QuotaToastConfig["quotaProjection"];
   resetTimeDecimals?: QuotaToastConfig["resetTimeDecimals"];
   resetTimeSpaced?: QuotaToastConfig["resetTimeSpaced"];
   /**
@@ -100,8 +101,23 @@ export interface ProviderCardPreferences {
   cardOrder?: readonly string[];
 }
 
+export const UNSCOPED = Symbol("unscoped");
+export type SourceKey = string | typeof UNSCOPED;
+
+export function cardSourceKey(
+  sourceId: string | undefined,
+  accountSourceIds: ReadonlySet<string>,
+): SourceKey {
+  return sourceId !== undefined && accountSourceIds.has(sourceId) ? sourceId : UNSCOPED;
+}
+
+export type MergedProbe = QuotaStatusLiveProbe & {
+  retainedSourceIds?: ReadonlySet<string>;
+  retainedUnscoped?: boolean;
+};
+
 export interface BuildProviderCardsInput {
-  probes: readonly QuotaStatusLiveProbe[];
+  probes: readonly MergedProbe[];
   preferences: ProviderCardPreferences;
   nowMs: number;
   /** Provider display label resolver; defaults to the registration table. */
@@ -163,6 +179,8 @@ function mapProviderError(
     message: safeProviderText(error.message, secrets) ?? PROVIDER_ERROR_GENERIC_MESSAGE,
   };
   if (error.retryable === true) mapped.retryable = true;
+  if (error.retryAtMs !== undefined) mapped.retryAtMs = error.retryAtMs;
+  if (error.kind !== undefined) mapped.kind = error.kind;
   if (error.failureCategory !== undefined) mapped.failureCategory = error.failureCategory;
   return mapped;
 }
@@ -261,7 +279,7 @@ function mapEntryRow(params: {
       row.percentUsed = 100 - entry.percentRemaining;
     }
     applyResetFields(row, entry, preferences);
-    if (preferences.quotaProjection === "runway") applyRunway(row, entry, nowMs);
+    applyRunway(row, entry, nowMs);
     if (preferences.accountingDetail === "detailed" && entry.basis) {
       const detailRows = detailRowsFor(entry.basis);
       if (detailRows.length > 0) row.detailRows = detailRows;
@@ -364,6 +382,28 @@ export function openAiOptionalVisibilityRows(
   ];
 }
 
+/** Persistent Resets choice for a Claude Agent card (no Credits row). */
+export function claudeAgentOptionalVisibilityRows(
+  cardId: CardId,
+): NonNullable<ProviderCard["visibilityRows"]> {
+  return [
+    {
+      rowId: optionalValueRowId(cardId, CLAUDE_AGENT_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE),
+      label: OPENAI_RESETS_ROW_LABEL,
+      info: CLAUDE_AGENT_RESETS_INFO,
+    },
+  ];
+}
+
+function optionalVisibilityRowsFor(
+  providerId: string,
+  cardId: CardId,
+): ProviderCard["visibilityRows"] {
+  if (providerId === "openai") return openAiOptionalVisibilityRows(cardId);
+  if (providerId === "claude-agent") return claudeAgentOptionalVisibilityRows(cardId);
+  return undefined;
+}
+
 function latestObservedAtIso(entries: readonly QuotaToastEntry[]): string | undefined {
   let latest: string | undefined;
   let latestMs = Number.NEGATIVE_INFINITY;
@@ -399,11 +439,28 @@ function pushInto<T>(map: Map<string, T[]>, key: string, value: T): void {
   else map.set(key, [value]);
 }
 
+function finishCard(
+  card: ProviderCard,
+  mapped: ReturnType<typeof mapEntryRows>,
+  entries: readonly QuotaToastEntry[],
+): ProviderCard {
+  if (mapped.primaryQuotaWindows.length > 0) {
+    card.primaryQuotaWindows = mapped.primaryQuotaWindows;
+  }
+  const optionalRows = optionalVisibilityRowsFor(card.providerId, card.cardId);
+  if (optionalRows) card.visibilityRows = optionalRows;
+  const observedAtIso = latestObservedAtIso(entries);
+  if (observedAtIso) card.observedAtIso = observedAtIso;
+  return card;
+}
+
 function buildProviderCard(params: {
   providerId: string;
   providerLabel: string;
   providerScopeId: CardId;
   providerScopeHash: string;
+  /** Display-only plan for a provider-scope card with no account descriptor. */
+  planLabel?: string;
   entries: readonly QuotaToastEntry[];
   errors: readonly QuotaToastError[];
   secrets: readonly string[];
@@ -418,23 +475,19 @@ function buildProviderCard(params: {
     preferences: params.preferences,
     nowMs: params.nowMs,
   });
+  const planLabel = params.planLabel ? sanitizeSingleLineDisplayText(params.planLabel).trim() : "";
   const card: ProviderCard = {
     cardId,
     providerId: params.providerId,
     providerLabel: params.providerLabel,
     providerScopeId: params.providerScopeId,
     providerScopeHash: params.providerScopeHash,
+    ...(planLabel ? { planLabel } : {}),
     labelSource: "provider",
     rows: mapped.rows,
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
   };
-  if (mapped.primaryQuotaWindows.length > 0) {
-    card.primaryQuotaWindows = mapped.primaryQuotaWindows;
-  }
-  if (params.providerId === "openai") card.visibilityRows = openAiOptionalVisibilityRows(cardId);
-  const observedAtIso = latestObservedAtIso(params.entries);
-  if (observedAtIso) card.observedAtIso = observedAtIso;
-  return card;
+  return finishCard(card, mapped, params.entries);
 }
 
 function buildAccountCard(params: {
@@ -479,13 +532,7 @@ function buildAccountCard(params: {
     rows: mapped.rows,
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
   };
-  if (mapped.primaryQuotaWindows.length > 0) {
-    card.primaryQuotaWindows = mapped.primaryQuotaWindows;
-  }
-  if (params.providerId === "openai") card.visibilityRows = openAiOptionalVisibilityRows(cardId);
-  const observedAtIso = latestObservedAtIso(params.entries);
-  if (observedAtIso) card.observedAtIso = observedAtIso;
-  return card;
+  return finishCard(card, mapped, params.entries);
 }
 
 /**
@@ -519,7 +566,7 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
 
     for (const entry of probe.result.entries) {
       const sourceId = entry.accounting.sourceId;
-      if (sourceId !== undefined && accountSourceIds.has(sourceId)) {
+      if (cardSourceKey(sourceId, accountSourceIds) !== UNSCOPED && sourceId !== undefined) {
         pushInto(entriesBySource, sourceId, entry);
       } else {
         unscopedEntries.push(entry);
@@ -527,7 +574,7 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
     }
     for (const error of probe.result.errors) {
       const sourceId = error.sourceId;
-      if (sourceId !== undefined && accountSourceIds.has(sourceId)) {
+      if (cardSourceKey(sourceId, accountSourceIds) !== UNSCOPED && sourceId !== undefined) {
         pushInto(errorsBySource, sourceId, error);
       } else {
         unscopedErrors.push(error);
@@ -541,12 +588,15 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
         providerLabel,
         providerScopeId,
         providerScopeHash,
+        // A plan belongs to this card only when the provider has no account cards of its own.
+        planLabel: accounts.length === 0 ? probe.result.planLabel : undefined,
         entries: unscopedEntries,
         errors: unscopedErrors,
         secrets,
         preferences,
         nowMs,
       });
+      if (probe.retainedUnscoped) card.stale = true;
       if (!seenCardIds.has(card.cardId)) {
         seenCardIds.add(card.cardId);
         cards.push(card);
@@ -567,6 +617,7 @@ export function buildProviderCards(input: BuildProviderCardsInput): ProviderCard
         preferences,
         nowMs,
       });
+      if (probe.retainedSourceIds?.has(account.sourceId)) card.stale = true;
       if (seenCardIds.has(card.cardId)) continue;
       seenCardIds.add(card.cardId);
       cards.push(card);

@@ -262,13 +262,12 @@ describe("primary quota-window projection", () => {
     }
   });
 
-  it("keeps static single-window provider rows that cannot change meaning", () => {
+  it("keeps aggregate provider quota rows in the outer primary slot", () => {
     const chutes = percentEntry({ name: "Chutes quota" });
     const chutesCard = cardFor("chutes", [chutes]);
     expect(chutesCard.primaryQuotaWindows).toEqual([expectedWindow(chutesCard, chutes, 0)]);
 
-    // Alibaba Coding Plan always emits 5h/weekly/monthly in that order, so the
-    // surviving aggregate row is always the static 5h row.
+    // With all CLI windows returned, the ordered aggregate row represents 5h.
     const codingPlan = [
       percentEntry({ name: "5h" }),
       percentEntry({ name: "Weekly" }),

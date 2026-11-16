@@ -423,6 +423,7 @@ describe("dashboard RPC lifecycle", () => {
     writeGuiCanonicalConfig(workspace, { dashboard: { port }, minIntervalMs: 40 });
     const fixture = buildSource();
     const snapshots = captureSnapshots();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const lease = await open({
       ...optionsFor(workspace, fixture.source),
       createSnapshots: snapshots.createSnapshots,
@@ -430,7 +431,7 @@ describe("dashboard RPC lifecycle", () => {
     if (!lease.runtime) throw new Error("expected the shared runtime");
     const registrar = createFakeRegistrar();
     const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
-    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
+    const watchInputs: Array<{ scope: "quota" | "analytics"; attemptNonce: string }> = [];
     let healthCalls = 0;
     let releaseTimeoutHealth: ((health: DashboardHealth) => void) | undefined;
     const timeoutWatches: Array<(error: Error) => void> = [];
@@ -457,7 +458,10 @@ describe("dashboard RPC lifecycle", () => {
         // RPC schema, whose health output guard validates a DashboardHealth.
         return registrar.call("health", {}, options?.signal) as Promise<DashboardHealth>;
       },
-      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+      watch: (
+        input: { scope: "quota" | "analytics"; attemptNonce: string },
+        options?: { signal?: AbortSignal },
+      ) => {
         watchInputs.push(input);
         // Keep the RPC server's held viewer distinct from the Desktop client's
         // signal: a host deadline cancels that request, not the live session.
@@ -496,9 +500,20 @@ describe("dashboard RPC lifecycle", () => {
     const client = createNativeDashboardClient({ rpc: caller, scope: "quota" });
     client.onReconnect(refetch);
 
+    const waitForCondition = async (check: () => void, _options?: unknown) => {
+      for (let attempt = 0; attempt < 1000; attempt++) {
+        try {
+          check();
+          return;
+        } catch (error) {
+          if (attempt === 999) throw error;
+          await Promise.resolve();
+        }
+      }
+    };
     try {
       // Exactly one host monitor: quota polls, analytics remains lazy.
-      await vi.waitFor(
+      await waitForCondition(
         () => {
           expect(snapshots.scopedViewers).toBe(1);
           expect(snapshots.scopedScopes).toEqual(["quota"]);
@@ -509,9 +524,9 @@ describe("dashboard RPC lifecycle", () => {
         { timeout: 1000, interval: 5 },
       );
       client.subscribe(() => {});
-      await vi.waitFor(
+      await waitForCondition(
         () => {
-          expect(watchInputs).toEqual([{ scope: "quota" }]);
+          expect(watchInputs).toEqual([{ scope: "quota", attemptNonce: expect.any(String) }]);
           expect(snapshots.scopedScopes).toEqual(["quota", "quota"]);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
@@ -521,9 +536,11 @@ describe("dashboard RPC lifecycle", () => {
       await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
       expect(fixture.calls.quota).toBe(1);
       const initialMonitorQuotaReads = fixture.calls.quota;
+      await vi.advanceTimersByTimeAsync(39);
+      expect(fixture.calls.quota).toBe(initialMonitorQuotaReads);
 
       timeoutWatches[0]?.(hostTimeout());
-      await vi.waitFor(
+      await waitForCondition(
         () => {
           expect(healthCalls).toBe(2);
           expect(releaseTimeoutHealth).toBeDefined();
@@ -533,7 +550,7 @@ describe("dashboard RPC lifecycle", () => {
       expect(client.connection()).toBe("live");
       expect(eventSubscriptions).toBe(1);
       expect(eventSignals[0]?.aborted).toBe(false);
-      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
+      await waitForCondition(() => expect(snapshots.scopedViewers).toBe(1), {
         timeout: 1000,
         interval: 5,
       });
@@ -543,9 +560,13 @@ describe("dashboard RPC lifecycle", () => {
         version: "lifecycle-test",
         build: "lifecycle-test",
       });
-      await vi.waitFor(
+      await waitForCondition(
         () => {
-          expect(watchInputs).toEqual([{ scope: "quota" }, { scope: "quota" }]);
+          expect(watchInputs).toEqual([
+            { scope: "quota", attemptNonce: expect.any(String) },
+            { scope: "quota", attemptNonce: expect.any(String) },
+          ]);
+          expect(watchInputs[1]?.attemptNonce).toBe(watchInputs[0]?.attemptNonce);
           expect(snapshots.scopedScopes).toEqual(["quota", "quota", "quota"]);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
@@ -556,27 +577,30 @@ describe("dashboard RPC lifecycle", () => {
       // The monitor and its quota interest survive: the poller keeps reading
       // the same cached slot without a stale marker or a reset.
       await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
-      await vi.waitFor(
-        () => expect(fixture.calls.quota).toBeGreaterThan(initialMonitorQuotaReads),
-        { timeout: 1000, interval: 5 },
-      );
+      expect(fixture.calls.quota).toBe(initialMonitorQuotaReads);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fixture.calls.quota).toBe(initialMonitorQuotaReads + 1);
       expect(refetch).not.toHaveBeenCalled();
 
       // A second Desktop deadline repeats the same in-place renewal with no
       // stream replacement, overlapping viewer, or analytics read.
       timeoutWatches[1]?.(hostTimeout());
-      await vi.waitFor(
+      await waitForCondition(
         () => {
           expect(healthCalls).toBe(3);
           expect(watchInputs).toHaveLength(3);
-          expect(watchInputs[2]).toEqual({ scope: "quota" });
+          expect(watchInputs[2]).toMatchObject({
+            scope: "quota",
+            attemptNonce: expect.any(String),
+          });
+          expect(watchInputs[2]?.attemptNonce).toBe(watchInputs[0]?.attemptNonce);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
         },
         { timeout: 1000, interval: 5 },
       );
       await expect(registrar.call("quota", {})).resolves.toMatchObject({ stale: false });
-      await vi.waitFor(
+      await waitForCondition(
         () => expect(fixture.calls.home + fixture.calls.project + fixture.calls.groups).toBe(0),
         { timeout: 1000, interval: 5 },
       );
@@ -585,15 +609,13 @@ describe("dashboard RPC lifecycle", () => {
       expect(refetch).not.toHaveBeenCalled();
 
       client.dispose();
-      await vi.waitFor(() => expect(snapshots.scopedViewers).toBe(1), {
+      await waitForCondition(() => expect(snapshots.scopedViewers).toBe(1), {
         timeout: 1000,
         interval: 5,
       });
       const pollReadsAfterWindowClosed = fixture.calls.quota;
-      await vi.waitFor(
-        () => expect(fixture.calls.quota).toBeGreaterThan(pollReadsAfterWindowClosed),
-        { timeout: 1000, interval: 5 },
-      );
+      await vi.advanceTimersByTimeAsync(40);
+      expect(fixture.calls.quota).toBe(pollReadsAfterWindowClosed + 1);
       expect(eventSignals[0]?.aborted).toBe(true);
     } finally {
       releaseTimeoutHealth?.({
@@ -605,6 +627,7 @@ describe("dashboard RPC lifecycle", () => {
       client.dispose();
       await registration.dispose();
       await lease.dispose();
+      vi.useRealTimers();
       expect(snapshots.scopedViewers).toBe(0);
     }
   });
@@ -624,7 +647,7 @@ describe("dashboard RPC lifecycle", () => {
     if (!lease.runtime) throw new Error("expected the shared runtime");
     const registrar = createFakeRegistrar();
     const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
-    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
+    const watchInputs: Array<{ scope: "quota" | "analytics"; attemptNonce: string }> = [];
     const timeoutWatches: Array<(error: Error) => void> = [];
     let activeWatches = 0;
     let maxActiveWatches = 0;
@@ -670,7 +693,10 @@ describe("dashboard RPC lifecycle", () => {
         registrar.call("groups", input, options?.signal),
       session: (input: { sessionId: string }, options?: { signal?: AbortSignal }) =>
         registrar.call("session", input, options?.signal),
-      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+      watch: (
+        input: { scope: "quota" | "analytics"; attemptNonce: string },
+        options?: { signal?: AbortSignal },
+      ) => {
         watchInputs.push(input);
         activeWatches += 1;
         maxActiveWatches = Math.max(maxActiveWatches, activeWatches);
@@ -730,7 +756,7 @@ describe("dashboard RPC lifecycle", () => {
       unsubscribe = client.subscribe(() => {});
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "analytics" }]);
+          expect(watchInputs).toEqual([{ scope: "analytics", attemptNonce: expect.any(String) }]);
           expect(snapshots.scopedScopes).toEqual(["quota", "analytics"]);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
@@ -769,7 +795,11 @@ describe("dashboard RPC lifecycle", () => {
       });
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "analytics" }, { scope: "analytics" }]);
+          expect(watchInputs).toEqual([
+            { scope: "analytics", attemptNonce: expect.any(String) },
+            { scope: "analytics", attemptNonce: expect.any(String) },
+          ]);
+          expect(watchInputs[1]?.attemptNonce).toBe(watchInputs[0]?.attemptNonce);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
         },
@@ -800,7 +830,11 @@ describe("dashboard RPC lifecycle", () => {
         () => {
           expect(healthCalls).toBe(3);
           expect(watchInputs).toHaveLength(3);
-          expect(watchInputs[2]).toEqual({ scope: "analytics" });
+          expect(watchInputs[2]).toMatchObject({
+            scope: "analytics",
+            attemptNonce: expect.any(String),
+          });
+          expect(watchInputs[2]?.attemptNonce).toBe(watchInputs[0]?.attemptNonce);
           expect(snapshots.scopedViewers).toBe(2);
           expect(client.connection()).toBe("live");
         },
@@ -862,7 +896,7 @@ describe("dashboard RPC lifecycle", () => {
     if (!lease.runtime) throw new Error("expected the shared runtime");
     const registrar = createFakeRegistrar();
     const registration = await registerDashboardRpc(registrar.registrar, lease.runtime);
-    const watchInputs: Array<{ scope: "quota" | "analytics" }> = [];
+    const watchInputs: Array<{ scope: "quota" | "analytics"; attemptNonce: string }> = [];
     const timeoutWatches: Array<(error: Error) => void> = [];
     let holdNextHealth = false;
     let releaseHealth: (() => void) | undefined;
@@ -900,7 +934,10 @@ describe("dashboard RPC lifecycle", () => {
         homeReads += 1;
         return registrar.call("home", input, options?.signal);
       },
-      watch: (input: { scope: "quota" | "analytics" }, options?: { signal?: AbortSignal }) => {
+      watch: (
+        input: { scope: "quota" | "analytics"; attemptNonce: string },
+        options?: { signal?: AbortSignal },
+      ) => {
         watchInputs.push(input);
         // Keep the RPC server's held viewer distinct from the Desktop client's
         // signal: a host deadline cancels that request, not the live session.
@@ -956,7 +993,7 @@ describe("dashboard RPC lifecycle", () => {
       unsubscribeAnalytics = analyticsClient.subscribe(() => {});
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "analytics" }]);
+          expect(watchInputs).toEqual([{ scope: "analytics", attemptNonce: expect.any(String) }]);
           expect(analyticsClient.connection()).toBe("live");
           expect(snapshots.scopedViewers).toBe(2);
         },
@@ -965,7 +1002,11 @@ describe("dashboard RPC lifecycle", () => {
       unsubscribeQuota = quotaClient.subscribe(() => {});
       await vi.waitFor(
         () => {
-          expect(watchInputs).toEqual([{ scope: "analytics" }, { scope: "quota" }]);
+          expect(watchInputs).toEqual([
+            { scope: "analytics", attemptNonce: expect.any(String) },
+            { scope: "quota", attemptNonce: expect.any(String) },
+          ]);
+          expect(watchInputs[1]?.attemptNonce).not.toBe(watchInputs[0]?.attemptNonce);
           expect(quotaClient.connection()).toBe("live");
           expect(snapshots.scopedViewers).toBe(3);
         },
@@ -999,10 +1040,11 @@ describe("dashboard RPC lifecycle", () => {
       await vi.waitFor(
         () => {
           expect(watchInputs).toEqual([
-            { scope: "analytics" },
-            { scope: "quota" },
-            { scope: "quota" },
+            { scope: "analytics", attemptNonce: expect.any(String) },
+            { scope: "quota", attemptNonce: expect.any(String) },
+            { scope: "quota", attemptNonce: expect.any(String) },
           ]);
+          expect(watchInputs[2]?.attemptNonce).toBe(watchInputs[1]?.attemptNonce);
           expect(snapshots.scopedViewers).toBe(3);
           expect(quotaClient.connection()).toBe("live");
         },

@@ -4,6 +4,7 @@ import {
   providerFailureCategoryForHttpStatus,
 } from "../contracts/provider-failure.js";
 import { readGlobalProviderConfigString } from "./api-key-resolver.js";
+import { createApiKeyRetryGuard, retryAfterDeadline } from "./api-key-retry-after.js";
 import {
   type AgyConfiguredCredentials,
   clearAgyCompanionCacheForTests,
@@ -15,7 +16,7 @@ import {
   makeAccountCacheKey,
   setCachedAccessToken,
 } from "./google-token-cache.js";
-import { fetchWithTimeout } from "./http.js";
+import { fetchWithTimeout, RequestTimeoutError } from "./http.js";
 import { mapWithConcurrency } from "./map-with-concurrency.js";
 import { readAuthFileCached } from "./opencode-auth.js";
 import {
@@ -284,7 +285,7 @@ async function refreshAccessToken(params: {
   timeoutMs?: number;
 }): Promise<
   | { accessToken: string; expiresIn: number }
-  | { error: string; failureCategory: ProviderFailureCategory }
+  | { error: string; failureCategory: ProviderFailureCategory; retryAtMs?: number }
 > {
   try {
     return await fetchWithTimeout(AGY_TOKEN_REFRESH_URL, {
@@ -301,6 +302,8 @@ async function refreshAccessToken(params: {
       timeoutMs: params.timeoutMs ?? AGY_TOKEN_TIMEOUT_MS,
       consume: async (response, timeoutSignal) => {
         if (!response.ok) {
+          const retryAtMs = retryAfterDeadline(response);
+          const retry = retryAtMs !== undefined ? { retryAtMs } : {};
           try {
             const errorData = (await response.json()) as {
               error?: string;
@@ -312,12 +315,14 @@ async function refreshAccessToken(params: {
             return {
               error: errorData.error_description || `HTTP ${response.status}`,
               failureCategory: providerFailureCategoryForHttpStatus(response.status),
+              ...retry,
             };
           } catch (error) {
             if (timeoutSignal.aborted) throw error;
             return {
               error: `HTTP ${response.status}`,
               failureCategory: providerFailureCategoryForHttpStatus(response.status),
+              ...retry,
             };
           }
         }
@@ -342,6 +347,13 @@ async function refreshAccessToken(params: {
       },
     });
   } catch (err) {
+    if (err instanceof RequestTimeoutError) {
+      return {
+        error: "Token refresh timeout",
+        failureCategory: "provider_api",
+        ...(err.retryAtMs !== undefined ? { retryAtMs: err.retryAtMs } : {}),
+      };
+    }
     if (err instanceof Error && err.message.includes("timeout")) {
       return { error: "Token refresh timeout", failureCategory: "provider_api" };
     }
@@ -355,7 +367,10 @@ async function refreshAgyAccessTokenWithCache(params: {
   skewMs?: number;
   force?: boolean;
   timeoutMs?: number;
-}): Promise<{ accessToken: string } | { error: string; failureCategory: ProviderFailureCategory }> {
+}): Promise<
+  | { accessToken: string }
+  | { error: string; failureCategory: ProviderFailureCategory; retryAtMs?: number }
+> {
   const skewMs = params.skewMs ?? 2 * 60_000;
   const key = makeAccountCacheKey({
     refreshToken: params.account.refreshToken,
@@ -375,13 +390,30 @@ async function refreshAgyAccessTokenWithCache(params: {
     }
   }
 
-  const refreshed = await refreshAccessToken({
-    refreshToken: params.account.refreshToken,
-    clientId: params.credentials.clientId,
-    clientSecret: params.credentials.clientSecret,
-    timeoutMs: params.timeoutMs,
-  });
-  if ("error" in refreshed) return refreshed;
+  // Guarded per refresh token: the token endpoint's limit is independent of quota reads.
+  const guarded = await tokenGuard(
+    params.account.refreshToken,
+    async () => {
+      const result = await refreshAccessToken({
+        refreshToken: params.account.refreshToken,
+        clientId: params.credentials.clientId,
+        clientSecret: params.credentials.clientSecret,
+        timeoutMs: params.timeoutMs,
+      });
+      return "error" in result
+        ? { success: false as const, ...result }
+        : { success: true as const, ...result };
+    },
+    params.timeoutMs,
+  );
+  if (!guarded.success) {
+    return {
+      error: guarded.error,
+      failureCategory: guarded.failureCategory,
+      ...(guarded.retryAtMs !== undefined ? { retryAtMs: guarded.retryAtMs } : {}),
+    };
+  }
+  const refreshed = { accessToken: guarded.accessToken, expiresIn: guarded.expiresIn };
 
   await setCachedAccessToken({
     key,
@@ -396,13 +428,44 @@ async function refreshAgyAccessTokenWithCache(params: {
 
 class GoogleAgyQuotaRequestError extends Error {
   readonly failureCategory: ProviderFailureCategory;
+  readonly retryAtMs?: number;
 
-  constructor(message: string, failureCategory: ProviderFailureCategory) {
+  constructor(message: string, failureCategory: ProviderFailureCategory, retryAtMs?: number) {
     super(message);
     this.name = "GoogleAgyQuotaRequestError";
     this.failureCategory = failureCategory;
+    if (retryAtMs !== undefined) this.retryAtMs = retryAtMs;
   }
 }
+
+type AgyAccountQuotaResult = {
+  success: boolean;
+  buckets?: GoogleAgyQuotaBucket[];
+  error?: string;
+  failureCategory?: ProviderFailureCategory;
+  accountEmail?: string;
+  retryAtMs?: number;
+  /** Token-endpoint deadline: surfaced to callers but never blocks quota reads. */
+  tokenRetryAtMs?: number;
+};
+
+type TokenRefreshOutcome =
+  | { success: true; accessToken: string; expiresIn: number }
+  | { success: false; error: string; failureCategory: ProviderFailureCategory; retryAtMs?: number };
+
+const tokenGuard = createApiKeyRetryGuard<TokenRefreshOutcome>((retryAtMs) => ({
+  success: false,
+  error: "Token refresh failed: HTTP 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+}));
+
+const accountGuard = createApiKeyRetryGuard<AgyAccountQuotaResult>((retryAtMs) => ({
+  success: false,
+  error: "Google AGY quota API error: 429",
+  failureCategory: "provider_api",
+  retryAtMs,
+}));
 
 async function retrieveGoogleAgyQuotaSummary(
   accessToken: string,
@@ -429,6 +492,7 @@ async function retrieveGoogleAgyQuotaSummary(
             ? `Google AGY quota auth error: ${response.status}`
             : `Google AGY quota API error: ${response.status}`,
           failureCategory,
+          retryAfterDeadline(response),
         );
       }
 
@@ -663,18 +727,49 @@ function mapSummaryBuckets(
   return Array.from(deduplicated.values()).sort(compareSummaryBuckets);
 }
 
-async function fetchAccountQuota(params: {
+type FetchAccountQuotaParams = {
   account: AgyAccount;
   accountIndex: number;
   credentials: AgyConfiguredCredentials;
   timeoutMs?: number;
-}): Promise<{
-  success: boolean;
-  buckets?: GoogleAgyQuotaBucket[];
-  error?: string;
-  failureCategory?: ProviderFailureCategory;
-  accountEmail?: string;
-}> {
+};
+
+/** Cooldowns are per refresh token + project; a concurrent identical call shares one request. */
+async function fetchAccountQuota(params: FetchAccountQuotaParams): Promise<AgyAccountQuotaResult> {
+  const accountEmail = params.account.email || params.account.sourceKey;
+  const { tokenRetryAtMs, ...result } = await accountGuard(
+    `${params.account.refreshToken}\n${params.account.projectId}`,
+    () => fetchAccountQuotaUncached(params),
+    params.timeoutMs,
+    (retryAtMs) => ({
+      success: false,
+      error: "Google AGY quota API error: 429",
+      failureCategory: "provider_api",
+      accountEmail,
+      retryAtMs,
+    }),
+  );
+  const buckets = result.buckets?.map((bucket) => {
+    const projected = {
+      ...bucket,
+      accountIndex: params.accountIndex,
+      sourceKey: params.account.sourceKey,
+    };
+    if (params.account.email) projected.accountEmail = params.account.email;
+    else delete projected.accountEmail;
+    return projected;
+  });
+  return {
+    ...result,
+    accountEmail,
+    ...(buckets ? { buckets } : {}),
+    ...(tokenRetryAtMs !== undefined ? { retryAtMs: tokenRetryAtMs } : {}),
+  };
+}
+
+async function fetchAccountQuotaUncached(
+  params: FetchAccountQuotaParams,
+): Promise<AgyAccountQuotaResult> {
   const accountEmail = params.account.email || params.account.sourceKey;
 
   try {
@@ -689,6 +784,7 @@ async function fetchAccountQuota(params: {
         error: tokenResult.error,
         failureCategory: tokenResult.failureCategory,
         accountEmail,
+        ...(tokenResult.retryAtMs !== undefined ? { tokenRetryAtMs: tokenResult.retryAtMs } : {}),
       };
     }
 
@@ -713,6 +809,7 @@ async function fetchAccountQuota(params: {
             error: retryToken.error,
             failureCategory: retryToken.failureCategory,
             accountEmail,
+            ...(retryToken.retryAtMs !== undefined ? { tokenRetryAtMs: retryToken.retryAtMs } : {}),
           };
         }
         summary = await retrieveGoogleAgyQuotaSummary(
@@ -743,6 +840,9 @@ async function fetchAccountQuota(params: {
         error: "API timeout",
         failureCategory: "provider_api",
         accountEmail,
+        ...(err instanceof RequestTimeoutError && err.retryAtMs !== undefined
+          ? { retryAtMs: err.retryAtMs }
+          : {}),
       };
     }
     return {
@@ -751,6 +851,9 @@ async function fetchAccountQuota(params: {
       failureCategory:
         err instanceof GoogleAgyQuotaRequestError ? err.failureCategory : "provider_api",
       accountEmail,
+      ...(err instanceof GoogleAgyQuotaRequestError && err.retryAtMs !== undefined
+        ? { retryAtMs: err.retryAtMs }
+        : {}),
     };
   }
 }
@@ -795,16 +898,18 @@ export async function queryGoogleAgyQuota(
   const allBuckets: GoogleAgyQuotaBucket[] = [];
   const errors: GoogleAccountError[] = [];
 
-  for (const result of results) {
+  for (const [accountIndex, result] of results.entries()) {
     if (result.success && result.buckets && result.buckets.length > 0) {
       allBuckets.push(...result.buckets);
     } else if (!result.success && result.error && result.accountEmail) {
       errors.push({
         email: result.accountEmail,
+        accountIndex,
         error: result.error,
         ...(result.failureCategory !== undefined
           ? { failureCategory: result.failureCategory }
           : {}),
+        ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
       });
     }
   }

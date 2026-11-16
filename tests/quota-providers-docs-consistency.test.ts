@@ -14,6 +14,42 @@ function read(path: string): string {
 }
 
 describe("GUI documentation consistency", () => {
+  it("documents Alibaba Coding Plan as Bailian CLI-backed and separate from Token Plan", () => {
+    const readme = read("README.md");
+    const providers = read("docs/readme/providers.md");
+    const troubleshooting = read("docs/readme/troubleshooting.md");
+
+    expect(readme).toMatch(
+      /\| Alibaba Coding Plan\s+\| \[Needs setup\]\(docs\/readme\/providers\.md#alibaba-coding-plan\)\s+\| Official CLI\s+\| Quota\s+\|/u,
+    );
+    expect(providers).toMatch(
+      /\| Alibaba Coding Plan\s+\| \[Needs setup\]\(#alibaba-coding-plan\)\s+\| Official CLI\s+\| Quota\s+\|/u,
+    );
+
+    const apiKeys = readMarkdownSection(providers, /^API keys$/);
+    expect(apiKeys).not.toMatch(/Alibaba Coding Plan|ALIBABA_CODING_PLAN_API_KEY|ALIBABA_API_KEY/u);
+
+    const codingPlanSetup = readMarkdownSection(providers, /^Alibaba Coding Plan$/);
+    for (const detail of [
+      "npm install -g bailian-cli",
+      "bl auth login --console",
+      "bl usage coding-plan --output json",
+      "macOS, Linux, and Windows",
+      "not matched to the OpenCode API-key identity",
+      "does not fall back to local estimates",
+    ]) {
+      expect(codingPlanSetup).toContain(detail);
+    }
+
+    const tokenPlanSetup = readMarkdownSection(providers, /^Alibaba Personal Token Plan$/);
+    expect(tokenPlanSetup).toContain("bl usage token-plan --output json");
+    expect(tokenPlanSetup).toContain("On Windows, use WSL");
+    expect(troubleshooting).toContain("Bailian CLI");
+    expect(troubleshooting).not.toContain("Limits need tuning");
+    expect(troubleshooting).not.toContain("Counters do not move");
+    expect(troubleshooting).not.toContain("Quota seems stale");
+  });
+
   it("keeps the documented canonical OpenRouter example valid", () => {
     expect(
       validateQuotaProviders([
@@ -108,7 +144,7 @@ describe("GUI documentation consistency", () => {
       "secrets",
       "configuration",
     );
-    expect(secretParagraph).toMatch(/\b(?:never|must not|cannot|forbidden)\b/i);
+    expect(secretParagraph).toMatch(/\b(?:never|must not|cannot|forbidden|do not)\b/i);
 
     const externalSection = readMarkdownSection(external, /^Supported integration surface$/);
     expect(externalSection).toContain("No public API");

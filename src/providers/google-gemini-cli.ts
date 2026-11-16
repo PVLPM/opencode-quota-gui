@@ -210,6 +210,7 @@ export const googleGeminiCliProvider: QuotaProvider = {
             ...(error.failureCategory !== undefined
               ? { failureCategory: error.failureCategory }
               : {}),
+            ...(error.retryAtMs !== undefined ? { retryAtMs: error.retryAtMs } : {}),
           })),
         );
       }

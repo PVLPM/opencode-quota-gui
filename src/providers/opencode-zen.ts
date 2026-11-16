@@ -287,6 +287,7 @@ async function fetchOpenCodeZenConsoleAccounts(
         ...(result.failureCategory !== undefined
           ? { failureCategory: result.failureCategory }
           : {}),
+        ...(result.retryAtMs !== undefined ? { retryAtMs: result.retryAtMs } : {}),
       });
       statusDetails.push({
         key: `live_fetch_error:${account.sourceId}`,
@@ -310,6 +311,7 @@ async function fetchOpenCodeZenConsoleAccounts(
           ...(optionalError.failureCategory !== undefined
             ? { failureCategory: optionalError.failureCategory }
             : {}),
+          ...(optionalError.retryAtMs !== undefined ? { retryAtMs: optionalError.retryAtMs } : {}),
         });
       }
     } else {

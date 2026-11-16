@@ -1,7 +1,6 @@
 import type { Accessor } from "solid-js";
 import { createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { QuotaSnapshot } from "../contracts/dashboard.js";
-import { createQuery } from "../ui/query.js";
 import type { DisplayPreferences } from "../ui/quota-semantics.js";
 import type { NativeDashboardConnection } from "./dashboard-client.js";
 import { createDashboardPanelState, type DashboardPanelClient } from "./panel-state.js";
@@ -13,8 +12,8 @@ import { buildSessionHeaderView } from "./session-header-model.js";
  *
  * `createDashboardPanelState` already owns the visibility-gated subscription,
  * the fail-closed settings read and host recovery, so the Slot reuses it
- * instead of creating a second collector. This module adds only the quota read
- * that the Slot's refresh tokens request; the Slot contributes one scoped
+ * instead of creating a second collector. The Slot reads the panel's quota
+ * query when its refresh tokens change; the Slot contributes one scoped
  * viewer to the shared runtime, which still owns the single quota poller.
  */
 
@@ -44,26 +43,29 @@ export function createSessionHeaderSource(options: {
     visible: options.active,
     ...(options.hostConnected === undefined ? {} : { hostConnected: options.hostConnected }),
   });
-  const quotaQuery = createQuery<QuotaSnapshot>(() => options.client.quota());
+  const quotaQuery = panel.quotaQuery;
   const now = options.now ?? Date.now;
   const [localNowMs, setLocalNowMs] = createSignal(now());
   const [freshReconnectEpoch, setFreshReconnectEpoch] = createSignal(0);
 
-  function refreshQuota(): void {
+  function refreshQuota(changed = false): void {
     const reconnectEpoch = panel.reconnectEpoch();
-    void quotaQuery.run().then((applied) => {
+    void quotaQuery.read({ changed }).then((applied) => {
       if (!applied) return;
       setFreshReconnectEpoch(reconnectEpoch);
       panel.markFresh();
     });
   }
 
+  let lastQuotaToken = 0;
   createEffect(() => {
     if (!options.active()) return;
     // Read both tokens where they are used; either one asks for a fresh read.
-    void panel.quotaReloadToken();
+    const token = panel.quotaReloadToken();
     void panel.reconnectEpoch();
-    refreshQuota();
+    const changed = token !== lastQuotaToken;
+    lastQuotaToken = token;
+    refreshQuota(changed);
   });
 
   // Keep the view clock in sync with reactive data without making the clock
@@ -104,13 +106,10 @@ export function createSessionHeaderSource(options: {
     const preferences = panel.preferences();
     if (settings === undefined || preferences === undefined) return EMPTY_VIEW;
     const snapshot = quotaQuery.data();
-    // The Panel keeps last-known data on screen with a stale badge. The Slot
-    // has no room for that badge, so it fails closed rather than painting old
-    // values as fresh, healthy or zero rings.
+    // A read error alone does not invalidate an otherwise fresh snapshot.
     const stale =
       snapshot === undefined ||
       snapshot.stale === true ||
-      quotaQuery.error() !== undefined ||
       panel.connection() !== "live" ||
       panel.hostStale() ||
       panel.settingsStale() ||
@@ -148,8 +147,8 @@ export function createSessionHeaderSource(options: {
     settingsError: panel.settingsError,
     quotaError: quotaQuery.error,
     retry: () => {
-      refreshQuota();
       panel.retry();
+      if (options.hostConnected?.() !== false) refreshQuota();
     },
   };
 }

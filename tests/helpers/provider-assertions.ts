@@ -12,6 +12,14 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
   anthropic: [
     {
       resultType: "quota",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+  ],
+  "claude-agent": [
+    {
+      resultType: "quota",
       acquisitionMethod: "local_cli",
       ownership: "maintained",
       authority: "provider_reported",
@@ -120,9 +128,9 @@ export const PROVIDER_ACCOUNTING_LEDGER: Record<string, Array<QuotaToastEntry["a
   "alibaba-coding-plan": [
     {
       resultType: "quota",
-      acquisitionMethod: "local_estimation",
+      acquisitionMethod: "local_cli",
       ownership: "maintained",
-      authority: "locally_derived",
+      authority: "provider_reported",
     },
   ],
   "alibaba-token-plan": [
@@ -349,6 +357,8 @@ export function visibleEntries(
       }),
     );
     if (providerId) {
+      if (providerId === "anthropic") expect(entry.accounting.sourceId).toBeTruthy();
+      if (providerId === "claude-agent") expect(entry.accounting.sourceId).toBeUndefined();
       const {
         sourceId: _sourceId,
         observedAtIso: _observedAtIso,

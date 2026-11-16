@@ -144,14 +144,16 @@ async function loadCliAuthenticatedProviderIds(config: Record<string, unknown>):
     typeof quotaToast?.anthropicBinaryPath === "string"
       ? quotaToast.anthropicBinaryPath
       : undefined;
-  const [anthropicConfigured, kimiGlobalAuth, kimiCnAuth] = await Promise.all([
-    hasAnthropicCredentialsConfigured({ binaryPath: anthropicBinaryPath }),
+  const [claudeCliConfigured, kimiGlobalAuth, kimiCnAuth] = await Promise.all([
+    hasAnthropicCredentialsConfigured({
+      binaryPath: anthropicBinaryPath,
+    }),
     resolveKimiGlobalAuthCached({ maxAgeMs: DEFAULT_KIMI_AUTH_CACHE_MAX_AGE_MS }),
     resolveKimiCnAuthCached({ maxAgeMs: DEFAULT_KIMI_AUTH_CACHE_MAX_AGE_MS }),
   ]);
 
   return [
-    ...(anthropicConfigured ? ["anthropic"] : []),
+    ...(claudeCliConfigured ? ["claude-agent"] : []),
     ...(kimiGlobalAuth.state === "configured" ? ["kimi-code-plan-global"] : []),
     ...(kimiCnAuth.state === "configured" ? ["kimi-code-plan-cn"] : []),
   ];

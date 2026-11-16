@@ -18,9 +18,15 @@
  * heartbeat, URL, history entry or `localStorage` key is involved.
  */
 import { type Accessor, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js";
-import type { DashboardEvent, DashboardHealth, SettingsSnapshot } from "../contracts/dashboard.js";
+import type {
+  DashboardEvent,
+  DashboardHealth,
+  QuotaSnapshot,
+  SettingsSnapshot,
+} from "../contracts/dashboard.js";
 import type { DashboardRpcViewScope } from "../rpc.js";
 import { createQuery } from "../ui/query.js";
+import { createQuotaQuery, type QuotaQuery } from "../ui/quota-query.js";
 import { displayPreferencesFromValues } from "../ui/settings-model.js";
 import { buildMismatchMessage, contractMismatchMessage } from "../ui/view-model.js";
 import type { NativeDashboardConnection } from "./dashboard-client.js";
@@ -40,6 +46,7 @@ export interface DashboardPanelOptions {
 export interface DashboardPanelClient {
   settings(): Promise<SettingsSnapshot>;
   health(): Promise<DashboardHealth>;
+  quota?(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   subscribe(listener: (event: DashboardEvent) => void): () => void;
   onConnectionChange(listener: (state: NativeDashboardConnection) => void): () => void;
   onReconnect(listener: () => void): () => void;
@@ -52,11 +59,13 @@ export interface DashboardPanelClient {
 }
 
 export interface DashboardPanelState {
+  quotaQuery: QuotaQuery;
   settings: Accessor<SettingsSnapshot | undefined>;
   /** The last settings read failure; a present `settings` is the last known payload. */
   settingsError: Accessor<unknown>;
   /** True when the settings read failed: visibility is last known or unavailable. */
   settingsStale: Accessor<boolean>;
+  healthError: Accessor<unknown>;
   connection: Accessor<NativeDashboardConnection>;
   buildWarning: Accessor<string | undefined>;
   contractMismatch: Accessor<string | undefined>;
@@ -73,7 +82,7 @@ export interface DashboardPanelState {
   /** Anchors the current routed payload as fresh for the current host epoch. */
   markFresh: () => void;
   /** Explicit recovery after a transport or host failure. */
-  retry: () => void;
+  retry: (options?: { refreshQuota?: boolean }) => void;
   /** Reasserts the scope this window needs from the shared runtime. */
   setScope: (scope: DashboardRpcViewScope) => void;
 }
@@ -81,7 +90,12 @@ export interface DashboardPanelState {
 export function createDashboardPanelState(options: DashboardPanelOptions): DashboardPanelState {
   const client = options.client;
   const settingsQuery = createQuery<SettingsSnapshot>(() => client.settings());
+  const quotaQuery = createQuotaQuery((refresh) => {
+    if (!client.quota) return Promise.reject(new Error("Quota is unavailable"));
+    return client.quota(refresh ? { refresh: true } : undefined);
+  });
   const [health, setHealth] = createSignal<DashboardHealth>();
+  const [healthError, setHealthError] = createSignal<unknown>();
   const [connection, setConnection] = createSignal<NativeDashboardConnection>(client.connection());
   const [reconnectEpoch, setReconnectEpoch] = createSignal(0);
   const [freshSettingsEpoch, setFreshSettingsEpoch] = createSignal(0);
@@ -92,24 +106,44 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
   /** The host epoch a successful transport reconnect has restored. */
   const [recoveredHostEpoch, setRecoveredHostEpoch] = createSignal(0);
 
-  function refreshSettings(): void {
+  let settingsInFlight: Promise<boolean> | undefined;
+  let settingsReadEpoch = 0;
+  // `changed` is an invalidation event: the in-flight read may predate it, so
+  // one follow-up read is owed. A plain retry just joins the in-flight read.
+  function refreshSettings(changed = false): void {
     const epoch = reconnectEpoch();
-    void settingsQuery.run().then((applied) => {
+    if (settingsInFlight) {
+      if (changed || settingsReadEpoch !== epoch) {
+        void settingsInFlight.then(() => refreshSettings());
+      }
+      return;
+    }
+    settingsReadEpoch = epoch;
+    settingsInFlight = settingsQuery.run();
+    void settingsInFlight.then((applied) => {
       if (applied) setFreshSettingsEpoch(epoch);
+      settingsInFlight = undefined;
     });
   }
 
+  let healthInFlight: Promise<void> | undefined;
   async function refreshHealth(): Promise<void> {
-    try {
-      setHealth(await client.health());
-    } catch {
-      // Health is diagnostic; the routed reads own the visible failure.
-    }
+    if (healthInFlight) return healthInFlight;
+    healthInFlight = (async () => {
+      try {
+        setHealth(await client.health());
+        setHealthError(undefined);
+      } catch (error) {
+        setHealthError(error);
+      }
+    })();
+    await healthInFlight;
+    healthInFlight = undefined;
   }
 
   function handleEvent(event: DashboardEvent): void {
     if (event.topic === "settings.changed") {
-      refreshSettings();
+      refreshSettings(true);
       return;
     }
     if (event.topic === "quota.changed") {
@@ -132,6 +166,7 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
   createEffect(() => {
     const connected = options.hostConnected?.() ?? true;
     if (!connected) {
+      quotaQuery.invalidate();
       hostWasConnected = false;
       setHostEpoch((epoch) => epoch + 1);
       client.suspend?.();
@@ -175,8 +210,12 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
     }),
   );
 
-  const unsubscribeConnection = client.onConnectionChange(setConnection);
+  const unsubscribeConnection = client.onConnectionChange((next) => {
+    if (next !== "live" && connection() === "live") quotaQuery.invalidate();
+    setConnection(next);
+  });
   const unsubscribeReconnect = client.onReconnect(() => {
+    quotaQuery.reconnected();
     setRecoveredHostEpoch(hostEpoch());
     setReconnectEpoch((epoch) => epoch + 1);
     refreshHealth();
@@ -194,9 +233,12 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
     return snapshot === undefined ? undefined : displayPreferencesFromValues(snapshot.values);
   });
 
+  let retryReconnecting = false;
   return {
+    quotaQuery,
     settings: settingsQuery.data,
     settingsError: settingsQuery.error,
+    healthError,
     settingsStale: () =>
       settingsQuery.error() !== undefined || freshSettingsEpoch() < reconnectEpoch(),
     connection,
@@ -218,20 +260,29 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
       if (hostEpoch() > recoveredHostEpoch()) return;
       setFreshHostEpoch(hostEpoch());
     },
-    retry: () => {
+    retry: (retryOptions) => {
       if (options.hostConnected?.() === false) return;
-      // A failed shell read on a healthy transport is retried locally; only a
-      // dropped host or transport needs the connection reopened.
-      if (
-        settingsQuery.error() !== undefined &&
-        options.hostConnected?.() !== false &&
-        connection() === "live"
-      ) {
+      const retryReads = () => {
         refreshSettings();
-        refreshHealth();
-        return;
+        void refreshHealth();
+        if (retryOptions?.refreshQuota !== false && client.quota) void quotaQuery.refresh();
+        setReloadToken((token) => token + 1);
+      };
+      if (connection() === "live") retryReads();
+      else if (!retryReconnecting) {
+        retryReconnecting = true;
+        const releaseReads = quotaQuery.holdReads();
+        void client
+          .reconnect()
+          .then(() => {
+            if (retryOptions?.refreshQuota !== false && client.quota) void quotaQuery.refresh();
+            releaseReads();
+          })
+          .catch(() => releaseReads())
+          .finally(() => {
+            retryReconnecting = false;
+          });
       }
-      void client.reconnect();
     },
     setScope: (scope) => {
       const result = client.setActiveView?.(scope);

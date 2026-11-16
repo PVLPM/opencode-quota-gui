@@ -1,12 +1,8 @@
-import {
-  DEFAULT_ALIBABA_AUTH_CACHE_MAX_AGE_MS,
-  resolveAlibabaCodingPlanAuthCached,
-} from "../lib/alibaba-auth.js";
-import { resolveAnthropicAuthIdentity } from "../lib/anthropic.js";
+import { resolveClaudeAgentAccountIdentity } from "../lib/anthropic.js";
 import { resolveChutesApiKey } from "../lib/chutes-config.js";
 import { resolveCopilotAuthIdentity } from "../lib/copilot.js";
 import { resolveDeepSeekApiKey } from "../lib/deepseek-auth.js";
-import type { QuotaProviderCachePolicy } from "../lib/entries.js";
+import type { QuotaProviderCachePolicy, QuotaProviderContext } from "../lib/entries.js";
 import { resolveGoogleAgyAuthIdentity } from "../lib/google-agy.js";
 import { resolveGeminiCliAuthIdentity } from "../lib/google-gemini-cli.js";
 import { resolveKiloApiKey } from "../lib/kilo-config.js";
@@ -52,6 +48,7 @@ import { resolveSyntheticApiKey } from "../lib/synthetic-config.js";
 import { resolveXaiAuthIdentity } from "../lib/xai.js";
 import { DEFAULT_ZAI_AUTH_CACHE_MAX_AGE_MS, resolveZaiAuthCached } from "../lib/zai-auth.js";
 import { DEFAULT_ZHIPU_AUTH_CACHE_MAX_AGE_MS, resolveZhipuAuthCached } from "../lib/zhipu-auth.js";
+import { getClaudeAgentRuntimeProviderId, isClaudeAgentRuntimeDetected } from "./claude-agent.js";
 
 const UNCACHED = { kind: "uncached" } as const satisfies QuotaProviderCachePolicy;
 
@@ -168,7 +165,7 @@ const quotaProvidersCachePolicy: QuotaProviderCachePolicy = {
     if (!definitions || definitions.length === 0) return null;
 
     const identities = await Promise.all(
-      definitions.map(resolveQuotaProviderDefinitionAuthIdentity),
+      definitions.map((definition) => resolveQuotaProviderDefinitionAuthIdentity(definition)),
     );
     if (identities.some((identity) => identity === null)) return null;
 
@@ -179,11 +176,26 @@ const quotaProvidersCachePolicy: QuotaProviderCachePolicy = {
   },
 };
 
+/** The Claude CLI login alone. */
+async function claudeAgentIdentity(
+  ctx: QuotaProviderContext,
+): Promise<ResolvedAuthIdentity | null> {
+  const selected = getClaudeAgentRuntimeProviderId(ctx) !== undefined;
+  return resolveClaudeAgentAccountIdentity({
+    binaryPath: ctx.config.anthropicBinaryPath,
+    operationCache: ctx.operationCache,
+    onlyCurrentModel: ctx.config.onlyCurrentModel === true,
+    runtimeDetected: selected ? false : await isClaudeAgentRuntimeDetected(ctx),
+  });
+}
+
 export const PROVIDER_CACHE_POLICIES = {
-  anthropic: {
+  anthropic: UNCACHED,
+  "claude-agent": {
     kind: "resolved-auth",
-    resolveIdentity: (ctx) =>
-      resolveAnthropicAuthIdentity({ binaryPath: ctx.config.anthropicBinaryPath }),
+    // Identity uses this cycle's CLI probe; repeating it only spawns more processes.
+    revalidateWithCycleCache: true,
+    resolveIdentity: (ctx) => claudeAgentIdentity(ctx),
   },
   copilot: {
     kind: "resolved-auth",
@@ -203,14 +215,7 @@ export const PROVIDER_CACHE_POLICIES = {
   }),
   cursor: UNCACHED,
   "alibaba-token-plan": UNCACHED,
-  "alibaba-coding-plan": resolvedCredentialPolicy("alibaba-coding-plan", async () => {
-    const resolved = await resolveAlibabaCodingPlanAuthCached({
-      maxAgeMs: DEFAULT_ALIBABA_AUTH_CACHE_MAX_AGE_MS,
-    });
-    return resolved.state === "configured"
-      ? { credential: resolved.apiKey, qualifiers: [resolved.tier] }
-      : null;
-  }),
+  "alibaba-coding-plan": UNCACHED,
   synthetic: resolvedCredentialPolicy("synthetic", async () => {
     const resolved = await resolveSyntheticApiKey();
     return resolved ? { credential: resolved.key } : null;

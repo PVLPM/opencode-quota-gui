@@ -107,9 +107,24 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toMatch(/region:\s*"side"/u);
     expect(guiSource).toMatch(/const TAB_ID = "dashboard"/u);
     expect(guiSource).toMatch(/mobile:\s*\{[^}]*kind:\s*"menu"/su);
-    expect(guiSource).toMatch(/render:\s*\(\)\s*=>\s*<NativeDashboardPanel\s+runtime=\{runtime\}/u);
+    expect(guiSource).toMatch(
+      /render:\s*\(\)\s*=>\s*\(?\s*<NativeDashboardPanel\s+runtime=\{runtime\}/u,
+    );
     expect(guiSource).toMatch(/visible=\{panel\.visible\}/u);
     expect(panelSource).toContain("DashboardPanel");
+  });
+
+  it("gates Native contributions on the public host version before setup side effects", () => {
+    const setupStart = guiSource.indexOf("setup(ctx) {");
+    const firstContribution = guiSource.indexOf("ctx.add(", setupStart);
+    const versionGate = guiSource.indexOf(
+      "if (!supportsNativeGui(ctx.app?.version)) return;",
+      setupStart,
+    );
+
+    expect(guiSource).toContain('from "../lib/opencode-version-core.js"');
+    expect(versionGate).toBeGreaterThan(setupStart);
+    expect(firstContribution).toBeGreaterThan(versionGate);
   });
 
   it("follows the host's live built-in server connection", () => {
@@ -118,6 +133,13 @@ describe("Desktop GUI entry", () => {
     expect(guiSource).toContain(".connected");
     expect(guiSource).toMatch(/hostConnected=\{hostConnected\}/u);
     expect(panelSource).toContain("hostConnected");
+  });
+
+  it("feeds the model-change toast from live settings without gating mismatch detection", () => {
+    expect(guiSource).toContain("createModelChangeToastSetting(runtime.client)");
+    expect(guiSource).toContain("modelChangeToastEnabled: modelChangeToastSetting.enabled");
+    expect(guiSource).toContain("onCleanup(modelChangeToastSetting.stop)");
+    expect(guiSource).toContain("source: runtime.cacheObserver");
   });
 
   it("offers an accessible retry while data is stale", () => {
@@ -180,7 +202,19 @@ describe("Desktop GUI entry", () => {
     expect(panelSource.match(/enabled=\{props\.visible\}/gu)?.length).toBe(7);
     expect(routesSource).toContain("function routeEnabled");
     expect(routesSource).toContain("props.enabled?.() !== false");
-    expect(routesSource.match(/props\.onFresh\?\.\(\)/gu)?.length).toBe(6);
+    for (const [route, count] of [
+      ["QuotaRoute", 3],
+      ["AnalyticsRoute", 1],
+      ["ModelsRoute", 1],
+      ["GroupDetailRoute", 1],
+      ["ProjectRoute", 1],
+      ["SessionRoute", 1],
+    ] as const) {
+      const start = routesSource.indexOf(`export function ${route}(`);
+      const end = routesSource.indexOf("\nexport interface ", start);
+      expect(start, `missing ${route}`).toBeGreaterThanOrEqual(0);
+      expect(routesSource.slice(start, end).match(/props\.onFresh\?\.\(\)/gu)?.length).toBe(count);
+    }
     expect(stateSource).toContain('from "../ui/query.js"');
 
     for (const view of [
@@ -222,7 +256,9 @@ describe("Desktop GUI entry", () => {
     // routed session changes, and a Settings remount re-seeds from the same
     // value instead of a session-keyed map.
     expect(guiSource).toContain("initialLocation={props.runtime.location()}");
-    expect(guiSource).toContain("onLocationChange={(next) => props.runtime.setLocation(next)}");
+    expect(guiSource).toContain("onLocationChange={props.setLocation}");
+    expect(guiSource).toContain("runtime.setLocation(next)");
+    expect(panelSource).toContain("props.externalLocation?.()");
     expect(guiSource).not.toContain("sessionKey");
     expect(panelSource).not.toContain("sessionKey");
     expect(runtimeSource).not.toContain("Map<string, Location>");
@@ -290,7 +326,7 @@ describe("Desktop GUI entry", () => {
 
   it("keeps settings capabilities in the shared view, not a native copy", () => {
     expect(settingsStateSource).toContain("client.settings()");
-    expect(settingsStateSource).toContain("client.quota()");
+    expect(settingsStateSource).toContain("client.quota(refresh ? { refresh: true } : undefined)");
     expect(settingsStateSource).toContain("client.onReconnect");
     expect(settingsStateSource).toContain("visibilityCatalogEquals");
     expect(settingsStateSource).not.toContain("localStorage");
@@ -413,14 +449,14 @@ describe("native build configuration", () => {
   it("ships the bundle from the same package with a bounded server peer", () => {
     expect(exportsMap["./gui-experimental"]?.default).toBe("./dist/gui-experimental.cjs");
     expect(packageScripts["build:gui"]).toBe("vite build --config vite.native.config.mjs");
-    expect(devDependencies["@opencode/plugin"]).toBe("2.2.0");
+    expect(devDependencies["@opencode/plugin"]).toBe("2.2.1");
     expect(peerDependencies["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
     expect(dependencies["@opencode/plugin"]).toBeUndefined();
     expect(dependencies["@opencode/ui"]).toBeUndefined();
     expect(devDependencies["@opencode/ui"]).toBe("2.0.32");
 
     const installed = readJson<PluginManifest>("node_modules/@opencode/plugin/package.json");
-    expect(installed.version).toBe("2.2.0");
+    expect(installed.version).toBe("2.2.1");
     const pluginExports = installed.exports ?? {};
     expect(pluginExports["./gui"]).toBeDefined();
     expect(pluginExports["./gui/vite"]).toBeDefined();

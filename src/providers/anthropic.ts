@@ -1,58 +1,105 @@
 /**
- * Anthropic Claude provider wrapper.
+ * Anthropic provider: OpenCode's own Anthropic logins only.
  *
- * Normalizes Claude CLI-exposed quota windows into generic toast entries.
+ * Subscription quota belongs to Claude Agent. API credentials expose no comparable quota here.
  */
 
-import {
-  getAnthropicDiagnostics,
-  hasAnthropicCredentialsConfigured,
-  queryAnthropicQuota,
-  queryAnthropicQuotaWithOAuth,
-} from "../lib/anthropic.js";
-import { resolveAnthropicOAuth } from "../lib/anthropic-auth.js";
-import { sanitizeDisplayText } from "../lib/display-sanitize.js";
+import type { AnthropicQuotaResult } from "../lib/anthropic.js";
 import type {
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
-import {
-  credentialRowAuthEntry,
-  formatCredentialDisplayNames,
-  readCredentialRows,
-} from "../lib/opencode-auth.js";
-import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
-import type { AuthData } from "../lib/types.js";
+import { resolveQuotaProviderSessionModelIdentity } from "../lib/quota-providers.js";
 import {
   attemptedErrorResult,
-  attemptedResult,
   notAttemptedResult,
   statusDetailsFromRecord,
   withStatusDetails,
 } from "./result-helpers.js";
 
 export function getAnthropicNoDataMessage(): string {
-  return "Quota unavailable via local Claude CLI or OAuth credentials";
+  return "Anthropic API quota unavailable";
+}
+
+const ANTHROPIC_API_QUOTA_UNAVAILABLE_MESSAGE = "Anthropic API quota is unavailable.";
+
+/**
+ * Map subscription quota returned for the Claude Agent CLI login.
+ */
+export function anthropicQuotaEntries(
+  quota: AnthropicQuotaResult,
+  params: {
+    group: string;
+    acquisitionMethod: QuotaToastEntry["accounting"]["acquisitionMethod"];
+    sourceId?: string;
+  },
+): QuotaToastEntry[] {
+  const { group } = params;
+  const accounting = {
+    resultType: "quota" as const,
+    acquisitionMethod: params.acquisitionMethod,
+    ownership: "maintained" as const,
+    authority: "provider_reported" as const,
+    ...(params.sourceId !== undefined ? { sourceId: params.sourceId } : {}),
+  };
+  const entries: QuotaToastEntry[] = [];
+  for (const [label, window, rowKey] of [
+    ["5h", quota.five_hour, "window:five_hour"],
+    ["Weekly", quota.seven_day, "window:week"],
+  ] as const) {
+    if (!window) continue;
+    entries.push({
+      accounting: { ...accounting },
+      name: `${group} ${label}`,
+      group,
+      label: `${label}:`,
+      rowKey,
+      percentRemaining: window.percentRemaining,
+      resetTimeIso: window.resetTimeIso,
+      ...(window.fixedWindow ? { fixedWindow: { ...window.fixedWindow } } : {}),
+    });
+  }
+  if (quota.extra_usage) {
+    entries.push({
+      accounting: { ...accounting },
+      name: `${group} Usage Credits`,
+      group: `${group} Usage Credits`,
+      label: "Monthly:",
+      rowKey: "window:month",
+      percentRemaining: quota.extra_usage.percentRemaining,
+    });
+  }
+  if (quota.fable_weekly) {
+    entries.push({
+      accounting: { ...accounting },
+      name: `${group} Fable Weekly`,
+      group,
+      label: "Fable:",
+      semantic: {
+        metric: { kind: "named", name: "Fable weekly" },
+        prominence: "primary",
+      },
+      percentRemaining: quota.fable_weekly.percentRemaining,
+      resetTimeIso: quota.fable_weekly.resetTimeIso,
+    });
+  }
+  return entries;
 }
 
 export const anthropicProvider: QuotaProvider = {
   id: "anthropic",
 
   async isAvailable(ctx: QuotaProviderContext): Promise<boolean> {
-    const providerAvailable = await isCanonicalProviderAvailable({
-      ctx,
-      providerId: "anthropic",
-      fallbackOnError: false,
-    });
-    if (!providerAvailable) {
-      return false;
+    if (ctx.config?.onlyCurrentModel === true) {
+      const selected =
+        ctx.config.currentProviderID ??
+        resolveQuotaProviderSessionModelIdentity({ currentModel: ctx.config.currentModel ?? "" })
+          ?.providerId;
+      return selected?.trim().toLowerCase() === "anthropic";
     }
-
-    return await hasAnthropicCredentialsConfigured({
-      binaryPath: ctx.config?.anthropicBinaryPath,
-    });
+    return false;
   },
 
   matchesCurrentModel(model: string): boolean {
@@ -60,232 +107,11 @@ export const anthropicProvider: QuotaProvider = {
   },
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
-    const options = {
-      binaryPath: ctx.config?.anthropicBinaryPath,
-      requestTimeoutMs: ctx.config?.requestTimeoutMs,
-    };
-    let statusDetails;
-    let acquisitionMethod: QuotaToastEntry["accounting"]["acquisitionMethod"] = "local_cli";
-    // A failed login stays in the list so it shows as its own error row.
-    const databaseCredentials = (
-      await readCredentialRows(["anthropic"], { methods: ["oauth"] })
-    ).flatMap((row) => {
-      if (row.integrationId !== "anthropic") return [];
-      const auth = resolveAnthropicOAuth({ anthropic: credentialRowAuthEntry(row) } as AuthData);
-      return auth.state === "configured" || auth.state === "failed" ? [{ row, auth }] : [];
-    });
-    try {
-      const diagnostics = await getAnthropicDiagnostics(options);
-      const quota = diagnostics.quotaSupported ? diagnostics.quota : undefined;
-      if (diagnostics.quotaSupported && diagnostics.quotaSource !== "claude-auth-status-json") {
-        acquisitionMethod = "remote_api";
-      }
-      statusDetails = statusDetailsFromRecord({
-        cli_installed: diagnostics.installed ? "true" : "false",
-        cli_version: diagnostics.version ?? "(none)",
-        binary_path: diagnostics.binaryPath ?? "(none)",
-        auth_status: diagnostics.authStatus,
-        quota_supported: diagnostics.quotaSupported ? "true" : "false",
-        quota_source: diagnostics.quotaSource === "none" ? "(none)" : diagnostics.quotaSource,
-        oauth_credential_source: diagnostics.oauthCredentialSource ?? "(none)",
-        checked_commands: diagnostics.checkedCommands.join(" | ") || "(none)",
-        message: diagnostics.message,
-        five_hour_remaining: quota
-          ? `${quota.five_hour.percentRemaining}% reset_at=${quota.five_hour.resetTimeIso ?? "(none)"}`
-          : undefined,
-        seven_day_remaining: quota
-          ? `${quota.seven_day.percentRemaining}% reset_at=${quota.seven_day.resetTimeIso ?? "(none)"}`
-          : undefined,
-        fable_weekly_remaining: quota?.fable_weekly
-          ? `${quota.fable_weekly.percentRemaining}% reset_at=${quota.fable_weekly.resetTimeIso ?? "(none)"}`
-          : undefined,
-      });
-    } catch (error) {
-      statusDetails = statusDetailsFromRecord({
-        cli_installed: "false",
-        message: `failed to probe Claude CLI: ${sanitizeDisplayText(error instanceof Error ? error.message : String(error))}`,
-      });
-    }
-
-    if (databaseCredentials.length > 0) {
-      const results = await Promise.all(
-        databaseCredentials.map(async ({ row, auth }) => ({
-          row,
-          result:
-            auth.state === "failed"
-              ? {
-                  success: false as const,
-                  error: `Anthropic sign-in could not be read: ${auth.error}. Run \`opencode auth login anthropic\`.`,
-                  failureCategory: "credentials" as const,
-                }
-              : await queryAnthropicQuotaWithOAuth(auth.accessToken, options.requestTimeoutMs),
-        })),
-      );
-      const names = formatCredentialDisplayNames(
-        "Claude",
-        results.map(({ row }) => ({ row, fallbackName: "Claude" })),
-      );
-      const accounts = results.map(({ row }, index) => ({
-        sourceId: row.id,
-        label: names[index] ?? "Claude",
-        active: row.active,
-      }));
-      const entries: QuotaToastEntry[] = [];
-      const errors: QuotaProviderResult["errors"] = [];
-      for (const [index, { row, result }] of results.entries()) {
-        const group = names[index] ?? "Claude";
-        if (!result?.success) {
-          if (result) {
-            errors.push({
-              label: group,
-              message: result.error,
-              sourceId: row.id,
-              failureCategory: result.failureCategory,
-            });
-          }
-          continue;
-        }
-        entries.push(
-          ...[
-            ["5h", result.five_hour, "window:five_hour"] as const,
-            ["Weekly", result.seven_day, "window:week"] as const,
-          ].map(([label, window, rowKey]) => ({
-            accounting: {
-              resultType: "quota" as const,
-              acquisitionMethod: "remote_api" as const,
-              ownership: "maintained" as const,
-              authority: "provider_reported" as const,
-              sourceId: row.id,
-            },
-            name: `${group} ${label}`,
-            group,
-            label: `${label}:`,
-            rowKey,
-            percentRemaining: window.percentRemaining,
-            resetTimeIso: window.resetTimeIso,
-          })),
-        );
-        if (result.extra_usage) {
-          entries.push({
-            accounting: {
-              resultType: "quota",
-              acquisitionMethod: "remote_api",
-              ownership: "maintained",
-              authority: "provider_reported",
-              sourceId: row.id,
-            },
-            name: `${group} Usage Credits`,
-            group: `${group} Usage Credits`,
-            label: "Monthly:",
-            rowKey: "window:month",
-            percentRemaining: result.extra_usage.percentRemaining,
-          });
-        }
-        if (result.fable_weekly) {
-          entries.push({
-            accounting: {
-              resultType: "quota",
-              acquisitionMethod: "remote_api",
-              ownership: "maintained",
-              authority: "provider_reported",
-              sourceId: row.id,
-            },
-            name: `${group} Fable Weekly`,
-            group,
-            label: "Fable:",
-            semantic: {
-              metric: { kind: "named", name: "Fable weekly" },
-              prominence: "primary",
-            },
-            percentRemaining: result.fable_weekly.percentRemaining,
-            resetTimeIso: result.fable_weekly.resetTimeIso,
-          });
-        }
-      }
-      return withStatusDetails({ ...attemptedResult(entries, errors), accounts }, statusDetails);
-    }
-
-    const result = await queryAnthropicQuota(options);
-    if (!result) {
-      return withStatusDetails(notAttemptedResult(), statusDetails);
-    }
-
-    if (!result.success) {
-      return withStatusDetails(
-        attemptedErrorResult("Claude", result.error, {
-          failureCategory: result.failureCategory,
-        }),
-        statusDetails,
-      );
-    }
-
-    const entries: QuotaToastEntry[] = [
-      {
-        accounting: {
-          resultType: "quota",
-          acquisitionMethod,
-          ownership: "maintained",
-          authority: "provider_reported",
-        },
-        name: "Claude 5h",
-        group: "Claude",
-        label: "5h:",
-        rowKey: "window:five_hour",
-        percentRemaining: result.five_hour.percentRemaining,
-        resetTimeIso: result.five_hour.resetTimeIso,
-      },
-      {
-        accounting: {
-          resultType: "quota",
-          acquisitionMethod,
-          ownership: "maintained",
-          authority: "provider_reported",
-        },
-        name: "Claude Weekly",
-        group: "Claude",
-        label: "Weekly:",
-        rowKey: "window:week",
-        percentRemaining: result.seven_day.percentRemaining,
-        resetTimeIso: result.seven_day.resetTimeIso,
-      },
-    ];
-
-    if (result.extra_usage) {
-      entries.push({
-        accounting: {
-          resultType: "quota",
-          acquisitionMethod,
-          ownership: "maintained",
-          authority: "provider_reported",
-        },
-        name: "Claude Usage Credits",
-        group: "Claude Usage Credits",
-        label: "Monthly:",
-        rowKey: "window:month",
-        percentRemaining: result.extra_usage.percentRemaining,
-      });
-    }
-
-    if (result.fable_weekly) {
-      entries.push({
-        accounting: {
-          resultType: "quota",
-          acquisitionMethod,
-          ownership: "maintained",
-          authority: "provider_reported",
-        },
-        name: "Claude Fable Weekly",
-        group: "Claude",
-        label: "Fable:",
-        semantic: {
-          metric: { kind: "named", name: "Fable weekly" },
-          prominence: "primary",
-        },
-        percentRemaining: result.fable_weekly.percentRemaining,
-        resetTimeIso: result.fable_weekly.resetTimeIso,
-      });
-    }
-
-    return withStatusDetails(attemptedResult(entries), statusDetails);
+    return withStatusDetails(
+      ctx.config?.onlyCurrentModel
+        ? attemptedErrorResult("Anthropic", ANTHROPIC_API_QUOTA_UNAVAILABLE_MESSAGE)
+        : notAttemptedResult(),
+      statusDetailsFromRecord({}),
+    );
   },
 };

@@ -41,6 +41,8 @@ type RetryEvent = {
 
 function createContext() {
   const hooks = new Map<string, (event: RetryEvent) => Promise<void>>();
+  const registeredTools = new Map<string, unknown>();
+  const toolRegistration = { dispose: vi.fn(async () => undefined) };
   const rpcRegistration = {
     events: { emit: vi.fn(async () => undefined) },
     dispose: vi.fn(async () => undefined),
@@ -58,13 +60,20 @@ function createContext() {
         return { dispose: async () => {} };
       }),
     },
-    tool: { transform: vi.fn() },
+    tool: {
+      transform: vi.fn(
+        async (transform: (editor: { add: (tool: { name: string }) => void }) => void) => {
+          transform({ add: (tool) => registeredTools.set(tool.name, tool) });
+          return toolRegistration;
+        },
+      ),
+    },
     command: { transform: vi.fn() },
     rpc,
     integration: createFakeIntegration([]),
     event: { subscribe: vi.fn(() => ({ async *[Symbol.asyncIterator]() {} })) },
   };
-  return { ctx, hooks, rpc, rpcRegistration };
+  return { ctx, hooks, rpc, rpcRegistration, registeredTools, toolRegistration };
 }
 
 async function freePort(): Promise<number> {
@@ -170,15 +179,16 @@ describe("GUI-only server plugin", () => {
     }
   });
 
-  it("registers no commands, tool or report hooks, attaches dashboard RPC and starts the dashboard", async () => {
+  it("registers no agent tools, attaches dashboard RPC and starts the dashboard", async () => {
     const port = await freePort();
     await writeCanonicalConfig(port);
-    const { ctx, hooks, rpc, rpcRegistration } = createContext();
+    const { ctx, hooks, rpc, rpcRegistration, registeredTools, toolRegistration } = createContext();
 
     const cleanup = await plugin.setup(ctx as never);
     if (cleanup) cleanups.push(cleanup);
 
     expect(ctx.tool.transform).not.toHaveBeenCalled();
+    expect([...registeredTools.keys()].sort()).toEqual([]);
     expect(ctx.command.transform).not.toHaveBeenCalled();
     expect(rpc.register).toHaveBeenCalledOnce();
     expect(rpc.register.mock.calls[0]?.[0]).toMatchObject({
@@ -195,6 +205,7 @@ describe("GUI-only server plugin", () => {
 
     await cleanup?.();
     expect(rpcRegistration.dispose).toHaveBeenCalledOnce();
+    expect(toolRegistration.dispose).not.toHaveBeenCalled();
   });
 
   it("attaches dashboard RPC with web disabled and binds no listener", async () => {
