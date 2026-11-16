@@ -10,9 +10,14 @@ branch push. The only entry point is the **Publish to npm (manual tag dispatch)*
 | Input | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `tag` | yes | — | An existing tag in this repository whose commit already has the matching `package.json` version. The workflow never creates or moves a tag. |
-| `publish` | yes | `false` | Explicit publication confirmation. The `publish` job also requires the repository variable `NPM_PUBLISH_ENABLED` to be exactly `true`. |
+| `publish` | yes | `false` | Explicit confirmation to submit the verified tarball to **npm Staged Packages**. The `publish` job also requires the repository variable `NPM_PUBLISH_ENABLED` to be exactly `true`. |
 
-Leaving `publish` at its default runs a publish-free rehearsal: verify, pack once, smoke.
+Leaving `publish` at its default runs a staging-free rehearsal: verify, pack once, smoke.
+
+The workflow never publishes publicly. It only stages; the owner then reviews the staged
+package on npmjs.com (package page, staged versions) and clicks **Approve** with 2FA.
+Configure the npm Trusted Publisher with `npm stage publish` allowed and both
+`npm publish` and `npm dist-tag` disabled.
 
 ## What each stage does
 
@@ -24,10 +29,12 @@ Leaving `publish` at its default runs a publish-free rehearsal: verify, pack onc
    dispatched tag: it is never conditional or advisory, and a blank tag input fails the
    job instead of silently skipping the check.
 2. `runtime-smoke` — installs and imports the uploaded tarball on Node 22 and Node 24.
-3. `publish` (guarded by both switches) — verifies the received tarball against its
-   SHA-256 manifest, chooses `next` for prerelease versions and `latest` otherwise, and
-   publishes that exact file with npm provenance (`--provenance`) over OIDC
-   (`id-token: write`). It never rebuilds or repacks.
+3. `publish` (guarded by both switches; "Submit to npm staging") - installs npm 11.x and
+   requires >= 11.15.0, verifies the received tarball against its SHA-256 manifest,
+   chooses `next` for prerelease versions and `latest` otherwise, and stages that exact
+   file with `npm stage publish` and npm provenance (`--provenance`) over OIDC
+   (`id-token: write`). The dist-tag is fixed at staging time. It never rebuilds or
+   repacks. Public release is the owner's separate Approve + 2FA step on npmjs.com.
 
 No job writes to the repository: there is no version-sync commit, no automatic tag, no
 npm dist-tag bookkeeping step, and no `git push`. Branch and tag state is read-only, so
