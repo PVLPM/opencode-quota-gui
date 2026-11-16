@@ -174,13 +174,58 @@ describe("saved reset inventory parsing", () => {
     [5_000],
     [Number.MAX_SAFE_INTEGER],
     [50, 51],
-  ])("omits the entire inventory above 100 (%s, %s)", (...counts) => {
+    [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+  ])("caps display at 100 segments instead of hiding inventory (%s, %s)", (...counts) => {
     const quota = parse({
       eligible: true,
       grants: counts.map((resets_left) => ({ resets_left, paused: false })),
     });
-    expect(quota?.saved_resets).toBeUndefined();
+    expect(quota?.saved_resets?.availableCount).toBe(100);
+    expect(quota?.saved_resets?.credits).toHaveLength(100);
     expect(quota?.five_hour).toBeDefined();
+  });
+
+  it("orders unsorted grants earliest known expiry first and unknown last, keeping the earliest when capped", () => {
+    const quota = parse({
+      eligible: true,
+      grants: [
+        { resets_left: 60, paused: false },
+        { resets_left: 60, paused: false, ends_at: "2026-12-05T00:00:00Z" },
+        { resets_left: 2, paused: false, ends_at: "2026-12-01T00:00:00Z" },
+        { resets_left: 2, paused: false, ends_at: "2026-12-05T00:00:00Z" },
+        { resets_left: 1, paused: false, ends_at: "2026-12-03T00:00:00Z" },
+      ],
+    });
+    const credits = quota?.saved_resets?.credits ?? [];
+    expect(quota?.saved_resets?.availableCount).toBe(100);
+    expect(credits).toHaveLength(100);
+    expect(credits.slice(0, 3)).toEqual([
+      { expiresAtIso: "2026-12-01T00:00:00.000Z" },
+      { expiresAtIso: "2026-12-01T00:00:00.000Z" },
+      { expiresAtIso: "2026-12-03T00:00:00.000Z" },
+    ]);
+    expect(credits.filter((c) => c.expiresAtIso === "2026-12-05T00:00:00.000Z")).toHaveLength(62);
+    expect(credits.filter((c) => c.expiresAtIso === undefined)).toHaveLength(35);
+    expect(credits.at(-1)).toEqual({});
+  });
+
+  it("keeps repeated expiries and sorts known before unknown below the cap", () => {
+    const quota = parse({
+      eligible: true,
+      grants: [
+        { resets_left: 1, paused: false },
+        { resets_left: 1, paused: false, ends_at: "2026-12-02T00:00:00Z" },
+        { resets_left: 1, paused: false, ends_at: "2026-12-02T00:00:00Z" },
+      ],
+    });
+    expect(quota?.saved_resets).toEqual({
+      availableCount: 3,
+      credits: [
+        { expiresAtIso: "2026-12-02T00:00:00.000Z" },
+        { expiresAtIso: "2026-12-02T00:00:00.000Z" },
+        {},
+      ],
+    });
   });
 
   it.each([
@@ -340,6 +385,16 @@ describe("OAuth usage request shape and fallback", () => {
     [500, "boom"],
   ])("does not bypass HTTP %i (%s)", async (status, body) => {
     httpMocks.fetchResponse.mockResolvedValue(response(status, body));
+    const diagnostics = await run();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(diagnostics.quotaSupported).toBe(false);
+  });
+
+  it.each([
+    "forbidden: user:profile required",
+    JSON.stringify({ error: { message: "missing User:Profile permission" } }),
+  ])("does not fall back on a 403 naming user:profile without the word scope", async (body) => {
+    httpMocks.fetchResponse.mockResolvedValue(response(403, body));
     const diagnostics = await run();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(diagnostics.quotaSupported).toBe(false);

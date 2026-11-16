@@ -664,6 +664,9 @@ function parseUsageResponse(
   };
 }
 
+/** Display cap for saved reset segments and the displayed count; larger valid inventories are truncated, not hidden. */
+const MAX_SAVED_RESET_SEGMENTS = 100;
+
 /** An optional ISO date: absent/null is open (`undefined`), a bad string is invalid (`NaN`). */
 function savedResetDateMs(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined;
@@ -678,8 +681,7 @@ function parseSavedResets(raw: unknown, nowMs: number): BankedResetAvailability 
   const root = asRecord(raw);
   if (root?.["eligible"] !== true || !Array.isArray(root["grants"])) return undefined;
 
-  let availableCount = 0;
-  const grants: Array<{ count: number; expiresAtIso?: string }> = [];
+  const grants: Array<{ count: number; endMs: number | undefined }> = [];
   for (const entry of root["grants"] as unknown[]) {
     const grant = asRecord(entry);
     if (!grant || grant["paused"] !== false) continue;
@@ -697,18 +699,20 @@ function parseSavedResets(raw: unknown, nowMs: number): BankedResetAvailability 
     ) {
       continue;
     }
-    availableCount += left;
-    if (availableCount > 100) return undefined;
-    const expiresAtIso = endMs === undefined ? undefined : new Date(endMs).toISOString();
-    grants.push(expiresAtIso === undefined ? { count: left } : { count: left, expiresAtIso });
+    // Counts are clamped per grant so huge safe integers never grow the sum or the allocation.
+    grants.push({ count: Math.min(left, MAX_SAVED_RESET_SEGMENTS), endMs });
   }
+  // Earliest known expiry first, unknown last; stable for equal expiries.
+  grants.sort((a, b) => (a.endMs ?? Infinity) - (b.endMs ?? Infinity) || 0);
   const credits: BankedResetCredit[] = [];
   for (const grant of grants) {
-    for (let index = 0; index < grant.count; index += 1) {
-      credits.push(grant.expiresAtIso === undefined ? {} : { expiresAtIso: grant.expiresAtIso });
+    const expiry =
+      grant.endMs === undefined ? {} : { expiresAtIso: new Date(grant.endMs).toISOString() };
+    for (let n = grant.count; n > 0 && credits.length < MAX_SAVED_RESET_SEGMENTS; n -= 1) {
+      credits.push({ ...expiry });
     }
   }
-  return availableCount > 0 ? { availableCount, credits } : undefined;
+  return credits.length > 0 ? { availableCount: credits.length, credits } : undefined;
 }
 
 function parseOAuthUsageResponse(
@@ -1236,10 +1240,11 @@ async function requestAnthropicOAuthUsage(
           let detail = "";
           try {
             const body = await response.text();
-            // A 403 naming a missing scope is a real credential problem, never an enhanced-form rejection.
+            // A 403 naming a missing scope or user:profile is a real credential problem, never an enhanced-form rejection.
             if (
               enhanced &&
-              (response.status === 400 || (response.status === 403 && !/scope/iu.test(body)))
+              (response.status === 400 ||
+                (response.status === 403 && !/scope|user:profile/iu.test(body)))
             ) {
               return RETRY_WITHOUT_ENHANCED;
             }
