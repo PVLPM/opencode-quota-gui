@@ -91,6 +91,26 @@ describe("GUI release safety", () => {
     }
   });
 
+  it("pins the build identity to the verified tag commit before any build or pack step", () => {
+    const release = workflow.jobs["release-package"];
+    const assertion = namedStep(release, "Assert tag, commit, and package version match");
+    const run = assertion.run ?? "";
+    expect(run.indexOf('"$CHECKED_OUT_SHA" != "$TAG_SHA"')).toBeGreaterThan(-1);
+    expect(run.indexOf('OPENCODE_QUOTA_BUILD_SHA=$TAG_SHA" >> "$GITHUB_ENV"')).toBeGreaterThan(
+      run.indexOf('"$CHECKED_OUT_SHA" != "$TAG_SHA"'),
+    );
+    for (const later of [
+      "Install dependencies",
+      "Run canonical verification",
+      "Pack and audit the release artifact once",
+    ]) {
+      expect(stepIndex(release, later)).toBeGreaterThan(
+        stepIndex(release, "Assert tag, commit, and package version match"),
+      );
+    }
+    expect(workflowSource).not.toContain("GITHUB_SHA");
+  });
+
   it("references only the dispatched tag and publish inputs, never release-event context", () => {
     for (const forbidden of [
       "github.event",

@@ -73,6 +73,11 @@ jobs:
 
           pnpm run verify:release-version
 
+          # The dispatch ref (main) may be newer than the release tag, so the
+          # workflow-provided commit variable is not the release identity. Pin the
+          # build identity to the verified tag commit for every later step.
+          echo "OPENCODE_QUOTA_BUILD_SHA=$TAG_SHA" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 

@@ -287,6 +287,17 @@ describe("build identity generation", () => {
     }
   });
 
+  it("uses the pinned release SHA even when the dispatch GITHUB_SHA differs", async () => {
+    const { resolveBuildIdentity } = await generator();
+    const root = fixture();
+    const tagSha = "5067c79722a31335bf7a474cb13e0c91b7649b2f";
+    const dispatchSha = "ffffffffffffffffffffffffffffffffffffffff";
+    expect(
+      resolveBuildIdentity(root, { OPENCODE_QUOTA_BUILD_SHA: tagSha, GITHUB_SHA: dispatchSha })
+        .build,
+    ).toBe(tagSha.slice(0, 12));
+  });
+
   it("does not guess identity without git; validated CI supports source archives", async () => {
     const { resolveBuildIdentity } = await generator();
     const root = fixture(false);
