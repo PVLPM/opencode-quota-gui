@@ -391,6 +391,9 @@ The Claude Agent card can also show:
 
 - **Claude Usage Credits:** a separate monthly group when that response includes enabled Usage Credits with numeric utilization. Missing or invalid credit data never changes the regular 5-hour and weekly rows.
 - **Fable:** a separate weekly row when Anthropic returns that model-scoped window. It is never guessed from your plan name. See [Claude Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
+- **Saved resets:** a read-only `Resets: N available` row, with each reset's expiry when known, when the usage response lists eligible, active, unpaused saved resets. At most 100 segments are shown; a larger inventory is truncated. Resets are never redeemed or spent, a failed refresh clears the row, and an expired reset is dropped from cached views.
+
+The usage request identifies as `claude-cli/<version> (external, cli)`; if Anthropic rejects that form, one retry uses `claude-code/<version>`.
 
 <a id="cursor"></a>
 
