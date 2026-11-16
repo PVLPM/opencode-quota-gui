@@ -233,6 +233,15 @@ export type DashboardRpcCacheObserverEvent =
       };
     }
   | {
+      /**
+       * One completed Claude Agent invocation whose cache writes were observed as 1-hour-only.
+       * Carries no transcript content, path or native id.
+       */
+      type: "session.cache.ttl";
+      created: number;
+      data: { sessionID: string; assistantMessageID: string; ttlMs: 3_600_000 };
+    }
+  | {
       type: "session.created";
       data: { sessionID: string; parentID: string };
     }
@@ -717,6 +726,20 @@ export function isDashboardRpcCacheObserverEvent(
     if (!isObject(tokens.cache) || !hasOnlyKeys(tokens.cache, ["read", "write"])) return false;
     return [tokens.cache.read, tokens.cache.write].every(
       (count) => count === undefined || (Number.isFinite(count) && (count as number) >= 0),
+    );
+  }
+
+  if (value.type === "session.cache.ttl") {
+    return (
+      hasExactKeys(value, ["type", "created", "data"]) &&
+      Number.isFinite(value.created) &&
+      isObject(value.data) &&
+      hasExactKeys(value.data, ["sessionID", "assistantMessageID", "ttlMs"]) &&
+      typeof value.data.sessionID === "string" &&
+      isValidResourceId(value.data.sessionID) &&
+      typeof value.data.assistantMessageID === "string" &&
+      isValidResourceId(value.data.assistantMessageID) &&
+      value.data.ttlMs === 3_600_000
     );
   }
 

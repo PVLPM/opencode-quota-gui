@@ -100,22 +100,56 @@ function ttlMetric(deadlineAtMs: number | undefined, nowMs: number): TtlMetric {
   }
   if (deadlineAtMs <= nowMs) {
     const elapsed = `+${formatTtlRemaining(Math.floor((nowMs - deadlineAtMs) / 1000) * 1000)}`;
-    return { label: `TTL ${elapsed}`, short: elapsed, spoken: `TTL ${elapsed}`, expired: true };
+    return {
+      label: `TTL ~${elapsed}`,
+      short: `~${elapsed}`,
+      spoken: `TTL about ${elapsed}, estimated`,
+      expired: true,
+    };
   }
   const remaining = formatTtlRemaining(deadlineAtMs - nowMs);
   return {
-    label: `TTL ${remaining}`,
-    short: remaining,
-    spoken: `TTL ${remaining}`,
+    label: `TTL ~${remaining}`,
+    short: `~${remaining}`,
+    spoken: `TTL about ${remaining}, estimated`,
     expired: false,
   };
 }
 
-function cacheMetric(percent: string | undefined): Metric {
-  if (percent === undefined) {
-    return { label: "Cache —", short: "unknown", spoken: "Cache unavailable" };
+export type CacheReuseWord = "Miss" | "Low reuse" | "Partial reuse" | "Hit" | "Unknown";
+
+/**
+ * Cache reuse efficiency category from the unrounded cache-read share (0..1) of the last
+ * completed primary call. These are reuse bands, not provider cache-hit semantics: a small
+ * positive read is a technical hit but is labelled Low reuse. `Miss` needs an independently
+ * confirmed zero; OpenCode reports missing cache usage as 0, so no caller can confirm one
+ * today and a plain zero stays Unknown.
+ */
+export function classifyCacheReuse(ratio: unknown, confirmedZero = false): CacheReuseWord {
+  if (typeof ratio !== "number" || !Number.isFinite(ratio) || ratio < 0 || ratio > 1) {
+    return "Unknown";
   }
-  return { label: `Cache ${percent}`, short: percent, spoken: `Cache ${percent}` };
+  if (ratio === 0) return confirmedZero ? "Miss" : "Unknown";
+  if (ratio <= 0.5) return "Low reuse";
+  if (ratio < 0.9) return "Partial reuse";
+  return "Hit";
+}
+
+/** Percent text; a positive share that would round to a false 0.00% shows as <0.01%. */
+function formatCachePercent(ratio: number): string {
+  const text = (ratio * 100).toFixed(2);
+  return ratio > 0 && text === "0.00" ? "<0.01%" : `${text}%`;
+}
+
+function cacheMetric(percent: string | undefined, word: CacheReuseWord): Metric {
+  if (percent === undefined) {
+    return { label: "Cache unknown", short: "unknown", spoken: "Cache unknown" };
+  }
+  return {
+    label: `Cache ${percent} · ${word}`,
+    short: `${percent} · ${word}`,
+    spoken: `Cache ${percent}, ${word.toLowerCase()}`,
+  };
 }
 
 /**
@@ -167,9 +201,9 @@ function presentation(
     ratio <= 1 &&
     typeof observedAt === "number" &&
     Number.isFinite(observedAt)
-      ? `${Number((ratio * 100).toFixed(1))}%`
+      ? formatCachePercent(ratio)
       : undefined;
-  const cache = cacheMetric(percent);
+  const cache = cacheMetric(percent, classifyCacheReuse(ratio));
   // The status bubble keeps the state, expiry, basis and cache share. Assumptions
   // and the start of the qualifying call are general caveats, explained under (i).
   const observedWhen = formatWallTime(observedAt, nowMs);
@@ -188,7 +222,14 @@ function presentation(
   const expiryTime = formatWallTime(estimate?.deadlineAtMs, nowMs);
   const expiry = expiryTime === undefined ? undefined : `Estimated expiry ${expiryTime}`;
   const basisSource = safeSegment(estimate?.source);
-  const basis = basisSource === undefined ? undefined : `Basis · ${basisSource}`;
+  const basis =
+    basisSource === undefined
+      ? undefined
+      : `Basis · ${basisSource}${
+          estimate?.kind === undefined
+            ? ""
+            : ` (${estimate.kind === "fallback" ? "fallback estimate" : estimate.kind})`
+        }`;
   return { tone, percent, ttl, cache, detail, expiry, basis, source } as const;
 }
 
@@ -565,7 +606,7 @@ export function createCacheComposerPill(
         !result.percent;
       const hasError = selected && history()?.key === session.key && history()?.status === "error";
       return {
-        label: `${result.ttl.label} • ${loading ? "Cache · Loading…" : result.cache.label}`,
+        label: `${result.ttl.label} · ${loading ? "Cache · Loading…" : result.cache.label}`,
         icon: hasError ? "warning" : "server",
         ...(mismatched
           ? { tone: flashKey() === session.key ? ("warning" as const) : ("danger" as const) }
@@ -814,7 +855,7 @@ export function createCacheComposerPill(
                   <span class={result().ttl.expired ? "qg-cache-elapsed" : undefined}>
                     {result().ttl.short}
                   </span>
-                  {` • ${result().cache.short}`}
+                  {` · ${result().cache.short}`}
                 </span>
               </button>
             </div>
@@ -844,9 +885,17 @@ export function createCacheComposerPill(
                 class="qg-cache-tooltip qg-cache-legend"
                 aria-label="Cache status legend"
               >
-                <span>TTL: estimated from current settings, documentation, or observed reuse.</span>
+                <span>
+                  TTL ~: estimated countdown from current settings, documentation, or observed
+                  reuse; not an authoritative expiry.
+                </span>
                 <span>Expiry counts from the last qualifying call's start.</span>
                 <span>Cache: observed token share of the last completed primary call.</span>
+                <span>
+                  Reuse share: Low reuse up to 50%, Partial reuse above 50% to under 90%, Hit 90% or
+                  more, Miss only for a confirmed zero. Unknown: missing, invalid, or a reported
+                  zero, which the host cannot tell from missing data.
+                </span>
                 <span>
                   Current settings may differ from the call's route or settings. Prefix changes,
                   eviction, or hidden warming can cause a miss.

@@ -309,7 +309,7 @@ describe("native window runtime", () => {
         "msg_idle_root",
       "root pill host cache event",
     );
-    expect(pill.show({ session } as never).label).toContain("15.4%");
+    expect(pill.show({ session } as never).label).toContain("15.38%");
 
     disposePill();
     dispose();
@@ -350,7 +350,7 @@ describe("native window runtime", () => {
         "msg_a_initial",
       "initial session A ratio",
     );
-    expect(pill.show({ session: sessionA } as never).label).toContain("15.4%");
+    expect(pill.show({ session: sessionA } as never).label).toContain("15.38%");
 
     setCurrent(sessionB);
     await waitFor(
@@ -376,7 +376,7 @@ describe("native window runtime", () => {
 
     setCurrent(sessionA);
     await waitFor(
-      () => pill.show({ session: sessionA } as never).label.includes("15.4%"),
+      () => pill.show({ session: sessionA } as never).label.includes("15.38%"),
       "session A returns with its retained last observed ratio",
     );
     pushPrimaryInvocation(fake, sessionA.id, "msg_a_new", 1_600, 1_700, {
@@ -388,7 +388,7 @@ describe("native window runtime", () => {
         runtime.cacheObserver.query(sessionA.id)?.primaryCacheReadRatio?.messageId === "msg_a_new",
       "new session A primary end",
     );
-    expect(pill.show({ session: sessionA } as never).label).toContain("21.4%");
+    expect(pill.show({ session: sessionA } as never).label).toContain("21.43%");
 
     disposePill();
     dispose();
@@ -436,7 +436,7 @@ describe("native window runtime", () => {
     expect(runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId).toBe(
       "msg_before_disconnect",
     );
-    expect(pill.show({ session } as never).label).toContain("15.4%");
+    expect(pill.show({ session } as never).label).toContain("15.38%");
 
     pushPrimaryInvocation(fake, session.id, "msg_after_reconnect", 2_200, 2_300, {
       input: 100,
@@ -448,7 +448,7 @@ describe("native window runtime", () => {
         "msg_after_reconnect",
       "post-reconnect primary end",
     );
-    expect(pill.show({ session } as never).label).toContain("21.4%");
+    expect(pill.show({ session } as never).label).toContain("21.43%");
 
     disposePill();
     dispose();
@@ -719,7 +719,7 @@ describe("native window runtime", () => {
     expect(runtime.cacheObserver.query(session.id)?.primaryCacheReadRatio?.messageId).toBe(
       "msg_before_scope_change",
     );
-    expect(pill.show({ session } as never).label).toContain("15.4%");
+    expect(pill.show({ session } as never).label).toContain("15.38%");
 
     // This primary occurs while the replacement health probe is pending. The
     // old stream is already retired, so the host event is not replayed later.
@@ -757,7 +757,7 @@ describe("native window runtime", () => {
         "msg_after_scope_change",
       "new primary after scope replacement",
     );
-    expect(pill.show({ session } as never).label).toContain("21.4%");
+    expect(pill.show({ session } as never).label).toContain("21.43%");
 
     disposePill();
     dispose();

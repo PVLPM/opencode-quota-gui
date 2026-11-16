@@ -62,6 +62,8 @@ export interface CacheInvocationObservation {
   /** Best-effort current configuration snapshot captured during this live call. */
   configuredTtlMs?: CacheConfiguredTtlMs;
   connectionMethod?: "oauth" | "key" | "external";
+  /** Claude Agent only: this exact invocation's cache writes were observed as 1-hour-only. */
+  observedTtlMs?: 3_600_000;
 }
 
 /** Host-configured retention values the observer accepts for a configurable route. */
@@ -82,10 +84,10 @@ export interface CacheRouteConfiguration {
 export interface CacheTtlEstimate {
   /**
    * configured: the host-configured `cache.ttl` for a configurable route; documented:
-   * vendor documentation; empirical: owner-approved observed retention; fallback:
+   * vendor documentation; empirical: owner-approved observed retention; observed: Claude Agent 1-hour-only cache writes matched to this call; fallback:
    * the generic 5-minute window for unknown, gateway, and OpenAI-family routes.
    */
-  kind: "configured" | "documented" | "empirical" | "fallback";
+  kind: "configured" | "documented" | "empirical" | "observed" | "fallback";
   ttlMs: CacheSupportedTtlMs;
   source: string;
   reference: string;
@@ -223,6 +225,7 @@ export function classifyCacheObserverState(
       ? routeConfiguration
       : { configuredTtlMs: latest.configuredTtlMs },
     latest.connectionMethod,
+    latest.observedTtlMs,
   );
   const ttlEstimate: CacheTtlEstimate = {
     kind: policy.kind,
@@ -412,7 +415,18 @@ function retentionPolicy(
   route: CacheRouteProvenance,
   routeConfiguration: CacheRouteConfiguration,
   connectionMethod: CacheInvocationObservation["connectionMethod"],
+  observedTtlMs?: CacheInvocationObservation["observedTtlMs"],
 ): RetentionPolicy {
+  if (route.providerId === "claude-agent" && observedTtlMs === 3_600_000) {
+    return {
+      kind: "observed",
+      ttlMs: 3_600_000,
+      source: "Claude Agent session transcript cache-write split",
+      reference: "cache-observer-policy:claude-agent-observed-1h",
+      assumption:
+        "Estimated from this call's 1-hour-only cache writes in the Claude Agent session record; physical retention is not observable and provider eviction may cause a miss.",
+    };
+  }
   const configuredTtlMs = routeConfiguration.configuredTtlMs;
   if (configuredTtlMs !== undefined && isCacheConfigurableProviderId(route.providerId)) {
     return {

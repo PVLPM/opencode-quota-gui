@@ -171,6 +171,32 @@ describe("claude agent provider", () => {
     expectAttemptedWithErrorLabel(await claudeAgentProvider.fetch(ctx), "Claude Agent");
   });
 
+  it("marks a rate-limited usage request retryable with its backoff deadline", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    vi.mocked(getAnthropicDiagnostics).mockResolvedValue({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+      message: "Anthropic API returned 429",
+      failureCategory: "provider_api",
+      retryAtMs: 1_700_000_000_000,
+    } as never);
+    const result = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({ providerIds: ["claude-agent"] }),
+    );
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        label: "Claude Agent",
+        message: "Claude quota request failed.",
+        failureCategory: "provider_api",
+        retryable: true,
+        retryAtMs: 1_700_000_000_000,
+      }),
+    ]);
+  });
+
   it("keeps OpenCode account rows and CLI provider rows separate", async () => {
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
     const { queryAnthropicQuotaWithOAuth, getAnthropicDiagnostics } = await import(

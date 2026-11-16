@@ -139,6 +139,8 @@ export interface AnthropicDiagnostics {
   message?: string;
   /** Source-assigned category for a failed OAuth usage request; absent otherwise. */
   failureCategory?: ProviderFailureCategory;
+  /** Epoch ms when a rate-limited usage request may be retried; absent otherwise. */
+  retryAtMs?: number;
   quota?: AnthropicQuotaResult;
   /** sha256 of the OAuth token bound to this probe, when a CLI token was used. */
   credentialFingerprint?: string;
@@ -245,6 +247,7 @@ type AnthropicFallbackQuota =
       detail?: string;
       failureKind?: "authentication";
       failureCategory?: ProviderFailureCategory;
+      retryAtMs?: number;
     };
 
 type ParsedAuthProbe = {
@@ -687,7 +690,7 @@ function parseOAuthUsageResponse(
  * error. `null` means it is present but cannot name a directory (not a string, empty, padded with
  * whitespace, or relative), so the caller must fail closed rather than read another login.
  */
-function parseClaudeConfigDirectoryCandidate(value: unknown): string | null | undefined {
+export function parseClaudeConfigDirectoryCandidate(value: unknown): string | null | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string") return null;
   if (!value || value.trim() !== value || !isAbsolute(value)) return null;
@@ -1070,10 +1073,17 @@ function sanitizeAnthropicRequestError(detail: string, accessToken: string): str
   return redactAccessTokenFromSanitizedDetail(detail, accessToken);
 }
 
+/** The usage endpoint rejects unrecognized clients, so identify as the Claude CLI that owns the login. */
+function claudeCodeUserAgent(cliVersion: string | null | undefined): string {
+  const version = (cliVersion ?? "").replace(/[^0-9A-Za-z.+-]/gu, "").slice(0, 48);
+  return version ? `claude-code/${version}` : "claude-code";
+}
+
 async function performAnthropicOAuthUsageRequest(
   accessToken: string,
   tokenFingerprint: string,
   requestTimeoutMs?: number,
+  cliVersion?: string | null,
 ): Promise<AnthropicFallbackQuota> {
   try {
     return await fetchWithTimeout(ANTHROPIC_USAGE_URL, {
@@ -1081,6 +1091,7 @@ async function performAnthropicOAuthUsageRequest(
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "anthropic-beta": ANTHROPIC_BETA_HEADER,
+          "User-Agent": claudeCodeUserAgent(cliVersion),
         },
       },
       timeoutMs: requestTimeoutMs,
@@ -1097,7 +1108,7 @@ async function performAnthropicOAuthUsageRequest(
           );
           anthropicOAuthCooldowns.set(tokenFingerprint, {
             failureCount: previousFailureCount + 1,
-            blockedUntilMs: nowMs + durationMs,
+            blockedUntilMs: Math.ceil(nowMs + durationMs),
           });
 
           let detail = "";
@@ -1115,6 +1126,7 @@ async function performAnthropicOAuthUsageRequest(
             state: "unavailable",
             detail: `${errorDetail} ${getAnthropicOAuthCooldownMessage(durationMs)}`,
             failureCategory: "provider_api",
+            retryAtMs: Math.ceil(nowMs + durationMs),
           };
         }
 
@@ -1183,6 +1195,7 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
   accessToken: string,
   requestTimeoutMs?: number,
   forcedOperationCache?: Map<symbol, unknown>,
+  cliVersion?: string | null,
 ): Promise<AnthropicFallbackQuota> {
   const tokenFingerprint = fingerprintAccessToken(accessToken);
   retainAnthropicOAuthCooldownForToken(tokenFingerprint);
@@ -1194,6 +1207,7 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
       state: "unavailable",
       detail: getAnthropicOAuthCooldownMessage(cooldown.blockedUntilMs - nowMs),
       failureCategory: "provider_api",
+      retryAtMs: cooldown.blockedUntilMs,
     };
   }
 
@@ -1240,11 +1254,13 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
         state: "unavailable",
         detail: getAnthropicOAuthCooldownMessage(remaining),
         failureCategory: "provider_api",
+        retryAtMs: activeCooldown?.blockedUntilMs,
       };
     const result = await performAnthropicOAuthUsageRequest(
       accessToken,
       tokenFingerprint,
       requestTimeoutMs,
+      cliVersion,
     );
     if (result.state === "success") rememberAnthropicOAuthQuota(tokenFingerprint, result.quota);
     return result;
@@ -1768,6 +1784,7 @@ export async function getAnthropicDiagnostics(
     credentials.accessToken,
     options.requestTimeoutMs,
     options.forceRefresh ? options.operationCache : undefined,
+    localDiagnostics.version,
   );
   if (fallbackQuota.state !== "success") {
     return {
@@ -1784,6 +1801,7 @@ export async function getAnthropicDiagnostics(
       ...(fallbackQuota.failureCategory !== undefined
         ? { failureCategory: fallbackQuota.failureCategory }
         : {}),
+      ...(fallbackQuota.retryAtMs !== undefined ? { retryAtMs: fallbackQuota.retryAtMs } : {}),
     };
   }
 
