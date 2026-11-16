@@ -54,6 +54,8 @@ export function claudeTranscriptPath(
   const env = query.env ?? process.env;
   // Fail closed on a present-but-invalid override (relative, padded, empty) instead of
   // reading another directory; UNC/network paths are never read either.
+  if (env.CLAUDE_CONFIG_DIR !== undefined && /^(?:\\\\|\/\/)/.test(env.CLAUDE_CONFIG_DIR))
+    return undefined;
   const configured = parseClaudeConfigDirectoryCandidate(env.CLAUDE_CONFIG_DIR);
   if (configured === null || (configured !== undefined && /^(?:\\\\|\/\/)/.test(configured))) {
     return undefined;
