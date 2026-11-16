@@ -317,6 +317,26 @@ describe("quota card clipboard runway and banked resets", () => {
     expect(rowLines(copied)).toEqual(["Banked resets: 2 available · Expiry unknown"]);
   });
 
+  it("copies Claude Agent saved resets but not direct Anthropic banked data", async () => {
+    const rows = [
+      percentRow({
+        label: "Resets",
+        kind: "value",
+        bankedResets: { availableCount: 1, credits: [] },
+        runway: undefined,
+        countdown: undefined,
+      }),
+    ];
+    const claude = await copiedSummary(
+      providerCard({ providerId: "claude-agent", providerLabel: "Claude Agent", rows }),
+    );
+    expect(rowLines(claude)).toEqual(["Resets: 1 available · Expiry unknown"]);
+    const anthropic = await copiedSummary(
+      providerCard({ providerId: "anthropic", providerLabel: "Anthropic", rows }),
+    );
+    expect(rowLines(anthropic)).not.toEqual(["Resets: 1 available · Expiry unknown"]);
+  });
+
   it("copies Claude Agent's provider rows with exact labels and runway from the provider payload", async () => {
     const HOUR_MS = 60 * 60_000;
     const DAY_MS = 24 * HOUR_MS;

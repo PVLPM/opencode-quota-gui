@@ -37,6 +37,7 @@ import {
   collectQuotaDashboardProviderResults,
   type QuotaStatusLiveProbe,
 } from "../lib/quota-render-data.js";
+import { withoutClaudeAgentSavedResets } from "../lib/quota-state.js";
 import type { QuotaToastConfig } from "../lib/types.js";
 import { getProviders } from "../providers/registry.js";
 import {
@@ -480,13 +481,14 @@ export function createDashboardReadSource(
       for (const key of rateLimited)
         if (entries.has(key)) {
           retained.add(key);
-          const old = store?.bySource.get(key);
-          if (old) next.set(key, old);
+          // A failed refresh proves neither eligibility nor expiry, so retained rows drop saved resets.
+          const old = withoutClaudeAgentSavedResets(store?.bySource.get(key) ?? []);
+          if (old.length > 0) next.set(key, old);
         }
       for (const [key, old] of store?.bySource ?? []) {
         if (entries.has(key) || (freshKeys.length > 0 && !failed.has(key))) continue;
         if (key !== UNSCOPED && !accountIds.has(key)) continue;
-        const safe = old.filter(
+        const safe = withoutClaudeAgentSavedResets(old).filter(
           (entry) => cardSourceKey(entry.accounting.sourceId, accountIds) === key,
         );
         if (safe.length === 0) continue;

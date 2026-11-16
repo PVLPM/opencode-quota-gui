@@ -284,6 +284,107 @@ describe("quota-state shared cache", () => {
     ]);
   });
 
+  describe("Claude Agent saved resets", () => {
+    const windowRow = { accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 58 };
+    const resetsRow = (credits: { expiresAtIso?: string | null }[]) => ({
+      kind: "value" as const,
+      accounting: { ...TEST_ACCOUNTING, resultType: "status" as const },
+      name: "Claude Agent Resets",
+      group: "Claude Agent",
+      label: "Resets:",
+      rowKey: "claude-agent:resets",
+      value: `${credits.length} available`,
+      bankedResets: { availableCount: credits.length, credits },
+    });
+    const rateLimited = {
+      attempted: true,
+      entries: [],
+      errors: [
+        {
+          label: "Claude Agent",
+          message: "limited",
+          failureCategory: "provider_api",
+          retryable: true,
+          retryAtMs: Date.now() + 45_000,
+        },
+      ],
+    };
+
+    it("never retains a previous reset row across a rate-limited refresh", async () => {
+      const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+      const provider = {
+        id: "claude-agent",
+        cachePolicy: { kind: "account-neutral" },
+        fetch: vi
+          .fn()
+          .mockResolvedValueOnce({
+            attempted: true,
+            entries: [windowRow, resetsRow([{}])],
+            errors: [],
+          })
+          .mockResolvedValueOnce(rateLimited),
+      } as any;
+      const ctx = createTestContext();
+      await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+      const result = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+      expect(result.entries).toEqual([windowRow]);
+    });
+
+    it("drops expired resets, and the row once none remain, from cached reads", async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(Date.parse("2026-11-16T12:00:00Z"));
+        const { fetchQuotaProviderResult, readCachedProviderResult } = await import(
+          "../src/lib/quota-state.js"
+        );
+        const provider = {
+          id: "claude-agent",
+          cachePolicy: { kind: "account-neutral" },
+          fetch: vi.fn(async () => ({
+            attempted: true,
+            entries: [
+              windowRow,
+              resetsRow([
+                { expiresAtIso: "2026-11-16T12:30:00.000Z" },
+                { expiresAtIso: "2026-11-17T00:00:00.000Z" },
+                {},
+              ]),
+            ],
+            errors: [],
+          })),
+        } as any;
+        const ctx = createTestContext();
+        await fetchQuotaProviderResult({ provider, ctx, ttlMs: 172_800_000 });
+
+        vi.setSystemTime(Date.parse("2026-11-16T13:00:00Z"));
+        const partial = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 172_800_000 });
+        const row = partial.entries.find(
+          (entry) => "rowKey" in entry && entry.rowKey === "claude-agent:resets",
+        );
+        expect(row).toMatchObject({
+          value: "2 available",
+          bankedResets: {
+            availableCount: 2,
+            credits: [{ expiresAtIso: "2026-11-17T00:00:00.000Z" }, {}],
+          },
+        });
+        expect(provider.fetch).toHaveBeenCalledTimes(1);
+
+        vi.setSystemTime(Date.parse("2026-11-18T00:00:00Z"));
+        const cached = await readCachedProviderResult({ provider, ctx, ttlMs: 172_800_000 });
+        const remaining = cached.hit
+          ? cached.result.entries.find(
+              (entry) => "rowKey" in entry && entry.rowKey === "claude-agent:resets",
+            )
+          : undefined;
+        expect(cached.hit).toBe(true);
+        expect(remaining).toMatchObject({ bankedResets: { availableCount: 1, credits: [{}] } });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it("revalidates partial rate-limit results even without matching old rows", async () => {
     const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
     const provider = {

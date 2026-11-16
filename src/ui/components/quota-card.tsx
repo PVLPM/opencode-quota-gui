@@ -192,9 +192,16 @@ function hasPositiveCreditsValue(value: string | undefined): boolean {
   return Number.isFinite(parsed) && parsed > 0;
 }
 
+/** Claude Agent shares the OpenAI Resets row; direct Anthropic stays excluded. */
+function isResetsProvider(providerId: string): boolean {
+  return isOpenAiProvider(providerId) || providerId === "claude-agent";
+}
+
 function isSuppressedOptionalRow(row: QuotaCardRow, providerId: string): boolean {
+  if (isResetsProvider(providerId) && isOpenAiResetsRow(row)) {
+    return resetSegments(row.bankedResets).length === 0;
+  }
   if (!isOpenAiProvider(providerId)) return false;
-  if (isOpenAiResetsRow(row)) return resetSegments(row.bankedResets).length === 0;
   if (isOpenAiCreditsRow(row)) return row.kind !== "value" || !hasPositiveCreditsValue(row.value);
   return false;
 }
@@ -307,7 +314,7 @@ export function QuotaCardView(props: {
       .filter((part) => part !== undefined && part.length > 0)
       .join(" · ");
     const lines = displayRows().map((row) => {
-      if (isOpenAiProvider(props.card.providerId) && isOpenAiResetsRow(row)) {
+      if (isResetsProvider(props.card.providerId) && isOpenAiResetsRow(row)) {
         const segments = resetSegments(row.bankedResets);
         return `${row.label}: ${segments.length} available · ${resetSummary(segments)}`;
       }
@@ -429,7 +436,7 @@ export function QuotaCardView(props: {
         <div class="qg-card__rows">
           <For each={displayRows()}>
             {(row) =>
-              isOpenAiProvider(props.card.providerId) && isOpenAiResetsRow(row) ? (
+              isResetsProvider(props.card.providerId) && isOpenAiResetsRow(row) ? (
                 <ResetRow row={row} timeZone={props.timeZone} />
               ) : (
                 <div

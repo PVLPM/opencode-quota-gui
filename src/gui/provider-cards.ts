@@ -19,6 +19,8 @@ import {
 } from "../contracts/dashboard.js";
 import type { CardId } from "../contracts/identity.js";
 import {
+  CLAUDE_AGENT_RESETS_INFO,
+  CLAUDE_AGENT_RESETS_ROW_KEY,
   OPENAI_CREDITS_INFO,
   OPENAI_CREDITS_ROW_KEY,
   OPENAI_CREDITS_ROW_LABEL,
@@ -380,6 +382,28 @@ export function openAiOptionalVisibilityRows(
   ];
 }
 
+/** Persistent Resets choice for a Claude Agent card (no Credits row). */
+export function claudeAgentOptionalVisibilityRows(
+  cardId: CardId,
+): NonNullable<ProviderCard["visibilityRows"]> {
+  return [
+    {
+      rowId: optionalValueRowId(cardId, CLAUDE_AGENT_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE),
+      label: OPENAI_RESETS_ROW_LABEL,
+      info: CLAUDE_AGENT_RESETS_INFO,
+    },
+  ];
+}
+
+function optionalVisibilityRowsFor(
+  providerId: string,
+  cardId: CardId,
+): ProviderCard["visibilityRows"] {
+  if (providerId === "openai") return openAiOptionalVisibilityRows(cardId);
+  if (providerId === "claude-agent") return claudeAgentOptionalVisibilityRows(cardId);
+  return undefined;
+}
+
 function latestObservedAtIso(entries: readonly QuotaToastEntry[]): string | undefined {
   let latest: string | undefined;
   let latestMs = Number.NEGATIVE_INFINITY;
@@ -415,6 +439,21 @@ function pushInto<T>(map: Map<string, T[]>, key: string, value: T): void {
   else map.set(key, [value]);
 }
 
+function finishCard(
+  card: ProviderCard,
+  mapped: ReturnType<typeof mapEntryRows>,
+  entries: readonly QuotaToastEntry[],
+): ProviderCard {
+  if (mapped.primaryQuotaWindows.length > 0) {
+    card.primaryQuotaWindows = mapped.primaryQuotaWindows;
+  }
+  const optionalRows = optionalVisibilityRowsFor(card.providerId, card.cardId);
+  if (optionalRows) card.visibilityRows = optionalRows;
+  const observedAtIso = latestObservedAtIso(entries);
+  if (observedAtIso) card.observedAtIso = observedAtIso;
+  return card;
+}
+
 function buildProviderCard(params: {
   providerId: string;
   providerLabel: string;
@@ -448,13 +487,7 @@ function buildProviderCard(params: {
     rows: mapped.rows,
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
   };
-  if (mapped.primaryQuotaWindows.length > 0) {
-    card.primaryQuotaWindows = mapped.primaryQuotaWindows;
-  }
-  if (params.providerId === "openai") card.visibilityRows = openAiOptionalVisibilityRows(cardId);
-  const observedAtIso = latestObservedAtIso(params.entries);
-  if (observedAtIso) card.observedAtIso = observedAtIso;
-  return card;
+  return finishCard(card, mapped, params.entries);
 }
 
 function buildAccountCard(params: {
@@ -499,13 +532,7 @@ function buildAccountCard(params: {
     rows: mapped.rows,
     errors: params.errors.map((error) => mapProviderError(error, params.secrets)),
   };
-  if (mapped.primaryQuotaWindows.length > 0) {
-    card.primaryQuotaWindows = mapped.primaryQuotaWindows;
-  }
-  if (params.providerId === "openai") card.visibilityRows = openAiOptionalVisibilityRows(cardId);
-  const observedAtIso = latestObservedAtIso(params.entries);
-  if (observedAtIso) card.observedAtIso = observedAtIso;
-  return card;
+  return finishCard(card, mapped, params.entries);
 }
 
 /**

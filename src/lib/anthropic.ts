@@ -14,6 +14,7 @@ import { readFile } from "fs/promises";
 import { homedir } from "os";
 import { isAbsolute, join, resolve } from "path";
 
+import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota.js";
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
@@ -25,6 +26,7 @@ import {
   deriveResolvedAuthIdentity,
   type ResolvedAuthIdentity,
 } from "./resolved-auth-identity.js";
+import { REQUEST_TIMEOUT_MS } from "./types.js";
 
 const DEFAULT_CLAUDE_BINARY = "claude";
 /** How `binaryPath` reads when the default `claude` ran from PATH. */
@@ -35,6 +37,7 @@ const ANTHROPIC_OAUTH_COOLDOWN_MAX_MS = 15 * 60_000;
 const ANTHROPIC_OAUTH_COOLDOWN_MAX_ENTRIES = 16;
 const ANTHROPIC_OAUTH_REUSE_MS = 60_000;
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const ANTHROPIC_USAGE_ENHANCED_URL = `${ANTHROPIC_USAGE_URL}?cedar_ember=1`;
 const ANTHROPIC_BETA_HEADER = "oauth-2025-04-20";
 const CLAUDE_CODE_CREDENTIALS_SERVICE = "Claude Code-credentials";
 const CLAUDE_NO_LOCAL_QUOTA_MESSAGE =
@@ -100,6 +103,8 @@ export interface AnthropicQuotaResult {
     percentRemaining: number;
     resetTimeIso?: string;
   };
+  /** Eligible, active, unpaused saved resets; only counts and expiry. Absent means none or unknown. */
+  saved_resets?: BankedResetAvailability;
 }
 
 export interface AnthropicUsageParseOptions {
@@ -659,6 +664,53 @@ function parseUsageResponse(
   };
 }
 
+/** An optional ISO date: absent/null is open (`undefined`), a bad string is invalid (`NaN`). */
+function savedResetDateMs(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  return typeof value === "string" ? Date.parse(value) : Number.NaN;
+}
+
+/**
+ * Independent of the quota windows: any malformed part only drops that grant (or the inventory).
+ * Identifiers, labels and every other field are discarded; unknown expiry stays absent.
+ */
+function parseSavedResets(raw: unknown, nowMs: number): BankedResetAvailability | undefined {
+  const root = asRecord(raw);
+  if (root?.["eligible"] !== true || !Array.isArray(root["grants"])) return undefined;
+
+  let availableCount = 0;
+  const grants: Array<{ count: number; expiresAtIso?: string }> = [];
+  for (const entry of root["grants"] as unknown[]) {
+    const grant = asRecord(entry);
+    if (!grant || grant["paused"] !== false) continue;
+    const left = grant["resets_left"];
+    if (typeof left !== "number" || !Number.isSafeInteger(left) || left <= 0) continue;
+    const startMs = savedResetDateMs(grant["starts_at"]);
+    const endMs = savedResetDateMs(grant["ends_at"]);
+    if (Number.isNaN(startMs) || Number.isNaN(endMs)) continue;
+    if (startMs !== undefined && startMs > nowMs) continue;
+    if (endMs !== undefined && endMs <= nowMs) continue;
+    const total = grant["resets_total"];
+    if (
+      total !== undefined &&
+      (typeof total !== "number" || !Number.isSafeInteger(total) || total < left)
+    ) {
+      continue;
+    }
+    availableCount += left;
+    if (availableCount > 100) return undefined;
+    const expiresAtIso = endMs === undefined ? undefined : new Date(endMs).toISOString();
+    grants.push(expiresAtIso === undefined ? { count: left } : { count: left, expiresAtIso });
+  }
+  const credits: BankedResetCredit[] = [];
+  for (const grant of grants) {
+    for (let index = 0; index < grant.count; index += 1) {
+      credits.push(grant.expiresAtIso === undefined ? {} : { expiresAtIso: grant.expiresAtIso });
+    }
+  }
+  return availableCount > 0 ? { availableCount, credits } : undefined;
+}
+
 function parseOAuthUsageResponse(
   data: unknown,
   observedAtMs = Date.now(),
@@ -668,7 +720,9 @@ function parseOAuthUsageResponse(
 
   const extraUsage = parseExtraUsageQuota(windows.root["extra_usage"]);
   const fableWeekly = parseFableWeeklyWindow(windows.root["limits"]);
+  const savedResets = parseSavedResets(windows.root["cedar_ember"], observedAtMs);
   return {
+    ...(savedResets ? { saved_resets: savedResets } : {}),
     success: true,
     ...(windows.fiveHour
       ? {
@@ -1074,28 +1128,73 @@ function sanitizeAnthropicRequestError(detail: string, accessToken: string): str
 }
 
 /** The usage endpoint rejects unrecognized clients, so identify as the Claude CLI that owns the login. */
-function claudeCodeUserAgent(cliVersion: string | null | undefined): string {
+function claudeCodeUserAgent(cliVersion: string | null | undefined, enhanced: boolean): string {
   const version = (cliVersion ?? "").replace(/[^0-9A-Za-z.+-]/gu, "").slice(0, 48);
+  if (enhanced)
+    return version ? `claude-cli/${version} (external, cli)` : "claude-cli (external, cli)";
+  // The plain fallback keeps the identity the usage probe has always sent.
   return version ? `claude-code/${version}` : "claude-code";
 }
 
+const RETRY_WITHOUT_ENHANCED = Symbol("retry usage request without cedar_ember");
+
+/** Enhanced request, then one plain retry only when the enhanced form itself was rejected. */
 async function performAnthropicOAuthUsageRequest(
   accessToken: string,
   tokenFingerprint: string,
   requestTimeoutMs?: number,
   cliVersion?: string | null,
 ): Promise<AnthropicFallbackQuota> {
+  const startedAtMs = Date.now();
+  const timeoutMs = requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+  const enhanced = await requestAnthropicOAuthUsage(
+    accessToken,
+    tokenFingerprint,
+    requestTimeoutMs,
+    cliVersion,
+    true,
+  );
+  if (enhanced !== RETRY_WITHOUT_ENHANCED) return enhanced;
+  // The fallback shares the caller's one timeout budget rather than doubling it.
+  const remainingMs = timeoutMs - (Date.now() - startedAtMs);
+  if (remainingMs <= 0) {
+    return {
+      state: "unavailable",
+      detail: "Anthropic OAuth usage request timed out",
+      failureCategory: "provider_api",
+    };
+  }
+  // The plain request never yields the retry sentinel.
+  return (await requestAnthropicOAuthUsage(
+    accessToken,
+    tokenFingerprint,
+    remainingMs,
+    cliVersion,
+    false,
+  )) as AnthropicFallbackQuota;
+}
+
+async function requestAnthropicOAuthUsage(
+  accessToken: string,
+  tokenFingerprint: string,
+  requestTimeoutMs: number | undefined,
+  cliVersion: string | null | undefined,
+  enhanced: boolean,
+): Promise<AnthropicFallbackQuota | typeof RETRY_WITHOUT_ENHANCED> {
   try {
-    return await fetchWithTimeout(ANTHROPIC_USAGE_URL, {
+    return await fetchWithTimeout(enhanced ? ANTHROPIC_USAGE_ENHANCED_URL : ANTHROPIC_USAGE_URL, {
       request: {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "anthropic-beta": ANTHROPIC_BETA_HEADER,
-          "User-Agent": claudeCodeUserAgent(cliVersion),
+          "User-Agent": claudeCodeUserAgent(cliVersion, enhanced),
         },
       },
       timeoutMs: requestTimeoutMs,
-      consume: async (response, timeoutSignal): Promise<AnthropicFallbackQuota> => {
+      consume: async (
+        response,
+        timeoutSignal,
+      ): Promise<AnthropicFallbackQuota | typeof RETRY_WITHOUT_ENHANCED> => {
         if (response.status === 429) {
           anthropicOAuthRecent.delete(tokenFingerprint);
           const nowMs = Date.now();
@@ -1136,7 +1235,15 @@ async function performAnthropicOAuthUsageRequest(
           const authenticationFailure = response.status === 401 || response.status === 403;
           let detail = "";
           try {
-            detail = sanitizeAnthropicApiDetail(await response.text(), accessToken);
+            const body = await response.text();
+            // A 403 naming a missing scope is a real credential problem, never an enhanced-form rejection.
+            if (
+              enhanced &&
+              (response.status === 400 || (response.status === 403 && !/scope/iu.test(body)))
+            ) {
+              return RETRY_WITHOUT_ENHANCED;
+            }
+            detail = sanitizeAnthropicApiDetail(body, accessToken);
           } catch (error) {
             if (timeoutSignal.aborted && !authenticationFailure) throw error;
             detail = "";
@@ -1262,7 +1369,15 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
       requestTimeoutMs,
       cliVersion,
     );
-    if (result.state === "success") rememberAnthropicOAuthQuota(tokenFingerprint, result.quota);
+    if (result.state === "success") {
+      rememberAnthropicOAuthQuota(tokenFingerprint, result.quota);
+    } else {
+      const cached = anthropicOAuthRecent.get(tokenFingerprint);
+      if (cached?.quota.saved_resets) {
+        const { saved_resets: _savedResets, ...quota } = cached.quota;
+        anthropicOAuthRecent.set(tokenFingerprint, { ...cached, quota });
+      }
+    }
     return result;
   })();
   anthropicOAuthInFlight.set(tokenFingerprint, inFlight);
@@ -1752,13 +1867,38 @@ async function getAnthropicLocalDiagnostics(
   return await probe;
 }
 
+async function readSavedResetsForLocalQuota(
+  localDiagnostics: AnthropicLocalDiagnostics,
+  options: AnthropicProbeOptions,
+): Promise<BankedResetAvailability | undefined> {
+  try {
+    const credentials = await readClaudeCliSubscriptionToken(localDiagnostics);
+    if (credentials.state !== "configured") return undefined;
+    const result = await queryAnthropicQuotaFromOAuthAccessToken(
+      credentials.accessToken,
+      options.requestTimeoutMs,
+      options.forceRefresh ? options.operationCache : undefined,
+      localDiagnostics.version,
+    );
+    return result.state === "success" ? result.quota.saved_resets : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function getAnthropicDiagnostics(
   options: AnthropicProbeOptions = {},
 ): Promise<AnthropicDiagnostics> {
   const localDiagnostics = await getAnthropicLocalDiagnostics(options);
   if (localDiagnostics.localQuota) {
-    // Local quota does not require reading the stored token.
-    return mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
+    // Local quota stays authoritative and needs no token. Saved resets are an optional extra read
+    // with the same verified-login token gate; the result still has no account identity, so it is
+    // never cached across accounts.
+    const mapped = mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
+    const savedResets = await readSavedResetsForLocalQuota(localDiagnostics, options);
+    return savedResets && mapped.quota
+      ? { ...mapped, quota: { ...mapped.quota, saved_resets: savedResets } }
+      : mapped;
   }
 
   if (localDiagnostics.authStatus !== "authenticated") {

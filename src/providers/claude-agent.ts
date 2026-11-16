@@ -4,6 +4,8 @@
  * only provider that launches the Claude CLI.
  */
 
+import type { BankedResetAvailability } from "../contracts/openai-quota.js";
+import { CLAUDE_AGENT_RESETS_ROW_KEY } from "../contracts/openai-quota.js";
 import type { AnthropicDiagnostics } from "../lib/anthropic.js";
 import { getAnthropicDiagnostics, hasAnthropicCredentialsConfigured } from "../lib/anthropic.js";
 import type {
@@ -27,6 +29,30 @@ import {
 export const CLAUDE_AGENT_RUNTIME_IDS = ["claude-agent", "claude-code"] as const;
 
 const CLAUDE_AGENT_GROUP = "Claude Agent";
+
+/** Always the OAuth-reported value: even beside CLI-local windows, resets come from the usage API. */
+function claudeAgentResetsEntry(resets: BankedResetAvailability): QuotaToastEntry {
+  return {
+    kind: "value",
+    accounting: {
+      resultType: "status",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+    name: `${CLAUDE_AGENT_GROUP} Resets`,
+    group: CLAUDE_AGENT_GROUP,
+    label: "Resets:",
+    rowKey: CLAUDE_AGENT_RESETS_ROW_KEY,
+    value: `${resets.availableCount} available`,
+    bankedResets: {
+      availableCount: resets.availableCount,
+      credits: resets.credits.map((credit) => ({
+        ...(credit.expiresAtIso !== undefined ? { expiresAtIso: credit.expiresAtIso } : {}),
+      })),
+    },
+  };
+}
 
 export function getClaudeAgentNoDataMessage(): string {
   return "Quota unavailable via local Claude CLI";
@@ -179,9 +205,19 @@ export const claudeAgentProvider: QuotaProvider = {
     if (diagnostics.quotaSupported && diagnostics.quota) {
       const acquisitionMethod: QuotaToastEntry["accounting"]["acquisitionMethod"] =
         diagnostics.quotaSource === "claude-auth-status-json" ? "local_cli" : "remote_api";
-      const result = attemptedResult(
-        anthropicQuotaEntries(diagnostics.quota, { group: CLAUDE_AGENT_GROUP, acquisitionMethod }),
+      const credits = diagnostics.quota.saved_resets?.credits.filter(
+        (credit) => credit.expiresAtIso == null || Date.parse(credit.expiresAtIso) > Date.now(),
       );
+      const savedResets = credits?.length ? { availableCount: credits.length, credits } : undefined;
+      const result = attemptedResult([
+        ...anthropicQuotaEntries(diagnostics.quota, {
+          group: CLAUDE_AGENT_GROUP,
+          acquisitionMethod,
+        }),
+        ...(savedResets && savedResets.availableCount > 0
+          ? [claudeAgentResetsEntry(savedResets)]
+          : []),
+      ]);
       return withStatusDetails(
         diagnostics.planLabel === undefined
           ? result

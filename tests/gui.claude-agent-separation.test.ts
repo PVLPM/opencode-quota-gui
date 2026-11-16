@@ -1,10 +1,12 @@
 import { expect, it } from "vitest";
+import { CLAUDE_AGENT_RESETS_ROW_KEY } from "../src/contracts/openai-quota.js";
 import { buildProviderCards } from "../src/gui/provider-cards.js";
 import { createDashboardReadSource } from "../src/gui/sources.js";
 import type {
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderResult,
+  QuotaToastEntry,
 } from "../src/lib/entries.js";
 import { buildQuotaProviderStateCacheKey } from "../src/lib/quota-state.js";
 import { DEFAULT_CONFIG } from "../src/lib/types.js";
@@ -122,6 +124,73 @@ it("retains last-good rows independently across failures and recovery", async ()
   expect(card(aFailed, "anthropic").rows).toEqual(card(initial, "anthropic").rows);
   expect(card(aFailed, "claude-agent").stale).toBeUndefined();
   expect(card(aFailed, "claude-agent").errors).toEqual([]);
+});
+
+it.each([
+  ["a plain failure", { label: "Claude", message: "CLI failed" }],
+  ["a rate limit", { label: "Claude", message: "limited", retryable: true, retryAtMs: 9e15 }],
+])("keeps last-good quota but never retained saved resets after %s", async (_name, error) => {
+  const resets: QuotaToastEntry = {
+    kind: "value",
+    accounting: {
+      resultType: "status",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    },
+    name: "Claude Agent Resets",
+    group: "Claude Agent",
+    label: "Resets:",
+    rowKey: CLAUDE_AGENT_RESETS_ROW_KEY,
+    value: "1 available",
+    bankedResets: { availableCount: 1, credits: [{ expiresAtIso: "2099-01-01T00:00:00.000Z" }] },
+  };
+  const window = anthropicQuotaEntries(quota, {
+    group: "Claude Agent",
+    acquisitionMethod: "remote_api",
+  });
+  let current: QuotaProviderResult = {
+    attempted: true,
+    entries: [...window, resets],
+    errors: [],
+  };
+  const provider: QuotaProvider = {
+    id: "claude-agent",
+    cachePolicy: { kind: "uncached" },
+    isAvailable: async () => true,
+    fetch: async () => current,
+  };
+  const source = createDashboardReadSource({
+    client: {
+      config: {
+        providers: async () => ({ data: { providers: [] } }),
+        get: async () => ({ data: {} }),
+      },
+    },
+    workspaceRoot: "C:/synthetic-workspace",
+    providers: [provider],
+    collectProviderResults: async () => [
+      { providerId: "claude-agent", result: current, cacheScope: "claude-scope" },
+    ],
+    loadConfig: async () => ({
+      ...DEFAULT_CONFIG,
+      enabledProviders: ["claude-agent"],
+      minIntervalMs: 0,
+    }),
+  });
+  const rows = async () =>
+    (await source.quota()).providers.cards.find((item) => item.providerId === "claude-agent")!.rows;
+
+  const fresh = await rows();
+  expect(fresh.some((row) => row.bankedResets?.availableCount === 1)).toBe(true);
+
+  current = { attempted: true, entries: [], errors: [error] };
+  const failed = await rows();
+  expect(failed.length).toBeGreaterThan(0);
+  expect(failed.some((row) => row.bankedResets !== undefined)).toBe(false);
+  expect(failed.map((row) => row.label)).toEqual(
+    fresh.filter((row) => row.bankedResets === undefined).map((row) => row.label),
+  );
 });
 
 it("includes the provider id in otherwise identical quota cache keys", () => {

@@ -1327,6 +1327,34 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
     expect(creditsVisibility?.info).toBe(OPENAI_CREDITS_INFO);
   });
 
+  it("seeds only a Resets row for Claude Agent that matches its runtime row id, and none for anthropic", () => {
+    const cards = cardsFor([
+      probe(
+        "claude-agent",
+        result({
+          accounts: [{ sourceId: "raw-claude", label: "Work" }],
+          entries: [
+            valueEntry({
+              sourceId: "raw-claude",
+              name: "Resets",
+              label: "Resets:",
+              rowKey: "claude-agent:resets",
+              value: "1 available",
+              resultType: "status",
+              bankedResets: { availableCount: 1, credits: [{ expiresAtIso: null }] },
+            }),
+          ],
+        }),
+      ),
+      probe("anthropic", result({ accounts: [{ sourceId: "raw-anthropic" }] })),
+    ]);
+    const claude = cards.find((card) => card.providerId === "claude-agent")!;
+    expect(claude.visibilityRows?.map(({ label }) => label)).toEqual(["Resets"]);
+    expect(claude.visibilityRows?.[0]?.rowId).toBe(claude.rows[0]?.rowId);
+    expect(JSON.stringify(claude.visibilityRows)).not.toContain("raw-claude");
+    expect(cards.find((card) => card.providerId === "anthropic")?.visibilityRows).toBeUndefined();
+  });
+
   it("keeps account-specific ids separate and adds no optional rows to other providers", () => {
     const cards = cardsFor([
       probe(

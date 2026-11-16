@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { CLAUDE_AGENT_RESETS_ROW_KEY } from "../contracts/openai-quota.js";
 import { writeJsonAtomic } from "./atomic-json.js";
 import type {
   QuotaProvider,
   QuotaProviderCacheContext,
   QuotaProviderContext,
   QuotaProviderResult,
+  QuotaToastEntry,
 } from "./entries.js";
 import { QUOTA_FORCE_REFRESH } from "./entries.js";
 
@@ -34,6 +36,46 @@ const QUOTA_PROVIDER_CACHE_PACKAGE_VERSION_FALLBACK = "unknown";
 const QUOTA_PROVIDER_CACHE_DIRNAME = "quota-provider-state";
 const QUOTA_PROVIDER_CACHE_RETENTION_MS = 24 * 60 * 60 * 1000;
 const QUOTA_PROVIDER_CACHE_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+
+function isClaudeResetsEntry(entry: QuotaToastEntry): boolean {
+  return "rowKey" in entry && entry.rowKey === CLAUDE_AGENT_RESETS_ROW_KEY;
+}
+
+/** Retained (not freshly measured) entries must never carry Claude Agent saved resets. */
+export function withoutClaudeAgentSavedResets(
+  entries: readonly QuotaToastEntry[],
+): QuotaToastEntry[] {
+  return entries.filter((entry) => !isClaudeResetsEntry(entry));
+}
+
+/**
+ * Cached reads must not show a saved reset past its expiry. Unknown (absent) and explicit-null
+ * expiries are kept; once no reset remains the row is dropped.
+ */
+function withoutExpiredClaudeResets(result: QuotaProviderResult): QuotaProviderResult {
+  if (!result.entries.some(isClaudeResetsEntry)) return result;
+  const nowMs = Date.now();
+  const entries = result.entries.flatMap((entry): QuotaToastEntry[] => {
+    if (!isClaudeResetsEntry(entry) || entry.kind !== "value" || !entry.bankedResets)
+      return [entry];
+    const credits = entry.bankedResets.credits.filter(
+      (credit) =>
+        typeof credit.expiresAtIso !== "string" || Date.parse(credit.expiresAtIso) > nowMs,
+    );
+    const availableCount =
+      entry.bankedResets.availableCount - (entry.bankedResets.credits.length - credits.length);
+    return availableCount > 0
+      ? [
+          {
+            ...entry,
+            value: `${availableCount} available`,
+            bankedResets: { availableCount, credits },
+          },
+        ]
+      : [];
+  });
+  return { ...result, entries };
+}
 
 const inMemoryCache = new Map<string, PersistedQuotaProviderCacheEntry & { stale?: boolean }>();
 const inFlightByKey = new Map<string, Promise<QuotaProviderResult>>();
@@ -503,7 +545,7 @@ export async function fetchQuotaProviderResult(params: {
       result: inMemory.result,
       cacheTimestamp: inMemory.timestamp,
     });
-    return cloneQuotaProviderResult(inMemory.result);
+    return withoutExpiredClaudeResets(cloneQuotaProviderResult(inMemory.result));
   }
 
   const inFlight = inFlightByKey.get(key);
@@ -544,7 +586,7 @@ export async function fetchQuotaProviderResult(params: {
       result: persisted.result,
       cacheTimestamp: persisted.timestamp,
     });
-    return cloneQuotaProviderResult(persisted.result);
+    return withoutExpiredClaudeResets(cloneQuotaProviderResult(persisted.result));
   }
 
   const inFlightAfterDiskRead = inFlightByKey.get(key);
@@ -581,7 +623,14 @@ export async function fetchQuotaProviderResult(params: {
             ignoreExpiry: true,
           }));
         if (previous && (await isProviderCacheScopeCurrent(provider, ctx, scope))) {
-          inMemoryCache.set(key, { ...previous, stale: true });
+          inMemoryCache.set(key, {
+            ...previous,
+            stale: true,
+            result: {
+              ...previous.result,
+              entries: previous.result.entries.filter((entry) => !isClaudeResetsEntry(entry)),
+            },
+          });
         } else {
           inMemoryCache.delete(key);
         }
@@ -605,12 +654,15 @@ export async function fetchQuotaProviderResult(params: {
           .map((entry) => entry.accounting.sourceId)
           .filter((id): id is string => id !== undefined),
       );
+      // A failed refresh proves neither eligibility nor remaining expiry, so saved resets are
+      // never carried over from an earlier snapshot.
+      const retained = previous.result.entries.filter((entry) => !isClaudeResetsEntry(entry));
       const fallback =
         snapshot.entries.length === 0 && rateLimited.some((error) => error.sourceId === undefined)
           ? provider.id === "openrouter"
-            ? previous.result.entries.filter((entry) => entry.accounting.sourceId === undefined)
-            : previous.result.entries
-          : previous.result.entries.filter(
+            ? retained.filter((entry) => entry.accounting.sourceId === undefined)
+            : retained
+          : retained.filter(
               (entry) =>
                 entry.accounting.sourceId !== undefined &&
                 failedAccounts.has(entry.accounting.sourceId) &&
@@ -718,7 +770,7 @@ export async function readCachedProviderResult(params: {
     });
     return {
       hit: true,
-      result: cloneQuotaProviderResult(inMemory.result),
+      result: withoutExpiredClaudeResets(cloneQuotaProviderResult(inMemory.result)),
       timestamp: inMemory.timestamp,
     };
   }
@@ -754,7 +806,7 @@ export async function readCachedProviderResult(params: {
     });
     return {
       hit: true,
-      result: cloneQuotaProviderResult(selected.result),
+      result: withoutExpiredClaudeResets(cloneQuotaProviderResult(selected.result)),
       timestamp: selected.timestamp,
     };
   }

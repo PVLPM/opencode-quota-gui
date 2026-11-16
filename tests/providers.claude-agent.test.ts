@@ -37,6 +37,39 @@ describe("claude agent provider", () => {
     (readCredentialRows as any).mockReset().mockResolvedValue([]);
   });
 
+  it("retains null and unknown expiries while pruning expired reset credits", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    vi.mocked(getAnthropicDiagnostics).mockResolvedValue({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      checkedCommands: [],
+      quota: {
+        success: true,
+        saved_resets: {
+          availableCount: 4,
+          credits: [
+            { expiresAtIso: null },
+            {},
+            { expiresAtIso: "2000-01-01T00:00:00.000Z" },
+            { expiresAtIso: "2099-01-01T00:00:00.000Z" },
+          ],
+        },
+      },
+    } as never);
+    const result = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({ providerIds: ["claude-agent"] }),
+    );
+    expect(result.entries.find((entry) => entry.rowKey === "claude-agent:resets")).toMatchObject({
+      value: "3 available",
+      bankedResets: {
+        availableCount: 3,
+        credits: [{ expiresAtIso: null }, {}, { expiresAtIso: "2099-01-01T00:00:00.000Z" }],
+      },
+    });
+  });
+
   it("passes the configured Claude binary path through Anthropic probes", async () => {
     const { hasAnthropicCredentialsConfigured, getAnthropicDiagnostics } = await import(
       "../src/lib/anthropic.js"

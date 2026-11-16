@@ -682,7 +682,7 @@ describe("Claude CLI diagnostics", () => {
     expect(identityMocks.deriveResolvedAuthIdentity).not.toHaveBeenCalled();
   });
 
-  it("uses CLI-reported quota without reading a stored token", async () => {
+  it("keeps CLI-reported quota and identity unbound, reading the token only for optional saved resets", async () => {
     setProcessPlatform("linux");
     readFileMock.mockResolvedValue(
       JSON.stringify({ claudeAiOauth: { accessToken: "stored-token" } }),
@@ -702,8 +702,8 @@ describe("Claude CLI diagnostics", () => {
 
     expect(diagnostics?.quotaSource).toBe("claude-auth-status-json");
     expect(diagnostics?.credentialFingerprint).toBeUndefined();
-    expect(readFileMock).not.toHaveBeenCalled();
-    expect(fetchWithTimeoutMock).not.toHaveBeenCalled();
+    expect(diagnostics?.quota?.five_hour?.percentRemaining).toBe(90);
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
   it("keys the Claude CLI row by its stored token, without any network call", async () => {
@@ -1497,12 +1497,12 @@ describe("Claude CLI diagnostics", () => {
       percentRemaining: 98,
       resetTimeIso: "2026-07-27T07:00:00.268Z",
     });
-    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(ANTHROPIC_USAGE_URL, {
+    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(`${ANTHROPIC_USAGE_URL}?cedar_ember=1`, {
       request: {
         headers: {
           Authorization: "Bearer oauth-access-token",
           "anthropic-beta": "oauth-2025-04-20",
-          "User-Agent": "claude-code/1.2.3",
+          "User-Agent": "claude-cli/1.2.3 (external, cli)",
         },
       },
       timeoutMs: undefined,
@@ -1732,12 +1732,12 @@ describe("Claude CLI diagnostics", () => {
 
     const diagnostics = await getAnthropicDiagnostics();
     expect(diagnostics.quotaSource).toBe("claude-credentials-oauth-api");
-    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(ANTHROPIC_USAGE_URL, {
+    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(`${ANTHROPIC_USAGE_URL}?cedar_ember=1`, {
       request: {
         headers: {
           Authorization: "Bearer oauth-access-token-from-keychain",
           "anthropic-beta": "oauth-2025-04-20",
-          "User-Agent": "claude-code/1.2.3",
+          "User-Agent": "claude-cli/1.2.3 (external, cli)",
         },
       },
       timeoutMs: undefined,
@@ -1805,12 +1805,12 @@ describe("Claude CLI diagnostics", () => {
     expect(diagnostics.quotaSource).toBe("claude-credentials-oauth-api");
     expect(diagnostics.quota?.five_hour.percentRemaining).toBe(75);
     expect(diagnostics.quota?.seven_day.percentRemaining).toBe(60);
-    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(ANTHROPIC_USAGE_URL, {
+    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(`${ANTHROPIC_USAGE_URL}?cedar_ember=1`, {
       request: {
         headers: {
           Authorization: "Bearer oauth-access-token-from-keychain",
           "anthropic-beta": "oauth-2025-04-20",
-          "User-Agent": "claude-code/1.2.3",
+          "User-Agent": "claude-cli/1.2.3 (external, cli)",
         },
       },
       timeoutMs: undefined,
@@ -1857,12 +1857,12 @@ describe("Claude CLI diagnostics", () => {
     expect(diagnostics.quotaSupported).toBe(true);
     expect(diagnostics.quota?.five_hour.percentRemaining).toBe(95);
     expect(diagnostics.quota?.seven_day.percentRemaining).toBe(90);
-    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(ANTHROPIC_USAGE_URL, {
+    expect(fetchWithTimeoutMock).toHaveBeenCalledWith(`${ANTHROPIC_USAGE_URL}?cedar_ember=1`, {
       request: {
         headers: {
           Authorization: "Bearer oauth-access-token-from-file",
           "anthropic-beta": "oauth-2025-04-20",
-          "User-Agent": "claude-code/1.2.3",
+          "User-Agent": "claude-cli/1.2.3 (external, cli)",
         },
       },
       timeoutMs: undefined,
@@ -2112,14 +2112,16 @@ describe("Claude CLI diagnostics", () => {
     return request.request.headers["User-Agent"];
   }
 
-  it("sends bare claude-code as the usage User-Agent when the CLI version is unknown", async () => {
-    await expect(sendUsageRequestWithCliOutput("claude\n")).resolves.toBe("claude-code");
+  it("sends a bare CLI-shaped usage User-Agent when the CLI version is unknown", async () => {
+    await expect(sendUsageRequestWithCliOutput("claude\n")).resolves.toBe(
+      "claude-cli (external, cli)",
+    );
   });
 
   it("bounds the CLI version placed in the usage User-Agent", async () => {
     const userAgent = (await sendUsageRequestWithCliOutput(`1.2.3-${"a".repeat(300)}\n`)) as string;
-    expect(userAgent).toMatch(/^claude-code\/1\.2\.3-a+$/u);
-    expect(userAgent.length).toBeLessThanOrEqual(64);
+    expect(userAgent).toMatch(/^claude-cli\/1\.2\.3-a+ \(external, cli\)$/u);
+    expect(userAgent.length).toBeLessThanOrEqual(80);
   });
 
   it("redacts an access token reconstructed while sanitizing a request error", async () => {
@@ -2670,7 +2672,7 @@ describe("Claude CLI diagnostics", () => {
 
     expect(diagnostics.quota?.five_hour.percentRemaining).toBe(90);
     expect(fetchWithTimeoutMock).toHaveBeenCalledWith(
-      ANTHROPIC_USAGE_URL,
+      `${ANTHROPIC_USAGE_URL}?cedar_ember=1`,
       expect.objectContaining({
         request: expect.objectContaining({
           headers: expect.objectContaining({ Authorization: "Bearer claude-code-token" }),
