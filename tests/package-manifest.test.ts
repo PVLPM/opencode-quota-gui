@@ -540,14 +540,14 @@ describe("package manifest compatibility", () => {
     const classifier = namedStep(changes, "Detect documentation-only changes");
     expect(classifier.id).toBe("classify");
     const script = classifier.run ?? "";
-    expect(script).toContain('git diff --no-renames --name-only -z "$BASE_SHA" "$HEAD_SHA"');
-    expect(script).toContain('while IFS= read -r -d \'\' path');
-    expect(script).toContain('if [[ "$changed" == false ]]');
-    expect(script).toContain('echo "docs_only=false" >> "$GITHUB_OUTPUT"');
-    expect(script).toContain('echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"');
+    expect(script).toContain("git diff --no-renames --name-only -z \"$BASE_SHA\" \"$HEAD_SHA\"");
+    expect(script).toContain("while IFS= read -r -d '' path");
+    expect(script).toContain("if [[ \"$changed\" == false ]]");
+    expect(script).toContain("echo \"docs_only=false\" >> \"$GITHUB_OUTPUT\"");
+    expect(script).toContain("echo \"docs_only=$docs_only\" >> \"$GITHUB_OUTPUT\"");
     expect(script).toContain("docs/*|images/*");
     expect(script).toContain("*.md|*.mdx|*.txt");
-    expect(script).toContain('if [[ "$path" == */* ]]');
+    expect(script).toContain("if [[ \"$path\" == */* ]]");
 
     for (const key of ["pnpm-quality", "windows-platform"]) {
       const job = ciWorkflow.jobs[key];
