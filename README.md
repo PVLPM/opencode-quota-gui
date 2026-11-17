@@ -11,19 +11,6 @@ Quota, token usage, and analytics inside OpenCode Desktop. OpenCode Quota GUI ad
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" /></a>
 </p>
 
-<table>
-  <tr>
-    <td width="56%" valign="middle">
-      <strong>New in v1.3.1: Cache observation in the composer</strong>
-      <p>See the measured cache-read share of your last completed model call and an estimated cache TTL, right where you work. Open the pill for recent session and agent observations.</p>
-      <sub>The TTL is an estimate, not a provider-confirmed expiration. Cache reuse is shown only when reliable usage data is available.</sub>
-    </td>
-    <td width="44%" align="center" valign="middle">
-      <img src="https://raw.githubusercontent.com/PVLPM/opencode-quota-gui/main/images/opencode-quota-gui_composer_pill.png" alt="OpenCode composer cache observation popover with per-session cache reuse and estimated TTL above the TTL, Cache and Hit pill" width="320" />
-    </td>
-  </tr>
-</table>
-
 ## Native OpenCode Desktop
 
 The Native panel is the primary experience in **v1.3.1**. Open **Quota & Usage** for Quota, Analytics, Models, and their detail pages; OpenCode Settings includes the plugin's **Quota & analytics** page. The session header shows a compact quota slot with a combined preview.
@@ -57,6 +44,13 @@ The full Native integration ships from **v1.3.0** and requires **OpenCode Deskto
       <img src="images/opencode-quota-gui_slot.png" alt="Session header quota rings with the combined quota preview popup open, listing each provider's windows and reset countdowns" />
       <br />
       <sub><strong>Header Slot</strong> — at-a-glance quota rings with the combined preview open.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center" valign="top">
+      <img src="https://raw.githubusercontent.com/PVLPM/opencode-quota-gui/main/images/opencode-quota-gui_composer_pill.png" alt="OpenCode composer cache observation popover showing per-session cache reuse and estimated TTL" width="320" />
+      <br />
+      <sub><strong>Composer cache observation (v1.3.1)</strong> — measured cache-read share, estimated TTL, and recent session or agent observations. TTL is not a provider-confirmed expiry.</sub>
     </td>
   </tr>
 </table>
