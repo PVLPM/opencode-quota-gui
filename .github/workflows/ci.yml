@@ -95,9 +95,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Diagnose changed CI test formatting
-        run: pnpm exec biome check tests/package-manifest.test.ts --max-diagnostics=10
-
       - name: Run canonical verification
         run: pnpm verify
 
