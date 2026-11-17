@@ -11,6 +11,19 @@ Quota, token usage, and analytics inside OpenCode Desktop. OpenCode Quota GUI ad
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" /></a>
 </p>
 
+<table>
+  <tr>
+    <td width="56%" valign="middle">
+      <strong>New in v1.3.1: Cache observation in the composer</strong>
+      <p>See the measured cache-read share of your last completed model call and an estimated cache TTL, right where you work. Open the pill for recent session and agent observations.</p>
+      <sub>The TTL is an estimate, not a provider-confirmed expiration. Cache reuse is shown only when reliable usage data is available.</sub>
+    </td>
+    <td width="44%" align="center" valign="middle">
+      <img src="https://raw.githubusercontent.com/PVLPM/opencode-quota-gui/main/images/opencode-quota-gui_composer_pill.png" alt="OpenCode composer cache observation popover with per-session cache reuse and estimated TTL above the TTL, Cache and Hit pill" width="320" />
+    </td>
+  </tr>
+</table>
+
 ## Native OpenCode Desktop
 
 The Native panel is the primary experience in **v1.3.1**. Open **Quota & Usage** for Quota, Analytics, Models, and their detail pages; OpenCode Settings includes the plugin's **Quota & analytics** page. The session header shows a compact quota slot with a combined preview.
@@ -116,10 +129,6 @@ In OpenCode Desktop 2.2.1+, **Quota & Usage** opens the product in the side pane
 The panel follows you between sessions: switching sessions reuses the same shared quota and analytics state instead of starting over, and header quota indicators stay in place across OpenCode Desktop's normal dashboard watch rotations.
 
 The Native composer also shows **Cache observation**, for example `TTL ~4m 30s · Cache 99.70% · Hit`. Its percentage is the cache-read share of the last completed primary call with reliable usage data, not a session average, labelled by how much of the prompt was reused: `Low reuse` (above 0% up to 50%), `Partial reuse` (above 50% to under 90%) and `Hit` (90% or more). These are reuse-efficiency bands, not provider cache-hit semantics, so a small positive cache read is technically a cache hit but shows `Low reuse`. `Miss` is reserved for an independently confirmed zero. `Unknown` means the usage data was missing or invalid, or the share is zero: OpenCode reports a missing cache-read count as zero, so a plain zero is never shown as a confirmed `Miss`. The `~` marks the TTL countdown as an estimate; it is not an authoritative expiry, and no supported OpenCode host exposes one. For Claude Agent, a call whose cache writes are recorded as 1-hour-only with zero cache reads in its session record is estimated at 60 minutes instead of 5; an observed 1-hour write does not prove that earlier cached segments last an hour. See [Cache TTL evidence](docs/readme/cache-ttl-evidence.md) for what is and is not observable per route. Green means cache reuse is likely within an estimated retention window; yellow means the estimate is uncertain or in its final 20%; red means estimated expiry, observed invalidation, or a model change; gray means there is insufficient reliable information. An active session with confirmed prior cache reads may also show yellow when its retention is unknown, without a countdown. Colors estimate future reuse and do not guarantee the next hit or prove what a provider retained. Select a session row to open its Session Analytics in the panel without switching the active chat; its breadcrumbs link back to parent sessions.
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/PVLPM/opencode-quota-gui/main/images/opencode-quota-gui_composer_pill.png" alt="Native composer Cache observation popover listing per-session TTL estimates and cache-read percentages above the TTL, Cache and Hit pill" width="320" />
-</p>
 
 For eligible quota windows, hover or focus the percentage or progress bar to see a linear runway estimate. It is available only when the provider data supports a reliable window projection; a reset timestamp alone is not enough. In particular, OpenCode Go's rolling five-hour window does not establish a fixed window start.
 
