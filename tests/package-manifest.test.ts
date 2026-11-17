@@ -530,8 +530,41 @@ describe("package manifest compatibility", () => {
     );
   });
 
+  it("skips expensive CI for docs-only diffs without weakening required checks", () => {
+    const changes = ciWorkflow.jobs.changes;
+    expect(changes["runs-on"]).toBe("ubuntu-latest");
+    expect(
+      changes.steps?.find((step) => step.uses === "actions/checkout@v6")?.with?.["fetch-depth"],
+    ).toBe(0);
+
+    const classifier = namedStep(changes, "Detect documentation-only changes");
+    expect(classifier.id).toBe("classify");
+    const script = classifier.run ?? "";
+    expect(script).toContain('git diff --no-renames --name-only -z "$BASE_SHA" "$HEAD_SHA"');
+    expect(script).toContain('while IFS= read -r -d \'\' path');
+    expect(script).toContain('if [[ "$changed" == false ]]');
+    expect(script).toContain('echo "docs_only=false" >> "$GITHUB_OUTPUT"');
+    expect(script).toContain('echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"');
+    expect(script).toContain("docs/*|images/*");
+    expect(script).toContain("*.md|*.mdx|*.txt");
+    expect(script).toContain('if [[ "$path" == */* ]]');
+
+    for (const key of ["pnpm-quality", "windows-platform"]) {
+      const job = ciWorkflow.jobs[key];
+      expect(job.needs).toBe("changes");
+      expect(job.if).toContain("!cancelled()");
+      expect(job.if).toContain("needs.changes.result != 'success'");
+      expect(job.if).toContain("needs.changes.outputs.docs_only != 'true'");
+    }
+    const smoke = ciWorkflow.jobs["runtime-smoke"];
+    expect(smoke.needs).toEqual(["changes", "pnpm-quality"]);
+    expect(smoke.if).toContain("needs.pnpm-quality.result == 'success'");
+    expect(smoke.if).toContain("needs.changes.outputs.docs_only != 'true'");
+  });
+
   it("runs canonical verification once on Ubuntu, only Windows-specific tests on Windows, and reuses the artifact for smoke", () => {
     expect(Object.keys(ciWorkflow.jobs).sort()).toEqual([
+      "changes",
       "pnpm-quality",
       "runtime-smoke",
       "windows-platform",
@@ -595,7 +628,7 @@ describe("package manifest compatibility", () => {
     );
 
     const smoke = ciWorkflow.jobs["runtime-smoke"];
-    expect(smoke.needs).toBe("pnpm-quality");
+    expect(smoke.needs).toEqual(["changes", "pnpm-quality"]);
     // One runner smokes the single uploaded artifact on both supported Node lines.
     expect(smoke.strategy).toBeUndefined();
     expect(
