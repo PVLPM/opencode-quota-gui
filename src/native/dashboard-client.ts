@@ -42,6 +42,7 @@ import type {
   DashboardRpcWatchOutput,
 } from "../rpc.js";
 import { isDashboardRpcCacheObserverEvent } from "../rpc.js";
+import { isHostRpcTimeout } from "../ui/view-model.js";
 
 export type NativeDashboardConnection = "connecting" | "live" | "reconnecting" | "closed";
 
@@ -139,20 +140,6 @@ export interface NativeDashboardClientOptions {
   scope?: DashboardRpcViewScope;
   onConnectionChange?: (state: NativeDashboardConnection) => void;
   onReconnect?: () => void;
-}
-
-function isHostWatchTimeout(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const clientError = error as { name?: unknown; reason?: unknown; cause?: unknown };
-  const cause = clientError.cause;
-  return (
-    clientError.name === "ClientError" &&
-    clientError.reason === "Transport" &&
-    typeof cause === "object" &&
-    cause !== null &&
-    "name" in cause &&
-    cause.name === "TimeoutError"
-  );
 }
 
 export function createNativeDashboardClient(
@@ -339,7 +326,7 @@ export function createNativeDashboardClient(
         return;
       } catch (error) {
         if (!isCurrent(attempt)) return;
-        if (!attempt.live || !isHostWatchTimeout(error)) {
+        if (!attempt.live || !isHostRpcTimeout(error)) {
           failAttempt(attempt);
           return;
         }

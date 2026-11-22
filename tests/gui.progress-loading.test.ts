@@ -44,6 +44,7 @@ interface BusyModule {
   createBusyIndicator: (delayMs?: number) => {
     visible: () => boolean;
     hasData: () => boolean;
+    elapsedSeconds: () => number;
     update: (state: { active: boolean; hasData: boolean }) => void;
     dispose: () => void;
   };
@@ -125,6 +126,7 @@ function busyIndicator(visible: boolean, hasData: boolean) {
   return {
     visible: () => visible,
     hasData: () => hasData,
+    elapsedSeconds: () => 7,
     update: () => {},
     dispose: () => {},
   };
@@ -245,13 +247,32 @@ describe("delayed foreground loading", () => {
     }
   });
 
+  it("counts real elapsed seconds from request start, not from when the panel appears", () => {
+    vi.useFakeTimers();
+    try {
+      const indicator = busyModule.createBusyIndicator();
+      indicator.update({ active: true, hasData: false });
+      vi.advanceTimersByTime(1000);
+      expect(indicator.visible()).toBe(true);
+      expect(indicator.elapsedSeconds()).toBe(1);
+      vi.advanceTimersByTime(4000);
+      expect(indicator.elapsedSeconds()).toBe(5);
+      indicator.update({ active: false, hasData: false });
+      vi.advanceTimersByTime(5000);
+      expect(indicator.elapsedSeconds()).toBe(5);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses exact Loading / Updating analytics copy with no percent or ETA", () => {
     const loading = render(busyModule.BusyOverlay, {
       indicator: busyIndicator(true, false),
       label: "analytics",
     });
     expect(loading).toContain('class="qg-busy"');
-    expect(loading).toContain("Loading analytics…");
+    expect(loading).toContain("Loading analytics… 7 s");
     expect(loading).not.toContain("qg-busy__dot");
     expect(loading).not.toMatch(/\d+\s*%|ETA|remaining/i);
 
@@ -259,7 +280,7 @@ describe("delayed foreground loading", () => {
       indicator: busyIndicator(true, true),
       label: "analytics",
     });
-    expect(updating).toContain("Updating analytics…");
+    expect(updating).toContain("Updating analytics… 7 s");
     expect(updating).not.toContain("qg-busy__dot");
   });
 

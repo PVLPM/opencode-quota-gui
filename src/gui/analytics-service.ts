@@ -94,6 +94,7 @@ export function createAnalyticsReadService(
       : DEFAULT_TRANSPORT_RETRY_BASE_MS;
 
   let transportPromise: Promise<AnalyticsTransport> | undefined;
+  let initPromise: Promise<AnalyticsTransport> | undefined;
   let initialized = false;
   let failures = 0;
   let nextRetryAtMs = 0;
@@ -144,7 +145,17 @@ export function createAnalyticsReadService(
     }
     const created = await transportPromise;
     if (initialized) return created;
-    if (Date.now() < nextRetryAtMs) throw new AnalyticsReadError("unavailable");
+    // Simultaneous first callers share one init and one failure count.
+    if (!initPromise) {
+      if (Date.now() < nextRetryAtMs) throw new AnalyticsReadError("unavailable");
+      initPromise = initTransport(created).finally(() => {
+        initPromise = undefined;
+      });
+    }
+    return await initPromise;
+  }
+
+  async function initTransport(created: AnalyticsTransport): Promise<AnalyticsTransport> {
     try {
       await created.init({
         ...(options.snapshotPath === undefined ? {} : { snapshotPath: options.snapshotPath }),

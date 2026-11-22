@@ -649,8 +649,19 @@ describe("section state machine", () => {
 
   it("rejects a stale server contract before treating it as compatible", () => {
     expect(describeError(new Error("ENOENT: C:\\Users\\local\\secret.json"))).toBe(
-      "The dashboard server did not answer. Check that the local dashboard is still running.",
+      "OpenCode did not return the dashboard data. Retry, or restart OpenCode if this keeps happening.",
     );
+    // The host's per-request deadline is not a dead dashboard; neither message
+    // asks the user to start a local HTTP server.
+    const hostTimeout = {
+      name: "ClientError",
+      reason: "Transport",
+      cause: new DOMException("The operation timed out", "TimeoutError"),
+    };
+    expect(describeError(hostTimeout)).toBe(
+      "OpenCode stopped waiting for this request. The read may still be finishing in the background; Retry in a moment.",
+    );
+    expect(describeError(hostTimeout)).not.toMatch(/local dashboard|server/i);
     expect(contractMismatchMessage(DASHBOARD_CONTRACT_VERSION)).toBeUndefined();
     // A newly rebuilt UI can meet an older, still-running server: same /api/v1
     // path, older payload revision. It must be rejected before any payload is

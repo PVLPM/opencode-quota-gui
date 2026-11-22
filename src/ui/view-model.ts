@@ -60,7 +60,25 @@ export function contractMismatchMessage(serverVersion: number): string | undefin
  */
 export function describeError(error: unknown): string {
   if (error instanceof DashboardError) return error.message;
-  return "The dashboard server did not answer. Check that the local dashboard is still running.";
+  if (isHostRpcTimeout(error)) {
+    return "OpenCode stopped waiting for this request. The read may still be finishing in the background; Retry in a moment.";
+  }
+  return "OpenCode did not return the dashboard data. Retry, or restart OpenCode if this keeps happening.";
+}
+
+/** The official RPC client's per-request deadline: a transport `TimeoutError`, host still alive. */
+export function isHostRpcTimeout(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const clientError = error as { name?: unknown; reason?: unknown; cause?: unknown };
+  const cause = clientError.cause;
+  return (
+    clientError.name === "ClientError" &&
+    clientError.reason === "Transport" &&
+    typeof cause === "object" &&
+    cause !== null &&
+    "name" in cause &&
+    cause.name === "TimeoutError"
+  );
 }
 
 /**

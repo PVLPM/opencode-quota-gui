@@ -307,6 +307,14 @@ available from the current worker interface.
   started scan waits, and a queued cold session read near its own worst case can
   still approach the budget. A browser/proxy-level 502 has not been reproduced
   and is not claimed fixed.
+- **Host RPC deadline vs worker budget.** Native Analytics reads go through the
+  host RPC, which (per `NATIVE_GUI_IMPLEMENTATION_DECISIONS.md` D11, Desktop
+  2.2.5 source) aborts an ordinary request whose response headers have not
+  arrived within 60 s, well before the 180 s worker budget. The abort does not
+  cancel the read: `home` ignores the RPC signal and the snapshot service
+  single-flights it, so a Retry joins the in-flight compute. The UI maps that
+  transport `TimeoutError` to its own message instead of the generic one.
+  The 60 s value is host-side evidence, not measured by this suite.
 - **No assumed `time_updated` index.** The installed OpenCode schema used for
   the BEFORE baseline has no index on `session_message.time_updated`.
   Timestamp/revision filtering therefore scans SQLite rather than using an
