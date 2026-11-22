@@ -21,6 +21,7 @@ import type { NativeDashboardRuntime } from "./runtime.js";
 const DETAIL_CLOSE_DELAY_MS = 140;
 const MISMATCH_DETAIL = "Selected model differs from the last observed route.";
 const ATTENTION_FLASH_MS = 180;
+const WARMING_LABEL = "Refreshed by OpenCode warming (inferred)";
 
 function safeTitle(title: string | undefined, fallback: string): string {
   const clean = (title ?? "")
@@ -207,18 +208,26 @@ function presentation(
   // The status bubble keeps the state, expiry, basis and cache share. Assumptions
   // and the start of the qualifying call are general caveats, explained under (i).
   const observedWhen = formatWallTime(observedAt, nowMs);
+  const estimate = reuseUncertain ? undefined : observed?.ttlEstimate;
+  const warming = estimate?.anchor === "warming-inferred";
+  const warmedAt = warming ? estimate?.anchorAtMs : undefined;
+  const warmedWhen =
+    typeof warmedAt === "number" && (observedAt === undefined || warmedAt > observedAt)
+      ? formatWallTime(warmedAt, nowMs)
+      : undefined;
   const source =
     percent === undefined
       ? undefined
-      : observedWhen === undefined
-        ? cache.label
-        : `${cache.label} · last completed call ${observedWhen}`;
+      : warmedWhen !== undefined
+        ? `${cache.label} · OpenCode warming ${warmedWhen} (inferred)`
+        : observedWhen === undefined
+          ? cache.label
+          : `${cache.label} · last completed call ${observedWhen}`;
   const detail = reuseUncertain
     ? "Prior cache reads; reuse uncertain"
     : ttl.expired
       ? "Estimated retention elapsed"
       : detailFor(observed);
-  const estimate = reuseUncertain ? undefined : observed?.ttlEstimate;
   const expiryTime = formatWallTime(estimate?.deadlineAtMs, nowMs);
   const expiry = expiryTime === undefined ? undefined : `Estimated expiry ${expiryTime}`;
   const basisSource = safeSegment(estimate?.source);
@@ -230,7 +239,7 @@ function presentation(
             ? ""
             : ` (${estimate.kind === "fallback" ? "fallback estimate" : estimate.kind})`
         }`;
-  return { tone, percent, ttl, cache, detail, expiry, basis, source } as const;
+  return { tone, percent, ttl, cache, detail, expiry, basis, source, warming } as const;
 }
 
 function detailFor(observed: CacheObserverClassification | undefined): string | undefined {
@@ -778,14 +787,23 @@ export function createCacheComposerPill(
             ? { ...observed, tone: "danger" as const, detail: MISMATCH_DETAIL }
             : observed;
         };
+        // The spinner always wins the slot; warming is only possible while idle.
+        const warmed = () => result().warming && !busy() && !childBusy(id());
         const detail = () => result().detail || result().source;
         const open = () => detail() !== undefined && detailId() === id();
         return (
           <div class={`qg-cache-row${child ? " qg-cache-child" : ""}`}>
             <div class="qg-cache-row-heading">
-              <Show when={child}>
+              <Show when={child || warmed()}>
                 <span class="qg-cache-busy" data-busy={busy() ? "true" : "false"}>
-                  <span class="qg-cache-visually-hidden">{busy() ? "Running" : ""}</span>
+                  <Show when={warmed()}>
+                    <span class="qg-cache-warming" aria-hidden="true">
+                      🔥
+                    </span>
+                  </Show>
+                  <span class="qg-cache-visually-hidden">
+                    {busy() ? "Running" : warmed() ? WARMING_LABEL : ""}
+                  </span>
                 </span>
               </Show>
               <Show

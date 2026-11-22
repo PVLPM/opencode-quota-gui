@@ -844,6 +844,82 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
   container.remove();
 });
 
+it("shows the warming flame only while idle and anchored, with an inferred popover line", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:10:00Z"));
+  const a = session("warm");
+  const now = Date.now();
+  const make = (warmed: boolean): CacheObserverClassification =>
+    ({
+      color: "green",
+      reason: "estimated-within-ttl",
+      primaryCacheReadRatio: { value: 0.8, observedAtMs: now - 120_000 },
+      ttlEstimate: {
+        deadlineAtMs: now + 240_000,
+        source: "test",
+        kind: "configured",
+        ...(warmed ? { anchor: "warming-inferred", anchorAtMs: now - 60_000 } : {}),
+      },
+    }) as unknown as CacheObserverClassification;
+  let observed = make(true);
+  let status: "idle" | "busy" = "idle";
+  let notify = () => {};
+  const runtime = mockRuntime(
+    mockCacheObserver({
+      subscribe: (_id: string, listener: () => void) => {
+        notify = listener;
+        return () => {};
+      },
+      query: () => observed,
+      status: () => status,
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => a } as unknown as Sessions, runtime),
+    dispose: cleanup,
+  }));
+  await flush();
+  renderMenu(pill, () => a, container);
+  const slot = () => container.querySelector<HTMLElement>(".qg-cache-busy");
+  const flame = () => slot()?.querySelector(".qg-cache-warming") ?? null;
+  const line = () => {
+    const dot = container.querySelector<HTMLButtonElement>("button.qg-cache-indicator");
+    dot?.dispatchEvent(new Event("pointerenter"));
+    const text = container.querySelector('[role="tooltip"]')?.textContent ?? "";
+    dot?.dispatchEvent(new Event("pointerleave"));
+    vi.advanceTimersByTime(200);
+    return text;
+  };
+
+  // Idle + warming: the flame sits in the spinner slot with its spoken name.
+  expect(flame()?.textContent).toBe("🔥");
+  expect(slot()?.getAttribute("data-busy")).toBe("false");
+  expect(slot()?.textContent).toContain("Refreshed by OpenCode warming (inferred)");
+  expect(line()).toMatch(
+    /Cache 80\.00% · Partial reuse · OpenCode warming \d{2}:\d{2} \(inferred\)/,
+  );
+  expect(line()).not.toContain("last completed call");
+
+  // A step in flight: the flame yields the slot (the main row has no spinner).
+  status = "busy";
+  notify();
+  expect(flame()).toBeNull();
+  expect(container.textContent).not.toContain("Refreshed by OpenCode warming");
+
+  // The anchor cleared by a later completed step: no flame, original line.
+  status = "idle";
+  observed = make(false);
+  notify();
+  expect(flame()).toBeNull();
+  expect(container.textContent).not.toContain("Refreshed by OpenCode warming");
+  expect(line()).toMatch(/last completed call \d{2}:\d{2}/);
+  expect(line()).not.toContain("OpenCode warming");
+  dispose();
+  container.remove();
+});
+
 it("renders the generic fallback for Qwen from the runtime", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
