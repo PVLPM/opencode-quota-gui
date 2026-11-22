@@ -26,7 +26,8 @@ import {
 } from "../lib/opencode-storage.js";
 import { getAnalyticsPricingFingerprint } from "./analytics-pricing-revision.js";
 
-export const ANALYTICS_SNAPSHOT_VERSION = 3;
+/** 4: compact fingerprints carry unknown-vs-zero cache telemetry (v3 files rebuild). */
+export const ANALYTICS_SNAPSHOT_VERSION = 4;
 export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
 /**
  * Warm DTO aggregation semantics. This is separate from the compact candidate
@@ -56,6 +57,8 @@ export type CompactFingerprint = [
   cacheRead: number,
   cacheWrite: number,
   cost: number | null,
+  /** Bit 1: cache-read counter was not stored; bit 2: cache-write. 0 = both observed. */
+  cacheMissing: number,
 ];
 
 /** One physical occurrence of a fingerprint contribution. */
@@ -143,8 +146,16 @@ export function rowKey(sessionID: string, messageID: string): string {
   return `${sessionID}\u0000${messageID}`;
 }
 
+function cacheMissingBits(row: OpenCodeRawAssistantRow): number {
+  return (row.cacheReadMissing ? 1 : 0) | (row.cacheWriteMissing ? 2 : 0);
+}
+
+/** Contribution identity: the upstream fingerprint plus unknown-vs-zero cache telemetry. */
 export function fingerprintOf(row: OpenCodeRawAssistantRow): string {
-  return rawAssistantRowFingerprint(row);
+  const bits = cacheMissingBits(row);
+  return bits === 0
+    ? rawAssistantRowFingerprint(row)
+    : `${rawAssistantRowFingerprint(row)}|${bits}`;
 }
 
 export function compactFingerprintOf(row: OpenCodeRawAssistantRow): CompactFingerprint {
@@ -159,6 +170,7 @@ export function compactFingerprintOf(row: OpenCodeRawAssistantRow): CompactFinge
     row.tokens.cacheRead,
     row.tokens.cacheWrite,
     row.cost ?? null,
+    cacheMissingBits(row),
   ];
 }
 
@@ -182,6 +194,8 @@ export function rowFromFingerprint(
   if (fingerprint[2] !== null) row.providerID = fingerprint[2];
   if (fingerprint[3] !== null) row.modelID = fingerprint[3];
   if (fingerprint[9] !== null) row.cost = fingerprint[9];
+  if (fingerprint[10] & 1) row.cacheReadMissing = true;
+  if (fingerprint[10] & 2) row.cacheWriteMissing = true;
   if (occurrence.agent !== undefined) row.agent = occurrence.agent;
   if (occurrence.variant !== undefined) row.variant = occurrence.variant;
   return row;
@@ -333,13 +347,14 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function isCompactFingerprint(value: unknown): value is CompactFingerprint {
-  if (!Array.isArray(value) || value.length !== 10) return false;
+  if (!Array.isArray(value) || value.length !== 11) return false;
   if (!isFiniteNumber(value[0]) || !isFiniteNumber(value[1])) return false;
   if (!isStringOrNull(value[2]) || !isStringOrNull(value[3])) return false;
   for (let index = 4; index <= 8; index += 1) {
     if (!isFiniteNumber(value[index])) return false;
   }
-  return value[9] === null || isFiniteNumber(value[9]);
+  if (value[9] !== null && !isFiniteNumber(value[9])) return false;
+  return value[10] === 0 || value[10] === 1 || value[10] === 2 || value[10] === 3;
 }
 
 function isOccurrenceTuple(value: unknown, fingerprintCount: number): boolean {

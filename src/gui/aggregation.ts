@@ -76,6 +76,20 @@ export interface UsageAnalyticsDataset {
   projects: Record<string, OpenCodeProjectInfo>;
   messages: OpenCodeRawAssistantRow[];
   compactions: OpenCodeCompactionMarker[];
+  /**
+   * Completed assistant rows the usage view excluded (zero-token). They are not
+   * steps, but the session DTO records where they sit so gaps never bridge them.
+   */
+  excluded?: Array<{ sessionId: string; atMs: number }>;
+}
+
+/** Where a message sits in its session's sequence: creation time, else completion time. */
+export function messagePositionMs(
+  row: Pick<OpenCodeRawAssistantRow, "createdAtMs" | "completedAtMs">,
+): number {
+  return row.createdAtMs > 0 && Number.isFinite(row.createdAtMs)
+    ? row.createdAtMs
+    : row.completedAtMs;
 }
 
 export interface HomeAnalytics {
@@ -927,6 +941,10 @@ function buildSessionSnapshot(
       latestActivityAtMs: subtreeLatest.get(id)!,
       models: sessionModelIdentities(ownSteps),
     };
+    const cacheUnknownSteps = ownSteps.filter(
+      (step) => step.row.cacheReadMissing || step.row.cacheWriteMissing,
+    ).length;
+    if (cacheUnknownSteps > 0) node.cacheUnknownSteps = cacheUnknownSteps;
     if (session.parentID !== undefined) node.parentId = session.parentID;
     const agent = sessionAgent(session, ownSteps);
     if (agent !== undefined) node.agent = agent;
@@ -961,6 +979,8 @@ function buildSessionSnapshot(
         step.createdAtMs = row.createdAtMs;
       }
       if (row.agent) step.agent = row.agent;
+      if (row.cacheReadMissing) step.cacheReadUnknown = true;
+      if (row.cacheWriteMissing) step.cacheWriteUnknown = true;
       steps.push(step);
     }
   }
@@ -1005,7 +1025,20 @@ function buildSessionSnapshot(
 
   const focusSteps = model.ownedBySession.get(sessionId) ?? [];
 
+  // Focus-session completed messages that are not steps: excluded zero-token
+  // rows and fork copies owned elsewhere. Gap metrics must not bridge them.
+  const focusStepIds = new Set(focusSteps.map((step) => step.row.messageID));
+  const unobservedAtMs = [
+    ...(model.dataset.excluded ?? [])
+      .filter((entry) => entry.sessionId === sessionId)
+      .map((entry) => entry.atMs),
+    ...model.dataset.messages
+      .filter((row) => row.sessionID === sessionId && !focusStepIds.has(row.messageID))
+      .map(messagePositionMs),
+  ].sort((a, b) => a - b);
+
   return {
+    ...(unobservedAtMs.length > 0 ? { unobservedAtMs } : {}),
     focusSessionId: sessionId,
     timeZone,
     projectId: focusProjectId,

@@ -788,6 +788,12 @@ export interface OpenCodeRawAssistantRow {
   agent?: string;
   /** Reasoning effort as stored (`model.variant`); absent when not recorded. */
   variant?: string;
+  /**
+   * The stored message had no numeric cache counter. `tokens.cacheRead/Write`
+   * still read 0 for accounting, but the 0 is unknown, not an observed zero.
+   */
+  cacheReadMissing?: true;
+  cacheWriteMissing?: true;
 }
 
 /**
@@ -851,6 +857,8 @@ function mapRawCompletedAssistantRow(row: ProjectedMessageRow): OpenCodeRawAssis
     modelID: message.modelID,
     agent: message.agent,
     ...(variant === undefined ? {} : { variant }),
+    ...(normalizeNumber(row.tokens_cache_read) === undefined ? { cacheReadMissing: true } : {}),
+    ...(normalizeNumber(row.tokens_cache_write) === undefined ? { cacheWriteMissing: true } : {}),
   };
 }
 

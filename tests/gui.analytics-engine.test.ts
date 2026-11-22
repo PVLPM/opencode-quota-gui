@@ -2348,6 +2348,38 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.close();
   });
 
+  it("projects unknown cache counters and excluded zero-token positions into the session DTO", async () => {
+    const db = baseDb();
+    const unknown = row(
+      "ses_root",
+      "msg_unknown",
+      NOW - 30 * 60_000,
+      { input: 7 },
+      {
+        cacheReadMissing: true,
+      },
+    );
+    const zero = row("ses_root", "msg_zero", NOW - 20 * 60_000, { input: 0, output: 0 });
+    for (const entry of [unknown, zero]) {
+      db.rows.push(entry);
+      db.updatedAt.set(rowKey(entry.sessionID, entry.messageID), entry.completedAtMs);
+    }
+    const { engine } = harness(db);
+
+    const session = await engine.session("ses_root");
+    const step = session.steps.find((candidate) => candidate.messageId === "msg_unknown");
+    expect(step).toMatchObject({ cacheReadUnknown: true });
+    expect(step).not.toHaveProperty("cacheWriteUnknown");
+    expect(session.steps.find((candidate) => candidate.messageId === "msg_a")).not.toHaveProperty(
+      "cacheReadUnknown",
+    );
+    expect(session.nodes.find((node) => node.sessionId === "ses_root")?.cacheUnknownSteps).toBe(1);
+    // The zero-token row is no step, but its position keeps gaps from bridging it.
+    expect(session.steps.some((candidate) => candidate.messageId === "msg_zero")).toBe(false);
+    expect(session.unobservedAtMs).toEqual([zero.createdAtMs]);
+    await engine.close();
+  });
+
   it("expires finite warm DTOs when a no-change refresh advances the window", async () => {
     const db = baseDb();
     const age24 = row("ses_root", "msg_age24_warm", NOW - 23 * HOUR, { input: 11 });

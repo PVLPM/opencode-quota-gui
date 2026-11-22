@@ -10,6 +10,7 @@ import {
   ANALYTICS_SNAPSHOT_SCHEMA,
   ANALYTICS_SNAPSHOT_VERSION,
   type AnalyticsState,
+  compactFingerprintOf,
   decodeAnalyticsPresentation,
   decodeAnalyticsState,
   defaultAnalyticsPresentationPath,
@@ -18,6 +19,7 @@ import {
   fingerprintOf,
   loadAnalyticsPresentation,
   loadAnalyticsSnapshot,
+  rowFromFingerprint,
   rowKey,
   saveAnalyticsPresentation,
   saveAnalyticsSnapshot,
@@ -179,6 +181,7 @@ function withRows(): AnalyticsState {
         entry.tokens.cacheRead,
         entry.tokens.cacheWrite,
         entry.cost ?? null,
+        0,
       ]);
       state.fingerprintIndex.set(fingerprint, index);
     }
@@ -473,6 +476,55 @@ describe("analytics snapshot codec v3", () => {
       decodeAnalyticsState({
         ...persisted,
         presentation: { home: { "24h": { projects: [] } }, project: [] },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("rebuilds from a v3 snapshot and reloads unknown-vs-zero cache telemetry exactly", () => {
+    const state = baseState();
+    const rows = [
+      row("ses_parent", "msg_zero", {
+        tokens: { input: 5, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      row("ses_parent", "msg_unknown", {
+        tokens: { input: 5, output: 1, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+        cacheReadMissing: true,
+        cacheWriteMissing: true,
+      }),
+    ];
+    for (const entry of rows) {
+      const fingerprint = fingerprintOf(entry);
+      const index = state.fingerprints.length;
+      state.fingerprints.push(compactFingerprintOf(entry));
+      state.fingerprintIndex.set(fingerprint, index);
+      state.occurrences.set(entry.messageID, {
+        fingerprintIndex: index,
+        sessionID: entry.sessionID,
+        messageID: entry.messageID,
+        updatedAtMs: null,
+      });
+    }
+    // Same tokens, different telemetry completeness: distinct contributions.
+    expect(state.fingerprints).toHaveLength(2);
+    const persisted = encodeAnalyticsState(state, NOW);
+    expect(persisted.version).toBe(4);
+    const decoded = decodeAnalyticsState(JSON.parse(JSON.stringify(persisted)));
+    const rebuilt = [...(decoded?.occurrences.values() ?? [])].map((occurrence) =>
+      rowFromFingerprint(decoded!.fingerprints[occurrence.fingerprintIndex]!, occurrence),
+    );
+    expect(rebuilt.find((r) => r.messageID === "msg_zero")?.cacheReadMissing).toBeUndefined();
+    expect(rebuilt.find((r) => r.messageID === "msg_unknown")).toMatchObject({
+      cacheReadMissing: true,
+      cacheWriteMissing: true,
+    });
+    // Old (v3) compact files and 10-field tuples are discarded, so they rebuild.
+    expect(
+      decodeAnalyticsState({ ...JSON.parse(JSON.stringify(persisted)), version: 3 }),
+    ).toBeUndefined();
+    expect(
+      decodeAnalyticsState({
+        ...JSON.parse(JSON.stringify(persisted)),
+        fingerprints: persisted.fingerprints.map((tuple) => tuple.slice(0, 10)),
       }),
     ).toBeUndefined();
   });

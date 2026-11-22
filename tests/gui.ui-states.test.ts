@@ -1991,6 +1991,25 @@ describe("session view composition", () => {
     expect(html).toContain('class="qg-node__rate" title="—">—</span>');
   });
 
+  it("shows an unknown Session Tree cache rate, never 0%, when cache counters were not recorded", async () => {
+    const base = sessionSnapshot();
+    const [root, child] = base.nodes as [SessionNode, SessionNode];
+    const html = await renderView("/views/session.tsx", "SessionView", {
+      snapshot: sessionSnapshot({
+        nodes: [
+          { ...root, ownTokens: costed({ input: 100 }), cacheUnknownSteps: 2 },
+          { ...child, ownTokens: costed({ input: 100, cacheRead: 100 }) },
+        ],
+      }),
+      range: "7d",
+    });
+    expect(html).toContain(
+      'class="qg-node__rate" title="Unknown: cache counters were not recorded for 2 step(s)">—</span>',
+    );
+    expect(html).toContain('class="qg-node__rate" title="50.00%">50%</span>');
+    expect(html).not.toContain('class="qg-node__rate" title="0.00%">0%</span>');
+  });
+
   it("draws focus compaction markers as ticks and drops the prose list", async () => {
     const html = await renderView("/views/session.tsx", "SessionView", {
       snapshot: sessionSnapshot(),

@@ -207,6 +207,41 @@ describe("raw completed assistant reader", () => {
     expect(rows.find((row) => row.messageID === "msg_plain")).not.toHaveProperty("variant");
   });
 
+  it("flags a missing cache counter as unknown while an observed zero stays unflagged", async () => {
+    stubDatabase({
+      sessions: [{ id: "ses_one", createdMs: 1 }],
+      messages: [
+        {
+          id: "msg_zero",
+          sessionID: "ses_one",
+          createdMs: 10,
+          completedMs: 20,
+          tokens: { input: 5, cacheRead: 0, cacheWrite: 0 },
+        },
+        {
+          id: "msg_no_read",
+          sessionID: "ses_one",
+          createdMs: 30,
+          completedMs: 40,
+          tokens: { input: 5, cacheWrite: 2 },
+        },
+        { id: "msg_no_tokens", sessionID: "ses_one", createdMs: 50, completedMs: 60 },
+      ],
+    });
+
+    const rows = await readCompletedAssistantRows();
+    const byId = new Map(rows.map((row) => [row.messageID, row]));
+    expect(byId.get("msg_zero")).not.toHaveProperty("cacheReadMissing");
+    expect(byId.get("msg_zero")).not.toHaveProperty("cacheWriteMissing");
+    expect(byId.get("msg_no_read")).toMatchObject({ cacheReadMissing: true });
+    expect(byId.get("msg_no_read")).not.toHaveProperty("cacheWriteMissing");
+    expect(byId.get("msg_no_read")?.tokens.cacheRead).toBe(0);
+    expect(byId.get("msg_no_tokens")).toMatchObject({
+      cacheReadMissing: true,
+      cacheWriteMissing: true,
+    });
+  });
+
   it("keeps completed-only rows and never returns unfinished or non-assistant rows", async () => {
     stubDatabase({
       sessions: [{ id: "ses_one", createdMs: 1 }],

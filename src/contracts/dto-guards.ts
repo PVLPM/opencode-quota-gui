@@ -687,7 +687,8 @@ function isSessionNode(value: unknown): value is SessionNode {
     isFiniteNumber(value.stepCount) &&
     isFiniteNumber(value.subtreeNodeCount) &&
     isFiniteNumber(value.latestActivityAtMs) &&
-    isArrayOf(value.models, isModelIdentity)
+    isArrayOf(value.models, isModelIdentity) &&
+    isOptional(value.cacheUnknownSteps, isFiniteNumber)
   );
 }
 
@@ -703,7 +704,9 @@ function isStepPoint(value: unknown): value is StepPoint {
     isFiniteNumber(value.contextTokens) &&
     isFiniteNumber(value.totalTokens) &&
     isOptional(value.model, isModelIdentity) &&
-    isOptional(value.agent, isText)
+    isOptional(value.agent, isText) &&
+    isOptional(value.cacheReadUnknown, (flag): flag is true => flag === true) &&
+    isOptional(value.cacheWriteUnknown, (flag): flag is true => flag === true)
   );
 }
 
@@ -727,6 +730,7 @@ export function isSessionSnapshot(value: unknown): value is SessionSnapshot {
     isArrayOf(value.nodes, isSessionNode) &&
     isArrayOf(value.steps, isStepPoint) &&
     isArrayOf(value.compactionMarkers, isCompactionMarker) &&
+    isOptional(value.unobservedAtMs, (list): list is number[] => isArrayOf(list, isFiniteNumber)) &&
     isCostedTokens(value.ownSummary) &&
     isFiniteNumber(value.ownSummary.stepCount) &&
     isCostedTokens(value.treeTotals) &&

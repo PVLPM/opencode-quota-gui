@@ -615,6 +615,60 @@ describe("session model identity and timing projection", () => {
     expect(steps[1]).toMatchObject({ messageId: "m2", createdAtMs: 100, atMs: 1_100 });
   });
 
+  it("carries unknown cache counters apart from observed zeros and counts them per node", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "m_zero", 10, { input: 5 }),
+        { ...assistantRow("ses_root", "m_read", 20, { input: 5 }), cacheReadMissing: true },
+        { ...assistantRow("ses_root", "m_write", 30, { input: 5 }), cacheWriteMissing: true },
+        assistantRow("ses_child", "c1", 40, { input: 5, cacheRead: 5 }),
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_root");
+    const byId = new Map(snapshot.steps.map((step) => [step.messageId, step]));
+    expect(byId.get("m_zero")).not.toHaveProperty("cacheReadUnknown");
+    expect(byId.get("m_read")).toMatchObject({ cacheReadUnknown: true });
+    expect(byId.get("m_read")).not.toHaveProperty("cacheWriteUnknown");
+    expect(byId.get("m_write")).toMatchObject({ cacheWriteUnknown: true });
+    expect(snapshot.nodes[0]?.cacheUnknownSteps).toBe(2);
+    expect(snapshot.nodes[1]).not.toHaveProperty("cacheUnknownSteps");
+    // The accounting itself is unchanged: unknown still adds 0 tokens.
+    expect(byId.get("m_read")?.stack.cacheRead).toBe(0);
+  });
+
+  it("records where excluded zero-token rows and unowned fork copies sit in the focus session", () => {
+    const zero = assistantRow("ses_root", "m_zero_token", 15);
+    const dataset = {
+      ...makeDataset({
+        sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+        messages: [assistantRow("ses_root", "m1", 10, { input: 1 })],
+      }),
+      excluded: [
+        { sessionId: "ses_root", atMs: zero.createdAtMs },
+        { sessionId: "ses_child", atMs: 99 },
+      ],
+    };
+    expect(createUsageAnalytics(dataset).session("ses_root").unobservedAtMs).toEqual([15]);
+    expect(createUsageAnalytics(dataset).session("ses_child")).toMatchObject({
+      unobservedAtMs: [99],
+    });
+
+    const forks = makeDataset({
+      sessions: [{ id: "ses_a" }, { id: "ses_b" }],
+      messages: [
+        assistantRow("ses_a", "a1", 10, { input: 1 }),
+        assistantRow("ses_b", "b1", 10, { input: 1 }),
+      ],
+    });
+    const analytics = createUsageAnalytics(forks);
+    const loser = analytics.session("ses_a").steps.length === 0 ? "ses_a" : "ses_b";
+    expect(analytics.session(loser).unobservedAtMs).toEqual([10]);
+    expect(
+      createUsageAnalytics(makeDataset({ sessions: [{ id: "s" }] })).session("s"),
+    ).not.toHaveProperty("unobservedAtMs");
+  });
+
   it("keeps each node's own tokens separate from its subtree", () => {
     const dataset = makeDataset({
       sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],

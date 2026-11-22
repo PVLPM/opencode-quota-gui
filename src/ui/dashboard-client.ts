@@ -1193,6 +1193,12 @@ function readSessionNode(value: JsonValue, endpoint: string): SessionNode {
   if (agent !== undefined) parsed.agent = agent;
   const parentId = readOptionalText(node.parentId, endpoint, `${detail}.parentId`);
   if (parentId !== undefined) parsed.parentId = parentId;
+  const cacheUnknownSteps = readOptionalNumber(
+    node.cacheUnknownSteps,
+    endpoint,
+    `${detail}.cacheUnknownSteps`,
+  );
+  if (cacheUnknownSteps !== undefined) parsed.cacheUnknownSteps = cacheUnknownSteps;
   return parsed;
 }
 
@@ -1212,6 +1218,16 @@ function readStep(value: JsonValue, endpoint: string): StepPoint {
   if (createdAtMs !== undefined) parsed.createdAtMs = createdAtMs;
   if (step.model !== undefined)
     parsed.model = readModelIdentity(step.model, endpoint, `${detail}.model`);
+  if (step.cacheReadUnknown !== undefined) {
+    if (readBoolean(step.cacheReadUnknown, endpoint, `${detail}.cacheReadUnknown`)) {
+      parsed.cacheReadUnknown = true;
+    }
+  }
+  if (step.cacheWriteUnknown !== undefined) {
+    if (readBoolean(step.cacheWriteUnknown, endpoint, `${detail}.cacheWriteUnknown`)) {
+      parsed.cacheWriteUnknown = true;
+    }
+  }
   return parsed;
 }
 
@@ -1233,7 +1249,14 @@ export function parseSessionSnapshot(value: JsonValue, endpoint: string): Sessio
   const root = readRecord(value, endpoint, "not an object");
   const ownSummaryRecord = readRecord(root.ownSummary, endpoint, "ownSummary");
   const ownSummary = readCostedTokens(ownSummaryRecord, endpoint, "ownSummary");
+  const unobservedAtMs =
+    root.unobservedAtMs === undefined
+      ? undefined
+      : readArray(root.unobservedAtMs, endpoint, "unobservedAtMs").map((entry) =>
+          readNumber(entry, endpoint, "unobservedAtMs[]"),
+        );
   return {
+    ...(unobservedAtMs === undefined ? {} : { unobservedAtMs }),
     focusSessionId: readText(root.focusSessionId, endpoint, "focusSessionId"),
     timeZone: readText(root.timeZone, endpoint, "timeZone"),
     projectId: readText(root.projectId, endpoint, "projectId"),

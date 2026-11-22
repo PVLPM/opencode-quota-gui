@@ -43,6 +43,7 @@ import { getProviders } from "../providers/registry.js";
 import {
   AnalyticsNotFoundError,
   createUsageAnalytics,
+  messagePositionMs,
   type UsageAnalytics,
   type UsageAnalyticsDataset,
 } from "./aggregation.js";
@@ -300,6 +301,9 @@ export function createDashboardReadSource(
     const usageDataset = (dataset: UsageAnalyticsDataset): UsageAnalyticsDataset => ({
       ...dataset,
       messages: dataset.messages.filter(rawAssistantRowHasTokenUsage),
+      excluded: dataset.messages
+        .filter((row) => !rawAssistantRowHasTokenUsage(row))
+        .map((row) => ({ sessionId: row.sessionID, atMs: messagePositionMs(row) })),
     });
 
     return {

@@ -35,7 +35,7 @@ import {
   type ReadCompletedAssistantRowsParams,
   rawAssistantRowHasTokenUsage,
 } from "../lib/opencode-storage.js";
-import { createUsageAnalytics, UNKNOWN_PROJECT_ID } from "./aggregation.js";
+import { createUsageAnalytics, messagePositionMs, UNKNOWN_PROJECT_ID } from "./aggregation.js";
 import { createAnalyticsIndexes } from "./analytics-indexes.js";
 import { type AnalyticsModel, createAnalyticsModel } from "./analytics-model.js";
 import { getAnalyticsPricingFingerprint } from "./analytics-pricing-revision.js";
@@ -705,6 +705,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     projects: AnalyticsState["projects"];
     messages: OpenCodeRawAssistantRow[];
     compactions: Array<{ sessionId: string; atMs: number; messageId: string }>;
+    excluded: Array<{ sessionId: string; atMs: number }>;
   } {
     const ids = indexes.treeIds(sessionId);
     const fingerprintIndexes = new Set<number>();
@@ -715,6 +716,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     const messages: OpenCodeRawAssistantRow[] = [];
+    const excluded: Array<{ sessionId: string; atMs: number }> = [];
     for (const messageID of indexes.fingerprintMessages(fingerprintIndexes)) {
       const occurrence = state.occurrences.get(messageID);
       if (!occurrence) continue;
@@ -722,7 +724,13 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (!row) continue;
       // Zero-token rows are metadata/activity only; the session DTO is a
       // usage view, so it must not grow steps, ownership, or pricing work.
-      if (!rawAssistantRowHasTokenUsage(row)) continue;
+      // Their position is kept for the focus session so gaps never bridge them.
+      if (!rawAssistantRowHasTokenUsage(row)) {
+        if (row.sessionID === sessionId) {
+          excluded.push({ sessionId, atMs: messagePositionMs(row) });
+        }
+        continue;
+      }
       messages.push(row);
       includedSessionIds.add(occurrence.sessionID);
     }
@@ -753,6 +761,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       projects,
       messages,
       compactions: detailCompactions.get(sessionId) ?? [],
+      excluded,
     };
   }
 

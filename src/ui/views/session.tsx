@@ -62,10 +62,19 @@ function SessionModelCell(props: { models: SessionNode["models"] }): JSX.Element
 }
 
 /** The session's own token-weighted cache rate; unavailable traffic stays a dash, never 0%. */
-function SessionCacheRate(props: { tokens: SessionNode["ownTokens"] }): JSX.Element {
-  const rate = () => cacheHitRate(props.tokens);
+function SessionCacheRate(props: { node: SessionNode }): JSX.Element {
+  // Missing cache counters made the zero unknown: no rate, never a manufactured 0%.
+  const unknown = () => (props.node.cacheUnknownSteps ?? 0) > 0;
+  const rate = () => (unknown() ? null : cacheHitRate(props.node.ownTokens));
   return (
-    <span class="qg-node__rate" title={formatPercentExact(rate())}>
+    <span
+      class="qg-node__rate"
+      title={
+        unknown()
+          ? `Unknown: cache counters were not recorded for ${props.node.cacheUnknownSteps} step(s)`
+          : formatPercentExact(rate())
+      }
+    >
       {rate() === null ? "—" : formatPercent(rate() ?? undefined)}
     </span>
   );
@@ -211,7 +220,7 @@ export function SessionView(props: {
                   </a>
                   <span class="qg-node__agent">{node.agent?.trim() ? node.agent : "—"}</span>
                   <SessionModelCell models={node.models} />
-                  <SessionCacheRate tokens={node.ownTokens} />
+                  <SessionCacheRate node={node} />
                   <span
                     class="qg-list__tokens qg-node__tokens"
                     title={formatExactCount(node.ownTokens.total)}

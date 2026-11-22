@@ -444,6 +444,12 @@ export interface SessionNode {
    * use. `models[0]` is the last used identity; empty when none was recorded.
    */
   models: ModelIdentity[];
+  /**
+   * Own steps whose stored message lacked a cache-read or cache-write counter.
+   * Their 0 is unknown, so the session's cache rate is unknown when this is
+   * positive. Omitted when every own step recorded both counters.
+   */
+  cacheUnknownSteps?: number;
 }
 
 /** Provider/model plus the reasoning effort only when OpenCode recorded one. */
@@ -469,6 +475,10 @@ export interface StepPoint {
   totalTokens: number;
   model?: ModelIdentity;
   agent?: string;
+  /** The message stored no cache-read counter: `stack.cacheRead` 0 is unknown, not observed. */
+  cacheReadUnknown?: true;
+  /** Same for the cache-write counter. */
+  cacheWriteUnknown?: true;
 }
 
 export interface SessionSnapshot {
@@ -482,6 +492,13 @@ export interface SessionSnapshot {
   nodes: SessionNode[];
   steps: StepPoint[];
   compactionMarkers: { sessionId: string; atMs: number; messageId: string }[];
+  /**
+   * Positions (creation time, else completion time) of the focus session's own
+   * completed assistant messages that are NOT in `steps` (zero-token rows,
+   * fork copies owned elsewhere). A gap spanning one is never bridged.
+   * Omitted when there are none.
+   */
+  unobservedAtMs?: number[];
   ownSummary: CostedTokens & { stepCount: number };
   treeTotals: CostedTokens;
   stepSemantics: string;
