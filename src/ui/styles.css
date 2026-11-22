@@ -2011,9 +2011,17 @@
   overflow: hidden;
 }
 
+/* Name absorbs width first (1fr down to its minimum); Agent and Model are
+   capped percentages that only then give way. Cache Rate and Tokens are fixed
+   so numeric values never truncate. */
+.qg-nodes__head,
+.qg-node {
+  --qg-node-columns: minmax(96px, 1fr) minmax(48px, 12%) minmax(96px, 30%) 72px 80px;
+}
+
 .qg-nodes__head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(72px, 16%) 64px 88px;
+  grid-template-columns: var(--qg-node-columns);
   gap: 12px;
   padding: 8px 16px;
   color: var(--qg-text-muted);
@@ -2022,15 +2030,16 @@
   border-bottom: 1px solid var(--qg-border);
 }
 
-.qg-nodes__head > :nth-child(3),
-.qg-nodes__head > :nth-child(4) {
+.qg-nodes__head > :nth-child(4),
+.qg-nodes__head > :nth-child(5) {
   text-align: right;
 }
 
 .qg-node {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(72px, 16%) 64px 88px;
-  grid-template-areas: "name agent steps tokens";
+  grid-template-columns: var(--qg-node-columns);
+  grid-template-areas: "name agent model rate tokens";
   align-items: center;
   gap: 4px 12px;
   padding: 8px 16px;
@@ -2042,8 +2051,7 @@
   transition: background var(--qg-transition);
 }
 
-.qg-node:hover,
-.qg-node:focus-visible {
+.qg-node:hover {
   background: var(--surface-raised-base-hover);
 }
 
@@ -2055,8 +2063,32 @@
   background: #202020;
 }
 
-.qg-node__name {
+/* The link covers the whole row; the "+N" trigger sits above it. */
+.qg-node__link {
   grid-area: name;
+  display: block;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.qg-node__link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.qg-node__link:focus-visible {
+  outline: none;
+}
+
+.qg-node__link:focus-visible::after {
+  outline: 2px solid #a5b8d6;
+  outline-offset: -2px;
+}
+
+.qg-node__name {
+  display: block;
   color: var(--qg-text);
   min-width: 0;
   padding-left: calc(var(--qg-node-depth, 0) * 16px);
@@ -2074,13 +2106,63 @@
   white-space: nowrap;
 }
 
-.qg-node__steps {
-  grid-area: steps;
+.qg-node__model {
+  grid-area: model;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+}
+
+.qg-node__model-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Never shrinks, so the count stays usable when the identity truncates. */
+.qg-node__more {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--qg-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--qg-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.qg-node__more:focus-visible {
+  outline: 2px solid #a5b8d6;
+  outline-offset: 2px;
+}
+
+.qg-node__model-list {
+  margin: 0;
+  padding: 0 0 0 18px;
+  min-width: 200px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.qg-node__rate,
+.qg-node__tokens {
   text-align: right;
+  white-space: nowrap;
+}
+
+.qg-node__rate {
+  grid-area: rate;
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
 .qg-node__tokens {
@@ -2090,8 +2172,7 @@
 @media (max-width: 640px) {
   .qg-nodes__head,
   .qg-node {
-    grid-template-columns: minmax(0, 1fr) minmax(44px, 14%) 48px 72px;
-    grid-template-areas: "name agent steps tokens";
+    --qg-node-columns: minmax(64px, 1fr) minmax(36px, 12%) minmax(72px, 30%) 56px 64px;
     gap: 4px 8px;
   }
 
@@ -2702,7 +2783,6 @@
 }
 .qg-topbar a:focus-visible,
 .qg-list__row:focus-visible,
-.qg-node:focus-visible,
 .qg-eye:focus-visible,
 .qg-vis-grip:focus-visible {
   outline: 2px solid #a5b8d6;

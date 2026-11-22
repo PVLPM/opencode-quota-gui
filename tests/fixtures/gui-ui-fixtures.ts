@@ -204,7 +204,10 @@ export function sessionSnapshot(overrides: Partial<SessionSnapshot> = {}): Sessi
         childIds: ["session-child-1"],
         ownTokens: costed({ input: 1200, cacheRead: 300 }),
         subtreeTokens: costed({ input: 2400, cacheRead: 300, output: 200 }),
-        models: [],
+        models: [
+          { providerId: "openai", modelId: "gpt-6.1-terra", effort: "high" },
+          { providerId: "openai", modelId: "gpt-6.1-luna" },
+        ],
         stepCount: 3,
         subtreeNodeCount: 2,
         latestActivityAtMs: NOW - 1000,

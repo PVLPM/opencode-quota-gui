@@ -55,6 +55,8 @@ export function InteractivePopover(props: InteractivePopoverProps): JSX.Element 
   const [open, setOpen] = createSignal(false);
   const [pinned, setPinned] = createSignal(false);
   onMount(() => {
+    // Non-DOM renderers (view-model tests) keep the static trigger.
+    if (typeof document === "undefined") return;
     void loadPopover().then((module) => {
       setPopover(() => module.Popover as LibraryPopover);
     });
@@ -81,6 +83,8 @@ export function InteractivePopover(props: InteractivePopoverProps): JSX.Element 
   }
 
   onMount(() => {
+    // Non-DOM renderers (view-model tests) mount without a document.
+    if (typeof document === "undefined") return;
     document.addEventListener("focusScope.autoFocusOnMount", onFocusScopeMount, true);
   });
 
@@ -184,7 +188,9 @@ export function InteractivePopover(props: InteractivePopoverProps): JSX.Element 
 
   onCleanup(() => {
     clearClose();
-    document.removeEventListener("focusScope.autoFocusOnMount", onFocusScopeMount, true);
+    if (typeof document !== "undefined") {
+      document.removeEventListener("focusScope.autoFocusOnMount", onFocusScopeMount, true);
+    }
     if (activeDisclosure?.close === closeNow) activeDisclosure = undefined;
   });
 

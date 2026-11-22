@@ -1,24 +1,77 @@
 import type { JSX } from "solid-js";
 import { createMemo, createSignal, For, Show } from "solid-js";
-import type { SessionSnapshot } from "../../contracts/dashboard";
+import type { SessionNode, SessionSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
+import { cacheHitRate } from "../chart-geometry";
+import { InteractivePopover } from "../components/interactive-popover";
 import { SessionChart } from "../components/session-chart";
 import { SortControl } from "../components/sort-control";
-import { formatExactCount, formatTokenCount } from "../format";
+import {
+  formatExactCount,
+  formatModelIdentity,
+  formatPercent,
+  formatPercentExact,
+  formatTokenCount,
+} from "../format";
 import { formatPath } from "../routing";
 import { sortSessionTree } from "../sorting";
 
 /** Very large trees are windowed for rendering only; totals and both graphs always cover every node. */
 const NODE_PAGE_SIZE = 200;
 
+/** The last-used identity, plus a disclosure of every distinct identity when there are several. */
+function SessionModelCell(props: { models: SessionNode["models"] }): JSX.Element {
+  return (
+    <span class="qg-node__model">
+      <Show when={props.models[0]} fallback="—">
+        {(primary) => (
+          <>
+            <span class="qg-node__model-text" title={formatModelIdentity(primary())}>
+              {formatModelIdentity(primary())}
+            </span>
+            <Show when={props.models.length > 1}>
+              <InteractivePopover
+                label={`${props.models.length - 1} more model configurations. Show all ${props.models.length}.`}
+                panelLabel="Model configurations used by this session, most recently used first"
+                triggerClass="qg-node__more"
+                contentClass="qg-temporal-popover"
+                placement="bottom-start"
+                content={
+                  <ol class="qg-node__model-list">
+                    <For each={props.models}>
+                      {(identity) => <li>{formatModelIdentity(identity)}</li>}
+                    </For>
+                  </ol>
+                }
+              >
+                +{props.models.length - 1}
+              </InteractivePopover>
+            </Show>
+          </>
+        )}
+      </Show>
+    </span>
+  );
+}
+
+/** The session's own token-weighted cache rate; unavailable traffic stays a dash, never 0%. */
+function SessionCacheRate(props: { tokens: SessionNode["ownTokens"] }): JSX.Element {
+  const rate = () => cacheHitRate(props.tokens);
+  return (
+    <span class="qg-node__rate" title={formatPercentExact(rate())}>
+      {rate() === null ? "—" : formatPercent(rate() ?? undefined)}
+    </span>
+  );
+}
+
 /**
  * Session page (design spec §10; R25–R27).
  *
  * Breadcrumbs carry the ancestors only — the current page is `aria-current`.
  * The focus session's own context and the tree's cumulative consumption stay
- * separate series. The session tree is an aligned Name | Agent | Steps |
- * Tokens table; ordering changes siblings only, so a parent always stays above
- * its descendants. Totals and both graphs always cover the whole tree.
+ * separate series. The session tree is an aligned Name | Agent | Model |
+ * Cache Rate | Tokens table showing each session's own values; ordering
+ * changes siblings only, so a parent always stays above its descendants.
  */
 export function SessionView(props: {
   snapshot: SessionSnapshot;
@@ -90,35 +143,43 @@ export function SessionView(props: {
             <div class="qg-nodes__head" aria-hidden="true">
               <span>Name</span>
               <span>Agent</span>
-              <span>Steps</span>
+              <span>Model</span>
+              <span>Cache Rate</span>
               <span>Tokens</span>
             </div>
             <For each={windowed()}>
               {(node) => (
-                <a
+                // The row is a plain container so the "+N" disclosure is not
+                // nested inside a link; the name link stretches over the row.
+                <div
                   class="qg-node"
-                  href={formatPath({ name: "session", sessionId: node.sessionId }, props.range)}
-                  aria-current={
-                    node.sessionId === props.snapshot.focusSessionId ? "page" : undefined
-                  }
                   data-focus={node.sessionId === props.snapshot.focusSessionId ? "true" : undefined}
                 >
-                  <span
-                    class="qg-node__name"
-                    title={node.title}
-                    style={{ "--qg-node-depth": String(node.depth) }}
+                  <a
+                    class="qg-node__link"
+                    href={formatPath({ name: "session", sessionId: node.sessionId }, props.range)}
+                    aria-current={
+                      node.sessionId === props.snapshot.focusSessionId ? "page" : undefined
+                    }
                   >
-                    {node.title}
-                  </span>
+                    <span
+                      class="qg-node__name"
+                      title={node.title}
+                      style={{ "--qg-node-depth": String(node.depth) }}
+                    >
+                      {node.title}
+                    </span>
+                  </a>
                   <span class="qg-node__agent">{node.agent?.trim() ? node.agent : "—"}</span>
-                  <span class="qg-node__steps">{formatExactCount(node.stepCount)}</span>
+                  <SessionModelCell models={node.models} />
+                  <SessionCacheRate tokens={node.ownTokens} />
                   <span
                     class="qg-list__tokens qg-node__tokens"
-                    title={formatExactCount(node.subtreeTokens.total)}
+                    title={formatExactCount(node.ownTokens.total)}
                   >
-                    {formatTokenCount(node.subtreeTokens.total)}
+                    {formatTokenCount(node.ownTokens.total)}
                   </span>
-                </a>
+                </div>
               )}
             </For>
           </div>

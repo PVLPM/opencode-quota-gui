@@ -117,6 +117,15 @@ export function formatPercentExact(value: number | null | undefined): string {
   return `${value.toFixed(2)}%`;
 }
 
+/** `provider/model#effort`; the effort suffix appears only when one was recorded. */
+export function formatModelIdentity(identity: {
+  providerId: string;
+  modelId: string;
+  effort?: string;
+}): string {
+  return `${identity.providerId}/${identity.modelId}${identity.effort ? `#${identity.effort}` : ""}`;
+}
+
 /** Right-axis rate ticks stay whole integers. */
 export function formatPercentTick(value: number): string {
   return Number.isFinite(value) ? `${Math.round(value)}%` : "—";

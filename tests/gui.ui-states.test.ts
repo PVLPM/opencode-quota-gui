@@ -11,6 +11,7 @@ import type {
   ProjectSnapshot,
   ProviderCard,
   QuotaCardRow,
+  SessionNode,
   SettingsSnapshot,
   SettingsWriteResult,
   Usage,
@@ -1910,7 +1911,7 @@ describe("session view composition", () => {
     expect(crumbs.match(/aria-current="page"/g)).toHaveLength(1);
   });
 
-  it("renders aligned Name | Agent | Steps | Tokens rows without own/subtree prose", async () => {
+  it("renders aligned Name | Agent | Model | Cache Rate | Tokens rows with each session's own values", async () => {
     const html = await renderView("/views/session.tsx", "SessionView", {
       snapshot: sessionSnapshot(),
       range: "7d",
@@ -1926,24 +1927,68 @@ describe("session view composition", () => {
     expect(html).toContain('class="qg-nodes__head"');
     expect(text(html)).toContain("Name");
     expect(text(html)).toContain("Agent");
-    expect(text(html)).toContain("Steps");
-    expect(text(html)).toContain("Tokens");
+    const head = html.match(/class="qg-nodes__head"[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "";
+    expect(
+      head
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    ).toBe("Name Agent Model Cache Rate Tokens");
+    expect(html).not.toContain("qg-node__steps");
     expect(text(html)).not.toContain("Worktree");
     expect(html).not.toContain("qg-node__own");
     expect(html).not.toContain("qg-node__worktree");
     expect(text(html)).not.toContain("own 2,900");
     expect(text(html)).not.toContain("subtree");
-    expect(html).toContain('class="qg-node__steps">3</span>');
-    expect(html).toContain('class="qg-node__steps">2</span>');
+    // Tokens are each row's own value (root 1,200+300, child 1,200+200), never the subtree total.
+    expect(html).toContain('class="qg-list__tokens qg-node__tokens" title="1,500"');
+    expect(html).toContain('class="qg-list__tokens qg-node__tokens" title="1,400"');
+    expect(html).not.toContain('title="2,900"');
+    // Cache Rate is the session's own weighted rate: 300 / (1,200 + 300).
+    expect(html).toContain('class="qg-node__rate" title="20.00%">20%</span>');
+    expect(html).toContain('class="qg-node__rate" title="0.00%">0%</span>');
+    // The last-used identity shows with the unique-count bubble.
+    expect(html).toContain("openai/gpt-6.1-terra#high");
+    expect(html).toContain('aria-label="1 more model configurations. Show all 2."');
     expect(html).toContain('href="/session/session-child-1"');
     // The synthetic fixture has no stored agent, so the cell is an em dash.
     expect(html.match(/class="qg-node__agent">—<\/span>/g)).toHaveLength(2);
     expect(html).toContain('data-focus="true"');
     expect(html).not.toContain("children:");
     expect(html).not.toContain('class="qg-node__children"');
-    // Both rendered nodes are row links; the current page's row is aria-current.
-    expect((html.match(/<a[^>]*class="qg-node"/g) ?? []).length).toBe(2);
+    // Both rendered nodes carry a name link; the current page's row is aria-current.
+    expect((html.match(/<a[^>]*class="qg-node__link"/g) ?? []).length).toBe(2);
     expect(html).toContain('aria-current="page"');
+  });
+
+  it("shows one provider/model#effort without a bubble, omits an unrecorded effort and weights the cache rate by tokens", async () => {
+    const base = sessionSnapshot();
+    const [root, child] = base.nodes as [SessionNode, SessionNode];
+    const html = await renderView("/views/session.tsx", "SessionView", {
+      snapshot: sessionSnapshot({
+        nodes: [
+          {
+            ...root,
+            models: [{ providerId: "openai", modelId: "gpt-6.1-terra", effort: "high" }],
+            // 300 / (100 + 300 + 100) of own traffic, not an average of step percentages.
+            ownTokens: costed({ input: 100, cacheRead: 300, cacheWrite: 100, output: 50 }),
+          },
+          {
+            ...child,
+            models: [{ providerId: "anthropic", modelId: "sonnet" }],
+            ownTokens: costed({}),
+          },
+        ],
+      }),
+      range: "7d",
+    });
+    expect(html).toContain("openai/gpt-6.1-terra#high");
+    expect(html).toContain("anthropic/sonnet");
+    expect(html).not.toContain("anthropic/sonnet#");
+    expect(html).not.toContain("more model configurations");
+    expect(html).toContain('class="qg-node__rate" title="60.00%">60%</span>');
+    // No input-side traffic of its own is unavailable, never a fabricated 0%.
+    expect(html).toContain('class="qg-node__rate" title="—">—</span>');
   });
 
   it("draws focus compaction markers as ticks and drops the prose list", async () => {
@@ -1957,7 +2002,6 @@ describe("session view composition", () => {
     expect(html).not.toContain("qg-chart__hover");
     expect(text(html)).not.toContain("Compaction markers");
     expect(text(html)).not.toContain("msg-compaction");
-    expect(html).toContain('class="qg-node__steps">3</span>');
   });
 
   it("windows a very large node list without shrinking the totals", async () => {

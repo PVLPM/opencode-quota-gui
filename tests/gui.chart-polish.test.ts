@@ -1517,7 +1517,7 @@ describe("session chart and tree presentation", () => {
     expect(chartIndexAt({ x: 120, left: 0, width: 100, count: 3 })).toBe(2);
   });
 
-  it("renders Name | Agent | Steps | Tokens and uses node.agent or a dash", () => {
+  it("renders Name | Agent | Model | Cache Rate | Tokens and uses node.agent or a dash", () => {
     const base = sessionSnapshot();
     const rootNode = base.nodes[0] as SessionSnapshot["nodes"][number];
     const childNode = base.nodes[1] as SessionSnapshot["nodes"][number];
@@ -1529,7 +1529,8 @@ describe("session chart and tree presentation", () => {
       const html = graph.textOf(root);
       expect(html).toContain("Name");
       expect(html).toContain("Agent");
-      expect(html).toContain("Steps");
+      expect(html).toContain("Model");
+      expect(html).toContain("Cache Rate");
       expect(html).toContain("Tokens");
       expect(html).not.toContain("Worktree");
       expect(byClass(root, "span", "qg-node__agent")).toHaveLength(2);
@@ -1557,7 +1558,7 @@ describe("session chart and tree presentation", () => {
     );
     try {
       expect(byClass(rootOnly.root, "div", "qg-nodes")).toHaveLength(1);
-      expect(byClass(rootOnly.root, "a", "qg-node")).toHaveLength(1);
+      expect(byClass(rootOnly.root, "div", "qg-node")).toHaveLength(1);
     } finally {
       rootOnly.dispose();
     }
@@ -1604,7 +1605,7 @@ describe("session chart and tree presentation", () => {
     );
     try {
       expect(byClass(childWithDescendant.root, "div", "qg-nodes")).toHaveLength(1);
-      expect(byClass(childWithDescendant.root, "a", "qg-node")).toHaveLength(2);
+      expect(byClass(childWithDescendant.root, "div", "qg-node")).toHaveLength(2);
     } finally {
       childWithDescendant.dispose();
     }

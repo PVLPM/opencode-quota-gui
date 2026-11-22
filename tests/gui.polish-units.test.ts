@@ -620,16 +620,16 @@ describe("sortSessionTree", () => {
     expect(nodes.map((entry) => entry.sessionId)).toEqual(["f", "c1", "c2", "g"]);
   });
 
-  it("uses subtree totals in tokens mode, not the node's own tokens", () => {
+  it("uses each node's own tokens in tokens mode, the value the table displays", () => {
     const nodes = [
       node("f", { childIds: ["c1", "c2"] }),
-      // c1 owns nothing but carries a huge subtree via g.
+      // c1 owns nothing; its huge subtree (via g) must not lift it above c2.
       node("c1", { childIds: ["g"], own: { input: 0 }, subtree: { input: 5_000 } }),
       node("c2", { own: { input: 1_000 }, subtree: { input: 1_000 } }),
       node("g", { own: { input: 5_000 }, subtree: { input: 5_000 } }),
     ];
     const sorted = sortSessionTree(nodes, "tokens");
-    expect(sorted.map((entry) => entry.sessionId)).toEqual(["f", "c1", "g", "c2"]);
+    expect(sorted.map((entry) => entry.sessionId)).toEqual(["f", "c2", "c1", "g"]);
     expect(sorted[0]?.sessionId).toBe("f");
   });
 
