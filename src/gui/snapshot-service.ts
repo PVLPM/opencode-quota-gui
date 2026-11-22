@@ -54,7 +54,6 @@ import type {
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import type { RangeKey } from "../contracts/ranges.js";
-import { AnalyticsReadError } from "./analytics-protocol.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 
 /** Default quota/provider poll interval (spec §4.2; existing config overrides). */
@@ -305,11 +304,6 @@ function failureLabel(error: unknown): string {
 
 /** Longest a foreground read waits on a revalidation before serving last-good stale. */
 export const STALE_SERVE_GRACE_MS = 500;
-/**
- * Longest a read with no DTO waits for an in-flight compute. Below the 60 s
- * Desktop RPC deadline (D11), so it only fires where the host would abort anyway.
- */
-export const FOREGROUND_BUDGET_MS = 50_000;
 
 export function createSnapshotService(options: SnapshotServiceOptions): SnapshotService {
   const logger = options.logger ?? createGuiLogger();
@@ -507,9 +501,9 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
    * Foreground analytics read, stale-while-revalidate. The single analytics
    * worker cannot answer while a synchronous scan runs, so a stale entry waits
    * at most STALE_SERVE_GRACE_MS before the last-good DTO is returned flagged
-   * stale; a key with no DTO waits at most FOREGROUND_BUDGET_MS, then fails with
-   * the existing `timeout` code. Either way the compute stays single-flight,
-   * commits when it lands, and `sessions.changed` makes clients refetch.
+   * stale. A key with no DTO simply awaits its compute. The compute stays
+   * single-flight and commits when it lands; `sessions.changed` is emitted only
+   * when a changed result was actually stored, so clients refetch exactly once.
    */
   function load<T>(key: string, compute: () => Promise<T>, force = false): Promise<T> {
     const prior = cache.get(key);
@@ -519,17 +513,14 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       prior && prior.sourceGeneration === sourceGeneration && hasStaleMarker(prior.snapshot)
         ? (markStale(prior.snapshot) as T)
         : undefined;
+    if (lastGood === undefined) return fresh;
     const epoch = viewerEpoch;
     return new Promise<T>((resolve, reject) => {
       let waiting = true;
-      const timer = setTimeout(
-        () => {
-          waiting = false;
-          if (lastGood !== undefined) resolve(lastGood);
-          else reject(new AnalyticsReadError("timeout"));
-        },
-        lastGood !== undefined ? STALE_SERVE_GRACE_MS : FOREGROUND_BUDGET_MS,
-      );
+      const timer = setTimeout(() => {
+        waiting = false;
+        resolve(lastGood);
+      }, STALE_SERVE_GRACE_MS);
       timer.unref();
       fresh.then(
         (value) => {
@@ -538,6 +529,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
           if (
             closed ||
             epoch !== viewerEpoch ||
+            cache.get(key)?.snapshot !== value ||
             notifiedLoads.has(fresh) ||
             (prior && substantiveOf(value) === prior.substantive)
           ) {

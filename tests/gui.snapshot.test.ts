@@ -19,7 +19,6 @@ import {
   DEFAULT_ANALYTICS_INTERVAL_MS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_QUOTA_INTERVAL_MS,
-  FOREGROUND_BUDGET_MS,
   MAX_TRACKED_PAGES,
   type SnapshotService,
   type SnapshotSource,
@@ -2105,30 +2104,43 @@ describe("GUI snapshot service stale-while-revalidate", () => {
     };
   }
 
-  it("serves the stale cached DTO at once while the worker refresh is in flight", async () => {
+  /** A service with a loaded 7d DTO, then a busy worker and an invalidated cache. */
+  async function staleWithBusyWorker() {
     vi.useFakeTimers();
     const worker = busyWorkerSource();
     const service = makeService(worker.source);
     const events: DashboardEvent[] = [];
     service.subscribe((event) => events.push(event));
     await service.home({ range: "7d" });
-
     worker.setBusy(true);
     service.notifySettingsChanged();
+    events.length = 0;
+    return { worker, service, events };
+  }
+
+  it("serves the stale cached DTO within the grace while the worker refresh is in flight", async () => {
+    const { worker, service, events } = await staleWithBusyWorker();
     const first = service.home({ range: "7d" });
-    const second = service.home({ range: "7d" });
     await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS);
-    const [a, b] = await Promise.all([first, second]);
-    expect(a.stale).toBe(true);
-    expect(a.usage.totals.total).toBe(10);
-    expect(b.stale).toBe(true);
+    expect(await first).toMatchObject({ stale: true, usage: { totals: { total: 10 } } });
+
+    // The real race: a second request arrives after the first already gave up.
+    let settled = false;
+    const second = service.home({ range: "7d" }).then((value) => {
+      settled = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await second).stale).toBe(true);
     // Both callers joined one in-flight refresh.
     expect(worker.calls()).toBe(2);
 
-    // The refresh lands later, replaces the stale DTO and tells clients.
+    // The refresh lands later, replaces the stale DTO and tells clients once.
     worker.parked[0]!.resolve(home("7d", { total: 25 }));
     await vi.advanceTimersByTimeAsync(0);
-    expect(events.map((event) => event.topic)).toContain("sessions.changed");
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]);
     const fresh = await service.home({ range: "7d" });
     expect(fresh.stale).toBe(false);
     expect(fresh.usage.totals.total).toBe(25);
@@ -2136,7 +2148,19 @@ describe("GUI snapshot service stale-while-revalidate", () => {
     vi.useRealTimers();
   });
 
-  it("answers a range without a cached DTO with a bounded wait, then lands it by event", async () => {
+  it("emits nothing when the refresh lands with unchanged content", async () => {
+    const { worker, service, events } = await staleWithBusyWorker();
+    const first = service.home({ range: "7d" });
+    await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS);
+    await first;
+    worker.parked[0]!.resolve(home("7d", { total: 10 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([]);
+    service.close();
+    vi.useRealTimers();
+  });
+
+  it("lets a range without a cached DTO simply await its compute", async () => {
     vi.useFakeTimers();
     const worker = busyWorkerSource();
     const service = makeService(worker.source);
@@ -2144,43 +2168,31 @@ describe("GUI snapshot service stale-while-revalidate", () => {
     service.subscribe((event) => events.push(event));
     worker.setBusy(true);
 
-    const pending = service.home({ range: "30d" });
-    const outcome = pending.then(
-      () => "resolved",
-      (error: unknown) => (error as { code?: string }).code,
-    );
-    await vi.advanceTimersByTimeAsync(FOREGROUND_BUDGET_MS - 1);
-    expect(worker.calls()).toBe(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(await outcome).toBe("timeout");
-
-    // A retry joins the same compute instead of queueing another scan.
-    void service.home({ range: "30d" }).catch(() => undefined);
+    let settled = false;
+    const pending = service.home({ range: "30d" }).then((value) => {
+      settled = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(settled).toBe(false);
     expect(worker.calls()).toBe(1);
 
     worker.parked[0]!.resolve(home("30d", { total: 7 }));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(events.map((event) => event.topic)).toContain("sessions.changed");
-    expect((await service.home({ range: "30d" })).usage.totals.total).toBe(7);
-    expect(worker.calls()).toBe(1);
+    expect((await pending).usage.totals.total).toBe(7);
+    expect(events).toEqual([]);
     service.close();
     vi.useRealTimers();
   });
 
-  it("keeps the stale DTO when the in-flight refresh fails", async () => {
-    vi.useFakeTimers();
-    const worker = busyWorkerSource();
-    const service = makeService(worker.source);
-    await service.home({ range: "7d" });
-    worker.setBusy(true);
-    service.notifySettingsChanged();
-
+  it("keeps the stale DTO and emits no event when the in-flight refresh fails", async () => {
+    const { worker, service, events } = await staleWithBusyWorker();
     const first = service.home({ range: "7d" });
     await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS);
     expect((await first).stale).toBe(true);
 
     worker.parked[0]!.reject(new Error("refresh failed"));
     await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([]);
     const after = service.home({ range: "7d" });
     await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS);
     const kept = await after;
