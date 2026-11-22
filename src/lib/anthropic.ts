@@ -146,6 +146,8 @@ export interface AnthropicDiagnostics {
   failureCategory?: ProviderFailureCategory;
   /** Epoch ms when a rate-limited usage request may be retried; absent otherwise. */
   retryAtMs?: number;
+  /** True when the usage request returned 401 and the stored token's own expiry is in the past. */
+  storedAccessTokenExpired?: true;
   quota?: AnthropicQuotaResult;
   /** sha256 of the OAuth token bound to this probe, when a CLI token was used. */
   credentialFingerprint?: string;
@@ -221,6 +223,8 @@ type AnthropicCredentialsAccess =
   | {
       state: "configured";
       accessToken: string;
+      /** The CLI's own `expiresAt` for this access token (epoch ms), when stored. */
+      expiresAtMs?: number;
       source: AnthropicCredentialSource;
     }
   | {
@@ -232,6 +236,7 @@ type ClaudeCredentialSourceResult =
   | {
       state: "configured";
       accessToken: string;
+      expiresAtMs?: number;
     }
   | {
       state: "not-found";
@@ -251,6 +256,8 @@ type AnthropicFallbackQuota =
       state: "unavailable";
       detail?: string;
       failureKind?: "authentication";
+      /** HTTP status of a rejected usage request. */
+      httpStatus?: number;
       failureCategory?: ProviderFailureCategory;
       retryAtMs?: number;
     };
@@ -824,10 +831,13 @@ function buildAnthropicNoQuotaDiagnosticsMessage(detail?: string): string {
     : ANTHROPIC_NO_QUOTA_MESSAGE;
 }
 
-function extractClaudeCredentialsAccessToken(data: unknown): string {
+function extractClaudeCredentialsAccessToken(data: unknown): {
+  accessToken: string;
+  expiresAtMs?: number;
+} {
   const root = asRecord(data);
   if (!root) {
-    return "";
+    return { accessToken: "" };
   }
 
   for (const candidate of [asRecord(root["claudeAiOauth"]), asRecord(root["oauth"]), root]) {
@@ -838,18 +848,24 @@ function extractClaudeCredentialsAccessToken(data: unknown): string {
     for (const key of ["accessToken", "access_token", "token"]) {
       const token = candidate[key];
       if (typeof token === "string" && token.trim()) {
-        return token.trim();
+        const expiresAt = candidate["expiresAt"];
+        return {
+          accessToken: token.trim(),
+          ...(typeof expiresAt === "number" && Number.isFinite(expiresAt)
+            ? { expiresAtMs: expiresAt }
+            : {}),
+        };
       }
     }
   }
 
-  return "";
+  return { accessToken: "" };
 }
 
 function parseClaudeCredentialsAccessToken(
   content: string,
   options: { allowPlainText: boolean },
-): { accessToken?: string; error?: string } {
+): { accessToken?: string; expiresAtMs?: number; error?: string } {
   const trimmed = content.trim();
   if (!trimmed) {
     return { error: "missing" };
@@ -861,8 +877,10 @@ function parseClaudeCredentialsAccessToken(
 
   try {
     const parsed = JSON.parse(trimmed) as unknown;
-    const accessToken = extractClaudeCredentialsAccessToken(parsed);
-    return accessToken ? { accessToken } : { error: "missing" };
+    const { accessToken, expiresAtMs } = extractClaudeCredentialsAccessToken(parsed);
+    return accessToken
+      ? { accessToken, ...(expiresAtMs === undefined ? {} : { expiresAtMs }) }
+      : { error: "missing" };
   } catch {
     // The parser's own message can quote a fragment of the token, so only a fixed reason is kept.
     return { error: "invalid JSON" };
@@ -937,6 +955,7 @@ async function readClaudeCredentialsAccessTokenFromMacOSKeychain(): Promise<Clau
     return {
       state: "configured",
       accessToken: parsed.accessToken,
+      ...(parsed.expiresAtMs === undefined ? {} : { expiresAtMs: parsed.expiresAtMs }),
     };
   }
 
@@ -971,6 +990,7 @@ async function readClaudeCredentialsAccessTokenFromFile(
     return {
       state: "configured",
       accessToken,
+      ...(parsed.expiresAtMs === undefined ? {} : { expiresAtMs: parsed.expiresAtMs }),
     };
   } catch (error) {
     const code =
@@ -1259,7 +1279,9 @@ async function requestAnthropicOAuthUsage(
             detail: detail
               ? `Anthropic API error ${response.status}: ${detail}`
               : `Anthropic API returned ${response.status}`,
-            ...(authenticationFailure ? { failureKind: "authentication" as const } : {}),
+            ...(authenticationFailure
+              ? { failureKind: "authentication" as const, httpStatus: response.status }
+              : {}),
             failureCategory: authenticationFailure ? "credentials" : "provider_api",
           };
         }
@@ -1947,6 +1969,12 @@ export async function getAnthropicDiagnostics(
         ? { failureCategory: fallbackQuota.failureCategory }
         : {}),
       ...(fallbackQuota.retryAtMs !== undefined ? { retryAtMs: fallbackQuota.retryAtMs } : {}),
+      // Evidence only: the CLI's own expiry says the token is stale; the request is still made.
+      ...(fallbackQuota.httpStatus === 401 &&
+      credentials.expiresAtMs !== undefined &&
+      credentials.expiresAtMs <= Date.now()
+        ? { storedAccessTokenExpired: true as const }
+        : {}),
     };
   }
 

@@ -935,6 +935,33 @@ describe("claude agent provider", () => {
     expect(readCredentialRows).not.toHaveBeenCalled();
     expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
   });
+  it("says the stored access token expired when diagnostics prove it", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+      message: "x",
+      failureCategory: "credentials",
+      storedAccessTokenExpired: true,
+    });
+
+    const out = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
+
+    expect(out.errors?.[0]).toMatchObject({
+      message:
+        "Claude's stored access token has expired. Run any `claude` command to refresh it, then Retry.",
+    });
+  });
+
   it("keeps a detected Claude Code route visible as an error when its usage probe fails", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"

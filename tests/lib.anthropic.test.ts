@@ -706,6 +706,33 @@ describe("Claude CLI diagnostics", () => {
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["401 with a past expiry", 401, -60_000, true],
+    ["401 with a future expiry", 401, 3_600_000, false],
+    ["403 with a past expiry", 403, -60_000, false],
+  ])("flags the stored token as expired only on %s", async (_name, status, offsetMs, expired) => {
+    setProcessPlatform("linux");
+    readFileMock.mockResolvedValue(
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: `expiry-token-${status}-${offsetMs}`,
+          expiresAt: Date.now() + offsetMs,
+        },
+      }),
+    );
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ loggedIn: true, ...FIRST_PARTY_CLAUDE_AI_LOGIN }) },
+    ]);
+    fetchResponseMock.mockResolvedValue(mockOAuthResponse(status, "rejected"));
+
+    const diagnostics = await getAnthropicDiagnostics({});
+
+    expect(diagnostics.failureCategory).toBe("credentials");
+    expect(diagnostics.storedAccessTokenExpired).toBe(expired ? true : undefined);
+    expect(JSON.stringify(diagnostics)).not.toContain("expiry-token");
+  });
+
   it("keys the Claude CLI row by its stored token, without any network call", async () => {
     setProcessPlatform("linux");
 

@@ -60,6 +60,8 @@ export function getClaudeAgentNoDataMessage(): string {
 
 function safeDiagnosticMessage(diagnostics: AnthropicDiagnostics): string {
   if (diagnostics.failureCategory === "provider_api") return "Claude quota request failed.";
+  if (diagnostics.storedAccessTokenExpired)
+    return "Claude's stored access token has expired. Run any `claude` command to refresh it, then Retry.";
   // "credentials" is only assigned after the CLI reported a verified login, so this is the usage
   // endpoint rejecting the stored token, not proof that the login is invalid.
   if (diagnostics.failureCategory === "credentials")
