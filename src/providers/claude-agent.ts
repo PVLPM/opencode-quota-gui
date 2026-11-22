@@ -60,8 +60,10 @@ export function getClaudeAgentNoDataMessage(): string {
 
 function safeDiagnosticMessage(diagnostics: AnthropicDiagnostics): string {
   if (diagnostics.failureCategory === "provider_api") return "Claude quota request failed.";
+  // "credentials" is only assigned after the CLI reported a verified login, so this is the usage
+  // endpoint rejecting the stored token, not proof that the login is invalid.
   if (diagnostics.failureCategory === "credentials")
-    return "Claude sign-in could not be used. Run `claude auth login` and try again.";
+    return "Claude CLI reports you are signed in, but the usage request was rejected. Retry; if it persists, run `claude auth login`.";
   if (!diagnostics.installed) return "Claude CLI is unavailable.";
   if (diagnostics.authStatus === "unauthenticated")
     return "Claude is not authenticated. Run `claude auth login` and try again.";

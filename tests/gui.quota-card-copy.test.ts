@@ -151,7 +151,7 @@ describe("quota card clipboard", () => {
       graph.listenerOf(buttons[0]!, "onClick")?.({});
       await Promise.resolve();
       expect(writeText).toHaveBeenCalledExactlyOnceWith(
-        "Synthetic Provider · Alice\nFirst quota: 62% remaining · Resets in 1h",
+        "Synthetic Provider · Alice\nPrivate error\nsecret error text\nFirst quota: 62% remaining · Resets in 1h",
       );
       expect(graph.textOf(root)).toContain("Quota summary copied.");
       graph.listenerOf(buttons[1]!, "onClick")?.({});
@@ -237,6 +237,48 @@ describe("quota card clipboard runway and banked resets", () => {
   function rowLines(copied: string): string[] {
     return copied.split("\n").slice(1);
   }
+
+  it("copies an error-only provider-level card with the displayed label and message", async () => {
+    const copied = await copiedSummary(
+      providerCard({
+        providerLabel: "Claude Agent",
+        planLabel: undefined,
+        accountLabel: undefined,
+        rows: [],
+        errors: [
+          {
+            label: "Claude Agent",
+            message: "Claude sign-in could not be used. Run `claude auth login` and try again.",
+          },
+        ],
+      }),
+    );
+    expect(copied).toBe(
+      "Claude Agent\nProvider-level error · Claude Agent\nClaude sign-in could not be used. Run `claude auth login` and try again.",
+    );
+  });
+
+  it("copies stale marker, every error and rows in display order", async () => {
+    const copied = await copiedSummary(
+      providerCard({
+        accountLabel: undefined,
+        rows: [percentRow({ label: "Quota", countdown: undefined })],
+        errors: [
+          { label: "One", message: "first" },
+          { label: "Two", message: "second" },
+        ],
+      }),
+      true,
+    );
+    expect(rowLines(copied)).toEqual([
+      "Data may be stale",
+      "Provider-level error · One",
+      "first",
+      "Provider-level error · Two",
+      "second",
+      "Quota: 62% remaining",
+    ]);
+  });
 
   it("adds a valid before-reset runway to the same row as its quota and reset", async () => {
     const copied = await copiedSummary(

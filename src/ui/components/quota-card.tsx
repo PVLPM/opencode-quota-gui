@@ -303,6 +303,9 @@ export function QuotaCardView(props: {
     return formatRunway(row.runway, now);
   }
 
+  const errorLabel = (label: string) =>
+    props.card.accountLabel ? label : `Provider-level error · ${label}`;
+
   async function copySummary(): Promise<void> {
     const identity = [
       props.card.providerLabel,
@@ -324,9 +327,16 @@ export function QuotaCardView(props: {
       const runwayPart = runway ? ` · ${runway}` : "";
       return `${row.label}: ${rowValueText(row, props.preferences)}${countdown}${runwayPart}`;
     });
+    // Same already-sanitized projection and labels the card renders, in display order.
+    const errorLines = props.card.errors.flatMap((error) => [
+      errorLabel(error.label),
+      error.message,
+    ]);
     try {
       await navigator.clipboard.writeText(
-        [identity, ...(props.stale ? ["Data may be stale"] : []), ...lines].join("\n"),
+        [identity, ...(props.stale ? ["Data may be stale"] : []), ...errorLines, ...lines].join(
+          "\n",
+        ),
       );
       setCopyStatus("Quota summary copied.");
     } catch {
@@ -401,9 +411,7 @@ export function QuotaCardView(props: {
           <For each={props.card.errors}>
             {(error) => (
               <p class="qg-error" data-level={props.card.accountLabel ? "account" : "provider"}>
-                <span class="qg-error__label">
-                  {props.card.accountLabel ? error.label : `Provider-level error · ${error.label}`}
-                </span>
+                <span class="qg-error__label">{errorLabel(error.label)}</span>
                 <span class="qg-error__message">{error.message}</span>
               </p>
             )}

@@ -926,7 +926,11 @@ describe("claude agent provider", () => {
     );
 
     expectAttemptedWithErrorLabel(out, "Claude Agent");
-    expect(out.errors?.[0]).toMatchObject({ failureCategory: "credentials" });
+    expect(out.errors?.[0]).toMatchObject({
+      failureCategory: "credentials",
+      message:
+        "Claude CLI reports you are signed in, but the usage request was rejected. Retry; if it persists, run `claude auth login`.",
+    });
     expect(visibleEntries(out.entries, "claude-agent")).toEqual([]);
     expect(readCredentialRows).not.toHaveBeenCalled();
     expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();

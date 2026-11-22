@@ -1312,6 +1312,19 @@ describe("Claude CLI diagnostics", () => {
     });
   });
 
+  it("does not retry a 401 or scope-naming 403 without the enhanced form", async () => {
+    fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(401, "unauthorized"));
+    await queryAnthropicQuotaWithOAuth("oauth-401-single-attempt-token");
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
+
+    fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(403, "missing scope user:profile"));
+    await expect(queryAnthropicQuotaWithOAuth("oauth-403-scope-token")).resolves.toMatchObject({
+      success: false,
+      failureCategory: "credentials",
+    });
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(2);
+  });
+
   it("uses a configured Claude binary path for probe commands", async () => {
     mockExecSequence([
       {
