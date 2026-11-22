@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS } from "../src/gui/analytics-protocol.js";
 import { createQuery } from "../src/ui/query.js";
-import { isHostRpcTimeout } from "../src/ui/view-model.js";
+import { isHostRpcTimeout, shouldRejoinAnalyticsRead } from "../src/ui/view-model.js";
 
 const hostTimeout = {
   name: "ClientError",
@@ -10,9 +9,8 @@ const hostTimeout = {
   cause: new DOMException("The operation timed out", "TimeoutError"),
 };
 
-// The exact predicate AnalyticsRoute passes to createQuery.
-const retryHostTimeout = (failure: unknown, elapsedMs: number): boolean =>
-  isHostRpcTimeout(failure) && elapsedMs < ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS;
+// The same predicate AnalyticsRoute passes to createQuery.
+const retryHostTimeout = shouldRejoinAnalyticsRead;
 
 function deferred<T>() {
   let resolve: (value: T) => void = () => {};

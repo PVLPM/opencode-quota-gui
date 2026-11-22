@@ -77,12 +77,14 @@ export function createBusyIndicator(delayMs: number = BUSY_DELAY_MS): BusyIndica
 }
 
 export function BusyOverlay(props: { indicator: BusyIndicator; label: string }): JSX.Element {
-  const copy = (): string =>
-    `${props.indicator.hasData() ? "Updating" : "Loading"} ${props.label}… ${props.indicator.elapsedSeconds()} s`;
+  // The ticking counter is hidden from assistive tech so the live region announces only the verb.
+  const verb = (): string =>
+    `${props.indicator.hasData() ? "Updating" : "Loading"} ${props.label}…`;
   return (
     <Show when={props.indicator.visible()}>
       <output class="qg-busy" aria-live="polite">
-        {copy()}
+        {verb()}
+        <span aria-hidden="true"> {props.indicator.elapsedSeconds()} s</span>
       </output>
     </Show>
   );

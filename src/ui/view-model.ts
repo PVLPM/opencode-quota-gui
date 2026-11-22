@@ -2,6 +2,7 @@ import { BUILD_IDENTITY, type BuildIdentity } from "../contracts/build-identity"
 import { isCardHidden, isLegacyProviderHidden } from "../contracts/card-visibility";
 import type { Bucket, ProviderCard, QuotaCardRow, Usage } from "../contracts/dashboard";
 import { DASHBOARD_CONTRACT_VERSION } from "../contracts/dashboard";
+import { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS } from "../gui/analytics-protocol";
 import type { ConnectionState } from "./dashboard-client";
 import { DashboardError } from "./dashboard-client";
 
@@ -79,6 +80,11 @@ export function isHostRpcTimeout(error: unknown): boolean {
     "name" in cause &&
     cause.name === "TimeoutError"
   );
+}
+
+/** Re-join an analytics read the host timed out on, until the server read budget has passed. */
+export function shouldRejoinAnalyticsRead(failure: unknown, elapsedMs: number): boolean {
+  return isHostRpcTimeout(failure) && elapsedMs < ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS;
 }
 
 /**

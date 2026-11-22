@@ -271,8 +271,11 @@ describe("delayed foreground loading", () => {
       indicator: busyIndicator(true, false),
       label: "analytics",
     });
+    // The counter sits in an aria-hidden span, so the visible text is checked with markup removed.
+    const visibleText = (html: string) => html.replace(/<!--.*?-->/g, "").replace(/<[^>]+>/g, "");
     expect(loading).toContain('class="qg-busy"');
-    expect(loading).toContain("Loading analytics… 7 s");
+    expect(loading).toContain('<span aria-hidden="true">');
+    expect(visibleText(loading)).toBe("Loading analytics… 7 s");
     expect(loading).not.toContain("qg-busy__dot");
     expect(loading).not.toMatch(/\d+\s*%|ETA|remaining/i);
 
@@ -280,7 +283,7 @@ describe("delayed foreground loading", () => {
       indicator: busyIndicator(true, true),
       label: "analytics",
     });
-    expect(updating).toContain("Updating analytics… 7 s");
+    expect(visibleText(updating)).toBe("Updating analytics… 7 s");
     expect(updating).not.toContain("qg-busy__dot");
   });
 

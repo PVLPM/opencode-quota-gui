@@ -12,7 +12,6 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import type { RangeKey } from "../contracts/ranges";
-import { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS } from "../gui/analytics-protocol";
 import { BuildAbout } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { QueryState } from "./components/states";
@@ -25,9 +24,9 @@ import { createQuotaQuery, type QuotaQuery } from "./quota-query";
 import type { displayPreferencesFromValues } from "./settings-model";
 import {
   describeError,
-  isHostRpcTimeout,
   isStaleAfterReconnect,
   resolveLoadState,
+  shouldRejoinAnalyticsRead,
 } from "./view-model";
 import { HomeView, QuotaLoading, QuotaView } from "./views/home";
 import { ModelDetailView } from "./views/model";
@@ -216,8 +215,7 @@ export function AnalyticsRoute(props: AnalyticsRouteProps): JSX.Element {
   // read keeps running; re-join it until the server read budget has passed.
   const query = createQuery<HomeSnapshot>(
     () => props.client.home({ range: props.range }),
-    (failure, elapsedMs) =>
-      isHostRpcTimeout(failure) && elapsedMs < ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS,
+    shouldRejoinAnalyticsRead,
   );
   onCleanup(() => query.invalidate());
   /**
