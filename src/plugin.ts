@@ -11,6 +11,7 @@ import { Plugin } from "@opencode/plugin";
 import { type DashboardLease, startDashboard } from "./gui/lifecycle.js";
 import { scrubLogReason } from "./gui/log.js";
 import { registerDashboardRpc } from "./gui/rpc.js";
+import { observeAnthropicApiResponse } from "./lib/anthropic-api-rate-limits.js";
 import { projectOpenCodeCacheObserverEvent } from "./lib/cache-observer-ingestion.js";
 import { readClaudeObservedTtl } from "./lib/claude-agent-transcript-ttl.js";
 import { createClaudeAgentTtlTracker } from "./lib/claude-agent-ttl-tracker.js";
@@ -69,6 +70,12 @@ export const QuotaToastPlugin = Plugin.define({
       } catch (error) {
         console.warn(`[opencode-quota-gui] retry hook failed: ${logReason(error)}`);
       }
+    });
+
+    // Read-only and synchronous: records allowlisted rate-limit headers from API-key Messages
+    // responses for the Anthropic API card. It never alters, delays or throws into the request.
+    await ctx.session.hook("http.response", (event) => {
+      observeAnthropicApiResponse({ request: event.request, response: event.response });
     });
 
     // Owner-approved per-session approximation (not per-request proof): the host shares no

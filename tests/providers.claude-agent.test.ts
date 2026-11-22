@@ -18,6 +18,11 @@ vi.mock("../src/lib/anthropic.js", async (importOriginal) => ({
   queryAnthropicQuotaWithOAuth: vi.fn(),
 }));
 
+// Hermetic: never read the developer's real Anthropic API key.
+vi.mock("../src/lib/anthropic-api-auth.js", () => ({
+  resolveAnthropicApiKey: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/lib/opencode-auth.js")>()),
   readCredentialRows: vi.fn().mockResolvedValue([]),
@@ -281,7 +286,7 @@ describe("claude agent provider", () => {
     });
     expect(await anthropicProvider.isAvailable(ctx)).toBe(true);
     expect((await anthropicProvider.fetch(ctx)).errors[0]?.message).toContain(
-      "API quota is unavailable",
+      "No Anthropic API key is configured",
     );
   });
 

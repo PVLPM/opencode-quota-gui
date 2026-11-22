@@ -51,9 +51,12 @@ export const QUOTA_PROVIDER_REGISTRATION_SOURCE = [
     runtimeIds: ["anthropic"],
     synonyms: [],
     shape: {
-      autoSetup: "unavailable",
-      authentication: "unavailable",
-      quota: "unavailable",
+      autoSetup: "usually",
+      authentication: "opencode_auth_api_key",
+      authFallbacks: ["env_api_key", "global_opencode_config"],
+      quota: "remote_api",
+      notes:
+        "Passive per-minute rate-limit headers from real API-key requests; no spend or balance",
     },
   },
   {

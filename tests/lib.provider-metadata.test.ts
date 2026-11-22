@@ -20,9 +20,12 @@ describe("provider-metadata", () => {
     expect(QUOTA_PROVIDER_SHAPES).toEqual([
       {
         id: "anthropic",
-        autoSetup: "unavailable",
-        authentication: "unavailable",
-        quota: "unavailable",
+        autoSetup: "usually",
+        authentication: "opencode_auth_api_key",
+        authFallbacks: ["env_api_key", "global_opencode_config"],
+        quota: "remote_api",
+        notes:
+          "Passive per-minute rate-limit headers from real API-key requests; no spend or balance",
       },
       {
         id: "claude-agent",

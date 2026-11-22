@@ -1,10 +1,20 @@
 /**
- * Anthropic provider: OpenCode's own Anthropic logins only.
+ * Anthropic provider: the Anthropic API-key connection only.
  *
- * Subscription quota belongs to Claude Agent. API credentials expose no comparable quota here.
+ * Subscription quota belongs to Claude Agent. An ordinary API key exposes no spend, balance or
+ * quota endpoint, so this card shows only per-minute rate limits passively observed on real
+ * OpenCode API-key Messages traffic (see `../lib/anthropic-api-rate-limits.ts`).
  */
 
 import type { AnthropicQuotaResult } from "../lib/anthropic.js";
+import { resolveAnthropicApiKey } from "../lib/anthropic-api-auth.js";
+import {
+  ANTHROPIC_RATE_LIMIT_METERS,
+  type AnthropicApiObservation,
+  type AnthropicRateLimitMeter,
+  digestAnthropicApiKey,
+  readAnthropicApiObservation,
+} from "../lib/anthropic-api-rate-limits.js";
 import type {
   QuotaProvider,
   QuotaProviderContext,
@@ -14,16 +24,18 @@ import type {
 import { resolveQuotaProviderSessionModelIdentity } from "../lib/quota-providers.js";
 import {
   attemptedErrorResult,
+  attemptedResult,
   notAttemptedResult,
   statusDetailsFromRecord,
   withStatusDetails,
 } from "./result-helpers.js";
 
 export function getAnthropicNoDataMessage(): string {
-  return "Anthropic API quota unavailable";
+  return "No Anthropic API key configured";
 }
 
-const ANTHROPIC_API_QUOTA_UNAVAILABLE_MESSAGE = "Anthropic API quota is unavailable.";
+const ANTHROPIC_API_KEY_MISSING_MESSAGE = "No Anthropic API key is configured.";
+const ANTHROPIC_NO_OBSERVATION_TEXT = "No rate-limit headers observed yet";
 
 /**
  * Map subscription quota returned for the Claude Agent CLI login.
@@ -88,6 +100,74 @@ export function anthropicQuotaEntries(
   return entries;
 }
 
+const ANTHROPIC_GROUP = "Anthropic";
+const RATE_LIMIT_INFO =
+  "Anthropic API rate limit (per minute) observed on your API-key requests. Not subscription quota, spend or balance.";
+
+const METER_LABELS = {
+  requests: "Requests",
+  tokens: "Tokens",
+  inputTokens: "Input tokens",
+  outputTokens: "Output tokens",
+} as const;
+
+function numberText(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+function meterValueText(meter: AnthropicRateLimitMeter): string | undefined {
+  if (meter.remaining !== undefined && meter.limit !== undefined) {
+    return `${numberText(meter.remaining)} of ${numberText(meter.limit)} remaining`;
+  }
+  if (meter.remaining !== undefined) return `${numberText(meter.remaining)} remaining`;
+  if (meter.limit !== undefined) return `Limit ${numberText(meter.limit)}`;
+  return undefined;
+}
+
+/**
+ * Rows for one passive observation. Plain value rows: a percentage is never computed, so no
+ * quota alert, runway or reset-notice logic can treat a per-minute rate limit as quota.
+ */
+function anthropicApiRateLimitEntries(observation: AnthropicApiObservation): QuotaToastEntry[] {
+  const accounting = {
+    resultType: "rate_limit" as const,
+    acquisitionMethod: "remote_api" as const,
+    ownership: "maintained" as const,
+    authority: "provider_reported" as const,
+    observedAtIso: new Date(observation.observedAtMs).toISOString(),
+  };
+  const entries: QuotaToastEntry[] = [];
+  for (const [, name] of ANTHROPIC_RATE_LIMIT_METERS) {
+    const meter = observation.meters[name];
+    const value = meter ? meterValueText(meter) : undefined;
+    if (!meter || value === undefined) continue;
+    entries.push({
+      kind: "value",
+      accounting: { ...accounting },
+      name: `${ANTHROPIC_GROUP} ${METER_LABELS[name]}`,
+      group: ANTHROPIC_GROUP,
+      label: `${METER_LABELS[name]}:`,
+      info: RATE_LIMIT_INFO,
+      rowKey: `rate_limit:${name}`,
+      value,
+      ...(meter.resetAtIso !== undefined ? { resetTimeIso: meter.resetAtIso } : {}),
+    });
+  }
+  if (observation.retryAfterSeconds !== undefined) {
+    entries.push({
+      kind: "value",
+      accounting: { ...accounting },
+      name: `${ANTHROPIC_GROUP} Retry after`,
+      group: ANTHROPIC_GROUP,
+      label: "Retry after:",
+      info: RATE_LIMIT_INFO,
+      rowKey: "rate_limit:retry_after",
+      value: `${numberText(observation.retryAfterSeconds)} s (last rate-limited response)`,
+    });
+  }
+  return entries;
+}
+
 export const anthropicProvider: QuotaProvider = {
   id: "anthropic",
 
@@ -99,7 +179,7 @@ export const anthropicProvider: QuotaProvider = {
           ?.providerId;
       return selected?.trim().toLowerCase() === "anthropic";
     }
-    return false;
+    return (await resolveAnthropicApiKey()) !== null;
   },
 
   matchesCurrentModel(model: string): boolean {
@@ -107,11 +187,45 @@ export const anthropicProvider: QuotaProvider = {
   },
 
   async fetch(ctx: QuotaProviderContext): Promise<QuotaProviderResult> {
+    const apiKey = await resolveAnthropicApiKey();
+    if (apiKey === null) {
+      return withStatusDetails(
+        ctx.config?.onlyCurrentModel
+          ? attemptedErrorResult(ANTHROPIC_GROUP, ANTHROPIC_API_KEY_MISSING_MESSAGE)
+          : notAttemptedResult(),
+        statusDetailsFromRecord({ api_key: "(none)" }),
+      );
+    }
+    const observation = readAnthropicApiObservation(digestAnthropicApiKey(apiKey));
+    const entries = observation ? anthropicApiRateLimitEntries(observation) : [];
+    // Configured but nothing observed yet is a truthful status, neither an error nor a zero.
+    const result = attemptedResult(
+      entries.length > 0
+        ? entries
+        : [
+            {
+              kind: "value",
+              accounting: {
+                resultType: "status",
+                acquisitionMethod: "remote_api",
+                ownership: "maintained",
+                authority: "provider_reported",
+              },
+              name: `${ANTHROPIC_GROUP} Rate limits`,
+              group: ANTHROPIC_GROUP,
+              label: "Rate limits:",
+              info: RATE_LIMIT_INFO,
+              rowKey: "rate_limit:none",
+              value: ANTHROPIC_NO_OBSERVATION_TEXT,
+            },
+          ],
+    );
     return withStatusDetails(
-      ctx.config?.onlyCurrentModel
-        ? attemptedErrorResult("Anthropic", ANTHROPIC_API_QUOTA_UNAVAILABLE_MESSAGE)
-        : notAttemptedResult(),
-      statusDetailsFromRecord({}),
+      result,
+      statusDetailsFromRecord({
+        api_key: "(configured)",
+        observed: observation ? "true" : "false",
+      }),
     );
   },
 };

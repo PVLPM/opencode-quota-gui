@@ -15,7 +15,7 @@ The dashboard reads provider results through the same OpenCode host process that
 
 | Provider           | Auth/setup                                                     | Data from          | Reports            |
 | ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic          | [Unavailable](#anthropic)                                      | —                  | —                  |
+| Anthropic          | [API key](#anthropic)                                          | Observed headers   | Rate limits        |
 | Claude Agent       | [Needs setup](#claude-agent)                                   | Local CLI/OAuth    | Quota              |
 | Chutes AI          | Automatic                                                      | Remote API         | Quota              |
 | Cursor             | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
@@ -38,7 +38,7 @@ The dashboard reads provider results through the same OpenCode host process that
 
 | Provider                | Auth/setup                                                     | Data from          | Reports            |
 | ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic               | [Unavailable](#anthropic)                                      | —                  | —                  |
+| Anthropic               | [API key](#anthropic)                                          | Observed headers   | Rate limits        |
 | Claude Agent            | [Needs setup](#claude-agent)                                   | Local CLI/OAuth    | Quota              |
 | Chutes AI               | Automatic                                                      | Remote API         | Quota              |
 | Cursor                  | [Needs setup](#cursor)                                         | Local estimate     | Budget and spend   |
@@ -369,7 +369,16 @@ GitHub references: [AI Credit billing reports](https://docs.github.com/en/rest/b
 
 ### Anthropic
 
-The Anthropic route is API-only and does not report Claude subscription quota. OpenCode Anthropic OAuth sign-ins are not queried for subscription quota, and API-key connections expose no comparable quota here. For Claude subscription quota, use [Claude Agent](#claude-agent) with its own Claude CLI login.
+The Anthropic card monitors the Anthropic **API** and is separate from [Claude Agent](#claude-agent), which reports Claude subscription quota from its own Claude CLI login. The two never share credentials, rows or errors.
+
+What it reports is passive: per-minute **rate limits** read from the `anthropic-ratelimit-*` and `retry-after` response headers of real OpenCode Messages requests to `api.anthropic.com` that were sent with an API key.
+
+- Rows (as Anthropic sends them): Requests, Tokens, Input tokens and Output tokens, each as remaining of limit with the reset time, plus Retry after on a rate-limited (429) response. A rate-limit reset is not a quota reset, and no percentage, runway or quota alert is derived from these rows.
+- Before any request has been observed, the card says "No rate-limit headers observed yet". That is neither an error nor zero. Observations are kept in memory only, are tied to the current key (changing the key shows nothing until a new request is observed), and show when they were observed. Nothing is observed while OpenCode is not making API-key requests.
+- It sends no request of its own: no test or dummy generation requests, and it does not poll `count_tokens` or `/v1/models`, which are not Messages meters.
+- Requests authenticated with Claude subscription (OAuth) sign-in are ignored, and no OAuth token is used for the Anthropic API card.
+- Not reported: spend, usage totals, credit balance, or organization rate limits. Anthropic provides those only through its Admin API, which needs a separate Admin key that an ordinary API key cannot replace, and no balance endpoint exists. This plugin does not use an Admin key.
+- Key: an OpenCode Anthropic API-key login, `ANTHROPIC_API_KEY`, or `provider.anthropic.options.apiKey` in trusted user/global config. An OpenCode Anthropic OAuth login does not count. See [API keys](#api-keys).
 
 In `enabledProviders`, the legacy `claude` alias now selects `claude-agent`. Use the canonical `anthropic` ID for the Anthropic API route, and `claude-agent` for Claude subscription quota.
 
