@@ -30,6 +30,7 @@ anonymized measurements in the PR or chat with environment caveats. See
 | --- | --- | --- |
 | `dense-30d` | 420 sessions, 128,000 assistant rows over 45 days, 10 projects, billions-equivalent cache-read tokens | Cold 7d, 30d extension, lifetime, warm switches, high-cache dense aggregation |
 | `long-lifetime` | 180 sessions, 54,000 rows over 18 months, 6 projects | Lifetime buckets, month-scale spans, 30d extension from a long history |
+| `heavy-history` | 2,282 sessions, 253,113 assistant rows over approximately 210 days, 10 synthetic projects | Larger history scaled to observed aggregate counts; small synthetic payloads do not reproduce a multi-gigabyte source's I/O |
 | `deep-session-tree` | 47 sessions / 46 descendants across six depths, 6,990 rows, 2 forks, 6 compactions, growing-context token patterns | Large tree and subsession detail, fork-copy ownership, compaction markers |
 
 Every profile uses a fixed seed. Data time offsets are deterministic relative
@@ -168,8 +169,11 @@ whole-worker memory estimate. Keep actual results local, like the full suite.
    output. Errors are reduced to fixed codes.
 7. Runs only the no-change delta; mutation and cold-resume scenarios are
    reported as skipped. External OpenCode activity can still change the source
-   during the run, so real no-change is reported as an observation, not a hard
-   guarantee.
+  during the run, so real no-change is reported as an observation, not a hard
+  guarantee.
+- The no-change check compares rolling 7d totals at different instants. A
+  completion aging out of that window can therefore fail the check even when
+  the source has not changed; inspect the window before interpreting a failure.
 
 The focused test `tests/gui.analytics-benchmark.test.ts` opens a **disposable
 synthetic** database through the same guarded reader, verifies `query_only` is

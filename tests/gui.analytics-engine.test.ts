@@ -2851,8 +2851,9 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
       savedAtMs: (persisted.savedAtMs ?? NOW) + 1,
       frontierAtMs: NOW + 60_000,
     };
+    const calls: ReaderCall[] = [];
     const engine = createAnalyticsEngine({
-      reader: createFakeReader(db, []),
+      reader: createFakeReader(db, calls),
       now: () => NOW + 5 * 60_000,
       refreshIntervalMs: INTERVAL,
       snapshotPath: "memory.json",
@@ -2872,6 +2873,14 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     const home = await engine.home("24h");
     expect(home.usage.totals.input).toBe(705);
     expect(home.stale).toBe(false);
+    expect(calls.filter((call) => call.method === "loadRevisions")).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({ updatedSinceMs: expect.any(Number) }),
+      }),
+    ]);
+    expect(
+      calls.filter((call) => call.method === "loadCompletedRows" && !call.params?.messageIDs),
+    ).toEqual([]);
     await engine.close();
   });
 
