@@ -1116,9 +1116,16 @@
   fill: var(--qg-chart-rate);
 }
 
-.qg-chart__strip-line {
-  stroke: var(--qg-border-strong);
-  stroke-width: 1;
+/* In the session plot the gold line crosses filled series, so it gets a dark
+   halo (as the cost line does) and sits above them; the tree line is dashed. */
+.qg-chart__rate-line--session {
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.6));
+}
+
+.qg-chart__rate-point--active {
+  stroke: var(--qg-surface-raised);
+  stroke-width: 1.25;
 }
 
 /* Model changes are filled diamonds; effort-only changes are hollow squares. */

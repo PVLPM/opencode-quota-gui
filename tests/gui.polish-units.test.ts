@@ -930,7 +930,7 @@ describe("modelTransitions", () => {
   });
 });
 
-describe("session Cache Rate strip", () => {
+describe("session Cache Rate line", () => {
   it("keeps unmeasured steps null, breaks the line there and dots an isolated step", () => {
     const base = {
       sessionId: "s",
@@ -958,8 +958,13 @@ describe("session Cache Rate strip", () => {
       treeTotals: costed({}),
       stepSemantics: "",
     } as never);
-    expect(geometry.strip.rates).toEqual([50, null, 0, 100]);
-    expect(geometry.strip.singles).toHaveLength(1);
-    expect(geometry.strip.paths).toHaveLength(1);
+    expect(geometry.cache.rates).toEqual([50, null, 0, 100]);
+    expect(geometry.cache.singles).toHaveLength(1);
+    expect(geometry.cache.paths).toHaveLength(1);
+    // Fixed 0–100% of the plot height: the lone 50% step sits at mid-plot.
+    expect(geometry.cache.singles[0]?.y).toBeCloseTo(
+      geometry.plot.bottom - geometry.plot.height / 2,
+    );
+    expect(geometry.viewHeight).toBeGreaterThan(geometry.plot.bottom);
   });
 });

@@ -436,23 +436,17 @@ export const DEFAULT_SESSION_SIZE: ChartSize = {
   padding: { top: 34, right: 56, bottom: 34, left: 52 },
 };
 
-/** The Cache Rate strip sits directly under the token plot, above the Steps labels. */
-export const SESSION_STRIP_GAP = 8;
-export const SESSION_STRIP_HEIGHT = 34;
-
-export interface SessionRateStrip {
-  top: number;
-  bottom: number;
+/**
+ * The Cache Rate line lives inside the token plot on a fixed 0–100% scale of
+ * the plot height, independent of both token axes.
+ */
+export interface SessionRateLine {
   /** Per step index; null when the step has no input-side traffic (never a fabricated 0%). */
   rates: (number | null)[];
   /** Isolated measured steps, drawn as dots because a run of one has no line. */
   singles: { x: number; y: number; stepIndex: number }[];
   /** One polyline per contiguous run of measured steps. */
   paths: string[];
-  /** Baseline of the Steps labels, below the strip. */
-  axisLabelY: number;
-  /** Full SVG height: the token plot, the strip and the Steps axis. */
-  viewHeight: number;
 }
 
 export interface SessionSeriesPoint {
@@ -510,7 +504,11 @@ export interface SessionChartGeometry {
   /** One shared right-axis scale for both cumulative series. */
   cumulativeTicks: AxisTick[];
   compaction: SessionCompactionTick[];
-  strip: SessionRateStrip;
+  cache: SessionRateLine;
+  /** Baseline of the Steps labels, below the plot. */
+  axisLabelY: number;
+  /** Full SVG height. */
+  viewHeight: number;
   stepX: (index: number) => number;
   labelIndexes: number[];
 }
@@ -734,8 +732,6 @@ export function buildSessionChartGeometry(
     }
   }
 
-  const stripTop = plot.bottom + SESSION_STRIP_GAP;
-  const stripBottom = stripTop + SESSION_STRIP_HEIGHT;
   const rates = source.map((step) => cacheHitRate(step.stack));
   const runs: { x: number; y: number; stepIndex: number }[][] = [];
   rates.forEach((rate, index) => {
@@ -745,7 +741,7 @@ export function buildSessionChartGeometry(
     }
     const point = {
       x: stepX(index),
-      y: stripBottom - (Math.min(Math.max(rate, 0), 100) / 100) * SESSION_STRIP_HEIGHT,
+      y: plot.bottom - (Math.min(Math.max(rate, 0), 100) / 100) * plot.height,
       stepIndex: index,
     };
     const open = runs.at(-1);
@@ -768,17 +764,15 @@ export function buildSessionChartGeometry(
     treeCumulativeValues,
     cumulativeTicks: tree.ticks,
     compaction,
-    strip: {
-      top: stripTop,
-      bottom: stripBottom,
+    cache: {
       rates,
       singles: measured
         .filter((run) => run.length === 1)
         .map((run) => run[0] as (typeof run)[number]),
       paths: measured.filter((run) => run.length > 1).map(toLinePath),
-      axisLabelY: stripBottom + 14,
-      viewHeight: stripBottom + size.padding.bottom,
     },
+    axisLabelY: plot.bottom + 16,
+    viewHeight: size.height,
     stepX,
     labelIndexes: stepLabelIndexes(count, plot.width),
   };

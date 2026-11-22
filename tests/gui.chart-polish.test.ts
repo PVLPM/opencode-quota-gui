@@ -1345,14 +1345,15 @@ describe("session chart and tree presentation", () => {
     }
   });
 
-  it("draws one Cache Rate strip under the plot sharing the step axis, surface and tooltip", async () => {
+  it("draws the Cache Rate line inside the one plot sharing the step axis, surface and tooltip", async () => {
     const snapshot = sessionSnapshot();
     const geometry = buildSessionChartGeometry(snapshot);
     const { root, dispose } = mountSession(snapshot);
     try {
-      expect(geometry.strip.top).toBeGreaterThan(geometry.plot.bottom);
-      expect(geometry.strip.axisLabelY).toBeGreaterThan(geometry.strip.bottom);
-      expect(geometry.strip.rates).toHaveLength(snapshot.steps.length);
+      expect(geometry.axisLabelY).toBeGreaterThan(geometry.plot.bottom);
+      expect(geometry.cache.rates).toHaveLength(snapshot.steps.length);
+      expect(byClass(root, "line", "qg-chart__strip-line")).toHaveLength(0);
+      expect(graph.textOf(root)).toContain("Cache Rate (0–100%)");
       expect(
         byClass(root, "path", "qg-chart__rate-line").length +
           byClass(root, "circle", "qg-chart__rate-point").length,
@@ -1372,7 +1373,7 @@ describe("session chart and tree presentation", () => {
       await Promise.resolve();
       const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
       expect(graph.textOf(tooltip)).toContain("Cache read");
-      expect(graph.textOf(tooltip)).toContain("Cache reuse");
+      expect(graph.textOf(tooltip)).toContain("Cache Rate");
       expect(graph.textOf(tooltip)).not.toContain("request start");
     } finally {
       dispose();
