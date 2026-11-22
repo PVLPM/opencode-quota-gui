@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveAnthropicApiKey } from "../src/lib/anthropic-api-auth.js";
 import {
   clearAnthropicApiObservations,
@@ -99,6 +99,13 @@ describe("anthropic provider", () => {
         response: new Response(null, { status: options.status ?? 200, headers }),
         nowMs: Date.parse("2026-11-22T10:00:00Z"),
       });
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.parse("2026-11-22T10:00:00Z"));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
     const RESET = "2026-11-22T10:01:00Z";
     const LIMITS = {
       "anthropic-ratelimit-requests-limit": "1000",
@@ -196,6 +203,60 @@ describe("anthropic provider", () => {
           },
         }),
       ).toBe(false);
+    });
+
+    it("drops remaining and reset once the reset has passed, keeping the observed limit", async () => {
+      vi.mocked(resolveAnthropicApiKey).mockResolvedValue(API_KEY);
+      expect(observe(LIMITS)).toBe(true);
+      vi.setSystemTime(Date.parse("2026-11-22T10:01:30Z"));
+
+      const out = await anthropicProvider.fetch(ctx());
+
+      expect(out.entries).toMatchObject([
+        { kind: "value", label: "Requests:", value: "Limit 1,000" },
+        { kind: "value", label: "Input tokens:", value: "79,000 of 80,000 remaining" },
+      ]);
+      expect(out.entries[0]).not.toHaveProperty("resetTimeIso");
+    });
+
+    it("hides Retry after once its window has passed and keeps it before then", async () => {
+      vi.mocked(resolveAnthropicApiKey).mockResolvedValue(API_KEY);
+      expect(observe({ "retry-after": "30" }, { status: 429 })).toBe(true);
+
+      vi.setSystemTime(Date.parse("2026-11-22T10:00:29Z"));
+      expect((await anthropicProvider.fetch(ctx())).entries).toMatchObject([
+        { label: "Retry after:", value: "30 s (last rate-limited response)" },
+      ]);
+
+      vi.setSystemTime(Date.parse("2026-11-22T10:00:30Z"));
+      expect((await anthropicProvider.fetch(ctx())).entries).toMatchObject([
+        { value: "No rate-limit headers observed yet" },
+      ]);
+    });
+
+    it("counts only a Messages request sent with the configured key, not one carrying another key", async () => {
+      vi.mocked(resolveAnthropicApiKey).mockResolvedValue(API_KEY);
+      const messagesUrl = "https://api.anthropic.com/v1/messages";
+      const observeWith = (apiKey: string) =>
+        observeAnthropicApiResponse({
+          request: new Request(messagesUrl, {
+            method: "POST",
+            headers: { authorization: "Bearer claude-subscription", "x-api-key": apiKey },
+          }),
+          response: new Response(null, { status: 200, headers: LIMITS }),
+          nowMs: Date.parse("2026-11-22T10:00:00Z"),
+        });
+
+      expect(observeWith("sk-ant-other-key")).toBe(true);
+      expect((await anthropicProvider.fetch(ctx())).entries).toMatchObject([
+        { value: "No rate-limit headers observed yet" },
+      ]);
+
+      expect(observeWith(API_KEY)).toBe(true);
+      expect((await anthropicProvider.fetch(ctx())).entries).toMatchObject([
+        { label: "Requests:", value: "958 of 1,000 remaining" },
+        { label: "Input tokens:", value: "79,000 of 80,000 remaining" },
+      ]);
     });
 
     it("keeps Claude Agent and the Anthropic API card independent when both are configured", async () => {

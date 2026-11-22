@@ -378,7 +378,7 @@ What it reports is passive: per-minute **rate limits** read from the `anthropic-
 - It sends no request of its own: no test or dummy generation requests, and it does not poll `count_tokens` or `/v1/models`, which are not Messages meters.
 - Requests authenticated with Claude subscription (OAuth) sign-in are ignored, and no OAuth token is used for the Anthropic API card.
 - Not reported: spend, usage totals, credit balance, or organization rate limits. Anthropic provides those only through its Admin API, which needs a separate Admin key that an ordinary API key cannot replace, and no balance endpoint exists. This plugin does not use an Admin key.
-- Key: an OpenCode Anthropic API-key login, `ANTHROPIC_API_KEY`, or `provider.anthropic.options.apiKey` in trusted user/global config. An OpenCode Anthropic OAuth login does not count. See [API keys](#api-keys).
+- Key: an OpenCode Anthropic API-key login, `ANTHROPIC_API_KEY`, or `provider.anthropic.options.apiKey` in trusted user/global config. An OpenCode Anthropic OAuth login does not count. See [API keys](#api-keys). The key is matched only when it comes from `ANTHROPIC_API_KEY`, the global OpenCode config, or OpenCode's stored API-key auth; a key set only in project-level config is not matched, so the card stays in the "No rate-limit headers observed yet" state.
 
 In `enabledProviders`, the legacy `claude` alias now selects `claude-agent`. Use the canonical `anthropic` ID for the Anthropic API route, and `claude-agent` for Claude subscription quota.
 

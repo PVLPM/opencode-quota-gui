@@ -128,7 +128,10 @@ function meterValueText(meter: AnthropicRateLimitMeter): string | undefined {
  * Rows for one passive observation. Plain value rows: a percentage is never computed, so no
  * quota alert, runway or reset-notice logic can treat a per-minute rate limit as quota.
  */
-function anthropicApiRateLimitEntries(observation: AnthropicApiObservation): QuotaToastEntry[] {
+function anthropicApiRateLimitEntries(
+  observation: AnthropicApiObservation,
+  nowMs: number,
+): QuotaToastEntry[] {
   const accounting = {
     resultType: "rate_limit" as const,
     acquisitionMethod: "remote_api" as const,
@@ -138,9 +141,13 @@ function anthropicApiRateLimitEntries(observation: AnthropicApiObservation): Quo
   };
   const entries: QuotaToastEntry[] = [];
   for (const [, name] of ANTHROPIC_RATE_LIMIT_METERS) {
-    const meter = observation.meters[name];
-    const value = meter ? meterValueText(meter) : undefined;
-    if (!meter || value === undefined) continue;
+    const observed = observation.meters[name];
+    if (!observed) continue;
+    // A passed reset means the observed remaining count is stale; only the limit still applies.
+    const expired = observed.resetAtIso !== undefined && Date.parse(observed.resetAtIso) <= nowMs;
+    const meter: AnthropicRateLimitMeter = expired ? { limit: observed.limit } : observed;
+    const value = meterValueText(meter);
+    if (value === undefined) continue;
     entries.push({
       kind: "value",
       accounting: { ...accounting },
@@ -153,7 +160,10 @@ function anthropicApiRateLimitEntries(observation: AnthropicApiObservation): Quo
       ...(meter.resetAtIso !== undefined ? { resetTimeIso: meter.resetAtIso } : {}),
     });
   }
-  if (observation.retryAfterSeconds !== undefined) {
+  if (
+    observation.retryAfterSeconds !== undefined &&
+    observation.observedAtMs + observation.retryAfterSeconds * 1000 > nowMs
+  ) {
     entries.push({
       kind: "value",
       accounting: { ...accounting },
@@ -197,7 +207,7 @@ export const anthropicProvider: QuotaProvider = {
       );
     }
     const observation = readAnthropicApiObservation(digestAnthropicApiKey(apiKey));
-    const entries = observation ? anthropicApiRateLimitEntries(observation) : [];
+    const entries = observation ? anthropicApiRateLimitEntries(observation, Date.now()) : [];
     // Configured but nothing observed yet is a truthful status, neither an error nor a zero.
     const result = attemptedResult(
       entries.length > 0
