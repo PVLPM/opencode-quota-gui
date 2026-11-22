@@ -569,6 +569,35 @@ export function createCacheObserverIngestor(
       if (source === "live") applyObservedTtl(event.data);
       return;
     }
+    if (isRecord(event) && event.type === "session.cache.warming") {
+      if (source === "live" && isRecord(event.data)) {
+        const data = event.data;
+        const sessionId = nonEmptyString(data.sessionID);
+        const state = sessionId === undefined ? undefined : states.get(sessionId);
+        const latest = state?.invocations.at(-1);
+        const estimate = sessionId === undefined ? undefined : query(sessionId)?.ttlEstimate;
+        if (
+          sessionId !== undefined &&
+          state !== undefined &&
+          latest !== undefined &&
+          estimate?.deadlineAtMs !== undefined &&
+          typeof data.dispatchMs === "number" &&
+          Number.isFinite(data.dispatchMs) &&
+          data.dispatchMs > (latest.warmingAnchorAtMs ?? latest.dispatchAtMs ?? Infinity) &&
+          data.evidence === "warming-inferred"
+        ) {
+          states.set(sessionId, {
+            ...state,
+            invocations: [
+              ...state.invocations.slice(0, -1),
+              { ...latest, warmingAnchorAtMs: data.dispatchMs },
+            ],
+          });
+          notify(sessionId);
+        }
+      }
+      return;
+    }
     const started = startedStepFromDto(event);
     if (started !== undefined) {
       const key = startedStepKey(started.sessionId, started.messageId);

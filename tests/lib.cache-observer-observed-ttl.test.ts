@@ -155,3 +155,42 @@ describe("session.cache.ttl DTO validation", () => {
     expect(isDashboardRpcCacheObserverEvent({ ...ttlEvent(), created: Number.NaN })).toBe(false);
   });
 });
+
+describe("warming refresh", () => {
+  const warming = (dispatchMs: number, sessionID = SESSION) => ({
+    type: "session.cache.warming",
+    data: { sessionID, dispatchMs, evidence: "warming-inferred" },
+  });
+
+  it("validates the exact relay shape", () => {
+    expect(isDashboardRpcCacheObserverEvent(warming(1_500))).toBe(true);
+    for (const bad of [
+      warming(-1),
+      warming(Number.NaN),
+      warming(1_500, ""),
+      { ...warming(1_500), extra: true },
+      { ...warming(1_500), data: { ...warming(1_500).data, evidence: "observed" } },
+    ])
+      expect(isDashboardRpcCacheObserverEvent(bad)).toBe(false);
+  });
+
+  it("reanchors only an existing newer estimate and clears on a later completed step", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestor.ingest(warming(1_500));
+    expect(ingestor.query(SESSION)).toBeUndefined();
+    ingestStep(ingestor);
+    expect(ingestor.query(SESSION)?.ttlEstimate?.anchor).toBeUndefined();
+    ingestor.ingest(warming(1_500));
+    expect(ingestor.query(SESSION)?.ttlEstimate).toMatchObject({
+      ttlMs: 300_000,
+      deadlineAtMs: 301_500,
+      anchor: "warming-inferred",
+      anchorAtMs: 1_500,
+    });
+    ingestor.ingest(warming(1_200));
+    expect(ingestor.query(SESSION)?.ttlEstimate?.anchorAtMs).toBe(1_500);
+    ingestStep(ingestor, "claude-agent", "new", SESSION, 1_700);
+    expect(ingestor.query(SESSION)?.ttlEstimate?.anchor).toBeUndefined();
+    ingestor.dispose();
+  });
+});

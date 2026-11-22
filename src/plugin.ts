@@ -22,6 +22,7 @@ import {
   notifyCredentialsChanged,
   scrubCredentialErrorText,
 } from "./lib/opencode-auth.js";
+import { OpencodeWarmingRefreshTracker } from "./lib/opencode-warming-refresh.js";
 import { resolveQuotaResetRetryDelayMs } from "./lib/quota-retry-wait.js";
 import type { QuotaSurfaceHost } from "./lib/quota-surface-data.js";
 
@@ -69,6 +70,15 @@ export const QuotaToastPlugin = Plugin.define({
         if (delay !== undefined) event.decision = { retry: true, delay };
       } catch (error) {
         console.warn(`[opencode-quota-gui] retry hook failed: ${logReason(error)}`);
+      }
+    });
+
+    const warming = new OpencodeWarmingRefreshTracker();
+    await ctx.session.hook("model.request", (event) => {
+      try {
+        warming.onModelRequest(event, Date.now());
+      } catch {
+        // Observation must never interfere with a request.
       }
     });
 
@@ -304,6 +314,17 @@ export const QuotaToastPlugin = Plugin.define({
               emitCacheObserverEvent(cacheObserverEvent, event.created);
             }
             claudeTtl.observe(event, cacheObserverEvent);
+            if (event.type === "session.step.started") warming.onStepStarted(event);
+            else if (event.type === "session.step.ended") warming.onStepEnded(event);
+            else if (event.type === "session.usage.updated") {
+              const refresh = warming.onUsageUpdated(event);
+              if (refresh !== undefined) {
+                emitCacheObserverEvent(
+                  { type: "session.cache.warming", data: refresh },
+                  Date.now(),
+                );
+              }
+            }
           }
           if (signal.aborted) return;
           throw new Error("host event stream ended");

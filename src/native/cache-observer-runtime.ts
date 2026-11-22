@@ -1377,7 +1377,7 @@ export function createNativeCacheObserverRuntime(options: {
         }
         return;
       }
-      if (event.type === "session.cache.ttl") {
+      if (event.type === "session.cache.ttl" || event.type === "session.cache.warming") {
         const sessionId = event.data.sessionID;
         if (interestedSessions.has(sessionId) || childOwners.has(sessionId)) ingestor.ingest(event);
         return;
