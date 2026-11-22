@@ -1,5 +1,6 @@
 import type {
   CostedTokens,
+  ModelIdentity,
   ProjectActivityRow,
   ProjectRootRow,
   ProjectSnapshot,
@@ -801,6 +802,48 @@ function sessionAgent(
   return latest?.row.agent?.trim();
 }
 
+/**
+ * Identity actually recorded for one invocation. OpenCode stores the effort as
+ * `model.variant`; `default` is its "no explicit effort" value, so neither it
+ * nor an empty string is shown as an effort.
+ */
+function modelIdentityOf(row: OpenCodeRawAssistantRow): ModelIdentity | undefined {
+  if (!row.providerID || !row.modelID) return undefined;
+  const identity: ModelIdentity = { providerId: row.providerID, modelId: row.modelID };
+  const effort = row.variant?.trim();
+  if (effort && effort !== "default") identity.effort = effort;
+  return identity;
+}
+
+function identityKey(identity: ModelIdentity): string {
+  return JSON.stringify([identity.providerId, identity.modelId, identity.effort ?? null]);
+}
+
+/** Distinct identities of one session's own steps, most recently used first. */
+function sessionModelIdentities(ownSteps: readonly OwnedStep[]): ModelIdentity[] {
+  const lastUse = new Map<string, { identity: ModelIdentity; step: OwnedStep }>();
+  for (const step of ownSteps) {
+    const identity = modelIdentityOf(step.row);
+    if (!identity) continue;
+    const key = identityKey(identity);
+    const known = lastUse.get(key);
+    if (
+      known === undefined ||
+      step.timeMs > known.step.timeMs ||
+      (step.timeMs === known.step.timeMs &&
+        compareIds(step.row.messageID, known.step.row.messageID) > 0)
+    ) {
+      lastUse.set(key, { identity, step });
+    }
+  }
+  return [...lastUse.values()]
+    .sort(
+      (a, b) =>
+        b.step.timeMs - a.step.timeMs || compareIds(b.step.row.messageID, a.step.row.messageID),
+    )
+    .map((entry) => entry.identity);
+}
+
 function buildSessionSnapshot(
   model: AnalyticsModel,
   sessionId: string,
@@ -882,6 +925,7 @@ function buildSessionSnapshot(
       stepCount: ownSteps.length,
       subtreeNodeCount: subtreeNodeCounts.get(id)!,
       latestActivityAtMs: subtreeLatest.get(id)!,
+      models: sessionModelIdentities(ownSteps),
     };
     if (session.parentID !== undefined) node.parentId = session.parentID;
     const agent = sessionAgent(session, ownSteps);
@@ -911,8 +955,10 @@ function buildSessionSnapshot(
         contextTokens: stack.input + stack.cacheRead + stack.cacheWrite,
         totalTokens: sumTokenStack(stack),
       };
-      if (row.providerID && row.modelID) {
-        step.model = { providerId: row.providerID, modelId: row.modelID };
+      const identity = modelIdentityOf(row);
+      if (identity) step.model = identity;
+      if (row.createdAtMs > 0 && Number.isFinite(row.createdAtMs)) {
+        step.createdAtMs = row.createdAtMs;
       }
       if (row.agent) step.agent = row.agent;
       steps.push(step);

@@ -184,8 +184,7 @@ interface RefreshJob {
 interface StagedUpsert {
   row: OpenCodeRawAssistantRow;
   updatedAtMs: number | null;
-  agent?: string;
-  /** The payload reader projected the agent field (absence is authoritative). */
+  /** The payload reader projected agent/effort (absence is authoritative). */
   agentProjected?: boolean;
 }
 
@@ -502,7 +501,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     return { index, fingerprint };
   }
 
-  function setRow(row: OpenCodeRawAssistantRow, updatedAtMs: number | null, agent?: string): void {
+  function setRow(row: OpenCodeRawAssistantRow, updatedAtMs: number | null): void {
     const { index } = internFingerprint(row);
     const occurrence: Occurrence = {
       fingerprintIndex: index,
@@ -510,7 +509,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       messageID: row.messageID,
       updatedAtMs,
     };
-    if (agent !== undefined) occurrence.agent = agent;
+    if (row.agent !== undefined) occurrence.agent = row.agent;
+    if (row.variant !== undefined) occurrence.variant = row.variant;
     state.occurrences.set(row.messageID, occurrence);
     indexes.upsert(occurrence);
   }
@@ -1453,7 +1453,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         // synthetic occurrence that simply has no transient agent loaded.
         agentProjected: true,
       };
-      if (row.agent !== undefined) entry.agent = row.agent;
       changedMap.set(key, entry);
       removalKeys.delete(key);
     };
@@ -2244,7 +2243,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const key = row.messageID;
       const occurrence = state.occurrences.get(key);
       if (!occurrence) {
-        setRow(row, updatedAtMs, row.agent);
+        setRow(row, updatedAtMs);
         upserts.push(row);
         return;
       }
@@ -2255,7 +2254,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         fingerprintOf(oldRow) === fingerprintOf(row);
       if (!sameContribution) {
         if (oldRow) removals.push(oldRow);
-        setRow(row, updatedAtMs, row.agent);
+        setRow(row, updatedAtMs);
         upserts.push(row);
         return;
       }
@@ -2263,9 +2262,16 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         occurrence.updatedAtMs = updatedAtMs;
         updatedAtChanged = true;
       }
-      if (agentProjected && row.agent !== occurrence.agent) {
+      // Agent and reasoning effort are detail-only metadata projected by the
+      // same payload read; either changing refreshes the cached session DTO.
+      if (
+        agentProjected &&
+        (row.agent !== occurrence.agent || row.variant !== occurrence.variant)
+      ) {
         if (row.agent === undefined) delete occurrence.agent;
         else occurrence.agent = row.agent;
+        if (row.variant === undefined) delete occurrence.variant;
+        else occurrence.variant = row.variant;
         agentUpserts.push(row);
         agentAffectedSessionIds.add(row.sessionID);
       }

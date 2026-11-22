@@ -549,3 +549,83 @@ describe("session tree scope", () => {
     }
   });
 });
+
+describe("session model identity and timing projection", () => {
+  const withModel = (
+    row: OpenCodeRawAssistantRow,
+    modelID: string,
+    variant?: string,
+  ): OpenCodeRawAssistantRow => ({
+    ...row,
+    providerID: "openai",
+    modelID,
+    ...(variant === undefined ? {} : { variant }),
+  });
+
+  it("lists distinct identities by most recent use, deduplicating returns to earlier identities", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        withModel(assistantRow("ses_root", "m1", 10, { input: 1 }), "terra", "high"),
+        withModel(assistantRow("ses_root", "m2", 20, { input: 2 }), "luna", "high"),
+        withModel(assistantRow("ses_root", "m3", 30, { input: 3 }), "terra", "high"),
+        withModel(assistantRow("ses_root", "m4", 40, { input: 4 }), "terra", "low"),
+        withModel(assistantRow("ses_root", "m5", 50, { input: 5 }), "terra", "default"),
+        withModel(assistantRow("ses_child", "c1", 60, { input: 6 }), "child-model", "max"),
+      ],
+    });
+    const nodes = createUsageAnalytics(dataset).session("ses_root").nodes;
+    expect(nodes[0]?.models).toEqual([
+      { providerId: "openai", modelId: "terra" },
+      { providerId: "openai", modelId: "terra", effort: "low" },
+      { providerId: "openai", modelId: "terra", effort: "high" },
+      { providerId: "openai", modelId: "luna", effort: "high" },
+    ]);
+    // A descendant's identity never leaks into its parent's own list.
+    expect(nodes[1]?.models).toEqual([
+      { providerId: "openai", modelId: "child-model", effort: "max" },
+    ]);
+  });
+
+  it("leaves identities empty when no model is recorded and never invents an effort", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "m1", 10, { input: 1 }),
+        withModel(assistantRow("ses_root", "m2", 20, { input: 2 }), "terra"),
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_root");
+    expect(snapshot.nodes[0]?.models).toEqual([{ providerId: "openai", modelId: "terra" }]);
+    expect(snapshot.steps[0]).not.toHaveProperty("model");
+    expect(snapshot.steps[1]?.model).toEqual({ providerId: "openai", modelId: "terra" });
+  });
+
+  it("exposes stored creation time per step only when it is a positive number", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        { ...assistantRow("ses_root", "m1", 10, { input: 1 }), createdAtMs: 0, completedAtMs: 50 },
+        assistantRow("ses_root", "m2", 100, { input: 2 }),
+      ],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps[0]).toMatchObject({ messageId: "m1", atMs: 50 });
+    expect(steps[0]).not.toHaveProperty("createdAtMs");
+    expect(steps[1]).toMatchObject({ messageId: "m2", createdAtMs: 100, atMs: 1_100 });
+  });
+
+  it("keeps each node's own tokens separate from its subtree", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "m1", 10, { input: 1, cacheRead: 3 }),
+        assistantRow("ses_child", "c1", 20, { input: 10, cacheRead: 30 }),
+      ],
+    });
+    const [root, child] = createUsageAnalytics(dataset).session("ses_root").nodes;
+    expect(root?.ownTokens.total).toBe(4);
+    expect(root?.subtreeTokens.total).toBe(44);
+    expect(child?.ownTokens.total).toBe(40);
+  });
+});

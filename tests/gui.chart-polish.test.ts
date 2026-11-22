@@ -1312,6 +1312,7 @@ describe("session chart and tree presentation", () => {
       childIds: index === 0 ? ["session-child-1", "session-child-2", "session-child-3"] : [],
       ownTokens: costed({ input: 10 }),
       subtreeTokens: costed({ input: 10 }),
+      models: [],
       stepCount: 1,
       subtreeNodeCount: 1,
       latestActivityAtMs: NOW - index,
@@ -1413,6 +1414,7 @@ describe("session chart and tree presentation", () => {
       childIds: [],
       ownTokens: costed({ input: 10 }),
       subtreeTokens: costed({ input: 10 }),
+      models: [],
     };
     const grandchildStep = {
       ...childStep,
@@ -1591,6 +1593,7 @@ describe("session chart and tree presentation", () => {
             childIds: [],
             ownTokens: costed({ input: 10 }),
             subtreeTokens: costed({ input: 10 }),
+            models: [],
           },
         ],
         steps: [base.steps[2] as SessionSnapshot["steps"][number]],

@@ -438,17 +438,36 @@ export interface SessionNode {
   stepCount: number;
   subtreeNodeCount: number;
   latestActivityAtMs: number;
+  /**
+   * Distinct provider/model/effort identities this session itself used,
+   * deduplicated by the complete identity and ordered by most recent actual
+   * use. `models[0]` is the last used identity; empty when none was recorded.
+   */
+  models: ModelIdentity[];
+}
+
+/** Provider/model plus the reasoning effort only when OpenCode recorded one. */
+export interface ModelIdentity {
+  providerId: string;
+  modelId: string;
+  effort?: string;
 }
 
 export interface StepPoint {
   sessionId: string;
   messageId: string;
+  /** Completion time of the assistant message (the step's chart position). */
   atMs: number;
+  /**
+   * OpenCode's stored assistant-message creation time. Not a request-start
+   * timestamp; absent when it was not recorded as a positive number.
+   */
+  createdAtMs?: number;
   branch: number;
   stack: TokenStack;
   contextTokens: number;
   totalTokens: number;
-  model?: { providerId: string; modelId: string };
+  model?: ModelIdentity;
   agent?: string;
 }
 

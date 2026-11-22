@@ -2320,6 +2320,34 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.close();
   });
 
+  it("refreshes the session DTO when only the recorded reasoning effort changes", async () => {
+    const db = baseDb();
+    const { engine, savedStates, setNow } = harness(db);
+    await engine.session("ses_root");
+    await flushAsync();
+
+    const target = db.rows.find((entry) => entry.messageID === "msg_b");
+    if (!target) throw new Error("msg_b missing");
+    target.providerID = "openai";
+    target.modelID = "gpt-5";
+    const compactWrites = savedStates.length;
+
+    // A fresh project range per round forces a payload re-read, as in the agent test above.
+    const ranges = ["30d", "7d", "lifetime"] as const;
+    for (const [index, variant] of ["high", "low", undefined].entries()) {
+      if (variant === undefined) delete target.variant;
+      else target.variant = variant;
+      setNow(NOW + 60_001 + index);
+      await engine.project("p1", ranges[index] ?? "lifetime");
+      await flushAsync();
+
+      const session = await engine.session("ses_root");
+      expect(session.steps.find((step) => step.messageId === "msg_b")?.model?.effort).toBe(variant);
+      expect(savedStates.length).toBe(compactWrites);
+    }
+    await engine.close();
+  });
+
   it("expires finite warm DTOs when a no-change refresh advances the window", async () => {
     const db = baseDb();
     const age24 = row("ses_root", "msg_age24_warm", NOW - 23 * HOUR, { input: 11 });

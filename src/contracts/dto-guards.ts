@@ -27,6 +27,7 @@ import type {
   HomeSnapshot,
   ImportPreview,
   JsonValue,
+  ModelIdentity,
   ProjectActivityRow,
   ProjectRootRow,
   ProjectSnapshot,
@@ -662,6 +663,15 @@ function isSessionBreadcrumb(value: unknown): value is SessionSnapshot["breadcru
   );
 }
 
+function isModelIdentity(value: unknown): value is ModelIdentity {
+  return (
+    isRecord(value) &&
+    isText(value.providerId) &&
+    isText(value.modelId) &&
+    isOptional(value.effort, isText)
+  );
+}
+
 function isSessionNode(value: unknown): value is SessionNode {
   return (
     isRecord(value) &&
@@ -676,7 +686,8 @@ function isSessionNode(value: unknown): value is SessionNode {
     isCostedTokens(value.subtreeTokens) &&
     isFiniteNumber(value.stepCount) &&
     isFiniteNumber(value.subtreeNodeCount) &&
-    isFiniteNumber(value.latestActivityAtMs)
+    isFiniteNumber(value.latestActivityAtMs) &&
+    isArrayOf(value.models, isModelIdentity)
   );
 }
 
@@ -686,15 +697,12 @@ function isStepPoint(value: unknown): value is StepPoint {
     isText(value.sessionId) &&
     isText(value.messageId) &&
     isFiniteNumber(value.atMs) &&
+    isOptional(value.createdAtMs, isFiniteNumber) &&
     isFiniteNumber(value.branch) &&
     isTokenStack(value.stack) &&
     isFiniteNumber(value.contextTokens) &&
     isFiniteNumber(value.totalTokens) &&
-    isOptional(
-      value.model,
-      (model): model is { providerId: string; modelId: string } =>
-        isRecord(model) && isText(model.providerId) && isText(model.modelId),
-    ) &&
+    isOptional(value.model, isModelIdentity) &&
     isOptional(value.agent, isText)
   );
 }

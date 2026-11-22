@@ -96,6 +96,8 @@ type ProjectedMessageRow = {
   time_completed: unknown;
   agent: unknown;
   mode: unknown;
+  /** `$.model.variant`: the reasoning effort OpenCode recorded for the invocation. */
+  variant?: unknown;
 };
 
 type SessionRow = {
@@ -209,6 +211,7 @@ const PROJECTED_MESSAGE_COLUMNS = [
   `${guardedJsonScalar("$.cost")} AS cost`,
   `${guardedJsonScalar("$.time.completed")} AS time_completed`,
   `${guardedJsonScalar("$.agent")} AS agent`,
+  `${guardedJsonScalar("$.model.variant")} AS variant`,
 ].join(", ");
 
 const ASSISTANT_FILTER = `type = 'assistant'`;
@@ -783,6 +786,8 @@ export interface OpenCodeRawAssistantRow {
   providerID?: string;
   modelID?: string;
   agent?: string;
+  /** Reasoning effort as stored (`model.variant`); absent when not recorded. */
+  variant?: string;
 }
 
 /**
@@ -828,6 +833,7 @@ function mapRawCompletedAssistantRow(row: ProjectedMessageRow): OpenCodeRawAssis
   const completed = completedAt(message);
   if (completed === null) return null;
 
+  const variant = normalizeString(row.variant);
   return {
     sessionID: message.sessionID,
     messageID: message.id,
@@ -844,6 +850,7 @@ function mapRawCompletedAssistantRow(row: ProjectedMessageRow): OpenCodeRawAssis
     providerID: message.providerID,
     modelID: message.modelID,
     agent: message.agent,
+    ...(variant === undefined ? {} : { variant }),
   };
 }
 

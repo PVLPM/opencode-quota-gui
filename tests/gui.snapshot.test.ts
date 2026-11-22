@@ -140,6 +140,7 @@ function session(sessionId = "s1"): SessionSnapshot {
         childIds: [],
         ownTokens: costed(3),
         subtreeTokens: costed(3),
+        models: [],
         stepCount: 1,
         subtreeNodeCount: 1,
         latestActivityAtMs: NOW,

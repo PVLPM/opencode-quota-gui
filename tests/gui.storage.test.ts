@@ -180,6 +180,33 @@ describe("raw completed assistant reader", () => {
     });
   });
 
+  it("reads the recorded reasoning effort from model.variant and leaves it unset when absent", async () => {
+    stubDatabase({
+      sessions: [{ id: "ses_one", createdMs: 1 }],
+      messages: [
+        {
+          id: "msg_effort",
+          sessionID: "ses_one",
+          createdMs: 10,
+          completedMs: 20,
+          model: { providerID: "openai", id: "gpt-5", variant: "high" },
+        },
+        {
+          id: "msg_plain",
+          sessionID: "ses_one",
+          createdMs: 30,
+          completedMs: 40,
+          model: { providerID: "openai", id: "gpt-5" },
+        },
+      ],
+    });
+
+    const rows = await readCompletedAssistantRows();
+
+    expect(rows.find((row) => row.messageID === "msg_effort")?.variant).toBe("high");
+    expect(rows.find((row) => row.messageID === "msg_plain")).not.toHaveProperty("variant");
+  });
+
   it("keeps completed-only rows and never returns unfinished or non-assistant rows", async () => {
     stubDatabase({
       sessions: [{ id: "ses_one", createdMs: 1 }],

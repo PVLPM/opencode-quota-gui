@@ -17,6 +17,7 @@ import type {
   HomeSnapshot,
   ImportPreview,
   JsonValue,
+  ModelIdentity,
   PrimaryQuotaWindowRef,
   ProjectActivityRow,
   ProjectRootRow,
@@ -1152,6 +1153,17 @@ function readBreadcrumb(
   };
 }
 
+function readModelIdentity(value: JsonValue, endpoint: string, detail: string): ModelIdentity {
+  const identity = readRecord(value, endpoint, detail);
+  const parsed: ModelIdentity = {
+    providerId: readText(identity.providerId, endpoint, `${detail}.providerId`),
+    modelId: readText(identity.modelId, endpoint, `${detail}.modelId`),
+  };
+  const effort = readOptionalText(identity.effort, endpoint, `${detail}.effort`);
+  if (effort !== undefined) parsed.effort = effort;
+  return parsed;
+}
+
 function readSessionNode(value: JsonValue, endpoint: string): SessionNode {
   const detail = "nodes[]";
   const node = readRecord(value, endpoint, detail);
@@ -1171,6 +1183,9 @@ function readSessionNode(value: JsonValue, endpoint: string): SessionNode {
       endpoint,
       `${detail}.latestActivityAtMs`,
     ),
+    models: readArray(node.models, endpoint, `${detail}.models`).map((entry) =>
+      readModelIdentity(entry, endpoint, `${detail}.models[]`),
+    ),
   };
   const worktreeLabel = readOptionalText(node.worktreeLabel, endpoint, `${detail}.worktreeLabel`);
   if (worktreeLabel !== undefined) parsed.worktreeLabel = worktreeLabel;
@@ -1184,7 +1199,7 @@ function readSessionNode(value: JsonValue, endpoint: string): SessionNode {
 function readStep(value: JsonValue, endpoint: string): StepPoint {
   const detail = "steps[]";
   const step = readRecord(value, endpoint, detail);
-  return {
+  const parsed: StepPoint = {
     sessionId: readText(step.sessionId, endpoint, `${detail}.sessionId`),
     messageId: readText(step.messageId, endpoint, `${detail}.messageId`),
     atMs: readNumber(step.atMs, endpoint, `${detail}.atMs`),
@@ -1193,6 +1208,11 @@ function readStep(value: JsonValue, endpoint: string): StepPoint {
     contextTokens: readNumber(step.contextTokens, endpoint, `${detail}.contextTokens`),
     totalTokens: readNumber(step.totalTokens, endpoint, `${detail}.totalTokens`),
   };
+  const createdAtMs = readOptionalNumber(step.createdAtMs, endpoint, `${detail}.createdAtMs`);
+  if (createdAtMs !== undefined) parsed.createdAtMs = createdAtMs;
+  if (step.model !== undefined)
+    parsed.model = readModelIdentity(step.model, endpoint, `${detail}.model`);
+  return parsed;
 }
 
 function readCompactionMarker(

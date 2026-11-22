@@ -35,7 +35,7 @@ export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
  * usage rollups, or before exact historical temporal pricing) must be rebuilt,
  * not served as if it were current.
  */
-export const ANALYTICS_PRESENTATION_VERSION = 3;
+export const ANALYTICS_PRESENTATION_VERSION = 4;
 
 export interface AnalyticsCoverage {
   /** Inclusive start; absent means the lifetime read reached the beginning. */
@@ -68,6 +68,8 @@ export interface Occurrence {
   updatedAtMs: number | null;
   /** In-memory only: never persisted, so detail-only agents stay transient. */
   agent?: string;
+  /** In-memory only, like `agent`: the recorded reasoning effort for session detail. */
+  variant?: string;
 }
 
 /**
@@ -162,7 +164,7 @@ export function compactFingerprintOf(row: OpenCodeRawAssistantRow): CompactFinge
 
 export function rowFromFingerprint(
   fingerprint: CompactFingerprint,
-  occurrence: Pick<Occurrence, "sessionID" | "messageID" | "agent">,
+  occurrence: Pick<Occurrence, "sessionID" | "messageID" | "agent" | "variant">,
 ): OpenCodeRawAssistantRow {
   const row: OpenCodeRawAssistantRow = {
     sessionID: occurrence.sessionID,
@@ -181,6 +183,7 @@ export function rowFromFingerprint(
   if (fingerprint[3] !== null) row.modelID = fingerprint[3];
   if (fingerprint[9] !== null) row.cost = fingerprint[9];
   if (occurrence.agent !== undefined) row.agent = occurrence.agent;
+  if (occurrence.variant !== undefined) row.variant = occurrence.variant;
   return row;
 }
 
