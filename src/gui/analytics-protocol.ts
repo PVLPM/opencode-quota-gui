@@ -16,16 +16,7 @@ import type { RangeKey } from "../contracts/ranges.js";
 
 export const ANALYTICS_WORKER_PROTOCOL_VERSION = 1;
 
-/**
- * Cold 7d/30d/lifetime analytics catch-up reads the full source store and can
- * legitimately take tens of seconds on a slow local disk; a foreground request
- * queued behind one can add its own scoped read. The old 90 s budget retired
- * healthy workers mid-read on measured sources. Keep a finite budget above the
- * measured worst request (112.9 s on the reported source), so genuinely stuck
- * workers are still retired and recovered on the next request. The Analytics
- * view also stops re-joining a host-timed-out read after this long.
- */
-export const ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
+export { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS } from "../contracts/dashboard.js";
 
 export type AnalyticsErrorCode =
   | "bad-request"

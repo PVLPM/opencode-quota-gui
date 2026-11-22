@@ -1,8 +1,10 @@
 import { BUILD_IDENTITY, type BuildIdentity } from "../contracts/build-identity";
 import { isCardHidden, isLegacyProviderHidden } from "../contracts/card-visibility";
 import type { Bucket, ProviderCard, QuotaCardRow, Usage } from "../contracts/dashboard";
-import { DASHBOARD_CONTRACT_VERSION } from "../contracts/dashboard";
-import { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS } from "../gui/analytics-protocol";
+import {
+  ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS,
+  DASHBOARD_CONTRACT_VERSION,
+} from "../contracts/dashboard";
 import type { ConnectionState } from "./dashboard-client";
 import { DashboardError } from "./dashboard-client";
 
