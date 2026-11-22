@@ -48,6 +48,7 @@ import {
 } from "../src/ui/chart-geometry.js";
 import { BUSY_DELAY_MS, createBusyIndicator } from "../src/ui/components/busy.js";
 import { estimateExplanation } from "../src/ui/components/estimate.js";
+import { modelTransitions } from "../src/ui/session-timing.js";
 import { sortProjectRows, sortRootRows, sortSessionTree } from "../src/ui/sorting.js";
 
 const HOUR_MS = 3_600_000;
@@ -882,5 +883,83 @@ describe("project lifetime usage", () => {
     expect(lifetime.usage.buckets[0]?.startMs).toBe(ACTIVITY_DAY_START);
     expect(lifetime.usage.window.sinceMs).toBeUndefined();
     expect(sevenDay.usage.buckets.at(-1)?.endMs).toBe(NOW);
+  });
+});
+
+describe("modelTransitions", () => {
+  const step = (
+    messageId: string,
+    model?: { providerId: string; modelId: string; effort?: string },
+    sessionId = "s",
+  ) =>
+    ({
+      sessionId,
+      messageId,
+      atMs: 1,
+      branch: 0,
+      stack: tokensOf(),
+      contextTokens: 0,
+      totalTokens: 0,
+      model,
+    }) as import("../src/contracts/dashboard.js").StepPoint;
+  const a = { providerId: "openai", modelId: "m1", effort: "high" };
+
+  it("marks model, effort-only and combined changes, and a switch back, once each", () => {
+    const steps = [
+      step("1", a),
+      step("2", { ...a, effort: "low" }),
+      step("3", { providerId: "openai", modelId: "m2", effort: "low" }),
+      step("4", { providerId: "openai", modelId: "m1", effort: "high" }),
+      step("5", { providerId: "openai", modelId: "m1", effort: "high" }),
+    ];
+    expect(modelTransitions(steps, "s").map((entry) => [entry.stepIndex, entry.kind])).toEqual([
+      [1, "effort"],
+      [2, "model"],
+      [3, "model"],
+    ]);
+  });
+
+  it("infers nothing across unrecorded identities and ignores other sessions", () => {
+    const steps = [
+      step("1", a),
+      step("2", undefined),
+      step("3", { ...a, modelId: "other" }),
+      step("4", { ...a, modelId: "child" }, "child"),
+    ];
+    expect(modelTransitions(steps, "s")).toEqual([]);
+  });
+});
+
+describe("session Cache Rate strip", () => {
+  it("keeps unmeasured steps null, breaks the line there and dots an isolated step", () => {
+    const base = {
+      sessionId: "s",
+      atMs: 1,
+      branch: 0,
+      contextTokens: 0,
+      totalTokens: 0,
+    };
+    const steps = [
+      { ...base, messageId: "1", stack: tokensOf({ input: 50, cacheRead: 50 }) },
+      { ...base, messageId: "2", stack: tokensOf({ input: 0, cacheRead: 0 }) },
+      { ...base, messageId: "3", stack: tokensOf({ input: 100, cacheRead: 0 }) },
+      { ...base, messageId: "4", stack: tokensOf({ input: 0, cacheRead: 100 }) },
+    ];
+    const geometry = buildSessionChartGeometry({
+      focusSessionId: "s",
+      timeZone: "UTC",
+      projectId: "p",
+      projectName: "P",
+      breadcrumbs: [],
+      nodes: [],
+      steps,
+      compactionMarkers: [],
+      ownSummary: { ...costed({}), stepCount: 4 },
+      treeTotals: costed({}),
+      stepSemantics: "",
+    } as never);
+    expect(geometry.strip.rates).toEqual([50, null, 0, 100]);
+    expect(geometry.strip.singles).toHaveLength(1);
+    expect(geometry.strip.paths).toHaveLength(1);
   });
 });

@@ -8,7 +8,16 @@ import {
 } from "../chart-geometry";
 import { chartIndexAt, createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
-import { axisRangeCaption, formatExactCount, formatTimestamp, formatTokenCount } from "../format";
+import {
+  axisRangeCaption,
+  formatExactCount,
+  formatModelIdentity,
+  formatPercent,
+  formatPercentExact,
+  formatTimestamp,
+  formatTokenCount,
+} from "../format";
+import { modelTransitions } from "../session-timing";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
 
@@ -39,6 +48,11 @@ export function SessionChart(props: {
   const active = inspection.active;
   const { size, ref } = createChartLayout(DEFAULT_SESSION_SIZE);
   const geometry = createMemo(() => buildSessionChartGeometry(props.snapshot, size));
+  const transitions = createMemo(() =>
+    modelTransitions(props.snapshot.steps, props.snapshot.focusSessionId),
+  );
+  const transitionAt = (index: number) => transitions().find((entry) => entry.stepIndex === index);
+  const rateAt = (index: number): number | null => geometry().strip.rates[index] ?? null;
   const own = () => props.snapshot.ownSummary;
   const tree = () => props.snapshot.treeTotals;
   const timeZone = () => props.snapshot.timeZone;
@@ -105,11 +119,11 @@ export function SessionChart(props: {
       `Step ${index + 1}`,
       formatTimestamp(step.atMs, timeZone()),
       contextText,
-      `Cumulative this session ${formatExactCount(geometry().ownCumulativeValues[index] ?? 0)}`,
+      `Cumulative Main session ${formatExactCount(geometry().ownCumulativeValues[index] ?? 0)}`,
     ];
     if (geometry().hasDescendants) {
       parts.push(
-        `Cumulative session tree ${formatExactCount(geometry().treeCumulativeValues[index] ?? 0)}`,
+        `Cumulative Session tree ${formatExactCount(geometry().treeCumulativeValues[index] ?? 0)}`,
       );
     }
     return parts.join(", ");
@@ -205,12 +219,28 @@ export function SessionChart(props: {
             </div>
             <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-own)" }}>
               <span class="qg-legend__swatch" aria-hidden="true" />
-              <span class="qg-legend__label">Cumulative · this session</span>
+              <span class="qg-legend__label">Cumulative · Main session</span>
             </div>
             <Show when={geometry().hasDescendants}>
               <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-total)" }}>
                 <span class="qg-legend__swatch qg-legend__swatch--dashed" aria-hidden="true" />
-                <span class="qg-legend__label">Cumulative · session tree</span>
+                <span class="qg-legend__label">Cumulative · Session tree</span>
+              </div>
+            </Show>
+            <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-rate)" }}>
+              <span class="qg-legend__swatch" aria-hidden="true" />
+              <span class="qg-legend__label">Cache Rate</span>
+            </div>
+            <Show when={transitions().some((entry) => entry.kind === "model")}>
+              <div class="qg-legend__item">
+                <span class="qg-legend__mark qg-legend__mark--model" aria-hidden="true" />
+                <span class="qg-legend__label">Model change</span>
+              </div>
+            </Show>
+            <Show when={transitions().some((entry) => entry.kind === "effort")}>
+              <div class="qg-legend__item">
+                <span class="qg-legend__mark qg-legend__mark--effort" aria-hidden="true" />
+                <span class="qg-legend__label">Effort change</span>
               </div>
             </Show>
           </div>
@@ -234,7 +264,7 @@ export function SessionChart(props: {
           }
         >
           <svg
-            viewBox={`0 0 ${size.width} ${size.height}`}
+            viewBox={`0 0 ${size.width} ${geometry().strip.viewHeight}`}
             role="img"
             aria-label={`Step series for ${props.snapshot.focusSessionId}: focus-session context on the left axis and cumulative consumption ${
               geometry().hasDescendants
@@ -384,13 +414,70 @@ export function SessionChart(props: {
               )}
             </Show>
 
+            <line
+              class="qg-chart__strip-line"
+              x1={geometry().plot.left}
+              x2={geometry().plot.right}
+              y1={geometry().strip.top}
+              y2={geometry().strip.top}
+            />
+            <line
+              class="qg-chart__strip-line"
+              x1={geometry().plot.left}
+              x2={geometry().plot.right}
+              y1={geometry().strip.bottom}
+              y2={geometry().strip.bottom}
+            />
+            <text
+              class="qg-chart__axis-label qg-chart__axis-label--rate"
+              x={geometry().plot.right + 8}
+              y={geometry().strip.top + 3}
+              text-anchor="start"
+            >
+              100%
+            </text>
+            <text
+              class="qg-chart__axis-label qg-chart__axis-label--rate"
+              x={geometry().plot.right + 8}
+              y={geometry().strip.bottom + 3}
+              text-anchor="start"
+            >
+              0%
+            </text>
+            <text
+              class="qg-chart__axis-title qg-chart__axis-title--rate"
+              x={geometry().plot.left - 8}
+              y={geometry().strip.top + 10}
+              text-anchor="end"
+            >
+              Cache
+            </text>
+            <For each={geometry().strip.paths}>
+              {(path) => <path class="qg-chart__rate-line" d={path} />}
+            </For>
+            <For each={geometry().strip.singles}>
+              {(point) => <circle class="qg-chart__rate-point" cx={point.x} cy={point.y} r="2.5" />}
+            </For>
+            <For each={transitions()}>
+              {(entry) => (
+                <path
+                  class={`qg-chart__transition qg-chart__transition--${entry.kind}`}
+                  d={
+                    entry.kind === "model"
+                      ? `M ${geometry().stepX(entry.stepIndex)} ${geometry().strip.top + 1} l 4 4 l -4 4 l -4 -4 Z`
+                      : `M ${geometry().stepX(entry.stepIndex) - 3.5} ${geometry().strip.top + 1} h 7 v 7 h -7 Z`
+                  }
+                />
+              )}
+            </For>
+
             <Show when={active() !== undefined}>
               <line
                 class="qg-chart__cursor"
                 x1={geometry().stepX(active() ?? 0)}
                 x2={geometry().stepX(active() ?? 0)}
                 y1={geometry().plot.top}
-                y2={geometry().plot.bottom}
+                y2={geometry().strip.bottom}
               />
             </Show>
 
@@ -402,7 +489,7 @@ export function SessionChart(props: {
                     <text
                       class="qg-chart__axis-label qg-chart__axis-label--step"
                       x={geometry().stepX(index)}
-                      y={geometry().plot.bottom + 14}
+                      y={geometry().strip.axisLabelY}
                       text-anchor="middle"
                     >
                       {index + 1}
@@ -414,7 +501,7 @@ export function SessionChart(props: {
             <text
               class="qg-chart__axis-title qg-chart__axis-title--steps"
               x={geometry().plot.left}
-              y={size.height - 4}
+              y={geometry().strip.viewHeight - 4}
               text-anchor="start"
             >
               Steps
@@ -432,8 +519,8 @@ export function SessionChart(props: {
             aria-valuenow={(active() ?? 0) + 1}
             aria-valuetext={stepText(active() ?? 0)}
             style={{
-              top: `${(geometry().plot.top / size.height) * 100}%`,
-              bottom: `${((size.height - geometry().plot.bottom) / size.height) * 100}%`,
+              top: `${(geometry().plot.top / geometry().strip.viewHeight) * 100}%`,
+              bottom: `${((geometry().strip.viewHeight - geometry().strip.bottom) / geometry().strip.viewHeight) * 100}%`,
               left: `${(geometry().plot.left / size.width) * 100}%`,
               right: `${((size.width - geometry().plot.right) / size.width) * 100}%`,
             }}
@@ -480,7 +567,7 @@ export function SessionChart(props: {
                     aria-hidden="true"
                     style={{ "--qg-swatch": "var(--qg-chart-own)" }}
                   />
-                  <span class="qg-totals__label">Cumulative · this session</span>
+                  <span class="qg-totals__label">Cumulative · Main session</span>
                   <span class="qg-totals__value">
                     {formatExactCount(geometry().ownCumulativeValues[active() ?? 0] ?? 0)}
                   </span>
@@ -492,11 +579,48 @@ export function SessionChart(props: {
                       aria-hidden="true"
                       style={{ "--qg-swatch": "var(--qg-chart-total)" }}
                     />
-                    <span class="qg-totals__label">Cumulative · session tree</span>
+                    <span class="qg-totals__label">Cumulative · Session tree</span>
                     <span class="qg-totals__value">
                       {formatExactCount(geometry().treeCumulativeValues[active() ?? 0] ?? 0)}
                     </span>
                   </div>
+                </Show>
+                <Show when={step().model}>
+                  {(model) => (
+                    <div class="qg-totals__row qg-tooltip__row">
+                      <span class="qg-totals__label">Model</span>
+                      <span class="qg-totals__value">{formatModelIdentity(model())}</span>
+                    </div>
+                  )}
+                </Show>
+                <div class="qg-totals__row qg-tooltip__row">
+                  <span class="qg-totals__label">Cache read</span>
+                  <span class="qg-totals__value">{formatExactCount(step().stack.cacheRead)}</span>
+                </div>
+                <div class="qg-totals__row qg-tooltip__row">
+                  <span
+                    class="qg-tooltip__swatch"
+                    aria-hidden="true"
+                    style={{ "--qg-swatch": "var(--qg-chart-rate)" }}
+                  />
+                  <span class="qg-totals__label">Cache reuse</span>
+                  <span class="qg-totals__value" title={formatPercentExact(rateAt(active() ?? 0))}>
+                    {rateAt(active() ?? 0) === null
+                      ? "—"
+                      : formatPercent(rateAt(active() ?? 0) ?? undefined)}
+                  </span>
+                </div>
+                <Show when={transitionAt(active() ?? 0)}>
+                  {(entry) => (
+                    <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--note">
+                      <span class="qg-totals__label">
+                        {entry().kind === "model" ? "Model changed" : "Effort changed"}
+                      </span>
+                      <span class="qg-totals__value">
+                        {formatModelIdentity(entry().from)} → {formatModelIdentity(entry().to)}
+                      </span>
+                    </div>
+                  )}
                 </Show>
                 <Show when={activeCompactions().length > 0}>
                   <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--note">
@@ -520,8 +644,8 @@ export function SessionChart(props: {
 
       <Show when={geometry().stepCount > 0 && geometry().focusStepCount === 0}>
         <p class="qg-chart__note">
-          No completed steps in the focus session yet; the yellow own line stays at zero while the
-          orange tree line still covers descendant steps.
+          No completed steps in the focus session yet; the teal Main session line stays at zero
+          while the orange Session tree line still covers descendant steps.
         </p>
       </Show>
 
@@ -543,9 +667,9 @@ export function SessionChart(props: {
                   ? "Context tokens (focus; last known on descendants)"
                   : "Context tokens (focus)"}
               </th>
-              <th scope="col">Cumulative tokens (this session)</th>
+              <th scope="col">Cumulative tokens (Main session)</th>
               <Show when={geometry().hasDescendants}>
-                <th scope="col">Cumulative tokens (session tree)</th>
+                <th scope="col">Cumulative tokens (Session tree)</th>
               </Show>
               <th scope="col">Compaction</th>
             </tr>

@@ -2156,7 +2156,7 @@ describe("session view composition", () => {
     for (const html of [root, subsession]) {
       expect(html).toContain('class="qg-usage qg-usage--session"');
       expect(html).toContain("Context · focus session");
-      expect(html).toContain("Cumulative · this session");
+      expect(html).toContain("Cumulative · Main session");
       expect(html).not.toContain("(left)");
       expect(html).not.toContain("(right)");
       expect(html).toContain("qg-chart__axis-title--context");
@@ -2169,9 +2169,9 @@ describe("session view composition", () => {
     }
     // Root with descendants adds the orange tree series; the leaf subsession
     // keeps only the yellow own series.
-    expect(root).toContain("Cumulative · session tree");
+    expect(root).toContain("Cumulative · Session tree");
     expect(root).toContain("qg-chart__line--total");
-    expect(subsession).not.toContain("Cumulative · session tree");
+    expect(subsession).not.toContain("Cumulative · Session tree");
     expect(subsession).not.toContain("qg-chart__line--total");
     // Multi-point areas fill under each line; the one-step subsession keeps
     // single-point dots instead of an invented area.
@@ -6587,7 +6587,7 @@ describe("styles and dependency boundaries", () => {
     expect(styles).toContain("--qg-token-output: #9ae600");
     expect(styles).toContain("--qg-token-cache-write: #00d3f2");
     expect(styles).toContain("--qg-chart-context: #51a2ff");
-    expect(styles).toContain("--qg-chart-own: #ffb900");
+    expect(styles).toContain("--qg-chart-own: var(--qg-token-reasoning)");
     expect(styles).toContain("--qg-chart-total: #ff8904");
     // Session keeps a white crosshair; usage has no crosshair or boundary overlay.
     expect(styles).toContain("stroke: #ffffff");
