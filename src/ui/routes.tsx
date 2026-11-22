@@ -12,6 +12,7 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import type { RangeKey } from "../contracts/ranges";
+import { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS } from "../gui/analytics-protocol";
 import { BuildAbout } from "./components/build-info";
 import { BusyOverlay, createBusyIndicator } from "./components/busy";
 import { QueryState } from "./components/states";
@@ -22,7 +23,12 @@ import { sameIdentity } from "./model-analytics";
 import { createQuery, type Query } from "./query";
 import { createQuotaQuery, type QuotaQuery } from "./quota-query";
 import type { displayPreferencesFromValues } from "./settings-model";
-import { describeError, isStaleAfterReconnect, resolveLoadState } from "./view-model";
+import {
+  describeError,
+  isHostRpcTimeout,
+  isStaleAfterReconnect,
+  resolveLoadState,
+} from "./view-model";
 import { HomeView, QuotaLoading, QuotaView } from "./views/home";
 import { ModelDetailView } from "./views/model";
 import { ModelsView } from "./views/models";
@@ -206,7 +212,14 @@ export interface AnalyticsRouteProps extends RouteLifecycleProps {
 }
 
 export function AnalyticsRoute(props: AnalyticsRouteProps): JSX.Element {
-  const query = createQuery<HomeSnapshot>(() => props.client.home({ range: props.range }));
+  // The host aborts one RPC after its own deadline while the single-flighted
+  // read keeps running; re-join it until the server read budget has passed.
+  const query = createQuery<HomeSnapshot>(
+    () => props.client.home({ range: props.range }),
+    (failure, elapsedMs) =>
+      isHostRpcTimeout(failure) && elapsedMs < ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS,
+  );
+  onCleanup(() => query.invalidate());
   /**
    * The reconnect epoch this route's payload is known to be fresh for. A refetch
    * that only starts after a reconnect must land before the marker clears.

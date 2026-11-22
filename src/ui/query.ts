@@ -17,7 +17,15 @@ export interface Query<T> {
   run: () => Promise<boolean>;
 }
 
-export function createQuery<T>(fetcher: () => Promise<T>): Query<T> & { invalidate: () => void } {
+/**
+ * `shouldRetry` re-issues the same fetch inside one `run` while it returns true,
+ * so the loading state and its elapsed clock continue. A superseded, invalidated
+ * or unmounted run never retries.
+ */
+export function createQuery<T>(
+  fetcher: () => Promise<T>,
+  shouldRetry?: (failure: unknown, elapsedMs: number) => boolean,
+): Query<T> & { invalidate: () => void } {
   const [data, setData] = createSignal<T | undefined>(undefined);
   const [error, setError] = createSignal<unknown>(undefined);
   const [loading, setLoading] = createSignal(false);
@@ -26,8 +34,17 @@ export function createQuery<T>(fetcher: () => Promise<T>): Query<T> & { invalida
   async function run(): Promise<boolean> {
     const id = ++requestId;
     setLoading(true);
+    const startedAt = Date.now();
     try {
-      const value = await fetcher();
+      let value: T;
+      for (;;) {
+        try {
+          value = await fetcher();
+          break;
+        } catch (failure) {
+          if (id !== requestId || !shouldRetry?.(failure, Date.now() - startedAt)) throw failure;
+        }
+      }
       if (id !== requestId) return false;
       setData(() => value);
       setError(undefined);

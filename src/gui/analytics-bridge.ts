@@ -16,7 +16,7 @@ import type {
   AnalyticsWorkerRequest,
   AnalyticsWorkerResponse,
 } from "./analytics-protocol.js";
-import { AnalyticsReadError } from "./analytics-protocol.js";
+import { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS, AnalyticsReadError } from "./analytics-protocol.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 
 export interface AnalyticsWorkerLike {
@@ -41,15 +41,7 @@ export interface AnalyticsBridgeOptions {
   maxRecoveryAttempts?: number;
 }
 
-/**
- * Cold 7d/30d/lifetime analytics catch-up reads the full source store and can
- * legitimately take tens of seconds on a slow local disk; a foreground request
- * queued behind one can add its own scoped read. The old 90 s budget retired
- * healthy workers mid-read on measured sources. Keep a finite budget above the
- * measured worst request (112.9 s on the reported source), so genuinely stuck
- * workers are still retired and recovered on the next request.
- */
-export const ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
+export { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS };
 const DEFAULT_RETRY_BASE_MS = 250;
 const DEFAULT_MAX_RECOVERY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_MS = 5_000;
