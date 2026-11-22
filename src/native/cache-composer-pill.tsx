@@ -21,7 +21,8 @@ import type { NativeDashboardRuntime } from "./runtime.js";
 const DETAIL_CLOSE_DELAY_MS = 140;
 const MISMATCH_DETAIL = "Selected model differs from the last observed route.";
 const ATTENTION_FLASH_MS = 180;
-const WARMING_LABEL = "Refreshed by OpenCode warming (inferred)";
+const WARMING_SEGMENT = " · Warming";
+const WARMING_SPOKEN = ", refreshed by OpenCode warming (inferred)";
 
 function safeTitle(title: string | undefined, fallback: string): string {
   const clean = (title ?? "")
@@ -178,9 +179,14 @@ function nextCountdownBoundary(deadlineAtMs: number, nowMs: number): number {
  */
 function presentation(
   observed: CacheObserverClassification | undefined,
-  options: { reuseUncertain?: boolean; countdownAtMs?: number; nowMs?: number } = {},
+  options: {
+    reuseUncertain?: boolean;
+    busy?: boolean;
+    countdownAtMs?: number;
+    nowMs?: number;
+  } = {},
 ) {
-  const { reuseUncertain = false, countdownAtMs, nowMs = 0 } = options;
+  const { reuseUncertain = false, busy = false, countdownAtMs, nowMs = 0 } = options;
   const ttl = ttlMetric(countdownAtMs, nowMs);
   const tone = ttl.expired
     ? ("danger" as const)
@@ -209,8 +215,10 @@ function presentation(
   // and the start of the qualifying call are general caveats, explained under (i).
   const observedWhen = formatWallTime(observedAt, nowMs);
   const estimate = reuseUncertain ? undefined : observed?.ttlEstimate;
-  const warming = estimate?.anchor === "warming-inferred";
-  const warmedAt = warming ? estimate?.anchorAtMs : undefined;
+  const anchored = estimate?.anchor === "warming-inferred";
+  // Warming is only possible while idle: a step in flight hides it.
+  const warming = anchored && !busy;
+  const warmedAt = anchored ? estimate?.anchorAtMs : undefined;
   const warmedWhen =
     typeof warmedAt === "number" && (observedAt === undefined || warmedAt > observedAt)
       ? formatWallTime(warmedAt, nowMs)
@@ -592,6 +600,7 @@ export function createCacheComposerPill(
     // downgrade a green estimate or hide its countdown.
     return presentation(observed, {
       reuseUncertain,
+      busy: runtime.cacheObserver.status(id) === "busy",
       countdownAtMs: countdownDeadline(observed),
       nowMs,
     });
@@ -615,7 +624,9 @@ export function createCacheComposerPill(
         !result.percent;
       const hasError = selected && history()?.key === session.key && history()?.status === "error";
       return {
-        label: `${result.ttl.label} · ${loading ? "Cache · Loading…" : result.cache.label}`,
+        label: `${result.ttl.label} · ${loading ? "Cache · Loading…" : result.cache.label}${
+          result.warming ? WARMING_SEGMENT : ""
+        }`,
         icon: hasError ? "warning" : "server",
         ...(mismatched
           ? { tone: flashKey() === session.key ? ("warning" as const) : ("danger" as const) }
@@ -787,23 +798,14 @@ export function createCacheComposerPill(
             ? { ...observed, tone: "danger" as const, detail: MISMATCH_DETAIL }
             : observed;
         };
-        // The spinner always wins the slot; warming is only possible while idle.
-        const warmed = () => result().warming && !busy() && !childBusy(id());
         const detail = () => result().detail || result().source;
         const open = () => detail() !== undefined && detailId() === id();
         return (
           <div class={`qg-cache-row${child ? " qg-cache-child" : ""}`}>
             <div class="qg-cache-row-heading">
-              <Show when={child || warmed()}>
+              <Show when={child}>
                 <span class="qg-cache-busy" data-busy={busy() ? "true" : "false"}>
-                  <Show when={warmed()}>
-                    <span class="qg-cache-warming" aria-hidden="true">
-                      🔥
-                    </span>
-                  </Show>
-                  <span class="qg-cache-visually-hidden">
-                    {busy() ? "Running" : warmed() ? WARMING_LABEL : ""}
-                  </span>
+                  <span class="qg-cache-visually-hidden">{busy() ? "Running" : ""}</span>
                 </span>
               </Show>
               <Show
@@ -846,7 +848,9 @@ export function createCacheComposerPill(
                   {model() ? `Model: ${model()}. ` : ""}
                   {child && busy() ? "Running. " : ""}
                   {result().detail ? `${result().detail}. ` : "Cache observation unknown. "}
-                  {`${result().ttl.spoken}. ${result().cache.spoken}. `}
+                  {`${result().ttl.spoken}. ${result().cache.spoken}${
+                    result().warming ? WARMING_SPOKEN : ""
+                  }. `}
                 </span>
                 <span class="qg-cache-identity-text">
                   <span class="qg-cache-primary">
@@ -873,7 +877,7 @@ export function createCacheComposerPill(
                   <span class={result().ttl.expired ? "qg-cache-elapsed" : undefined}>
                     {result().ttl.short}
                   </span>
-                  {` · ${result().cache.short}`}
+                  {` · ${result().cache.short}${result().warming ? WARMING_SEGMENT : ""}`}
                 </span>
               </button>
             </div>

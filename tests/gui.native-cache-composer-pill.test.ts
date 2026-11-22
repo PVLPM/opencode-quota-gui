@@ -844,7 +844,7 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
   container.remove();
 });
 
-it("shows the warming flame only while idle and anchored, with an inferred popover line", async () => {
+it("appends Warming only while idle and anchored, with an inferred popover line", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-01-01T00:10:00Z"));
   const a = session("warm");
@@ -882,8 +882,9 @@ it("shows the warming flame only while idle and anchored, with an inferred popov
   }));
   await flush();
   renderMenu(pill, () => a, container);
-  const slot = () => container.querySelector<HTMLElement>(".qg-cache-busy");
-  const flame = () => slot()?.querySelector(".qg-cache-warming") ?? null;
+  const shown = () => pill.show({ session: a } as ComposerPillProps)?.label ?? "";
+  const rowText = () => container.querySelector(".qg-cache-metrics")?.textContent ?? "";
+  const spoken = () => container.querySelector(".qg-cache-visually-hidden")?.textContent ?? "";
   const line = () => {
     const dot = container.querySelector<HTMLButtonElement>("button.qg-cache-indicator");
     dot?.dispatchEvent(new Event("pointerenter"));
@@ -893,27 +894,45 @@ it("shows the warming flame only while idle and anchored, with an inferred popov
     return text;
   };
 
-  // Idle + warming: the flame sits in the spinner slot with its spoken name.
-  expect(flame()?.textContent).toBe("🔥");
-  expect(slot()?.getAttribute("data-busy")).toBe("false");
-  expect(slot()?.textContent).toContain("Refreshed by OpenCode warming (inferred)");
+  // No extra slot or glyph: the row layout is untouched.
+  expect(container.querySelector(".qg-cache-busy")).toBeNull();
+  expect(container.textContent).not.toContain("🔥");
+
+  // Idle + warming: " · Warming" ends the pill label and the row metrics.
+  expect(shown()).toBe("TTL ~4m 0s · Cache 80.00% · Partial reuse · Warming");
+  expect(rowText()).toMatch(/Partial reuse · Warming$/);
+  expect(spoken()).toContain(
+    "Cache 80.00%, partial reuse, refreshed by OpenCode warming (inferred).",
+  );
   expect(line()).toMatch(
     /Cache 80\.00% · Partial reuse · OpenCode warming \d{2}:\d{2} \(inferred\)/,
   );
   expect(line()).not.toContain("last completed call");
 
-  // A step in flight: the flame yields the slot (the main row has no spinner).
+  // A step in flight hides it.
   status = "busy";
   notify();
-  expect(flame()).toBeNull();
-  expect(container.textContent).not.toContain("Refreshed by OpenCode warming");
+  expect(shown()).not.toContain("Warming");
+  expect(rowText()).not.toContain("Warming");
+  expect(spoken()).not.toContain("warming");
 
-  // The anchor cleared by a later completed step: no flame, original line.
+  // Uncertain reuse (busy, route-unverified prior reads) nulls the estimate: no warming.
+  observed = {
+    ...make(true),
+    color: "gray",
+    reason: "route-unverified",
+    primaryCacheReadTelemetry: "available",
+  } as unknown as CacheObserverClassification;
+  notify();
+  expect(shown()).not.toContain("Warming");
+  expect(line()).not.toContain("OpenCode warming");
+
+  // The anchor cleared by a later completed step: no warming, original line.
   status = "idle";
   observed = make(false);
   notify();
-  expect(flame()).toBeNull();
-  expect(container.textContent).not.toContain("Refreshed by OpenCode warming");
+  expect(shown()).toBe("TTL ~4m 0s · Cache 80.00% · Partial reuse");
+  expect(rowText()).not.toContain("Warming");
   expect(line()).toMatch(/last completed call \d{2}:\d{2}/);
   expect(line()).not.toContain("OpenCode warming");
   dispose();

@@ -179,19 +179,6 @@
   height: 1rem;
   color: var(--text-interactive-base, currentColor);
 }
-/* Inferred-warming flame: same box as the ring, never shown while it spins. */
-.qg-cache-warming {
-  position: absolute;
-  left: 0;
-  top: 50%;
-  width: 0.625rem;
-  height: 0.625rem;
-  margin-top: -0.3125rem;
-  font-size: 0.5625rem;
-  line-height: 0.625rem;
-  text-align: center;
-  overflow: visible;
-}
 .qg-cache-busy::before {
   content: "";
   position: absolute;
