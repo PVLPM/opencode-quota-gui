@@ -1508,6 +1508,44 @@ describe("session chart and tree presentation", () => {
     ]);
   });
 
+  it("opens a root on the Session tree and switches to Main session from the focused row", () => {
+    const { root, dispose } = renderSessionView(sessionSnapshot());
+    try {
+      expect(byClass(root, "path", "qg-chart__line--total")).toHaveLength(1);
+      const focusLink = byClass(root, "a", "qg-node__link")[0] as TestNode;
+      let prevented = false;
+      listener(
+        focusLink,
+        "onClick",
+      )?.({
+        preventDefault: () => {
+          prevented = true;
+        },
+      });
+      expect(prevented).toBe(true);
+      // Main session: the tree series is gone and the tree table is still whole.
+      expect(byClass(root, "path", "qg-chart__line--total")).toHaveLength(0);
+      expect(byClass(root, "path", "qg-chart__line--own")).toHaveLength(1);
+      expect(byClass(root, "div", "qg-node")).toHaveLength(2);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("opens a child on its own Main session scope", () => {
+    const base = sessionSnapshot();
+    const { root, dispose } = renderSessionView(
+      sessionSnapshot({ focusSessionId: "session-child-1" }),
+    );
+    try {
+      expect(base.nodes.some((node) => node.sessionId === "session-child-1")).toBe(true);
+      expect(byClass(root, "path", "qg-chart__line--total")).toHaveLength(0);
+      expect(byClass(root, "div", "qg-node")).toHaveLength(2);
+    } finally {
+      dispose();
+    }
+  });
+
   it("selects the nearest rendered step across the plot", () => {
     expect(chartIndexAt({ x: 0, left: 0, width: 100, count: 3 })).toBe(0);
     expect(chartIndexAt({ x: 24, left: 0, width: 100, count: 3 })).toBe(0);

@@ -13,7 +13,14 @@ import {
   formatPercentExact,
   formatTokenCount,
 } from "../format";
+import { SegmentedControl, SegmentedControlItem } from "../opencode-ui";
 import { formatPath } from "../routing";
+import {
+  defaultSessionScope,
+  SESSION_SCOPES,
+  type SessionScope,
+  scopeSessionSnapshot,
+} from "../session-scope";
 import { sortSessionTree } from "../sorting";
 
 /** Very large trees are windowed for rendering only; totals and both graphs always cover every node. */
@@ -85,6 +92,15 @@ export function SessionView(props: {
   const focusedNode = createMemo(() =>
     props.snapshot.nodes.find((node) => node.sessionId === props.snapshot.focusSessionId),
   );
+  // The scope choice belongs to one focused session; opening another resets to its default.
+  const [override, setOverride] = createSignal<{ id: string; scope: SessionScope }>();
+  const scope = (): SessionScope => {
+    const chosen = override();
+    return chosen?.id === props.snapshot.focusSessionId
+      ? chosen.scope
+      : defaultSessionScope(props.snapshot);
+  };
+  const chartSnapshot = createMemo(() => scopeSessionSnapshot(props.snapshot, scope()));
   // A focused child with no descendants adds no information beyond its own
   // chart; a root session and any child with descendants keep the tree.
   const showTree = createMemo(() => {
@@ -127,8 +143,25 @@ export function SessionView(props: {
             {props.snapshot.breadcrumbs.find((crumb) => crumb.isFocus)?.title ??
               props.snapshot.focusSessionId}
           </h2>
+          <Show when={props.snapshot.nodes.length > 1}>
+            <SegmentedControl
+              class="qg-sort"
+              aria-label="Session chart scope"
+              value={scope()}
+              onChange={(value) => {
+                if (value === "main" || value === "tree")
+                  setOverride({ id: props.snapshot.focusSessionId, scope: value });
+              }}
+            >
+              <For each={SESSION_SCOPES}>
+                {(entry) => (
+                  <SegmentedControlItem value={entry.value}>{entry.label}</SegmentedControlItem>
+                )}
+              </For>
+            </SegmentedControl>
+          </Show>
         </header>
-        <SessionChart snapshot={props.snapshot} headingId="qg-session-usage" />
+        <SessionChart snapshot={chartSnapshot()} headingId="qg-session-usage" />
       </div>
 
       <Show when={showTree()}>
@@ -161,6 +194,12 @@ export function SessionView(props: {
                     aria-current={
                       node.sessionId === props.snapshot.focusSessionId ? "page" : undefined
                     }
+                    onClick={(event) => {
+                      // The focused row is the scope control for its own session.
+                      if (node.sessionId !== props.snapshot.focusSessionId) return;
+                      event.preventDefault();
+                      setOverride({ id: node.sessionId, scope: "main" });
+                    }}
                   >
                     <span
                       class="qg-node__name"
