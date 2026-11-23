@@ -70,17 +70,7 @@ const MAX_PROJECT_CACHE = 12;
 /** Bound on in-memory grouped DTOs; keeps detail navigation from growing state. */
 const MAX_GROUP_CACHE = 24;
 const PRESENTATION_SAVE_INTERVAL_MS = 60_000;
-/**
- * Idle grace before the automatic 7d -> 30d extension starts. A zero-delay
- * timer only yields one event-loop turn and can immediately queue a long
- * synchronous SQL read ahead of foreground navigation.
- */
-export const ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS = 2_000;
-/** Bounded busy retries; a later 7d response schedules a fresh attempt. */
-const LOW_PRIORITY_EXTENSION_MAX_DEFERRALS = 1;
 const HOME_PRECOMPUTE_RANGES: readonly RangeKey[] = ["24h", "7d", "30d"];
-
-type LowPriorityTimer = ReturnType<typeof setTimeout> & { unref?: () => void };
 
 /**
  * Fixed instrumentation labels. Each phase is timed around the operation it
@@ -414,7 +404,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   let warmIdentityVerifiedGeneration = -1;
   let coverageTrusted = false;
   let sidecarNewerThanIndex = false;
-  let lowPriorityTimer: LowPriorityTimer | undefined;
   let closed = false;
   let closing = false;
   let closePromise: Promise<void> | undefined;
@@ -1265,52 +1254,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       changed = true;
     }
     if (changed) queuePresentationWrite(atMs);
-  }
-
-  /**
-   * The UI's default finite view is 7d. After that response is ready, extend
-   * once to 30d after a short idle grace. A foreground request that arrives
-   * during the grace (or a refresh already in flight) wins: the extension
-   * retries at most once, then leaves rescheduling to the next 7d response.
-   * This is not preemption; a synchronous SQLite read that has already started
-   * still runs to completion. Lifetime is never scheduled automatically.
-   */
-  function scheduleThirtyDayExtension(range: RangeKey, atMs: number): void {
-    if (range !== "7d" || closed || closing || lowPriorityTimer !== undefined) return;
-    if (coversSince(rangeWindow("30d", atMs).sinceMs, state.extent)) return;
-
-    const hasPendingRefreshWork = (): boolean =>
-      refreshPromise !== undefined ||
-      pendingGlobal !== undefined ||
-      pendingMetadataOnly ||
-      pendingDetailSessions.size > 0 ||
-      pendingProjectScopes.size > 0;
-
-    let deferrals = 0;
-    const arm = (): void => {
-      const timer = setTimeout(() => {
-        lowPriorityTimer = undefined;
-        if (closed || closing) return;
-        const scheduledAtMs = now();
-        if (coversSince(rangeWindow("30d", scheduledAtMs).sinceMs, state.extent)) return;
-        if (hasPendingRefreshWork()) {
-          if (deferrals < LOW_PRIORITY_EXTENSION_MAX_DEFERRALS) {
-            deferrals += 1;
-            arm();
-          }
-          return;
-        }
-        void requestRefresh({
-          globalRange: "30d",
-          detailSessionIds: [],
-          projectScopes: [],
-        }).catch(() => {});
-      }, ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS) as LowPriorityTimer;
-      timer.unref?.();
-      lowPriorityTimer = timer;
-    };
-
-    arm();
   }
 
   function buildCandidate(
@@ -2577,7 +2520,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
               sidecarNewerThanIndex || missingCoverage,
             );
           }
-          scheduleThirtyDayExtension(range, atMs);
           return homeSnapshotWithStaleness(current, range, atMs, stale);
         }
       }
@@ -2604,7 +2546,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       );
       cacheHome(range, result, atMs);
       precomputeHomeSnapshots(atMs);
-      scheduleThirtyDayExtension(range, atMs);
       return homeSnapshotWithStaleness(result, range, atMs, stale);
     },
 
@@ -2885,10 +2826,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (closed) return;
       closing = true;
       closePromise = (async () => {
-        if (lowPriorityTimer !== undefined) {
-          clearTimeout(lowPriorityTimer);
-          lowPriorityTimer = undefined;
-        }
         pendingGlobal = undefined;
         pendingMetadataOnly = false;
         pendingDetailSessions.clear();

@@ -10,7 +10,6 @@ import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/agg
 import {
   ANALYTICS_FULL_REPAIR_INTERVAL_MS,
   ANALYTICS_SOURCE_CURSOR_OVERLAP_MS,
-  ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS,
   createAnalyticsEngine,
 } from "../src/gui/analytics-engine.js";
 import type { AnalyticsReader } from "../src/gui/analytics-reader.js";
@@ -3101,7 +3100,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.close();
   });
 
-  it("serves 7d first and extends only the missing 30d side after the idle grace", async () => {
+  it("does not extend 7d until a wider range is requested", async () => {
     vi.useFakeTimers();
     try {
       const db = baseDb();
@@ -3115,10 +3114,12 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
         untilMs: NOW,
       });
 
-      // The zero-delay behavior is gone: nothing starts during the grace.
+      // Time alone must not start a wider analytics read.
       expect(fullReads(calls)).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS);
+      await vi.advanceTimersByTimeAsync(INTERVAL);
       await vi.advanceTimersByTimeAsync(0);
+      expect(fullReads(calls)).toHaveLength(1);
+      await engine.home("30d");
       const reads = fullReads(calls);
       expect(reads.length).toBeGreaterThanOrEqual(2);
       const extension = reads[reads.length - 1];
@@ -3145,7 +3146,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     }
   });
 
-  it("defers the 30d extension while a foreground refresh is in flight", async () => {
+  it("does not start a 30d extension after foreground work drains", async () => {
     vi.useFakeTimers();
     try {
       const db = baseDb();
@@ -3184,22 +3185,18 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       // The first grace fires while the foreground refresh owns the queue.
-      await vi.advanceTimersByTimeAsync(ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS);
+      await vi.advanceTimersByTimeAsync(INTERVAL);
       expect(fullReads(calls)).toHaveLength(readsAfterHome);
 
       gate = undefined;
       release?.();
       await foreground;
 
-      // The bounded retry starts the extension only after the queue is idle.
-      await vi.advanceTimersByTimeAsync(ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS);
+      // Finishing foreground work does not schedule a wider scan.
+      const readsAfterForeground = fullReads(calls).length;
+      await vi.advanceTimersByTimeAsync(INTERVAL);
       await vi.advanceTimersByTimeAsync(0);
-      const reads = fullReads(calls);
-      expect(reads.length).toBeGreaterThanOrEqual(2);
-      expect(reads[reads.length - 1]?.params).toMatchObject({
-        sinceMs: NOW - 30 * DAY,
-        untilMs: NOW - 7 * DAY,
-      });
+      expect(fullReads(calls)).toHaveLength(readsAfterForeground);
       await engine.close();
     } finally {
       vi.useRealTimers();
