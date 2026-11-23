@@ -489,7 +489,7 @@ export const DashboardRpc = {
           !hasOnlyKeys(value, ["range", "background"]) ||
           (value.background !== undefined && typeof value.background !== "boolean")
         ) {
-          return "input must contain only range";
+          return "input must contain range and optional boolean background";
         }
         return checkRange(value);
       }),

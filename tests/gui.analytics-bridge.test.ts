@@ -10,6 +10,7 @@ import type { AnalyticsEngine } from "../src/gui/analytics-engine.js";
 import type { AnalyticsWorkerRequest } from "../src/gui/analytics-protocol.js";
 import { createAnalyticsWorkerRuntime } from "../src/gui/analytics-worker-runtime.js";
 import { createGuiLogger } from "../src/gui/log.js";
+import { createSnapshotService, type SnapshotSource } from "../src/gui/snapshot-service.js";
 
 const logger = createGuiLogger({ sink: () => {} });
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
@@ -90,6 +91,98 @@ async function flushMicrotasks(rounds = 50): Promise<void> {
 }
 
 describe("analytics worker bridge", () => {
+  it("retires an initialized worker when no reads follow", async () => {
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    await bridge.init({});
+    await vi.waitFor(() => expect(worker.terminated).toBe(1));
+    expect(framesOf(worker, "close")).toHaveLength(1);
+    await bridge.close();
+  });
+  it("promotes a clicked queued range through the snapshot service without duplicate reads", async () => {
+    const worker = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const source = {
+      home: ({ range, exact, background }) => bridge.home(range, exact, background),
+      project: (input) => bridge.project(input.projectId, input.range),
+      session: (input) => bridge.session(input.sessionId),
+    } satisfies SnapshotSource;
+    const service = createSnapshotService({ source, logger });
+    const active = service.home({ range: "7d" });
+    await flushMicrotasks();
+    const lifetime = service.home({ range: "lifetime", background: true });
+    const background = service.home({ range: "30d", background: true });
+    const click = service.home({ range: "30d" });
+    const first = framesOf(worker, "home")[0];
+    worker.emit("message", { id: first?.id, ok: true, result: {} });
+    await flushMicrotasks();
+    const second = framesOf(worker, "home")[1];
+    expect(second?.command).toMatchObject({ range: "30d" });
+    worker.emit("message", { id: second?.id, ok: true, result: {} });
+    await flushMicrotasks();
+    const third = framesOf(worker, "home")[2];
+    expect(third?.command).toMatchObject({ range: "lifetime" });
+    worker.emit("message", { id: third?.id, ok: true, result: {} });
+    await Promise.all([active, lifetime, background, click]);
+    expect(framesOf(worker, "home")).toHaveLength(3);
+    service.close();
+    await bridge.close();
+  });
+  it("coalesces a foreground click joining a running background range", async () => {
+    const worker = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const source = {
+      home: ({ range, exact, background }) => bridge.home(range, exact, background),
+      project: (input) => bridge.project(input.projectId, input.range),
+      session: (input) => bridge.session(input.sessionId),
+    } satisfies SnapshotSource;
+    const service = createSnapshotService({ source, logger });
+    const background = service.home({ range: "30d", background: true });
+    await flushMicrotasks();
+    const click = service.home({ range: "30d" });
+    await flushMicrotasks();
+    const first = framesOf(worker, "home")[0];
+    expect(framesOf(worker, "home")).toHaveLength(1);
+    worker.emit("message", { id: first?.id, ok: true, result: {} });
+    await Promise.all([background, click]);
+    expect(framesOf(worker, "home")).toHaveLength(1);
+    service.close();
+    await bridge.close();
+  });
+  it("does not count a slow drain as a worker failure", async () => {
+    const first = new FakeWorker((command) =>
+      command.kind === "close" ? "ignore" : answerEcho(command),
+    );
+    const second = new FakeWorker(answerEcho);
+    let count = 0;
+    const bridge = createAnalyticsBridge({
+      createWorker: () => (++count === 1 ? first : second),
+      requestTimeoutMs: 20,
+      retryBaseMs: 60_000,
+      maxRecoveryAttempts: 1,
+      logger,
+    });
+    await bridge.home("7d");
+    await vi.waitFor(() => expect(framesOf(first, "close")).toHaveLength(1));
+    await expect(bridge.home("30d")).resolves.toMatchObject({ marker: "home:30d" });
+    expect(first.terminated).toBe(1);
+    expect(count).toBe(2);
+    await bridge.close();
+  }, 5_000);
+  it("forwards generation events while draining", async () => {
+    const worker = new FakeWorker((command) =>
+      command.kind === "close" ? "ignore" : answerEcho(command),
+    );
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const listener = vi.fn();
+    bridge.subscribe?.(listener);
+    await bridge.home("7d");
+    await vi.waitFor(() => expect(framesOf(worker, "close")).toHaveLength(1));
+    worker.emit("message", { type: "analytics-generation", generation: 1 });
+    expect(listener).toHaveBeenCalledTimes(1);
+    worker.emit("message", { id: framesOf(worker, "close")[0]?.id, ok: true });
+    await bridge.close();
+  });
   it("drains after FIFO background work and ignores retired worker events", async () => {
     const workers: FakeWorker[] = [];
     const bridge = createAnalyticsBridge({
@@ -145,19 +238,19 @@ describe("analytics worker bridge", () => {
     const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
     const active = bridge.home("7d");
     await flushMicrotasks();
+    const foreground = bridge.home("lifetime", false, true);
     const background = bridge.home("30d", false, true);
-    const foreground = bridge.home("lifetime");
     const join = bridge.home("30d");
     const first = framesOf(worker, "home")[0];
     expect(first?.command).toMatchObject({ kind: "home", range: "7d" });
     worker.emit("message", { id: first?.id, ok: true, result: {} });
     await flushMicrotasks();
     const next = framesOf(worker, "home")[1];
-    expect(next?.command).toMatchObject({ kind: "home", range: "lifetime" });
+    expect(next?.command).toMatchObject({ kind: "home", range: "30d" });
     worker.emit("message", { id: next?.id, ok: true, result: {} });
     await flushMicrotasks();
     const last = framesOf(worker, "home")[2];
-    expect(last?.command).toMatchObject({ kind: "home", range: "30d" });
+    expect(last?.command).toMatchObject({ kind: "home", range: "lifetime" });
     worker.emit("message", { id: last?.id, ok: true, result: {} });
     await Promise.all([active, background, foreground, join]);
     expect(framesOf(worker, "home")).toHaveLength(3);

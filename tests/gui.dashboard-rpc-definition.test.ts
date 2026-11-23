@@ -140,7 +140,7 @@ describe("dashboard RPC definition", () => {
     await expectRejected(
       methods.home.input,
       { range: "30d", background: "yes" },
-      "input must contain only range",
+      "input must contain range and optional boolean background",
     );
     await expectRejected(
       methods.home.input,
@@ -150,7 +150,7 @@ describe("dashboard RPC definition", () => {
     await expectRejected(
       methods.home.input,
       { range: "7d", extra: true },
-      "input must contain only range",
+      "input must contain range and optional boolean background",
     );
 
     await expectAccepted(methods.project.input, { projectId: "project-1", range: "7d" });

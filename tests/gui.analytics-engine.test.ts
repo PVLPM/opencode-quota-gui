@@ -2594,6 +2594,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
 
   it("moves warm session hits to the newest LRU slot and persists a bounded cache", async () => {
     const db = baseDb();
+    let nowMs = NOW;
     const calls: ReaderCall[] = [];
     const savedPresentations: WarmAnalyticsPresentation[] = [];
     const ordered: Array<[string, SessionSnapshot]> = Array.from(
@@ -2616,7 +2617,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     };
     const engine = createAnalyticsEngine({
       reader,
-      now: () => NOW,
+      now: () => nowMs,
       refreshIntervalMs: INTERVAL,
       snapshotPath: "memory.json",
       loadSnapshot: async () => undefined,
@@ -2638,8 +2639,9 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     });
 
     await engine.session("ses_0");
+    nowMs += 60_001;
     await engine.session("ses_1");
-    await engine.close();
+    await vi.waitFor(() => expect(savedPresentations.at(-1)?.session?.at(-1)?.[0]).toBe("ses_1"));
     const latest = savedPresentations[savedPresentations.length - 1];
     expect(latest?.session?.map(([sessionId]) => sessionId)).toEqual([
       "ses_2",
@@ -2652,6 +2654,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
       "ses_1",
     ]);
     release?.();
+    await engine.close();
     await flushAsync();
   });
 
@@ -2660,13 +2663,17 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     const oldSavedAt = NOW - 60_000;
     const calls: ReaderCall[] = [];
     const savedAts: number[] = [];
+    let release!: (value: AnalyticsState | undefined) => void;
+    const gate = new Promise<AnalyticsState | undefined>((resolve) => {
+      release = resolve;
+    });
     const warmSession = analytics(datasetOf(db)).session("ses_root");
     const engine = createAnalyticsEngine({
       reader: createFakeReader(db, calls),
       now: () => NOW,
       refreshIntervalMs: INTERVAL,
       snapshotPath: "memory.json",
-      loadSnapshot: async () => await new Promise<AnalyticsState | undefined>(() => {}),
+      loadSnapshot: async () => await gate,
       loadPresentation: async () => ({
         home: {},
         project: [],
@@ -2685,20 +2692,25 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
 
     await engine.session("ses_root");
     await vi.waitFor(() => expect(savedAts.length).toBeGreaterThan(0));
-    await engine.close();
     expect(savedAts.every((savedAtMs) => savedAtMs === oldSavedAt)).toBe(true);
+    release(undefined);
+    await engine.close();
   });
 
   it("preserves the sidecar source identity in pre-index writes", async () => {
     const db = baseDb();
     const warmSession = analytics(datasetOf(db)).session("ses_root");
     const decodedWrites: WarmAnalyticsPresentation[] = [];
+    let release!: (value: AnalyticsState | undefined) => void;
+    const gate = new Promise<AnalyticsState | undefined>((resolve) => {
+      release = resolve;
+    });
     const engine = createAnalyticsEngine({
       reader: createFakeReader(db, []),
       now: () => NOW,
       refreshIntervalMs: INTERVAL,
       snapshotPath: "memory.json",
-      loadSnapshot: async () => await new Promise<AnalyticsState | undefined>(() => {}),
+      loadSnapshot: async () => await gate,
       loadPresentation: async () => ({
         home: {},
         project: [],
@@ -2719,8 +2731,6 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
 
     await engine.session("ses_root");
     await vi.waitFor(() => expect(decodedWrites.length).toBeGreaterThan(0));
-    await engine.close();
-
     expect(decodedWrites.length).toBeGreaterThan(0);
     for (const write of decodedWrites) {
       expect(write.sourceIdentity).toMatchObject({
@@ -2733,6 +2743,8 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
       });
       expect(write.session?.map(([sessionId]) => sessionId)).toEqual(["ses_root"]);
     }
+    release(undefined);
+    await engine.close();
   });
 
   it("serves a persisted presentation DTO before any refresh completes", async () => {
@@ -2794,6 +2806,42 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     expect(refreshed.stale).toBe(false);
     expect(generations.length).toBeGreaterThan(0);
     await engine.close();
+  });
+
+  it("persists and notifies when close waits for a stale refresh", async () => {
+    const first = harness(baseDb());
+    await first.engine.home("24h");
+    await flushAsync();
+    const saved = cloneState(first.savedStates.at(-1)!);
+    const presentation = structuredClone(first.savedPresentations.at(-1)!);
+    await first.engine.close();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const db = baseDb();
+    db.rows.push(row("ses_root", "msg_background", NOW + 30_000, { input: 5 }));
+    const base = createFakeReader(db, []);
+    let count = 0;
+    const reader: AnalyticsReader = {
+      async withSnapshot(read) {
+        count += 1;
+        if (count > 1) await gate;
+        return base.withSnapshot(read);
+      },
+    };
+    const next = harness(db, {
+      reader,
+      now: NOW + INTERVAL + 60_000,
+      loadSnapshot: async () => saved,
+      loadPresentation: async () => presentation,
+    });
+    expect((await next.engine.home("24h")).stale).toBe(true);
+    const closing = next.engine.close();
+    release();
+    await closing;
+    expect(next.savedStates.length).toBeGreaterThan(0);
+    expect(next.generations).toHaveLength(1);
   });
 
   it("invalidates derived presentation costs when the pricing fingerprint changes", async () => {
@@ -3425,6 +3473,8 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     await engine.refresh();
     expect(generations).toHaveLength(1);
     expect(generations[0]).toBeGreaterThan(0);
+    await engine.refresh();
+    expect(generations).toHaveLength(1);
     await engine.close();
   });
 

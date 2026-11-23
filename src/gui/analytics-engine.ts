@@ -2849,8 +2849,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     async close() {
       if (closePromise) return closePromise;
       if (closed) return;
-      closing = true;
       closePromise = (async () => {
+        await refreshPromise?.catch(() => {});
+        closing = true;
         pendingGlobal = undefined;
         pendingMetadataOnly = false;
         pendingDetailSessions.clear();

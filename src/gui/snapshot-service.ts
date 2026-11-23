@@ -84,6 +84,7 @@ export const MAX_TRACKED_PAGES = 16;
  * `refreshAnalytics` is an optional shared worker refresh seam, and `close` is
  * closed by the lifecycle when the last lease disposes, not by this service.
  */
+/** Same-key home reads must coalesce, including foreground priority joins. */
 export type SnapshotSource = Pick<DashboardDataSource, "home" | "project" | "session"> & {
   quota?: DashboardDataSource["quota"];
   groups?: DashboardDataSource["groups"];
@@ -173,6 +174,7 @@ interface CacheEntry {
 
 interface InflightTask {
   promise: Promise<unknown>;
+  promote?: () => void;
   /** Viewer epoch at creation; ending that session disowns this task. */
   epoch: number;
   /** Source generation at creation; a handoff disowns this task's result. */
@@ -497,9 +499,15 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
    * single-flight and commits when it lands; `sessions.changed` is emitted only
    * when a changed result was actually stored, so clients refetch exactly once.
    */
-  function load<T>(key: string, compute: () => Promise<T>, force = false): Promise<T> {
+  function load<T>(
+    key: string,
+    compute: () => Promise<T>,
+    force = false,
+    promote?: () => void,
+    foreground = false,
+  ): Promise<T> {
     const prior = cache.get(key);
-    const fresh = loadSingleFlight(key, compute, force);
+    const fresh = loadSingleFlight(key, compute, force, promote, foreground);
     if (force || closed || isQuotaKey(key) || !inflight.has(key)) return fresh;
     const lastGood =
       prior && prior.sourceGeneration === sourceGeneration && hasStaleMarker(prior.snapshot)
@@ -526,7 +534,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     return Promise.resolve(lastGood);
   }
 
-  function loadSingleFlight<T>(key: string, compute: () => Promise<T>, force = false): Promise<T> {
+  function loadSingleFlight<T>(
+    key: string,
+    compute: () => Promise<T>,
+    force = false,
+    promote?: () => void,
+    foreground = false,
+  ): Promise<T> {
     const epoch = viewerEpoch;
     const generation = sourceGeneration;
     // A closed service does not track, register, or cache: the caller still
@@ -549,6 +563,10 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
     const pending = inflight.get(key);
     if (pending && pending.epoch === epoch && pending.sourceGeneration === generation) {
+      if (foreground && pending.promote) {
+        pending.promote();
+        pending.promote = undefined;
+      }
       // The key was requested again in the same viewer session and source
       // generation while its compute was still pending: preserve single-flight
       // and let it cache again.
@@ -568,6 +586,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     }
 
     const task: InflightTask = {
+      promote,
       epoch,
       sourceGeneration: generation,
       promise: Promise.resolve(),
@@ -857,17 +876,31 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   return {
     home: (input) => {
       const key = homeKey(input.range);
-      const request = load(key, () =>
-        options.source.home({
-          range: input.range,
-          ...(input.background ? { background: true } : {}),
-        }),
+      const request = load(
+        key,
+        () =>
+          options.source.home({
+            range: input.range,
+            ...(input.background ? { background: true } : {}),
+          }),
+        false,
+        input.background
+          ? () => {
+              void options.source.home({ range: input.range }).catch(() => {});
+            }
+          : undefined,
+        !input.background,
       );
       void request.then(
         (snapshot) => {
           if (snapshot.provisional && cache.get(key)?.snapshot === snapshot && !closed) {
-            void load(key, () =>
-              options.source.home({ range: input.range, exact: true, background: true }),
+            void load(
+              key,
+              () => options.source.home({ range: input.range, exact: true, background: true }),
+              false,
+              () => {
+                void options.source.home({ range: input.range, exact: true }).catch(() => {});
+              },
             ).catch(() => {});
           }
         },

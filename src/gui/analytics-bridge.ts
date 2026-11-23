@@ -150,6 +150,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
    */
   const inFlightReads = new Map<string, Promise<unknown>>();
   const queue: Array<{
+    key?: string;
     background: boolean;
     run: () => Promise<void>;
     reject: (error: AnalyticsReadError) => void;
@@ -221,7 +222,6 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       if (typeof value !== "object" || value === null) return;
       const record = value as Record<string, unknown>;
       if (record.type === "analytics-generation") {
-        if (draining) return;
         for (const listener of Array.from(listeners)) {
           try {
             listener();
@@ -263,17 +263,21 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
   function send(
     instance: AnalyticsWorkerLike,
     command: AnalyticsWorkerRequest["command"],
+    graceful = false,
   ): Promise<AnalyticsWorkerResponse> {
     const id = nextRequestId;
     nextRequestId += 1;
     return new Promise<AnalyticsWorkerResponse>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        // A timed-out worker may still be alive but stuck (for example a
-        // deterministic OOM loop). Retire it so the next call starts clean.
-        retire(instance, "unavailable");
-        reject(new AnalyticsReadError("timeout"));
-      }, requestTimeoutMs);
+      const timer = setTimeout(
+        () => {
+          pending.delete(id);
+          // A timed-out worker may still be alive but stuck (for example a
+          // deterministic OOM loop). Retire it so the next call starts clean.
+          if (!graceful) retire(instance, "unavailable");
+          reject(new AnalyticsReadError("timeout"));
+        },
+        graceful ? 2_500 : requestTimeoutMs,
+      );
       const unref = (timer as { unref?: () => void }).unref;
       if (typeof unref === "function") unref.call(timer);
       pending.set(id, { resolve, reject, timer });
@@ -282,7 +286,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       } catch {
         pending.delete(id);
         clearTimeout(timer);
-        retire(instance, "unavailable");
+        if (!graceful) retire(instance, "unavailable");
         reject(new AnalyticsReadError("unavailable"));
       }
     });
@@ -346,26 +350,28 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     return await creation;
   }
 
+  async function retireGracefully(instance: AnalyticsWorkerLike): Promise<void> {
+    try {
+      await send(instance, { kind: "close" }, true);
+    } catch {
+      // Shutdown is best effort and must not affect recovery backoff.
+    } finally {
+      retiredInstances.add(instance);
+      if (worker === instance) worker = undefined;
+      try {
+        await instance.terminate();
+      } catch {
+        // Best effort.
+      }
+    }
+  }
+
   function pump(): void {
     if (running || closed) return;
     if (queue.length === 0) {
       const instance = worker;
       if (instance && !draining && pending.size === 0) {
-        const done = (async () => {
-          try {
-            await send(instance, { kind: "close" });
-          } catch {
-            // Termination still releases the worker after a close failure.
-          } finally {
-            retiredInstances.add(instance);
-            if (worker === instance) worker = undefined;
-            try {
-              await instance.terminate();
-            } catch {
-              /* Best effort. */
-            }
-          }
-        })();
+        const done = retireGracefully(instance);
         draining = done.finally(() => {
           draining = undefined;
           pump();
@@ -394,11 +400,18 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       const existing = inFlightReads.get(key);
       // SAFETY: the key covers every input of the command, and all callers of
       // that key request the same result type.
-      if (existing !== undefined) return existing as Promise<TResult>;
+      if (existing !== undefined) {
+        if (!background) {
+          const queued = queue.find((job) => job.key === key);
+          if (queued) queued.background = false;
+        }
+        return existing as Promise<TResult>;
+      }
     }
 
     const request = new Promise<TResult>((resolve, reject) => {
       queue.push({
+        key,
         background,
         reject,
         run: async () => {
@@ -434,6 +447,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       if (closed) throw new AnalyticsReadError("closed");
       initOptions = nextOptions;
       await ensureWorker();
+      queueMicrotask(pump);
     },
     home: (range, exact, background) =>
       call({ kind: "home", range, ...(exact ? { exact } : {}) }, background),
@@ -458,25 +472,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       listeners.clear();
       failPending("closed");
       if (instance) {
-        // Give the worker engine a bounded chance to drain queued persistence
-        // before the thread is terminated.
-        try {
-          await Promise.race([
-            send(instance, { kind: "close" }).catch(() => undefined),
-            new Promise<void>((resolve) => {
-              const timer = setTimeout(resolve, 2_500);
-              const unref = (timer as { unref?: () => void }).unref;
-              if (typeof unref === "function") unref.call(timer);
-            }),
-          ]);
-        } catch {
-          // Close remains best effort.
-        }
-        try {
-          instance.terminate();
-        } catch {
-          // Termination is best effort; pending callers were already rejected.
-        }
+        await retireGracefully(instance);
         failPending("closed");
       }
     },
