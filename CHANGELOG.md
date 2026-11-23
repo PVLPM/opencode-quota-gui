@@ -2,6 +2,36 @@
 
 User-facing release notes for OpenCode Quota GUI.
 
+## 1.3.2
+
+### Added
+
+- **Analytics opens warm.** Saved analytics appears at once while a refresh runs. With no saved data, a fast provisional 7-day view is shown as updating and is replaced by the exact one. Opening Analytics also prefetches the 30-day and lifetime ranges in the background; their range buttons show a pending ring until they are ready. Lifetime is read first, so its single scan covers the narrower ranges.
+- **Session scope.** A **Main session / Session tree** switch sets whether the Session view covers the focused session alone or the session with its descendants. The Session Tree table is redesigned as Name | Agent | Model | Cache Rate | Tokens, with each session's own values. Model and effort changes are marked on the chart (#17, #19).
+- **Per-step timing and idle gaps.** The Session chart shows each message's created-to-completed time and the idle time since the previous message. It also summarizes the **Longest idle gap** and the **Longest high-reuse gap** (cache reuse of 90% or more). These come from stored message times and are observations, not provider cache TTLs (#28).
+- **Anthropic API rate limits.** The Anthropic card shows per-minute rate limits observed on your own API-key requests. It is not subscription quota, spend, or balance (#31).
+
+### Improved
+
+- **Analytics uses less idle memory.** Quota-only use never starts the analytics worker, and the worker shuts down when idle, releasing its memory.
+- **Cache Rate in the Session plot.** Cache Rate is drawn inside the token plot on a fixed 0–100% scale. Unknown cache data appears as a gap or **Unavailable**, never as 0% (#28).
+- **Cache pill warming.** The cache pill shows ` · Warming` when OpenCode's warming refresh has refreshed the cache. The state is inferred, and the pill appears only while idle.
+- **Quota retry follows the active account.** With `waitForQuotaReset` on, a provider limit is retried once the active account's exhausted quota windows reset. The retry waits for the latest of those resets, plus a one-minute buffer, capped at five hours. Other accounts are not considered; if the active account cannot be identified, OpenCode's own retry decision is kept.
+
+### Fixed
+
+- **Accurate Analytics errors.** Native errors no longer tell you to start a local dashboard server, and a host RPC timeout has its own message. Simultaneous first Analytics requests no longer count one failure twice (#34).
+- **Analytics survives host timeouts.** When the host times out an Analytics request, the view re-joins the same read until the worker's time budget ends. Leaving the view or starting a newer request stops it. The loading indicator shows elapsed seconds.
+- **Expired Claude token.** When Claude usage returns 401 because the stored access token has expired, the card says so and asks you to run any `claude` command to refresh it, then Retry.
+- **Claude usage rejections.** A rejected usage request is no longer reported as a sign-in failure, and Claude card errors can be copied (#33).
+- **Stale Anthropic rate limits.** Once a rate-limit reset time has passed, the card shows only the limit, not the remaining count observed before the reset. An expired retry-after is no longer shown.
+
+### Compatibility
+
+- **OpenCode 2.3.x supported.** The `@opencode/plugin` peer range is now `>=2.0.16 <2.4.0`; the plugin typechecks and passes its plugin tests against 2.3.2.
+- **Analytics rebuild after upgrading.** The analytics snapshot version moved from 3 to 4, so saved analytics is rebuilt once on first use.
+- **Claude Agent subscription limits are not retried.** The retry hook acts only on typed provider rate-limit or quota errors and HTTP 429 responses. A Claude Agent five-hour limit message has neither, so OpenCode keeps its own retry timing. Upstream: [anomalyco/opencode#63189](https://github.com/anomalyco/opencode/issues/63189).
+
 ## 1.3.1
 
 ### Added
