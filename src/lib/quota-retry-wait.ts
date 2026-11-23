@@ -54,10 +54,8 @@ export function getQuotaResetRetryDelayMs(
     ),
   );
   const active = activeSourceId ?? (marked.size === 1 ? [...marked][0] : undefined);
-  if (sources.size > 1 && !active) {
-    console.debug("[opencode-quota-gui] retry: active account is unknown");
-    return undefined;
-  }
+  // Several accounts and no known active one: leave the host decision as is.
+  if (sources.size > 1 && !active) return undefined;
   if (active && sources.size > 0 && !sources.has(active)) return undefined;
   let latestResetMs: number | undefined;
   for (const result of results) {
