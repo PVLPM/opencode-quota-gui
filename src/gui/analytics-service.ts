@@ -25,7 +25,7 @@ import {
 import { createGuiLogger, type GuiLogger } from "./log.js";
 
 export interface AnalyticsReadService {
-  home(input: { range: RangeKey }): Promise<HomeSnapshot>;
+  home(input: { range: RangeKey; exact?: boolean }): Promise<HomeSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
   /** One range-certified grouped model/provider read. */
@@ -191,7 +191,7 @@ export function createAnalyticsReadService(
   return {
     async home(input) {
       validateRange(input.range);
-      return (await ensureTransport()).home(input.range);
+      return (await ensureTransport()).home(input.range, input.exact);
     },
 
     async project(input) {

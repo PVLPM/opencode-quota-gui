@@ -67,7 +67,7 @@ export interface AnalyticsWorkerMemoryStats {
 /** A command sent to the one analytics worker. IDs are added by the bridge. */
 export type AnalyticsWorkerCommand =
   | { kind: "init"; options: AnalyticsInitOptions }
-  | { kind: "home"; range: RangeKey }
+  | { kind: "home"; range: RangeKey; exact?: boolean }
   | { kind: "project"; projectId: string; range: RangeKey }
   | { kind: "session"; sessionId: string }
   | { kind: "groups"; query: AnalyticsGroupQuery }
@@ -106,7 +106,7 @@ export interface AnalyticsGenerationNotification {
  */
 export interface AnalyticsTransport {
   init(options: AnalyticsInitOptions): Promise<void>;
-  home(range: RangeKey): Promise<HomeSnapshot>;
+  home(range: RangeKey, exact?: boolean): Promise<HomeSnapshot>;
   project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
   session(sessionId: string): Promise<SessionSnapshot>;
   groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;

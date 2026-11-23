@@ -94,7 +94,7 @@ interface PendingRequest {
 function coalescedCommandKey(command: AnalyticsWorkerRequest["command"]): string | undefined {
   switch (command.kind) {
     case "home":
-      return `home\u0000${command.range}`;
+      return `home\u0000${command.range}\u0000${command.exact === true}`;
     case "project":
       return `project\u0000${command.projectId}\u0000${command.range}`;
     case "session":
@@ -375,7 +375,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       initOptions = nextOptions;
       await ensureWorker();
     },
-    home: (range) => call({ kind: "home", range }),
+    home: (range, exact) => call({ kind: "home", range, ...(exact ? { exact } : {}) }),
     project: (projectId, range) => call({ kind: "project", projectId, range }),
     session: (sessionId) => call({ kind: "session", sessionId }),
     groups: (query) => call({ kind: "groups", query }),

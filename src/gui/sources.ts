@@ -595,7 +595,7 @@ export function createDashboardReadSource(
   // Read surface
   // -------------------------------------------------------------------------
 
-  async function home(input: { range: RangeKey }): Promise<HomeSnapshot> {
+  async function home(input: { range: RangeKey; exact?: boolean }): Promise<HomeSnapshot> {
     return (await getAnalyticsService()).home(input);
   }
 

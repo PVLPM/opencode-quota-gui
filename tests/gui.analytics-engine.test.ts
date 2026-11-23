@@ -212,6 +212,7 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
   };
 
   function completedRows(params: {
+    createdSinceMs?: number;
     completedSinceMs?: number;
     completedUntilMs?: number;
     completedAtTimes?: readonly number[];
@@ -219,6 +220,9 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
     messageIDs?: readonly string[];
   }): OpenCodeRawAssistantRow[] {
     let rows = [...db.rows];
+    if (params.createdSinceMs !== undefined) {
+      rows = rows.filter((entry) => entry.createdAtMs >= params.createdSinceMs!);
+    }
     if (params.messageIDs) {
       const ids = new Set(params.messageIDs);
       rows = rows.filter((entry) => ids.has(entry.messageID));
@@ -602,6 +606,53 @@ function fullReads(calls: ReaderCall[], afterIndex = 0): ReaderCall[] {
 }
 
 describe("analytics engine: rollup views and coverage", () => {
+  it("returns provisional 7d, then replaces it after the exact build without certifying the provisional", async () => {
+    const db = baseDb();
+    db.rows.push(
+      row("ses_root", "msg_cross", NOW - 8 * DAY, { input: 33 }, { completedAtMs: NOW - HOUR }),
+    );
+    const calls: ReaderCall[] = [];
+    const base = createFakeReader(db, calls);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reads = 0;
+    const reader: AnalyticsReader = {
+      withSnapshot: async (read) => {
+        reads += 1;
+        if (reads > 1) await gate;
+        return base.withSnapshot(read);
+      },
+    };
+    const { engine, savedStates, savedPresentations, generations } = harness(db, { reader });
+    const provisional = await engine.home("7d");
+    expect(provisional.stale).toBe(true);
+    expect(provisional.usage.stale).toBe(true);
+    expect(provisional.usage.totals.input).toBe(1500);
+    expect(savedStates).toHaveLength(0);
+    expect(savedPresentations).toHaveLength(0);
+    const exactPromise = engine.home("7d", true);
+    release();
+    const exact = await exactPromise;
+    expect(generations.length).toBeGreaterThan(0);
+    expect(exact.stale).toBe(false);
+    expect(exact.usage.totals.input).toBe(1533);
+    await engine.close();
+  });
+
+  it("rebuilds provisional 7d after restart before any exact result is persisted", async () => {
+    const db = baseDb();
+    const first = harness(db);
+    expect((await first.engine.home("7d")).provisional).toBe(true);
+    await first.engine.close();
+    expect(first.savedStates).toHaveLength(0);
+    expect(first.savedPresentations).toHaveLength(0);
+    const restarted = harness(db);
+    expect((await restarted.engine.home("7d")).provisional).toBe(true);
+    expect((await restarted.engine.home("7d", true)).stale).toBe(false);
+    await restarted.engine.close();
+  });
   it("returns an empty-provider HomeSnapshot and exact bucket sums", async () => {
     const db = baseDb();
     db.rows.push(row("ses_root", "msg_edge", NOW - DAY, { input: 1_000 }));
@@ -3105,7 +3156,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     try {
       const db = baseDb();
       const { engine, calls } = harness(db);
-      const home = await engine.home("7d");
+      const home = await engine.home("7d", true);
       expect(home.usage.totals.input).toBe(1_500);
       const initial = fullReads(calls);
       expect(initial).toHaveLength(1);
@@ -3221,7 +3272,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
   it("coalesces rapid range requests into the wider refresh", async () => {
     const db = baseDb();
     const { engine, calls } = harness(db);
-    await Promise.all([engine.home("24h"), engine.home("7d"), engine.home("30d")]);
+    await Promise.all([engine.home("24h"), engine.home("7d", true), engine.home("30d")]);
 
     const reads = fullReads(calls);
     expect(reads).toHaveLength(1);
@@ -3237,7 +3288,7 @@ describe("analytics engine: warm presentation and scheduler behavior", () => {
     try {
       const db = baseDb();
       const { engine, calls, savedPresentations } = harness(db);
-      await engine.home("7d");
+      await engine.home("7d", true);
       const beforeClose = calls.filter((call) => call.method === "withSnapshot").length;
       await engine.close();
       expect(savedPresentations.length).toBeGreaterThan(0);
@@ -3591,7 +3642,7 @@ describe("analytics engine: grouped model/provider transport", () => {
   it("reads no raw payloads for warm grouped and detail queries", async () => {
     const db = baseDb();
     const { engine, calls } = harness(db);
-    await engine.home("7d");
+    await engine.home("7d", true);
     const baseline = calls.length;
 
     const modelDetailQuery: AnalyticsGroupQuery = {

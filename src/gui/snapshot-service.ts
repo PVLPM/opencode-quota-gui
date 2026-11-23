@@ -859,7 +859,21 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   }
 
   return {
-    home: (input) => load(homeKey(input.range), () => options.source.home({ range: input.range })),
+    home: (input) => {
+      const key = homeKey(input.range);
+      const request = load(key, () => options.source.home({ range: input.range }));
+      void request.then(
+        (snapshot) => {
+          if (snapshot.provisional && cache.get(key)?.snapshot === snapshot && !closed) {
+            void load(key, () => options.source.home({ range: input.range, exact: true })).catch(
+              () => {},
+            );
+          }
+        },
+        () => {},
+      );
+      return request;
+    },
     quota: (input) => {
       const compute = () => {
         if (!options.source.quota) {

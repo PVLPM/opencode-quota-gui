@@ -2092,6 +2092,29 @@ describe("GUI snapshot service stale-while-revalidate", () => {
     return { promise, resolve, reject };
   }
 
+  it("serves a provisional response and publishes one exact replacement", async () => {
+    const gate = deferred<HomeSnapshot>();
+    const homeSource = vi.fn(async ({ range, exact }: { range: RangeKey; exact?: boolean }) =>
+      exact
+        ? gate.promise
+        : { ...home(range, { total: 10 }), stale: true, provisional: true as const },
+    );
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    const initial = await service.home({ range: "7d" });
+    expect(initial).toMatchObject({ stale: true, provisional: true });
+    await vi.waitFor(() => expect(homeSource).toHaveBeenCalledTimes(2));
+    expect((await service.home({ range: "7d" })).stale).toBe(true);
+    gate.resolve(home("7d", { total: 25 }));
+    await vi.waitFor(() =>
+      expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]),
+    );
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(25);
+    service.close();
+  });
+
   /** Home source whose later calls park behind a busy worker until released. */
   function busyWorkerSource() {
     const parked: Array<ReturnType<typeof deferred<HomeSnapshot>>> = [];

@@ -141,7 +141,7 @@ export interface AnalyticsWorkerMemory {
 }
 
 export interface AnalyticsEngine {
-  home(range: RangeKey): Promise<HomeSnapshot>;
+  home(range: RangeKey, exact?: boolean): Promise<HomeSnapshot>;
   project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
   session(sessionId: string): Promise<SessionSnapshot>;
   /** One range-certified grouped model/provider read over the shared model. */
@@ -403,6 +403,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   let warmIdentityVerification: Promise<boolean> | undefined;
   let warmIdentityVerifiedGeneration = -1;
   let coverageTrusted = false;
+  let provisionalHome: Promise<HomeSnapshot | undefined> | undefined;
   let sidecarNewerThanIndex = false;
   let closed = false;
   let closing = false;
@@ -1127,6 +1128,33 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       usage: { ...snapshot.usage, stale },
       projects: snapshot.projects,
     };
+  }
+
+  function buildProvisionalHome(atMs: number): Promise<HomeSnapshot | undefined> {
+    if (provisionalHome) return provisionalHome;
+    provisionalHome = (async () => {
+      const result = await reader.withSnapshot((snapshot) => {
+        const provisional = createAnalyticsModel({ timeZone });
+        provisional.setMetadata(snapshot.readAllSessionsIndex(), snapshot.readProjectsIndex());
+        // A message created before this window but completed within it is missed until the exact pass.
+        const rows = snapshot.readCompletedAssistantRows({
+          createdSinceMs: rangeWindow("7d", atMs).sinceMs,
+        });
+        provisional.apply(rows.filter(rawAssistantRowHasTokenUsage), []);
+        const data = provisional.home("7d", atMs);
+        return {
+          generatedAtMs: atMs,
+          range: "7d" as const,
+          stale: true,
+          provisional: true as const,
+          providers: { cards: [], enabledProviders: [], polledAtMs: atMs },
+          usage: { ...data.usage, stale: true },
+          projects: data.projects,
+        };
+      });
+      return result.status === "ok" ? result.value : undefined;
+    })();
+    return provisionalHome;
   }
 
   /**
@@ -2484,7 +2512,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   }
 
   return {
-    async home(range) {
+    async home(range, exact = false) {
       if (!isRangeKey(range)) throw new AnalyticsLookupError("bad-request");
       if (closed) throw new Error("analytics closed");
       await ensureLoaded();
@@ -2525,6 +2553,15 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       }
       await ensureIndexLoaded();
       if (!coverageTrusted || !coversSince(window.sinceMs, state.extent)) {
+        if (
+          !exact &&
+          range === "7d" &&
+          state.occurrences.size === 0 &&
+          state.extent === undefined
+        ) {
+          const provisional = await buildProvisionalHome(atMs);
+          if (provisional !== undefined) return provisional;
+        }
         await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
         if (
           unavailable &&

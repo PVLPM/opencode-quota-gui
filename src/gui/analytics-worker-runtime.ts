@@ -72,7 +72,7 @@ export function createAnalyticsWorkerRuntime(
 
     if (command.kind === "home") {
       if (!isRangeKey(command.range)) throw new AnalyticsReadError("bad-request");
-      return await engine.home(command.range);
+      return await engine.home(command.range, command.exact);
     }
     if (command.kind === "project") {
       if (!isRangeKey(command.range) || !command.projectId) {
