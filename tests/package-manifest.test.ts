@@ -206,7 +206,7 @@ describe("package manifest compatibility", () => {
   });
 
   it("keeps the Desktop SDK pinned and bounds the server peer to tested hosts", () => {
-    expect(pkg.peerDependencies?.["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
+    expect(pkg.peerDependencies?.["@opencode/plugin"]).toBe(">=2.0.16 <2.4.0");
     expect(pkg.devDependencies?.["@opencode/plugin"]).toBe("2.2.1");
     for (const dependencies of [
       pkg.dependencies,
@@ -228,7 +228,7 @@ describe("package manifest compatibility", () => {
     expect(typescriptValidator).toContain('const EXPECTED_TYPESCRIPT_VERSION = "7.0.2";');
     expect(typescriptValidator).toContain('const EXPECTED_PLUGIN_SDK_VERSION = "2.2.1";');
     expect(typescriptValidator).toContain(
-      'const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.3.0";',
+      'const EXPECTED_PLUGIN_PEER_VERSION = ">=2.0.16 <2.4.0";',
     );
     expect(typescriptValidator).not.toMatch(/@opentui|bun-ffi-structs|Known unmet peer/);
     expect(typescriptValidator).not.toMatch(/TypeScript v4 freeze|\^5\.9/);
