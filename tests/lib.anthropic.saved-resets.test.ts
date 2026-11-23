@@ -18,6 +18,8 @@ vi.mock("child_process", () => ({ execFile: vi.fn() }));
 vi.mock("fs/promises", () => ({ readFile: vi.fn() }));
 vi.mock("../src/lib/opencode-auth.js", () => ({
   readAuthFileCached: vi.fn().mockResolvedValue(null),
+  readAuthFile: vi.fn().mockResolvedValue(null),
+  getCredentialDatabasePaths: vi.fn().mockReturnValue([]),
 }));
 vi.mock("../src/lib/http.js", () => ({
   fetchWithTimeout: vi.fn(

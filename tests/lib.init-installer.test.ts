@@ -276,10 +276,10 @@ describe("init installer planning and merge behavior", () => {
     expect(hostRaw).not.toContain("tuiCommandDisplay");
   });
 
-  it("labels Anthropic quota unavailable without a quick-setup claim", () => {
+  it("labels Anthropic plainly now that API-key rate limits are observed", () => {
     expect(getInstallerProviderPromptOptions()).toContainEqual({
       value: "anthropic",
-      label: "Anthropic (quota unavailable)",
+      label: "Anthropic",
     });
     expect(getInstallerProviderPromptOptions()).toContainEqual({
       value: "claude-agent",
