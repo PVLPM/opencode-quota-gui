@@ -303,6 +303,19 @@ describe("raw completed assistant reader", () => {
     expect(rows.map((row) => row.messageID)).toEqual(["msg_inside", "msg_after"]);
   });
 
+  it("filters provisional rows by indexed creation time, including scoped reads", async () => {
+    stubDatabase({
+      sessions: [{ id: "ses_one", createdMs: 1 }],
+      messages: [
+        { id: "msg_old", sessionID: "ses_one", createdMs: 50, completedMs: 250 },
+        { id: "msg_new", sessionID: "ses_one", createdMs: 150, completedMs: 250 },
+      ],
+    });
+    const rows = await readCompletedAssistantRows({ createdSinceMs: 100, sessionIDs: ["ses_one"] });
+    expect(rows.map((row) => row.messageID)).toEqual(["msg_new"]);
+    expect(sqliteTrace.statements.some((sql) => sql.includes("time_created >= ?"))).toBe(true);
+  });
+
   it("projects an exact completion-time candidate set through one JSON bind", async () => {
     stubDatabase({
       sessions: [{ id: "ses_one", createdMs: 1 }],

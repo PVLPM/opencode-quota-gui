@@ -316,6 +316,7 @@ function mapCompletedAssistantMessages(rows: ProjectedMessageRow[]): OpenCodeMes
 
 function buildCompletedAssistantQuery(
   params: {
+    createdSinceMs?: number;
     completedSinceMs?: number;
     completedUntilMs?: number;
     completedAtTimes?: readonly number[];
@@ -337,6 +338,10 @@ function buildCompletedAssistantQuery(
   ];
   const args: unknown[] = [];
 
+  if (typeof params.createdSinceMs === "number") {
+    where.push("time_created >= ?");
+    args.push(params.createdSinceMs);
+  }
   if (typeof params.completedSinceMs === "number") {
     where.push(`${completedExpression} >= ?`);
     args.push(params.completedSinceMs);
@@ -863,6 +868,7 @@ function mapRawCompletedAssistantRow(row: ProjectedMessageRow): OpenCodeRawAssis
 }
 
 export interface ReadCompletedAssistantRowsParams {
+  createdSinceMs?: number;
   completedSinceMs?: number;
   completedUntilMs?: number;
   /**
@@ -903,6 +909,7 @@ function readCompletedAssistantRowsFrom(
   const hasUpdatedAt = columns.has("time_updated");
 
   const reservedArgs = countDefined([
+    params.createdSinceMs,
     params.completedSinceMs,
     params.completedUntilMs,
     params.completedAtTimes,
@@ -925,6 +932,7 @@ function readCompletedAssistantRowsFrom(
     const queries = scopedIdQueries(scope.ids, maxIdsPerQuery, (clause) =>
       buildCompletedAssistantQuery(
         {
+          createdSinceMs: params.createdSinceMs,
           completedSinceMs: params.completedSinceMs,
           completedUntilMs: params.completedUntilMs,
           completedAtTimes: params.completedAtTimes,
