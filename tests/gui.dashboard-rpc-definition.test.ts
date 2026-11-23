@@ -136,6 +136,12 @@ describe("dashboard RPC definition", () => {
 
   it("validates home, project and session resource inputs", async () => {
     await expectAccepted(methods.home.input, { range: "30d" });
+    await expectAccepted(methods.home.input, { range: "30d", background: true });
+    await expectRejected(
+      methods.home.input,
+      { range: "30d", background: "yes" },
+      "input must contain only range",
+    );
     await expectRejected(
       methods.home.input,
       { range: "90d" },

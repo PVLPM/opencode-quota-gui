@@ -133,6 +133,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
 
   let worker: AnalyticsWorkerLike | undefined;
   let workerPromise: Promise<AnalyticsWorkerLike> | undefined;
+  let draining: Promise<void> | undefined;
   let initOptions: AnalyticsInitOptions = {};
   let closed = false;
   let broken = false;
@@ -148,6 +149,12 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
    * even if every original caller has gone away.
    */
   const inFlightReads = new Map<string, Promise<unknown>>();
+  const queue: Array<{
+    background: boolean;
+    run: () => Promise<void>;
+    reject: (error: AnalyticsReadError) => void;
+  }> = [];
+  let running = false;
   const listeners = new Set<() => void>();
   const retiredInstances = new WeakSet<AnalyticsWorkerLike>();
 
@@ -214,6 +221,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       if (typeof value !== "object" || value === null) return;
       const record = value as Record<string, unknown>;
       if (record.type === "analytics-generation") {
+        if (draining) return;
         for (const listener of Array.from(listeners)) {
           try {
             listener();
@@ -283,6 +291,8 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
   async function ensureWorker(): Promise<AnalyticsWorkerLike> {
     if (closed) throw new AnalyticsReadError("closed");
     if (broken) throw new AnalyticsReadError("unavailable");
+    if (draining) await draining;
+    if (closed) throw new AnalyticsReadError("closed");
     if (worker) return worker;
     if (workerPromise) return await workerPromise;
     if (Date.now() < nextRetryAtMs) throw new AnalyticsReadError("unavailable");
@@ -336,7 +346,49 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     return await creation;
   }
 
-  async function call<TResult>(command: AnalyticsWorkerRequest["command"]): Promise<TResult> {
+  function pump(): void {
+    if (running || closed) return;
+    if (queue.length === 0) {
+      const instance = worker;
+      if (instance && !draining && pending.size === 0) {
+        const done = (async () => {
+          try {
+            await send(instance, { kind: "close" });
+          } catch {
+            // Termination still releases the worker after a close failure.
+          } finally {
+            retiredInstances.add(instance);
+            if (worker === instance) worker = undefined;
+            try {
+              await instance.terminate();
+            } catch {
+              /* Best effort. */
+            }
+          }
+        })();
+        draining = done.finally(() => {
+          draining = undefined;
+          pump();
+        });
+      }
+      return;
+    }
+    const foreground = queue.findIndex((job) => !job.background);
+    const [job] = queue.splice(foreground < 0 ? 0 : foreground, 1);
+    if (!job) return;
+    running = true;
+    void job.run().finally(() => {
+      running = false;
+      if (queue.length > 0) pump();
+      else setImmediate(pump);
+    });
+  }
+
+  async function call<TResult>(
+    command: AnalyticsWorkerRequest["command"],
+    background = false,
+  ): Promise<TResult> {
+    if (closed) throw new AnalyticsReadError("closed");
     const key = coalescedCommandKey(command);
     if (key !== undefined) {
       const existing = inFlightReads.get(key);
@@ -345,17 +397,25 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       if (existing !== undefined) return existing as Promise<TResult>;
     }
 
-    const request = (async () => {
-      const instance = await ensureWorker();
-      // `close` may have run, or the resolved worker may have crashed, while
-      // this call was waiting. Never post into a dead instance that already
-      // failed its other waiters.
-      if (closed) throw new AnalyticsReadError("closed");
-      if (retiredInstances.has(instance)) throw new AnalyticsReadError("unavailable");
-      const response = await send(instance, command);
-      if (!response.ok) throw new AnalyticsReadError(response.error.code);
-      return response.result as TResult;
-    })();
+    const request = new Promise<TResult>((resolve, reject) => {
+      queue.push({
+        background,
+        reject,
+        run: async () => {
+          try {
+            const instance = await ensureWorker();
+            if (closed) throw new AnalyticsReadError("closed");
+            if (retiredInstances.has(instance)) throw new AnalyticsReadError("unavailable");
+            const response = await send(instance, command);
+            if (!response.ok) throw new AnalyticsReadError(response.error.code);
+            resolve(response.result as TResult);
+          } catch (error) {
+            reject(error);
+          }
+        },
+      });
+      queueMicrotask(pump);
+    });
 
     if (key !== undefined) {
       inFlightReads.set(key, request);
@@ -375,7 +435,8 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
       initOptions = nextOptions;
       await ensureWorker();
     },
-    home: (range, exact) => call({ kind: "home", range, ...(exact ? { exact } : {}) }),
+    home: (range, exact, background) =>
+      call({ kind: "home", range, ...(exact ? { exact } : {}) }, background),
     project: (projectId, range) => call({ kind: "project", projectId, range }),
     session: (sessionId) => call({ kind: "session", sessionId }),
     groups: (query) => call({ kind: "groups", query }),
@@ -389,6 +450,8 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     async close() {
       if (closed) return;
       closed = true;
+      for (const job of queue.splice(0)) job.reject(new AnalyticsReadError("closed"));
+      if (draining) await draining;
       const instance = worker;
       worker = undefined;
       workerPromise = undefined;

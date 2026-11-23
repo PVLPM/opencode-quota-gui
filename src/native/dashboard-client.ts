@@ -57,7 +57,10 @@ export interface DashboardRpcCallOptions {
 export interface DashboardRpcCaller {
   health(input: DashboardRpcNoInput, options?: DashboardRpcCallOptions): Promise<DashboardHealth>;
   quota(input: { refresh?: boolean }, options?: DashboardRpcCallOptions): Promise<QuotaSnapshot>;
-  home(input: { range: RangeKey }, options?: DashboardRpcCallOptions): Promise<HomeSnapshot>;
+  home(
+    input: { range: RangeKey; background?: boolean },
+    options?: DashboardRpcCallOptions,
+  ): Promise<HomeSnapshot>;
   groups(
     input: AnalyticsGroupQuery,
     options?: DashboardRpcCallOptions,

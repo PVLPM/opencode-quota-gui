@@ -558,7 +558,7 @@ export interface DashboardEvent {
 /** Transport-neutral browser seam (spec §5.1); every member has a producer. */
 export interface DashboardDataSource {
   health(): Promise<DashboardHealth>;
-  home(input: { range: RangeKey; exact?: boolean }): Promise<HomeSnapshot>;
+  home(input: { range: RangeKey; exact?: boolean; background?: boolean }): Promise<HomeSnapshot>;
   quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;

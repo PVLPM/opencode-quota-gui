@@ -194,6 +194,9 @@ describe("dashboard RPC handlers", () => {
     });
     await expect(call(captured, "quota", {})).resolves.toEqual({ marker: "quota" });
     await expect(call(captured, "home", { range: "7d" })).resolves.toEqual({ marker: "home" });
+    await expect(call(captured, "home", { range: "30d", background: true })).resolves.toEqual({
+      marker: "home",
+    });
     await expect(call(captured, "groups", { range: "7d", dimension: "model" })).resolves.toEqual({
       marker: "groups",
     });
@@ -205,6 +208,7 @@ describe("dashboard RPC handlers", () => {
     });
 
     expect(fake.snapshots.home).toHaveBeenCalledWith({ range: "7d" });
+    expect(fake.snapshots.home).toHaveBeenCalledWith({ range: "30d", background: true });
     expect(fake.snapshots.groups).toHaveBeenCalledWith({ range: "7d", dimension: "model" });
     await expect(call(captured, "settings", {})).resolves.toEqual({ revision: "rev-1" });
     await expect(call(captured, "importPreview", {})).resolves.toEqual({ from: "legacy" });

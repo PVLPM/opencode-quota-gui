@@ -106,7 +106,7 @@ export interface AnalyticsGenerationNotification {
  */
 export interface AnalyticsTransport {
   init(options: AnalyticsInitOptions): Promise<void>;
-  home(range: RangeKey, exact?: boolean): Promise<HomeSnapshot>;
+  home(range: RangeKey, exact?: boolean, background?: boolean): Promise<HomeSnapshot>;
   project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
   session(sessionId: string): Promise<SessionSnapshot>;
   groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;

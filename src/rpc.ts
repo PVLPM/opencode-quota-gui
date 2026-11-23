@@ -483,8 +483,12 @@ export const DashboardRpc = {
       errors: DASHBOARD_RPC_ERRORS,
     },
     home: {
-      input: schema<{ range: RangeKey }>((value) => {
-        if (!isObject(value) || !hasExactKeys(value, ["range"])) {
+      input: schema<{ range: RangeKey; background?: boolean }>((value) => {
+        if (
+          !isObject(value) ||
+          !hasOnlyKeys(value, ["range", "background"]) ||
+          (value.background !== undefined && typeof value.background !== "boolean")
+        ) {
           return "input must contain only range";
         }
         return checkRange(value);

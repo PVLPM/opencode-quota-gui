@@ -2115,6 +2115,15 @@ describe("GUI snapshot service stale-while-revalidate", () => {
     service.close();
   });
 
+  it("passes background priority to the analytics source", async () => {
+    const homeSource = vi.fn(async ({ range }: { range: RangeKey }) => home(range));
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    await service.home({ range: "30d", background: true });
+    expect(homeSource).toHaveBeenCalledWith({ range: "30d", background: true });
+    service.close();
+  });
+
   /** Home source whose later calls park behind a busy worker until released. */
   function busyWorkerSource() {
     const parked: Array<ReturnType<typeof deferred<HomeSnapshot>>> = [];

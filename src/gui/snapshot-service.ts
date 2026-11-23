@@ -124,7 +124,7 @@ export interface SnapshotViewer {
 }
 
 export interface SnapshotService {
-  home(input: { range: RangeKey }): Promise<HomeSnapshot>;
+  home(input: { range: RangeKey; background?: boolean }): Promise<HomeSnapshot>;
   quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
@@ -861,7 +861,12 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   return {
     home: (input) => {
       const key = homeKey(input.range);
-      const request = load(key, () => options.source.home({ range: input.range }));
+      const request = load(key, () =>
+        options.source.home({
+          range: input.range,
+          ...(input.background ? { background: true } : {}),
+        }),
+      );
       void request.then(
         (snapshot) => {
           if (snapshot.provisional && cache.get(key)?.snapshot === snapshot && !closed) {

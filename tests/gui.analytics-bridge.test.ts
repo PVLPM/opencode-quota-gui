@@ -90,6 +90,79 @@ async function flushMicrotasks(rounds = 50): Promise<void> {
 }
 
 describe("analytics worker bridge", () => {
+  it("drains after FIFO background work and ignores retired worker events", async () => {
+    const workers: FakeWorker[] = [];
+    const bridge = createAnalyticsBridge({
+      createWorker: () => {
+        const worker = new FakeWorker(answerEcho);
+        workers.push(worker);
+        return worker;
+      },
+      logger,
+    });
+    const notifications = vi.fn();
+    bridge.subscribe?.(notifications);
+    await Promise.all([
+      bridge.home("7d"),
+      bridge.home("30d", false, true),
+      bridge.home("lifetime", false, true),
+    ]);
+    await vi.waitFor(() => expect(workers[0]?.terminated).toBe(1));
+    expect(framesOf(workers[0]!, "home").map((frame) => frame.command)).toMatchObject([
+      { range: "7d" },
+      { range: "30d" },
+      { range: "lifetime" },
+    ]);
+    workers[0]?.emit("message", { type: "analytics-generation", generation: 1 });
+    expect(notifications).not.toHaveBeenCalled();
+    await bridge.home("24h");
+    expect(workers).toHaveLength(2);
+    await bridge.close();
+  });
+  it("creates a fresh worker for a request made while the prior worker is closing", async () => {
+    const first = new FakeWorker((command) =>
+      command.kind === "close" ? "ignore" : answerEcho(command),
+    );
+    const second = new FakeWorker(answerEcho);
+    let count = 0;
+    const bridge = createAnalyticsBridge({
+      createWorker: () => (++count === 1 ? first : second),
+      logger,
+    });
+    await bridge.home("7d");
+    await vi.waitFor(() => expect(framesOf(first, "close")).toHaveLength(1));
+    const next = bridge.home("30d");
+    expect(count).toBe(1);
+    const close = framesOf(first, "close")[0];
+    first.emit("message", { id: close?.id, ok: true });
+    await next;
+    expect(count).toBe(2);
+    expect(first.terminated).toBe(1);
+    await bridge.close();
+  });
+  it("prioritizes foreground reads and joins an identical queued background read", async () => {
+    const worker = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const active = bridge.home("7d");
+    await flushMicrotasks();
+    const background = bridge.home("30d", false, true);
+    const foreground = bridge.home("lifetime");
+    const join = bridge.home("30d");
+    const first = framesOf(worker, "home")[0];
+    expect(first?.command).toMatchObject({ kind: "home", range: "7d" });
+    worker.emit("message", { id: first?.id, ok: true, result: {} });
+    await flushMicrotasks();
+    const next = framesOf(worker, "home")[1];
+    expect(next?.command).toMatchObject({ kind: "home", range: "lifetime" });
+    worker.emit("message", { id: next?.id, ok: true, result: {} });
+    await flushMicrotasks();
+    const last = framesOf(worker, "home")[2];
+    expect(last?.command).toMatchObject({ kind: "home", range: "30d" });
+    worker.emit("message", { id: last?.id, ok: true, result: {} });
+    await Promise.all([active, background, foreground, join]);
+    expect(framesOf(worker, "home")).toHaveLength(3);
+    await bridge.close();
+  });
   it("retires a timed-out worker, recreates it, and replays init", async () => {
     let created = 0;
     const first = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));

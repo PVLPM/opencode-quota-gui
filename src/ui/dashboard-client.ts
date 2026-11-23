@@ -1537,7 +1537,7 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
     },
 
     async home(input) {
-      const endpoint = `/api/v1/home?range=${encodeURIComponent(input.range)}`;
+      const endpoint = `/api/v1/home?range=${encodeURIComponent(input.range)}${input.background ? "&background=true" : ""}`;
       return parseHomeSnapshot(await request(endpoint), endpoint);
     },
 
