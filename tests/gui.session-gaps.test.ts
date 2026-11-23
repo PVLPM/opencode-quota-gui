@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-
 import type { ModelIdentity, SessionSnapshot, StepPoint } from "../src/contracts/dashboard.js";
+import { formatElapsed } from "../src/ui/format.js";
 import {
   formatCacheReuse,
   HIGH_REUSE_THRESHOLD_PCT,
@@ -308,5 +308,16 @@ describe("longest idle / high-reuse gaps", () => {
       ).longestHighReuse;
     expect(at(90, 10)).not.toBeNull();
     expect(at(899, 101)).toBeNull();
+  });
+});
+
+describe("formatElapsed", () => {
+  it("formats short, minute and hour spans and rejects bad input", () => {
+    expect(formatElapsed(850)).toBe("850 ms");
+    expect(formatElapsed(4200)).toBe("4.2s");
+    expect(formatElapsed(725_000)).toBe("12m 05s");
+    expect(formatElapsed(7_380_000)).toBe("2h 03m");
+    expect(formatElapsed(undefined)).toBe("-");
+    expect(formatElapsed(-1)).toBe("-");
   });
 });

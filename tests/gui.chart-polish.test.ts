@@ -1373,8 +1373,70 @@ describe("session chart and tree presentation", () => {
       await Promise.resolve();
       const tooltip = graph.elementsNamed(root, "output")[0] as TestNode;
       expect(graph.textOf(tooltip)).toContain("Cache read");
-      expect(graph.textOf(tooltip)).toContain("Cache Rate");
+      expect(graph.textOf(tooltip)).toContain("Cache reuse");
       expect(graph.textOf(tooltip)).not.toContain("request start");
+    } finally {
+      dispose();
+    }
+  });
+  it("treats unknown cache counters as a gap, never 0%, and shows timing and gap fields", async () => {
+    const base = sessionSnapshot();
+    const first = base.steps[0] as SessionSnapshot["steps"][number];
+    const model = { providerId: "openai", modelId: "gpt-6.1-terra", effort: "high" };
+    const t0 = NOW - 3 * 3_600_000;
+    const mk = (
+      id: string,
+      created: number,
+      done: number,
+      extra: Partial<SessionSnapshot["steps"][number]> = {},
+    ) => ({
+      ...first,
+      messageId: id,
+      createdAtMs: created,
+      atMs: done,
+      model,
+      stack: { ...first.stack, input: 100, cacheRead: 900, cacheWrite: 0 },
+      ...extra,
+    });
+    const steps = [
+      mk("a", t0, t0 + 4_000),
+      mk("b", t0 + 64_000, t0 + 70_000, {
+        cacheReadUnknown: true,
+        stack: { ...first.stack, input: 100, cacheRead: 0, cacheWrite: 0 },
+      }),
+      mk("c", t0 + 670_000, t0 + 676_000),
+    ];
+    const snapshot = sessionSnapshot({ steps, compactionMarkers: [], unobservedAtMs: [] });
+    const geometry = buildSessionChartGeometry(snapshot);
+    expect(geometry.cache.rates[1]).toBeNull();
+    expect(geometry.cache.rates[0]).toBeCloseTo(90);
+    const { root, dispose } = mountSession(snapshot);
+    try {
+      const text = graph.textOf(root);
+      expect(text).toContain("Longest idle gap");
+      expect(text).toContain("Longest high-reuse gap");
+      expect(text).not.toMatch(/TTL|expiry|retention/i);
+      expect(text).toContain("Unavailable");
+      const surface = byClass(root, "div", "qg-chart__surface")[0] as TestNode;
+      listener(
+        surface,
+        "onPointerMove",
+      )?.(
+        pointerEvent(geometry.stepX(2), { left: geometry.plot.left, width: geometry.plot.width }),
+      );
+      await Promise.resolve();
+      const tooltip = graph.textOf(graph.elementsNamed(root, "output")[0] as TestNode);
+      for (const label of [
+        "Message created",
+        "Message completed",
+        "Message created → completed",
+        "Idle since previous message",
+        "Cache read",
+        "Cache reuse",
+        "Provider / model / effort",
+      ]) {
+        expect(tooltip).toContain(label);
+      }
     } finally {
       dispose();
     }

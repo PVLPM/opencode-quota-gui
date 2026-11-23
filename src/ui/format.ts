@@ -137,6 +137,21 @@ export function formatTimestamp(ms: number | undefined, timeZone: string): strin
   return new Date(ms).toLocaleString("en-GB", { timeZone });
 }
 
+/** Elapsed time between stored message times: `850 ms`, `4.2s`, `12m 05s`, `2h 03m`. */
+export function formatElapsed(ms: number | undefined): string {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 0) return "-";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 10) return `${Number(totalSeconds.toFixed(1))}s`;
+  const rounded = Math.round(totalSeconds);
+  if (rounded < 60) return `${rounded}s`;
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const seconds = rounded % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0 ? `${hours}h ${pad(minutes)}m` : `${minutes}m ${pad(seconds)}s`;
+}
+
 /**
  * Quota's Polled footer is intentionally minute-precise. Keep the same explicit
  * host zone and date as formatTimestamp; only the seconds are omitted.

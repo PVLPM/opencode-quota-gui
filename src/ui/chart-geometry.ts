@@ -1,5 +1,6 @@
 import type { Bucket, SessionSnapshot, TokenStack } from "../contracts/dashboard";
 import { type CategoryDescriptor, TOKEN_CATEGORIES } from "./format";
+import { stepCacheReuse } from "./session-gaps";
 
 /**
  * Chart geometry (design spec §6, §10; R31, R32, R48).
@@ -732,7 +733,8 @@ export function buildSessionChartGeometry(
     }
   }
 
-  const rates = source.map((step) => cacheHitRate(step.stack));
+  // Unknown cache counters (a stored 0 may be missing data) leave a gap, never 0%.
+  const rates = source.map((step) => stepCacheReuse(step));
   const runs: { x: number; y: number; stepIndex: number }[][] = [];
   rates.forEach((rate, index) => {
     if (rate === null) {

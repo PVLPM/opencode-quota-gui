@@ -10,6 +10,7 @@ import { chartIndexAt, createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
 import {
   axisRangeCaption,
+  formatElapsed,
   formatExactCount,
   formatModelIdentity,
   formatPercent,
@@ -17,6 +18,13 @@ import {
   formatTimestamp,
   formatTokenCount,
 } from "../format";
+import {
+  formatCacheReuse,
+  SESSION_GAP_LABELS,
+  type SessionGap,
+  sessionGapMetrics,
+  stepTimings,
+} from "../session-gaps";
 import { modelTransitions } from "../session-timing";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
@@ -53,17 +61,40 @@ export function SessionChart(props: {
   );
   const transitionAt = (index: number) => transitions().find((entry) => entry.stepIndex === index);
   const rateAt = (index: number): number | null => geometry().cache.rates[index] ?? null;
+  const timings = createMemo(() => stepTimings(props.snapshot.steps));
+  const timingAt = (index: number) => timings()[index];
+  /** A stored 0 with an unknown counter is missing data, not a measured zero. */
+  const cacheReadAt = (index: number): number | undefined => {
+    const step = props.snapshot.steps[index];
+    return step === undefined || step.cacheReadUnknown ? undefined : step.stack.cacheRead;
+  };
+  const gaps = createMemo(() => sessionGapMetrics(props.snapshot));
   const own = () => props.snapshot.ownSummary;
   const tree = () => props.snapshot.treeTotals;
   const timeZone = () => props.snapshot.timeZone;
-  // Slot: "Longest idle gap" and "Longest high-reuse gap" join this list once computed.
-  const summaryItems = (): ChartSummaryItem[] =>
-    geometry().hasDescendants
+  const gapItem = (label: string, gap: SessionGap | null): ChartSummaryItem => ({
+    label,
+    value:
+      gap === null
+        ? SESSION_GAP_LABELS.unavailable
+        : `${formatElapsed(gap.idleMs)} · ${formatCacheReuse(gap.cacheReusePct)}`,
+    // Honest basis: stored message times, never an HTTP request interval or a cache lifetime.
+    title:
+      gap === null
+        ? SESSION_GAP_LABELS.gapBasis
+        : `${SESSION_GAP_LABELS.gapBasis} (steps ${gap.fromStepIndex + 1} → ${gap.toStepIndex + 1})`,
+  });
+  const gapItems = (): ChartSummaryItem[] => [
+    gapItem(SESSION_GAP_LABELS.longestIdleGap, gaps().longestIdle),
+    gapItem(SESSION_GAP_LABELS.longestHighReuseGap, gaps().longestHighReuse),
+  ];
+  const summaryItems = (): ChartSummaryItem[] => [
+    ...(geometry().hasDescendants
       ? [
           {
             label: "Tree total tokens",
             value: formatExactCount(tree().total),
-            emphasis: "primary",
+            emphasis: "primary" as const,
           },
           {
             label: "This session · own tokens",
@@ -74,9 +105,11 @@ export function SessionChart(props: {
           {
             label: "Total tokens · this session",
             value: formatExactCount(own().total),
-            emphasis: "primary",
+            emphasis: "primary" as const,
           },
-        ];
+        ]),
+    ...gapItems(),
+  ];
 
   const compactionAt = (index: number): SessionCompactionTick[] =>
     geometry().compaction.filter((marker) => marker.stepIndex === index);
@@ -106,6 +139,9 @@ export function SessionChart(props: {
     return index === undefined ? 0 : geometry().stepX(index) / size.width;
   });
 
+  const formatReuseWords = (rate: number | null): string =>
+    rate === null ? SESSION_GAP_LABELS.unavailable : formatPercentExact(rate);
+
   const stepText = (index: number): string => {
     const step = props.snapshot.steps[index];
     if (!step) return `Step ${index + 1}`;
@@ -128,14 +164,23 @@ export function SessionChart(props: {
       );
     }
     const rate = rateAt(index);
-    parts.push(`Cache rate ${rate === null ? "not measured" : formatPercentExact(rate)}`);
+    parts.push(`${SESSION_GAP_LABELS.cacheReuse} ${formatReuseWords(rate)}`);
+    const timing = timingAt(index);
+    if (timing) {
+      if (timing.durationMs !== undefined) {
+        parts.push(`${SESSION_GAP_LABELS.messageDuration} ${formatElapsed(timing.durationMs)}`);
+      }
+      if (timing.overlap) parts.push(SESSION_GAP_LABELS.overlapsPrevious);
+      else if (timing.idleMs !== undefined) {
+        parts.push(`${SESSION_GAP_LABELS.idleSincePrevious} ${formatElapsed(timing.idleMs)}`);
+      }
+    }
     const change = transitionAt(index);
     if (change) {
       parts.push(
         `${change.kind === "model" ? "Model changed" : "Effort changed"} from ${formatModelIdentity(change.from)} to ${formatModelIdentity(change.to)}`,
       );
     }
-    // Per-step timing fields are appended here once the timing helper lands.
     return parts.join(", ");
   };
 
@@ -573,29 +618,74 @@ export function SessionChart(props: {
                 <Show when={step().model}>
                   {(model) => (
                     <div class="qg-totals__row qg-tooltip__row">
-                      <span class="qg-totals__label">Model</span>
+                      <span class="qg-totals__label">{SESSION_GAP_LABELS.providerModelEffort}</span>
                       <span class="qg-totals__value">{formatModelIdentity(model())}</span>
                     </div>
                   )}
                 </Show>
-                <div class="qg-totals__row qg-tooltip__row">
-                  <span class="qg-totals__label">Cache read</span>
-                  <span class="qg-totals__value">{formatExactCount(step().stack.cacheRead)}</span>
-                </div>
+                <Show when={timingAt(active() ?? 0)}>
+                  {(timing) => (
+                    <>
+                      <Show when={timing().createdAtMs !== undefined}>
+                        <div class="qg-totals__row qg-tooltip__row">
+                          <span class="qg-totals__label">{SESSION_GAP_LABELS.messageCreated}</span>
+                          <span class="qg-totals__value">
+                            {formatTimestamp(timing().createdAtMs, timeZone())}
+                          </span>
+                        </div>
+                      </Show>
+                      <div class="qg-totals__row qg-tooltip__row">
+                        <span class="qg-totals__label">{SESSION_GAP_LABELS.messageCompleted}</span>
+                        <span class="qg-totals__value">
+                          {formatTimestamp(timing().completedAtMs, timeZone())}
+                        </span>
+                      </div>
+                      <Show when={timing().durationMs !== undefined}>
+                        <div class="qg-totals__row qg-tooltip__row">
+                          <span class="qg-totals__label">{SESSION_GAP_LABELS.messageDuration}</span>
+                          <span class="qg-totals__value">{formatElapsed(timing().durationMs)}</span>
+                        </div>
+                      </Show>
+                      <Show when={timing().overlap || timing().idleMs !== undefined}>
+                        <div class="qg-totals__row qg-tooltip__row">
+                          <span class="qg-totals__label">
+                            {timing().overlap
+                              ? SESSION_GAP_LABELS.overlapsPrevious
+                              : SESSION_GAP_LABELS.idleSincePrevious}
+                          </span>
+                          <span class="qg-totals__value">
+                            {timing().overlap
+                              ? timing().overlapMs === undefined
+                                ? "Yes"
+                                : formatElapsed(timing().overlapMs)
+                              : formatElapsed(timing().idleMs)}
+                          </span>
+                        </div>
+                      </Show>
+                    </>
+                  )}
+                </Show>
+                <Show when={cacheReadAt(active() ?? 0) !== undefined}>
+                  <div class="qg-totals__row qg-tooltip__row">
+                    <span class="qg-totals__label">{SESSION_GAP_LABELS.cacheReadTokens}</span>
+                    <span class="qg-totals__value">
+                      {formatExactCount(cacheReadAt(active() ?? 0) as number)}
+                    </span>
+                  </div>
+                </Show>
                 <div class="qg-totals__row qg-tooltip__row">
                   <span
                     class="qg-tooltip__swatch"
                     aria-hidden="true"
                     style={{ "--qg-swatch": "var(--qg-chart-rate)" }}
                   />
-                  <span class="qg-totals__label">Cache Rate</span>
+                  <span class="qg-totals__label">{SESSION_GAP_LABELS.cacheReuse}</span>
                   <span class="qg-totals__value" title={formatPercentExact(rateAt(active() ?? 0))}>
                     {rateAt(active() ?? 0) === null
-                      ? "—"
+                      ? SESSION_GAP_LABELS.unavailable
                       : formatPercent(rateAt(active() ?? 0) ?? undefined)}
                   </span>
                 </div>
-                {/* Slot: per-step timing rows (request start, duration, gap) go here. */}
                 <Show when={transitionAt(active() ?? 0)}>
                   {(entry) => (
                     <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--note">
@@ -657,7 +747,7 @@ export function SessionChart(props: {
               <Show when={geometry().hasDescendants}>
                 <th scope="col">Cumulative tokens (Session tree)</th>
               </Show>
-              <th scope="col">Cache Rate</th>
+              <th scope="col">{SESSION_GAP_LABELS.cacheReuse}</th>
               <th scope="col">Compaction</th>
             </tr>
           </thead>
@@ -678,7 +768,7 @@ export function SessionChart(props: {
                   <Show when={geometry().hasDescendants}>
                     <td>{formatExactCount(geometry().treeCumulativeValues[index()] ?? 0)}</td>
                   </Show>
-                  <td>{rateAt(index()) === null ? "—" : formatPercentExact(rateAt(index()))}</td>
+                  <td>{formatReuseWords(rateAt(index()))}</td>
                   <td>
                     {compactionAt(index()).length === 0
                       ? "—"
