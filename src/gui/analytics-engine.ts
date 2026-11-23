@@ -19,6 +19,7 @@ import {
 import type {
   AnalyticsGroupQuery,
   AnalyticsGroupSnapshot,
+  AnalyticsRangeReader,
   HomeSnapshot,
   ProjectSnapshot,
   SessionSnapshot,
@@ -140,13 +141,7 @@ export interface AnalyticsWorkerMemory {
   phases?: AnalyticsPhaseMetrics;
 }
 
-export interface AnalyticsEngine {
-  home(range: RangeKey, exact?: boolean): Promise<HomeSnapshot>;
-  project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
-  session(sessionId: string): Promise<SessionSnapshot>;
-  /** One range-certified grouped model/provider read over the shared model. */
-  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
-  refresh(): Promise<void>;
+export interface AnalyticsEngine extends AnalyticsRangeReader {
   stats(): Promise<AnalyticsWorkerMemory>;
   /** Best-effort GC trigger; false when the runtime exposes no hook. */
   gc(): Promise<boolean>;
@@ -2511,6 +2506,13 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     void requestRefresh(job).catch(() => {});
   }
 
+  async function refreshGlobalOrThrow(range: RangeKey): Promise<void> {
+    await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
+    if (unavailable && state.occurrences.size === 0 && Object.keys(state.sessions).length === 0) {
+      throw new AnalyticsLookupError("unavailable");
+    }
+  }
+
   return {
     async home(range, exact = false) {
       if (!isRangeKey(range)) throw new AnalyticsLookupError("bad-request");
@@ -2562,14 +2564,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           const provisional = await buildProvisionalHome(atMs);
           if (provisional !== undefined) return provisional;
         }
-        await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
-        if (
-          unavailable &&
-          state.occurrences.size === 0 &&
-          Object.keys(state.sessions).length === 0
-        ) {
-          throw new AnalyticsLookupError("unavailable");
-        }
+        await refreshGlobalOrThrow(range);
       }
       const stale = isStale(now());
       if (stale) {
@@ -2651,14 +2646,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         return result;
       }
       if (!coverageTrusted || !coversSince(window.sinceMs, state.extent)) {
-        await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
-        if (
-          unavailable &&
-          state.occurrences.size === 0 &&
-          Object.keys(state.sessions).length === 0
-        ) {
-          throw new AnalyticsLookupError("unavailable");
-        }
+        await refreshGlobalOrThrow(range);
       }
       const derivationAtMs = groupDerivationAtMs(range, atMs);
       const missingCoverage = !coversSince(window.sinceMs, state.extent);

@@ -8,6 +8,7 @@
 import type {
   AnalyticsGroupQuery,
   AnalyticsGroupSnapshot,
+  AnalyticsRangeReader,
   HomeSnapshot,
   ProjectSnapshot,
   SessionSnapshot,
@@ -104,13 +105,8 @@ export interface AnalyticsGenerationNotification {
  * Host-side transport seam. Production uses a Node/Bun worker bridge; tests
  * substitute a loopback transport over the same engine/protocol.
  */
-export interface AnalyticsTransport {
+export interface AnalyticsTransport extends AnalyticsRangeReader {
   init(options: AnalyticsInitOptions): Promise<void>;
-  home(range: RangeKey, exact?: boolean, background?: boolean): Promise<HomeSnapshot>;
-  project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
-  session(sessionId: string): Promise<SessionSnapshot>;
-  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
-  refresh(): Promise<void>;
   /** Optional diagnostics seam; the real worker implements it. */
   stats?(): Promise<AnalyticsWorkerMemoryStats>;
   /** Optional GC seam; returns false when the runtime exposes no hook. */

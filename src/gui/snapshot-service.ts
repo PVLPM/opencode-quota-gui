@@ -123,12 +123,8 @@ export interface SnapshotViewer {
   release(): void;
 }
 
-export interface SnapshotService {
-  home(input: { range: RangeKey; background?: boolean }): Promise<HomeSnapshot>;
-  quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
-  project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
-  session(input: { sessionId: string }): Promise<SessionSnapshot>;
-  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
+export interface SnapshotService
+  extends Pick<DashboardDataSource, "home" | "quota" | "project" | "session" | "groups"> {
   /** Invalidations broadcast over SSE (three topics, never raw snapshots). */
   subscribe(listener: (event: DashboardEvent) => void): () => void;
   /**

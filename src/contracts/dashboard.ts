@@ -388,6 +388,15 @@ export interface HomeSnapshot {
   projects: ProjectActivityRow[];
 }
 
+/** Positional analytics reads shared by the engine and worker transport. */
+export interface AnalyticsRangeReader {
+  home(range: RangeKey, exact?: boolean, background?: boolean): Promise<HomeSnapshot>;
+  project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
+  session(sessionId: string): Promise<SessionSnapshot>;
+  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
+  refresh(): Promise<void>;
+}
+
 /**
  * Independent quota/provider read (transport contract). Analytics never waits
  * on this; a quota viewer never starts the analytics worker.
