@@ -302,9 +302,6 @@ function failureLabel(error: unknown): string {
   return "unavailable";
 }
 
-/** Longest a foreground read waits on a revalidation before serving last-good stale. */
-export const STALE_SERVE_GRACE_MS = 500;
-
 export function createSnapshotService(options: SnapshotServiceOptions): SnapshotService {
   const logger = options.logger ?? createGuiLogger();
   const now = options.now ?? Date.now;
@@ -499,9 +496,8 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
   /**
    * Foreground analytics read, stale-while-revalidate. The single analytics
-   * worker cannot answer while a synchronous scan runs, so a stale entry waits
-   * at most STALE_SERVE_GRACE_MS before the last-good DTO is returned flagged
-   * stale. A key with no DTO simply awaits its compute. The compute stays
+   * worker cannot answer while a synchronous scan runs, so a stale entry returns
+   * the last-good DTO immediately flagged stale. A key with no DTO awaits its compute. The compute stays
    * single-flight and commits when it lands; `sessions.changed` is emitted only
    * when a changed result was actually stored, so clients refetch exactly once.
    */
@@ -515,35 +511,23 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         : undefined;
     if (lastGood === undefined) return fresh;
     const epoch = viewerEpoch;
-    return new Promise<T>((resolve, reject) => {
-      let waiting = true;
-      const timer = setTimeout(() => {
-        waiting = false;
-        resolve(lastGood);
-      }, STALE_SERVE_GRACE_MS);
-      timer.unref();
-      fresh.then(
-        (value) => {
-          clearTimeout(timer);
-          if (waiting) return resolve(value);
-          if (
-            closed ||
-            epoch !== viewerEpoch ||
-            cache.get(key)?.snapshot !== value ||
-            notifiedLoads.has(fresh) ||
-            (prior && substantiveOf(value) === prior.substantive)
-          ) {
-            return;
-          }
-          notifiedLoads.add(fresh);
-          emit({ topic: topicFor(key), at: now() });
-        },
-        (error: unknown) => {
-          clearTimeout(timer);
-          if (waiting) reject(error);
-        },
-      );
-    });
+    void fresh.then(
+      (value) => {
+        if (
+          closed ||
+          epoch !== viewerEpoch ||
+          cache.get(key)?.snapshot !== value ||
+          notifiedLoads.has(fresh) ||
+          (prior && substantiveOf(value) === prior.substantive)
+        ) {
+          return;
+        }
+        notifiedLoads.add(fresh);
+        emit({ topic: topicFor(key), at: now() });
+      },
+      () => {},
+    );
+    return Promise.resolve(lastGood);
   }
 
   function loadSingleFlight<T>(key: string, compute: () => Promise<T>, force = false): Promise<T> {

@@ -22,7 +22,6 @@ import {
   MAX_TRACKED_PAGES,
   type SnapshotService,
   type SnapshotSource,
-  STALE_SERVE_GRACE_MS,
 } from "../src/gui/snapshot-service.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
@@ -746,7 +745,8 @@ describe("GUI snapshot service", () => {
     expect((await service.groups(query)).stale).toBe(true);
     expect(calls).toBe(1);
     sourceStale = false;
-    expect((await service.groups(query)).stale).toBe(false);
+    expect((await service.groups(query)).stale).toBe(true);
+    await vi.waitFor(async () => expect((await service.groups(query)).stale).toBe(false));
     expect(calls).toBe(2);
     await service.groups(query);
     expect(calls).toBe(2);
@@ -769,14 +769,14 @@ describe("GUI snapshot service", () => {
     expect(calls).toBe(1);
 
     // The stale payload was not cached as fresh: the next read calls the source
-    // again and can return a fresh result.
+    // again while immediately returning the stale result.
     sourceStale = false;
     const second = await service.home({ range: "7d" });
     expect(calls).toBe(2);
-    expect(second.stale).toBe(false);
+    expect(second.stale).toBe(true);
 
     // That fresh result is cached again: no unnecessary third source call.
-    await expect(service.home({ range: "7d" })).resolves.toEqual(second);
+    await vi.waitFor(async () => expect((await service.home({ range: "7d" })).stale).toBe(false));
     expect(calls).toBe(2);
   });
 
@@ -844,7 +844,10 @@ describe("GUI snapshot service", () => {
     expect(calls).toBe(1);
 
     usageStale = false;
-    await expect(service.project({ projectId: "p1", range: "7d" })).resolves.toEqual(project("7d"));
+    expect((await service.project({ projectId: "p1", range: "7d" })).stale).toBe(true);
+    await vi.waitFor(async () =>
+      expect(await service.project({ projectId: "p1", range: "7d" })).toEqual(project("7d")),
+    );
     expect(calls).toBe(2);
   });
 
@@ -1086,9 +1089,11 @@ describe("GUI snapshot service", () => {
     expect(secondCalls).toBe(1);
 
     const refreshed = await service.project({ projectId: "first", range: "7d" });
-    expect(refreshed.totals.total).toBe(20);
+    expect(refreshed.totals.total).toBe(10);
     expect(firstCalls).toBe(3);
-    expect(events).toEqual([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await service.project({ projectId: "first", range: "7d" })).totals.total).toBe(20);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]);
     reconnected();
   });
 
@@ -1292,9 +1297,15 @@ describe("GUI snapshot service", () => {
 
     total = 30;
     service.notifySettingsChanged();
-    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(30);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(20);
     expect(calls).toBe(3);
-    expect(events.map((event) => event.topic)).toEqual(["sessions.changed", "settings.changed"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(30);
+    expect(events.map((event) => event.topic)).toEqual([
+      "sessions.changed",
+      "settings.changed",
+      "sessions.changed",
+    ]);
     viewer();
   });
 
@@ -2119,21 +2130,20 @@ describe("GUI snapshot service stale-while-revalidate", () => {
     return { worker, service, events };
   }
 
-  it("serves the stale cached DTO within the grace while the worker refresh is in flight", async () => {
+  it("serves the stale cached DTO immediately while the worker refresh is in flight", async () => {
     const { worker, service, events } = await staleWithBusyWorker();
     const first = service.home({ range: "7d" });
-    await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS);
+    await vi.advanceTimersByTimeAsync(0);
+    let firstSettled = false;
+    void first.then(() => {
+      firstSettled = true;
+    });
+    await Promise.resolve();
+    expect(firstSettled).toBe(true);
     expect(await first).toMatchObject({ stale: true, usage: { totals: { total: 10 } } });
 
-    // The real race: a second request arrives after the first already gave up.
-    let settled = false;
-    const second = service.home({ range: "7d" }).then((value) => {
-      settled = true;
-      return value;
-    });
-    await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS - 1);
-    expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
+    // A second request joins the same in-flight refresh and also returns immediately.
+    const second = service.home({ range: "7d" });
     expect((await second).stale).toBe(true);
     // Both callers joined one in-flight refresh.
     expect(worker.calls()).toBe(2);
@@ -2152,7 +2162,6 @@ describe("GUI snapshot service stale-while-revalidate", () => {
   it("emits nothing when the refresh lands with unchanged content", async () => {
     const { worker, service, events } = await staleWithBusyWorker();
     const first = service.home({ range: "7d" });
-    await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS);
     await first;
     worker.parked[0]!.resolve(home("7d", { total: 10 }));
     await vi.advanceTimersByTimeAsync(0);
@@ -2188,14 +2197,12 @@ describe("GUI snapshot service stale-while-revalidate", () => {
   it("keeps the stale DTO and emits no event when the in-flight refresh fails", async () => {
     const { worker, service, events } = await staleWithBusyWorker();
     const first = service.home({ range: "7d" });
-    await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS);
     expect((await first).stale).toBe(true);
 
     worker.parked[0]!.reject(new Error("refresh failed"));
     await vi.advanceTimersByTimeAsync(0);
     expect(events).toEqual([]);
     const after = service.home({ range: "7d" });
-    await vi.advanceTimersByTimeAsync(STALE_SERVE_GRACE_MS);
     const kept = await after;
     expect(kept.stale).toBe(true);
     expect(kept.usage.totals.total).toBe(10);
