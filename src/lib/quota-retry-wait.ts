@@ -4,6 +4,7 @@
  * instead of following its normal retry timing.
  */
 import { isPercentEntry, type QuotaProviderResult } from "./entries.js";
+import { readCredentialRows } from "./opencode-auth.js";
 import { collectQuotaRenderData } from "./quota-render-data.js";
 import {
   createQuotaRuntimeRequestContext,
@@ -30,25 +31,56 @@ export function isQuotaLimitError(error: QuotaRetryEvent["error"]): boolean {
 }
 
 /**
- * Milliseconds until the earliest reset among used-up (0% left) windows, plus the buffer, at
- * most the cap. Undefined when no used-up window has a reset time still ahead.
+ * Milliseconds until all used-up windows have reset, plus the buffer, at most the cap.
  */
 export function getQuotaResetRetryDelayMs(
   results: readonly QuotaProviderResult[],
   nowMs: number,
+  activeSourceId?: string,
 ): number | undefined {
-  let earliestResetMs: number | undefined;
+  const sources = new Set(
+    results.flatMap((result) => [
+      ...result.entries.flatMap((entry) =>
+        entry.accounting.sourceId ? [entry.accounting.sourceId] : [],
+      ),
+      ...(result.accounts?.map((account) => account.sourceId) ?? []),
+    ]),
+  );
+  const marked = new Set(
+    results.flatMap(
+      (result) =>
+        result.accounts?.filter((account) => account.active).map((account) => account.sourceId) ??
+        [],
+    ),
+  );
+  const active = activeSourceId ?? (marked.size === 1 ? [...marked][0] : undefined);
+  if (sources.size > 1 && !active) {
+    console.debug("[opencode-quota-gui] retry: active account is unknown");
+    return undefined;
+  }
+  if (active && sources.size > 0 && !sources.has(active)) return undefined;
+  let latestResetMs: number | undefined;
   for (const result of results) {
+    if (
+      !result.attempted ||
+      result.errors.some((error) => !active || !error.sourceId || error.sourceId === active)
+    )
+      return undefined;
     for (const entry of result.entries) {
-      if (!isPercentEntry(entry) || !(entry.percentRemaining <= 0) || !entry.resetTimeIso) continue;
+      if (sources.size > 1 && !entry.accounting.sourceId) return undefined;
+      if (active && entry.accounting.sourceId && entry.accounting.sourceId !== active) continue;
+      if (!isPercentEntry(entry)) continue;
+      if (!Number.isFinite(entry.percentRemaining)) return undefined;
+      if (entry.percentRemaining > 0) continue;
+      if (!entry.resetTimeIso) return undefined;
       const resetMs = Date.parse(entry.resetTimeIso);
-      if (!(resetMs > nowMs)) continue;
-      if (earliestResetMs === undefined || resetMs < earliestResetMs) earliestResetMs = resetMs;
+      if (!(resetMs > nowMs)) return undefined;
+      if (latestResetMs === undefined || resetMs > latestResetMs) latestResetMs = resetMs;
     }
   }
-  if (earliestResetMs === undefined) return undefined;
+  if (latestResetMs === undefined) return undefined;
   return Math.min(
-    earliestResetMs - nowMs + QUOTA_RESET_RETRY_BUFFER_MS,
+    latestResetMs - nowMs + QUOTA_RESET_RETRY_BUFFER_MS,
     QUOTA_RESET_RETRY_MAX_DELAY_MS,
   );
 }
@@ -73,7 +105,11 @@ export async function resolveQuotaResetRetryDelayMs(
     client: runtime.client,
     resolveRuntimeProviderIds: runtime.resolveRuntimeProviderIds,
     // Only the provider of the model that hit the limit counts, whatever onlyCurrentModel says.
-    config: { ...runtime.config, onlyCurrentModel: true },
+    config: {
+      ...runtime.config,
+      onlyCurrentModel: true,
+      opencodeGoWindows: ["rolling", "weekly", "monthly"],
+    },
     configMeta: runtime.configMeta,
     request: createQuotaRuntimeRequestContext(runtime),
     workspaceRoot: runtime.roots.workspaceRoot,
@@ -81,8 +117,12 @@ export async function resolveQuotaResetRetryDelayMs(
     bypassProviderCache: true,
     providers: runtime.providers,
   });
+  const rows = await readCredentialRows([event.model.providerID], { firstOnly: true });
+  if (rows.some((row) => row.resolveError !== undefined)) return undefined;
+  const active = rows.find((row) => row.active)?.id;
   return getQuotaResetRetryDelayMs(
     collected.providerResults.map((probe) => probe.result),
     Date.now(),
+    active,
   );
 }

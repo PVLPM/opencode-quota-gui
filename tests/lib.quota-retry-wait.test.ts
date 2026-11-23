@@ -81,7 +81,7 @@ describe("getQuotaResetRetryDelayMs", () => {
     expect(delay).toBe(90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
   });
 
-  it("picks the earliest reset among used-up windows of every result", () => {
+  it("waits for the latest exhausted window when entries have no model metadata", () => {
     const delay = getQuotaResetRetryDelayMs(
       [
         result([window("5h", 0, at(90 * MINUTE_MS))]),
@@ -89,7 +89,57 @@ describe("getQuotaResetRetryDelayMs", () => {
       ],
       NOW_MS,
     );
-    expect(delay).toBe(20 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+    expect(delay).toBe(90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+  });
+
+  it("does not guess when another exhausted window has a missing or stale reset", () => {
+    for (const reset of [undefined, at(-MINUTE_MS), "invalid"]) {
+      expect(
+        getQuotaResetRetryDelayMs(
+          [result([window("5h", 0, at(90 * MINUTE_MS)), window("Weekly", 0, reset)])],
+          NOW_MS,
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it("uses only the marked active account and refuses ambiguous accounts", () => {
+    const entries = [
+      {
+        ...window("5h", 0, at(90 * MINUTE_MS)),
+        accounting: { ...TEST_ACCOUNTING, sourceId: "active" },
+      },
+      {
+        ...window("5h", 0, at(20 * MINUTE_MS)),
+        accounting: { ...TEST_ACCOUNTING, sourceId: "other" },
+      },
+    ];
+    const accounts = [
+      { sourceId: "active", active: true },
+      { sourceId: "other", active: false },
+    ];
+    expect(getQuotaResetRetryDelayMs([{ ...result(entries), accounts }], NOW_MS)).toBe(
+      90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS,
+    );
+    expect(
+      getQuotaResetRetryDelayMs(
+        [{ ...result(entries), accounts: accounts.map(({ sourceId }) => ({ sourceId })) }],
+        NOW_MS,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refuses a failed refresh or unknown percentage", () => {
+    const good = window("5h", 0, at(MINUTE_MS));
+    expect(
+      getQuotaResetRetryDelayMs(
+        [{ ...result([good]), errors: [{ label: "failed", message: "failed" }] }],
+        NOW_MS,
+      ),
+    ).toBeUndefined();
+    expect(
+      getQuotaResetRetryDelayMs([result([good, window("Weekly", Number.NaN)])], NOW_MS),
+    ).toBeUndefined();
   });
 
   it("caps the wait", () => {
@@ -99,6 +149,20 @@ describe("getQuotaResetRetryDelayMs", () => {
     );
     expect(delay).toBe(QUOTA_RESET_RETRY_MAX_DELAY_MS);
     expect(QUOTA_RESET_RETRY_MAX_DELAY_MS).toBe(5 * 60 * MINUTE_MS);
+  });
+
+  it("waits for weekly when both weekly and 5h are exhausted", () => {
+    expect(
+      getQuotaResetRetryDelayMs(
+        [
+          result([
+            window("5h", 0, at(60 * MINUTE_MS)),
+            window("Weekly", 0, at(4 * 60 * MINUTE_MS)),
+          ]),
+        ],
+        NOW_MS,
+      ),
+    ).toBe(4 * 60 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
   });
 
   it("has no delay without a used-up window whose reset is still ahead", () => {
@@ -204,6 +268,47 @@ describe("resolveQuotaResetRetryDelayMs", () => {
     expect(copilot.fetch).not.toHaveBeenCalled();
   });
 
+  it("uses OpenCode's active credential rather than another integration's marker", async () => {
+    const { bindCredentialSource } = await import("../src/lib/opencode-auth.js");
+    const release = bindCredentialSource({
+      kind: "opencode-integration-api",
+      readRows: async () => [
+        {
+          id: "current",
+          integrationId: "zai-coding-plan",
+          label: "",
+          active: true,
+          value: {},
+        },
+      ],
+    });
+    try {
+      const entries = [
+        {
+          ...window("5h", 0, at(90 * MINUTE_MS)),
+          accounting: { ...TEST_ACCOUNTING, sourceId: "current" },
+        },
+        {
+          ...window("5h", 0, at(20 * MINUTE_MS)),
+          accounting: { ...TEST_ACCOUNTING, sourceId: "other" },
+        },
+      ];
+      const provider = makeProvider("zai", entries, () => true);
+      provider.fetch.mockResolvedValue({
+        ...result(entries),
+        accounts: [
+          { sourceId: "current", active: true },
+          { sourceId: "other", active: true },
+        ],
+      });
+      mocks.getProviders.mockReturnValue([provider]);
+      mocks.loadConfig.mockResolvedValue(makeQuotaToastTestConfig());
+      await expect(resolve(limitEvent)).resolves.toBe(90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+    } finally {
+      release();
+    }
+  });
+
   it("asks the provider for fresh quota on every limit error instead of reusing the cache", async () => {
     // A cacheable provider and a long minIntervalMs: a normal refresh would reuse the first result.
     const zai = {
@@ -236,6 +341,19 @@ describe("resolveQuotaResetRetryDelayMs", () => {
 
     await expect(
       resolve({ ...limitEvent, error: { type: "provider.transport" } }),
+    ).resolves.toBeUndefined();
+    expect(mocks.loadConfig).not.toHaveBeenCalled();
+  });
+
+  it("leaves an untyped Claude Agent five-hour limit error unchanged", async () => {
+    const error = new Error(
+      "You've hit your 5-hour limit · resets 4:10am (Europe/Istanbul)\nResets at 2026-11-23T01:10:00.000Z.",
+    );
+    await expect(
+      resolve({
+        model: { id: "claude-sonnet", providerID: "claude-agent" },
+        error: error as unknown as QuotaRetryEvent["error"],
+      }),
     ).resolves.toBeUndefined();
     expect(mocks.loadConfig).not.toHaveBeenCalled();
   });
