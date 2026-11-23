@@ -13,7 +13,7 @@ import type {
 } from "../contracts/dashboard";
 import type { RangeKey } from "../contracts/ranges";
 import { BuildAbout } from "./components/build-info";
-import { BusyOverlay, createBusyIndicator } from "./components/busy";
+import { type BusyIndicator, BusyOverlay, createBusyIndicator } from "./components/busy";
 import { QueryState } from "./components/states";
 import type { Toaster } from "./components/toast";
 import type { ConnectionState } from "./dashboard-client";
@@ -60,6 +60,32 @@ interface RouteLifecycleProps {
   enabled?: () => boolean;
   /** Called after a response is applied; the native shell anchors freshness here. */
   onFresh?: () => void;
+}
+
+/**
+ * The load state, range-failure notice and delayed busy panel of a route whose
+ * payload carries its range; `onScreen` says whether the payload is the scope
+ * the route currently requests.
+ */
+function createRouteView<T extends { range: RangeKey }>(
+  query: Query<T>,
+  range: () => RangeKey,
+  onScreen: (data: T) => boolean,
+) {
+  const state = () =>
+    resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
+  const rangeFailure = () =>
+    describeRangeFailure(query.data(), range(), query.loading(), query.error() !== undefined);
+  const busy: BusyIndicator = createBusyIndicator();
+  createEffect(() => {
+    const data = query.data();
+    busy.update({
+      active: query.loading() && (data === undefined || !onScreen(data)),
+      hasData: data !== undefined,
+    });
+  });
+  onCleanup(() => busy.dispose());
+  return { state, rangeFailure, busy };
 }
 
 function routeEnabled(props: RouteLifecycleProps): boolean {
@@ -301,19 +327,11 @@ export function AnalyticsRoute(props: AnalyticsRouteProps): JSX.Element {
     prefetch(range, key);
   });
 
-  const state = () =>
-    resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
-  const rangeFailure = () =>
-    describeRangeFailure(query.data(), props.range, query.loading(), query.error() !== undefined);
-  const busy = createBusyIndicator();
-  createEffect(() => {
-    const data = query.data();
-    busy.update({
-      active: query.loading() && (data === undefined || data.range !== props.range),
-      hasData: data !== undefined,
-    });
-  });
-  onCleanup(() => busy.dispose());
+  const { state, rangeFailure, busy } = createRouteView(
+    query,
+    () => props.range,
+    (data) => data.range === props.range,
+  );
   const staleNow = () => {
     const current = state();
     if (current.kind === "ready" && current.stale) return true;
@@ -566,21 +584,11 @@ export function ProjectRoute(props: ProjectRouteProps): JSX.Element {
     });
   });
 
-  const state = () =>
-    resolveLoadState({ data: query.data(), error: query.error(), loading: query.loading() });
-  const rangeFailure = () =>
-    describeRangeFailure(query.data(), props.range, query.loading(), query.error() !== undefined);
-  const busy = createBusyIndicator();
-  createEffect(() => {
-    const data = query.data();
-    busy.update({
-      active:
-        query.loading() &&
-        (data === undefined || data.range !== props.range || data.projectId !== props.projectId),
-      hasData: data !== undefined,
-    });
-  });
-  onCleanup(() => busy.dispose());
+  const { state, rangeFailure, busy } = createRouteView(
+    query,
+    () => props.range,
+    (data) => data.range === props.range && data.projectId === props.projectId,
+  );
 
   createEffect(() =>
     props.onStale(

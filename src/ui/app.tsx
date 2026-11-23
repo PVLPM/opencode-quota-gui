@@ -106,6 +106,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const [contractMismatch, setContractMismatch] = createSignal<string | undefined>(undefined);
   const [reloadToken, setReloadToken] = createSignal(0);
   const [quotaReloadToken, setQuotaReloadToken] = createSignal(0);
+  const [prefetchPending, setPrefetchPending] = createSignal<ReadonlySet<RangeKey>>(new Set());
   const [homeSnapshot, setHomeSnapshot] = createSignal<QuotaSnapshot | undefined>(undefined);
   const quotaQuery = createQuotaQuery((refresh) =>
     props.client.quota(refresh ? { refresh: true } : undefined),
@@ -115,7 +116,6 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     if (snapshot) setHomeSnapshot(snapshot);
   });
   const [routeStale, setRouteStale] = createSignal(false);
-  const [prefetchPending, setPrefetchPending] = createSignal<ReadonlySet<RangeKey>>(new Set());
   /** Bumped on every reconnection: it refetches each route and anchors staleness. */
   const [reconnectEpoch, setReconnectEpoch] = createSignal(0);
   const [settingsFreshEpoch, setSettingsFreshEpoch] = createSignal(0);
@@ -482,13 +482,13 @@ export function App(props: { client: DashboardClient }): JSX.Element {
               </Match>
               <Match when={route().name === "analytics"}>
                 <AnalyticsRoute
+                  onPrefetchPending={setPrefetchPending}
                   client={props.client}
                   range={range()}
                   reloadToken={reloadToken()}
                   reconnectEpoch={reconnectEpoch()}
                   connection={connection()}
                   onStale={setRouteStale}
-                  onPrefetchPending={setPrefetchPending}
                 />
               </Match>
 

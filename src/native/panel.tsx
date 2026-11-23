@@ -91,13 +91,13 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
     props.onLocationChange(next);
   }
   const [navTooltip, setNavTooltip] = createSignal<NavTarget>();
+  const [prefetchPending, setPrefetchPending] = createSignal<ReadonlySet<RangeKey>>(new Set());
   const [homeSnapshot, setHomeSnapshot] = createSignal<QuotaSnapshot>();
   createEffect(() => {
     const snapshot = panel.quotaQuery.data();
     if (snapshot) setHomeSnapshot(snapshot);
   });
   const [routeStale, setRouteStale] = createSignal(false);
-  const [prefetchPending, setPrefetchPending] = createSignal<ReadonlySet<RangeKey>>(new Set());
   const [rememberedModelsDimension, setRememberedModelsDimension] =
     createSignal<AnalyticsDimension>("provider");
   let mainElement: HTMLElement | undefined;
@@ -397,6 +397,7 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
 
                 <Match when={route().name === "analytics"}>
                   <AnalyticsRoute
+                    onPrefetchPending={setPrefetchPending}
                     client={props.client}
                     range={range()}
                     reloadToken={panel.reloadToken()}
@@ -405,7 +406,6 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                     enabled={props.visible}
                     onFresh={panel.markFresh}
                     onStale={setRouteStale}
-                    onPrefetchPending={setPrefetchPending}
                   />
                 </Match>
 

@@ -3932,13 +3932,8 @@ describe("range transitions name the range still on screen", () => {
     function prefetchApp(path = "/analytics?range=7d") {
       const reads: Read[] = [];
       let emit: ((event: DashboardEvent) => void) | undefined;
-      let quotaReads = 0;
       const app = mountApp({
         path,
-        quota: async () => {
-          quotaReads += 1;
-          return homeSnapshot();
-        },
         home: ({ range, background }) => {
           const gate = deferred<HomeSnapshot>();
           reads.push({ range, background: background === true, gate });
