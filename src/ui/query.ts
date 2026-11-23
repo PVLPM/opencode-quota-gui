@@ -25,7 +25,7 @@ export interface Query<T> {
 export function createQuery<T>(
   fetcher: () => Promise<T>,
   shouldRetry?: (failure: unknown, elapsedMs: number) => boolean,
-): Query<T> & { invalidate: () => void } {
+): Query<T> & { invalidate: () => void; set: (value: T) => void } {
   const [data, setData] = createSignal<T | undefined>(undefined);
   const [error, setError] = createSignal<unknown>(undefined);
   const [loading, setLoading] = createSignal(false);
@@ -63,5 +63,13 @@ export function createQuery<T>(
     setLoading(false);
   }
 
-  return { data, error, loading, run, invalidate };
+  /** Applies an already-fetched payload and drops any read still in flight. */
+  function set(value: T): void {
+    requestId++;
+    setData(() => value);
+    setError(undefined);
+    setLoading(false);
+  }
+
+  return { data, error, loading, run, invalidate, set };
 }

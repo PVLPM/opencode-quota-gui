@@ -3885,7 +3885,9 @@ describe("range transitions name the range still on screen", () => {
     const requests: RangeKey[] = [];
     const app = mountApp({
       path: "/analytics?range=7d",
-      home: ({ range }) => {
+      home: ({ range, background }) => {
+        // A prefetch never settles here, so the foreground read is the only one observed.
+        if (background) return new Promise<HomeSnapshot>(() => {});
         requests.push(range);
         return range === "7d" ? Promise.resolve(oldPayload) : nextPayload.promise;
       },
@@ -3920,13 +3922,137 @@ describe("range transitions name the range still on screen", () => {
     }
   });
 
+  describe("analytics prefetch", () => {
+    interface Read {
+      range: RangeKey;
+      background: boolean;
+      gate: Deferred<HomeSnapshot>;
+    }
+
+    function prefetchApp(path = "/analytics?range=7d") {
+      const reads: Read[] = [];
+      let emit: ((event: DashboardEvent) => void) | undefined;
+      let quotaReads = 0;
+      const app = mountApp({
+        path,
+        quota: async () => {
+          quotaReads += 1;
+          return homeSnapshot();
+        },
+        home: ({ range, background }) => {
+          const gate = deferred<HomeSnapshot>();
+          reads.push({ range, background: background === true, gate });
+          return gate.promise;
+        },
+        subscribe: (onEvent) => {
+          emit = onEvent;
+          return () => {};
+        },
+      });
+      const labels = () =>
+        renderGraph
+          .elementsNamed(app.root, "span")
+          .filter((node) => node.props.class === "qg-range__label");
+      const busy = () =>
+        labels()
+          .filter((node) => node.props["aria-busy"] === "true")
+          .map((node) => renderGraph.textOf(node));
+      const resolve = (read: Read) =>
+        read.gate.resolve(analyticsPayload(read.range, `p-${read.range}`, 100));
+      return { app, reads, busy, resolve, emit: (event: DashboardEvent) => emit?.(event) };
+    }
+
+    const summary = (reads: Read[]) =>
+      reads.map((read) => `${read.range}${read.background ? "*" : ""}`);
+
+    it("issues 30d and lifetime in the background in the same tick as the foreground read", async () => {
+      const { app, reads } = prefetchApp();
+      try {
+        await Promise.resolve();
+        await settle();
+        expect(summary(reads)).toEqual(["7d", "30d*", "lifetime*"]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("never prefetches from the Quota tab and does not prefetch the foreground range", async () => {
+      const quota = prefetchApp("/quota");
+      try {
+        await settle();
+        expect(quota.reads).toEqual([]);
+      } finally {
+        quota.app.dispose();
+      }
+      const lifetime = prefetchApp("/analytics?range=lifetime");
+      try {
+        await settle();
+        expect(summary(lifetime.reads)).toEqual(["lifetime", "30d*"]);
+      } finally {
+        lifetime.app.dispose();
+      }
+    });
+
+    it("shows the pending state per range and clears it when ready or failed", async () => {
+      const { app, reads, busy, resolve } = prefetchApp();
+      try {
+        await settle();
+        expect(busy()).toHaveLength(2);
+        const thirty = reads.find((read) => read.range === "30d");
+        const life = reads.find((read) => read.range === "lifetime");
+        if (!thirty || !life) throw new Error("prefetch did not start");
+        resolve(thirty);
+        await settle();
+        expect(busy()).toHaveLength(1);
+        life.gate.reject(new DashboardError("internal", 500, "boom"));
+        await settle();
+        expect(busy()).toEqual([]);
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("applies a ready range on click without another read", async () => {
+      const { app, reads, resolve } = prefetchApp();
+      try {
+        await settle();
+        for (const read of reads) resolve(read);
+        await settle();
+        await settle();
+        const before = reads.length;
+        await app.navigate("/analytics?range=30d");
+        await settle();
+        expect(reads).toHaveLength(before);
+        expect(app.text()).toContain("p-30d");
+      } finally {
+        app.dispose();
+      }
+    });
+
+    it("does not re-issue background reads that are still pending on a refetch", async () => {
+      const { app, reads, emit } = prefetchApp();
+      try {
+        await settle();
+        const background = () => reads.filter((read) => read.background).length;
+        expect(background()).toBe(2);
+        emit({ topic: "sessions.changed", at: NOW });
+        await settle();
+        await settle();
+        expect(reads.filter((read) => !read.background).length).toBeGreaterThan(1);
+        expect(background()).toBe(2);
+      } finally {
+        app.dispose();
+      }
+    });
+  });
   it("keeps the old view and offers a local Retry when the range fetch fails", async () => {
     const oldPayload = analyticsPayload("7d", "alpha-7d", 960);
     const pending: Deferred<HomeSnapshot>[] = [];
     const requests: RangeKey[] = [];
     const app = mountApp({
       path: "/analytics?range=7d",
-      home: ({ range }) => {
+      home: ({ range, background }) => {
+        if (background) return new Promise<HomeSnapshot>(() => {});
         requests.push(range);
         if (range === "7d") return Promise.resolve(oldPayload);
         const next = deferred<HomeSnapshot>();
@@ -6093,8 +6219,8 @@ describe("routing and range persistence", () => {
         quotaReads += 1;
         return homeSnapshot();
       },
-      home: async () => {
-        analyticsReads += 1;
+      home: async ({ background }) => {
+        if (background !== true) analyticsReads += 1;
         return homeSnapshot();
       },
       project: async () => projectSnapshot(),
@@ -6185,8 +6311,8 @@ describe("routing and range persistence", () => {
       },
       health: async () => ({ app: "opencode-quota-gui", contractVersion: 2 }),
       quota: async () => homeSnapshot(),
-      home: async ({ range }) => {
-        ranges.push(range);
+      home: async ({ range, background }) => {
+        if (background !== true) ranges.push(range);
         return homeSnapshot({ range });
       },
       project: async () => projectSnapshot(),
@@ -6372,8 +6498,8 @@ describe("styles and dependency boundaries", () => {
         if (failQuota) throw new Error("synthetic failure");
         return homeSnapshot();
       },
-      home: async () => {
-        analyticsReads += 1;
+      home: async ({ background }) => {
+        if (background !== true) analyticsReads += 1;
         return homeSnapshot();
       },
       project: async () => projectSnapshot(),

@@ -16,11 +16,12 @@ import type {
   AnalyticsEntityIdentity,
   QuotaSnapshot,
 } from "../contracts/dashboard";
-import { isRangeKey, RANGE_KEYS } from "../contracts/ranges";
+import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
 import type { DashboardRpcViewScope } from "../rpc.js";
 import { AnalyticsTabs } from "../ui/components/analytics-tabs";
 import { BuildMismatchStatus } from "../ui/components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "../ui/components/icons";
+import { RangeLabel } from "../ui/components/range-label";
 import { ErrorCard, ReloadRequired } from "../ui/components/states";
 import { TemporalStatusStrip } from "../ui/components/temporal-status";
 import { RANGE_LABELS } from "../ui/format";
@@ -96,6 +97,7 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
     if (snapshot) setHomeSnapshot(snapshot);
   });
   const [routeStale, setRouteStale] = createSignal(false);
+  const [prefetchPending, setPrefetchPending] = createSignal<ReadonlySet<RangeKey>>(new Set());
   const [rememberedModelsDimension, setRememberedModelsDimension] =
     createSignal<AnalyticsDimension>("provider");
   let mainElement: HTMLElement | undefined;
@@ -333,7 +335,10 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                   <For each={RANGE_KEYS}>
                     {(key) => (
                       <SegmentedControlItem value={key}>
-                        {RANGE_LABELS[key] ?? key}
+                        <RangeLabel
+                          label={RANGE_LABELS[key] ?? key}
+                          pending={prefetchPending().has(key)}
+                        />
                       </SegmentedControlItem>
                     )}
                   </For>
@@ -400,6 +405,7 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                     enabled={props.visible}
                     onFresh={panel.markFresh}
                     onStale={setRouteStale}
+                    onPrefetchPending={setPrefetchPending}
                   />
                 </Match>
 

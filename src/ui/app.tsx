@@ -21,6 +21,7 @@ import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
 import { AnalyticsTabs } from "./components/analytics-tabs";
 import { BuildMismatchStatus } from "./components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
+import { RangeLabel } from "./components/range-label";
 import { ReloadRequired } from "./components/states";
 import { TemporalStatusStrip } from "./components/temporal-status";
 import { createToaster, ToastRegion } from "./components/toast";
@@ -114,6 +115,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     if (snapshot) setHomeSnapshot(snapshot);
   });
   const [routeStale, setRouteStale] = createSignal(false);
+  const [prefetchPending, setPrefetchPending] = createSignal<ReadonlySet<RangeKey>>(new Set());
   /** Bumped on every reconnection: it refetches each route and anchors staleness. */
   const [reconnectEpoch, setReconnectEpoch] = createSignal(0);
   const [settingsFreshEpoch, setSettingsFreshEpoch] = createSignal(0);
@@ -436,7 +438,10 @@ export function App(props: { client: DashboardClient }): JSX.Element {
               >
                 {RANGE_KEYS.map((key) => (
                   <SegmentedControlItem value={key}>
-                    {RANGE_LABELS[key] ?? key}
+                    <RangeLabel
+                      label={RANGE_LABELS[key] ?? key}
+                      pending={prefetchPending().has(key)}
+                    />
                   </SegmentedControlItem>
                 ))}
               </SegmentedControl>
@@ -483,6 +488,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   reconnectEpoch={reconnectEpoch()}
                   connection={connection()}
                   onStale={setRouteStale}
+                  onPrefetchPending={setPrefetchPending}
                 />
               </Match>
 

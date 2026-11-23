@@ -397,6 +397,34 @@
   padding-inline: 8px;
 }
 
+/* A range still being prefetched: the same thin spinning ring as the native
+   cache-busy mark, after the label. */
+.qg-range__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.qg-range__spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: qg-range-spin 0.9s linear infinite;
+}
+@keyframes qg-range-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qg-range__spinner {
+    /* No motion: a static ring still marks the pending read. */
+    animation: none;
+    border-top-color: currentColor;
+  }
+}
+
 .qg-eyes {
   display: inline-flex;
   align-items: center;

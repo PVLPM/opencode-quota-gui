@@ -208,7 +208,12 @@ export interface AnalyticsRouteProps extends RouteLifecycleProps {
   client: DashboardDataSource;
   range: RangeKey;
   connection: RouteConnectionState;
+  /** Reports which ranges are still being prefetched; empty once none are (and on unmount). */
+  onPrefetchPending?: (pending: ReadonlySet<RangeKey>) => void;
 }
+
+/** Ranges read in the background as soon as Analytics opens. */
+const PREFETCH_RANGES: readonly RangeKey[] = ["30d", "lifetime"];
 
 export function AnalyticsRoute(props: AnalyticsRouteProps): JSX.Element {
   // The host aborts one RPC after its own deadline while the single-flighted
@@ -217,7 +222,49 @@ export function AnalyticsRoute(props: AnalyticsRouteProps): JSX.Element {
     () => props.client.home({ range: props.range }),
     shouldRejoinAnalyticsRead,
   );
-  onCleanup(() => query.invalidate());
+  // Ready payloads per range, valid only for the reload/reconnect state they
+  // were read under; a click on a ready range applies one without a new read.
+  const ready = new Map<RangeKey, { key: string; data: HomeSnapshot }>();
+  const pending = new Set<RangeKey>();
+  let latest: { range: RangeKey; key: string } | undefined;
+  let disposed = false;
+  const publishPending = () => props.onPrefetchPending?.(new Set(pending));
+  const remember = (range: RangeKey, key: string, data: HomeSnapshot) => {
+    // A provisional or stale payload is refreshed by a normal read, never reused.
+    if (PREFETCH_RANGES.includes(range) && !data.stale && !data.usage.stale) {
+      ready.set(range, { key, data });
+    }
+  };
+  function prefetch(foreground: RangeKey, key: string): void {
+    for (const range of PREFETCH_RANGES) {
+      if (range === foreground || pending.has(range) || ready.get(range)?.key === key) continue;
+      pending.add(range);
+      let read: Promise<HomeSnapshot>;
+      try {
+        read = props.client.home({ range, background: true });
+      } catch (failure) {
+        read = Promise.reject(failure);
+      }
+      void read
+        .then((data) => {
+          if (!disposed) remember(range, key, data);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          pending.delete(range);
+          if (disposed) return;
+          publishPending();
+          // The state moved on while this read was running: read again, once.
+          if (latest !== undefined && latest.key !== key) prefetch(latest.range, latest.key);
+        });
+    }
+    publishPending();
+  }
+  onCleanup(() => {
+    disposed = true;
+    query.invalidate();
+    props.onPrefetchPending?.(new Set());
+  });
   /**
    * The reconnect epoch this route's payload is known to be fresh for. A refetch
    * that only starts after a reconnect must land before the marker clears.
@@ -229,13 +276,25 @@ export function AnalyticsRoute(props: AnalyticsRouteProps): JSX.Element {
     const epoch = props.reconnectEpoch;
     const range = props.range;
     const token = props.reloadToken;
-    void range;
     void token;
-    void query.run().then((applied) => {
-      if (!applied) return;
+    const key = `${epoch}:${token}`;
+    latest = { range, key };
+    const hit = ready.get(range);
+    if (hit?.key === key) {
+      query.set(hit.data);
       setFreshEpoch(epoch);
       props.onFresh?.();
-    });
+    } else {
+      void query.run().then((applied) => {
+        if (!applied) return;
+        const data = query.data();
+        if (data !== undefined) remember(range, key, data);
+        setFreshEpoch(epoch);
+        props.onFresh?.();
+      });
+    }
+    // Same tick as the foreground read, so the worker sees the whole batch.
+    prefetch(range, key);
   });
 
   const state = () =>
