@@ -212,8 +212,12 @@ export interface AnalyticsRouteProps extends RouteLifecycleProps {
   onPrefetchPending?: (pending: ReadonlySet<RangeKey>) => void;
 }
 
-/** Ranges read in the background as soon as Analytics opens. */
-const PREFETCH_RANGES: readonly RangeKey[] = ["30d", "lifetime"];
+/**
+ * Ranges read in the background as soon as Analytics opens. Lifetime goes
+ * first: its single full scan leaves coverage that 30d (and the exact 7d
+ * refresh) reuse without another completion scan.
+ */
+const PREFETCH_RANGES: readonly RangeKey[] = ["lifetime", "30d"];
 
 export function AnalyticsRoute(props: AnalyticsRouteProps): JSX.Element {
   // The host aborts one RPC after its own deadline while the single-flighted

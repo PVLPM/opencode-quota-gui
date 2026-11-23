@@ -3970,7 +3970,7 @@ describe("range transitions name the range still on screen", () => {
       try {
         await Promise.resolve();
         await settle();
-        expect(summary(reads)).toEqual(["7d", "30d*", "lifetime*"]);
+        expect(summary(reads)).toEqual(["7d", "lifetime*", "30d*"]);
       } finally {
         app.dispose();
       }
