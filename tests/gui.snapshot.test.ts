@@ -2106,6 +2106,7 @@ describe("GUI snapshot service stale-while-revalidate", () => {
     const initial = await service.home({ range: "7d" });
     expect(initial).toMatchObject({ stale: true, provisional: true });
     await vi.waitFor(() => expect(homeSource).toHaveBeenCalledTimes(2));
+    expect(homeSource).toHaveBeenNthCalledWith(2, { range: "7d", exact: true, background: true });
     expect((await service.home({ range: "7d" })).stale).toBe(true);
     gate.resolve(home("7d", { total: 25 }));
     await vi.waitFor(() =>

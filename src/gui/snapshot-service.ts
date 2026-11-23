@@ -866,9 +866,9 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       void request.then(
         (snapshot) => {
           if (snapshot.provisional && cache.get(key)?.snapshot === snapshot && !closed) {
-            void load(key, () => options.source.home({ range: input.range, exact: true })).catch(
-              () => {},
-            );
+            void load(key, () =>
+              options.source.home({ range: input.range, exact: true, background: true }),
+            ).catch(() => {});
           }
         },
         () => {},
