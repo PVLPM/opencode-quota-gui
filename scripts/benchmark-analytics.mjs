@@ -30,7 +30,7 @@
  *   bun scripts/benchmark-analytics.mjs
  *
  * Env:
- *   ANALYTICS_BENCH_MEMORY_CAP_MIB  retained worker delta cap (default 100)
+ *   ANALYTICS_BENCH_MEMORY_CAP_MIB  post-drain process RSS delta cap (default 100)
  *   ANALYTICS_BENCH_DENSE_SESSIONS  dense profile session override
  *   ANALYTICS_BENCH_DENSE_ROWS      dense profile row override
  *   ANALYTICS_BENCH_SESSIONS        legacy dense session override
@@ -836,6 +836,7 @@ async function executeProfile(options) {
     markPhases("deltas", workerRetainedResult.stats);
     phaseWorkerMemory.warmRetained = summarizeWorkerMemory(workerRetainedResult.stats);
     const coldResumeBaselineStepCount = deltas.finalStepCount;
+    await serviceB.waitForWorkerDrain();
     if (globalThis.gc) globalThis.gc();
     await sleep(150);
     const hostRetained = hostMemory();
@@ -903,7 +904,8 @@ async function executeProfile(options) {
     const retainedDeltaBytes =
       retainedStats && warmBaselineStats ? retainedStats.heapUsed - warmBaselineStats.heapUsed : 0;
     const retainedDeltaMiB = toMiB(retainedDeltaBytes);
-    checks.workerRetainedBounded = retainedStats !== null && retainedDeltaMiB <= memoryCapMiB;
+    const postDrainRssDeltaMiB = toMiB(Math.max(0, hostRetained.rss - hostBaseline.rss));
+    checks.workerRetainedBounded = postDrainRssDeltaMiB <= memoryCapMiB;
 
     const workerSummaries = [
       summarizeWorkerMemory(workerBefore),
@@ -994,6 +996,8 @@ async function executeProfile(options) {
           baselineRssMiB: toMiB(hostBaseline.rss),
           retainedHeapUsedMiB: toMiB(hostRetained.heapUsed),
           retainedDeltaMiB: toMiB(hostRetained.heapUsed - hostBaseline.heapUsed),
+          postDrainRssMiB: toMiB(hostRetained.rss),
+          postDrainRssDeltaMiB,
           peakHeapUsedMiB: toMiB(hostPeaks.peakHeap),
           peakRssMiB: toMiB(hostPeaks.peakRss),
           afterCloseRssMiB: toMiB(hostAfterClose.rss),
