@@ -2116,6 +2116,90 @@ describe("GUI snapshot service stale-while-revalidate", () => {
     service.close();
   });
 
+  it("announces an exact replacement whose numbers equal the provisional paint", async () => {
+    const gate = deferred<HomeSnapshot>();
+    const homeSource = vi.fn(async ({ range, exact }: { range: RangeKey; exact?: boolean }) =>
+      exact
+        ? gate.promise
+        : { ...home(range, { total: 10 }), stale: true, provisional: true as const },
+    );
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    await service.home({ range: "7d" });
+    await vi.waitFor(() => expect(homeSource).toHaveBeenCalledTimes(2));
+    gate.resolve(home("7d", { total: 10 }));
+    await vi.waitFor(() =>
+      expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]),
+    );
+    // The marker is gone and the equal exact payload is now the served one.
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(10);
+    expect(await service.home({ range: "7d" })).not.toHaveProperty("provisional");
+    service.close();
+  });
+
+  it("surfaces a terminal exact failure on the provisional payload and retries exactly", async () => {
+    const exact = vi
+      .fn<() => Promise<HomeSnapshot>>()
+      .mockRejectedValueOnce(new Error("worker stopped"))
+      .mockResolvedValue(home("7d", { total: 40 }));
+    const { source } = fakeSource({
+      home: async ({ range, exact: isExact }: { range: RangeKey; exact?: boolean }) =>
+        isExact
+          ? exact()
+          : { ...home(range, { total: 10 }), stale: true, provisional: true as const },
+    });
+    const service = makeService(source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    expect(await service.home({ range: "7d" })).toMatchObject({ provisional: true });
+
+    await vi.waitFor(() => expect(events.length).toBeGreaterThan(0));
+    const failed = await service.home({ range: "7d" });
+    expect(failed.exactError).toBeDefined();
+    expect(failed.provisional).toBe(true);
+    expect(failed.usage.totals.total).toBe(10);
+    expect(events.map((event) => event.topic)).toContain("sessions.changed");
+
+    // A manual exact retry forces a fresh compute even while the failed marker
+    // is still a cache hit, then clears the marker.
+    const retried = await service.home({ range: "7d", exact: true });
+    expect(retried).not.toHaveProperty("exactError");
+    expect(retried.usage.totals.total).toBe(40);
+    expect(exact).toHaveBeenCalledTimes(2);
+    service.close();
+  });
+
+  it("joins a just-settled failed read instead of starting a second compute", async () => {
+    vi.useFakeTimers();
+    const homeSource = vi
+      .fn<() => Promise<HomeSnapshot>>()
+      .mockRejectedValue(new Error("worker died"));
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    await expect(service.home({ range: "7d" })).rejects.toThrow("worker died");
+    // The host's final probe lands in the same tick: join the terminal outcome.
+    await expect(service.home({ range: "7d" })).rejects.toThrow("worker died");
+    expect(homeSource).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await expect(service.home({ range: "7d" })).rejects.toThrow("worker died");
+    expect(homeSource).toHaveBeenCalledTimes(2);
+    service.close();
+    vi.useRealTimers();
+  });
+
+  it("serves a just-settled successful read from its cache", async () => {
+    const homeSource = vi.fn(async ({ range }: { range: RangeKey }) => home(range, { total: 12 }));
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(12);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(12);
+    expect(homeSource).toHaveBeenCalledTimes(1);
+    service.close();
+  });
+
   it("passes background priority to the analytics source", async () => {
     const homeSource = vi.fn(async ({ range }: { range: RangeKey }) => home(range));
     const { source } = fakeSource({ home: homeSource });

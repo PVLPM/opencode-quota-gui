@@ -39,12 +39,23 @@ export interface AnalyticsBridgeOptions {
   retryBaseMs?: number;
   /** Stop retrying after this many consecutive failures (default 5). */
   maxRecoveryAttempts?: number;
+  /**
+   * How long an idle worker is kept warm before it is retired (default 0 =
+   * retire as soon as the queue drains). A short grace avoids re-loading the
+   * compact index and re-hydrating the model across rapid tab switches.
+   */
+  idleRetireMs?: number;
 }
 
 export { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS };
 const DEFAULT_RETRY_BASE_MS = 250;
 const DEFAULT_MAX_RECOVERY_ATTEMPTS = 5;
 const MAX_RETRY_DELAY_MS = 5_000;
+/**
+ * Upper bound for worker-advertised pricing upkeep. It must outlive the 6 s
+ * refresh timeout, but a lost "inactive" frame must not pin the worker forever.
+ */
+const DEFAULT_UPKEEP_MAX_WAIT_MS = 30_000;
 
 /** Pure mapping for the optional Node worker heap limit. */
 export function workerResourceLimits(
@@ -130,16 +141,25 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     options.maxRecoveryAttempts > 0
       ? Math.floor(options.maxRecoveryAttempts)
       : DEFAULT_MAX_RECOVERY_ATTEMPTS;
+  const idleRetireMs =
+    options.idleRetireMs !== undefined &&
+    Number.isFinite(options.idleRetireMs) &&
+    options.idleRetireMs >= 0
+      ? Math.floor(options.idleRetireMs)
+      : 0;
 
   let worker: AnalyticsWorkerLike | undefined;
   let workerPromise: Promise<AnalyticsWorkerLike> | undefined;
   let draining: Promise<void> | undefined;
+  let idleRetireTimer: ReturnType<typeof setTimeout> | undefined;
   let initOptions: AnalyticsInitOptions = {};
   let closed = false;
   let broken = false;
   let failures = 0;
   let nextRetryAtMs = 0;
   let nextRequestId = 1;
+  let upkeepActive = 0;
+  let upkeepWaitTimer: ReturnType<typeof setTimeout> | undefined;
   const pending = new Map<number, PendingRequest>();
   /**
    * In-flight reads keyed by command identity. Identical reads from reconnect
@@ -188,6 +208,8 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
   }
 
   function retire(instance: AnalyticsWorkerLike | undefined, code: "unavailable" | "closed"): void {
+    cancelIdleRetire();
+    resetUpkeep();
     if (instance !== undefined) {
       retiredInstances.add(instance);
       if (worker === instance) {
@@ -229,6 +251,10 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
             // A subscriber failure never breaks the bridge.
           }
         }
+        return;
+      }
+      if (record.type === "analytics-upkeep") {
+        setUpkeepActive(record.active === true);
         return;
       }
       const response = value as AnalyticsWorkerResponse;
@@ -351,6 +377,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
   }
 
   async function retireGracefully(instance: AnalyticsWorkerLike): Promise<void> {
+    cancelIdleRetire();
     try {
       await send(instance, { kind: "close" }, true);
     } catch {
@@ -366,19 +393,92 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     }
   }
 
+  function drainIdleWorker(instance: AnalyticsWorkerLike): void {
+    const done = retireGracefully(instance);
+    draining = done.finally(() => {
+      draining = undefined;
+      pump();
+    });
+  }
+
+  function cancelIdleRetire(): void {
+    if (idleRetireTimer === undefined) return;
+    clearTimeout(idleRetireTimer);
+    idleRetireTimer = undefined;
+  }
+
+  function clearUpkeepWait(): void {
+    if (upkeepWaitTimer === undefined) return;
+    clearTimeout(upkeepWaitTimer);
+    upkeepWaitTimer = undefined;
+  }
+
+  function resetUpkeep(): void {
+    clearUpkeepWait();
+    upkeepActive = 0;
+  }
+
+  /**
+   * Track pricing upkeep the worker started after its last reply. Idle
+   * retirement waits for the matching "inactive" frame (or the safety cap), so
+   * a 6 s models.dev request is not cut off by the shorter idle grace.
+   */
+  function setUpkeepActive(active: boolean): void {
+    if (active) {
+      upkeepActive += 1;
+      if (upkeepActive === 1 && upkeepWaitTimer === undefined) {
+        upkeepWaitTimer = setTimeout(() => {
+          upkeepWaitTimer = undefined;
+          upkeepActive = 0;
+          pump();
+        }, DEFAULT_UPKEEP_MAX_WAIT_MS);
+        // SAFETY: the host Node timer owns `unref`; the browser/DOM timer shape
+        // simply omits it, which the optional call tolerates.
+        (upkeepWaitTimer as { unref?: () => void }).unref?.();
+      }
+      return;
+    }
+    upkeepActive = Math.max(0, upkeepActive - 1);
+    if (upkeepActive > 0) return;
+    clearUpkeepWait();
+    pump();
+  }
+
+  function retireWhenIdle(instance: AnalyticsWorkerLike): void {
+    if (upkeepActive > 0) return;
+    if (idleRetireMs === 0) {
+      drainIdleWorker(instance);
+      return;
+    }
+    if (idleRetireTimer !== undefined) return;
+    idleRetireTimer = setTimeout(() => {
+      idleRetireTimer = undefined;
+      if (
+        closed ||
+        running ||
+        queue.length > 0 ||
+        pending.size > 0 ||
+        upkeepActive > 0 ||
+        draining ||
+        worker !== instance
+      ) {
+        return;
+      }
+      drainIdleWorker(instance);
+    }, idleRetireMs);
+    // SAFETY: the host Node timer owns `unref`; the browser/DOM timer shape
+    // simply omits it, which the optional call tolerates.
+    (idleRetireTimer as { unref?: () => void }).unref?.();
+  }
+
   function pump(): void {
     if (running || closed) return;
     if (queue.length === 0) {
       const instance = worker;
-      if (instance && !draining && pending.size === 0) {
-        const done = retireGracefully(instance);
-        draining = done.finally(() => {
-          draining = undefined;
-          pump();
-        });
-      }
+      if (instance && !draining && pending.size === 0) retireWhenIdle(instance);
       return;
     }
+    cancelIdleRetire();
     const foreground = queue.findIndex((job) => !job.background);
     const [job] = queue.splice(foreground < 0 ? 0 : foreground, 1);
     if (!job) return;
@@ -395,6 +495,7 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     background = false,
   ): Promise<TResult> {
     if (closed) throw new AnalyticsReadError("closed");
+    cancelIdleRetire();
     const key = coalescedCommandKey(command);
     if (key !== undefined) {
       const existing = inFlightReads.get(key);
@@ -464,6 +565,8 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     async close() {
       if (closed) return;
       closed = true;
+      cancelIdleRetire();
+      resetUpkeep();
       for (const job of queue.splice(0)) job.reject(new AnalyticsReadError("closed"));
       if (draining) await draining;
       const instance = worker;

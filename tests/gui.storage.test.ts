@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -178,6 +178,68 @@ describe("raw completed assistant reader", () => {
       modelID: "gpt-5",
       agent: "build",
     });
+  });
+
+  it("projects the host-recorded message cost and ignores non-numeric JSON values", async () => {
+    const path = stubDatabase({
+      sessions: [{ id: "ses_cost", createdMs: 1 }],
+      messages: [
+        {
+          id: "msg_positive",
+          sessionID: "ses_cost",
+          createdMs: 10,
+          completedMs: 20,
+          tokens: { input: 1 },
+          cost: 1.25,
+        },
+        {
+          id: "msg_zero",
+          sessionID: "ses_cost",
+          createdMs: 30,
+          completedMs: 40,
+          tokens: { input: 1 },
+          cost: 0,
+        },
+        {
+          id: "msg_negative",
+          sessionID: "ses_cost",
+          createdMs: 50,
+          completedMs: 60,
+          tokens: { input: 1 },
+          cost: -1,
+        },
+        {
+          id: "msg_missing",
+          sessionID: "ses_cost",
+          createdMs: 70,
+          completedMs: 80,
+          tokens: { input: 1 },
+        },
+        {
+          id: "msg_string",
+          sessionID: "ses_cost",
+          createdMs: 90,
+          completedMs: 100,
+          tokens: { input: 1 },
+          cost: 1.25,
+        },
+      ],
+    });
+
+    const db = new DatabaseSync(path);
+    db.prepare(
+      "UPDATE session_message SET data = json_set(data, '$.cost', '1.25') WHERE id = ?",
+    ).run("msg_string");
+    db.close();
+
+    const rows = await readCompletedAssistantRows();
+    const byID = new Map(rows.map((row) => [row.messageID, row]));
+
+    expect(byID.get("msg_positive")?.cost).toBe(1.25);
+    expect(byID.get("msg_zero")?.cost).toBe(0);
+    expect(byID.get("msg_negative")?.cost).toBe(-1);
+    expect(byID.get("msg_missing")?.cost).toBeUndefined();
+    expect(byID.get("msg_string")?.cost).toBeUndefined();
   });
 
   it("reads the recorded reasoning effort from model.variant and leaves it unset when absent", async () => {
@@ -835,6 +897,31 @@ describe("message revision snapshot", () => {
     ).toBeNull();
   });
 
+  it("projects assistant parentID linkage and leaves user rows without it", async () => {
+    stubDatabase({
+      sessions: [{ id: "ses_a", createdMs: 1 }],
+      messages: [
+        {
+          id: "msg_reply",
+          sessionID: "ses_a",
+          createdMs: 100,
+          completedMs: 200,
+          parentID: "msg_prompt",
+        },
+        { id: "msg_prompt", sessionID: "ses_a", type: "user", createdMs: 50 },
+      ],
+    });
+
+    const snapshot = await readMessageRevisions();
+
+    expect(
+      snapshot.revisions.find((revision) => revision.messageID === "msg_reply")?.parentID,
+    ).toBe("msg_prompt");
+    expect(
+      snapshot.revisions.find((revision) => revision.messageID === "msg_prompt"),
+    ).not.toHaveProperty("parentID");
+  });
+
   it("chunks combined session and message scopes under the bind bound", async () => {
     // One more id than one chunk, with three sessions sharing the remaining args.
     const messages = Array.from({ length: SCOPED_QUERY_ARG_BUDGET + 1 }, (_, index) => ({
@@ -1256,6 +1343,72 @@ describe("consistent storage snapshot", () => {
     await expect(readAllSessionsIndex()).resolves.toMatchObject({
       ses_new: { id: "ses_new" },
     });
+  });
+
+  it("exposes a cheap database/WAL signature that moves on an in-place message update", async () => {
+    const dbPath = stubDatabase({
+      journalMode: "wal",
+      sessions: [{ id: "ses_a", createdMs: 1 }],
+      messages: [{ id: "msg_original", sessionID: "ses_a", createdMs: 10, completedMs: 20 }],
+    });
+
+    const before = await withOpenCodeStorageSnapshot((snapshot) => snapshot.changeSignature);
+    expect(before.status).toBe("ok");
+    if (before.status !== "ok") return;
+    expect(before.value).toMatch(/^v1\|/u);
+
+    const same = await withOpenCodeStorageSnapshot((snapshot) => snapshot.changeSignature);
+    expect(same).toEqual(before);
+
+    // Completion lives in the JSON payload: the row identity and rowid do not
+    // change. The WAL stat must still change so the revision gate re-scans.
+    const writer = new DatabaseSync(dbPath);
+    try {
+      writer
+        .prepare(`UPDATE "session_message" SET data = ? WHERE id = ?`)
+        .run(JSON.stringify({ time: { created: 10, completed: 30 } }), "msg_original");
+      const changed = await withOpenCodeStorageSnapshot((snapshot) => snapshot.changeSignature);
+      expect(changed).not.toEqual(before);
+    } finally {
+      writer.close();
+    }
+  });
+
+  it("treats a same-size WAL rewrite, checkpoint/truncate and replacement as a change", async () => {
+    const dbPath = stubDatabase({
+      journalMode: "wal",
+      sessions: [{ id: "ses_a", createdMs: 1 }],
+      messages: [{ id: "msg_original", sessionID: "ses_a", createdMs: 10, completedMs: 20 }],
+    });
+    const walPath = `${dbPath}-wal`;
+    // A committed WAL. The signature treats it as the baseline.
+    writeFileSync(walPath, Buffer.alloc(4_096, 7));
+    utimesSync(walPath, new Date(1_000_000), new Date(1_000_000));
+    const before = await withOpenCodeStorageSnapshot((snapshot) => snapshot.changeSignature);
+    expect(before.status).toBe("ok");
+    if (before.status !== "ok") return;
+
+    // Same byte size, reused/rewritten WAL: the timestamp is the only evidence.
+    writeFileSync(walPath, Buffer.alloc(4_096, 9));
+    utimesSync(walPath, new Date(1_002_000), new Date(1_002_000));
+    const reused = await withOpenCodeStorageSnapshot((snapshot) => snapshot.changeSignature);
+    expect(reused).not.toEqual(before);
+
+    // Checkpoint/truncate: a zero-length WAL is treated as absent.
+    writeFileSync(walPath, Buffer.alloc(0));
+    const truncated = await withOpenCodeStorageSnapshot((snapshot) => snapshot.changeSignature);
+    expect(truncated).not.toEqual(reused);
+    // SAFETY: `changeSignature` returns a structured signature value with a text field.
+    expect((truncated as { value: string }).value).toContain("|absent");
+
+    // Replacement at the same path (new identity) must not look unchanged.
+    const backup = `${dbPath}.backup`;
+    copyFileSync(dbPath, backup);
+    rmSync(dbPath);
+    copyFileSync(backup, dbPath);
+    rmSync(backup);
+    const replaced = await withOpenCodeStorageSnapshot((snapshot) => snapshot.changeSignature);
+    expect(replaced).not.toEqual(truncated);
   });
 
   it("serves one consistent snapshot while another connection commits (WAL)", async () => {

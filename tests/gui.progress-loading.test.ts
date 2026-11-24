@@ -307,7 +307,8 @@ describe("delayed foreground loading", () => {
 
   it("gives every busy overlay an explicit label", () => {
     // The shared route containers own the overlays now; the app shell must not
-    // drift back to a private copy.
+    // drift back to a private copy. Analytics renders one overlay inside the
+    // shared frame; Session keeps its own, and Quota has the only other one.
     expect(appSource).toContain('from "./routes"');
     expect(appSource).not.toContain("<BusyOverlay");
     const overlays = [...routesSource.matchAll(/<BusyOverlay\b([^>]*)>/gu)].map(
@@ -317,11 +318,13 @@ describe("delayed foreground loading", () => {
       (attributes) => /\blabel="([^"]+)"/u.exec(attributes)?.[1] ?? undefined,
     );
     // Five analytics surfaces (analytics home, models, model/provider detail,
-    // projects, sessions) plus the single quota view.
-    expect(overlays).toHaveLength(6);
+    // projects, sessions) plus the single quota view. Four analytics routes
+    // share the frame's overlay, so the literal count is three.
+    expect(overlays).toHaveLength(3);
     expect(labels.every((label) => label !== undefined)).toBe(true);
-    expect(labels.filter((label) => label === "analytics")).toHaveLength(5);
+    expect(labels.filter((label) => label === "analytics")).toHaveLength(2);
     expect(labels.filter((label) => label === "quota")).toHaveLength(1);
+    expect(routesSource.match(/<AnalyticsFrame\b/gu)).toHaveLength(4);
   });
 
   it("does not toast background range work", () => {

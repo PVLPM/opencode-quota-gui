@@ -215,14 +215,20 @@ export async function loadDistModules(repoRoot) {
 export function createAnalyticsService(modules, options) {
   let lastTermination = Promise.resolve();
   const logger = modules.createGuiLogger({ sink: () => {} });
+  const idleRetireMs =
+    typeof options.idleRetireMs === "number" && Number.isFinite(options.idleRetireMs)
+      ? options.idleRetireMs
+      : undefined;
   const service = modules.createAnalyticsReadService({
     snapshotPath: options.snapshotPath,
     refreshIntervalMs: options.refreshIntervalMs,
     requestTimeoutMs: options.requestTimeoutMs,
+    ...(idleRetireMs === undefined ? {} : { idleRetireMs }),
     logger,
     createTransport: () =>
       modules.createAnalyticsBridge({
         requestTimeoutMs: options.requestTimeoutMs,
+        ...(idleRetireMs === undefined ? {} : { idleRetireMs }),
         logger,
         createWorker: () => {
           const url = pathToFileURL(modules.workerPath);

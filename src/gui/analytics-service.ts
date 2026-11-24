@@ -16,8 +16,10 @@ import type {
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import { isRangeKey, type RangeKey } from "../contracts/ranges.js";
+import type { PricingSnapshotConfig } from "../lib/types.js";
 import { createAnalyticsBridge } from "./analytics-bridge.js";
 import {
+  type AnalyticsInitOptions,
   AnalyticsReadError,
   type AnalyticsTransport,
   type AnalyticsWorkerMemoryStats,
@@ -44,6 +46,8 @@ export interface AnalyticsReadService {
 export interface AnalyticsReadServiceOptions {
   snapshotPath?: string;
   refreshIntervalMs?: number;
+  /** Owner's pricing snapshot selection/freshness policy, applied in the worker. */
+  pricingSnapshot?: PricingSnapshotConfig;
   requestTimeoutMs?: number;
   logger?: GuiLogger;
   /** Optional Node worker heap ceiling; omit for runtime-managed default. */
@@ -52,12 +56,18 @@ export interface AnalyticsReadServiceOptions {
   maxTransportAttempts?: number;
   /** Base backoff for transport init recovery (default 250 ms). */
   transportRetryBaseMs?: number;
+  /**
+   * Keep a warm worker this long after its queue drains (default 5000 ms) so a
+   * quick tab switch does not re-load the persisted index. 0 retires at once.
+   */
+  idleRetireMs?: number;
   /** Test/embedding seam; production default builds the Node/Bun worker bridge. */
   createTransport?: () => AnalyticsTransport | Promise<AnalyticsTransport>;
 }
 
 const DEFAULT_MAX_TRANSPORT_ATTEMPTS = 5;
 const DEFAULT_TRANSPORT_RETRY_BASE_MS = 250;
+const DEFAULT_IDLE_RETIRE_MS = 5_000;
 const MAX_TRANSPORT_RETRY_DELAY_MS = 5_000;
 
 function badRequest(): AnalyticsReadError {
@@ -68,6 +78,12 @@ export function createAnalyticsReadService(
   options: AnalyticsReadServiceOptions = {},
 ): AnalyticsReadService {
   const logger = options.logger ?? createGuiLogger();
+  const idleRetireMs =
+    options.idleRetireMs !== undefined &&
+    Number.isFinite(options.idleRetireMs) &&
+    options.idleRetireMs >= 0
+      ? options.idleRetireMs
+      : DEFAULT_IDLE_RETIRE_MS;
   const createTransport =
     options.createTransport ??
     (() =>
@@ -78,6 +94,7 @@ export function createAnalyticsReadService(
         ...(options.workerHeapLimitMb === undefined
           ? {}
           : { workerHeapLimitMb: options.workerHeapLimitMb }),
+        idleRetireMs,
         logger,
       }));
   const maxTransportAttempts =
@@ -157,12 +174,15 @@ export function createAnalyticsReadService(
 
   async function initTransport(created: AnalyticsTransport): Promise<AnalyticsTransport> {
     try {
-      await created.init({
-        ...(options.snapshotPath === undefined ? {} : { snapshotPath: options.snapshotPath }),
-        ...(options.refreshIntervalMs === undefined
-          ? {}
-          : { refreshIntervalMs: options.refreshIntervalMs }),
-      });
+      const initOptions: AnalyticsInitOptions = {};
+      if (options.snapshotPath !== undefined) initOptions.snapshotPath = options.snapshotPath;
+      if (options.refreshIntervalMs !== undefined) {
+        initOptions.refreshIntervalMs = options.refreshIntervalMs;
+      }
+      if (options.pricingSnapshot !== undefined) {
+        initOptions.pricingSnapshot = options.pricingSnapshot;
+      }
+      await created.init(initOptions);
       initialized = true;
       failures = 0;
       nextRetryAtMs = 0;

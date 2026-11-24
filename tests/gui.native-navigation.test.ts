@@ -48,6 +48,10 @@ describe("native navigation", () => {
       [`/provider/${token}?range=30d`, { name: "provider", identity }],
       ["/project/proj%201?range=7d", { name: "project", projectId: "proj 1" }],
       ["/session/ses%201", { name: "session", sessionId: "ses 1" }],
+      [
+        "/session/ses%201?view=individual",
+        { name: "session", sessionId: "ses 1", individual: true },
+      ],
     ] as const;
 
     for (const [path, route] of cases) {
@@ -143,5 +147,8 @@ describe("native navigation", () => {
       "/models?range=24h&group=model",
     );
     expect(formatPath({ name: "session", sessionId: "ses 1" }, "7d")).toBe("/session/ses%201");
+    expect(formatPath({ name: "session", sessionId: "ses 1", individual: true }, "7d")).toBe(
+      "/session/ses%201?view=individual",
+    );
   });
 });

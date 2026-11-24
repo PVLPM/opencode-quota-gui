@@ -86,10 +86,14 @@ interface FakeDb {
   updatedAt: Map<string, number | null>;
   revisionOverrides: Map<string, Partial<OpenCodeMessageRevision>>;
   extraRevisions: OpenCodeMessageRevision[];
+  /** Assistant reply linkage exposed through the revision projection. */
+  parentIDs: Map<string, string>;
   compactions: OpenCodeCompactionMarker[];
   identity: OpenCodeSourceIdentity;
   status: "ok" | "missing" | "unreadable";
   updatedAtAvailable: boolean;
+  /** Optional cheap source signature; absent keeps legacy scan behavior. */
+  changeSignature?: string;
 }
 
 function session(
@@ -173,6 +177,7 @@ function baseDb(): FakeDb {
     updatedAt,
     revisionOverrides: new Map(),
     extraRevisions: [],
+    parentIDs: new Map(),
     compactions: [{ sessionId: "ses_root", atMs: NOW - HOUR, messageId: "msg_c" }],
     identity: identity(),
     status: "ok",
@@ -188,7 +193,7 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
     const revisions: OpenCodeMessageRevision[] = [];
     for (const entry of db.rows) {
       const key = rowKey(entry.sessionID, entry.messageID);
-      revisions.push({
+      const revision: OpenCodeMessageRevision = {
         messageID: entry.messageID,
         sessionID: entry.sessionID,
         type: "assistant",
@@ -196,7 +201,11 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
         updatedAtMs: db.updatedAt.get(key) ?? null,
         completedAtMs: entry.completedAtMs,
         ...db.revisionOverrides.get(entry.messageID),
-      });
+      };
+      if (db.parentIDs.has(entry.messageID)) {
+        revision.parentID = db.parentIDs.get(entry.messageID);
+      }
+      revisions.push(revision);
     }
     revisions.push(...db.extraRevisions);
     let filtered = revisions;
@@ -264,6 +273,7 @@ function createFakeReader(db: FakeDb, calls: ReaderCall[]): AnalyticsReader {
       const snapshot: OpenCodeStorageSnapshot = {
         dbPath: db.identity.dbPath,
         identity: structuredClone(db.identity),
+        changeSignature: db.changeSignature,
         readAllSessionsIndex: () => {
           calls.push({ method: "loadSessions" });
           return structuredClone(db.sessions);
@@ -1067,6 +1077,7 @@ describe("analytics engine: revision reconciliation", () => {
         {
           providerID: "no-such-provider",
           modelID: "no-such-model",
+          cost: undefined,
         },
       ),
       row("ses_root", "priced_2", NOW - HOUR, { input: 30 }),
@@ -1196,6 +1207,111 @@ describe("analytics engine: revision reconciliation", () => {
     );
   });
 
+  it("skips revision discovery when the source signature is unchanged", async () => {
+    const db = baseDb();
+    db.changeSignature = "sig-1";
+    const { engine, calls, savedStates } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+    expect(savedStates[savedStates.length - 1]?.sourceSignature).toBe("sig-1");
+    const baseline = calls.length;
+
+    await engine.refresh();
+    const unchanged = calls.slice(baseline);
+    expect(unchanged.filter((call) => call.method === "loadRevisions")).toHaveLength(0);
+    expect(unchanged.some((call) => call.method === "loadRevisionFrontier")).toBe(false);
+    // A signature match also removes the metadata and elapsed-window scans.
+    expect(
+      unchanged.some((call) => call.method === "loadSessions" || call.method === "loadProjects"),
+    ).toBe(false);
+    expect(fullReads(calls, baseline)).toHaveLength(0);
+
+    db.changeSignature = "sig-2";
+    const changedStart = calls.length;
+    await engine.refresh();
+    const changed = calls.slice(changedStart);
+    const revisions = changed.filter((call) => call.method === "loadRevisions");
+    expect(revisions).toHaveLength(1);
+    expect(revisions[0]?.params?.updatedSinceMs).toBe(
+      NOW - HOUR - ANALYTICS_SOURCE_CURSOR_OVERLAP_MS,
+    );
+    await flushAsync();
+    expect(savedStates[savedStates.length - 1]?.sourceSignature).toBe("sig-2");
+  });
+
+  it("reuses the persisted signature after a restart to skip discovery", async () => {
+    const db = baseDb();
+    db.changeSignature = "sig-1";
+    const first = harness(db);
+    await first.engine.home("24h");
+    await flushAsync();
+    const persisted = first.savedStates[first.savedStates.length - 1];
+    expect(persisted?.sourceSignature).toBe("sig-1");
+    await first.engine.close();
+    if (!persisted) throw new Error("expected a persisted state");
+
+    const calls: ReaderCall[] = [];
+    const restarted = harness(db, {
+      reader: createFakeReader(db, calls),
+      loadSnapshot: async () => persisted,
+    });
+    await restarted.engine.home("24h");
+    const baseline = calls.length;
+    await restarted.engine.refresh();
+    const refresh = calls.slice(baseline);
+    expect(refresh.filter((call) => call.method === "loadRevisions")).toHaveLength(0);
+    expect(refresh.some((call) => call.method === "loadRevisionFrontier")).toBe(false);
+    expect(
+      refresh.some((call) => call.method === "loadSessions" || call.method === "loadProjects"),
+    ).toBe(false);
+  });
+
+  it("reuses metadata on an unchanged scoped-only refresh", async () => {
+    const db = baseDb();
+    db.changeSignature = "sig-1";
+    const first = harness(db);
+    await first.engine.home("24h");
+    await flushAsync();
+    const persisted = first.savedStates[first.savedStates.length - 1];
+    await first.engine.close();
+    if (!persisted) throw new Error("expected a persisted state");
+
+    const calls: ReaderCall[] = [];
+    const restarted = harness(db, {
+      now: NOW + INTERVAL + 1,
+      reader: createFakeReader(db, calls),
+      loadSnapshot: async () => persisted,
+    });
+    await restarted.engine.session("ses_root");
+
+    expect(
+      calls.some((call) => call.method === "loadSessions" || call.method === "loadProjects"),
+    ).toBe(false);
+    // The scoped detail projection is still index-backed and authoritative.
+    const revisions = calls.filter((call) => call.method === "loadRevisions");
+    expect(revisions.length).toBeGreaterThan(0);
+    for (const call of revisions) {
+      expect(Array.isArray(call.params?.sessionIDs)).toBe(true);
+      expect(call.params?.updatedSinceMs).toBeUndefined();
+    }
+  });
+
+  it("does not sweep the elapsed window when the source signature is unchanged", async () => {
+    const db = baseDb();
+    db.changeSignature = "sig-1";
+    const { engine, calls, setNow } = harness(db);
+    await engine.home("24h");
+    await flushAsync();
+    const baseline = calls.length;
+
+    setNow(NOW + 2 * HOUR);
+    await engine.refresh();
+
+    // The cursor did not move, so the strict later window is not re-read.
+    expect(fullReads(calls, baseline)).toHaveLength(0);
+    expect(calls.slice(baseline).filter((call) => call.method === "loadRevisions")).toHaveLength(0);
+  });
+
   it("does not sweep stored rows that a partial delta did not mention", async () => {
     const db = baseDb();
     const { engine, savedStates } = harness(db);
@@ -1250,33 +1366,48 @@ describe("analytics engine: revision reconciliation", () => {
 
   it("caps the cursor at wall time for future rows and applies them when eligible", async () => {
     const db = baseDb();
-    const { engine, savedStates, setNow } = harness(db);
+    db.changeSignature = "sig-1";
+    const { engine, calls, savedStates, setNow } = harness(db);
     await engine.home("24h");
+    await flushAsync();
 
     db.rows.push(row("ses_root", "msg_future", NOW + DAY, { input: 50 }));
     db.updatedAt.set(rowKey("ses_root", "msg_future"), NOW + DAY);
+    db.changeSignature = "sig-2";
     await engine.refresh();
     await flushAsync();
     let saved = savedStates[savedStates.length - 1];
     expect(saved?.sourceCursorAtMs).toBe(NOW);
     expect(saved?.sourceCursorAtMs).toBeLessThanOrEqual(NOW);
+    expect(saved?.futureCompletionAtMs).toBe(NOW + DAY);
     expect((await engine.home("24h")).usage.totals.input).toBe(700);
 
+    // The source signature stays constant; only wall time reaches the known
+    // future completion. The gate must yield to the release projection.
     setNow(NOW + DAY + 1);
+    const beforeRelease = calls.length;
     await engine.refresh();
+    expect(
+      calls
+        .slice(beforeRelease)
+        .some(
+          (call) => call.method === "loadRevisions" && call.params?.updatedSinceMs === undefined,
+        ),
+    ).toBe(true);
     const futureHome = await engine.home("24h");
     expect(futureHome.usage.totals.input).toBe(50);
     await flushAsync();
     saved = savedStates[savedStates.length - 1];
     expect(saved?.sourceCursorAtMs).toBe(NOW + DAY);
+    expect(saved?.futureCompletionAtMs).toBeUndefined();
   });
 
   it("repairs deletions and unchanged-timestamp edits only on the persisted 7-day cadence", async () => {
     const db = baseDb();
+    db.changeSignature = "sig-1";
     const { engine, calls, savedStates, setNow } = harness(db);
     await engine.home("lifetime");
     await flushAsync();
-    const baseline = calls.length;
 
     // Backdate both changes to the already-seen source timestamp: the delta
     // cannot distinguish them, so only the rare payload repair can.
@@ -1284,22 +1415,66 @@ describe("analytics engine: revision reconciliation", () => {
     if (!edited) throw new Error("msg_o missing");
     edited.tokens.input = 401;
     db.rows = db.rows.filter((entry) => entry.messageID !== "msg_b");
+    db.changeSignature = "sig-2";
     await engine.refresh();
     const beforeRepair = await engine.home("lifetime");
     expect(beforeRepair.usage.totals.input).toBe(1_500);
 
+    // The signature has not moved since the edit; the due repair must still
+    // override the unchanged-source gate.
     setNow(NOW + ANALYTICS_FULL_REPAIR_INTERVAL_MS + 1);
+    const repairStart = calls.length;
     await engine.refresh();
     const repaired = await engine.home("lifetime");
     expect(repaired.usage.totals.input).toBe(1_301);
     expect(repaired.usage.stepCount).toBe(3);
 
-    const repairReads = calls.slice(baseline).filter((call) => call.method === "loadRevisions");
+    const repairReads = calls.slice(repairStart).filter((call) => call.method === "loadRevisions");
     expect(repairReads.some((call) => call.params?.updatedSinceMs === undefined)).toBe(true);
     await flushAsync();
     expect(savedStates[savedStates.length - 1]?.lastFullRepairAtMs).toBe(
       NOW + ANALYTICS_FULL_REPAIR_INTERVAL_MS + 1,
     );
+    expect(savedStates[savedStates.length - 1]?.sourceSignature).toBe("sig-2");
+  });
+
+  it("still runs an overdue repair after a restart with an unchanged signature", async () => {
+    const db = baseDb();
+    db.changeSignature = "sig-1";
+    const first = harness(db);
+    await first.engine.home("lifetime");
+    await flushAsync();
+
+    const edited = db.rows.find((entry) => entry.messageID === "msg_o");
+    if (!edited) throw new Error("msg_o missing");
+    edited.tokens.input = 401;
+    db.rows = db.rows.filter((entry) => entry.messageID !== "msg_b");
+    db.changeSignature = "sig-2";
+    await first.engine.refresh();
+    await flushAsync();
+    const persisted = first.savedStates[first.savedStates.length - 1];
+    await first.engine.close();
+    if (!persisted) throw new Error("expected a persisted state");
+    expect(persisted.sourceSignature).toBe("sig-2");
+    expect(persisted.lastFullRepairAtMs).toBe(NOW);
+
+    const calls: ReaderCall[] = [];
+    const restarted = harness(db, {
+      now: NOW + ANALYTICS_FULL_REPAIR_INTERVAL_MS + 1,
+      reader: createFakeReader(db, calls),
+      loadSnapshot: async () => persisted,
+    });
+    await restarted.engine.home("lifetime");
+    const repairStart = calls.length;
+    await restarted.engine.refresh();
+    expect(
+      calls
+        .slice(repairStart)
+        .some(
+          (call) => call.method === "loadRevisions" && call.params?.updatedSinceMs === undefined,
+        ),
+    ).toBe(true);
+    expect((await restarted.engine.home("lifetime")).usage.totals.input).toBe(1_301);
   });
 
   it("keeps contributions and the cursor unchanged when the source is unavailable", async () => {
@@ -1445,6 +1620,41 @@ describe("analytics engine: scope reads", () => {
     await flushAsync();
     const latest = savedStates[savedStates.length - 1];
     expect(latest?.occurrences.get("msg!2")?.updatedAtMs).toBe(NOW - HOUR);
+    await engine.close();
+  });
+
+  it("marks the linked reply to a mid-step prompt from the stored parentID", async () => {
+    const db = baseDb();
+    db.rows = [
+      {
+        ...row("ses_root", "msg_running", NOW - 10 * 60_000),
+        completedAtMs: NOW - 60_000,
+      },
+      { ...row("ses_root", "msg_next", NOW - 5 * 60_000), completedAtMs: NOW },
+    ];
+    for (const entry of db.rows) {
+      db.updatedAt.set(rowKey(entry.sessionID, entry.messageID), entry.completedAtMs);
+    }
+    db.extraRevisions.push({
+      messageID: "usr_mid_step",
+      sessionID: "ses_root",
+      type: "user",
+      createdAtMs: NOW - 7 * 60_000,
+      updatedAtMs: NOW - 7 * 60_000,
+      completedAtMs: null,
+    });
+    // The running reply started before the input; its successor answers it.
+    db.parentIDs.set("msg_next", "usr_mid_step");
+    const { engine } = harness(db);
+
+    const snapshot = await engine.session("ses_root");
+
+    expect(
+      snapshot.steps.map((step) => [step.messageId, step.inputMarker === true] as const),
+    ).toEqual([
+      ["msg_running", false],
+      ["msg_next", true],
+    ]);
     await engine.close();
   });
 

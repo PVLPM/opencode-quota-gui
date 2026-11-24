@@ -16,6 +16,12 @@ describe("clean history route canonicalization", () => {
     ["/#/analytics?range=7d", "30d", "/analytics?range=7d", "7d"],
     ["/#/project/a%2Fb?range=24h", "7d", "/project/a%2Fb?range=24h", "24h"],
     ["/#/session/ses%201?range=24h", "30d", "/session/ses%201", "24h"],
+    [
+      "/#/session/ses%201?view=individual&range=24h",
+      "30d",
+      "/session/ses%201?view=individual",
+      "24h",
+    ],
     ["/#/?range=lifetime", "7d", "/quota", "lifetime"],
     ["/analytics", "30d", "/analytics?range=30d", "30d"],
   ] as const)("canonicalizes %s without retaining hash state", (input, stored, path, range) => {
@@ -35,5 +41,25 @@ describe("clean history route canonicalization", () => {
     "/quota/",
   ])("does not parse malformed route %s as a page", (path) => {
     expect(parseLocation(path, "7d").route.name).toBe("not-found");
+  });
+
+  it("round-trips the individual session view and drops it on browser back", () => {
+    const individual = parseLocation("/session/ses%201?view=individual", "7d");
+    expect(individual.route).toEqual({
+      name: "session",
+      sessionId: "ses 1",
+      individual: true,
+    });
+    expect(formatPath(individual.route, individual.range)).toBe("/session/ses%201?view=individual");
+
+    // Browser back returns to the plain session URL, which parses as the main chart.
+    expect(parseLocation("/session/ses%201", "7d").route).toEqual({
+      name: "session",
+      sessionId: "ses 1",
+    });
+    expect(parseLocation("/session/ses%201?view=other", "7d").route).toEqual({
+      name: "session",
+      sessionId: "ses 1",
+    });
   });
 });

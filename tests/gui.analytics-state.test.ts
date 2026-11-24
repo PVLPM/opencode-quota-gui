@@ -148,6 +148,8 @@ function baseState(): AnalyticsState {
     frontierAtMs: NOW,
     sourceCursorAtMs: NOW - 60_000,
     lastFullRepairAtMs: NOW,
+    sourceSignature: "v1|sig-1",
+    futureCompletionAtMs: NOW + 3_600_000,
   };
 }
 
@@ -233,6 +235,8 @@ describe("analytics snapshot codec v3", () => {
     expect(decoded?.savedAtMs).toBe(NOW);
     expect(decoded?.sourceCursorAtMs).toBe(NOW - 60_000);
     expect(decoded?.lastFullRepairAtMs).toBe(NOW);
+    expect(decoded?.sourceSignature).toBe("v1|sig-1");
+    expect(decoded?.futureCompletionAtMs).toBe(NOW + 3_600_000);
     expect(decoded?.fingerprintIndex.size).toBe(1);
   });
 
@@ -258,6 +262,44 @@ describe("analytics snapshot codec v3", () => {
       expect(decoded?.sourceCursorAtMs).toBeUndefined();
       expect(decoded?.lastFullRepairAtMs).toBeUndefined();
     }
+  });
+
+  it("keeps the future-completion release additive and optional", () => {
+    const state = baseState();
+    delete state.futureCompletionAtMs;
+    const legacy = encodeAnalyticsState(state, NOW);
+    expect(legacy.futureCompletionAtMs).toBeNull();
+    expect(
+      decodeAnalyticsState(JSON.parse(JSON.stringify(legacy)))?.futureCompletionAtMs,
+    ).toBeUndefined();
+
+    const persisted = encodeAnalyticsState(baseState(), NOW);
+    expect(decodeAnalyticsState({ ...persisted, futureCompletionAtMs: "soon" })).toBeUndefined();
+  });
+
+  it("keeps the change signature additive and optional", () => {
+    const state = baseState();
+    delete state.sourceSignature;
+    const legacy = encodeAnalyticsState(state, NOW);
+    expect(legacy.sourceSignature).toBeNull();
+    expect(
+      decodeAnalyticsState(JSON.parse(JSON.stringify(legacy)))?.sourceSignature,
+    ).toBeUndefined();
+
+    const persisted = encodeAnalyticsState(baseState(), NOW);
+    expect(persisted.sourceSignature).toBe("v1|sig-1");
+    expect(
+      decodeAnalyticsState({
+        ...persisted,
+        sourceSignature: 42,
+      }),
+    ).toBeUndefined();
+    expect(
+      decodeAnalyticsState({
+        ...persisted,
+        sourceSignature: "x".repeat(513),
+      }),
+    ).toBeUndefined();
   });
 
   it("round-trips a bounded warm presentation sidecar", () => {

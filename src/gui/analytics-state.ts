@@ -34,9 +34,13 @@ export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
  * version because the presentation cache is disposable: a sidecar written
  * under older semantics (for example before zero-token rows were excluded from
  * usage rollups, or before exact historical temporal pricing) must be rebuilt,
- * not served as if it were current.
+ * not served as if it were current. 5 adds recorded-cost fallback provenance to
+ * cost totals. 6 adds input-source markers to session steps; older payloads
+ * would render without them. 7 places markers by assistant creation time or
+ * explicit parent linkage, so 6 payloads can mark a step that was already
+ * running when the input arrived.
  */
-export const ANALYTICS_PRESENTATION_VERSION = 4;
+export const ANALYTICS_PRESENTATION_VERSION = 7;
 
 export interface AnalyticsCoverage {
   /** Inclusive start; absent means the lifetime read reached the beginning. */
@@ -139,6 +143,17 @@ export interface AnalyticsState {
   sourceCursorAtMs?: number;
   /** Wall time of the last completed full reconciliation (7-day repair). */
   lastFullRepairAtMs?: number;
+  /**
+   * Earliest completion time known to be in the future when the last global
+   * projection ran. Once wall time reaches it, the signature gate must not skip
+   * the read that can finally include the row.
+   */
+  futureCompletionAtMs?: number;
+  /**
+   * Cheap source-change signature observed before the read that produced this
+   * state. A later refresh with the same signature can skip revision discovery.
+   */
+  sourceSignature?: string;
   presentation?: AnalyticsPresentation;
 }
 
@@ -210,6 +225,10 @@ interface PersistedAnalyticsStateV3 {
   sourceCursorAtMs: number | null;
   /** Additive v3 field: absent/null in legacy files means "repair due". */
   lastFullRepairAtMs: number | null;
+  /** Additive v3 field: absent/null means a revision scan is required. */
+  sourceSignature: string | null;
+  /** Additive v3 field: earliest completion still in the future at projection time. */
+  futureCompletionAtMs: number | null;
   sourceIdentity: SourceIdentityTuple | null;
   extent: { sinceMs: number | null; untilMs: number } | null;
   fingerprints: CompactFingerprint[];
@@ -292,6 +311,8 @@ export function encodeAnalyticsState(
     frontierAtMs: state.frontierAtMs,
     sourceCursorAtMs: state.sourceCursorAtMs ?? null,
     lastFullRepairAtMs: state.lastFullRepairAtMs ?? null,
+    sourceSignature: state.sourceSignature ?? null,
+    futureCompletionAtMs: state.futureCompletionAtMs ?? null,
     sourceIdentity: state.sourceIdentity ? identityToTuple(state.sourceIdentity) : null,
     extent:
       state.extent === undefined
@@ -450,6 +471,18 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
   if (repairValue !== undefined && repairValue !== null && !isFiniteNumber(repairValue)) {
     return undefined;
   }
+  const signatureValue = record.sourceSignature;
+  if (
+    signatureValue !== undefined &&
+    signatureValue !== null &&
+    (!isStringOrNull(signatureValue) || signatureValue.length === 0 || signatureValue.length > 512)
+  ) {
+    return undefined;
+  }
+  const futureValue = record.futureCompletionAtMs;
+  if (futureValue !== undefined && futureValue !== null && !isFiniteNumber(futureValue)) {
+    return undefined;
+  }
 
   const identityValue = record.sourceIdentity;
   if (
@@ -545,7 +578,7 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
     | PersistedAnalyticsStateV3["presentation"]
     | undefined;
 
-  return {
+  const state: AnalyticsState = {
     sessions,
     projects,
     fingerprints,
@@ -573,6 +606,11 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
         }
       : {}),
   };
+  if (isStringOrNull(signatureValue) && signatureValue !== null) {
+    state.sourceSignature = signatureValue;
+  }
+  if (isFiniteNumber(futureValue)) state.futureCompletionAtMs = futureValue;
+  return state;
 }
 
 export function defaultAnalyticsSnapshotPath(): string {

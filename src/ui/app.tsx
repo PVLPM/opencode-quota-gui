@@ -12,12 +12,12 @@ import {
 } from "solid-js";
 import type {
   AnalyticsDimension,
-  AnalyticsEntityIdentity,
   DashboardHealth,
   QuotaSnapshot,
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
+import { createAnalyticsPresentationStore } from "./analytics-cache";
 import { AnalyticsTabs } from "./components/analytics-tabs";
 import { BuildMismatchStatus } from "./components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
@@ -31,15 +31,7 @@ import { analyticsTabForRoute, viewScopeForRoute } from "./navigation-model";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
 import { createQuery } from "./query";
 import { createQuotaQuery } from "./quota-query";
-import {
-  AnalyticsRoute,
-  GroupDetailRoute,
-  ModelsRoute,
-  ProjectRoute,
-  QuotaRoute,
-  SessionRoute,
-  SettingsRoute,
-} from "./routes";
+import { AnalyticsViews, QuotaRoute, SettingsRoute } from "./routes";
 import {
   canonicalizeLocation,
   formatPath,
@@ -106,7 +98,9 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const [contractMismatch, setContractMismatch] = createSignal<string | undefined>(undefined);
   const [reloadToken, setReloadToken] = createSignal(0);
   const [quotaReloadToken, setQuotaReloadToken] = createSignal(0);
-  const [prefetchPending, setPrefetchPending] = createSignal<ReadonlySet<RangeKey>>(new Set());
+  const analyticsStore = createAnalyticsPresentationStore((input) => props.client.home(input), {
+    owner: () => props.client,
+  });
   const [homeSnapshot, setHomeSnapshot] = createSignal<QuotaSnapshot | undefined>(undefined);
   const quotaQuery = createQuotaQuery((refresh) =>
     props.client.quota(refresh ? { refresh: true } : undefined),
@@ -120,6 +114,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const [reconnectEpoch, setReconnectEpoch] = createSignal(0);
   const [settingsFreshEpoch, setSettingsFreshEpoch] = createSignal(0);
   const toaster = createToaster();
+  onCleanup(() => analyticsStore.dispose());
 
   const range = () => location().range;
   const route = () => location().route;
@@ -180,7 +175,9 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const [catalogCache, setCatalogCache] = createSignal<VisibilityCatalog>(
     readVisibilityCatalog(browserStorage()),
   );
-  const quotaCatalog = createMemo(() => catalogFromQuotaSnapshot(homeSnapshot()));
+  const quotaCatalog = createMemo(() =>
+    catalogFromQuotaSnapshot(homeSnapshot(), preferences().rowOrder),
+  );
   const catalog = createMemo(() => mergeVisibilityCatalog(quotaCatalog(), catalogCache()));
 
   // Compare before writing: the cache signal feeds the merged catalog, so a
@@ -440,7 +437,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   <SegmentedControlItem value={key}>
                     <RangeLabel
                       label={RANGE_LABELS[key] ?? key}
-                      pending={prefetchPending().has(key)}
+                      pending={analyticsStore.pending().has(key)}
                     />
                   </SegmentedControlItem>
                 ))}
@@ -480,80 +477,17 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   }}
                 />
               </Match>
-              <Match when={route().name === "analytics"}>
-                <AnalyticsRoute
-                  onPrefetchPending={setPrefetchPending}
+              <Match when={analyticsTab() !== undefined}>
+                <AnalyticsViews
                   client={props.client}
+                  store={analyticsStore}
+                  connection={connection()}
+                  route={route()}
                   range={range()}
                   reloadToken={reloadToken()}
                   reconnectEpoch={reconnectEpoch()}
-                  connection={connection()}
                   onStale={setRouteStale}
-                />
-              </Match>
-
-              <Match when={route().name === "models"}>
-                <ModelsRoute
-                  client={props.client}
-                  dimension={(route() as { dimension: AnalyticsDimension }).dimension}
-                  onDimensionChange={replaceModelsDimension}
-                  range={range()}
-                  reloadToken={reloadToken()}
-                  reconnectEpoch={reconnectEpoch()}
-                  connection={connection()}
-                  onStale={setRouteStale}
-                />
-              </Match>
-
-              <Match when={route().name === "model"}>
-                <GroupDetailRoute
-                  client={props.client}
-                  entity="model"
-                  identity={(route() as { identity: AnalyticsEntityIdentity }).identity}
-                  modelsGroup={(route() as { modelsGroup?: AnalyticsDimension }).modelsGroup}
-                  range={range()}
-                  reloadToken={reloadToken()}
-                  reconnectEpoch={reconnectEpoch()}
-                  connection={connection()}
-                  onStale={setRouteStale}
-                />
-              </Match>
-
-              <Match when={route().name === "provider"}>
-                <GroupDetailRoute
-                  client={props.client}
-                  entity="provider"
-                  identity={(route() as { identity: AnalyticsEntityIdentity }).identity}
-                  modelsGroup={(route() as { modelsGroup?: AnalyticsDimension }).modelsGroup}
-                  range={range()}
-                  reloadToken={reloadToken()}
-                  reconnectEpoch={reconnectEpoch()}
-                  connection={connection()}
-                  onStale={setRouteStale}
-                />
-              </Match>
-
-              <Match when={route().name === "project"}>
-                <ProjectRoute
-                  client={props.client}
-                  range={range()}
-                  projectId={(route() as { projectId: string }).projectId}
-                  reloadToken={reloadToken()}
-                  reconnectEpoch={reconnectEpoch()}
-                  connection={connection()}
-                  onStale={setRouteStale}
-                />
-              </Match>
-
-              <Match when={route().name === "session"}>
-                <SessionRoute
-                  client={props.client}
-                  range={range()}
-                  sessionId={(route() as { sessionId: string }).sessionId}
-                  reloadToken={reloadToken()}
-                  reconnectEpoch={reconnectEpoch()}
-                  connection={connection()}
-                  onStale={setRouteStale}
+                  onModelsDimensionChange={replaceModelsDimension}
                 />
               </Match>
 

@@ -53,6 +53,8 @@ import type {
   QuotaSnapshot,
   SessionSnapshot,
 } from "../contracts/dashboard.js";
+import { isRecord } from "../contracts/dto-guards.js";
+import { isTransientProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { RangeKey } from "../contracts/ranges.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 
@@ -233,11 +235,15 @@ const DERIVED_NOISE_KEYS: ReadonlySet<string> = new Set([
   "untilMs",
   "startMs",
   "endMs",
+  // A provisional first paint is replaced by the same numbers: the marker is
+  // presentation state, and the unconditional replacement event below clears it.
+  "provisional",
+  "exactError",
 ]);
 
 function stripDerivedNoise(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stripDerivedNoise);
-  if (typeof value === "object" && value !== null) {
+  if (isRecord(value)) {
     const out: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
       if (DERIVED_NOISE_KEYS.has(key)) continue;
@@ -254,6 +260,21 @@ function substantiveOf(snapshot: unknown): string {
 
 function staleFlag(value: unknown): boolean {
   return typeof value === "object" && value !== null && "stale" in value && value.stale === true;
+}
+
+/** A provisional first paint whose exact replacement is still computing. */
+function isProvisional(value: unknown): value is object {
+  return isRecord(value) && value.provisional === true;
+}
+
+/** Terminal exact-read failure marker on a provisional payload. */
+function hasExactError(cause: unknown): boolean {
+  return isRecord(cause) && "exactError" in cause && cause.exactError !== undefined;
+}
+
+/** Terminal exact-read failure carrying the still-useful provisional payload. */
+function withExactFailure<T extends object>(snapshot: T, message: string): T {
+  return { ...snapshot, exactError: message };
 }
 
 /**
@@ -304,6 +325,18 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   const logger = options.logger ?? createGuiLogger();
   const now = options.now ?? Date.now;
   const cache = new Map<string, CacheEntry>();
+  /**
+   * A just-settled rejected compute. The host's final probe can arrive right
+   * after the worker died; joining this outcome briefly avoids starting a
+   * second full scan for the same logical read.
+   */
+  const settledFailures = new Map<
+    string,
+    { error: unknown; untilMs: number; epoch: number; sourceGeneration: number }
+  >();
+  /** One announcement per exact payload object; joined exact reads share it. */
+  const announcedExact = new WeakSet<object>();
+  const SETTLED_FAILURE_GRACE_MS = 5_000;
   let quotaRefresh: Promise<QuotaSnapshot> | undefined;
   let quotaPoll: Promise<boolean> | undefined;
   const computes = new Map<string, () => Promise<unknown>>();
@@ -522,7 +555,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
           epoch !== viewerEpoch ||
           cache.get(key)?.snapshot !== value ||
           notifiedLoads.has(fresh) ||
-          (prior && substantiveOf(value) === prior.substantive)
+          // The exact-replacement path owns this announcement when the prior
+          // paint was provisional; the scheduler emits once for the payload.
+          (prior !== undefined && isProvisional(prior.snapshot)) ||
+          // A provisional entry must always announce its exact replacement,
+          // even when the substantive payload is unchanged: that event is the
+          // only way the UI learns the exact result has landed.
+          (prior && !isProvisional(prior.snapshot) && substantiveOf(value) === prior.substantive)
         ) {
           return;
         }
@@ -578,6 +617,19 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     // A pending task from an ended viewer session or a previous source identity
     // is disowned: this caller runs its own compute instead.
 
+    const settled = settledFailures.get(key);
+    if (settled !== undefined) {
+      if (
+        !force &&
+        settled.epoch === epoch &&
+        settled.sourceGeneration === generation &&
+        settled.untilMs > now()
+      ) {
+        return Promise.reject<T>(settled.error);
+      }
+      settledFailures.delete(key);
+    }
+
     let computation: Promise<T>;
     try {
       computation = compute();
@@ -598,11 +650,21 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         snapshot = await computation;
       } catch (error: unknown) {
         const fallback = tracked.get(key) === task.version ? cache.get(key) : undefined;
-        if (!fallback) throw error;
         // A previous owner's last-good entry may be served only when the DTO
         // can carry the stale marker. Session snapshots cannot, so their
         // failure is surfaced rather than presented as fresh old-owner data.
-        if (fallback.sourceGeneration !== sourceGeneration && !hasStaleMarker(fallback.snapshot)) {
+        if (
+          !fallback ||
+          (fallback.sourceGeneration !== sourceGeneration && !hasStaleMarker(fallback.snapshot))
+        ) {
+          if (!closed) {
+            settledFailures.set(key, {
+              error,
+              epoch: task.epoch,
+              sourceGeneration: task.sourceGeneration,
+              untilMs: now() + SETTLED_FAILURE_GRACE_MS,
+            });
+          }
           throw error;
         }
         if (!closed && task.epoch === viewerEpoch && task.sourceGeneration === sourceGeneration) {
@@ -614,6 +676,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         return markStale(fallback.snapshot) as T;
       }
 
+      settledFailures.delete(key);
       // A commit belongs to the viewer session and source identity that started
       // the load: a disconnect or owner handoff already dirtied the entries, so
       // an old result never re-freshens them.
@@ -752,9 +815,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         card.errors.some(
           (error) =>
             error.kind !== "intentional-filter" &&
-            (error.failureCategory === "provider_api" ||
-              error.failureCategory === "discovery" ||
-              error.failureCategory === "local") &&
+            isTransientProviderFailureCategory(error.failureCategory) &&
             !(error.retryAtMs !== undefined && error.retryAtMs > now()),
         ),
       );
@@ -867,6 +928,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   }
 
   function dirty(): void {
+    settledFailures.clear();
     for (const entry of cache.values()) {
       entry.stale = true;
       entry.invalidated = true;
@@ -878,12 +940,20 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       const key = homeKey(input.range);
       const request = load(
         key,
-        () =>
-          options.source.home({
-            range: input.range,
-            ...(input.background ? { background: true } : {}),
-          }),
-        false,
+        () => {
+          const homeRequest =
+            input.background && input.exact === true
+              ? { range: input.range, background: true, exact: true }
+              : input.background
+                ? { range: input.range, background: true }
+                : input.exact === true
+                  ? { range: input.range, exact: true }
+                  : { range: input.range };
+          return options.source.home(homeRequest);
+        },
+        // An exact read is an explicit revalidation request and must not be
+        // satisfied by a cached provisional/marker entry.
+        input.exact === true,
         input.background
           ? () => {
               void options.source.home({ range: input.range }).catch(() => {});
@@ -893,16 +963,55 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       );
       void request.then(
         (snapshot) => {
-          if (snapshot.provisional && cache.get(key)?.snapshot === snapshot && !closed) {
-            void load(
-              key,
-              () => options.source.home({ range: input.range, exact: true, background: true }),
-              false,
-              () => {
-                void options.source.home({ range: input.range, exact: true }).catch(() => {});
-              },
-            ).catch(() => {});
-          }
+          if (
+            !isProvisional(snapshot) ||
+            hasExactError(snapshot) ||
+            cache.get(key)?.snapshot !== snapshot ||
+            closed
+          )
+            return;
+          const exact = load(
+            key,
+            () => options.source.home({ range: input.range, exact: true, background: true }),
+            // An exact replacement is explicitly requested; a still-cached
+            // provisional paint must never satisfy it.
+            true,
+            () => {
+              void options.source.home({ range: input.range, exact: true }).catch(() => {});
+            },
+          );
+          const settle = () => {
+            const current = cache.get(key);
+            if (closed || !current || !isProvisional(current.snapshot)) return;
+            if (hasExactError(current.snapshot)) return;
+            const failed = withExactFailure(
+              current.snapshot,
+              "The exact analytics read failed. Retry to finish this range.",
+            );
+            cache.set(key, {
+              ...current,
+              snapshot: failed,
+              substantive: substantiveOf(failed),
+              // Keep the provisional data as a cache hit, but advertise the
+              // terminal status. A manual exact retry forces a fresh compute.
+              stale: false,
+            });
+            emit({ topic: topicFor(key), at: now() });
+          };
+          void exact.then(
+            (value) => {
+              if (isProvisional(value)) {
+                settle();
+                return;
+              }
+              if (isRecord(value)) {
+                if (announcedExact.has(value)) return;
+                announcedExact.add(value);
+              }
+              emit({ topic: topicFor(key), at: now() });
+            },
+            () => settle(),
+          );
         },
         () => {},
       );
@@ -1041,6 +1150,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       computes.clear();
       cache.clear();
       inflight.clear();
+      settledFailures.clear();
       tracked.clear();
       scopedViewers.clear();
     },

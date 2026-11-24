@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-
+import { DashboardError } from "../src/ui/dashboard-client.js";
 import { createQuery } from "../src/ui/query.js";
-import { isHostRpcTimeout, shouldRejoinAnalyticsRead } from "../src/ui/view-model.js";
+import {
+  isHostRpcTimeout,
+  isRecoverableReadFailure,
+  rejoinAnalyticsRead,
+  shouldRejoinAnalyticsRead,
+} from "../src/ui/view-model.js";
 
 const hostTimeout = {
   name: "ClientError",
@@ -130,11 +135,123 @@ describe("createQuery host-timeout re-join", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("probes the server cache once after the budget and applies a late result", async () => {
+    vi.useFakeTimers();
+    const deadlineFailure = async (): Promise<string> => {
+      vi.advanceTimersByTime(60_000);
+      throw hostTimeout;
+    };
+    const fetcher = vi
+      .fn<() => Promise<string>>()
+      .mockImplementationOnce(deadlineFailure)
+      .mockImplementationOnce(deadlineFailure)
+      .mockImplementationOnce(deadlineFailure)
+      .mockResolvedValueOnce("late");
+    const real = createQuery(
+      () => fetcher(),
+      retryHostTimeout,
+      (failure, elapsedMs) => isHostRpcTimeout(failure) && elapsedMs >= 180_000,
+    );
+
+    expect(await real.run()).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(real.data()).toBe("late");
+  });
+
+  it("surfaces the host timeout when the final probe also fails", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn<() => Promise<string>>().mockImplementation(async () => {
+      vi.advanceTimersByTime(60_000);
+      throw hostTimeout;
+    });
+    const real = createQuery(
+      () => fetcher(),
+      retryHostTimeout,
+      (failure, elapsedMs) => isHostRpcTimeout(failure) && elapsedMs >= 180_000,
+    );
+
+    expect(await real.run()).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(isHostRpcTimeout(real.error())).toBe(true);
+  });
+
+  it("does not probe after an unmount invalidates the run", async () => {
+    const pending = deferred<string>();
+    const fetcher = vi.fn<() => Promise<string>>().mockReturnValue(pending.promise);
+    const real = createQuery(
+      () => fetcher(),
+      retryHostTimeout,
+      (failure, elapsedMs) => isHostRpcTimeout(failure) && elapsedMs >= 180_000,
+    );
+
+    const run = real.run();
+    real.invalidate();
+    pending.reject(hostTimeout);
+    expect(await run).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a worker timeout as terminal, never as a host timeout", async () => {
+    const workerTimeout = { type: "internal", message: "Internal dashboard error" };
+    const fetcher = vi.fn<() => Promise<string>>().mockRejectedValue(workerTimeout);
+    const query = createQuery(fetcher, retryHostTimeout, () => false);
+
+    expect(await query.run()).toBe(false);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(query.error()).toBe(workerTimeout);
+    vi.useRealTimers();
+  });
+
   it("never retries without a predicate (other routes)", async () => {
     const fetcher = vi.fn<() => Promise<string>>().mockRejectedValue(hostTimeout);
     const query = createQuery(fetcher);
 
     expect(await query.run()).toBe(false);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("prefetch re-join and recoverable classification", () => {
+  it("re-joins a host timeout for a background prefetch", async () => {
+    const read = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(hostTimeout)
+      .mockResolvedValueOnce("lifetime");
+
+    await expect(rejoinAnalyticsRead(read)).resolves.toBe("lifetime");
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops on a non-host failure without a second call", async () => {
+    const terminal = { type: "internal", message: "Internal dashboard error" };
+    const read = vi.fn<() => Promise<string>>().mockRejectedValue(terminal);
+
+    await expect(rejoinAnalyticsRead(read)).rejects.toBe(terminal);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops issuing reads once the owning shell is gone", async () => {
+    let cancelled = false;
+    let calls = 0;
+    const read = async (): Promise<string> => {
+      calls += 1;
+      cancelled = true;
+      throw hostTimeout;
+    };
+
+    await expect(rejoinAnalyticsRead(read, () => cancelled)).rejects.toThrow(
+      "analytics read cancelled",
+    );
+    expect(calls).toBe(1);
+  });
+
+  it("classifies retryable and permanent read failures", () => {
+    expect(isRecoverableReadFailure(hostTimeout)).toBe(true);
+    expect(isRecoverableReadFailure(new DashboardError("internal", 500, "boom"))).toBe(true);
+    expect(isRecoverableReadFailure(new DashboardError("not-found", 404, "missing"))).toBe(false);
+    expect(isRecoverableReadFailure(new DashboardError("bad-request", 400, "bad"))).toBe(false);
+    expect(isRecoverableReadFailure({ type: "internal", message: "worker gone" })).toBe(true);
+    expect(isRecoverableReadFailure({ type: "project-not-found", message: "missing" })).toBe(false);
+    expect(isRecoverableReadFailure(new Error("socket closed"))).toBe(true);
   });
 });

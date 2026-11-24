@@ -19,12 +19,14 @@ export interface Query<T> {
 
 /**
  * `shouldRetry` re-issues the same fetch inside one `run` while it returns true,
- * so the loading state and its elapsed clock continue. A superseded, invalidated
- * or unmounted run never retries.
+ * so the loading state and its elapsed clock continue. `shouldProbe` allows one
+ * final fetch after the retry budget is spent (for example a cache probe at the
+ * server read deadline). A superseded, invalidated or unmounted run never retries.
  */
 export function createQuery<T>(
   fetcher: () => Promise<T>,
   shouldRetry?: (failure: unknown, elapsedMs: number) => boolean,
+  shouldProbe?: (cause: unknown, elapsedMs: number) => boolean,
 ): Query<T> & { invalidate: () => void; set: (value: T) => void } {
   const [data, setData] = createSignal<T | undefined>(undefined);
   const [error, setError] = createSignal<unknown>(undefined);
@@ -37,12 +39,20 @@ export function createQuery<T>(
     const startedAt = Date.now();
     try {
       let value: T;
+      let probeUsed = false;
       for (;;) {
         try {
           value = await fetcher();
           break;
         } catch (failure) {
-          if (id !== requestId || !shouldRetry?.(failure, Date.now() - startedAt)) throw failure;
+          if (id !== requestId) throw failure;
+          const elapsedMs = Date.now() - startedAt;
+          if (shouldRetry?.(failure, elapsedMs)) continue;
+          if (!probeUsed && shouldProbe?.(failure, elapsedMs)) {
+            probeUsed = true;
+            continue;
+          }
+          throw failure;
         }
       }
       if (id !== requestId) return false;

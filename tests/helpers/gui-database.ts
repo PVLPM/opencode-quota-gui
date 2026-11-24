@@ -44,6 +44,8 @@ export type GuiDatabaseMessageRow = {
   } | null;
   cost?: number | null;
   agent?: string | null;
+  /** Assistant reply linkage: the user message this row answers. */
+  parentID?: string | null;
 };
 
 export type GuiDatabaseProjectRow = {
@@ -131,6 +133,7 @@ function buildMessageData(row: GuiDatabaseMessageRow): Record<string, unknown> {
   }
   if (row.cost !== undefined && row.cost !== null) data.cost = row.cost;
   if (row.agent !== undefined && row.agent !== null) data.agent = row.agent;
+  if (row.parentID !== undefined && row.parentID !== null) data.parentID = row.parentID;
   return data;
 }
 

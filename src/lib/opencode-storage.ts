@@ -1,4 +1,4 @@
-import { existsSync, realpathSync, statSync } from "node:fs";
+import { type BigIntStats, existsSync, realpathSync, statSync } from "node:fs";
 
 import { getOpenCodeDbPath } from "./opencode-db-path.js";
 import { openOpenCodeSqliteReadOnly, type SqliteConn } from "./opencode-sqlite.js";
@@ -1154,6 +1154,11 @@ export interface OpenCodeMessageRevision {
   updatedAtMs: number | null;
   /** Positive parsed `$.time.completed`; null when unfinished or unavailable. */
   completedAtMs: number | null;
+  /**
+   * Assistant `$.parentID`: the user message this reply answers, when the
+   * stored JSON records it. Absent on user rows and on schemas without JSON.
+   */
+  parentID?: string;
 }
 
 export interface OpenCodeMessageRevisionSnapshot {
@@ -1201,6 +1206,7 @@ type RevisionRow = {
   time_created: unknown;
   time_updated: unknown;
   completed: unknown;
+  parent_id: unknown;
 };
 
 const UNAVAILABLE_REVISION_SNAPSHOT: OpenCodeMessageRevisionSnapshot = {
@@ -1251,6 +1257,7 @@ function readMessageRevisionsFrom(
     completedAtAvailable
       ? `${guardedJsonScalar("$.time.completed")} AS completed`
       : "NULL AS completed",
+    completedAtAvailable ? `${guardedJsonScalar("$.parentID")} AS parent_id` : "NULL AS parent_id",
   ].join(", ");
 
   const revisions: OpenCodeMessageRevision[] = [];
@@ -1301,6 +1308,7 @@ function readMessageRevisionsFrom(
       const createdAt = normalizeNumber(row.time_created);
       const updatedAt = normalizeNumber(row.time_updated);
       const completed = normalizeNumber(row.completed);
+      const parentID = normalizeString(row.parent_id);
       revisions.push({
         messageID: row.id,
         sessionID: row.session_id,
@@ -1308,6 +1316,7 @@ function readMessageRevisionsFrom(
         createdAtMs: createdAt ?? 0,
         updatedAtMs: updatedAt ?? null,
         completedAtMs: completed !== undefined && completed > 0 ? Math.trunc(completed) : null,
+        ...(parentID === undefined ? {} : { parentID }),
       });
     }
   };
@@ -1543,6 +1552,77 @@ function readSourceIdentityStat(): OpenCodeSourceIdentity {
 }
 
 /**
+ * Cheap, non-mutating evidence that the SQLite files changed since the last
+ * completed analytics revision.
+ *
+ * The revision projection is a full scan because completion time lives in
+ * message JSON. Before paying for it, the worker compares this signature with
+ * the one persisted alongside the compact index. Any committed write appends to
+ * the WAL (or changes the main file when a rollback journal is used), so the
+ * size/mtime of `opencode.db` and `opencode.db-wal` plus the stable file
+ * identity change for inserts, deletions, and in-place JSON updates. A
+ * read-only connection's `PRAGMA data_version` is intentionally not used: it is
+ * only comparable within one connection, and the storage snapshot opens a new
+ * connection per refresh.
+ *
+ * The signature is captured before the snapshot transaction begins. Any write
+ * counted here is therefore committed before `BEGIN`, so the same refresh can
+ * persist this signature with data that already includes it. A write that lands
+ * after the stat is caught by the next refresh because its file state differs.
+ *
+ * This is an optimization, not the correctness boundary: a same-size WAL or a
+ * coarse filesystem timestamp can theoretically hide a commit, so the persisted
+ * 7-day repair still re-reads the source periodically (and always overrides the
+ * signature gate when due).
+ */
+function readOpenCodeSourceChangeSignature(): string | null {
+  const dbPath = getOpenCodeDbPath();
+  if (dbPath === ":memory:") return null;
+
+  let database: BigIntStats;
+  try {
+    database = statSync(dbPath, { bigint: true });
+  } catch {
+    return null;
+  }
+  if (!database.isFile()) return null;
+
+  const dbMtime =
+    typeof database.mtimeNs === "bigint" ? database.mtimeNs.toString() : String(database.mtimeMs);
+  let wal = "absent";
+  try {
+    const walStat = statSync(`${dbPath}-wal`, { bigint: true });
+    // Opening a WAL database read-only may create a zero-length `-wal`; it
+    // holds no committed frames, so it must not look like a source change.
+    if (walStat.isFile() && walStat.size > 0n) {
+      const walMtime =
+        typeof walStat.mtimeNs === "bigint" ? walStat.mtimeNs.toString() : String(walStat.mtimeMs);
+      wal = `${walStat.size}:${walMtime}`;
+    }
+  } catch (error: unknown) {
+    // Only "no WAL file" is conclusive (rollback journal). Any other stat
+    // failure makes the evidence inconclusive, so return no signature and let
+    // the caller scan.
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: unknown }).code
+        : undefined;
+    if (code !== "ENOENT" && code !== "ENOTDIR") return null;
+  }
+
+  return [
+    "v1",
+    dbPath,
+    database.dev.toString(),
+    database.ino.toString(),
+    database.birthtimeNs.toString(),
+    database.size.toString(),
+    dbMtime,
+    wal,
+  ].join("|");
+}
+
+/**
  * Read the local source identity. `status: "ok"` means the file exists and the
  * schema was readable (including a successfully opened, empty database);
  * `"missing"` and `"unreadable"` are explicit so callers can preserve the last
@@ -1578,6 +1658,12 @@ export interface OpenCodeStorageSnapshot {
   readonly dbPath: string;
   /** Identity captured for the transaction that backs every reader below. */
   readonly identity: OpenCodeSourceIdentity;
+  /**
+   * Cheap source-change evidence captured before this snapshot's transaction
+   * began; `null` when the filesystem could not be inspected. See
+   * `readOpenCodeSourceChangeSignature`.
+   */
+  readonly changeSignature?: string | null;
   readAllSessionsIndex(): Record<string, OpenCodeSessionInfo>;
   readProjectsIndex(): Record<string, OpenCodeProjectInfo>;
   readCompletedAssistantRows(params?: ReadCompletedAssistantRowsParams): OpenCodeRawAssistantRow[];
@@ -1598,10 +1684,12 @@ export type OpenCodeStorageSnapshotResult<T> =
 function createStorageSnapshot(
   conn: SqliteConn,
   identity: OpenCodeSourceIdentity,
+  changeSignature: string | null,
 ): OpenCodeStorageSnapshot {
   return {
     dbPath: identity.dbPath,
     identity,
+    changeSignature,
     readAllSessionsIndex: () => readAllSessionsIndexFrom(conn),
     readProjectsIndex: () => readProjectsIndexFrom(conn),
     readCompletedAssistantRows: (params = {}) => readCompletedAssistantRowsFrom(conn, params),
@@ -1658,6 +1746,10 @@ export async function withOpenCodeStorageSnapshot<T>(
   if (statIdentity.status === "missing") return { status: "missing" };
   if (statIdentity.status === "unreadable") return { status: "unreadable" };
 
+  // Captured before `BEGIN`: every write counted by the signature is visible to
+  // the transaction, so the refresh may persist it with data that includes it.
+  const changeSignature = readOpenCodeSourceChangeSignature();
+
   let conn: SqliteConn;
   try {
     conn = await openOpenCodeSqliteReadOnly(statIdentity.dbPath);
@@ -1686,7 +1778,7 @@ export async function withOpenCodeStorageSnapshot<T>(
       return { status: "unreadable" };
     }
 
-    const value = await read(createStorageSnapshot(conn, identity));
+    const value = await read(createStorageSnapshot(conn, identity, changeSignature));
     // Do not publish a generation if the path was replaced during the read;
     // the connection remains the old file while the path already points at a
     // different generation.

@@ -267,39 +267,53 @@ export function estimateNote(
   return isPartialEstimate(tokens) ? "Partial estimate" : undefined;
 }
 
+const RECORDED_COST_NOTE =
+  "Includes cost recorded by OpenCode for models without models.dev pricing.";
+
 export function estimateNoteTitle(
-  tokens: Pick<CostedTokens, "unpricedTokens" | "unknownTokens">,
+  tokens: Pick<CostedTokens, "unpricedTokens" | "unknownTokens"> & {
+    recordedCostUsd?: number;
+  },
 ): string {
   const parts = ["API-equivalent estimate based on model pricing. Not actual billed spend."];
   if (tokens.unpricedTokens > 0)
     parts.push(`${Math.round(tokens.unpricedTokens)} unpriced tokens are excluded.`);
   if (tokens.unknownTokens > 0)
     parts.push(`${Math.round(tokens.unknownTokens)} unknown tokens are excluded.`);
+  if ((tokens.recordedCostUsd ?? 0) > 0) parts.push(RECORDED_COST_NOTE);
   return parts.join(" ");
 }
 
-export function exactCostTitle(tokens: Pick<CostedTokens, "apiEquivalentCostUsd">): string {
-  return tokens.apiEquivalentCostUsd === null
-    ? "No priced tokens in this total."
-    : `API-equivalent estimate: $${tokens.apiEquivalentCostUsd.toFixed(6)}. Not actual billed spend.`;
+export function exactCostTitle(
+  tokens: Pick<CostedTokens, "apiEquivalentCostUsd"> & { recordedCostUsd?: number },
+): string {
+  const title =
+    tokens.apiEquivalentCostUsd === null
+      ? "No priced tokens in this total."
+      : `API-equivalent estimate: $${tokens.apiEquivalentCostUsd.toFixed(6)}. Not actual billed spend.`;
+  return (tokens.recordedCostUsd ?? 0) > 0 ? `${title} ${RECORDED_COST_NOTE}` : title;
 }
 
 export type CostBearingTokens = Pick<
   CostedTokens,
   "total" | "apiEquivalentCostUsd" | "unpricedTokens" | "unknownTokens"
->;
+> & {
+  recordedCostUsd?: number;
+  recordedCostTokens?: number;
+};
 
 /**
  * `Free` is a claim about the whole total, so it needs a positive token count,
- * an exactly zero numeric price, and no excluded tokens. A rounded sub-cent
- * estimate or a partially priced total never qualifies.
+ * an exactly zero numeric price, no excluded tokens, and no recorded-cost
+ * fallback. Zero/missing recorded cost is never Free evidence.
  */
 export function isAuthoritativelyFree(tokens: CostBearingTokens): boolean {
   return (
     tokens.total > 0 &&
     tokens.apiEquivalentCostUsd === 0 &&
     tokens.unpricedTokens === 0 &&
-    tokens.unknownTokens === 0
+    tokens.unknownTokens === 0 &&
+    (tokens.recordedCostUsd ?? 0) === 0
   );
 }
 
@@ -331,6 +345,8 @@ export interface CombinedEstimate {
   apiEquivalentCostUsd: number | null;
   unpricedTokens: number;
   unknownTokens: number;
+  recordedCostUsd?: number;
+  recordedCostTokens?: number;
 }
 
 /**
@@ -343,19 +359,28 @@ export function combineEstimates(tokens: readonly CostedTokens[]): CombinedEstim
   let anyPriced = false;
   let unpricedTokens = 0;
   let unknownTokens = 0;
+  let recordedCostUsd = 0;
+  let recordedCostTokens = 0;
   for (const entry of tokens) {
     total += entry.total;
     unpricedTokens += entry.unpricedTokens;
     unknownTokens += entry.unknownTokens;
+    recordedCostUsd += entry.recordedCostUsd ?? 0;
+    recordedCostTokens += entry.recordedCostTokens ?? 0;
     if (entry.apiEquivalentCostUsd !== null) {
       anyPriced = true;
       cost += entry.apiEquivalentCostUsd;
     }
   }
-  return {
+  const combined: CombinedEstimate = {
     total,
     apiEquivalentCostUsd: anyPriced ? cost : null,
     unpricedTokens,
     unknownTokens,
   };
+  if (recordedCostUsd > 0) {
+    combined.recordedCostUsd = recordedCostUsd;
+    combined.recordedCostTokens = recordedCostTokens;
+  }
+  return combined;
 }

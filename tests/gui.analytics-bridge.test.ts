@@ -11,6 +11,11 @@ import type { AnalyticsWorkerRequest } from "../src/gui/analytics-protocol.js";
 import { createAnalyticsWorkerRuntime } from "../src/gui/analytics-worker-runtime.js";
 import { createGuiLogger } from "../src/gui/log.js";
 import { createSnapshotService, type SnapshotSource } from "../src/gui/snapshot-service.js";
+import {
+  __resetPricingSnapshotForTests,
+  getPricingRefreshPolicy,
+  getPricingSnapshotSelection,
+} from "../src/lib/modelsdev-pricing.js";
 
 const logger = createGuiLogger({ sink: () => {} });
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
@@ -98,6 +103,82 @@ describe("analytics worker bridge", () => {
     await vi.waitFor(() => expect(worker.terminated).toBe(1));
     expect(framesOf(worker, "close")).toHaveLength(1);
     await bridge.close();
+  });
+
+  it("keeps a warm worker through the idle grace and retires after it", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({
+      createWorker: () => worker,
+      idleRetireMs: 1_000,
+      logger,
+    });
+    try {
+      await bridge.init({});
+      await vi.advanceTimersByTimeAsync(500);
+      expect(worker.terminated).toBe(0);
+      await bridge.home("7d");
+      // The read cancels the pending retirement, then a new grace starts.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(worker.terminated).toBe(0);
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+      expect(framesOf(worker, "close")).toHaveLength(1);
+      await flushMicrotasks();
+      expect(worker.terminated).toBe(1);
+    } finally {
+      await bridge.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("delays idle retirement while worker pricing upkeep is active", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({
+      createWorker: () => worker,
+      idleRetireMs: 1_000,
+      logger,
+    });
+    try {
+      await bridge.init({});
+      worker.emit("message", { type: "analytics-upkeep", active: true });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(worker.terminated).toBe(0);
+      expect(framesOf(worker, "close")).toHaveLength(0);
+
+      worker.emit("message", { type: "analytics-upkeep", active: false });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks();
+      expect(framesOf(worker, "close")).toHaveLength(1);
+      await flushMicrotasks();
+      expect(worker.terminated).toBe(1);
+    } finally {
+      await bridge.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops waiting for pricing upkeep after the safety cap", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({
+      createWorker: () => worker,
+      idleRetireMs: 1_000,
+      logger,
+    });
+    try {
+      await bridge.init({});
+      worker.emit("message", { type: "analytics-upkeep", active: true });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(worker.terminated).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks();
+      expect(worker.terminated).toBe(1);
+    } finally {
+      await bridge.close();
+      vi.useRealTimers();
+    }
   });
   it("promotes a clicked queued range through the snapshot service without duplicate reads", async () => {
     const worker = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
@@ -736,6 +817,7 @@ describe("analytics worker bridge", () => {
         peakRss: 0,
       }),
       gc: async () => false,
+      unpricedRoutes: () => [],
       close: async () => {},
     } satisfies AnalyticsEngine;
     const runtime = createAnalyticsWorkerRuntime({ createEngine: () => engine });
@@ -762,6 +844,24 @@ describe("analytics worker bridge", () => {
     ).rejects.toMatchObject({ code: "bad-request" });
     expect(groups).toHaveBeenCalledTimes(1);
     await runtime.close();
+  });
+
+  it("applies the configured pricing snapshot policy at worker init", async () => {
+    const runtime = createAnalyticsWorkerRuntime({
+      // SAFETY: init only selects the pricing policy; the engine is never called.
+      createEngine: () => ({ unpricedRoutes: () => [], close: async () => {} }) as AnalyticsEngine,
+    });
+    try {
+      await runtime.handle({
+        kind: "init",
+        options: { pricingSnapshot: { source: "bundled", autoRefresh: 1 } },
+      });
+      expect(getPricingSnapshotSelection()).toBe("bundled");
+      expect(getPricingRefreshPolicy().maxAgeMs).toBe(DAY);
+    } finally {
+      await runtime.close();
+      __resetPricingSnapshotForTests();
+    }
   });
 
   it("uses an optional runtime-managed heap limit only when configured", () => {

@@ -14,6 +14,7 @@ import type {
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { PricingSnapshotConfig } from "../lib/types.js";
 
 export const ANALYTICS_WORKER_PROTOCOL_VERSION = 1;
 
@@ -41,6 +42,8 @@ export class AnalyticsReadError extends Error {
 export interface AnalyticsInitOptions {
   snapshotPath?: string;
   refreshIntervalMs?: number;
+  /** Owner's pricing snapshot selection and freshness policy for the worker. */
+  pricingSnapshot?: PricingSnapshotConfig;
 }
 
 /** Cumulative timing for one fixed worker phase; contains no identifying data. */
@@ -99,6 +102,17 @@ export type AnalyticsWorkerResponse =
 export interface AnalyticsGenerationNotification {
   type: "analytics-generation";
   generation: number;
+}
+
+/**
+ * Unsolicited worker -> host notification: priced-snapshot upkeep (a models.dev
+ * refresh and persistence) is running or has settled. The host keeps the worker
+ * alive while upkeep is active so a refresh started after the last read reply
+ * can finish instead of being cut off by idle retirement.
+ */
+export interface AnalyticsUpkeepNotification {
+  type: "analytics-upkeep";
+  active: boolean;
 }
 
 /**
