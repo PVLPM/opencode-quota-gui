@@ -1,6 +1,5 @@
 import type { QuotaSnapshot } from "../contracts/dashboard";
 import { rowFieldKey } from "../contracts/identity";
-import { orderRowsByPreference } from "../contracts/row-order";
 
 /** Bounded, untrusted browser-local memory of individual quota cards for Settings. */
 export interface VisibilityRow {
@@ -220,13 +219,12 @@ export function visibilityCatalogEquals(
  * Quota, in the same order and with the same row ownership. Shared by the
  * browser Settings route and the native SettingsPage.
  *
- * `rowOrder` interleaves declared optional rows with the emitted rows using the
- * saved per-card order; cards without an entry keep emission/declaration order.
+ * Rows stay in provider emission order, with declared optional rows after them;
+ * that is the order a legacy aggregate hide resolves against, matching Quota and
+ * notifications. Settings applies the saved per-card `rowOrder` only when it
+ * displays the list.
  */
-export function catalogFromQuotaSnapshot(
-  snapshot: QuotaSnapshot | undefined,
-  rowOrder?: Readonly<Record<string, readonly string[]>>,
-): VisibilityCatalog {
+export function catalogFromQuotaSnapshot(snapshot: QuotaSnapshot | undefined): VisibilityCatalog {
   if (snapshot === undefined) return { cards: [] };
   const cards: VisibilityCard[] = [];
   for (const card of snapshot.providers.cards) {
@@ -264,12 +262,6 @@ export function catalogFromQuotaSnapshot(
     };
     for (const row of card.rows) addRow(row.rowId, row.label, row.info);
     for (const control of controls) addRow(control.rowId, control.label, control.info);
-    visibility.rows = orderRowsByPreference(
-      visibility.rows,
-      rowOrder?.[card.cardId],
-      (row) => row.id,
-      controls,
-    );
     cards.push(visibility);
   }
   return { cards };

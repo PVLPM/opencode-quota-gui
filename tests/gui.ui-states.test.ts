@@ -93,7 +93,7 @@ import {
   visibleRows,
 } from "../src/ui/view-model";
 import type { VisibilityCatalog } from "../src/ui/views/settings";
-import { readVisibilityCatalog } from "../src/ui/visibility-catalog";
+import { catalogFromQuotaSnapshot, readVisibilityCatalog } from "../src/ui/visibility-catalog";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { SettingsQuerySeam } from "./fixtures/gui-live-settings.js";
 import type { TestEvent, TestListener, TestNode } from "./fixtures/gui-test-renderer.js";
@@ -3080,42 +3080,69 @@ describe("settings page", () => {
     expect(html).toContain("text-input-v2");
   });
 
-  it("resolves a legacy aggregate row hide against the rows Settings lists", async () => {
+  it("resolves a legacy aggregate row hide against provider emission order after a row reorder", async () => {
     const cardId = `alibaba-token-plan:${"a".repeat(64)}`;
     const fiveHour = `${cardId}#window:five_hour|quota:percent`;
     const weekly = `${cardId}#window:week|quota:percent`;
     const legacy = `${cardId}#aggregate|quota:percent`;
+    const payloadRows = [
+      { rowId: fiveHour, label: "5h", kind: "percent", resultType: "quota" },
+      { rowId: weekly, label: "Weekly", kind: "percent", resultType: "quota" },
+    ];
 
-    async function renderRows(rows: { id: string; label: string }[]) {
+    async function renderRows(
+      rows: typeof payloadRows,
+      rowOrder?: Record<string, string[]>,
+    ): Promise<string> {
       const snapshot = settingsSnapshot();
       snapshot.values["dashboard.hiddenRows"] = [legacy];
+      if (rowOrder) snapshot.values["dashboard.rowOrder"] = rowOrder;
+      const catalog = catalogFromQuotaSnapshot({
+        providers: {
+          cards: [
+            {
+              cardId,
+              providerId: "alibaba-token-plan",
+              providerLabel: "Alibaba Personal Token Plan",
+              labelSource: "account",
+              rows,
+              errors: [],
+            },
+          ],
+          enabledProviders: "auto",
+          polledAtMs: NOW,
+        },
+      } as never);
       return renderView("/views/settings.tsx", "SettingsView", {
         snapshot,
         client: {},
         toaster: { toasts: () => [], push: () => {}, dismiss: () => {} },
-        catalog: {
-          cards: [
-            {
-              providerId: "alibaba-token-plan",
-              providerLabel: "Alibaba Personal Token Plan",
-              cardId,
-              rows,
-            },
-          ],
-        },
+        catalog,
         onReload: noop,
       });
     }
 
-    const bothHtml = await renderRows([
-      { id: fiveHour, label: "5h" },
-      { id: weekly, label: "Weekly" },
-    ]);
+    // Quota and notifications resolve the legacy aggregate id to the first
+    // emitted row; Settings must agree.
+    expect(visibleRows(payloadRows as never, [legacy]).map((row) => row.rowId)).toEqual([weekly]);
+
+    const bothHtml = await renderRows(payloadRows);
     expect(bothHtml).toContain('aria-label="Show 5h"');
     expect(bothHtml).toContain('aria-label="Hide Weekly"');
 
+    // A saved row order changes only the displayed order, not the row the
+    // legacy hide follows.
+    const reorderedHtml = await renderRows(payloadRows, { [cardId]: [weekly, fiveHour] });
+    expect(reorderedHtml.indexOf('aria-label="Hide Weekly"')).toBeLessThan(
+      reorderedHtml.indexOf('aria-label="Show 5h"'),
+    );
+    expect(reorderedHtml).toContain('aria-label="Show 5h"');
+    expect(reorderedHtml).toContain('aria-label="Hide Weekly"');
+
     // Weekly-only: the old hide follows Weekly instead of pointing at an absent 5h.
-    const weeklyOnlyHtml = await renderRows([{ id: weekly, label: "Weekly" }]);
+    const weeklyOnlyHtml = await renderRows([
+      { rowId: weekly, label: "Weekly", kind: "percent", resultType: "quota" },
+    ]);
     expect(weeklyOnlyHtml).toContain('aria-label="Show Weekly"');
   });
 

@@ -14,7 +14,6 @@
 import { type Accessor, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import type { DashboardEvent, QuotaSnapshot, SettingsSnapshot } from "../contracts/dashboard.js";
 import { createQuery, type Query } from "../ui/query.js";
-import { displayPreferencesFromValues } from "../ui/settings-model.js";
 import { isStaleAfterReconnect } from "../ui/view-model.js";
 import {
   catalogFromQuotaSnapshot,
@@ -176,12 +175,7 @@ export function createSettingsPageState(
   refreshSettings();
   refreshQuota();
 
-  const quotaCatalog = createMemo(() =>
-    catalogFromQuotaSnapshot(
-      quotaQuery.data(),
-      displayPreferencesFromValues(settingsQuery.data()?.values ?? {}).rowOrder,
-    ),
-  );
+  const quotaCatalog = createMemo(() => catalogFromQuotaSnapshot(quotaQuery.data()));
   const catalog = createMemo(() => mergeVisibilityCatalog(quotaCatalog(), catalogCache()));
 
   // Keep identities and help text across refetches, in memory only: native

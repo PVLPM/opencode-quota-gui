@@ -143,7 +143,7 @@ describe("card-centric visibility catalog v2", () => {
     ).not.toHaveProperty("planLabel");
   });
 
-  it("orders combined emitted and declared rows from the saved per-card order", () => {
+  it("keeps emitted rows before declared rows in provider emission order", () => {
     const snapshot = {
       providers: {
         cards: [
@@ -178,16 +178,11 @@ describe("card-centric visibility catalog v2", () => {
     };
     // SAFETY: the fixture is a complete quota snapshot; only catalog projection
     // reads its providers/cards here.
-    const catalog = catalogFromQuotaSnapshot(snapshot as never, {
-      [ACCOUNT_A]: [
-        `${ACCOUNT_A}#window:month|quota:percent`,
-        `${ACCOUNT_A}#window:week|quota:percent`,
-      ],
-    });
+    const catalog = catalogFromQuotaSnapshot(snapshot as never);
     expect(catalog.cards[0]?.rows.map((row) => row.label)).toEqual([
-      "Monthly credits",
       "Weekly",
       "Resets",
+      "Monthly credits",
     ]);
   });
 

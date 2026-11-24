@@ -175,9 +175,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const [catalogCache, setCatalogCache] = createSignal<VisibilityCatalog>(
     readVisibilityCatalog(browserStorage()),
   );
-  const quotaCatalog = createMemo(() =>
-    catalogFromQuotaSnapshot(homeSnapshot(), preferences().rowOrder),
-  );
+  const quotaCatalog = createMemo(() => catalogFromQuotaSnapshot(homeSnapshot()));
   const catalog = createMemo(() => mergeVisibilityCatalog(quotaCatalog(), catalogCache()));
 
   // Compare before writing: the cache signal feeds the merged catalog, so a

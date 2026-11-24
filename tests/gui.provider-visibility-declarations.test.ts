@@ -316,11 +316,11 @@ describe("provider optional Visibility declarations", () => {
 
     // SAFETY: the fixture card is the complete provider card; the snapshot
     // reader only consumes `providers.cards` for this catalog projection.
-    const valueCatalog = catalogFromQuotaSnapshot({ providers: { cards: [valueCard] } } as never, {
-      [cardId]: stableOrder,
-    });
+    const valueCatalog = catalogFromQuotaSnapshot({ providers: { cards: [valueCard] } } as never);
     expect(valueCatalog.cards[0]?.rows.filter((row) => row.id === fiveHour)).toHaveLength(1);
-    expect(valueCatalog.cards[0]?.rows.map((row) => row.id).slice(0, 2)).toEqual([week, fiveHour]);
+    // The catalog keeps provider emission order so a legacy hide resolves the
+    // same way here as on Quota; Settings applies `stableOrder` for display.
+    expect(valueCatalog.cards[0]?.rows.map((row) => row.id).slice(0, 2)).toEqual([fiveHour, week]);
 
     const percentCard = alibabaCards([
       percent({ resultType: "quota", window: "five_hour" }),
