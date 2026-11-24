@@ -47,6 +47,19 @@ export function supportsNativeGui(version: string | OpenCodeVersion | undefined)
 }
 
 /**
+ * Whether the host renders the visible heading of a composer pill's custom
+ * `menu` popover itself. Hosts before 2.4.0 do (the popover body then starts
+ * below that heading); 2.4.0 moved the whole popover body, including any
+ * heading, to the plugin. Unknown versions are treated as the newer contract.
+ */
+export function hostRendersComposerMenuHeading(
+  version: string | OpenCodeVersion | undefined,
+): boolean {
+  const parsed = typeof version === "string" ? parseOpenCodeVersion(version) : version;
+  return parsed !== undefined && !isAtLeast(parsed, 2, 4, 0);
+}
+
+/**
  * Whether the host predates the Native GUI and therefore keeps the compatibility
  * web dashboard on by default. Only a parseable version below 2.2.1 qualifies;
  * missing or unparseable versions fail closed.

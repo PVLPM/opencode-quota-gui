@@ -13,7 +13,7 @@ Quota, token usage, and analytics inside OpenCode Desktop. OpenCode Quota GUI ad
 
 ## Native OpenCode Desktop
 
-The Native panel is the primary experience in **v1.3.1**. Open **Quota & Usage** for Quota, Analytics, Models, and their detail pages; OpenCode Settings includes the plugin's **Quota & analytics** page. The session header shows a compact quota slot with a combined preview.
+The Native panel is the primary experience in **v1.3.2**. Open **Quota & Usage** for Quota, Analytics, Models, and their detail pages; OpenCode Settings includes the plugin's **Quota & analytics** page. The session header shows a compact quota slot with a combined preview.
 
 The full Native integration ships from **v1.3.0** and requires **OpenCode Desktop 2.2.1 or newer**.
 
@@ -57,7 +57,7 @@ The full Native integration ships from **v1.3.0** and requires **OpenCode Deskto
 
 ## What you get
 
-The Native panel is the primary surface in v1.3.1. Every feature below is available there, and the optional browser dashboard mirrors the same views as a fallback.
+The Native panel is the primary surface in v1.3.2. Every feature below is available there, and the optional browser dashboard mirrors the same views as a fallback.
 
 ## Features
 
@@ -72,7 +72,7 @@ The Native panel is the primary surface in v1.3.1. Every feature below is availa
 - **Session detail:** per-step context and cumulative own-session and whole-tree token charts, compaction markers, and a nested session tree with steps and totals.
 - **API-equivalent estimates:** list-price estimates for recorded tokens, using the peak or off-peak rate that applied when each step completed, shown beside token totals in Analytics, Models, projects, providers, and models. They are estimates, not subscription spend.
 - **Customization:** used or remaining percentages, label style, row detail, provider selection, refresh interval, request timeout, card order, per-card or per-row visibility, and which providers show peak and off-peak status. Custom quota providers and pricing fallbacks live in the canonical config.
-- **Local-first operation:** no cloud account and no hosted sync; the plugin reads OpenCode data on this machine. The optional browser dashboard binds only to `127.0.0.1`. Reset-aware retry can hold a request until the provider's used-up quota window resets; turn it off with `waitForQuotaReset: false`.
+- **Local-first operation:** no cloud account and no hosted sync; the plugin reads OpenCode data on this machine. The optional browser dashboard binds only to `127.0.0.1`. Reset-aware retry can hold a request until the provider's used-up quota window resets; turn it off with `waitForQuotaReset: false`. Opt-in auto-resume can instead send one `continue` after a quota-limited session's window resets.
 
 ## Quick start
 
@@ -108,7 +108,7 @@ The browser dashboard default follows the OpenCode host version. On supported ho
 
 `true` forces web access on and `false` keeps it off. Then open <http://localhost:4144/quota>. The first page may show an empty dashboard until OpenCode has loaded the plugin and discovered a provider account. The path and platform overrides are in [Configuration](docs/readme/configuration.md#web-dashboard).
 
-Requirements: OpenCode `>= 2.0.16 < 2.3.0` and Node.js `22.13+` or `23.4+`. The full Native Desktop integration ships from v1.3.0 and requires OpenCode Desktop 2.2.1+. On supported older hosts, the browser dashboard is the automatic fallback. This package does not support OpenCode 1.
+Requirements: OpenCode `>= 2.0.16 < 2.5.0` and Node.js `22.13+` or `23.4+`. The full Native Desktop integration ships from v1.3.0 and requires OpenCode Desktop 2.2.1+. On supported older hosts, the browser dashboard is the automatic fallback. This package does not support OpenCode 1.
 
 ## Native panel
 
@@ -168,7 +168,7 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 
 | Provider           | Auth/setup                                                     | Data from          | Reports            |
 | ------------------ | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic          | [Unavailable](docs/readme/providers.md#anthropic)              | —                  | —                  |
+| Anthropic          | [API key](docs/readme/providers.md#anthropic)                  | Observed headers   | Rate limits        |
 | Claude Agent       | [Needs setup](docs/readme/providers.md#claude-agent)           | Local CLI/OAuth    | Quota              |
 | Chutes AI          | Automatic                                                      | Remote API         | Quota              |
 | Cursor             | [Needs setup](docs/readme/providers.md#cursor)                 | Local estimate     | Budget and spend   |
@@ -191,7 +191,7 @@ Most providers work automatically once you log in through OpenCode. A **Needs se
 
 | Provider                | Auth/setup                                                     | Data from          | Reports            |
 | ----------------------- | -------------------------------------------------------------- | ------------------ | ------------------ |
-| Anthropic               | [Unavailable](docs/readme/providers.md#anthropic)              | —                  | —                  |
+| Anthropic               | [API key](docs/readme/providers.md#anthropic)                  | Observed headers   | Rate limits        |
 | Claude Agent            | [Needs setup](docs/readme/providers.md#claude-agent)           | Local CLI/OAuth    | Quota              |
 | Chutes AI               | Automatic                                                      | Remote API         | Quota              |
 | Cursor                  | [Needs setup](docs/readme/providers.md#cursor)                 | Local estimate     | Budget and spend   |
@@ -259,6 +259,7 @@ The plugin reads only the canonical file at runtime:
 `$XDG_CONFIG_HOME/opencode` replaces `~/.config/opencode` when `XDG_CONFIG_HOME` is set, and `OPENCODE_CONFIG_DIR` replaces the global OpenCode config folder. The sibling `config.json` is not read, converted, or imported; it is preserved unchanged. Changes made in `Settings` write to this canonical file. Settings values, source labels, the port, and visibility lists come only from the canonical file and defaults, regardless of whether OpenCode uses `opencode.json` or `opencode.jsonc`. Selecting a project install in `init` adds only the project OpenCode plugin entry; behavior settings remain global. Inherited legacy values are available only through the separate import preview.
 
 - **Legacy import:** when a global legacy OpenCode Quota source exists, Settings can preview and copy seven compatible keys: `percentDisplayMode`, `percentLabelStyle`, `enabledProviders`, `minIntervalMs`, `requestTimeoutMs`, `accountingDetail`, and `waitForQuotaReset`. The import is read-only for the source; files stay byte-for-byte untouched. Custom provider definitions are not imported, so copy `quotaProviders` into the canonical file yourself.
+- **Auto-resume on quota recovery:** off by default (`autoResumeOnQuotaRecovery`). When on, a session that terminally fails on a provider quota limit gets one `continue` prompt after the failed route's exhausted primary window is observed as reset, following two minutes of inactivity (temporary check failures keep it pending; they never authorize it), and only if the session is still failed, idle and on the same model. It appears as a user message, never replays tool actions, and is dropped if OpenCode or the plugin restarts. One resume is consumed per user-initiated execution; a quota failure after that `continue` waits for a fresh user prompt. Evidence must be bound to one verified identity: an active OpenCode account row, or, for a route whose adapter exposes no account rows, the provider cache identity. Supported: Claude Agent, Copilot, OpenAI, Synthetic, Chutes, Z.ai, Zhipu, NanoGPT, MiniMax Token Plan, MiniMax Token Plan (CN), xAI, OpenCode Go, OpenCode Zen, Ollama Cloud. A route whose provider registration has no auto-resume contract is rejected before the live quota probe and is not polled. Claude Agent's known untyped five-hour and weekly subscription-limit messages are recognized, but only the independent observation of the applicable window exhausted for the same Claude identity can authorize the continuation; native retry is unchanged. The full eligibility matrix and exclusions are in [configuration](docs/readme/configuration.md#auto-resume-on-quota-recovery).
 - **Visibility:** hiding a provider or row is presentation only and never changes polling or provider data. Opaque card and row IDs in `dashboard.hiddenCards` and `dashboard.hiddenRows` are internal identifiers: use **Settings → Visibility** to manage them instead of editing or deriving IDs by hand.
 - **Temporal pricing:** `dashboard.temporalProviderOverrides` stores sparse per-provider on/off choices for the live peak and off-peak status in the Quota header. A provider with a discovered account is shown by default; an explicit choice wins. Hiding a status is presentation only and never changes polling, quota values, or recorded usage.
 - **Web dashboard (optional fallback):** on by default below OpenCode 2.2.1 (including 2.2.0) and off by default at 2.2.1 and newer. An explicit `"dashboard": { "enabled": true }` or `"dashboard": { "enabled": false }` in the canonical file always wins. When enabled, the browser UI is served on `127.0.0.1` at `dashboard.port` (default `4144`), and the server never falls back to another port. Missing/unparseable host versions and malformed or invalid canonical settings fail closed when the switch is absent. Changes apply after an OpenCode restart.

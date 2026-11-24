@@ -17,6 +17,7 @@ import type {
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import {
   DEFAULT_OPENAI_AUTH_CACHE_MAX_AGE_MS,
   hasOpenAIOAuthCached,
@@ -51,27 +52,6 @@ const TOKEN_SHARING_METHOD_ID = "chatgpt-token-sharing";
 
 function isTokenSharingLogin(row: CredentialRow): boolean {
   return row.value.methodID === TOKEN_SHARING_METHOD_ID;
-}
-
-const OPENAI_WINDOW_ROW_KEYS: Readonly<Record<string, string>> = {
-  "5h:": "window:five_hour",
-  "Weekly:": "window:week",
-  "Monthly:": "window:month",
-  "Code Review:": "window:code_review",
-};
-
-/**
- * Percent-only window rows carry no typed `semantic`, so they get stable
- * explicit `rowKey`s by window (the fallback aggregate row when no window
- * exists); labels themselves are never used as ids.
- */
-function withOpenAiWindowRowKeys(
-  entries: QuotaProviderResult["entries"],
-): QuotaProviderResult["entries"] {
-  return entries.map((entry) => ({
-    ...entry,
-    rowKey: (entry.label ? OPENAI_WINDOW_ROW_KEYS[entry.label] : undefined) ?? "aggregate",
-  }));
 }
 
 const OPENAI_OPTIONAL_ACCOUNTING = {
@@ -236,29 +216,44 @@ export const openaiProvider: QuotaProvider = {
             credits: result.credits,
             bankedResets: result.bankedResets,
           });
-          const windowEntries = withOpenAiWindowRowKeys(
-            groupedPercentWindowEntries({
-              group,
-              accounting: {
-                resultType: "rate_limit",
-                acquisitionMethod: "remote_api",
-                ownership: "maintained",
-                authority: "provider_reported",
-                ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+          const windowEntries = groupedPercentWindowEntries({
+            group,
+            accounting: {
+              resultType: "rate_limit",
+              acquisitionMethod: "remote_api",
+              ownership: "maintained",
+              authority: "provider_reported",
+              ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+            },
+            windows: [
+              {
+                window: result.windows.hourly,
+                suffix: "5h",
+                label: "5h:",
+                semantic: windowSemantic("five_hour"),
               },
-              windows: [
-                { window: result.windows.hourly, suffix: "5h", label: "5h:" },
-                { window: result.windows.weekly, suffix: "Weekly", label: "Weekly:" },
-                { window: result.windows.monthly, suffix: "Monthly", label: "Monthly:" },
-                {
-                  window: result.windows.codeReview,
-                  suffix: "Code Review",
-                  label: "Code Review:",
-                },
-              ],
-              fallbackWhenEmpty: optionalEntries.length === 0,
-            }),
-          );
+              {
+                window: result.windows.weekly,
+                suffix: "Weekly",
+                label: "Weekly:",
+                semantic: windowSemantic("week"),
+              },
+              {
+                window: result.windows.monthly,
+                suffix: "Monthly",
+                label: "Monthly:",
+                semantic: windowSemantic("month"),
+              },
+              {
+                window: result.windows.codeReview,
+                suffix: "Code Review",
+                label: "Code Review:",
+                semantic: windowSemantic("code_review"),
+              },
+            ],
+            // A successful response with no reported window is not a 0% quota.
+            fallbackWhenEmpty: false,
+          });
           return attemptedResult([...windowEntries, ...optionalEntries], [], {
             singleWindowDisplayName: group,
           });

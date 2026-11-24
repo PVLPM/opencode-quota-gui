@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { readFileSync } from "fs";
 import { readFile } from "fs/promises";
 import { join } from "path";
@@ -6,6 +7,7 @@ import { writeJsonAtomic } from "./atomic-json.js";
 import { fetchWithTimeout } from "./http.js";
 import { getOpencodeRuntimeDirs, type OpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import { getGuiPrivateCacheDir } from "./private-state-paths.js";
+import { acquireStateFileLock } from "./state-file-lock.js";
 import type { PricingSnapshotSource } from "./types.js";
 
 const SOURCE_URL = "https://models.dev/api.json";
@@ -15,6 +17,12 @@ const RUNTIME_REFRESH_STATE_FILENAME = "modelsdev-pricing.refresh-state.json";
 const DEFAULT_REFRESH_MIN_ATTEMPT_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 6_000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+/** Approved automatic network budget across every refresh kind, rolling 24h. */
+const MAX_AUTOMATIC_REQUESTS_PER_DAY = 10;
+/** Cheap analytics-side gate: re-read refresh state/snapshot at most this often. */
+const ANALYTICS_PRICING_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+/** Reservation is a tiny read+write; a busy lock must not block analytics. */
+const DEFAULT_BUDGET_LOCK_TIMEOUT_MS = 250;
 
 export type CostRates = {
   input?: number;
@@ -66,7 +74,7 @@ export type PricingSnapshot = {
   catalog?: PricingCatalog;
 };
 
-export const DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
+export const DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS = MS_PER_DAY;
 
 export type PricingSnapshotHealth = {
   generatedAt: number;
@@ -75,16 +83,52 @@ export type PricingSnapshotHealth = {
   stale: boolean;
 };
 
+/**
+ * One recorded models.dev request. Automatic entries consume the rolling 24h
+ * budget; manual `force` refreshes are recorded but stay outside it.
+ */
+export interface PricingRefreshAttempt {
+  at: number;
+  automatic: boolean;
+  /** Distinguishes reservations made in the same millisecond. */
+  id?: string;
+}
+
 export interface PricingRefreshStateV1 {
   version: 1;
   updatedAt: number;
   lastAttemptAt?: number;
   lastSuccessAt?: number;
   lastFailureAt?: number;
-  lastResult?: "success" | "not_modified" | "skipped_fresh" | "skipped_throttled" | "failed";
+  lastResult?:
+    | "success"
+    | "not_modified"
+    | "skipped_fresh"
+    | "skipped_throttled"
+    | "skipped_budget"
+    | "failed";
   lastError?: string;
   etag?: string;
   lastModified?: string;
+  /** Every automatic and manual network request inside the rolling 24h. */
+  attempts24h?: PricingRefreshAttempt[];
+  /**
+   * Unpriced routes already checked against the catalog identity in `key`.
+   * A route missing here for the current identity may bypass the minimum
+   * automatic attempt interval once; the rolling 24h budget still applies.
+   */
+  unpricedChecked?: PricingRouteChecks;
+  /**
+   * Unpriced routes that already spent their one throttle bypass for the
+   * catalog identity in `key`. A failed attempt still counts, so retries obey
+   * the ordinary minimum interval instead of burning the daily budget.
+   */
+  unpricedBypassUsed?: PricingRouteChecks;
+}
+
+export interface PricingRouteChecks {
+  key: string;
+  routes: string[];
 }
 
 export interface PricingRefreshPolicy {
@@ -95,7 +139,7 @@ export interface PricingRefreshPolicy {
 }
 
 export interface PricingRefreshOptions {
-  reason?: "init" | "tokens" | "status" | "manual";
+  reason?: "init" | "tokens" | "status" | "manual" | "unpriced";
   force?: boolean;
   nowMs?: number;
   maxAgeMs?: number;
@@ -108,6 +152,20 @@ export interface PricingRefreshOptions {
   providerAllowlist?: string[];
   snapshotSelection?: PricingSnapshotSource;
   allowRefreshWhenSelectionBundled?: boolean;
+  /**
+   * Skip the max-age check for an unpriced-triggered attempt. The rolling
+   * budget always applies; the 6h throttle applies unless `unpricedRouteKeys`
+   * contains a route not yet checked against the current catalog identity.
+   */
+  refreshEvenIfFresh?: boolean;
+  /**
+   * Unpriced routes (see `pricingRouteKey`) the caller observed. A route with
+   * no recorded check and no spent throttle bypass for the current catalog
+   * identity may skip the 6h throttle once; later observations stay throttled.
+   */
+  unpricedRouteKeys?: readonly string[];
+  /** Cross-process budget-lock wait; expired means skip the attempt. */
+  lockTimeoutMs?: number;
 }
 
 export interface PricingRefreshResult {
@@ -133,8 +191,9 @@ let SNAPSHOT_SOURCE: "runtime" | "bundled" | "empty" = "bundled";
 let SNAPSHOT_SELECTION: PricingSnapshotSource = "auto";
 let MODEL_INDEX: Map<string, string[]> | null = null;
 let REFRESH_IN_FLIGHT: Promise<PricingRefreshResult> | null = null;
-let PROCESS_REFRESH_CHECKED = false;
 let CONFIGURED_PRICING_SNAPSHOT_MAX_AGE_MS = DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS;
+let LAST_ANALYTICS_PRICING_CHECK_AT_MS = 0;
+let LAST_ANALYTICS_UNPRICED_SIGNATURE = "";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -380,6 +439,18 @@ function applySnapshotSelection(params?: {
   return selected;
 }
 
+/**
+ * Adopt a runtime snapshot rewritten by another process (the plugin host, or
+ * this worker's own refresh). A fresh `_meta` object is what invalidates the
+ * analytics pricing fingerprint and its derived presentation caches.
+ */
+export function reloadPricingSnapshotFromDisk(params?: {
+  runtimeDirs?: OpencodeRuntimeDirs;
+  bootstrapSnapshotOverride?: PricingSnapshot;
+}): void {
+  applySnapshotSelection(params);
+}
+
 function ensureLoaded(): PricingSnapshot {
   if (SNAPSHOT) return SNAPSHOT;
   const selected = applySnapshotSelection();
@@ -434,6 +505,7 @@ function normalizeRefreshState(raw: unknown): PricingRefreshStateV1 | null {
       "not_modified",
       "skipped_fresh",
       "skipped_throttled",
+      "skipped_budget",
       "failed",
     ]);
     if (allowed.has(obj.lastResult)) {
@@ -441,20 +513,78 @@ function normalizeRefreshState(raw: unknown): PricingRefreshStateV1 | null {
     }
   }
 
+  if (Array.isArray(obj.attempts24h)) {
+    const attempts: PricingRefreshAttempt[] = [];
+    for (const rawAttempt of obj.attempts24h) {
+      const attempt = asRecord(rawAttempt);
+      const at = Number(attempt?.at);
+      if (!Number.isFinite(at) || at <= 0 || typeof attempt?.automatic !== "boolean") continue;
+      const id = typeof attempt.id === "string" && attempt.id ? attempt.id : undefined;
+      attempts.push({
+        at: Math.trunc(at),
+        automatic: attempt.automatic,
+        ...(id === undefined ? {} : { id }),
+      });
+    }
+    if (attempts.length > 0) out.attempts24h = attempts;
+  }
+
   if (typeof obj.lastError === "string" && obj.lastError) out.lastError = obj.lastError;
   if (typeof obj.etag === "string" && obj.etag) out.etag = obj.etag;
   if (typeof obj.lastModified === "string" && obj.lastModified) out.lastModified = obj.lastModified;
 
+  const unpricedChecked = normalizeRouteChecks(obj.unpricedChecked);
+  if (unpricedChecked) out.unpricedChecked = unpricedChecked;
+  const unpricedBypassUsed = normalizeRouteChecks(obj.unpricedBypassUsed);
+  if (unpricedBypassUsed) out.unpricedBypassUsed = unpricedBypassUsed;
+
   return out;
 }
 
-async function readRefreshState(path: string): Promise<PricingRefreshStateV1 | null> {
+function normalizeRouteChecks(raw: unknown): PricingRouteChecks | undefined {
+  const obj = asRecord(raw);
+  if (typeof obj?.key !== "string" || !obj.key) return undefined;
+  const routes = Array.isArray(obj.routes)
+    ? [
+        ...new Set(
+          obj.routes.filter(
+            (route): route is string => typeof route === "string" && route.length > 0,
+          ),
+        ),
+      ]
+    : [];
+  return routes.length > 0 ? { key: obj.key, routes } : undefined;
+}
+
+type RefreshStateReadResult =
+  | { kind: "ok"; state: PricingRefreshStateV1 }
+  | { kind: "missing" }
+  | { kind: "unreadable" };
+
+function isEnoentError(error: unknown): boolean {
+  return (
+    typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT"
+  );
+}
+
+/**
+ * Distinguish a fresh install (ENOENT) from a ledger that exists but cannot be
+ * trusted (malformed JSON, unsupported version, permission or I/O failure). The
+ * budget must fail closed for the latter instead of resetting reservations.
+ */
+async function readRefreshStateDetailed(path: string): Promise<RefreshStateReadResult> {
   try {
     const raw = await readFile(path, "utf-8");
-    return normalizeRefreshState(JSON.parse(raw));
-  } catch {
-    return null;
+    const state = normalizeRefreshState(JSON.parse(raw));
+    return state ? { kind: "ok", state } : { kind: "unreadable" };
+  } catch (error) {
+    return isEnoentError(error) ? { kind: "missing" } : { kind: "unreadable" };
   }
+}
+
+async function readRefreshState(path: string): Promise<PricingRefreshStateV1 | null> {
+  const result = await readRefreshStateDetailed(path);
+  return result.kind === "ok" ? result.state : null;
 }
 
 export async function readPricingRefreshState(
@@ -468,6 +598,352 @@ function makeDefaultRefreshState(nowMs: number): PricingRefreshStateV1 {
     version: 1,
     updatedAt: nowMs,
   };
+}
+
+function pruneRefreshAttempts(
+  attempts: readonly PricingRefreshAttempt[] | undefined,
+  nowMs: number,
+): PricingRefreshAttempt[] {
+  if (!attempts) return [];
+  return attempts.filter((attempt) => attempt.at > nowMs - MS_PER_DAY);
+}
+
+function automaticAttemptsWithinDay(
+  attempts: readonly PricingRefreshAttempt[],
+  nowMs: number,
+): number {
+  return attempts.filter((attempt) => attempt.automatic && attempt.at > nowMs - MS_PER_DAY).length;
+}
+
+/** Stable identity of the catalog state a kicker attempt was based on. */
+function refreshStateKey(state: PricingRefreshStateV1 | null | undefined): string {
+  return (
+    state?.etag ?? state?.lastModified ?? `generatedAt:${getPricingSnapshotMeta().generatedAt}`
+  );
+}
+
+function routeChecksForIdentity(
+  checks: PricingRouteChecks | undefined,
+  state: PricingRefreshStateV1 | null | undefined,
+): Set<string> {
+  return checks && checks.key === refreshStateKey(state)
+    ? new Set(checks.routes)
+    : new Set<string>();
+}
+
+function withRouteChecks(
+  existing: PricingRouteChecks | undefined,
+  key: string,
+  routes: readonly string[],
+): PricingRouteChecks {
+  return {
+    key,
+    routes:
+      existing && existing.key === key
+        ? [...new Set([...existing.routes, ...routes])]
+        : [...new Set(routes)],
+  };
+}
+
+/**
+ * Routes with no recorded unpriced check against the state's catalog identity.
+ * A route checked against an older identity counts again because the new
+ * catalog may price it.
+ */
+function unpricedRoutesUntried(
+  routeKeys: readonly string[] | undefined,
+  state: PricingRefreshStateV1 | null | undefined,
+): string[] {
+  if (!routeKeys || routeKeys.length === 0) return [];
+  const checked = routeChecksForIdentity(state?.unpricedChecked, state);
+  return routeKeys.filter((routeKey) => !checked.has(routeKey));
+}
+
+/**
+ * Untried routes that may still spend their one throttle bypass for the current
+ * catalog identity. A route whose bypass was already reserved at this identity
+ * waits for the ordinary minimum interval.
+ */
+function unpricedRoutesBypassable(
+  routeKeys: readonly string[] | undefined,
+  state: PricingRefreshStateV1 | null | undefined,
+): string[] {
+  const untried = unpricedRoutesUntried(routeKeys, state);
+  if (untried.length === 0) return [];
+  const used = routeChecksForIdentity(state?.unpricedBypassUsed, state);
+  return untried.filter((routeKey) => !used.has(routeKey));
+}
+
+function appendRefreshAttempt(
+  state: PricingRefreshStateV1,
+  nowMs: number,
+  automatic: boolean,
+): PricingRefreshStateV1 {
+  return {
+    ...state,
+    attempts24h: [
+      ...pruneRefreshAttempts(state.attempts24h, nowMs),
+      { at: nowMs, automatic, id: randomUUID() },
+    ],
+  };
+}
+
+function mergeRefreshAttempts(
+  ...lists: Array<readonly PricingRefreshAttempt[] | undefined>
+): PricingRefreshAttempt[] {
+  const byKey = new Map<string, PricingRefreshAttempt>();
+  for (const attempts of lists) {
+    for (const attempt of attempts ?? []) {
+      byKey.set(attempt.id ?? `${attempt.at}\u0000${attempt.automatic}`, attempt);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.at - b.at);
+}
+
+function mergeRouteChecks(
+  winner: PricingRefreshStateV1,
+  other: PricingRefreshStateV1 | null | undefined,
+  field: "unpricedChecked" | "unpricedBypassUsed",
+): PricingRouteChecks | undefined {
+  const a = winner[field];
+  const b = other?.[field];
+  if (!a || !b || a.key !== b.key) return a ?? b;
+  return { key: a.key, routes: [...new Set([...a.routes, ...b.routes])] };
+}
+
+/**
+ * Reserve one automatic slot atomically in the refresh-state file. The
+ * read-check-append-write happens under a cross-process lock, so plugin hosts,
+ * workers, and separate OpenCode processes share one hard 10/24h budget. A lock
+ * that cannot be acquired promptly skips the attempt instead of blocking. An
+ * unreadable ledger fails closed for automatic attempts: it is never mistaken
+ * for a fresh install that resets the rolling budget.
+ */
+async function reserveRefreshAttempt(params: {
+  statePath: string;
+  nowMs: number;
+  automatic: boolean;
+  force: boolean;
+  minAttemptIntervalMs: number;
+  lockTimeoutMs: number;
+  fallbackState: PricingRefreshStateV1;
+  unpricedRouteKeys?: readonly string[];
+}): Promise<
+  | { ok: true; state: PricingRefreshStateV1 }
+  | {
+      ok: false;
+      reason: "throttled" | "budget" | "busy" | "state_unreadable";
+      state: PricingRefreshStateV1;
+    }
+> {
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await acquireStateFileLock(params.statePath, { timeoutMs: params.lockTimeoutMs });
+  } catch {
+    return { ok: false, reason: "busy", state: params.fallbackState };
+  }
+  try {
+    const read = await readRefreshStateDetailed(params.statePath);
+    if (read.kind === "unreadable" && !params.force) {
+      // A manual refresh may still proceed and repair the file on completion;
+      // an automatic one must not spend or reset the shared budget blind.
+      return { ok: false, reason: "state_unreadable", state: params.fallbackState };
+    }
+    const current = read.kind === "ok" ? read.state : makeDefaultRefreshState(params.nowMs);
+    const bypassableUnpricedRoutes = unpricedRoutesBypassable(params.unpricedRouteKeys, current);
+    if (
+      !params.force &&
+      bypassableUnpricedRoutes.length === 0 &&
+      current.lastAttemptAt &&
+      params.nowMs - current.lastAttemptAt < params.minAttemptIntervalMs
+    ) {
+      return {
+        ok: false,
+        reason: "throttled",
+        state: {
+          ...current,
+          updatedAt: params.nowMs,
+          lastResult: "skipped_throttled",
+        },
+      };
+    }
+
+    const recentAttempts = pruneRefreshAttempts(current.attempts24h, params.nowMs);
+    if (
+      !params.force &&
+      automaticAttemptsWithinDay(recentAttempts, params.nowMs) >= MAX_AUTOMATIC_REQUESTS_PER_DAY
+    ) {
+      return {
+        ok: false,
+        reason: "budget",
+        state: {
+          ...current,
+          updatedAt: params.nowMs,
+          lastResult: "skipped_budget",
+          attempts24h: recentAttempts,
+        },
+      };
+    }
+
+    const attemptState = appendRefreshAttempt(current, params.nowMs, params.automatic);
+    const reserved: PricingRefreshStateV1 = {
+      ...attemptState,
+      version: 1,
+      updatedAt: params.nowMs,
+      lastAttemptAt: params.nowMs,
+      ...(!params.force && bypassableUnpricedRoutes.length > 0
+        ? {
+            unpricedBypassUsed: withRouteChecks(
+              attemptState.unpricedBypassUsed,
+              refreshStateKey(current),
+              bypassableUnpricedRoutes,
+            ),
+          }
+        : {}),
+    };
+    await writeJsonAtomic(params.statePath, reserved, { trailingNewline: true });
+    return { ok: true, state: reserved };
+  } catch {
+    return { ok: false, reason: "busy", state: params.fallbackState };
+  } finally {
+    await release();
+  }
+}
+
+/**
+ * Completion writes merge the latest reservations from other processes instead
+ * of overwriting them, so a slow request cannot erase a newer budget slot.
+ */
+async function writeRefreshStateMerged(
+  statePath: string,
+  nextState: PricingRefreshStateV1,
+  lockTimeoutMs: number,
+): Promise<void> {
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await acquireStateFileLock(statePath, { timeoutMs: lockTimeoutMs });
+  } catch {
+    // Never clobber a concurrent reservation; the attempt is already counted.
+    return;
+  }
+  try {
+    const current = await readRefreshState(statePath);
+    const attempts24h = mergeRefreshAttempts(current?.attempts24h, nextState.attempts24h);
+    const currentIsNewer = current !== null && current.updatedAt > nextState.updatedAt;
+    const winner = currentIsNewer ? current : nextState;
+    const other = currentIsNewer ? nextState : current;
+    const unpricedChecked = mergeRouteChecks(winner, other, "unpricedChecked");
+    const unpricedBypassUsed = mergeRouteChecks(winner, other, "unpricedBypassUsed");
+    const merged: PricingRefreshStateV1 = {
+      ...winner,
+      attempts24h,
+      ...(unpricedChecked === undefined ? {} : { unpricedChecked }),
+      ...(unpricedBypassUsed === undefined ? {} : { unpricedBypassUsed }),
+      ...(currentIsNewer
+        ? {}
+        : {
+            updatedAt: Math.max(current?.updatedAt ?? 0, nextState.updatedAt),
+            ...(current?.lastAttemptAt !== undefined &&
+            (nextState.lastAttemptAt === undefined ||
+              current.lastAttemptAt > nextState.lastAttemptAt)
+              ? { lastAttemptAt: current.lastAttemptAt }
+              : {}),
+          }),
+    };
+    await writeJsonAtomic(statePath, merged, { trailingNewline: true });
+  } finally {
+    await release();
+  }
+}
+
+function buildCompletionState(params: {
+  attemptingState: PricingRefreshStateV1;
+  nowMs: number;
+  lastResult: "success" | "not_modified";
+  etag?: string;
+  lastModified?: string;
+  unpricedRouteKeys?: readonly string[];
+}): PricingRefreshStateV1 {
+  const state: PricingRefreshStateV1 = {
+    ...params.attemptingState,
+    updatedAt: params.nowMs,
+    lastSuccessAt: params.nowMs,
+    lastResult: params.lastResult,
+    lastError: undefined,
+    etag: params.etag ?? params.attemptingState.etag,
+    lastModified: params.lastModified ?? params.attemptingState.lastModified,
+  };
+
+  const routeKeys = params.unpricedRouteKeys ?? [];
+  if (routeKeys.length > 0) {
+    state.unpricedChecked = withRouteChecks(
+      state.unpricedChecked,
+      refreshStateKey(state),
+      routeKeys,
+    );
+  }
+  return state;
+}
+
+/** Persist a definitive catalog answer; a lost race must not fail the refresh. */
+async function completeRefresh(params: {
+  statePath: string;
+  attemptingState: PricingRefreshStateV1;
+  nowMs: number;
+  lastResult: "success" | "not_modified";
+  etag?: string;
+  lastModified?: string;
+  unpricedRouteKeys?: readonly string[];
+  lockTimeoutMs: number;
+}): Promise<PricingRefreshResult> {
+  const state = buildCompletionState(params);
+  try {
+    await writeRefreshStateMerged(params.statePath, state, params.lockTimeoutMs);
+  } catch {
+    // best effort; the in-memory/runtime snapshot is already active
+  }
+  return { attempted: true, updated: true, state };
+}
+
+export type PricingRoute = { providerID?: string; modelID?: string };
+
+function pricingRouteKey(route: PricingRoute): string {
+  return `${route.providerID ?? ""}\u0000${route.modelID ?? ""}`;
+}
+
+/**
+ * True when the route already has explicit rates. Unknown routes are not
+ * priced, so they can justify one unpriced-triggered refresh attempt.
+ */
+function pricingRouteIsPriced(route: PricingRoute): boolean {
+  const providerID = route.providerID?.trim();
+  const modelID = route.modelID?.trim();
+  if (!modelID) return true;
+
+  const candidates: Array<[string | undefined, string]> = [];
+  const add = (provider: string | undefined, model: string): void => {
+    if (!model) return;
+    candidates.push([provider, model]);
+  };
+  add(providerID, modelID);
+  if (providerID && modelID.startsWith(`${providerID}/`)) {
+    add(providerID, modelID.slice(providerID.length + 1));
+  }
+  const slash = modelID.indexOf("/");
+  if (slash > 0) add(modelID.slice(0, slash), modelID.slice(slash + 1));
+  add(inferProviderForModelId(modelID) ?? undefined, modelID);
+
+  return candidates.some(([provider, model]) => provider !== undefined && hasCost(provider, model));
+}
+
+function dedupePricingRoutes(routes: readonly PricingRoute[]): PricingRoute[] {
+  const byKey = new Map<string, PricingRoute>();
+  for (const route of routes) {
+    if (!route.modelID?.trim()) continue;
+    const key = pricingRouteKey(route);
+    if (!byKey.has(key)) byKey.set(key, route);
+  }
+  return [...byKey.values()];
 }
 
 function pickRateBuckets(rawCost: unknown): CostRates | null {
@@ -796,17 +1272,6 @@ export async function maybeRefreshPricingSnapshot(
       };
     }
 
-    if (!force && PROCESS_REFRESH_CHECKED) {
-      return {
-        attempted: false,
-        updated: false,
-        reason: "already_checked_this_process",
-        state: previousState,
-      };
-    }
-
-    PROCESS_REFRESH_CHECKED = true;
-
     const health = getPricingSnapshotHealth({ nowMs, maxAgeMs });
 
     if (!force && !policy.enabled) {
@@ -822,7 +1287,7 @@ export async function maybeRefreshPricingSnapshot(
       };
     }
 
-    if (!force && !health.stale && !legacyRuntimePinnedByValidators) {
+    if (!force && !opts.refreshEvenIfFresh && !health.stale && !legacyRuntimePinnedByValidators) {
       return {
         attempted: false,
         updated: false,
@@ -835,8 +1300,13 @@ export async function maybeRefreshPricingSnapshot(
       };
     }
 
+    const bypassableUnpricedRoutes = unpricedRoutesBypassable(
+      opts.unpricedRouteKeys,
+      previousState,
+    );
     if (
       !force &&
+      bypassableUnpricedRoutes.length === 0 &&
       previousState.lastAttemptAt &&
       nowMs - previousState.lastAttemptAt < minAttemptIntervalMs
     ) {
@@ -852,12 +1322,28 @@ export async function maybeRefreshPricingSnapshot(
       };
     }
 
-    const attemptingState: PricingRefreshStateV1 = {
-      ...previousState,
-      version: 1,
-      updatedAt: nowMs,
-      lastAttemptAt: nowMs,
-    };
+    const lockTimeoutMs = opts.lockTimeoutMs ?? DEFAULT_BUDGET_LOCK_TIMEOUT_MS;
+    const reservation = await reserveRefreshAttempt({
+      statePath,
+      nowMs,
+      automatic: !force,
+      force,
+      minAttemptIntervalMs,
+      lockTimeoutMs,
+      fallbackState: previousState,
+      ...(opts.unpricedRouteKeys === undefined
+        ? {}
+        : { unpricedRouteKeys: opts.unpricedRouteKeys }),
+    });
+    if (!reservation.ok) {
+      return {
+        attempted: false,
+        updated: false,
+        reason: reservation.reason,
+        state: reservation.state,
+      };
+    }
+    const attemptingState = reservation.state;
 
     try {
       let fetchResult = await fetchModelsDevSnapshot({
@@ -871,9 +1357,27 @@ export async function maybeRefreshPricingSnapshot(
         // An unconditional request must not answer 304. Retry once without
         // validators; a second 304 still cannot establish catalog presence, so
         // fail the refresh instead of persisting a fresh catalog-less snapshot.
+        // The retry is a real network request and reserves its own budget slot.
+        const retryReservation = await reserveRefreshAttempt({
+          statePath,
+          nowMs,
+          automatic: !force,
+          force,
+          minAttemptIntervalMs: 0,
+          lockTimeoutMs,
+          fallbackState: attemptingState,
+        });
+        if (!retryReservation.ok) {
+          throw new Error(
+            retryReservation.reason === "budget"
+              ? "models.dev pricing refresh budget exhausted (10 automatic requests per 24h)"
+              : "models.dev pricing refresh budget reservation unavailable",
+          );
+        }
+        const retryState = retryReservation.state;
         const retry = await fetchModelsDevSnapshot({
           timeoutMs,
-          state: attemptingState,
+          state: retryState,
           fetchFn: opts.fetchFn,
           conditional: false,
         });
@@ -882,6 +1386,7 @@ export async function maybeRefreshPricingSnapshot(
             "models.dev returned not modified while an authoritative catalog refresh was required",
           );
         }
+        attemptingState.attempts24h = retryState.attempts24h;
         fetchResult = retry;
       }
 
@@ -909,25 +1414,16 @@ export async function maybeRefreshPricingSnapshot(
           selection,
         });
 
-        const nextState: PricingRefreshStateV1 = {
-          ...attemptingState,
-          updatedAt: nowMs,
-          lastSuccessAt: nowMs,
+        return await completeRefresh({
+          statePath,
+          attemptingState,
+          nowMs,
           lastResult: "not_modified",
-          lastError: undefined,
-          etag: fetchResult.etag ?? attemptingState.etag,
-          lastModified: fetchResult.lastModified ?? attemptingState.lastModified,
-        };
-        try {
-          await writeJsonAtomic(statePath, nextState, { trailingNewline: true });
-        } catch {
-          // best effort; keep refreshed in-memory/runtime snapshot active
-        }
-        return {
-          attempted: true,
-          updated: true,
-          state: nextState,
-        };
+          etag: fetchResult.etag,
+          lastModified: fetchResult.lastModified,
+          unpricedRouteKeys: opts.unpricedRouteKeys,
+          lockTimeoutMs,
+        });
       }
 
       const fetchedSnapshot = buildSnapshotFromApi(fetchResult.api, requestedProviderIDs, nowMs);
@@ -972,27 +1468,16 @@ export async function maybeRefreshPricingSnapshot(
         selection,
       });
 
-      const nextState: PricingRefreshStateV1 = {
-        ...attemptingState,
-        updatedAt: nowMs,
-        lastSuccessAt: nowMs,
+      return await completeRefresh({
+        statePath,
+        attemptingState,
+        nowMs,
         lastResult: "success",
-        lastError: undefined,
-        etag: fetchResult.etag ?? attemptingState.etag,
-        lastModified: fetchResult.lastModified ?? attemptingState.lastModified,
-      };
-
-      try {
-        await writeJsonAtomic(statePath, nextState, { trailingNewline: true });
-      } catch {
-        // best effort; snapshot has already been updated
-      }
-
-      return {
-        attempted: true,
-        updated: true,
-        state: nextState,
-      };
+        etag: fetchResult.etag,
+        lastModified: fetchResult.lastModified,
+        unpricedRouteKeys: opts.unpricedRouteKeys,
+        lockTimeoutMs,
+      });
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       const nextState: PricingRefreshStateV1 = {
@@ -1004,7 +1489,7 @@ export async function maybeRefreshPricingSnapshot(
       };
 
       try {
-        await writeJsonAtomic(statePath, nextState, { trailingNewline: true });
+        await writeRefreshStateMerged(statePath, nextState, lockTimeoutMs);
       } catch {
         // best effort; report original fetch/refresh error
       }
@@ -1021,6 +1506,88 @@ export async function maybeRefreshPricingSnapshot(
   });
 
   return REFRESH_IN_FLIGHT;
+}
+
+/**
+ * Event-driven analytics pricing upkeep: adopt an externally refreshed runtime
+ * snapshot, run the normal freshness refresh, and give one extra attempt when a
+ * route used by Analytics is still unpriced or unknown. A route not yet checked
+ * against the current catalog identity gets one throttle bypass per identity;
+ * every attempt still obeys the rolling 24h automatic request budget, and a
+ * bundled selection never refreshes. Cheap re-entry: unchanged unpriced routes
+ * inside the check interval do no I/O.
+ */
+export async function refreshAnalyticsPricing(opts?: {
+  routes?: readonly PricingRoute[];
+  nowMs?: number;
+  runtimeDirs?: OpencodeRuntimeDirs;
+  fetchFn?: typeof fetch;
+  bootstrapSnapshotOverride?: PricingSnapshot;
+  snapshotSelection?: PricingSnapshotSource;
+}): Promise<PricingRefreshResult | undefined> {
+  const nowMs = opts?.nowMs ?? Date.now();
+  const selection = opts?.snapshotSelection ?? SNAPSHOT_SELECTION;
+  if (selection === "bundled") return undefined;
+
+  const routes = dedupePricingRoutes(opts?.routes ?? []);
+  const preliminarySignature = routes
+    .filter((route) => !pricingRouteIsPriced(route))
+    .map(pricingRouteKey)
+    .sort()
+    .join("\u0001");
+  const currentlyStale = getPricingSnapshotHealth({
+    nowMs,
+    maxAgeMs: getPricingRefreshPolicy().maxAgeMs,
+  }).stale;
+  if (
+    !currentlyStale &&
+    nowMs - LAST_ANALYTICS_PRICING_CHECK_AT_MS < ANALYTICS_PRICING_CHECK_INTERVAL_MS &&
+    preliminarySignature === LAST_ANALYTICS_UNPRICED_SIGNATURE
+  ) {
+    return undefined;
+  }
+
+  reloadPricingSnapshotFromDisk({
+    ...(opts?.runtimeDirs === undefined ? {} : { runtimeDirs: opts.runtimeDirs }),
+    ...(opts?.bootstrapSnapshotOverride === undefined
+      ? {}
+      : { bootstrapSnapshotOverride: opts.bootstrapSnapshotOverride }),
+  });
+
+  const unpricedRoutes = routes.filter((route) => !pricingRouteIsPriced(route));
+  const unpricedRouteKeys = unpricedRoutes.map(pricingRouteKey);
+  const signature = [...unpricedRouteKeys].sort().join("\u0001");
+  LAST_ANALYTICS_PRICING_CHECK_AT_MS = nowMs;
+  LAST_ANALYTICS_UNPRICED_SIGNATURE = signature;
+
+  const state =
+    (await readRefreshState(getRuntimePricingRefreshStatePath(opts?.runtimeDirs))) ?? undefined;
+  const health = getPricingSnapshotHealth({ nowMs, maxAgeMs: getPricingRefreshPolicy().maxAgeMs });
+  if (!health.stale && unpricedRoutesUntried(unpricedRouteKeys, state).length === 0) {
+    return undefined;
+  }
+
+  const result = await maybeRefreshPricingSnapshot({
+    reason: unpricedRoutes.length > 0 ? "unpriced" : "status",
+    refreshEvenIfFresh: unpricedRoutes.length > 0,
+    unpricedRouteKeys,
+    nowMs,
+    snapshotSelection: selection,
+    ...(opts?.runtimeDirs === undefined ? {} : { runtimeDirs: opts.runtimeDirs }),
+    ...(opts?.fetchFn === undefined ? {} : { fetchFn: opts.fetchFn }),
+    ...(opts?.bootstrapSnapshotOverride === undefined
+      ? {}
+      : { bootstrapSnapshotOverride: opts.bootstrapSnapshotOverride }),
+  });
+
+  reloadPricingSnapshotFromDisk({
+    ...(opts?.runtimeDirs === undefined ? {} : { runtimeDirs: opts.runtimeDirs }),
+    ...(opts?.bootstrapSnapshotOverride === undefined
+      ? {}
+      : { bootstrapSnapshotOverride: opts.bootstrapSnapshotOverride }),
+  });
+
+  return result;
 }
 
 export function setPricingSnapshotSelection(selection: PricingSnapshotSource): void {
@@ -1187,5 +1754,6 @@ export function __resetPricingSnapshotForTests(): void {
   CONFIGURED_PRICING_SNAPSHOT_MAX_AGE_MS = DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS;
   MODEL_INDEX = null;
   REFRESH_IN_FLIGHT = null;
-  PROCESS_REFRESH_CHECKED = false;
+  LAST_ANALYTICS_PRICING_CHECK_AT_MS = 0;
+  LAST_ANALYTICS_UNPRICED_SIGNATURE = "";
 }

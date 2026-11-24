@@ -48,7 +48,7 @@ it("provides an accessible cache legend and uses a native cache icon", () => {
     'button[aria-label="About cache observations"]',
   )!;
   expect(info.textContent).not.toContain("About cache observations");
-  expect(container.querySelector(".qg-cache-heading")?.textContent).not.toBe("Cache observation");
+  expect(container.querySelector(".qg-cache-heading-title")?.textContent).toBe("Cache observation");
   expect(info.querySelector('[data-native-icon="info"]')).not.toBeNull();
   expect(container.querySelector('[aria-label="Cache status legend"]')).toBeNull();
   info.focus();
@@ -105,7 +105,7 @@ it("scrolls to the newest child once on open, not on subsequent updates", async 
   const { pill, dispose } = createRoot((dispose) => ({
     dispose,
     pill: createCacheComposerPill(
-      { current: () => current } as unknown as Sessions,
+      sessionsStub(() => current),
       mockRuntime(observer),
     ),
   }));
@@ -121,6 +121,68 @@ it("scrolls to the newest child once on open, not on subsequent updates", async 
   expect(list.scrollTop).toBe(25);
   close();
   dispose();
+});
+
+it("owns the popover heading in flow on 2.4+ and overlays only a legacy host heading", () => {
+  const current = session("heading");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(mockCacheObserver()),
+    ),
+    dispose: cleanup,
+  }));
+  const close = renderMenu(pill, () => current, container);
+  const menu = container.querySelector<HTMLElement>(".qg-cache-menu")!;
+  expect(menu.dataset.hostHeading).toBe("false");
+  const heading = menu.firstElementChild as HTMLElement;
+  expect(heading.className).toContain("qg-cache-heading");
+  // The visible heading and the info button are in flow inside the popover,
+  // so neither can float above the host's panel.
+  expect(heading.querySelector(".qg-cache-heading-title")?.textContent).toBe("Cache observation");
+  expect(heading.querySelector('button[aria-label="About cache observations"]')).not.toBeNull();
+  expect(menu.querySelector(".qg-cache-row")).not.toBeNull();
+  close();
+  dispose();
+  container.remove();
+
+  const legacyContainer = document.createElement("div");
+  document.body.append(legacyContainer);
+  const legacy = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      { current: () => current } as unknown as Sessions,
+      mockRuntime(mockCacheObserver()),
+      undefined,
+      undefined,
+      { hostRendersMenuHeading: true },
+    ),
+    dispose: cleanup,
+  }));
+  const closeLegacy = renderMenu(legacy.pill, () => current, legacyContainer);
+  const legacyMenu = legacyContainer.querySelector<HTMLElement>(".qg-cache-menu")!;
+  expect(legacyMenu.dataset.hostHeading).toBe("true");
+  // The old host draws the title; only the button overlays that row.
+  expect(legacyMenu.querySelector(".qg-cache-heading-title")).toBeNull();
+  expect(legacyMenu.querySelector('button[aria-label="About cache observations"]')).not.toBeNull();
+  closeLegacy();
+  legacy.dispose();
+  legacyContainer.remove();
+
+  const css = readFileSync(join(process.cwd(), "src/native/native.css"), "utf8");
+  const inFlow = /\.qg-cache-heading\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+  expect(inFlow).toContain("position: relative");
+  expect(inFlow).not.toContain("bottom: 100%");
+  const overlay =
+    /\.qg-cache-menu\[data-host-heading="true"\]\s*\.qg-cache-heading\s*\{([^}]*)\}/.exec(
+      css,
+    )?.[1] ?? "";
+  expect(overlay).toContain("position: absolute");
+  expect(overlay).toContain("bottom: 100%");
+  // The host portals this popover outside the panel root, so it opts in itself.
+  const menuRule = /\.qg-cache-menu\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+  expect(menuRule).toContain("user-select: text");
 });
 
 it("opens the chosen dashboard session without navigating from status or info controls", () => {
@@ -176,6 +238,12 @@ it("opens the chosen dashboard session without navigating from status or info co
 
 function session(id: string) {
   return { id, key: `server\n${id}`, server: { builtin: true, connected: true } };
+}
+
+// SAFETY: the pill reads only `current()`; the fixture supplies that one method
+// and never reaches the rest of the Sessions contract.
+function sessionsStub(read: () => { id: string; key: string }): Sessions {
+  return { list: () => [], current: read } as Sessions;
 }
 
 function mockCacheObserver(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -263,7 +331,7 @@ it("keeps discovery and history with the selection, renders live, and cancels on
   const { dispose, pill, current } = createRoot((cleanup) => {
     const [current, set] = createSignal(a);
     setCurrent = set;
-    const pill = createCacheComposerPill({ current } as unknown as Sessions, runtime);
+    const pill = createCacheComposerPill(sessionsStub(current), runtime);
     return { dispose: cleanup, pill, current };
   });
   // Discovery follows the selection, not the popover: one subscription per
@@ -555,16 +623,73 @@ it("labels rows with agent, provider, model and effort when authoritative metada
     .map((id) => document.getElementById(id)?.textContent)
     .join(" ");
   expect(description).toContain("general");
-  expect(description).toContain("anthropic / claude-test#high");
+  expect(description).toContain("anthropic/claude-test#high");
   expect(description).toContain("Cache 80.00%, partial reuse.");
   expect(description).toMatch(/TTL about \+.*, estimated\./);
   expect(
     [...container.querySelectorAll(".qg-cache-agent")].map((node) => node.textContent),
   ).toEqual(["general", "build"]);
+  const modelLabels = [...container.querySelectorAll(".qg-cache-model .qg-model-identity")];
+  expect(modelLabels.map((node) => node.textContent)).toEqual(["claude-test#high", "glm-test#max"]);
+  expect(modelLabels.map((node) => node.getAttribute("title"))).toEqual([
+    "anthropic/claude-test#high",
+    "zai/glm-test#max",
+  ]);
+  expect(modelLabels.map((node) => node.getAttribute("aria-label"))).toEqual([
+    "Anthropic: anthropic/claude-test#high",
+    "Z.ai: zai/glm-test#max",
+  ]);
   expect(
-    [...container.querySelectorAll(".qg-cache-model")].map((node) => node.textContent),
-  ).toEqual(["anthropic / claude-test#high", "zai / glm-test#max"]);
+    modelLabels.map((node) =>
+      node.querySelector(".qg-provider-logo")?.getAttribute("data-provider-logo"),
+    ),
+  ).toEqual(["anthropic", "zai"]);
+  const metrics = container.querySelector<HTMLElement>(".qg-cache-metrics")!;
+  expect(metrics.getAttribute("title")).toBeNull();
+  metrics.dispatchEvent(new Event("pointerenter"));
+  const metricsTip = container.querySelector('[role="tooltip"]')?.textContent ?? "";
+  expect(metricsTip).toContain("Cache 80.00%");
+  expect(metricsTip).toContain("Partial reuse");
+  expect(metricsTip).toMatch(/^TTL /);
+  metrics.dispatchEvent(new Event("pointerleave"));
   expect(container.textContent).not.toContain("\u202e");
+  dispose();
+  container.remove();
+});
+
+it("keeps the provider text prefix when the catalog has no mark", async () => {
+  const a = session("unknown-model");
+  const runtime = mockRuntime(
+    mockCacheObserver({
+      metadata: (id: string) =>
+        id === a.id
+          ? {
+              title: "Unknown model",
+              model: { providerID: "unknown-provider", id: "mystery", variant: "low" },
+            }
+          : undefined,
+      query: () => ({
+        color: "green",
+        reason: "estimated-reuse-within-ttl",
+        primaryCacheReadRatio: { value: 0.8, observedAtMs: 1000 },
+        ttlEstimate: { deadlineAtMs: 2000 },
+      }),
+      status: () => "idle" as const,
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => a } as unknown as Sessions, runtime),
+    dispose: cleanup,
+  }));
+  await flush();
+  renderMenu(pill, () => a, container);
+  const label = container.querySelector<HTMLElement>(".qg-cache-model .qg-model-identity")!;
+  expect(label.querySelector(".qg-provider-logo")).toBeNull();
+  expect(label.textContent).toBe("unknown-provider/mystery#low");
+  expect(label.getAttribute("title")).toBe("unknown-provider/mystery#low");
+  expect(label.getAttribute("aria-label")).toBeNull();
   dispose();
   container.remove();
 });
@@ -682,9 +807,12 @@ it("reorders and relabels a child row when a metadata update event lands", async
     },
   });
   await vi.waitFor(() => expect(titles()).toEqual(["Newer worker", "Promoted worker"]));
-  expect(container.querySelector(".qg-cache-child:last-child .qg-cache-model")?.textContent).toBe(
-    "anthropic / claude-test#high",
+  const promoted = container.querySelector<HTMLElement>(
+    ".qg-cache-child:last-child .qg-cache-model .qg-model-identity",
   );
+  expect(promoted?.textContent).toBe("claude-test#high");
+  expect(promoted?.getAttribute("title")).toBe("anthropic/claude-test#high");
+  expect(promoted?.getAttribute("aria-label")).toBe("Anthropic: anthropic/claude-test#high");
   dispose();
   observer.dispose();
   container.remove();
@@ -838,8 +966,204 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
     label: "TTL ~5m 0s · Cache 80.00% · Partial reuse",
     tone: "success",
     icon: "server",
-    title: "Cache observation",
+    title: "TTL ~5m 0s · Cache 80.00% · Partial reuse",
   });
+  dispose();
+  container.remove();
+});
+
+it("appends Warming only while idle and anchored, with an inferred popover line", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:10:00Z"));
+  const a = session("warm");
+  const now = Date.now();
+  const make = (warmed: boolean): CacheObserverClassification =>
+    ({
+      color: "green",
+      reason: "estimated-within-ttl",
+      primaryCacheReadRatio: { value: 0.8, observedAtMs: now - 120_000 },
+      ttlEstimate: {
+        deadlineAtMs: now + 240_000,
+        source: "test",
+        kind: "configured",
+        ...(warmed ? { anchor: "warming-inferred", anchorAtMs: now - 60_000 } : {}),
+      },
+    }) as unknown as CacheObserverClassification;
+  let observed = make(true);
+  let status: "idle" | "busy" = "idle";
+  let notify = () => {};
+  const runtime = mockRuntime(
+    mockCacheObserver({
+      subscribe: (_id: string, listener: () => void) => {
+        notify = listener;
+        return () => {};
+      },
+      query: () => observed,
+      status: () => status,
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => a } as unknown as Sessions, runtime),
+    dispose: cleanup,
+  }));
+  await flush();
+  renderMenu(pill, () => a, container);
+  const shown = () => pill.show({ session: a } as ComposerPillProps)?.label ?? "";
+  const rowText = () => container.querySelector(".qg-cache-metrics")?.textContent ?? "";
+  const rowTip = () => {
+    const metrics = container.querySelector<HTMLElement>(".qg-cache-metrics");
+    metrics?.dispatchEvent(new Event("pointerenter"));
+    const text = container.querySelector('[role="tooltip"]')?.textContent ?? "";
+    metrics?.dispatchEvent(new Event("pointerleave"));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    return text;
+  };
+  const spoken = () => container.querySelector(".qg-cache-visually-hidden")?.textContent ?? "";
+  const line = () => {
+    const dot = container.querySelector<HTMLButtonElement>("button.qg-cache-indicator");
+    dot?.dispatchEvent(new Event("pointerenter"));
+    const text = container.querySelector('[role="tooltip"]')?.textContent ?? "";
+    dot?.dispatchEvent(new Event("pointerleave"));
+    vi.advanceTimersByTime(200);
+    return text;
+  };
+
+  // No extra slot or glyph: the row layout is untouched.
+  expect(container.querySelector(".qg-cache-busy")).toBeNull();
+  expect(container.textContent).not.toContain("🔥");
+
+  // Idle + warming: " · Warming" ends the pill label and the row metrics.
+  expect(shown()).toBe("TTL ~4m 0s · Cache 80.00% · Partial reuse · Warming");
+  expect(rowText()).toMatch(/Partial reuse · Warming$/);
+  expect(rowTip()).toMatch(/Cache 80\.00% · Partial reuse · Warming$/);
+  expect(spoken()).toContain(
+    "Cache 80.00%, partial reuse, refreshed by OpenCode warming (inferred).",
+  );
+  expect(line()).toMatch(
+    /Cache 80\.00% · Partial reuse · OpenCode warming \d{2}:\d{2} \(inferred\)/,
+  );
+  expect(line()).not.toContain("last completed call");
+
+  // A step in flight hides it.
+  status = "busy";
+  notify();
+  expect(shown()).not.toContain("Warming");
+  expect(rowText()).not.toContain("Warming");
+  expect(rowTip()).not.toContain("Warming");
+  expect(spoken()).not.toContain("warming");
+
+  // Uncertain reuse (busy, route-unverified prior reads) nulls the estimate: no warming.
+  observed = {
+    ...make(true),
+    color: "gray",
+    reason: "route-unverified",
+    primaryCacheReadTelemetry: "available",
+  } as unknown as CacheObserverClassification;
+  notify();
+  expect(shown()).not.toContain("Warming");
+  expect(line()).not.toContain("OpenCode warming");
+
+  // The anchor cleared by a later completed step: no warming, original line.
+  status = "idle";
+  observed = make(false);
+  notify();
+  expect(shown()).toBe("TTL ~4m 0s · Cache 80.00% · Partial reuse");
+  expect(rowText()).not.toContain("Warming");
+  expect(line()).toMatch(/last completed call \d{2}:\d{2}/);
+  expect(line()).not.toContain("OpenCode warming");
+  dispose();
+  container.remove();
+});
+
+it("keeps the metrics hover card mounted and live across ticks, and opens it on focus", async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:10:00Z"));
+  const a = session("hover-card");
+  const now = Date.now();
+  const classification = (ratio: number): CacheObserverClassification =>
+    ({
+      color: "green",
+      reason: "estimated-within-ttl",
+      primaryCacheReadRatio: { value: ratio, observedAtMs: now - 120_000 },
+      ttlEstimate: {
+        deadlineAtMs: now + 240_000,
+        source: "test",
+        kind: "configured",
+      },
+    }) as unknown as CacheObserverClassification;
+  let observed = classification(0.8);
+  let notify = () => {};
+  const runtime = mockRuntime(
+    mockCacheObserver({
+      subscribe: (_id: string, listener: () => void) => {
+        notify = listener;
+        return () => {};
+      },
+      query: () => observed,
+      status: () => "idle" as const,
+      metadata: (id: string) => (id === a.id ? { title: "Hover row" } : undefined),
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill(
+      sessionsStub(() => a),
+      runtime,
+      undefined,
+      () => {},
+    ),
+    dispose: cleanup,
+  }));
+  await flush();
+  const close = renderMenu(pill, () => a, container);
+  const row = container.querySelector(".qg-cache-row:not(.qg-cache-child)")!;
+  const metrics = row.querySelector<HTMLElement>(".qg-cache-metrics")!;
+  const identity = row.querySelector<HTMLButtonElement>(".qg-cache-identity")!;
+  // The native title is gone; the plugin card owns the full text.
+  expect(metrics.hasAttribute("title")).toBe(false);
+
+  metrics.dispatchEvent(new Event("pointerenter"));
+  const card = container.querySelector<HTMLElement>('[role="tooltip"]')!;
+  expect(card.textContent).toContain("Cache 80.00%");
+  expect(identity.getAttribute("aria-describedby")).toContain(card.id);
+
+  // Moving onto the card keeps it open; leaving it dismisses it.
+  metrics.dispatchEvent(new Event("pointerleave"));
+  card.dispatchEvent(new Event("pointerenter"));
+  vi.advanceTimersByTime(200);
+  expect(container.querySelector('[role="tooltip"]')).toBe(card);
+
+  // A tick changes the countdown and share; the row and card update in place.
+  vi.advanceTimersByTime(2_000);
+  observed = classification(0.5);
+  notify();
+  await flush();
+  expect(container.querySelector(".qg-cache-row:not(.qg-cache-child)")).toBe(row);
+  expect(row.querySelector(".qg-cache-metrics")).toBe(metrics);
+  expect(container.querySelector('[role="tooltip"]')).toBe(card);
+  expect(card.textContent).toContain("Cache 50.00%");
+
+  card.dispatchEvent(new Event("pointerleave"));
+  vi.advanceTimersByTime(200);
+  expect(container.querySelector('[role="tooltip"]')).toBeNull();
+
+  // Keyboard focus shows the same live card; Escape and blur dismiss it.
+  identity.focus();
+  const focused = container.querySelector<HTMLElement>('[role="tooltip"]')!;
+  expect(focused.textContent).toContain("Cache 50.00%");
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  expect(container.querySelector('[role="tooltip"]')).toBeNull();
+
+  identity.blur();
+  identity.focus();
+  expect(container.querySelector('[role="tooltip"]')).not.toBeNull();
+  identity.blur();
+  expect(container.querySelector('[role="tooltip"]')).toBeNull();
+
+  close();
   dispose();
   container.remove();
 });
@@ -983,7 +1307,7 @@ it("clears pending loading on RPC loss and starts only the selected session on r
     const [current, set] = createSignal(a);
     setCurrent = set;
     return {
-      pill: createCacheComposerPill({ current } as unknown as Sessions, runtime),
+      pill: createCacheComposerPill(sessionsStub(current), runtime),
       dispose: cleanup,
     };
   });
@@ -1023,7 +1347,7 @@ it("marks a collapsed history error without exposing technical details", async (
       label: "TTL — · Cache unknown",
       icon: "warning",
       tone: "warning",
-      title: "Cache observation",
+      title: "TTL — · Cache unknown",
     }),
   );
   const container = document.createElement("div");
@@ -1317,10 +1641,7 @@ it("reacts to real model selection events without changing the cache estimate", 
   const { pill, current, setCurrent, dispose } = createRoot((cleanup) => {
     const [current, setCurrent] = createSignal(a);
     return {
-      pill: createCacheComposerPill(
-        { current } as unknown as Sessions,
-        mockRuntime({ ...observer }),
-      ),
+      pill: createCacheComposerPill(sessionsStub(current), mockRuntime({ ...observer })),
       current,
       setCurrent,
       dispose: cleanup,
@@ -1388,7 +1709,7 @@ it("reacts to real model selection events without changing the cache estimate", 
   select(50, "cached");
   expect(show()).toMatchObject({
     tone: before.tone,
-    title: "Cache observation",
+    title: before.label,
     label: before.label,
   });
   expect(mounted.firstElementChild?.getAttribute("data-tone")).toBe(before.tone ?? "neutral");
@@ -1399,7 +1720,7 @@ it("reacts to real model selection events without changing the cache estimate", 
   media.mockRestore();
   setCurrent(b);
   vi.advanceTimersByTime(500);
-  expect(show().title).toBe("Cache observation");
+  expect(show().title).toBe(show().label);
   unmount();
   unmountPill();
   dispose();
@@ -1450,7 +1771,7 @@ it("shows the collapsed TTL countdown and cache share in one label, with only th
     label: "TTL ~4m 30s · Cache 98.70% · Hit",
     icon: "server",
     tone: "success",
-    title: "Cache observation",
+    title: "TTL ~4m 30s · Cache 98.70% · Hit",
   });
   dispose();
 });
@@ -1588,7 +1909,7 @@ it.each([
   document.body.append(container);
   const { pill, dispose } = createRoot((cleanup) => ({
     pill: createCacheComposerPill(
-      { current: () => a } as unknown as Sessions,
+      sessionsStub(() => a),
       mockRuntime(mockCacheObserver({ query: () => observed })),
     ),
     dispose: cleanup,
@@ -1984,6 +2305,9 @@ it("keeps the popup's important values bold on the strong text token, off the we
   expect(ruleFor(".qg-cache-metrics")?.body).toMatch(/color:\s*var\(--text-strong/);
   expect(ruleFor(".qg-cache-metrics")?.body).toMatch(/font-weight:\s*600/);
   expect(ruleFor(".qg-cache-tooltip-primary")?.body).toMatch(/font-weight:\s*600/);
+  expect(ruleFor('.qg-cache-tooltip[data-above="true"]')?.body).toMatch(
+    /transform:\s*translateY\(-100%\)/,
+  );
   expect(
     cacheRules.filter((rule) => rule.body.includes("--text-weak")).map((rule) => rule.selector),
   ).toEqual([".qg-cache-elapsed"]);
@@ -2144,7 +2468,8 @@ it("uses neutral, estimated and danger tones with the catalog cache icon", () =>
     dispose: cleanup,
   }));
   const show = () => pill.show({ session: sessionRef } as ComposerPillProps)!;
-  expect(show()).toMatchObject({ icon: "server", title: "Cache observation" });
+  expect(show()).toMatchObject({ icon: "server" });
+  expect(show().title).toBe(show().label);
   expect(show().tone).toBeUndefined();
   expect(show().label).not.toContain("?");
   observed = {

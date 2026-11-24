@@ -204,6 +204,10 @@ export function sessionSnapshot(overrides: Partial<SessionSnapshot> = {}): Sessi
         childIds: ["session-child-1"],
         ownTokens: costed({ input: 1200, cacheRead: 300 }),
         subtreeTokens: costed({ input: 2400, cacheRead: 300, output: 200 }),
+        models: [
+          { providerId: "openai", modelId: "gpt-6.1-terra", effort: "high" },
+          { providerId: "openai", modelId: "gpt-6.1-luna" },
+        ],
         stepCount: 3,
         subtreeNodeCount: 2,
         latestActivityAtMs: NOW - 1000,
@@ -217,6 +221,7 @@ export function sessionSnapshot(overrides: Partial<SessionSnapshot> = {}): Sessi
         childIds: [],
         ownTokens: costed({ input: 1200, output: 200 }),
         subtreeTokens: costed({ input: 1200, output: 200 }),
+        models: [],
         stepCount: 2,
         subtreeNodeCount: 1,
         latestActivityAtMs: NOW - 2000,
@@ -296,6 +301,7 @@ export function settingsSnapshot(overrides: Partial<SettingsSnapshot> = {}): Set
     "dashboard.hiddenRows": [],
     "dashboard.providerOrder": [],
     "dashboard.cardOrder": [],
+    "dashboard.rowOrder": {},
     "dashboard.port": 4144,
   };
   return {

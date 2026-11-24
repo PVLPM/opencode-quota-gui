@@ -2737,8 +2737,9 @@ function mountApp(
       };
     },
     health: async () => ({ app: "opencode-quota-gui", contractVersion: 2 }),
-    home: async ({ range }: { range: RangeKey }) => {
-      calls.home.push(range);
+    home: async ({ range, background }: { range: RangeKey; background?: boolean }) => {
+      // Background prefetches are not foreground reads; keep them out of `calls.home`.
+      if (background !== true) calls.home.push(range);
       return { ...homeSnapshot({ range }), usage: usage(range, []) };
     },
     quota: async () => homeSnapshot(),

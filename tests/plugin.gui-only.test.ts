@@ -7,7 +7,11 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createConnection, createServer as createNetServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import {
+  clearAnthropicApiObservations,
+  digestAnthropicApiKey,
+  readAnthropicApiObservation,
+} from "../src/lib/anthropic-api-rate-limits.js";
 import { createFakeIntegration } from "./helpers/fake-integration.js";
 
 const resolveRetryDelay = vi.hoisted(() => vi.fn());
@@ -194,7 +198,9 @@ describe("GUI-only server plugin", () => {
     expect(rpc.register.mock.calls[0]?.[0]).toMatchObject({
       id: "opencode-quota-gui.dashboard",
     });
-    expect([...hooks.keys()]).toEqual(["retry"]);
+    expect([...hooks.keys()]).toEqual(
+      expect.arrayContaining(["retry", "http.response", "model.request"]),
+    );
     expect(ctx.session.get).not.toHaveBeenCalled();
     expect(ctx.session.wait).not.toHaveBeenCalled();
     expect(ctx.session.prompt).not.toHaveBeenCalled();
@@ -261,6 +267,35 @@ describe("GUI-only server plugin", () => {
     expect(failed.decision).toEqual({ retry: false });
     expect(warn).toHaveBeenCalledWith("[opencode-quota-gui] retry hook failed: quota read failed");
     warn.mockRestore();
+  });
+
+  it("observes API-key Messages rate limits through a read-only http.response hook", async () => {
+    const port = await freePort();
+    await writeCanonicalConfig(port);
+    const { ctx, hooks } = createContext();
+    const cleanup = await plugin.setup(ctx as never);
+    if (cleanup) cleanups.push(cleanup);
+    const hook = hooks.get("http.response") as unknown as (event: unknown) => unknown;
+    if (!hook) throw new Error("expected the http.response hook");
+    clearAnthropicApiObservations();
+
+    const response = new Response("body", {
+      headers: { "anthropic-ratelimit-requests-remaining": "7" },
+    });
+    const request = new Request("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      body: "prompt",
+      headers: { "x-api-key": "sk-hook-key" },
+    });
+    expect(hook({ request, response })).toBeUndefined();
+
+    expect(readAnthropicApiObservation(digestAnthropicApiKey("sk-hook-key"))).toMatchObject({
+      meters: { requests: { remaining: 7 } },
+    });
+    // The host's request and response stay untouched and unread.
+    expect(response.bodyUsed).toBe(false);
+    expect(request.bodyUsed).toBe(false);
+    expect(() => hook({ request: null, response: null })).not.toThrow();
   });
 
   it("binds credentials, drops cached logins on credential events, and cleans up", async () => {

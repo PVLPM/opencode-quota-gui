@@ -14,7 +14,7 @@ import { cloneQuotaToastEntry } from "./entries.js";
 import {
   getQuotaProviderDisplayLabel,
   getQuotaProviderIdsForRuntimeId,
-  getQuotaProviderShape,
+  getQuotaProviderRegistration,
 } from "./provider-metadata.js";
 import { projectQuotaProviderResults } from "./quota-accounting-projection.js";
 import type { QuotaFormatStyle } from "./quota-format-style.js";
@@ -167,7 +167,7 @@ export function matchesQuotaProviderCurrentSelection(params: {
 
   if (params.currentProviderID) {
     const explicitId = params.currentProviderID.trim().toLowerCase();
-    const catalogShape = getQuotaProviderShape(explicitId);
+    const catalogShape = getQuotaProviderRegistration(explicitId);
     if (catalogShape?.id === explicitId) return params.provider.id === catalogShape.id;
 
     const runtimeCandidates = getQuotaProviderIdsForRuntimeId(explicitId);

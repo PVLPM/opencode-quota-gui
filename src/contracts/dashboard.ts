@@ -1,7 +1,7 @@
 import type { AnalyticsTemporalBreakdown } from "./analytics-temporal.js";
 import type { CardId, RowId } from "./identity.js";
 import type { BankedResetAvailability } from "./openai-quota.js";
-import type { ProviderFailureCategory } from "./provider-failure.js";
+import type { ProviderFailureCategory, QuotaAttemptOutcome } from "./provider-failure.js";
 import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
 import type { TemporalStatusSnapshot } from "./temporal.js";
 
@@ -105,6 +105,16 @@ export interface CostedTokens extends TokenStack {
   apiEquivalentCostUsd: number | null;
   unpricedTokens: number;
   unknownTokens: number;
+  /**
+   * Portion of `apiEquivalentCostUsd` that came from OpenCode's recorded
+   * per-message cost because models.dev could not price the route.
+   */
+  recordedCostUsd?: number;
+  /**
+   * Tokens priced by that recorded-cost fallback. They are already included in
+   * the priced total and are never counted as unpriced/unknown tokens.
+   */
+  recordedCostTokens?: number;
 }
 
 export interface Bucket {
@@ -355,6 +365,11 @@ export interface ProviderCard {
     message: string;
     retryable?: boolean;
     retryAtMs?: number;
+    /**
+     * Outcome of the attempt behind this error. A `cooldown` skip made no
+     * request, so it is displayed as a muted retry notice, never a failure.
+     */
+    attemptOutcome?: QuotaAttemptOutcome;
     kind?: "intentional-filter";
     /** Source-assigned safe category; absence means unknown and consumers fail closed. */
     failureCategory?: ProviderFailureCategory;
@@ -365,8 +380,15 @@ export interface ProviderCard {
   /**
    * Persistent optional-row choices (additive): stable ids and labels exist
    * even when runtime values are absent. Never synthetic zero data rows.
+   * `rowId` is the stable declared field id; `aliases` lists the emitted row
+   * ids that render the same field in another shape.
    */
-  visibilityRows?: { rowId: RowId; label: string; info?: string }[];
+  visibilityRows?: {
+    rowId: RowId;
+    label: string;
+    info?: string;
+    aliases?: RowId[];
+  }[];
 }
 
 export interface ProjectActivityRow {
@@ -381,10 +403,26 @@ export interface HomeSnapshot {
   generatedAtMs: number;
   range: RangeKey;
   stale: boolean;
+  provisional?: true;
+  /**
+   * Additive: the exact replacement behind a provisional paint failed. The
+   * provisional data stays visible; the UI clears its pending ring and offers
+   * a retry. Absent while the exact read is pending or after it succeeds.
+   */
+  exactError?: string;
   /** `polledAtMs` is a poll time, not a guarantee that every provider succeeded. */
   providers: { cards: ProviderCard[]; enabledProviders: string[] | "auto"; polledAtMs: number };
   usage: Usage;
   projects: ProjectActivityRow[];
+}
+
+/** Positional analytics reads shared by the engine and worker transport. */
+export interface AnalyticsRangeReader {
+  home(range: RangeKey, exact?: boolean, background?: boolean): Promise<HomeSnapshot>;
+  project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
+  session(sessionId: string): Promise<SessionSnapshot>;
+  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
+  refresh(): Promise<void>;
 }
 
 /**
@@ -438,18 +476,52 @@ export interface SessionNode {
   stepCount: number;
   subtreeNodeCount: number;
   latestActivityAtMs: number;
+  /**
+   * Distinct provider/model/effort identities this session itself used,
+   * deduplicated by the complete identity and ordered by most recent actual
+   * use. `models[0]` is the last used identity; empty when none was recorded.
+   */
+  models: ModelIdentity[];
+  /**
+   * Own steps whose stored message lacked a cache-read or cache-write counter.
+   * Their 0 is unknown, so the session's cache rate is unknown when this is
+   * positive. Omitted when every own step recorded both counters.
+   */
+  cacheUnknownSteps?: number;
+}
+
+/** Provider/model plus the reasoning effort only when OpenCode recorded one. */
+export interface ModelIdentity {
+  providerId: string;
+  modelId: string;
+  effort?: string;
 }
 
 export interface StepPoint {
   sessionId: string;
   messageId: string;
+  /** Completion time of the assistant message (the step's chart position). */
   atMs: number;
+  /**
+   * OpenCode's stored assistant-message creation time. Not a request-start
+   * timestamp; absent when it was not recorded as a positive number.
+   */
+  createdAtMs?: number;
   branch: number;
   stack: TokenStack;
   contextTokens: number;
   totalTokens: number;
-  model?: { providerId: string; modelId: string };
+  model?: ModelIdentity;
   agent?: string;
+  /** The message stored no cache-read counter: `stack.cacheRead` 0 is unknown, not observed. */
+  cacheReadUnknown?: true;
+  /** Same for the cache-write counter. */
+  cacheWriteUnknown?: true;
+  /**
+   * The first assistant step after a user-role message in this step's own
+   * session. Position only: the DTO never carries prompt text.
+   */
+  inputMarker?: true;
 }
 
 export interface SessionSnapshot {
@@ -463,6 +535,13 @@ export interface SessionSnapshot {
   nodes: SessionNode[];
   steps: StepPoint[];
   compactionMarkers: { sessionId: string; atMs: number; messageId: string }[];
+  /**
+   * Positions (creation time, else completion time) of the focus session's own
+   * completed assistant messages that are NOT in `steps` (zero-token rows,
+   * fork copies owned elsewhere). A gap spanning one is never bridged.
+   * Omitted when there are none.
+   */
+  unobservedAtMs?: number[];
   ownSummary: CostedTokens & { stepCount: number };
   treeTotals: CostedTokens;
   stepSemantics: string;
@@ -521,7 +600,7 @@ export interface DashboardEvent {
 /** Transport-neutral browser seam (spec §5.1); every member has a producer. */
 export interface DashboardDataSource {
   health(): Promise<DashboardHealth>;
-  home(input: { range: RangeKey }): Promise<HomeSnapshot>;
+  home(input: { range: RangeKey; exact?: boolean; background?: boolean }): Promise<HomeSnapshot>;
   quota(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
   project(input: { projectId: string; range: RangeKey }): Promise<ProjectSnapshot>;
   session(input: { sessionId: string }): Promise<SessionSnapshot>;
@@ -557,3 +636,14 @@ export type GuiSettingsStore = Pick<
   | "importApply"
   | "openSettingsFile"
 >;
+
+/**
+ * Cold 7d/30d/lifetime analytics catch-up reads the full source store and can
+ * legitimately take tens of seconds on a slow local disk; a foreground request
+ * queued behind one can add its own scoped read. The old 90 s budget retired
+ * healthy workers mid-read on measured sources. Keep a finite budget above the
+ * measured worst request (112.9 s on the reported source), so genuinely stuck
+ * workers are still retired and recovered on the next request. The Analytics
+ * view also stops re-joining a host-timed-out read after this long.
+ */
+export const ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS = 180_000;

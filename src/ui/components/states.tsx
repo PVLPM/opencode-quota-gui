@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { Match, Show, Switch } from "solid-js";
+import { createSignal, Match, onCleanup, Show, Switch } from "solid-js";
 import type { LoadState } from "../view-model";
 
 /**
@@ -28,6 +28,9 @@ export function QueryState<T>(props: {
   render: (data: T, stale: boolean) => JSX.Element;
   /** Recovery for a failed read; defaults to a full page reload. */
   onRetry?: () => void;
+  /** False hides the countdown once this logical request's auto attempt is spent. */
+  autoRetry?: boolean;
+  onAutoRetry?: () => void;
 }): JSX.Element {
   const ready = () => (props.state.kind === "ready" ? props.state : undefined);
   const failed = () => (props.state.kind === "error" ? props.state : undefined);
@@ -46,7 +49,14 @@ export function QueryState<T>(props: {
       </Match>
       <Match keyed when={failed()}>
         {(state) => (
-          <ErrorCard message={state.message} retryable={state.retryable} onRetry={reload} />
+          <ErrorCard
+            message={state.message}
+            retryable={state.retryable}
+            recoverable={state.recoverable}
+            autoRetry={props.autoRetry}
+            {...(props.onAutoRetry === undefined ? {} : { onAutoRetry: props.onAutoRetry })}
+            onRetry={reload}
+          />
         )}
       </Match>
       <Match keyed when={ready()}>
@@ -80,17 +90,79 @@ export function EmptyNotice(props: { message: string; children?: JSX.Element }):
 export function ErrorCard(props: {
   message: string;
   retryable: boolean;
+  /** Arm the 3-second auto-retry countdown (recoverable failures only). */
+  recoverable?: boolean;
+  /** False suppresses the countdown after the logical request's auto budget is spent. */
+  autoRetry?: boolean;
+  onAutoRetry?: () => void;
   onRetry: () => void;
 }): JSX.Element {
   return (
     <div class="qg-error-card" role="alert">
       <span class="qg-error-card__message">{props.message}</span>
       <Show when={props.retryable}>
-        <button type="button" class="qg-input" onClick={() => props.onRetry()}>
-          Retry
-        </button>
+        <RetryAction
+          recoverable={props.recoverable === true}
+          autoRetry={props.autoRetry}
+          {...(props.onAutoRetry === undefined ? {} : { onAutoRetry: props.onAutoRetry })}
+          onRetry={props.onRetry}
+        />
       </Show>
     </div>
+  );
+}
+
+/**
+ * A Retry button for a recoverable failure counts down `Retry (3..1)` and then
+ * retries once by itself. The route owns the per-request budget: once spent it
+ * passes `autoRetry={false}` and the button stays a plain manual Retry. A
+ * manual click retries at once; unmount cancels both the countdown and the
+ * pending retry, so navigation never fires a late read.
+ */
+export function RetryAction(props: {
+  onRetry: () => void;
+  recoverable?: boolean;
+  /** False = manual only (the request already used its one auto attempt). */
+  autoRetry?: boolean;
+  onAutoRetry?: () => void;
+  class?: string;
+  label?: string;
+}): JSX.Element {
+  const [seconds, setSeconds] = createSignal(3);
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let fired = false;
+  const countdown = props.recoverable === true && props.autoRetry !== false;
+
+  const clear = () => {
+    if (timer !== undefined) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+  };
+  const fire = () => {
+    if (fired) return;
+    fired = true;
+    clear();
+    props.onRetry();
+  };
+  if (countdown) {
+    timer = setInterval(() => {
+      const next = seconds() - 1;
+      if (next <= 0) {
+        fired = true;
+        clear();
+        (props.onAutoRetry ?? props.onRetry)();
+        return;
+      }
+      setSeconds(next);
+    }, 1_000);
+  }
+  onCleanup(clear);
+
+  return (
+    <button type="button" class={props.class ?? "qg-input"} onClick={fire} aria-label={props.label}>
+      {countdown && !fired ? `Retry (${seconds()})` : "Retry"}
+    </button>
   );
 }
 

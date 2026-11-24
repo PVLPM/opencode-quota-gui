@@ -17,6 +17,7 @@ import type {
   HomeSnapshot,
   ImportPreview,
   JsonValue,
+  ModelIdentity,
   PrimaryQuotaWindowRef,
   ProjectActivityRow,
   ProjectRootRow,
@@ -37,7 +38,7 @@ import { PRIMARY_QUOTA_WINDOW_LIMIT } from "../contracts/dashboard";
 import { isCostedTokens, isDashboardEvent, isTokenStack } from "../contracts/guards";
 import type { CardId, RowId } from "../contracts/identity";
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota";
-import { PROVIDER_FAILURE_CATEGORIES } from "../contracts/provider-failure";
+import { isQuotaAttemptOutcome, PROVIDER_FAILURE_CATEGORIES } from "../contracts/provider-failure";
 import { type BucketUnit, isRangeKey, type RangeKey, type RangeWindow } from "../contracts/ranges";
 import type {
   TemporalEffect,
@@ -482,6 +483,12 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
         `${detail}.errors[].retryAtMs`,
       );
       if (retryAtMs !== undefined) parsedError.retryAtMs = retryAtMs;
+      if (error.attemptOutcome !== undefined) {
+        if (!isQuotaAttemptOutcome(error.attemptOutcome)) {
+          throw faulty(endpoint, `${detail}.errors[].attemptOutcome`);
+        }
+        parsedError.attemptOutcome = error.attemptOutcome;
+      }
       const kind = readOptionalEnum(
         error.kind,
         ["intentional-filter"] as const,
@@ -500,6 +507,12 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
     }),
   };
 
+  if (card.stale !== undefined) {
+    if (readBoolean(card.stale, endpoint, `${detail}.stale`) !== true) {
+      throw faulty(endpoint, `${detail}.stale`);
+    }
+    parsed.stale = true;
+  }
   const accountLabel = readOptionalText(card.accountLabel, endpoint, `${detail}.accountLabel`);
   if (accountLabel !== undefined) parsed.accountLabel = accountLabel;
   const planLabel = readOptionalText(card.planLabel, endpoint, `${detail}.planLabel`);
@@ -535,6 +548,13 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
       };
       const info = readOptionalText(row.info, endpoint, `${detail}.visibilityRows[].info`);
       if (info !== undefined) parsedRow.info = info;
+      if (row.aliases !== undefined) {
+        parsedRow.aliases = readArray(
+          row.aliases,
+          endpoint,
+          `${detail}.visibilityRows[].aliases`,
+        ).map((alias) => readRowId(alias, endpoint, `${detail}.visibilityRows[].aliases[]`));
+      }
       return parsedRow;
     });
   }
@@ -1077,7 +1097,7 @@ export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota")
 export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): HomeSnapshot {
   const root = readRecord(value, endpoint, "not an object");
   const providers = readRecord(root.providers, endpoint, "providers");
-  return {
+  const parsed: HomeSnapshot = {
     generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
     range: readRangeKey(root.range, endpoint, "range"),
     stale: readBoolean(root.stale, endpoint, "stale"),
@@ -1097,6 +1117,12 @@ export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): 
       readProjectActivityRow(row, endpoint),
     ),
   };
+  if (readOptionalBoolean(root.provisional, endpoint, "provisional") === true) {
+    parsed.provisional = true;
+  }
+  const exactError = readOptionalText(root.exactError, endpoint, "exactError");
+  if (exactError !== undefined) parsed.exactError = exactError;
+  return parsed;
 }
 
 function readProjectRoot(value: JsonValue, endpoint: string): ProjectRootRow {
@@ -1152,6 +1178,17 @@ function readBreadcrumb(
   };
 }
 
+function readModelIdentity(value: JsonValue, endpoint: string, detail: string): ModelIdentity {
+  const identity = readRecord(value, endpoint, detail);
+  const parsed: ModelIdentity = {
+    providerId: readText(identity.providerId, endpoint, `${detail}.providerId`),
+    modelId: readText(identity.modelId, endpoint, `${detail}.modelId`),
+  };
+  const effort = readOptionalText(identity.effort, endpoint, `${detail}.effort`);
+  if (effort !== undefined) parsed.effort = effort;
+  return parsed;
+}
+
 function readSessionNode(value: JsonValue, endpoint: string): SessionNode {
   const detail = "nodes[]";
   const node = readRecord(value, endpoint, detail);
@@ -1171,6 +1208,9 @@ function readSessionNode(value: JsonValue, endpoint: string): SessionNode {
       endpoint,
       `${detail}.latestActivityAtMs`,
     ),
+    models: readArray(node.models, endpoint, `${detail}.models`).map((entry) =>
+      readModelIdentity(entry, endpoint, `${detail}.models[]`),
+    ),
   };
   const worktreeLabel = readOptionalText(node.worktreeLabel, endpoint, `${detail}.worktreeLabel`);
   if (worktreeLabel !== undefined) parsed.worktreeLabel = worktreeLabel;
@@ -1178,13 +1218,19 @@ function readSessionNode(value: JsonValue, endpoint: string): SessionNode {
   if (agent !== undefined) parsed.agent = agent;
   const parentId = readOptionalText(node.parentId, endpoint, `${detail}.parentId`);
   if (parentId !== undefined) parsed.parentId = parentId;
+  const cacheUnknownSteps = readOptionalNumber(
+    node.cacheUnknownSteps,
+    endpoint,
+    `${detail}.cacheUnknownSteps`,
+  );
+  if (cacheUnknownSteps !== undefined) parsed.cacheUnknownSteps = cacheUnknownSteps;
   return parsed;
 }
 
 function readStep(value: JsonValue, endpoint: string): StepPoint {
   const detail = "steps[]";
   const step = readRecord(value, endpoint, detail);
-  return {
+  const parsed: StepPoint = {
     sessionId: readText(step.sessionId, endpoint, `${detail}.sessionId`),
     messageId: readText(step.messageId, endpoint, `${detail}.messageId`),
     atMs: readNumber(step.atMs, endpoint, `${detail}.atMs`),
@@ -1193,6 +1239,26 @@ function readStep(value: JsonValue, endpoint: string): StepPoint {
     contextTokens: readNumber(step.contextTokens, endpoint, `${detail}.contextTokens`),
     totalTokens: readNumber(step.totalTokens, endpoint, `${detail}.totalTokens`),
   };
+  const createdAtMs = readOptionalNumber(step.createdAtMs, endpoint, `${detail}.createdAtMs`);
+  if (createdAtMs !== undefined) parsed.createdAtMs = createdAtMs;
+  if (step.model !== undefined)
+    parsed.model = readModelIdentity(step.model, endpoint, `${detail}.model`);
+  if (step.cacheReadUnknown !== undefined) {
+    if (readBoolean(step.cacheReadUnknown, endpoint, `${detail}.cacheReadUnknown`)) {
+      parsed.cacheReadUnknown = true;
+    }
+  }
+  if (step.cacheWriteUnknown !== undefined) {
+    if (readBoolean(step.cacheWriteUnknown, endpoint, `${detail}.cacheWriteUnknown`)) {
+      parsed.cacheWriteUnknown = true;
+    }
+  }
+  if (step.inputMarker !== undefined) {
+    if (readBoolean(step.inputMarker, endpoint, `${detail}.inputMarker`)) {
+      parsed.inputMarker = true;
+    }
+  }
+  return parsed;
 }
 
 function readCompactionMarker(
@@ -1213,7 +1279,14 @@ export function parseSessionSnapshot(value: JsonValue, endpoint: string): Sessio
   const root = readRecord(value, endpoint, "not an object");
   const ownSummaryRecord = readRecord(root.ownSummary, endpoint, "ownSummary");
   const ownSummary = readCostedTokens(ownSummaryRecord, endpoint, "ownSummary");
+  const unobservedAtMs =
+    root.unobservedAtMs === undefined
+      ? undefined
+      : readArray(root.unobservedAtMs, endpoint, "unobservedAtMs").map((entry) =>
+          readNumber(entry, endpoint, "unobservedAtMs[]"),
+        );
   return {
+    ...(unobservedAtMs === undefined ? {} : { unobservedAtMs }),
     focusSessionId: readText(root.focusSessionId, endpoint, "focusSessionId"),
     timeZone: readText(root.timeZone, endpoint, "timeZone"),
     projectId: readText(root.projectId, endpoint, "projectId"),
@@ -1494,7 +1567,7 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
     },
 
     async home(input) {
-      const endpoint = `/api/v1/home?range=${encodeURIComponent(input.range)}`;
+      const endpoint = `/api/v1/home?range=${encodeURIComponent(input.range)}${input.background ? "&background=true" : ""}`;
       return parseHomeSnapshot(await request(endpoint), endpoint);
     },
 

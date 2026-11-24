@@ -6,7 +6,8 @@
  * exact `cardId`, its `providerId`, or its authoritative bare provider-scope
  * hash. Effective server settings normalize legacy full scope ids to
  * `providerId`; every full card id is now an exact hide. Row hiding is a
- * separate, exact `rowId` check and is not affected by this helper.
+ * separate check in `row-visibility.ts`, which resolves pre-window aggregate
+ * row ids against the card's first emitted typed row.
  */
 
 export interface ProviderVisibilityIdentity {

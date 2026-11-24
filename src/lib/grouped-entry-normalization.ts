@@ -78,7 +78,7 @@ function normalizeGroupedQuotaEntry(
   return {
     ...normalized,
     group: owned.name.trim(),
-    ...(target === "quota" ? { label: label ?? "Status:" } : {}),
+    ...(target === "quota" && !owned.semantic ? { label: label ?? "Status:" } : {}),
   };
 }
 

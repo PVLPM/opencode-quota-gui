@@ -35,8 +35,11 @@ vi.mock("../src/lib/opencode-runtime-paths.js", () =>
 
 // Loaded after the mocks above are set up.
 const {
+  collectQuotaWindows,
+  getQuotaAutoResumeProviderIds,
   getQuotaResetRetryDelayMs,
   isQuotaLimitError,
+  resolveQuotaEvidenceBinding,
   QUOTA_RESET_RETRY_BUFFER_MS,
   QUOTA_RESET_RETRY_MAX_DELAY_MS,
 } = await import("../src/lib/quota-retry-wait.js");
@@ -59,9 +62,19 @@ function result(entries: QuotaToastEntry[]): QuotaProviderResult {
 }
 
 describe("isQuotaLimitError", () => {
-  it("accepts OpenCode's rate-limit and quota errors and any HTTP 429", () => {
-    expect(isQuotaLimitError({ type: "provider.rate-limit" })).toBe(true);
-    expect(isQuotaLimitError({ type: "provider.quota" })).toBe(true);
+  it("accepts OpenCode's quota-shaped errors and any HTTP 429", () => {
+    for (const type of [
+      "provider.rate-limit",
+      "provider.quota",
+      "provider.free-limit",
+      "provider.budget-limit",
+      "provider.model-budget-limit",
+      "provider.go-limit",
+      "provider.chatgpt-limit",
+      "provider.chatgpt-workspace-limit",
+    ]) {
+      expect(isQuotaLimitError({ type })).toBe(true);
+    }
     expect(isQuotaLimitError({ type: "provider.unknown", status: 429 })).toBe(true);
   });
 
@@ -69,6 +82,67 @@ describe("isQuotaLimitError", () => {
     for (const type of ["provider.auth", "provider.transport", "provider.internal", "unknown"]) {
       expect(isQuotaLimitError({ type, status: 500 })).toBe(false);
     }
+  });
+});
+
+describe("getQuotaAutoResumeProviderIds", () => {
+  it("maps both Claude Agent runtime ids to the eligible route provider", () => {
+    expect(getQuotaAutoResumeProviderIds("claude-agent")).toEqual(new Set(["claude-agent"]));
+    expect(getQuotaAutoResumeProviderIds("claude-code")).toEqual(new Set(["claude-agent"]));
+    expect(getQuotaAutoResumeProviderIds("zai-coding-plan").has("zai")).toBe(true);
+  });
+
+  it("returns nothing for a route whose registration has no auto-resume contract", () => {
+    // An inferred account row must never make one of these routes eligible.
+    expect(getQuotaAutoResumeProviderIds("anthropic").size).toBe(0);
+    expect(getQuotaAutoResumeProviderIds("openrouter").size).toBe(0);
+  });
+});
+
+describe("resolveQuotaEvidenceBinding", () => {
+  it("never binds an ineligible provider through an inferred active account", () => {
+    const accountWindow = {
+      ...window("5h", 0, at(90 * MINUTE_MS)),
+      accounting: { ...TEST_ACCOUNTING, sourceId: "account-1" },
+    };
+    const providerResult = {
+      ...result([accountWindow]),
+      accounts: [{ sourceId: "account-1", active: true }],
+    };
+
+    expect(
+      resolveQuotaEvidenceBinding({
+        modelProviderID: "anthropic",
+        providerResults: [{ providerId: "anthropic", result: providerResult }],
+        activeSourceId: "account-1",
+      }),
+    ).toBeUndefined();
+  });
+});
+
+describe("collectQuotaWindows", () => {
+  it("includes a named primary row only when auto-resume asks for that exact row", () => {
+    const fiveHour = {
+      ...window("5h", 0, at(90 * MINUTE_MS)),
+      semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
+    } satisfies QuotaToastEntry;
+    const fable = {
+      ...window("Fable", 0, at(90 * MINUTE_MS)),
+      semantic: { metric: { kind: "named", name: "Fable weekly" }, prominence: "primary" },
+    } satisfies QuotaToastEntry;
+    const binding = { kind: "provider-scope", providerId: "claude-agent", scope: "scope" } as const;
+
+    expect(
+      collectQuotaWindows([result([fiveHour, fable])], binding, {
+        primaryAccountOnly: true,
+      })?.windows.map((entry) => entry.key),
+    ).toEqual(["window:five_hour"]);
+    expect(
+      collectQuotaWindows([result([fiveHour, fable])], binding, {
+        primaryAccountOnly: true,
+        includeNamedWindows: ["named:Fable weekly"],
+      })?.windows.map((entry) => entry.key),
+    ).toEqual(["window:five_hour", "named:Fable weekly"]);
   });
 });
 
@@ -81,7 +155,7 @@ describe("getQuotaResetRetryDelayMs", () => {
     expect(delay).toBe(90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
   });
 
-  it("picks the earliest reset among used-up windows of every result", () => {
+  it("waits for the latest exhausted window when entries have no model metadata", () => {
     const delay = getQuotaResetRetryDelayMs(
       [
         result([window("5h", 0, at(90 * MINUTE_MS))]),
@@ -89,16 +163,89 @@ describe("getQuotaResetRetryDelayMs", () => {
       ],
       NOW_MS,
     );
-    expect(delay).toBe(20 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+    expect(delay).toBe(90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
   });
 
-  it("caps the wait", () => {
+  it("does not guess when another exhausted window has a missing or stale reset", () => {
+    for (const reset of [undefined, at(-MINUTE_MS), "invalid"]) {
+      expect(
+        getQuotaResetRetryDelayMs(
+          [result([window("5h", 0, at(90 * MINUTE_MS)), window("Weekly", 0, reset)])],
+          NOW_MS,
+        ),
+      ).toBeUndefined();
+    }
+  });
+
+  it("uses only the marked active account and refuses ambiguous accounts", () => {
+    const entries = [
+      {
+        ...window("5h", 0, at(90 * MINUTE_MS)),
+        accounting: { ...TEST_ACCOUNTING, sourceId: "active" },
+      },
+      {
+        ...window("5h", 0, at(20 * MINUTE_MS)),
+        accounting: { ...TEST_ACCOUNTING, sourceId: "other" },
+      },
+    ];
+    const accounts = [
+      { sourceId: "active", active: true },
+      { sourceId: "other", active: false },
+    ];
+    expect(getQuotaResetRetryDelayMs([{ ...result(entries), accounts }], NOW_MS)).toBe(
+      90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS,
+    );
+    expect(
+      getQuotaResetRetryDelayMs(
+        [{ ...result(entries), accounts: accounts.map(({ sourceId }) => ({ sourceId })) }],
+        NOW_MS,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refuses a failed refresh or unknown percentage", () => {
+    const good = window("5h", 0, at(MINUTE_MS));
+    expect(
+      getQuotaResetRetryDelayMs(
+        [{ ...result([good]), errors: [{ label: "failed", message: "failed" }] }],
+        NOW_MS,
+      ),
+    ).toBeUndefined();
+    expect(
+      getQuotaResetRetryDelayMs([result([good, window("Weekly", Number.NaN)])], NOW_MS),
+    ).toBeUndefined();
+  });
+
+  it("caps the reset wait and adds the buffer after the cap", () => {
     const delay = getQuotaResetRetryDelayMs(
       [result([window("Weekly", 0, at(3 * 24 * 60 * MINUTE_MS))])],
       NOW_MS,
     );
-    expect(delay).toBe(QUOTA_RESET_RETRY_MAX_DELAY_MS);
+    expect(delay).toBe(QUOTA_RESET_RETRY_MAX_DELAY_MS + QUOTA_RESET_RETRY_BUFFER_MS);
     expect(QUOTA_RESET_RETRY_MAX_DELAY_MS).toBe(5 * 60 * MINUTE_MS);
+  });
+
+  it("never lands the capped retry just before the reset", () => {
+    // The reset is 30 seconds inside the five-hour cap: the old cap landed before it.
+    const delay = getQuotaResetRetryDelayMs(
+      [result([window("Weekly", 0, at(QUOTA_RESET_RETRY_MAX_DELAY_MS - 30_000))])],
+      NOW_MS,
+    );
+    expect(delay).toBe(QUOTA_RESET_RETRY_MAX_DELAY_MS - 30_000 + QUOTA_RESET_RETRY_BUFFER_MS);
+  });
+
+  it("waits for weekly when both weekly and 5h are exhausted", () => {
+    expect(
+      getQuotaResetRetryDelayMs(
+        [
+          result([
+            window("5h", 0, at(60 * MINUTE_MS)),
+            window("Weekly", 0, at(4 * 60 * MINUTE_MS)),
+          ]),
+        ],
+        NOW_MS,
+      ),
+    ).toBe(4 * 60 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
   });
 
   it("has no delay without a used-up window whose reset is still ahead", () => {
@@ -204,6 +351,47 @@ describe("resolveQuotaResetRetryDelayMs", () => {
     expect(copilot.fetch).not.toHaveBeenCalled();
   });
 
+  it("uses OpenCode's active credential rather than another integration's marker", async () => {
+    const { bindCredentialSource } = await import("../src/lib/opencode-auth.js");
+    const release = bindCredentialSource({
+      kind: "opencode-integration-api",
+      readRows: async () => [
+        {
+          id: "current",
+          integrationId: "zai-coding-plan",
+          label: "",
+          active: true,
+          value: {},
+        },
+      ],
+    });
+    try {
+      const entries = [
+        {
+          ...window("5h", 0, at(90 * MINUTE_MS)),
+          accounting: { ...TEST_ACCOUNTING, sourceId: "current" },
+        },
+        {
+          ...window("5h", 0, at(20 * MINUTE_MS)),
+          accounting: { ...TEST_ACCOUNTING, sourceId: "other" },
+        },
+      ];
+      const provider = makeProvider("zai", entries, () => true);
+      provider.fetch.mockResolvedValue({
+        ...result(entries),
+        accounts: [
+          { sourceId: "current", active: true },
+          { sourceId: "other", active: true },
+        ],
+      });
+      mocks.getProviders.mockReturnValue([provider]);
+      mocks.loadConfig.mockResolvedValue(makeQuotaToastTestConfig());
+      await expect(resolve(limitEvent)).resolves.toBe(90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+    } finally {
+      release();
+    }
+  });
+
   it("asks the provider for fresh quota on every limit error instead of reusing the cache", async () => {
     // A cacheable provider and a long minIntervalMs: a normal refresh would reuse the first result.
     const zai = {
@@ -240,11 +428,137 @@ describe("resolveQuotaResetRetryDelayMs", () => {
     expect(mocks.loadConfig).not.toHaveBeenCalled();
   });
 
+  it("leaves untyped Claude Agent subscription-limit messages unchanged", async () => {
+    for (const message of [
+      "Claude Code subscription limit reached (five hour). Resets at 2026-11-23T01:10:00.000Z.",
+      "You've hit your session limit · resets 4:10am (Europe/Istanbul)",
+      "You've hit your weekly limit · resets May 31 at 5pm (Asia/Shanghai)",
+    ]) {
+      await expect(
+        resolve({
+          model: { id: "claude-sonnet", providerID: "claude-agent" },
+          error: { type: "provider.unknown", message } as unknown as QuotaRetryEvent["error"],
+        }),
+      ).resolves.toBeUndefined();
+    }
+    expect(mocks.loadConfig).not.toHaveBeenCalled();
+  });
+
   it("keeps OpenCode's decision when the provider still has quota left", async () => {
     const zai = makeProvider("zai", [window("5h", 12, at(90 * MINUTE_MS))], () => true);
     mocks.getProviders.mockReturnValue([zai]);
     mocks.loadConfig.mockResolvedValue(makeQuotaToastTestConfig({ waitForQuotaReset: true }));
 
     await expect(resolve(limitEvent)).resolves.toBeUndefined();
+  });
+
+  it("waits at least as long as the provider's retryAfterMs", async () => {
+    const zai = makeProvider("zai", [window("5h", 0, at(10 * MINUTE_MS))], () => true);
+    mocks.getProviders.mockReturnValue([zai]);
+    mocks.loadConfig.mockResolvedValue(makeQuotaToastTestConfig({ waitForQuotaReset: true }));
+
+    await expect(
+      resolve({
+        ...limitEvent,
+        error: { type: "provider.rate-limit", status: 429, retryAfterMs: 20 * MINUTE_MS },
+      }),
+    ).resolves.toBe(20 * MINUTE_MS);
+    // A shorter provider wait never shortens the observed reset wait.
+    await expect(
+      resolve({
+        ...limitEvent,
+        error: { type: "provider.rate-limit", status: 429, retryAfterMs: 5 * MINUTE_MS },
+      }),
+    ).resolves.toBe(10 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+  });
+
+  it("recognizes ChatGPT subscription limits when a window is exhausted", async () => {
+    const openai = makeProvider("openai", [window("Weekly", 0, at(90 * MINUTE_MS))], () => true);
+    mocks.getProviders.mockReturnValue([openai]);
+    mocks.loadConfig.mockResolvedValue(makeQuotaToastTestConfig({ waitForQuotaReset: true }));
+
+    await expect(
+      resolve({
+        ...limitEvent,
+        model: { id: "gpt-5", providerID: "openai" },
+        error: { type: "provider.chatgpt-limit" },
+      }),
+    ).resolves.toBe(90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+  });
+
+  it("bounds a hanging live probe by the configured request timeout", async () => {
+    const hanging = makeProvider("zai", [], () => true);
+    hanging.fetch.mockReturnValue(new Promise(() => {}));
+    mocks.getProviders.mockReturnValue([hanging]);
+    mocks.loadConfig.mockResolvedValue(
+      makeQuotaToastTestConfig({ waitForQuotaReset: true, requestTimeoutMs: 25 }),
+    );
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const pending = resolve(limitEvent);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("distinguishes a disabled auto-resume setting from unavailable evidence", async () => {
+    const zai = makeProvider("zai", [window("5h", 0, at(90 * MINUTE_MS))], () => true);
+    mocks.getProviders.mockReturnValue([zai]);
+    mocks.loadConfig.mockResolvedValue(
+      makeQuotaToastTestConfig({ autoResumeOnQuotaRecovery: false }),
+    );
+    const { probeQuotaForModelState } = await import("../src/lib/quota-retry-wait.js");
+
+    await expect(
+      probeQuotaForModelState(
+        createHost(),
+        limitEvent.model,
+        (config) => config.autoResumeOnQuotaRecovery,
+      ),
+    ).resolves.toEqual({ state: "disabled" });
+    expect(zai.fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a route with no auto-resume contract before probing it", async () => {
+    const anthropic = makeProvider("anthropic", [window("5h", 0, at(90 * MINUTE_MS))], () => true);
+    mocks.getProviders.mockReturnValue([anthropic]);
+    mocks.loadConfig.mockResolvedValue(
+      makeQuotaToastTestConfig({ autoResumeOnQuotaRecovery: true }),
+    );
+    const { probeQuotaForModelState } = await import("../src/lib/quota-retry-wait.js");
+
+    await expect(
+      probeQuotaForModelState(
+        createHost(),
+        { id: "claude-sonnet", providerID: "anthropic" },
+        (config) => config.autoResumeOnQuotaRecovery,
+        { includeProviderScope: true },
+      ),
+    ).resolves.toEqual({ state: "unsupported" });
+    expect(anthropic.fetch).not.toHaveBeenCalled();
+  });
+
+  it("reports unavailable evidence when an enabled probe times out", async () => {
+    const hanging = makeProvider("zai", [], () => true);
+    hanging.fetch.mockReturnValue(new Promise(() => {}));
+    mocks.getProviders.mockReturnValue([hanging]);
+    mocks.loadConfig.mockResolvedValue(
+      makeQuotaToastTestConfig({ autoResumeOnQuotaRecovery: true, requestTimeoutMs: 25 }),
+    );
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const { probeQuotaForModelState } = await import("../src/lib/quota-retry-wait.js");
+      const pending = probeQuotaForModelState(
+        createHost(),
+        limitEvent.model,
+        (config) => config.autoResumeOnQuotaRecovery,
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(pending).resolves.toEqual({ state: "unavailable" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

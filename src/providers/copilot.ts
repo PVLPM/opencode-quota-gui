@@ -18,6 +18,7 @@ import type {
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import {
   credentialRowAuthEntry,
   formatCredentialDisplayNames,
@@ -175,7 +176,7 @@ function personalEntries(result: CopilotQuotaResult): QuotaToastEntry[] {
         name,
         group,
         label: "Quota:",
-        rowKey: "window:month",
+        semantic: windowSemantic("month"),
         value: "Unlimited",
         resetTimeIso: result.resetTimeIso,
       },
@@ -189,7 +190,7 @@ function personalEntries(result: CopilotQuotaResult): QuotaToastEntry[] {
       name,
       group,
       label: result.unit === "ai_credits" ? "Credits:" : "Quota:",
-      rowKey: "window:month",
+      semantic: windowSemantic("month"),
       right: `${formatNumber(result.used)}/${formatNumber(result.total)}`,
       percentRemaining: result.percentRemaining,
       resetTimeIso: result.resetTimeIso,
@@ -201,7 +202,7 @@ function personalEntries(result: CopilotQuotaResult): QuotaToastEntry[] {
       name,
       group,
       label: result.unit === "ai_credits" ? "Credits:" : "Usage:",
-      rowKey: "window:month",
+      semantic: windowSemantic("month", "supplementary"),
       value:
         result.unit === "ai_credits"
           ? formatAiCreditUsageValue(result)
@@ -273,7 +274,7 @@ function managedEntries(
       name: "Copilot AI Credits",
       group,
       label: "Credits:",
-      rowKey: "window:month",
+      semantic: windowSemantic("month", "supplementary"),
       value: formatAiCreditUsageValue(result),
       resetTimeIso: result.resetTimeIso,
     },

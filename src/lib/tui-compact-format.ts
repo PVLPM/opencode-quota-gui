@@ -104,6 +104,8 @@ function formatCompactValueEntrySegment(
 
 type CompactPercentGroup = {
   provider: string;
+  /** Original entry position of the group's first percent row. */
+  order: number;
   windows: Array<{
     label: string | null;
     value: string;
@@ -115,6 +117,8 @@ type CompactPercentGroup = {
 type CompactCandidate = {
   segment: string;
   prominence: 0 | 1;
+  /** Original entry position; keeps mixed semantic/legacy providers in card order. */
+  order: number;
   providerKey?: string;
   detail?: string;
   atomic?: { prefix: string; value: string };
@@ -125,7 +129,7 @@ type CompactCandidate = {
 
 type PendingLegacySegment =
   | { kind: "percent"; key: string }
-  | { kind: "value"; segment: string; provider: string };
+  | { kind: "value"; segment: string; provider: string; order: number };
 
 function formatCompactPercentGroupSegment(
   group: CompactPercentGroup,
@@ -148,6 +152,7 @@ function formatCompactPercentGroupSegment(
 
 function buildSemanticCandidate(
   entry: QuotaToastEntry,
+  order: number,
   percentDisplayMode: QuotaToastConfig["percentDisplayMode"],
   accountingDetail: QuotaToastConfig["accountingDetail"],
   resetTimeSpaced?: boolean,
@@ -172,8 +177,12 @@ function buildSemanticCandidate(
   if (!value) return null;
 
   const provider = getProviderName(entry);
-  const label = compactText(interpretation.label);
-  const prefix = compactText([provider, label].filter(Boolean).join(": "));
+  const hasExplicitLabel = Boolean(entry.label?.trim() || entry.metricLabel?.trim());
+  const explicitLabel = hasExplicitLabel ? getWindowLabel(entry) : null;
+  const label = explicitLabel ? explicitLabel.text : compactText(interpretation.label);
+  const prefix = compactText(
+    [provider, label].filter(Boolean).join(explicitLabel?.isWindow ? " " : ": "),
+  );
   const runway = isPercentEntry(entry) ? formatQuotaRunway(entry.runway) : "";
   const displayValue = compactText(
     [
@@ -195,6 +204,7 @@ function buildSemanticCandidate(
   return {
     segment,
     prominence: entry.semantic.prominence === "supplementary" ? 1 : 0,
+    order,
     providerKey: provider.toLowerCase(),
     ...(isPercentEntry(entry) && entry.runway ? { runway: entry.runway } : {}),
     ...(detail ? { detail } : {}),
@@ -214,10 +224,11 @@ function formatCompactEntryCandidates(params: {
   const groups = new Map<string, CompactPercentGroup>();
   const pendingLegacy: PendingLegacySegment[] = [];
 
-  for (const entry of params.entries) {
+  for (const [index, entry] of params.entries.entries()) {
     if (entry.semantic) {
       const candidate = buildSemanticCandidate(
         entry,
+        index,
         params.percentDisplayMode,
         params.accountingDetail,
         params.resetTimeSpaced,
@@ -229,7 +240,12 @@ function formatCompactEntryCandidates(params: {
     if (isValueEntry(entry)) {
       const segment = formatCompactValueEntrySegment(entry, params.resetTimeSpaced);
       if (segment) {
-        pendingLegacy.push({ kind: "value", segment, provider: getProviderName(entry) });
+        pendingLegacy.push({
+          kind: "value",
+          segment,
+          provider: getProviderName(entry),
+          order: index,
+        });
       }
       continue;
     }
@@ -251,7 +267,7 @@ function formatCompactEntryCandidates(params: {
     let group = groups.get(key);
 
     if (!group) {
-      group = { provider, windows: [] };
+      group = { provider, order: index, windows: [] };
       groups.set(key, group);
       pendingLegacy.push({ kind: "percent", key });
     }
@@ -270,6 +286,7 @@ function formatCompactEntryCandidates(params: {
         return {
           segment: pending.segment,
           prominence: 0,
+          order: pending.order,
           providerKey: pending.provider.toLowerCase(),
         };
       }
@@ -294,6 +311,7 @@ function formatCompactEntryCandidates(params: {
       return {
         segment,
         prominence: 0,
+        order: group.order,
         providerKey: group.provider.toLowerCase(),
         ...(fallbackSegment && fallbackSegment !== segment && fallbackValue
           ? {
@@ -306,13 +324,9 @@ function formatCompactEntryCandidates(params: {
     })
     .filter((candidate): candidate is CompactCandidate => Boolean(candidate));
 
-  return [...legacy, ...semantic]
-    .map((candidate, index) => ({ candidate, index }))
-    .sort(
-      (left, right) =>
-        left.candidate.prominence - right.candidate.prominence || left.index - right.index,
-    )
-    .map(({ candidate }) => candidate);
+  return [...legacy, ...semantic].sort(
+    (left, right) => left.prominence - right.prominence || left.order - right.order,
+  );
 }
 
 function fitAtomicCandidate(
@@ -483,7 +497,7 @@ function applyProviderOverflow(
 
   const withOverflow = (items: CompactCandidate[], count: number): CompactCandidate[] => [
     ...items,
-    { segment: formatProviderOverflow(count), prominence: 0 },
+    { segment: formatProviderOverflow(count), prominence: 0, order: Number.MAX_SAFE_INTEGER },
   ];
 
   if (joinCompactSegments(withOverflow(current, omitted)).length <= maxWidth) {
@@ -512,13 +526,15 @@ function applyProviderOverflow(
       if (truncated) {
         return [
           { ...first, segment: truncated },
-          { segment: overflowText, prominence: 0 },
+          { segment: overflowText, prominence: 0, order: Number.MAX_SAFE_INTEGER },
         ];
       }
     }
   }
 
-  return overflowText.length <= maxWidth ? [{ segment: overflowText, prominence: 0 }] : admitted;
+  return overflowText.length <= maxWidth
+    ? [{ segment: overflowText, prominence: 0, order: Number.MAX_SAFE_INTEGER }]
+    : admitted;
 }
 
 function formatIssueCount(count: number): string {
@@ -555,7 +571,11 @@ export function buildCompactQuotaStatusLine(params: {
   });
   const sessionTokensSegment = formatCompactSessionTokensSegment(data);
   if (sessionTokensSegment) {
-    candidates.push({ segment: sessionTokensSegment, prominence: 0 });
+    candidates.push({
+      segment: sessionTokensSegment,
+      prominence: 0,
+      order: Number.MAX_SAFE_INTEGER,
+    });
   }
 
   const admitted = applyProviderOverflow(
@@ -577,7 +597,7 @@ export function buildCompactQuotaStatusLine(params: {
         COMPACT_SEGMENT_SEPARATOR,
       );
       if (candidate.length <= maxWidth) {
-        admitted.push({ segment: issueSegment, prominence: 0 });
+        admitted.push({ segment: issueSegment, prominence: 0, order: Number.MAX_SAFE_INTEGER });
       }
     }
   }

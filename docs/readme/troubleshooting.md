@@ -72,7 +72,7 @@ Custom definitions live in the canonical `quotaProviders` array. See [Configurat
 | Claude is installed at a custom path | Set `anthropicBinaryPath` in the canonical config file. |
 | Not signed in | Run `claude auth login`, then check `claude auth status`. |
 | Claude Agent signed in but no quota rows | Sign in to Claude again if the OAuth credential fallback is missing or stale. |
-| Anthropic card missing | Anthropic API quota is unavailable here; OpenCode Anthropic OAuth sign-ins do not report subscription quota. Use Claude Agent for Claude subscription quota. |
+| Anthropic card missing | The card needs an Anthropic API key (OpenCode API-key login, `ANTHROPIC_API_KEY` or trusted config); an OAuth sign-in does not count and never reports subscription quota. Use Claude Agent for Claude subscription quota. |
 | Claude Agent card missing | Make sure OpenCode has the `claude-agent` provider and `claude auth status` reports a sign-in. |
 
 </details>

@@ -7,11 +7,13 @@ import {
   queryAlibabaTokenPlanQuota,
 } from "../lib/alibaba-token-plan.js";
 import type {
+  AccountingWindow,
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
 import { modelProviderMatchesRuntimeId } from "../lib/provider-model-matching.js";
 import { REQUEST_TIMEOUT_MS } from "../lib/types.js";
@@ -35,12 +37,14 @@ function windowEntry(
   window: AlibabaTokenPlanWindow,
   suffix: string,
   label: string,
+  semanticWindow: AccountingWindow,
 ): QuotaToastEntry {
   return {
     accounting: { ...ACCOUNTING },
     name: `${GROUP} ${suffix}`,
     group: GROUP,
     label,
+    semantic: windowSemantic(semanticWindow),
     percentRemaining: window.percentRemaining,
     ...(window.resetTimeIso ? { resetTimeIso: window.resetTimeIso } : {}),
   };
@@ -89,8 +93,12 @@ function alibabaFailureCategory(
 function mapClosedResult(result: AlibabaTokenPlanClosedResult): QuotaProviderResult {
   if (result.ok) {
     const entries: QuotaToastEntry[] = [];
-    if (result.fiveHour) entries.push(windowEntry(result.fiveHour, "5h", "5h:"));
-    if (result.weekly) entries.push(windowEntry(result.weekly, "Weekly", "Weekly:"));
+    if (result.fiveHour) {
+      entries.push(windowEntry(result.fiveHour, "5h", "5h:", "five_hour"));
+    }
+    if (result.weekly) {
+      entries.push(windowEntry(result.weekly, "Weekly", "Weekly:", "week"));
+    }
     return attemptedResult(entries);
   }
   if (result.error.kind === "unsupported_platform") {

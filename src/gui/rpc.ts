@@ -186,6 +186,9 @@ function mapRpcError(error: unknown): MappedRpcError {
       details: sanitizeDashboardErrorDetails(safeCode, errorDetails(error)) ?? {},
     };
   }
+  // The analytics worker's own `timeout`, `unavailable`, and `closed` codes land
+  // here as `internal`: they are terminal for that worker read, not the host's
+  // transport deadline, so a client must not re-join them as a timed-out RPC.
   return {
     code: "internal",
     message: DASHBOARD_ERROR_MESSAGES.internal,

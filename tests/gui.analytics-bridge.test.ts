@@ -10,6 +10,12 @@ import type { AnalyticsEngine } from "../src/gui/analytics-engine.js";
 import type { AnalyticsWorkerRequest } from "../src/gui/analytics-protocol.js";
 import { createAnalyticsWorkerRuntime } from "../src/gui/analytics-worker-runtime.js";
 import { createGuiLogger } from "../src/gui/log.js";
+import { createSnapshotService, type SnapshotSource } from "../src/gui/snapshot-service.js";
+import {
+  __resetPricingSnapshotForTests,
+  getPricingRefreshPolicy,
+  getPricingSnapshotSelection,
+} from "../src/lib/modelsdev-pricing.js";
 
 const logger = createGuiLogger({ sink: () => {} });
 const NOW = Date.parse("2026-10-19T12:00:00.000Z");
@@ -90,6 +96,247 @@ async function flushMicrotasks(rounds = 50): Promise<void> {
 }
 
 describe("analytics worker bridge", () => {
+  it("retires an initialized worker when no reads follow", async () => {
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    await bridge.init({});
+    await vi.waitFor(() => expect(worker.terminated).toBe(1));
+    expect(framesOf(worker, "close")).toHaveLength(1);
+    await bridge.close();
+  });
+
+  it("keeps a warm worker through the idle grace and retires after it", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({
+      createWorker: () => worker,
+      idleRetireMs: 1_000,
+      logger,
+    });
+    try {
+      await bridge.init({});
+      await vi.advanceTimersByTimeAsync(500);
+      expect(worker.terminated).toBe(0);
+      await bridge.home("7d");
+      // The read cancels the pending retirement, then a new grace starts.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(worker.terminated).toBe(0);
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+      expect(framesOf(worker, "close")).toHaveLength(1);
+      await flushMicrotasks();
+      expect(worker.terminated).toBe(1);
+    } finally {
+      await bridge.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("delays idle retirement while worker pricing upkeep is active", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({
+      createWorker: () => worker,
+      idleRetireMs: 1_000,
+      logger,
+    });
+    try {
+      await bridge.init({});
+      worker.emit("message", { type: "analytics-upkeep", active: true });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(worker.terminated).toBe(0);
+      expect(framesOf(worker, "close")).toHaveLength(0);
+
+      worker.emit("message", { type: "analytics-upkeep", active: false });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks();
+      expect(framesOf(worker, "close")).toHaveLength(1);
+      await flushMicrotasks();
+      expect(worker.terminated).toBe(1);
+    } finally {
+      await bridge.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops waiting for pricing upkeep after the safety cap", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({
+      createWorker: () => worker,
+      idleRetireMs: 1_000,
+      logger,
+    });
+    try {
+      await bridge.init({});
+      worker.emit("message", { type: "analytics-upkeep", active: true });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(worker.terminated).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushMicrotasks();
+      expect(worker.terminated).toBe(1);
+    } finally {
+      await bridge.close();
+      vi.useRealTimers();
+    }
+  });
+  it("promotes a clicked queued range through the snapshot service without duplicate reads", async () => {
+    const worker = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const source = {
+      home: ({ range, exact, background }) => bridge.home(range, exact, background),
+      project: (input) => bridge.project(input.projectId, input.range),
+      session: (input) => bridge.session(input.sessionId),
+    } satisfies SnapshotSource;
+    const service = createSnapshotService({ source, logger });
+    const active = service.home({ range: "7d" });
+    await flushMicrotasks();
+    const lifetime = service.home({ range: "lifetime", background: true });
+    const background = service.home({ range: "30d", background: true });
+    const click = service.home({ range: "30d" });
+    const first = framesOf(worker, "home")[0];
+    worker.emit("message", { id: first?.id, ok: true, result: {} });
+    await flushMicrotasks();
+    const second = framesOf(worker, "home")[1];
+    expect(second?.command).toMatchObject({ range: "30d" });
+    worker.emit("message", { id: second?.id, ok: true, result: {} });
+    await flushMicrotasks();
+    const third = framesOf(worker, "home")[2];
+    expect(third?.command).toMatchObject({ range: "lifetime" });
+    worker.emit("message", { id: third?.id, ok: true, result: {} });
+    await Promise.all([active, lifetime, background, click]);
+    expect(framesOf(worker, "home")).toHaveLength(3);
+    service.close();
+    await bridge.close();
+  });
+  it("coalesces a foreground click joining a running background range", async () => {
+    const worker = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const source = {
+      home: ({ range, exact, background }) => bridge.home(range, exact, background),
+      project: (input) => bridge.project(input.projectId, input.range),
+      session: (input) => bridge.session(input.sessionId),
+    } satisfies SnapshotSource;
+    const service = createSnapshotService({ source, logger });
+    const background = service.home({ range: "30d", background: true });
+    await flushMicrotasks();
+    const click = service.home({ range: "30d" });
+    await flushMicrotasks();
+    const first = framesOf(worker, "home")[0];
+    expect(framesOf(worker, "home")).toHaveLength(1);
+    worker.emit("message", { id: first?.id, ok: true, result: {} });
+    await Promise.all([background, click]);
+    expect(framesOf(worker, "home")).toHaveLength(1);
+    service.close();
+    await bridge.close();
+  });
+  it("does not count a slow drain as a worker failure", async () => {
+    const first = new FakeWorker((command) =>
+      command.kind === "close" ? "ignore" : answerEcho(command),
+    );
+    const second = new FakeWorker(answerEcho);
+    let count = 0;
+    const bridge = createAnalyticsBridge({
+      createWorker: () => (++count === 1 ? first : second),
+      requestTimeoutMs: 20,
+      retryBaseMs: 60_000,
+      maxRecoveryAttempts: 1,
+      logger,
+    });
+    await bridge.home("7d");
+    await vi.waitFor(() => expect(framesOf(first, "close")).toHaveLength(1));
+    await expect(bridge.home("30d")).resolves.toMatchObject({ marker: "home:30d" });
+    expect(first.terminated).toBe(1);
+    expect(count).toBe(2);
+    await bridge.close();
+  }, 5_000);
+  it("forwards generation events while draining", async () => {
+    const worker = new FakeWorker((command) =>
+      command.kind === "close" ? "ignore" : answerEcho(command),
+    );
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const listener = vi.fn();
+    bridge.subscribe?.(listener);
+    await bridge.home("7d");
+    await vi.waitFor(() => expect(framesOf(worker, "close")).toHaveLength(1));
+    worker.emit("message", { type: "analytics-generation", generation: 1 });
+    expect(listener).toHaveBeenCalledTimes(1);
+    worker.emit("message", { id: framesOf(worker, "close")[0]?.id, ok: true });
+    await bridge.close();
+  });
+  it("drains after FIFO background work and ignores retired worker events", async () => {
+    const workers: FakeWorker[] = [];
+    const bridge = createAnalyticsBridge({
+      createWorker: () => {
+        const worker = new FakeWorker(answerEcho);
+        workers.push(worker);
+        return worker;
+      },
+      logger,
+    });
+    const notifications = vi.fn();
+    bridge.subscribe?.(notifications);
+    await Promise.all([
+      bridge.home("7d"),
+      bridge.home("30d", false, true),
+      bridge.home("lifetime", false, true),
+    ]);
+    await vi.waitFor(() => expect(workers[0]?.terminated).toBe(1));
+    expect(framesOf(workers[0]!, "home").map((frame) => frame.command)).toMatchObject([
+      { range: "7d" },
+      { range: "30d" },
+      { range: "lifetime" },
+    ]);
+    workers[0]?.emit("message", { type: "analytics-generation", generation: 1 });
+    expect(notifications).not.toHaveBeenCalled();
+    await bridge.home("24h");
+    expect(workers).toHaveLength(2);
+    await bridge.close();
+  });
+  it("creates a fresh worker for a request made while the prior worker is closing", async () => {
+    const first = new FakeWorker((command) =>
+      command.kind === "close" ? "ignore" : answerEcho(command),
+    );
+    const second = new FakeWorker(answerEcho);
+    let count = 0;
+    const bridge = createAnalyticsBridge({
+      createWorker: () => (++count === 1 ? first : second),
+      logger,
+    });
+    await bridge.home("7d");
+    await vi.waitFor(() => expect(framesOf(first, "close")).toHaveLength(1));
+    const next = bridge.home("30d");
+    expect(count).toBe(1);
+    const close = framesOf(first, "close")[0];
+    first.emit("message", { id: close?.id, ok: true });
+    await next;
+    expect(count).toBe(2);
+    expect(first.terminated).toBe(1);
+    await bridge.close();
+  });
+  it("prioritizes foreground reads and joins an identical queued background read", async () => {
+    const worker = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
+    const bridge = createAnalyticsBridge({ createWorker: () => worker, logger });
+    const active = bridge.home("7d");
+    await flushMicrotasks();
+    const foreground = bridge.home("lifetime", false, true);
+    const background = bridge.home("30d", false, true);
+    const join = bridge.home("30d");
+    const first = framesOf(worker, "home")[0];
+    expect(first?.command).toMatchObject({ kind: "home", range: "7d" });
+    worker.emit("message", { id: first?.id, ok: true, result: {} });
+    await flushMicrotasks();
+    const next = framesOf(worker, "home")[1];
+    expect(next?.command).toMatchObject({ kind: "home", range: "30d" });
+    worker.emit("message", { id: next?.id, ok: true, result: {} });
+    await flushMicrotasks();
+    const last = framesOf(worker, "home")[2];
+    expect(last?.command).toMatchObject({ kind: "home", range: "lifetime" });
+    worker.emit("message", { id: last?.id, ok: true, result: {} });
+    await Promise.all([active, background, foreground, join]);
+    expect(framesOf(worker, "home")).toHaveLength(3);
+    await bridge.close();
+  });
   it("retires a timed-out worker, recreates it, and replays init", async () => {
     let created = 0;
     const first = new FakeWorker((command) => (command.kind === "home" ? "ignore" : undefined));
@@ -570,6 +817,7 @@ describe("analytics worker bridge", () => {
         peakRss: 0,
       }),
       gc: async () => false,
+      unpricedRoutes: () => [],
       close: async () => {},
     } satisfies AnalyticsEngine;
     const runtime = createAnalyticsWorkerRuntime({ createEngine: () => engine });
@@ -596,6 +844,24 @@ describe("analytics worker bridge", () => {
     ).rejects.toMatchObject({ code: "bad-request" });
     expect(groups).toHaveBeenCalledTimes(1);
     await runtime.close();
+  });
+
+  it("applies the configured pricing snapshot policy at worker init", async () => {
+    const runtime = createAnalyticsWorkerRuntime({
+      // SAFETY: init only selects the pricing policy; the engine is never called.
+      createEngine: () => ({ unpricedRoutes: () => [], close: async () => {} }) as AnalyticsEngine,
+    });
+    try {
+      await runtime.handle({
+        kind: "init",
+        options: { pricingSnapshot: { source: "bundled", autoRefresh: 1 } },
+      });
+      expect(getPricingSnapshotSelection()).toBe("bundled");
+      expect(getPricingRefreshPolicy().maxAgeMs).toBe(DAY);
+    } finally {
+      await runtime.close();
+      __resetPricingSnapshotForTests();
+    }
   });
 
   it("uses an optional runtime-managed heap limit only when configured", () => {

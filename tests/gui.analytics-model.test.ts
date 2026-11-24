@@ -172,7 +172,7 @@ function row(input: {
       cacheWrite: 0,
       ...input.tokens,
     },
-    cost: input.cost ?? 1,
+    ...(input.cost === undefined ? {} : { cost: input.cost }),
     ...(input.agent === undefined ? {} : { agent: input.agent }),
   };
   // An explicit `undefined` leaves the raw identity missing; omitting the
@@ -1193,6 +1193,7 @@ describe("analytics model: price status", () => {
             [modelID]: {
               status: "supported",
               source: `providers/${providerID}/models/${modelID}.toml`,
+              base: { input: 1.32, output: 3.96, cache_read: 0.044 },
               overrides: [
                 {
                   id: "text.output.overrides[0]",
@@ -1268,18 +1269,19 @@ describe("analytics model: price status", () => {
             [modelID]: {
               status: "supported",
               source: `providers/${providerID}/models/${modelID}.toml`,
+              base: { input: 1.32, output: 3.96, cache_read: 0.044 },
               overrides: [
                 {
                   id: "text.output.overrides[0]",
                   field: "output",
                   when: { type: "utc_hours", op: "gte", value: "10:00" },
-                  rates: { output: 0.99 },
+                  rates: { output: 1.98 },
                 },
                 {
                   id: "text.output.overrides[1]",
                   field: "output",
                   when: { type: "utc_hours", op: "lt", value: "10:00" },
-                  rates: { output: 1.98 },
+                  rates: { output: 3.96 },
                 },
               ],
               multipliers: [],
@@ -1320,9 +1322,9 @@ describe("analytics model: price status", () => {
       NOW,
     );
     expect(detail.temporalBreakdown?.rows[0]?.peak.output).toBe(1_000_000);
-    expect(detail.temporalBreakdown?.rows[0]?.peak.apiEquivalentCostUsd).toBeCloseTo(1.98, 10);
+    expect(detail.temporalBreakdown?.rows[0]?.peak.apiEquivalentCostUsd).toBeCloseTo(3.96, 10);
     expect(detail.temporalBreakdown?.rows[0]?.offpeak.output).toBe(1_000_000);
-    expect(detail.temporalBreakdown?.rows[0]?.offpeak.apiEquivalentCostUsd).toBeCloseTo(0.99, 10);
+    expect(detail.temporalBreakdown?.rows[0]?.offpeak.apiEquivalentCostUsd).toBeCloseTo(1.98, 10);
   });
 
   it("admits an exact Z.ai monetary policy instead of excluding the provider name", () => {
@@ -3359,5 +3361,105 @@ describe("analytics model: rebuild equivalence", () => {
     const fresh = createModel(finalSessions, finalRows);
     expectSameModelOutputs(model, fresh);
     expect(model.ownedStepCount()).toBe(4);
+  });
+});
+
+describe("analytics model: unpriced route reporting", () => {
+  it("keeps only routes whose last pricing outcome had no cost", () => {
+    const sessions = [sessionInfo("ses_prices", "p1")];
+    const model = createModel(sessions, [
+      row({
+        sessionID: "ses_prices",
+        messageID: "msg_unpriced",
+        completedAtMs: NOW - HOUR,
+        tokens: { input: 10 },
+        providerID: "unpriced-labs",
+        modelID: "mystery-1",
+      }),
+      row({
+        sessionID: "ses_prices",
+        messageID: "msg_priced",
+        completedAtMs: NOW - HOUR,
+        tokens: { input: 10 },
+        providerID: "zero-labs",
+        modelID: "zero-1",
+      }),
+      row({
+        sessionID: "ses_prices",
+        messageID: "msg_free",
+        completedAtMs: NOW - HOUR,
+        tokens: { input: 10 },
+        providerID: "free-labs",
+        modelID: "free-1",
+      }),
+    ]);
+
+    expect(model.unpricedRoutes()).toEqual([{ providerID: "unpriced-labs", modelID: "mystery-1" }]);
+
+    model.clear();
+    expect(model.unpricedRoutes()).toEqual([]);
+  });
+});
+
+describe("analytics model: recorded-cost fallback", () => {
+  it("uses positive recorded cost only for unpriced routes and keeps the kicker interested", () => {
+    const sessions = [sessionInfo("ses_prices", "p1")];
+    const model = createModel(sessions, [
+      row({
+        sessionID: "ses_prices",
+        messageID: "msg_recorded",
+        completedAtMs: NOW - HOUR,
+        tokens: { input: 100, output: 50 },
+        providerID: "unpriced-labs",
+        modelID: "mystery-1",
+        cost: 0.75,
+      }),
+      row({
+        sessionID: "ses_prices",
+        messageID: "msg_modelsdev_zero",
+        completedAtMs: NOW - HOUR,
+        tokens: { input: 100 },
+        providerID: "free-labs",
+        modelID: "free-1",
+        cost: 99,
+      }),
+    ]);
+
+    const byProvider = model.groups({ range: "24h", dimension: "provider" }, NOW);
+    const unpricedRow = findGroupRow(byProvider.rows, known("unpriced-labs"));
+    expect(unpricedRow?.tokens).toMatchObject({
+      total: 150,
+      apiEquivalentCostUsd: 0.75,
+      unpricedTokens: 0,
+      unknownTokens: 0,
+      recordedCostUsd: 0.75,
+      recordedCostTokens: 150,
+    });
+    expect(findGroupRow(byProvider.rows, known("free-labs"))?.tokens).toMatchObject({
+      apiEquivalentCostUsd: 0,
+    });
+    expect(findGroupRow(byProvider.rows, known("free-labs"))?.tokens).not.toHaveProperty(
+      "recordedCostUsd",
+    );
+
+    expect(model.unpricedRoutes()).toEqual([{ providerID: "unpriced-labs", modelID: "mystery-1" }]);
+
+    // Once models.dev prices the route, a rebuild drops the fallback marker and
+    // removes the route from the kicker.
+    const repriced = createModel(sessions, [
+      row({
+        sessionID: "ses_prices",
+        messageID: "msg_recorded",
+        completedAtMs: NOW - HOUR,
+        tokens: { input: 100, output: 50 },
+        providerID: "zero-labs",
+        modelID: "zero-1",
+        cost: 0.75,
+      }),
+    ]);
+    expect(repriced.unpricedRoutes()).toEqual([]);
+    expect(
+      repriced.groups({ range: "24h", dimension: "provider" }, NOW).rows[0]?.tokens,
+    ).not.toHaveProperty("recordedCostUsd");
   });
 });

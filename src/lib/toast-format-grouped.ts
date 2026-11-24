@@ -48,8 +48,6 @@ function extractWindowLabel(text: string): string | null {
 }
 
 function resolveGroupedRowLabel(entry: QuotaToastEntry, semanticLabel: string): string {
-  if (entry.semantic) return semanticLabel;
-
   const rawLabel = normalizeLabelText(entry.label);
   const fromLabel = extractWindowLabel(rawLabel);
   if (fromLabel) return fromLabel;
@@ -60,8 +58,11 @@ function resolveGroupedRowLabel(entry: QuotaToastEntry, semanticLabel: string): 
   if (fromMetricLabel) return fromMetricLabel;
   if (metricLabel) return metricLabel;
 
-  const fromName = extractWindowLabel(entry.name);
+  const fromName = entry.semantic ? null : extractWindowLabel(entry.name);
   if (fromName) return fromName;
+
+  const fromSemantic = normalizeLabelText(semanticLabel);
+  if (fromSemantic) return fromSemantic;
 
   return normalizeLabelText(entry.group) || "Quota window";
 }
@@ -150,7 +151,9 @@ export function formatQuotaRowsGrouped(params: {
 
       if (interpretation.display.kind === "value") {
         const isAtomicValue = interpretation.display.entryKind !== "value";
-        const label = entry.semantic ? interpretation.label : entry.label?.trim() || entry.name;
+        const label = entry.semantic
+          ? normalizeLabelText(interpretation.label) || entry.name
+          : entry.label?.trim() || entry.name;
         const isRedundantLabel =
           !entry.semantic &&
           !entry.label &&

@@ -1,5 +1,6 @@
 import type {
   CostedTokens,
+  ModelIdentity,
   ProjectActivityRow,
   ProjectRootRow,
   ProjectSnapshot,
@@ -25,7 +26,7 @@ import {
   type OpenCodeSessionInfo,
   rawAssistantRowFingerprint,
 } from "../lib/opencode-storage.js";
-import { type PricingResolution, priceTokenBuckets } from "../lib/quota-stats.js";
+import { type PricingResolution, priceTokenBucketsWithRecordedCost } from "../lib/quota-stats.js";
 import type { TokenBuckets } from "../lib/token-buckets.js";
 import { type ForkOwnerCandidate, selectForkOwnerCandidates } from "../lib/usage-ownership.js";
 
@@ -69,12 +70,43 @@ export class AnalyticsNotFoundError extends Error {
   }
 }
 
+/**
+ * One user-role message position. `replyMessageIds` is the explicit
+ * assistant-`parentID` linkage when the stored message JSON records it.
+ */
+export interface InputMessagePosition {
+  sessionId: string;
+  atMs: number;
+  messageId: string;
+  replyMessageIds?: readonly string[];
+}
+
 /** The raw dataset one P3 source read hands to the factory. */
 export interface UsageAnalyticsDataset {
   sessions: Record<string, OpenCodeSessionInfo>;
   projects: Record<string, OpenCodeProjectInfo>;
   messages: OpenCodeRawAssistantRow[];
   compactions: OpenCodeCompactionMarker[];
+  /**
+   * Completed assistant rows the usage view excluded (zero-token). They are not
+   * steps, but the session DTO records where they sit so gaps never bridge them.
+   */
+  excluded?: Array<{ sessionId: string; atMs: number }>;
+  /**
+   * User-role message positions per session (scoped read, ids and times only).
+   * The session DTO marks the first assistant step after one; prompt text is
+   * never read or carried.
+   */
+  userMessages?: InputMessagePosition[];
+}
+
+/** Where a message sits in its session's sequence: creation time, else completion time. */
+export function messagePositionMs(
+  row: Pick<OpenCodeRawAssistantRow, "createdAtMs" | "completedAtMs">,
+): number {
+  return row.createdAtMs > 0 && Number.isFinite(row.createdAtMs)
+    ? row.createdAtMs
+    : row.completedAtMs;
 }
 
 export interface HomeAnalytics {
@@ -172,6 +204,8 @@ interface CostedAccumulator {
   pricedAny: boolean;
   unpricedTokens: number;
   unknownTokens: number;
+  recordedCostUsd: number;
+  recordedCostTokens: number;
 }
 
 function createAccumulator(): CostedAccumulator {
@@ -185,6 +219,8 @@ function createAccumulator(): CostedAccumulator {
     pricedAny: false,
     unpricedTokens: 0,
     unknownTokens: 0,
+    recordedCostUsd: 0,
+    recordedCostTokens: 0,
   };
 }
 
@@ -202,6 +238,8 @@ function mergeAccumulator(target: CostedAccumulator, source: CostedAccumulator):
   target.pricedAny = target.pricedAny || source.pricedAny;
   target.unpricedTokens += source.unpricedTokens;
   target.unknownTokens += source.unknownTokens;
+  target.recordedCostUsd += source.recordedCostUsd;
+  target.recordedCostTokens += source.recordedCostTokens;
 }
 
 function finalizeAccumulator(accumulator: CostedAccumulator): CostedTokens {
@@ -218,7 +256,16 @@ function finalizeAccumulator(accumulator: CostedAccumulator): CostedTokens {
     apiEquivalentCostUsd: accumulator.pricedAny ? accumulator.costUsd : null,
     unpricedTokens: accumulator.unpricedTokens,
     unknownTokens: accumulator.unknownTokens,
+    ...recordedCostFields(accumulator.recordedCostUsd, accumulator.recordedCostTokens),
   };
+}
+
+/** Shared recorded-cost provenance fields; omitted when no fallback contributed. */
+export function recordedCostFields(
+  costUsd: number,
+  tokens: number,
+): Partial<Pick<CostedTokens, "recordedCostUsd" | "recordedCostTokens">> {
+  return costUsd > 0 ? { recordedCostUsd: costUsd, recordedCostTokens: tokens } : {};
 }
 
 /**
@@ -239,10 +286,11 @@ function addRawStep(
   accumulator.output += tokens.output;
   accumulator.reasoning += tokens.reasoning;
 
-  const outcome = priceTokenBuckets({
+  const outcome = priceTokenBucketsWithRecordedCost({
     providerID: row.providerID,
     modelID: row.modelID,
     tokens,
+    recordedCostUsd: row.cost,
     // A completed physical row is priced at its own assistant completion
     // instant; never infer a timestamp from a range boundary or wall clock.
     atMs: row.completedAtMs,
@@ -259,6 +307,14 @@ function addRawStep(
   if (outcome.status === "priced") {
     accumulator.pricedAny = true;
     accumulator.costUsd += outcome.costUsd;
+    return;
+  }
+
+  if (outcome.status === "recorded_cost") {
+    accumulator.pricedAny = true;
+    accumulator.costUsd += outcome.costUsd;
+    accumulator.recordedCostUsd += outcome.costUsd;
+    accumulator.recordedCostTokens += outcome.recordedTokens;
     return;
   }
 
@@ -801,6 +857,120 @@ function sessionAgent(
   return latest?.row.agent?.trim();
 }
 
+/**
+ * Identity actually recorded for one invocation. OpenCode stores the effort as
+ * `model.variant`; `default` is its "no explicit effort" value, so neither it
+ * nor an empty string is shown as an effort.
+ */
+function modelIdentityOf(row: OpenCodeRawAssistantRow): ModelIdentity | undefined {
+  if (!row.providerID || !row.modelID) return undefined;
+  const identity: ModelIdentity = { providerId: row.providerID, modelId: row.modelID };
+  const effort = row.variant?.trim();
+  if (effort && effort !== "default") identity.effort = effort;
+  return identity;
+}
+
+function identityKey(identity: ModelIdentity): string {
+  return JSON.stringify([identity.providerId, identity.modelId, identity.effort ?? null]);
+}
+
+/** Distinct identities of one session's own steps, most recently used first. */
+function sessionModelIdentities(ownSteps: readonly OwnedStep[]): ModelIdentity[] {
+  const lastUse = new Map<string, { identity: ModelIdentity; step: OwnedStep }>();
+  for (const step of ownSteps) {
+    const identity = modelIdentityOf(step.row);
+    if (!identity) continue;
+    const key = identityKey(identity);
+    const known = lastUse.get(key);
+    if (
+      known === undefined ||
+      step.timeMs > known.step.timeMs ||
+      (step.timeMs === known.step.timeMs &&
+        compareIds(step.row.messageID, known.step.row.messageID) > 0)
+    ) {
+      lastUse.set(key, { identity, step });
+    }
+  }
+  return [...lastUse.values()]
+    .sort(
+      (a, b) =>
+        b.step.timeMs - a.step.timeMs || compareIds(b.step.row.messageID, a.step.row.messageID),
+    )
+    .map((entry) => entry.identity);
+}
+
+/** Creation time when recorded, else the step's completion position. */
+function stepStartMs(step: StepPoint): number {
+  return step.createdAtMs !== undefined && step.createdAtMs > 0 ? step.createdAtMs : step.atMs;
+}
+
+/**
+ * Marks each focus-session step that is the first assistant reply after a
+ * user-role message. Positions only; prompt text never enters the DTO.
+ *
+ * Completion time cannot answer this: a reply that was already running when
+ * the input arrived completes after it. Explicit assistant `parentID` linkage
+ * is authoritative. Without it, a step only qualifies when its recorded
+ * creation time is strictly after the input; equal or missing creation times
+ * stay unmarked because their order cannot be proven.
+ */
+function markInputMarkers(
+  steps: readonly StepPoint[],
+  sessionId: string,
+  userMessages: readonly InputMessagePosition[],
+): void {
+  const messages = userMessages
+    .filter((message) => message.sessionId === sessionId)
+    .sort((a, b) => a.atMs - b.atMs || compareIds(a.messageId, b.messageId));
+  if (messages.length === 0) return;
+  const focusSteps = steps.filter((step) => step.sessionId === sessionId);
+  if (focusSteps.length === 0) return;
+
+  const byMessageId = new Map<string, StepPoint>();
+  for (const step of focusSteps) {
+    if (!byMessageId.has(step.messageId)) byMessageId.set(step.messageId, step);
+  }
+
+  const linkedMessages = new Set<string>();
+  for (const message of messages) {
+    const replyIds = message.replyMessageIds;
+    if (replyIds === undefined || replyIds.length === 0) continue;
+    // The stored linkage is authoritative even when the linked reply is not a
+    // charted step (fork-owned elsewhere, zero-token, descendant): never fall
+    // back to timing for a prompt whose reply is known.
+    linkedMessages.add(message.messageId);
+    let reply: StepPoint | undefined;
+    for (const replyId of replyIds) {
+      const candidate = byMessageId.get(replyId);
+      if (candidate === undefined) continue;
+      if (reply === undefined || stepStartMs(candidate) < stepStartMs(reply)) reply = candidate;
+    }
+    if (reply !== undefined) reply.inputMarker = true;
+  }
+
+  const byCreation = focusSteps
+    .filter(
+      (step) =>
+        step.createdAtMs !== undefined && step.createdAtMs > 0 && Number.isFinite(step.createdAtMs),
+    )
+    .sort(
+      (a, b) => (a.createdAtMs ?? 0) - (b.createdAtMs ?? 0) || compareIds(a.messageId, b.messageId),
+    );
+  if (byCreation.length === 0) return;
+  let cursor = 0;
+  for (const message of messages) {
+    if (linkedMessages.has(message.messageId)) continue;
+    while (cursor < byCreation.length && (byCreation[cursor]!.createdAtMs ?? 0) < message.atMs) {
+      cursor += 1;
+    }
+    const step = byCreation[cursor];
+    if (step === undefined) break;
+    // Equal creation times cannot prove the reply started after the input.
+    if ((step.createdAtMs ?? 0) === message.atMs) continue;
+    step.inputMarker = true;
+  }
+}
+
 function buildSessionSnapshot(
   model: AnalyticsModel,
   sessionId: string,
@@ -882,7 +1052,12 @@ function buildSessionSnapshot(
       stepCount: ownSteps.length,
       subtreeNodeCount: subtreeNodeCounts.get(id)!,
       latestActivityAtMs: subtreeLatest.get(id)!,
+      models: sessionModelIdentities(ownSteps),
     };
+    const cacheUnknownSteps = ownSteps.filter(
+      (step) => step.row.cacheReadMissing || step.row.cacheWriteMissing,
+    ).length;
+    if (cacheUnknownSteps > 0) node.cacheUnknownSteps = cacheUnknownSteps;
     if (session.parentID !== undefined) node.parentId = session.parentID;
     const agent = sessionAgent(session, ownSteps);
     if (agent !== undefined) node.agent = agent;
@@ -911,10 +1086,14 @@ function buildSessionSnapshot(
         contextTokens: stack.input + stack.cacheRead + stack.cacheWrite,
         totalTokens: sumTokenStack(stack),
       };
-      if (row.providerID && row.modelID) {
-        step.model = { providerId: row.providerID, modelId: row.modelID };
+      const identity = modelIdentityOf(row);
+      if (identity) step.model = identity;
+      if (row.createdAtMs > 0 && Number.isFinite(row.createdAtMs)) {
+        step.createdAtMs = row.createdAtMs;
       }
       if (row.agent) step.agent = row.agent;
+      if (row.cacheReadMissing) step.cacheReadUnknown = true;
+      if (row.cacheWriteMissing) step.cacheWriteUnknown = true;
       steps.push(step);
     }
   }
@@ -924,6 +1103,7 @@ function buildSessionSnapshot(
     if (byMessage !== 0) return byMessage;
     return compareIds(a.sessionId, b.sessionId);
   });
+  markInputMarkers(steps, sessionId, model.dataset.userMessages ?? []);
 
   const treeTotals = createAccumulator();
   for (const node of order) mergeAccumulator(treeTotals, ownAccumulators.get(node.id)!);
@@ -959,7 +1139,20 @@ function buildSessionSnapshot(
 
   const focusSteps = model.ownedBySession.get(sessionId) ?? [];
 
+  // Focus-session completed messages that are not steps: excluded zero-token
+  // rows and fork copies owned elsewhere. Gap metrics must not bridge them.
+  const focusStepIds = new Set(focusSteps.map((step) => step.row.messageID));
+  const unobservedAtMs = [
+    ...(model.dataset.excluded ?? [])
+      .filter((entry) => entry.sessionId === sessionId)
+      .map((entry) => entry.atMs),
+    ...model.dataset.messages
+      .filter((row) => row.sessionID === sessionId && !focusStepIds.has(row.messageID))
+      .map(messagePositionMs),
+  ].sort((a, b) => a - b);
+
   return {
+    ...(unobservedAtMs.length > 0 ? { unobservedAtMs } : {}),
     focusSessionId: sessionId,
     timeZone,
     projectId: focusProjectId,

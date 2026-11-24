@@ -74,7 +74,8 @@ export function sortSessionTree(nodes: SessionNode[], mode: SortMode): SessionNo
 
   const keyOf = (node: SessionNode): SortableRow => ({
     latestActivityAtMs: node.latestActivityAtMs,
-    tokens: node.subtreeTokens.total,
+    // The displayed row value: a node's own tokens, never its descendants'.
+    tokens: node.ownTokens.total,
     id: node.sessionId,
   });
   const childrenOf = (node: SessionNode): SessionNode[] => {

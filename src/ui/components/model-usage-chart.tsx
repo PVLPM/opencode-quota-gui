@@ -69,6 +69,10 @@ export function ModelUsageChart(props: {
   actions?: JSX.Element;
   loading?: boolean;
   error?: string;
+  /** Classification of the first-load failure (drives countdown vs permanent). */
+  errorRecoverable?: boolean;
+  autoRetry?: boolean;
+  onAutoRetry?: () => void;
   onRetry?: () => void;
   activeSeries?: string;
   /** Transient child emphasis that follows the active parent series. */
@@ -316,7 +320,14 @@ export function ModelUsageChart(props: {
             fallback={<Skeleton label={props.loading ? "Loading models" : "Loading usage"} />}
           >
             {(message) => (
-              <ErrorCard message={message()} retryable onRetry={() => props.onRetry?.()} />
+              <ErrorCard
+                message={message()}
+                retryable
+                recoverable={props.errorRecoverable === true}
+                autoRetry={props.autoRetry}
+                {...(props.onAutoRetry === undefined ? {} : { onAutoRetry: props.onAutoRetry })}
+                onRetry={() => props.onRetry?.()}
+              />
             )}
           </Show>
         }

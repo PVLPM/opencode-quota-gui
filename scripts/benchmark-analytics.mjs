@@ -30,7 +30,7 @@
  *   bun scripts/benchmark-analytics.mjs
  *
  * Env:
- *   ANALYTICS_BENCH_MEMORY_CAP_MIB  retained worker delta cap (default 100)
+ *   ANALYTICS_BENCH_MEMORY_CAP_MIB  post-drain process RSS delta cap (default 100)
  *   ANALYTICS_BENCH_DENSE_SESSIONS  dense profile session override
  *   ANALYTICS_BENCH_DENSE_ROWS      dense profile row override
  *   ANALYTICS_BENCH_SESSIONS        legacy dense session override
@@ -84,6 +84,14 @@ import { resolveRealSource, selectRealSource } from "./analytics-benchmark-real.
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const runtime = detectRuntime();
+/** 0/absent = retire at once; a positive value measures the idle-grace tradeoff. */
+const benchIdleRetireMs = (() => {
+  const raw = process.env.ANALYTICS_BENCH_IDLE_RETIRE_MS?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+})();
+const idleRetireOption = benchIdleRetireMs === undefined ? {} : { idleRetireMs: benchIdleRetireMs };
 
 if (runtime === "node" && typeof globalThis.gc !== "function" && process.env.OCQ_BENCH_GC !== "1") {
   const child = spawnSync(process.execPath, ["--expose-gc", ...process.argv.slice(1)], {
@@ -331,6 +339,8 @@ async function measureWarmSwitches(service, internal, rounds) {
     ["home7d", () => service.home({ range: "7d" })],
     ["home30d", () => service.home({ range: "30d" })],
     ["homeLifetime", () => service.home({ range: "lifetime" })],
+    ["groupsProvider7d", () => service.groups({ dimension: "provider", range: "7d" })],
+    ["groupsModel30d", () => service.groups({ dimension: "model", range: "30d" })],
     [
       "projectDense30d",
       () => service.project({ projectId: internal.denseProjectId, range: "30d" }),
@@ -597,6 +607,7 @@ async function measureColdResume(options) {
     snapshotPath: isolatedSnapshotPath,
     refreshIntervalMs: 3_600_000,
     requestTimeoutMs: 600_000,
+    ...idleRetireOption,
   });
   try {
     const workerBefore = await workerStats(service);
@@ -723,6 +734,7 @@ async function executeProfile(options) {
       snapshotPath,
       refreshIntervalMs: 3_600_000,
       requestTimeoutMs: 600_000,
+      ...idleRetireOption,
     });
     current.service = serviceA;
     server = await startDashboard({
@@ -799,6 +811,7 @@ async function executeProfile(options) {
       snapshotPath,
       refreshIntervalMs: 3_600_000,
       requestTimeoutMs: 600_000,
+      ...idleRetireOption,
     });
     current.service = serviceB;
     workerWarmBefore = await workerStats(serviceB);
@@ -836,6 +849,7 @@ async function executeProfile(options) {
     markPhases("deltas", workerRetainedResult.stats);
     phaseWorkerMemory.warmRetained = summarizeWorkerMemory(workerRetainedResult.stats);
     const coldResumeBaselineStepCount = deltas.finalStepCount;
+    await serviceB.waitForWorkerDrain();
     if (globalThis.gc) globalThis.gc();
     await sleep(150);
     const hostRetained = hostMemory();
@@ -903,7 +917,8 @@ async function executeProfile(options) {
     const retainedDeltaBytes =
       retainedStats && warmBaselineStats ? retainedStats.heapUsed - warmBaselineStats.heapUsed : 0;
     const retainedDeltaMiB = toMiB(retainedDeltaBytes);
-    checks.workerRetainedBounded = retainedStats !== null && retainedDeltaMiB <= memoryCapMiB;
+    const postDrainRssDeltaMiB = toMiB(Math.max(0, hostRetained.rss - hostBaseline.rss));
+    checks.workerRetainedBounded = postDrainRssDeltaMiB <= memoryCapMiB;
 
     const workerSummaries = [
       summarizeWorkerMemory(workerBefore),
@@ -994,6 +1009,8 @@ async function executeProfile(options) {
           baselineRssMiB: toMiB(hostBaseline.rss),
           retainedHeapUsedMiB: toMiB(hostRetained.heapUsed),
           retainedDeltaMiB: toMiB(hostRetained.heapUsed - hostBaseline.heapUsed),
+          postDrainRssMiB: toMiB(hostRetained.rss),
+          postDrainRssDeltaMiB,
           peakHeapUsedMiB: toMiB(hostPeaks.peakHeap),
           peakRssMiB: toMiB(hostPeaks.peakRss),
           afterCloseRssMiB: toMiB(hostAfterClose.rss),

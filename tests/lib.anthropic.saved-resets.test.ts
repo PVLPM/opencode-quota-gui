@@ -2,8 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const httpMocks = vi.hoisted(() => ({ fetchResponse: vi.fn() }));
 
+const stateMocks = vi.hoisted(() => ({
+  dir: `${process.env["TEMP"] ?? process.cwd()}/ocq-anthropic-saved-resets-${process.pid}`,
+}));
+
+const fsPromisesMocks = vi.hoisted(() => ({
+  readFile: vi.fn(),
+  stat: vi.fn(),
+}));
+
+import { rmSync } from "node:fs";
+
 import { execFile } from "child_process";
-import { readFile } from "fs/promises";
 import {
   clearAnthropicDiagnosticsCacheForTests,
   getAnthropicDiagnostics,
@@ -11,13 +21,26 @@ import {
   queryAnthropicQuotaWithOAuth,
 } from "../src/lib/anthropic.js";
 import { fetchWithTimeout } from "../src/lib/http.js";
-import { REQUEST_TIMEOUT_MS } from "../src/lib/types.js";
 import { claudeAgentProvider } from "../src/providers/claude-agent.js";
 
 vi.mock("child_process", () => ({ execFile: vi.fn() }));
-vi.mock("fs/promises", () => ({ readFile: vi.fn() }));
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  const isThrottlePath = (path: unknown) => String(path).includes("anthropic-oauth-throttle");
+  return {
+    ...actual,
+    readFile: vi.fn((...args: Parameters<typeof actual.readFile>) =>
+      isThrottlePath(args[0]) ? actual.readFile(...args) : fsPromisesMocks.readFile(...args),
+    ),
+    stat: vi.fn((...args: Parameters<typeof actual.stat>) =>
+      isThrottlePath(args[0]) ? actual.stat(...args) : fsPromisesMocks.stat(...args),
+    ),
+  };
+});
 vi.mock("../src/lib/opencode-auth.js", () => ({
   readAuthFileCached: vi.fn().mockResolvedValue(null),
+  readAuthFile: vi.fn().mockResolvedValue(null),
+  getCredentialDatabasePaths: vi.fn().mockReturnValue([]),
 }));
 vi.mock("../src/lib/http.js", () => ({
   fetchWithTimeout: vi.fn(
@@ -27,10 +50,14 @@ vi.mock("../src/lib/http.js", () => ({
     ) => await options.consume(await httpMocks.fetchResponse(), new AbortController().signal),
   ),
 }));
+vi.mock("../src/lib/private-state-paths.js", () => ({
+  getGuiPrivateStatePath: (...segments: string[]) => [stateMocks.dir, ...segments].join("/"),
+}));
 
 const NOW = Date.parse("2026-11-16T12:00:00.000Z");
 const execFileMock = vi.mocked(execFile);
-const readFileMock = vi.mocked(readFile);
+const readFileMock = fsPromisesMocks.readFile;
+const statMock = fsPromisesMocks.stat;
 const fetchMock = vi.mocked(fetchWithTimeout);
 const windows = { five_hour: { utilization: 10 }, seven_day: { utilization: 20 } };
 const FIRST_PARTY = { authMethod: "claude.ai", apiProvider: "firstParty" };
@@ -65,13 +92,17 @@ function mockCli(authJson: Record<string, unknown>, probes = 1): void {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  rmSync(stateMocks.dir, { recursive: true, force: true });
   readFileMock.mockResolvedValue(JSON.stringify({ claudeAiOauth: { accessToken: "tok-1" } }));
 });
 
-afterEach(() => {
+afterEach(async () => {
+  vi.useRealTimers();
+  rmSync(stateMocks.dir, { recursive: true, force: true });
   execFileMock.mockReset();
   readFileMock.mockReset();
+  statMock.mockReset();
   fetchMock.mockClear();
   httpMocks.fetchResponse.mockReset();
   clearAnthropicDiagnosticsCacheForTests();
@@ -281,98 +312,102 @@ describe("OAuth usage request shape and fallback", () => {
     expect(String(urls()[0])).not.toContain("skip_spend");
   });
 
-  it.each([400, 403])("retries once without cedar_ember after HTTP %i", async (status) => {
-    httpMocks.fetchResponse
-      .mockResolvedValueOnce(response(status, "forbidden"))
-      .mockResolvedValueOnce(response(200, windows));
-    const diagnostics = await run();
-    expect(urls()).toEqual([
-      "https://api.anthropic.com/api/oauth/usage?cedar_ember=1",
-      "https://api.anthropic.com/api/oauth/usage",
-    ]);
-    expect(diagnostics.quotaSupported).toBe(true);
-    expect(diagnostics.quota?.saved_resets).toBeUndefined();
-    const userAgent = (i: number) =>
-      (fetchMock.mock.calls[i]![1] as { request: { headers: Record<string, string> } }).request
-        .headers["User-Agent"];
-    expect(userAgent(0)).toBe("claude-cli/1.2.3 (external, cli)");
-    expect(userAgent(1)).toBe("claude-code/1.2.3");
-  });
+  const ENHANCED_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1";
+  const PLAIN_URL = "https://api.anthropic.com/api/oauth/usage";
+  const userAgentAt = (index: number) =>
+    (fetchMock.mock.calls[index]![1] as { request: { headers: Record<string, string> } }).request
+      .headers["User-Agent"];
 
-  it("falls back with the bare claude-code identity when the CLI version is unknown", async () => {
-    execFileMock.mockReset();
-    mockCli({ authenticated: true, ...FIRST_PARTY }, 1);
-    // First exec step answers `--version` with no version at all.
-    const steps = [
-      { stdout: "claude\n" },
-      { stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY }) },
-    ];
-    execFileMock.mockImplementation((_f, _a, _o, callback) => {
-      callback(null, steps.shift()?.stdout ?? "", "");
-      return {} as never;
-    });
-    httpMocks.fetchResponse
-      .mockResolvedValueOnce(response(400, "bad"))
-      .mockResolvedValueOnce(response(200, windows));
-    await run();
-    const agents = fetchMock.mock.calls.map(
-      (call) =>
-        (call[1] as { request: { headers: Record<string, string> } }).request.headers["User-Agent"],
-    );
-    expect(agents).toEqual(["claude-cli (external, cli)", "claude-code"]);
-  });
-
-  it("spends one timeout budget across the enhanced attempt and its fallback", async () => {
+  it.each([
+    400, 403,
+  ])("uses the plain form only on the next eligible claim after HTTP %i", async (status) => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(NOW);
+      mockCli({ authenticated: true, ...FIRST_PARTY }, 3);
       httpMocks.fetchResponse
-        .mockImplementationOnce(async () => {
-          vi.setSystemTime(NOW + 1_500);
-          return response(400, "bad");
-        })
+        .mockResolvedValueOnce(response(status, "forbidden"))
         .mockResolvedValueOnce(response(200, windows));
-      await getAnthropicDiagnostics({ requestTimeoutMs: 4_000 });
-      const timeouts = fetchMock.mock.calls.map(
-        (call) => (call[1] as { timeoutMs?: number }).timeoutMs,
-      );
-      expect(timeouts).toEqual([4_000, 2_500]);
+
+      const first = await run();
+      expect(urls()).toEqual([ENHANCED_URL]);
+      expect(first.quotaSupported).toBe(false);
+
+      // One claim, one HTTP request: the same spacing window never carries a
+      // second enhanced/plain attempt.
+      const suppressed = await run();
+      expect(urls()).toEqual([ENHANCED_URL]);
+      expect(suppressed.retryAtMs).toBe(NOW + 180_000);
+
+      await vi.advanceTimersByTimeAsync(180_001);
+      const plain = await run();
+      expect(urls()).toEqual([ENHANCED_URL, PLAIN_URL]);
+      expect(plain.quotaSupported).toBe(true);
+      expect(plain.quota?.saved_resets).toBeUndefined();
+      expect(userAgentAt(0)).toBe("claude-cli/1.2.3 (external, cli)");
+      expect(userAgentAt(1)).toBe("claude-code/1.2.3");
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("shares the default timeout budget with the fallback", async () => {
+  it("uses the bare plain identity only on the next eligible claim when the CLI version is unknown", async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(NOW);
+      execFileMock.mockReset();
+      // First exec step answers `--version` with no version at all; three
+      // probes cover the rejected enhanced claim, the spacing skip and the
+      // eligible plain claim.
+      const steps = Array.from({ length: 3 }, () => [
+        { stdout: "claude\n" },
+        { stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY }) },
+      ]).flat();
+      execFileMock.mockImplementation((_f, _a, _o, callback) => {
+        callback(null, steps.shift()?.stdout ?? "", "");
+        return {} as never;
+      });
       httpMocks.fetchResponse
-        .mockImplementationOnce(async () => {
-          vi.setSystemTime(NOW + 1_500);
-          return response(400, "bad");
-        })
+        .mockResolvedValueOnce(response(400, "bad"))
         .mockResolvedValueOnce(response(200, windows));
       await run();
-      expect(fetchMock.mock.calls.map((call) => call[1].timeoutMs)).toEqual([
-        undefined,
-        REQUEST_TIMEOUT_MS - 1_500,
-      ]);
+      expect(urls()).toEqual([ENHANCED_URL]);
+      await vi.advanceTimersByTimeAsync(180_001);
+      await run();
+      expect(urls()).toEqual([ENHANCED_URL, PLAIN_URL]);
+      const agents = fetchMock.mock.calls.map(
+        (call) =>
+          (call[1] as { request: { headers: Record<string, string> } }).request.headers[
+            "User-Agent"
+          ],
+      );
+      expect(agents).toEqual(["claude-cli (external, cli)", "claude-code"]);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("does not start the fallback once the budget is spent", async () => {
+  it.each([
+    undefined,
+    4_000,
+  ])("gives the next plain-form claim its own timeout budget (%s)", async (requestTimeoutMs) => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(NOW);
-      httpMocks.fetchResponse.mockImplementationOnce(async () => {
-        vi.setSystemTime(NOW + 4_000);
-        return response(403, "forbidden");
-      });
-      const diagnostics = await getAnthropicDiagnostics({ requestTimeoutMs: 4_000 });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(diagnostics.quotaSupported).toBe(false);
+      mockCli({ authenticated: true, ...FIRST_PARTY }, 3);
+      httpMocks.fetchResponse
+        .mockImplementationOnce(async () => {
+          vi.setSystemTime(NOW + 1_500);
+          return response(400, "bad");
+        })
+        .mockResolvedValueOnce(response(200, windows));
+      const options = requestTimeoutMs === undefined ? {} : { requestTimeoutMs };
+      await getAnthropicDiagnostics(options);
+      await vi.advanceTimersByTimeAsync(180_001);
+      await getAnthropicDiagnostics(options);
+      expect(
+        fetchMock.mock.calls.map((call) => (call[1] as { timeoutMs?: number }).timeoutMs),
+      ).toEqual([requestTimeoutMs, requestTimeoutMs]);
     } finally {
       vi.useRealTimers();
     }
@@ -463,6 +498,8 @@ describe("local CLI quota path", () => {
   });
 
   it("does not carry reset metadata to a later failure or another account token", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     mockCli({ authenticated: true, ...FIRST_PARTY, ...localQuota }, 2);
     httpMocks.fetchResponse.mockResolvedValueOnce(
       response(200, { cedar_ember: eligible, five_hour: { utilization: 1 } }),
@@ -470,6 +507,7 @@ describe("local CLI quota path", () => {
     expect(
       (await getAnthropicDiagnostics({ forceRefresh: true, operationCache: new Map() })).quota,
     ).toMatchObject({ saved_resets: { availableCount: 1 } });
+    await vi.advanceTimersByTimeAsync(180_001);
     readFileMock.mockResolvedValue(JSON.stringify({ claudeAiOauth: { accessToken: "tok-2" } }));
     httpMocks.fetchResponse.mockResolvedValueOnce(response(500, "x"));
     const second = await getAnthropicDiagnostics({ forceRefresh: true, operationCache: new Map() });
@@ -481,10 +519,14 @@ describe("local CLI quota path", () => {
     "401",
     "timeout",
   ])("removes cached resets after a forced %s failure without losing quota or another token", async (failure) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     const body = response(200, { ...windows, cedar_ember: eligible });
     httpMocks.fetchResponse.mockResolvedValue(body);
     await queryAnthropicQuotaWithOAuth("other-token");
+    await vi.advanceTimersByTimeAsync(180_001);
     await queryAnthropicQuotaWithOAuth("tok-1");
+    await vi.advanceTimersByTimeAsync(180_001);
     if (failure === "timeout") {
       httpMocks.fetchResponse.mockRejectedValueOnce(new Error("timeout"));
     } else {
@@ -499,13 +541,14 @@ describe("local CLI quota path", () => {
     const local = await getAnthropicDiagnostics();
     expect(local.quota?.five_hour?.percentRemaining).toBe(43);
     expect(local.quota?.saved_resets).toBeUndefined();
-    const cached = await queryAnthropicQuotaWithOAuth("tok-1");
-    expect(cached).toMatchObject({ success: true, five_hour: { percentRemaining: 90 } });
-    expect(cached).not.toHaveProperty("saved_resets");
+    // The failure does not bypass the shared request spacing.
+    expect(await queryAnthropicQuotaWithOAuth("tok-1")).toMatchObject({ success: false });
+    await vi.advanceTimersByTimeAsync(180_001);
     expect(await queryAnthropicQuotaWithOAuth("other-token")).toMatchObject({
+      success: true,
       saved_resets: { availableCount: 1 },
     });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("exposes a claude-agent:resets value row through the provider", async () => {
@@ -521,7 +564,12 @@ describe("local CLI quota path", () => {
       value: "1 available",
       bankedResets: { availableCount: 1, credits: [{ expiresAtIso: "2099-01-01T00:00:00.000Z" }] },
     });
-    expect(result.entries.some((entry) => entry.rowKey === "window:five_hour")).toBe(true);
+    expect(
+      result.entries.some(
+        (entry) =>
+          entry.semantic?.metric.kind === "window" && entry.semantic.metric.window === "five_hour",
+      ),
+    ).toBe(true);
   });
 
   it("prunes expired cached resets before emitting a provider row", async () => {

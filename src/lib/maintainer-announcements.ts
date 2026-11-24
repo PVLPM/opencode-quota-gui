@@ -1,6 +1,6 @@
 import {
   type CanonicalQuotaProviderId,
-  getQuotaProviderShape,
+  getQuotaProviderRegistration,
   normalizeQuotaProviderId,
 } from "./provider-metadata.js";
 
@@ -85,7 +85,7 @@ function normalizedProviderIds(providerIds: readonly string[]): CanonicalQuotaPr
   const seen = new Set<string>();
 
   for (const providerId of providerIds) {
-    const shape = getQuotaProviderShape(normalizeQuotaProviderId(providerId));
+    const shape = getQuotaProviderRegistration(normalizeQuotaProviderId(providerId));
     if (!shape || seen.has(shape.id)) {
       continue;
     }

@@ -2,7 +2,7 @@ import type { Attributes, ObservableResult } from "@opentelemetry/api";
 
 import type { QuotaProviderResult } from "./entries.js";
 import { isPercentEntry } from "./entries.js";
-import { getQuotaProviderShape } from "./provider-metadata.js";
+import { getQuotaProviderRegistration } from "./provider-metadata.js";
 import { classifyQuotaWindowText } from "./quota-entry-display.js";
 import { QUOTA_PROVIDERS_AGGREGATE_ID } from "./quota-providers.js";
 
@@ -98,7 +98,7 @@ function safeProviderAttribute(providerId: string): string {
   ) {
     return "custom";
   }
-  return getQuotaProviderShape(providerId)?.id ?? "other";
+  return getQuotaProviderRegistration(providerId)?.id ?? "other";
 }
 
 function activeProviderId(providerId: string): string {

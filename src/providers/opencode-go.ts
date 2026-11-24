@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 
 import type {
+  AccountingWindow,
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaProviderStatusDetail,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import {
   credentialRowAuthEntry,
   formatCredentialDisplayNames,
@@ -47,11 +49,11 @@ const OPENCODE_GO_WINDOW_LABELS: Record<OpenCodeGoWindowKey, { name: string; lab
   weekly: { name: `${OPENCODE_GO_PROVIDER_LABEL} Weekly`, label: "Weekly:" },
   monthly: { name: `${OPENCODE_GO_PROVIDER_LABEL} Monthly`, label: "Monthly:" },
 };
-/** Stable explicit row keys (metric + window) for the percent-only window rows. */
-const OPENCODE_GO_WINDOW_ROW_KEYS: Record<OpenCodeGoWindowKey, string> = {
-  rolling: "window:five_hour",
-  weekly: "window:week",
-  monthly: "window:month",
+/** Typed window metrics for the percent-only window rows. */
+const OPENCODE_GO_WINDOW_METRICS: Record<OpenCodeGoWindowKey, AccountingWindow> = {
+  rolling: "five_hour",
+  weekly: "week",
+  monthly: "month",
 };
 
 const notSubscribedCredentialFingerprints = new Set<string>();
@@ -105,7 +107,7 @@ function buildOpenCodeGoEntries(
       name: `${group} ${labels.label.slice(0, -1)}`,
       group,
       label: labels.label,
-      rowKey: OPENCODE_GO_WINDOW_ROW_KEYS[window],
+      semantic: windowSemantic(OPENCODE_GO_WINDOW_METRICS[window]),
       percentRemaining: usage.percentRemaining,
       ...(usage.resetTimeIso !== undefined ? { resetTimeIso: usage.resetTimeIso } : {}),
     });

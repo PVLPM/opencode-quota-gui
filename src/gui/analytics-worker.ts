@@ -5,6 +5,7 @@
  * It owns all storage reads, the compact index, persistence, and aggregation;
  * only protocol frames and finished DTOs cross back to the host.
  */
+import { createAnalyticsPricingUpkeep } from "./analytics-pricing-upkeep.js";
 import { AnalyticsReadError, type AnalyticsWorkerRequest } from "./analytics-protocol.js";
 import { createAnalyticsWorkerRuntime } from "./analytics-worker-runtime.js";
 
@@ -47,10 +48,22 @@ async function main(): Promise<void> {
     },
   });
 
+  const pricingUpkeep = createAnalyticsPricingUpkeep({
+    postMessage: (message) => port.postMessage(message),
+    routes: () => runtime.unpricedRoutes(),
+  });
+
   const respond = (request: AnalyticsWorkerRequest): void => {
     void (async () => {
       try {
         const result = await runtime.handle(request.command);
+        const upkeep =
+          request.command.kind !== "init" && request.command.kind !== "close"
+            ? pricingUpkeep
+            : null;
+        // Advertise upkeep before the reply frame: the refresh itself starts
+        // after it, so a slow models.dev response never delays the read path.
+        upkeep?.begin();
         port.postMessage({ id: request.id, ok: true, result });
       } catch (error) {
         const code = error instanceof AnalyticsReadError ? error.code : "unavailable";

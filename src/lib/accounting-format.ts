@@ -293,13 +293,23 @@ export function compareAccountingSemanticEntries(
   return leftKey[0] - rightKey[0] || leftKey[1] - rightKey[1] || leftKey[2] - rightKey[2];
 }
 
+/**
+ * The row's display label. Explicit presentation labels supplied by the
+ * provider (`metricLabel`, then `label`) win for window, component and
+ * aggregate metrics: semantic metadata is identity and eligibility only, never
+ * a source of visible copy. A named metric is different: its semantic name is
+ * the row's identity, so the label is always derived from it and provider copy
+ * cannot drift it (the canonical Fable weekly window renders as "Fable").
+ */
 export function getAccountingEntryLabel(entry: QuotaToastEntry): string {
-  if (!entry.semantic) return entry.metricLabel?.trim() || entry.label?.trim() || entry.name;
-  return formatAccountingSemanticLabel(
+  const explicit = entry.metricLabel?.trim() || entry.label?.trim();
+  if (!entry.semantic) return explicit || entry.name;
+  const semanticLabel = formatAccountingSemanticLabel(
     entry.accounting.resultType,
     entry.semantic,
     isPercentEntry(entry) ? "percent" : entry.kind,
   );
+  return entry.semantic.metric.kind === "named" ? semanticLabel : explicit || semanticLabel;
 }
 
 export type AccountingBooleanWording = "semantic" | "generic";

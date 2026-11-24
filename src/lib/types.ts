@@ -153,6 +153,13 @@ export interface QuotaDashboardConfig {
    */
   cardOrder: string[];
   /**
+   * Sparse per-card row display order: opaque card id -> ordered opaque row
+   * ids. A card absent from this map keeps provider emission order. Listed
+   * rows come first in saved order, and every unlisted/new row keeps emission
+   * order after them. Display order only; hiding stays in `hiddenRows`.
+   */
+  rowOrder: Record<string, string[]>;
+  /**
    * Explicit temporal chip visibility per provider. Sparse by design: an
    * absent provider follows account discovery, while a present boolean keeps
    * the user's explicit on/off choice.
@@ -240,6 +247,13 @@ export interface QuotaToastConfig {
   resetTimeSpaced?: boolean;
   minIntervalMs: number;
 
+  /**
+   * Minimum spacing between Anthropic OAuth usage requests for Claude Agent,
+   * shared by every OpenCode process. Defaults to three minutes; never below
+   * one minute.
+   */
+  claudeAgentPollIntervalMs: number;
+
   /** Request timeout in milliseconds for remote provider API calls. */
   requestTimeoutMs: number;
 
@@ -298,6 +312,14 @@ export interface QuotaToastConfig {
    * model's provider resets, instead of OpenCode's normal retry timing.
    */
   waitForQuotaReset: boolean;
+
+  /**
+   * If true, a session that terminally failed on a provider quota limit gets one `continue`
+   * prompt after the failed account's exhausted quota window is observed as reset and the
+   * session has stayed inactive for two minutes. Off by default; pending resumes are lost when
+   * the plugin process restarts.
+   */
+  autoResumeOnQuotaRecovery: boolean;
 
   /**
    * If true, show the Session input/output tokens section in quota displays when session token data is available.
@@ -360,6 +382,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   accountingDetail: "summary",
   resetTimeSpaced: true,
   minIntervalMs: 60000, // 1 minute
+  claudeAgentPollIntervalMs: 180000, // 3 minutes; shared by every OpenCode process
   requestTimeoutMs: REQUEST_TIMEOUT_MS,
 
   debug: false,
@@ -375,7 +398,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   opencodeMonthlyLimit: undefined,
   pricingSnapshot: {
     source: "auto",
-    autoRefresh: 7,
+    autoRefresh: 1,
   },
 
   showOnIdle: true,
@@ -385,6 +408,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   toastDurationMs: 9000,
   onlyCurrentModel: false,
   waitForQuotaReset: true,
+  autoResumeOnQuotaRecovery: false,
   showSessionTokens: true,
   sessionTokenScope: "current",
   tuiSidebarPanel: {
@@ -419,6 +443,7 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
     hiddenRows: [],
     providerOrder: [],
     cardOrder: [],
+    rowOrder: {},
     temporalProviderOverrides: {},
   },
   layout: {

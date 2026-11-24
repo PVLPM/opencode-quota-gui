@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   detectOpenCodeMajor,
   detectOpenCodeVersion,
+  hostRendersComposerMenuHeading,
   isPreNativeGuiVersion,
   parseOpenCodeMajor,
   parseOpenCodeVersion,
@@ -84,5 +85,21 @@ describe("OpenCode version detection", () => {
     [undefined, false],
   ])("reports isPreNativeGuiVersion(%j) as %j", (version, legacy) => {
     expect(isPreNativeGuiVersion(version)).toBe(legacy);
+  });
+
+  it.each([
+    ["2.0.16", true],
+    ["2.2.1", true],
+    ["2.3.2", true],
+    ["2.3.9-beta.1", true],
+    ["2.4.0", false],
+    ["2.4.1", false],
+    ["2.4.1-rc.1", false],
+    ["3.0.0", false],
+    ["", false],
+    ["garbage", false],
+    [undefined, false],
+  ])("reports hostRendersComposerMenuHeading(%j) as %j", (version, renders) => {
+    expect(hostRendersComposerMenuHeading(version)).toBe(renders);
   });
 });

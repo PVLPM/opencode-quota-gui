@@ -3,11 +3,13 @@
  */
 
 import type {
+  AccountingWindow,
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
 import { modelProviderIncludesAny } from "../lib/provider-model-matching.js";
 import {
@@ -33,6 +35,7 @@ function toSyntheticEntry(params: {
   window: SyntheticQuotaWindow;
   suffix: "5h" | "Weekly";
   label: "5h:" | "Weekly:";
+  semanticWindow: AccountingWindow;
   currency?: boolean;
 }): QuotaToastEntry {
   const right = formatSyntheticSummary(params.window, params.currency);
@@ -47,6 +50,7 @@ function toSyntheticEntry(params: {
     name: `Synthetic ${params.suffix}`,
     group: "Synthetic",
     label: params.label,
+    semantic: windowSemantic(params.semanticWindow),
     percentRemaining: params.window.percentRemaining,
     right,
     resetTimeIso: params.window.resetTimeIso,
@@ -87,11 +91,13 @@ export const syntheticProvider: QuotaProvider = {
               window: result.windows.fiveHour,
               suffix: "5h",
               label: "5h:",
+              semanticWindow: "five_hour",
             }),
             toSyntheticEntry({
               window: result.windows.weekly,
               suffix: "Weekly",
               label: "Weekly:",
+              semanticWindow: "week",
               currency: true,
             }),
           ],

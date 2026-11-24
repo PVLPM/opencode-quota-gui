@@ -5,10 +5,11 @@
  * `withOpenCodeStorageSnapshot` transaction (identity + metadata + revision
  * membership + changed-ID payload). Historical extent, the trusted source
  * `time_updated` cursor, and wall-time frontier freshness are separate: normal
- * global refreshes read only the inclusive cursor-overlap delta, scoped reads
- * never advance the cursor, and a persisted 7-day repair re-reads the indexed
- * extent plus cached scopes. There is no autonomous timer; work is
- * request-driven.
+ * global refreshes read the inclusive cursor-overlap delta only when the cheap
+ * database/WAL signature changed since the last completed revision; an
+ * unchanged source skips the projected scan entirely. Scoped reads never
+ * advance the cursor, and a persisted 7-day repair re-reads the indexed extent
+ * plus cached scopes. There is no autonomous timer; work is request-driven.
  */
 import { performance } from "node:perf_hooks";
 
@@ -19,6 +20,7 @@ import {
 import type {
   AnalyticsGroupQuery,
   AnalyticsGroupSnapshot,
+  AnalyticsRangeReader,
   HomeSnapshot,
   ProjectSnapshot,
   SessionSnapshot,
@@ -35,7 +37,12 @@ import {
   type ReadCompletedAssistantRowsParams,
   rawAssistantRowHasTokenUsage,
 } from "../lib/opencode-storage.js";
-import { createUsageAnalytics, UNKNOWN_PROJECT_ID } from "./aggregation.js";
+import {
+  createUsageAnalytics,
+  type InputMessagePosition,
+  messagePositionMs,
+  UNKNOWN_PROJECT_ID,
+} from "./aggregation.js";
 import { createAnalyticsIndexes } from "./analytics-indexes.js";
 import { type AnalyticsModel, createAnalyticsModel } from "./analytics-model.js";
 import { getAnalyticsPricingFingerprint } from "./analytics-pricing-revision.js";
@@ -70,17 +77,7 @@ const MAX_PROJECT_CACHE = 12;
 /** Bound on in-memory grouped DTOs; keeps detail navigation from growing state. */
 const MAX_GROUP_CACHE = 24;
 const PRESENTATION_SAVE_INTERVAL_MS = 60_000;
-/**
- * Idle grace before the automatic 7d -> 30d extension starts. A zero-delay
- * timer only yields one event-loop turn and can immediately queue a long
- * synchronous SQL read ahead of foreground navigation.
- */
-export const ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS = 2_000;
-/** Bounded busy retries; a later 7d response schedules a fresh attempt. */
-const LOW_PRIORITY_EXTENSION_MAX_DEFERRALS = 1;
 const HOME_PRECOMPUTE_RANGES: readonly RangeKey[] = ["24h", "7d", "30d"];
-
-type LowPriorityTimer = ReturnType<typeof setTimeout> & { unref?: () => void };
 
 /**
  * Fixed instrumentation labels. Each phase is timed around the operation it
@@ -150,16 +147,12 @@ export interface AnalyticsWorkerMemory {
   phases?: AnalyticsPhaseMetrics;
 }
 
-export interface AnalyticsEngine {
-  home(range: RangeKey): Promise<HomeSnapshot>;
-  project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
-  session(sessionId: string): Promise<SessionSnapshot>;
-  /** One range-certified grouped model/provider read over the shared model. */
-  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
-  refresh(): Promise<void>;
+export interface AnalyticsEngine extends AnalyticsRangeReader {
   stats(): Promise<AnalyticsWorkerMemory>;
   /** Best-effort GC trigger; false when the runtime exposes no hook. */
   gc(): Promise<boolean>;
+  /** Distinct analytics routes whose last pricing outcome had no cost. */
+  unpricedRoutes(): Array<{ providerID?: string; modelID?: string }>;
   close(): Promise<void>;
 }
 
@@ -184,8 +177,7 @@ interface RefreshJob {
 interface StagedUpsert {
   row: OpenCodeRawAssistantRow;
   updatedAtMs: number | null;
-  agent?: string;
-  /** The payload reader projected the agent field (absence is authoritative). */
+  /** The payload reader projected agent/effort (absence is authoritative). */
   agentProjected?: boolean;
 }
 
@@ -223,6 +215,8 @@ interface Candidate {
   extentChanged: boolean;
   detailSignatures: Array<[string, string]>;
   detailCompactions: Array<[string, Array<{ sessionId: string; atMs: number; messageId: string }>]>;
+  /** Focus-session user-message positions; ids and times only, never prompt text. */
+  detailUserMessages: Array<[string, InputMessagePosition[]]>;
   /** Detail focuses whose full tree payload (agents included) is now loaded. */
   detailCoverageChanges: Array<[string, DetailScopeCoverage]>;
   projectSignatures: Array<[string, string]>;
@@ -235,6 +229,15 @@ interface Candidate {
   sourceCursorAtMs?: number | null;
   /** Set when this global refresh completed a baseline/full repair. */
   repairCompletedAtMs?: number;
+  /** Source-change signature captured before this snapshot's transaction. */
+  sourceSignature?: string;
+  /**
+   * The source database/WAL signature matched the persisted one, so a first
+   * detail load only fills in-memory metadata; cached DTOs already reflect it.
+   */
+  sourceUnchanged?: boolean;
+  /** Earliest future completion seen; `null` clears because none remains. */
+  futureCompletionAtMs?: number | null;
 }
 
 const RANGE_WIDTH: Record<RangeKey, number> = {
@@ -414,8 +417,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
   let warmIdentityVerification: Promise<boolean> | undefined;
   let warmIdentityVerifiedGeneration = -1;
   let coverageTrusted = false;
+  let provisionalHome: Promise<HomeSnapshot | undefined> | undefined;
   let sidecarNewerThanIndex = false;
-  let lowPriorityTimer: LowPriorityTimer | undefined;
   let closed = false;
   let closing = false;
   let closePromise: Promise<void> | undefined;
@@ -478,6 +481,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     string,
     Array<{ sessionId: string; atMs: number; messageId: string }>
   >();
+  const detailUserMessages = new Map<string, InputMessagePosition[]>();
   const projectSignatures = new Map<string, string>();
   const projectCoverage = new Map<string, ProjectScopeCoverage>();
   const detailCoverage = new Map<string, DetailScopeCoverage>();
@@ -502,7 +506,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     return { index, fingerprint };
   }
 
-  function setRow(row: OpenCodeRawAssistantRow, updatedAtMs: number | null, agent?: string): void {
+  function setRow(row: OpenCodeRawAssistantRow, updatedAtMs: number | null): void {
     const { index } = internFingerprint(row);
     const occurrence: Occurrence = {
       fingerprintIndex: index,
@@ -510,7 +514,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       messageID: row.messageID,
       updatedAtMs,
     };
-    if (agent !== undefined) occurrence.agent = agent;
+    if (row.agent !== undefined) occurrence.agent = row.agent;
+    if (row.variant !== undefined) occurrence.variant = row.variant;
     state.occurrences.set(row.messageID, occurrence);
     indexes.upsert(occurrence);
   }
@@ -705,6 +710,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     projects: AnalyticsState["projects"];
     messages: OpenCodeRawAssistantRow[];
     compactions: Array<{ sessionId: string; atMs: number; messageId: string }>;
+    userMessages: InputMessagePosition[];
+    excluded: Array<{ sessionId: string; atMs: number }>;
   } {
     const ids = indexes.treeIds(sessionId);
     const fingerprintIndexes = new Set<number>();
@@ -715,6 +722,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     const messages: OpenCodeRawAssistantRow[] = [];
+    const excluded: Array<{ sessionId: string; atMs: number }> = [];
     for (const messageID of indexes.fingerprintMessages(fingerprintIndexes)) {
       const occurrence = state.occurrences.get(messageID);
       if (!occurrence) continue;
@@ -722,7 +730,13 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       if (!row) continue;
       // Zero-token rows are metadata/activity only; the session DTO is a
       // usage view, so it must not grow steps, ownership, or pricing work.
-      if (!rawAssistantRowHasTokenUsage(row)) continue;
+      // Their position is kept for the focus session so gaps never bridge them.
+      if (!rawAssistantRowHasTokenUsage(row)) {
+        if (row.sessionID === sessionId) {
+          excluded.push({ sessionId, atMs: messagePositionMs(row) });
+        }
+        continue;
+      }
       messages.push(row);
       includedSessionIds.add(occurrence.sessionID);
     }
@@ -753,6 +767,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       projects,
       messages,
       compactions: detailCompactions.get(sessionId) ?? [],
+      userMessages: detailUserMessages.get(sessionId) ?? [],
+      excluded,
     };
   }
 
@@ -1131,6 +1147,33 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     };
   }
 
+  function buildProvisionalHome(atMs: number): Promise<HomeSnapshot | undefined> {
+    if (provisionalHome) return provisionalHome;
+    provisionalHome = (async () => {
+      const result = await reader.withSnapshot((snapshot) => {
+        const provisional = createAnalyticsModel({ timeZone });
+        provisional.setMetadata(snapshot.readAllSessionsIndex(), snapshot.readProjectsIndex());
+        // A message created before this window but completed within it is missed until the exact pass.
+        const rows = snapshot.readCompletedAssistantRows({
+          createdSinceMs: rangeWindow("7d", atMs).sinceMs,
+        });
+        provisional.apply(rows.filter(rawAssistantRowHasTokenUsage), []);
+        const data = provisional.home("7d", atMs);
+        return {
+          generatedAtMs: atMs,
+          range: "7d" as const,
+          stale: true,
+          provisional: true as const,
+          providers: { cards: [], enabledProviders: [], polledAtMs: atMs },
+          usage: { ...data.usage, stale: true },
+          projects: data.projects,
+        };
+      });
+      return result.status === "ok" ? result.value : undefined;
+    })();
+    return provisionalHome;
+  }
+
   /**
    * Grouped DTOs are cheap to rebuild from the already-owned model and share
    * Home's certified `nowMs`; only a bounded LRU keeps repeats off the model.
@@ -1258,52 +1301,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (changed) queuePresentationWrite(atMs);
   }
 
-  /**
-   * The UI's default finite view is 7d. After that response is ready, extend
-   * once to 30d after a short idle grace. A foreground request that arrives
-   * during the grace (or a refresh already in flight) wins: the extension
-   * retries at most once, then leaves rescheduling to the next 7d response.
-   * This is not preemption; a synchronous SQLite read that has already started
-   * still runs to completion. Lifetime is never scheduled automatically.
-   */
-  function scheduleThirtyDayExtension(range: RangeKey, atMs: number): void {
-    if (range !== "7d" || closed || closing || lowPriorityTimer !== undefined) return;
-    if (coversSince(rangeWindow("30d", atMs).sinceMs, state.extent)) return;
-
-    const hasPendingRefreshWork = (): boolean =>
-      refreshPromise !== undefined ||
-      pendingGlobal !== undefined ||
-      pendingMetadataOnly ||
-      pendingDetailSessions.size > 0 ||
-      pendingProjectScopes.size > 0;
-
-    let deferrals = 0;
-    const arm = (): void => {
-      const timer = setTimeout(() => {
-        lowPriorityTimer = undefined;
-        if (closed || closing) return;
-        const scheduledAtMs = now();
-        if (coversSince(rangeWindow("30d", scheduledAtMs).sinceMs, state.extent)) return;
-        if (hasPendingRefreshWork()) {
-          if (deferrals < LOW_PRIORITY_EXTENSION_MAX_DEFERRALS) {
-            deferrals += 1;
-            arm();
-          }
-          return;
-        }
-        void requestRefresh({
-          globalRange: "30d",
-          detailSessionIds: [],
-          projectScopes: [],
-        }).catch(() => {});
-      }, ANALYTICS_THIRTY_DAY_EXTENSION_DELAY_MS) as LowPriorityTimer;
-      timer.unref?.();
-      lowPriorityTimer = timer;
-    };
-
-    arm();
-  }
-
   function buildCandidate(
     snapshot: OpenCodeStorageSnapshot,
     job: RefreshJob,
@@ -1329,12 +1326,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const readChangedRows = (messageIDs: readonly string[]): OpenCodeRawAssistantRow[] =>
       measureSync("changedPayloadRead", () => snapshot.readCompletedAssistantRows({ messageIDs }));
 
-    const sessions = measureSync("metadataRead", () => snapshot.readAllSessionsIndex());
-    const projects = measureSync("metadataRead", () => snapshot.readProjectsIndex());
-    // Stage metadata topology without touching committed indexes until commit.
-    const candidateIndexes = createAnalyticsIndexes();
-    candidateIndexes.setSessions(sessions);
-
     const globalRefresh = job.globalRange !== undefined;
     const effectiveExtent = replaced ? undefined : state.extent;
     const priorCursor = replaced ? undefined : state.sourceCursorAtMs;
@@ -1348,18 +1339,59 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         // source timestamps; reconcile fully rather than skip them.
         (priorCursor !== undefined && atMs < priorCursor));
 
+    const emptyBaseline = priorCursor === undefined && state.occurrences.size === 0 && !replaced;
+    // A completion timestamp rejected as "future" at one refresh becomes
+    // eligible when wall time reaches it. That row's `time_updated` is already
+    // behind the cursor, so a normal delta cannot see it: force a full identity
+    // projection on that refresh instead of certifying the unchanged signature.
+    const priorFutureCompletionAtMs = replaced ? undefined : state.futureCompletionAtMs;
+    const futureDue =
+      globalRefresh && priorFutureCompletionAtMs !== undefined && atMs >= priorFutureCompletionAtMs;
+    // An unchanged on-disk source (database + WAL stat) cannot contain new,
+    // edited, completed, or removed rows. The revision projection and the
+    // session/project indexes are full table scans, so the persisted state is
+    // reused as-is and the cursor stays authoritative — for a global refresh
+    // and for a scoped-only refresh alike. The signature is captured before
+    // `BEGIN`, so any write it counts is already visible to this snapshot. A
+    // scoped-only refresh never persists the signature: only a global read
+    // advances the cursor, so a newer signature must wait for that read. A due
+    // 7-day repair (or clock rollback) must override the gate, because backdated
+    // edits and deletions are invisible to the delta.
+    const changeSignature = snapshot.changeSignature ?? null;
+    const sourceUnchanged =
+      !repairDue &&
+      !futureDue &&
+      !emptyBaseline &&
+      priorCursor !== undefined &&
+      changeSignature !== null &&
+      state.sourceSignature !== undefined &&
+      changeSignature === state.sourceSignature;
+
+    const sessions = sourceUnchanged
+      ? state.sessions
+      : measureSync("metadataRead", () => snapshot.readAllSessionsIndex());
+    const projects = sourceUnchanged
+      ? state.projects
+      : measureSync("metadataRead", () => snapshot.readProjectsIndex());
+    // Stage metadata topology without touching committed indexes until commit.
+    const candidateIndexes = createAnalyticsIndexes();
+    candidateIndexes.setSessions(sessions);
+
     // Establish the source cursor either from a cheap physical frontier (no
     // stored contribution needs membership) or from one full revision
     // projection. Normal refreshes use only the cursor-overlap delta.
     let revisionSnapshot: OpenCodeMessageRevisionSnapshot | undefined;
     let fullProjection = false;
+    let fullIdentityScan = false;
     let cursorBaseline = false;
     let deltaValid = false;
     let sourceCursorAtMs: number | null | undefined;
+    let futureCompletionAtMs: number | null | undefined;
 
     if (globalRefresh) {
-      const emptyBaseline = priorCursor === undefined && state.occurrences.size === 0 && !replaced;
-      if (emptyBaseline) {
+      if (sourceUnchanged) {
+        deltaValid = true;
+      } else if (emptyBaseline) {
         const frontier = measureSync("revisionDiscovery", () =>
           snapshot.readMessageRevisionFrontier(),
         );
@@ -1368,7 +1400,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
             ? Math.min(frontier.maxUpdatedAtMs ?? 0, atMs)
             : null;
         cursorBaseline = true;
-      } else if (priorCursor !== undefined && !repairDue) {
+      } else if (priorCursor !== undefined && !repairDue && !futureDue) {
         revisionSnapshot = measureSync("revisionDiscovery", () =>
           snapshot.readMessageRevisions({
             updatedSinceMs: Math.max(0, priorCursor - ANALYTICS_SOURCE_CURSOR_OVERLAP_MS),
@@ -1389,9 +1421,13 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           fullProjection = true;
         }
       } else {
+        // A due repair/clock rollback re-reads payloads; a future-completion
+        // release only needs the full identity set so the now-eligible row is
+        // fetched by id.
         revisionSnapshot = measureSync("revisionDiscovery", () => snapshot.readMessageRevisions());
         if (!revisionSnapshot.available) return "unavailable";
-        fullProjection = true;
+        fullIdentityScan = true;
+        fullProjection = repairDue;
       }
 
       if (revisionSnapshot) {
@@ -1399,8 +1435,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           fullProjection ||
           !revisionSnapshot.updatedAtAvailable ||
           !revisionSnapshot.completedAtAvailable;
+        fullIdentityScan = fullIdentityScan || fullProjection;
         const revisions = revisionSnapshot.revisions;
-        if (!fullProjection) {
+        if (!fullIdentityScan) {
           // Deterministic time-then-id order keeps equal timestamps and
           // lexically earlier late commits replayable and idempotent.
           revisions.sort(
@@ -1410,6 +1447,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           );
         }
         let maxUpdated = priorCursor;
+        let earliestFuture: number | undefined;
         for (const revision of revisions) {
           if (
             revision.updatedAtMs !== null &&
@@ -1417,13 +1455,41 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
           ) {
             maxUpdated = revision.updatedAtMs;
           }
+          if (
+            revisionSnapshot.completedAtAvailable &&
+            revision.type === "assistant" &&
+            revision.completedAtMs !== null &&
+            revision.completedAtMs > atMs &&
+            (earliestFuture === undefined || revision.completedAtMs < earliestFuture)
+          ) {
+            earliestFuture = revision.completedAtMs;
+          }
         }
         sourceCursorAtMs =
           revisionSnapshot.updatedAtAvailable && revisionSnapshot.completedAtAvailable
             ? Math.min(maxUpdated ?? 0, atMs)
             : null;
+        if (revisionSnapshot.completedAtAvailable) {
+          if (fullIdentityScan) {
+            futureCompletionAtMs = earliestFuture ?? null;
+          } else {
+            // A delta only proves the future rows it mentions. Keep an older
+            // pending completion until wall time reaches it.
+            const carried =
+              priorFutureCompletionAtMs !== undefined && priorFutureCompletionAtMs > atMs
+                ? priorFutureCompletionAtMs
+                : undefined;
+            futureCompletionAtMs =
+              earliestFuture === undefined
+                ? carried
+                : carried === undefined
+                  ? earliestFuture
+                  : Math.min(earliestFuture, carried);
+          }
+        }
       }
-      deltaValid = !fullProjection && revisionSnapshot !== undefined && !repairDue;
+      deltaValid =
+        sourceUnchanged || (!fullIdentityScan && revisionSnapshot !== undefined && !repairDue);
     }
 
     const bulkRows: OpenCodeRawAssistantRow[] = [];
@@ -1433,7 +1499,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const removalKeys = new Set<string>();
     const authoritativePayloadIDs = new Set<string>();
     const watermarks =
-      revisionSnapshot !== undefined && !fullProjection && revisionSnapshot.updatedAtAvailable
+      revisionSnapshot !== undefined && !fullIdentityScan && revisionSnapshot.updatedAtAvailable
         ? new Map<string, number | null>(
             revisionSnapshot.revisions.map((revision) => [
               revision.messageID,
@@ -1453,7 +1519,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         // synthetic occurrence that simply has no transient agent loaded.
         agentProjected: true,
       };
-      if (row.agent !== undefined) entry.agent = row.agent;
       changedMap.set(key, entry);
       removalKeys.delete(key);
     };
@@ -1556,7 +1621,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
 
     const completedMembership = revisionSnapshot?.completedAtAvailable === true;
-    if (fullProjection && !completedMembership && !replaced && nextExtent) {
+    if (fullIdentityScan && !completedMembership && !replaced && nextExtent) {
       // No completion identity: the extent payload read above is authoritative
       // for completion/type membership inside the indexed extent.
       for (const [key, occurrence] of state.occurrences) {
@@ -1577,6 +1642,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const detailCompactionChanges: Array<
       [string, Array<{ sessionId: string; atMs: number; messageId: string }>]
     > = [];
+    const detailUserMessageChanges: Array<[string, InputMessagePosition[]]> = [];
     const detailCoverageChanges: Array<[string, DetailScopeCoverage]> = [];
     const projectSignatureChanges: Array<[string, string]> = [];
     const projectCoverageChanges: Array<[string, ProjectScopeCoverage]> = [];
@@ -1824,9 +1890,36 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         snapshot.readMessageRevisions({ sessionIDs: ids }),
       );
       const scopedWatermarks = new Map<string, number | null>();
+      const focusUserMessages: InputMessagePosition[] = [];
       if (scopedRevisions.available) {
+        // Explicit reply linkage: an assistant row's stored `parentID` is the
+        // user message it answers. Timing alone cannot separate a reply that
+        // was already running when the input arrived.
+        const repliesByParent = new Map<string, string[]>();
         for (const revision of scopedRevisions.revisions) {
           scopedWatermarks.set(revision.messageID, revision.updatedAtMs);
+          if (revision.type.toLowerCase() === "assistant" && revision.parentID !== undefined) {
+            const replies = repliesByParent.get(revision.parentID);
+            if (replies === undefined) repliesByParent.set(revision.parentID, [revision.messageID]);
+            else replies.push(revision.messageID);
+          }
+        }
+        for (const revision of scopedRevisions.revisions) {
+          if (
+            revision.sessionID !== focusId ||
+            revision.type.toLowerCase() !== "user" ||
+            revision.createdAtMs <= 0
+          ) {
+            continue;
+          }
+          const replies = repliesByParent.get(revision.messageID);
+          const position: InputMessagePosition = {
+            sessionId: focusId,
+            atMs: revision.createdAtMs,
+            messageId: revision.messageID,
+          };
+          if (replies !== undefined) position.replyMessageIds = replies;
+          focusUserMessages.push(position);
         }
       }
       const signature = sessionRevisionSignature(sessions, ids);
@@ -1942,6 +2035,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         detailCompactionChanges.push([focusId, markers]);
         detailCoverageChanges.push([focusId, { signature: ids.join("\u0001"), untilMs: atMs }]);
       }
+      detailUserMessageChanges.push([focusId, focusUserMessages]);
       detailSignatureChanges.push([focusId, signature]);
     }
 
@@ -1970,7 +2064,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     // Apply the projected revision delta after every payload/membership read.
     // Only a full projection may sweep stored rows as deleted.
     const seenKeys =
-      fullProjection && revisionSnapshot?.completedAtAvailable ? new Set<string>() : undefined;
+      fullIdentityScan && revisionSnapshot?.completedAtAvailable ? new Set<string>() : undefined;
     const extentSince = nextExtent?.sinceMs;
     const extentUntil = nextExtent?.untilMs ?? atMs;
     if (revisionSnapshot?.completedAtAvailable) {
@@ -2068,7 +2162,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       discoverExternalOwners(read);
     }
 
-    return {
+    const candidate: Candidate = {
       identity,
       sessions,
       projects,
@@ -2080,12 +2174,21 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       extentChanged,
       detailSignatures: detailSignatureChanges,
       detailCompactions: detailCompactionChanges,
+      detailUserMessages: detailUserMessageChanges,
       detailCoverageChanges,
       projectSignatures: projectSignatureChanges,
       projectCoverages: projectCoverageChanges,
+      sourceUnchanged,
       ...(globalRefresh ? { sourceCursorAtMs } : {}),
       ...(globalRefresh && (cursorBaseline || fullProjection) ? { repairCompletedAtMs: atMs } : {}),
     };
+    if (globalRefresh && snapshot.changeSignature) {
+      candidate.sourceSignature = snapshot.changeSignature;
+    }
+    if (globalRefresh && futureCompletionAtMs !== undefined) {
+      candidate.futureCompletionAtMs = futureCompletionAtMs;
+    }
+    return candidate;
   }
   /** Drops fingerprint tuples no occurrence references (small periodic GC). */
   function pruneFingerprints(): void {
@@ -2124,6 +2227,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const atMs = now();
     const priorSourceCursorAtMs = state.sourceCursorAtMs;
     const priorLastFullRepairAtMs = state.lastFullRepairAtMs;
+    const priorSourceSignature = state.sourceSignature;
+    const priorFutureCompletionAtMs = state.futureCompletionAtMs;
     const priorExtentSinceMs = state.extent?.sinceMs;
     const priorSourceIdentity = state.sourceIdentity;
     if (job.globalRange !== undefined) lastGlobalAttemptAtMs = atMs;
@@ -2201,6 +2306,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       state.presentation = undefined;
       state.sourceCursorAtMs = undefined;
       state.lastFullRepairAtMs = undefined;
+      state.sourceSignature = undefined;
+      state.futureCompletionAtMs = undefined;
       warmPresentation = undefined;
       warmSourceIdentity = undefined;
       warmIdentityVerification = undefined;
@@ -2208,6 +2315,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       projectSignatures.clear();
       detailSignatures.clear();
       detailCompactions.clear();
+      detailUserMessages.clear();
       detailCoverage.clear();
       projectCoverage.clear();
       projectFreshAt.clear();
@@ -2225,6 +2333,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const upserts: OpenCodeRawAssistantRow[] = [];
     const agentUpserts: OpenCodeRawAssistantRow[] = [];
     const agentAffectedSessionIds = new Set<string>();
+    const sourceUnchanged = candidate.sourceUnchanged === true;
     let updatedAtChanged = false;
     let occurrenceRemoved = false;
 
@@ -2244,7 +2353,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const key = row.messageID;
       const occurrence = state.occurrences.get(key);
       if (!occurrence) {
-        setRow(row, updatedAtMs, row.agent);
+        setRow(row, updatedAtMs);
         upserts.push(row);
         return;
       }
@@ -2255,7 +2364,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         fingerprintOf(oldRow) === fingerprintOf(row);
       if (!sameContribution) {
         if (oldRow) removals.push(oldRow);
-        setRow(row, updatedAtMs, row.agent);
+        setRow(row, updatedAtMs);
         upserts.push(row);
         return;
       }
@@ -2263,11 +2372,21 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         occurrence.updatedAtMs = updatedAtMs;
         updatedAtChanged = true;
       }
-      if (agentProjected && row.agent !== occurrence.agent) {
+      // Agent and reasoning effort are detail-only metadata projected by the
+      // same payload read; either changing refreshes the cached session DTO.
+      if (
+        agentProjected &&
+        (row.agent !== occurrence.agent || row.variant !== occurrence.variant)
+      ) {
+        // Compact occurrences do not persist agent/variant; filling them from
+        // the first unchanged-source detail read does not change the cached DTO.
+        const wasKnown = occurrence.agent !== undefined || occurrence.variant !== undefined;
         if (row.agent === undefined) delete occurrence.agent;
         else occurrence.agent = row.agent;
+        if (row.variant === undefined) delete occurrence.variant;
+        else occurrence.variant = row.variant;
         agentUpserts.push(row);
-        agentAffectedSessionIds.add(row.sessionID);
+        if (wasKnown || !sourceUnchanged) agentAffectedSessionIds.add(row.sessionID);
       }
     };
 
@@ -2314,12 +2433,20 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (candidate.repairCompletedAtMs !== undefined) {
       state.lastFullRepairAtMs = candidate.repairCompletedAtMs;
     }
+    if (candidate.sourceSignature !== undefined) {
+      state.sourceSignature = candidate.sourceSignature;
+    }
+    if (candidate.futureCompletionAtMs !== undefined) {
+      if (candidate.futureCompletionAtMs === null) state.futureCompletionAtMs = undefined;
+      else state.futureCompletionAtMs = candidate.futureCompletionAtMs;
+    }
     unavailable = false;
 
     for (const [focusId, signature] of candidate.detailSignatures) {
       if (signature === "") {
         detailSignatures.delete(focusId);
         detailCompactions.delete(focusId);
+        detailUserMessages.delete(focusId);
         detailCoverage.delete(focusId);
         detailFreshAt.delete(focusId);
       } else {
@@ -2332,10 +2459,25 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
     const markerChangedFocusIds = new Set<string>();
     for (const [focusId, markers] of candidate.detailCompactions) {
-      if (metadataChanged(detailCompactions.get(focusId) ?? [], markers)) {
+      const previous = detailCompactions.get(focusId);
+      if (
+        metadataChanged(previous ?? [], markers) &&
+        (previous !== undefined || !sourceUnchanged)
+      ) {
         markerChangedFocusIds.add(focusId);
       }
       detailCompactions.set(focusId, markers);
+    }
+    const userMessageChangedFocusIds = new Set<string>();
+    for (const [focusId, messages] of candidate.detailUserMessages) {
+      const previous = detailUserMessages.get(focusId);
+      if (
+        metadataChanged(previous ?? [], messages) &&
+        (previous !== undefined || !sourceUnchanged)
+      ) {
+        userMessageChangedFocusIds.add(focusId);
+      }
+      detailUserMessages.set(focusId, messages);
     }
     for (const [projectId, signature] of candidate.projectSignatures) {
       projectSignatures.set(projectId, signature);
@@ -2346,6 +2488,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
     trimMap(detailSignatures, MAX_SCOPE_BATCH * 4);
     trimMap(detailCompactions, MAX_SCOPE_BATCH * 4);
+    trimMap(detailUserMessages, MAX_SCOPE_BATCH * 4);
     trimMap(detailCoverage, MAX_SCOPE_BATCH * 4);
     trimMap(detailFreshAt, MAX_SCOPE_BATCH * 4);
     trimMap(projectSignatures, MAX_SCOPE_BATCH * 4);
@@ -2364,6 +2507,11 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const repairChanged =
       candidate.repairCompletedAtMs !== undefined &&
       state.lastFullRepairAtMs !== priorLastFullRepairAtMs;
+    const signatureChanged =
+      candidate.sourceSignature !== undefined && state.sourceSignature !== priorSourceSignature;
+    const futureChanged =
+      candidate.futureCompletionAtMs !== undefined &&
+      state.futureCompletionAtMs !== priorFutureCompletionAtMs;
     const extentSinceChanged = state.extent?.sinceMs !== priorExtentSinceMs;
     const identityEstablished =
       priorSourceIdentity === undefined && state.sourceIdentity !== undefined;
@@ -2371,9 +2519,9 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     if (!dataChanged && agentAffectedSessionIds.size > 0) {
       sessionCacheInvalidated = invalidateCachedSessions(agentAffectedSessionIds);
     }
-    if (!dataChanged && markerChangedFocusIds.size > 0) {
+    if (!dataChanged && (markerChangedFocusIds.size > 0 || userMessageChangedFocusIds.size > 0)) {
       const affectedSessionIds = new Set<string>();
-      for (const focusId of markerChangedFocusIds) {
+      for (const focusId of [...markerChangedFocusIds, ...userMessageChangedFocusIds]) {
         affectedSessionIds.add(focusId);
         for (const sessionId of indexes.treeIds(focusId)) affectedSessionIds.add(sessionId);
       }
@@ -2428,6 +2576,8 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       updatedAtChanged ||
       cursorChanged ||
       repairChanged ||
+      signatureChanged ||
+      futureChanged ||
       extentSinceChanged ||
       identityEstablished;
     if (snapshotNeeded) {
@@ -2525,8 +2675,15 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     void requestRefresh(job).catch(() => {});
   }
 
+  async function refreshGlobalOrThrow(range: RangeKey): Promise<void> {
+    await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
+    if (unavailable && state.occurrences.size === 0 && Object.keys(state.sessions).length === 0) {
+      throw new AnalyticsLookupError("unavailable");
+    }
+  }
+
   return {
-    async home(range) {
+    async home(range, exact = false) {
       if (!isRangeKey(range)) throw new AnalyticsLookupError("bad-request");
       if (closed) throw new Error("analytics closed");
       await ensureLoaded();
@@ -2562,20 +2719,21 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
               sidecarNewerThanIndex || missingCoverage,
             );
           }
-          scheduleThirtyDayExtension(range, atMs);
           return homeSnapshotWithStaleness(current, range, atMs, stale);
         }
       }
       await ensureIndexLoaded();
       if (!coverageTrusted || !coversSince(window.sinceMs, state.extent)) {
-        await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
         if (
-          unavailable &&
+          !exact &&
+          range === "7d" &&
           state.occurrences.size === 0 &&
-          Object.keys(state.sessions).length === 0
+          state.extent === undefined
         ) {
-          throw new AnalyticsLookupError("unavailable");
+          const provisional = await buildProvisionalHome(atMs);
+          if (provisional !== undefined) return provisional;
         }
+        await refreshGlobalOrThrow(range);
       }
       const stale = isStale(now());
       if (stale) {
@@ -2589,7 +2747,6 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       );
       cacheHome(range, result, atMs);
       precomputeHomeSnapshots(atMs);
-      scheduleThirtyDayExtension(range, atMs);
       return homeSnapshotWithStaleness(result, range, atMs, stale);
     },
 
@@ -2658,14 +2815,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         return result;
       }
       if (!coverageTrusted || !coversSince(window.sinceMs, state.extent)) {
-        await requestRefresh({ globalRange: range, detailSessionIds: [], projectScopes: [] });
-        if (
-          unavailable &&
-          state.occurrences.size === 0 &&
-          Object.keys(state.sessions).length === 0
-        ) {
-          throw new AnalyticsLookupError("unavailable");
-        }
+        await refreshGlobalOrThrow(range);
       }
       const derivationAtMs = groupDerivationAtMs(range, atMs);
       const missingCoverage = !coversSince(window.sinceMs, state.extent);
@@ -2794,7 +2944,12 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       const ids = indexes.treeIds(sessionId);
       const signature = sessionRevisionSignature(state.sessions, ids);
       const markers = detailCompactions.get(sessionId);
-      if (detailSignatures.get(sessionId) !== signature || markers === undefined) {
+      const userMessages = detailUserMessages.get(sessionId);
+      if (
+        detailSignatures.get(sessionId) !== signature ||
+        markers === undefined ||
+        userMessages === undefined
+      ) {
         await requestRefresh({ detailSessionIds: [sessionId], projectScopes: [] });
       }
       if (!isDetailFresh(sessionId, now())) {
@@ -2865,15 +3020,17 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       return false;
     },
 
+    unpricedRoutes() {
+      if (!modelHydrated || modelDirty) return [];
+      return model.unpricedRoutes();
+    },
+
     async close() {
       if (closePromise) return closePromise;
       if (closed) return;
-      closing = true;
       closePromise = (async () => {
-        if (lowPriorityTimer !== undefined) {
-          clearTimeout(lowPriorityTimer);
-          lowPriorityTimer = undefined;
-        }
+        await refreshPromise?.catch(() => {});
+        closing = true;
         pendingGlobal = undefined;
         pendingMetadataOnly = false;
         pendingDetailSessions.clear();
@@ -2894,6 +3051,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         lastProjectScopes.clear();
         detailSignatures.clear();
         detailCompactions.clear();
+        detailUserMessages.clear();
         detailCoverage.clear();
         projectSignatures.clear();
         projectCoverage.clear();

@@ -1,7 +1,18 @@
 import type { JSX } from "solid-js";
-import { createMemo, createSignal, For, Show } from "solid-js";
+import {
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  on,
+  onCleanup,
+  onMount,
+  Show,
+} from "solid-js";
 import type { ProviderCard, QuotaCardRow } from "../../contracts/dashboard";
 import type { BankedResetAvailability, BankedResetCredit } from "../../contracts/openai-quota";
+import { isTransientProviderFailureCategory } from "../../contracts/provider-failure";
+import { orderRowsByPreference } from "../../contracts/row-order";
 import { formatRunway, formatTimestamp } from "../format";
 import { Icon, Tooltip } from "../opencode-ui";
 import {
@@ -164,24 +175,21 @@ function resetSegments(availability: BankedResetAvailability | undefined): Reset
   return [...supplied, ...placeholders];
 }
 
-function isOpenAiProvider(providerId: string): boolean {
-  return providerId === "openai";
-}
-
 /**
- * OpenAI reset rows carry explicit banked-reset metadata; a display label is
- * never an identity. Other providers may use the same wording for normal rows.
+ * A reset row carries explicit banked-reset metadata; a display label is never
+ * an identity. Any provider that declares the same optional field gets the same
+ * reset rendering.
  */
-function isOpenAiResetsRow(row: QuotaCardRow): boolean {
+function isResetsRow(row: QuotaCardRow): boolean {
   return row.bankedResets !== undefined;
 }
 
 /**
- * The backend's balance result type is the stable OpenAI credit identity. A
- * malformed balance row with a percent/quantity shape is still credits, so it
- * is suppressed rather than drawing unrelated graphics.
+ * The backend's balance result type is the stable credit identity. A malformed
+ * balance row with a percent/quantity shape is still credits, so it is
+ * suppressed rather than drawing unrelated graphics.
  */
-function isOpenAiCreditsRow(row: QuotaCardRow): boolean {
+function isCreditsRow(row: QuotaCardRow): boolean {
   return row.resultType === "balance";
 }
 
@@ -192,18 +200,26 @@ function hasPositiveCreditsValue(value: string | undefined): boolean {
   return Number.isFinite(parsed) && parsed > 0;
 }
 
-/** Claude Agent shares the OpenAI Resets row; direct Anthropic stays excluded. */
-function isResetsProvider(providerId: string): boolean {
-  return isOpenAiProvider(providerId) || providerId === "claude-agent";
+/** A row the provider declared as an optional field in its registration metadata. */
+function isDeclaredOptionalRow(row: QuotaCardRow, card: ProviderCard): boolean {
+  return (card.visibilityRows ?? []).some(
+    (declared) => declared.rowId === row.rowId || declared.aliases?.includes(row.rowId),
+  );
 }
 
-function isSuppressedOptionalRow(row: QuotaCardRow, providerId: string): boolean {
-  if (isResetsProvider(providerId) && isOpenAiResetsRow(row)) {
-    return resetSegments(row.bankedResets).length === 0;
-  }
-  if (!isOpenAiProvider(providerId)) return false;
-  if (isOpenAiCreditsRow(row)) return row.kind !== "value" || !hasPositiveCreditsValue(row.value);
-  return false;
+function isSuppressedOptionalRow(row: QuotaCardRow, card: ProviderCard): boolean {
+  if (!isDeclaredOptionalRow(row, card)) return false;
+  if (isResetsRow(row)) return resetSegments(row.bankedResets).length === 0;
+  if (!isCreditsRow(row)) return false;
+  // A structured quantity is a real declared balance (DeepSeek, Zen, ...);
+  // only malformed percent shapes and empty/zero value rows are suppressed.
+  if (row.kind === "quantity") return false;
+  return row.kind !== "value" || !hasPositiveCreditsValue(row.value);
+}
+
+/** A reset row is rendered as resets only when the provider declared that optional field. */
+function isDeclaredResetsRow(row: QuotaCardRow, card: ProviderCard): boolean {
+  return isResetsRow(row) && isDeclaredOptionalRow(row, card);
 }
 
 function RowInfo(props: { label: string; info: string }): JSX.Element {
@@ -273,24 +289,128 @@ function ResetRow(props: { row: QuotaCardRow; timeZone: string }): JSX.Element {
   );
 }
 
+function resetBoundaryPassed(row: QuotaCardRow, nowMs: number): boolean {
+  if (row.resetAtIso === undefined) return false;
+  const resetAtMs = Date.parse(row.resetAtIso);
+  return Number.isFinite(resetAtMs) && resetAtMs <= nowMs;
+}
+
+/** A cooldown/transient outcome made no fresh request or may recover on its own. */
+function isMutedPollError(error: ProviderCard["errors"][number]): boolean {
+  return (
+    error.attemptOutcome === "cooldown" ||
+    error.attemptOutcome === "transient" ||
+    isTransientProviderFailureCategory(error.failureCategory)
+  );
+}
+
+function formatShortDuration(ms: number, roundUp: boolean): string {
+  const seconds = roundUp
+    ? Math.max(1, Math.ceil(Math.max(0, ms) / 1_000))
+    : Math.max(0, Math.floor(Math.max(0, ms) / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function formatUpdatedAge(observedAtIso: string | undefined, nowMs: number): string | undefined {
+  if (observedAtIso === undefined) return undefined;
+  const observedAtMs = Date.parse(observedAtIso);
+  if (!Number.isFinite(observedAtMs) || observedAtMs > nowMs) return undefined;
+  return `Updated ${formatShortDuration(nowMs - observedAtMs, false)} ago`;
+}
+
 export function QuotaCardView(props: {
   card: ProviderCard;
   preferences: DisplayPreferences;
   hiddenRows: string[];
   stale: boolean;
   timeZone: string;
+  /** Render time supplied by the snapshot; tests pass a fixed clock. */
+  nowMs?: number;
 }): JSX.Element {
+  type CardError = ProviderCard["errors"][number];
   /**
-   * Visibility is presentation-only and managed in Settings, never on Home.
+   * A mounted card advances its own clock once a minute, so the retained age,
+   * retry text and per-row reset expiry do not freeze between snapshot polls.
+   * A new snapshot rebases the offset instead of double-counting time.
    */
-  const shownRows = () => visibleRows(props.card.rows, props.hiddenRows);
-  const displayRows = () =>
-    shownRows().filter((row) => !isSuppressedOptionalRow(row, props.card.providerId));
+  const CARD_NOW_TICK_MS = 60_000;
+  const [tickOffsetMs, setTickOffsetMs] = createSignal(0);
+  onMount(() => {
+    const timer = setInterval(
+      () => setTickOffsetMs((offset) => offset + CARD_NOW_TICK_MS),
+      CARD_NOW_TICK_MS,
+    );
+    onCleanup(() => clearInterval(timer));
+  });
+  createEffect(
+    on(
+      () => props.nowMs,
+      () => setTickOffsetMs(0),
+      { defer: true },
+    ),
+  );
+  const cardNowMs = () => {
+    const offset = tickOffsetMs();
+    return props.nowMs === undefined ? Date.now() : props.nowMs + offset;
+  };
+
+  /** Visibility is presentation-only and managed in Settings, never on Home. */
+  const visibilityRows = () => {
+    const controls = props.card.visibilityRows ?? [];
+    return orderRowsByPreference(
+      visibleRows(props.card.rows, props.hiddenRows, controls),
+      props.preferences.rowOrder?.[props.card.cardId],
+      (row) => row.rowId,
+      controls,
+    );
+  };
+  /**
+   * A retained row whose reset boundary passed is dropped instead of showing 0%.
+   * Fresh provider rows are authoritative and are never dropped by our clock.
+   */
+  const shownRows = () =>
+    props.stale
+      ? visibilityRows().filter((row) => !resetBoundaryPassed(row, cardNowMs()))
+      : visibilityRows();
+  const displayRows = () => shownRows().filter((row) => !isSuppressedOptionalRow(row, props.card));
   const [copyStatus, setCopyStatus] = createSignal("");
+
+  /**
+   * A retained measurement plus a polling/cooldown skip is not a provider
+   * failure. Keep the rows visible with a muted age/retry notice; credential
+   * rejections and unknown categories stay red.
+   */
+  const mutedErrors = createMemo<CardError[]>(() =>
+    props.card.stale === true && displayRows().length > 0
+      ? props.card.errors.filter(isMutedPollError)
+      : [],
+  );
+  const visibleErrors = createMemo<CardError[]>(() =>
+    props.card.errors.filter((error) => !mutedErrors().includes(error)),
+  );
+  const mutedNotice = createMemo<string | undefined>(() => {
+    if (mutedErrors().length === 0) return undefined;
+    const nowMs = cardNowMs();
+    const updated = formatUpdatedAge(props.card.observedAtIso, nowMs);
+    const retryAtMs = mutedErrors()
+      .map((error) => error.retryAtMs)
+      .filter((value): value is number => value !== undefined && value > nowMs)
+      .sort((left, right) => left - right)[0];
+    const retry =
+      retryAtMs === undefined
+        ? undefined
+        : `retrying in ${formatShortDuration(retryAtMs - nowMs, true)}`;
+    return [updated, retry].filter((part) => part !== undefined).join(" · ") || undefined;
+  });
 
   function runwayText(row: QuotaCardRow): string | undefined {
     if (props.stale) return undefined;
-    const now = Date.now();
+    const now = cardNowMs();
     if (row.runway?.kind === "lasts_past_reset") {
       const reset = row.resetAtIso;
       if (
@@ -303,6 +423,9 @@ export function QuotaCardView(props: {
     return formatRunway(row.runway, now);
   }
 
+  const errorLabel = (label: string) =>
+    props.card.accountLabel ? label : `Provider-level error · ${label}`;
+
   async function copySummary(): Promise<void> {
     const identity = [
       props.card.providerLabel,
@@ -314,7 +437,7 @@ export function QuotaCardView(props: {
       .filter((part) => part !== undefined && part.length > 0)
       .join(" · ");
     const lines = displayRows().map((row) => {
-      if (isResetsProvider(props.card.providerId) && isOpenAiResetsRow(row)) {
+      if (isDeclaredResetsRow(row, props.card)) {
         const segments = resetSegments(row.bankedResets);
         return `${row.label}: ${segments.length} available · ${resetSummary(segments)}`;
       }
@@ -324,9 +447,18 @@ export function QuotaCardView(props: {
       const runwayPart = runway ? ` · ${runway}` : "";
       return `${row.label}: ${rowValueText(row, props.preferences)}${countdown}${runwayPart}`;
     });
+    // Same already-sanitized projection and labels the card renders, in display order.
+    // Suppressed polling errors are replaced by the same muted notice the card shows.
+    const notice = mutedNotice();
+    const errorLines = visibleErrors().flatMap((error) => [errorLabel(error.label), error.message]);
     try {
       await navigator.clipboard.writeText(
-        [identity, ...(props.stale ? ["Data may be stale"] : []), ...lines].join("\n"),
+        [
+          identity,
+          ...(props.stale ? [notice ?? "Data may be stale"] : []),
+          ...errorLines,
+          ...lines,
+        ].join("\n"),
       );
       setCopyStatus("Quota summary copied.");
     } catch {
@@ -335,7 +467,7 @@ export function QuotaCardView(props: {
   }
 
   return (
-    <article class="qg-card" data-error={props.card.errors.length > 0 ? "true" : undefined}>
+    <article class="qg-card" data-error={visibleErrors().length > 0 ? "true" : undefined}>
       <header class="qg-card__head">
         <div class="qg-card__identity">
           <ProviderLogo providerId={props.card.providerId} class="qg-card__logo" />
@@ -393,17 +525,15 @@ export function QuotaCardView(props: {
       </header>
 
       <Show when={props.card.stale === true}>
-        <p class="qg-stale">Data may be stale</p>
+        <p class="qg-stale">{mutedNotice() ?? "Data may be stale"}</p>
       </Show>
 
-      <Show when={props.card.errors.length > 0}>
+      <Show when={visibleErrors().length > 0}>
         <div class="qg-card__errors">
-          <For each={props.card.errors}>
+          <For each={visibleErrors()}>
             {(error) => (
               <p class="qg-error" data-level={props.card.accountLabel ? "account" : "provider"}>
-                <span class="qg-error__label">
-                  {props.card.accountLabel ? error.label : `Provider-level error · ${error.label}`}
-                </span>
+                <span class="qg-error__label">{errorLabel(error.label)}</span>
                 <span class="qg-error__message">{error.message}</span>
               </p>
             )}
@@ -416,17 +546,17 @@ export function QuotaCardView(props: {
         fallback={
           <>
             <Show when={props.card.rows.length === 0}>
-              <Show when={props.card.errors.length === 0}>
+              <Show when={visibleErrors().length === 0}>
                 <p class="qg-muted">No quota rows are reported for this account.</p>
               </Show>
             </Show>
-            <Show when={props.card.rows.length > 0 && shownRows().length === 0}>
+            <Show when={props.card.rows.length > 0 && visibilityRows().length === 0}>
               <p class="qg-muted">
                 Every row on this card is hidden — clear them in Settings → Visibility.
               </p>
             </Show>
-            <Show when={props.card.rows.length > 0 && shownRows().length > 0}>
-              <Show when={props.card.errors.length === 0}>
+            <Show when={props.card.rows.length > 0 && visibilityRows().length > 0}>
+              <Show when={visibleErrors().length === 0}>
                 <p class="qg-muted">No quota rows are reported for this account.</p>
               </Show>
             </Show>
@@ -436,7 +566,7 @@ export function QuotaCardView(props: {
         <div class="qg-card__rows">
           <For each={displayRows()}>
             {(row) =>
-              isResetsProvider(props.card.providerId) && isOpenAiResetsRow(row) ? (
+              isDeclaredResetsRow(row, props.card) ? (
                 <ResetRow row={row} timeZone={props.timeZone} />
               ) : (
                 <div

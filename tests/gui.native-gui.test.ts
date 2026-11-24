@@ -186,34 +186,41 @@ describe("Desktop GUI entry", () => {
 
   it("reuses the shared route containers and feature views rather than redrawing them", () => {
     expect(panelSource).toContain('from "../ui/routes"');
+    expect(panelSource).toContain("AnalyticsViews");
+    expect(panelSource).toContain("QuotaRoute");
+    expect(routesSource).toContain("export function AnalyticsViews");
     for (const route of [
-      "QuotaRoute",
       "AnalyticsRoute",
       "ModelsRoute",
       "GroupDetailRoute",
       "ProjectRoute",
       "SessionRoute",
     ]) {
-      expect(panelSource, `missing ${route}`).toContain(route);
+      expect(routesSource, `missing ${route}`).toContain(route);
     }
     expect(panelSource).toContain("AnalyticsTabs");
     expect(panelSource).toContain("SegmentedControl");
     expect(panelSource).toContain("TemporalStatusStrip");
-    expect(panelSource.match(/enabled=\{props\.visible\}/gu)?.length).toBe(7);
+    // Quota passes visibility directly; analytics passes it through the shared views.
+    expect(panelSource.match(/enabled=\{props\.visible\}/gu)?.length).toBe(2);
     expect(routesSource).toContain("function routeEnabled");
     expect(routesSource).toContain("props.enabled?.() !== false");
     for (const [route, count] of [
       ["QuotaRoute", 3],
       ["AnalyticsRoute", 1],
-      ["ModelsRoute", 1],
-      ["GroupDetailRoute", 1],
-      ["ProjectRoute", 1],
-      ["SessionRoute", 1],
     ] as const) {
-      const start = routesSource.indexOf(`export function ${route}(`);
-      const end = routesSource.indexOf("\nexport interface ", start);
+      const start = routesSource.indexOf(`function ${route}(`);
+      const end = routesSource.indexOf("\n}\n", start);
       expect(start, `missing ${route}`).toBeGreaterThanOrEqual(0);
       expect(routesSource.slice(start, end).match(/props\.onFresh\?\.\(\)/gu)?.length).toBe(count);
+    }
+    // The other analytics routes anchor freshness through the shared retained read.
+    for (const route of ["ModelsRoute", "GroupDetailRoute", "ProjectRoute", "SessionRoute"]) {
+      const start = routesSource.indexOf(`function ${route}(`);
+      const end = routesSource.indexOf("\n}\n", start);
+      expect(routesSource.slice(start, end), `${route} does not retain`).toContain(
+        "useRetainedRoute(",
+      );
     }
     expect(stateSource).toContain('from "../ui/query.js"');
 
@@ -242,9 +249,10 @@ describe("Desktop GUI entry", () => {
     );
     expect(panelSource).toContain('formatPath({ name: "analytics" }, range())');
     expect(panelSource).toContain("modelsDimension() ?? rememberedModelsDimension()");
-    for (const name of ["home", "analytics", "models", "model", "provider", "project", "session"]) {
-      expect(panelSource, `missing ${name} route`).toContain(`when={route().name === "${name}"}`);
+    for (const name of ["analytics", "models", "model", "provider", "project", "session"]) {
+      expect(routesSource, `missing ${name} route`).toContain(`route.name === "${name}"`);
     }
+    expect(panelSource).toContain('when={route().name === "home"}');
     expect(panelSource).not.toContain("SettingsRoute");
   });
 
@@ -336,6 +344,7 @@ describe("Desktop GUI entry", () => {
     for (const key of [
       "dashboard.hiddenCards",
       "dashboard.cardOrder",
+      "dashboard.rowOrder",
       "dashboard.temporalProviderOverrides",
       "dashboard.enabled",
       "dashboard.port",
@@ -449,14 +458,14 @@ describe("native build configuration", () => {
   it("ships the bundle from the same package with a bounded server peer", () => {
     expect(exportsMap["./gui-experimental"]?.default).toBe("./dist/gui-experimental.cjs");
     expect(packageScripts["build:gui"]).toBe("vite build --config vite.native.config.mjs");
-    expect(devDependencies["@opencode/plugin"]).toBe("2.2.1");
-    expect(peerDependencies["@opencode/plugin"]).toBe(">=2.0.16 <2.3.0");
+    expect(devDependencies["@opencode/plugin"]).toBe("2.4.1");
+    expect(peerDependencies["@opencode/plugin"]).toBe(">=2.0.16 <2.5.0");
     expect(dependencies["@opencode/plugin"]).toBeUndefined();
     expect(dependencies["@opencode/ui"]).toBeUndefined();
     expect(devDependencies["@opencode/ui"]).toBe("2.0.32");
 
     const installed = readJson<PluginManifest>("node_modules/@opencode/plugin/package.json");
-    expect(installed.version).toBe("2.2.1");
+    expect(installed.version).toBe("2.4.1");
     const pluginExports = installed.exports ?? {};
     expect(pluginExports["./gui"]).toBeDefined();
     expect(pluginExports["./gui/vite"]).toBeDefined();

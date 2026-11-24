@@ -513,6 +513,69 @@ describe("independent browser quota transport", () => {
     expect(() => parseQuotaSnapshot(wrong)).toThrow(DashboardError);
   });
 
+  it("keeps retained card stale and cooldown attempt outcome through the quota read", () => {
+    const card = {
+      cardId: "anthropic:test",
+      providerId: "anthropic",
+      providerLabel: "Anthropic",
+      accountLabel: "Claude",
+      labelSource: "connection",
+      stale: true,
+      observedAtIso: new Date(NOW - 4 * 60_000).toISOString(),
+      rows: [
+        {
+          rowId: "anthropic:test#window:five_hour|quota:percent",
+          label: "5h",
+          kind: "percent",
+          resultType: "quota",
+          percentRemaining: 40,
+          resetAtIso: new Date(NOW + 60 * 60_000).toISOString(),
+        },
+      ],
+      errors: [
+        {
+          label: "Claude Agent",
+          message: "Claude quota request failed.",
+          attemptOutcome: "cooldown",
+          retryAtMs: NOW + 120_000,
+        },
+      ],
+    };
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: { cards: [card], enabledProviders: "auto", polledAtMs: NOW },
+    };
+
+    expect(parseQuotaSnapshot(payload).providers.cards[0]).toMatchObject({
+      stale: true,
+      errors: [{ attemptOutcome: "cooldown" }],
+    });
+    // The stale marker is a literal `true`: a false or non-boolean value is a
+    // malformed card, not a fresh one.
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        providers: { ...payload.providers, cards: [{ ...card, stale: false }] },
+      }),
+    ).toThrow(DashboardError);
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        providers: {
+          ...payload.providers,
+          cards: [
+            {
+              ...card,
+              errors: [{ ...card.errors[0], attemptOutcome: "guess" }],
+            },
+          ],
+        },
+      }),
+    ).toThrow(DashboardError);
+  });
+
   it("rejects malformed provider data instead of inventing a successful empty read", () => {
     expect(() =>
       parseQuotaSnapshot({ generatedAtMs: NOW, stale: false, providers: { cards: null } }),
@@ -554,6 +617,7 @@ describe("independent browser quota transport", () => {
             visibilityRows: [
               {
                 rowId: "openai:synthetic#openai:resets|status:value",
+                aliases: ["openai:synthetic#openai:resets|quota:percent"],
                 label: "Resets",
                 info: "Resets info",
               },
@@ -601,6 +665,13 @@ describe("independent browser quota transport", () => {
     };
     wrongVisibility.providers.cards[0]!.visibilityRows[0]!.rowId = 7;
     expect(() => parseQuotaSnapshot(wrongVisibility)).toThrow(DashboardError);
+    // SAFETY: the test deliberately corrupts one parsed DTO field to exercise
+    // the decoder; the runtime shape stays a quota snapshot with an unknown alias.
+    const wrongAlias = JSON.parse(JSON.stringify(payload)) as typeof payload & {
+      providers: { cards: Array<{ visibilityRows: Array<{ aliases?: unknown }> }> };
+    };
+    wrongAlias.providers.cards[0]!.visibilityRows[0]!.aliases = [7];
+    expect(() => parseQuotaSnapshot(wrongAlias)).toThrow(DashboardError);
   });
 
   it("requests only the range-free quota endpoint", async () => {

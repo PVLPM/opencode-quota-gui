@@ -52,7 +52,9 @@ export function isCostedTokens(value: unknown): value is CostedTokens {
     (value.apiEquivalentCostUsd === null ||
       isNonNegativeFiniteNumber(value.apiEquivalentCostUsd)) &&
     isNonNegativeFiniteNumber(value.unpricedTokens) &&
-    isNonNegativeFiniteNumber(value.unknownTokens)
+    isNonNegativeFiniteNumber(value.unknownTokens) &&
+    (value.recordedCostUsd === undefined || isNonNegativeFiniteNumber(value.recordedCostUsd)) &&
+    (value.recordedCostTokens === undefined || isNonNegativeFiniteNumber(value.recordedCostTokens))
   );
 }
 

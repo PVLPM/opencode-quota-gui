@@ -15,14 +15,21 @@ import {
   OPENAI_RESETS_INFO,
   OPENAI_RESETS_ROW_KEY,
 } from "../src/contracts/openai-quota.js";
+import { effectiveHiddenRowIds } from "../src/contracts/row-visibility.js";
 import type { UsageAnalyticsDataset } from "../src/gui/aggregation.js";
 import {
   buildCardId,
   buildProviderScopeCardId,
   hashQuotaCardIdentity,
   PROVIDER_SCOPE_IDENTITY_KEY,
+  rowIdForEntry,
 } from "../src/gui/identity.js";
-import { buildProviderCards, type ProviderCardPreferences } from "../src/gui/provider-cards.js";
+import {
+  buildProviderCards,
+  type ProviderCardPreferences,
+  quotaEntryIsHidden,
+} from "../src/gui/provider-cards.js";
+import { detectQuotaNotifications } from "../src/gui/quota-notification-detector.js";
 import { createDashboardReadSource, DashboardSourceError } from "../src/gui/sources.js";
 import type {
   AccountingPercentageBasis,
@@ -35,7 +42,11 @@ import type {
 } from "../src/lib/entries.js";
 import type { OpenCodeRawAssistantRow } from "../src/lib/opencode-storage.js";
 import type { QuotaStatusLiveProbe } from "../src/lib/quota-render-data.js";
-import { DEFAULT_CONFIG, type QuotaToastConfig } from "../src/lib/types.js";
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_NATIVE_QUOTA_NOTIFICATION_POLICY,
+  type QuotaToastConfig,
+} from "../src/lib/types.js";
 import { buildSessionHeaderView } from "../src/native/session-header-model.js";
 import { visibleCards } from "../src/ui/view-model.js";
 
@@ -238,7 +249,7 @@ describe("gui provider cards — account mapping", () => {
     const panelCards = buildProviderCards({
       probes: [
         probe(
-          "anthropic",
+          "deepseek",
           result({
             accounts: [
               { sourceId: "a", label: "A" },
@@ -263,13 +274,13 @@ describe("gui provider cards — account mapping", () => {
         ),
         probe("openai", result({ entries: [percentEntry({ rowKey: "window:weekly" })] })),
       ],
-      preferences: { ...SUMMARY, providerOrder: ["openai", "anthropic"] },
+      preferences: { ...SUMMARY, providerOrder: ["openai", "deepseek"] },
       nowMs: NOW,
     });
     expect(panelCards.map((card) => [card.providerId, card.accountLabel])).toEqual([
       ["openai", undefined],
-      ["anthropic", "A"],
-      ["anthropic", "B"],
+      ["deepseek", "A"],
+      ["deepseek", "B"],
     ]);
     const hiddenCards = [panelCards[0]!.cardId];
     const panel = visibleCards(panelCards, hiddenCards);
@@ -282,7 +293,7 @@ describe("gui provider cards — account mapping", () => {
       },
       hiddenCards,
       hiddenRows: [],
-      preferences: { percentMode: "used", detailed: false, providerOrder: ["openai", "anthropic"] },
+      preferences: { percentMode: "used", detailed: false, providerOrder: ["openai", "deepseek"] },
       nowMs: NOW,
     });
     expect(panel.map((card) => card.accountLabel)).toEqual(["A", "B"]);
@@ -1252,7 +1263,7 @@ describe("gui read source — composition", () => {
 });
 
 describe("gui provider cards — OpenAI optional visibility rows", () => {
-  it("seeds Resets and Credits visibility independently of zero runtime data", () => {
+  it("seeds every declared optional visibility row independently of zero runtime data", () => {
     const cards = cardsFor([
       probe(
         "openai",
@@ -1265,9 +1276,13 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
 
     expect(cards).toHaveLength(1);
     expect(cards[0]?.rows).toEqual([]);
-    expect(cards[0]?.visibilityRows?.map(({ label, info }) => ({ label, info }))).toEqual([
-      { label: "Resets", info: OPENAI_RESETS_INFO },
-      { label: "Credits", info: OPENAI_CREDITS_INFO },
+    expect(cards[0]?.visibilityRows?.map(({ label }) => label)).toEqual([
+      "5h",
+      "Weekly",
+      "Monthly",
+      "Code Review",
+      "Resets",
+      "Credits",
     ]);
     const serialized = JSON.stringify(cards[0]?.visibilityRows);
     expect(serialized).not.toContain("raw-openai-one");
@@ -1303,7 +1318,8 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
     ]);
 
     const card = cards[0]!;
-    const [resetsVisibility, creditsVisibility] = card.visibilityRows ?? [];
+    const resetsVisibility = card.visibilityRows?.find((row) => row.label === "Resets");
+    const creditsVisibility = card.visibilityRows?.find((row) => row.label === "Credits");
     expect(card.rows.map((row) => row.rowId)).toEqual([
       resetsVisibility?.rowId,
       creditsVisibility?.rowId,
@@ -1349,10 +1365,154 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
       probe("anthropic", result({ accounts: [{ sourceId: "raw-anthropic" }] })),
     ]);
     const claude = cards.find((card) => card.providerId === "claude-agent")!;
-    expect(claude.visibilityRows?.map(({ label }) => label)).toEqual(["Resets"]);
-    expect(claude.visibilityRows?.[0]?.rowId).toBe(claude.rows[0]?.rowId);
+    expect(claude.visibilityRows?.map(({ label }) => label)).toEqual([
+      "5h",
+      "Weekly",
+      "Monthly credits",
+      "Fable",
+      "Resets",
+    ]);
+    const claudeResets = claude.visibilityRows?.find((row) => row.label === "Resets");
+    expect(claudeResets?.rowId).toBe(claude.rows[0]?.rowId);
     expect(JSON.stringify(claude.visibilityRows)).not.toContain("raw-claude");
-    expect(cards.find((card) => card.providerId === "anthropic")?.visibilityRows).toBeUndefined();
+    const anthropic = cards.find((card) => card.providerId === "anthropic");
+    expect(anthropic?.visibilityRows?.map(({ label }) => label)).toEqual([
+      "Requests",
+      "Tokens",
+      "Input tokens",
+      "Output tokens",
+    ]);
+  });
+
+  it("merges declared window eyes into the emitted rate-limit rows", () => {
+    const card = cardsFor([
+      probe(
+        "openai",
+        result({
+          accounts: [{ sourceId: "raw-openai-one", label: "Work" }],
+          entries: [
+            percentEntry({
+              sourceId: "raw-openai-one",
+              window: "five_hour",
+              resultType: "rate_limit",
+            }),
+            percentEntry({
+              sourceId: "raw-openai-one",
+              window: "week",
+              resultType: "rate_limit",
+            }),
+          ],
+        }),
+      ),
+    ])[0]!;
+
+    const emitted = new Map(
+      card.rows.map((row) => {
+        const key = row.rowId.slice(row.rowId.indexOf("#") + 1);
+        return [key.slice(0, key.lastIndexOf("|")), row.rowId];
+      }),
+    );
+    const union = new Map(
+      [...card.rows, ...(card.visibilityRows ?? [])].map((row) => [row.rowId, row]),
+    );
+    const fields = [...union.values()].map((row) => {
+      const key = row.rowId.slice(row.rowId.indexOf("#") + 1);
+      return key.slice(0, key.lastIndexOf("|"));
+    });
+    expect(new Set(fields).size).toBe(fields.length);
+    expect(
+      card.visibilityRows?.find((row) => row.rowId.includes("#window:five_hour|"))?.rowId,
+    ).toBe(emitted.get("window:five_hour"));
+    expect(card.visibilityRows?.find((row) => row.rowId.includes("#window:week|"))?.rowId).toBe(
+      emitted.get("window:week"),
+    );
+  });
+
+  it("keeps provider emission order when dashboard.rowOrder moves a row", () => {
+    const probes = [
+      probe(
+        "openai",
+        result({
+          accounts: [{ sourceId: "raw-openai-one", label: "Work" }],
+          entries: [
+            percentEntry({
+              sourceId: "raw-openai-one",
+              window: "five_hour",
+              resultType: "rate_limit",
+            }),
+            percentEntry({
+              sourceId: "raw-openai-one",
+              window: "week",
+              resultType: "rate_limit",
+            }),
+            percentEntry({
+              sourceId: "raw-openai-one",
+              window: "month",
+              resultType: "rate_limit",
+            }),
+            percentEntry({
+              sourceId: "raw-openai-one",
+              window: "code_review",
+              resultType: "rate_limit",
+            }),
+          ],
+        }),
+      ),
+    ];
+    const base = cardsFor(probes)[0]!;
+    const ids = base.rows.map((row) => row.rowId);
+    const preferences: ProviderCardPreferences = {
+      ...SUMMARY,
+      rowOrder: { [base.cardId]: [ids[2]!, "card#missing-row", ids[0]!] },
+    };
+    const ordered = buildProviderCards({ probes, preferences, nowMs: NOW })[0]!;
+
+    // The payload keeps emission order; display surfaces apply dashboard.rowOrder
+    // themselves so a legacy aggregate hide cannot follow the dragged position.
+    expect(ordered.rows.map((row) => row.rowId)).toEqual(ids);
+  });
+
+  it("resolves a legacy aggregate hide against provider order after a row reorder", () => {
+    const probes = [
+      probe(
+        "openai",
+        result({
+          accounts: [{ sourceId: "raw-openai-one" }],
+          entries: [
+            percentEntry({ sourceId: "raw-openai-one", window: "five_hour", percentRemaining: 5 }),
+            percentEntry({ sourceId: "raw-openai-one", window: "week", percentRemaining: 80 }),
+          ],
+        }),
+      ),
+    ];
+    const base = cardsFor(probes)[0]!;
+    const [fiveHour, weekly] = base.rows.map((row) => row.rowId);
+    const card = buildProviderCards({
+      probes,
+      preferences: {
+        ...SUMMARY,
+        rowOrder: { [base.cardId]: base.rows.slice(1).map((row) => row.rowId) },
+      },
+      nowMs: NOW,
+    })[0]!;
+
+    expect(card.rows.map((row) => row.rowId)).toEqual([fiveHour, weekly]);
+    const legacy = `${card.cardId}#aggregate|quota:percent`;
+    expect(
+      effectiveHiddenRowIds(
+        card.rows.map((row) => row.rowId),
+        [legacy],
+      ),
+    ).toEqual(new Set([fiveHour]));
+    // Notification eligibility uses the same resolution: the hidden first-emitted
+    // row never enters detector state, even though display order moved Weekly first.
+    const detected = detectQuotaNotifications({
+      cards: [card],
+      hiddenRows: [legacy],
+      nowMs: NOW,
+      policy: DEFAULT_NATIVE_QUOTA_NOTIFICATION_POLICY,
+    });
+    expect(Object.keys(detected.state.rows)).toEqual([`${card.cardId}\u001f${weekly}`]);
   });
 
   it("keeps account-specific ids separate and adds no optional rows to other providers", () => {
@@ -1378,6 +1538,77 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
       openaiCards[1]?.visibilityRows?.[0]?.rowId,
     );
     const anthropicCard = cards.find((card) => card.providerId === "anthropic");
-    expect(anthropicCard?.visibilityRows).toBeUndefined();
+    expect(anthropicCard?.visibilityRows?.map(({ label }) => label)).toEqual([
+      "Requests",
+      "Tokens",
+      "Input tokens",
+      "Output tokens",
+    ]);
+    expect(
+      anthropicCard?.visibilityRows?.some((row) => row.rowId === anthropicCard.rows[0]?.rowId),
+    ).toBe(false);
+  });
+
+  it("matches exact hidden card and row ids for account and provider scopes", () => {
+    const accounts = [{ sourceId: "acct-a" }, { sourceId: "acct-b" }];
+    const entryA = percentEntry({ sourceId: "acct-a", window: "week" });
+    const entryB = percentEntry({ sourceId: "acct-b", window: "week" });
+    const unscoped = percentEntry({ window: "month" });
+    const providerResult = result({ accounts, entries: [entryA, entryB, unscoped] });
+    const cardA = buildCardId("openai", "acct-a");
+    const scopeCard = buildProviderScopeCardId("openai");
+    const base = { providerId: "openai", result: providerResult };
+
+    expect(quotaEntryIsHidden({ ...base, entry: entryA })).toBe(false);
+    expect(
+      quotaEntryIsHidden({
+        ...base,
+        entry: entryA,
+        hiddenRows: [rowIdForEntry(cardA, entryA)],
+      }),
+    ).toBe(true);
+    expect(
+      quotaEntryIsHidden({
+        ...base,
+        entry: entryB,
+        hiddenRows: [rowIdForEntry(cardA, entryA)],
+      }),
+    ).toBe(false);
+    expect(quotaEntryIsHidden({ ...base, entry: entryA, hiddenCards: [cardA] })).toBe(true);
+    expect(quotaEntryIsHidden({ ...base, entry: entryA, hiddenCards: ["openai"] })).toBe(true);
+    expect(
+      quotaEntryIsHidden({
+        ...base,
+        entry: entryA,
+        hiddenCards: [hashQuotaCardIdentity("openai", PROVIDER_SCOPE_IDENTITY_KEY)],
+      }),
+    ).toBe(true);
+    expect(
+      quotaEntryIsHidden({
+        ...base,
+        entry: unscoped,
+        hiddenRows: [rowIdForEntry(scopeCard, unscoped)],
+      }),
+    ).toBe(true);
+  });
+
+  it("resolves a legacy aggregate hidden row id against the emitted rows", () => {
+    const accounts = [{ sourceId: "acct-a" }];
+    const fiveHour = percentEntry({ sourceId: "acct-a", window: "five_hour" });
+    const weekly = percentEntry({ sourceId: "acct-a", window: "week" });
+    const cardA = buildCardId("openai", "acct-a");
+    const legacy = `${cardA}#aggregate|quota:percent`;
+    const providerResult = result({ accounts, entries: [fiveHour, weekly] });
+    const base = { providerId: "openai", result: providerResult };
+
+    expect(quotaEntryIsHidden({ ...base, entry: fiveHour, hiddenRows: [legacy] })).toBe(true);
+    expect(quotaEntryIsHidden({ ...base, entry: weekly, hiddenRows: [legacy] })).toBe(false);
+
+    // The old hide followed the first row that was actually emitted.
+    const weeklyOnly = {
+      providerId: "openai",
+      result: result({ accounts, entries: [weekly] }),
+    };
+    expect(quotaEntryIsHidden({ ...weeklyOnly, entry: weekly, hiddenRows: [legacy] })).toBe(true);
   });
 });

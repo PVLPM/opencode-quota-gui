@@ -48,6 +48,8 @@ import {
 } from "../src/ui/chart-geometry.js";
 import { BUSY_DELAY_MS, createBusyIndicator } from "../src/ui/components/busy.js";
 import { estimateExplanation } from "../src/ui/components/estimate.js";
+import { focusSessionSnapshot } from "../src/ui/session-scope.js";
+import { modelTransitions } from "../src/ui/session-timing.js";
 import { sortProjectRows, sortRootRows, sortSessionTree } from "../src/ui/sorting.js";
 
 const HOUR_MS = 3_600_000;
@@ -85,6 +87,7 @@ function sessionNode(sessionId: string, parentId?: string, depth = 0): SessionNo
     childIds: [],
     ownTokens: costed(),
     subtreeTokens: costed(),
+    models: [],
     stepCount: 0,
     subtreeNodeCount: 1,
     latestActivityAtMs: 0,
@@ -227,6 +230,7 @@ function node(
     childIds: opts.childIds ?? [],
     ownTokens: costed(opts.own ?? {}),
     subtreeTokens: costed(opts.subtree ?? opts.own ?? {}),
+    models: [],
     stepCount: 0,
     subtreeNodeCount: 1,
     latestActivityAtMs: opts.latestActivityAtMs ?? 0,
@@ -371,8 +375,29 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
   });
 });
 
-describe("buildSessionChartGeometry own, tree and context carry", () => {
-  it("carries focus context through children while own cumulative stays flat on the shared scale", () => {
+describe("focusSessionSnapshot", () => {
+  it("keeps only the focus session's own node, steps and totals", () => {
+    const focus = "session-focus";
+    const child = "session-child";
+    const snapshot = sessionOf(
+      focus,
+      [sessionNode(focus), sessionNode(child, focus, 1)],
+      [sessionStep(focus, 0, 500, 500), sessionStep(child, 1, 999, 100)],
+    );
+    const scoped = focusSessionSnapshot(snapshot);
+
+    expect(scoped.nodes.map((node) => node.sessionId)).toEqual([focus]);
+    expect(scoped.nodes[0]?.childIds).toEqual([]);
+    expect(scoped.steps.map((step) => step.sessionId)).toEqual([focus]);
+    expect(scoped.treeTotals).toEqual(snapshot.ownSummary);
+    // The source snapshot is never mutated.
+    expect(snapshot.steps).toHaveLength(2);
+    expect(snapshot.nodes).toHaveLength(2);
+  });
+});
+
+describe("buildSessionChartGeometry main-step axis and tree fold", () => {
+  it("plots only main-session steps and folds descendant tokens into the next main point", () => {
     const focus = "session-focus";
     const child = "session-child";
     const rootNode = sessionNode(focus);
@@ -390,28 +415,27 @@ describe("buildSessionChartGeometry own, tree and context carry", () => {
       ),
     );
 
+    expect(geometry.stepCount).toBe(2);
     expect(geometry.hasDescendants).toBe(true);
-    expect(geometry.focusStepCount).toBe(2);
-    // The child context is never borrowed; the last focus value carries.
-    expect(geometry.contextValues).toEqual([500, 500, 300, 300]);
-    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1, 2, 3]);
-    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 500, 300, 300]);
-    expect(geometry.ownCumulativeValues).toEqual([500, 500, 900, 900]);
-    expect(geometry.treeCumulativeValues).toEqual([500, 1200, 1600, 1650]);
-    expect(geometry.own.points.map((point) => point.value)).toEqual([500, 500, 900, 900]);
-    expect(geometry.tree.points.map((point) => point.value)).toEqual([500, 1200, 1600, 1650]);
-    for (let index = 0; index < geometry.own.points.length; index += 1) {
-      expect(geometry.ownCumulativeValues[index]).toBeLessThanOrEqual(
-        geometry.treeCumulativeValues[index] as number,
-      );
-    }
+    // No x position exists for a descendant step.
+    expect(geometry.contextValues).toEqual([500, 300]);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1]);
+    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 300]);
+    expect(geometry.ownCumulativeValues).toEqual([500, 900]);
+    // The child's 700 between two main steps belongs to the second point; the
+    // trailing 50 after the last main step is not plotted.
+    expect(geometry.treeCumulativeValues).toEqual([500, 1600]);
+    expect(geometry.own.points.map((point) => point.value)).toEqual([500, 900]);
+    expect(geometry.tree.points.map((point) => point.value)).toEqual([500, 1600]);
     expect(geometry.own.domainMax).toBe(1650);
     expect(geometry.tree.domainMax).toBe(1650);
     expect(geometry.cumulativeTicks).toEqual(geometry.tree.ticks);
     expect(geometry.own.points[0]?.y).toBeCloseTo(geometry.tree.points[0]?.y as number, 10);
+    expect(geometry.cache.rates).toHaveLength(2);
+    expect(geometry.labelIndexes).toEqual([0, 1]);
   });
 
-  it("retains unknown context before the first focus sample and starts own cumulative at zero", () => {
+  it("never invents a context value or a position for a descendant step before the first main step", () => {
     const focus = "session-focus";
     const child = "session-child";
     const geometry = buildSessionChartGeometry(
@@ -426,18 +450,17 @@ describe("buildSessionChartGeometry own, tree and context carry", () => {
       ),
     );
 
-    expect(geometry.hasDescendants).toBe(true);
-    expect(geometry.contextValues).toEqual([undefined, 500, 500]);
-    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([1, 2]);
-    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 500]);
-    expect(geometry.focusStepCount).toBe(1);
-    expect(geometry.ownCumulativeValues).toEqual([0, 200, 200]);
-    expect(geometry.treeCumulativeValues).toEqual([100, 300, 350]);
+    expect(geometry.stepCount).toBe(1);
+    expect(geometry.contextValues).toEqual([500]);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0]);
+    expect(geometry.ownCumulativeValues).toEqual([200]);
+    // The earlier child's 100 folds into the first main point; the later 50 does not.
+    expect(geometry.treeCumulativeValues).toEqual([300]);
     expect(geometry.own.domainMax).toBe(350);
     expect(geometry.tree.domainMax).toBe(350);
   });
 
-  it("shows own and tree for a subsession with descendants and only own for a leaf", () => {
+  it("shows only own values for a leaf and aligns a descendant tree fold for a parent", () => {
     const focus = "session-child";
     const grandchild = "session-grandchild";
     const leaf = buildSessionChartGeometry(
@@ -459,15 +482,15 @@ describe("buildSessionChartGeometry own, tree and context carry", () => {
       ),
     );
     expect(withDescendant.hasDescendants).toBe(true);
-    expect(withDescendant.focusStepCount).toBe(1);
-    expect(withDescendant.contextValues).toEqual([1200, 1200]);
-    expect(withDescendant.ownCumulativeValues).toEqual([1400, 1400]);
-    expect(withDescendant.treeCumulativeValues).toEqual([1400, 1500]);
+    expect(withDescendant.stepCount).toBe(1);
+    expect(withDescendant.contextValues).toEqual([1200]);
+    expect(withDescendant.ownCumulativeValues).toEqual([1400]);
+    expect(withDescendant.treeCumulativeValues).toEqual([1400]);
     expect(withDescendant.own.domainMax).toBe(1500);
     expect(withDescendant.tree.domainMax).toBe(1500);
   });
 
-  it("does not reset own or tree prefixes at compaction and does not count carried context as focus steps", () => {
+  it("does not reset prefixes at compaction and does not plot a descendant step", () => {
     const focus = "session-focus";
     const child = "session-child";
     const snapshot = sessionOf(
@@ -482,11 +505,11 @@ describe("buildSessionChartGeometry own, tree and context carry", () => {
     snapshot.compactionMarkers = [{ sessionId: focus, atMs: 1500, messageId: "msg-compaction" }];
     const geometry = buildSessionChartGeometry(snapshot);
 
-    expect(geometry.focusStepCount).toBe(2);
-    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1, 2]);
-    expect(geometry.contextValues).toEqual([500, 300, 300]);
-    expect(geometry.ownCumulativeValues).toEqual([500, 900, 900]);
-    expect(geometry.treeCumulativeValues).toEqual([500, 900, 1000]);
+    expect(geometry.stepCount).toBe(2);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1]);
+    expect(geometry.contextValues).toEqual([500, 300]);
+    expect(geometry.ownCumulativeValues).toEqual([500, 900]);
+    expect(geometry.treeCumulativeValues).toEqual([500, 900]);
     expect(geometry.compaction).toEqual([
       expect.objectContaining({ sessionId: focus, stepIndex: 1 }),
     ]);
@@ -618,16 +641,16 @@ describe("sortSessionTree", () => {
     expect(nodes.map((entry) => entry.sessionId)).toEqual(["f", "c1", "c2", "g"]);
   });
 
-  it("uses subtree totals in tokens mode, not the node's own tokens", () => {
+  it("uses each node's own tokens in tokens mode, the value the table displays", () => {
     const nodes = [
       node("f", { childIds: ["c1", "c2"] }),
-      // c1 owns nothing but carries a huge subtree via g.
+      // c1 owns nothing; its huge subtree (via g) must not lift it above c2.
       node("c1", { childIds: ["g"], own: { input: 0 }, subtree: { input: 5_000 } }),
       node("c2", { own: { input: 1_000 }, subtree: { input: 1_000 } }),
       node("g", { own: { input: 5_000 }, subtree: { input: 5_000 } }),
     ];
     const sorted = sortSessionTree(nodes, "tokens");
-    expect(sorted.map((entry) => entry.sessionId)).toEqual(["f", "c1", "g", "c2"]);
+    expect(sorted.map((entry) => entry.sessionId)).toEqual(["f", "c2", "c1", "g"]);
     expect(sorted[0]?.sessionId).toBe("f");
   });
 
@@ -880,5 +903,88 @@ describe("project lifetime usage", () => {
     expect(lifetime.usage.buckets[0]?.startMs).toBe(ACTIVITY_DAY_START);
     expect(lifetime.usage.window.sinceMs).toBeUndefined();
     expect(sevenDay.usage.buckets.at(-1)?.endMs).toBe(NOW);
+  });
+});
+
+describe("modelTransitions", () => {
+  const step = (
+    messageId: string,
+    model?: { providerId: string; modelId: string; effort?: string },
+    sessionId = "s",
+  ) =>
+    ({
+      sessionId,
+      messageId,
+      atMs: 1,
+      branch: 0,
+      stack: tokensOf(),
+      contextTokens: 0,
+      totalTokens: 0,
+      model,
+    }) as import("../src/contracts/dashboard.js").StepPoint;
+  const a = { providerId: "openai", modelId: "m1", effort: "high" };
+
+  it("marks model, effort-only and combined changes, and a switch back, once each", () => {
+    const steps = [
+      step("1", a),
+      step("2", { ...a, effort: "low" }),
+      step("3", { providerId: "openai", modelId: "m2", effort: "low" }),
+      step("4", { providerId: "openai", modelId: "m1", effort: "high" }),
+      step("5", { providerId: "openai", modelId: "m1", effort: "high" }),
+    ];
+    expect(modelTransitions(steps, "s").map((entry) => [entry.stepIndex, entry.kind])).toEqual([
+      [1, "effort"],
+      [2, "model"],
+      [3, "model"],
+    ]);
+  });
+
+  it("infers nothing across unrecorded identities and ignores other sessions", () => {
+    const steps = [
+      step("1", a),
+      step("2", undefined),
+      step("3", { ...a, modelId: "other" }),
+      step("4", { ...a, modelId: "child" }, "child"),
+    ];
+    expect(modelTransitions(steps, "s")).toEqual([]);
+  });
+});
+
+describe("session Cache Rate line", () => {
+  it("keeps unmeasured steps null, breaks the line there and dots an isolated step", () => {
+    const base = {
+      sessionId: "s",
+      atMs: 1,
+      branch: 0,
+      contextTokens: 0,
+      totalTokens: 0,
+    };
+    const steps = [
+      { ...base, messageId: "1", stack: tokensOf({ input: 50, cacheRead: 50 }) },
+      { ...base, messageId: "2", stack: tokensOf({ input: 0, cacheRead: 0 }) },
+      { ...base, messageId: "3", stack: tokensOf({ input: 100, cacheRead: 0 }) },
+      { ...base, messageId: "4", stack: tokensOf({ input: 0, cacheRead: 100 }) },
+    ];
+    const geometry = buildSessionChartGeometry({
+      focusSessionId: "s",
+      timeZone: "UTC",
+      projectId: "p",
+      projectName: "P",
+      breadcrumbs: [],
+      nodes: [],
+      steps,
+      compactionMarkers: [],
+      ownSummary: { ...costed({}), stepCount: 4 },
+      treeTotals: costed({}),
+      stepSemantics: "",
+    } as never);
+    expect(geometry.cache.rates).toEqual([50, null, 0, 100]);
+    expect(geometry.cache.singles).toHaveLength(1);
+    expect(geometry.cache.paths).toHaveLength(1);
+    // Fixed 0–100% of the plot height: the lone 50% step sits at mid-plot.
+    expect(geometry.cache.singles[0]?.y).toBeCloseTo(
+      geometry.plot.bottom - geometry.plot.height / 2,
+    );
+    expect(geometry.viewHeight).toBeGreaterThan(geometry.plot.bottom);
   });
 });

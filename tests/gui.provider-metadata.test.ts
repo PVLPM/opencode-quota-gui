@@ -455,9 +455,11 @@ describe("multi-account provider loops", () => {
     const first = await run("Work");
     const second = await run("Renamed");
 
-    expect(first.entries.map((entry) => entry.rowKey)).toEqual(["window:week"]);
-    expect(second.entries.map((entry) => entry.rowKey)).toEqual(
-      first.entries.map((entry) => entry.rowKey),
+    expect(first.entries.map((entry) => entry.semantic?.metric)).toEqual([
+      { kind: "window", window: "week" },
+    ]);
+    expect(second.entries.map((entry) => entry.semantic?.metric)).toEqual(
+      first.entries.map((entry) => entry.semantic?.metric),
     );
     expect(second.entries[0]?.percentRemaining).toBe(80);
     expect(findAccount(first, "cred-xai-work")?.label).toBe("[xAI Work] (SuperGrok) (active)");
@@ -501,7 +503,7 @@ describe("multi-account provider loops", () => {
       expect.objectContaining({
         name: "Copilot Premium Interactions",
         group: "[Copilot Work] (individual) (active)",
-        rowKey: "window:month",
+        semantic: { metric: { kind: "window", window: "month" }, prominence: "primary" },
         percentRemaining: 75,
         accounting: expect.objectContaining({ sourceId: "cred-copilot-work" }),
       }),
@@ -551,13 +553,13 @@ describe("multi-account provider loops", () => {
     expect(output.entries).toEqual([
       expect.objectContaining({
         group: "[Z.ai Work] (active)",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 80,
         accounting: expect.objectContaining({ sourceId: "cred-zai-work" }),
       }),
       expect.objectContaining({
         group: "[Z.ai Work] (active)",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 90,
         accounting: expect.objectContaining({ sourceId: "cred-zai-work" }),
       }),
@@ -772,7 +774,7 @@ describe("multi-account provider loops", () => {
     expect(output.entries).toEqual([
       expect.objectContaining({
         name: "[OpenAI Work] (Plus) (active) 5h",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 80,
         accounting: expect.objectContaining({ sourceId: "cred-openai-work" }),
       }),
@@ -814,10 +816,10 @@ describe("multi-account provider loops", () => {
 
     const output = await opencodeGoProvider.fetch(context());
 
-    expect(output.entries?.map((entry) => entry.rowKey)).toEqual([
-      "window:five_hour",
-      "window:week",
-      "window:month",
+    expect(output.entries?.map((entry) => entry.semantic?.metric)).toEqual([
+      { kind: "window", window: "five_hour" },
+      { kind: "window", window: "week" },
+      { kind: "window", window: "month" },
     ]);
     expect(output.errors).toEqual([
       expect.objectContaining({ label: "[OpenCode Go Home]", sourceId: "cred-go-home" }),

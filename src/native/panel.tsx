@@ -11,28 +11,19 @@ import {
   Show,
   Switch,
 } from "solid-js";
-import type {
-  AnalyticsDimension,
-  AnalyticsEntityIdentity,
-  QuotaSnapshot,
-} from "../contracts/dashboard";
+import type { AnalyticsDimension, QuotaSnapshot } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS } from "../contracts/ranges";
 import type { DashboardRpcViewScope } from "../rpc.js";
+import { createAnalyticsPresentationStore } from "../ui/analytics-cache";
 import { AnalyticsTabs } from "../ui/components/analytics-tabs";
 import { BuildMismatchStatus } from "../ui/components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "../ui/components/icons";
+import { RangeLabel } from "../ui/components/range-label";
 import { ErrorCard, ReloadRequired } from "../ui/components/states";
 import { TemporalStatusStrip } from "../ui/components/temporal-status";
 import { RANGE_LABELS } from "../ui/format";
 import { analyticsTabForRoute, isInternalDashboardHref } from "../ui/navigation-model";
-import {
-  AnalyticsRoute,
-  GroupDetailRoute,
-  ModelsRoute,
-  ProjectRoute,
-  QuotaRoute,
-  SessionRoute,
-} from "../ui/routes";
+import { AnalyticsViews, QuotaRoute } from "../ui/routes";
 import {
   formatPath,
   type Location,
@@ -90,6 +81,9 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
     props.onLocationChange(next);
   }
   const [navTooltip, setNavTooltip] = createSignal<NavTarget>();
+  const analyticsStore = createAnalyticsPresentationStore((input) => props.client.home(input), {
+    owner: () => props.client,
+  });
   const [homeSnapshot, setHomeSnapshot] = createSignal<QuotaSnapshot>();
   createEffect(() => {
     const snapshot = panel.quotaQuery.data();
@@ -118,6 +112,7 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
     props.onScopeChange(panelScope(props.visible(), route()));
   });
   onCleanup(() => props.onScopeChange("quota"));
+  onCleanup(() => analyticsStore.dispose());
 
   // A new route starts without the previous route's stale badge and at the top
   // of its own scroll. Grouping changes count as a new view; range changes do
@@ -333,7 +328,10 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                   <For each={RANGE_KEYS}>
                     {(key) => (
                       <SegmentedControlItem value={key}>
-                        {RANGE_LABELS[key] ?? key}
+                        <RangeLabel
+                          label={RANGE_LABELS[key] ?? key}
+                          pending={analyticsStore.pending().has(key)}
+                        />
                       </SegmentedControlItem>
                     )}
                   </For>
@@ -390,93 +388,21 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                   </Show>
                 </Match>
 
-                <Match when={route().name === "analytics"}>
-                  <AnalyticsRoute
+                <Match when={analyticsTab() !== undefined}>
+                  <AnalyticsViews
                     client={props.client}
+                    store={analyticsStore}
+                    connection={panel.connection()}
+                    route={route()}
                     range={range()}
                     reloadToken={panel.reloadToken()}
                     reconnectEpoch={panel.reconnectEpoch()}
-                    connection={panel.connection()}
                     enabled={props.visible}
                     onFresh={panel.markFresh}
                     onStale={setRouteStale}
-                  />
-                </Match>
-
-                <Match when={route().name === "models"}>
-                  <ModelsRoute
-                    client={props.client}
-                    dimension={(route() as { dimension: AnalyticsDimension }).dimension}
-                    onDimensionChange={(dimension) =>
+                    onModelsDimensionChange={(dimension) =>
                       setLocation(replaceModelsDimension(location(), dimension))
                     }
-                    range={range()}
-                    reloadToken={panel.reloadToken()}
-                    reconnectEpoch={panel.reconnectEpoch()}
-                    connection={panel.connection()}
-                    enabled={props.visible}
-                    onFresh={panel.markFresh}
-                    onStale={setRouteStale}
-                  />
-                </Match>
-
-                <Match when={route().name === "model"}>
-                  <GroupDetailRoute
-                    client={props.client}
-                    entity="model"
-                    identity={(route() as { identity: AnalyticsEntityIdentity }).identity}
-                    modelsGroup={(route() as { modelsGroup?: AnalyticsDimension }).modelsGroup}
-                    range={range()}
-                    reloadToken={panel.reloadToken()}
-                    reconnectEpoch={panel.reconnectEpoch()}
-                    connection={panel.connection()}
-                    enabled={props.visible}
-                    onFresh={panel.markFresh}
-                    onStale={setRouteStale}
-                  />
-                </Match>
-
-                <Match when={route().name === "provider"}>
-                  <GroupDetailRoute
-                    client={props.client}
-                    entity="provider"
-                    identity={(route() as { identity: AnalyticsEntityIdentity }).identity}
-                    modelsGroup={(route() as { modelsGroup?: AnalyticsDimension }).modelsGroup}
-                    range={range()}
-                    reloadToken={panel.reloadToken()}
-                    reconnectEpoch={panel.reconnectEpoch()}
-                    connection={panel.connection()}
-                    enabled={props.visible}
-                    onFresh={panel.markFresh}
-                    onStale={setRouteStale}
-                  />
-                </Match>
-
-                <Match when={route().name === "project"}>
-                  <ProjectRoute
-                    client={props.client}
-                    range={range()}
-                    projectId={(route() as { projectId: string }).projectId}
-                    reloadToken={panel.reloadToken()}
-                    reconnectEpoch={panel.reconnectEpoch()}
-                    connection={panel.connection()}
-                    enabled={props.visible}
-                    onFresh={panel.markFresh}
-                    onStale={setRouteStale}
-                  />
-                </Match>
-
-                <Match when={route().name === "session"}>
-                  <SessionRoute
-                    client={props.client}
-                    range={range()}
-                    sessionId={(route() as { sessionId: string }).sessionId}
-                    reloadToken={panel.reloadToken()}
-                    reconnectEpoch={panel.reconnectEpoch()}
-                    connection={panel.connection()}
-                    enabled={props.visible}
-                    onFresh={panel.markFresh}
-                    onStale={setRouteStale}
                   />
                 </Match>
               </Switch>

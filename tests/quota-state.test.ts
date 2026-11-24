@@ -284,6 +284,154 @@ describe("quota-state shared cache", () => {
     ]);
   });
 
+  it("keeps last-good rows through a transient provider failure without a retry deadline", async () => {
+    const { fetchQuotaProviderResult, readCachedProviderResult } = await import(
+      "../src/lib/quota-state.js"
+    );
+    const lastGood = { accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 58 };
+    const provider = {
+      id: "transient-retention-test",
+      cachePolicy: { kind: "account-neutral" },
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce({ attempted: true, entries: [lastGood], errors: [] })
+        .mockResolvedValueOnce({
+          attempted: true,
+          entries: [],
+          errors: [
+            { label: "Provider", message: "request timed out", failureCategory: "provider_api" },
+          ],
+        }),
+    } as any;
+    const ctx = createTestContext();
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    const result = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+
+    expect(result.entries).toEqual([lastGood]);
+    expect(result.errors).toEqual([
+      expect.objectContaining({ message: "request timed out", failureCategory: "provider_api" }),
+    ]);
+    const cached = await readCachedProviderResult({ provider, ctx, ttlMs: 0 });
+    expect(cached).toMatchObject({ hit: true });
+    if (cached.hit) expect(cached.result.entries).toEqual([lastGood]);
+  });
+
+  it("keeps a Windows process-local scope's last-good in memory without touching disk", async () => {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+    try {
+      const { deriveProcessLocalAuthIdentity } = await import(
+        "../src/lib/resolved-auth-identity.js"
+      );
+      const { fetchQuotaProviderResult, getQuotaProviderResultScope, readCachedProviderResult } =
+        await import("../src/lib/quota-state.js");
+      const identityA = deriveProcessLocalAuthIdentity({
+        providerId: "anthropic:claude-cli-account",
+        principal: { kind: "stable-id", value: "account-a" },
+        qualifiers: ["claude", "C:/claude", "distinct"],
+      });
+      const identityB = deriveProcessLocalAuthIdentity({
+        providerId: "anthropic:claude-cli-account",
+        principal: { kind: "stable-id", value: "account-b" },
+        qualifiers: ["claude", "C:/claude", "distinct"],
+      });
+      expect(identityA).not.toBeNull();
+      expect(identityB).not.toBeNull();
+      expect(identityA).not.toBe(identityB);
+
+      const entry = { accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 58 };
+      let identity = identityA;
+      const provider = {
+        id: "process-local-retention-test",
+        cachePolicy: {
+          kind: "resolved-auth",
+          resolveIdentity: async () => identity,
+        },
+        fetch: vi
+          .fn()
+          .mockResolvedValueOnce({ attempted: true, entries: [entry], errors: [] })
+          .mockResolvedValue({
+            attempted: true,
+            entries: [],
+            errors: [{ label: "Provider", message: "timeout", failureCategory: "provider_api" }],
+          }),
+      } as any;
+      const ctx = createTestContext();
+      const scopeA = await getQuotaProviderResultScope(provider, ctx);
+      expect(scopeA).toBeDefined();
+
+      await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
+      const cached = await readCachedProviderResult({ provider, ctx, ttlMs: 60_000 });
+      expect(cached).toMatchObject({ hit: true });
+
+      const failed = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+      expect(failed.entries).toEqual([entry]);
+
+      const files = await readdir(
+        `${TEST_RUNTIME_ROOT}/cache/opencode-quota-gui/quota-provider-state`,
+      ).catch(() => []);
+      expect(files.filter((name) => name.startsWith("process-local-retention-test-"))).toEqual([]);
+
+      // A per-process identity cannot carry another account's last-good to a new account.
+      identity = identityB;
+      expect(await getQuotaProviderResultScope(provider, ctx)).not.toBe(scopeA);
+      const switched = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+      expect(switched.entries).toEqual([]);
+    } finally {
+      if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+    }
+  });
+
+  it("drops last-good rows on a credentials failure", async () => {
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+    const lastGood = { accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 58 };
+    const provider = {
+      id: "credentials-retention-test",
+      cachePolicy: { kind: "account-neutral" },
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce({ attempted: true, entries: [lastGood], errors: [] })
+        .mockResolvedValue({
+          attempted: true,
+          entries: [],
+          errors: [{ label: "Provider", message: "HTTP 401", failureCategory: "credentials" }],
+        }),
+    } as any;
+    const ctx = createTestContext();
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    const failed = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+
+    expect(failed.entries).toEqual([]);
+    // A credentials failure also clears the cache, so the next poll fetches again.
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    expect(provider.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not retain when a transient failure is mixed with a credentials failure", async () => {
+    const { fetchQuotaProviderResult } = await import("../src/lib/quota-state.js");
+    const lastGood = { accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 58 };
+    const provider = {
+      id: "mixed-retention-test",
+      cachePolicy: { kind: "account-neutral" },
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce({ attempted: true, entries: [lastGood], errors: [] })
+        .mockResolvedValueOnce({
+          attempted: true,
+          entries: [],
+          errors: [
+            { label: "Provider", message: "request timed out", failureCategory: "provider_api" },
+            { label: "Provider", message: "HTTP 401", failureCategory: "credentials" },
+          ],
+        }),
+    } as any;
+    const ctx = createTestContext();
+    await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+    const failed = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 0 });
+
+    expect(failed.entries).toEqual([]);
+  });
+
   describe("Claude Agent saved resets", () => {
     const windowRow = { accounting: TEST_ACCOUNTING, name: "Claude 5h", percentRemaining: 58 };
     const resetsRow = (credits: { expiresAtIso?: string | null }[]) => ({
@@ -1707,7 +1855,7 @@ describe("quota-state shared cache", () => {
     const network = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
-        new Response("limited", { status: 429, headers: { "Retry-After": "45" } }),
+        new Response("limited", { status: 429, headers: { "Retry-After": "300" } }),
       )
       .mockResolvedValueOnce(
         new Response(
@@ -1734,7 +1882,7 @@ describe("quota-state shared cache", () => {
     await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
     await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000, forceRefresh: true });
     expect(network).toHaveBeenCalledTimes(1);
-    clock.mockReturnValue(1_045_001);
+    clock.mockReturnValue(1_300_001);
     const recovered = await fetchQuotaProviderResult({
       provider,
       ctx,
@@ -2711,6 +2859,7 @@ describe("quota-state shared cache", () => {
       attempted: true,
       entries: [],
       errors: [{ label: "Synthetic", message: "Invalid normalized provider result" }],
+      statusDetails: [{ key: "normalization_violation", value: "entries[0]" }],
     });
     expect(second).toEqual(first);
     expect(provider.fetch).toHaveBeenCalledTimes(2);
@@ -2887,6 +3036,7 @@ describe("quota-state shared cache", () => {
       attempted: true,
       entries: [],
       errors: [{ label: "OpenCode Zen", message: "Invalid normalized provider result" }],
+      statusDetails: [{ key: "normalization_violation", value: "entries[0]" }],
     });
     expect(second).toEqual(first);
     expect(provider.fetch).toHaveBeenCalledTimes(2);

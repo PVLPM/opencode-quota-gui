@@ -54,11 +54,11 @@ import {
 } from "../lib/opencode-storage.js";
 import {
   type PricingResolution,
-  priceTokenBuckets,
+  priceTokenBucketsWithRecordedCost,
   resolvePricingKey,
 } from "../lib/quota-stats.js";
 import { type ForkOwnerCandidate, selectForkOwners } from "../lib/usage-ownership.js";
-import { UNKNOWN_PROJECT_ID, UNTITLED_SESSION_TITLE } from "./aggregation.js";
+import { recordedCostFields, UNKNOWN_PROJECT_ID, UNTITLED_SESSION_TITLE } from "./aggregation.js";
 
 const HOUR_MS = 3_600_000;
 
@@ -78,6 +78,8 @@ export interface OwnedStep {
   pricedAny: boolean;
   unpricedTokens: number;
   unknownTokens: number;
+  recordedCostUsd: number;
+  recordedCostTokens: number;
 }
 
 interface Accumulator {
@@ -91,6 +93,8 @@ interface Accumulator {
   pricedCount: number;
   unpricedTokens: number;
   unknownTokens: number;
+  recordedCostUsd: number;
+  recordedCostTokens: number;
 }
 
 /**
@@ -127,6 +131,8 @@ interface GroupOccurrence {
   pricedAny: boolean;
   unpricedTokens: number;
   unknownTokens: number;
+  recordedCostUsd: number;
+  recordedCostTokens: number;
 }
 
 export interface HomeAnalyticsRollup {
@@ -168,6 +174,8 @@ function createAccumulator(): Accumulator {
     pricedCount: 0,
     unpricedTokens: 0,
     unknownTokens: 0,
+    recordedCostUsd: 0,
+    recordedCostTokens: 0,
   };
 }
 
@@ -181,6 +189,8 @@ function addStepToAccumulator(accumulator: Accumulator, step: OwnedStep): void {
   if (step.pricedAny) accumulator.pricedCount += 1;
   accumulator.unpricedTokens += step.unpricedTokens;
   accumulator.unknownTokens += step.unknownTokens;
+  accumulator.recordedCostUsd += step.recordedCostUsd;
+  accumulator.recordedCostTokens += step.recordedCostTokens;
 }
 
 function subtractStepFromAccumulator(accumulator: Accumulator, step: OwnedStep): void {
@@ -193,6 +203,8 @@ function subtractStepFromAccumulator(accumulator: Accumulator, step: OwnedStep):
   if (step.pricedAny) accumulator.pricedCount -= 1;
   accumulator.unpricedTokens -= step.unpricedTokens;
   accumulator.unknownTokens -= step.unknownTokens;
+  accumulator.recordedCostUsd -= step.recordedCostUsd;
+  accumulator.recordedCostTokens -= step.recordedCostTokens;
 }
 
 function mergeAccumulator(target: Accumulator, source: Accumulator): void {
@@ -205,6 +217,8 @@ function mergeAccumulator(target: Accumulator, source: Accumulator): void {
   target.pricedCount += source.pricedCount;
   target.unpricedTokens += source.unpricedTokens;
   target.unknownTokens += source.unknownTokens;
+  target.recordedCostUsd += source.recordedCostUsd;
+  target.recordedCostTokens += source.recordedCostTokens;
 }
 
 function finalize(accumulator: Accumulator): CostedTokens {
@@ -221,6 +235,7 @@ function finalize(accumulator: Accumulator): CostedTokens {
     apiEquivalentCostUsd: accumulator.pricedCount > 0 ? accumulator.costUsd : null,
     unpricedTokens: accumulator.unpricedTokens,
     unknownTokens: accumulator.unknownTokens,
+    ...recordedCostFields(accumulator.recordedCostUsd, accumulator.recordedCostTokens),
   };
 }
 
@@ -492,6 +507,8 @@ export interface AnalyticsModel {
   groups(query: AnalyticsGroupQuery, nowMs: number): AnalyticsGroupSnapshot;
   earliestActivityMs(): number | undefined;
   ownedStepCount(): number;
+  /** Distinct analytics routes whose last pricing outcome had no cost. */
+  unpricedRoutes(): Array<{ providerID?: string; modelID?: string }>;
 }
 
 /** Host calendar zone used for every bucket boundary in this model. */
@@ -503,6 +520,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
   const timeZone = options.timeZone ?? "UTC";
   const pricingCache = new Map<string, PricingResolution>();
   const groups = new Map<string, GroupOccurrence[]>();
+  const unpricedRouteByKey = new Map<string, { providerID?: string; modelID?: string }>();
   const ownedByFp = new Map<string, Map<string, OwnedStep>>();
   const ownedBySession = new Map<string, Map<string, OwnedStep>>();
   const hours = new Map<number, HourBucket>();
@@ -521,14 +539,22 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
 
   function priceRow(
     row: OpenCodeRawAssistantRow,
-  ): Pick<GroupOccurrence, "costUsd" | "pricedAny" | "unpricedTokens" | "unknownTokens"> {
+  ): Pick<
+    GroupOccurrence,
+    | "costUsd"
+    | "pricedAny"
+    | "unpricedTokens"
+    | "unknownTokens"
+    | "recordedCostUsd"
+    | "recordedCostTokens"
+  > {
     const total =
       row.tokens.input +
       row.tokens.output +
       row.tokens.reasoning +
       row.tokens.cacheRead +
       row.tokens.cacheWrite;
-    const outcome = priceTokenBuckets({
+    const outcome = priceTokenBucketsWithRecordedCost({
       providerID: row.providerID,
       modelID: row.modelID,
       tokens: {
@@ -538,6 +564,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         cache_read: row.tokens.cacheRead,
         cache_write: row.tokens.cacheWrite,
       },
+      recordedCostUsd: row.cost,
       // Historical temporal pricing follows the physical assistant completion
       // instant, not the enclosing range window or the worker's wall clock.
       atMs: row.completedAtMs,
@@ -549,15 +576,48 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         pricedAny: true,
         unpricedTokens: outcome.unpricedTokens,
         unknownTokens: 0,
+        recordedCostUsd: 0,
+        recordedCostTokens: 0,
       };
     }
     if (outcome.status === "priced") {
-      return { costUsd: outcome.costUsd, pricedAny: true, unpricedTokens: 0, unknownTokens: 0 };
+      return {
+        costUsd: outcome.costUsd,
+        pricedAny: true,
+        unpricedTokens: 0,
+        unknownTokens: 0,
+        recordedCostUsd: 0,
+        recordedCostTokens: 0,
+      };
+    }
+    if (outcome.status === "recorded_cost") {
+      return {
+        costUsd: outcome.costUsd,
+        pricedAny: true,
+        unpricedTokens: 0,
+        unknownTokens: 0,
+        recordedCostUsd: outcome.costUsd,
+        recordedCostTokens: outcome.recordedTokens,
+      };
     }
     if (outcome.status === "unpriced") {
-      return { costUsd: 0, pricedAny: false, unpricedTokens: total, unknownTokens: 0 };
+      return {
+        costUsd: 0,
+        pricedAny: false,
+        unpricedTokens: total,
+        unknownTokens: 0,
+        recordedCostUsd: 0,
+        recordedCostTokens: 0,
+      };
     }
-    return { costUsd: 0, pricedAny: false, unpricedTokens: 0, unknownTokens: total };
+    return {
+      costUsd: 0,
+      pricedAny: false,
+      unpricedTokens: 0,
+      unknownTokens: total,
+      recordedCostUsd: 0,
+      recordedCostTokens: 0,
+    };
   }
 
   /**
@@ -682,8 +742,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
 
     const promptTokens = step.tokens.input + step.tokens.cacheRead + step.tokens.cacheWrite;
     const cost = lookupCost(key.provider, key.model);
-    if (cost === null) return undefined;
-    const base = selectCostAtContext(cost, promptTokens).rates;
+    // Absolute overrides are meaningful only against the policy's own base.
+    // The live snapshot can be a derived price that matches neither side, so
+    // prefer the base captured with the temporal policy when present.
+    const base = policy.base ?? (cost ? selectCostAtContext(cost, promptTokens).rates : null);
+    if (base === null) return undefined;
     const resolved = resolveTemporalRates(key.provider, key.model, step.completedAtMs, base);
     if (resolved.status !== "resolved" || resolved.rates === null) return undefined;
 
@@ -790,6 +853,8 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       pricedAny: occurrence.pricedAny,
       unpricedTokens: occurrence.unpricedTokens,
       unknownTokens: occurrence.unknownTokens,
+      recordedCostUsd: occurrence.recordedCostUsd,
+      recordedCostTokens: occurrence.recordedCostTokens,
     };
     if (occurrence.providerID !== undefined) step.providerID = occurrence.providerID;
     if (occurrence.modelID !== undefined) step.modelID = occurrence.modelID;
@@ -809,7 +874,9 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       step.costUsd === occurrence.costUsd &&
       step.pricedAny === occurrence.pricedAny &&
       step.unpricedTokens === occurrence.unpricedTokens &&
-      step.unknownTokens === occurrence.unknownTokens
+      step.unknownTokens === occurrence.unknownTokens &&
+      step.recordedCostUsd === occurrence.recordedCostUsd &&
+      step.recordedCostTokens === occurrence.recordedCostTokens
     );
   }
 
@@ -929,6 +996,21 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       groups.set(fingerprint, occurrences);
     }
     const priced = priceRow(row);
+    if (row.modelID) {
+      const routeKey = `${row.providerID ?? ""}\u0000${row.modelID}`;
+      // A recorded-cost price still asks the kicker to prefer models.dev once
+      // it publishes a price for the route.
+      if (priced.pricedAny && priced.recordedCostTokens === 0) {
+        unpricedRouteByKey.delete(routeKey);
+      } else {
+        unpricedRouteByKey.set(
+          routeKey,
+          row.providerID === undefined
+            ? { modelID: row.modelID }
+            : { providerID: row.providerID, modelID: row.modelID },
+        );
+      }
+    }
     const occurrence: GroupOccurrence = {
       sessionID: row.sessionID,
       messageID: row.messageID,
@@ -1550,6 +1632,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       groups.clear();
       ownedByFp.clear();
       ownedBySession.clear();
+      unpricedRouteByKey.clear();
       hours.clear();
       latestStepBySession.clear();
       earliestStepBySession.clear();
@@ -1613,5 +1696,6 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       for (const steps of ownedBySession.values()) count += steps.size;
       return count;
     },
+    unpricedRoutes: () => [...unpricedRouteByKey.values()],
   };
 }

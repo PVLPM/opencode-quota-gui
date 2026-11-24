@@ -22,8 +22,8 @@ import {
 } from "./opencode-config-read.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
 import {
+  getQuotaProviderRegistration,
   getQuotaProviderRuntimeIds,
-  getQuotaProviderShape,
   normalizeQuotaProviderId,
 } from "./provider-metadata.js";
 
@@ -169,7 +169,7 @@ export async function reconcileDetectedProvidersInGlobalConfig(
     options.detectedProviderIds
       .map((providerId) => normalizeQuotaProviderId(providerId))
       .filter((providerId) => {
-        const shape = getQuotaProviderShape(providerId);
+        const shape = getQuotaProviderRegistration(providerId);
         return Boolean(shape && shape.id !== "quota-providers");
       }),
   );

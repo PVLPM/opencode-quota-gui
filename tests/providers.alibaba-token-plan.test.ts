@@ -198,6 +198,7 @@ describe("alibaba-token-plan provider", () => {
         name: "Alibaba Personal Token Plan Weekly",
         group: "Alibaba Personal Token Plan",
         label: "Weekly:",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 60,
         resetTimeIso: "2024-05-01T20:53:20.000Z",
       },
@@ -282,6 +283,7 @@ describe("alibaba-token-plan four-surface formatting", () => {
         name: "Alibaba Personal Token Plan Weekly",
         group: "Alibaba Personal Token Plan",
         label: "Weekly:",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 60,
       },
     ];

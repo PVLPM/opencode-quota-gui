@@ -13,7 +13,7 @@ import {
   loadConfiguredOpenCodeConfig,
   loadConfiguredProviderIds,
 } from "./opencode-config-providers.js";
-import { getQuotaProviderShape } from "./provider-metadata.js";
+import { getQuotaProviderRegistration } from "./provider-metadata.js";
 import type { QuotaRuntimeClient, QuotaRuntimeContext } from "./quota-runtime-context.js";
 import { resolveQuotaRuntimeContext } from "./quota-runtime-context.js";
 import type { QuotaToastConfig } from "./types.js";
@@ -203,6 +203,21 @@ function writeLine(stream: Pick<NodeJS.WriteStream, "write">, message: string): 
 }
 
 /**
+ * Resolve an explicit `--provider` value. An unknown id is reported to stderr
+ * and returns null so the command exits 1; absent means no provider filter.
+ */
+export function resolveCliProviderId(
+  requested: string | undefined,
+  stderr: Pick<NodeJS.WriteStream, "write">,
+): string | undefined | null {
+  if (requested === undefined) return undefined;
+  const resolved = getQuotaProviderRegistration(requested)?.id;
+  if (resolved !== undefined) return resolved;
+  writeLine(stderr, `Unknown provider: ${requested}`);
+  return null;
+}
+
+/**
  * Builds one `show` or `status` report in this process, for the folder the command runs in,
  * and prints it. It works with OpenCode closed: logins are read read-only from OpenCode's
  * database, and only while the report runs.
@@ -252,11 +267,8 @@ export async function runCliShowCommand(options: RunCliShowCommandOptions = {}):
     return 0;
   }
 
-  const providerId = parsed.providerId ? getQuotaProviderShape(parsed.providerId)?.id : undefined;
-  if (parsed.providerId && !providerId) {
-    writeLine(stderr, `Unknown provider: ${parsed.providerId}`);
-    return 1;
-  }
+  const providerId = resolveCliProviderId(parsed.providerId, stderr);
+  if (providerId === null) return 1;
 
   return runCliReport({
     cwd: options.cwd ?? process.cwd(),

@@ -61,7 +61,7 @@ A fresh setup works with defaults. The browser dashboard follows the OpenCode ho
 
 ## Requirements
 
-- OpenCode `>= 2.0.16 < 2.3.0`. The full Native Desktop integration ships from v1.3.0 and requires OpenCode Desktop 2.2.1+; supported older hosts use the browser dashboard fallback. This package does not support OpenCode 1.
+- OpenCode `>= 2.0.16 < 2.5.0`. The full Native Desktop integration ships from v1.3.0 and requires OpenCode Desktop 2.2.1+; supported older hosts use the browser dashboard fallback. This package does not support OpenCode 1.
 - Node.js `22.13+` (or `23.4+` on Node 23), whether you run the package with `npx` or from a local checkout.
 
 ## Local checkout (development)
@@ -76,6 +76,8 @@ Build once, then point `plugins` at the explicit server file with an absolute `f
 ```
 
 `server.ts` re-exports the built server plugin default from `dist/index.js`. This explicit file entry loads only the server; it does not discover the Desktop GUI export. For Desktop GUI development, use the built package directory entry so OpenCode can resolve both the server and `./gui-experimental` exports.
+
+OpenCode 2.4.x requires the entry to be a directory and logs `configured plugin path must be a directory` for the single-file form above. On those hosts, point `plugins` at the checkout root instead, for example `"file:///absolute/path/to/opencode-quota-gui"`, so OpenCode loads the built package entry.
 
 Build before loading:
 

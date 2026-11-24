@@ -168,7 +168,7 @@ describe("V2 server plugin credential lifecycle", () => {
       expect(call?.data?.sessionID).toBe(sessionID);
       return call?.data?.connectionMethod;
     };
-    return { integration, queue, relayed, method };
+    return { ctx, integration, queue, relayed, method };
   }
   const cred = (method: string): Active => ({
     type: "credential",
@@ -177,6 +177,39 @@ describe("V2 server plugin credential lifecycle", () => {
     method,
   });
   const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+  it("relays only accepted warming refreshes and contains hook errors", async () => {
+    const { ctx, queue, relayed } = await setupSampling(async () => undefined);
+    const hook = ctx.session.hook.mock.calls.find(([name]) => name === "model.request")?.[1] as
+      | ((event: unknown) => void)
+      | undefined;
+    expect(hook).toBeDefined();
+    expect(() =>
+      hook?.({
+        get sessionID() {
+          throw new Error("bad input");
+        },
+      }),
+    ).not.toThrow();
+    const usage = (read: number) => ({
+      type: "session.usage.updated",
+      created: Date.now(),
+      data: { sessionID: "ses_w", tokens: { cache: { read } } },
+    });
+    queue.push(step("ses_w", "msg_w"));
+    queue.push(usage(10));
+    await flush();
+    queue.push(usage(11));
+    await flush();
+    expect(relayed()).not.toContain("session.cache.warming");
+    hook?.({
+      sessionID: "ses_w",
+      kind: "generate",
+      model: { providerID: "openai", id: "gpt-6.1" },
+    });
+    queue.push(usage(20));
+    await vi.waitFor(() => expect(relayed()).toContain("session.cache.warming"));
+  });
 
   it("relays a minimal session.cache.ttl DTO for a 1h-only Claude Agent step", async () => {
     const { mkdir, mkdtemp, rm, writeFile } = await import("node:fs/promises");

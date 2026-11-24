@@ -139,6 +139,7 @@ function session(sessionId = "s1"): SessionSnapshot {
         childIds: [],
         ownTokens: costed(3),
         subtreeTokens: costed(3),
+        models: [],
         stepCount: 1,
         subtreeNodeCount: 1,
         latestActivityAtMs: NOW,
@@ -744,7 +745,8 @@ describe("GUI snapshot service", () => {
     expect((await service.groups(query)).stale).toBe(true);
     expect(calls).toBe(1);
     sourceStale = false;
-    expect((await service.groups(query)).stale).toBe(false);
+    expect((await service.groups(query)).stale).toBe(true);
+    await vi.waitFor(async () => expect((await service.groups(query)).stale).toBe(false));
     expect(calls).toBe(2);
     await service.groups(query);
     expect(calls).toBe(2);
@@ -767,14 +769,14 @@ describe("GUI snapshot service", () => {
     expect(calls).toBe(1);
 
     // The stale payload was not cached as fresh: the next read calls the source
-    // again and can return a fresh result.
+    // again while immediately returning the stale result.
     sourceStale = false;
     const second = await service.home({ range: "7d" });
     expect(calls).toBe(2);
-    expect(second.stale).toBe(false);
+    expect(second.stale).toBe(true);
 
     // That fresh result is cached again: no unnecessary third source call.
-    await expect(service.home({ range: "7d" })).resolves.toEqual(second);
+    await vi.waitFor(async () => expect((await service.home({ range: "7d" })).stale).toBe(false));
     expect(calls).toBe(2);
   });
 
@@ -842,7 +844,10 @@ describe("GUI snapshot service", () => {
     expect(calls).toBe(1);
 
     usageStale = false;
-    await expect(service.project({ projectId: "p1", range: "7d" })).resolves.toEqual(project("7d"));
+    expect((await service.project({ projectId: "p1", range: "7d" })).stale).toBe(true);
+    await vi.waitFor(async () =>
+      expect(await service.project({ projectId: "p1", range: "7d" })).toEqual(project("7d")),
+    );
     expect(calls).toBe(2);
   });
 
@@ -1084,9 +1089,11 @@ describe("GUI snapshot service", () => {
     expect(secondCalls).toBe(1);
 
     const refreshed = await service.project({ projectId: "first", range: "7d" });
-    expect(refreshed.totals.total).toBe(20);
+    expect(refreshed.totals.total).toBe(10);
     expect(firstCalls).toBe(3);
-    expect(events).toEqual([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await service.project({ projectId: "first", range: "7d" })).totals.total).toBe(20);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]);
     reconnected();
   });
 
@@ -1290,9 +1297,15 @@ describe("GUI snapshot service", () => {
 
     total = 30;
     service.notifySettingsChanged();
-    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(30);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(20);
     expect(calls).toBe(3);
-    expect(events.map((event) => event.topic)).toEqual(["sessions.changed", "settings.changed"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(30);
+    expect(events.map((event) => event.topic)).toEqual([
+      "sessions.changed",
+      "settings.changed",
+      "sessions.changed",
+    ]);
     viewer();
   });
 
@@ -2065,5 +2078,252 @@ describe("GUI snapshot service", () => {
     reopened.release();
     monitor.release();
     service.close();
+  });
+});
+
+describe("GUI snapshot service stale-while-revalidate", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("serves a provisional response and publishes one exact replacement", async () => {
+    const gate = deferred<HomeSnapshot>();
+    const homeSource = vi.fn(async ({ range, exact }: { range: RangeKey; exact?: boolean }) =>
+      exact
+        ? gate.promise
+        : { ...home(range, { total: 10 }), stale: true, provisional: true as const },
+    );
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    const initial = await service.home({ range: "7d" });
+    expect(initial).toMatchObject({ stale: true, provisional: true });
+    await vi.waitFor(() => expect(homeSource).toHaveBeenCalledTimes(2));
+    expect(homeSource).toHaveBeenNthCalledWith(2, { range: "7d", exact: true, background: true });
+    expect((await service.home({ range: "7d" })).stale).toBe(true);
+    gate.resolve(home("7d", { total: 25 }));
+    await vi.waitFor(() =>
+      expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]),
+    );
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(25);
+    service.close();
+  });
+
+  it("announces an exact replacement whose numbers equal the provisional paint", async () => {
+    const gate = deferred<HomeSnapshot>();
+    const homeSource = vi.fn(async ({ range, exact }: { range: RangeKey; exact?: boolean }) =>
+      exact
+        ? gate.promise
+        : { ...home(range, { total: 10 }), stale: true, provisional: true as const },
+    );
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    await service.home({ range: "7d" });
+    await vi.waitFor(() => expect(homeSource).toHaveBeenCalledTimes(2));
+    gate.resolve(home("7d", { total: 10 }));
+    await vi.waitFor(() =>
+      expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]),
+    );
+    // The marker is gone and the equal exact payload is now the served one.
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(10);
+    expect(await service.home({ range: "7d" })).not.toHaveProperty("provisional");
+    service.close();
+  });
+
+  it("surfaces a terminal exact failure on the provisional payload and retries exactly", async () => {
+    const exact = vi
+      .fn<() => Promise<HomeSnapshot>>()
+      .mockRejectedValueOnce(new Error("worker stopped"))
+      .mockResolvedValue(home("7d", { total: 40 }));
+    const { source } = fakeSource({
+      home: async ({ range, exact: isExact }: { range: RangeKey; exact?: boolean }) =>
+        isExact
+          ? exact()
+          : { ...home(range, { total: 10 }), stale: true, provisional: true as const },
+    });
+    const service = makeService(source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    expect(await service.home({ range: "7d" })).toMatchObject({ provisional: true });
+
+    await vi.waitFor(() => expect(events.length).toBeGreaterThan(0));
+    const failed = await service.home({ range: "7d" });
+    expect(failed.exactError).toBeDefined();
+    expect(failed.provisional).toBe(true);
+    expect(failed.usage.totals.total).toBe(10);
+    expect(events.map((event) => event.topic)).toContain("sessions.changed");
+
+    // A manual exact retry forces a fresh compute even while the failed marker
+    // is still a cache hit, then clears the marker.
+    const retried = await service.home({ range: "7d", exact: true });
+    expect(retried).not.toHaveProperty("exactError");
+    expect(retried.usage.totals.total).toBe(40);
+    expect(exact).toHaveBeenCalledTimes(2);
+    service.close();
+  });
+
+  it("joins a just-settled failed read instead of starting a second compute", async () => {
+    vi.useFakeTimers();
+    const homeSource = vi
+      .fn<() => Promise<HomeSnapshot>>()
+      .mockRejectedValue(new Error("worker died"));
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    await expect(service.home({ range: "7d" })).rejects.toThrow("worker died");
+    // The host's final probe lands in the same tick: join the terminal outcome.
+    await expect(service.home({ range: "7d" })).rejects.toThrow("worker died");
+    expect(homeSource).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5_001);
+    await expect(service.home({ range: "7d" })).rejects.toThrow("worker died");
+    expect(homeSource).toHaveBeenCalledTimes(2);
+    service.close();
+    vi.useRealTimers();
+  });
+
+  it("serves a just-settled successful read from its cache", async () => {
+    const homeSource = vi.fn(async ({ range }: { range: RangeKey }) => home(range, { total: 12 }));
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(12);
+    expect((await service.home({ range: "7d" })).usage.totals.total).toBe(12);
+    expect(homeSource).toHaveBeenCalledTimes(1);
+    service.close();
+  });
+
+  it("passes background priority to the analytics source", async () => {
+    const homeSource = vi.fn(async ({ range }: { range: RangeKey }) => home(range));
+    const { source } = fakeSource({ home: homeSource });
+    const service = makeService(source);
+    await service.home({ range: "30d", background: true });
+    expect(homeSource).toHaveBeenCalledWith({ range: "30d", background: true });
+    service.close();
+  });
+
+  /** Home source whose later calls park behind a busy worker until released. */
+  function busyWorkerSource() {
+    const parked: Array<ReturnType<typeof deferred<HomeSnapshot>>> = [];
+    let busy = false;
+    let calls = 0;
+    const { source } = fakeSource({
+      home: async ({ range }) => {
+        calls += 1;
+        if (!busy) return home(range, { total: 10 });
+        const gate = deferred<HomeSnapshot>();
+        parked.push(gate);
+        return gate.promise;
+      },
+    });
+    return {
+      source,
+      parked,
+      setBusy: (value: boolean) => {
+        busy = value;
+      },
+      calls: () => calls,
+    };
+  }
+
+  /** A service with a loaded 7d DTO, then a busy worker and an invalidated cache. */
+  async function staleWithBusyWorker() {
+    vi.useFakeTimers();
+    const worker = busyWorkerSource();
+    const service = makeService(worker.source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    await service.home({ range: "7d" });
+    worker.setBusy(true);
+    service.notifySettingsChanged();
+    events.length = 0;
+    return { worker, service, events };
+  }
+
+  it("serves the stale cached DTO immediately while the worker refresh is in flight", async () => {
+    const { worker, service, events } = await staleWithBusyWorker();
+    const first = service.home({ range: "7d" });
+    await vi.advanceTimersByTimeAsync(0);
+    let firstSettled = false;
+    void first.then(() => {
+      firstSettled = true;
+    });
+    await Promise.resolve();
+    expect(firstSettled).toBe(true);
+    expect(await first).toMatchObject({ stale: true, usage: { totals: { total: 10 } } });
+
+    // A second request joins the same in-flight refresh and also returns immediately.
+    const second = service.home({ range: "7d" });
+    expect((await second).stale).toBe(true);
+    // Both callers joined one in-flight refresh.
+    expect(worker.calls()).toBe(2);
+
+    // The refresh lands later, replaces the stale DTO and tells clients once.
+    worker.parked[0]!.resolve(home("7d", { total: 25 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.map((event) => event.topic)).toEqual(["sessions.changed"]);
+    const fresh = await service.home({ range: "7d" });
+    expect(fresh.stale).toBe(false);
+    expect(fresh.usage.totals.total).toBe(25);
+    service.close();
+    vi.useRealTimers();
+  });
+
+  it("emits nothing when the refresh lands with unchanged content", async () => {
+    const { worker, service, events } = await staleWithBusyWorker();
+    const first = service.home({ range: "7d" });
+    await first;
+    worker.parked[0]!.resolve(home("7d", { total: 10 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([]);
+    service.close();
+    vi.useRealTimers();
+  });
+
+  it("lets a range without a cached DTO simply await its compute", async () => {
+    vi.useFakeTimers();
+    const worker = busyWorkerSource();
+    const service = makeService(worker.source);
+    const events: DashboardEvent[] = [];
+    service.subscribe((event) => events.push(event));
+    worker.setBusy(true);
+
+    let settled = false;
+    const pending = service.home({ range: "30d" }).then((value) => {
+      settled = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(settled).toBe(false);
+    expect(worker.calls()).toBe(1);
+
+    worker.parked[0]!.resolve(home("30d", { total: 7 }));
+    expect((await pending).usage.totals.total).toBe(7);
+    expect(events).toEqual([]);
+    service.close();
+    vi.useRealTimers();
+  });
+
+  it("keeps the stale DTO and emits no event when the in-flight refresh fails", async () => {
+    const { worker, service, events } = await staleWithBusyWorker();
+    const first = service.home({ range: "7d" });
+    expect((await first).stale).toBe(true);
+
+    worker.parked[0]!.reject(new Error("refresh failed"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual([]);
+    const after = service.home({ range: "7d" });
+    const kept = await after;
+    expect(kept.stale).toBe(true);
+    expect(kept.usage.totals.total).toBe(10);
+    service.close();
+    vi.useRealTimers();
   });
 });

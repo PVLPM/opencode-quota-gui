@@ -44,6 +44,7 @@ interface BusyModule {
   createBusyIndicator: (delayMs?: number) => {
     visible: () => boolean;
     hasData: () => boolean;
+    elapsedSeconds: () => number;
     update: (state: { active: boolean; hasData: boolean }) => void;
     dispose: () => void;
   };
@@ -125,6 +126,7 @@ function busyIndicator(visible: boolean, hasData: boolean) {
   return {
     visible: () => visible,
     hasData: () => hasData,
+    elapsedSeconds: () => 7,
     update: () => {},
     dispose: () => {},
   };
@@ -245,13 +247,35 @@ describe("delayed foreground loading", () => {
     }
   });
 
+  it("counts real elapsed seconds from request start, not from when the panel appears", () => {
+    vi.useFakeTimers();
+    try {
+      const indicator = busyModule.createBusyIndicator();
+      indicator.update({ active: true, hasData: false });
+      vi.advanceTimersByTime(1000);
+      expect(indicator.visible()).toBe(true);
+      expect(indicator.elapsedSeconds()).toBe(1);
+      vi.advanceTimersByTime(4000);
+      expect(indicator.elapsedSeconds()).toBe(5);
+      indicator.update({ active: false, hasData: false });
+      vi.advanceTimersByTime(5000);
+      expect(indicator.elapsedSeconds()).toBe(5);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses exact Loading / Updating analytics copy with no percent or ETA", () => {
     const loading = render(busyModule.BusyOverlay, {
       indicator: busyIndicator(true, false),
       label: "analytics",
     });
+    // The counter sits in an aria-hidden span, so the visible text is checked with markup removed.
+    const visibleText = (html: string) => html.replace(/<!--.*?-->/g, "").replace(/<[^>]+>/g, "");
     expect(loading).toContain('class="qg-busy"');
-    expect(loading).toContain("Loading analytics…");
+    expect(loading).toContain('<span aria-hidden="true">');
+    expect(visibleText(loading)).toBe("Loading analytics… 7 s");
     expect(loading).not.toContain("qg-busy__dot");
     expect(loading).not.toMatch(/\d+\s*%|ETA|remaining/i);
 
@@ -259,7 +283,7 @@ describe("delayed foreground loading", () => {
       indicator: busyIndicator(true, true),
       label: "analytics",
     });
-    expect(updating).toContain("Updating analytics…");
+    expect(visibleText(updating)).toBe("Updating analytics… 7 s");
     expect(updating).not.toContain("qg-busy__dot");
   });
 
@@ -283,7 +307,8 @@ describe("delayed foreground loading", () => {
 
   it("gives every busy overlay an explicit label", () => {
     // The shared route containers own the overlays now; the app shell must not
-    // drift back to a private copy.
+    // drift back to a private copy. Analytics renders one overlay inside the
+    // shared frame; Session keeps its own, and Quota has the only other one.
     expect(appSource).toContain('from "./routes"');
     expect(appSource).not.toContain("<BusyOverlay");
     const overlays = [...routesSource.matchAll(/<BusyOverlay\b([^>]*)>/gu)].map(
@@ -293,11 +318,13 @@ describe("delayed foreground loading", () => {
       (attributes) => /\blabel="([^"]+)"/u.exec(attributes)?.[1] ?? undefined,
     );
     // Five analytics surfaces (analytics home, models, model/provider detail,
-    // projects, sessions) plus the single quota view.
-    expect(overlays).toHaveLength(6);
+    // projects, sessions) plus the single quota view. Four analytics routes
+    // share the frame's overlay, so the literal count is three.
+    expect(overlays).toHaveLength(3);
     expect(labels.every((label) => label !== undefined)).toBe(true);
-    expect(labels.filter((label) => label === "analytics")).toHaveLength(5);
+    expect(labels.filter((label) => label === "analytics")).toHaveLength(2);
     expect(labels.filter((label) => label === "quota")).toHaveLength(1);
+    expect(routesSource.match(/<AnalyticsFrame\b/gu)).toHaveLength(4);
   });
 
   it("does not toast background range work", () => {

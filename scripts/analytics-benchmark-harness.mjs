@@ -8,6 +8,7 @@
 import { existsSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
+import { Worker as NodeWorker } from "node:worker_threads";
 
 export const MIB = 1_048_576;
 
@@ -181,6 +182,7 @@ export function createSettingsStub() {
 export async function loadDistModules(repoRoot) {
   const paths = {
     service: `${repoRoot}/dist/gui/analytics-service.js`,
+    bridge: `${repoRoot}/dist/gui/analytics-bridge.js`,
     server: `${repoRoot}/dist/gui/server.js`,
     snapshots: `${repoRoot}/dist/gui/snapshot-service.js`,
     logger: `${repoRoot}/dist/gui/log.js`,
@@ -191,8 +193,9 @@ export async function loadDistModules(repoRoot) {
     .filter(([, path]) => !existsSync(path))
     .map(([name]) => name);
   if (missing.length > 0) throw new BenchError("dist-missing");
-  const [service, server, snapshots, logger, dbPath] = await Promise.all([
+  const [service, bridge, server, snapshots, logger, dbPath] = await Promise.all([
     import(pathToFileURL(paths.service).href),
+    import(pathToFileURL(paths.bridge).href),
     import(pathToFileURL(paths.server).href),
     import(pathToFileURL(paths.snapshots).href),
     import(pathToFileURL(paths.logger).href),
@@ -200,6 +203,7 @@ export async function loadDistModules(repoRoot) {
   ]);
   return {
     createAnalyticsReadService: service.createAnalyticsReadService,
+    createAnalyticsBridge: bridge.createAnalyticsBridge,
     createDashboardServer: server.createDashboardServer,
     createSnapshotService: snapshots.createSnapshotService,
     createGuiLogger: logger.createGuiLogger,
@@ -209,12 +213,45 @@ export async function loadDistModules(repoRoot) {
 }
 
 export function createAnalyticsService(modules, options) {
-  return modules.createAnalyticsReadService({
+  let lastTermination = Promise.resolve();
+  const logger = modules.createGuiLogger({ sink: () => {} });
+  const idleRetireMs =
+    typeof options.idleRetireMs === "number" && Number.isFinite(options.idleRetireMs)
+      ? options.idleRetireMs
+      : undefined;
+  const service = modules.createAnalyticsReadService({
     snapshotPath: options.snapshotPath,
     refreshIntervalMs: options.refreshIntervalMs,
     requestTimeoutMs: options.requestTimeoutMs,
-    logger: modules.createGuiLogger({ sink: () => {} }),
+    ...(idleRetireMs === undefined ? {} : { idleRetireMs }),
+    logger,
+    createTransport: () =>
+      modules.createAnalyticsBridge({
+        requestTimeoutMs: options.requestTimeoutMs,
+        ...(idleRetireMs === undefined ? {} : { idleRetireMs }),
+        logger,
+        createWorker: () => {
+          const url = pathToFileURL(modules.workerPath);
+          const worker =
+            typeof globalThis.Bun === "undefined"
+              ? new NodeWorker(url)
+              : new Worker(url.href, { type: "module" });
+          const terminate = worker.terminate.bind(worker);
+          let resolveTermination;
+          lastTermination = new Promise((resolve) => {
+            resolveTermination = resolve;
+          });
+          worker.terminate = () => {
+            const result = terminate();
+            void Promise.resolve(result).then(resolveTermination, resolveTermination);
+            return result;
+          };
+          return worker;
+        },
+      }),
   });
+  service.waitForWorkerDrain = () => lastTermination;
+  return service;
 }
 
 export async function startDashboard(options) {
@@ -424,7 +461,7 @@ export function printHumanTable(result) {
       `  GET / p95 ${formatMs(http.index.active.p95Ms)} (${http.index.active.failures} fail) | health p95 ${formatMs(http.health.active.p95Ms)} (${http.health.active.failures} fail)`,
     );
     lines.push(
-      `  worker retained ${worker.retained ? `${worker.retained.heapUsedMiB.toFixed(1)} MiB (delta ${worker.retainedDeltaMiB.toFixed(1)} MiB)` : "n/a"} | heap peak ${worker.peakHeapUsedMiB.toFixed(1)} MiB | rss peak ${worker.peakRssMiB.toFixed(1)} MiB`,
+      `  post-drain rss ${profile.memory.host.postDrainRssMiB.toFixed(1)} MiB (delta ${profile.memory.host.postDrainRssDeltaMiB.toFixed(1)} MiB) | heap peak ${worker.peakHeapUsedMiB.toFixed(1)} MiB | rss peak ${worker.peakRssMiB.toFixed(1)} MiB`,
     );
     if (profile.phases?.available) {
       const interval = profile.phases.intervals;

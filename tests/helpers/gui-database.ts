@@ -34,7 +34,7 @@ export type GuiDatabaseMessageRow = {
   /** `session_message.time_updated`; defaults to `completedMs ?? createdMs`. */
   updatedMs?: number;
   completedMs?: number | null;
-  model?: { providerID: string; id: string } | null;
+  model?: { providerID: string; id: string; variant?: string } | null;
   tokens?: {
     input?: number;
     output?: number;
@@ -44,6 +44,8 @@ export type GuiDatabaseMessageRow = {
   } | null;
   cost?: number | null;
   agent?: string | null;
+  /** Assistant reply linkage: the user message this row answers. */
+  parentID?: string | null;
 };
 
 export type GuiDatabaseProjectRow = {
@@ -110,7 +112,12 @@ function buildMessageData(row: GuiDatabaseMessageRow): Record<string, unknown> {
         : { completed: row.completedMs }),
     },
   };
-  if (row.model) data.model = { providerID: row.model.providerID, id: row.model.id };
+  if (row.model) {
+    data.model = { providerID: row.model.providerID, id: row.model.id };
+    if (row.model.variant !== undefined) {
+      (data.model as Record<string, unknown>).variant = row.model.variant;
+    }
+  }
   if (row.tokens) {
     const tokens: Record<string, unknown> = {};
     if (row.tokens.input !== undefined) tokens.input = row.tokens.input;
@@ -126,6 +133,7 @@ function buildMessageData(row: GuiDatabaseMessageRow): Record<string, unknown> {
   }
   if (row.cost !== undefined && row.cost !== null) data.cost = row.cost;
   if (row.agent !== undefined && row.agent !== null) data.agent = row.agent;
+  if (row.parentID !== undefined && row.parentID !== null) data.parentID = row.parentID;
   return data;
 }
 

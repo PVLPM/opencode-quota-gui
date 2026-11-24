@@ -64,6 +64,7 @@ describe("ollama-cloud provider", () => {
         name: "Ollama Cloud Session",
         group: "Ollama Cloud",
         label: "Session:",
+        semantic: { metric: { kind: "named", name: "Session" }, prominence: "primary" },
         percentRemaining: 75,
         resetTimeIso: "2026-10-01T07:00:00.000Z",
       },
@@ -71,6 +72,7 @@ describe("ollama-cloud provider", () => {
         name: "Ollama Cloud Weekly",
         group: "Ollama Cloud",
         label: "Weekly:",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 40,
         resetTimeIso: "2026-10-05T00:00:00.000Z",
       },
@@ -121,6 +123,7 @@ describe("ollama-cloud provider", () => {
         name: "Ollama Cloud Monthly",
         group: "Ollama Cloud",
         label: "Monthly:",
+        semantic: { metric: { kind: "window", window: "month" }, prominence: "primary" },
         percentRemaining: 72.5,
         resetTimeIso: "2026-10-15T09:30:00.000Z",
       },
@@ -129,6 +132,10 @@ describe("ollama-cloud provider", () => {
         name: "Ollama Cloud Purchased",
         group: "Ollama Cloud",
         label: "Purchased:",
+        semantic: {
+          metric: { kind: "component", component: "remaining_credits" },
+          prominence: "supplementary",
+        },
         value: "$25.00 left",
       },
     ]);
@@ -173,6 +180,10 @@ describe("ollama-cloud provider", () => {
         name: "Ollama Cloud Purchased",
         group: "Ollama Cloud",
         label: "Purchased:",
+        semantic: {
+          metric: { kind: "component", component: "remaining_credits" },
+          prominence: "supplementary",
+        },
         value: "$0.00 left",
       },
     ]);

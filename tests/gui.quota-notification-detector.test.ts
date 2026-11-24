@@ -77,7 +77,9 @@ function card(
     providerLabel?: string;
     accountLabel?: string;
     providerScopeHash?: string;
+    stale?: boolean;
     errors?: readonly QuotaNotificationProviderErrorObservation[];
+    visibilityRows?: readonly { rowId: string; aliases?: readonly string[] }[];
   } = {},
 ): QuotaNotificationCardObservation {
   const observation: QuotaNotificationCardObservation = {
@@ -90,7 +92,9 @@ function card(
   if (params.providerScopeHash !== undefined) {
     observation.providerScopeHash = params.providerScopeHash;
   }
+  if (params.stale !== undefined) observation.stale = params.stale;
   if (params.errors !== undefined) observation.errors = params.errors;
+  if (params.visibilityRows !== undefined) observation.visibilityRows = params.visibilityRows;
   return observation;
 }
 
@@ -418,6 +422,22 @@ describe("quota notification detector", () => {
     expect(providerError.state.rows).toEqual({});
   });
 
+  it("treats a declared control alias as the same hidden field", () => {
+    const primary = `${CARD_ID}#window:five_hour|quota:percent`;
+    const alias = `${CARD_ID}#window:five_hour|status:value`;
+    const visibilityRows = [{ rowId: primary, aliases: [alias] }];
+    const baseline = detect([card({ rows: [percentRow(alias, 25)], visibilityRows })]);
+
+    for (const hiddenRows of [[primary], [alias]]) {
+      const hidden = next(baseline, [card({ rows: [percentRow(alias, 5)], visibilityRows })], {
+        hiddenRows,
+        cooldownMs: 0,
+      });
+      expect(hidden.notifications).toEqual([]);
+      expect(hidden.state.rows).toEqual({});
+    }
+  });
+
   it("keeps per-card identity for the same row id", () => {
     const firstCard = card({
       cardId: `openai:${"1".repeat(64)}`,
@@ -461,6 +481,43 @@ describe("quota notification detector", () => {
     expect(exhausted.notifications).toEqual([
       expect.objectContaining({ kind: "exhausted", rowId: "new" }),
     ]);
+  });
+
+  it("treats every semantic window as reset-eligible and named metrics as not", () => {
+    const rows = [
+      percentRow("5h", 40, {
+        resetAtIso: OLD_RESET_AT,
+        metric: { kind: "window", window: "five_hour" },
+      }),
+      percentRow("weekly", 40, {
+        resetAtIso: OLD_RESET_AT,
+        metric: { kind: "window", window: "week" },
+      }),
+      percentRow("monthly", 40, {
+        resetAtIso: OLD_RESET_AT,
+        metric: { kind: "window", window: "month" },
+      }),
+      percentRow("fable", 40, {
+        resetAtIso: OLD_RESET_AT,
+        metric: { kind: "named", name: "Fable weekly" },
+      }),
+    ];
+    const baseline = detect([card({ rows })]);
+    const reset = next(
+      baseline,
+      [card({ rows: rows.map((row) => ({ ...row, percentRemaining: 80, resetAtIso: RESET_AT })) })],
+      {
+        nowMs: NOW + 2 * 60 * 60 * 1000,
+        policy: { reset: { enabled: true, windows: ["fiveHour", "weekly", "monthly"] } },
+      },
+    );
+
+    expect(reset.notifications.map((notification) => notification.rowId).sort()).toEqual([
+      "5h",
+      "monthly",
+      "weekly",
+    ]);
+    expect(reset.notifications.every((notification) => notification.kind === "reset")).toBe(true);
   });
 
   it("emits reset using the proven existing transition semantics", () => {
@@ -844,6 +901,153 @@ describe("quota notification detector", () => {
     expect(recovered.notifications).toEqual([]);
     expect(repeated.notifications).toHaveLength(1);
     expect(repeated.notifications[0]?.kind).toBe("provider-error");
+  });
+
+  it("silences a transient retained error and alerts on the second consecutive failure", () => {
+    const baseline = detect([card({ rows: [percentRow("row-1", 25)] })]);
+    const retainedError = card({
+      rows: [percentRow("row-1", 25)],
+      errors: [{ failureCategory: "provider_api" }],
+      stale: true,
+    });
+    const first = next(baseline, [retainedError], { cooldownMs: 0 });
+    expect(first.notifications).toEqual([]);
+    expect(first.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 1,
+    });
+
+    const second = next(first, [retainedError], { cooldownMs: 0 });
+    expect(second.notifications).toEqual([
+      expect.objectContaining({ kind: "provider-error", providerId: "openai" }),
+    ]);
+    expect(second.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 2,
+    });
+
+    // A fresh error with no retained last-good rows still alerts immediately.
+    const fresh = next(detect([card({ rows: [] })]), [
+      card({ rows: [], errors: [{ failureCategory: "provider_api" }] }),
+    ]);
+    expect(fresh.notifications).toHaveLength(1);
+    expect(fresh.notifications[0]?.kind).toBe("provider-error");
+    const freshRepeat = next(fresh, [
+      card({ rows: [], errors: [{ failureCategory: "provider_api" }] }),
+    ]);
+    expect(freshRepeat.notifications).toEqual([]);
+  });
+
+  it("keeps the failure streak across a cooldown skip", () => {
+    const baseline = detect([card({ rows: [percentRow("row-1", 25)] })]);
+    const retainedFailure = card({
+      rows: [percentRow("row-1", 25)],
+      errors: [{ failureCategory: "provider_api" }],
+      stale: true,
+    });
+    const cooldown = card({
+      rows: [percentRow("row-1", 25)],
+      errors: [
+        {
+          failureCategory: "provider_api",
+          attemptOutcome: "cooldown",
+          retryAtMs: NOW + 120_000,
+        },
+      ],
+      stale: true,
+    });
+
+    const firstFailure = next(baseline, [retainedFailure], { cooldownMs: 0 });
+    expect(firstFailure.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 1,
+      staleError: true,
+    });
+
+    const skipped = next(firstFailure, [cooldown], { cooldownMs: 0 });
+    expect(skipped.notifications).toEqual([]);
+    // A skip made no request: it neither breaks nor recovers the failure streak.
+    expect(skipped.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 1,
+      staleError: true,
+    });
+
+    const secondFailure = next(skipped, [retainedFailure], { cooldownMs: 0 });
+    expect(secondFailure.notifications).toEqual([
+      expect.objectContaining({ kind: "provider-error", providerId: "openai" }),
+    ]);
+    expect(secondFailure.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 2,
+    });
+  });
+
+  it("does not count a cooldown skip as a failure observation", () => {
+    const baseline = detect([card({ rows: [percentRow("row-1", 25)] })]);
+    const cooldown = card({
+      rows: [percentRow("row-1", 25)],
+      errors: [
+        {
+          failureCategory: "provider_api",
+          attemptOutcome: "cooldown",
+          retryAtMs: Date.now() + 120_000,
+        },
+      ],
+      stale: true,
+    });
+    const skipped = next(baseline, [cooldown], { cooldownMs: 0 });
+    expect(skipped.notifications).toEqual([]);
+    expect(skipped.state.providers[CARD_ID]).toMatchObject({ status: "healthy" });
+
+    // The next real transient failure is still the first observation, so it
+    // remains silent until a second consecutive failure proves persistence.
+    const realFailure = card({
+      rows: [percentRow("row-1", 25)],
+      errors: [{ failureCategory: "provider_api" }],
+      stale: true,
+    });
+    const firstReal = next(skipped, [realFailure], { cooldownMs: 0 });
+    expect(firstReal.notifications).toEqual([]);
+    expect(firstReal.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 1,
+    });
+    const secondReal = next(firstReal, [realFailure], { cooldownMs: 0 });
+    expect(secondReal.notifications).toHaveLength(1);
+  });
+
+  it("keeps retained rows out of threshold and reset evaluation", () => {
+    const baseline = detect([card({ rows: [percentRow("row-1", 50)] })]);
+    const retainedDrop = next(baseline, [card({ rows: [percentRow("row-1", 5)], stale: true })], {
+      cooldownMs: 0,
+    });
+    expect(retainedDrop.notifications).toEqual([]);
+    // The last real measurement stays the baseline, so recovery still proves the
+    // low transition instead of silently rebaselining on retained data.
+    const freshDrop = next(retainedDrop, [card({ rows: [percentRow("row-1", 5)] })], {
+      cooldownMs: 0,
+    });
+    expect(freshDrop.notifications).toEqual([expect.objectContaining({ kind: "low" })]);
+  });
+
+  it("resolves a legacy aggregate hidden row id to the first emitted typed row", () => {
+    const fiveHour = `${CARD_ID}#window:five_hour|quota:percent`;
+    const weekly = `${CARD_ID}#window:week|quota:percent`;
+    const result = detect(
+      [
+        card({
+          rows: [
+            percentRow(fiveHour, 5),
+            percentRow(weekly, 80, { metric: { kind: "window", window: "week" } }),
+          ],
+        }),
+      ],
+      { hiddenRows: [`${CARD_ID}#aggregate|quota:percent`] },
+    );
+
+    expect(result.notifications).toEqual([]);
+    expect(Object.keys(result.state.rows)).toEqual([`${CARD_ID}\u001f${weekly}`]);
   });
 
   it("consumes a ProviderCard's structured failureCategory directly", () => {

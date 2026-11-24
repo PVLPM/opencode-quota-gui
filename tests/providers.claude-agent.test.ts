@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { normalizeQuotaProviderResult } from "../src/lib/quota-state-codec.js";
 import { anthropicProvider } from "../src/providers/anthropic.js";
 import { claudeAgentProvider } from "../src/providers/claude-agent.js";
 import {
@@ -16,6 +17,11 @@ vi.mock("../src/lib/anthropic.js", async (importOriginal) => ({
   getAnthropicDiagnostics: vi.fn(),
   hasAnthropicCredentialsConfigured: vi.fn(),
   queryAnthropicQuotaWithOAuth: vi.fn(),
+}));
+
+// Hermetic: never read the developer's real Anthropic API key.
+vi.mock("../src/lib/anthropic-api-auth.js", () => ({
+  resolveAnthropicApiKey: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("../src/lib/opencode-auth.js", async (importOriginal) => ({
@@ -90,6 +96,7 @@ describe("claude agent provider", () => {
     await claudeAgentProvider.fetch(ctx);
     expect(hasAnthropicCredentialsConfigured).toHaveBeenCalledWith(
       expect.objectContaining({ binaryPath: "/custom/claude" }),
+      { treatUnverifiedAsConfigured: true },
     );
     expect(getAnthropicDiagnostics).toHaveBeenCalledWith(
       expect.objectContaining({ binaryPath: "/custom/claude" }),
@@ -230,6 +237,101 @@ describe("claude agent provider", () => {
     ]);
   });
 
+  // Regression: errors carrying `attemptOutcome` were rejected by the codec, so every cooldown or
+  // transient failure replaced the card (and its last-good rows) with "Invalid normalized provider
+  // result".
+  it.each([
+    "cooldown",
+    "transient",
+    "credentials",
+  ] as const)("keeps a %s usage failure valid through normalization", async (attemptOutcome) => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    vi.mocked(getAnthropicDiagnostics).mockResolvedValue({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+      message: "Anthropic API returned 429",
+      failureCategory: attemptOutcome === "credentials" ? "credentials" : "provider_api",
+      attemptOutcome,
+      retryAtMs: 1_700_000_000_000,
+    } as never);
+    const fetched = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({ providerIds: ["claude-agent"] }),
+    );
+    const normalized = normalizeQuotaProviderResult(fetched);
+    expect(normalized?.errors).toEqual([
+      expect.objectContaining({
+        label: "Claude Agent",
+        attemptOutcome,
+        retryAtMs: 1_700_000_000_000,
+      }),
+    ]);
+    expect(
+      normalizeQuotaProviderResult({
+        ...fetched,
+        errors: [{ ...fetched.errors[0], attemptOutcome: "guess" }],
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps a full OAuth usage result valid through normalization", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    vi.mocked(getAnthropicDiagnostics).mockResolvedValue({
+      installed: true,
+      version: "2.1.258",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      oauthCredentialSource: "claude-credentials",
+      checkedCommands: ["claude --version"],
+      attemptOutcome: "fresh",
+      quotaMeasuredAtMs: Date.UTC(2026, 10, 24, 9, 0, 0),
+      planLabel: "Max",
+      quota: {
+        success: true,
+        five_hour: { percentRemaining: 58, resetTimeIso: "2026-11-24T14:10:00.268Z" },
+        seven_day: { percentRemaining: 72, resetTimeIso: "2026-11-27T07:00:00.268Z" },
+        fable_weekly: { percentRemaining: 98, resetTimeIso: "2026-11-27T07:00:00.268Z" },
+        saved_resets: {
+          availableCount: 1,
+          credits: [{ expiresAtIso: "2099-01-01T00:00:00.000Z" }],
+        },
+      },
+    } as never);
+    const fetched = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({ providerIds: ["claude-agent"] }),
+    );
+    const normalized = normalizeQuotaProviderResult(fetched);
+    expect(normalized).not.toBeNull();
+    expect(normalized?.entries).toHaveLength(fetched.entries.length);
+  });
+
+  it("reports a timed-out CLI probe as a retryable provider failure without claiming a quota request", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    vi.mocked(getAnthropicDiagnostics).mockResolvedValue({
+      installed: true,
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+      message: "Timed out while running Claude CLI auth status.",
+      failureCategory: "provider_api",
+      probeFailure: true,
+    } as never);
+    const result = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({ providerIds: ["claude-agent"] }),
+    );
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        label: "Claude Agent",
+        message: "Claude CLI did not respond. Retry.",
+        failureCategory: "provider_api",
+      }),
+    ]);
+  });
+
   it("keeps OpenCode account rows and CLI provider rows separate", async () => {
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
     const { queryAnthropicQuotaWithOAuth, getAnthropicDiagnostics } = await import(
@@ -281,7 +383,7 @@ describe("claude agent provider", () => {
     });
     expect(await anthropicProvider.isAvailable(ctx)).toBe(true);
     expect((await anthropicProvider.fetch(ctx)).errors[0]?.message).toContain(
-      "API quota is unavailable",
+      "No Anthropic API key is configured",
     );
   });
 
@@ -469,7 +571,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 58,
         resetTimeIso: "2026-07-21T14:10:00.268Z",
       },
@@ -477,7 +579,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Weekly",
         group: "Claude Agent",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 72,
         resetTimeIso: "2026-07-27T07:00:00.268Z",
       },
@@ -576,7 +678,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 43,
         resetTimeIso: undefined,
       },
@@ -584,7 +686,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Weekly",
         group: "Claude Agent",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 88,
         resetTimeIso: undefined,
       },
@@ -653,7 +755,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 43,
         resetTimeIso: undefined,
       },
@@ -661,7 +763,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Weekly",
         group: "Claude Agent",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 88,
         resetTimeIso: undefined,
       },
@@ -669,7 +771,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Usage Credits",
         group: "Claude Agent Usage Credits",
         label: "Monthly:",
-        rowKey: "window:month",
+        semantic: { metric: { kind: "window", window: "month" }, prominence: "primary" },
         percentRemaining: 62,
       },
     ]);
@@ -709,7 +811,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 50,
         resetTimeIso: "2026-03-25T18:00:00.000Z",
       },
@@ -717,7 +819,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Weekly",
         group: "Claude Agent",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 70,
         resetTimeIso: "2026-04-01T00:00:00.000Z",
       },
@@ -817,7 +919,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 75,
         resetTimeIso: undefined,
       },
@@ -926,11 +1028,42 @@ describe("claude agent provider", () => {
     );
 
     expectAttemptedWithErrorLabel(out, "Claude Agent");
-    expect(out.errors?.[0]).toMatchObject({ failureCategory: "credentials" });
+    expect(out.errors?.[0]).toMatchObject({
+      failureCategory: "credentials",
+      message:
+        "Claude CLI reports you are signed in, but the usage request was rejected. Retry; if it persists, run `claude auth login`.",
+    });
     expect(visibleEntries(out.entries, "claude-agent")).toEqual([]);
     expect(readCredentialRows).not.toHaveBeenCalled();
     expect(queryAnthropicQuotaWithOAuth).not.toHaveBeenCalled();
   });
+  it("says the stored access token expired when diagnostics prove it", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    (getAnthropicDiagnostics as any).mockResolvedValueOnce({
+      installed: true,
+      version: "2.1.123",
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+      message: "x",
+      failureCategory: "credentials",
+      storedAccessTokenExpired: true,
+    });
+
+    const out = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({
+        providerIds: ["claude-code"],
+        configOverrides: { currentProviderID: "claude-code", onlyCurrentModel: true },
+      }),
+    );
+
+    expect(out.errors?.[0]).toMatchObject({
+      message:
+        "Claude's stored access token has expired. Run any `claude` command to refresh it, then Retry.",
+    });
+  });
+
   it("keeps a detected Claude Code route visible as an error when its usage probe fails", async () => {
     const { getAnthropicDiagnostics, queryAnthropicQuotaWithOAuth } = await import(
       "../src/lib/anthropic.js"

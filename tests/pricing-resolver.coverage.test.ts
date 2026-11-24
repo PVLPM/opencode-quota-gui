@@ -10,9 +10,14 @@ import {
   listModelsForProvider,
   listProviders,
   lookupCost,
+  lookupCostAtContext,
   setPricingSnapshotSelection,
 } from "../src/lib/modelsdev-pricing.js";
-import { priceTokenBuckets, resolvePricingKey } from "../src/lib/quota-stats.js";
+import {
+  priceTokenBuckets,
+  priceTokenBucketsWithRecordedCost,
+  resolvePricingKey,
+} from "../src/lib/quota-stats.js";
 
 const CURSOR_UPSTREAM_PRICING_PATH = new URL(
   "../references/upstream-plugins/cursor-opencode-provider/dist/pricing-data.js",
@@ -818,5 +823,191 @@ describe("resolvePricingKey snapshot coverage", () => {
     }
 
     expect(failures).toEqual([]);
+  });
+
+  it("prices the live gpt-6.2-sol and longcat-2.5-free routes in bare and prefixed forms", () => {
+    const gptTokens = {
+      input: 1_000_000,
+      output: 1_000_000,
+      reasoning: 0,
+      cache_read: 1_000_000,
+      cache_write: 1_000_000,
+    };
+
+    expect(lookupCost("openai", "gpt-6.2-sol")).toEqual({
+      input: 2,
+      output: 10,
+      cache_read: 0.1,
+      cache_write: 2.5,
+      tiers: [
+        {
+          input: 4,
+          output: 15,
+          cache_read: 0.2,
+          cache_write: 5,
+          tier: { type: "context", size: 272_000 },
+        },
+      ],
+    });
+
+    for (const modelID of ["gpt-6.2-sol", "openai/gpt-6.2-sol"]) {
+      expect(resolvePricingKey({ providerID: "openai", modelID })).toEqual({
+        ok: true,
+        method: "source_provider",
+        key: { provider: "openai", model: "gpt-6.2-sol" },
+      });
+      expect(
+        priceTokenBuckets({
+          providerID: "openai",
+          modelID,
+          tokens: gptTokens,
+          contextTokens: 0,
+        }),
+      ).toMatchObject({
+        status: "priced",
+        key: { provider: "openai", model: "gpt-6.2-sol" },
+        costUsd: 14.6,
+      });
+      expect(
+        priceTokenBuckets({
+          providerID: "openai",
+          modelID,
+          tokens: gptTokens,
+          contextTokens: 272_000,
+        }),
+      ).toMatchObject({ status: "priced", costUsd: 24.2, contextTierSize: 272_000 });
+    }
+
+    expect(lookupCostAtContext("openai", "gpt-6.2-sol", 272_000)?.rates).toEqual({
+      input: 4,
+      output: 15,
+      cache_read: 0.2,
+      cache_write: 5,
+    });
+
+    // Explicit upstream zeros make the route priced at zero, never guessed
+    // from the `-free` suffix alone.
+    expect(lookupCost("opencode", "longcat-2.5-free")).toEqual({
+      input: 0,
+      output: 0,
+      cache_read: 0,
+    });
+    for (const modelID of ["longcat-2.5-free", "opencode/longcat-2.5-free"]) {
+      expect(resolvePricingKey({ providerID: "opencode", modelID })).toEqual({
+        ok: true,
+        method: "source_provider",
+        key: { provider: "opencode", model: "longcat-2.5-free" },
+      });
+      expect(
+        priceTokenBuckets({
+          providerID: "opencode",
+          modelID,
+          tokens: {
+            input: 1_000,
+            output: 0,
+            reasoning: 0,
+            cache_read: 0,
+            cache_write: 0,
+          },
+        }),
+      ).toMatchObject({
+        status: "priced",
+        key: { provider: "opencode", model: "longcat-2.5-free" },
+        costUsd: 0,
+      });
+    }
+  });
+
+  it("prices Mistral's dated catalog ids in bare and prefixed forms", () => {
+    expect(lookupCost("mistral", "deepseek-v4-1-flash-1017")).toEqual({
+      input: 0.3,
+      output: 1.2,
+      cache_read: 0.007,
+    });
+    expect(lookupCost("mistral", "zai-glm-5-3-flash")).toEqual({
+      input: 0.15,
+      output: 0.5,
+      cache_read: 0.03,
+    });
+
+    for (const modelID of ["deepseek-v4-1-flash-1017", "mistral/deepseek-v4-1-flash-1017"]) {
+      expect(resolvePricingKey({ providerID: "mistral", modelID })).toEqual({
+        ok: true,
+        method: "source_provider",
+        key: { provider: "mistral", model: "deepseek-v4-1-flash-1017" },
+      });
+      expect(
+        priceTokenBuckets({
+          providerID: "mistral",
+          modelID,
+          tokens: {
+            input: 1_000_000,
+            output: 1_000_000,
+            reasoning: 0,
+            cache_read: 0,
+            cache_write: 0,
+          },
+        }),
+      ).toMatchObject({
+        status: "priced",
+        key: { provider: "mistral", model: "deepseek-v4-1-flash-1017" },
+        costUsd: 1.5,
+      });
+    }
+  });
+
+  it("uses recorded cost only for unpriced or unknown routes with a finite positive value", () => {
+    const tokens = {
+      input: 1_000,
+      output: 500,
+      reasoning: 0,
+      cache_read: 0,
+      cache_write: 0,
+    };
+
+    expect(
+      priceTokenBucketsWithRecordedCost({
+        providerID: "no-such-provider",
+        modelID: "no-such-model",
+        tokens,
+        recordedCostUsd: 2.5,
+      }),
+    ).toEqual({ status: "recorded_cost", costUsd: 2.5, recordedTokens: 1_500 });
+
+    for (const recordedCostUsd of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        priceTokenBucketsWithRecordedCost({
+          providerID: "no-such-provider",
+          modelID: "no-such-model",
+          tokens,
+          recordedCostUsd,
+        }),
+      ).toMatchObject({ status: "unknown" });
+    }
+    expect(
+      priceTokenBucketsWithRecordedCost({
+        providerID: "no-such-provider",
+        modelID: "no-such-model",
+        tokens,
+      }),
+    ).toMatchObject({ status: "unknown" });
+
+    // models.dev always wins when it can price the route.
+    expect(
+      priceTokenBucketsWithRecordedCost({
+        providerID: "openai",
+        modelID: "gpt-6.2-sol",
+        tokens,
+        recordedCostUsd: 99,
+      }),
+    ).toMatchObject({ status: "priced", key: { provider: "openai", model: "gpt-6.2-sol" } });
+    expect(
+      priceTokenBucketsWithRecordedCost({
+        providerID: "opencode",
+        modelID: "longcat-2.5-free",
+        tokens,
+        recordedCostUsd: 99,
+      }),
+    ).toMatchObject({ status: "priced", costUsd: 0 });
   });
 });

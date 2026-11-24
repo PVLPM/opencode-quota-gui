@@ -20,7 +20,8 @@ export type Route =
   | { name: "model"; identity: AnalyticsEntityIdentity; modelsGroup?: AnalyticsDimension }
   | { name: "provider"; identity: AnalyticsEntityIdentity; modelsGroup?: AnalyticsDimension }
   | { name: "project"; projectId: string }
-  | { name: "session"; sessionId: string }
+  /** `individual` opens the session's own analytics instead of a project root's tree chart. */
+  | { name: "session"; sessionId: string; individual?: boolean }
   | { name: "settings" }
   | { name: "not-found"; path: string };
 
@@ -122,10 +123,13 @@ export function parseLocation(pathWithQuery: string, fallbackRange: RangeKey): L
   const match = /^\/(project|session)\/([^/]+)$/.exec(path);
   const id = match ? decodeSegment(match[2] ?? "") : undefined;
   if (match && id !== undefined) {
+    if (match[1] === "project") {
+      return { route: { name: "project", projectId: id }, range };
+    }
     return {
       route:
-        match[1] === "project"
-          ? { name: "project", projectId: id }
+        params.get("view") === "individual"
+          ? { name: "session", sessionId: id, individual: true }
           : { name: "session", sessionId: id },
       range,
     };
@@ -158,7 +162,9 @@ export function formatPath(route: Route, range: RangeKey): string {
     case "project":
       return `/project/${encodeURIComponent(route.projectId)}${suffix}`;
     case "session":
-      return `/session/${encodeURIComponent(route.sessionId)}`;
+      return `/session/${encodeURIComponent(route.sessionId)}${
+        route.individual ? "?view=individual" : ""
+      }`;
     case "settings":
       return "/settings";
     default:

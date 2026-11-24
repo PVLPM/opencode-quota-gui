@@ -11,6 +11,7 @@ import { Plugin } from "@opencode/plugin";
 import { type DashboardLease, startDashboard } from "./gui/lifecycle.js";
 import { scrubLogReason } from "./gui/log.js";
 import { registerDashboardRpc } from "./gui/rpc.js";
+import { observeAnthropicApiResponse } from "./lib/anthropic-api-rate-limits.js";
 import { projectOpenCodeCacheObserverEvent } from "./lib/cache-observer-ingestion.js";
 import { readClaudeObservedTtl } from "./lib/claude-agent-transcript-ttl.js";
 import { createClaudeAgentTtlTracker } from "./lib/claude-agent-ttl-tracker.js";
@@ -21,7 +22,13 @@ import {
   notifyCredentialsChanged,
   scrubCredentialErrorText,
 } from "./lib/opencode-auth.js";
-import { resolveQuotaResetRetryDelayMs } from "./lib/quota-retry-wait.js";
+import { OpencodeWarmingRefreshTracker } from "./lib/opencode-warming-refresh.js";
+import { createQuotaAutoResumption } from "./lib/quota-auto-resume.js";
+import {
+  collectQuotaWindows,
+  probeQuotaForModelState,
+  resolveQuotaResetRetryDelayMs,
+} from "./lib/quota-retry-wait.js";
 import type { QuotaSurfaceHost } from "./lib/quota-surface-data.js";
 
 /** An error as one line that is safe to log: tokens redacted, at most 120 characters. */
@@ -69,6 +76,59 @@ export const QuotaToastPlugin = Plugin.define({
       } catch (error) {
         console.warn(`[opencode-quota-gui] retry hook failed: ${logReason(error)}`);
       }
+    });
+
+    // With autoResumeOnQuotaRecovery on (default off), a session that terminally failed on a
+    // provider quota limit gets one `continue` prompt after the failed route's exhausted window
+    // is observed as reset for the same verified identity. In-process timers only: a plugin
+    // restart drops a pending resume.
+    const autoResume = createQuotaAutoResumption({
+      session: ctx.session,
+      probe: async (model) => {
+        const result = await probeQuotaForModelState(
+          retryHost,
+          model,
+          (config) => config.autoResumeOnQuotaRecovery,
+          { includeProviderScope: true },
+        );
+        if (result.state === "disabled") return { kind: "disabled" };
+        if (result.state === "unsupported") return { kind: "unsupported" };
+        if (result.state === "unavailable") return { kind: "absent" };
+        const collection = collectQuotaWindows(
+          result.probe.providerResults.map((entry) => entry.result),
+          result.probe.binding,
+          {
+            primaryAccountOnly: true,
+            // The controller keeps this model-scoped row only for a Fable failed model.
+            includeNamedWindows: ["named:Fable weekly"],
+          },
+        );
+        return collection ? { kind: "collection", collection } : { kind: "absent" };
+      },
+      log: (message) => console.warn(`[opencode-quota-gui] ${message}`),
+    });
+    // A user-submitted prompt suppresses a pending auto-resume; our own prompt carries the marker.
+    await ctx.session.hook("prompt", (event) => {
+      try {
+        autoResume.onPrompt(event);
+      } catch {
+        // Pending-resume tracking must never interfere with a prompt.
+      }
+    });
+
+    const warming = new OpencodeWarmingRefreshTracker();
+    await ctx.session.hook("model.request", (event) => {
+      try {
+        warming.onModelRequest(event, Date.now());
+      } catch {
+        // Observation must never interfere with a request.
+      }
+    });
+
+    // Read-only and synchronous: records allowlisted rate-limit headers from API-key Messages
+    // responses for the Anthropic API card. It never alters, delays or throws into the request.
+    await ctx.session.hook("http.response", (event) => {
+      observeAnthropicApiResponse({ request: event.request, response: event.response });
     });
 
     // Owner-approved per-session approximation (not per-request proof): the host shares no
@@ -267,6 +327,11 @@ export const QuotaToastPlugin = Plugin.define({
             if (event.type === "credential.updated" || event.type === "credential.switched") {
               notifyCredentialsChanged();
             }
+            try {
+              autoResume.handleEvent(event);
+            } catch {
+              // Resume tracking is observation only; never break the host event stream.
+            }
             // The Started event's model identity is available before invocation completion. Do not
             // enrich it from model.list here: that mutable catalog may no longer match dispatch.
             const sessionID = (event.data as { sessionID?: unknown } | undefined)?.sessionID;
@@ -297,6 +362,17 @@ export const QuotaToastPlugin = Plugin.define({
               emitCacheObserverEvent(cacheObserverEvent, event.created);
             }
             claudeTtl.observe(event, cacheObserverEvent);
+            if (event.type === "session.step.started") warming.onStepStarted(event);
+            else if (event.type === "session.step.ended") warming.onStepEnded(event);
+            else if (event.type === "session.usage.updated") {
+              const refresh = warming.onUsageUpdated(event);
+              if (refresh !== undefined) {
+                emitCacheObserverEvent(
+                  { type: "session.cache.warming", data: refresh },
+                  Date.now(),
+                );
+              }
+            }
           }
           if (signal.aborted) return;
           throw new Error("host event stream ended");
@@ -363,6 +439,7 @@ export const QuotaToastPlugin = Plugin.define({
 
     return async () => {
       hostEvents.abort();
+      autoResume.dispose();
       claudeTtl.dispose();
       openaiMethodBySession.clear();
       pendingCacheObserverEvents.length = 0;

@@ -58,6 +58,18 @@ afterEach(() => {
 });
 
 describe("analytics benchmark deterministic synthetic fixtures", () => {
+  it("generates the heavy history profile using its configured long span", async () => {
+    const fixture = await createSyntheticDatabase({
+      profileName: "heavy-history",
+      root: tempRoot(),
+      anchorMs: ANCHOR_MS,
+      overrides: { sessions: 60, rows: 6_000 },
+    });
+    expect(fixture.synthetic.sessions).toBe(60);
+    expect(fixture.synthetic.rows).toBe(6_000);
+    expect(fixture.synthetic.spanDays).toBeGreaterThan(180);
+  });
+
   it("produces the same fixed-seed shape and anonymous selection", async () => {
     const first = await smallSynthetic(tempRoot());
     const second = await smallSynthetic(tempRoot());
@@ -514,6 +526,10 @@ describe.skipIf(!existsSync(join(REPO_ROOT, "dist/gui/analytics-worker.js")))(
       expect(profile.checks.coldResumeSecondRefreshPassed).toBe(true);
       expect(profile.checks.coldResumeUpdateWindowBounded).toBe(true);
       expect(profile.persistence.snapshotWritten).toBe(true);
+      expect(profile.checks.workerRetainedBounded).toBe(
+        profile.memory.host.postDrainRssDeltaMiB <= profile.memory.worker.capTargetMiB,
+      );
+      expect(profile.memory.host.postDrainRssMiB).toEqual(expect.any(Number));
       const failed = Object.entries(profile.checks)
         .filter(([, value]) => value === false)
         .map(([name]) => name);

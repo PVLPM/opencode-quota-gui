@@ -2,7 +2,7 @@ import { isIP } from "node:net";
 
 import type { AccountingResultType } from "./entries.js";
 import { lookupCost } from "./modelsdev-pricing.js";
-import { getQuotaProviderShape } from "./provider-metadata.js";
+import { getQuotaProviderRegistration } from "./provider-metadata.js";
 import { resolvePricingKey } from "./quota-stats.js";
 
 export const QUOTA_PROVIDER_REMOTE_FORMATS = ["quota-v1", "openrouter-key-v1", "json-v1"] as const;
@@ -1333,7 +1333,7 @@ export function validateQuotaProviders(value: unknown): QuotaProvidersValidation
           message: `"${QUOTA_PROVIDERS_AGGREGATE_ID}" is reserved for the aggregate provider`,
         });
       }
-      const builtIn = getQuotaProviderShape(id);
+      const builtIn = getQuotaProviderRegistration(id);
       if (builtIn && !(MAINTAINED_LOCAL_ESTIMATE_IDS as readonly string[]).includes(id)) {
         issues.push({
           key: `${providerKey}.id`,

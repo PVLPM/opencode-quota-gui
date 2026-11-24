@@ -53,7 +53,7 @@
   /* Chart-specific hues stay separate from the token stack. */
   --qg-chart-rate: #ffb900;
   --qg-chart-context: #51a2ff;
-  --qg-chart-own: #ffb900;
+  --qg-chart-own: var(--qg-token-reasoning);
   --qg-chart-total: #ff8904;
   /* The API-equivalent trend is not a token category. It uses the existing
      cache-hit amber; the fifth rank stays an independent green. */
@@ -107,6 +107,15 @@
   display: flex;
   flex-direction: column;
   gap: 0;
+  /* Host shells often disable selection around injected panels; product text stays copyable. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.qg-app input,
+.qg-app textarea {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .qg-chrome {
@@ -397,6 +406,34 @@
   padding-inline: 8px;
 }
 
+/* A range still being prefetched: the same thin spinning ring as the native
+   cache-busy mark, after the label. */
+.qg-range__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.qg-range__spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: qg-range-spin 0.9s linear infinite;
+}
+@keyframes qg-range-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .qg-range__spinner {
+    /* No motion: a static ring still marks the pending read. */
+    animation: none;
+    border-top-color: currentColor;
+  }
+}
+
 .qg-eyes {
   display: inline-flex;
   align-items: center;
@@ -642,6 +679,21 @@
   -webkit-mask-size: contain;
   mask-size: contain;
   vertical-align: -0.2em;
+}
+
+/* Compact model label: the provider mark takes the place of the text prefix.
+   It follows the line's font size and text color, and the surrounding
+   ellipsis/nowrap containers keep working because the label stays inline. */
+.qg-model-identity {
+  display: inline;
+  max-width: 100%;
+}
+
+.qg-model-identity__logo {
+  width: 1em;
+  height: 1em;
+  margin-right: 0.25em;
+  vertical-align: -0.15em;
 }
 
 .qg-card__logo {
@@ -1116,13 +1168,66 @@
   fill: var(--qg-chart-rate);
 }
 
+/* In the session plot the gold line crosses filled series, so it gets a dark
+   halo (as the cost line does) and sits above them; the tree line is dashed. */
+.qg-chart__rate-line--session {
+  stroke-width: 1.5;
+  filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.6));
+}
+
+.qg-chart__rate-point--active {
+  stroke: var(--qg-surface-raised);
+  stroke-width: 1.25;
+}
+
+/* Model changes are filled diamonds; effort-only changes are hollow squares. */
+.qg-chart__transition--model {
+  fill: var(--qg-text-secondary);
+  stroke: none;
+}
+
+.qg-chart__transition--effort {
+  fill: var(--qg-surface-raised);
+  stroke: var(--qg-text-secondary);
+  stroke-width: 1.25;
+}
+
+/* Input markers are filled squares (below the transition row); model changes
+   stay diamonds and effort-only changes hollow squares. */
+.qg-chart__transition--input {
+  fill: var(--qg-text-secondary);
+  stroke: none;
+}
+
+.qg-legend__mark {
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border: 1.25px solid var(--qg-text-secondary);
+}
+
+.qg-legend__mark--model {
+  background: var(--qg-text-secondary);
+  transform: rotate(45deg) scale(0.85);
+}
+
+.qg-legend__mark--effort {
+  background: transparent;
+}
+
+.qg-legend__mark--input {
+  background: var(--qg-text-secondary);
+  border-color: var(--qg-text-secondary);
+}
+
 .qg-chart__marker {
   stroke: var(--qg-text-muted);
   stroke-width: 1;
   stroke-dasharray: 3 3;
 }
 
-/* Session chart: blue focus context (left); yellow own and orange tree cumulatives share the right axis. */
+/* Session chart: blue focus context (left); teal Main session and orange tree cumulatives share the right axis. */
 .qg-chart__axis-title {
   fill: var(--qg-text-muted);
   font-size: 10px;
@@ -1193,6 +1298,8 @@
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
+  /* Both cumulative series are dashed; hue separates main from tree. */
+  stroke-dasharray: 6 3;
 }
 
 .qg-chart__line--total {
@@ -1201,7 +1308,6 @@
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
-  /* Non-colour distinction from the solid own-session line. */
   stroke-dasharray: 6 3;
 }
 
@@ -1222,6 +1328,9 @@
   position: absolute;
   cursor: crosshair;
   outline: none;
+  /* Scrubbing must never start a text selection. */
+  user-select: none;
+  -webkit-user-select: none;
   /* Keep vertical page panning available on narrow touch screens. */
   touch-action: pan-y;
 }
@@ -1257,6 +1366,94 @@
   font-size: var(--font-size-small);
   pointer-events: none;
   overflow: hidden;
+}
+
+/* Session inspection: a two-column, nowrap grid so every label and number
+   stays on one line; section dividers keep the header, series and timing scannable. */
+.qg-tooltip--session {
+  width: max-content;
+  min-width: 280px;
+  max-width: 380px;
+  padding: 10px 12px;
+}
+
+.qg-tooltip--session .qg-tooltip__head {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 4px 12px;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--qg-border);
+  margin: 0 0 2px;
+  white-space: nowrap;
+}
+
+.qg-tooltip__group {
+  display: grid;
+  gap: 4px 16px;
+  padding: 6px 0;
+}
+
+.qg-tooltip__group + .qg-tooltip__group {
+  border-top: 1px solid var(--qg-border);
+}
+
+.qg-tooltip__group--series {
+  grid-template-columns: 8px minmax(0, 1fr) max-content;
+  align-items: center;
+}
+
+.qg-tooltip__group--timing {
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: baseline;
+}
+
+.qg-tooltip__grid-row {
+  display: contents;
+}
+
+.qg-tooltip__label {
+  min-width: 0;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qg-tooltip__value {
+  color: var(--qg-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.qg-tooltip__model {
+  min-width: 0;
+  color: var(--qg-text);
+  text-align: right;
+  font-size: var(--font-size-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qg-tooltip__note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qg-tooltip__note.qg-tooltip__transition {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .qg-tooltip__head {
@@ -1317,6 +1514,17 @@
   height: 2px;
   border-radius: 1px;
   background: var(--qg-chart-rate);
+}
+
+.qg-tooltip__swatch-spacer {
+  flex: none;
+  width: 8px;
+  height: 8px;
+}
+
+.qg-tooltip__swatch--input {
+  background: var(--qg-text-secondary);
+  border-radius: 1px;
 }
 
 .qg-legend {
@@ -2011,9 +2219,17 @@
   overflow: hidden;
 }
 
+/* Name absorbs width first (1fr down to its minimum); Agent and Model are
+   capped percentages that only then give way. Cache Rate and Tokens are fixed
+   so numeric values never truncate. */
+.qg-nodes__head,
+.qg-node {
+  --qg-node-columns: minmax(96px, 1fr) minmax(48px, 12%) minmax(96px, 30%) 72px 80px;
+}
+
 .qg-nodes__head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(72px, 16%) 64px 88px;
+  grid-template-columns: var(--qg-node-columns);
   gap: 12px;
   padding: 8px 16px;
   color: var(--qg-text-muted);
@@ -2022,15 +2238,16 @@
   border-bottom: 1px solid var(--qg-border);
 }
 
-.qg-nodes__head > :nth-child(3),
-.qg-nodes__head > :nth-child(4) {
+.qg-nodes__head > :nth-child(4),
+.qg-nodes__head > :nth-child(5) {
   text-align: right;
 }
 
 .qg-node {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(72px, 16%) 64px 88px;
-  grid-template-areas: "name agent steps tokens";
+  grid-template-columns: var(--qg-node-columns);
+  grid-template-areas: "name agent model rate tokens";
   align-items: center;
   gap: 4px 12px;
   padding: 8px 16px;
@@ -2042,8 +2259,7 @@
   transition: background var(--qg-transition);
 }
 
-.qg-node:hover,
-.qg-node:focus-visible {
+.qg-node:hover {
   background: var(--surface-raised-base-hover);
 }
 
@@ -2055,8 +2271,32 @@
   background: #202020;
 }
 
-.qg-node__name {
+/* The link covers the whole row; the "+N" trigger sits above it. */
+.qg-node__link {
   grid-area: name;
+  display: block;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.qg-node__link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.qg-node__link:focus-visible {
+  outline: none;
+}
+
+.qg-node__link:focus-visible::after {
+  outline: 2px solid #a5b8d6;
+  outline-offset: -2px;
+}
+
+.qg-node__name {
+  display: block;
   color: var(--qg-text);
   min-width: 0;
   padding-left: calc(var(--qg-node-depth, 0) * 16px);
@@ -2074,13 +2314,63 @@
   white-space: nowrap;
 }
 
-.qg-node__steps {
-  grid-area: steps;
+.qg-node__model {
+  grid-area: model;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+}
+
+.qg-node__model-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Never shrinks, so the count stays usable when the identity truncates. */
+.qg-node__more {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--qg-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--qg-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.qg-node__more:focus-visible {
+  outline: 2px solid #a5b8d6;
+  outline-offset: 2px;
+}
+
+.qg-node__model-list {
+  margin: 0;
+  padding: 0 0 0 18px;
+  min-width: 200px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.qg-node__rate,
+.qg-node__tokens {
   text-align: right;
+  white-space: nowrap;
+}
+
+.qg-node__rate {
+  grid-area: rate;
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
 .qg-node__tokens {
@@ -2090,8 +2380,7 @@
 @media (max-width: 640px) {
   .qg-nodes__head,
   .qg-node {
-    grid-template-columns: minmax(0, 1fr) minmax(44px, 14%) 48px 72px;
-    grid-template-areas: "name agent steps tokens";
+    --qg-node-columns: minmax(64px, 1fr) minmax(36px, 12%) minmax(72px, 30%) 56px 64px;
     gap: 4px 8px;
   }
 
@@ -2391,12 +2680,24 @@
   background: var(--qg-frame);
 }
 
+/* A lifted card or row is one drag surface: same elevation and no selection. */
+.qg-vis-row[data-dragging="true"],
 .qg-vis-provider[data-dragging="true"] {
-  border-color: var(--qg-border-strong);
   box-shadow: 0 10px 28px #0005;
   cursor: grabbing;
   user-select: none;
+  -webkit-user-select: none;
   transition: none;
+}
+
+.qg-vis-provider[data-dragging="true"] {
+  border-color: var(--qg-border-strong);
+}
+
+/* A lifted row keeps its own surface so the rows underneath do not show through. */
+.qg-vis-row[data-dragging="true"] {
+  border-radius: var(--qg-radius);
+  background: var(--qg-surface);
 }
 
 .qg-vis-legacy {
@@ -2451,6 +2752,9 @@
   color: var(--qg-text-muted);
   cursor: grab;
   touch-action: none;
+  /* A drag handle must not begin a text selection. */
+  user-select: none;
+  -webkit-user-select: none;
   transition:
     color var(--qg-transition),
     background var(--qg-transition);
@@ -2478,8 +2782,19 @@
   grid-template-columns: 20px minmax(0, 1fr) 28px;
   align-items: center;
   column-gap: 8px;
-  padding: 5px 8px;
+  /* Nested fields sit one step in from the provider header's grip and name. */
+  padding: 5px 8px 5px 16px;
   border-top: 1px solid var(--qg-border);
+}
+
+.qg-vis-row-slot {
+  position: relative;
+  min-width: 0;
+}
+
+.qg-vis-row-slot[data-lifted="true"] {
+  border-radius: var(--qg-radius);
+  background: var(--qg-surface-raised);
 }
 
 .qg-vis-row__label {
@@ -2489,7 +2804,8 @@
   overflow-wrap: anywhere;
 }
 
-/* Rows reserve the grip column so labels share the provider name's left edge. */
+/* Rows keep the same grid so grip, label and eye stay in their columns; only
+   the row's left inset differs, which nests the field under the provider. */
 .qg-vis-provider__head > .qg-eye,
 .qg-vis-row > .qg-eye {
   grid-column: 3;
@@ -2525,6 +2841,38 @@
   letter-spacing: -0.35px;
   line-height: 1.25;
 }
+.qg-page-head__heading {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.qg-page-head__models {
+  position: relative;
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qg-page-head__models-entry,
+.qg-page-head__models-sep {
+  white-space: nowrap;
+}
+.qg-page-head__models .qg-node__more {
+  vertical-align: baseline;
+}
+.qg-page-head__models-measure {
+  position: absolute;
+  top: 0;
+  left: -10000px;
+  visibility: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
 .qg-page-head__meta {
   display: inline-flex;
   align-items: baseline;
@@ -2550,6 +2898,15 @@
 }
 .qg-usage--session {
   grid-template-columns: minmax(0, 1fr);
+}
+
+/*
+ * The Session tooltip may be taller than its plot. Let it leave the panel box
+ * instead of being clipped by the shared rounded frame; its placement already
+ * stays inside the visible scroller viewport.
+ */
+.qg-chart-shell__panel:has(> .qg-usage--session) {
+  overflow: visible;
 }
 .qg-usage--session .qg-legend {
   flex-direction: row;
@@ -2702,7 +3059,6 @@
 }
 .qg-topbar a:focus-visible,
 .qg-list__row:focus-visible,
-.qg-node:focus-visible,
 .qg-eye:focus-visible,
 .qg-vis-grip:focus-visible {
   outline: 2px solid #a5b8d6;

@@ -183,6 +183,7 @@ describe("refresh-modelsdev-temporal extraction", () => {
     });
     if (entry.status !== "supported") throw new Error("fixture must be supported");
 
+    expect(entry.base).toEqual({ input: 0.15, output: 0.6, cache_read: 0.003 });
     expect(entry.overrides).toHaveLength(3);
     expect(entry.overrides[0]).toMatchObject({
       id: "text.input.overrides[0]",
@@ -213,6 +214,22 @@ describe("refresh-modelsdev-temporal extraction", () => {
         factor: { text: 2 },
       },
     ]);
+  });
+
+  it("fails closed when absolute overrides have no unconditional base rates", () => {
+    const entry = extractTemporalModel(
+      "openai",
+      "gpt-5.5",
+      "providers/openai/models/gpt-5.5.toml",
+      `
+schema = 2
+[[cost.text.input.overrides]]
+when = { utc_hours = { gte = "14:00" } }
+price = 2
+`,
+    );
+    expect(entry).toMatchObject({ status: "unsupported" });
+    expect(entry.reason).toMatch(/base rates/);
   });
 
   it("ignores non-temporal overrides instead of inventing a monetary policy", () => {
@@ -1197,9 +1214,12 @@ describe("bundled modelsdev temporal data", () => {
     expect(getTemporalPolicy("deepseek", "deepseek-v4-pro")).toMatchObject({
       status: "supported",
     });
-    expect(getTemporalPolicy("openrouter", "deepseek/deepseek-v4.1-flash-1017")).toMatchObject({
+    expect(getTemporalPolicy("openrouter", "tencent/hy3")).toMatchObject({
       status: "supported",
+      base: { input: 0.0825, output: 0.33, cache_read: 0.020625 },
     });
+    expect(getTemporalPolicy("openrouter", "deepseek/deepseek-v4.1-flash-1017")).toBeNull();
+    expect(getTemporalPolicy("openrouter", "deepseek/deepseek-v4-pro-0813")).toBeNull();
     expect(getTemporalPolicy("opencode-go", "gemini-4-argon")).toMatchObject({
       status: "unsupported",
     });

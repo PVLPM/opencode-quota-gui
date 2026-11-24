@@ -80,8 +80,9 @@ export interface BuildTemporalStatusInput {
   /** Holiday calendars referenced by the bundled snapshot. */
   holidays?: readonly TemporalHolidayInterval[];
   /**
-   * Test/embedding seam only. Production reads the active pricing snapshot so
-   * an override can be compared with the same base it replaces.
+   * Fallback base-rate lookup for policies without a captured source base
+   * (multiplier-only policies and test/embedding seams). Production prefers
+   * the base bundled with an absolute-override policy.
    */
   baseRates?: (providerId: string, modelId: string) => TemporalRates | null;
   /** Provider-maintained quota policies; defaults to the bundled data module. */
@@ -861,7 +862,14 @@ export function buildTemporalStatus(input: BuildTemporalStatusInput): TemporalSt
       for (const modelId of routes) {
         const policy = getTemporalPolicy(provider.providerId, modelId);
         if (!policy) continue;
-        models.push(modelStatus(provider.providerId, modelId, input.nowMs, resolveBase));
+        // Absolute overrides are meaningful only against their source's own base.
+        // The pricing snapshot's api.json cost can be a derived/current price, so
+        // prefer the base captured with the temporal policy when present.
+        const base =
+          policy.status === "supported"
+            ? (policy.base ?? resolveBase(provider.providerId, modelId))
+            : null;
+        models.push(modelStatus(provider.providerId, modelId, input.nowMs, base));
         for (const jurisdiction of holidayJurisdictions(policy)) jurisdictions.add(jurisdiction);
       }
     }
@@ -892,13 +900,12 @@ function modelStatus(
   providerId: string,
   modelId: string,
   nowMs: number,
-  baseRates: (providerId: string, modelId: string) => TemporalRates | null,
+  base: TemporalRates | null,
 ): TemporalModelStatus {
   const policy = getTemporalPolicy(providerId, modelId);
-  const base = baseRates(providerId, modelId);
   const state = getTemporalInstantState(providerId, modelId, nowMs);
   const current = classifyInstant(policy, state, base);
-  const intervals = projectIntervals(providerId, modelId, nowMs, baseRates);
+  const intervals = projectIntervals(providerId, modelId, nowMs, base);
   const weekly = policyWeeklySchedule(policy, base);
   // The preview is deliberately short, so its last interval ends at the horizon
   // rather than at a proved transition. Ask the core evaluator for the real
@@ -924,11 +931,10 @@ function projectIntervals(
   providerId: string,
   modelId: string,
   nowMs: number,
-  baseRates: (providerId: string, modelId: string) => TemporalRates | null,
+  base: TemporalRates | null,
 ): TemporalModelInterval[] {
   const policy = getTemporalPolicy(providerId, modelId);
   if (!policy || policy.status === "unsupported") return [];
-  const base = baseRates(providerId, modelId);
   const rawIntervals = listTemporalIntervals(
     providerId,
     modelId,

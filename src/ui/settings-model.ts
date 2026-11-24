@@ -1,4 +1,6 @@
 import type { JsonValue, SettingsSnapshot, SettingsWriteResult } from "../contracts/dashboard";
+import { isRecord, isText } from "../contracts/dto-guards";
+import { AUTO_RESUME_SUPPORTED_PROVIDER_LABELS } from "../contracts/provider-auto-resume";
 import { isLegacyImportKey } from "../contracts/settings";
 import type { DisplayPreferences } from "./components/quota-card";
 
@@ -56,6 +58,7 @@ export type SettingsControl =
   | "windows"
   | "list"
   | "map"
+  | "row-order"
   | "native-policy"
   | "readonly";
 
@@ -99,6 +102,9 @@ function withImportEligibility(fields: SettingsField[]): readonly SettingsField[
   return fields.map((field) => ({ ...field, importable: isLegacyImportKey(field.key) }));
 }
 
+/** Provider labels come from the registration metadata so Settings cannot drift from eligibility. */
+export const AUTO_RESUME_ON_QUOTA_RECOVERY_HELP = `When a quota-limited session stops, waits for the same account's window to reset, then after 2 minutes sends one continue. Supported: ${AUTO_RESUME_SUPPORTED_PROVIDER_LABELS.join(", ")}.`;
+
 export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
   {
     key: "nativeQuotaNotifications",
@@ -113,6 +119,13 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     control: "switch",
     label: "Wait for quota reset",
     help: "Hold requests until the quota window resets instead of failing them.",
+  },
+  {
+    key: "autoResumeOnQuotaRecovery",
+    group: "wait",
+    control: "switch",
+    label: "Auto-resume on quota recovery",
+    help: AUTO_RESUME_ON_QUOTA_RECOVERY_HELP,
   },
   {
     key: "percentDisplayMode",
@@ -190,6 +203,14 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     help: "Any finite value above zero; there is no extra dashboard floor.",
   },
   {
+    key: "claudeAgentPollIntervalMs",
+    group: "advanced",
+    control: "number",
+    label: "Claude Agent polling interval (ms)",
+    help: "Minimum spacing between Claude usage requests; at least 60000.",
+    min: 60000,
+  },
+  {
     key: "requestTimeoutMs",
     group: "advanced",
     control: "number",
@@ -260,6 +281,13 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
     group: "visibility",
     control: "list",
     label: "Card order",
+    hidden: true,
+  },
+  {
+    key: "dashboard.rowOrder",
+    group: "visibility",
+    control: "row-order",
+    label: "Row order",
     hidden: true,
   },
   {
@@ -426,11 +454,19 @@ export function validateValue(
       return Array.isArray(value) && value.every((entry) => typeof entry === "string")
         ? undefined
         : `${field.label} takes a list of ids.`;
+    case "row-order":
+      return isRecord(value) &&
+        Object.entries(value).every(
+          ([cardId, ids]) =>
+            cardId.length > 0 &&
+            Array.isArray(ids) &&
+            ids.every((id) => isText(id) && id.length > 0),
+        )
+        ? undefined
+        : `${field.label} takes card ids mapped to row-id lists.`;
     case "map":
-      return value !== null &&
-        typeof value === "object" &&
-        !Array.isArray(value) &&
-        Object.values(value).every((entry) => typeof entry === "boolean")
+      return isRecord(value) &&
+        Object.values(value).every((entry) => entry === true || entry === false)
         ? undefined
         : `${field.label} takes provider ids mapped to true or false.`;
     default:
@@ -518,10 +554,10 @@ export function stringList(value: JsonValue | undefined): string[] {
 export function temporalProviderOverridesFromValue(
   value: JsonValue | undefined,
 ): Record<string, boolean> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  if (!isRecord(value)) return {};
   const entries: [string, boolean][] = [];
   for (const [providerId, enabled] of Object.entries(value)) {
-    if (typeof enabled === "boolean") entries.push([providerId, enabled]);
+    if (enabled === true || enabled === false) entries.push([providerId, enabled]);
   }
   return Object.fromEntries(entries);
 }
@@ -637,6 +673,21 @@ export function keyboardMovedCardOrder(
   );
 }
 
+/** Sparse card → ordered row-id lists, defensively read from a settings value. */
+export function rowOrderFromValue(value: JsonValue | undefined) {
+  if (!isRecord(value)) return {};
+  const rowOrder: Record<string, string[]> = {};
+  for (const [cardId, ids] of Object.entries(value)) {
+    if (cardId.length === 0 || !Array.isArray(ids)) continue;
+    const normalized: string[] = [];
+    for (const id of ids) {
+      if (isText(id) && id.length > 0) normalized.push(id);
+    }
+    if (normalized.length > 0) rowOrder[cardId] = [...new Set(normalized)];
+  }
+  return rowOrder;
+}
+
 /** Display preferences the Home and Project views read from the settings snapshot. */
 export function displayPreferencesFromValues(
   values: Record<string, JsonValue>,
@@ -644,20 +695,25 @@ export function displayPreferencesFromValues(
   const percentMode = values.percentDisplayMode === "used" ? "used" : "remaining";
   const cardOrder = stringList(values["dashboard.cardOrder"]);
   const providerOrder = stringList(values["dashboard.providerOrder"]);
+  const rowOrder = rowOrderFromValue(values["dashboard.rowOrder"]);
   const temporalProviderOverrides = temporalProviderOverridesFromValue(
     values["dashboard.temporalProviderOverrides"],
   );
-  return {
+  const preferences: DisplayPreferences = {
     percentMode,
     percentLabelStyle: values.percentLabelStyle === "bare" ? "bare" : "full",
     showRunway: values.quotaProjection === "runway",
     detailed: values.accountingDetail === "detailed",
-    // Absent and empty mean the same thing; omitting them keeps the shape the
-    // view already had when neither order was configured.
-    ...(cardOrder.length > 0 ? { cardOrder } : {}),
-    ...(providerOrder.length > 0 ? { providerOrder } : {}),
-    ...(Object.keys(temporalProviderOverrides).length > 0 ? { temporalProviderOverrides } : {}),
   };
+  // Absent and empty mean the same thing; omitting them keeps the shape the
+  // view already had when neither order was configured.
+  if (cardOrder.length > 0) preferences.cardOrder = cardOrder;
+  if (providerOrder.length > 0) preferences.providerOrder = providerOrder;
+  if (Object.keys(rowOrder).length > 0) preferences.rowOrder = rowOrder;
+  if (Object.keys(temporalProviderOverrides).length > 0) {
+    preferences.temporalProviderOverrides = temporalProviderOverrides;
+  }
+  return preferences;
 }
 
 export interface SettingsDraft {

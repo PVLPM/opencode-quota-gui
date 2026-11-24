@@ -31,6 +31,14 @@ export const SYNTHETIC_PROFILES = {
     spanDays: 540,
     tokenProfile: "long-lifetime",
   },
+  "heavy-history": {
+    seed: 0x7ea4e1,
+    sessions: 2_282,
+    rows: 253_113,
+    projects: 10,
+    spanDays: 210,
+    tokenProfile: "long-lifetime",
+  },
   "deep-session-tree": {
     seed: 0xdee9f0e,
     sessions: 47,
@@ -676,7 +684,7 @@ export async function createSyntheticDatabase(options) {
   const built =
     profileName === "dense-30d"
       ? buildDense(profileName, config, anchorMs, random, statements)
-      : profileName === "long-lifetime"
+      : profileName === "long-lifetime" || profileName === "heavy-history"
         ? buildLongLifetime(profileName, config, anchorMs, random, statements)
         : buildDeep(profileName, config, anchorMs, random, statements);
 

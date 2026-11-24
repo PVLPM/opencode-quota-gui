@@ -1,6 +1,5 @@
 import { buildCliStatus } from "./cli-reports.js";
-import { runCliReport } from "./cli-show.js";
-import { getQuotaProviderShape } from "./provider-metadata.js";
+import { resolveCliProviderId, runCliReport } from "./cli-show.js";
 
 export interface RunCliStatusCommandOptions {
   argv?: string[];
@@ -113,11 +112,8 @@ export async function runCliStatusCommand(
     return 0;
   }
 
-  const providerId = parsed.providerId ? getQuotaProviderShape(parsed.providerId)?.id : undefined;
-  if (parsed.providerId && !providerId) {
-    writeLine(stderr, `Unknown provider: ${parsed.providerId}`);
-    return 1;
-  }
+  const providerId = resolveCliProviderId(parsed.providerId, stderr);
+  if (providerId === null) return 1;
 
   return runCliReport({
     cwd: options.cwd ?? process.cwd(),

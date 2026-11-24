@@ -3,7 +3,9 @@ import {
   QUOTA_PROVIDER_REGISTRATION_SOURCE,
   type QuotaProviderAuthentication,
   type QuotaProviderAuthFallback,
+  type QuotaProviderAutoResumeBinding,
   type QuotaProviderAutoSetup,
+  type QuotaProviderOptionalVisibilityRow,
   type QuotaProviderQuotaSource,
   type QuotaProviderRegistrationSourceEntry,
 } from "./provider-registration.js";
@@ -12,6 +14,7 @@ export type {
   CanonicalQuotaProviderId,
   QuotaProviderAuthentication,
   QuotaProviderAuthFallback,
+  QuotaProviderAutoResumeBinding,
   QuotaProviderAutoSetup,
   QuotaProviderQuotaSource,
 } from "./provider-registration.js";
@@ -23,6 +26,8 @@ export interface QuotaProviderShape {
   authentication: QuotaProviderAuthentication;
   authFallbacks?: QuotaProviderAuthFallback[];
   quota: QuotaProviderQuotaSource;
+  autoResume?: QuotaProviderAutoResumeBinding;
+  optionalVisibilityRows?: readonly QuotaProviderOptionalVisibilityRow[];
   quickSetupAnchor?: string;
   notes?: string;
 }
@@ -138,11 +143,37 @@ export function normalizeQuotaProviderId(id: string): string {
   return QUOTA_PROVIDER_ID_SYNONYMS[normalized] ?? normalized;
 }
 
-export function getQuotaProviderShape(id: string): QuotaProviderShape | undefined {
+export function getQuotaProviderRegistration(id: string): QuotaProviderShape | undefined {
   const normalized = normalizeQuotaProviderId(id);
   return isCanonicalQuotaProviderId(normalized)
     ? QUOTA_PROVIDER_CATALOG[normalized].shape
     : undefined;
+}
+
+function autoResumeProviderLabels(
+  predicate: (binding: QuotaProviderAutoResumeBinding | undefined) => boolean,
+): readonly string[] {
+  return catalogKeys()
+    .filter((id) => id !== "quota-providers")
+    .filter((id) => predicate(QUOTA_PROVIDER_CATALOG[id].shape.autoResume))
+    .map((id) => QUOTA_PROVIDER_CATALOG[id].label);
+}
+
+/** Display labels for providers that can supply one exact auto-resume binding kind. */
+export function getAutoResumeProviderLabelsForBinding(
+  binding: QuotaProviderAutoResumeBinding,
+): readonly string[] {
+  return autoResumeProviderLabels((candidate) => candidate === binding);
+}
+
+/** Display labels for every provider that can supply auto-resume evidence. */
+export function getSupportedAutoResumeProviderLabels(): readonly string[] {
+  return autoResumeProviderLabels((binding) => binding !== undefined);
+}
+
+/** Display labels for providers that can never supply auto-resume evidence. */
+export function getUnsupportedAutoResumeProviderLabels(): readonly string[] {
+  return autoResumeProviderLabels((binding) => binding === undefined);
 }
 
 export function getQuotaProviderDisplayLabel(id: string): string {
@@ -151,7 +182,7 @@ export function getQuotaProviderDisplayLabel(id: string): string {
 }
 
 export function getQuotaProviderRuntimeIds(id: string): readonly string[] {
-  const shape = getQuotaProviderShape(id);
+  const shape = getQuotaProviderRegistration(id);
   if (!shape) {
     return [];
   }

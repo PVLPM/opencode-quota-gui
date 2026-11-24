@@ -43,6 +43,7 @@ describe("chutes provider", () => {
     expect(visibleEntries(out.entries, "chutes")).toEqual([
       {
         name: "Chutes",
+        semantic: { metric: { kind: "window", window: "day" }, prominence: "primary" },
         percentRemaining: 75,
         resetTimeIso: "2026-01-02T00:00:00.000Z",
       },

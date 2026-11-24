@@ -87,6 +87,7 @@ describe("Alibaba Coding Plan provider", () => {
       name: "Alibaba Coding Plan (lite) (CLI) 5h",
       group: "Alibaba Coding Plan (lite) (CLI)",
       label: "5h:",
+      semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
       right: "25/200",
       percentRemaining: 87.5,
       resetTimeIso: "2026-03-26T12:00:00.000Z",

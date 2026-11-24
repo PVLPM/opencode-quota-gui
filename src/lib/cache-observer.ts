@@ -64,6 +64,7 @@ export interface CacheInvocationObservation {
   connectionMethod?: "oauth" | "key" | "external";
   /** Claude Agent only: this exact invocation's cache writes were observed as 1-hour-only. */
   observedTtlMs?: 3_600_000;
+  warmingAnchorAtMs?: number;
 }
 
 /** Host-configured retention values the observer accepts for a configurable route. */
@@ -96,6 +97,8 @@ export interface CacheTtlEstimate {
   dispatchAtMs?: number;
   /** Estimated boundary only; this is not proof of physical eviction. */
   deadlineAtMs?: number;
+  anchor?: "warming-inferred";
+  anchorAtMs?: number;
 }
 
 export interface CacheObserverScope {
@@ -239,9 +242,15 @@ export function classifyCacheObserverState(
   }
 
   const dispatchAtMs = latest.dispatchAtMs;
-  const deadlineAtMs = dispatchAtMs + policy.ttlMs;
-  const warningAtMs = dispatchAtMs + Math.floor(policy.ttlMs * 0.8);
-  const estimate: CacheTtlEstimate = { ...ttlEstimate, dispatchAtMs, deadlineAtMs };
+  const anchorAtMs = latest.warmingAnchorAtMs ?? dispatchAtMs;
+  const deadlineAtMs = anchorAtMs + policy.ttlMs;
+  const warningAtMs = anchorAtMs + Math.floor(policy.ttlMs * 0.8);
+  const estimate: CacheTtlEstimate = {
+    ...ttlEstimate,
+    dispatchAtMs,
+    deadlineAtMs,
+    ...(latest.warmingAnchorAtMs === undefined ? {} : { anchor: "warming-inferred", anchorAtMs }),
+  };
 
   if (deadlineAtMs <= nowMs) {
     return { color: "red", reason: "estimated-ttl-expired", ttlEstimate: estimate, ...reported };

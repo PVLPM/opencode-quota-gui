@@ -6,6 +6,10 @@
 
 import { isAnalyticsGroupQuery } from "../contracts/analytics-entity.js";
 import { isRangeKey } from "../contracts/ranges.js";
+import {
+  setPricingSnapshotAutoRefresh,
+  setPricingSnapshotSelection,
+} from "../lib/modelsdev-pricing.js";
 import { type AnalyticsEngine, createAnalyticsEngine } from "./analytics-engine.js";
 import type {
   AnalyticsInitOptions,
@@ -16,6 +20,8 @@ import { type AnalyticsErrorCode, AnalyticsReadError } from "./analytics-protoco
 
 export interface AnalyticsWorkerRuntime {
   handle(command: AnalyticsWorkerCommand): Promise<AnalyticsWorkerResult>;
+  /** Routes the live model could not price, for the worker's pricing upkeep. */
+  unpricedRoutes(): Array<{ providerID?: string; modelID?: string }>;
   close(): Promise<void>;
 }
 
@@ -59,6 +65,10 @@ export function createAnalyticsWorkerRuntime(
 
   async function handle(command: AnalyticsWorkerCommand): Promise<AnalyticsWorkerResult> {
     if (command.kind === "init") {
+      if (command.options.pricingSnapshot) {
+        setPricingSnapshotAutoRefresh(command.options.pricingSnapshot.autoRefresh);
+        setPricingSnapshotSelection(command.options.pricingSnapshot.source);
+      }
       if (!engine) engine = createEngine(command.options);
       return undefined;
     }
@@ -72,7 +82,7 @@ export function createAnalyticsWorkerRuntime(
 
     if (command.kind === "home") {
       if (!isRangeKey(command.range)) throw new AnalyticsReadError("bad-request");
-      return await engine.home(command.range);
+      return await engine.home(command.range, command.exact);
     }
     if (command.kind === "project") {
       if (!isRangeKey(command.range) || !command.projectId) {
@@ -108,6 +118,9 @@ export function createAnalyticsWorkerRuntime(
       } catch (error) {
         throw new AnalyticsReadError(errorCodeOf(error));
       }
+    },
+    unpricedRoutes() {
+      return engine?.unpricedRoutes() ?? [];
     },
     async close() {
       closed = true;

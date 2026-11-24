@@ -242,6 +242,10 @@ export type DashboardRpcCacheObserverEvent =
       data: { sessionID: string; assistantMessageID: string; ttlMs: 3_600_000 };
     }
   | {
+      type: "session.cache.warming";
+      data: { sessionID: string; dispatchMs: number; evidence: "warming-inferred" };
+    }
+  | {
       type: "session.created";
       data: { sessionID: string; parentID: string };
     }
@@ -479,9 +483,13 @@ export const DashboardRpc = {
       errors: DASHBOARD_RPC_ERRORS,
     },
     home: {
-      input: schema<{ range: RangeKey }>((value) => {
-        if (!isObject(value) || !hasExactKeys(value, ["range"])) {
-          return "input must contain only range";
+      input: schema<{ range: RangeKey; background?: boolean }>((value) => {
+        if (
+          !isObject(value) ||
+          !hasOnlyKeys(value, ["range", "background"]) ||
+          (value.background !== undefined && typeof value.background !== "boolean")
+        ) {
+          return "input must contain range and optional boolean background";
         }
         return checkRange(value);
       }),
@@ -726,6 +734,20 @@ export function isDashboardRpcCacheObserverEvent(
     if (!isObject(tokens.cache) || !hasOnlyKeys(tokens.cache, ["read", "write"])) return false;
     return [tokens.cache.read, tokens.cache.write].every(
       (count) => count === undefined || (Number.isFinite(count) && (count as number) >= 0),
+    );
+  }
+
+  if (value.type === "session.cache.warming") {
+    return (
+      hasExactKeys(value, ["type", "data"]) &&
+      isObject(value.data) &&
+      hasExactKeys(value.data, ["sessionID", "dispatchMs", "evidence"]) &&
+      typeof value.data.sessionID === "string" &&
+      isValidResourceId(value.data.sessionID) &&
+      typeof value.data.dispatchMs === "number" &&
+      Number.isFinite(value.data.dispatchMs) &&
+      value.data.dispatchMs >= 0 &&
+      value.data.evidence === "warming-inferred"
     );
   }
 

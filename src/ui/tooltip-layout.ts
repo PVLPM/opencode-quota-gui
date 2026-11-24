@@ -9,9 +9,9 @@ export interface TooltipRect {
 
 /**
  * Places the custom tooltip over the plot, on the half opposite the active
- * bucket. The collision box is the intersection of the chart/card and the
- * visible scroller, so a narrow card never lets the overlay escape its border
- * and a scrolled chart never leaves a floating tooltip behind.
+ * bucket. Horizontal collision stays inside the chart card, while vertical
+ * collision uses the visible scroller viewport: a short plot must not clip a
+ * tall multi-row tooltip, and a scrolled chart never leaves it floating.
  */
 export function placeChartTooltip(input: {
   chart: TooltipRect;
@@ -25,9 +25,9 @@ export function placeChartTooltip(input: {
   const inset = 8;
   const gap = Math.max(0, input.gap ?? 10);
   const clipLeft = Math.max(chart.left, bounds.left);
-  const clipTop = Math.max(chart.top, bounds.top);
   const clipRight = Math.min(chart.left + chart.width, bounds.left + bounds.width);
-  const clipBottom = Math.min(chart.top + chart.height, bounds.top + bounds.height);
+  const clipTop = bounds.top;
+  const clipBottom = bounds.top + bounds.height;
   const maxWidth = Math.max(0, clipRight - clipLeft - inset * 2);
   const maxHeight = Math.max(0, clipBottom - clipTop - inset * 2);
   const width = Math.min(tooltip.width, maxWidth);
@@ -46,12 +46,15 @@ export function placeChartTooltip(input: {
     clipTop + inset,
     Math.max(clipTop + inset, clipBottom - inset - height),
   );
+  // Visibility still requires the chart itself in view, not merely the scroller.
+  const chartVisibleVertically =
+    Math.min(chart.top + chart.height, clipBottom) > Math.max(chart.top, clipTop);
   return {
     left: left - chart.left,
     top: top - chart.top,
     maxWidth,
     maxHeight,
-    visible: clipRight > clipLeft && clipBottom > clipTop && width > 0 && height > 0,
+    visible: clipRight > clipLeft && chartVisibleVertically && width > 0 && height > 0,
   };
 }
 

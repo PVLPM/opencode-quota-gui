@@ -26,26 +26,47 @@ In OpenCode Desktop 2.2.x, open the plugin's page in OpenCode Settings. Alternat
 
 | Group | What it changes |
 | --- | --- |
-| Wait for quota reset | `waitForQuotaReset`; holds a request when a used-up quota window has a known reset. |
+| Wait for quota reset | `waitForQuotaReset`; holds a request when a used-up quota window has a known reset. `autoResumeOnQuotaRecovery`; after a quota-limited session stops, sends one `continue` when the failed route's window resets (off by default). |
 | Display | `percentDisplayMode` (remaining or used) and `percentLabelStyle` (full or bare). |
-| Advanced | Provider selection, minimum refresh interval, request timeout, and accounting detail. |
+| Advanced | Provider selection, minimum refresh interval, Claude Agent polling interval, request timeout, and accounting detail. |
 | Temporal pricing | Shows or hides live peak and off-peak status per provider. Presentation only. |
 | Visibility | Shows or hides cards and rows, and reorders cards. Presentation only. |
 | Dashboard | Read-only address, the canonical file path, configuration issues, and build details. |
 
 Saving Settings writes to the canonical file atomically. If the file changed elsewhere, the save returns a conflict and keeps your draft. The Desktop Settings page includes the web dashboard switch; changing it requires an OpenCode restart. You can also use the manual recovery edit under [Web dashboard](#web-dashboard).
 
+### Auto-resume on quota recovery
+
+`autoResumeOnQuotaRecovery` is off by default. When enabled, a session that terminally fails on a genuine provider quota limit is resumed once, without a native continue API:
+
+1. The failure must be a quota-shaped error (a typed provider rate-limit or quota error, or HTTP 429), or a known Claude Agent subscription-limit message that OpenCode 2.4.1 exposes without a type. The plugin must then observe a used-up primary provider quota or rate-limit window for the failed route, with a known future reset. Only primary route windows count: supplementary, budget, value, named, Code Review and MCP rows are not evidence, except that the Claude Agent `Fable weekly` row is evidence only for a Fable model. The rows must be bound to one verified identity: the same active OpenCode account, or—for a single-source route such as Claude Agent—the same stable credential identity that the provider cache reports when arming and at every recovery check.
+2. Recovery uses the same reset transition as reset notifications: a later observation of that window, for the same identity, with a newer future reset and more availability than the used-up observation. A positive percentage alone is not enough. The first recovery check runs at the expected reset; after confirmed recovery the plugin allows two minutes of inactivity.
+3. Only if the session is still failed, idle, on the same model and identity, it sends one `continue` prompt with `opencode-quota-gui-autoresume` metadata. That prompt appears in the transcript as a user message; no tool action is replayed. One resume is consumed per user-initiated execution: if that `continue` run fails on quota again, auto-resume waits for a fresh user prompt.
+
+A user prompt, interruption, model switch, credential change, session deletion, another execution or turning the setting off cancels the pending continuation. Temporary gaps in evidence do not: a failed quota check, a provider cooldown, an RPC timeout, a missing row or an unreadable session keeps the continuation pending and is checked again a minute later. Missing evidence never authorizes a continuation, so if a reset happens entirely while evidence is unavailable, that cycle is not resumed. A route whose provider registration has no auto-resume contract is permanent, not temporary: it is rejected before the live quota probe, never resumes, and is not polled again. Native retry and provider cooldown policies still decide first. The wait is in-process only: a plugin or OpenCode restart drops a pending resume, and the next terminal quota failure starts a new cycle.
+
+**Claude Agent subscription limits:** OpenCode 2.4.1 can report a Claude Agent five-hour or weekly subscription limit as an untyped `provider.unknown` error with only a message (no status, retry time or quota type; [anomalyco/opencode#63189](https://github.com/anomalyco/opencode/issues/63189)). Auto-resume recognizes only the known Claude Agent message shapes, and only on the `claude-agent` or `claude-code` route. A recognized message alone never authorizes a continuation: the same verified Claude identity must independently report the applicable `five_hour` or `week` window exhausted with a future reset, or the `Fable weekly` row for a Fable model. If that evidence is unavailable, the continuation stays pending and is checked again a minute later. Native retry is not changed and still keeps OpenCode's own timing for these untyped messages.
+
+Eligibility follows the evidence the failed route can bind, and the route's provider registration decides it before the live probe:
+
+- **Account-bound:** Copilot, OpenAI, xAI, OpenCode Go and OpenCode Zen resume only when the failed route's active OpenCode credential row is available. OpenCode Zen also needs its primary monthly budget window and reset; Copilot's managed usage or budget-only rows cannot arm.
+- **Single-source:** Claude Agent's verified Claude CLI login binds through its Claude identity scope (protected `rai1_`, or the in-memory `rai1p_` identity on Windows). Synthetic, Chutes, NanoGPT and Ollama Cloud bind through the same provider cache scope where that stable identity exists. On Windows, a key-only route without a protected key identity is not resumed; Claude Agent still binds through its in-memory identity.
+- **Account or key:** MiniMax Token Plan, MiniMax Token Plan (CN), Z.ai and Zhipu bind to the active OpenCode credential row when one is reported; with no rows they use the single-source cache scope when available.
+- **Never:** Anthropic (per-minute API value rows), OpenRouter (key-limit/budget and spend rows without a primary route window or reset), Kilo Gateway (credit and balance components), Cursor (named API rows), Gemini CLI and Google AGY (bucket rows without primary window semantics), Kimi Code and Kimi Code (CN) (named rows without primary window semantics), DeepSeek (balance components), Xiaomi MiMo (monthly window without a reset), Alibaba Coding Plan and Alibaba Personal Token Plan (no route identity scope), and custom `quotaProviders` (no typed primary route window). These routes are rejected before the live probe, never auto-resume, and an inferred account row cannot make them eligible.
+
 ### Visibility identifiers
 
-Use **Settings → Visibility** to hide individual cards and rows, and drag a card's grip or press Alt+Up/Down from it to reorder. Each Visibility card represents one Home card, including separate accounts under the same provider. Hiding cards or rows never disables quota polling or deletes data.
+Use **Settings → Visibility** to hide individual cards and rows, and drag a card's or row's grip or press Alt+Up/Down from it to reorder. Each Visibility card represents one Home card, including separate accounts under the same provider. Hiding cards or rows never disables quota polling or deletes data.
 
-New card-eye actions store exact opaque card ids in `dashboard.hiddenCards`; row eyes use `dashboard.hiddenRows`. Reordering writes opaque card ids to `dashboard.cardOrder`. Do not construct these ids from labels or copy them between accounts. A non-empty card order lists preferred cards first; new or unlisted cards append in backend order. The legacy `dashboard.providerOrder` still contains provider ids, is preserved unchanged, and applies when card order is absent or empty.
+New card-eye actions store exact opaque card ids in `dashboard.hiddenCards`; row eyes use `dashboard.hiddenRows`. Reordering writes opaque card ids to `dashboard.cardOrder` and opaque row ids per card to `dashboard.rowOrder`. Do not construct these ids from labels or copy them between accounts. A non-empty card order lists preferred cards first; new or unlisted cards append in backend order. A non-empty row order lists preferred rows first; new or unlisted rows append in provider emission order. The legacy `dashboard.providerOrder` still contains provider ids, is preserved unchanged, and applies when card order is absent or empty.
 
 Older `dashboard.hiddenCards` lists had no semantics marker, so a full provider-scope card id there meant a provider-wide hide. On read, those ids are automatically normalized to the plain provider id, and the next hidden-card save records `dashboard.hiddenCardsVersion: 2`. That marker is read-only metadata; version 2 lists keep exact card ids, so hiding a provider-scope card no longer hides its sibling account cards. Plain provider ids and legacy bare provider-scope hashes remain provider-wide group hides. Their card eyes stay enabled: **Show** removes those group markers from the draft and stores exact hides for every other card the current Visibility catalog knows for that provider, keeping the selected card visible. Unknown ids and other providers are preserved. Row eyes remain independent.
 
 ### Temporal pricing status
 
 **Settings → Temporal pricing** lists every provider with time-based pricing rules and toggles its live peak and off-peak status in the Quota header. Choices are stored sparsely in `dashboard.temporalProviderOverrides` as provider ids mapped to booleans. A provider with a discovered account is shown by default; an explicit `true` or `false` overrides that default. The setting changes presentation only: it does not change polling, quota values, or recorded usage.
+
+For absolute price rules, status compares each rule with the base rates captured from the same source policy, so an unrelated live or derived API price cannot turn a known schedule into **Unknown**. A route whose schedule cannot be verified stays **Unknown** instead of being guessed. The dated schedule preview projects at most three days ahead; its end is a display horizon, not an expiry or validity window.
 
 ### Web dashboard
 
@@ -110,9 +131,16 @@ The import never edits, moves, or deletes the source files; they stay byte-for-b
   // Keep OpenCode's normal retry timing when false.
   "waitForQuotaReset": true,
 
+  // After a quota-limited session stops, send one continue when its window resets. Off by default.
+  "autoResumeOnQuotaRecovery": false,
+
   // Minimum time between provider refreshes, and each provider request timeout.
   "minIntervalMs": 60000,
   "requestTimeoutMs": 5000,
+
+  // Minimum spacing between Claude Agent usage requests, shared by every OpenCode
+  // process. Defaults to 180000; values below 60000 are raised to 60000.
+  "claudeAgentPollIntervalMs": 180000,
 
   // "summary" keeps main rows; "detailed" adds supplementary rows.
   "accountingDetail": "summary"
@@ -121,7 +149,7 @@ The import never edits, moves, or deletes the source files; they stay byte-for-b
 
 `enabledProviders: "auto"` discovers providers from OpenCode. A manual list must include `quota-providers` when you use custom definitions, plus every built-in provider you still want.
 
-The legacy `claude` alias now selects `claude-agent`; use `anthropic` explicitly for the Anthropic API route. Anthropic API quota is unavailable, and Claude subscription quota requires the Claude Agent CLI login.
+The legacy `claude` alias now selects `claude-agent`; use `anthropic` explicitly for the Anthropic API route. Anthropic reports only passive API rate limits, and Claude subscription quota requires the Claude Agent CLI login.
 
 ## Optional OpenTelemetry
 
@@ -148,7 +176,7 @@ These keys live in the canonical file. They are provider-specific and optional.
 | `cursorIncludedApiUsd` | unset | Override Cursor's monthly included API budget in USD. |
 | `cursorBillingCycleStartDay` | unset | Billing day `1`–`28`. Unset uses the local calendar month. |
 | `pricingSnapshot.source` | `"auto"` | Token pricing source: `auto`, `bundled`, or `runtime`. |
-| `pricingSnapshot.autoRefresh` | `7` | Refresh the runtime pricing snapshot after this many days. |
+| `pricingSnapshot.autoRefresh` | `1` | Refresh the runtime pricing snapshot after this many days. Automatic `models.dev` requests share a rolling 24-hour budget of 10. |
 
 ## Custom providers
 

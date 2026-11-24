@@ -11,6 +11,7 @@ import type {
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import { queryOllamaCloudQuota } from "../lib/ollama-cloud.js";
 import { getOllamaCloudKeyDiagnostics, hasOllamaCloudApiKey } from "../lib/ollama-cloud-config.js";
 import { modelProviderMatchesRuntimeId } from "../lib/provider-model-matching.js";
@@ -44,6 +45,9 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
       name: `${OLLAMA_CLOUD_PROVIDER_LABEL} Session`,
       group: OLLAMA_CLOUD_PROVIDER_LABEL,
       label: "Session:",
+      // The API calls this a "session" limit without a documented fixed
+      // window, so it gets a stable named identity but stays reset-ineligible.
+      semantic: { metric: { kind: "named", name: "Session" }, prominence: "primary" },
       percentRemaining: result.session.percentRemaining,
       ...(result.session.resetTimeIso ? { resetTimeIso: result.session.resetTimeIso } : {}),
     });
@@ -58,6 +62,7 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
       name: `${OLLAMA_CLOUD_PROVIDER_LABEL} Weekly`,
       group: OLLAMA_CLOUD_PROVIDER_LABEL,
       label: "Weekly:",
+      semantic: windowSemantic("week"),
       percentRemaining: result.weekly.percentRemaining,
       ...(result.weekly.resetTimeIso ? { resetTimeIso: result.weekly.resetTimeIso } : {}),
     });
@@ -74,6 +79,7 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
       name: `${OLLAMA_CLOUD_PROVIDER_LABEL} Monthly`,
       group: OLLAMA_CLOUD_PROVIDER_LABEL,
       label: "Monthly:",
+      semantic: windowSemantic("month"),
       percentRemaining: included.percentRemaining,
       ...(included.resetTimeIso ? { resetTimeIso: included.resetTimeIso } : {}),
     });
@@ -90,6 +96,10 @@ function mapOllamaCloudSuccess(result: OllamaCloudSuccess): QuotaProviderResult 
       name: `${OLLAMA_CLOUD_PROVIDER_LABEL} Purchased`,
       group: OLLAMA_CLOUD_PROVIDER_LABEL,
       label: "Purchased:",
+      semantic: {
+        metric: { kind: "component", component: "remaining_credits" },
+        prominence: "supplementary",
+      },
       value: `$${result.purchasedUsd.toFixed(2)} left`,
     });
   }

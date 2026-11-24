@@ -15,12 +15,17 @@ import type {
   NativeCacheObserverChildrenSnapshot,
   NativeCacheObserverSessionMeta,
 } from "./cache-observer-runtime.js";
+import { NativeModelIdentityLabel } from "./model-identity.js";
 import type { NativeDashboardRuntime } from "./runtime.js";
 
 /** One popup-wide detail overlay: at most one row's bubble is ever active. */
 const DETAIL_CLOSE_DELAY_MS = 140;
 const MISMATCH_DETAIL = "Selected model differs from the last observed route.";
+/** The popover's visible heading. The pill's own `title` names it for assistive technology. */
+const MENU_HEADING = "Cache observation";
 const ATTENTION_FLASH_MS = 180;
+const WARMING_SEGMENT = " · Warming";
+const WARMING_SPOKEN = ", refreshed by OpenCode warming (inferred)";
 
 function safeTitle(title: string | undefined, fallback: string): string {
   const clean = (title ?? "")
@@ -47,7 +52,7 @@ function sessionModel(meta: NativeCacheObserverSessionMeta | undefined): string 
   const modelId = safeSegment(meta?.model?.id);
   if (provider !== undefined && modelId !== undefined) {
     const effort = safeSegment(meta?.model?.variant);
-    return `${provider} / ${modelId}${effort === undefined ? "" : `#${effort}`}`;
+    return `${provider}/${modelId}${effort === undefined ? "" : `#${effort}`}`;
   }
   return undefined;
 }
@@ -177,9 +182,14 @@ function nextCountdownBoundary(deadlineAtMs: number, nowMs: number): number {
  */
 function presentation(
   observed: CacheObserverClassification | undefined,
-  options: { reuseUncertain?: boolean; countdownAtMs?: number; nowMs?: number } = {},
+  options: {
+    reuseUncertain?: boolean;
+    busy?: boolean;
+    countdownAtMs?: number;
+    nowMs?: number;
+  } = {},
 ) {
-  const { reuseUncertain = false, countdownAtMs, nowMs = 0 } = options;
+  const { reuseUncertain = false, busy = false, countdownAtMs, nowMs = 0 } = options;
   const ttl = ttlMetric(countdownAtMs, nowMs);
   const tone = ttl.expired
     ? ("danger" as const)
@@ -207,18 +217,28 @@ function presentation(
   // The status bubble keeps the state, expiry, basis and cache share. Assumptions
   // and the start of the qualifying call are general caveats, explained under (i).
   const observedWhen = formatWallTime(observedAt, nowMs);
+  const estimate = reuseUncertain ? undefined : observed?.ttlEstimate;
+  const anchored = estimate?.anchor === "warming-inferred";
+  // Warming is only possible while idle: a step in flight hides it.
+  const warming = anchored && !busy;
+  const warmedAt = anchored ? estimate?.anchorAtMs : undefined;
+  const warmedWhen =
+    typeof warmedAt === "number" && (observedAt === undefined || warmedAt > observedAt)
+      ? formatWallTime(warmedAt, nowMs)
+      : undefined;
   const source =
     percent === undefined
       ? undefined
-      : observedWhen === undefined
-        ? cache.label
-        : `${cache.label} · last completed call ${observedWhen}`;
+      : warmedWhen !== undefined
+        ? `${cache.label} · OpenCode warming ${warmedWhen} (inferred)`
+        : observedWhen === undefined
+          ? cache.label
+          : `${cache.label} · last completed call ${observedWhen}`;
   const detail = reuseUncertain
     ? "Prior cache reads; reuse uncertain"
     : ttl.expired
       ? "Estimated retention elapsed"
       : detailFor(observed);
-  const estimate = reuseUncertain ? undefined : observed?.ttlEstimate;
   const expiryTime = formatWallTime(estimate?.deadlineAtMs, nowMs);
   const expiry = expiryTime === undefined ? undefined : `Estimated expiry ${expiryTime}`;
   const basisSource = safeSegment(estimate?.source);
@@ -230,7 +250,7 @@ function presentation(
             ? ""
             : ` (${estimate.kind === "fallback" ? "fallback estimate" : estimate.kind})`
         }`;
-  return { tone, percent, ttl, cache, detail, expiry, basis, source } as const;
+  return { tone, percent, ttl, cache, detail, expiry, basis, source, warming } as const;
 }
 
 function detailFor(observed: CacheObserverClassification | undefined): string | undefined {
@@ -293,7 +313,12 @@ export function createCacheComposerPill(
   runtime: NativeDashboardRuntime,
   ui?: Pick<Ui, "Icon">,
   openSession?: (session: ComposerPillProps["session"], sessionId: string) => void,
+  options: { hostRendersMenuHeading?: boolean } = {},
 ): ComposerPill {
+  // 2.0.16–2.3.x draw the popover heading themselves; 2.4.0+ hand the whole
+  // popover body to the plugin, so this heading (and its info button) must be
+  // in flow instead of overlaying a host row that no longer exists.
+  const hostRendersMenuHeading = options.hostRendersMenuHeading ?? false;
   const [transport, setTransport] = createSignal(runtime.cacheObserver.transport());
   const [revision, setRevision] = createSignal(0);
   const [gapRevision, setGapRevision] = createSignal(0);
@@ -583,6 +608,7 @@ export function createCacheComposerPill(
     // downgrade a green estimate or hide its countdown.
     return presentation(observed, {
       reuseUncertain,
+      busy: runtime.cacheObserver.status(id) === "busy",
       countdownAtMs: countdownDeadline(observed),
       nowMs,
     });
@@ -605,8 +631,12 @@ export function createCacheComposerPill(
         history()?.status === "loading" &&
         !result.percent;
       const hasError = selected && history()?.key === session.key && history()?.status === "error";
+      // The composer truncates the pill; the native title carries the whole state.
+      const label = `${result.ttl.label} · ${
+        loading ? "Cache · Loading…" : result.cache.label
+      }${result.warming ? WARMING_SEGMENT : ""}`;
       return {
-        label: `${result.ttl.label} · ${loading ? "Cache · Loading…" : result.cache.label}`,
+        label,
         icon: hasError ? "warning" : "server",
         ...(mismatched
           ? { tone: flashKey() === session.key ? ("warning" as const) : ("danger" as const) }
@@ -615,7 +645,7 @@ export function createCacheComposerPill(
             : hasError
               ? { tone: "warning" as const }
               : {}),
-        title: mismatched ? MISMATCH_DETAIL : "Cache observation",
+        title: mismatched ? MISMATCH_DETAIL : label,
       };
     },
     menu(input) {
@@ -639,7 +669,8 @@ export function createCacheComposerPill(
         });
       });
       const [detailId, setDetailId] = createSignal<string>();
-      const [anchor, setAnchor] = createSignal<{ top: number; left: number }>();
+      const [detailMode, setDetailMode] = createSignal<"status" | "metrics">("status");
+      const [anchor, setAnchor] = createSignal<{ top: number; left: number; above: boolean }>();
       const [pinned, setPinned] = createSignal(false);
       const [infoPinned, setInfoPinned] = createSignal(false);
       const infoOpen = () => infoPinned();
@@ -664,7 +695,7 @@ export function createCacheComposerPill(
           closeDetail();
         }, DETAIL_CLOSE_DELAY_MS);
       };
-      const anchorTo = (dot: HTMLElement) => {
+      const anchorTo = (dot: HTMLElement, flipAtBottom = false) => {
         const menu = menuElement;
         if (menu === undefined) {
           setAnchor(undefined);
@@ -676,12 +707,32 @@ export function createCacheComposerPill(
           Math.max(dotRect.left - menuRect.left, 0),
           Math.max(menu.clientWidth - 336, 0),
         );
-        setAnchor({ top: dotRect.bottom - menuRect.top + 4, left });
+        const above =
+          flipAtBottom && dotRect.top - menuRect.top > Math.max(menu.clientHeight, 0) / 2;
+        setAnchor({
+          top: above ? dotRect.top - menuRect.top - 4 : dotRect.bottom - menuRect.top + 4,
+          left,
+          above,
+        });
       };
       const openDetail = (id: string, dot: HTMLElement) => {
         clearCloseTimer();
         setPinned(false);
+        setDetailMode("status");
         anchorTo(dot);
+        setDetailId(id);
+      };
+      /**
+       * The full metrics line has no native `title`: a value that changes every
+       * tick makes the browser hide and re-show its tooltip. This is the same
+       * plugin-owned overlay, anchored to the value and flipped up near the
+       * menu's bottom edge so the host popover never clips it.
+       */
+      const openMetrics = (id: string, metrics: HTMLElement) => {
+        clearCloseTimer();
+        setPinned(false);
+        setDetailMode("metrics");
+        anchorTo(metrics, true);
         setDetailId(id);
       };
       const pinDetail = (id: string) => {
@@ -694,6 +745,7 @@ export function createCacheComposerPill(
         if (dot instanceof HTMLElement) anchorTo(dot);
         else setAnchor(undefined);
         setPinned(true);
+        setDetailMode("status");
         setDetailId(id);
       };
       createEffect(() => {
@@ -753,6 +805,13 @@ export function createCacheComposerPill(
           ? { ...result, detail: MISMATCH_DETAIL }
           : result;
       };
+      /** The same full state the removed native `title` carried, live. */
+      const metricsText = (id: string): string => {
+        const result = view(id);
+        return `${result.ttl.label} · ${result.cache.label}${
+          result.warming ? WARMING_SEGMENT : ""
+        }`;
+      };
       // A list refresh can remove the row whose bubble is open; the overlay
       // closes instead of lingering on a stale anchor.
       createEffect(() => {
@@ -772,6 +831,16 @@ export function createCacheComposerPill(
         const label = () => safeTitle(rowMeta()?.title, fallback());
         const agent = () => safeSegment(rowMeta()?.agent);
         const model = () => sessionModel(rowMeta());
+        // Keep the display label on the same sanitized values as the
+        // accessible description, with a stable object across timer ticks.
+        const modelIdentity = createMemo(() => {
+          const observed = rowMeta()?.model;
+          if (observed === undefined) return undefined;
+          const providerID = safeSegment(observed.providerID);
+          const id = safeSegment(observed.id);
+          if (providerID === undefined || id === undefined) return undefined;
+          return { providerID, id, variant: safeSegment(observed.variant) };
+        });
         const result = () => {
           const observed = view(id());
           return !child && mainMismatch()
@@ -780,6 +849,8 @@ export function createCacheComposerPill(
         };
         const detail = () => result().detail || result().source;
         const open = () => detail() !== undefined && detailId() === id();
+        const metricsOpen = () => detailMode() === "metrics" && detailId() === id();
+        let metricsElement: HTMLSpanElement | undefined;
         return (
           <div class={`qg-cache-row${child ? " qg-cache-child" : ""}`}>
             <div class="qg-cache-row-heading">
@@ -816,7 +887,21 @@ export function createCacheComposerPill(
                 class="qg-cache-identity"
                 disabled={!openSession}
                 aria-label={`Open ${label()} in dashboard`}
-                aria-describedby={descriptionId}
+                aria-describedby={metricsOpen() ? `${descriptionId} ${tooltipId}` : descriptionId}
+                onFocus={(event) => {
+                  // Pointer clicks keep the card out of the way; only visible
+                  // (keyboard) focus opens it.
+                  if (
+                    typeof event.currentTarget.matches === "function" &&
+                    !event.currentTarget.matches(":focus-visible")
+                  ) {
+                    return;
+                  }
+                  if (metricsElement !== undefined) openMetrics(id(), metricsElement);
+                }}
+                onBlur={() => {
+                  if (metricsOpen()) closeDetail();
+                }}
                 onClick={() => {
                   if (!openSession) return;
                   openSession(input.session, id());
@@ -828,7 +913,9 @@ export function createCacheComposerPill(
                   {model() ? `Model: ${model()}. ` : ""}
                   {child && busy() ? "Running. " : ""}
                   {result().detail ? `${result().detail}. ` : "Cache observation unknown. "}
-                  {`${result().ttl.spoken}. ${result().cache.spoken}. `}
+                  {`${result().ttl.spoken}. ${result().cache.spoken}${
+                    result().warming ? WARMING_SPOKEN : ""
+                  }. `}
                 </span>
                 <span class="qg-cache-identity-text">
                   <span class="qg-cache-primary">
@@ -843,19 +930,26 @@ export function createCacheComposerPill(
                       {label()}
                     </span>
                   </span>
-                  <Show when={model()}>
-                    {(name) => (
-                      <span class="qg-cache-model" title={name()}>
-                        {name()}
+                  <Show when={modelIdentity()}>
+                    {(identity) => (
+                      <span class="qg-cache-model">
+                        <NativeModelIdentityLabel identity={identity()} />
                       </span>
                     )}
                   </Show>
                 </span>
-                <span class="qg-cache-metrics">
+                <span
+                  ref={(element) => {
+                    metricsElement = element;
+                  }}
+                  class="qg-cache-metrics"
+                  onPointerEnter={(event) => openMetrics(id(), event.currentTarget)}
+                  onPointerLeave={() => scheduleClose()}
+                >
                   <span class={result().ttl.expired ? "qg-cache-elapsed" : undefined}>
                     {result().ttl.short}
                   </span>
-                  {` · ${result().cache.short}`}
+                  {` · ${result().cache.short}${result().warming ? WARMING_SEGMENT : ""}`}
                 </span>
               </button>
             </div>
@@ -864,8 +958,15 @@ export function createCacheComposerPill(
       };
 
       return (
-        <div ref={menuElement} class="qg-cache-menu">
+        <div
+          ref={menuElement}
+          class="qg-cache-menu"
+          data-host-heading={hostRendersMenuHeading ? "true" : "false"}
+        >
           <div class="qg-cache-heading">
+            <Show when={!hostRendersMenuHeading}>
+              <span class="qg-cache-heading-title">{MENU_HEADING}</span>
+            </Show>
             <button
               type="button"
               class="qg-cache-info"
@@ -951,6 +1052,7 @@ export function createCacheComposerPill(
               role="tooltip"
               id={tooltipId}
               class="qg-cache-tooltip"
+              data-above={anchor()?.above ? "true" : undefined}
               style={{
                 top: `${anchor()?.top ?? 0}px`,
                 left: `${anchor()?.left ?? 0}px`,
@@ -958,17 +1060,22 @@ export function createCacheComposerPill(
               onPointerEnter={clearCloseTimer}
               onPointerLeave={() => scheduleClose()}
             >
-              <Show when={detailResult().detail}>
-                {(text) => <span class="qg-cache-tooltip-primary">{text()}</span>}
+              <Show when={detailMode() === "metrics"}>
+                <span class="qg-cache-tooltip-primary">{metricsText(detailId() ?? "")}</span>
               </Show>
-              <Show when={detailResult().expiry}>
-                {(text) => <span class="qg-cache-tooltip-primary">{text()}</span>}
-              </Show>
-              <Show when={detailResult().basis}>
-                {(text) => <span class="qg-cache-tooltip-note">{text()}</span>}
-              </Show>
-              <Show when={detailResult().source}>
-                {(text) => <span class="qg-cache-tooltip-note">{text()}</span>}
+              <Show when={detailMode() === "status"}>
+                <Show when={detailResult().detail}>
+                  {(text) => <span class="qg-cache-tooltip-primary">{text()}</span>}
+                </Show>
+                <Show when={detailResult().expiry}>
+                  {(text) => <span class="qg-cache-tooltip-primary">{text()}</span>}
+                </Show>
+                <Show when={detailResult().basis}>
+                  {(text) => <span class="qg-cache-tooltip-note">{text()}</span>}
+                </Show>
+                <Show when={detailResult().source}>
+                  {(text) => <span class="qg-cache-tooltip-note">{text()}</span>}
+                </Show>
               </Show>
             </span>
           </Show>

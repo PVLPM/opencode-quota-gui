@@ -63,6 +63,12 @@ describe("loadConfig", () => {
     return { config, meta };
   }
 
+  it("preserves legacy aggregate row ids for render-time resolution", async () => {
+    const legacy = `alibaba-token-plan:${"a".repeat(64)}#aggregate|quota:percent`;
+    const { config } = await loadSdkConfig({ dashboard: { hiddenRows: [legacy] } });
+    expect(config.dashboard.hiddenRows).toEqual([legacy]);
+  });
+
   it("defaults and validates native TUI command display with provenance", async () => {
     const defaults = await loadSdkConfig({});
     expect(defaults.config.tuiCommandDisplay).toBe("dialog");
@@ -816,7 +822,7 @@ describe("loadConfig", () => {
   it("defaults pricingSnapshot config and accepts valid overrides", async () => {
     const defaults = await loadSdkConfig({});
     expect(defaults.config.pricingSnapshot.source).toBe("auto");
-    expect(defaults.config.pricingSnapshot.autoRefresh).toBe(7);
+    expect(defaults.config.pricingSnapshot.autoRefresh).toBe(1);
 
     const bundled = await loadSdkConfig({
       pricingSnapshot: { source: "bundled", autoRefresh: 7 },
@@ -834,7 +840,7 @@ describe("loadConfig", () => {
       pricingSnapshot: { source: "remote", autoRefresh: 0 },
     });
     expect(invalid.config.pricingSnapshot.source).toBe("auto");
-    expect(invalid.config.pricingSnapshot.autoRefresh).toBe(7);
+    expect(invalid.config.pricingSnapshot.autoRefresh).toBe(1);
   });
 
   it("reads formatStyle and falls back to legacy toastStyle when needed", async () => {
@@ -965,6 +971,26 @@ describe("loadConfig", () => {
       const rejected = await loadSdkConfig({ waitForQuotaReset: invalid });
       expect(rejected.config.waitForQuotaReset).toBe(true);
       expect(rejected.meta.settingSources).not.toHaveProperty("waitForQuotaReset");
+    }
+  });
+
+  it("defaults autoResumeOnQuotaRecovery off and accepts boolean overrides", async () => {
+    const defaults = await loadSdkConfig({});
+    expect(defaults.config.autoResumeOnQuotaRecovery).toBe(false);
+    expect(defaults.meta.settingSources).not.toHaveProperty("autoResumeOnQuotaRecovery");
+
+    for (const autoResumeOnQuotaRecovery of [true, false]) {
+      const configured = await loadSdkConfig({ autoResumeOnQuotaRecovery });
+      expect(configured.config.autoResumeOnQuotaRecovery).toBe(autoResumeOnQuotaRecovery);
+      expect(configured.meta.settingSources).toEqual({
+        autoResumeOnQuotaRecovery: "client.config.get",
+      });
+    }
+
+    for (const invalid of ["true", 1, null]) {
+      const rejected = await loadSdkConfig({ autoResumeOnQuotaRecovery: invalid });
+      expect(rejected.config.autoResumeOnQuotaRecovery).toBe(false);
+      expect(rejected.meta.settingSources).not.toHaveProperty("autoResumeOnQuotaRecovery");
     }
   });
 

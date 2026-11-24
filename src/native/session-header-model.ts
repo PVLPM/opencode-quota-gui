@@ -5,6 +5,7 @@ import type {
   QuotaCardRow,
   QuotaSnapshot,
 } from "../contracts/dashboard.js";
+import { orderRowsByPreference } from "../contracts/row-order.js";
 import type {
   TemporalModelPhase,
   TemporalModelStatus,
@@ -183,7 +184,7 @@ export function primaryRingRows(
   const references = card.primaryQuotaWindows;
   if (references === undefined || references.length === 0) return [];
   const rowsById = new Map(
-    visibleRows(card.rows, [...hiddenRows])
+    visibleRows(card.rows, [...hiddenRows], card.visibilityRows ?? [])
       .filter(
         (row) =>
           row.kind === "percent" &&
@@ -221,9 +222,13 @@ export function previewPercentRows(
   hiddenRows: readonly string[],
   preferences: DisplayPreferences,
 ): QuotaCardRow[] {
-  return visibleRows(card.rows, [...hiddenRows]).filter(
-    (row) => row.kind === "percent" && isPercentValue(rowPercent(row, preferences)),
-  );
+  const controls = card.visibilityRows ?? [];
+  return orderRowsByPreference(
+    visibleRows(card.rows, [...hiddenRows], controls),
+    preferences.rowOrder?.[card.cardId],
+    (row) => row.rowId,
+    controls,
+  ).filter((row) => row.kind === "percent" && isPercentValue(rowPercent(row, preferences)));
 }
 
 function toRing(entry: PrimaryRingRow, preferences: DisplayPreferences): HeaderRing {

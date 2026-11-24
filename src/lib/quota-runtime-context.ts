@@ -135,6 +135,7 @@ export function createQuotaProviderRuntimeContext(runtime: {
     workspaceRoot: runtime.workspaceRoot,
     config: {
       anthropicBinaryPath: runtime.config.anthropicBinaryPath,
+      claudeAgentPollIntervalMs: runtime.config.claudeAgentPollIntervalMs,
       cursorPlan: runtime.config.cursorPlan,
       cursorIncludedApiUsd: runtime.config.cursorIncludedApiUsd,
       cursorBillingCycleStartDay: runtime.config.cursorBillingCycleStartDay,

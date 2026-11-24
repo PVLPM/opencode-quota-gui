@@ -553,7 +553,16 @@ export function createDashboardServer(
         return;
       }
       snapshots.setViewScope("analytics", "request");
-      sendJson(res, 200, await snapshots.home({ range }));
+      const background = url.searchParams.get("background");
+      if (background !== null && background !== "true" && background !== "false") {
+        sendError(res, "bad-request");
+        return;
+      }
+      sendJson(
+        res,
+        200,
+        await snapshots.home({ range, ...(background === "true" ? { background: true } : {}) }),
+      );
       return;
     }
 

@@ -15,7 +15,7 @@ import {
   getMaintainerAnnouncementTargetProviderIds,
 } from "./maintainer-announcements.js";
 import { getMaintainerAnnouncementsHomeStatePath } from "./private-state-paths.js";
-import { getQuotaProviderShape, normalizeQuotaProviderId } from "./provider-metadata.js";
+import { getQuotaProviderRegistration, normalizeQuotaProviderId } from "./provider-metadata.js";
 import {
   buildQuotaExport,
   createExportProviderContext,
@@ -23,6 +23,7 @@ import {
   writeQuotaExport,
 } from "./quota-export.js";
 import { resolveQuotaFormatStyle } from "./quota-format-style.js";
+import { quotaEntryIsHidden } from "./quota-identity.js";
 import {
   type CollectQuotaRenderDataResult,
   collectConcreteEnabledProviderIds,
@@ -129,8 +130,25 @@ export async function getQuotaMessage(
     result.providerResults.length > 0
   ) {
     try {
+      const hiddenCards = config.dashboard.hiddenCards;
+      const hiddenRows = config.dashboard.hiddenRows;
       const notices = await observeQuotaResetNotifications({
-        providers: result.providerResults,
+        providers: result.providerResults.map((provider) => ({
+          ...provider,
+          result: {
+            ...provider.result,
+            entries: provider.result.entries.filter(
+              (entry) =>
+                !quotaEntryIsHidden({
+                  providerId: provider.providerId,
+                  result: provider.result,
+                  entry,
+                  hiddenCards,
+                  hiddenRows,
+                }),
+            ),
+          },
+        })),
         windows: config.resetNotifications.windows,
       });
       resetNotification = formatQuotaResetNotification(notices) ?? undefined;
@@ -303,7 +321,7 @@ async function getHomeAnnouncementText(runtime: QuotaRuntimeContext): Promise<st
   const announcements = BUNDLED_MAINTAINER_ANNOUNCEMENTS;
   const targetProviderIds = new Set(getMaintainerAnnouncementTargetProviderIds({ announcements }));
   const announcementProviders = runtime.providers.filter((provider) => {
-    const shape = getQuotaProviderShape(normalizeQuotaProviderId(provider.id));
+    const shape = getQuotaProviderRegistration(normalizeQuotaProviderId(provider.id));
     return shape ? targetProviderIds.has(shape.id) : false;
   });
   const providerIds = await collectConcreteEnabledProviderIds({

@@ -432,6 +432,65 @@ describe("canonical dashboard config layer", () => {
     expect(meta.configIssues).toEqual([]);
   });
 
+  it("defaults dashboard.rowOrder to an empty map and reads sparse per-card lists", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, { minIntervalMs: 500 });
+
+    const empty = await load(workspace);
+    expect(empty.config.dashboard.rowOrder).toEqual({});
+    expect(empty.meta.settingSources).not.toHaveProperty("dashboard.rowOrder");
+
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: {
+        rowOrder: { "card-b": ["row-2", "row-1", "row-2"], "card-a": [] },
+      },
+    });
+
+    const global = await load(workspace);
+    expect(global.config.dashboard.rowOrder).toEqual({
+      "card-b": ["row-2", "row-1"],
+      "card-a": [],
+    });
+    expect(global.meta.settingSources["dashboard.rowOrder"]).toBe(workspace.guiConfigPath);
+
+    writeQuotaSidecarConfig(workspace.workspaceRoot, {
+      dashboard: { rowOrder: { "card-c": ["row-1"] } },
+    });
+
+    const merged = await load(workspace);
+    expect(merged.config.dashboard.rowOrder).toEqual({ "card-c": ["row-1"] });
+    expect(merged.meta.settingSources["dashboard.rowOrder"]).toBe(
+      quotaSidecarConfigSource(workspace.workspaceRoot),
+    );
+  });
+
+  it("rejects a malformed dashboard.rowOrder and caps each card list", async () => {
+    const workspace = makeWorkspace();
+    writeGuiCanonicalConfig(workspace, { dashboard: { rowOrder: { "card-a": "row-1" } } });
+
+    const invalid = await load(workspace);
+    expect(invalid.config.dashboard.rowOrder).toEqual({});
+    const issue = invalid.meta.configIssues.find((entry) => entry.key === "dashboard.rowOrder");
+    expect(issue?.message).toMatch(/card ids mapped to row-id lists/);
+
+    writeGuiCanonicalConfig(workspace, { dashboard: { rowOrder: null } });
+    const nullValue = await load(workspace);
+    expect(nullValue.config.dashboard.rowOrder).toEqual({});
+    expect(nullValue.meta.configIssues.some((entry) => entry.key === "dashboard.rowOrder")).toBe(
+      true,
+    );
+
+    const oversized = Array.from({ length: 501 }, (_value, index) => `row-${index}`);
+    writeGuiCanonicalConfig(workspace, {
+      dashboard: { rowOrder: { "card-a": oversized } },
+    });
+
+    const capped = await load(workspace);
+    expect(capped.config.dashboard.rowOrder["card-a"]).toHaveLength(500);
+    expect(capped.config.dashboard.rowOrder["card-a"]?.[0]).toBe("row-0");
+    expect(capped.config.dashboard.rowOrder["card-a"]?.[499]).toBe("row-499");
+  });
+
   it("reads, dedupes, and retains unknown dashboard.cardOrder ids across layers", async () => {
     const workspace = makeWorkspace();
     writeGuiCanonicalConfig(workspace, {

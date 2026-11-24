@@ -117,6 +117,15 @@ export function formatPercentExact(value: number | null | undefined): string {
   return `${value.toFixed(2)}%`;
 }
 
+/** `provider/model#effort`; the effort suffix appears only when one was recorded. */
+export function formatModelIdentity(identity: {
+  providerId: string;
+  modelId: string;
+  effort?: string;
+}): string {
+  return `${identity.providerId}/${identity.modelId}${identity.effort ? `#${identity.effort}` : ""}`;
+}
+
 /** Right-axis rate ticks stay whole integers. */
 export function formatPercentTick(value: number): string {
   return Number.isFinite(value) ? `${Math.round(value)}%` : "—";
@@ -126,6 +135,39 @@ export function formatPercentTick(value: number): string {
 export function formatTimestamp(ms: number | undefined, timeZone: string): string {
   if (ms === undefined || !Number.isFinite(ms)) return "—";
   return new Date(ms).toLocaleString("en-GB", { timeZone });
+}
+
+/** Compact tooltip date `23/11/2026` in the payload's host zone. */
+export function formatDateOnly(ms: number | undefined, timeZone: string): string {
+  if (ms === undefined || !Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleDateString("en-GB", { timeZone });
+}
+
+/** `23:05:04` in the payload's host zone, with no date. */
+export function formatTimeOnly(ms: number | undefined, timeZone: string): string {
+  if (ms === undefined || !Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleTimeString("en-GB", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+/** Elapsed time between stored message times: `850 ms`, `4.2s`, `12m 05s`, `2h 03m`. */
+export function formatElapsed(ms: number | undefined): string {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 0) return "-";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 10) return `${Number(totalSeconds.toFixed(1))}s`;
+  const rounded = Math.round(totalSeconds);
+  if (rounded < 60) return `${rounded}s`;
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const seconds = rounded % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0 ? `${hours}h ${pad(minutes)}m` : `${minutes}m ${pad(seconds)}s`;
 }
 
 /**

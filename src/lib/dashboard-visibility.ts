@@ -1,26 +1,22 @@
 /**
- * Persisted semantics for `dashboard.hiddenCards` (backend-only helpers).
+ * Persisted semantics for `dashboard.hiddenCards` and `dashboard.hiddenRows`
+ * (backend-only helpers).
  *
  * Version 1 (implicit, no marker) treated a provider-scope card id as a
  * provider-wide hide. Version 2 treats every hiddenCards entry as an exact card
  * id, while a plain provider id and the legacy bare provider-scope hash remain
- * provider-wide forms. The domain and identity-key literals below are pinned to
- * `src/gui/identity.ts` by the backend tests; importing GUI identity (and its
- * node:crypto hash) from this layer would couple config loading to the GUI.
+ * provider-wide forms. The card/row identity helpers live in
+ * `src/contracts/identity.ts` so this layer and the GUI share one hash.
  */
-import { createHash } from "node:crypto";
+import { hashQuotaCardIdentity, PROVIDER_SCOPE_IDENTITY_KEY } from "./quota-identity.js";
 
 export const DASHBOARD_HIDDEN_CARDS_VERSION = 2;
 
-const CARD_HASH_DOMAIN = "ocq-card-v1";
-const PROVIDER_SCOPE_IDENTITY_KEY = "provider";
 const CARD_HASH_RE = /^[0-9a-f]{64}$/u;
 
 /** The provider-scope hash exactly as `buildProviderScopeCardId` derives it. */
 export function dashboardProviderScopeHash(providerId: string): string {
-  return createHash("sha256")
-    .update(`${CARD_HASH_DOMAIN}\0${providerId}\0${PROVIDER_SCOPE_IDENTITY_KEY}`, "utf8")
-    .digest("hex");
+  return hashQuotaCardIdentity(providerId, PROVIDER_SCOPE_IDENTITY_KEY);
 }
 
 /**
@@ -50,3 +46,9 @@ export function normalizeLegacyDashboardHiddenCards(ids: readonly string[]): str
   }
   return normalized;
 }
+
+/**
+ * Row ids saved before per-window semantics are resolved against the live card
+ * at render/notification time in `src/contracts/row-visibility.ts`. They are
+ * intentionally preserved verbatim here until an explicit Settings toggle.
+ */

@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
   clearAnthropicDiagnosticsCacheForTests,
   queryAnthropicQuotaWithOAuth,
@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({ cacheDir: "", request: vi.fn() }));
 
 vi.mock("../src/lib/private-state-paths.js", () => ({
   getGuiPrivateCacheDir: () => mocks.cacheDir,
+  getGuiPrivateStatePath: (...segments: string[]) =>
+    [mocks.cacheDir, "state", ...segments].join("/"),
 }));
 vi.mock("child_process", () => ({
   execFile: (
@@ -40,16 +42,23 @@ vi.mock("../src/lib/http.js", () => ({
   ) => options.consume(await mocks.request(), new AbortController().signal),
 }));
 
-afterEach(() => {
+beforeEach(async () => {
+  mocks.cacheDir = await mkdtemp(join(tmpdir(), "anthropic-refresh-"));
+});
+
+afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   clearAnthropicDiagnosticsCacheForTests();
   __resetQuotaStateForTests();
   notifyCredentialsChanged();
   mocks.request.mockReset();
+  await rm(mocks.cacheDir, { recursive: true, force: true });
 });
 
 it("waits for an older normal probe then coalesces forced probes and reuses the forced result in the cycle", async () => {
+  const start = Date.now();
+  const now = vi.spyOn(Date, "now").mockReturnValue(start);
   let release!: (response: Response) => void;
   mocks.request
     .mockReturnValueOnce(
@@ -64,7 +73,8 @@ it("waits for an older normal probe then coalesces forced probes and reuses the 
   const cycle = new Map<symbol, unknown>();
   const forced = queryAnthropicQuotaWithOAuth("overlap-token", undefined, cycle);
   const otherCycle = queryAnthropicQuotaWithOAuth("overlap-token", undefined, new Map());
-  expect(mocks.request).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(mocks.request).toHaveBeenCalledTimes(1));
+  now.mockReturnValue(start + 180_000);
   release(new Response(JSON.stringify({ five_hour: { utilization: 20 } }), { status: 200 }));
   expect(await normal).toMatchObject({ five_hour: { percentRemaining: 80 } });
   expect(await forced).toMatchObject({ five_hour: { percentRemaining: 60 } });
@@ -84,6 +94,7 @@ it("does not issue a forced request when the preceding normal probe establishes 
   );
   const normal = queryAnthropicQuotaWithOAuth("cooldown-overlap-token");
   const forced = queryAnthropicQuotaWithOAuth("cooldown-overlap-token", undefined, new Map());
+  await vi.waitFor(() => expect(mocks.request).toHaveBeenCalledTimes(1));
   release(new Response("limited", { status: 429, headers: { "Retry-After": "45" } }));
   expect(await normal).toMatchObject({ success: false });
   expect(await forced).toMatchObject({ success: false });
@@ -91,8 +102,9 @@ it("does not issue a forced request when the preceding normal probe establishes 
 });
 
 it("forced refresh fetches a new Claude Agent subscription result instead of recent quota", async () => {
-  mocks.cacheDir = await mkdtemp(join(tmpdir(), "anthropic-refresh-"));
   vi.stubEnv("CLAUDE_CONFIG_DIR", mocks.cacheDir);
+  const start = Date.now();
+  const now = vi.spyOn(Date, "now").mockReturnValue(start);
   await writeFile(
     join(mocks.cacheDir, ".credentials.json"),
     JSON.stringify({
@@ -126,6 +138,7 @@ it("forced refresh fetches a new Claude Agent subscription result instead of rec
   try {
     const first = await fetchQuotaProviderResult({ provider, ctx, ttlMs: 60_000 });
     expect(first.entries[0]?.percentRemaining).toBe(80);
+    now.mockReturnValue(start + 180_000);
     const refreshed = await fetchQuotaProviderResult({
       provider,
       ctx,
@@ -136,43 +149,41 @@ it("forced refresh fetches a new Claude Agent subscription result instead of rec
     expect(mocks.request).toHaveBeenCalledTimes(2);
   } finally {
     unbind();
-    await rm(mocks.cacheDir, { recursive: true, force: true });
   }
 });
 
-it("invalidates only the rate-limited token's earlier quota after its cooldown", async () => {
+it("shares a 429 cooldown across tokens and fetches again after it expires", async () => {
   const start = Date.now();
   const now = vi.spyOn(Date, "now").mockReturnValue(start);
   const quota = (used: number) =>
     new Response(JSON.stringify({ five_hour: { utilization: used } }), { status: 200 });
   mocks.request
     .mockResolvedValueOnce(quota(10))
-    .mockResolvedValueOnce(quota(20))
     .mockResolvedValueOnce(
-      new Response("rate limited", { status: 429, headers: { "Retry-After": "45" } }),
+      new Response("rate limited", { status: 429, headers: { "Retry-After": "300" } }),
     )
     .mockResolvedValueOnce(quota(30));
   expect(await queryAnthropicQuotaWithOAuth("account-a")).toMatchObject({
     five_hour: { percentRemaining: 90 },
   });
-  expect(await queryAnthropicQuotaWithOAuth("account-b")).toMatchObject({
-    five_hour: { percentRemaining: 80 },
-  });
-  // A backwards clock step bypasses the recent entry while leaving it within its later reuse window.
-  now.mockReturnValue(start - 1);
+
+  now.mockReturnValue(start + 180_000);
+  expect(await queryAnthropicQuotaWithOAuth("account-b")).toMatchObject({ success: false });
+
+  // The cooldown is account-neutral: another token that has a recent quota is
+  // still paused instead of being allowed to extend the 429 streak.
+  now.mockReturnValue(start + 185_000);
   expect(await queryAnthropicQuotaWithOAuth("account-a")).toMatchObject({ success: false });
-  now.mockReturnValue(start + 45_000);
-  expect(await queryAnthropicQuotaWithOAuth("account-b")).toMatchObject({
-    five_hour: { percentRemaining: 80 },
-  });
+  expect(mocks.request).toHaveBeenCalledTimes(2);
+
+  now.mockReturnValue(start + 480_000);
   expect(await queryAnthropicQuotaWithOAuth("account-a")).toMatchObject({
     five_hour: { percentRemaining: 70 },
   });
-  expect(mocks.request).toHaveBeenCalledTimes(4);
+  expect(mocks.request).toHaveBeenCalledTimes(3);
 });
 
 it("manual Claude Agent refresh respects subscription Retry-After until the cooldown expires", async () => {
-  mocks.cacheDir = await mkdtemp(join(tmpdir(), "anthropic-refresh-"));
   vi.stubEnv("CLAUDE_CONFIG_DIR", mocks.cacheDir);
   await writeFile(
     join(mocks.cacheDir, ".credentials.json"),
@@ -196,7 +207,7 @@ it("manual Claude Agent refresh respects subscription Retry-After until the cool
   const now = vi.spyOn(Date, "now").mockReturnValue(start);
   mocks.request
     .mockResolvedValueOnce(
-      new Response("rate limited", { status: 429, headers: { "Retry-After": "60" } }),
+      new Response("rate limited", { status: 429, headers: { "Retry-After": "300" } }),
     )
     .mockResolvedValueOnce(
       new Response(JSON.stringify({ five_hour: { utilization: 20 } }), { status: 200 }),
@@ -213,18 +224,17 @@ it("manual Claude Agent refresh respects subscription Retry-After until the cool
     expect(initial.errors).toHaveLength(1);
     expect(mocks.request).toHaveBeenCalledTimes(1);
 
-    now.mockReturnValue(start + 59_000);
+    now.mockReturnValue(start + 299_000);
     const forced = await read(true);
     expect(forced.errors).toHaveLength(1);
     expect(mocks.request).toHaveBeenCalledTimes(1);
 
-    now.mockReturnValue(start + 60_000);
+    now.mockReturnValue(start + 300_000);
     const recovered = await read(true);
     expect(mocks.request).toHaveBeenCalledTimes(2);
     expect(recovered.errors).toHaveLength(0);
     expect(recovered.entries).toHaveLength(1);
   } finally {
     unbind();
-    await rm(mocks.cacheDir, { recursive: true, force: true });
   }
 });

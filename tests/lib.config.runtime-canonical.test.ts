@@ -93,6 +93,26 @@ describe("runtime loadConfig canonical-only", () => {
     expect(meta.configIssues).toEqual([]);
   });
 
+  it("clamps a sub-minute Claude Agent polling interval from canonical config", async () => {
+    writeGuiCanonicalConfig(workspace, { claudeAgentPollIntervalMs: 30_000 });
+    const meta = createLoadConfigMeta();
+    const clamped = await loadConfig(undefined, meta, {
+      configRootDir: workspace.workspaceRoot,
+      globalConfigDir: workspace.configDir,
+    });
+    expect(clamped.claudeAgentPollIntervalMs).toBe(60_000);
+
+    const canonicalPath = writeGuiCanonicalConfig(workspace, {
+      claudeAgentPollIntervalMs: 240_000,
+    });
+    const raised = await loadConfig(undefined, createLoadConfigMeta(), {
+      configRootDir: workspace.workspaceRoot,
+      globalConfigDir: workspace.configDir,
+    });
+    expect(raised.claudeAgentPollIntervalMs).toBe(240_000);
+    expect(canonicalPath).toBe(getGuiConfigPath(workspace.configDir));
+  });
+
   it("keeps legacy agentCustomProviders entries inert without read failures or migration", async () => {
     const canonicalPath = writeGuiCanonicalConfig(workspace, {
       quotaProviders: [],

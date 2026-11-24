@@ -68,6 +68,7 @@ function makeDataset(parts: {
   projects?: OpenCodeProjectInfo[];
   messages?: OpenCodeRawAssistantRow[];
   compactions?: OpenCodeCompactionMarker[];
+  userMessages?: Array<{ sessionId: string; atMs: number; messageId: string }>;
 }): UsageAnalyticsDataset {
   const sessions: Record<string, OpenCodeSessionInfo> = {};
   for (const session of parts.sessions ?? []) sessions[session.id] = session;
@@ -78,6 +79,7 @@ function makeDataset(parts: {
     projects,
     messages: parts.messages ?? [],
     compactions: parts.compactions ?? [],
+    userMessages: parts.userMessages ?? [],
   };
 }
 
@@ -547,5 +549,260 @@ describe("session tree scope", () => {
       expect(error.message).not.toContain("/");
       expect(error.message).not.toContain("\\");
     }
+  });
+});
+
+describe("session model identity and timing projection", () => {
+  const withModel = (
+    row: OpenCodeRawAssistantRow,
+    modelID: string,
+    variant?: string,
+  ): OpenCodeRawAssistantRow => ({
+    ...row,
+    providerID: "openai",
+    modelID,
+    ...(variant === undefined ? {} : { variant }),
+  });
+
+  it("lists distinct identities by most recent use, deduplicating returns to earlier identities", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        withModel(assistantRow("ses_root", "m1", 10, { input: 1 }), "terra", "high"),
+        withModel(assistantRow("ses_root", "m2", 20, { input: 2 }), "luna", "high"),
+        withModel(assistantRow("ses_root", "m3", 30, { input: 3 }), "terra", "high"),
+        withModel(assistantRow("ses_root", "m4", 40, { input: 4 }), "terra", "low"),
+        withModel(assistantRow("ses_root", "m5", 50, { input: 5 }), "terra", "default"),
+        withModel(assistantRow("ses_child", "c1", 60, { input: 6 }), "child-model", "max"),
+      ],
+    });
+    const nodes = createUsageAnalytics(dataset).session("ses_root").nodes;
+    expect(nodes[0]?.models).toEqual([
+      { providerId: "openai", modelId: "terra" },
+      { providerId: "openai", modelId: "terra", effort: "low" },
+      { providerId: "openai", modelId: "terra", effort: "high" },
+      { providerId: "openai", modelId: "luna", effort: "high" },
+    ]);
+    // A descendant's identity never leaks into its parent's own list.
+    expect(nodes[1]?.models).toEqual([
+      { providerId: "openai", modelId: "child-model", effort: "max" },
+    ]);
+  });
+
+  it("leaves identities empty when no model is recorded and never invents an effort", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "m1", 10, { input: 1 }),
+        withModel(assistantRow("ses_root", "m2", 20, { input: 2 }), "terra"),
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_root");
+    expect(snapshot.nodes[0]?.models).toEqual([{ providerId: "openai", modelId: "terra" }]);
+    expect(snapshot.steps[0]).not.toHaveProperty("model");
+    expect(snapshot.steps[1]?.model).toEqual({ providerId: "openai", modelId: "terra" });
+  });
+
+  it("exposes stored creation time per step only when it is a positive number", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        { ...assistantRow("ses_root", "m1", 10, { input: 1 }), createdAtMs: 0, completedAtMs: 50 },
+        assistantRow("ses_root", "m2", 100, { input: 2 }),
+      ],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps[0]).toMatchObject({ messageId: "m1", atMs: 50 });
+    expect(steps[0]).not.toHaveProperty("createdAtMs");
+    expect(steps[1]).toMatchObject({ messageId: "m2", createdAtMs: 100, atMs: 1_100 });
+  });
+
+  it("carries unknown cache counters apart from observed zeros and counts them per node", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "m_zero", 10, { input: 5 }),
+        { ...assistantRow("ses_root", "m_read", 20, { input: 5 }), cacheReadMissing: true },
+        { ...assistantRow("ses_root", "m_write", 30, { input: 5 }), cacheWriteMissing: true },
+        assistantRow("ses_child", "c1", 40, { input: 5, cacheRead: 5 }),
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_root");
+    const byId = new Map(snapshot.steps.map((step) => [step.messageId, step]));
+    expect(byId.get("m_zero")).not.toHaveProperty("cacheReadUnknown");
+    expect(byId.get("m_read")).toMatchObject({ cacheReadUnknown: true });
+    expect(byId.get("m_read")).not.toHaveProperty("cacheWriteUnknown");
+    expect(byId.get("m_write")).toMatchObject({ cacheWriteUnknown: true });
+    expect(snapshot.nodes[0]?.cacheUnknownSteps).toBe(2);
+    expect(snapshot.nodes[1]).not.toHaveProperty("cacheUnknownSteps");
+    // The accounting itself is unchanged: unknown still adds 0 tokens.
+    expect(byId.get("m_read")?.stack.cacheRead).toBe(0);
+  });
+
+  it("records where excluded zero-token rows and unowned fork copies sit in the focus session", () => {
+    const zero = assistantRow("ses_root", "m_zero_token", 15);
+    const dataset = {
+      ...makeDataset({
+        sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+        messages: [assistantRow("ses_root", "m1", 10, { input: 1 })],
+      }),
+      excluded: [
+        { sessionId: "ses_root", atMs: zero.createdAtMs },
+        { sessionId: "ses_child", atMs: 99 },
+      ],
+    };
+    expect(createUsageAnalytics(dataset).session("ses_root").unobservedAtMs).toEqual([15]);
+    expect(createUsageAnalytics(dataset).session("ses_child")).toMatchObject({
+      unobservedAtMs: [99],
+    });
+
+    const forks = makeDataset({
+      sessions: [{ id: "ses_a" }, { id: "ses_b" }],
+      messages: [
+        assistantRow("ses_a", "a1", 10, { input: 1 }),
+        assistantRow("ses_b", "b1", 10, { input: 1 }),
+      ],
+    });
+    const analytics = createUsageAnalytics(forks);
+    const loser = analytics.session("ses_a").steps.length === 0 ? "ses_a" : "ses_b";
+    expect(analytics.session(loser).unobservedAtMs).toEqual([10]);
+    expect(
+      createUsageAnalytics(makeDataset({ sessions: [{ id: "s" }] })).session("s"),
+    ).not.toHaveProperty("unobservedAtMs");
+  });
+
+  it("keeps each node's own tokens separate from its subtree", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "m1", 10, { input: 1, cacheRead: 3 }),
+        assistantRow("ses_child", "c1", 20, { input: 10, cacheRead: 30 }),
+      ],
+    });
+    const [root, child] = createUsageAnalytics(dataset).session("ses_root").nodes;
+    expect(root?.ownTokens.total).toBe(4);
+    expect(root?.subtreeTokens.total).toBe(44);
+    expect(child?.ownTokens.total).toBe(40);
+  });
+
+  it("marks only the first root step after each user prompt and excludes descendants' prompts", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "msg_a", 1_000, { input: 1 }),
+        assistantRow("ses_root", "msg_b", 3_000, { input: 2 }),
+        assistantRow("ses_root", "msg_c", 5_000, { input: 3 }),
+        assistantRow("ses_child", "msg_child", 3_000, { input: 4 }),
+      ],
+      userMessages: [
+        { sessionId: "ses_root", atMs: 500, messageId: "usr_first" },
+        { sessionId: "ses_root", atMs: 1_000, messageId: "usr_second" },
+        { sessionId: "ses_root", atMs: 2_500, messageId: "usr_follow_up" },
+        { sessionId: "ses_child", atMs: 2_600, messageId: "usr_child_task" },
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_root");
+    const rootSteps = snapshot.steps.filter((step) => step.sessionId === "ses_root");
+    // Two prompts before step 1 and one between steps 1 and 2: one marker each.
+    expect(rootSteps.map((step) => step.inputMarker === true)).toEqual([true, true, false]);
+    // A descendant prompt is not a marker on the main chart.
+    expect(snapshot.steps.find((step) => step.sessionId === "ses_child")?.inputMarker).toBe(
+      undefined,
+    );
+    // Positions only: prompt text and even message ids never enter the DTO.
+    expect(JSON.stringify(snapshot)).not.toContain("usr_first");
+    expect(JSON.stringify(snapshot)).not.toContain("usr_follow_up");
+  });
+
+  it("marks the step created after an input that arrives mid-step, not the running step", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        {
+          ...assistantRow("ses_root", "msg_running", 1_000, { input: 1 }),
+          completedAtMs: 10_000,
+        },
+        { ...assistantRow("ses_root", "msg_next", 12_000, { input: 2 }), completedAtMs: 15_000 },
+      ],
+      userMessages: [{ sessionId: "ses_root", atMs: 5_000, messageId: "usr_mid_step" }],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps.map((step) => step.inputMarker === true)).toEqual([false, true]);
+  });
+
+  it("uses stored assistant parentID linkage ahead of creation timing", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        {
+          ...assistantRow("ses_root", "msg_running", 1_000, { input: 1 }),
+          completedAtMs: 10_000,
+        },
+        { ...assistantRow("ses_root", "msg_next", 12_000, { input: 2 }), completedAtMs: 15_000 },
+      ],
+      userMessages: [
+        {
+          sessionId: "ses_root",
+          atMs: 5_000,
+          messageId: "usr_mid_step",
+          replyMessageIds: ["msg_running"],
+        },
+      ],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps.map((step) => step.inputMarker === true)).toEqual([true, false]);
+  });
+
+  it("leaves an input unmarked when the step has no verifiable creation time", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        {
+          ...assistantRow("ses_root", "msg_unknown_start", 1_000, { input: 1 }),
+          createdAtMs: 0,
+          completedAtMs: 10_000,
+        },
+      ],
+      userMessages: [{ sessionId: "ses_root", atMs: 5_000, messageId: "usr_mid_step" }],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps.map((step) => step.inputMarker === true)).toEqual([false]);
+  });
+
+  it("leaves an input unmarked when its time equals the next step's creation time", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        { ...assistantRow("ses_root", "msg_same_ms", 5_000, { input: 1 }), completedAtMs: 9_000 },
+      ],
+      userMessages: [{ sessionId: "ses_root", atMs: 5_000, messageId: "usr_same_ms" }],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps.map((step) => step.inputMarker === true)).toEqual([false]);
+  });
+
+  it("marks a child task prompt on step 1 and a follow-up mid-session without its parent's prompts", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "msg_root", 1_000, { input: 1 }),
+        assistantRow("ses_child", "msg_child_a", 1_000, { input: 2 }),
+        assistantRow("ses_child", "msg_child_b", 3_000, { input: 3 }),
+        assistantRow("ses_child", "msg_child_c", 5_000, { input: 4 }),
+      ],
+      userMessages: [
+        { sessionId: "ses_root", atMs: 1_000, messageId: "usr_root" },
+        { sessionId: "ses_child", atMs: 500, messageId: "usr_child_task" },
+        { sessionId: "ses_child", atMs: 4_500, messageId: "usr_child_follow_up" },
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_child");
+    const childSteps = snapshot.steps.filter((step) => step.sessionId === "ses_child");
+    expect(childSteps.map((step) => step.messageId)).toEqual([
+      "msg_child_a",
+      "msg_child_b",
+      "msg_child_c",
+    ]);
+    expect(childSteps.map((step) => step.inputMarker === true)).toEqual([true, false, true]);
   });
 });

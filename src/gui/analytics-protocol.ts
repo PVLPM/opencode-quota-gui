@@ -8,13 +8,17 @@
 import type {
   AnalyticsGroupQuery,
   AnalyticsGroupSnapshot,
+  AnalyticsRangeReader,
   HomeSnapshot,
   ProjectSnapshot,
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { PricingSnapshotConfig } from "../lib/types.js";
 
 export const ANALYTICS_WORKER_PROTOCOL_VERSION = 1;
+
+export { ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS } from "../contracts/dashboard.js";
 
 export type AnalyticsErrorCode =
   | "bad-request"
@@ -38,6 +42,8 @@ export class AnalyticsReadError extends Error {
 export interface AnalyticsInitOptions {
   snapshotPath?: string;
   refreshIntervalMs?: number;
+  /** Owner's pricing snapshot selection and freshness policy for the worker. */
+  pricingSnapshot?: PricingSnapshotConfig;
 }
 
 /** Cumulative timing for one fixed worker phase; contains no identifying data. */
@@ -65,7 +71,7 @@ export interface AnalyticsWorkerMemoryStats {
 /** A command sent to the one analytics worker. IDs are added by the bridge. */
 export type AnalyticsWorkerCommand =
   | { kind: "init"; options: AnalyticsInitOptions }
-  | { kind: "home"; range: RangeKey }
+  | { kind: "home"; range: RangeKey; exact?: boolean }
   | { kind: "project"; projectId: string; range: RangeKey }
   | { kind: "session"; sessionId: string }
   | { kind: "groups"; query: AnalyticsGroupQuery }
@@ -99,16 +105,22 @@ export interface AnalyticsGenerationNotification {
 }
 
 /**
+ * Unsolicited worker -> host notification: priced-snapshot upkeep (a models.dev
+ * refresh and persistence) is running or has settled. The host keeps the worker
+ * alive while upkeep is active so a refresh started after the last read reply
+ * can finish instead of being cut off by idle retirement.
+ */
+export interface AnalyticsUpkeepNotification {
+  type: "analytics-upkeep";
+  active: boolean;
+}
+
+/**
  * Host-side transport seam. Production uses a Node/Bun worker bridge; tests
  * substitute a loopback transport over the same engine/protocol.
  */
-export interface AnalyticsTransport {
+export interface AnalyticsTransport extends AnalyticsRangeReader {
   init(options: AnalyticsInitOptions): Promise<void>;
-  home(range: RangeKey): Promise<HomeSnapshot>;
-  project(projectId: string, range: RangeKey): Promise<ProjectSnapshot>;
-  session(sessionId: string): Promise<SessionSnapshot>;
-  groups(query: AnalyticsGroupQuery): Promise<AnalyticsGroupSnapshot>;
-  refresh(): Promise<void>;
   /** Optional diagnostics seam; the real worker implements it. */
   stats?(): Promise<AnalyticsWorkerMemoryStats>;
   /** Optional GC seam; returns false when the runtime exposes no hook. */

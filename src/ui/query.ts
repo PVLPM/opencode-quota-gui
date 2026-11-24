@@ -17,7 +17,17 @@ export interface Query<T> {
   run: () => Promise<boolean>;
 }
 
-export function createQuery<T>(fetcher: () => Promise<T>): Query<T> & { invalidate: () => void } {
+/**
+ * `shouldRetry` re-issues the same fetch inside one `run` while it returns true,
+ * so the loading state and its elapsed clock continue. `shouldProbe` allows one
+ * final fetch after the retry budget is spent (for example a cache probe at the
+ * server read deadline). A superseded, invalidated or unmounted run never retries.
+ */
+export function createQuery<T>(
+  fetcher: () => Promise<T>,
+  shouldRetry?: (failure: unknown, elapsedMs: number) => boolean,
+  shouldProbe?: (cause: unknown, elapsedMs: number) => boolean,
+): Query<T> & { invalidate: () => void; set: (value: T) => void } {
   const [data, setData] = createSignal<T | undefined>(undefined);
   const [error, setError] = createSignal<unknown>(undefined);
   const [loading, setLoading] = createSignal(false);
@@ -26,8 +36,25 @@ export function createQuery<T>(fetcher: () => Promise<T>): Query<T> & { invalida
   async function run(): Promise<boolean> {
     const id = ++requestId;
     setLoading(true);
+    const startedAt = Date.now();
     try {
-      const value = await fetcher();
+      let value: T;
+      let probeUsed = false;
+      for (;;) {
+        try {
+          value = await fetcher();
+          break;
+        } catch (failure) {
+          if (id !== requestId) throw failure;
+          const elapsedMs = Date.now() - startedAt;
+          if (shouldRetry?.(failure, elapsedMs)) continue;
+          if (!probeUsed && shouldProbe?.(failure, elapsedMs)) {
+            probeUsed = true;
+            continue;
+          }
+          throw failure;
+        }
+      }
       if (id !== requestId) return false;
       setData(() => value);
       setError(undefined);
@@ -46,5 +73,13 @@ export function createQuery<T>(fetcher: () => Promise<T>): Query<T> & { invalida
     setLoading(false);
   }
 
-  return { data, error, loading, run, invalidate };
+  /** Applies an already-fetched payload and drops any read still in flight. */
+  function set(value: T): void {
+    requestId++;
+    setData(() => value);
+    setError(undefined);
+    setLoading(false);
+  }
+
+  return { data, error, loading, run, invalidate, set };
 }

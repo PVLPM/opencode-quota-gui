@@ -11,6 +11,7 @@
 
 import { existsSync, realpathSync } from "fs";
 import { join } from "path";
+import { ANTHROPIC_OAUTH_MIN_POLL_INTERVAL_MS } from "./anthropic-oauth-throttle.js";
 import {
   DASHBOARD_HIDDEN_CARDS_VERSION,
   normalizeLegacyDashboardHiddenCards,
@@ -21,7 +22,7 @@ import {
   readOpenCodeConfigCandidate,
 } from "./opencode-config-read.js";
 import { getOpencodeRuntimeDirs } from "./opencode-runtime-paths.js";
-import { getQuotaProviderShape, normalizeQuotaProviderId } from "./provider-metadata.js";
+import { getQuotaProviderRegistration, normalizeQuotaProviderId } from "./provider-metadata.js";
 import { isQuotaFormatStyle, resolveQuotaFormatStyle } from "./quota-format-style.js";
 import { cloneQuotaProviders, validateQuotaProviders } from "./quota-providers.js";
 import type {
@@ -77,6 +78,7 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "resetTimeDecimals",
   "resetTimeSpaced",
   "minIntervalMs",
+  "claudeAgentPollIntervalMs",
   "requestTimeoutMs",
   "debug",
   "enabledProviders",
@@ -96,6 +98,7 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "toastDurationMs",
   "onlyCurrentModel",
   "waitForQuotaReset",
+  "autoResumeOnQuotaRecovery",
   "showSessionTokens",
   "sessionTokenScope",
   "tuiSidebarPanel.enabled",
@@ -123,6 +126,7 @@ export const QUOTA_TOAST_SETTING_SOURCE_KEYS = [
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
   "dashboard.cardOrder",
+  "dashboard.rowOrder",
   "dashboard.temporalProviderOverrides",
 ] as const;
 
@@ -178,6 +182,7 @@ const NETWORK_SETTING_SOURCE_KEYS = [
   "enabledProviders",
   "quotaProviders",
   "minIntervalMs",
+  "claudeAgentPollIntervalMs",
   "requestTimeoutMs",
   "pricingSnapshot.source",
   "pricingSnapshot.autoRefresh",
@@ -226,6 +231,7 @@ type ValidatedQuotaToastPatch = {
   resetTimeDecimals?: number;
   resetTimeSpaced?: boolean;
   minIntervalMs?: number;
+  claudeAgentPollIntervalMs?: number;
   requestTimeoutMs?: number;
   debug?: boolean;
   enabledProviders?: string[] | "auto";
@@ -244,6 +250,7 @@ type ValidatedQuotaToastPatch = {
   toastDurationMs?: number;
   onlyCurrentModel?: boolean;
   waitForQuotaReset?: boolean;
+  autoResumeOnQuotaRecovery?: boolean;
   showSessionTokens?: boolean;
   sessionTokenScope?: SessionTokenScope;
   tuiSidebarPanel?: TuiSidebarPanelPatch;
@@ -442,6 +449,9 @@ function cloneConfig(config: QuotaToastConfig): QuotaToastConfig {
       hiddenRows: [...config.dashboard.hiddenRows],
       providerOrder: [...config.dashboard.providerOrder],
       cardOrder: [...config.dashboard.cardOrder],
+      rowOrder: Object.fromEntries(
+        Object.entries(config.dashboard.rowOrder).map(([cardId, ids]) => [cardId, [...ids]]),
+      ),
       temporalProviderOverrides: { ...config.dashboard.temporalProviderOverrides },
     },
   };
@@ -667,7 +677,7 @@ export function normalizeEnabledProviders(value: unknown): NormalizedEnabledProv
     }
 
     const normalized = normalizeQuotaProviderId(provider);
-    if (normalized && getQuotaProviderShape(normalized)) {
+    if (normalized && getQuotaProviderRegistration(normalized)) {
       validProviders.push(normalized);
     } else {
       invalidProviders.push(provider);
@@ -887,6 +897,28 @@ function normalizeTemporalProviderOverrides(value: unknown): Record<string, bool
   return Object.fromEntries(overrides);
 }
 
+/**
+ * Sparse card → ordered row-id list. Each list is deduped and capped like the
+ * flat dashboard id lists; one malformed entry rejects the whole map, matching
+ * the temporal override semantics.
+ */
+function normalizeRowOrder(value: unknown): Record<string, string[]> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const entries = Object.entries(value);
+  if (entries.length > DASHBOARD_HIDDEN_ID_LIMIT) return undefined;
+  const rowOrder: [string, string[]][] = [];
+  for (const [cardId, ids] of entries) {
+    if (cardId.length === 0 || cardId.length > 512 || !Array.isArray(ids)) return undefined;
+    const normalized: string[] = [];
+    for (const id of ids) {
+      if (typeof id !== "string" || id.length === 0 || id.length > 512) return undefined;
+      normalized.push(id);
+    }
+    rowOrder.push([cardId, dedupe(normalized).slice(0, DASHBOARD_HIDDEN_ID_LIMIT)]);
+  }
+  return Object.fromEntries(rowOrder);
+}
+
 function extractDashboardPatch(
   value: unknown,
   reportIssue?: (key: string, message: string) => void,
@@ -932,6 +964,8 @@ function extractDashboardPatch(
     }
     // A layer without a v2 marker owns legacy semantics: a full provider-scope
     // card id meant the whole provider group. Version 2 preserves exact ids.
+    // Legacy aggregate row ids stay verbatim and resolve at render/notification
+    // time to the card's first emitted row, until Settings rewrites them.
     patch[key] =
       key === "hiddenCards" && value.hiddenCardsVersion !== DASHBOARD_HIDDEN_CARDS_VERSION
         ? normalizeLegacyDashboardHiddenCards(ids)
@@ -947,6 +981,15 @@ function extractDashboardPatch(
       );
     } else {
       patch.temporalProviderOverrides = overrides;
+    }
+  }
+
+  if (hasOwnKey(value, "rowOrder")) {
+    const rowOrder = normalizeRowOrder(value.rowOrder);
+    if (rowOrder === undefined) {
+      reportIssue?.("dashboard.rowOrder", "expected an object of card ids mapped to row-id lists");
+    } else {
+      patch.rowOrder = rowOrder;
     }
   }
 
@@ -1067,6 +1110,16 @@ function extractValidatedQuotaToastPatch(
     isPositiveNumber(quotaToastConfig.minIntervalMs)
   ) {
     patch.minIntervalMs = quotaToastConfig.minIntervalMs;
+  }
+
+  if (
+    hasOwnKey(quotaToastConfig, "claudeAgentPollIntervalMs") &&
+    isPositiveNumber(quotaToastConfig.claudeAgentPollIntervalMs)
+  ) {
+    patch.claudeAgentPollIntervalMs = Math.max(
+      ANTHROPIC_OAUTH_MIN_POLL_INTERVAL_MS,
+      quotaToastConfig.claudeAgentPollIntervalMs,
+    );
   }
 
   if (
@@ -1200,6 +1253,13 @@ function extractValidatedQuotaToastPatch(
     typeof quotaToastConfig.waitForQuotaReset === "boolean"
   ) {
     patch.waitForQuotaReset = quotaToastConfig.waitForQuotaReset;
+  }
+
+  if (
+    hasOwnKey(quotaToastConfig, "autoResumeOnQuotaRecovery") &&
+    typeof quotaToastConfig.autoResumeOnQuotaRecovery === "boolean"
+  ) {
+    patch.autoResumeOnQuotaRecovery = quotaToastConfig.autoResumeOnQuotaRecovery;
   }
 
   if (
@@ -1417,6 +1477,14 @@ function applyValidatedQuotaToastPatch(
     applySettingSource(settingSources, "minIntervalMs", sourcePath);
   }
 
+  if (hasOwnKey(patch, "claudeAgentPollIntervalMs")) {
+    config.claudeAgentPollIntervalMs = Math.max(
+      ANTHROPIC_OAUTH_MIN_POLL_INTERVAL_MS,
+      patch.claudeAgentPollIntervalMs!,
+    );
+    applySettingSource(settingSources, "claudeAgentPollIntervalMs", sourcePath);
+  }
+
   if (hasOwnKey(patch, "requestTimeoutMs")) {
     config.requestTimeoutMs = patch.requestTimeoutMs!;
     applySettingSource(settingSources, "requestTimeoutMs", sourcePath);
@@ -1510,6 +1578,11 @@ function applyValidatedQuotaToastPatch(
   if (hasOwnKey(patch, "waitForQuotaReset")) {
     config.waitForQuotaReset = patch.waitForQuotaReset!;
     applySettingSource(settingSources, "waitForQuotaReset", sourcePath);
+  }
+
+  if (hasOwnKey(patch, "autoResumeOnQuotaRecovery")) {
+    config.autoResumeOnQuotaRecovery = patch.autoResumeOnQuotaRecovery!;
+    applySettingSource(settingSources, "autoResumeOnQuotaRecovery", sourcePath);
   }
 
   if (hasOwnKey(patch, "showSessionTokens")) {
@@ -1658,6 +1731,13 @@ function applyValidatedQuotaToastPatch(
     if (patch.dashboard.cardOrder) {
       config.dashboard.cardOrder = [...patch.dashboard.cardOrder];
       applySettingSource(settingSources, "dashboard.cardOrder", sourcePath);
+    }
+
+    if (patch.dashboard.rowOrder) {
+      config.dashboard.rowOrder = Object.fromEntries(
+        Object.entries(patch.dashboard.rowOrder).map(([cardId, ids]) => [cardId, [...ids]]),
+      );
+      applySettingSource(settingSources, "dashboard.rowOrder", sourcePath);
     }
 
     if (patch.dashboard.temporalProviderOverrides) {

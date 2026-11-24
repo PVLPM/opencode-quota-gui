@@ -27,6 +27,7 @@ import type {
   HomeSnapshot,
   ImportPreview,
   JsonValue,
+  ModelIdentity,
   ProjectActivityRow,
   ProjectRootRow,
   ProjectSnapshot,
@@ -44,7 +45,12 @@ import type {
 import { PRIMARY_QUOTA_WINDOW_LIMIT } from "./dashboard.js";
 import { isCostedTokens, isTokenStack } from "./guards.js";
 import type { BankedResetAvailability } from "./openai-quota.js";
-import { isProviderFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
+import {
+  isProviderFailureCategory,
+  isQuotaAttemptOutcome,
+  type ProviderFailureCategory,
+  type QuotaAttemptOutcome,
+} from "./provider-failure.js";
 import { type BucketUnit, isRangeKey, type RangeWindow } from "./ranges.js";
 import type {
   TemporalEffect,
@@ -81,11 +87,11 @@ const TEMPORAL_EFFECT_UNITS = ["api_price", "quota_points"] as const;
 const TEMPORAL_HOLIDAYS = ["CN", "US", "CA"] as const;
 const TEMPORAL_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
 
-function isRecord(value: unknown): value is RecordValue {
+export function isRecord(value: unknown): value is RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isText(value: unknown): value is string {
+export function isText(value: unknown): value is string {
   return typeof value === "string";
 }
 
@@ -258,6 +264,7 @@ function isProviderCard(value: unknown): value is ProviderCard {
   }
   if (!isOptional(value.planLabel, isText)) return false;
   if (!isOptional(value.accountLabel, isText)) return false;
+  if (!isOptional(value.stale, (stale) => stale === true)) return false;
   if (!isOptional(value.providerScopeId, isText)) return false;
   if (!isOptional(value.providerScopeHash, isText)) return false;
   if (!isOptional(value.observedAtIso, isText)) return false;
@@ -271,6 +278,7 @@ function isProviderCard(value: unknown): value is ProviderCard {
         message: string;
         retryable?: boolean;
         retryAtMs?: number;
+        attemptOutcome?: QuotaAttemptOutcome;
         kind?: "intentional-filter";
         failureCategory?: ProviderFailureCategory;
       }[] =>
@@ -282,6 +290,7 @@ function isProviderCard(value: unknown): value is ProviderCard {
             isText(entry.message) &&
             isOptional(entry.retryable, isBoolean) &&
             isOptional(entry.retryAtMs, isFiniteNumber) &&
+            isOptional(entry.attemptOutcome, isQuotaAttemptOutcome) &&
             isOptional(
               entry.kind,
               (kind): kind is "intentional-filter" => kind === "intentional-filter",
@@ -302,11 +311,22 @@ function isProviderCard(value: unknown): value is ProviderCard {
   if (
     !isOptional(
       value.visibilityRows,
-      (rows): rows is { rowId: string; label: string; info?: string }[] =>
+      (
+        rows,
+      ): rows is {
+        rowId: string;
+        label: string;
+        info?: string;
+        aliases?: string[];
+      }[] =>
         isArrayOf(
           rows,
           (row) =>
-            isRecord(row) && isText(row.rowId) && isText(row.label) && isOptional(row.info, isText),
+            isRecord(row) &&
+            isText(row.rowId) &&
+            isText(row.label) &&
+            isOptional(row.info, isText) &&
+            isOptional(row.aliases, (aliases): aliases is string[] => isArrayOf(aliases, isText)),
         ),
     )
   ) {
@@ -527,6 +547,8 @@ export function isHomeSnapshot(value: unknown): value is HomeSnapshot {
     isFiniteNumber(value.generatedAtMs) &&
     isRangeKey(value.range) &&
     isBoolean(value.stale) &&
+    isOptional(value.provisional, (provisional) => provisional === true) &&
+    isOptional(value.exactError, isText) &&
     isProviders(value.providers) &&
     isUsage(value.usage) &&
     isArrayOf(value.projects, isProjectActivityRow)
@@ -662,6 +684,15 @@ function isSessionBreadcrumb(value: unknown): value is SessionSnapshot["breadcru
   );
 }
 
+function isModelIdentity(value: unknown): value is ModelIdentity {
+  return (
+    isRecord(value) &&
+    isText(value.providerId) &&
+    isText(value.modelId) &&
+    isOptional(value.effort, isText)
+  );
+}
+
 function isSessionNode(value: unknown): value is SessionNode {
   return (
     isRecord(value) &&
@@ -676,7 +707,9 @@ function isSessionNode(value: unknown): value is SessionNode {
     isCostedTokens(value.subtreeTokens) &&
     isFiniteNumber(value.stepCount) &&
     isFiniteNumber(value.subtreeNodeCount) &&
-    isFiniteNumber(value.latestActivityAtMs)
+    isFiniteNumber(value.latestActivityAtMs) &&
+    isArrayOf(value.models, isModelIdentity) &&
+    isOptional(value.cacheUnknownSteps, isFiniteNumber)
   );
 }
 
@@ -686,16 +719,16 @@ function isStepPoint(value: unknown): value is StepPoint {
     isText(value.sessionId) &&
     isText(value.messageId) &&
     isFiniteNumber(value.atMs) &&
+    isOptional(value.createdAtMs, isFiniteNumber) &&
     isFiniteNumber(value.branch) &&
     isTokenStack(value.stack) &&
     isFiniteNumber(value.contextTokens) &&
     isFiniteNumber(value.totalTokens) &&
-    isOptional(
-      value.model,
-      (model): model is { providerId: string; modelId: string } =>
-        isRecord(model) && isText(model.providerId) && isText(model.modelId),
-    ) &&
-    isOptional(value.agent, isText)
+    isOptional(value.model, isModelIdentity) &&
+    isOptional(value.agent, isText) &&
+    isOptional(value.cacheReadUnknown, (flag): flag is true => flag === true) &&
+    isOptional(value.cacheWriteUnknown, (flag): flag is true => flag === true) &&
+    isOptional(value.inputMarker, (flag): flag is true => flag === true)
   );
 }
 
@@ -719,6 +752,7 @@ export function isSessionSnapshot(value: unknown): value is SessionSnapshot {
     isArrayOf(value.nodes, isSessionNode) &&
     isArrayOf(value.steps, isStepPoint) &&
     isArrayOf(value.compactionMarkers, isCompactionMarker) &&
+    isOptional(value.unobservedAtMs, (list): list is number[] => isArrayOf(list, isFiniteNumber)) &&
     isCostedTokens(value.ownSummary) &&
     isFiniteNumber(value.ownSummary.stepCount) &&
     isCostedTokens(value.treeTotals) &&

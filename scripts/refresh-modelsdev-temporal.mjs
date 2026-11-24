@@ -600,6 +600,37 @@ function parseRate(value, label) {
   return value;
 }
 
+/**
+ * The unconditional `cost.text.*` rates. Absolute overrides replace these, so
+ * they are the only correct reference for deciding whether a rule raises or
+ * lowers a price. The runtime pricing snapshot can be a different, derived
+ * price and must not be used for that comparison.
+ */
+function parseBaseRates(costText) {
+  if (!isObject(costText)) return null;
+  const rates = {};
+  const input = costText.input;
+  if (isObject(input)) {
+    if ("price" in input) rates.input = parseRate(input.price, "cost.text.input.price");
+    if (isObject(input.cache)) {
+      if ("read" in input.cache) {
+        rates.cache_read = parseRate(input.cache.read, "cost.text.input.cache.read");
+      }
+      if ("write" in input.cache) {
+        rates.cache_write = parseRate(input.cache.write, "cost.text.input.cache.write");
+      }
+    }
+  }
+  const output = costText.output;
+  if (isObject(output)) {
+    if ("price" in output) rates.output = parseRate(output.price, "cost.text.output.price");
+    if ("reasoning" in output) {
+      rates.reasoning = parseRate(output.reasoning, "cost.text.output.reasoning");
+    }
+  }
+  return Object.keys(rates).length > 0 ? sortedRates(rates) : null;
+}
+
 function parseOverrideRates(raw, field, label) {
   if (!isObject(raw)) throw new Error(`${label} must be an object`);
   const allowed = field === "input" ? ["when", "price", "cache"] : ["when", "price", "reasoning"];
@@ -747,10 +778,27 @@ export function extractTemporalModel(providerId, modelId, sourcePath, text) {
   ) {
     unsupportedReason = "model mixes temporal and non-temporal cost rules";
   }
+  let base = null;
+  if (unsupportedReason === null && overrides.length > 0) {
+    try {
+      base = parseBaseRates(parsed.cost?.text);
+    } catch (error) {
+      unsupportedReason = error instanceof Error ? error.message : String(error);
+    }
+    if (unsupportedReason === null && base === null) {
+      unsupportedReason = "absolute overrides require unconditional base rates";
+    }
+  }
   if (unsupportedReason !== null) {
     return { status: "unsupported", source: sourcePath, reason: unsupportedReason };
   }
-  return { status: "supported", source: sourcePath, overrides, multipliers };
+  return {
+    status: "supported",
+    source: sourcePath,
+    ...(base ? { base } : {}),
+    overrides,
+    multipliers,
+  };
 }
 
 function sortObject(record) {

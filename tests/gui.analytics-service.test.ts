@@ -330,6 +330,62 @@ describe("analytics read service", () => {
     await service.close();
   });
 
+  it("initializes the transport once for simultaneous first callers", async () => {
+    let initCalls = 0;
+    let releaseInit: (() => void) | undefined;
+    const trace: TransportTrace = { init: 0, calls: [], closed: 0 };
+    const base = fakeTransport(trace);
+    const transport: AnalyticsTransport = {
+      ...base,
+      async init() {
+        initCalls += 1;
+        await new Promise<void>((resolve) => {
+          releaseInit = resolve;
+        });
+      },
+    };
+    const createTransport = vi.fn(() => transport);
+    const service = createAnalyticsReadService({ createTransport });
+
+    const first = service.home({ range: "7d" });
+    const second = service.refresh();
+    await vi.waitFor(() => expect(releaseInit).toBeDefined());
+    releaseInit?.();
+    await Promise.all([first, second]);
+
+    expect(createTransport).toHaveBeenCalledTimes(1);
+    expect(initCalls).toBe(1);
+    await service.close();
+  });
+
+  it("counts one failed init once when callers overlap, so a transient failure recovers", async () => {
+    let initCalls = 0;
+    const trace: TransportTrace = { init: 0, calls: [], closed: 0 };
+    const base = fakeTransport(trace);
+    const transport: AnalyticsTransport = {
+      ...base,
+      async init() {
+        initCalls += 1;
+        if (initCalls === 1) throw new AnalyticsReadError("unavailable");
+      },
+    };
+    const service = createAnalyticsReadService({
+      createTransport: () => transport,
+      maxTransportAttempts: 2,
+      transportRetryBaseMs: 0,
+    });
+
+    const results = await Promise.allSettled([
+      service.home({ range: "7d" }),
+      service.home({ range: "7d" }),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+    // One transient init failure must not exhaust a two-attempt budget.
+    await expect(service.home({ range: "7d" })).resolves.toMatchObject({ range: "7d" });
+    expect(initCalls).toBe(2);
+    await service.close();
+  });
+
   it("forwards transport generation notifications only after initialization", async () => {
     let notify: (() => void) | undefined;
     const transport: AnalyticsTransport = {

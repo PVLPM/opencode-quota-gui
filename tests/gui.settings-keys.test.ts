@@ -80,8 +80,10 @@ const EXPECTED_KEYS = [
   "resetTimeDecimals",
   "resetTimeSpaced",
   "waitForQuotaReset",
+  "autoResumeOnQuotaRecovery",
   "enabledProviders",
   "minIntervalMs",
+  "claudeAgentPollIntervalMs",
   "requestTimeoutMs",
   "accountingDetail",
   "lowQuotaThresholdRemainingPercent",
@@ -93,6 +95,7 @@ const EXPECTED_KEYS = [
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
   "dashboard.cardOrder",
+  "dashboard.rowOrder",
   "dashboard.temporalProviderOverrides",
   "dashboard.enabled",
   "dashboard.port",
@@ -139,8 +142,10 @@ describe("GUI settings keys", () => {
       resetTimeDecimals: null,
       resetTimeSpaced: true,
       waitForQuotaReset: true,
+      autoResumeOnQuotaRecovery: false,
       enabledProviders: "auto",
       minIntervalMs: 60000,
+      claudeAgentPollIntervalMs: 180000,
       requestTimeoutMs: 5000,
       accountingDetail: "summary",
       lowQuotaThresholdRemainingPercent: 10,
@@ -163,6 +168,7 @@ describe("GUI settings keys", () => {
       "dashboard.hiddenRows": [],
       "dashboard.providerOrder": [],
       "dashboard.cardOrder": [],
+      "dashboard.rowOrder": {},
       "dashboard.temporalProviderOverrides": {},
       "dashboard.enabled": false,
       "dashboard.port": 4144,
@@ -226,6 +232,39 @@ describe("GUI settings keys", () => {
       }),
       "invalid-setting",
     );
+  });
+
+  it("defaults the Claude Agent polling interval and enforces the one-minute GUI floor", async () => {
+    const workspace = makeWorkspace();
+    const store = makeStore(workspace);
+    const before = await store.settings();
+    expect(before.values.claudeAgentPollIntervalMs).toBe(180_000);
+
+    const saved = await store.saveSettings({
+      patch: { claudeAgentPollIntervalMs: 60_000 },
+      expectedRevision: before.revision,
+    });
+    expect(saved.applied).toEqual({ claudeAgentPollIntervalMs: 60_000 });
+    expect(readDotted(workspace, "claudeAgentPollIntervalMs")).toBe(60_000);
+
+    const after = await store.settings();
+    const error = await expectGuiError(
+      store.saveSettings({
+        patch: { claudeAgentPollIntervalMs: 59_999 },
+        expectedRevision: after.revision,
+      }),
+      "invalid-setting",
+      { key: "claudeAgentPollIntervalMs" },
+    );
+    expect(error.message).toContain("60000");
+    expect(readDotted(workspace, "claudeAgentPollIntervalMs")).toBe(60_000);
+
+    const raised = await store.saveSettings({
+      patch: { claudeAgentPollIntervalMs: 240_000 },
+      expectedRevision: after.revision,
+    });
+    expect(raised.applied).toEqual({ claudeAgentPollIntervalMs: 240_000 });
+    expect(readDotted(workspace, "claudeAgentPollIntervalMs")).toBe(240_000);
   });
 
   it("reads dashboard.port from the canonical file and keeps it read-only", async () => {
@@ -449,6 +488,11 @@ describe("GUI settings keys", () => {
     ["dashboard.hiddenRows", ["card-1#row-1"], ["card-1#row-1"]],
     ["dashboard.providerOrder", ["provider-1", "provider-2"], ["provider-1", "provider-2"]],
     ["dashboard.cardOrder", ["card-2", "card-1"], ["card-2", "card-1"]],
+    [
+      "dashboard.rowOrder",
+      { "card-1": ["card-1#row-b", "card-1#row-a"], "card-2": [] },
+      { "card-1": ["card-1#row-b", "card-1#row-a"], "card-2": [] },
+    ],
     ["dashboard.enabled", true, true],
     ["dashboard.enabled", false, false],
     [
@@ -564,6 +608,7 @@ describe("GUI settings keys", () => {
         "dashboard.hiddenCards": ["a", "a", "b"],
         "dashboard.providerOrder": ["second", "first", "second"],
         "dashboard.cardOrder": ["card-b", "card-a", "card-b"],
+        "dashboard.rowOrder": { "card-b": ["row-2", "row-1", "row-2"] },
       },
       expectedRevision: before.revision,
     });
@@ -572,6 +617,9 @@ describe("GUI settings keys", () => {
     expect(readDotted(workspace, "dashboard.hiddenCards")).toEqual(["a", "b"]);
     expect(readDotted(workspace, "dashboard.providerOrder")).toEqual(["second", "first"]);
     expect(readDotted(workspace, "dashboard.cardOrder")).toEqual(["card-b", "card-a"]);
+    expect(readDotted(workspace, "dashboard.rowOrder")).toEqual({
+      "card-b": ["row-2", "row-1"],
+    });
   });
 
   it("rejects unknown keys with unknown-setting and writes nothing", async () => {
@@ -626,6 +674,15 @@ describe("GUI settings keys", () => {
       Array.from({ length: 501 }, (_value, index) => `provider-${index}`),
     ],
     ["dashboard.cardOrder", Array.from({ length: 501 }, (_value, index) => `card-${index}`)],
+    ["dashboard.rowOrder", []],
+    ["dashboard.rowOrder", { "card-1": "row-1" }],
+    ["dashboard.rowOrder", { "card-1": [1] }],
+    ["dashboard.rowOrder", { "card-1": [""] }],
+    ["dashboard.rowOrder", { "": ["row-1"] }],
+    [
+      "dashboard.rowOrder",
+      { "card-1": Array.from({ length: 501 }, (_value, index) => `row-${index}`) },
+    ],
     ["dashboard.enabled", "yes"],
     ["dashboard.enabled", 1],
   ];
