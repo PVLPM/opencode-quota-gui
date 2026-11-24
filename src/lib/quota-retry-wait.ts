@@ -413,12 +413,9 @@ export async function probeQuotaForModelState(
 
 /** One live quota probe for the model's provider. `undefined` when disabled or unavailable. */
 export async function probeQuotaForModel(
-  host: Pick<QuotaSurfaceHost, "client" | "roots">,
-  model: { readonly id: string; readonly providerID: string },
-  isEnabled: (config: QuotaToastConfig) => boolean,
-  options: { includeProviderScope?: boolean } = {},
+  ...args: Parameters<typeof probeQuotaForModelState>
 ): Promise<QuotaModelProbe | undefined> {
-  const result = await probeQuotaForModelState(host, model, isEnabled, options);
+  const result = await probeQuotaForModelState(...args);
   return result.state === "probe" ? result.probe : undefined;
 }
 

@@ -227,6 +227,24 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
     return { kind: "ok", info };
   }
 
+  /** Reads the session; cancels or re-polls itself and returns `undefined` unless it is usable. */
+  async function readLiveSession(
+    sessionID: string,
+    resume: PendingResume,
+  ): Promise<QuotaAutoResumeSessionInfo | undefined> {
+    const state = sessionState(await readSession(sessionID), resume);
+    if (disposed || pending.get(sessionID) !== resume) return undefined;
+    if (state.kind === "cancel") {
+      cancel(sessionID);
+      return undefined;
+    }
+    if (state.kind === "unavailable") {
+      retryLater(sessionID, resume);
+      return undefined;
+    }
+    return state.info;
+  }
+
   type ProbeState =
     | { kind: "collection"; collection: QuotaWindowCollection }
     | { kind: "cancelled" }
@@ -390,16 +408,7 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
 
   async function fire(sessionID: string, resume: PendingResume): Promise<void> {
     // Re-check after the probe: a user prompt or a resume may have landed while it ran.
-    const state = sessionState(await readSession(sessionID), resume);
-    if (disposed || pending.get(sessionID) !== resume) return;
-    if (state.kind === "cancel") {
-      cancel(sessionID);
-      return;
-    }
-    if (state.kind === "unavailable") {
-      retryLater(sessionID, resume);
-      return;
-    }
+    if ((await readLiveSession(sessionID, resume)) === undefined) return;
     // Single-flight: removing the entry before the prompt makes a second fire impossible.
     pending.delete(sessionID);
     // A failure from the execution this prompt starts must not schedule another continue.
@@ -420,17 +429,8 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
 
   async function evaluate(sessionID: string, resume: PendingResume): Promise<void> {
     if (disposed || pending.get(sessionID) !== resume) return;
-    const state = sessionState(await readSession(sessionID), resume);
-    if (disposed || pending.get(sessionID) !== resume) return;
-    if (state.kind === "cancel") {
-      cancel(sessionID);
-      return;
-    }
-    if (state.kind === "unavailable") {
-      retryLater(sessionID, resume);
-      return;
-    }
-    const info = state.info;
+    const info = await readLiveSession(sessionID, resume);
+    if (info === undefined) return;
     const model = info.model;
     if (model === undefined) {
       retryLater(sessionID, resume);
