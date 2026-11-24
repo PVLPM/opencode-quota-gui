@@ -570,6 +570,83 @@ describe("temporal status projection", () => {
     });
   });
 
+  it("keeps OpenCode Go DeepSeek peak windows and treats Zen DeepSeek as flat", () => {
+    setTemporalSnapshotForTests(actualSnapshot());
+    const catalog = readBundledTemporalCatalog();
+    expect([...(catalog.routes["opencode-go"] ?? [])].sort()).toEqual([
+      "deepseek-v4-pro",
+      "deepseek-v4.1-flash",
+    ]);
+    // OpenCode Zen publishes flat DeepSeek prices, so it has no temporal
+    // route even though its models can share the Go route ids.
+    expect(catalog.routes.opencode).toBeUndefined();
+
+    const goAt = (nowIso: string) =>
+      buildTemporalStatus({
+        providers: [{ providerId: "opencode-go", providerLabel: "OpenCode Go", discovered: true }],
+        nowMs: Date.parse(nowIso),
+        routes: catalog.routes,
+        holidays: catalog.holidays,
+      }).providers[0];
+
+    const peak = goAt("2026-11-24T02:00:00.000Z");
+    expect(peak?.models.map((entry) => entry.modelId).sort()).toEqual([
+      "deepseek-v4-pro",
+      "deepseek-v4.1-flash",
+    ]);
+    for (const model of peak?.models ?? []) {
+      expect(model).toMatchObject({
+        state: "peak",
+        effect: { factor: 2, direction: "peak", unit: "api_price" },
+        nextChangeAtMs: Date.parse("2026-11-24T04:00:00.000Z"),
+        nextState: "offpeak",
+      });
+      expect(model.weekly).toEqual({
+        timeZone: "UTC",
+        utcOffsetMinutes: 0,
+        basePhase: "offpeak",
+        baseEffect: { factor: 1, direction: "unchanged", unit: "api_price", scalar: true },
+        windows: [
+          {
+            days: WEEKDAYS,
+            startMinute: 60,
+            endMinute: 240,
+            phase: "peak",
+            effect: { factor: 2, direction: "peak", unit: "api_price", scalar: true },
+          },
+          {
+            days: WEEKDAYS,
+            startMinute: 360,
+            endMinute: 600,
+            phase: "peak",
+            effect: { factor: 2, direction: "peak", unit: "api_price", scalar: true },
+          },
+        ],
+      });
+      // Go does not apply DeepSeek's Chinese-holiday exception.
+      expect(model.weekly?.exceptHolidays).toBeUndefined();
+    }
+
+    const offpeak = goAt("2026-11-24T04:00:00.000Z");
+    expect(offpeak?.models).toHaveLength(2);
+    for (const model of offpeak?.models ?? []) {
+      expect(model).toMatchObject({
+        state: "offpeak",
+        effect: { factor: 1, direction: "unchanged", unit: "api_price" },
+        nextChangeAtMs: Date.parse("2026-11-24T06:00:00.000Z"),
+        nextState: "peak",
+      });
+    }
+
+    const zen = buildTemporalStatus({
+      providers: [{ providerId: "opencode", providerLabel: "OpenCode Zen", discovered: true }],
+      nowMs: Date.parse("2026-11-24T02:00:00.000Z"),
+      routes: catalog.routes,
+      holidays: catalog.holidays,
+    });
+    expect(zen.providers).toEqual([]);
+  });
+
   it("keeps a surcharge-only policy's unchanged baseline on off-peak", () => {
     const deepseek = build("2026-01-05T04:00:00.000Z").providers.find(
       (provider) => provider.providerId === "deepseek",
