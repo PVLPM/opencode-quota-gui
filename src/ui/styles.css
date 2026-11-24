@@ -2678,8 +2678,9 @@
   background: var(--qg-frame);
 }
 
-.qg-vis-provider[data-dragging="true"],
-.qg-vis-row[data-dragging="true"] {
+/* A lifted card or row is one drag surface: same elevation and no selection. */
+.qg-vis-row[data-dragging="true"],
+.qg-vis-provider[data-dragging="true"] {
   box-shadow: 0 10px 28px #0005;
   cursor: grabbing;
   user-select: none;
