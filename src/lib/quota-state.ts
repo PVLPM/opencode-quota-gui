@@ -26,6 +26,7 @@ import type { PersistedQuotaProviderCacheEntry } from "./quota-state-codec.js";
 import {
   cloneQuotaProviderResult,
   decodePersistedQuotaProviderCacheEntry,
+  describeQuotaProviderResultViolation,
   encodePersistedQuotaProviderCacheEntry,
   normalizeQuotaProviderResult,
 } from "./quota-state-codec.js";
@@ -269,6 +270,9 @@ async function fetchValidatedProviderResult(
         label: getQuotaProviderDisplayLabel(provider.id),
         message: "Invalid normalized provider result",
       },
+    ],
+    statusDetails: [
+      { key: "normalization_violation", value: describeQuotaProviderResultViolation(fetched) },
     ],
   };
 }

@@ -2859,6 +2859,7 @@ describe("quota-state shared cache", () => {
       attempted: true,
       entries: [],
       errors: [{ label: "Synthetic", message: "Invalid normalized provider result" }],
+      statusDetails: [{ key: "normalization_violation", value: "entries[0]" }],
     });
     expect(second).toEqual(first);
     expect(provider.fetch).toHaveBeenCalledTimes(2);
@@ -3035,6 +3036,7 @@ describe("quota-state shared cache", () => {
       attempted: true,
       entries: [],
       errors: [{ label: "OpenCode Zen", message: "Invalid normalized provider result" }],
+      statusDetails: [{ key: "normalization_violation", value: "entries[0]" }],
     });
     expect(second).toEqual(first);
     expect(provider.fetch).toHaveBeenCalledTimes(2);

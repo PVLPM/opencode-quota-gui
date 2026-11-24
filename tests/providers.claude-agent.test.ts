@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { normalizeQuotaProviderResult } from "../src/lib/quota-state-codec.js";
 import { anthropicProvider } from "../src/providers/anthropic.js";
 import { claudeAgentProvider } from "../src/providers/claude-agent.js";
 import {
@@ -234,6 +235,77 @@ describe("claude agent provider", () => {
         retryAtMs: 1_700_000_000_000,
       }),
     ]);
+  });
+
+  // Regression: errors carrying `attemptOutcome` were rejected by the codec, so every cooldown or
+  // transient failure replaced the card (and its last-good rows) with "Invalid normalized provider
+  // result".
+  it.each([
+    "cooldown",
+    "transient",
+    "credentials",
+  ] as const)("keeps a %s usage failure valid through normalization", async (attemptOutcome) => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    vi.mocked(getAnthropicDiagnostics).mockResolvedValue({
+      installed: true,
+      authStatus: "authenticated",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+      message: "Anthropic API returned 429",
+      failureCategory: attemptOutcome === "credentials" ? "credentials" : "provider_api",
+      attemptOutcome,
+      retryAtMs: 1_700_000_000_000,
+    } as never);
+    const fetched = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({ providerIds: ["claude-agent"] }),
+    );
+    const normalized = normalizeQuotaProviderResult(fetched);
+    expect(normalized?.errors).toEqual([
+      expect.objectContaining({
+        label: "Claude Agent",
+        attemptOutcome,
+        retryAtMs: 1_700_000_000_000,
+      }),
+    ]);
+    expect(
+      normalizeQuotaProviderResult({
+        ...fetched,
+        errors: [{ ...fetched.errors[0], attemptOutcome: "guess" }],
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps a full OAuth usage result valid through normalization", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    vi.mocked(getAnthropicDiagnostics).mockResolvedValue({
+      installed: true,
+      version: "2.1.258",
+      authStatus: "authenticated",
+      quotaSupported: true,
+      quotaSource: "claude-credentials-oauth-api",
+      oauthCredentialSource: "claude-credentials",
+      checkedCommands: ["claude --version"],
+      attemptOutcome: "fresh",
+      quotaMeasuredAtMs: Date.UTC(2026, 10, 24, 9, 0, 0),
+      planLabel: "Max",
+      quota: {
+        success: true,
+        five_hour: { percentRemaining: 58, resetTimeIso: "2026-11-24T14:10:00.268Z" },
+        seven_day: { percentRemaining: 72, resetTimeIso: "2026-11-27T07:00:00.268Z" },
+        fable_weekly: { percentRemaining: 98, resetTimeIso: "2026-11-27T07:00:00.268Z" },
+        saved_resets: {
+          availableCount: 1,
+          credits: [{ expiresAtIso: "2099-01-01T00:00:00.000Z" }],
+        },
+      },
+    } as never);
+    const fetched = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({ providerIds: ["claude-agent"] }),
+    );
+    const normalized = normalizeQuotaProviderResult(fetched);
+    expect(normalized).not.toBeNull();
+    expect(normalized?.entries).toHaveLength(fetched.entries.length);
   });
 
   it("reports a timed-out CLI probe as a retryable provider failure without claiming a quota request", async () => {

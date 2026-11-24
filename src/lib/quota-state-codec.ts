@@ -1,4 +1,4 @@
-import { isProviderFailureCategory } from "../contracts/provider-failure.js";
+import { isProviderFailureCategory, isQuotaAttemptOutcome } from "../contracts/provider-failure.js";
 import { accountingUnitsEqual, isCanonicalAccountingDecimal } from "./accounting-format.js";
 import { sanitizeQuotaProviderResult, sanitizeSingleLineDisplayText } from "./display-sanitize.js";
 import type {
@@ -348,8 +348,10 @@ function isQuotaToastError(value: unknown): boolean {
       "kind",
       "sourceId",
       "retryAtMs",
+      "attemptOutcome",
     ]) &&
     typeof value.label === "string" &&
+    (value.attemptOutcome === undefined || isQuotaAttemptOutcome(value.attemptOutcome)) &&
     typeof value.message === "string" &&
     (value.retryAtMs === undefined ||
       (Number.isSafeInteger(value.retryAtMs) && (value.retryAtMs as number) >= 0)) &&
@@ -511,6 +513,17 @@ function isQuotaProviderResult(value: unknown, safeText: boolean): value is Quot
       (isDenseArray(value.rawDetails) && value.rawDetails.every(isQuotaProviderStatusDetail))) &&
     (value.presentation === undefined || isQuotaProviderPresentation(value.presentation))
   );
+}
+
+/** Privacy-safe location of the first contract violation, e.g. `errors[0]`; never field values. */
+export function describeQuotaProviderResultViolation(value: unknown): string {
+  if (!isRecord(value) || !isDenseArray(value.entries) || !isDenseArray(value.errors)) {
+    return "result";
+  }
+  const entry = value.entries.findIndex((item) => !isQuotaToastEntry(item, false));
+  if (entry >= 0) return `entries[${entry}]`;
+  const error = value.errors.findIndex((item) => !isQuotaToastError(item));
+  return error >= 0 ? `errors[${error}]` : "result";
 }
 
 export function normalizeQuotaProviderResult(value: unknown): QuotaProviderResult | null {
