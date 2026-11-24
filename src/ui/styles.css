@@ -2678,13 +2678,23 @@
   background: var(--qg-frame);
 }
 
-.qg-vis-provider[data-dragging="true"] {
-  border-color: var(--qg-border-strong);
+.qg-vis-provider[data-dragging="true"],
+.qg-vis-row[data-dragging="true"] {
   box-shadow: 0 10px 28px #0005;
   cursor: grabbing;
   user-select: none;
   -webkit-user-select: none;
   transition: none;
+}
+
+.qg-vis-provider[data-dragging="true"] {
+  border-color: var(--qg-border-strong);
+}
+
+/* A lifted row keeps its own surface so the rows underneath do not show through. */
+.qg-vis-row[data-dragging="true"] {
+  border-radius: var(--qg-radius);
+  background: var(--qg-surface);
 }
 
 .qg-vis-legacy {
@@ -2769,7 +2779,8 @@
   grid-template-columns: 20px minmax(0, 1fr) 28px;
   align-items: center;
   column-gap: 8px;
-  padding: 5px 8px;
+  /* Nested fields sit one step in from the provider header's grip and name. */
+  padding: 5px 8px 5px 16px;
   border-top: 1px solid var(--qg-border);
 }
 
@@ -2790,7 +2801,8 @@
   overflow-wrap: anywhere;
 }
 
-/* Rows reserve the grip column so labels share the provider name's left edge. */
+/* Rows keep the same grid so grip, label and eye stay in their columns; only
+   the row's left inset differs, which nests the field under the provider. */
 .qg-vis-provider__head > .qg-eye,
 .qg-vis-row > .qg-eye {
   grid-column: 3;

@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { createCardSorter } from "../src/ui/sortable-cards";
 
+/**
+ * Layout-aware stand-in for the real DOM.
+ *
+ * Each card has a layout slot (top = 100px × position) and an optional inline
+ * transform. Rectangles are reported in viewport pixels, including a host
+ * offset and scale, which is what an embedded host's transform does. The
+ * controller must place the card at the same viewport point the pointer is
+ * holding, so cardTop() below includes both the host mapping and the transform.
+ */
 function rig(reducedMotion = false) {
   const original = ["anthropic:a", "openrouter:a", "anthropic:b"];
   let order = [...original];
@@ -8,20 +17,60 @@ function rig(reducedMotion = false) {
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 0;
   const commits = vi.fn();
-  const node = (id: string) => ({
-    style: { setProperty: vi.fn(), removeProperty: vi.fn() },
-    getBoundingClientRect: () => ({
-      top: order.indexOf(id) * 100,
-      bottom: order.indexOf(id) * 100 + 90,
-      left: 20,
-      width: 400,
-      height: 90,
-    }),
+  const host = { left: 0, top: 0, scale: 1 };
+  const declarations = new Map<string, Map<string, string>>();
+
+  const styleFor = (key: string) => {
+    let values = declarations.get(key);
+    if (values === undefined) {
+      values = new Map<string, string>();
+      declarations.set(key, values);
+    }
+    return {
+      setProperty: vi.fn((name: string, value: string) => values.set(name, value)),
+      removeProperty: vi.fn((name: string) => values.delete(name)),
+    };
+  };
+  const translateFor = (id: string) => {
+    const raw = declarations.get(`${id}:card`)?.get("transform") ?? "";
+    const found = /translate3d\((-?[\d.]+)px, (-?[\d.]+)px/u.exec(raw);
+    return { x: found ? Number(found[1]) : 0, y: found ? Number(found[2]) : 0 };
+  };
+  const layoutTop = (id: string) => host.top + order.indexOf(id) * 100 * host.scale;
+  const cardTop = (id: string) => layoutTop(id) + translateFor(id).y * host.scale;
+  const cardRect = (id: string) => ({
+    top: cardTop(id),
+    bottom: cardTop(id) + 90 * host.scale,
+    left: host.left + (20 + translateFor(id).x) * host.scale,
+    width: 400 * host.scale,
+    height: 90 * host.scale,
+  });
+  const slotRect = (id: string) => ({
+    top: layoutTop(id),
+    bottom: layoutTop(id) + 90 * host.scale,
+    left: host.left + 20 * host.scale,
+    width: 400 * host.scale,
+    height: 90 * host.scale,
+  });
+  const node = (id: string, kind: "slot" | "card" | "grip") => ({
+    style: styleFor(`${id}:${kind}`),
+    offsetWidth: kind === "grip" ? 24 : 400,
+    offsetHeight: kind === "grip" ? 28 : 90,
+    getBoundingClientRect: () =>
+      kind === "slot"
+        ? slotRect(id)
+        : kind === "card"
+          ? cardRect(id)
+          : { ...cardRect(id), top: cardRect(id).top + 10, height: 28, width: 24 },
     animate: vi.fn(() => ({ cancel: vi.fn() })),
     focus: vi.fn(),
+    isConnected: true,
   });
   const nodes = new Map(
-    original.map((id) => [id, { slot: node(id), card: node(id), grip: node(id) }]),
+    original.map((id) => [
+      id,
+      { slot: node(id, "slot"), card: node(id, "card"), grip: node(id, "grip") },
+    ]),
   );
   const capture = {
     setPointerCapture: vi.fn(),
@@ -72,9 +121,34 @@ function rig(reducedMotion = false) {
     event,
     flush,
     frames,
+    host,
     order: () => order,
     active: () => active,
+    cardTop,
+    transform: (id: string) => declarations.get(`${id}:card`)?.get("transform"),
   };
+}
+
+/** Stub a window that records both bubbling and capture-phase listeners. */
+function stubWindow() {
+  const listeners = new Map<
+    string,
+    { listener: (event: unknown) => void; capture: boolean | undefined }
+  >();
+  vi.stubGlobal("window", {
+    addEventListener: (
+      name: string,
+      listener: (event: unknown) => void,
+      capture?: boolean | { capture?: boolean },
+    ) => {
+      listeners.set(name, {
+        listener,
+        capture: typeof capture === "boolean" ? capture : capture?.capture,
+      });
+    },
+    removeEventListener: (name: string) => listeners.delete(name),
+  });
+  return listeners;
 }
 
 describe("whole-card pointer sorting controller", () => {
@@ -89,9 +163,19 @@ describe("whole-card pointer sorting controller", () => {
     expect(r.order()).toEqual(["openrouter:a", "anthropic:b", "anthropic:a"]);
     expect(r.nodes.get("anthropic:a")?.card.style.setProperty).toHaveBeenCalledWith(
       "position",
+      "relative",
+    );
+    // The card is never taken out of flow: a viewport-fixed preview resolves
+    // against a transformed host ancestor and lands away from the pointer.
+    expect(r.nodes.get("anthropic:a")?.card.style.setProperty).not.toHaveBeenCalledWith(
+      "position",
       "fixed",
     );
     expect(r.nodes.get("openrouter:a")?.card.animate).toHaveBeenCalled();
+    // Grab point was 20px into the card; after the preview moves the slot the
+    // rendered top still holds the pointer, not the slot's new position.
+    expect(r.cardTop("anthropic:a")).toBeCloseTo(205);
+    expect(r.transform("anthropic:a")).toBe("translate3d(0px, 5px, 0)");
     expect(r.commits).not.toHaveBeenCalled();
     r.sorter.up(r.event(225));
     expect(r.commits).toHaveBeenCalledTimes(1);
@@ -101,6 +185,7 @@ describe("whole-card pointer sorting controller", () => {
     );
     expect(r.capture.releasePointerCapture).toHaveBeenCalledWith(1);
     expect(r.active()).toBeUndefined();
+    expect(r.transform("anthropic:a")).toBeUndefined();
   });
 
   it.each([
@@ -118,6 +203,8 @@ describe("whole-card pointer sorting controller", () => {
     expect(r.commits).not.toHaveBeenCalled();
     expect(r.frames.size).toBe(0);
     expect(r.active()).toBeUndefined();
+    expect(r.transform("anthropic:a")).toBeUndefined();
+    expect(r.cardTop("anthropic:a")).toBeCloseTo(0);
   });
 
   it("ignores other pointers and a click without movement never changes the draft", () => {
@@ -127,6 +214,7 @@ describe("whole-card pointer sorting controller", () => {
     r.sorter.up(r.event(20));
     expect(r.commits).not.toHaveBeenCalled();
     expect(r.order()).toEqual(r.original);
+    expect(r.transform("anthropic:a")).toBeUndefined();
   });
 
   it("coalesces pointer moves into one frame and suppresses FLIP for reduced motion", () => {
@@ -137,9 +225,29 @@ describe("whole-card pointer sorting controller", () => {
     r.flush();
     expect(r.order()).toEqual(["openrouter:a", "anthropic:b", "anthropic:a"]);
     expect(r.nodes.get("openrouter:a")?.card.animate).not.toHaveBeenCalled();
+    expect(r.cardTop("anthropic:a")).toBeCloseTo(205);
     r.sorter.dispose();
     expect(r.commits).not.toHaveBeenCalled();
     expect(r.order()).toEqual(r.original);
+  });
+
+  it("keeps the grab point under the pointer inside an offset, scaled host", () => {
+    const r = rig();
+    // An embedded host maps the whole page through a 1.5× transform that starts
+    // 300px down. Viewport rects include that mapping; the card's own translate
+    // is in local pixels, so the controller must divide the error by the scale.
+    r.host.top = 300;
+    r.host.left = 10;
+    r.host.scale = 1.5;
+    const grabY = r.cardTop("anthropic:a") + 40;
+    r.sorter.down("anthropic:a", r.event(grabY));
+    r.sorter.move(r.event(grabY + 30));
+    r.flush();
+    expect(r.order()).toEqual(r.original);
+    expect(r.cardTop("anthropic:a")).toBeCloseTo(grabY + 30 - 40);
+    // 30 viewport pixels of travel at 1.5× is 20 local pixels.
+    expect(r.transform("anthropic:a")).toBe("translate3d(0px, 20px, 0)");
+    r.sorter.cancel();
   });
 
   it("uses modest scrollport nudges rather than scrolling the page", () => {
@@ -156,21 +264,41 @@ describe("whole-card pointer sorting controller", () => {
     expect(r.commits).not.toHaveBeenCalled();
   });
 
+  it("tracks scroll of any ancestor so the card stays with the pointer", () => {
+    const listeners = stubWindow();
+    const r = rig();
+    try {
+      r.sorter.down("anthropic:a", r.event(20));
+      r.sorter.move(r.event(60));
+      r.flush();
+      expect(r.frames.size).toBe(0);
+      expect(listeners.get("scroll")?.capture).toBe(true);
+      listeners.get("scroll")?.listener({});
+      expect(r.frames.size).toBe(1);
+      r.sorter.cancel();
+      expect(listeners.size).toBe(0);
+    } finally {
+      r.sorter.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("handles Escape globally when moving the captured card temporarily removes focus", () => {
-    const listeners = new Map<string, (event: { key: string; preventDefault(): void }) => void>();
-    vi.stubGlobal("window", {
-      addEventListener: (
-        name: string,
-        listener: (event: { key: string; preventDefault(): void }) => void,
-      ) => listeners.set(name, listener),
-      removeEventListener: (name: string) => listeners.delete(name),
-    });
+    const listeners = stubWindow();
     const r = rig();
     try {
       r.sorter.down("anthropic:a", r.event(20));
       r.sorter.move(r.event(225));
       r.flush();
-      listeners.get("keydown")?.({ key: "Escape", preventDefault: () => {} });
+      (
+        listeners.get("keydown")?.listener as (event: {
+          key: string;
+          preventDefault(): void;
+        }) => void
+      )?.({
+        key: "Escape",
+        preventDefault: () => {},
+      });
       expect(r.order()).toEqual(r.original);
       expect(r.commits).not.toHaveBeenCalled();
       expect(listeners.size).toBe(0);

@@ -26,7 +26,7 @@ function ruleBody(source: string, selector: string): string {
 /** Declared properties of a rule body, keyed by property name. */
 function declarations(body: string): Map<string, string> {
   const entries = new Map<string, string>();
-  for (const part of body.split(";")) {
+  for (const part of body.replace(/\/\*[\s\S]*?\*\//gu, "").split(";")) {
     const separator = part.indexOf(":");
     if (separator === -1) continue;
     const property = part.slice(0, separator).trim();
@@ -34,6 +34,13 @@ function declarations(body: string): Map<string, string> {
     entries.set(property, part.slice(separator + 1).trim());
   }
   return entries;
+}
+
+/** Expand a CSS padding shorthand into its four sides, in pixels. */
+function paddingBox(value: string): { top: number; right: number; bottom: number; left: number } {
+  const parts = value.split(/\s+/).map((part) => Number.parseFloat(part));
+  const [top = 0, right = top, bottom = top, left = right] = parts;
+  return { top, right, bottom, left };
 }
 
 describe("Settings Visibility card tone", () => {
@@ -63,5 +70,28 @@ describe("Settings Visibility card tone", () => {
     expect(declarations(ruleBody(styles, ".qg-vis-row")).get("grid-template-columns")).toBe(
       "20px minmax(0, 1fr) 28px",
     );
+  });
+
+  it("nests child field grips and labels one step inside the provider header", () => {
+    const head = declarations(ruleBody(styles, ".qg-vis-provider__head"));
+    const row = declarations(ruleBody(styles, ".qg-vis-row"));
+    const headPadding = paddingBox(head.get("padding") ?? "");
+    const rowPadding = paddingBox(row.get("padding") ?? "");
+    const indent = rowPadding.left - headPadding.left;
+
+    // The child row is visibly nested without losing the compact row height.
+    expect(indent).toBeGreaterThan(0);
+    expect(indent).toBeLessThanOrEqual(12);
+    expect(rowPadding.right).toBe(headPadding.right);
+    expect(rowPadding.top).toBe(rowPadding.bottom);
+    expect(row.get("grid-template-columns")).toBe(head.get("grid-template-columns"));
+
+    // Both eyes stay in the third column, flush with the card's right inset.
+    const eyes =
+      /\.qg-vis-provider__head > \.qg-eye,\s*\.qg-vis-row > \.qg-eye\s*\{([^}]*)\}/u.exec(styles);
+    expect(eyes?.[1]).toBeDefined();
+    const eye = declarations(eyes?.[1] ?? "");
+    expect(eye.get("grid-column")).toBe("3");
+    expect(eye.get("justify-self")).toBe("end");
   });
 });
