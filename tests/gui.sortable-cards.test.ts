@@ -18,6 +18,7 @@ function rig(reducedMotion = false) {
   let nextFrame = 0;
   const commits = vi.fn();
   const host = { left: 0, top: 0, scale: 1 };
+  let reflectTransform = true;
   const declarations = new Map<string, Map<string, string>>();
 
   const styleFor = (key: string) => {
@@ -38,13 +39,16 @@ function rig(reducedMotion = false) {
   };
   const layoutTop = (id: string) => host.top + order.indexOf(id) * 100 * host.scale;
   const cardTop = (id: string) => layoutTop(id) + translateFor(id).y * host.scale;
-  const cardRect = (id: string) => ({
-    top: cardTop(id),
-    bottom: cardTop(id) + 90 * host.scale,
-    left: host.left + (20 + translateFor(id).x) * host.scale,
-    width: 400 * host.scale,
-    height: 90 * host.scale,
-  });
+  const cardRect = (id: string) => {
+    const translate = reflectTransform ? translateFor(id) : { x: 0, y: 0 };
+    return {
+      top: layoutTop(id) + translate.y * host.scale,
+      bottom: layoutTop(id) + translate.y * host.scale + 90 * host.scale,
+      left: host.left + (20 + translate.x) * host.scale,
+      width: 400 * host.scale,
+      height: 90 * host.scale,
+    };
+  };
   const slotRect = (id: string) => ({
     top: layoutTop(id),
     bottom: layoutTop(id) + 90 * host.scale,
@@ -126,6 +130,10 @@ function rig(reducedMotion = false) {
     active: () => active,
     cardTop,
     transform: (id: string) => declarations.get(`${id}:card`)?.get("transform"),
+    /** Report only the layout box, as a DOM that has not applied the inline transform yet. */
+    ignoreTransformInRects: () => {
+      reflectTransform = false;
+    },
   };
 }
 
@@ -186,6 +194,24 @@ describe("whole-card pointer sorting controller", () => {
     expect(r.capture.releasePointerCapture).toHaveBeenCalledWith(1);
     expect(r.active()).toBeUndefined();
     expect(r.transform("anthropic:a")).toBeUndefined();
+  });
+
+  it("reorders from the grab geometry when a DOM rect omits the inline transform", () => {
+    const r = rig();
+    // A DOM or test double may report only the layout box, without the inline
+    // transform. The preview's visual top is pointer - grabOffset regardless,
+    // so the reorder test must not depend on reading that transform back.
+    r.ignoreTransformInRects();
+    r.sorter.down("anthropic:a", r.event(20));
+    r.sorter.move(r.event(225));
+    r.flush();
+    expect(r.active()).toBe("anthropic:a");
+    expect(r.order()).toEqual(["openrouter:a", "anthropic:b", "anthropic:a"]);
+    r.sorter.up(r.event(225));
+    expect(r.commits).toHaveBeenCalledWith(
+      ["openrouter:a", "anthropic:b", "anthropic:a"],
+      "anthropic:a",
+    );
   });
 
   it.each([

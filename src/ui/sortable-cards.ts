@@ -30,6 +30,8 @@ interface Drag {
   /** Pointer position inside the lifted card at grab time, in viewport pixels. */
   offsetX: number;
   offsetY: number;
+  /** Rendered card height at grab time; the layout never changes during a drag. */
+  height: number;
   startX: number;
   startY: number;
   x: number;
@@ -217,8 +219,10 @@ export function createCardSorter(options: SorterOptions) {
     // After any scroll, re-anchor before the hit test so a nudged frame never
     // shows the card trailing the pointer by the scroll step.
     followPointer(current);
-    const rect = current.nodes.card.getBoundingClientRect();
-    const center = rect.top + rect.height / 2;
+    // The preview's visual top is known from the pointer and the grab offset,
+    // so the reorder test does not read back a transformed rect: not every DOM
+    // reflects an inline transform immediately, and the layout box never moves.
+    const center = current.y - current.offsetY + current.height / 2;
     const others = current.order.filter((id) => id !== current.id);
     const toIndex = others.filter((id) => {
       const slot = options.nodes(id)?.slot.getBoundingClientRect();
@@ -253,6 +257,7 @@ export function createCardSorter(options: SorterOptions) {
         order: [...ids],
         offsetX: event.clientX - rect.left,
         offsetY: event.clientY - rect.top,
+        height: rect.height,
         startX: event.clientX,
         startY: event.clientY,
         x: event.clientX,
