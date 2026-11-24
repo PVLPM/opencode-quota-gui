@@ -12,7 +12,7 @@ User-facing release notes for OpenCode Quota GUI.
 - **Provider logos in model labels.** The Composer Pill, Session chart tooltip, Session Tree and session header show the provider's logo instead of the `provider/` prefix. Providers without a logo keep the text, and the full `provider/model#variant` stays in the hover text and accessible name.
 - **Session model header.** An individual session's header lists the models it used (`a → b`), with a `+N` bubble when they don't fit.
 - **Row reorder in Visibility.** Rows inside a quota card can be reordered in Settings by drag or Alt+↑/↓, and the cards render that order.
-- **Auto-resume after a quota reset.** The opt-in `autoResumeOnQuotaRecovery` setting sends one `continue` two minutes after the failed route's quota recovers. It runs in-process with no daemon, at most once per user-started run, and only for providers that can tie the reset to the failed route. Settings lists the supported providers; the full matrix is in the configuration docs.
+- **Auto-resume after a quota reset.** The opt-in `autoResumeOnQuotaRecovery` setting sends one `continue` two minutes after the failed route's quota is confirmed reset for the same account, model and window. A positive percentage alone is not proof, and a temporary failed check, cooldown or RPC timeout keeps the continuation pending instead of cancelling it. It runs in-process with no daemon, at most once per user-started run, and only for providers that can tie the reset to the failed route. Settings lists the supported providers; the full matrix is in the configuration docs.
 - **Claude Agent polling interval.** A new **Claude Agent polling interval** setting (`claudeAgentPollIntervalMs`, default 180 s, minimum 60 s) sets the minimum spacing between Claude usage requests, shared by every OpenCode process on the machine.
 - **Per-step timing and idle gaps.** The Session chart shows each message's created-to-completed time and the idle time since the previous message. It also summarizes the **Longest idle gap** and the **Longest high-reuse gap** (cache reuse of 90% or more). These come from stored message times and are observations, not provider cache TTLs (#28).
 - **Anthropic API rate limits.** The Anthropic card shows per-minute rate limits observed on your own API-key requests. It is not subscription quota, spend, or balance (#31).
@@ -38,13 +38,21 @@ User-facing release notes for OpenCode Quota GUI.
 - **Claude usage rejections.** A rejected usage request is no longer reported as a sign-in failure, and Claude card errors can be copied (#33).
 - **One Visibility toggle per field.** OpenAI no longer shows duplicate rows, and a field keeps one stable toggle when a provider changes how it reports it, so saved hide and order choices keep applying.
 - **Composer Pill hover no longer blinks.** The pill has its own hover card instead of a native tooltip that was rewritten every tick.
+- **Claude Agent no longer sticks on "Invalid normalized provider result".** Cooldown, transient and rejected usage results were discarded by result validation, so the card lost its last-good numbers and stayed in a provider-level error. They are now kept, with the muted **retrying in** line during cooldown. A genuinely invalid provider result now records which part failed, without values.
+- **Muted Claude errors on the Web dashboard.** The browser dashboard keeps each card's stale flag and error outcome, so retained cooldown or transient errors are muted there too.
+- **Persistent provider-error alerts.** A cooldown skip between two real failures no longer resets the failure count.
+- **Visibility drag follows the pointer.** A dragged provider card or field stays at the grab point in the Native Desktop host and while the list scrolls, instead of rendering below the cursor. Field rows are indented under their provider header.
+- **Older hidden rows stay put.** Reordering rows no longer moves a hide saved by an earlier version to a different row, on Home, in notifications or in the Settings eye.
+- **Analytics freshness after reconnect.** Saved Analytics still paints at once but is marked current only after a fresh read lands.
+- **Session tree reopens warm.** Opening one session no longer evicts the saved parent or child session views when the database is unchanged; revisiting a large session tree is back to tens of milliseconds.
+- **Temporal pricing.** OpenRouter's MiniMax M3.1 Flash schedule no longer shows **Unknown**: absolute Peak/Off-peak rules are compared with their own base price, not the live API price. OpenRouter no longer publishes time-based pricing for DeepSeek V4 Pro 0813 or V4.1 Flash 1017, so those schedules were removed. An **Unknown** interval spans the 3-day preview horizon; it is not an expiry date.
 - **Stale Anthropic rate limits.** Once a rate-limit reset time has passed, the card shows only the limit, not the remaining count observed before the reset. An expired retry-after is no longer shown.
 
 ### Compatibility
 
 - **OpenCode 2.3.x and 2.4.x supported.** The `@opencode/plugin` peer range is now `>=2.0.16 <2.5.0`; the plugin typechecks and passes its plugin tests against 2.4.1.
 - **Analytics rebuild after upgrading.** The analytics snapshot version moved from 3 to 4, so saved analytics is rebuilt once on first use. The presentation version moved from 4 to 7 so saved cards are rebuilt with recorded-cost provenance, the new chart series and input markers.
-- **Claude Agent subscription limits are not retried.** The retry hook acts only on typed provider rate-limit or quota errors and HTTP 429 responses. A Claude Agent five-hour limit message has neither, so OpenCode keeps its own retry timing. Upstream: [anomalyco/opencode#63189](https://github.com/anomalyco/opencode/issues/63189).
+- **Claude Agent subscription limits are not retried.** The retry hook acts only on typed provider rate-limit or quota errors and HTTP 429 responses. A Claude Agent five-hour limit message has neither, so OpenCode keeps its own retry timing and auto-resume does not arm for it. Upstream: [anomalyco/opencode#63189](https://github.com/anomalyco/opencode/issues/63189).
 
 ## 1.3.1
 
