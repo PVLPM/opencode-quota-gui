@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-
+import {
+  getAutoResumeProviderLabelsForBinding,
+  getSupportedAutoResumeProviderLabels,
+  getUnsupportedAutoResumeProviderLabels,
+} from "../src/lib/provider-metadata.js";
 import { validateQuotaProviders } from "../src/lib/quota-providers.js";
 import {
   hasMarkdownLinkTo,
@@ -294,6 +298,47 @@ describe("GUI documentation consistency", () => {
     expect(manualInstall).toContain("project OpenCode plugin entry");
     expect(configuration).toContain("does not create project behavior settings");
     expect(updating).toContain("project plugin install");
+  });
+
+  it("pins auto-resume eligibility docs to provider registration metadata", () => {
+    const configuration = read("docs/readme/configuration.md");
+    const readme = read("README.md");
+    const section = readMarkdownSection(configuration, /^Auto-resume on quota recovery$/);
+    const bullet = (label: string): string => {
+      const line = section.split("\n").find((candidate) => candidate.startsWith(`- **${label}:**`));
+      if (line === undefined) throw new Error(`auto-resume bullet not found: ${label}`);
+      return line;
+    };
+    const account = bullet("Account-bound");
+    const singleSource = bullet("Single-source");
+    const accountOrKey = bullet("Account or key");
+    const never = bullet("Never");
+
+    for (const label of getAutoResumeProviderLabelsForBinding("account")) {
+      expect(account).toContain(label);
+      expect(never).not.toContain(label);
+    }
+    for (const label of getAutoResumeProviderLabelsForBinding("single-source")) {
+      expect(singleSource).toContain(label);
+      expect(never).not.toContain(label);
+    }
+    for (const label of getAutoResumeProviderLabelsForBinding("account-or-single-source")) {
+      expect(accountOrKey).toContain(label);
+      expect(never).not.toContain(label);
+    }
+    for (const label of getUnsupportedAutoResumeProviderLabels()) {
+      expect(never).toContain(label);
+    }
+    expect(never).toContain("custom `quotaProviders`");
+
+    const readmeParagraph = readMarkdownParagraphContaining(
+      readme,
+      "Auto-resume on quota recovery",
+    );
+    for (const label of getSupportedAutoResumeProviderLabels()) {
+      expect(readmeParagraph).toContain(label);
+    }
+    expect(readmeParagraph).not.toContain("Not supported");
   });
 
   it("keeps the canonical example self-contained", () => {

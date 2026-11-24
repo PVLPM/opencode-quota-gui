@@ -23,7 +23,12 @@ import {
   scrubCredentialErrorText,
 } from "./lib/opencode-auth.js";
 import { OpencodeWarmingRefreshTracker } from "./lib/opencode-warming-refresh.js";
-import { resolveQuotaResetRetryDelayMs } from "./lib/quota-retry-wait.js";
+import { createQuotaAutoResumption } from "./lib/quota-auto-resume.js";
+import {
+  collectQuotaWindows,
+  probeQuotaForModel,
+  resolveQuotaResetRetryDelayMs,
+} from "./lib/quota-retry-wait.js";
 import type { QuotaSurfaceHost } from "./lib/quota-surface-data.js";
 
 /** An error as one line that is safe to log: tokens redacted, at most 120 characters. */
@@ -70,6 +75,38 @@ export const QuotaToastPlugin = Plugin.define({
         if (delay !== undefined) event.decision = { retry: true, delay };
       } catch (error) {
         console.warn(`[opencode-quota-gui] retry hook failed: ${logReason(error)}`);
+      }
+    });
+
+    // With autoResumeOnQuotaRecovery on (default off), a session that terminally failed on a
+    // provider quota limit gets one `continue` prompt after the failed route's exhausted window
+    // is observed as reset for the same verified identity. In-process timers only: a plugin
+    // restart drops a pending resume.
+    const autoResume = createQuotaAutoResumption({
+      session: ctx.session,
+      probe: async (model) => {
+        const probe = await probeQuotaForModel(
+          retryHost,
+          model,
+          (config) => config.autoResumeOnQuotaRecovery,
+          { includeProviderScope: true },
+        );
+        return probe
+          ? collectQuotaWindows(
+              probe.providerResults.map((entry) => entry.result),
+              probe.binding,
+              { primaryAccountOnly: true },
+            )
+          : undefined;
+      },
+      log: (message) => console.warn(`[opencode-quota-gui] ${message}`),
+    });
+    // A user-submitted prompt suppresses a pending auto-resume; our own prompt carries the marker.
+    await ctx.session.hook("prompt", (event) => {
+      try {
+        autoResume.onPrompt(event);
+      } catch {
+        // Pending-resume tracking must never interfere with a prompt.
       }
     });
 
@@ -284,6 +321,11 @@ export const QuotaToastPlugin = Plugin.define({
             if (event.type === "credential.updated" || event.type === "credential.switched") {
               notifyCredentialsChanged();
             }
+            try {
+              autoResume.handleEvent(event);
+            } catch {
+              // Resume tracking is observation only; never break the host event stream.
+            }
             // The Started event's model identity is available before invocation completion. Do not
             // enrich it from model.list here: that mutable catalog may no longer match dispatch.
             const sessionID = (event.data as { sessionID?: unknown } | undefined)?.sessionID;
@@ -391,6 +433,7 @@ export const QuotaToastPlugin = Plugin.define({
 
     return async () => {
       hostEvents.abort();
+      autoResume.dispose();
       claudeTtl.dispose();
       openaiMethodBySession.clear();
       pendingCacheObserverEvents.length = 0;

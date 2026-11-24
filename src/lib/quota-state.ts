@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { CLAUDE_AGENT_RESETS_ROW_KEY } from "../contracts/openai-quota.js";
+import { isTransientProviderFailureCategory } from "../contracts/provider-failure.js";
 import { writeJsonAtomic } from "./atomic-json.js";
 import type {
   QuotaProvider,
@@ -29,7 +30,10 @@ import {
   normalizeQuotaProviderResult,
 } from "./quota-state-codec.js";
 import { updateQuotaTelemetrySnapshot } from "./quota-telemetry.js";
-import type { ResolvedAuthIdentity } from "./resolved-auth-identity.js";
+import {
+  isProcessLocalResolvedAuthIdentity,
+  type ResolvedAuthIdentity,
+} from "./resolved-auth-identity.js";
 import { getPackageVersion } from "./version.js";
 
 const QUOTA_PROVIDER_CACHE_PACKAGE_VERSION_FALLBACK = "unknown";
@@ -291,7 +295,11 @@ async function resolveRuntimeEligibleQuotaProviders(
   }
 }
 
-type ProviderCacheScope = { resolvedAuthIdentity?: ResolvedAuthIdentity } | null;
+type ProviderCacheScope = {
+  resolvedAuthIdentity?: ResolvedAuthIdentity;
+  /** No protected identity storage: the key may only live in the in-memory tier. */
+  memoryOnly?: boolean;
+} | null;
 
 async function resolveProviderCacheScope(
   provider: QuotaProvider,
@@ -304,7 +312,11 @@ async function resolveProviderCacheScope(
 
   try {
     const resolvedAuthIdentity = await policy.resolveIdentity(ctx, cacheContext);
-    return resolvedAuthIdentity ? { resolvedAuthIdentity } : null;
+    if (!resolvedAuthIdentity) return null;
+    return {
+      resolvedAuthIdentity,
+      ...(isProcessLocalResolvedAuthIdentity(resolvedAuthIdentity) ? { memoryOnly: true } : {}),
+    };
   } catch {
     return null;
   }
@@ -478,6 +490,12 @@ export async function fetchQuotaProviderResult(params: {
     runtimeEligibleQuotaProviders,
     resolvedAuthIdentity: scope.resolvedAuthIdentity,
   });
+  // A process-local identity (Windows) may key only the in-memory tier: the value is not stable
+  // across restarts, so it must never name a persisted file.
+  const memoryOnly = scope.memoryOnly === true;
+  const removePersistedCacheFile = async (): Promise<void> => {
+    if (!memoryOnly) await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
+  };
 
   if (params.forceRefresh && !isLiveLocalUsageProviderId(provider.id)) {
     const existing = refreshByKey.get(key);
@@ -565,15 +583,16 @@ export async function fetchQuotaProviderResult(params: {
     return cloneQuotaProviderResult(snapshot);
   }
 
-  const persisted = forceAggregateRefresh
-    ? null
-    : await readPersistedQuotaProviderCacheEntry({
-        key,
-        providerId: provider.id,
-        packageVersion,
-        ttlMs,
-        now,
-      });
+  const persisted =
+    forceAggregateRefresh || memoryOnly
+      ? null
+      : await readPersistedQuotaProviderCacheEntry({
+          key,
+          providerId: provider.id,
+          packageVersion,
+          ttlMs,
+          now,
+        });
   if (persisted && !inMemoryCache.has(key)) {
     inMemoryCache.set(key, {
       ...persisted,
@@ -614,14 +633,16 @@ export async function fetchQuotaProviderResult(params: {
       if (ctx.operationCache?.get(QUOTA_FORCE_REFRESH) === true) {
         const previous =
           inMemoryCache.get(key) ??
-          (await readPersistedQuotaProviderCacheEntry({
-            key,
-            providerId: provider.id,
-            packageVersion,
-            ttlMs,
-            now: Date.now(),
-            ignoreExpiry: true,
-          }));
+          (memoryOnly
+            ? null
+            : await readPersistedQuotaProviderCacheEntry({
+                key,
+                providerId: provider.id,
+                packageVersion,
+                ttlMs,
+                now: Date.now(),
+                ignoreExpiry: true,
+              }));
         if (previous && (await isProviderCacheScopeCurrent(provider, ctx, scope))) {
           inMemoryCache.set(key, {
             ...previous,
@@ -634,20 +655,29 @@ export async function fetchQuotaProviderResult(params: {
         } else {
           inMemoryCache.delete(key);
         }
-        await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
+        await removePersistedCacheFile();
       }
       throw error;
     }
 
-    const rateLimited = snapshot.errors.filter((error) => error.retryAtMs !== undefined);
+    const failures = snapshot.errors.filter((error) => error.kind !== "intentional-filter");
+    const allFailuresTransient =
+      failures.length > 0 &&
+      failures.every((error) => isTransientProviderFailureCategory(error.failureCategory));
+    // A rate-limited account and a transient provider failure both prove nothing about that
+    // account's quota, so its last measurement stays. A credentials failure (or a mixed result
+    // that includes one) still drops it: the account itself may have changed.
+    const retentionFailures = allFailuresTransient
+      ? failures
+      : snapshot.errors.filter((error) => error.retryAtMs !== undefined);
     const previous = inMemoryCache.get(key);
     if (
-      rateLimited.length > 0 &&
+      retentionFailures.length > 0 &&
       previous &&
       (await isProviderCacheScopeCurrent(provider, ctx, scope))
     ) {
       const failedAccounts = new Set(
-        rateLimited.map((error) => error.sourceId).filter((id) => id !== undefined),
+        retentionFailures.map((error) => error.sourceId).filter((id) => id !== undefined),
       );
       const accountsWithFreshEntries = new Set(
         snapshot.entries
@@ -658,7 +688,8 @@ export async function fetchQuotaProviderResult(params: {
       // never carried over from an earlier snapshot.
       const retained = previous.result.entries.filter((entry) => !isClaudeResetsEntry(entry));
       const fallback =
-        snapshot.entries.length === 0 && rateLimited.some((error) => error.sourceId === undefined)
+        snapshot.entries.length === 0 &&
+        retentionFailures.some((error) => error.sourceId === undefined)
           ? provider.id === "openrouter"
             ? retained.filter((entry) => entry.accounting.sourceId === undefined)
             : retained
@@ -675,7 +706,7 @@ export async function fetchQuotaProviderResult(params: {
           stale: true,
           result: cloneQuotaProviderResult(stale),
         });
-        await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
+        await removePersistedCacheFile();
         return stale;
       }
     }
@@ -686,7 +717,7 @@ export async function fetchQuotaProviderResult(params: {
       !(await isProviderCacheScopeCurrent(provider, ctx, scope))
     ) {
       inMemoryCache.delete(key);
-      await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
+      await removePersistedCacheFile();
       return snapshot;
     }
 
@@ -700,7 +731,7 @@ export async function fetchQuotaProviderResult(params: {
 
     if (snapshot.errors.some((error) => error.kind !== "intentional-filter")) {
       inMemoryCache.set(key, { ...entry, stale: true, result: cloneQuotaProviderResult(snapshot) });
-      await safeRm(getQuotaProviderStateCacheFilePath(provider.id, key));
+      await removePersistedCacheFile();
       return snapshot;
     }
 
@@ -708,7 +739,7 @@ export async function fetchQuotaProviderResult(params: {
       ...entry,
       result: cloneQuotaProviderResult(entry.result),
     });
-    await writePersistedQuotaProviderCacheEntry(entry, key);
+    if (!memoryOnly) await writePersistedQuotaProviderCacheEntry(entry, key);
     return snapshot;
   })().finally(() => {
     inFlightByKey.delete(key);
@@ -758,6 +789,7 @@ export async function readCachedProviderResult(params: {
     resolvedAuthIdentity: scope.resolvedAuthIdentity,
   });
   const now = Date.now();
+  const memoryOnly = scope.memoryOnly === true;
 
   const inMemory = inMemoryCache.get(key);
   if (inMemory) {
@@ -776,14 +808,16 @@ export async function readCachedProviderResult(params: {
   }
 
   const packageVersion = await getQuotaProviderCachePackageVersion();
-  const persisted = await readPersistedQuotaProviderCacheEntry({
-    key,
-    providerId: params.provider.id,
-    packageVersion,
-    ttlMs: params.ttlMs,
-    now,
-    ignoreExpiry: true,
-  });
+  const persisted = memoryOnly
+    ? null
+    : await readPersistedQuotaProviderCacheEntry({
+        key,
+        providerId: params.provider.id,
+        packageVersion,
+        ttlMs: params.ttlMs,
+        now,
+        ignoreExpiry: true,
+      });
 
   if (persisted) {
     if (!(await isProviderCacheScopeCurrent(params.provider, params.ctx, scope))) {

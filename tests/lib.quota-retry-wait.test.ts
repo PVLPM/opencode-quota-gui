@@ -59,9 +59,19 @@ function result(entries: QuotaToastEntry[]): QuotaProviderResult {
 }
 
 describe("isQuotaLimitError", () => {
-  it("accepts OpenCode's rate-limit and quota errors and any HTTP 429", () => {
-    expect(isQuotaLimitError({ type: "provider.rate-limit" })).toBe(true);
-    expect(isQuotaLimitError({ type: "provider.quota" })).toBe(true);
+  it("accepts OpenCode's quota-shaped errors and any HTTP 429", () => {
+    for (const type of [
+      "provider.rate-limit",
+      "provider.quota",
+      "provider.free-limit",
+      "provider.budget-limit",
+      "provider.model-budget-limit",
+      "provider.go-limit",
+      "provider.chatgpt-limit",
+      "provider.chatgpt-workspace-limit",
+    ]) {
+      expect(isQuotaLimitError({ type })).toBe(true);
+    }
     expect(isQuotaLimitError({ type: "provider.unknown", status: 429 })).toBe(true);
   });
 
@@ -142,13 +152,22 @@ describe("getQuotaResetRetryDelayMs", () => {
     ).toBeUndefined();
   });
 
-  it("caps the wait", () => {
+  it("caps the reset wait and adds the buffer after the cap", () => {
     const delay = getQuotaResetRetryDelayMs(
       [result([window("Weekly", 0, at(3 * 24 * 60 * MINUTE_MS))])],
       NOW_MS,
     );
-    expect(delay).toBe(QUOTA_RESET_RETRY_MAX_DELAY_MS);
+    expect(delay).toBe(QUOTA_RESET_RETRY_MAX_DELAY_MS + QUOTA_RESET_RETRY_BUFFER_MS);
     expect(QUOTA_RESET_RETRY_MAX_DELAY_MS).toBe(5 * 60 * MINUTE_MS);
+  });
+
+  it("never lands the capped retry just before the reset", () => {
+    // The reset is 30 seconds inside the five-hour cap: the old cap landed before it.
+    const delay = getQuotaResetRetryDelayMs(
+      [result([window("Weekly", 0, at(QUOTA_RESET_RETRY_MAX_DELAY_MS - 30_000))])],
+      NOW_MS,
+    );
+    expect(delay).toBe(QUOTA_RESET_RETRY_MAX_DELAY_MS - 30_000 + QUOTA_RESET_RETRY_BUFFER_MS);
   });
 
   it("waits for weekly when both weekly and 5h are exhausted", () => {
@@ -364,5 +383,56 @@ describe("resolveQuotaResetRetryDelayMs", () => {
     mocks.loadConfig.mockResolvedValue(makeQuotaToastTestConfig({ waitForQuotaReset: true }));
 
     await expect(resolve(limitEvent)).resolves.toBeUndefined();
+  });
+
+  it("waits at least as long as the provider's retryAfterMs", async () => {
+    const zai = makeProvider("zai", [window("5h", 0, at(10 * MINUTE_MS))], () => true);
+    mocks.getProviders.mockReturnValue([zai]);
+    mocks.loadConfig.mockResolvedValue(makeQuotaToastTestConfig({ waitForQuotaReset: true }));
+
+    await expect(
+      resolve({
+        ...limitEvent,
+        error: { type: "provider.rate-limit", status: 429, retryAfterMs: 20 * MINUTE_MS },
+      }),
+    ).resolves.toBe(20 * MINUTE_MS);
+    // A shorter provider wait never shortens the observed reset wait.
+    await expect(
+      resolve({
+        ...limitEvent,
+        error: { type: "provider.rate-limit", status: 429, retryAfterMs: 5 * MINUTE_MS },
+      }),
+    ).resolves.toBe(10 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+  });
+
+  it("recognizes ChatGPT subscription limits when a window is exhausted", async () => {
+    const openai = makeProvider("openai", [window("Weekly", 0, at(90 * MINUTE_MS))], () => true);
+    mocks.getProviders.mockReturnValue([openai]);
+    mocks.loadConfig.mockResolvedValue(makeQuotaToastTestConfig({ waitForQuotaReset: true }));
+
+    await expect(
+      resolve({
+        ...limitEvent,
+        model: { id: "gpt-5", providerID: "openai" },
+        error: { type: "provider.chatgpt-limit" },
+      }),
+    ).resolves.toBe(90 * MINUTE_MS + QUOTA_RESET_RETRY_BUFFER_MS);
+  });
+
+  it("bounds a hanging live probe by the configured request timeout", async () => {
+    const hanging = makeProvider("zai", [], () => true);
+    hanging.fetch.mockReturnValue(new Promise(() => {}));
+    mocks.getProviders.mockReturnValue([hanging]);
+    mocks.loadConfig.mockResolvedValue(
+      makeQuotaToastTestConfig({ waitForQuotaReset: true, requestTimeoutMs: 25 }),
+    );
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const pending = resolve(limitEvent);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(pending).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

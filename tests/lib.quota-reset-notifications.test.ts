@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { AccountingWindow } from "../src/lib/entries.js";
 import type { QuotaResetProviderResult } from "../src/lib/quota-reset-notifications.js";
 import {
   formatQuotaResetNotification,
@@ -27,6 +28,7 @@ function provider(params: {
   name?: string;
   group?: string;
   label?: string;
+  window?: AccountingWindow;
   resultType?: "quota" | "usage";
 }): QuotaResetProviderResult {
   const providerId = params.providerId ?? "openai";
@@ -41,6 +43,10 @@ function provider(params: {
           name,
           group: params.group ?? (params.sourceId ? `${name} (${params.sourceId})` : name),
           label: params.label ?? "7d",
+          semantic: {
+            metric: { kind: "window", window: params.window ?? "week" },
+            prominence: "primary",
+          },
           percentRemaining: params.percentRemaining,
           resetTimeIso: new Date(params.resetAtMs).toISOString(),
           accounting: {
@@ -415,7 +421,9 @@ describe("quota reset notifications", () => {
     const reset = start + 60 * 60 * 1000;
 
     await observeQuotaResetNotifications({
-      providers: [provider({ percentRemaining: 10, resetAtMs: reset, label: "Monthly" })],
+      providers: [
+        provider({ percentRemaining: 10, resetAtMs: reset, label: "Monthly", window: "month" }),
+      ],
       windows: ["weekly"],
       nowMs: start,
       statePath: path,
@@ -428,6 +436,56 @@ describe("quota reset notifications", () => {
     });
 
     expect(JSON.parse(await readFile(path, "utf8")).observations).toEqual({});
+  });
+
+  it("never derives a reset window from a display label", async () => {
+    const path = await statePath();
+    const start = Date.UTC(2026, 0, 1, 12);
+    const reset = start + 60 * 60 * 1000;
+    const accounting = {
+      resultType: "quota",
+      acquisitionMethod: "remote_api",
+      ownership: "maintained",
+      authority: "provider_reported",
+    } as const;
+
+    await observeQuotaResetNotifications({
+      providers: [
+        {
+          providerId: "openai",
+          result: {
+            attempted: true,
+            errors: [],
+            entries: [
+              {
+                accounting,
+                name: "Weekly",
+                label: "Weekly:",
+                percentRemaining: 10,
+                resetTimeIso: new Date(reset).toISOString(),
+              },
+              {
+                accounting: { ...accounting, sourceId: "typed" },
+                semantic: {
+                  metric: { kind: "window", window: "week" },
+                  prominence: "primary",
+                },
+                name: "Monthly label",
+                label: "Monthly:",
+                percentRemaining: 10,
+                resetTimeIso: new Date(reset).toISOString(),
+              },
+            ],
+          },
+        },
+      ],
+      windows: ["weekly"],
+      nowMs: start,
+      statePath: path,
+    });
+
+    // Only the typed window row becomes a candidate; the label-only row is skipped.
+    expect(Object.keys(JSON.parse(await readFile(path, "utf8")).observations)).toHaveLength(1);
   });
 
   it("keeps accounts independent without persisting source identifiers", async () => {
