@@ -92,11 +92,16 @@ export const QuotaToastPlugin = Plugin.define({
           { includeProviderScope: true },
         );
         if (result.state === "disabled") return { kind: "disabled" };
+        if (result.state === "unsupported") return { kind: "unsupported" };
         if (result.state === "unavailable") return { kind: "absent" };
         const collection = collectQuotaWindows(
           result.probe.providerResults.map((entry) => entry.result),
           result.probe.binding,
-          { primaryAccountOnly: true },
+          {
+            primaryAccountOnly: true,
+            // The controller keeps this model-scoped row only for a Fable failed model.
+            includeNamedWindows: ["named:Fable weekly"],
+          },
         );
         return collection ? { kind: "collection", collection } : { kind: "absent" };
       },

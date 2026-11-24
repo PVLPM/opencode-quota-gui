@@ -20,6 +20,53 @@ const RESET_DELAY_MS = RESET_MS - NOW_MS;
 const SESSION_ID = "session-1";
 const MODEL = { id: "glm-4.6", providerID: "zai-coding-plan" };
 const BINDING = { kind: "account", sourceId: "account-1" } as const;
+const CLAUDE_MODEL = { id: "claude-sonnet-4-5", providerID: "claude-agent" };
+const CLAUDE_BINDING = {
+  kind: "provider-scope",
+  providerId: "claude-agent",
+  scope: "claude-scope-a",
+} as const;
+const FIVE_HOUR_RESET_MS = RESET_MS + 5 * 60 * MINUTE_MS;
+
+function claudeCollection(
+  fiveHourPercent: number,
+  weekPercent: number,
+  options: {
+    fiveHourResetMs?: number;
+    weekResetMs?: number;
+    fable?: number;
+    fableResetMs?: number;
+  } = {},
+): QuotaWindowCollection {
+  return {
+    binding: CLAUDE_BINDING,
+    windows: [
+      {
+        key: "window:five_hour",
+        percentRemaining: fiveHourPercent,
+        ...(fiveHourPercent <= 0
+          ? options.fiveHourResetMs !== undefined
+            ? { resetMs: options.fiveHourResetMs }
+            : {}
+          : { resetMs: FIVE_HOUR_RESET_MS }),
+      },
+      {
+        key: "window:week",
+        percentRemaining: weekPercent,
+        resetMs: options.weekResetMs ?? RESET_MS + 7 * 24 * 60 * MINUTE_MS,
+      },
+      ...(options.fable !== undefined
+        ? [
+            {
+              key: "named:Fable weekly",
+              percentRemaining: options.fable,
+              resetMs: options.fableResetMs ?? RESET_MS + 7 * 24 * 60 * MINUTE_MS,
+            },
+          ]
+        : []),
+    ],
+  };
+}
 
 function exhausted(resetMs = RESET_MS, percentRemaining = 0): QuotaWindowCollection {
   return {
@@ -492,9 +539,122 @@ describe("quota auto-resume", () => {
     expect(prompt).toHaveBeenCalledOnce();
   });
 
-  it("does not arm for Claude Agent's untyped five-hour limit", async () => {
+  it("resumes a Claude Agent five-hour subscription limit after confirmation and reset", async () => {
+    const message =
+      "Claude Code subscription limit reached (five hour). Resets at 2026-01-01T00:10:00.000Z.";
+    const { controller, probe, prompt } = makeHarness({
+      probes: [
+        claudeCollection(0, 50, { fiveHourResetMs: RESET_MS }),
+        claudeCollection(100, 50),
+        claudeCollection(100, 50),
+      ],
+      // The legacy runtime alias must resolve to the same Claude Agent registration.
+      info: sessionInfo({ model: { id: "claude-sonnet-4-5", providerID: "claude-code" } }),
+    });
+    controller.handleEvent(failedEvent({ type: "provider.unknown", message }));
+    await flushTimers(0);
+    expect(probe).toHaveBeenCalledOnce();
+    await flushTimers(RESET_DELAY_MS);
+    expect(prompt).not.toHaveBeenCalled();
+    await flushTimers(QUOTA_AUTO_RESUME_GRACE_MS - 1);
+    expect(prompt).not.toHaveBeenCalled();
+    await flushTimers(1);
+    expect(prompt).toHaveBeenCalledOnce();
+    await flushTimers(24 * 60 * MINUTE_MS);
+    expect(prompt).toHaveBeenCalledOnce();
+  });
+
+  it("resumes a Claude Agent weekly subscription limit from raw Claude Code text", async () => {
+    const message =
+      "You've hit your weekly limit · resets May 31 at 5pm (Asia/Shanghai) Resets at 2026-01-01T00:10:00.000Z.";
+    const { controller, probe, prompt } = makeHarness({
+      probes: [
+        claudeCollection(50, 0, { weekResetMs: RESET_MS }),
+        claudeCollection(50, 100),
+        claudeCollection(50, 100),
+      ],
+      info: sessionInfo({ model: CLAUDE_MODEL }),
+    });
+    controller.handleEvent(failedEvent({ type: "provider.unknown", message }));
+    await flushTimers(0);
+    expect(probe).toHaveBeenCalledOnce();
+    await flushTimers(RESET_DELAY_MS);
+    await flushTimers(QUOTA_AUTO_RESUME_GRACE_MS);
+    expect(prompt).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a recognized Claude limit pending while its window evidence is unavailable", async () => {
+    const message = "You've hit your session limit · resets 4:20pm (America/New_York)";
+    const { controller, probe, prompt } = makeHarness({
+      probes: [
+        claudeCollection(0, 50), // exhausted but no usable reset yet
+        claudeCollection(0, 50, { fiveHourResetMs: RESET_MS }),
+        claudeCollection(100, 50),
+        claudeCollection(100, 50),
+      ],
+      info: sessionInfo({ model: CLAUDE_MODEL }),
+    });
+    controller.handleEvent(failedEvent({ type: "provider.unknown", message }));
+    await flushTimers(0);
+    expect(probe).toHaveBeenCalledOnce();
+    await flushTimers(RETRY_MS - 1);
+    expect(prompt).not.toHaveBeenCalled();
+    await flushTimers(1);
+    expect(probe).toHaveBeenCalledTimes(2);
+    await flushTimers(RESET_DELAY_MS - RETRY_MS);
+    await flushTimers(QUOTA_AUTO_RESUME_GRACE_MS);
+    expect(prompt).toHaveBeenCalledOnce();
+  });
+
+  it("does not arm a Claude message when the named window still has quota", async () => {
+    const message =
+      "Claude Code subscription limit reached (five hour). Resets at 2026-01-01T00:10:00.000Z.";
+    const { controller, probe, prompt } = makeHarness({
+      probes: [claudeCollection(50, 0, { weekResetMs: RESET_MS })],
+      info: sessionInfo({ model: CLAUDE_MODEL }),
+    });
+    controller.handleEvent(failedEvent({ type: "provider.unknown", message }));
+    await flushTimers(0);
+    expect(probe).toHaveBeenCalledOnce();
+    await flushTimers(24 * 60 * MINUTE_MS);
+    expect(probe).toHaveBeenCalledOnce();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("does not apply Claude Fable weekly evidence to a non-Fable model", async () => {
+    const message = "You've hit your weekly limit · resets May 31 at 5pm (Asia/Shanghai)";
+    const { controller, probe, prompt } = makeHarness({
+      probes: [claudeCollection(50, 50, { fable: 0 })],
+      info: sessionInfo({ model: CLAUDE_MODEL }),
+    });
+    controller.handleEvent(failedEvent({ type: "provider.unknown", message }));
+    await flushTimers(0);
+    expect(probe).toHaveBeenCalledOnce();
+    await flushTimers(24 * 60 * MINUTE_MS);
+    expect(probe).toHaveBeenCalledOnce();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("uses Claude Fable weekly evidence for a Fable model", async () => {
+    const message = "You've hit your weekly limit · resets May 31 at 5pm (Asia/Shanghai)";
+    const { controller, probe, prompt } = makeHarness({
+      probes: [
+        claudeCollection(50, 50, { fable: 0, fableResetMs: RESET_MS }),
+        claudeCollection(50, 50, { fable: 100 }),
+        claudeCollection(50, 50, { fable: 100 }),
+      ],
+      info: sessionInfo({ model: { id: "claude-fable-5", providerID: "claude-agent" } }),
+    });
+    controller.handleEvent(failedEvent({ type: "provider.unknown", message }));
+    await flushTimers(0);
+    expect(probe).toHaveBeenCalledOnce();
+    await flushTimers(RESET_DELAY_MS);
+    await flushTimers(QUOTA_AUTO_RESUME_GRACE_MS);
+    expect(prompt).toHaveBeenCalledOnce();
+  });
+
+  it("does not arm a Claude subscription message on a non-Claude route", async () => {
     const { controller, probe, prompt } = makeHarness();
-    // OpenCode 2.4.1 reports this as an unknown provider error with only a message.
     controller.handleEvent(
       failedEvent({
         type: "provider.unknown",
@@ -503,6 +663,32 @@ describe("quota auto-resume", () => {
     );
     await flushTimers(24 * 60 * MINUTE_MS);
     expect(probe).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("does not arm for an unrelated Claude error message", async () => {
+    const { controller, probe, prompt } = makeHarness({
+      probes: [claudeCollection(0, 50, { fiveHourResetMs: RESET_MS })],
+      info: sessionInfo({ model: CLAUDE_MODEL }),
+    });
+    controller.handleEvent(
+      failedEvent({
+        type: "provider.unknown",
+        message: "Claude Code could not finish its reply (HTTP 500)",
+      }),
+    );
+    await flushTimers(24 * 60 * MINUTE_MS);
+    expect(probe).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
+  it("does not poll a route without an auto-resume contract", async () => {
+    const { controller, probe, prompt } = makeHarness({ probes: [{ kind: "unsupported" }] });
+    controller.handleEvent(failedEvent());
+    await flushTimers(0);
+    expect(probe).toHaveBeenCalledOnce();
+    await flushTimers(24 * 60 * MINUTE_MS);
+    expect(probe).toHaveBeenCalledOnce();
     expect(prompt).not.toHaveBeenCalled();
   });
 

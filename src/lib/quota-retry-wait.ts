@@ -94,20 +94,34 @@ export type QuotaWindowCollectionOptions = {
   /**
    * Auto-resume evidence only: require a verified binding and keep only primary provider route
    * windows. Supplementary, budget, value, named, code-review and MCP rows do not govern a failed
-   * model request and are excluded.
+   * model request and are excluded unless `includeNamedWindows` names them.
    */
   primaryAccountOnly?: boolean;
+  /**
+   * Named windows that are primary evidence for a specific model route. Auto-resume uses this for
+   * Claude Agent's model-scoped `Fable weekly` row; the caller decides whether the failed model
+   * makes it applicable.
+   */
+  includeNamedWindows?: readonly string[];
 };
 
 const NON_ROUTE_WINDOW_KINDS: ReadonlySet<string> = new Set(["code_review", "mcp"]);
 
 /** A primary quota/rate-limit window that can govern the model route that failed. */
-function isPrimaryRouteWindow(entry: QuotaPercentEntry): boolean {
+function isPrimaryRouteWindow(
+  entry: QuotaPercentEntry,
+  includeNamed: ReadonlySet<string>,
+): boolean {
   const semantic = entry.semantic;
   if (!semantic || semantic.prominence !== "primary") return false;
+  const routeResultType =
+    entry.accounting.resultType === "quota" || entry.accounting.resultType === "rate_limit";
+  if (!routeResultType) return false;
+  if (semantic.metric.kind === "named") {
+    return includeNamed.has(`named:${semantic.metric.name}`);
+  }
   if (semantic.metric.kind !== "window") return false;
-  if (NON_ROUTE_WINDOW_KINDS.has(semantic.metric.window)) return false;
-  return entry.accounting.resultType === "quota" || entry.accounting.resultType === "rate_limit";
+  return !NON_ROUTE_WINDOW_KINDS.has(semantic.metric.window);
 }
 
 /** A provider result with no account identity of its own: exactly one source by construction. */
@@ -202,6 +216,7 @@ export function collectQuotaWindows(
     if (active && sources.size > 0 && !sources.has(active)) return undefined;
   }
   const windows: QuotaPercentWindow[] = [];
+  const includeNamed = new Set(options.includeNamedWindows ?? []);
   for (const result of results) {
     if (!result.attempted) return undefined;
     if (providerScope !== undefined) {
@@ -219,7 +234,7 @@ export function collectQuotaWindows(
       if (!isPercentEntry(entry)) continue;
       if (!Number.isFinite(entry.percentRemaining)) return undefined;
       if (options.primaryAccountOnly) {
-        if (!isPrimaryRouteWindow(entry)) continue;
+        if (!isPrimaryRouteWindow(entry, includeNamed)) continue;
         if (
           providerScope === undefined &&
           (!active || !isBoundToActiveAccount(result, entry, active))
@@ -270,6 +285,15 @@ export function getQuotaResetRetryDelayMs(
   );
 }
 
+/** Canonical providers for a runtime route that declare auto-resume evidence. */
+export function getQuotaAutoResumeProviderIds(modelProviderID: string): ReadonlySet<string> {
+  return new Set(
+    getQuotaProviderIdsForRuntimeId(modelProviderID).filter(
+      (providerId) => getQuotaProviderRegistration(providerId)?.autoResume !== undefined,
+    ),
+  );
+}
+
 /**
  * Picks the verified identity for auto-resume evidence. A single-source route uses the provider
  * cache scope of its unaccounted result (the Claude CLI login, one API key); everything else
@@ -280,11 +304,7 @@ export function resolveQuotaEvidenceBinding(params: {
   readonly providerResults: readonly QuotaStatusLiveProbe[];
   readonly activeSourceId?: string;
 }): QuotaWindowBinding | undefined {
-  const eligibleProviderIds: ReadonlySet<string> = new Set(
-    getQuotaProviderIdsForRuntimeId(params.modelProviderID).filter((providerId) => {
-      return getQuotaProviderRegistration(providerId)?.autoResume !== undefined;
-    }),
-  );
+  const eligibleProviderIds = getQuotaAutoResumeProviderIds(params.modelProviderID);
   if (eligibleProviderIds.size === 0) return undefined;
   const routeResults = params.providerResults.filter((probe) =>
     eligibleProviderIds.has(probe.providerId),
@@ -339,13 +359,14 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | und
 
 export type QuotaModelProbeState =
   | { readonly state: "disabled" }
+  | { readonly state: "unsupported" }
   | { readonly state: "unavailable" }
   | { readonly state: "probe"; readonly probe: QuotaModelProbe };
 
 /**
- * One live quota probe for the model's provider, keeping "the feature is off" distinct from
- * "the evidence is temporarily unavailable". Native retry treats both as no delay; auto-resume
- * must keep polling the latter and stop immediately on the former.
+ * One live quota probe for the model's provider, keeping "the feature is off", "this route can
+ * never supply auto-resume evidence", and "the evidence is temporarily unavailable" distinct.
+ * Auto-resume stops immediately for the first two and keeps polling the last.
  */
 export async function probeQuotaForModelState(
   host: Pick<QuotaSurfaceHost, "client" | "roots">,
@@ -359,6 +380,13 @@ export async function probeQuotaForModelState(
     sessionMeta: { modelID: model.id, providerID: model.providerID },
   });
   if (!isEnabled(runtime.config)) return { state: "disabled" };
+  // The provider registration is the permanent eligibility contract; never infer it from rows.
+  const autoResumeProviderIds = options.includeProviderScope
+    ? getQuotaAutoResumeProviderIds(model.providerID)
+    : undefined;
+  if (autoResumeProviderIds !== undefined && autoResumeProviderIds.size === 0) {
+    return { state: "unsupported" };
+  }
   const probed = await withTimeout(
     (async () => {
       const collected = await collectQuotaRenderData({
@@ -388,18 +416,26 @@ export async function probeQuotaForModelState(
     runtime.config.requestTimeoutMs,
   );
   if (!probed) return { state: "unavailable" };
+  // Eligibility is decided above; only providers that declare autoResume evidence can feed the
+  // collection, so an account row cannot smuggle an ineligible provider's windows in.
+  const routeResults =
+    autoResumeProviderIds !== undefined
+      ? probed.collected.providerResults.filter((entry) =>
+          autoResumeProviderIds.has(entry.providerId),
+        )
+      : probed.collected.providerResults;
   const binding = options.includeProviderScope
     ? resolveQuotaEvidenceBinding({
         modelProviderID: model.providerID,
-        providerResults: probed.collected.providerResults,
+        providerResults: routeResults,
         ...(probed.activeSourceId !== undefined ? { activeSourceId: probed.activeSourceId } : {}),
       })
     : undefined;
   // A provider-scope binding is only meaningful for its own provider result.
   const providerResults =
     binding?.kind === "provider-scope"
-      ? probed.collected.providerResults.filter((entry) => entry.providerId === binding.providerId)
-      : probed.collected.providerResults;
+      ? routeResults.filter((entry) => entry.providerId === binding.providerId)
+      : routeResults;
   return {
     state: "probe",
     probe: {

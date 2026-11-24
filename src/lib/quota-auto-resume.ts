@@ -10,17 +10,19 @@
  * keeps the pending resume and polls again; only authoritative events and evidence cancel it.
  * The first observation that shows a used-up window with a future reset boundary becomes the
  * baseline, so an unavailable first probe never loses the continuation but also never authorizes
- * it without the later transition. A disabled setting cancels the pending resume and is not
- * polled again.
+ * it without the later transition. A disabled setting or a route whose provider registration has
+ * no `autoResume` contract cancels the pending resume and is not polled again.
  *
- * Claude Agent's five-hour subscription limit is not classified as a quota limit by OpenCode
- * 2.4.1 (it arrives as an untyped provider error with only a message), so it cannot arm this
- * feature until upstream supplies a structured quota error. Native retry and provider cooldown
- * policies are never replaced by this module.
+ * OpenCode 2.4.1 loses the structured quota error for some Claude Agent subscription limits and
+ * exposes only a message. Known Claude subscription-limit messages are recognized for this module
+ * only; they still require an independently observed exhausted five-hour or weekly window (plus
+ * the Fable weekly row only for a Fable model) for the same verified identity. Native retry
+ * classification and provider cooldown policies are never changed by that recognition.
  *
  * In-process only. There is no durable queue: a plugin restart drops a pending resume (accepted;
  * the next terminal failure arms a new cycle). No tool action is replayed.
  */
+import { getQuotaProviderIdsForRuntimeId } from "./provider-metadata.js";
 import { type ResetObservation, updateObservation } from "./quota-reset-notifications.js";
 import {
   isQuotaLimitError,
@@ -49,11 +51,15 @@ export type QuotaAutoResumeSessionInfo = {
   time?: { idle?: number };
 };
 
-/** The probe's evidence state; the setting's enablement stays distinct from absent evidence. */
+/**
+ * The probe's evidence state; the setting's enablement, permanent route support, and temporary
+ * evidence absence stay distinct.
+ */
 export type QuotaAutoResumeProbe =
   | { readonly kind: "collection"; readonly collection: QuotaWindowCollection }
   | { readonly kind: "absent" }
-  | { readonly kind: "disabled" };
+  | { readonly kind: "disabled" }
+  | { readonly kind: "unsupported" };
 
 export interface QuotaAutoResumeDeps {
   /**
@@ -97,6 +103,8 @@ type PendingResume = {
   modelID?: string;
   providerID?: string;
   binding?: QuotaWindowBinding;
+  /** Set when a known Claude subscription-limit message armed this pending resume. */
+  subscription?: ClaudeSubscriptionWindow;
   /**
    * The exhausted windows this resume tracks. Undefined while the first observation is still
    * unavailable: the resume is pending, but no continuation is authorized without a baseline.
@@ -110,6 +118,7 @@ type PendingResume = {
 
 type FailureError = {
   type: string;
+  message?: string;
   status?: number;
   retryAfterMs?: number;
 };
@@ -120,11 +129,109 @@ function failureError(value: unknown): FailureError | undefined {
   if (typeof error.type !== "string") return undefined;
   return {
     type: error.type,
+    ...(typeof error.message === "string" ? { message: error.message } : {}),
     ...(typeof error.status === "number" ? { status: error.status } : {}),
     ...(typeof error.retryAfterMs === "number" && Number.isFinite(error.retryAfterMs)
       ? { retryAfterMs: error.retryAfterMs }
       : {}),
   };
+}
+
+/** The Claude subscription window named by a known terminal message. */
+type ClaudeSubscriptionWindow = "five_hour" | "week" | "any";
+
+/**
+ * Known Claude Agent subscription-limit messages. Auto-resume-only: `isQuotaLimitError` and the
+ * native retry hook never see this recognition.
+ *
+ * OpenCode 2.4.1's claude-agent error converter turns a rejected `rate_limit_event` plus an empty
+ * result into `Claude Code subscription limit reached (<window>). Resets at <ISO>.`, and it
+ * preserves Claude Code's own text when the result is non-empty. The converter and message shape:
+ * https://github.com/anomalyco/opencode/blob/v2.4.1/packages/core/src/plugin/provider/claude-agent/language-model/claude-agent-error.ts
+ * Observed payloads and the lossy UnknownProvider classification:
+ * https://github.com/anomalyco/opencode/issues/63189 (session text and the empty-result form).
+ * Claude Code uses the same `You've hit your <window> limit · resets ...` shape for its weekly
+ * limit. `five_hour`/`seven_day` and the other rate-limit types are in the Claude Agent SDK
+ * `SDKRateLimitInfo` type: https://unpkg.com/@anthropic-ai/claude-agent-sdk/sdk.d.ts
+ */
+const CLAUDE_SUBSCRIPTION_LIMIT_MESSAGES: readonly {
+  readonly pattern: RegExp;
+  readonly window: ClaudeSubscriptionWindow;
+}[] = [
+  { pattern: /^Claude Code subscription limit reached \(five hour\)/, window: "five_hour" },
+  { pattern: /^Claude Code subscription limit reached \(seven day\)/, window: "week" },
+  { pattern: /^Claude Code subscription limit reached\b/, window: "any" },
+  {
+    pattern: /^You've hit your (?:session|five-hour|5-hour) limit\b/i,
+    window: "five_hour",
+  },
+  { pattern: /^You've hit your weekly limit\b/i, window: "week" },
+];
+
+function claudeSubscriptionWindow(
+  message: string | undefined,
+): ClaudeSubscriptionWindow | undefined {
+  if (message === undefined) return undefined;
+  const normalized = message.trim();
+  return CLAUDE_SUBSCRIPTION_LIMIT_MESSAGES.find(({ pattern }) => pattern.test(normalized))?.window;
+}
+
+/** Claude Agent's runtime ids normalize to this canonical provider in the registration catalog. */
+function isClaudeAgentRoute(providerID: string): boolean {
+  return getQuotaProviderIdsForRuntimeId(providerID).includes("claude-agent");
+}
+
+/** The `named:Fable weekly` row belongs to the Fable model only (anthropicQuotaEntries). */
+function isFableModel(modelID: string | undefined): boolean {
+  return modelID !== undefined && /fable/i.test(modelID);
+}
+
+/** The window keys that can confirm a recognized Claude subscription-limit message. */
+function subscriptionWindowKeys(resume: PendingResume): readonly string[] {
+  if (resume.subscription === "five_hour") return ["window:five_hour"];
+  const keys = ["window:week"];
+  if (isFableModel(resume.modelID)) keys.push("named:Fable weekly");
+  if (resume.subscription === "any") keys.unshift("window:five_hour");
+  return keys;
+}
+
+type SubscriptionConfirmation = "confirmed" | "contradicted" | "unavailable";
+
+/**
+ * A message alone never arms recovery. At least one applicable window must be independently
+ * observed as exhausted with a future reset for the same verified binding. A missing row or reset
+ * is temporary evidence; a present row that still has quota contradicts the message.
+ */
+function subscriptionConfirmation(
+  collection: QuotaWindowCollection,
+  resume: PendingResume,
+  nowMs: number,
+): SubscriptionConfirmation {
+  const expected = subscriptionWindowKeys(resume);
+  const present = collection.windows.filter(
+    (window) => window.key !== undefined && expected.includes(window.key),
+  );
+  if (
+    present.some(
+      (window) =>
+        window.percentRemaining <= 0 && window.resetMs !== undefined && window.resetMs > nowMs,
+    )
+  ) {
+    return "confirmed";
+  }
+  // A possible window row is missing: absence of evidence, not proof against the message.
+  if (present.length < expected.length) return "unavailable";
+  if (present.every((window) => window.percentRemaining > 0)) return "contradicted";
+  // Exhausted but no future reset yet: keep polling for usable evidence.
+  return "unavailable";
+}
+
+/** Applies model-scoped row semantics before a window can become recovery evidence. */
+function isApplicableWindow(
+  window: QuotaWindowCollection["windows"][number],
+  resume: PendingResume,
+): boolean {
+  return window.key !== "named:Fable weekly" || isFableModel(resume.modelID);
 }
 
 function sessionIDOf(data: unknown): string | undefined {
@@ -250,7 +357,8 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
     | { kind: "cancelled" }
     | { kind: "disabled" }
     | { kind: "identity" }
-    | { kind: "unavailable" };
+    | { kind: "unavailable" }
+    | { kind: "unsupported" };
 
   async function probeQuota(
     sessionID: string,
@@ -265,9 +373,10 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
     }
     // The controller may have been disposed or superseded while the probe ran.
     if (disposed || pending.get(sessionID) !== resume) return { kind: "cancelled" };
-    // A disabled feature stops the pending resume; absent evidence keeps polling instead.
+    // A disabled feature or a permanently unsupported route stops the pending resume.
     if (result === undefined || result.kind === "absent") return { kind: "unavailable" };
     if (result.kind === "disabled") return { kind: "disabled" };
+    if (result.kind === "unsupported") return { kind: "unsupported" };
     const collection = result.collection;
     if (resume.binding !== undefined) {
       // A different verified identity means this continuation is no longer valid.
@@ -280,6 +389,7 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
   }
 
   type WindowState =
+    | { kind: "cancel" }
     | { kind: "recovered" }
     | { kind: "waiting"; nextCheckAtMs?: number }
     | { kind: "unknown" };
@@ -379,7 +489,13 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
   ): WindowState {
     const binding = collection.binding;
     if (binding === undefined) return { kind: "unknown" };
-    const exhausted = collection.windows.filter((window) => window.percentRemaining <= 0);
+    if (resume.subscription !== undefined) {
+      const confirmation = subscriptionConfirmation(collection, resume, nowMs);
+      if (confirmation === "contradicted") return { kind: "cancel" };
+      if (confirmation === "unavailable") return { kind: "unknown" };
+    }
+    const applicable = collection.windows.filter((window) => isApplicableWindow(window, resume));
+    const exhausted = applicable.filter((window) => window.percentRemaining <= 0);
     if (exhausted.length === 0) return { kind: "unknown" };
     const windows = new Map<string, TrackedWindow>();
     let latestResetMs = nowMs;
@@ -440,6 +556,11 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
     resume.modelID ??= model.id;
     resume.providerID ??= model.providerID;
     resume.idleAtArm ??= info.time?.idle;
+    // A recognized Claude subscription-limit message is only valid on the Claude Agent route.
+    if (resume.subscription !== undefined && !isClaudeAgentRoute(model.providerID)) {
+      cancel(sessionID);
+      return;
+    }
     const route = { id: model.id, providerID: model.providerID };
     const probe = await probeQuota(sessionID, resume, route);
     if (probe.kind === "cancelled") return;
@@ -447,8 +568,8 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
       cancel(sessionID);
       return;
     }
-    // Turning the setting off cancels the pending resume instead of polling a disabled feature.
-    if (probe.kind === "disabled") {
+    // Turning the setting off, or a route with no auto-resume contract, cancels immediately.
+    if (probe.kind === "disabled" || probe.kind === "unsupported") {
       cancel(sessionID);
       return;
     }
@@ -458,6 +579,10 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
       return;
     }
     const windows = observeWindows(probe.collection, resume, now());
+    if (windows.kind === "cancel") {
+      cancel(sessionID);
+      return;
+    }
     if (windows.kind !== "recovered") {
       if (windows.kind === "waiting") {
         // The window is confirmed used up again; the next reset starts a new grace period.
@@ -478,11 +603,16 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
     await fire(sessionID, resume);
   }
 
-  async function arm(sessionID: string, error: FailureError): Promise<void> {
+  async function arm(
+    sessionID: string,
+    error: FailureError,
+    subscription: ClaudeSubscriptionWindow | undefined,
+  ): Promise<void> {
     if (disposed || pending.has(sessionID)) return;
     const failureAt = now();
     const resume: PendingResume = {
       failureAt,
+      ...(subscription !== undefined ? { subscription } : {}),
       ...(error.retryAfterMs !== undefined
         ? { retryAfterAtMs: failureAt + error.retryAfterMs }
         : {}),
@@ -505,8 +635,17 @@ export function createQuotaAutoResumption(deps: QuotaAutoResumeDeps): {
           if (consumed.has(sessionID)) return;
           const data = event.data as Record<string, unknown>;
           const error = failureError(data.error);
-          if (!error || !isQuotaLimitError(error as QuotaRetryEvent["error"])) return;
-          void arm(sessionID, error);
+          if (!error) return;
+          const typed = isQuotaLimitError(error as QuotaRetryEvent["error"]);
+          // OpenCode 2.4.1 exposes some Claude subscription limits as provider.unknown with only
+          // a message. Recognize only the known shapes; a message alone still cannot arm without
+          // the independent exhausted-window confirmation in `establishBaseline`.
+          const subscription =
+            !typed && error.type === "provider.unknown"
+              ? claudeSubscriptionWindow(error.message)
+              : undefined;
+          if (!typed && subscription === undefined) return;
+          void arm(sessionID, error, subscription);
           return;
         }
         case "session.execution.interrupted":
