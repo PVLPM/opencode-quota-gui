@@ -1,6 +1,6 @@
 import type { QuotaSnapshot, SettingsSnapshot } from "../contracts/dashboard.js";
 import { isProviderFailureCategory } from "../contracts/provider-failure.js";
-import { getQuotaProviderShape } from "../lib/provider-metadata.js";
+import { getQuotaProviderRegistration } from "../lib/provider-metadata.js";
 import {
   formatNativeSettingsCopyDiagnostics,
   type NativeSettingsCopyDiagnosticsInput,
@@ -59,7 +59,7 @@ function providerStatusesFromSnapshot(
   };
 
   for (const card of quota.providers.cards) {
-    const providerId = getQuotaProviderShape(card.providerId)?.id;
+    const providerId = getQuotaProviderRegistration(card.providerId)?.id;
     if (!providerId) continue;
     const summary = summaryFor(providerId);
     summary.cardCount += 1;
@@ -80,7 +80,7 @@ function providerStatusesFromSnapshot(
   if (Array.isArray(enabledProviders)) {
     for (const configuredId of enabledProviders) {
       if (typeof configuredId !== "string") continue;
-      const providerId = getQuotaProviderShape(configuredId)?.id;
+      const providerId = getQuotaProviderRegistration(configuredId)?.id;
       if (providerId) summaryFor(providerId);
     }
   }

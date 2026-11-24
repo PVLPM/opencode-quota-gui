@@ -1,9 +1,13 @@
 import { readFile } from "fs/promises";
 
-import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+import type {
+  ProviderFailureCategory,
+  QuotaAttemptOutcome,
+} from "../contracts/provider-failure.js";
 import { sanitizeDisplayText } from "../lib/display-sanitize.js";
 import type {
   AccountingMetadata,
+  AccountingSemantic,
   FixedWindowProjectionEvidence,
   QuotaProviderPresentation,
   QuotaProviderResult,
@@ -36,6 +40,7 @@ export function attemptedErrorResult(
     retryable?: boolean;
     failureCategory?: ProviderFailureCategory;
     retryAtMs?: number;
+    attemptOutcome?: QuotaAttemptOutcome;
   } = {},
 ): QuotaProviderResult {
   return attemptedResult(
@@ -46,6 +51,7 @@ export function attemptedErrorResult(
         message,
         ...(options.retryable === true ? { retryable: true } : {}),
         ...(options.retryAtMs !== undefined ? { retryAtMs: options.retryAtMs } : {}),
+        ...(options.attemptOutcome !== undefined ? { attemptOutcome: options.attemptOutcome } : {}),
         ...(options.failureCategory !== undefined
           ? { failureCategory: options.failureCategory }
           : {}),
@@ -210,12 +216,13 @@ export function groupedPercentWindowEntries(params: {
     };
     suffix: string;
     label: string;
+    semantic?: AccountingSemantic;
   }>;
   fallbackWhenEmpty?: boolean;
 }): QuotaToastEntry[] {
   const entries: QuotaToastEntry[] = [];
 
-  for (const { window, suffix, label } of params.windows) {
+  for (const { window, suffix, label, semantic } of params.windows) {
     if (!window) continue;
 
     entries.push({
@@ -223,6 +230,9 @@ export function groupedPercentWindowEntries(params: {
       name: `${params.group} ${suffix}`,
       group: params.group,
       label,
+      ...(semantic
+        ? { semantic: { metric: { ...semantic.metric }, prominence: semantic.prominence } }
+        : {}),
       percentRemaining: window.percentRemaining,
       resetTimeIso: window.resetTimeIso,
       ...(window.fixedWindow ? { fixedWindow: { ...window.fixedWindow } } : {}),

@@ -22,7 +22,9 @@ import type {
   SettingsSnapshot,
   SettingsWriteResult,
 } from "../contracts/dashboard.js";
+import { isRecord, isText } from "../contracts/dto-guards.js";
 import { LEGACY_IMPORT_KEYS } from "../contracts/settings.js";
+import { ANTHROPIC_OAUTH_MIN_POLL_INTERVAL_MS } from "../lib/anthropic-oauth-throttle.js";
 import { withCanonicalConfigLock } from "../lib/canonical-config-lock.js";
 import {
   buildConfigLayerCandidates,
@@ -84,8 +86,10 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "resetTimeDecimals",
   "resetTimeSpaced",
   "waitForQuotaReset",
+  "autoResumeOnQuotaRecovery",
   "enabledProviders",
   "minIntervalMs",
+  "claudeAgentPollIntervalMs",
   "requestTimeoutMs",
   "accountingDetail",
   "lowQuotaThresholdRemainingPercent",
@@ -97,6 +101,7 @@ export const GUI_SETTINGS_WRITABLE_KEYS = [
   "dashboard.hiddenRows",
   "dashboard.providerOrder",
   "dashboard.cardOrder",
+  "dashboard.rowOrder",
   "dashboard.temporalProviderOverrides",
   "dashboard.enabled",
 ] as const;
@@ -239,10 +244,6 @@ interface NormalizedWrite {
   changes: Map<string, JsonValue | undefined>;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 /** Strict finite-number check: `Number.isFinite` coerces nothing, so it implies a number primitive. */
 function isFiniteNumber(value: JsonValue): value is number {
   return Number.isFinite(value);
@@ -374,12 +375,16 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return config.resetTimeSpaced ?? null;
       case "waitForQuotaReset":
         return config.waitForQuotaReset;
+      case "autoResumeOnQuotaRecovery":
+        return config.autoResumeOnQuotaRecovery;
       case "enabledProviders":
         return Array.isArray(config.enabledProviders)
           ? [...config.enabledProviders]
           : config.enabledProviders;
       case "minIntervalMs":
         return config.minIntervalMs;
+      case "claudeAgentPollIntervalMs":
+        return config.claudeAgentPollIntervalMs;
       case "requestTimeoutMs":
         return config.requestTimeoutMs;
       case "accountingDetail":
@@ -415,6 +420,10 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return [...config.dashboard.providerOrder];
       case "dashboard.cardOrder":
         return [...config.dashboard.cardOrder];
+      case "dashboard.rowOrder":
+        return Object.fromEntries(
+          Object.entries(config.dashboard.rowOrder).map(([cardId, ids]) => [cardId, [...ids]]),
+        );
       case "dashboard.temporalProviderOverrides":
         return { ...config.dashboard.temporalProviderOverrides };
       case "dashboard.enabled":
@@ -577,6 +586,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return value;
       case "resetTimeSpaced":
       case "waitForQuotaReset":
+      case "autoResumeOnQuotaRecovery":
         if (value !== true && value !== false) {
           throw invalidSetting(key, "expected boolean");
         }
@@ -601,6 +611,14 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
       case "requestTimeoutMs":
         if (!isPositiveNumber(value)) {
           throw invalidSetting(key, "expected a finite number greater than 0");
+        }
+        return value;
+      case "claudeAgentPollIntervalMs":
+        if (!isPositiveNumber(value) || value < ANTHROPIC_OAUTH_MIN_POLL_INTERVAL_MS) {
+          throw invalidSetting(
+            key,
+            `expected a finite number of at least ${ANTHROPIC_OAUTH_MIN_POLL_INTERVAL_MS}`,
+          );
         }
         return value;
       case "accountingDetail":
@@ -664,7 +682,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
         return [...new Set(ids)];
       }
       case "dashboard.temporalProviderOverrides": {
-        if (!isPlainObject(value)) {
+        if (!isRecord(value)) {
           throw invalidSetting(key, "expected an object of provider ids mapped to booleans");
         }
         const entries = Object.entries(value);
@@ -677,6 +695,36 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
           }
         }
         return Object.fromEntries(entries);
+      }
+      case "dashboard.rowOrder": {
+        if (!isRecord(value)) {
+          throw invalidSetting(key, "expected an object of card ids mapped to row-id lists");
+        }
+        const entries = Object.entries(value);
+        if (entries.length > DASHBOARD_HIDDEN_ID_LIMIT) {
+          throw invalidSetting(key, `expected at most ${DASHBOARD_HIDDEN_ID_LIMIT} cards`);
+        }
+        const rowOrder: [string, string[]][] = [];
+        for (const [cardId, ids] of entries) {
+          if (cardId.length === 0 || cardId.length > 512 || !Array.isArray(ids)) {
+            throw invalidSetting(key, "expected an object of card ids mapped to row-id lists");
+          }
+          const normalized: string[] = [];
+          for (const id of ids) {
+            if (!isText(id) || id.length === 0 || id.length > 512) {
+              throw invalidSetting(key, "expected an object of card ids mapped to row-id lists");
+            }
+            normalized.push(id);
+          }
+          if (normalized.length > DASHBOARD_HIDDEN_ID_LIMIT) {
+            throw invalidSetting(
+              key,
+              `expected at most ${DASHBOARD_HIDDEN_ID_LIMIT} row ids per card`,
+            );
+          }
+          rowOrder.push([cardId, [...new Set(normalized)]]);
+        }
+        return Object.fromEntries(rowOrder);
       }
       case "dashboard.port":
         throw invalidSetting(key, "this setting is read-only; edit the canonical file and restart");
@@ -746,7 +794,7 @@ export function createGuiSettingsStore(options: GuiSettingsStoreOptions): GuiSet
     let node = target;
     for (const part of parts.slice(0, -1)) {
       const child = node[part];
-      if (isPlainObject(child)) {
+      if (isRecord(child)) {
         node = child;
       } else {
         const created: Record<string, unknown> = {};

@@ -1,7 +1,7 @@
 import type { AnalyticsTemporalBreakdown } from "./analytics-temporal.js";
 import type { CardId, RowId } from "./identity.js";
 import type { BankedResetAvailability } from "./openai-quota.js";
-import type { ProviderFailureCategory } from "./provider-failure.js";
+import type { ProviderFailureCategory, QuotaAttemptOutcome } from "./provider-failure.js";
 import type { BucketUnit, RangeKey, RangeWindow } from "./ranges.js";
 import type { TemporalStatusSnapshot } from "./temporal.js";
 
@@ -105,6 +105,16 @@ export interface CostedTokens extends TokenStack {
   apiEquivalentCostUsd: number | null;
   unpricedTokens: number;
   unknownTokens: number;
+  /**
+   * Portion of `apiEquivalentCostUsd` that came from OpenCode's recorded
+   * per-message cost because models.dev could not price the route.
+   */
+  recordedCostUsd?: number;
+  /**
+   * Tokens priced by that recorded-cost fallback. They are already included in
+   * the priced total and are never counted as unpriced/unknown tokens.
+   */
+  recordedCostTokens?: number;
 }
 
 export interface Bucket {
@@ -355,6 +365,11 @@ export interface ProviderCard {
     message: string;
     retryable?: boolean;
     retryAtMs?: number;
+    /**
+     * Outcome of the attempt behind this error. A `cooldown` skip made no
+     * request, so it is displayed as a muted retry notice, never a failure.
+     */
+    attemptOutcome?: QuotaAttemptOutcome;
     kind?: "intentional-filter";
     /** Source-assigned safe category; absence means unknown and consumers fail closed. */
     failureCategory?: ProviderFailureCategory;
@@ -365,8 +380,15 @@ export interface ProviderCard {
   /**
    * Persistent optional-row choices (additive): stable ids and labels exist
    * even when runtime values are absent. Never synthetic zero data rows.
+   * `rowId` is the stable declared field id; `aliases` lists the emitted row
+   * ids that render the same field in another shape.
    */
-  visibilityRows?: { rowId: RowId; label: string; info?: string }[];
+  visibilityRows?: {
+    rowId: RowId;
+    label: string;
+    info?: string;
+    aliases?: RowId[];
+  }[];
 }
 
 export interface ProjectActivityRow {
@@ -382,6 +404,12 @@ export interface HomeSnapshot {
   range: RangeKey;
   stale: boolean;
   provisional?: true;
+  /**
+   * Additive: the exact replacement behind a provisional paint failed. The
+   * provisional data stays visible; the UI clears its pending ring and offers
+   * a retry. Absent while the exact read is pending or after it succeeds.
+   */
+  exactError?: string;
   /** `polledAtMs` is a poll time, not a guarantee that every provider succeeded. */
   providers: { cards: ProviderCard[]; enabledProviders: string[] | "auto"; polledAtMs: number };
   usage: Usage;
@@ -489,6 +517,11 @@ export interface StepPoint {
   cacheReadUnknown?: true;
   /** Same for the cache-write counter. */
   cacheWriteUnknown?: true;
+  /**
+   * The first assistant step after a user-role message in this step's own
+   * session. Position only: the DTO never carries prompt text.
+   */
+  inputMarker?: true;
 }
 
 export interface SessionSnapshot {

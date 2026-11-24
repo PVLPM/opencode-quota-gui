@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { AUTO_RESUME_SUPPORTED_PROVIDER_LABELS } from "../src/contracts/provider-auto-resume.js";
 import { normalizeEnabledProviders } from "../src/lib/config.js";
-
 import {
   getQuotaProviderDisplayLabel,
   getQuotaProviderIdsForRuntimeId,
+  getQuotaProviderRegistration,
   getQuotaProviderRuntimeIds,
-  getQuotaProviderShape,
+  getSupportedAutoResumeProviderLabels,
   normalizeQuotaProviderId,
   QUOTA_PROVIDER_CATALOG,
   QUOTA_PROVIDER_ID_SYNONYMS,
@@ -17,7 +18,7 @@ import { QUOTA_PROVIDER_REGISTRATION_SOURCE } from "../src/lib/provider-registra
 
 describe("provider-metadata", () => {
   it("defines the canonical provider setup catalog", () => {
-    expect(QUOTA_PROVIDER_SHAPES).toEqual([
+    expect(QUOTA_PROVIDER_SHAPES).toMatchObject([
       {
         id: "anthropic",
         autoSetup: "usually",
@@ -404,37 +405,37 @@ describe("provider-metadata", () => {
   });
 
   it("returns provider setup metadata for canonical ids and aliases", () => {
-    expect(getQuotaProviderShape("openai")).toEqual({
+    expect(getQuotaProviderRegistration("openai")).toMatchObject({
       id: "openai",
       autoSetup: "yes",
       authentication: "opencode_auth_oauth_token",
       quota: "remote_api",
     });
-    expect(getQuotaProviderShape("github-copilot")).toEqual({
+    expect(getQuotaProviderRegistration("github-copilot")).toMatchObject({
       id: "copilot",
       autoSetup: "usually",
       authentication: "github_oauth_or_pat",
       quota: "remote_api",
       notes: "OAuth for personal flow; PAT for managed billing",
     });
-    expect(getQuotaProviderShape("alibaba")).toEqual({
+    expect(getQuotaProviderRegistration("alibaba")).toMatchObject({
       id: "alibaba-coding-plan",
       autoSetup: "needs_quick_setup",
       authentication: "local_cli_auth",
       quota: "local_cli_report",
       quickSetupAnchor: "alibaba-coding-plan",
     });
-    expect(getQuotaProviderShape("alibaba-token-plan")).toEqual({
+    expect(getQuotaProviderRegistration("alibaba-token-plan")).toMatchObject({
       id: "alibaba-token-plan",
       autoSetup: "needs_quick_setup",
       authentication: "local_cli_auth",
       quota: "local_cli_report",
       quickSetupAnchor: "alibaba-personal-token-plan",
     });
-    expect(getQuotaProviderShape("alibaba-coding-plan")).not.toEqual(
-      getQuotaProviderShape("alibaba-token-plan"),
+    expect(getQuotaProviderRegistration("alibaba-coding-plan")).not.toEqual(
+      getQuotaProviderRegistration("alibaba-token-plan"),
     );
-    expect(getQuotaProviderShape("gemini-cli")).toEqual({
+    expect(getQuotaProviderRegistration("gemini-cli")).toMatchObject({
       id: "google-gemini-cli",
       recommendedReplacementId: "google-agy",
       autoSetup: "needs_quick_setup",
@@ -442,21 +443,21 @@ describe("provider-metadata", () => {
       quota: "remote_api",
       quickSetupAnchor: "gemini-cli",
     });
-    expect(getQuotaProviderShape("google-agy")).toEqual({
+    expect(getQuotaProviderRegistration("google-agy")).toMatchObject({
       id: "google-agy",
       autoSetup: "needs_quick_setup",
       authentication: "companion_auth_oauth_token",
       quota: "remote_api",
       quickSetupAnchor: "google-agy-quick-setup",
     });
-    expect(getQuotaProviderShape("deep-seek")).toEqual({
+    expect(getQuotaProviderRegistration("deep-seek")).toMatchObject({
       id: "deepseek",
       autoSetup: "yes",
       authentication: "opencode_auth_api_key",
       authFallbacks: ["env_api_key", "global_opencode_config"],
       quota: "remote_api",
     });
-    expect(getQuotaProviderShape("opencode-zen")).toEqual({
+    expect(getQuotaProviderRegistration("opencode-zen")).toMatchObject({
       id: "opencode",
       autoSetup: "yes",
       authentication: "opencode_auth_oauth_token",
@@ -464,7 +465,7 @@ describe("provider-metadata", () => {
       notes:
         "Reads the OpenCode Console billing, budget and usage APIs with your OpenCode Console sign-in",
     });
-    expect(getQuotaProviderShape("kilo")).toEqual({
+    expect(getQuotaProviderRegistration("kilo")).toMatchObject({
       id: "kilo",
       autoSetup: "usually",
       authentication: "opencode_auth_api_key",
@@ -473,14 +474,14 @@ describe("provider-metadata", () => {
       notes:
         "Queries Kilo Pass state first, then falls back to the documented personal Gateway balance when no active subscription exists",
     });
-    expect(getQuotaProviderShape("xai")).toEqual({
+    expect(getQuotaProviderRegistration("xai")).toMatchObject({
       id: "xai",
       autoSetup: "yes",
       authentication: "opencode_auth_oauth_token",
       quota: "remote_api",
       notes: "SuperGrok OAuth via OpenCode /connect; shared weekly credit meter",
     });
-    expect(getQuotaProviderShape("xiaomi-token-plan-ams")).toEqual({
+    expect(getQuotaProviderRegistration("xiaomi-token-plan-ams")).toMatchObject({
       id: "xiaomi",
       autoSetup: "needs_quick_setup",
       authentication: "state_only",
@@ -488,9 +489,81 @@ describe("provider-metadata", () => {
       quickSetupAnchor: "xiaomi-mimo",
       notes: "Reads the Xiaomi MiMo dashboard with a filtered trusted cookie",
     });
-    expect(getQuotaProviderShape("not-a-provider")).toBeUndefined();
-    expect(getQuotaProviderShape("qwen-code")).toBeUndefined();
-    expect(getQuotaProviderShape("google-antigravity")).toBeUndefined();
+    expect(getQuotaProviderRegistration("not-a-provider")).toBeUndefined();
+    expect(getQuotaProviderRegistration("qwen-code")).toBeUndefined();
+    expect(getQuotaProviderRegistration("google-antigravity")).toBeUndefined();
+  });
+
+  it("declares persistent visibility rows for optional fields", () => {
+    const optionalRows = (id: string) =>
+      getQuotaProviderRegistration(id)?.optionalVisibilityRows ?? [];
+    const keys = (id: string) =>
+      optionalRows(id).map((row) => `${row.rowKey}|${row.resultType}|${row.kind ?? "value"}`);
+
+    expect(keys("openai")).toEqual(
+      expect.arrayContaining([
+        "window:five_hour|rate_limit|percent",
+        "window:week|rate_limit|percent",
+        "window:month|rate_limit|percent",
+        "window:code_review|rate_limit|percent",
+        "openai:resets|status|value",
+        "openai:credits|balance|value",
+      ]),
+    );
+    expect(keys("claude-agent")).toEqual(
+      expect.arrayContaining([
+        "window:five_hour|quota|percent",
+        "window:week|quota|percent",
+        "window:month|quota|percent",
+        "named:Fable weekly|quota|percent",
+        "claude-agent:resets|status|value",
+      ]),
+    );
+    expect(keys("opencode")).toEqual(
+      expect.arrayContaining([
+        "window:month|budget|percent",
+        "window:month|spend|quantity",
+        "component:current_balance|balance|quantity",
+        "component:auto_reload|status|boolean",
+      ]),
+    );
+    expect(keys("deepseek")).toEqual(
+      expect.arrayContaining([
+        "component:total_balance|balance|quantity",
+        "component:granted_balance|balance|quantity",
+        "component:topped_up_balance|balance|quantity",
+        "named:Availability|status|boolean",
+      ]),
+    );
+    expect(keys("copilot")).toEqual(
+      expect.arrayContaining([
+        "window:month|quota|percent",
+        "named:additional_usage|budget|percent",
+      ]),
+    );
+    expect(keys("anthropic")).toEqual(
+      expect.arrayContaining([
+        "rate_limit:requests|rate_limit|value",
+        "rate_limit:tokens|rate_limit|value",
+        "rate_limit:inputTokens|rate_limit|value",
+        "rate_limit:outputTokens|rate_limit|value",
+      ]),
+    );
+
+    const seen = new Map<string, Set<string>>();
+    for (const shape of QUOTA_PROVIDER_SHAPES) {
+      const ids = new Set<string>();
+      for (const row of shape.optionalVisibilityRows ?? []) {
+        expect(row.rowKey.trim()).not.toBe("");
+        expect(row.label.trim()).not.toBe("");
+        expect(row.info.trim()).not.toBe("");
+        const id = `${row.rowKey}|${row.resultType}|${row.kind ?? "value"}`;
+        expect(ids.has(id), `${shape.id} declares ${id} twice`).toBe(false);
+        ids.add(id);
+      }
+      seen.set(shape.id, ids);
+    }
+    expect(seen.size).toBe(QUOTA_PROVIDER_SHAPES.length);
   });
 
   it("returns display labels for known providers", () => {
@@ -521,5 +594,11 @@ describe("provider-metadata", () => {
     expect(getQuotaProviderDisplayLabel("grok")).toBe("grok");
     expect(getQuotaProviderDisplayLabel("quota-providers")).toBe("Quota providers");
     expect(getQuotaProviderDisplayLabel("something-else")).toBe("something-else");
+  });
+
+  it("keeps the browser-safe auto-resume label list aligned with registration metadata", () => {
+    expect([...AUTO_RESUME_SUPPORTED_PROVIDER_LABELS]).toEqual([
+      ...getSupportedAutoResumeProviderLabels(),
+    ]);
   });
 });

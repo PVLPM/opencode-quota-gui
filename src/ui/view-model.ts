@@ -5,6 +5,8 @@ import {
   ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS,
   DASHBOARD_CONTRACT_VERSION,
 } from "../contracts/dashboard";
+import { isRecord, isText } from "../contracts/dto-guards";
+import { effectiveHiddenRowIds, type RowVisibilityControl } from "../contracts/row-visibility";
 import type { ConnectionState } from "./dashboard-client";
 import { DashboardError } from "./dashboard-client";
 
@@ -44,7 +46,7 @@ export interface FetchOutcome<T> {
 export type LoadState<T> =
   | { kind: "skeleton" }
   | { kind: "reload-required"; message: string }
-  | { kind: "error"; message: string; retryable: boolean }
+  | { kind: "error"; message: string; retryable: boolean; recoverable: boolean }
   | { kind: "ready"; data: T; stale: boolean; refreshing: boolean };
 
 /**
@@ -90,6 +92,72 @@ export function shouldRejoinAnalyticsRead(failure: unknown, elapsedMs: number): 
 }
 
 /**
+ * After the re-join budget is spent, one plain read still joins a result the
+ * worker committed at the deadline (the snapshot service serves or joins it).
+ */
+export function shouldProbeAnalyticsRead(cause: unknown, elapsedMs: number): boolean {
+  return isHostRpcTimeout(cause) && elapsedMs >= ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * A background analytics read with no route-owned query (prefetch) needs the
+ * same re-join loop. `cancelled` stops issuing further attempts after the shell
+ * that owns the retained payload is gone.
+ */
+export async function rejoinAnalyticsRead<T>(
+  read: () => Promise<T>,
+  cancelled?: () => boolean,
+): Promise<T> {
+  const startedAt = Date.now();
+  let probeUsed = false;
+  for (;;) {
+    if (cancelled?.() === true) throw new Error("analytics read cancelled");
+    try {
+      return await read();
+    } catch (failure) {
+      if (!isHostRpcTimeout(failure)) throw failure;
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs < ANALYTICS_DEFAULT_REQUEST_TIMEOUT_MS) continue;
+      if (probeUsed) throw failure;
+      probeUsed = true;
+    }
+  }
+}
+
+/**
+ * Declared 4xx conditions cannot succeed on an immediate automatic retry (a
+ * missing project stays missing); transport and unexpected server failures can.
+ */
+const PERMANENT_READ_CODES: ReadonlySet<string> = new Set([
+  "bad-request",
+  "bad-host",
+  "bad-origin",
+  "unsupported-media-type",
+  "body-too-large",
+  "method-not-allowed",
+  "not-found",
+  "config-changed",
+  "config-read-error",
+  "config-target-error",
+  "unknown-setting",
+  "invalid-setting",
+  "project-not-found",
+  "session-not-found",
+]);
+
+export function isRecoverableReadFailure(cause: unknown): boolean {
+  if (cause instanceof DashboardError) {
+    return cause.status >= 500 && !PERMANENT_READ_CODES.has(cause.code);
+  }
+  if (isRecord(cause) && "type" in cause) {
+    const type = cause.type;
+    if (isText(type)) return !PERMANENT_READ_CODES.has(type);
+  }
+  // Unknown shape: a dropped connection or parse failure is transport-like.
+  return true;
+}
+
+/**
  * A settings-revision conflict arrives in two shapes: the browser client throws
  * a `DashboardError`, while the official native RPC client unwraps the server's
  * `RpcError` into a plain `{ type, message, data? }` object. Recognize only the
@@ -120,7 +188,12 @@ export function resolveLoadState<T>(
   }
   if (outcome.loading) return { kind: "skeleton" };
   if (outcome.error !== undefined) {
-    return { kind: "error", message: describeError(outcome.error), retryable: true };
+    return {
+      kind: "error",
+      message: describeError(outcome.error),
+      retryable: true,
+      recoverable: isRecoverableReadFailure(outcome.error),
+    };
   }
   return { kind: "skeleton" };
 }
@@ -160,10 +233,23 @@ export function isStaleAfterReconnect(reconnectEpoch: number, freshEpoch: number
   return reconnectEpoch > freshEpoch;
 }
 
-/** Rows hide by stable row id; a hidden row changes no payload and no polling (invariant 8). */
-export function visibleRows(rows: QuotaCardRow[], hiddenRows: string[]): QuotaCardRow[] {
+/**
+ * Rows hide by stable row id; a hidden row changes no payload and no polling
+ * (invariant 8). A pre-window `aggregate` id resolves to the first emitted row
+ * it used to match, and a declared control hides every emitted shape it owns,
+ * so an upgrade or a provider shape change never re-shows a hidden row.
+ */
+export function visibleRows(
+  rows: QuotaCardRow[],
+  hiddenRows: string[],
+  controls: readonly RowVisibilityControl[] = [],
+): QuotaCardRow[] {
   if (hiddenRows.length === 0) return rows;
-  const hidden = new Set(hiddenRows);
+  const hidden = effectiveHiddenRowIds(
+    rows.map((row) => row.rowId),
+    hiddenRows,
+    controls,
+  );
   return rows.filter((row) => !hidden.has(row.rowId));
 }
 

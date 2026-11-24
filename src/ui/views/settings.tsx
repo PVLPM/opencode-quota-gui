@@ -7,6 +7,11 @@ import type {
   JsonValue,
   SettingsSnapshot,
 } from "../../contracts/dashboard";
+import { orderRowsByPreference } from "../../contracts/row-order";
+import {
+  effectiveHiddenRowIds,
+  materializeLegacyHiddenRowsForCard,
+} from "../../contracts/row-visibility";
 import type { TemporalStatusSnapshot } from "../../contracts/temporal";
 import { BuildAbout } from "../components/build-info";
 import { EyeToggle } from "../components/eye-toggle";
@@ -39,6 +44,7 @@ import {
   parseNumberInput,
   parseProviderIds,
   providerSelection,
+  rowOrderFromValue,
   SETTINGS_FIELDS,
   SETTINGS_GROUPS,
   type SettingsDraft,
@@ -340,13 +346,18 @@ export function SettingsView(props: {
   }
 
   /** Row state is independent of the provider eye and never cleared by it. */
-  function toggleRowEye(row: VisibilityRow): void {
+  function toggleRowEye(card: VisibilityCard, row: VisibilityRow): void {
     if (!hiddenRowsWritable() || busy()) return;
-    const hidden = hiddenRowIds();
-    edit(
-      "dashboard.hiddenRows",
-      hidden.includes(row.id) ? hidden.filter((entry) => entry !== row.id) : [...hidden, row.id],
+    const hidden = materializeLegacyHiddenRowsForCard(
+      card.cardId,
+      hiddenRowIds(),
+      card.rows.flatMap((entry) => [entry.id, ...(entry.aliases ?? [])]),
     );
+    const aliases = row.aliases ?? [];
+    const hiddenSet = new Set(hidden);
+    const isHidden = hiddenSet.has(row.id) || aliases.some((id) => hiddenSet.has(id));
+    const remaining = hidden.filter((id) => id !== row.id && !aliases.includes(id));
+    edit("dashboard.hiddenRows", isHidden ? remaining : [...remaining, row.id]);
   }
 
   function writeCardOrder(next: string[], movedId: string): void {
@@ -371,7 +382,7 @@ export function SettingsView(props: {
         ? { slot: nodes.slot, card: nodes.card, grip: nodes.grip }
         : undefined;
     },
-    enabled: () => cardOrderWritable() && !busy(),
+    enabled: () => cardOrderWritable() && !busy() && draggingRowId() === undefined,
     preview: setProvisionalOrder,
     active: setDraggingCardId,
     commit: writeCardOrder,
@@ -398,7 +409,7 @@ export function SettingsView(props: {
       sorter.cancel();
       return;
     }
-    if (!cardOrderWritable() || busy() || draggingCardId()) return;
+    if (!cardOrderWritable() || busy() || draggingCardId() || draggingRowId()) return;
     if (event.altKey !== true) return;
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault?.();
@@ -409,6 +420,110 @@ export function SettingsView(props: {
       );
       // Solid applies keyed DOM moves after the event batch; restore focus afterward.
       queueMicrotask(() => cardNodes.get(card.cardId)?.grip?.focus({ preventScroll: true }));
+    }
+  }
+
+  /** Row order is saved per card; every other card keeps provider emission order. */
+  const [draggingRowId, setDraggingRowId] = createSignal<string | undefined>();
+  const [provisionalRows, setProvisionalRows] = createSignal<
+    { cardId: string; ids: string[] } | undefined
+  >();
+  const [rowOrderAnnouncement, setRowOrderAnnouncement] = createSignal("");
+  const rowNodes = new Map<string, Partial<SortableCardNodes>>();
+  let rowCardId: string | undefined;
+
+  const rowOrderWritable = () => props.snapshot.writable.includes("dashboard.rowOrder");
+  const rowOrderValues = () => rowOrderFromValue(valueForKey("dashboard.rowOrder"));
+
+  const rowControls = (card: VisibilityCard) =>
+    card.rows.map((row) => ({ rowId: row.id, aliases: row.aliases }));
+
+  function baseRows(card: VisibilityCard): VisibilityRow[] {
+    return orderRowsByPreference(
+      card.rows,
+      rowOrderValues()[card.cardId],
+      (row) => row.id,
+      rowControls(card),
+    );
+  }
+
+  function displayRows(card: VisibilityCard): VisibilityRow[] {
+    const provisional = provisionalRows();
+    return orderRowsByPreference(
+      card.rows,
+      provisional?.cardId === card.cardId ? provisional.ids : rowOrderValues()[card.cardId],
+      (row) => row.id,
+      rowControls(card),
+    );
+  }
+
+  function writeRowOrder(next: string[], card: VisibilityCard, movedId: string): void {
+    const current = baseRows(card).map((row) => row.id);
+    if (JSON.stringify(next) === JSON.stringify(current)) return;
+    edit("dashboard.rowOrder", { ...rowOrderValues(), [card.cardId]: [...next] });
+    const moved = card.rows.find((row) => row.id === movedId);
+    setRowOrderAnnouncement(
+      `${moved?.label ?? "Row"} moved to position ${next.indexOf(movedId) + 1} of ${next.length}.`,
+    );
+  }
+
+  const rowSorter = createCardSorter({
+    ids: () => {
+      const card = props.catalog.cards.find((entry) => entry.cardId === rowCardId);
+      return card ? baseRows(card).map((row) => row.id) : [];
+    },
+    nodes: (id) => {
+      const nodes = rowNodes.get(id);
+      return nodes?.slot && nodes.card && nodes.grip
+        ? { slot: nodes.slot, card: nodes.card, grip: nodes.grip }
+        : undefined;
+    },
+    container: () => visibilityList,
+    enabled: () => rowOrderWritable() && !busy() && draggingCardId() === undefined,
+    preview: (ids) => setProvisionalRows(ids && rowCardId ? { cardId: rowCardId, ids } : undefined),
+    active: (id) => {
+      setDraggingRowId(id);
+      if (id === undefined) rowCardId = undefined;
+    },
+    commit: (ids, movedId) => {
+      const card = props.catalog.cards.find((entry) => entry.cardId === rowCardId);
+      if (card) writeRowOrder(ids, card, movedId);
+    },
+  });
+  onCleanup(() => rowSorter.dispose());
+  createEffect(() => {
+    displayCards();
+    busy();
+    rowSorter.cancel();
+  });
+
+  function registerRowNode<K extends keyof SortableCardNodes>(
+    id: string,
+    key: K,
+    node: SortableCardNodes[K],
+  ): void {
+    const nodes = rowNodes.get(id) ?? {};
+    nodes[key] = node;
+    rowNodes.set(id, nodes);
+  }
+
+  function onRowGrabKey(event: KeyboardEvent, card: VisibilityCard, row: VisibilityRow): void {
+    if (event.key === "Escape") {
+      rowSorter.cancel();
+      return;
+    }
+    if (!rowOrderWritable() || busy() || draggingRowId() || draggingCardId()) return;
+    if (event.altKey !== true) return;
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      event.preventDefault?.();
+      const current = baseRows(card).map((entry) => entry.id);
+      writeRowOrder(
+        keyboardMovedCardOrder(current, row.id, event.key === "ArrowUp" ? -1 : 1),
+        card,
+        row.id,
+      );
+      // Solid applies keyed DOM moves after the event batch; restore focus afterward.
+      queueMicrotask(() => rowNodes.get(row.id)?.grip?.focus({ preventScroll: true }));
     }
   }
 
@@ -491,14 +606,31 @@ export function SettingsView(props: {
         <fieldset
           ref={visibilityList}
           class="qg-vis-list"
-          data-sorting={draggingCardId() !== undefined ? "true" : undefined}
+          data-sorting={
+            draggingCardId() !== undefined || draggingRowId() !== undefined ? "true" : undefined
+          }
           aria-label="Card visibility"
-          onPointerMove={(event) => sorter.move(event)}
-          onPointerUp={(event) => sorter.up(event)}
-          onPointerCancel={(event) => sorter.lost(event)}
-          onLostPointerCapture={(event) => sorter.lost(event)}
+          onPointerMove={(event) => {
+            sorter.move(event);
+            rowSorter.move(event);
+          }}
+          onPointerUp={(event) => {
+            sorter.up(event);
+            rowSorter.up(event);
+          }}
+          onPointerCancel={(event) => {
+            sorter.lost(event);
+            rowSorter.lost(event);
+          }}
+          onLostPointerCapture={(event) => {
+            sorter.lost(event);
+            rowSorter.lost(event);
+          }}
           onKeyDown={(event) => {
-            if (event.key === "Escape") sorter.cancel();
+            if (event.key === "Escape") {
+              sorter.cancel();
+              rowSorter.cancel();
+            }
           }}
         >
           <Show
@@ -532,7 +664,7 @@ export function SettingsView(props: {
                           title="Drag to reorder; Alt plus arrow keys move it too"
                           ref={(node) => registerNode(card.cardId, "grip", node)}
                           aria-label={`Reorder ${cardIdentityLabel(card)}`}
-                          disabled={!cardOrderWritable() || busy()}
+                          disabled={!cardOrderWritable() || busy() || draggingRowId() !== undefined}
                           onPointerDown={(event) => sorter.down(card.cardId, event)}
                           onKeyDown={(event) => onCardGrabKey(event, card)}
                         >
@@ -554,7 +686,10 @@ export function SettingsView(props: {
                         <EyeToggle
                           variant="provider"
                           disabled={
-                            !hiddenCardsWritable() || busy() || draggingCardId() !== undefined
+                            !hiddenCardsWritable() ||
+                            busy() ||
+                            draggingCardId() !== undefined ||
+                            draggingRowId() !== undefined
                           }
                           pressed={cardHidden()}
                           label={`${cardHidden() ? "Show" : "Hide"} ${cardIdentityLabel(card)}`}
@@ -562,43 +697,79 @@ export function SettingsView(props: {
                           onToggle={async () => toggleCardEye(card)}
                         />
                       </header>
-                      <For each={card.rows}>
+                      <For each={displayRows(card)}>
                         {(row) => {
-                          const rowHidden = () => hiddenRowIds().includes(row.id);
+                          const rowHidden = () =>
+                            effectiveHiddenRowIds(
+                              card.rows.flatMap((entry) => [entry.id, ...(entry.aliases ?? [])]),
+                              hiddenRowIds(),
+                              rowControls(card),
+                            ).has(row.id);
+                          const rowLifted = () => draggingRowId() === row.id;
                           return (
-                            <div class="qg-vis-row">
-                              <span class="qg-vis-row__label">
-                                <span class="qg-row__labelgroup">
-                                  <span>{row.label}</span>
-                                  <Show when={row.info}>
-                                    {(info) => (
-                                      <Tooltip
-                                        value={info()}
-                                        triggerTabIndex={0}
-                                        appearance="large"
-                                        contentClass="qg-row__tooltip"
-                                      >
-                                        <span class="sr-only">
-                                          More information about {row.label}
-                                        </span>
-                                        <span class="qg-row__info" aria-hidden="true">
-                                          <Icon name="info" size="small" />
-                                        </span>
-                                      </Tooltip>
-                                    )}
-                                  </Show>
+                            <div
+                              class="qg-vis-row-slot"
+                              data-lifted={rowLifted() ? "true" : undefined}
+                              ref={(node) => registerRowNode(row.id, "slot", node)}
+                            >
+                              <div
+                                class="qg-vis-row"
+                                data-dragging={rowLifted() ? "true" : undefined}
+                                ref={(node) => registerRowNode(row.id, "card", node)}
+                              >
+                                <button
+                                  type="button"
+                                  class="qg-vis-grip qg-vis-row__grip"
+                                  title="Drag to reorder; Alt plus arrow keys move it too"
+                                  ref={(node) => registerRowNode(row.id, "grip", node)}
+                                  aria-label={`Reorder ${row.label}`}
+                                  disabled={
+                                    !rowOrderWritable() || busy() || draggingCardId() !== undefined
+                                  }
+                                  onPointerDown={(event) => {
+                                    rowCardId = card.cardId;
+                                    rowSorter.down(row.id, event);
+                                  }}
+                                  onKeyDown={(event) => onRowGrabKey(event, card, row)}
+                                >
+                                  <GripDotsIcon />
+                                </button>
+                                <span class="qg-vis-row__label">
+                                  <span class="qg-row__labelgroup">
+                                    <span>{row.label}</span>
+                                    <Show when={row.info}>
+                                      {(info) => (
+                                        <Tooltip
+                                          value={info()}
+                                          triggerTabIndex={0}
+                                          appearance="large"
+                                          contentClass="qg-row__tooltip"
+                                        >
+                                          <span class="sr-only">
+                                            More information about {row.label}
+                                          </span>
+                                          <span class="qg-row__info" aria-hidden="true">
+                                            <Icon name="info" size="small" />
+                                          </span>
+                                        </Tooltip>
+                                      )}
+                                    </Show>
+                                  </span>
                                 </span>
-                              </span>
-                              <EyeToggle
-                                variant="row"
-                                disabled={
-                                  !hiddenRowsWritable() || busy() || draggingCardId() !== undefined
-                                }
-                                pressed={rowHidden()}
-                                label={`${rowHidden() ? "Show" : "Hide"} ${row.label}`}
-                                title={rowHidden() ? "Show" : "Hide"}
-                                onToggle={async () => toggleRowEye(row)}
-                              />
+                                <EyeToggle
+                                  variant="row"
+                                  disabled={
+                                    !hiddenRowsWritable() ||
+                                    busy() ||
+                                    draggingCardId() !== undefined ||
+                                    draggingRowId() !== undefined
+                                  }
+                                  pressed={rowHidden()}
+                                  label={`${rowHidden() ? "Show" : "Hide"} ${row.label}`}
+                                  title={rowHidden() ? "Show" : "Hide"}
+                                  onToggle={async () => toggleRowEye(card, row)}
+                                />
+                              </div>
                             </div>
                           );
                         }}
@@ -612,6 +783,9 @@ export function SettingsView(props: {
         </fieldset>
         <output class="qg-inherited" aria-live="polite">
           {cardOrderAnnouncement()}
+        </output>
+        <output class="qg-inherited" aria-live="polite">
+          {rowOrderAnnouncement()}
         </output>
       </>
     );

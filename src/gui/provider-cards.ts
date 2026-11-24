@@ -18,18 +18,8 @@ import {
   type QuotaCardRow,
 } from "../contracts/dashboard.js";
 import type { CardId } from "../contracts/identity.js";
-import {
-  CLAUDE_AGENT_RESETS_INFO,
-  CLAUDE_AGENT_RESETS_ROW_KEY,
-  OPENAI_CREDITS_INFO,
-  OPENAI_CREDITS_ROW_KEY,
-  OPENAI_CREDITS_ROW_LABEL,
-  OPENAI_CREDITS_ROW_RESULT_TYPE,
-  OPENAI_RESETS_INFO,
-  OPENAI_RESETS_ROW_KEY,
-  OPENAI_RESETS_ROW_LABEL,
-  OPENAI_RESETS_ROW_RESULT_TYPE,
-} from "../contracts/openai-quota.js";
+import { optionalRowId, rowIdForEntry } from "../contracts/identity.js";
+import { orderRowsByPreference } from "../contracts/row-order.js";
 import {
   formatAccountingQuantity,
   interpretAccountingRow,
@@ -58,15 +48,16 @@ import { formatResetCountdown, isResetTimeDecimals } from "../lib/format-utils.j
 import { scrubCredentialErrorText } from "../lib/opencode-auth.js";
 import { getQuotaProviderDisplayLabel } from "../lib/provider-metadata.js";
 import { projectQuotaRunway } from "../lib/quota-exhaustion-projection.js";
-import type { QuotaStatusLiveProbe } from "../lib/quota-render-data.js";
-import type { QuotaToastConfig } from "../lib/types.js";
 import {
   buildCardId,
   buildProviderScopeCardId,
   hashQuotaCardIdentity,
+  optionalVisibilityRowsFor,
   PROVIDER_SCOPE_IDENTITY_KEY,
-  rowIdForEntry,
-} from "./identity.js";
+  quotaEntryIsHidden,
+} from "../lib/quota-identity.js";
+import type { QuotaStatusLiveProbe } from "../lib/quota-render-data.js";
+import type { QuotaToastConfig } from "../lib/types.js";
 import { primaryQuotaWindowSlot } from "./primary-quota-windows.js";
 
 /** Controlled fallback for unknown/unsafe provider errors (spec §9 R38). */
@@ -99,6 +90,12 @@ export interface ProviderCardPreferences {
    * independent. Affects presentation only.
    */
   cardOrder?: readonly string[];
+  /**
+   * Sparse per-card row display order (`dashboard.rowOrder`). A card with no
+   * entry keeps provider emission order; listed rows come first in saved order
+   * and every unlisted/new row follows in emission order. Presentation only.
+   */
+  rowOrder?: Readonly<Record<string, readonly string[]>>;
 }
 
 export const UNSCOPED = Symbol("unscoped");
@@ -180,6 +177,7 @@ function mapProviderError(
   };
   if (error.retryable === true) mapped.retryable = true;
   if (error.retryAtMs !== undefined) mapped.retryAtMs = error.retryAtMs;
+  if (error.attemptOutcome !== undefined) mapped.attemptOutcome = error.attemptOutcome;
   if (error.kind !== undefined) mapped.kind = error.kind;
   if (error.failureCategory !== undefined) mapped.failureCategory = error.failureCategory;
   return mapped;
@@ -311,8 +309,13 @@ function mapEntryRows(params: {
   providerId: string;
   cardId: CardId;
   preferences: ProviderCardPreferences;
+  rowOrder?: readonly string[];
   nowMs: number;
-}): { rows: QuotaCardRow[]; primaryQuotaWindows: PrimaryQuotaWindowRef[] } {
+}): {
+  rows: QuotaCardRow[];
+  primaryQuotaWindows: PrimaryQuotaWindowRef[];
+  visibilityRows: ProviderCard["visibilityRows"];
+} {
   const rows: QuotaCardRow[] = [];
   const windowsBySlot = new Map<PrimaryQuotaWindowSlot, PrimaryQuotaWindowRef>();
   const seen = new Set<string>();
@@ -335,74 +338,24 @@ function mapEntryRows(params: {
       windowsBySlot.set(slot, { rowId: row.rowId, slot });
     }
   }
+  const visibilityRows = optionalVisibilityRowsFor(params.providerId, params.cardId, rows);
   return {
-    rows,
+    rows: orderRowsByPreference(rows, params.rowOrder, undefined, visibilityRows),
     primaryQuotaWindows: [...windowsBySlot.values()].sort((left, right) => left.slot - right.slot),
+    visibilityRows,
   };
 }
 
-const OPENAI_OPTIONAL_ROW_ACCOUNTING = {
-  acquisitionMethod: "remote_api",
-  ownership: "maintained",
-  authority: "provider_reported",
-} as const;
-
-function optionalValueRowId(
+/** The stable row id an optional declared row carries once the provider emits it. */
+export function optionalValueRowId(
   cardId: CardId,
   rowKey: string,
   resultType: QuotaCardRow["resultType"],
 ): QuotaCardRow["rowId"] {
-  return rowIdForEntry(cardId, {
-    kind: "value",
-    name: "",
-    value: "",
-    rowKey,
-    accounting: { ...OPENAI_OPTIONAL_ROW_ACCOUNTING, resultType },
-  });
+  return optionalRowId(cardId, rowKey, resultType, "value");
 }
 
-/**
- * Persistent Resets/Credits choices for an OpenAI card. These are metadata for
- * the Settings eyes only; they never create a zero/empty Quota data row.
- */
-export function openAiOptionalVisibilityRows(
-  cardId: CardId,
-): NonNullable<ProviderCard["visibilityRows"]> {
-  return [
-    {
-      rowId: optionalValueRowId(cardId, OPENAI_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE),
-      label: OPENAI_RESETS_ROW_LABEL,
-      info: OPENAI_RESETS_INFO,
-    },
-    {
-      rowId: optionalValueRowId(cardId, OPENAI_CREDITS_ROW_KEY, OPENAI_CREDITS_ROW_RESULT_TYPE),
-      label: OPENAI_CREDITS_ROW_LABEL,
-      info: OPENAI_CREDITS_INFO,
-    },
-  ];
-}
-
-/** Persistent Resets choice for a Claude Agent card (no Credits row). */
-export function claudeAgentOptionalVisibilityRows(
-  cardId: CardId,
-): NonNullable<ProviderCard["visibilityRows"]> {
-  return [
-    {
-      rowId: optionalValueRowId(cardId, CLAUDE_AGENT_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE),
-      label: OPENAI_RESETS_ROW_LABEL,
-      info: CLAUDE_AGENT_RESETS_INFO,
-    },
-  ];
-}
-
-function optionalVisibilityRowsFor(
-  providerId: string,
-  cardId: CardId,
-): ProviderCard["visibilityRows"] {
-  if (providerId === "openai") return openAiOptionalVisibilityRows(cardId);
-  if (providerId === "claude-agent") return claudeAgentOptionalVisibilityRows(cardId);
-  return undefined;
-}
+export { quotaEntryIsHidden };
 
 function latestObservedAtIso(entries: readonly QuotaToastEntry[]): string | undefined {
   let latest: string | undefined;
@@ -447,8 +400,7 @@ function finishCard(
   if (mapped.primaryQuotaWindows.length > 0) {
     card.primaryQuotaWindows = mapped.primaryQuotaWindows;
   }
-  const optionalRows = optionalVisibilityRowsFor(card.providerId, card.cardId);
-  if (optionalRows) card.visibilityRows = optionalRows;
+  if (mapped.visibilityRows) card.visibilityRows = mapped.visibilityRows;
   const observedAtIso = latestObservedAtIso(entries);
   if (observedAtIso) card.observedAtIso = observedAtIso;
   return card;
@@ -473,6 +425,7 @@ function buildProviderCard(params: {
     providerId: params.providerId,
     cardId,
     preferences: params.preferences,
+    rowOrder: params.preferences.rowOrder?.[cardId],
     nowMs: params.nowMs,
   });
   const planLabel = params.planLabel ? sanitizeSingleLineDisplayText(params.planLabel).trim() : "";
@@ -517,6 +470,7 @@ function buildAccountCard(params: {
     providerId: params.providerId,
     cardId,
     preferences: params.preferences,
+    rowOrder: params.preferences.rowOrder?.[cardId],
     nowMs: params.nowMs,
   });
   const card: ProviderCard = {

@@ -1,11 +1,13 @@
 import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
 import type {
   AccountingMetadata,
+  AccountingWindow,
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import {
   credentialRowAuthEntry,
   formatCredentialDisplayNames,
@@ -38,45 +40,56 @@ type GlmQuotaResult = {
   };
 };
 
-const GLM_WINDOW_ROW_KEYS = {
-  fiveHour: "window:five_hour",
-  weekly: "window:week",
-  mcp: "window:mcp",
-} as const;
+const GLM_WINDOW_METRICS: Record<keyof GlmQuotaResult["windows"], AccountingWindow> = {
+  fiveHour: "five_hour",
+  weekly: "week",
+  mcp: "mcp",
+};
 
-/**
- * Percent-only window rows carry no typed `semantic`, so they get stable
- * explicit `rowKey`s (metric + window) instead of label-derived ids.
- */
-function windowEntriesWithRowKeys(params: {
+/** Percent-only window rows carry typed window semantics instead of label-derived ids. */
+function windowEntriesWithSemantics(params: {
   group: string;
   accounting: AccountingMetadata;
   windows: GlmQuotaResult["windows"];
 }): QuotaToastEntry[] {
-  const specs: Array<{ window?: GlmQuotaWindow; suffix: string; label: string }> = [];
-  const rowKeys: string[] = [];
+  const specs: Array<{
+    window?: GlmQuotaWindow;
+    suffix: string;
+    label: string;
+    semantic: ReturnType<typeof windowSemantic>;
+  }> = [];
   if (params.windows.fiveHour) {
-    specs.push({ window: params.windows.fiveHour, suffix: "5h", label: "5h:" });
-    rowKeys.push(GLM_WINDOW_ROW_KEYS.fiveHour);
+    specs.push({
+      window: params.windows.fiveHour,
+      suffix: "5h",
+      label: "5h:",
+      semantic: windowSemantic(GLM_WINDOW_METRICS.fiveHour),
+    });
   }
   if (params.windows.weekly) {
-    specs.push({ window: params.windows.weekly, suffix: "Weekly", label: "Weekly:" });
-    rowKeys.push(GLM_WINDOW_ROW_KEYS.weekly);
+    specs.push({
+      window: params.windows.weekly,
+      suffix: "Weekly",
+      label: "Weekly:",
+      semantic: windowSemantic(GLM_WINDOW_METRICS.weekly),
+    });
   }
   if (params.windows.mcp) {
-    specs.push({ window: params.windows.mcp, suffix: "MCP", label: "MCP:" });
-    rowKeys.push(GLM_WINDOW_ROW_KEYS.mcp);
+    specs.push({
+      window: params.windows.mcp,
+      suffix: "MCP",
+      label: "MCP:",
+      semantic: windowSemantic(GLM_WINDOW_METRICS.mcp),
+    });
   }
 
   return groupedPercentWindowEntries({
     group: params.group,
     accounting: params.accounting,
     windows: specs,
-  }).map((entry, index) => ({
-    ...entry,
-    // groupedPercentWindowEntries emits one aggregate fallback row when no window exists.
-    rowKey: rowKeys[index] ?? "aggregate",
-  }));
+    // No reported window is not a 0% quota.
+    fallbackWhenEmpty: false,
+  });
 }
 
 export function createGlmCodingPlanProvider(params: {
@@ -179,7 +192,7 @@ export function createGlmCodingPlanProvider(params: {
               errorLabel: group,
               onSuccess: (quota) =>
                 attemptedResult(
-                  windowEntriesWithRowKeys({
+                  windowEntriesWithSemantics({
                     group,
                     accounting: {
                       resultType: "quota",
@@ -203,7 +216,7 @@ export function createGlmCodingPlanProvider(params: {
         errorLabel: params.errorLabel,
         onSuccess: (quota) =>
           attemptedResult(
-            windowEntriesWithRowKeys({
+            windowEntriesWithSemantics({
               group: quota.label,
               accounting: {
                 resultType: "quota",

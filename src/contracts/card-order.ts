@@ -10,7 +10,7 @@
 
 const UNKNOWN_RANK = Number.POSITIVE_INFINITY;
 
-function rankByIds(
+export function rankByIds(
   preference: readonly string[] | undefined,
   knownIds: ReadonlySet<string>,
 ): Map<string, number> {
@@ -24,7 +24,7 @@ function rankByIds(
   return ranks;
 }
 
-function stableSortByRank<T>(cards: readonly T[], rankOf: (card: T) => number): T[] {
+export function stableSortByRank<T>(cards: readonly T[], rankOf: (card: T) => number): T[] {
   return cards
     .map((card, index) => ({ card, index, rank: rankOf(card) }))
     .sort((left, right) =>

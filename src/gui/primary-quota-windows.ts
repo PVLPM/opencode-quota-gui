@@ -40,12 +40,30 @@ interface PrimaryQuotaWindowRule {
 }
 
 const ANTHROPIC_SUBSCRIPTION_WINDOWS: PrimaryQuotaWindowRule = {
-  rowKeys: [
-    { value: "window:five_hour", slot: 0 },
-    { value: "window:week", slot: 1 },
-  ],
+  ...windowRule([
+    ["five_hour", 0],
+    ["week", 1],
+  ]),
   namedMetrics: [{ value: "Fable weekly", slot: 2 }],
 };
+
+/**
+ * One typed window list generates both identities: the semantic window the
+ * provider emits now and the explicit `rowKey` an entry cached before that
+ * migration still carries.
+ */
+function windowRule(
+  windows: readonly (readonly [AccountingWindow, PrimaryQuotaWindowSlot])[],
+  extraRowKeys: readonly SlotValue<string>[] = [],
+): Pick<PrimaryQuotaWindowRule, "rowKeys" | "windows"> {
+  return {
+    rowKeys: [
+      ...windows.map(([value, slot]) => ({ value: `window:${value}`, slot })),
+      ...extraRowKeys,
+    ],
+    windows: windows.map(([value, slot]) => ({ value, slot })),
+  };
+}
 
 /**
  * Explicit, evidence-backed mapping. Omitted providers intentionally have no
@@ -59,40 +77,42 @@ const PRIMARY_QUOTA_WINDOW_RULES: Readonly<Record<string, PrimaryQuotaWindowRule
   // Claude Agent emits the same subscription rows from its Claude CLI login.
   "claude-agent": ANTHROPIC_SUBSCRIPTION_WINDOWS,
   // 5h/weekly/monthly ChatGPT windows; Code Review is a special secondary
-  // window (`src/providers/openai.ts` 56-75, 239-261).
+  // window. `rowKeys` stays for entries cached before typed window semantics.
   openai: {
-    rowKeys: [
-      { value: "window:five_hour", slot: 0 },
-      { value: "window:week", slot: 1 },
-      { value: "window:month", slot: 2 },
-    ],
+    ...windowRule([
+      ["five_hour", 0],
+      ["week", 1],
+      ["month", 2],
+    ]),
   },
   // GLM five-hour/weekly plan windows; MCP is a tool-specific allowance
-  // (`src/providers/glm-coding-plan-provider.ts` 40-79).
+  // (`src/providers/glm-coding-plan-provider.ts`).
   zai: {
-    rowKeys: [
-      { value: "window:five_hour", slot: 0 },
-      { value: "window:week", slot: 1 },
-    ],
+    ...windowRule([
+      ["five_hour", 0],
+      ["week", 1],
+    ]),
   },
   zhipu: {
-    rowKeys: [
-      { value: "window:five_hour", slot: 0 },
-      { value: "window:week", slot: 1 },
-    ],
+    ...windowRule([
+      ["five_hour", 0],
+      ["week", 1],
+    ]),
   },
-  // Rolling/weekly/monthly Go plan windows (`src/providers/opencode-go.ts` 44-55).
+  // Rolling/weekly/monthly Go plan windows (`src/providers/opencode-go.ts`).
   "opencode-go": {
-    rowKeys: [
-      { value: "window:five_hour", slot: 0 },
-      { value: "window:week", slot: 1 },
-      { value: "window:month", slot: 2 },
-    ],
+    ...windowRule([
+      ["five_hour", 0],
+      ["week", 1],
+      ["month", 2],
+    ]),
   },
   // The plan entitlement is Copilot's only primary window, so it occupies the
   // outer slot; the additional-usage row is a budget percent
-  // (`src/providers/copilot.ts` 109-142, 185-215).
-  copilot: { rowKeys: [{ value: "window:month", slot: 0 }] },
+  // (`src/providers/copilot.ts`).
+  copilot: {
+    ...windowRule([["month", 0]]),
+  },
   // Daily/monthly subscription limits are the provider's two-window family in
   // full-card order (`src/providers/nanogpt.ts` 70-105).
   nanogpt: {
@@ -125,14 +145,22 @@ const PRIMARY_QUOTA_WINDOW_RULES: Readonly<Record<string, PrimaryQuotaWindowRule
   kilo: { components: [{ value: "remaining_credits", slot: 0 }] },
   // xAI always emits exactly one provider-supplied period row, so any valid
   // period identity occupies the same outer slot even when the response-defined
-  // period changes (`src/providers/xai.ts` 29-40, 92-153).
+  // period changes (`src/providers/xai.ts`).
   xai: {
-    rowKeys: [
-      { value: "window:day", slot: 0 },
-      { value: "window:week", slot: 0 },
-      { value: "window:month", slot: 0 },
-      { value: "named:period", slot: 0 },
-    ],
+    ...windowRule(
+      [
+        ["day", 0],
+        ["week", 0],
+        ["month", 0],
+      ],
+      [{ value: "named:period", slot: 0 }],
+    ),
+    namedMetrics: [{ value: "period", slot: 0 }],
+  },
+  // Zen's monthly budget/quota is the subscription's primary window; spend,
+  // balance and auto-reload stay supplementary (`src/providers/opencode-zen.ts`).
+  opencode: {
+    ...windowRule([["month", 0]]),
   },
   // These provider cards compact their quota entries into one aggregate row.
   // Synthetic returns 5h before weekly; Bailian CLI Coding Plan may return any

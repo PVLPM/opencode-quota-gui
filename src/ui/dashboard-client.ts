@@ -536,6 +536,13 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
       };
       const info = readOptionalText(row.info, endpoint, `${detail}.visibilityRows[].info`);
       if (info !== undefined) parsedRow.info = info;
+      if (row.aliases !== undefined) {
+        parsedRow.aliases = readArray(
+          row.aliases,
+          endpoint,
+          `${detail}.visibilityRows[].aliases`,
+        ).map((alias) => readRowId(alias, endpoint, `${detail}.visibilityRows[].aliases[]`));
+      }
       return parsedRow;
     });
   }
@@ -1078,7 +1085,7 @@ export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota")
 export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): HomeSnapshot {
   const root = readRecord(value, endpoint, "not an object");
   const providers = readRecord(root.providers, endpoint, "providers");
-  return {
+  const parsed: HomeSnapshot = {
     generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
     range: readRangeKey(root.range, endpoint, "range"),
     stale: readBoolean(root.stale, endpoint, "stale"),
@@ -1098,6 +1105,12 @@ export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): 
       readProjectActivityRow(row, endpoint),
     ),
   };
+  if (readOptionalBoolean(root.provisional, endpoint, "provisional") === true) {
+    parsed.provisional = true;
+  }
+  const exactError = readOptionalText(root.exactError, endpoint, "exactError");
+  if (exactError !== undefined) parsed.exactError = exactError;
+  return parsed;
 }
 
 function readProjectRoot(value: JsonValue, endpoint: string): ProjectRootRow {
@@ -1226,6 +1239,11 @@ function readStep(value: JsonValue, endpoint: string): StepPoint {
   if (step.cacheWriteUnknown !== undefined) {
     if (readBoolean(step.cacheWriteUnknown, endpoint, `${detail}.cacheWriteUnknown`)) {
       parsed.cacheWriteUnknown = true;
+    }
+  }
+  if (step.inputMarker !== undefined) {
+    if (readBoolean(step.inputMarker, endpoint, `${detail}.inputMarker`)) {
+      parsed.inputMarker = true;
     }
   }
   return parsed;

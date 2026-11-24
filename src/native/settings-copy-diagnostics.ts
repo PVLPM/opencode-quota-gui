@@ -2,7 +2,7 @@ import {
   PROVIDER_FAILURE_CATEGORIES,
   type ProviderFailureCategory,
 } from "../contracts/provider-failure.js";
-import { getQuotaProviderShape } from "../lib/provider-metadata.js";
+import { getQuotaProviderRegistration } from "../lib/provider-metadata.js";
 import type { CanonicalQuotaProviderId } from "../lib/provider-registration.js";
 
 /** Closed statuses shared by provider availability and quota probe summaries. */
@@ -158,7 +158,7 @@ function validVersion(value: unknown): value is string {
 
 function canonicalProviderId(value: unknown): CanonicalQuotaProviderId | undefined {
   if (typeof value !== "string" || value.length > 128) return undefined;
-  return getQuotaProviderShape(value)?.id;
+  return getQuotaProviderRegistration(value)?.id;
 }
 
 function projectProviderStatuses(value: unknown): NativeSettingsCopyProviderSummary[] | undefined {

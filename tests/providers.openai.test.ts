@@ -65,7 +65,7 @@ describe("openai provider", () => {
         name: "OpenAI (Pro) 5h",
         group: "OpenAI (Pro)",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 42,
         resetTimeIso: "2026-01-01T00:00:00.000Z",
       },
@@ -73,7 +73,7 @@ describe("openai provider", () => {
         name: "OpenAI (Pro) Weekly",
         group: "OpenAI (Pro)",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 80,
         resetTimeIso: "2026-01-07T00:00:00.000Z",
       },
@@ -81,7 +81,7 @@ describe("openai provider", () => {
         name: "OpenAI (Pro) Monthly",
         group: "OpenAI (Pro)",
         label: "Monthly:",
-        rowKey: "window:month",
+        semantic: { metric: { kind: "window", window: "month" }, prominence: "primary" },
         percentRemaining: 67,
         resetTimeIso: "2026-02-01T00:00:00.000Z",
       },
@@ -89,7 +89,7 @@ describe("openai provider", () => {
         name: "OpenAI (Pro) Code Review",
         group: "OpenAI (Pro)",
         label: "Code Review:",
-        rowKey: "window:code_review",
+        semantic: { metric: { kind: "window", window: "code_review" }, prominence: "primary" },
         percentRemaining: 55,
         resetTimeIso: "2026-01-02T00:00:00.000Z",
       },
@@ -98,6 +98,21 @@ describe("openai provider", () => {
     expect(out.presentation).toEqual({
       singleWindowDisplayName: "OpenAI (Pro)",
     });
+  });
+
+  it("emits no fabricated 0% row when a successful response reports no windows", async () => {
+    const { queryOpenAIQuota } = await import("../src/lib/openai.js");
+    (queryOpenAIQuota as any).mockResolvedValueOnce({
+      success: true,
+      label: "OpenAI",
+      windows: {},
+    });
+
+    const out = await openaiProvider.fetch({} as any);
+
+    expect(out.attempted).toBe(true);
+    expect(out.entries).toEqual([]);
+    expect(out.errors).toEqual([]);
   });
 
   it("maps errors into toast errors", async () => {
@@ -546,7 +561,7 @@ describe("openai provider", () => {
       }),
     ).toBe(
       firstId === "oauth-id"
-        ? "OpenAI Work 42% | +1"
+        ? "OpenAI Work 5h 42% | +1"
         : "OpenAI - ChatGPT quota unavailable for API key | +1",
     );
   });

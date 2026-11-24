@@ -103,16 +103,30 @@ function getDialogMetricLabel(entry: QuotaToastEntry, metricLabel: string): stri
 }
 
 function getCommandMetricLabel(entry: QuotaToastEntry, semanticLabel: string): string {
-  if (entry.semantic) return semanticLabel;
-
-  const window = getCommandWindowLabel(entry);
   const resultType = entry.accounting?.resultType;
+  const explicit = normalizeMetricText(entry.label);
+  const metricLabel = normalizeMetricText(entry.metricLabel);
+
+  if (entry.semantic) {
+    const window = explicit && !metricLabel ? getCommandWindowLabel(entry) : null;
+    if (window) {
+      const noun =
+        resultType === "budget"
+          ? "budget"
+          : resultType === "usage"
+            ? "usage"
+            : resultType === "spend"
+              ? "spend"
+              : "quota";
+      return `${window} ${noun}`;
+    }
+    return normalizeMetricText(semanticLabel) || entry.name;
+  }
 
   if (resultType === "balance") return "Balance";
   if (resultType === "status") return "Status";
 
-  const explicit = normalizeMetricText(entry.label);
-  const metricLabel = normalizeMetricText(entry.metricLabel);
+  const window = getCommandWindowLabel(entry);
   const noun =
     resultType === "budget"
       ? "budget"
@@ -124,11 +138,11 @@ function getCommandMetricLabel(entry: QuotaToastEntry, semanticLabel: string): s
             ? "quota"
             : "";
 
-  if (noun) {
-    return window ? `${window} ${noun}` : metricLabel || noun[0]!.toUpperCase() + noun.slice(1);
-  }
-  if (window) return `${window} quota`;
+  // A time window keeps the pre-semantic window label: the dialog strips
+  // "quota" from its own column, and an explicit label never wins there.
+  if (window) return noun ? `${window} ${noun}` : `${window} quota`;
 
+  if (noun) return metricLabel || noun[0]!.toUpperCase() + noun.slice(1);
   return explicit || (isValueEntry(entry) ? "Value" : "Quota");
 }
 

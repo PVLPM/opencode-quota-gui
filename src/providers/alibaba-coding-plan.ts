@@ -5,7 +5,13 @@ import {
   queryAlibabaCodingPlanQuota,
 } from "../lib/alibaba-coding-plan-cli.js";
 import { sanitizeSingleLineDisplayText } from "../lib/display-sanitize.js";
-import type { QuotaProvider, QuotaProviderContext, QuotaToastEntry } from "../lib/entries.js";
+import type {
+  AccountingWindow,
+  QuotaProvider,
+  QuotaProviderContext,
+  QuotaToastEntry,
+} from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import { isCanonicalProviderAvailable } from "../lib/provider-availability.js";
 import {
   attemptedErrorResult,
@@ -30,7 +36,7 @@ const STATUS_ACCOUNTING = {
 
 function windowEntry(
   window: AlibabaCodingPlanUsageWindow | undefined,
-  params: { group: string; suffix: string; label: string },
+  params: { group: string; suffix: string; label: string; semanticWindow: AccountingWindow },
 ): QuotaToastEntry | undefined {
   if (!window) return undefined;
 
@@ -43,6 +49,7 @@ function windowEntry(
       name,
       group: params.group,
       label: params.label,
+      semantic: windowSemantic(params.semanticWindow),
       ...(hasCounts ? { right: `${window.used}/${window.total}` } : {}),
       percentRemaining: Math.max(0, Math.min(100, (1 - window.percentage) * 100)),
       ...resetTime,
@@ -56,6 +63,7 @@ function windowEntry(
       name,
       group: params.group,
       label: params.label,
+      semantic: windowSemantic(params.semanticWindow),
       value: "Quota details unavailable",
       ...resetTime,
     };
@@ -72,9 +80,24 @@ function entriesFromUsage(
     : "";
   const group = `Alibaba Coding Plan${instanceType ? ` (${instanceType})` : ""} (CLI)`;
   return [
-    windowEntry(result.usage.fiveHour, { group, suffix: "5h", label: "5h:" }),
-    windowEntry(result.usage.weekly, { group, suffix: "Weekly", label: "Weekly:" }),
-    windowEntry(result.usage.monthly, { group, suffix: "Monthly", label: "Monthly:" }),
+    windowEntry(result.usage.fiveHour, {
+      group,
+      suffix: "5h",
+      label: "5h:",
+      semanticWindow: "five_hour",
+    }),
+    windowEntry(result.usage.weekly, {
+      group,
+      suffix: "Weekly",
+      label: "Weekly:",
+      semanticWindow: "week",
+    }),
+    windowEntry(result.usage.monthly, {
+      group,
+      suffix: "Monthly",
+      label: "Monthly:",
+      semanticWindow: "month",
+    }),
   ].filter((entry): entry is QuotaToastEntry => entry !== undefined);
 }
 

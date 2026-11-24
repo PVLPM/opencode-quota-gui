@@ -157,6 +157,27 @@ describe("accounting-format", () => {
     ).toBe("Availability");
   });
 
+  it("keeps provider labels visible: semantic metadata never rewrites copy", () => {
+    const entry: QuotaToastEntry = {
+      accounting: { ...ACCOUNTING, resultType: "rate_limit" },
+      name: "OpenAI",
+      group: "OpenAI",
+      label: "5h:",
+      semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
+      percentRemaining: 42,
+    };
+    expect(getAccountingEntryLabel(entry)).toBe("5h:");
+    expect(interpretAccountingRow(entry, { booleanWording: "semantic" }).label).toBe("5h:");
+    expect(getAccountingEntryLabel({ ...entry, metricLabel: "Rolling" })).toBe("Rolling");
+    expect(
+      getAccountingEntryLabel({
+        ...entry,
+        label: undefined,
+        metricLabel: undefined,
+      }),
+    ).toBe("5h rate limit");
+  });
+
   it("interprets every row kind with explicit boolean wording and raw percentages", () => {
     const percent = interpretAccountingRow(
       {

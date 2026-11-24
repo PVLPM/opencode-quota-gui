@@ -51,6 +51,9 @@ vi.mock("../src/lib/resolved-auth-identity.js", () => ({
     async (params: { providerId: string; identities: readonly string[] }) =>
       `opaque:${params.providerId}:${params.identities.join("|")}`,
   ),
+  // quota-state imports this value to decide whether an identity may key only
+  // the in-memory cache tier; the fake identities above are persisted-shape.
+  isProcessLocalResolvedAuthIdentity: () => false,
 }));
 
 import { __resetQuotaStateForTests, fetchQuotaProviderResult } from "../src/lib/quota-state.js";

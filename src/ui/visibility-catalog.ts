@@ -1,10 +1,18 @@
 import type { QuotaSnapshot } from "../contracts/dashboard";
+import { rowFieldKey } from "../contracts/identity";
+import { orderRowsByPreference } from "../contracts/row-order";
 
 /** Bounded, untrusted browser-local memory of individual quota cards for Settings. */
 export interface VisibilityRow {
   id: string;
   label: string;
   info?: string;
+  /**
+   * Emitted row ids that render this declared field in another shape. Live
+   * payloads carry them so a hide or saved order follows the field; the cache
+   * only needs to preserve them for an absent live card.
+   */
+  aliases?: readonly string[];
 }
 
 export interface VisibilityCard {
@@ -104,7 +112,24 @@ function sanitizeCatalog(value: unknown): VisibilityCatalog {
       seenRows.add(id);
       rowBudget -= 1;
       const info = text(row.info);
-      rows.push({ id, label, ...(info === undefined ? {} : { info }) });
+      const aliases: string[] = [];
+      for (const alias of Array.isArray(row.aliases) ? row.aliases : []) {
+        const value = identifier(alias);
+        if (
+          !value ||
+          value === id ||
+          !value.startsWith(`${cardId}#`) ||
+          value.length <= cardId.length + 1 ||
+          aliases.includes(value)
+        )
+          continue;
+        aliases.push(value);
+        if (aliases.length >= 8) break;
+      }
+      const visibilityRow: VisibilityRow = { id, label };
+      if (info !== undefined) visibilityRow.info = info;
+      if (aliases.length > 0) visibilityRow.aliases = aliases;
+      rows.push(visibilityRow);
     }
     cards.push({
       cardId,
@@ -140,9 +165,17 @@ export function writeVisibilityCatalog(
   catalog: VisibilityCatalog,
 ): void {
   try {
+    // Aliases are live presentation context, not cache state: a persisted
+    // alias could outlive the provider shape that justified it. Keep the
+    // cached row set (and its stable ids) only.
+    const sanitized = sanitizeCatalog(catalog);
+    const cards = sanitized.cards.map((card) => ({
+      ...card,
+      rows: card.rows.map(({ aliases: _aliases, ...row }) => row),
+    }));
     storage?.setItem(
       VISIBILITY_CATALOG_STORAGE_KEY,
-      JSON.stringify({ version: STORAGE_VERSION, ...sanitizeCatalog(catalog) }),
+      JSON.stringify({ version: STORAGE_VERSION, cards }),
     );
   } catch {
     // Storage failure loses persistence, never the current Settings session.
@@ -173,7 +206,8 @@ export function visibilityCatalogEquals(
             next !== undefined &&
             row.id === next.id &&
             row.label === next.label &&
-            row.info === next.info
+            row.info === next.info &&
+            row.aliases?.join("\u0000") === next.aliases?.join("\u0000")
           );
         })
       );
@@ -185,8 +219,14 @@ export function visibilityCatalogEquals(
  * The quota payload's individual card identities, including cards hidden on
  * Quota, in the same order and with the same row ownership. Shared by the
  * browser Settings route and the native SettingsPage.
+ *
+ * `rowOrder` interleaves declared optional rows with the emitted rows using the
+ * saved per-card order; cards without an entry keep emission/declaration order.
  */
-export function catalogFromQuotaSnapshot(snapshot: QuotaSnapshot | undefined): VisibilityCatalog {
+export function catalogFromQuotaSnapshot(
+  snapshot: QuotaSnapshot | undefined,
+  rowOrder?: Readonly<Record<string, readonly string[]>>,
+): VisibilityCatalog {
   if (snapshot === undefined) return { cards: [] };
   const cards: VisibilityCard[] = [];
   for (const card of snapshot.providers.cards) {
@@ -203,20 +243,33 @@ export function catalogFromQuotaSnapshot(snapshot: QuotaSnapshot | undefined): V
         : { providerScopeHash: card.providerScopeHash }),
       rows: [],
     };
+    const controls = card.visibilityRows ?? [];
+    const controlById = new Map<string, (typeof controls)[number]>();
+    for (const control of controls) {
+      controlById.set(control.rowId, control);
+      for (const alias of control.aliases ?? []) controlById.set(alias, control);
+    }
     const addRow = (id: string, label: string, info?: string): void => {
-      const existing = visibility.rows.find((row) => row.id === id);
+      const control = controlById.get(id);
+      const rowId = control?.rowId ?? id;
+      const existing = visibility.rows.find((row) => row.id === rowId);
       if (existing) {
         if (existing.info === undefined && info !== undefined) existing.info = info;
         return;
       }
-      visibility.rows.push({
-        id,
-        label,
-        ...(info === undefined ? {} : { info }),
-      });
+      const row: VisibilityRow = { id: rowId, label };
+      if (info !== undefined) row.info = info;
+      if (control?.aliases?.length) row.aliases = [...control.aliases];
+      visibility.rows.push(row);
     };
     for (const row of card.rows) addRow(row.rowId, row.label, row.info);
-    for (const row of card.visibilityRows ?? []) addRow(row.rowId, row.label, row.info);
+    for (const control of controls) addRow(control.rowId, control.label, control.info);
+    visibility.rows = orderRowsByPreference(
+      visibility.rows,
+      rowOrder?.[card.cardId],
+      (row) => row.id,
+      controls,
+    );
     cards.push(visibility);
   }
   return { cards };
@@ -235,6 +288,10 @@ export function mergeVisibilityCatalog(
     if (!old) return card;
     const oldRows = new Map(old.rows.map((row) => [row.id, row]));
     const seen = new Set(card.rows.map((row) => row.id));
+    // A cached row for a field the live payload already carries with another
+    // shape (for example an older declared id beside the emitted id) is a stale
+    // duplicate, not a transient gap; never resurrect it.
+    const liveFields = new Set(card.rows.map((row) => rowFieldKey(row.id)));
     return {
       ...card,
       ...(card.providerScopeId === undefined && old.providerScopeId !== undefined
@@ -248,7 +305,7 @@ export function mergeVisibilityCatalog(
           const info = row.info ?? oldRows.get(row.id)?.info;
           return info === undefined ? row : { ...row, info };
         }),
-        ...old.rows.filter((row) => !seen.has(row.id)),
+        ...old.rows.filter((row) => !seen.has(row.id) && !liveFields.has(rowFieldKey(row.id))),
       ],
     };
   });

@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 
 import type { BankedResetAvailability } from "../contracts/openai-quota.js";
-import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+import type {
+  ProviderFailureCategory,
+  QuotaAttemptOutcome,
+} from "../contracts/provider-failure.js";
 import type { QuotaProviderDefinition } from "./quota-providers.js";
 import type { QuotaTelemetryToken } from "./quota-telemetry.js";
 import type { ResolvedAuthIdentity } from "./resolved-auth-identity.js";
@@ -240,6 +243,14 @@ export function cloneAccountingSemantic(semantic: AccountingSemantic): Accountin
   return { metric: { ...semantic.metric }, prominence: semantic.prominence };
 }
 
+/** The one typed-window semantic builder every provider window mapping must use. */
+export function windowSemantic(
+  window: AccountingWindow,
+  prominence: AccountingProminence = "primary",
+): AccountingSemantic {
+  return { metric: { kind: "window", window }, prominence };
+}
+
 export function cloneAccountingBasisFact(fact: AccountingBasisFact): AccountingBasisFact {
   return { quantity: cloneAccountingQuantity(fact.quantity), authority: fact.authority };
 }
@@ -288,6 +299,11 @@ export function cloneQuotaToastEntry(entry: QuotaToastEntry): QuotaToastEntry {
 export interface QuotaToastError {
   /** Deadline observed in an upstream Retry-After response. */
   retryAtMs?: number;
+  /**
+   * Outcome of the attempt that produced this error. A `cooldown` skip made no
+   * request, so it is not a failure observation. Absence means unknown.
+   */
+  attemptOutcome?: QuotaAttemptOutcome;
   /** Short label that will be rendered as "label: message". */
   label: string;
   message: string;
@@ -462,6 +478,8 @@ export interface QuotaProviderContext {
   workspaceRoot: string;
   config: {
     anthropicBinaryPath?: string;
+    /** Minimum spacing between Claude Agent usage requests, shared by processes. */
+    claudeAgentPollIntervalMs?: number;
     cursorPlan: CursorQuotaPlan;
     cursorIncludedApiUsd?: number;
     cursorBillingCycleStartDay?: number;

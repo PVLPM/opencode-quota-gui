@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  catalogFromQuotaSnapshot,
   mergeVisibilityCatalog,
   readVisibilityCatalog,
   VISIBILITY_CATALOG_LIMITS,
@@ -49,6 +50,18 @@ describe("card-centric visibility catalog v2", () => {
     expect(JSON.parse(store.getItem("") ?? "null").version).toBe(2);
     expect(readVisibilityCatalog(store)).toEqual(catalog);
     expect(readVisibilityCatalog(store).cards[0]?.rows[0]).not.toHaveProperty("accountLabel");
+  });
+
+  it("keeps live row aliases out of the persisted cache", () => {
+    const store = storage();
+    const rowId = `${ACCOUNT_A}#window:month|quota:percent`;
+    const alias = `${ACCOUNT_A}#window:month|quota:value`;
+    const catalog = {
+      cards: [card({ rows: [{ id: rowId, label: "Monthly", aliases: [alias] }] })],
+    };
+    writeVisibilityCatalog(store, catalog);
+    expect(readVisibilityCatalog(store).cards[0]?.rows[0]).not.toHaveProperty("aliases");
+    expect(catalog.cards[0]?.rows[0]?.aliases).toEqual([alias]);
   });
 
   it("discards the old provider schema, even stored under the new key", () => {
@@ -128,6 +141,72 @@ describe("card-centric visibility catalog v2", () => {
         { cards: [card()] },
       ).cards[0],
     ).not.toHaveProperty("planLabel");
+  });
+
+  it("orders combined emitted and declared rows from the saved per-card order", () => {
+    const snapshot = {
+      providers: {
+        cards: [
+          {
+            cardId: ACCOUNT_A,
+            providerId: "anthropic",
+            providerLabel: "Anthropic",
+            labelSource: "account" as const,
+            rows: [
+              {
+                rowId: `${ACCOUNT_A}#window:week|quota:percent`,
+                label: "Weekly",
+                kind: "percent" as const,
+                resultType: "quota" as const,
+              },
+              {
+                rowId: `${ACCOUNT_A}#openai:resets|status:value`,
+                label: "Resets",
+                kind: "value" as const,
+                resultType: "status" as const,
+              },
+            ],
+            errors: [],
+            visibilityRows: [
+              { rowId: `${ACCOUNT_A}#window:month|quota:percent`, label: "Monthly credits" },
+            ],
+          },
+        ],
+        enabledProviders: "auto" as const,
+        polledAtMs: 0,
+      },
+    };
+    // SAFETY: the fixture is a complete quota snapshot; only catalog projection
+    // reads its providers/cards here.
+    const catalog = catalogFromQuotaSnapshot(snapshot as never, {
+      [ACCOUNT_A]: [
+        `${ACCOUNT_A}#window:month|quota:percent`,
+        `${ACCOUNT_A}#window:week|quota:percent`,
+      ],
+    });
+    expect(catalog.cards[0]?.rows.map((row) => row.label)).toEqual([
+      "Monthly credits",
+      "Weekly",
+      "Resets",
+    ]);
+  });
+
+  it("never resurrects a cached row for a field the live payload already carries", () => {
+    const live = card({
+      rows: [{ id: `${ACCOUNT_A}#window:month|quota:percent`, label: "Monthly" }],
+    });
+    const cached = card({
+      rows: [
+        { id: `${ACCOUNT_A}#window:month|quota:percent`, label: "Monthly" },
+        { id: `${ACCOUNT_A}#window:month|rate_limit:percent`, label: "Monthly" },
+        { id: `${ACCOUNT_A}#window:week|quota:percent`, label: "Weekly" },
+      ],
+    });
+    const merged = mergeVisibilityCatalog({ cards: [live] }, { cards: [cached] });
+    expect(merged.cards[0]?.rows.map((row) => row.id)).toEqual([
+      `${ACCOUNT_A}#window:month|quota:percent`,
+      `${ACCOUNT_A}#window:week|quota:percent`,
+    ]);
   });
 
   it("validates and bounds untrusted cards, rows, labels and duplicate identities", () => {

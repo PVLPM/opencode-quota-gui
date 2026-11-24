@@ -192,6 +192,9 @@ describe("GUI contract guards", () => {
     expect(isCostedTokens({ ...costed, total: 25 })).toBe(false);
     expect(isCostedTokens({ ...costed, apiEquivalentCostUsd: "1.5" })).toBe(false);
     expect(isCostedTokens({ ...costed, unpricedTokens: -1 })).toBe(false);
+    expect(isCostedTokens({ ...costed, recordedCostUsd: 0.5, recordedCostTokens: 10 })).toBe(true);
+    expect(isCostedTokens({ ...costed, recordedCostUsd: -1 })).toBe(false);
+    expect(isCostedTokens({ ...costed, recordedCostTokens: Number.NaN })).toBe(false);
   });
 
   it("accepts only the three frozen SSE topics with an optional visibility scope", () => {

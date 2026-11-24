@@ -17,6 +17,8 @@ import {
 } from "../src/gui/identity.js";
 import type {
   AccountingMetadata,
+  AccountingResultType,
+  AccountingWindow,
   QuotaBooleanEntry,
   QuotaPercentEntry,
   QuotaQuantityEntry,
@@ -93,6 +95,73 @@ describe("gui identity — card hashing", () => {
     expect(scopeId).toBe(buildCardId("xai", PROVIDER_SCOPE_IDENTITY_KEY));
     expect(scopeId).not.toBe(buildCardId("xai", RAW_ACCOUNT_ID));
     expect(scopeId).not.toBe(buildCardId("anthropic", PROVIDER_SCOPE_IDENTITY_KEY));
+  });
+});
+
+describe("gui identity — semantic migration", () => {
+  const cardId = buildCardId("openai", RAW_ACCOUNT_ID);
+
+  function legacyWindowRowId(
+    window: AccountingWindow,
+    resultType: AccountingResultType = "rate_limit",
+  ) {
+    return rowIdForEntry(cardId, {
+      kind: "percent",
+      name: "Window",
+      percentRemaining: 50,
+      rowKey: `window:${window}`,
+      accounting: { ...TEST_ACCOUNTING, resultType },
+    });
+  }
+
+  function migratedWindowRowId(
+    window: AccountingWindow,
+    resultType: AccountingResultType = "rate_limit",
+  ) {
+    const entry = percentEntry({
+      name: "Renamed window",
+      label: "Renamed:",
+      accounting: { ...TEST_ACCOUNTING, resultType },
+      semantic: { metric: { kind: "window", window }, prominence: "primary" },
+    });
+    delete entry.rowKey;
+    return rowIdForEntry(cardId, entry);
+  }
+
+  it("keeps every saved rowId when a window rowKey becomes the same semantic window", () => {
+    const windows: AccountingWindow[] = [
+      "five_hour",
+      "hour",
+      "day",
+      "week",
+      "month",
+      "year",
+      "mcp",
+      "code_review",
+    ];
+    for (const window of windows) {
+      for (const resultType of ["quota", "rate_limit"] as const) {
+        expect(migratedWindowRowId(window, resultType)).toBe(legacyWindowRowId(window, resultType));
+        expect(migratedWindowRowId(window, resultType)).toContain(`#window:${window}|`);
+      }
+    }
+  });
+
+  it("keeps saved hiddenRows suppressing the migrated row", () => {
+    const savedHiddenRows = [
+      legacyWindowRowId("five_hour"),
+      legacyWindowRowId("week", "quota"),
+      legacyWindowRowId("month"),
+    ];
+    const migratedRows = [
+      migratedWindowRowId("five_hour"),
+      migratedWindowRowId("week", "quota"),
+      migratedWindowRowId("month"),
+      migratedWindowRowId("day"),
+    ];
+    expect(migratedRows.filter((rowId) => !savedHiddenRows.includes(rowId))).toEqual([
+      migratedWindowRowId("day"),
+    ]);
   });
 });
 

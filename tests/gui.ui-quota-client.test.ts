@@ -554,6 +554,7 @@ describe("independent browser quota transport", () => {
             visibilityRows: [
               {
                 rowId: "openai:synthetic#openai:resets|status:value",
+                aliases: ["openai:synthetic#openai:resets|quota:percent"],
                 label: "Resets",
                 info: "Resets info",
               },
@@ -601,6 +602,13 @@ describe("independent browser quota transport", () => {
     };
     wrongVisibility.providers.cards[0]!.visibilityRows[0]!.rowId = 7;
     expect(() => parseQuotaSnapshot(wrongVisibility)).toThrow(DashboardError);
+    // SAFETY: the test deliberately corrupts one parsed DTO field to exercise
+    // the decoder; the runtime shape stays a quota snapshot with an unknown alias.
+    const wrongAlias = JSON.parse(JSON.stringify(payload)) as typeof payload & {
+      providers: { cards: Array<{ visibilityRows: Array<{ aliases?: unknown }> }> };
+    };
+    wrongAlias.providers.cards[0]!.visibilityRows[0]!.aliases = [7];
+    expect(() => parseQuotaSnapshot(wrongAlias)).toThrow(DashboardError);
   });
 
   it("requests only the range-free quota endpoint", async () => {

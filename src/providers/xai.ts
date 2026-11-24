@@ -3,11 +3,13 @@
  */
 
 import type {
+  AccountingSemantic,
   QuotaProvider,
   QuotaProviderContext,
   QuotaProviderMatchContext,
   QuotaProviderResult,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import {
   credentialRowAuthEntry,
   formatCredentialDisplayNames,
@@ -26,17 +28,17 @@ import {
 } from "../lib/xai.js";
 import { attemptedResult, mapNullableProviderResult } from "./result-helpers.js";
 
-/** Stable explicit row key for the single percent row (never the display label). */
-function xaiWindowRowKey(kind: XaiPeriodKind): string {
+/** Typed identity for the single provider-defined period row (never its label). */
+function xaiWindowSemantic(kind: XaiPeriodKind): AccountingSemantic {
   switch (kind) {
     case "weekly":
-      return "window:week";
+      return windowSemantic("week");
     case "monthly":
-      return "window:month";
+      return windowSemantic("month");
     case "daily":
-      return "window:day";
+      return windowSemantic("day");
     default:
-      return "named:period";
+      return { metric: { kind: "named", name: "period" }, prominence: "primary" };
   }
 }
 
@@ -109,7 +111,7 @@ export const xaiProvider: QuotaProvider = {
                 name: `${group} ${period}`,
                 group,
                 label: `${period}:`,
-                rowKey: xaiWindowRowKey(result.window.kind),
+                semantic: xaiWindowSemantic(result.window.kind),
                 percentRemaining: result.window.percentRemaining,
                 resetTimeIso: result.window.resetTimeIso,
               },
@@ -139,7 +141,7 @@ export const xaiProvider: QuotaProvider = {
               name: `${result.label} ${period}`,
               group: result.label,
               label: `${period}:`,
-              rowKey: xaiWindowRowKey(result.window.kind),
+              semantic: xaiWindowSemantic(result.window.kind),
               percentRemaining: result.window.percentRemaining,
               resetTimeIso: result.window.resetTimeIso,
               ...(result.window.fixedWindow

@@ -27,7 +27,12 @@ import {
   SessionNotFoundError,
 } from "./opencode-storage.js";
 import type { TokenBuckets } from "./token-buckets.js";
-import { addTokenBuckets, emptyTokenBuckets, tokenBucketsFromMessage } from "./token-buckets.js";
+import {
+  addTokenBuckets,
+  emptyTokenBuckets,
+  tokenBucketsFromMessage,
+  totalTokenBuckets,
+} from "./token-buckets.js";
 import {
   calculateUsdFromTokenBuckets,
   splitTokenBucketsByRate,
@@ -1053,6 +1058,45 @@ export function priceTokenBuckets(params: {
       mappedModel: key.model,
     },
   };
+}
+
+/**
+ * A message priced from OpenCode's recorded cost instead of models.dev. The
+ * source stays distinguishable so the estimate can say so and so the unpriced
+ * kicker still prefers models.dev once it has a price.
+ */
+type RecordedCostPricingOutcome = {
+  status: "recorded_cost";
+  costUsd: number;
+  recordedTokens: number;
+};
+
+export type TokenPricingWithRecordedCostOutcome = TokenPricingOutcome | RecordedCostPricingOutcome;
+
+/**
+ * models.dev remains primary. Only a row whose resolved route has no usable
+ * models.dev rates (unknown or unpriced) may use the host-recorded message cost,
+ * and only a finite positive value: zero/missing/negative/NaN stays unpriced
+ * and is never Free evidence. Partially priced rows keep their models.dev cost.
+ */
+export function priceTokenBucketsWithRecordedCost(params: {
+  providerID?: string | null;
+  modelID?: string | null;
+  tokens: TokenBuckets;
+  recordedCostUsd?: number;
+  contextTokens?: number;
+  atMs?: number;
+  cache?: Map<string, PricingResolution>;
+}): TokenPricingWithRecordedCostOutcome {
+  const outcome = priceTokenBuckets(params);
+  if (outcome.status === "priced" || outcome.status === "partial") return outcome;
+
+  const recorded = params.recordedCostUsd;
+  if (typeof recorded !== "number" || !Number.isFinite(recorded) || recorded <= 0) return outcome;
+  const recordedTokens = totalTokenBuckets(params.tokens);
+  if (!(recordedTokens > 0)) return outcome;
+
+  return { status: "recorded_cost", costUsd: recorded, recordedTokens };
 }
 
 function compareSessionCreatedAt(
