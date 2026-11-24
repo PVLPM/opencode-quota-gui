@@ -24,9 +24,9 @@ The full Native integration ships from **v1.3.0** and requires **OpenCode Deskto
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="images/opencode-quota-gui_session.png" alt="Session analytics in the native panel with per-step context and cumulative token charts across a session tree, compaction markers, and a session tree table" />
+      <img src="images/opencode-quota-gui_session.png" alt="Session analytics in the native panel showing scoped context, cumulative and cache-rate series with user-prompt markers, longest idle and high-reuse gaps, and a session tree listing each session's agent, model, cache rate and tokens" />
       <br />
-      <sub><strong>Session analytics</strong> — per-session and whole-tree usage, compaction markers, and the session tree.</sub>
+      <sub><strong>Session analytics</strong> - scoped context, cumulative and cache-rate series with prompt markers, and a session tree with model and cache columns.</sub>
     </td>
     <td width="50%" valign="top">
       <img src="images/opencode-quota-gui_providers.png" alt="Models analytics grouped by provider with a stacked token chart, an API-equivalent cost line, and a cost and token breakdown by provider and model" />
