@@ -337,22 +337,28 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | und
   });
 }
 
+export type QuotaModelProbeState =
+  | { readonly state: "disabled" }
+  | { readonly state: "unavailable" }
+  | { readonly state: "probe"; readonly probe: QuotaModelProbe };
+
 /**
- * One live quota probe for the model's provider. Skips the probe when `isEnabled` rejects the
- * loaded config, and bounds the whole probe by the configured request timeout (D5).
+ * One live quota probe for the model's provider, keeping "the feature is off" distinct from
+ * "the evidence is temporarily unavailable". Native retry treats both as no delay; auto-resume
+ * must keep polling the latter and stop immediately on the former.
  */
-export async function probeQuotaForModel(
+export async function probeQuotaForModelState(
   host: Pick<QuotaSurfaceHost, "client" | "roots">,
   model: { readonly id: string; readonly providerID: string },
   isEnabled: (config: QuotaToastConfig) => boolean,
   options: { includeProviderScope?: boolean } = {},
-): Promise<QuotaModelProbe | undefined> {
+): Promise<QuotaModelProbeState> {
   const runtime = await resolveQuotaRuntimeContext({
     client: host.client,
     roots: host.roots,
     sessionMeta: { modelID: model.id, providerID: model.providerID },
   });
-  if (!isEnabled(runtime.config)) return undefined;
+  if (!isEnabled(runtime.config)) return { state: "disabled" };
   const probed = await withTimeout(
     (async () => {
       const collected = await collectQuotaRenderData({
@@ -381,7 +387,7 @@ export async function probeQuotaForModel(
     })(),
     runtime.config.requestTimeoutMs,
   );
-  if (!probed) return undefined;
+  if (!probed) return { state: "unavailable" };
   const binding = options.includeProviderScope
     ? resolveQuotaEvidenceBinding({
         modelProviderID: model.providerID,
@@ -395,11 +401,25 @@ export async function probeQuotaForModel(
       ? probed.collected.providerResults.filter((entry) => entry.providerId === binding.providerId)
       : probed.collected.providerResults;
   return {
-    config: runtime.config,
-    providerResults,
-    ...(probed.activeSourceId !== undefined ? { activeSourceId: probed.activeSourceId } : {}),
-    ...(binding !== undefined ? { binding } : {}),
+    state: "probe",
+    probe: {
+      config: runtime.config,
+      providerResults,
+      ...(probed.activeSourceId !== undefined ? { activeSourceId: probed.activeSourceId } : {}),
+      ...(binding !== undefined ? { binding } : {}),
+    },
   };
+}
+
+/** One live quota probe for the model's provider. `undefined` when disabled or unavailable. */
+export async function probeQuotaForModel(
+  host: Pick<QuotaSurfaceHost, "client" | "roots">,
+  model: { readonly id: string; readonly providerID: string },
+  isEnabled: (config: QuotaToastConfig) => boolean,
+  options: { includeProviderScope?: boolean } = {},
+): Promise<QuotaModelProbe | undefined> {
+  const result = await probeQuotaForModelState(host, model, isEnabled, options);
+  return result.state === "probe" ? result.probe : undefined;
 }
 
 /**

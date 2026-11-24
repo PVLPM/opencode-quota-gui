@@ -26,7 +26,7 @@ import { OpencodeWarmingRefreshTracker } from "./lib/opencode-warming-refresh.js
 import { createQuotaAutoResumption } from "./lib/quota-auto-resume.js";
 import {
   collectQuotaWindows,
-  probeQuotaForModel,
+  probeQuotaForModelState,
   resolveQuotaResetRetryDelayMs,
 } from "./lib/quota-retry-wait.js";
 import type { QuotaSurfaceHost } from "./lib/quota-surface-data.js";
@@ -85,19 +85,20 @@ export const QuotaToastPlugin = Plugin.define({
     const autoResume = createQuotaAutoResumption({
       session: ctx.session,
       probe: async (model) => {
-        const probe = await probeQuotaForModel(
+        const result = await probeQuotaForModelState(
           retryHost,
           model,
           (config) => config.autoResumeOnQuotaRecovery,
           { includeProviderScope: true },
         );
-        return probe
-          ? collectQuotaWindows(
-              probe.providerResults.map((entry) => entry.result),
-              probe.binding,
-              { primaryAccountOnly: true },
-            )
-          : undefined;
+        if (result.state === "disabled") return { kind: "disabled" };
+        if (result.state === "unavailable") return { kind: "absent" };
+        const collection = collectQuotaWindows(
+          result.probe.providerResults.map((entry) => entry.result),
+          result.probe.binding,
+          { primaryAccountOnly: true },
+        );
+        return collection ? { kind: "collection", collection } : { kind: "absent" };
       },
       log: (message) => console.warn(`[opencode-quota-gui] ${message}`),
     });

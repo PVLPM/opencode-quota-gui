@@ -885,9 +885,9 @@ describe("Claude Agent auto-resume identity", () => {
     const { get, prompt } = harness();
     const probe = vi
       .fn()
-      .mockResolvedValueOnce(exhausted)
-      .mockResolvedValueOnce(recovered)
-      .mockResolvedValueOnce(recovered);
+      .mockResolvedValueOnce({ kind: "collection", collection: exhausted })
+      .mockResolvedValueOnce({ kind: "collection", collection: recovered })
+      .mockResolvedValueOnce({ kind: "collection", collection: recovered });
     const controller = createQuotaAutoResumption({
       probe,
       session: { get, prompt },
@@ -899,7 +899,7 @@ describe("Claude Agent auto-resume identity", () => {
       data: { sessionID: CLAUDE_SESSION_ID, error: { type: "provider.quota" } },
     });
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(10 * MINUTE_MS + 60_000);
+    await vi.advanceTimersByTimeAsync(10 * MINUTE_MS);
     await vi.advanceTimersByTimeAsync(QUOTA_AUTO_RESUME_GRACE_MS);
 
     expect(prompt).toHaveBeenCalledOnce();
@@ -914,7 +914,10 @@ describe("Claude Agent auto-resume identity", () => {
     );
     const { get, prompt } = harness();
     const controller = createQuotaAutoResumption({
-      probe: vi.fn().mockResolvedValueOnce(exhausted).mockResolvedValue(recovered),
+      probe: vi
+        .fn()
+        .mockResolvedValueOnce({ kind: "collection", collection: exhausted })
+        .mockResolvedValue({ kind: "collection", collection: recovered }),
       session: { get, prompt },
     });
 
@@ -923,16 +926,20 @@ describe("Claude Agent auto-resume identity", () => {
       created: NOW_MS,
       data: { sessionID: CLAUDE_SESSION_ID, error: { type: "provider.quota" } },
     });
-    await vi.advanceTimersByTimeAsync(10 * MINUTE_MS + 60_000 + QUOTA_AUTO_RESUME_GRACE_MS);
+    await vi.advanceTimersByTimeAsync(10 * MINUTE_MS + QUOTA_AUTO_RESUME_GRACE_MS);
 
     expect(prompt).not.toHaveBeenCalled();
   });
 
-  it("refuses to arm when the Claude identity is unknown", async () => {
-    const result = await claudeAgentResult(0, 50, new Date(NOW_MS + 10 * MINUTE_MS).toISOString());
-    const unbound = collectQuotaWindows([result], undefined, { primaryAccountOnly: true });
+  it("keeps polling while the Claude identity is unknown", async () => {
+    const bound = collectionFor(
+      await claudeAgentResult(0, 50, new Date(NOW_MS + 10 * MINUTE_MS).toISOString()),
+      "clip-account-a",
+    );
+    // A real observation with no verified identity cannot arm a baseline.
+    const unbound: QuotaWindowCollection = { windows: bound.windows };
     const { get, prompt } = harness();
-    const probe = vi.fn().mockResolvedValue(unbound);
+    const probe = vi.fn().mockResolvedValue({ kind: "collection", collection: unbound });
     const controller = createQuotaAutoResumption({
       probe,
       session: { get, prompt },
@@ -944,9 +951,10 @@ describe("Claude Agent auto-resume identity", () => {
       data: { sessionID: CLAUDE_SESSION_ID, error: { type: "provider.quota" } },
     });
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(24 * 60 * MINUTE_MS);
+    await vi.advanceTimersByTimeAsync(10 * MINUTE_MS);
 
-    expect(probe).toHaveBeenCalledOnce();
+    // No verified identity means no baseline and no proof, so the pending resume polls.
+    expect(probe.mock.calls.length).toBeGreaterThan(1);
     expect(prompt).not.toHaveBeenCalled();
   });
 });

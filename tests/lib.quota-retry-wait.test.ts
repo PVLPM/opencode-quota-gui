@@ -435,4 +435,44 @@ describe("resolveQuotaResetRetryDelayMs", () => {
       vi.useRealTimers();
     }
   });
+
+  it("distinguishes a disabled auto-resume setting from unavailable evidence", async () => {
+    const zai = makeProvider("zai", [window("5h", 0, at(90 * MINUTE_MS))], () => true);
+    mocks.getProviders.mockReturnValue([zai]);
+    mocks.loadConfig.mockResolvedValue(
+      makeQuotaToastTestConfig({ autoResumeOnQuotaRecovery: false }),
+    );
+    const { probeQuotaForModelState } = await import("../src/lib/quota-retry-wait.js");
+
+    await expect(
+      probeQuotaForModelState(
+        createHost(),
+        limitEvent.model,
+        (config) => config.autoResumeOnQuotaRecovery,
+      ),
+    ).resolves.toEqual({ state: "disabled" });
+    expect(zai.fetch).not.toHaveBeenCalled();
+  });
+
+  it("reports unavailable evidence when an enabled probe times out", async () => {
+    const hanging = makeProvider("zai", [], () => true);
+    hanging.fetch.mockReturnValue(new Promise(() => {}));
+    mocks.getProviders.mockReturnValue([hanging]);
+    mocks.loadConfig.mockResolvedValue(
+      makeQuotaToastTestConfig({ autoResumeOnQuotaRecovery: true, requestTimeoutMs: 25 }),
+    );
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const { probeQuotaForModelState } = await import("../src/lib/quota-retry-wait.js");
+      const pending = probeQuotaForModelState(
+        createHost(),
+        limitEvent.model,
+        (config) => config.autoResumeOnQuotaRecovery,
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(pending).resolves.toEqual({ state: "unavailable" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
