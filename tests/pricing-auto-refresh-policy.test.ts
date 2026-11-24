@@ -1832,9 +1832,51 @@ describe("pricing runtime refresh policy", () => {
     });
     expect(second).toBeUndefined();
     expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // Past both the cheap gate and the 6h interval, the persisted check for
+    // this catalog identity still prevents another request.
+    const afterThrottleWindow = await pricing.refreshAnalyticsPricing({
+      ...options,
+      nowMs: nowMs + 6 * 60 * 60 * 1000 + 1,
+    });
+    expect(afterThrottleWindow).toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the unpriced route's chance when the attempt is throttled", async () => {
+  it("does not re-request a checked unpriced route after a simulated restart", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+
+    const fetchFn = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: { models: { "gpt-4o-mini": { cost: { input: 0.123, output: 0.456 } } } },
+        }),
+        { status: 200, headers: { etag: "restart-etag" } },
+      ),
+    );
+    const options = {
+      routes: [{ providerID: "openai", modelID: "openai/gpt-6.2-sol" }],
+      runtimeDirs,
+      fetchFn,
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs),
+    };
+
+    const first = await pricing.refreshAnalyticsPricing({ ...options, nowMs });
+    expect(first).toMatchObject({ attempted: true });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    const restarted = await loadPricingModule();
+    const second = await restarted.refreshAnalyticsPricing({
+      ...options,
+      nowMs: nowMs + 16 * 60 * 1000,
+    });
+    expect(second).toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the 6h throttle for ordinary automatic refreshes", async () => {
     const pricing = await loadPricingModule();
     const runtimeDirs = await createTempRuntimeDirs();
     const nowMs = 1_800_000_000_000;
@@ -1842,6 +1884,31 @@ describe("pricing runtime refresh policy", () => {
     await mkdir(snapshotDir, { recursive: true });
     await writeFile(
       pricing.getRuntimePricingRefreshStatePath(runtimeDirs),
+      JSON.stringify({ version: 1, updatedAt: nowMs, lastAttemptAt: nowMs }),
+      "utf-8",
+    );
+
+    const fetchFn = vi.fn();
+    const throttled = await pricing.refreshAnalyticsPricing({
+      routes: [{ providerID: "openai", modelID: "openai/gpt-4o-mini" }],
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs - 4 * DAY_MS),
+    });
+    expect(throttled).toMatchObject({ attempted: false, reason: "throttled" });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("bypasses the 6h throttle for a new unpriced route but still enforces the 10/24h budget", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
+    await mkdir(snapshotDir, { recursive: true });
+    const statePath = pricing.getRuntimePricingRefreshStatePath(runtimeDirs);
+    await writeFile(
+      statePath,
       JSON.stringify({ version: 1, updatedAt: nowMs, lastAttemptAt: nowMs }),
       "utf-8",
     );
@@ -1854,6 +1921,57 @@ describe("pricing runtime refresh policy", () => {
         { status: 200, headers: { etag: "after-throttle" } },
       ),
     );
+
+    const bypassed = await pricing.refreshAnalyticsPricing({
+      routes: [{ providerID: "openai", modelID: "openai/gpt-6.2-sol" }],
+      nowMs,
+      runtimeDirs,
+      fetchFn,
+      bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs),
+    });
+    expect(bypassed).toMatchObject({ attempted: true, updated: true });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // Another new route is still blocked once the shared budget is exhausted.
+    const budgetNow = nowMs + 16 * 60 * 1000;
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        updatedAt: budgetNow,
+        lastAttemptAt: budgetNow,
+        etag: "budget-etag",
+        attempts24h: Array.from({ length: 10 }, (_, index) => ({
+          at: budgetNow - index,
+          automatic: true,
+        })),
+      }),
+      "utf-8",
+    );
+    const budgetBlocked = await pricing.refreshAnalyticsPricing({
+      routes: [{ providerID: "openai", modelID: "openai/another-unpriced" }],
+      nowMs: budgetNow,
+      runtimeDirs,
+      fetchFn,
+      bootstrapSnapshotOverride: createBootstrapSnapshot(budgetNow),
+    });
+    expect(budgetBlocked).toMatchObject({ attempted: false, reason: "budget" });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not bypass the 6h throttle again after a failed bypass attempt", async () => {
+    const pricing = await loadPricingModule();
+    const runtimeDirs = await createTempRuntimeDirs();
+    const nowMs = 1_800_000_000_000;
+    const snapshotDir = join(runtimeDirs.cacheDir, "opencode-quota-gui");
+    await mkdir(snapshotDir, { recursive: true });
+    await writeFile(
+      pricing.getRuntimePricingRefreshStatePath(runtimeDirs),
+      JSON.stringify({ version: 1, updatedAt: nowMs, lastAttemptAt: nowMs }),
+      "utf-8",
+    );
+
+    const fetchFn = vi.fn().mockRejectedValue(new Error("models.dev down"));
     const options = {
       routes: [{ providerID: "openai", modelID: "openai/gpt-6.2-sol" }],
       runtimeDirs,
@@ -1861,16 +1979,34 @@ describe("pricing runtime refresh policy", () => {
       bootstrapSnapshotOverride: createBootstrapSnapshot(nowMs),
     };
 
-    const throttled = await pricing.refreshAnalyticsPricing({ ...options, nowMs });
-    expect(throttled).toMatchObject({ attempted: false, reason: "throttled" });
-    expect(fetchFn).not.toHaveBeenCalled();
+    const bypassed = await pricing.refreshAnalyticsPricing({ ...options, nowMs });
+    expect(bypassed).toMatchObject({ attempted: true, updated: false });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
 
+    // The failed attempt still spent the one bypass for this catalog identity,
+    // so the 15-minute re-entry cannot request again inside the 6h interval.
+    const throttled = await pricing.refreshAnalyticsPricing({
+      ...options,
+      nowMs: nowMs + 16 * 60 * 1000,
+    });
+    expect(throttled).toMatchObject({ attempted: false, reason: "throttled" });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // The route still retries through the ordinary 6h throttle.
+    fetchFn.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          openai: { models: { "gpt-4o-mini": { cost: { input: 0.123, output: 0.456 } } } },
+        }),
+        { status: 200, headers: { etag: "after-retry" } },
+      ),
+    );
     const retried = await pricing.refreshAnalyticsPricing({
       ...options,
       nowMs: nowMs + 6 * 60 * 60 * 1000 + 1,
     });
     expect(retried).toMatchObject({ attempted: true, updated: true });
-    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
   it("does not re-request an unpriced route after a 304 and re-enables it on a new catalog ETag", async () => {
@@ -1921,13 +2057,14 @@ describe("pricing runtime refresh policy", () => {
     expect(fetchFn).toHaveBeenCalledTimes(1);
 
     // Another process refreshed and published a different catalog ETag, which
-    // makes the route untried again for the new catalog state.
+    // makes the route untried again for the new catalog state. That new
+    // identity bypasses the 6h throttle even though the last attempt is recent.
     await writeFile(
       statePath,
       JSON.stringify({
         version: 1,
         updatedAt: nowMs + 16 * 60 * 1000,
-        lastAttemptAt: nowMs - 7 * 60 * 60 * 1000,
+        lastAttemptAt: nowMs + 16 * 60 * 1000,
         etag: "catalog-etag-2",
       }),
       "utf-8",

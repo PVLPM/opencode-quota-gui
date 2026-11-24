@@ -112,6 +112,23 @@ export interface PricingRefreshStateV1 {
   lastModified?: string;
   /** Every automatic and manual network request inside the rolling 24h. */
   attempts24h?: PricingRefreshAttempt[];
+  /**
+   * Unpriced routes already checked against the catalog identity in `key`.
+   * A route missing here for the current identity may bypass the minimum
+   * automatic attempt interval once; the rolling 24h budget still applies.
+   */
+  unpricedChecked?: PricingRouteChecks;
+  /**
+   * Unpriced routes that already spent their one throttle bypass for the
+   * catalog identity in `key`. A failed attempt still counts, so retries obey
+   * the ordinary minimum interval instead of burning the daily budget.
+   */
+  unpricedBypassUsed?: PricingRouteChecks;
+}
+
+export interface PricingRouteChecks {
+  key: string;
+  routes: string[];
 }
 
 export interface PricingRefreshPolicy {
@@ -137,9 +154,16 @@ export interface PricingRefreshOptions {
   allowRefreshWhenSelectionBundled?: boolean;
   /**
    * Skip the max-age check for an unpriced-triggered attempt. The rolling
-   * budget and the 6h throttle still apply.
+   * budget always applies; the 6h throttle applies unless `unpricedRouteKeys`
+   * contains a route not yet checked against the current catalog identity.
    */
   refreshEvenIfFresh?: boolean;
+  /**
+   * Unpriced routes (see `pricingRouteKey`) the caller observed. A route with
+   * no recorded check and no spent throttle bypass for the current catalog
+   * identity may skip the 6h throttle once; later observations stay throttled.
+   */
+  unpricedRouteKeys?: readonly string[];
   /** Cross-process budget-lock wait; expired means skip the attempt. */
   lockTimeoutMs?: number;
 }
@@ -168,8 +192,6 @@ let SNAPSHOT_SELECTION: PricingSnapshotSource = "auto";
 let MODEL_INDEX: Map<string, string[]> | null = null;
 let REFRESH_IN_FLIGHT: Promise<PricingRefreshResult> | null = null;
 let CONFIGURED_PRICING_SNAPSHOT_MAX_AGE_MS = DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS;
-/** Route -> refresh-state identity already tried by the unpriced kicker. */
-const UNPRICED_ROUTES_CHECKED = new Map<string, string>();
 let LAST_ANALYTICS_PRICING_CHECK_AT_MS = 0;
 let LAST_ANALYTICS_UNPRICED_SIGNATURE = "";
 
@@ -511,7 +533,27 @@ function normalizeRefreshState(raw: unknown): PricingRefreshStateV1 | null {
   if (typeof obj.etag === "string" && obj.etag) out.etag = obj.etag;
   if (typeof obj.lastModified === "string" && obj.lastModified) out.lastModified = obj.lastModified;
 
+  const unpricedChecked = normalizeRouteChecks(obj.unpricedChecked);
+  if (unpricedChecked) out.unpricedChecked = unpricedChecked;
+  const unpricedBypassUsed = normalizeRouteChecks(obj.unpricedBypassUsed);
+  if (unpricedBypassUsed) out.unpricedBypassUsed = unpricedBypassUsed;
+
   return out;
+}
+
+function normalizeRouteChecks(raw: unknown): PricingRouteChecks | undefined {
+  const obj = asRecord(raw);
+  if (typeof obj?.key !== "string" || !obj.key) return undefined;
+  const routes = Array.isArray(obj.routes)
+    ? [
+        ...new Set(
+          obj.routes.filter(
+            (route): route is string => typeof route === "string" && route.length > 0,
+          ),
+        ),
+      ]
+    : [];
+  return routes.length > 0 ? { key: obj.key, routes } : undefined;
 }
 
 type RefreshStateReadResult =
@@ -580,6 +622,58 @@ function refreshStateKey(state: PricingRefreshStateV1 | null | undefined): strin
   );
 }
 
+function routeChecksForIdentity(
+  checks: PricingRouteChecks | undefined,
+  state: PricingRefreshStateV1 | null | undefined,
+): Set<string> {
+  return checks && checks.key === refreshStateKey(state)
+    ? new Set(checks.routes)
+    : new Set<string>();
+}
+
+function withRouteChecks(
+  existing: PricingRouteChecks | undefined,
+  key: string,
+  routes: readonly string[],
+): PricingRouteChecks {
+  return {
+    key,
+    routes:
+      existing && existing.key === key
+        ? [...new Set([...existing.routes, ...routes])]
+        : [...new Set(routes)],
+  };
+}
+
+/**
+ * Routes with no recorded unpriced check against the state's catalog identity.
+ * A route checked against an older identity counts again because the new
+ * catalog may price it.
+ */
+function unpricedRoutesUntried(
+  routeKeys: readonly string[] | undefined,
+  state: PricingRefreshStateV1 | null | undefined,
+): string[] {
+  if (!routeKeys || routeKeys.length === 0) return [];
+  const checked = routeChecksForIdentity(state?.unpricedChecked, state);
+  return routeKeys.filter((routeKey) => !checked.has(routeKey));
+}
+
+/**
+ * Untried routes that may still spend their one throttle bypass for the current
+ * catalog identity. A route whose bypass was already reserved at this identity
+ * waits for the ordinary minimum interval.
+ */
+function unpricedRoutesBypassable(
+  routeKeys: readonly string[] | undefined,
+  state: PricingRefreshStateV1 | null | undefined,
+): string[] {
+  const untried = unpricedRoutesUntried(routeKeys, state);
+  if (untried.length === 0) return [];
+  const used = routeChecksForIdentity(state?.unpricedBypassUsed, state);
+  return untried.filter((routeKey) => !used.has(routeKey));
+}
+
 function appendRefreshAttempt(
   state: PricingRefreshStateV1,
   nowMs: number,
@@ -606,6 +700,17 @@ function mergeRefreshAttempts(
   return [...byKey.values()].sort((a, b) => a.at - b.at);
 }
 
+function mergeRouteChecks(
+  winner: PricingRefreshStateV1,
+  other: PricingRefreshStateV1 | null | undefined,
+  field: "unpricedChecked" | "unpricedBypassUsed",
+): PricingRouteChecks | undefined {
+  const a = winner[field];
+  const b = other?.[field];
+  if (!a || !b || a.key !== b.key) return a ?? b;
+  return { key: a.key, routes: [...new Set([...a.routes, ...b.routes])] };
+}
+
 /**
  * Reserve one automatic slot atomically in the refresh-state file. The
  * read-check-append-write happens under a cross-process lock, so plugin hosts,
@@ -622,6 +727,7 @@ async function reserveRefreshAttempt(params: {
   minAttemptIntervalMs: number;
   lockTimeoutMs: number;
   fallbackState: PricingRefreshStateV1;
+  unpricedRouteKeys?: readonly string[];
 }): Promise<
   | { ok: true; state: PricingRefreshStateV1 }
   | {
@@ -644,8 +750,10 @@ async function reserveRefreshAttempt(params: {
       return { ok: false, reason: "state_unreadable", state: params.fallbackState };
     }
     const current = read.kind === "ok" ? read.state : makeDefaultRefreshState(params.nowMs);
+    const bypassableUnpricedRoutes = unpricedRoutesBypassable(params.unpricedRouteKeys, current);
     if (
       !params.force &&
+      bypassableUnpricedRoutes.length === 0 &&
       current.lastAttemptAt &&
       params.nowMs - current.lastAttemptAt < params.minAttemptIntervalMs
     ) {
@@ -677,11 +785,21 @@ async function reserveRefreshAttempt(params: {
       };
     }
 
+    const attemptState = appendRefreshAttempt(current, params.nowMs, params.automatic);
     const reserved: PricingRefreshStateV1 = {
-      ...appendRefreshAttempt(current, params.nowMs, params.automatic),
+      ...attemptState,
       version: 1,
       updatedAt: params.nowMs,
       lastAttemptAt: params.nowMs,
+      ...(!params.force && bypassableUnpricedRoutes.length > 0
+        ? {
+            unpricedBypassUsed: withRouteChecks(
+              attemptState.unpricedBypassUsed,
+              refreshStateKey(current),
+              bypassableUnpricedRoutes,
+            ),
+          }
+        : {}),
     };
     await writeJsonAtomic(params.statePath, reserved, { trailingNewline: true });
     return { ok: true, state: reserved };
@@ -711,19 +829,27 @@ async function writeRefreshStateMerged(
   try {
     const current = await readRefreshState(statePath);
     const attempts24h = mergeRefreshAttempts(current?.attempts24h, nextState.attempts24h);
-    const merged: PricingRefreshStateV1 =
-      current && current.updatedAt > nextState.updatedAt
-        ? { ...current, attempts24h }
+    const currentIsNewer = current !== null && current.updatedAt > nextState.updatedAt;
+    const winner = currentIsNewer ? current : nextState;
+    const other = currentIsNewer ? nextState : current;
+    const unpricedChecked = mergeRouteChecks(winner, other, "unpricedChecked");
+    const unpricedBypassUsed = mergeRouteChecks(winner, other, "unpricedBypassUsed");
+    const merged: PricingRefreshStateV1 = {
+      ...winner,
+      attempts24h,
+      ...(unpricedChecked === undefined ? {} : { unpricedChecked }),
+      ...(unpricedBypassUsed === undefined ? {} : { unpricedBypassUsed }),
+      ...(currentIsNewer
+        ? {}
         : {
-            ...nextState,
-            attempts24h,
             updatedAt: Math.max(current?.updatedAt ?? 0, nextState.updatedAt),
             ...(current?.lastAttemptAt !== undefined &&
             (nextState.lastAttemptAt === undefined ||
               current.lastAttemptAt > nextState.lastAttemptAt)
               ? { lastAttemptAt: current.lastAttemptAt }
               : {}),
-          };
+          }),
+    };
     await writeJsonAtomic(statePath, merged, { trailingNewline: true });
   } finally {
     await release();
@@ -736,8 +862,9 @@ function buildCompletionState(params: {
   lastResult: "success" | "not_modified";
   etag?: string;
   lastModified?: string;
+  unpricedRouteKeys?: readonly string[];
 }): PricingRefreshStateV1 {
-  return {
+  const state: PricingRefreshStateV1 = {
     ...params.attemptingState,
     updatedAt: params.nowMs,
     lastSuccessAt: params.nowMs,
@@ -746,6 +873,36 @@ function buildCompletionState(params: {
     etag: params.etag ?? params.attemptingState.etag,
     lastModified: params.lastModified ?? params.attemptingState.lastModified,
   };
+
+  const routeKeys = params.unpricedRouteKeys ?? [];
+  if (routeKeys.length > 0) {
+    state.unpricedChecked = withRouteChecks(
+      state.unpricedChecked,
+      refreshStateKey(state),
+      routeKeys,
+    );
+  }
+  return state;
+}
+
+/** Persist a definitive catalog answer; a lost race must not fail the refresh. */
+async function completeRefresh(params: {
+  statePath: string;
+  attemptingState: PricingRefreshStateV1;
+  nowMs: number;
+  lastResult: "success" | "not_modified";
+  etag?: string;
+  lastModified?: string;
+  unpricedRouteKeys?: readonly string[];
+  lockTimeoutMs: number;
+}): Promise<PricingRefreshResult> {
+  const state = buildCompletionState(params);
+  try {
+    await writeRefreshStateMerged(params.statePath, state, params.lockTimeoutMs);
+  } catch {
+    // best effort; the in-memory/runtime snapshot is already active
+  }
+  return { attempted: true, updated: true, state };
 }
 
 export type PricingRoute = { providerID?: string; modelID?: string };
@@ -1143,8 +1300,13 @@ export async function maybeRefreshPricingSnapshot(
       };
     }
 
+    const bypassableUnpricedRoutes = unpricedRoutesBypassable(
+      opts.unpricedRouteKeys,
+      previousState,
+    );
     if (
       !force &&
+      bypassableUnpricedRoutes.length === 0 &&
       previousState.lastAttemptAt &&
       nowMs - previousState.lastAttemptAt < minAttemptIntervalMs
     ) {
@@ -1169,6 +1331,9 @@ export async function maybeRefreshPricingSnapshot(
       minAttemptIntervalMs,
       lockTimeoutMs,
       fallbackState: previousState,
+      ...(opts.unpricedRouteKeys === undefined
+        ? {}
+        : { unpricedRouteKeys: opts.unpricedRouteKeys }),
     });
     if (!reservation.ok) {
       return {
@@ -1249,23 +1414,16 @@ export async function maybeRefreshPricingSnapshot(
           selection,
         });
 
-        const nextState = buildCompletionState({
+        return await completeRefresh({
+          statePath,
           attemptingState,
           nowMs,
           lastResult: "not_modified",
           etag: fetchResult.etag,
           lastModified: fetchResult.lastModified,
+          unpricedRouteKeys: opts.unpricedRouteKeys,
+          lockTimeoutMs,
         });
-        try {
-          await writeRefreshStateMerged(statePath, nextState, lockTimeoutMs);
-        } catch {
-          // best effort; keep refreshed in-memory/runtime snapshot active
-        }
-        return {
-          attempted: true,
-          updated: true,
-          state: nextState,
-        };
       }
 
       const fetchedSnapshot = buildSnapshotFromApi(fetchResult.api, requestedProviderIDs, nowMs);
@@ -1310,25 +1468,16 @@ export async function maybeRefreshPricingSnapshot(
         selection,
       });
 
-      const nextState = buildCompletionState({
+      return await completeRefresh({
+        statePath,
         attemptingState,
         nowMs,
         lastResult: "success",
         etag: fetchResult.etag,
         lastModified: fetchResult.lastModified,
+        unpricedRouteKeys: opts.unpricedRouteKeys,
+        lockTimeoutMs,
       });
-
-      try {
-        await writeRefreshStateMerged(statePath, nextState, lockTimeoutMs);
-      } catch {
-        // best effort; snapshot has already been updated
-      }
-
-      return {
-        attempted: true,
-        updated: true,
-        state: nextState,
-      };
     } catch (error) {
       const errorMessage = getErrorMessage(error);
       const nextState: PricingRefreshStateV1 = {
@@ -1362,10 +1511,11 @@ export async function maybeRefreshPricingSnapshot(
 /**
  * Event-driven analytics pricing upkeep: adopt an externally refreshed runtime
  * snapshot, run the normal freshness refresh, and give one extra attempt when a
- * route used by Analytics is still unpriced or unknown. Every path stays behind
- * the 6h throttle and the rolling 24h automatic request budget, and a bundled
- * selection never refreshes. Cheap re-entry: unchanged unpriced routes inside
- * the check interval do no I/O.
+ * route used by Analytics is still unpriced or unknown. A route not yet checked
+ * against the current catalog identity gets one throttle bypass per identity;
+ * every attempt still obeys the rolling 24h automatic request budget, and a
+ * bundled selection never refreshes. Cheap re-entry: unchanged unpriced routes
+ * inside the check interval do no I/O.
  */
 export async function refreshAnalyticsPricing(opts?: {
   routes?: readonly PricingRoute[];
@@ -1405,22 +1555,22 @@ export async function refreshAnalyticsPricing(opts?: {
   });
 
   const unpricedRoutes = routes.filter((route) => !pricingRouteIsPriced(route));
-  const signature = unpricedRoutes.map(pricingRouteKey).sort().join("\u0001");
+  const unpricedRouteKeys = unpricedRoutes.map(pricingRouteKey);
+  const signature = [...unpricedRouteKeys].sort().join("\u0001");
   LAST_ANALYTICS_PRICING_CHECK_AT_MS = nowMs;
   LAST_ANALYTICS_UNPRICED_SIGNATURE = signature;
 
   const state =
     (await readRefreshState(getRuntimePricingRefreshStatePath(opts?.runtimeDirs))) ?? undefined;
-  const stateKey = refreshStateKey(state);
-  const untried = unpricedRoutes.filter(
-    (route) => UNPRICED_ROUTES_CHECKED.get(pricingRouteKey(route)) !== stateKey,
-  );
   const health = getPricingSnapshotHealth({ nowMs, maxAgeMs: getPricingRefreshPolicy().maxAgeMs });
-  if (!health.stale && untried.length === 0) return undefined;
+  if (!health.stale && unpricedRoutesUntried(unpricedRouteKeys, state).length === 0) {
+    return undefined;
+  }
 
   const result = await maybeRefreshPricingSnapshot({
     reason: unpricedRoutes.length > 0 ? "unpriced" : "status",
     refreshEvenIfFresh: unpricedRoutes.length > 0,
+    unpricedRouteKeys,
     nowMs,
     snapshotSelection: selection,
     ...(opts?.runtimeDirs === undefined ? {} : { runtimeDirs: opts.runtimeDirs }),
@@ -1437,19 +1587,6 @@ export async function refreshAnalyticsPricing(opts?: {
       : { bootstrapSnapshotOverride: opts.bootstrapSnapshotOverride }),
   });
 
-  // A definitive catalog answer (200 success or 304 not modified) checks these
-  // routes against the resulting catalog identity (ETag/last-modified, else the
-  // refreshed generatedAt). Skipped attempts (throttled, busy, budget,
-  // unreadable ledger) and failed requests leave the routes untried.
-  const definitiveCatalogAnswer =
-    result.attempted &&
-    (result.state.lastResult === "success" || result.state.lastResult === "not_modified");
-  if (definitiveCatalogAnswer) {
-    const nextStateKey = refreshStateKey(result.state);
-    for (const route of unpricedRoutes) {
-      UNPRICED_ROUTES_CHECKED.set(pricingRouteKey(route), nextStateKey);
-    }
-  }
   return result;
 }
 
@@ -1617,7 +1754,6 @@ export function __resetPricingSnapshotForTests(): void {
   CONFIGURED_PRICING_SNAPSHOT_MAX_AGE_MS = DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS;
   MODEL_INDEX = null;
   REFRESH_IN_FLIGHT = null;
-  UNPRICED_ROUTES_CHECKED.clear();
   LAST_ANALYTICS_PRICING_CHECK_AT_MS = 0;
   LAST_ANALYTICS_UNPRICED_SIGNATURE = "";
 }
