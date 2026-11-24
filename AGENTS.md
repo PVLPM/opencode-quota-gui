@@ -17,6 +17,12 @@
 - Avoid duplicate parsers, validators, mappers, adapters, caches, retry mechanisms, services, and helpers. Inspect the diff for duplication and check the combined result again after integrating parallel worktrees.
 - Do not merge code merely because it looks similar when responsibilities or contracts differ. Do not introduce abstractions solely to silence duplication tools.
 
+## Provider field contract
+
+- Provider row identity, Visibility and notification eligibility come only from `GroupedQuotaEntryMeta.semantic` or an explicit provider `rowKey` — never display labels, array order or provider-id string matching.
+- Keep rowIds stable: converting a `window:*`/`component:*`/`named:*` `rowKey` to the same semantic metric is id-preserving; any rowKey change needs a `dashboard.hiddenRows` normalization plus a golden-id test.
+- Declare optional Visibility rows and reset windows in the provider registration metadata, and ship visibility, notification and compatibility tests with every provider change.
+
 ## Optional tools
 
 - CodeGraph and jscpd MCP are optional developer tools. If unavailable, use existing alternatives and continue independent work. When installation materially benefits the task, explain the benefit and ask permission first.
