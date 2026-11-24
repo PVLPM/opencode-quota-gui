@@ -231,6 +231,11 @@ interface Candidate {
   repairCompletedAtMs?: number;
   /** Source-change signature captured before this snapshot's transaction. */
   sourceSignature?: string;
+  /**
+   * The source database/WAL signature matched the persisted one, so a first
+   * detail load only fills in-memory metadata; cached DTOs already reflect it.
+   */
+  sourceUnchanged?: boolean;
   /** Earliest future completion seen; `null` clears because none remains. */
   futureCompletionAtMs?: number | null;
 }
@@ -2173,6 +2178,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       detailCoverageChanges,
       projectSignatures: projectSignatureChanges,
       projectCoverages: projectCoverageChanges,
+      sourceUnchanged,
       ...(globalRefresh ? { sourceCursorAtMs } : {}),
       ...(globalRefresh && (cursorBaseline || fullProjection) ? { repairCompletedAtMs: atMs } : {}),
     };
@@ -2327,6 +2333,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const upserts: OpenCodeRawAssistantRow[] = [];
     const agentUpserts: OpenCodeRawAssistantRow[] = [];
     const agentAffectedSessionIds = new Set<string>();
+    const sourceUnchanged = candidate.sourceUnchanged === true;
     let updatedAtChanged = false;
     let occurrenceRemoved = false;
 
@@ -2371,12 +2378,15 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         agentProjected &&
         (row.agent !== occurrence.agent || row.variant !== occurrence.variant)
       ) {
+        // Compact occurrences do not persist agent/variant; filling them from
+        // the first unchanged-source detail read does not change the cached DTO.
+        const wasKnown = occurrence.agent !== undefined || occurrence.variant !== undefined;
         if (row.agent === undefined) delete occurrence.agent;
         else occurrence.agent = row.agent;
         if (row.variant === undefined) delete occurrence.variant;
         else occurrence.variant = row.variant;
         agentUpserts.push(row);
-        agentAffectedSessionIds.add(row.sessionID);
+        if (wasKnown || !sourceUnchanged) agentAffectedSessionIds.add(row.sessionID);
       }
     };
 
@@ -2449,14 +2459,22 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     }
     const markerChangedFocusIds = new Set<string>();
     for (const [focusId, markers] of candidate.detailCompactions) {
-      if (metadataChanged(detailCompactions.get(focusId) ?? [], markers)) {
+      const previous = detailCompactions.get(focusId);
+      if (
+        metadataChanged(previous ?? [], markers) &&
+        (previous !== undefined || !sourceUnchanged)
+      ) {
         markerChangedFocusIds.add(focusId);
       }
       detailCompactions.set(focusId, markers);
     }
     const userMessageChangedFocusIds = new Set<string>();
     for (const [focusId, messages] of candidate.detailUserMessages) {
-      if (metadataChanged(detailUserMessages.get(focusId) ?? [], messages)) {
+      const previous = detailUserMessages.get(focusId);
+      if (
+        metadataChanged(previous ?? [], messages) &&
+        (previous !== undefined || !sourceUnchanged)
+      ) {
         userMessageChangedFocusIds.add(focusId);
       }
       detailUserMessages.set(focusId, messages);

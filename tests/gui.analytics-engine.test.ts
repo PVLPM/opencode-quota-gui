@@ -1266,6 +1266,50 @@ describe("analytics engine: revision reconciliation", () => {
     ).toBe(false);
   });
 
+  it("keeps parent and child session DTOs warm across an unchanged-source restart", async () => {
+    const db = baseDb();
+    db.changeSignature = "sig-1";
+    // Agents are not persisted in compact occurrences; the first detail read
+    // after restore must hydrate them without churning the cached DTOs.
+    db.rows.find((entry) => entry.messageID === "msg_b")!.agent = "build";
+    const first = harness(db);
+    await first.engine.home("24h");
+    await first.engine.session("ses_root");
+    await first.engine.session("ses_child");
+    await first.engine.close();
+    const persisted = decodeAnalyticsState(
+      JSON.parse(JSON.stringify(encodeAnalyticsState(first.savedStates.at(-1)!, NOW))),
+    )!;
+    const warm = decodeAnalyticsPresentation(
+      JSON.parse(
+        JSON.stringify(
+          encodeAnalyticsPresentation(
+            { ...persisted, presentation: first.savedPresentations.at(-1)! },
+            NOW,
+          ),
+        ),
+      ),
+    )!;
+    // Loading the child must not invalidate the parent DTO it is part of.
+    expect(warm.session?.map(([sessionId]) => sessionId).sort()).toEqual(["ses_child", "ses_root"]);
+
+    const second = harness(db, {
+      loadSnapshot: async () => structuredClone(persisted),
+      loadPresentation: async () => structuredClone(warm),
+    });
+    expect((await second.engine.session("ses_root")).focusSessionId).toBe("ses_root");
+    // The first detail-metadata population after restore must not churn the
+    // retained DTOs when the source signature is unchanged.
+    await second.engine.refresh();
+    await second.engine.close();
+    expect(
+      second.savedPresentations
+        .at(-1)
+        ?.session?.map(([sessionId]) => sessionId)
+        .sort(),
+    ).toEqual(["ses_child", "ses_root"]);
+  });
+
   it("reuses metadata on an unchanged scoped-only refresh", async () => {
     const db = baseDb();
     db.changeSignature = "sig-1";
