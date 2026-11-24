@@ -96,9 +96,10 @@ describe("bundled pricing coverage and tiers", () => {
     }
 
     // All-provider normalized data is ~1 MB pretty; the compact bundled file
-    // keeps full coverage under 800 KB and offline behavior deterministic.
+    // keeps full coverage plus the authoritative catalog under 1.2 MB and
+    // offline behavior deterministic.
     expect(modelCount).toBeGreaterThan(8000);
-    expect(Buffer.byteLength(readFileSync(SNAPSHOT_URL, "utf8"), "utf8")).toBeLessThan(800 * 1024);
+    expect(Buffer.byteLength(readFileSync(SNAPSHOT_URL, "utf8"), "utf8")).toBeLessThan(1200 * 1024);
     expect(tieredCount).toBeGreaterThan(800);
     expect(reasoningCount).toBeGreaterThan(0);
   });
