@@ -213,18 +213,25 @@ describe("quota runway tooltips", () => {
     dispose();
   });
 
-  it("does not install a per-card interval for runway tooltips", () => {
-    const setInterval = vi.spyOn(globalThis, "setInterval");
+  it("installs one card clock interval for runway tooltips and clears it on dispose", () => {
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
     const { dispose } = mount({
       kind: "before_reset",
       projectedAtIso: new Date(NOW + 60_000).toISOString(),
     });
+    const timer = setIntervalSpy.mock.results[0]?.value;
 
     try {
-      expect(setInterval).not.toHaveBeenCalled();
+      // One clock per mounted card keeps the retained age and reset countdown
+      // current between snapshot polls; no row or tooltip installs its own.
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(clearIntervalSpy).not.toHaveBeenCalledWith(timer);
     } finally {
       dispose();
-      setInterval.mockRestore();
+      expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
+      setIntervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
     }
   });
 });

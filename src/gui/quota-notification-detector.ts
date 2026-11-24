@@ -20,6 +20,9 @@
  * - `provider-error`: a proven healthy -> error transition, only when the
  *   caller supplies safe structured failure provenance. Error labels and
  *   messages are never inspected.
+ * - Retained last-good rows (a `stale` card) keep their previous observation
+ *   state and are never evaluated for low/exhausted/reset transitions; live
+ *   provider errors on that card still count.
  * - Cooldown always applies to the exact fingerprint and is never bypassed.
  * - First startup and newly visible cards or rows silently baseline.
  *
@@ -51,7 +54,11 @@ import { createHash } from "node:crypto";
 
 import { isCardHidden } from "../contracts/card-visibility.js";
 import type { QuotaCardRow } from "../contracts/dashboard.js";
-import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
+import type {
+  ProviderFailureCategory,
+  QuotaAttemptOutcome,
+} from "../contracts/provider-failure.js";
+import { effectiveHiddenRowIds } from "../contracts/row-visibility.js";
 import {
   MAX_TRANSITION_AGE_MS,
   type ResetObservation,
@@ -154,19 +161,36 @@ export interface QuotaNotificationCardObservation {
   accountLabel?: string;
   /** Bare provider-scope hash used by normalized legacy hidden-card semantics. */
   providerScopeHash?: string;
+  /**
+   * True when the card's rows are retained last-good data rather than this
+   * cycle's measurement. A transient failed poll never raises a provider-error
+   * notification for retained readings; the card still shows the error.
+   */
+  stale?: boolean;
   rows: readonly QuotaNotificationRowObservation[];
+  /**
+   * Declared optional-row controls. Their stable ids and aliases make a hidden
+   * field silent regardless of which shape the provider emitted this cycle.
+   */
+  visibilityRows?: readonly { rowId: string; aliases?: readonly string[] }[];
   errors?: readonly QuotaNotificationProviderErrorObservation[];
 }
 
 /** Only the safe structured category is read; labels and messages are ignored. */
 export interface QuotaNotificationProviderErrorObservation {
   failureCategory?: ProviderFailureCategory;
+  /** A cooldown skip made no request and is never a failure observation. */
+  attemptOutcome?: QuotaAttemptOutcome;
 }
 
-/** Unknown or absent categories are never notifiable. */
+/**
+ * Unknown or absent categories are never notifiable. A cooldown skip is a
+ * timing decision, not a provider failure, so it is also not notifiable.
+ */
 export function isNotifiableProviderError(
   error: QuotaNotificationProviderErrorObservation,
 ): boolean {
+  if (error.attemptOutcome === "cooldown") return false;
   return error.failureCategory === QUOTA_NOTIFICATION_PROVIDER_ERROR_CATEGORY;
 }
 
@@ -185,6 +209,10 @@ export interface QuotaNotificationRowState {
 export interface QuotaNotificationProviderState {
   status: "healthy" | "error";
   observedAtMs: number;
+  /** Consecutive observations that carried a notifiable provider error. */
+  consecutiveErrors?: number;
+  /** The latest error observation was suppressed because its rows were retained. */
+  staleError?: boolean;
 }
 
 /** Memory-only detector state. Do not persist rows/providers across restarts. */
@@ -346,7 +374,7 @@ export function detectQuotaNotifications(
 ): DetectQuotaNotificationsResult {
   const nowMs = input.nowMs;
   const hiddenCards = new Set(input.hiddenCards ?? []);
-  const hiddenRows = new Set(input.hiddenRows ?? []);
+  const configuredHiddenRows = input.hiddenRows ?? [];
   const previousState =
     input.state?.version === QUOTA_NOTIFICATION_DETECTOR_STATE_VERSION ? input.state : undefined;
   const cooldowns: Record<string, number> = { ...(input.cooldowns ?? {}) };
@@ -369,8 +397,27 @@ export function detectQuotaNotifications(
     if (seenCards.has(card.cardId) || isCardHidden(card, hiddenCards)) continue;
     seenCards.add(card.cardId);
 
+    const hiddenRows = effectiveHiddenRowIds(
+      card.rows.map((row) => row.rowId),
+      configuredHiddenRows,
+      card.visibilityRows ?? [],
+    );
+    const cardRowsRetained = card.stale === true;
+    if (cardRowsRetained) {
+      // Retained last-good rows stay out of threshold/reset evaluation. Keep
+      // their previous observation state so the next fresh reading still
+      // compares against the last real measurement.
+      const prefix = `${card.cardId}\u001f`;
+      for (const [key, state] of Object.entries(previousState?.rows ?? {})) {
+        if (!key.startsWith(prefix) || nextRows.has(key)) continue;
+        if (hiddenRows.has(key.slice(prefix.length))) continue;
+        nextRows.set(key, cloneRowState(state));
+      }
+    }
+
     for (const row of card.rows) {
       if (hiddenRows.has(row.rowId)) continue;
+      if (cardRowsRetained) continue;
       if (!isEligiblePercentRow(row)) continue;
 
       const key = rowStateKey(card.cardId, row.rowId);
@@ -507,13 +554,34 @@ export function detectQuotaNotifications(
       continue;
     }
 
-    const status: QuotaNotificationProviderState["status"] =
-      (card.errors?.some(isNotifiableProviderError) ?? false) ? "error" : "healthy";
-    nextProviders.set(card.cardId, { status, observedAtMs: nowMs });
+    const isError = card.errors?.some(isNotifiableProviderError) ?? false;
+    const status: QuotaNotificationProviderState["status"] = isError ? "error" : "healthy";
+    const consecutiveErrors = isError
+      ? previousProvider?.status === "error"
+        ? (previousProvider.consecutiveErrors ?? 1) + 1
+        : 1
+      : 0;
+    const providerState: QuotaNotificationProviderState = { status, observedAtMs: nowMs };
+    if (isError) {
+      providerState.consecutiveErrors = consecutiveErrors;
+      providerState.staleError = card.stale === true;
+    }
+    nextProviders.set(card.cardId, providerState);
 
-    if (!previousProvider || previousProvider.status !== "healthy" || status !== "error") {
+    if (!previousProvider || status !== "error") {
       continue;
     }
+
+    // One transient poll failure on a card that still shows retained last-good
+    // rows is silent; the second consecutive failing observation is a proven
+    // persistent error and alerts. A fresh error without retained rows alerts
+    // immediately. The card shows the error either way.
+    const freshTransition = previousProvider.status === "healthy" && card.stale !== true;
+    const persistentAfterSuppressed =
+      previousProvider.status === "error" &&
+      previousProvider.staleError === true &&
+      consecutiveErrors === 2;
+    if (!freshTransition && !persistentAfterSuppressed) continue;
 
     if (policy.enabled && policy.providerError.enabled) {
       const fingerprint = quotaNotificationFingerprint({

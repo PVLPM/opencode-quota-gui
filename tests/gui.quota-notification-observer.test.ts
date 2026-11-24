@@ -25,6 +25,7 @@ import {
   type QuotaNotificationSettings,
   quotaNotificationSettingsFromSnapshot,
 } from "../src/gui/quota-notification-observer.js";
+import { markQuotaObservationLive } from "../src/gui/quota-observation.js";
 import { writeJsonAtomic } from "../src/lib/atomic-json.js";
 import type { NativeQuotaNotificationPolicy } from "../src/lib/types.js";
 
@@ -285,13 +286,14 @@ describe("quota notification observer", () => {
     await observer.close();
   });
 
-  it("ignores stale snapshots and keeps the previous baseline", async () => {
+  it("ignores cached replay snapshots and keeps the previous baseline", async () => {
     const { observer, events } = createObserver({});
 
     observer.observe(snapshot(50));
     await observer.flush();
     expect(events).toEqual([]);
 
+    // A synthesized replay is unmarked and still ignored, even with cards.
     observer.observe(snapshot(5, { stale: true }));
     await observer.flush();
     expect(events).toEqual([]);
@@ -310,6 +312,50 @@ describe("quota notification observer", () => {
     await fresh.observer.flush();
     expect(fresh.events).toEqual([]);
     await fresh.observer.close();
+  });
+
+  it("counts a live stale observation of the only failing provider", async () => {
+    const { observer, events } = createObserver({});
+    const retainedError = markQuotaObservationLive(
+      snapshotOf(
+        [
+          {
+            ...card({
+              percentRemaining: 25,
+              errors: [{ failureCategory: "provider_api" }],
+            }),
+            stale: true,
+          },
+        ],
+        true,
+      ),
+    );
+
+    observer.observe(retainedError);
+    await observer.flush();
+    expect(events).toEqual([]);
+    observer.observe(retainedError);
+    await observer.flush();
+    expect(events.map((event) => event.kind)).toEqual(["provider-error"]);
+    await observer.close();
+  });
+
+  it("does not evaluate rows from a live stale observation", async () => {
+    const { observer, events } = createObserver({});
+    observer.observe(snapshot(50));
+    await observer.flush();
+
+    const retainedRows = markQuotaObservationLive(
+      snapshotOf([{ ...card({ percentRemaining: 5 }), stale: true }], true),
+    );
+    observer.observe(retainedRows);
+    await observer.flush();
+    expect(events).toEqual([]);
+
+    observer.observe(snapshot(5));
+    await observer.flush();
+    expect(events.map((event) => event.kind)).toEqual(["low"]);
+    await observer.close();
   });
 
   it("honours hidden cards and rows from effective settings", async () => {

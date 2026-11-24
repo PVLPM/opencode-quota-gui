@@ -109,7 +109,11 @@ describe("quota card clipboard", () => {
   it("copies only the clicked account's visible rows with its current display preferences", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
-    const firstRow = percentRow({ label: "First quota", countdown: "1h" });
+    const firstRow = percentRow({
+      label: "First quota",
+      countdown: "1h",
+      resetAtIso: new Date(Date.now() + 3_600_000).toISOString(),
+    });
     const hiddenRow = percentRow({ label: "Hidden quota" });
     const first = providerCard({
       accountLabel: "Alice",
@@ -118,7 +122,13 @@ describe("quota card clipboard", () => {
     });
     const second = providerCard({
       accountLabel: "Bob",
-      rows: [percentRow({ label: "Bob quota", countdown: undefined })],
+      rows: [
+        percentRow({
+          label: "Bob quota",
+          countdown: undefined,
+          resetAtIso: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      ],
     });
     // The fixture normally reuses one row ID; make only the second row hidden.
     hiddenRow.rowId = "hidden-row" as typeof hiddenRow.rowId;
@@ -299,13 +309,17 @@ describe("quota card clipboard runway and banked resets", () => {
   });
 
   it("adds lasts-past-reset only while its reset is a valid future time", async () => {
-    const cases: Array<{ resetAtIso: string | undefined; runway: string | undefined }> = [
-      { resetAtIso: new Date(NOW + 2_000).toISOString(), runway: "Projected to last until reset" },
-      { resetAtIso: undefined, runway: undefined },
-      { resetAtIso: "invalid", runway: undefined },
-      { resetAtIso: new Date(NOW - 1).toISOString(), runway: undefined },
+    const cases: Array<{ resetAtIso: string | undefined; expected: string[] }> = [
+      {
+        resetAtIso: new Date(NOW + 2_000).toISOString(),
+        expected: ["Quota: 62% remaining · Projected to last until reset"],
+      },
+      { resetAtIso: undefined, expected: ["Quota: 62% remaining"] },
+      { resetAtIso: "invalid", expected: ["Quota: 62% remaining"] },
+      // Fresh provider rows are authoritative; only retained rows are expired by our clock.
+      { resetAtIso: new Date(NOW - 1).toISOString(), expected: ["Quota: 62% remaining"] },
     ];
-    for (const { resetAtIso, runway } of cases) {
+    for (const { resetAtIso, expected } of cases) {
       const copied = await copiedSummary(
         providerCard({
           rows: [
@@ -318,10 +332,24 @@ describe("quota card clipboard runway and banked resets", () => {
           ],
         }),
       );
-      expect(rowLines(copied)).toEqual([
-        runway === undefined ? "Quota: 62% remaining" : `Quota: 62% remaining · ${runway}`,
-      ]);
+      expect(rowLines(copied)).toEqual(expected);
     }
+  });
+
+  it("drops a retained row whose reset passed instead of showing it as 0%", async () => {
+    const copied = await copiedSummary(
+      providerCard({
+        rows: [
+          percentRow({
+            label: "Quota",
+            countdown: undefined,
+            resetAtIso: new Date(NOW - 1).toISOString(),
+          }),
+        ],
+      }),
+      true,
+    );
+    expect(rowLines(copied)).toEqual(["Data may be stale"]);
   });
 
   it("omits runway from stale cards while keeping quota and reset text", async () => {
@@ -341,19 +369,19 @@ describe("quota card clipboard runway and banked resets", () => {
   });
 
   it("keeps banked-reset summaries unchanged", async () => {
+    const resetsRow = percentRow({
+      label: "Banked resets",
+      kind: "value",
+      bankedResets: { availableCount: 2, credits: [] },
+      runway: undefined,
+      countdown: undefined,
+    });
     const copied = await copiedSummary(
       providerCard({
         providerId: "openai",
         providerLabel: "OpenAI",
-        rows: [
-          percentRow({
-            label: "Banked resets",
-            kind: "value",
-            bankedResets: { availableCount: 2, credits: [] },
-            runway: undefined,
-            countdown: undefined,
-          }),
-        ],
+        rows: [resetsRow],
+        visibilityRows: [{ rowId: resetsRow.rowId, label: "Banked resets" }],
       }),
     );
     expect(rowLines(copied)).toEqual(["Banked resets: 2 available · Expiry unknown"]);
@@ -370,7 +398,12 @@ describe("quota card clipboard runway and banked resets", () => {
       }),
     ];
     const claude = await copiedSummary(
-      providerCard({ providerId: "claude-agent", providerLabel: "Claude Agent", rows }),
+      providerCard({
+        providerId: "claude-agent",
+        providerLabel: "Claude Agent",
+        rows,
+        visibilityRows: [{ rowId: rows[0]!.rowId, label: "Resets" }],
+      }),
     );
     expect(rowLines(claude)).toEqual(["Resets: 1 available · Expiry unknown"]);
     const anthropic = await copiedSummary(

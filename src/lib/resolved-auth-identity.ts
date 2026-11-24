@@ -9,6 +9,9 @@ const RESOLVED_AUTH_KEY_FILENAME = "resolved-auth-key-v1";
 const RESOLVED_AUTH_KEY_PREFIX = "v1:";
 const RESOLVED_AUTH_KEY_BYTES = 32;
 const RESOLVED_AUTH_IDENTITY_PREFIX = "rai1_";
+const PROCESS_LOCAL_AUTH_IDENTITY_PREFIX = "rai1p_";
+/** Per-process key for platforms with no protected identity storage. It never leaves memory. */
+const PROCESS_LOCAL_IDENTITY_KEY = randomBytes(RESOLVED_AUTH_KEY_BYTES);
 const WINNER_READ_ATTEMPTS = 20;
 const WINNER_READ_DELAY_MS = 5;
 
@@ -212,6 +215,60 @@ export async function composeResolvedAuthIdentities(params: {
     [...params.identities],
     params.qualifiers ?? [],
   ]);
+}
+
+/**
+ * A process-local identity for platforms without protected identity storage (Windows). The random
+ * key never leaves this process, so the value cannot be reproduced after a restart and may only
+ * key in-memory retention, never a persisted cache. The principal must be non-secret account
+ * evidence; a credential or token is never suitable here.
+ */
+export function deriveProcessLocalAuthIdentity(params: {
+  providerId: string;
+  principal: ResolvedAuthPrincipal;
+  qualifiers?: readonly string[];
+}): ResolvedAuthIdentity | null {
+  if (process.platform !== "win32") return null;
+  const value = params.principal.value.trim();
+  if (!params.providerId || !value) return null;
+
+  return `${PROCESS_LOCAL_AUTH_IDENTITY_PREFIX}${createHmac("sha256", PROCESS_LOCAL_IDENTITY_KEY)
+    .update(
+      identityPayload([
+        "process-local",
+        params.providerId,
+        params.principal.kind,
+        value,
+        params.qualifiers ?? [],
+      ]),
+    )
+    .digest("base64url")}` as ResolvedAuthIdentity;
+}
+
+/** Process-local equivalent of `composeResolvedAuthIdentities`; Windows-only, like its inputs. */
+export function composeProcessLocalAuthIdentities(params: {
+  providerId: string;
+  identities: readonly ResolvedAuthIdentity[];
+  qualifiers?: readonly string[];
+}): ResolvedAuthIdentity | null {
+  if (process.platform !== "win32") return null;
+  if (!params.providerId || params.identities.length === 0) return null;
+
+  return `${PROCESS_LOCAL_AUTH_IDENTITY_PREFIX}${createHmac("sha256", PROCESS_LOCAL_IDENTITY_KEY)
+    .update(
+      identityPayload([
+        "process-local-composition",
+        params.providerId,
+        [...params.identities],
+        params.qualifiers ?? [],
+      ]),
+    )
+    .digest("base64url")}` as ResolvedAuthIdentity;
+}
+
+/** True for the in-memory-only identity; such a scope must never be persisted. */
+export function isProcessLocalResolvedAuthIdentity(value: string): boolean {
+  return value.startsWith(PROCESS_LOCAL_AUTH_IDENTITY_PREFIX);
 }
 
 export function isResolvedAuthIdentity(value: unknown): value is ResolvedAuthIdentity {

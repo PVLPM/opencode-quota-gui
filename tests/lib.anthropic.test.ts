@@ -22,10 +22,20 @@ const identityMocks = vi.hoisted(() => ({
   ),
 }));
 
+const stateMocks = vi.hoisted(() => ({
+  dir: `${process.env["TEMP"] ?? process.cwd()}/ocq-anthropic-throttle-${process.pid}`,
+}));
+
+const fsPromisesMocks = vi.hoisted(() => ({
+  readFile: vi.fn(),
+  stat: vi.fn(),
+}));
+
+import type { Stats } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFile } from "child_process";
-import { readFile } from "fs/promises";
 import {
   buildClaudeCommandInvocation,
   clearAnthropicDiagnosticsCacheForTests,
@@ -45,9 +55,21 @@ vi.mock("child_process", () => ({
   execFile: vi.fn(),
 }));
 
-vi.mock("fs/promises", () => ({
-  readFile: vi.fn(),
-}));
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  const isThrottlePath = (path: unknown) => String(path).includes("anthropic-oauth-throttle");
+  return {
+    ...actual,
+    // The throttle's real lock/state files must use the real file system; the
+    // Claude credential reads keep the test-controlled mocks.
+    readFile: vi.fn((...args: Parameters<typeof actual.readFile>) =>
+      isThrottlePath(args[0]) ? actual.readFile(...args) : fsPromisesMocks.readFile(...args),
+    ),
+    stat: vi.fn((...args: Parameters<typeof actual.stat>) =>
+      isThrottlePath(args[0]) ? actual.stat(...args) : fsPromisesMocks.stat(...args),
+    ),
+  };
+});
 
 vi.mock("fs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("fs")>()),
@@ -72,7 +94,15 @@ vi.mock("../src/lib/http.js", () => ({
   ),
 }));
 
-vi.mock("../src/lib/resolved-auth-identity.js", () => identityMocks);
+vi.mock("../src/lib/resolved-auth-identity.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/resolved-auth-identity.js")>()),
+  deriveResolvedAuthIdentity: identityMocks.deriveResolvedAuthIdentity,
+  composeResolvedAuthIdentities: identityMocks.composeResolvedAuthIdentities,
+}));
+
+vi.mock("../src/lib/private-state-paths.js", () => ({
+  getGuiPrivateStatePath: (...segments: string[]) => [stateMocks.dir, ...segments].join("/"),
+}));
 
 type ExecSequenceStep = {
   stdout?: string;
@@ -91,7 +121,8 @@ const CLAUDE_INSTALL_FOLDER_CANDIDATES = [
 ];
 
 const execFileMock = vi.mocked(execFile);
-const readFileMock = vi.mocked(readFile);
+const readFileMock = fsPromisesMocks.readFile;
+const statMock = fsPromisesMocks.stat;
 const readAuthFileCachedMock = authMocks.readAuthFileCached;
 const fetchWithTimeoutMock = vi.mocked(fetchWithTimeout);
 const fetchResponseMock = httpMocks.fetchResponse;
@@ -122,6 +153,11 @@ function mockExecSequence(steps: ExecSequenceStep[]): void {
     callback(error, step.stdout ?? "", step.stderr ?? "");
     return {} as never;
   });
+}
+
+/** A credentials-file stat as the identity-reuse gate sees it. */
+function claudeCredentialStat(mtimeMs: number, size: number): Stats {
+  return { isFile: () => true, mtimeMs, size } as Stats;
 }
 
 function mockJsonResponse(body: unknown, status = 200): Response {
@@ -170,20 +206,43 @@ function authenticatedWithoutQuotaSteps(count: number): ExecSequenceStep[] {
 
 const originalClaudeConfigDirectory = process.env["CLAUDE_CONFIG_DIR"];
 
-beforeEach(() => {
+beforeEach(async () => {
+  rmSync(stateMocks.dir, { recursive: true, force: true });
   readAuthFileCachedMock.mockResolvedValue(null);
+  identityMocks.deriveResolvedAuthIdentity.mockImplementation(
+    async (params: { providerId: string }) => `identity:${params.providerId}`,
+  );
+  identityMocks.composeResolvedAuthIdentities.mockImplementation(
+    async (params: { providerId: string; identities: readonly string[] }) =>
+      `composed:${params.providerId}:${params.identities.join("|")}`,
+  );
   // The probe inherits this process's environment, so a developer's own CLAUDE_CONFIG_DIR must not leak in.
   delete process.env["CLAUDE_CONFIG_DIR"];
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
+  rmSync(stateMocks.dir, { recursive: true, force: true });
   execFileMock.mockReset();
   fsMocks.existsSync.mockReset();
   fsMocks.existsSync.mockReturnValue(false);
   readFileMock.mockReset();
+  statMock.mockReset();
   readAuthFileCachedMock.mockReset();
-  fetchWithTimeoutMock.mockClear();
+  fetchWithTimeoutMock.mockReset();
+  // Restore the default response bridge so a queued `mockRejectedValueOnce` from
+  // one test can never be consumed by the next.
+  fetchWithTimeoutMock.mockImplementation(
+    async (
+      _url: string,
+      options: {
+        consume: (response: Response, signal: AbortSignal) => Promise<unknown> | unknown;
+      },
+    ) => {
+      const response = await httpMocks.fetchResponse();
+      return await options.consume(response, new AbortController().signal);
+    },
+  );
   fetchResponseMock.mockReset();
   clearAnthropicDiagnosticsCacheForTests();
   if (originalProcessPlatformDescriptor) {
@@ -658,7 +717,7 @@ describe("Claude CLI diagnostics", () => {
     ]);
     expect(execFileMock).toHaveBeenCalledTimes(6);
   });
-  it("keeps selected Claude Code CLI quota uncached without an Anthropic account identity", async () => {
+  it("stays uncached when CLI-reported quota has neither a readable token nor account evidence", async () => {
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
       {
@@ -682,7 +741,393 @@ describe("Claude CLI diagnostics", () => {
     expect(identityMocks.deriveResolvedAuthIdentity).not.toHaveBeenCalled();
   });
 
-  it("keeps CLI-reported quota and identity unbound, reading the token only for optional saved resets", async () => {
+  it("keys CLI-reported quota by the readable first-party token", async () => {
+    setProcessPlatform("linux");
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "local-quota-token" } }),
+    );
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      {
+        stdout: JSON.stringify({
+          authenticated: true,
+          ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+          quota: {
+            five_hour: { used_percentage: 10 },
+            seven_day: { used_percentage: 20 },
+          },
+        }),
+      },
+    ]);
+
+    await resolveClaudeAgentAccountIdentity({
+      binaryPath: "claude",
+      onlyCurrentModel: false,
+      runtimeDetected: false,
+    });
+
+    expect(identityMocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "anthropic:claude-cli-account",
+        principal: { kind: "credential", value: "local-quota-token" },
+      }),
+    );
+  });
+
+  it("keys CLI-reported quota by the CLI account when the token cannot be read", async () => {
+    setProcessPlatform("linux");
+    readFileMock.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      {
+        stdout: JSON.stringify({
+          authenticated: true,
+          ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+          email: "user@example.com",
+          orgId: "org-1",
+          quota: {
+            five_hour: { used_percentage: 10 },
+            seven_day: { used_percentage: 20 },
+          },
+        }),
+      },
+    ]);
+
+    await resolveClaudeAgentAccountIdentity({
+      binaryPath: "claude",
+      onlyCurrentModel: false,
+      runtimeDetected: false,
+    });
+
+    expect(identityMocks.deriveResolvedAuthIdentity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: "anthropic:claude-cli-state",
+        qualifiers: expect.arrayContaining(['account:["org-1","user@example.com"]']),
+      }),
+    );
+  });
+
+  it("falls back to an account-specific process-local identity on Windows", async () => {
+    setProcessPlatform("win32");
+    identityMocks.deriveResolvedAuthIdentity.mockResolvedValue(null);
+    identityMocks.composeResolvedAuthIdentities.mockResolvedValue(null);
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "windows-token" } }),
+    );
+    const status = (email: string, orgId: string): ExecSequenceStep => ({
+      stdout: JSON.stringify({
+        authenticated: true,
+        ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+        email,
+        orgId,
+        quota: { five_hour: { used_percentage: 10 }, seven_day: { used_percentage: 20 } },
+      }),
+    });
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      status("user@example.com", "org-1"),
+      { stdout: "claude 1.2.3\n" },
+      status("user@example.com", "org-1"),
+      { stdout: "claude 1.2.3\n" },
+      status("other@example.com", "org-2"),
+      { stdout: "claude 1.2.3\n" },
+      {
+        stdout: JSON.stringify({
+          authenticated: true,
+          ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+          quota: { five_hour: { used_percentage: 10 }, seven_day: { used_percentage: 20 } },
+        }),
+      },
+    ]);
+    const options = { binaryPath: "claude", onlyCurrentModel: false, runtimeDetected: false };
+
+    const first = await resolveClaudeAgentAccountIdentity(options);
+    const repeat = await resolveClaudeAgentAccountIdentity(options);
+    const changed = await resolveClaudeAgentAccountIdentity(options);
+    const withoutEvidence = await resolveClaudeAgentAccountIdentity(options);
+
+    expect(first).toMatch(/^rai1p_[A-Za-z0-9_-]{43}$/u);
+    expect(repeat).toBe(first);
+    expect(changed).not.toBe(first);
+    expect(JSON.stringify({ first, changed })).not.toContain("example.com");
+    expect(withoutEvidence).toBeNull();
+  });
+
+  it("does not share a Windows Claude identity across users of one organization", async () => {
+    setProcessPlatform("win32");
+    identityMocks.deriveResolvedAuthIdentity.mockResolvedValue(null);
+    identityMocks.composeResolvedAuthIdentities.mockResolvedValue(null);
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "shared-org-token" } }),
+    );
+    const status = (email?: string): ExecSequenceStep => ({
+      stdout: JSON.stringify({
+        authenticated: true,
+        ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+        orgId: "shared-org",
+        ...(email === undefined ? {} : { email }),
+        quota: { five_hour: { used_percentage: 10 }, seven_day: { used_percentage: 20 } },
+      }),
+    });
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      status("first@example.com"),
+      { stdout: "claude 1.2.3\n" },
+      status("second@example.com"),
+      { stdout: "claude 1.2.3\n" },
+      status(),
+    ]);
+    const options = { binaryPath: "claude", onlyCurrentModel: false, runtimeDetected: false };
+
+    const first = await resolveClaudeAgentAccountIdentity(options);
+    const second = await resolveClaudeAgentAccountIdentity(options);
+    const orgOnly = await resolveClaudeAgentAccountIdentity(options);
+
+    expect(first).toMatch(/^rai1p_/u);
+    expect(second).toMatch(/^rai1p_/u);
+    expect(second).not.toBe(first);
+    expect(orgOnly).toBeNull();
+  });
+
+  it("accepts a user account id without email as Windows identity evidence", async () => {
+    setProcessPlatform("win32");
+    identityMocks.deriveResolvedAuthIdentity.mockResolvedValue(null);
+    identityMocks.composeResolvedAuthIdentities.mockResolvedValue(null);
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "shared-org-token" } }),
+    );
+    const status = (accountUuid: string): ExecSequenceStep => ({
+      stdout: JSON.stringify({
+        authenticated: true,
+        ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+        orgId: "shared-org",
+        accountUuid,
+        quota: { five_hour: { used_percentage: 10 }, seven_day: { used_percentage: 20 } },
+      }),
+    });
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      status("user-a"),
+      { stdout: "claude 1.2.3\n" },
+      status("user-b"),
+    ]);
+    const options = { binaryPath: "claude", onlyCurrentModel: false, runtimeDetected: false };
+
+    const first = await resolveClaudeAgentAccountIdentity(options);
+    const second = await resolveClaudeAgentAccountIdentity(options);
+
+    expect(first).toMatch(/^rai1p_/u);
+    expect(second).toMatch(/^rai1p_/u);
+    expect(second).not.toBe(first);
+  });
+
+  it("leaves an org-only CLI login unscoped on platforms with protected identity storage", async () => {
+    setProcessPlatform("linux");
+    readFileMock.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      {
+        stdout: JSON.stringify({
+          authenticated: true,
+          ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+          orgId: "shared-org",
+        }),
+      },
+    ]);
+
+    await expect(
+      resolveClaudeAgentAccountIdentity({
+        binaryPath: "claude",
+        onlyCurrentModel: false,
+        runtimeDetected: false,
+      }),
+    ).resolves.toBeNull();
+    expect(identityMocks.deriveResolvedAuthIdentity).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse a user-specific identity after the CLI reports only an organization", async () => {
+    setProcessPlatform("win32");
+    identityMocks.deriveResolvedAuthIdentity.mockResolvedValue(null);
+    identityMocks.composeResolvedAuthIdentities.mockResolvedValue(null);
+    statMock.mockResolvedValue(claudeCredentialStat(6_000, 120));
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "user-a-token" } }),
+    );
+    const status = (email?: string): ExecSequenceStep => ({
+      stdout: JSON.stringify({
+        authenticated: true,
+        ...FIRST_PARTY_CLAUDE_AI_LOGIN,
+        orgId: "shared-org",
+        ...(email === undefined ? {} : { email }),
+        quota: { five_hour: { used_percentage: 10 }, seven_day: { used_percentage: 20 } },
+      }),
+    });
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      status("first@example.com"),
+      { stdout: "claude 1.2.3\n" },
+      status(),
+      { stdout: "claude 1.2.3\n" },
+      { code: "ETIMEDOUT", killed: true, errorMessage: "Command failed: timed out" },
+    ]);
+    const options = { binaryPath: "claude", onlyCurrentModel: false, runtimeDetected: false };
+
+    const first = await resolveClaudeAgentAccountIdentity(options);
+    const orgOnly = await resolveClaudeAgentAccountIdentity(options);
+    const timeoutAfterSwitch = await resolveClaudeAgentAccountIdentity(options);
+
+    expect(first).toMatch(/^rai1p_/u);
+    expect(orgOnly).toBeNull();
+    // The org-only cycle invalidates the remembered user, so the later timeout cannot reuse it
+    // even though the credential file stat is unchanged.
+    expect(timeoutAfterSwitch).toBeNull();
+  });
+
+  it("reuses the last CLI identity through a timed-out probe only while the credential file is unchanged", async () => {
+    setProcessPlatform("linux");
+    process.env["CLAUDE_CONFIG_DIR"] = join(homedir(), "claude recall config");
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "recall-token" } }),
+    );
+    let mtimeMs = 1_000;
+    const size = 100;
+    statMock.mockImplementation(async () => claudeCredentialStat(mtimeMs, size));
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY_CLAUDE_AI_LOGIN }) },
+      { stdout: "claude 1.2.3\n" },
+      { code: "ETIMEDOUT", killed: true, errorMessage: "Command failed: timed out" },
+      { stdout: "claude 1.2.3\n" },
+      { code: "ETIMEDOUT", killed: true, errorMessage: "Command failed: timed out" },
+      { stdout: "claude 1.2.3\n" },
+      { code: "ETIMEDOUT", killed: true, errorMessage: "Command failed: timed out" },
+    ]);
+    const options = { binaryPath: "claude", onlyCurrentModel: false, runtimeDetected: false };
+
+    const first = await resolveClaudeAgentAccountIdentity(options);
+    expect(first).toContain("anthropic:claude-cli-account");
+
+    const unchanged = await resolveClaudeAgentAccountIdentity(options);
+    expect(unchanged).toBe(first);
+
+    mtimeMs += 1;
+    const changed = await resolveClaudeAgentAccountIdentity(options);
+    expect(changed).toBeNull();
+
+    statMock.mockRejectedValue(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+    const unreadable = await resolveClaudeAgentAccountIdentity(options);
+    expect(unreadable).toBeNull();
+  });
+
+  it("reuses the last CLI identity when a signed-in probe loses its token and account evidence", async () => {
+    setProcessPlatform("linux");
+    process.env["CLAUDE_CONFIG_DIR"] = join(homedir(), "claude recall config");
+    statMock.mockResolvedValue(claudeCredentialStat(2_000, 64));
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "stable-token" } }),
+    );
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY_CLAUDE_AI_LOGIN }) },
+      { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY_CLAUDE_AI_LOGIN }) },
+    ]);
+    const options = { binaryPath: "claude", onlyCurrentModel: false, runtimeDetected: false };
+
+    const first = await resolveClaudeAgentAccountIdentity(options);
+    readFileMock.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+    const withoutEvidence = await resolveClaudeAgentAccountIdentity(options);
+
+    expect(first).toContain("anthropic:claude-cli-account");
+    expect(withoutEvidence).toBe(first);
+  });
+
+  it("classifies a timed-out auth-status probe as a transient provider failure", async () => {
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      {
+        code: "ETIMEDOUT",
+        killed: true,
+        errorMessage: "Command failed: claude auth status --json (timed out)",
+      },
+    ]);
+
+    const diagnostics = await getAnthropicDiagnostics({});
+
+    expect(diagnostics.installed).toBe(true);
+    expect(diagnostics.authStatus).toBe("unknown");
+    expect(diagnostics.failureCategory).toBe("provider_api");
+    expect(diagnostics.probeFailure).toBe(true);
+  });
+
+  it("treats an unverifiable CLI probe as still configured only when the caller asks", async () => {
+    const timeoutSteps: ExecSequenceStep[] = [
+      { stdout: "claude 1.2.3\n" },
+      { code: "ETIMEDOUT", killed: true, errorMessage: "Command failed: timed out" },
+    ];
+    mockExecSequence([...timeoutSteps, ...timeoutSteps]);
+
+    await expect(hasAnthropicCredentialsConfigured({})).resolves.toBe(false);
+    await expect(
+      hasAnthropicCredentialsConfigured({}, { treatUnverifiedAsConfigured: true }),
+    ).resolves.toBe(true);
+  });
+
+  it("keeps a JSON-reported login when stderr carries unauthenticated-looking noise", async () => {
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      {
+        stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY_CLAUDE_AI_LOGIN }),
+        stderr: "Tip: run `claude auth login` to switch accounts.\n",
+      },
+    ]);
+
+    const diagnostics = await getAnthropicDiagnostics({});
+
+    expect(diagnostics.authStatus).toBe("authenticated");
+    expect(diagnostics.failureCategory).toBeUndefined();
+  });
+
+  it("leaves a missing Claude CLI unclassified", async () => {
+    mockExecSequence([
+      {
+        code: "ENOENT",
+        stderr: "'claude' is not recognized as an internal or external command",
+      },
+    ]);
+
+    const diagnostics = await getAnthropicDiagnostics({});
+
+    expect(diagnostics.installed).toBe(false);
+    expect(diagnostics.failureCategory).toBeUndefined();
+    expect(diagnostics.probeFailure).toBeUndefined();
+  });
+
+  it("retries one credentials-file read after the CLI's token refresh raced it", async () => {
+    setProcessPlatform("linux");
+    fetchResponseMock.mockResolvedValue(
+      mockJsonResponse({ five_hour: { utilization: 10 }, seven_day: { utilization: 20 } }),
+    );
+    mockExecSequence([
+      { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY_CLAUDE_AI_LOGIN }) },
+      { stdout: "claude 1.2.3\n" },
+      { stdout: JSON.stringify({ authenticated: true, ...FIRST_PARTY_CLAUDE_AI_LOGIN }) },
+    ]);
+    readFileMock
+      .mockResolvedValueOnce(JSON.stringify({ claudeAiOauth: { accessToken: "tok-1" } }))
+      .mockRejectedValueOnce(Object.assign(new Error("ENOENT"), { code: "ENOENT" }))
+      .mockResolvedValueOnce(JSON.stringify({ claudeAiOauth: { accessToken: "tok-1" } }));
+
+    const first = await getAnthropicDiagnostics({});
+    const second = await getAnthropicDiagnostics({});
+
+    expect(first.quotaSupported).toBe(true);
+    expect(second.quotaSupported).toBe(true);
+    expect(readFileMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps CLI-reported quota independent of the stored token and reads it only for optional saved resets", async () => {
     setProcessPlatform("linux");
     readFileMock.mockResolvedValue(
       JSON.stringify({ claudeAiOauth: { accessToken: "stored-token" } }),
@@ -805,7 +1250,7 @@ describe("Claude CLI diagnostics", () => {
     });
   });
 
-  it("derives no Claude Agent identity when the Claude CLI reports quota", async () => {
+  it("leaves CLI-reported quota unbound when no token or account evidence is readable", async () => {
     setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
@@ -1255,12 +1700,15 @@ describe("Claude CLI diagnostics", () => {
   });
 
   it("labels OAuth HTTP, transport, and malformed-response failures as provider API", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
     fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(500, "server error"));
     await expect(queryAnthropicQuotaWithOAuth("oauth-http-failure-token")).resolves.toMatchObject({
       success: false,
       failureCategory: "provider_api",
     });
 
+    await vi.advanceTimersByTimeAsync(180_001);
     fetchWithTimeoutMock.mockRejectedValueOnce(new Error("socket hang up"));
     await expect(
       queryAnthropicQuotaWithOAuth("oauth-transport-failure-token"),
@@ -1269,11 +1717,14 @@ describe("Claude CLI diagnostics", () => {
       failureCategory: "provider_api",
     });
 
+    await vi.advanceTimersByTimeAsync(180_001);
     fetchResponseMock.mockResolvedValueOnce(mockInvalidJsonResponse());
     await expect(queryAnthropicQuotaWithOAuth("oauth-invalid-json-token")).resolves.toMatchObject({
       success: false,
       failureCategory: "provider_api",
     });
+
+    await vi.advanceTimersByTimeAsync(180_001);
 
     fetchResponseMock.mockResolvedValueOnce(mockJsonResponse({ unexpected: true }));
     await expect(queryAnthropicQuotaWithOAuth("oauth-invalid-shape-token")).resolves.toMatchObject({
@@ -1283,6 +1734,8 @@ describe("Claude CLI diagnostics", () => {
   });
 
   it("reuses a recent OAuth quota only for the same credential", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
     fetchResponseMock
       .mockResolvedValueOnce(
         mockJsonResponse({
@@ -1299,6 +1752,7 @@ describe("Claude CLI diagnostics", () => {
 
     const first = await queryAnthropicQuotaWithOAuth("account-a-token");
     const sameCredential = await queryAnthropicQuotaWithOAuth("account-a-token");
+    await vi.advanceTimersByTimeAsync(180_001);
     const otherCredential = await queryAnthropicQuotaWithOAuth("account-b-token");
 
     expect(first).toMatchObject({ success: true, five_hour: { percentRemaining: 90 } });
@@ -1344,6 +1798,7 @@ describe("Claude CLI diagnostics", () => {
     await queryAnthropicQuotaWithOAuth("oauth-401-single-attempt-token");
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
 
+    clearAnthropicDiagnosticsCacheForTests();
     fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(403, "missing scope user:profile"));
     await expect(queryAnthropicQuotaWithOAuth("oauth-403-scope-token")).resolves.toMatchObject({
       success: false,
@@ -2084,7 +2539,7 @@ describe("Claude CLI diagnostics", () => {
     );
     fetchResponseMock
       .mockResolvedValueOnce(
-        mockOAuthResponse(429, "rate limited oauth-\u001b[31msecret-token", "45"),
+        mockOAuthResponse(429, "rate limited oauth-\u001b[31msecret-token", "300"),
       )
       .mockResolvedValueOnce(
         mockJsonResponse({
@@ -2096,7 +2551,7 @@ describe("Claude CLI diagnostics", () => {
     const first = await getAnthropicDiagnostics();
     expect(first.message).toContain("Anthropic API error 429: rate limited [redacted]");
     expect(first.message).toContain(
-      "Anthropic OAuth usage probe paused after HTTP 429; retry in 45s.",
+      "Anthropic OAuth usage probe paused after HTTP 429; retry in 300s.",
     );
     expect(first.message).not.toContain("oauth-secret-token");
     expect(first.message).not.toContain("\u001b");
@@ -2104,15 +2559,58 @@ describe("Claude CLI diagnostics", () => {
     await vi.advanceTimersByTimeAsync(5_001);
     const suppressed = await getAnthropicDiagnostics();
     expect(suppressed.message).toContain(
-      "Anthropic OAuth usage probe paused after HTTP 429; retry in 40s.",
+      "Anthropic OAuth usage probe paused after HTTP 429; retry in 295s.",
     );
     expect(suppressed.message).not.toContain("oauth-secret-token");
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(40_000);
+    await vi.advanceTimersByTimeAsync(295_000);
     const retried = await getAnthropicDiagnostics();
     expect(retried.quotaSupported).toBe(true);
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("publishes a 429 deadline before a stalled body read times out", async () => {
+    setProcessPlatform("linux");
+    mockExecSequence(authenticatedWithoutQuotaSteps(2));
+    readFileMock.mockResolvedValue(
+      JSON.stringify({ claudeAiOauth: { accessToken: "oauth-secret-token" } }),
+    );
+    const stalled = mockOAuthResponse(429, "", "300");
+    stalled.text = vi.fn(() => new Promise<string>(() => {}));
+    fetchResponseMock.mockResolvedValueOnce(stalled);
+    fetchWithTimeoutMock.mockImplementationOnce(async (_url, options) => {
+      const response = await httpMocks.fetchResponse();
+      // The publish happens before the body read; wait for the shared record,
+      // then simulate the request timeout while the body is still stalled.
+      void options.consume(response, new AbortController().signal);
+      const statePath = join(stateMocks.dir, "anthropic-oauth-throttle.json");
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        try {
+          const state = JSON.parse(readFileSync(statePath, "utf8")) as {
+            blockedUntilMs?: number;
+          };
+          // The provisional claim record is 60s; the server deadline is 300s.
+          if (state.blockedUntilMs !== undefined && state.blockedUntilMs > Date.now() + 120_000)
+            break;
+        } catch {
+          // The claim may not have written the record yet.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      // Let the publish continuation report the deadline to the caller before
+      // this mock simulates the body-read timeout.
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      throw new Error("Request timeout after 5s");
+    });
+
+    const first = await getAnthropicDiagnostics();
+    expect(first.message).toContain("Anthropic OAuth usage probe paused after HTTP 429");
+    expect(first.retryAtMs).toBeGreaterThan(Date.now() + 290_000);
+
+    const paused = await getAnthropicDiagnostics();
+    expect(paused.retryAtMs).toBe(first.retryAtMs);
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
   it("exposes the cooldown deadline as retryAtMs on a 429 and while paused", async () => {
@@ -2123,9 +2621,9 @@ describe("Claude CLI diagnostics", () => {
     readFileMock.mockResolvedValue(
       JSON.stringify({ claudeAiOauth: { accessToken: "oauth-secret-token" } }),
     );
-    fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(429, "rate limited", "45"));
+    fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(429, "rate limited", "300"));
 
-    const deadline = Date.parse("2026-07-10T12:00:45.000Z");
+    const deadline = Date.parse("2026-07-10T12:05:00.000Z");
     const first = await getAnthropicDiagnostics();
     expect(first.retryAtMs).toBe(deadline);
     const paused = await getAnthropicDiagnostics();
@@ -2189,11 +2687,11 @@ describe("Claude CLI diagnostics", () => {
       JSON.stringify({ claudeAiOauth: { accessToken: "oauth-access-token" } }),
     );
     fetchResponseMock.mockResolvedValue(
-      mockOAuthResponse(429, "rate limited", "Fri, 10 Jul 2026 12:02:00 GMT"),
+      mockOAuthResponse(429, "rate limited", "Fri, 10 Jul 2026 12:04:00 GMT"),
     );
 
     const first = await getAnthropicDiagnostics();
-    expect(first.message).toContain("retry in 120s.");
+    expect(first.message).toContain("retry in 240s.");
 
     await vi.advanceTimersByTimeAsync(5_001);
     await getAnthropicDiagnostics();
@@ -2206,6 +2704,7 @@ describe("Claude CLI diagnostics", () => {
     ["negative", "-1"],
     ["zero", "0"],
     ["past date", "Thu, 09 Jul 2026 12:00:00 GMT"],
+    ["above the one-day safety limit", "86401"],
   ])("uses the safe backoff floor for %s Retry-After", async (_label, retryAfter) => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
@@ -2217,14 +2716,14 @@ describe("Claude CLI diagnostics", () => {
     fetchResponseMock.mockResolvedValue(mockOAuthResponse(429, "rate limited", retryAfter));
 
     const first = await getAnthropicDiagnostics();
-    expect(first.message).toContain("retry in 30s.");
+    expect(first.message).toContain("retry in 180s.");
 
     await vi.advanceTimersByTimeAsync(5_001);
     await getAnthropicDiagnostics();
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
-  it("caps Retry-After cooldowns at fifteen minutes", async () => {
+  it("honors a server Retry-After beyond five minutes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
     setProcessPlatform("linux");
@@ -2235,7 +2734,7 @@ describe("Claude CLI diagnostics", () => {
     fetchResponseMock.mockResolvedValue(mockOAuthResponse(429, "rate limited", "3600"));
 
     const diagnostics = await getAnthropicDiagnostics();
-    expect(diagnostics.message).toContain("retry in 900s.");
+    expect(diagnostics.message).toContain("retry in 3600s.");
   });
 
   it("establishes a cooldown when the 429 response body cannot be read", async () => {
@@ -2252,7 +2751,7 @@ describe("Claude CLI diagnostics", () => {
 
     const first = await getAnthropicDiagnostics();
     expect(first.message).toContain("Anthropic API returned 429");
-    expect(first.message).toContain("retry in 30s.");
+    expect(first.message).toContain("retry in 180s.");
 
     await vi.advanceTimersByTimeAsync(5_001);
     await getAnthropicDiagnostics();
@@ -2276,27 +2775,30 @@ describe("Claude CLI diagnostics", () => {
     });
 
     const first = await getAnthropicDiagnostics();
-    expect(first.message).toContain("body stalled");
+    expect(first.message).toContain("Anthropic API returned 429");
+    expect(first.message).toContain("retry in 180s.");
 
     await vi.advanceTimersByTimeAsync(5_001);
     const suppressed = await getAnthropicDiagnostics();
     expect(suppressed.message).toContain(
-      "Anthropic OAuth usage probe paused after HTTP 429; retry in 40s.",
+      "Anthropic OAuth usage probe paused after HTTP 429; retry in 175s.",
     );
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
-  it("increases fallback backoff for consecutive 429 responses", async () => {
+  it("increases fallback backoff for consecutive 429 responses up to five minutes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
     setProcessPlatform("linux");
-    mockExecSequence(authenticatedWithoutQuotaSteps(4));
+    mockExecSequence(authenticatedWithoutQuotaSteps(6));
     readFileMock.mockResolvedValue(
       JSON.stringify({ claudeAiOauth: { accessToken: "oauth-access-token" } }),
     );
     fetchResponseMock
       .mockResolvedValueOnce(mockOAuthResponse(429, "first"))
       .mockResolvedValueOnce(mockOAuthResponse(429, "second"))
+      .mockResolvedValueOnce(mockOAuthResponse(429, "third"))
+      .mockResolvedValueOnce(mockOAuthResponse(429, "fourth"))
       .mockResolvedValueOnce(
         mockJsonResponse({
           five_hour: { utilization: 10 },
@@ -2305,19 +2807,23 @@ describe("Claude CLI diagnostics", () => {
       );
 
     const first = await getAnthropicDiagnostics();
-    expect(first.message).toContain("retry in 30s.");
+    expect(first.message).toContain("retry in 180s.");
 
-    await vi.advanceTimersByTimeAsync(30_001);
+    await vi.advanceTimersByTimeAsync(180_001);
     const second = await getAnthropicDiagnostics();
-    expect(second.message).toContain("retry in 60s.");
+    expect(second.message).toContain("retry in 180s.");
 
-    await vi.advanceTimersByTimeAsync(30_001);
-    await getAnthropicDiagnostics();
-    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(180_001);
+    const third = await getAnthropicDiagnostics();
+    expect(third.message).toContain("retry in 240s.");
 
-    await vi.advanceTimersByTimeAsync(30_000);
-    await getAnthropicDiagnostics();
-    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(240_001);
+    const fourth = await getAnthropicDiagnostics();
+    expect(fourth.message).toContain("retry in 300s.");
+
+    await vi.advanceTimersByTimeAsync(300_001);
+    await expect(getAnthropicDiagnostics()).resolves.toMatchObject({ quotaSupported: true });
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(5);
   });
 
   it("resets the backoff sequence after a non-429 response", async () => {
@@ -2335,13 +2841,13 @@ describe("Claude CLI diagnostics", () => {
       .mockResolvedValueOnce(mockOAuthResponse(500, "server error"));
 
     await getAnthropicDiagnostics();
-    await vi.advanceTimersByTimeAsync(30_001);
+    await vi.advanceTimersByTimeAsync(180_001);
     await getAnthropicDiagnostics();
-    await vi.advanceTimersByTimeAsync(5_001);
+    await vi.advanceTimersByTimeAsync(180_001);
     const second429 = await getAnthropicDiagnostics();
-    expect(second429.message).toContain("retry in 30s.");
+    expect(second429.message).toContain("retry in 180s.");
 
-    await vi.advanceTimersByTimeAsync(30_001);
+    await vi.advanceTimersByTimeAsync(180_001);
     await getAnthropicDiagnostics();
     expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(4);
   });
@@ -2411,9 +2917,11 @@ describe("Claude CLI diagnostics", () => {
     expect(fetchResponseMock).toHaveBeenCalledTimes(1);
   });
 
-  it("shares OAuth cooldown and recent success across instances per token", async () => {
+  it("shares the account-neutral 429 cooldown across instances and tokens", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
     fetchResponseMock
-      .mockResolvedValueOnce(mockOAuthResponse(429, "rate limited", "900"))
+      .mockResolvedValueOnce(mockOAuthResponse(429, "rate limited", "300"))
       .mockResolvedValueOnce(
         mockJsonResponse({
           five_hour: { utilization: 10 },
@@ -2428,8 +2936,15 @@ describe("Claude CLI diagnostics", () => {
     const secondModule = await import("../src/lib/anthropic.js");
     const stillBlocked = await secondModule.queryAnthropicQuotaWithOAuth("opencode-account-token");
     expect(stillBlocked?.success).toBe(false);
+    // The shared record carries timing only, so every token honors the same
+    // deadline until it expires.
+    const otherTokenBlocked = await secondModule.queryAnthropicQuotaWithOAuth(
+      "claude-credentials-token",
+    );
+    expect(otherTokenBlocked?.success).toBe(false);
     expect(fetchResponseMock).toHaveBeenCalledTimes(1);
 
+    await vi.advanceTimersByTimeAsync(300_001);
     const claudeCredentialQuota = await secondModule.queryAnthropicQuotaWithOAuth(
       "claude-credentials-token",
     );
@@ -2439,35 +2954,21 @@ describe("Claude CLI diagnostics", () => {
       seven_day: { percentRemaining: 80, resetTimeIso: undefined },
     });
     expect(fetchResponseMock).toHaveBeenCalledTimes(2);
-
-    vi.resetModules();
-    const thirdModule = await import("../src/lib/anthropic.js");
-    await expect(
-      thirdModule.queryAnthropicQuotaWithOAuth("claude-credentials-token"),
-    ).resolves.toEqual(claudeCredentialQuota);
-    expect(fetchResponseMock).toHaveBeenCalledTimes(2);
   });
 
-  it("does not apply an old token cooldown to a newly observed token", async () => {
+  it("applies the shared OAuth cooldown to a newly observed token", async () => {
     setProcessPlatform("linux");
     mockExecSequence(authenticatedWithoutQuotaSteps(2));
     readFileMock
       .mockResolvedValueOnce(JSON.stringify({ claudeAiOauth: { accessToken: "old-token" } }))
       .mockResolvedValueOnce(JSON.stringify({ claudeAiOauth: { accessToken: "new-token" } }));
-    fetchResponseMock
-      .mockResolvedValueOnce(mockOAuthResponse(429, "rate limited", "900"))
-      .mockResolvedValueOnce(
-        mockJsonResponse({
-          five_hour: { utilization: 10 },
-          seven_day: { utilization: 20 },
-        }),
-      );
+    fetchResponseMock.mockResolvedValueOnce(mockOAuthResponse(429, "rate limited", "900"));
 
     const first = await getAnthropicDiagnostics({ binaryPath: "claude-a" });
     expect(first.quotaSupported).toBe(false);
     const second = await getAnthropicDiagnostics({ binaryPath: "claude-b" });
-    expect(second.quotaSupported).toBe(true);
-    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(2);
+    expect(second.quotaSupported).toBe(false);
+    expect(fetchWithTimeoutMock).toHaveBeenCalledTimes(1);
   });
 
   it("clears OAuth cooldown state through the test reset helper", async () => {
@@ -2628,6 +3129,7 @@ describe("Claude CLI diagnostics", () => {
     ]);
 
     const first = await getAnthropicDiagnostics({ binaryPath: "shared-claude" });
+    clearAnthropicDiagnosticsCacheForTests();
     const second = await getAnthropicDiagnostics({ binaryPath: "shared-claude" });
     expect(first.quota?.five_hour.percentRemaining).toBe(90);
     expect(second.quota?.five_hour.percentRemaining).toBe(70);
@@ -2635,6 +3137,8 @@ describe("Claude CLI diagnostics", () => {
   });
 
   it("does not reuse fallback diagnostics across credentials sharing a CLI path", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
     setProcessPlatform("linux");
     mockExecSequence([
       { stdout: "claude 1.2.3\n" },
@@ -2682,6 +3186,7 @@ describe("Claude CLI diagnostics", () => {
       );
 
     const first = await getAnthropicDiagnostics({ binaryPath: "shared-claude" });
+    await vi.advanceTimersByTimeAsync(180_001);
     const second = await getAnthropicDiagnostics({ binaryPath: "shared-claude" });
     expect(first.quota?.five_hour.percentRemaining).toBe(90);
     expect(second.quota?.five_hour.percentRemaining).toBe(70);

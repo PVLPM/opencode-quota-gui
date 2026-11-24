@@ -31,7 +31,10 @@ export const CLAUDE_AGENT_RUNTIME_IDS = ["claude-agent", "claude-code"] as const
 const CLAUDE_AGENT_GROUP = "Claude Agent";
 
 /** Always the OAuth-reported value: even beside CLI-local windows, resets come from the usage API. */
-function claudeAgentResetsEntry(resets: BankedResetAvailability): QuotaToastEntry {
+function claudeAgentResetsEntry(
+  resets: BankedResetAvailability,
+  observedAtMs?: number,
+): QuotaToastEntry {
   return {
     kind: "value",
     accounting: {
@@ -39,6 +42,9 @@ function claudeAgentResetsEntry(resets: BankedResetAvailability): QuotaToastEntr
       acquisitionMethod: "remote_api",
       ownership: "maintained",
       authority: "provider_reported",
+      ...(observedAtMs !== undefined
+        ? { observedAtIso: new Date(observedAtMs).toISOString() }
+        : {}),
     },
     name: `${CLAUDE_AGENT_GROUP} Resets`,
     group: CLAUDE_AGENT_GROUP,
@@ -59,6 +65,9 @@ export function getClaudeAgentNoDataMessage(): string {
 }
 
 function safeDiagnosticMessage(diagnostics: AnthropicDiagnostics): string {
+  // A probe that timed out says nothing about the login; keep the token and the card, show the error.
+  if (diagnostics.probeFailure === true && diagnostics.quotaSource === "none")
+    return "Claude CLI did not respond. Retry.";
   if (diagnostics.failureCategory === "provider_api") return "Claude quota request failed.";
   if (diagnostics.storedAccessTokenExpired)
     return "Claude's stored access token has expired. Run any `claude` command to refresh it, then Retry.";
@@ -70,7 +79,7 @@ function safeDiagnosticMessage(diagnostics: AnthropicDiagnostics): string {
   if (diagnostics.authStatus === "unauthenticated")
     return "Claude is not authenticated. Run `claude auth login` and try again.";
   if (diagnostics.authStatus === "unknown")
-    return "Claude authentication could not be verified. Run `claude auth login` and try again.";
+    return "Claude authentication could not be verified. Retry; if it persists, run `claude auth login`.";
   return "Claude Agent usage is unavailable.";
 }
 
@@ -147,10 +156,15 @@ export const claudeAgentProvider: QuotaProvider = {
       fallbackOnError: false,
     });
     if (!runtimeAvailable) return false;
-    return await hasAnthropicCredentialsConfigured({
-      binaryPath: ctx.config?.anthropicBinaryPath,
-      operationCache: ctx.operationCache,
-    });
+    // A probe that cannot report a status must not hide a detected runtime: fetch then shows the
+    // error row (and a genuine sign-out still hides it). Only a confirmed sign-out is unavailable.
+    return await hasAnthropicCredentialsConfigured(
+      {
+        binaryPath: ctx.config?.anthropicBinaryPath,
+        operationCache: ctx.operationCache,
+      },
+      { treatUnverifiedAsConfigured: true },
+    );
   },
 
   async isDiscovered(ctx: QuotaProviderContext): Promise<boolean> {
@@ -173,6 +187,7 @@ export const claudeAgentProvider: QuotaProvider = {
         binaryPath: ctx.config?.anthropicBinaryPath,
         ...(ctx.operationCache ? { operationCache: ctx.operationCache } : {}),
         requestTimeoutMs: ctx.config?.requestTimeoutMs,
+        pollIntervalMs: ctx.config?.claudeAgentPollIntervalMs,
         ...(forceRefresh ? { forceRefresh: true } : {}),
       });
     } catch {
@@ -217,9 +232,12 @@ export const claudeAgentProvider: QuotaProvider = {
         ...anthropicQuotaEntries(diagnostics.quota, {
           group: CLAUDE_AGENT_GROUP,
           acquisitionMethod,
+          ...(diagnostics.quotaMeasuredAtMs !== undefined
+            ? { observedAtMs: diagnostics.quotaMeasuredAtMs }
+            : {}),
         }),
         ...(savedResets && savedResets.availableCount > 0
-          ? [claudeAgentResetsEntry(savedResets)]
+          ? [claudeAgentResetsEntry(savedResets, diagnostics.quotaMeasuredAtMs)]
           : []),
       ]);
       return withStatusDetails(
@@ -234,6 +252,9 @@ export const claudeAgentProvider: QuotaProvider = {
       attemptedErrorResult(CLAUDE_AGENT_GROUP, safeDiagnosticMessage(diagnostics), {
         ...(diagnostics.failureCategory !== undefined
           ? { failureCategory: diagnostics.failureCategory }
+          : {}),
+        ...(diagnostics.attemptOutcome !== undefined
+          ? { attemptOutcome: diagnostics.attemptOutcome }
           : {}),
         ...(diagnostics.retryAtMs !== undefined
           ? { retryable: true, retryAtMs: diagnostics.retryAtMs }

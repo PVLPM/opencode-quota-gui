@@ -199,6 +199,68 @@ describe("resolved-auth identity", () => {
     ).toBe(true);
   });
 
+  it("derives account-specific process-local identities only on Windows", async () => {
+    const identity = await import("../src/lib/resolved-auth-identity.js");
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    const params = {
+      providerId: "anthropic:claude-cli-account",
+      principal: { kind: "stable-id" as const, value: '["org-1","user@example.com"]' },
+      qualifiers: ["claude", "C:/claude", "distinct"],
+    };
+    try {
+      Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+      const first = identity.deriveProcessLocalAuthIdentity(params);
+      const repeat = identity.deriveProcessLocalAuthIdentity(params);
+      const changed = identity.deriveProcessLocalAuthIdentity({
+        ...params,
+        principal: { kind: "stable-id", value: '["org-2","other@example.com"]' },
+      });
+
+      expect(first).toMatch(/^rai1p_[A-Za-z0-9_-]{43}$/u);
+      expect(identity.isProcessLocalResolvedAuthIdentity(first!)).toBe(true);
+      expect(identity.isProcessLocalResolvedAuthIdentity("rai1_protected")).toBe(false);
+      expect(first).toBe(repeat);
+      expect(changed).not.toBe(first);
+      expect(first).not.toContain("example.com");
+
+      const composed = identity.composeProcessLocalAuthIdentities({
+        providerId: "claude-agent",
+        identities: [first!],
+        qualifiers: ["all-models"],
+      });
+      const composedAgain = identity.composeProcessLocalAuthIdentities({
+        providerId: "claude-agent",
+        identities: [first!],
+        qualifiers: ["all-models"],
+      });
+      expect(composed).toMatch(/^rai1p_[A-Za-z0-9_-]{43}$/u);
+      expect(composedAgain).toBe(composed);
+      expect(
+        identity.deriveProcessLocalAuthIdentity({
+          ...params,
+          principal: { kind: "stable-id", value: "  " },
+        }),
+      ).toBeNull();
+    } finally {
+      if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+    }
+
+    if (typeof process.getuid === "function") {
+      try {
+        Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+        expect(identity.deriveProcessLocalAuthIdentity(params)).toBeNull();
+        expect(
+          identity.composeProcessLocalAuthIdentities({
+            providerId: "claude-agent",
+            identities: ["rai1p_protected" as never],
+          }),
+        ).toBeNull();
+      } finally {
+        if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+      }
+    }
+  });
+
   it.runIf(POSIX_IDENTITY_STORAGE)(
     "refuses a symlinked key directory instead of redirecting key creation",
     async () => {

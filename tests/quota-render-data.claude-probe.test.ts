@@ -12,6 +12,7 @@ import { claudeAgentProvider } from "../src/providers/claude-agent.js";
 const mocks = vi.hoisted(() => ({ calls: [] as string[][], signedIn: true, dir: "" }));
 vi.mock("../src/lib/private-state-paths.js", () => ({
   getGuiPrivateCacheDir: () => mocks.dir,
+  getGuiPrivateStatePath: (...segments: string[]) => [mocks.dir, "state", ...segments].join("/"),
 }));
 vi.mock("../src/lib/resolved-auth-identity.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/lib/resolved-auth-identity.js")>()),

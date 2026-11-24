@@ -95,6 +95,7 @@ describe("claude agent provider", () => {
     await claudeAgentProvider.fetch(ctx);
     expect(hasAnthropicCredentialsConfigured).toHaveBeenCalledWith(
       expect.objectContaining({ binaryPath: "/custom/claude" }),
+      { treatUnverifiedAsConfigured: true },
     );
     expect(getAnthropicDiagnostics).toHaveBeenCalledWith(
       expect.objectContaining({ binaryPath: "/custom/claude" }),
@@ -231,6 +232,30 @@ describe("claude agent provider", () => {
         failureCategory: "provider_api",
         retryable: true,
         retryAtMs: 1_700_000_000_000,
+      }),
+    ]);
+  });
+
+  it("reports a timed-out CLI probe as a retryable provider failure without claiming a quota request", async () => {
+    const { getAnthropicDiagnostics } = await import("../src/lib/anthropic.js");
+    vi.mocked(getAnthropicDiagnostics).mockResolvedValue({
+      installed: true,
+      authStatus: "unknown",
+      quotaSupported: false,
+      quotaSource: "none",
+      checkedCommands: [],
+      message: "Timed out while running Claude CLI auth status.",
+      failureCategory: "provider_api",
+      probeFailure: true,
+    } as never);
+    const result = await claudeAgentProvider.fetch(
+      createProviderAvailabilityContext({ providerIds: ["claude-agent"] }),
+    );
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        label: "Claude Agent",
+        message: "Claude CLI did not respond. Retry.",
+        failureCategory: "provider_api",
       }),
     ]);
   });
@@ -474,7 +499,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 58,
         resetTimeIso: "2026-07-21T14:10:00.268Z",
       },
@@ -482,7 +507,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Weekly",
         group: "Claude Agent",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 72,
         resetTimeIso: "2026-07-27T07:00:00.268Z",
       },
@@ -581,7 +606,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 43,
         resetTimeIso: undefined,
       },
@@ -589,7 +614,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Weekly",
         group: "Claude Agent",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 88,
         resetTimeIso: undefined,
       },
@@ -658,7 +683,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 43,
         resetTimeIso: undefined,
       },
@@ -666,7 +691,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Weekly",
         group: "Claude Agent",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 88,
         resetTimeIso: undefined,
       },
@@ -674,7 +699,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Usage Credits",
         group: "Claude Agent Usage Credits",
         label: "Monthly:",
-        rowKey: "window:month",
+        semantic: { metric: { kind: "window", window: "month" }, prominence: "primary" },
         percentRemaining: 62,
       },
     ]);
@@ -714,7 +739,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 50,
         resetTimeIso: "2026-03-25T18:00:00.000Z",
       },
@@ -722,7 +747,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent Weekly",
         group: "Claude Agent",
         label: "Weekly:",
-        rowKey: "window:week",
+        semantic: { metric: { kind: "window", window: "week" }, prominence: "primary" },
         percentRemaining: 70,
         resetTimeIso: "2026-04-01T00:00:00.000Z",
       },
@@ -822,7 +847,7 @@ describe("claude agent provider", () => {
         name: "Claude Agent 5h",
         group: "Claude Agent",
         label: "5h:",
-        rowKey: "window:five_hour",
+        semantic: { metric: { kind: "window", window: "five_hour" }, prominence: "primary" },
         percentRemaining: 75,
         resetTimeIso: undefined,
       },

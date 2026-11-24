@@ -22,14 +22,23 @@ vi.mock("fs/promises", async (importOriginal) => {
       }
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     }),
+    // Stat metadata is restricted the same way: credential-file signatures must come from a
+    // fixture, never from the developer's real login.
+    stat: vi.fn(async (path: string) => {
+      if (fixtureScope.root && String(path).startsWith(fixtureScope.root)) {
+        return actual.stat(path);
+      }
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    }),
   };
 });
 
-vi.mock("../src/lib/resolved-auth-identity.js", () => ({
+vi.mock("../src/lib/resolved-auth-identity.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/lib/resolved-auth-identity.js")>()),
   deriveResolvedAuthIdentity: vi.fn(
     async (params: { providerId: string }) => `identity:${params.providerId}`,
   ),
-  composeResolvedAuthIdentities: vi.fn(),
+  composeResolvedAuthIdentities: vi.fn(async () => null),
 }));
 
 import { homedir } from "node:os";
@@ -72,6 +81,48 @@ function claudeShimReportingConfigDirectory(configDirectory?: string): string {
     authMethod: "claude.ai",
     apiProvider: "firstParty",
     configDirectory,
+  });
+  return [
+    "@echo off",
+    'if "%~1"=="--version" (',
+    "  echo 9.9.9 Claude Code",
+    "  exit /b 0",
+    ")",
+    'if "%~1"=="auth" (',
+    `  echo ${report}`,
+    "  exit /b 0",
+    ")",
+    "exit /b 2",
+    "",
+  ].join("\r\n");
+}
+
+/** A shim whose auth status outlives the 3 s probe budget, as a loaded machine's cold start can. */
+function claudeShimThatStallsAuthStatus(): string {
+  return [
+    "@echo off",
+    'if "%~1"=="--version" (',
+    "  echo 9.9.9 Claude Code",
+    "  exit /b 0",
+    ")",
+    'if "%~1"=="auth" (',
+    "  ping -n 5 127.0.0.1 >nul",
+    '  echo {"authenticated": true}',
+    "  exit /b 0",
+    ")",
+    "exit /b 2",
+    "",
+  ].join("\r\n");
+}
+
+/** A cmd.exe shim whose auth status reports a first-party login with account evidence. */
+function claudeShimReportingAccount(email: string, orgId: string): string {
+  const report = JSON.stringify({
+    authenticated: true,
+    authMethod: "claude.ai",
+    apiProvider: "firstParty",
+    email,
+    orgId,
   });
   return [
     "@echo off",
@@ -135,6 +186,49 @@ describe.runIf(process.platform === "win32")(
       expect(diagnostics.version).toBe("9.9.9");
       expect(diagnostics.authStatus).toBe("authenticated");
       expect(diagnostics.binaryPath).toBe(shim);
+    });
+
+    it("classifies a probe that exceeds the CLI budget as a transient provider failure", async () => {
+      const shimDirectory = join(root, "slow claude");
+      await mkdir(shimDirectory, { recursive: true });
+      const shim = join(shimDirectory, "claude.cmd");
+      await writeFile(shim, claudeShimThatStallsAuthStatus());
+
+      const diagnostics = await getAnthropicDiagnostics({ binaryPath: shim });
+
+      expect(diagnostics.installed).toBe(true);
+      expect(diagnostics.authStatus).toBe("unknown");
+      expect(diagnostics.failureCategory).toBe("provider_api");
+      expect(diagnostics.probeFailure).toBe(true);
+    }, 20_000);
+
+    it("derives an account-specific process-local identity from the real CLI status", async () => {
+      const derive = vi.mocked(deriveResolvedAuthIdentity);
+      derive.mockImplementation(async () => null as never);
+      try {
+        const shimDirectory = join(root, "process local identity");
+        await mkdir(shimDirectory, { recursive: true });
+        const shim = join(shimDirectory, "claude.cmd");
+        await writeFile(shim, claudeShimReportingAccount("first@example.com", "org-first"));
+        const options = {
+          binaryPath: shim,
+          onlyCurrentModel: false,
+          runtimeDetected: false,
+        };
+
+        const first = await resolveClaudeAgentAccountIdentity(options);
+        const repeat = await resolveClaudeAgentAccountIdentity(options);
+        await writeFile(shim, claudeShimReportingAccount("second@example.com", "org-second"));
+        const changed = await resolveClaudeAgentAccountIdentity(options);
+
+        expect(first).toMatch(/^rai1p_[A-Za-z0-9_-]{43}$/u);
+        expect(repeat).toBe(first);
+        expect(changed).not.toBe(first);
+      } finally {
+        derive.mockImplementation(
+          async (params: { providerId: string }) => `identity:${params.providerId}`,
+        );
+      }
     });
 
     it("resolves the default bare claude command through PATH inside cmd.exe", async () => {

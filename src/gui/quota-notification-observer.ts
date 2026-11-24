@@ -40,6 +40,7 @@ import {
   type QuotaNotification,
   type QuotaNotificationDetectorState,
 } from "./quota-notification-detector.js";
+import { isLiveQuotaObservation } from "./quota-observation.js";
 
 const PERSISTED_STATE_VERSION = 1 as const;
 const DEFAULT_STATE_FILE = "quota-notifications.json";
@@ -68,7 +69,7 @@ export interface QuotaNotificationObserverOptions {
 
 export interface QuotaNotificationObserver {
   /**
-   * Queue one observation of a fresh quota snapshot. A caller with an
+   * Queue one observation of a completed quota source cycle. A caller with an
    * asynchronous source read must capture `epoch()` before that read and pass
    * it here; an observation whose captured epoch no longer matches is dropped.
    * Never rejects.
@@ -429,7 +430,10 @@ export function createQuotaNotificationObserver(
 
   async function observeNow(snapshot: QuotaSnapshot, epoch: number): Promise<void> {
     if (closed || epoch !== sourceEpoch) return;
-    if (snapshot.stale === true) return;
+    // Cached replays are synthesized from an earlier snapshot and carry no live
+    // observation. A stale live cycle still carries fresh error observations and
+    // retained rows; the detector excludes those rows from transitions.
+    if (snapshot.stale === true && !isLiveQuotaObservation(snapshot)) return;
 
     let settings: QuotaNotificationSettings;
     try {

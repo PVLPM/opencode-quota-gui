@@ -29,6 +29,8 @@ import type {
   QuotaSnapshot,
   SessionSnapshot,
 } from "../contracts/dashboard.js";
+import { OPENAI_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE } from "../contracts/openai-quota.js";
+import { isTransientProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { RangeKey } from "../contracts/ranges.js";
 import { createLoadConfigMeta, loadConfig } from "../lib/config.js";
 import type { QuotaProvider, QuotaProviderContext, QuotaToastEntry } from "../lib/entries.js";
@@ -54,11 +56,12 @@ import {
   buildProviderCards,
   cardSourceKey,
   type MergedProbe,
-  openAiOptionalVisibilityRows,
+  optionalValueRowId,
   type ProviderCardPreferences,
   type SourceKey,
   UNSCOPED,
 } from "./provider-cards.js";
+import { markQuotaObservationLive } from "./quota-observation.js";
 import { TEMPORAL_QUOTA_POLICIES } from "./temporal-quota-policy-data.js";
 import {
   buildTemporalStatus,
@@ -153,10 +156,18 @@ function translateAnalyticsError(error: unknown): unknown {
 /**
  * The production default. Creating the service starts no worker and performs
  * no read; the worker is built lazily by the service on the first analytics
- * request (analytics-api contract).
+ * request (analytics-api contract). The worker receives the owner's pricing
+ * snapshot policy; a config read failure keeps safe defaults.
  */
-function createDefaultAnalyticsService(): DashboardAnalyticsService {
-  return createAnalyticsReadService();
+async function createDefaultAnalyticsService(
+  loadConfigForService: () => Promise<QuotaToastConfig>,
+): Promise<DashboardAnalyticsService> {
+  try {
+    const config = await loadConfigForService();
+    return createAnalyticsReadService({ pricingSnapshot: config.pricingSnapshot });
+  } catch {
+    return createAnalyticsReadService();
+  }
 }
 
 /**
@@ -199,8 +210,12 @@ export function createOpenAiResetDetailsVisibility(
     }
     const cardId = buildCardId("openai", sourceId);
     if (hiddenCards.has(cardId)) return false;
-    const [resetsRow] = openAiOptionalVisibilityRows(cardId);
-    return resetsRow !== undefined && !hiddenRows.has(resetsRow.rowId);
+    const resetsRowId = optionalValueRowId(
+      cardId,
+      OPENAI_RESETS_ROW_KEY,
+      OPENAI_RESETS_ROW_RESULT_TYPE,
+    );
+    return !hiddenRows.has(resetsRowId);
   };
 }
 
@@ -247,6 +262,7 @@ function cardPreferences(config: QuotaToastConfig): ProviderCardPreferences {
     accountingDetail: config.accountingDetail,
     providerOrder: config.dashboard.providerOrder,
     cardOrder: config.dashboard.cardOrder,
+    rowOrder: config.dashboard.rowOrder,
   };
   if (config.resetTimeDecimals !== undefined) {
     preferences.resetTimeDecimals = config.resetTimeDecimals;
@@ -366,7 +382,7 @@ export function createDashboardReadSource(
       } else if (options.loadDataset) {
         created = Promise.resolve(createLegacyAnalyticsService());
       } else {
-        created = Promise.resolve(createDefaultAnalyticsService());
+        created = createDefaultAnalyticsService(loadDashboardConfig);
       }
     } catch (error) {
       return Promise.reject(error);
@@ -477,11 +493,55 @@ export function createDashboardReadSource(
           .filter((error) => error.retryAtMs !== undefined)
           .map((error) => cardSourceKey(error.sourceId, accountIds)),
       );
-      const freshKeys = [...entries.keys()].filter((key) => !rateLimited.has(key));
+      // A transient failure key that still carries entries is treated as a quota-state last-good
+      // snapshot: those rows were measured before the failure, so they are retained and marked
+      // stale, never fresh. Other errors can accompany genuinely fresh entries and do not imply
+      // retention.
+      const keyHasLastGood = (key: SourceKey) => (store?.bySource.get(key)?.length ?? 0) > 0;
+      const explicitTransientKeys = new Set(
+        errors
+          .filter(
+            (error) =>
+              isTransientProviderFailureCategory(error.failureCategory) ||
+              error.attemptOutcome === "transient" ||
+              error.attemptOutcome === "cooldown",
+          )
+          .map((error) => cardSourceKey(error.sourceId, accountIds)),
+      );
+      // A provider that previously produced rows for this key keeps them when a later attempt
+      // fails in an unclassified way: an unknown category is treated as transient instead of
+      // purging a valid measurement, and is normalized so the card mutes it. If this probe also
+      // carries entries for the key, those are the measurement; the error stays visible. Credential
+      // rejections still prove the account changed and never retain.
+      const unknownRetainedKeys = new Set(
+        errors
+          .filter((error) => {
+            const key = cardSourceKey(error.sourceId, accountIds);
+            if (entries.has(key) || rateLimited.has(key) || explicitTransientKeys.has(key))
+              return false;
+            if (error.failureCategory === "credentials" || error.attemptOutcome === "credentials")
+              return false;
+            return keyHasLastGood(key);
+          })
+          .map((error) => cardSourceKey(error.sourceId, accountIds)),
+      );
+      const transientKeys = new Set([...explicitTransientKeys, ...unknownRetainedKeys]);
+      const retainedEntryKeys = [...entries.keys()].filter(
+        (key) => transientKeys.has(key) && !rateLimited.has(key),
+      );
+      const freshKeys = [...entries.keys()].filter(
+        (key) => !rateLimited.has(key) && !transientKeys.has(key),
+      );
       anyFresh ||= freshKeys.length > 0;
       const next = new Map<SourceKey, QuotaToastEntry[]>();
       const retained = new Set<SourceKey>();
       for (const key of freshKeys) next.set(key, entries.get(key)!);
+      for (const key of retainedEntryKeys) {
+        const safe = withoutClaudeAgentSavedResets(entries.get(key)!);
+        entries.set(key, safe);
+        next.set(key, safe);
+        retained.add(key);
+      }
       for (const key of rateLimited)
         if (entries.has(key)) {
           retained.add(key);
@@ -489,6 +549,12 @@ export function createDashboardReadSource(
           const old = withoutClaudeAgentSavedResets(store?.bySource.get(key) ?? []);
           if (old.length > 0) next.set(key, old);
         }
+      // A failure that is neither transient nor rate-limited (a credential rejection) proves the
+      // account may have changed. It must not reattach the old measurement, and the stored copy is
+      // purged so a later empty result cannot bring it back.
+      for (const key of failed) {
+        if (!transientKeys.has(key) && !rateLimited.has(key)) store?.bySource.delete(key);
+      }
       for (const [key, old] of store?.bySource ?? []) {
         if (entries.has(key) || (freshKeys.length > 0 && !failed.has(key))) continue;
         if (key !== UNSCOPED && !accountIds.has(key)) continue;
@@ -503,9 +569,30 @@ export function createDashboardReadSource(
       if (probe.cacheScope)
         lastGoodProbes.set(probe.providerId, { cacheScope: probe.cacheScope, bySource: next });
       anyRetained ||= retained.size > 0;
+      const normalizedErrors = errors.map((error) => {
+        const key = cardSourceKey(error.sourceId, accountIds);
+        const normalized = unknownRetainedKeys.has(key)
+          ? { ...error, failureCategory: "provider_api" as const }
+          : error;
+        // A retained non-credential failure is a last-good measurement with a
+        // recoverable error. Mark an unspecified outcome so the card mutes it
+        // instead of leaving a red provider error over valid retained rows.
+        if (
+          retained.has(key) &&
+          normalized.failureCategory !== "credentials" &&
+          normalized.attemptOutcome === undefined
+        ) {
+          return { ...normalized, attemptOutcome: "transient" as const };
+        }
+        return normalized;
+      });
       merged.push({
         ...probe,
-        result: { ...probe.result, entries: [...entries.values()].flat() },
+        result: {
+          ...probe.result,
+          errors: normalizedErrors,
+          entries: [...entries.values()].flat(),
+        },
         retainedSourceIds: new Set([...retained].filter((key): key is string => key !== UNSCOPED)),
         retainedUnscoped: retained.has(UNSCOPED),
       });
@@ -550,7 +637,7 @@ export function createDashboardReadSource(
       const temporal = temporalStatusForCards(cards, nowMs);
       if (temporal) snapshot.temporal = temporal;
       lastQuotaSnapshot = snapshot;
-      return snapshot;
+      return markQuotaObservationLive(snapshot);
     } catch (error) {
       if (lastQuotaSnapshot) {
         return {

@@ -365,7 +365,10 @@ it("keeps healthy account rings during a failed poll and restores the failed acc
                 ],
           errors:
             cycle === 2
-              ? [{ sourceId: "b", label: "B", message: "temporary" }]
+              ? // A known retry deadline makes this a rate-limited failure: it is
+                // retained without arming the early transient re-poll, so this
+                // test keeps its one-poll-per-minute timeline.
+                [{ sourceId: "b", label: "B", message: "temporary", retryAtMs: start + 90_000 }]
               : cycle >= 4
                 ? [
                     { sourceId: "a", label: "A", message: "offline" },

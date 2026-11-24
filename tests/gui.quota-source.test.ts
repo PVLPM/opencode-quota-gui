@@ -8,6 +8,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { CostedTokens, HomeSnapshot } from "../src/contracts/dashboard.js";
+import {
+  OPENAI_RESETS_ROW_KEY,
+  OPENAI_RESETS_ROW_RESULT_TYPE,
+} from "../src/contracts/openai-quota.js";
 import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts/ranges.js";
 import { AnalyticsNotFoundError } from "../src/gui/aggregation.js";
 import {
@@ -16,7 +20,11 @@ import {
   hashQuotaCardIdentity,
   PROVIDER_SCOPE_IDENTITY_KEY,
 } from "../src/gui/identity.js";
-import { openAiOptionalVisibilityRows } from "../src/gui/provider-cards.js";
+import { optionalValueRowId } from "../src/gui/provider-cards.js";
+import {
+  createQuotaNotificationObserver,
+  type QuotaNotificationSettings,
+} from "../src/gui/quota-notification-observer.js";
 import { createSnapshotService } from "../src/gui/snapshot-service.js";
 import {
   createDashboardReadSource,
@@ -26,7 +34,11 @@ import {
 import type { QuotaPercentEntry, QuotaProvider, QuotaProviderResult } from "../src/lib/entries.js";
 import { bindCredentialSource } from "../src/lib/opencode-auth.js";
 import type { QuotaStatusLiveProbe } from "../src/lib/quota-render-data.js";
-import { DEFAULT_CONFIG, type QuotaToastConfig } from "../src/lib/types.js";
+import {
+  DEFAULT_CONFIG,
+  type NativeQuotaNotificationPolicy,
+  type QuotaToastConfig,
+} from "../src/lib/types.js";
 import { openaiProvider } from "../src/providers/openai.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
@@ -111,6 +123,37 @@ const CLIENT: DashboardReadSourceOptions["client"] = {
     get: async () => ({ data: {} }),
   },
 };
+
+const NOTIFICATION_POLICY: NativeQuotaNotificationPolicy = {
+  enabled: true,
+  modelChangeToastEnabled: true,
+  low: { enabled: true, thresholdRemainingPercent: 10 },
+  exhausted: { enabled: true },
+  reset: {
+    enabled: true,
+    windows: ["fiveHour", "hourly", "daily", "weekly", "monthly", "yearly"],
+  },
+  providerError: { enabled: true },
+  duplicateCooldownMinutes: 30,
+};
+
+function sourceNotificationObserver() {
+  const events: Array<{ kind: string }> = [];
+  const settings: QuotaNotificationSettings = {
+    policy: NOTIFICATION_POLICY,
+    hiddenCards: [],
+    hiddenRows: [],
+    percentDisplayMode: "remaining",
+  };
+  const observer = createQuotaNotificationObserver({
+    statePath: "C:/synthetic-quota-notification-state.json",
+    now: () => NOW,
+    loadSettings: async () => settings,
+    writeState: async () => undefined,
+  });
+  observer.subscribe((event) => events.push(event));
+  return { observer, events };
+}
 
 interface QuotaHarness {
   source: ReturnType<typeof createDashboardReadSource>;
@@ -257,12 +300,16 @@ describe("quota read source", () => {
       }) as unknown as typeof fetch,
     );
     const accountId = "openai-runway-test";
-    const resetsRow = openAiOptionalVisibilityRows(buildCardId("openai", accountId))[0]!;
+    const resetsRow = optionalValueRowId(
+      buildCardId("openai", accountId),
+      OPENAI_RESETS_ROW_KEY,
+      OPENAI_RESETS_ROW_RESULT_TYPE,
+    );
     const config = baseConfig({
       enabledProviders: ["openai"],
       dashboard: {
         ...DEFAULT_CONFIG.dashboard,
-        hiddenRows: [resetsRow.rowId],
+        hiddenRows: [resetsRow],
       },
     });
     const unbindCredentials = bindCredentialSource({
@@ -765,6 +812,176 @@ describe("quota read source", () => {
     expect(third.providers.cards[0]?.errors).toEqual([]);
   });
 
+  it("retains Claude's CLI-reported quota through a transient error and drops it on a login change", async () => {
+    let cycle = 0;
+    let scope = "claude-login-a";
+    const localQuotaResult = (percentRemaining: number): QuotaProviderResult =>
+      result({
+        entries: [percentEntry(percentRemaining, "Claude 5h")],
+        errors: [],
+      });
+    const test = harness({
+      collect: async () => {
+        cycle += 1;
+        if (cycle === 1) {
+          return [{ providerId: "claude-agent", result: localQuotaResult(73), cacheScope: scope }];
+        }
+        if (cycle === 2) {
+          return [
+            {
+              providerId: "claude-agent",
+              result: result({
+                errors: [
+                  {
+                    label: "Claude Agent",
+                    message: "Claude CLI did not respond. Retry.",
+                    failureCategory: "provider_api",
+                  },
+                ],
+              }),
+              cacheScope: scope,
+            },
+          ];
+        }
+        return [
+          {
+            providerId: "claude-agent",
+            result: result({
+              errors: [{ label: "Claude Agent", message: "signed out" }],
+            }),
+            cacheScope: scope,
+          },
+        ];
+      },
+    });
+
+    await test.source.quota();
+    const retained = await test.source.quota();
+    const card = retained.providers.cards.find((item) => item.providerId === "claude-agent");
+    expect(card?.rows.map((row) => row.percentRemaining)).toEqual([73]);
+    expect(card?.stale).toBe(true);
+    expect(card?.errors[0]?.failureCategory).toBe("provider_api");
+
+    // A different login scope cannot reuse the previous account's measurement.
+    scope = "claude-login-b";
+    const switched = await test.source.quota();
+    const switchedCard = switched.providers.cards.find(
+      (item) => item.providerId === "claude-agent",
+    );
+    expect(switchedCard?.rows).toEqual([]);
+    expect(switchedCard?.errors[0]?.message).toBe("signed out");
+  });
+
+  it("marks a retained unclassified failure as transient so the card mutes it", async () => {
+    let cycle = 0;
+    const test = harness({
+      collect: async () => {
+        cycle += 1;
+        if (cycle === 1) {
+          return [probe("claude-agent", result({ entries: [percentEntry(73, "Claude 5h")] }))];
+        }
+        return [
+          probe(
+            "claude-agent",
+            result({
+              errors: [{ label: "Claude Agent", message: "Claude quota request failed." }],
+            }),
+          ),
+        ];
+      },
+    });
+
+    await test.source.quota();
+    const retained = await test.source.quota();
+    const card = retained.providers.cards.find((item) => item.providerId === "claude-agent");
+    expect(card?.rows.map((row) => row.percentRemaining)).toEqual([73]);
+    expect(card?.stale).toBe(true);
+    expect(card?.errors[0]?.message).toBe("Claude quota request failed.");
+    expect(card?.errors[0]?.failureCategory).toBe("provider_api");
+    expect(card?.errors[0]?.attemptOutcome).toBe("transient");
+  });
+
+  it("counts consecutive errors when the only provider retains last-good rows", async () => {
+    let cycle = 0;
+    const test = harness({
+      collect: async () => {
+        cycle += 1;
+        if (cycle === 1) {
+          return [probe("claude-agent", result({ entries: [percentEntry(73, "Claude 5h")] }))];
+        }
+        return [
+          probe(
+            "claude-agent",
+            result({
+              errors: [
+                {
+                  label: "Claude Agent",
+                  message: "Claude CLI did not respond. Retry.",
+                  failureCategory: "provider_api",
+                },
+              ],
+            }),
+          ),
+        ];
+      },
+    });
+    const { observer, events } = sourceNotificationObserver();
+
+    observer.observe(await test.source.quota());
+    const firstRetained = await test.source.quota();
+    expect(firstRetained.stale).toBe(true);
+    expect(firstRetained.providers.cards[0]?.stale).toBe(true);
+    observer.observe(firstRetained);
+    observer.observe(await test.source.quota());
+    await observer.flush();
+
+    // The first live retained failure is silent; the second proves persistence.
+    expect(events.map((event) => event.kind)).toEqual(["provider-error"]);
+    await observer.close();
+  });
+
+  it("counts a persistent error beside a fresh provider", async () => {
+    let cycle = 0;
+    const test = harness({
+      collect: async () => {
+        cycle += 1;
+        const fresh = probe("anthropic", result({ entries: [percentEntry(50)] }));
+        if (cycle === 1) {
+          return [
+            fresh,
+            probe("claude-agent", result({ entries: [percentEntry(73, "Claude 5h")] })),
+          ];
+        }
+        return [
+          fresh,
+          probe(
+            "claude-agent",
+            result({
+              errors: [
+                {
+                  label: "Claude Agent",
+                  message: "Claude CLI did not respond. Retry.",
+                  failureCategory: "provider_api",
+                },
+              ],
+            }),
+          ),
+        ];
+      },
+    });
+    const { observer, events } = sourceNotificationObserver();
+
+    observer.observe(await test.source.quota());
+    const firstMixed = await test.source.quota();
+    expect(firstMixed.stale).toBe(false);
+    observer.observe(firstMixed);
+    observer.observe(await test.source.quota());
+    await observer.flush();
+
+    expect(events.map((event) => event.kind)).toEqual(["provider-error"]);
+    await observer.close();
+  });
+
   it("drops a deselected provider's last-good card and stays fresh", async () => {
     const test = harness({
       collect: async ({ providers }) => {
@@ -990,7 +1207,11 @@ describe("quota read source", () => {
     const hiddenAccount = buildCardId("openai", "raw-hidden-account");
     const hiddenRowAccount = buildCardId("openai", "raw-hidden-row");
     const visibleAccount = buildCardId("openai", "raw-visible-account");
-    const hiddenResetsRow = openAiOptionalVisibilityRows(hiddenRowAccount)[0]!.rowId;
+    const hiddenResetsRow = optionalValueRowId(
+      hiddenRowAccount,
+      OPENAI_RESETS_ROW_KEY,
+      OPENAI_RESETS_ROW_RESULT_TYPE,
+    );
     let visibility: ((sourceId?: string) => boolean) | undefined;
     const test = harness({
       config: baseConfig({

@@ -21,6 +21,7 @@ import type {
   QuotaProviderResult,
   QuotaToastEntry,
 } from "../lib/entries.js";
+import { windowSemantic } from "../lib/entries.js";
 import { resolveQuotaProviderSessionModelIdentity } from "../lib/quota-providers.js";
 import {
   attemptedErrorResult,
@@ -46,6 +47,8 @@ export function anthropicQuotaEntries(
     group: string;
     acquisitionMethod: QuotaToastEntry["accounting"]["acquisitionMethod"];
     sourceId?: string;
+    /** When this quota was measured; omitted for legacy callers that carry no timestamp. */
+    observedAtMs?: number;
   },
 ): QuotaToastEntry[] {
   const { group } = params;
@@ -55,11 +58,14 @@ export function anthropicQuotaEntries(
     ownership: "maintained" as const,
     authority: "provider_reported" as const,
     ...(params.sourceId !== undefined ? { sourceId: params.sourceId } : {}),
+    ...(params.observedAtMs !== undefined
+      ? { observedAtIso: new Date(params.observedAtMs).toISOString() }
+      : {}),
   };
   const entries: QuotaToastEntry[] = [];
-  for (const [label, window, rowKey] of [
-    ["5h", quota.five_hour, "window:five_hour"],
-    ["Weekly", quota.seven_day, "window:week"],
+  for (const [label, window, semantic] of [
+    ["5h", quota.five_hour, windowSemantic("five_hour")],
+    ["Weekly", quota.seven_day, windowSemantic("week")],
   ] as const) {
     if (!window) continue;
     entries.push({
@@ -67,7 +73,7 @@ export function anthropicQuotaEntries(
       name: `${group} ${label}`,
       group,
       label: `${label}:`,
-      rowKey,
+      semantic,
       percentRemaining: window.percentRemaining,
       resetTimeIso: window.resetTimeIso,
       ...(window.fixedWindow ? { fixedWindow: { ...window.fixedWindow } } : {}),
@@ -79,7 +85,7 @@ export function anthropicQuotaEntries(
       name: `${group} Usage Credits`,
       group: `${group} Usage Credits`,
       label: "Monthly:",
-      rowKey: "window:month",
+      semantic: windowSemantic("month"),
       percentRemaining: quota.extra_usage.percentRemaining,
     });
   }

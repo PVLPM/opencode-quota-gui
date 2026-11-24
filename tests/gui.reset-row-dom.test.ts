@@ -11,7 +11,8 @@ import { percentRow, providerCard } from "./fixtures/gui-ui-fixtures.js";
 import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
- * The shared saved-resets row is rendered for OpenAI and Claude Agent only.
+ * The shared saved-resets row is rendered only when the provider registration
+ * declares that optional field (OpenAI and Claude Agent today).
  * The tooltip is stubbed to its children under SSR, so each segment's screen
  * reader text (which repeats the tooltip's title/expiry/relative lines) is the
  * observable tooltip content.
@@ -78,19 +79,22 @@ async function render(providerId: string, credits: BankedResetCredit[], count = 
   const module = await graph.load("/components/quota-card.tsx");
   const component = module.QuotaCardView;
   if (typeof component !== "function") throw new Error("QuotaCardView missing");
+  const resetsRow = percentRow({
+    label: "Resets",
+    kind: "value",
+    bankedResets: { availableCount: count, credits },
+    runway: undefined,
+    countdown: undefined,
+    // The fixture's fixed NOW is in the past; a resets row has no quota boundary.
+    resetAtIso: undefined,
+  });
+  const declared = providerId === "openai" || providerId === "claude-agent";
   const card: ProviderCard = providerCard({
     providerId,
     providerLabel: providerId,
-    rows: [
-      percentRow({
-        label: "Resets",
-        kind: "value",
-        bankedResets: { availableCount: count, credits },
-        runway: undefined,
-        countdown: undefined,
-      }),
-    ],
+    rows: [resetsRow],
   });
+  if (declared) card.visibilityRows = [{ rowId: resetsRow.rowId, label: "Resets" }];
   const html = graph.renderToString(() =>
     graph.createComponent(component, {
       card,

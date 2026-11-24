@@ -10,19 +10,31 @@
 import { execFile } from "child_process";
 import { createHash } from "crypto";
 import { existsSync } from "fs";
-import { readFile } from "fs/promises";
+import { readFile, stat } from "fs/promises";
 import { homedir } from "os";
 import { isAbsolute, join, resolve } from "path";
 
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota.js";
-import type { ProviderFailureCategory } from "../contracts/provider-failure.js";
-
+import {
+  isTransientProviderFailureCategory,
+  type ProviderFailureCategory,
+  type QuotaAttemptOutcome,
+} from "../contracts/provider-failure.js";
+import {
+  ANTHROPIC_OAUTH_RETRY_AFTER_MAX_MS,
+  type AnthropicOAuthAttemptCompletionResult,
+  claimAnthropicOAuthUsageRequest,
+  clearAnthropicOAuthThrottleStateForTests,
+  normalizeAnthropicOAuthPollIntervalMs,
+} from "./anthropic-oauth-throttle.js";
 import { sanitizeDisplaySnippet, sanitizeDisplayText } from "./display-sanitize.js";
 import type { FixedWindowProjectionEvidence } from "./entries.js";
 import { fetchWithTimeout } from "./http.js";
 import { buildFixedWindowEvidence } from "./quota-exhaustion-projection.js";
 import {
+  composeProcessLocalAuthIdentities,
   composeResolvedAuthIdentities,
+  deriveProcessLocalAuthIdentity,
   deriveResolvedAuthIdentity,
   type ResolvedAuthIdentity,
 } from "./resolved-auth-identity.js";
@@ -32,10 +44,8 @@ const DEFAULT_CLAUDE_BINARY = "claude";
 /** How `binaryPath` reads when the default `claude` ran from PATH. */
 const CLAUDE_ON_PATH_DISPLAY = "claude (PATH)";
 const CLAUDE_COMMAND_TIMEOUT_MS = 3_000;
-const ANTHROPIC_OAUTH_BACKOFF_BASE_MS = 30_000;
-const ANTHROPIC_OAUTH_COOLDOWN_MAX_MS = 15 * 60_000;
-const ANTHROPIC_OAUTH_COOLDOWN_MAX_ENTRIES = 16;
-const ANTHROPIC_OAUTH_REUSE_MS = 60_000;
+/** Window for treating a failed credential-file read as a transient write race. */
+const CLAUDE_CREDENTIALS_READ_RETRY_MS = 60_000;
 const ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const ANTHROPIC_USAGE_ENHANCED_URL = `${ANTHROPIC_USAGE_URL}?cedar_ember=1`;
 const ANTHROPIC_BETA_HEADER = "oauth-2025-04-20";
@@ -144,6 +154,15 @@ export interface AnthropicDiagnostics {
   message?: string;
   /** Source-assigned category for a failed OAuth usage request; absent otherwise. */
   failureCategory?: ProviderFailureCategory;
+  /** Outcome of this attempt; never inferred from display text. */
+  attemptOutcome?: QuotaAttemptOutcome;
+  /**
+   * When the returned quota was actually measured. Absent when no quota is
+   * returned. A reused measurement keeps its original time.
+   */
+  quotaMeasuredAtMs?: number;
+  /** True when the CLI probe itself did not complete (timeout or unusable output). */
+  probeFailure?: true;
   /** Epoch ms when a rate-limited usage request may be retried; absent otherwise. */
   retryAtMs?: number;
   /** True when the usage request returned 401 and the stored token's own expiry is in the past. */
@@ -160,6 +179,8 @@ export interface AnthropicProbeOptions {
   operationCache?: Map<symbol, unknown>;
   forceRefresh?: boolean;
   requestTimeoutMs?: number;
+  /** Minimum spacing between Anthropic usage requests for Claude Agent. */
+  pollIntervalMs?: number;
 }
 
 type ClaudeCommandResult = {
@@ -198,6 +219,19 @@ type AnthropicLocalDiagnostics = {
   claudeAiLoginVerified?: boolean;
   /** Display-only plan, set only for a verified login whose `subscriptionType` is a known plan. */
   planLabel?: string;
+  /**
+   * Account-specific CLI login evidence (org id and email). It is hashed into the cache identity
+   * and never displayed or persisted. Absent when the CLI reports no account.
+   */
+  accountHint?: string;
+  /**
+   * True when the CLI reported an organization id but no user-specific account evidence. An
+   * organization is shared by its members, so it can neither key nor reuse a row scope.
+   */
+  orgOnlyAccountEvidence?: true;
+  /** Set when the probe itself failed transiently; the CLI's auth may still be valid. */
+  failureCategory?: ProviderFailureCategory;
+  probeFailure?: true;
 };
 
 type ResolvedClaudeConfigDirectory = {
@@ -211,9 +245,9 @@ type ResolvedClaudeConfigDirectory = {
 /** Where the Claude CLI keeps its login. "unresolved" names no directory, so nothing is read. */
 type ClaudeConfigDirectory = ResolvedClaudeConfigDirectory | { state: "unresolved" };
 
-type AnthropicOAuthCooldown = {
-  failureCount: number;
-  blockedUntilMs: number;
+type AnthropicOAuthRecentQuota = {
+  quota: AnthropicQuotaResult;
+  measuredAtMs: number;
 };
 
 /** Which credential store provided the OAuth access token used for the usage probe. */
@@ -226,6 +260,8 @@ type AnthropicCredentialsAccess =
       /** The CLI's own `expiresAt` for this access token (epoch ms), when stored. */
       expiresAtMs?: number;
       source: AnthropicCredentialSource;
+      /** Which credential store supplied it; only a file source can be stat-verified. */
+      storage: "file" | "keychain";
     }
   | {
       state: "unavailable";
@@ -237,6 +273,7 @@ type ClaudeCredentialSourceResult =
       state: "configured";
       accessToken: string;
       expiresAtMs?: number;
+      storage: "file" | "keychain";
     }
   | {
       state: "not-found";
@@ -251,6 +288,10 @@ type AnthropicFallbackQuota =
   | {
       state: "success";
       quota: AnthropicQuotaResult;
+      /** `fresh` made the request; `reuse` served the recent measurement. */
+      attempt: "fresh" | "reuse";
+      /** When the returned quota was measured, not when it was reused. */
+      measuredAtMs: number;
     }
   | {
       state: "unavailable";
@@ -260,6 +301,12 @@ type AnthropicFallbackQuota =
       httpStatus?: number;
       failureCategory?: ProviderFailureCategory;
       retryAtMs?: number;
+      /** True when this outcome was a 429; the shared throttle publishes it. */
+      rateLimited?: true;
+      /** Parsed Retry-After for a 429, when the server supplied a usable value. */
+      retryAfterMs?: number;
+      /** `cooldown` made no request; the rest are real attempt outcomes. */
+      attempt: "cooldown" | "transient" | "credentials";
     };
 
 type ParsedAuthProbe = {
@@ -268,13 +315,19 @@ type ParsedAuthProbe = {
   jsonPayload?: unknown;
   unsupportedCommand?: boolean;
   claudeAiLoginVerified?: boolean;
+  failureCategory?: ProviderFailureCategory;
+  probeFailure?: true;
 };
 
 type AnthropicOAuthSharedState = {
-  cooldowns: Map<string, AnthropicOAuthCooldown>;
   inFlight: Map<string, Promise<AnthropicFallbackQuota>>;
   forcedInFlight?: Map<string, Promise<AnthropicFallbackQuota>>;
-  recent: Map<string, { quota: AnthropicQuotaResult; checkedAtMs: number }>;
+  recent: Map<string, AnthropicOAuthRecentQuota>;
+  /**
+   * Credentials whose enhanced usage form was rejected. The plain form is used
+   * on the next eligible claim, never as a second request inside the same claim.
+   */
+  plainForm?: Set<string>;
 };
 
 const ANTHROPIC_OAUTH_SHARED_STATE_KEY = Symbol.for(
@@ -286,9 +339,8 @@ let anthropicOAuthSharedState = anthropicOAuthGlobal[ANTHROPIC_OAUTH_SHARED_STAT
   | undefined;
 if (anthropicOAuthSharedState === undefined) {
   anthropicOAuthSharedState = {
-    cooldowns: new Map<string, AnthropicOAuthCooldown>(),
     inFlight: new Map<string, Promise<AnthropicFallbackQuota>>(),
-    recent: new Map<string, { quota: AnthropicQuotaResult; checkedAtMs: number }>(),
+    recent: new Map<string, AnthropicOAuthRecentQuota>(),
   };
   Object.defineProperty(anthropicOAuthGlobal, ANTHROPIC_OAUTH_SHARED_STATE_KEY, {
     value: anthropicOAuthSharedState,
@@ -297,12 +349,38 @@ if (anthropicOAuthSharedState === undefined) {
   });
 }
 
-const anthropicOAuthCooldowns = anthropicOAuthSharedState.cooldowns;
 const anthropicOAuthInFlight = anthropicOAuthSharedState.inFlight;
 anthropicOAuthSharedState.forcedInFlight ??= new Map();
+anthropicOAuthSharedState.plainForm ??= new Set();
 const anthropicOAuthForcedInFlight = anthropicOAuthSharedState.forcedInFlight;
 const anthropicOAuthRecent = anthropicOAuthSharedState.recent;
+const anthropicOAuthPlainForm = anthropicOAuthSharedState.plainForm;
 const anthropicForcedResultsKey = Symbol("anthropic forced results");
+/**
+ * Config directories whose credentials file was read successfully in this process. The CLI
+ * rewrites that file while refreshing its token, so a read that fails during that window is
+ * retried once instead of being reported as a missing login.
+ */
+const claudeCredentialsLastGoodReads = new Map<string, number>();
+
+type ClaudeCredentialFileSignature = {
+  path: string;
+  configDirEnv: string | undefined;
+  mtimeMs: number;
+  size: number;
+};
+
+type ClaudeIdentitySuccess = {
+  identity: ResolvedAuthIdentity;
+  signature: ClaudeCredentialFileSignature;
+};
+
+/**
+ * The last successful Claude CLI identity for each config directory. It lives only in this
+ * process: a transient probe failure may reuse it only while the credentials file is provably
+ * unchanged, so a switch or a rotated login can never borrow another account's last-good.
+ */
+const claudeIdentitySuccesses = new Map<string, ClaudeIdentitySuccess>();
 
 export function resolveAnthropicBinaryPath(binaryPath?: string): string {
   const trimmed = binaryPath?.trim();
@@ -955,6 +1033,7 @@ async function readClaudeCredentialsAccessTokenFromMacOSKeychain(): Promise<Clau
     return {
       state: "configured",
       accessToken: parsed.accessToken,
+      storage: "keychain",
       ...(parsed.expiresAtMs === undefined ? {} : { expiresAtMs: parsed.expiresAtMs }),
     };
   }
@@ -990,6 +1069,7 @@ async function readClaudeCredentialsAccessTokenFromFile(
     return {
       state: "configured",
       accessToken,
+      storage: "file",
       ...(parsed.expiresAtMs === undefined ? {} : { expiresAtMs: parsed.expiresAtMs }),
     };
   } catch (error) {
@@ -1012,6 +1092,90 @@ async function readClaudeCredentialsAccessTokenFromFile(
       detail: `Could not read Claude credentials in ${location}: ${shownCode} error.`,
     };
   }
+}
+
+function rememberClaudeCredentialsRead(directory: ResolvedClaudeConfigDirectory): void {
+  const nowMs = Date.now();
+  for (const [path, readAtMs] of claudeCredentialsLastGoodReads) {
+    if (nowMs - readAtMs >= CLAUDE_CREDENTIALS_READ_RETRY_MS) {
+      claudeCredentialsLastGoodReads.delete(path);
+    }
+  }
+  claudeCredentialsLastGoodReads.set(directory.path, nowMs);
+}
+
+function hadRecentClaudeCredentialsRead(directory: ResolvedClaudeConfigDirectory): boolean {
+  const readAtMs = claudeCredentialsLastGoodReads.get(directory.path);
+  return readAtMs !== undefined && Date.now() - readAtMs < CLAUDE_CREDENTIALS_READ_RETRY_MS;
+}
+
+/**
+ * The credential file's identity signature, captured before its token is read. `stat` is the only
+ * read here: a changed, missing, or unreadable file yields null, which disables reuse.
+ */
+async function readClaudeCredentialFileSignature(
+  configDirectory: ClaudeConfigDirectory | undefined,
+): Promise<ClaudeCredentialFileSignature | null> {
+  if (configDirectory?.state !== "resolved") return null;
+  const path = join(configDirectory.path, ".credentials.json");
+  try {
+    const stats = await stat(path);
+    if (!stats.isFile()) return null;
+    return {
+      path,
+      configDirEnv: process.env[CLAUDE_CONFIG_DIR_ENV],
+      mtimeMs: stats.mtimeMs,
+      size: stats.size,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remember a successful, file-backed, user-specific Claude identity. Organization-only evidence
+ * never reaches this helper: it cannot distinguish two members of one organization. A keychain
+ * token has no stat-able source, so it is never remembered and can never be reused from memory.
+ */
+function rememberClaudeIdentitySuccess(
+  configDirectory: ClaudeConfigDirectory | undefined,
+  identity: ResolvedAuthIdentity,
+  signature: ClaudeCredentialFileSignature | null,
+): void {
+  if (configDirectory?.state !== "resolved" || signature === null) return;
+  claudeIdentitySuccesses.set(configDirectory.path, { identity, signature });
+}
+
+/** Drop a remembered identity once the current probe can no longer attribute the same user. */
+function forgetClaudeIdentitySuccess(configDirectory: ClaudeConfigDirectory | undefined): void {
+  if (configDirectory?.state !== "resolved") return;
+  claudeIdentitySuccesses.delete(configDirectory.path);
+}
+
+/**
+ * Reuse the last successful identity only while the credential source is provably unchanged:
+ * the same directory, the same CLAUDE_CONFIG_DIR value, and an identical credentials-file stat.
+ * Any change, an unreadable file, or no record yields null, leaving this cycle without a scope.
+ */
+async function recallClaudeIdentitySuccess(): Promise<ResolvedAuthIdentity | null> {
+  const configDirectory = resolveClaudeConfigDirectory(
+    undefined,
+    process.env[CLAUDE_CONFIG_DIR_ENV],
+  );
+  if (configDirectory.state !== "resolved") return null;
+  const remembered = claudeIdentitySuccesses.get(configDirectory.path);
+  if (!remembered) return null;
+  if (remembered.signature.configDirEnv !== process.env[CLAUDE_CONFIG_DIR_ENV]) return null;
+  const current = await readClaudeCredentialFileSignature(configDirectory);
+  if (
+    current === null ||
+    current.path !== remembered.signature.path ||
+    current.mtimeMs !== remembered.signature.mtimeMs ||
+    current.size !== remembered.signature.size
+  ) {
+    return null;
+  }
+  return remembered.identity;
 }
 
 async function readClaudeOAuthAccessToken(
@@ -1037,8 +1201,14 @@ async function readClaudeOAuthAccessToken(
     locationsChecked.push(keychainCredentials.location);
   }
 
-  const fileCredentials = await readClaudeCredentialsAccessTokenFromFile(configDirectory);
+  let fileCredentials = await readClaudeCredentialsAccessTokenFromFile(configDirectory);
+  // The CLI rewrites this file while refreshing its token. If it was readable moments ago, one
+  // more read can land after the write instead of reporting a missing login for a poll.
+  if (fileCredentials.state !== "configured" && hadRecentClaudeCredentialsRead(configDirectory)) {
+    fileCredentials = await readClaudeCredentialsAccessTokenFromFile(configDirectory);
+  }
   if (fileCredentials.state === "configured") {
+    rememberClaudeCredentialsRead(configDirectory);
     return { ...fileCredentials, source: "claude-credentials" };
   }
   if (fileCredentials.state === "unavailable") {
@@ -1080,58 +1250,43 @@ function parseRetryAfterMs(value: string | null, nowMs: number): number | undefi
 
   if (/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/u.test(trimmed)) {
     const seconds = Number(trimmed);
-    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : undefined;
+    const durationMs = seconds * 1_000;
+    return Number.isFinite(durationMs) &&
+      durationMs > 0 &&
+      durationMs <= ANTHROPIC_OAUTH_RETRY_AFTER_MAX_MS
+      ? durationMs
+      : undefined;
   }
 
   const retryAtMs = Date.parse(trimmed);
   const durationMs = retryAtMs - nowMs;
-  return Number.isFinite(durationMs) && durationMs > 0 ? durationMs : undefined;
-}
-
-function getAnthropicOAuthCooldownDurationMs(
-  failureCount: number,
-  retryAfter: string | null,
-  nowMs: number,
-): number {
-  const exponentialMs = Math.min(
-    ANTHROPIC_OAUTH_COOLDOWN_MAX_MS,
-    ANTHROPIC_OAUTH_BACKOFF_BASE_MS * 2 ** Math.min(failureCount, 30),
-  );
-  const retryAfterMs = Math.min(
-    ANTHROPIC_OAUTH_COOLDOWN_MAX_MS,
-    parseRetryAfterMs(retryAfter, nowMs) ?? 0,
-  );
-  return Math.max(exponentialMs, retryAfterMs);
+  return Number.isFinite(durationMs) &&
+    durationMs > 0 &&
+    durationMs <= ANTHROPIC_OAUTH_RETRY_AFTER_MAX_MS
+    ? durationMs
+    : undefined;
 }
 
 function getAnthropicOAuthCooldownMessage(remainingMs: number): string {
-  const boundedRemainingMs = Math.min(ANTHROPIC_OAUTH_COOLDOWN_MAX_MS, Math.max(0, remainingMs));
   return `Anthropic OAuth usage probe paused after HTTP 429; retry in ${Math.ceil(
-    boundedRemainingMs / 1_000,
+    Math.max(0, remainingMs) / 1_000,
   )}s.`;
 }
 
-function retainAnthropicOAuthCooldownForToken(tokenFingerprint: string): void {
-  const targetSize = anthropicOAuthCooldowns.has(tokenFingerprint)
-    ? ANTHROPIC_OAUTH_COOLDOWN_MAX_ENTRIES
-    : ANTHROPIC_OAUTH_COOLDOWN_MAX_ENTRIES - 1;
-  const oldestFirst = [...anthropicOAuthCooldowns.entries()].sort(
-    ([, left], [, right]) => left.blockedUntilMs - right.blockedUntilMs,
-  );
-  for (const [fingerprint] of oldestFirst) {
-    if (anthropicOAuthCooldowns.size <= targetSize) break;
-    if (fingerprint !== tokenFingerprint) anthropicOAuthCooldowns.delete(fingerprint);
-  }
-}
-
-function rememberAnthropicOAuthQuota(tokenFingerprint: string, quota: AnthropicQuotaResult): void {
+function rememberAnthropicOAuthQuota(
+  tokenFingerprint: string,
+  quota: AnthropicQuotaResult,
+  measuredAtMs: number,
+  pollIntervalMs?: number,
+): void {
   const nowMs = Date.now();
+  const reuseWindowMs = normalizeAnthropicOAuthPollIntervalMs(pollIntervalMs);
   for (const [fingerprint, entry] of anthropicOAuthRecent) {
-    if (nowMs - entry.checkedAtMs >= ANTHROPIC_OAUTH_REUSE_MS) {
+    if (nowMs - entry.measuredAtMs >= reuseWindowMs) {
       anthropicOAuthRecent.delete(fingerprint);
     }
   }
-  anthropicOAuthRecent.set(tokenFingerprint, { quota, checkedAtMs: nowMs });
+  anthropicOAuthRecent.set(tokenFingerprint, { quota, measuredAtMs });
 }
 
 function redactAccessTokenFromSanitizedDetail(detail: string, accessToken: string): string {
@@ -1160,42 +1315,33 @@ function claudeCodeUserAgent(cliVersion: string | null | undefined, enhanced: bo
   return version ? `claude-code/${version}` : "claude-code";
 }
 
-const RETRY_WITHOUT_ENHANCED = Symbol("retry usage request without cedar_ember");
+/** The 429 deadline is published before the body is consumed, which may time out. */
+type AnthropicRateLimitPublisher = (info: {
+  retryAfterMs: number | undefined;
+  nowMs: number;
+}) => Promise<unknown>;
 
-/** Enhanced request, then one plain retry only when the enhanced form itself was rejected. */
+/**
+ * One HTTP request per claim. The enhanced form is remembered per credential; a
+ * rejection switches later, separately-spaced claims to the plain form instead
+ * of firing a second request inside this claim's spacing window.
+ */
 async function performAnthropicOAuthUsageRequest(
   accessToken: string,
   tokenFingerprint: string,
   requestTimeoutMs?: number,
   cliVersion?: string | null,
+  publishRateLimit?: AnthropicRateLimitPublisher,
 ): Promise<AnthropicFallbackQuota> {
-  const startedAtMs = Date.now();
-  const timeoutMs = requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
-  const enhanced = await requestAnthropicOAuthUsage(
+  const enhanced = !anthropicOAuthPlainForm.has(tokenFingerprint);
+  return await requestAnthropicOAuthUsage(
     accessToken,
     tokenFingerprint,
     requestTimeoutMs,
     cliVersion,
-    true,
+    enhanced,
+    publishRateLimit,
   );
-  if (enhanced !== RETRY_WITHOUT_ENHANCED) return enhanced;
-  // The fallback shares the caller's one timeout budget rather than doubling it.
-  const remainingMs = timeoutMs - (Date.now() - startedAtMs);
-  if (remainingMs <= 0) {
-    return {
-      state: "unavailable",
-      detail: "Anthropic OAuth usage request timed out",
-      failureCategory: "provider_api",
-    };
-  }
-  // The plain request never yields the retry sentinel.
-  return (await requestAnthropicOAuthUsage(
-    accessToken,
-    tokenFingerprint,
-    remainingMs,
-    cliVersion,
-    false,
-  )) as AnthropicFallbackQuota;
 }
 
 async function requestAnthropicOAuthUsage(
@@ -1204,7 +1350,8 @@ async function requestAnthropicOAuthUsage(
   requestTimeoutMs: number | undefined,
   cliVersion: string | null | undefined,
   enhanced: boolean,
-): Promise<AnthropicFallbackQuota | typeof RETRY_WITHOUT_ENHANCED> {
+  publishRateLimit?: AnthropicRateLimitPublisher,
+): Promise<AnthropicFallbackQuota> {
   try {
     return await fetchWithTimeout(enhanced ? ANTHROPIC_USAGE_ENHANCED_URL : ANTHROPIC_USAGE_URL, {
       request: {
@@ -1215,30 +1362,31 @@ async function requestAnthropicOAuthUsage(
         },
       },
       timeoutMs: requestTimeoutMs,
-      consume: async (
-        response,
-        timeoutSignal,
-      ): Promise<AnthropicFallbackQuota | typeof RETRY_WITHOUT_ENHANCED> => {
+      consume: async (response, timeoutSignal): Promise<AnthropicFallbackQuota> => {
         if (response.status === 429) {
           anthropicOAuthRecent.delete(tokenFingerprint);
           const nowMs = Date.now();
-          const previousFailureCount =
-            anthropicOAuthCooldowns.get(tokenFingerprint)?.failureCount ?? 0;
-          const durationMs = getAnthropicOAuthCooldownDurationMs(
-            previousFailureCount,
+          const retryAfterMs = parseRetryAfterMs(
             response.headers?.get?.("Retry-After") ?? null,
             nowMs,
           );
-          anthropicOAuthCooldowns.set(tokenFingerprint, {
-            failureCount: previousFailureCount + 1,
-            blockedUntilMs: Math.ceil(nowMs + durationMs),
-          });
 
+          // The headers already prove the deadline; publish it before the body
+          // read, which may time out and would otherwise lose the cooldown.
+          if (publishRateLimit) {
+            try {
+              await publishRateLimit({ retryAfterMs, nowMs });
+            } catch {
+              // The throttle keeps the deadline in-process and retries the write.
+            }
+          }
+
+          // The 429 is already proven; a body read failure must not discard the
+          // known deadline or turn this attempt into an unclassified error.
           let detail = "";
           try {
             detail = sanitizeAnthropicApiDetail(await response.text(), accessToken);
-          } catch (error) {
-            if (timeoutSignal.aborted) throw error;
+          } catch {
             detail = "";
           }
 
@@ -1247,42 +1395,40 @@ async function requestAnthropicOAuthUsage(
             : `Anthropic API returned ${response.status}`;
           return {
             state: "unavailable",
-            detail: `${errorDetail} ${getAnthropicOAuthCooldownMessage(durationMs)}`,
+            detail: errorDetail,
             failureCategory: "provider_api",
-            retryAtMs: Math.ceil(nowMs + durationMs),
+            rateLimited: true,
+            ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+            attempt: "transient",
           };
         }
-
-        anthropicOAuthCooldowns.delete(tokenFingerprint);
 
         if (!response.ok) {
           const authenticationFailure = response.status === 401 || response.status === 403;
           let detail = "";
+          let enhancedRejected = enhanced && response.status === 400;
           try {
             const body = await response.text();
             // A 403 naming a missing scope or user:profile is a real credential problem, never an enhanced-form rejection.
-            if (
-              enhanced &&
-              (response.status === 400 ||
-                (response.status === 403 && !/scope|user:profile/iu.test(body)))
-            ) {
-              return RETRY_WITHOUT_ENHANCED;
+            if (enhanced && response.status === 403 && !/scope|user:profile/iu.test(body)) {
+              enhancedRejected = true;
             }
             detail = sanitizeAnthropicApiDetail(body, accessToken);
           } catch (error) {
             if (timeoutSignal.aborted && !authenticationFailure) throw error;
             detail = "";
           }
+          if (enhancedRejected) anthropicOAuthPlainForm.add(tokenFingerprint);
 
           return {
             state: "unavailable",
             detail: detail
               ? `Anthropic API error ${response.status}: ${detail}`
               : `Anthropic API returned ${response.status}`,
-            ...(authenticationFailure
-              ? { failureKind: "authentication" as const, httpStatus: response.status }
-              : {}),
+            ...(authenticationFailure ? { failureKind: "authentication" as const } : {}),
+            httpStatus: response.status,
             failureCategory: authenticationFailure ? "credentials" : "provider_api",
+            attempt: authenticationFailure ? "credentials" : "transient",
           };
         }
 
@@ -1295,6 +1441,7 @@ async function requestAnthropicOAuthUsage(
             state: "unavailable",
             detail: "Failed to parse Anthropic quota response",
             failureCategory: "provider_api",
+            attempt: "transient",
           };
         }
 
@@ -1304,12 +1451,15 @@ async function requestAnthropicOAuthUsage(
             state: "unavailable",
             detail: "Unexpected Anthropic quota response shape",
             failureCategory: "provider_api",
+            attempt: "transient",
           };
         }
 
         return {
           state: "success",
           quota,
+          attempt: "fresh",
+          measuredAtMs: Date.now(),
         };
       },
     });
@@ -1321,6 +1471,7 @@ async function requestAnthropicOAuthUsage(
         accessToken,
       ),
       failureCategory: "provider_api",
+      attempt: "transient",
     };
   }
 }
@@ -1330,29 +1481,10 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
   requestTimeoutMs?: number,
   forcedOperationCache?: Map<symbol, unknown>,
   cliVersion?: string | null,
+  pollIntervalMs?: number,
 ): Promise<AnthropicFallbackQuota> {
   const tokenFingerprint = fingerprintAccessToken(accessToken);
-  retainAnthropicOAuthCooldownForToken(tokenFingerprint);
-
-  const nowMs = Date.now();
-  const cooldown = anthropicOAuthCooldowns.get(tokenFingerprint);
-  if (cooldown && cooldown.blockedUntilMs > nowMs) {
-    return {
-      state: "unavailable",
-      detail: getAnthropicOAuthCooldownMessage(cooldown.blockedUntilMs - nowMs),
-      failureCategory: "provider_api",
-      retryAtMs: cooldown.blockedUntilMs,
-    };
-  }
-
-  const recent = forcedOperationCache ? undefined : anthropicOAuthRecent.get(tokenFingerprint);
-  if (
-    recent &&
-    nowMs >= recent.checkedAtMs &&
-    nowMs - recent.checkedAtMs < ANTHROPIC_OAUTH_REUSE_MS
-  ) {
-    return { state: "success", quota: recent.quota };
-  }
+  const intervalMs = normalizeAnthropicOAuthPollIntervalMs(pollIntervalMs);
 
   let forcedResults: Map<string, Promise<AnthropicFallbackQuota>> | undefined;
   if (forcedOperationCache) {
@@ -1381,24 +1513,133 @@ async function queryAnthropicQuotaFromOAuthAccessToken(
   const prior = forcedResults ? anthropicOAuthInFlight.get(tokenFingerprint) : undefined;
   const inFlight = (async (): Promise<AnthropicFallbackQuota> => {
     if (prior) await prior;
-    const activeCooldown = anthropicOAuthCooldowns.get(tokenFingerprint);
-    const remaining = (activeCooldown?.blockedUntilMs ?? 0) - Date.now();
-    if (remaining > 0)
+
+    // The claim is cross-process: a busy lock, an active cooldown or a request
+    // still inside the configured spacing window all skip without fetching.
+    const claim = await claimAnthropicOAuthUsageRequest({
+      nowMs: Date.now(),
+      pollIntervalMs: intervalMs,
+      requestTimeoutMs,
+    });
+    if (claim.state === "skip") {
+      if (claim.reason === "spacing") {
+        const recent = anthropicOAuthRecent.get(tokenFingerprint);
+        const nowMs = Date.now();
+        if (recent && nowMs >= recent.measuredAtMs && nowMs - recent.measuredAtMs < intervalMs) {
+          return {
+            state: "success",
+            quota: recent.quota,
+            attempt: "reuse",
+            measuredAtMs: recent.measuredAtMs,
+          };
+        }
+        return {
+          state: "unavailable",
+          detail: "Claude Agent waiting for its next configured usage request.",
+          failureCategory: "provider_api",
+          ...(claim.retryAtMs !== undefined ? { retryAtMs: claim.retryAtMs } : {}),
+          attempt: "cooldown",
+        };
+      }
+      const nowMs = Date.now();
+      const retryAtMs = claim.retryAtMs ?? (claim.reason === "cooldown" ? nowMs : undefined);
       return {
         state: "unavailable",
-        detail: getAnthropicOAuthCooldownMessage(remaining),
+        detail:
+          claim.reason === "cooldown" && retryAtMs !== undefined
+            ? getAnthropicOAuthCooldownMessage(retryAtMs - nowMs)
+            : "Claude Agent usage request is already being coordinated.",
         failureCategory: "provider_api",
-        retryAtMs: activeCooldown?.blockedUntilMs,
+        ...(retryAtMs !== undefined ? { retryAtMs } : {}),
+        attempt: "cooldown",
       };
-    const result = await performAnthropicOAuthUsageRequest(
-      accessToken,
-      tokenFingerprint,
-      requestTimeoutMs,
-      cliVersion,
-    );
+    }
+
+    let publishedCompletion: AnthropicOAuthAttemptCompletionResult | undefined;
+    let publishedRetryAfterMs: number | undefined;
+    const publishRateLimit: AnthropicRateLimitPublisher = async (info) => {
+      publishedRetryAfterMs = info.retryAfterMs;
+      publishedCompletion = await claim.complete({
+        kind: "rate-limited",
+        ...(info.retryAfterMs !== undefined ? { retryAfterMs: info.retryAfterMs } : {}),
+        nowMs: info.nowMs,
+      });
+    };
+
+    let result: AnthropicFallbackQuota;
+    try {
+      result = await performAnthropicOAuthUsageRequest(
+        accessToken,
+        tokenFingerprint,
+        requestTimeoutMs,
+        cliVersion,
+        publishRateLimit,
+      );
+    } catch (error) {
+      if (publishedCompletion === undefined) {
+        await claim.complete({ kind: "network-error" });
+        throw error;
+      }
+      // The 429 was proven from headers before this failure; report the cooldown.
+      result = {
+        state: "unavailable",
+        detail: "Anthropic API returned 429",
+        failureCategory: "provider_api",
+        rateLimited: true,
+        ...(publishedRetryAfterMs !== undefined ? { retryAfterMs: publishedRetryAfterMs } : {}),
+        attempt: "transient",
+      };
+    }
+
+    // A body-read timeout is classified as a plain transient failure, but the
+    // headers already proved the 429. Keep that deadline and do not downgrade it.
+    if (
+      publishedCompletion !== undefined &&
+      result.state !== "success" &&
+      result.rateLimited !== true
+    ) {
+      result = {
+        state: "unavailable",
+        detail: "Anthropic API returned 429",
+        failureCategory: "provider_api",
+        rateLimited: true,
+        ...(publishedRetryAfterMs !== undefined ? { retryAfterMs: publishedRetryAfterMs } : {}),
+        attempt: "transient",
+      };
+    }
+
+    let completion: AnthropicOAuthAttemptCompletionResult | undefined;
     if (result.state === "success") {
-      rememberAnthropicOAuthQuota(tokenFingerprint, result.quota);
+      await claim.complete({ kind: "success" });
+      rememberAnthropicOAuthQuota(tokenFingerprint, result.quota, result.measuredAtMs, intervalMs);
+    } else if (result.rateLimited === true) {
+      completion =
+        publishedCompletion ??
+        (await claim.complete({
+          kind: "rate-limited",
+          ...(result.retryAfterMs !== undefined ? { retryAfterMs: result.retryAfterMs } : {}),
+          nowMs: Date.now(),
+        }));
+      const nowMs = Date.now();
+      const blockedUntilMs = completion.blockedUntilMs ?? nowMs;
+      // The shared request spacing still applies: the card and diagnostics must
+      // name the next real attempt, not an earlier server deadline.
+      const nextAttemptAtMs = Math.max(blockedUntilMs, claim.claimedAtMs + intervalMs);
+      result = {
+        ...result,
+        detail: `${result.detail ?? ""} ${getAnthropicOAuthCooldownMessage(
+          nextAttemptAtMs - nowMs,
+        )}`.trim(),
+        retryAtMs: nextAttemptAtMs,
+      };
+    } else if (result.httpStatus !== undefined) {
+      // Any response other than 429 ends the previous 429 streak.
+      await claim.complete({ kind: "response" });
     } else {
+      await claim.complete({ kind: "network-error" });
+    }
+
+    if (result.state !== "success") {
       const cached = anthropicOAuthRecent.get(tokenFingerprint);
       if (cached?.quota.saved_resets) {
         const { saved_resets: _savedResets, ...quota } = cached.quota;
@@ -1502,6 +1743,45 @@ function hasFirstPartyClaudeAiLogin(payload: unknown): boolean {
     typeof provider === "string" &&
     provider.trim().toLowerCase() === "firstparty"
   );
+}
+
+/** Field names that carry a user-specific account id in the CLI's own status. */
+const CLAUDE_USER_ACCOUNT_ID_FIELDS = [
+  "accountUuid",
+  "account_uuid",
+  "userUuid",
+  "user_uuid",
+  "userId",
+  "user_id",
+] as const;
+
+/**
+ * User-specific evidence in the CLI's own status, used only to key the cache identity when the
+ * stored token cannot be read. An organization id alone is not evidence because every member
+ * shares it; when user evidence exists, the organization is only a qualifier. It is never
+ * displayed, persisted, or sent anywhere.
+ */
+function claudeLoginAccountHint(payload: unknown): string | undefined {
+  const record = asRecord(payload);
+  if (!record) return undefined;
+  const orgId = typeof record["orgId"] === "string" ? record["orgId"].trim() : "";
+  const email = typeof record["email"] === "string" ? record["email"].trim().toLowerCase() : "";
+  const userId =
+    CLAUDE_USER_ACCOUNT_ID_FIELDS.map((key) =>
+      typeof record[key] === "string" ? record[key].trim() : "",
+    ).find((value) => value !== "") ?? "";
+  if (!email && !userId) return undefined;
+  // The organization id is only a qualifier here; the email/user id keeps it user-specific.
+  // Omitting the extra element when no user id exists preserves the existing email-only scope.
+  return userId ? JSON.stringify([orgId, email, userId]) : JSON.stringify([orgId, email]);
+}
+
+/** True when the CLI named an organization but no user-specific account evidence. */
+function hasClaudeOrgOnlyAccountEvidence(payload: unknown): boolean {
+  const record = asRecord(payload);
+  if (!record) return false;
+  const orgId = typeof record["orgId"] === "string" ? record["orgId"].trim() : "";
+  return orgId !== "" && claudeLoginAccountHint(payload) === undefined;
 }
 
 /** The only plan names shown. The CLI's `subscriptionType` is undocumented, so anything else is omitted. */
@@ -1638,6 +1918,44 @@ async function runClaudeCommand(invocation: ClaudeCommandInvocation): Promise<Cl
 
 function parseClaudeAuthStatusResult(result: ClaudeCommandResult): ParsedAuthProbe {
   const combinedOutput = `${result.stdout}\n${result.stderr}`;
+  const trimmed = result.stdout.trim();
+  let jsonPayload: unknown;
+  let hasJsonBody = false;
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      jsonPayload = JSON.parse(trimmed) as unknown;
+      hasJsonBody = true;
+    } catch {
+      // Not a JSON body; the text/exit-code fallbacks below decide.
+    }
+  }
+
+  // A JSON status body is authoritative. stderr noise (banners, update notices) must not turn a
+  // positively reported login into a sign-out.
+  if (hasJsonBody) {
+    const auth = extractAuthBoolean(jsonPayload);
+    if (auth === true) {
+      if (hasNonSubscriptionLogin(jsonPayload)) {
+        return {
+          authStatus: "unknown",
+          message: CLAUDE_NON_SUBSCRIPTION_LOGIN_MESSAGE,
+        };
+      }
+      return {
+        authStatus: "authenticated",
+        jsonPayload,
+        claudeAiLoginVerified: hasFirstPartyClaudeAiLogin(jsonPayload),
+      };
+    }
+
+    if (auth === false) {
+      return {
+        authStatus: "unauthenticated",
+        message: "Claude is not authenticated. Run `claude auth login` and try again.",
+        jsonPayload,
+      };
+    }
+  }
 
   if (hasUnsupportedCommandText(combinedOutput)) {
     return {
@@ -1654,42 +1972,13 @@ function parseClaudeAuthStatusResult(result: ClaudeCommandResult): ParsedAuthPro
     };
   }
 
-  const trimmed = result.stdout.trim();
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    try {
-      const payload = JSON.parse(trimmed) as unknown;
-      const auth = extractAuthBoolean(payload);
-
-      if (auth === true) {
-        if (hasNonSubscriptionLogin(payload)) {
-          return {
-            authStatus: "unknown",
-            message: CLAUDE_NON_SUBSCRIPTION_LOGIN_MESSAGE,
-          };
-        }
-        return {
-          authStatus: "authenticated",
-          jsonPayload: payload,
-          claudeAiLoginVerified: hasFirstPartyClaudeAiLogin(payload),
-        };
-      }
-
-      if (auth === false) {
-        return {
-          authStatus: "unauthenticated",
-          message: "Claude is not authenticated. Run `claude auth login` and try again.",
-          jsonPayload: payload,
-        };
-      }
-
-      return {
-        authStatus: "unknown",
-        message: "Could not verify Claude authentication status from JSON output.",
-        jsonPayload: payload,
-      };
-    } catch {
-      // Fall through to exit-code-based handling.
-    }
+  if (hasJsonBody) {
+    return {
+      authStatus: "unknown",
+      message: "Could not verify Claude authentication status from JSON output.",
+      jsonPayload,
+      failureCategory: "provider_api",
+    };
   }
 
   if (result.code === 0) {
@@ -1700,6 +1989,8 @@ function parseClaudeAuthStatusResult(result: ClaudeCommandResult): ParsedAuthPro
     return {
       authStatus: "unknown",
       message: "Timed out while running Claude CLI auth status.",
+      failureCategory: "provider_api",
+      probeFailure: true,
     };
   }
 
@@ -1709,6 +2000,8 @@ function parseClaudeAuthStatusResult(result: ClaudeCommandResult): ParsedAuthPro
     message: detail
       ? `Could not verify Claude authentication status. ${detail}`
       : "Could not verify Claude authentication status.",
+    failureCategory: "provider_api",
+    probeFailure: true,
   };
 }
 
@@ -1743,6 +2036,12 @@ function mapLocalDiagnosticsToAnthropicDiagnostics(
 
   if (localDiagnostics.message) {
     diagnostics.message = localDiagnostics.message;
+  }
+  if (localDiagnostics.failureCategory !== undefined) {
+    diagnostics.failureCategory = localDiagnostics.failureCategory;
+  }
+  if (localDiagnostics.probeFailure === true) {
+    diagnostics.probeFailure = true;
   }
 
   return diagnostics;
@@ -1818,6 +2117,10 @@ async function probeAnthropicLocalDiagnostics(
       binaryPath: binaryPathDisplay,
       checkedCommands,
       message: parsedAuth.message,
+      ...(parsedAuth.failureCategory !== undefined
+        ? { failureCategory: parsedAuth.failureCategory }
+        : {}),
+      ...(parsedAuth.probeFailure === true ? { probeFailure: true as const } : {}),
     };
   }
 
@@ -1827,46 +2130,44 @@ async function probeAnthropicLocalDiagnostics(
     asRecord(parsedAuth.jsonPayload)?.["configDirectory"],
     process.env[CLAUDE_CONFIG_DIR_ENV],
   );
+  const accountHint = claudeLoginAccountHint(parsedAuth.jsonPayload);
+  const orgOnlyAccountEvidence = hasClaudeOrgOnlyAccountEvidence(parsedAuth.jsonPayload);
   const quota = parsedAuth.jsonPayload ? parseUsageResponse(parsedAuth.jsonPayload) : null;
   // Only a verified first-party login may name its plan; the same login answers the quota above.
   const planLabel =
     parsedAuth.claudeAiLoginVerified === true
       ? deriveClaudePlanLabel(parsedAuth.jsonPayload)
       : undefined;
-  if (quota) {
-    return {
-      installed: true,
-      version,
-      authStatus: "authenticated",
-      binaryPath: binaryPathDisplay,
-      checkedCommands,
-      localQuota: quota,
-      effectiveBinary: binaryPath,
-      configDirectory,
-      claudeAiLoginVerified: parsedAuth.claudeAiLoginVerified === true,
-      ...(planLabel === undefined ? {} : { planLabel }),
-    };
-  }
-
-  return {
+  // Both successful returns are the same authenticated CLI diagnostics; only the quota evidence
+  // or the no-quota message differs.
+  const diagnostics = {
     installed: true,
     version,
     authStatus: "authenticated",
     binaryPath: binaryPathDisplay,
     checkedCommands,
-    message: CLAUDE_NO_LOCAL_QUOTA_MESSAGE,
     effectiveBinary: binaryPath,
     configDirectory,
     claudeAiLoginVerified: parsedAuth.claudeAiLoginVerified === true,
     ...(planLabel === undefined ? {} : { planLabel }),
-  };
+    ...(accountHint === undefined ? {} : { accountHint }),
+    ...(orgOnlyAccountEvidence ? { orgOnlyAccountEvidence: true as const } : {}),
+  } satisfies AnthropicLocalDiagnostics;
+  if (quota) {
+    return { ...diagnostics, localQuota: quota };
+  }
+
+  return { ...diagnostics, message: CLAUDE_NO_LOCAL_QUOTA_MESSAGE };
 }
 
 export function clearAnthropicDiagnosticsCacheForTests(): void {
-  anthropicOAuthCooldowns.clear();
   anthropicOAuthInFlight.clear();
   anthropicOAuthForcedInFlight.clear();
   anthropicOAuthRecent.clear();
+  anthropicOAuthPlainForm.clear();
+  clearAnthropicOAuthThrottleStateForTests();
+  claudeCredentialsLastGoodReads.clear();
+  claudeIdentitySuccesses.clear();
 }
 
 const localDiagnosticsCacheKey = Symbol("anthropic local diagnostics");
@@ -1906,6 +2207,7 @@ async function readSavedResetsForLocalQuota(
       options.requestTimeoutMs,
       options.forceRefresh ? options.operationCache : undefined,
       localDiagnostics.version,
+      options.pollIntervalMs,
     );
     return result.state === "success" ? result.quota.saved_resets : undefined;
   } catch {
@@ -1919,13 +2221,18 @@ export async function getAnthropicDiagnostics(
   const localDiagnostics = await getAnthropicLocalDiagnostics(options);
   if (localDiagnostics.localQuota) {
     // Local quota stays authoritative and needs no token. Saved resets are an optional extra read
-    // with the same verified-login token gate; the result still has no account identity, so it is
-    // never cached across accounts.
+    // with the same verified-login token gate; the cache identity is derived separately from the
+    // CLI login's own token or account evidence.
     const mapped = mapLocalDiagnosticsToAnthropicDiagnostics(localDiagnostics);
     const savedResets = await readSavedResetsForLocalQuota(localDiagnostics, options);
-    return savedResets && mapped.quota
-      ? { ...mapped, quota: { ...mapped.quota, saved_resets: savedResets } }
-      : mapped;
+    const measured = {
+      ...mapped,
+      attemptOutcome: "fresh" as const,
+      quotaMeasuredAtMs: Date.now(),
+    };
+    return savedResets && measured.quota
+      ? { ...measured, quota: { ...measured.quota, saved_resets: savedResets } }
+      : measured;
   }
 
   if (localDiagnostics.authStatus !== "authenticated") {
@@ -1952,6 +2259,7 @@ export async function getAnthropicDiagnostics(
     options.requestTimeoutMs,
     options.forceRefresh ? options.operationCache : undefined,
     localDiagnostics.version,
+    options.pollIntervalMs,
   );
   if (fallbackQuota.state !== "success") {
     return {
@@ -1965,6 +2273,7 @@ export async function getAnthropicDiagnostics(
       checkedCommands: localDiagnostics.checkedCommands,
       message: buildAnthropicNoQuotaDiagnosticsMessage(fallbackQuota.detail),
       credentialFingerprint,
+      attemptOutcome: fallbackQuota.attempt,
       ...(fallbackQuota.failureCategory !== undefined
         ? { failureCategory: fallbackQuota.failureCategory }
         : {}),
@@ -1989,6 +2298,8 @@ export async function getAnthropicDiagnostics(
     checkedCommands: localDiagnostics.checkedCommands,
     quota: fallbackQuota.quota,
     credentialFingerprint,
+    attemptOutcome: fallbackQuota.attempt,
+    quotaMeasuredAtMs: fallbackQuota.measuredAtMs,
     // The plan belongs to the CLI login only when this quota came from that login's own token.
     ...(credentials.source === "claude-credentials" && localDiagnostics.planLabel !== undefined
       ? { planLabel: localDiagnostics.planLabel }
@@ -1998,18 +2309,29 @@ export async function getAnthropicDiagnostics(
 
 export async function hasAnthropicCredentialsConfigured(
   options: AnthropicProbeOptions = {},
+  availability: { treatUnverifiedAsConfigured?: boolean } = {},
 ): Promise<boolean> {
   try {
     const diagnostics = await getAnthropicLocalDiagnostics(options);
-    return diagnostics.installed && diagnostics.authStatus === "authenticated";
+    if (diagnostics.installed && diagnostics.authStatus === "authenticated") return true;
+    // A probe that could not report a status (timeout, unreadable output) is not a sign-out; a
+    // caller that shows the error row instead of hiding the provider treats it as still configured.
+    return (
+      availability.treatUnverifiedAsConfigured === true &&
+      diagnostics.installed &&
+      diagnostics.authStatus === "unknown"
+    );
   } catch {
-    return false;
+    return availability.treatUnverifiedAsConfigured === true;
   }
 }
 
 /**
- * Identity of the Claude Agent provider's single Claude CLI login. Null when the CLI reports quota
- * itself (no account binding) or cannot be probed, so the caller must not cache it.
+ * Identity of the Claude Agent provider's single Claude CLI login. It is account-specific:
+ * the readable first-party token keys it, otherwise the CLI's own user-specific account evidence
+ * (email or account/user id) does. An organization id alone is shared by its members, so it never
+ * keys a scope. Without user-specific evidence, null keeps another account's last-good from being
+ * reused.
  */
 export async function resolveClaudeAgentAccountIdentity(params: {
   binaryPath?: string;
@@ -2026,42 +2348,107 @@ export async function resolveClaudeAgentAccountIdentity(params: {
   } catch {
     return null;
   }
-  // Claude CLI quota does not expose an account identity.
-  if (localDiagnostics.localQuota) return null;
 
   const identity = await claudeCliAccountIdentity(localDiagnostics, params.runtimeDetected);
   if (!identity) return null;
-  return await composeResolvedAuthIdentities({
+  const composition = {
     providerId: "claude-agent",
     identities: [identity],
     qualifiers: [params.onlyCurrentModel ? "only-current-model" : "all-models"],
-  });
+  };
+  return (
+    (await composeResolvedAuthIdentities(composition)) ??
+    composeProcessLocalAuthIdentities(composition)
+  );
 }
 
 /**
- * The Claude CLI row's identity. A readable first-party CLI token keys it, because its quota and its
- * quota depends on that token. Otherwise the row shows only the CLI's install and sign-in
- * state, so that state keys it.
+ * The Claude CLI row's identity. A readable first-party CLI token keys it, because its quota
+ * depends on that token. Otherwise the CLI's own non-secret, user-specific account evidence keys
+ * it; an organization id alone is shared by every member and is never used. Without user
+ * evidence, a machine-only state would outlive an account switch. On platforms without protected
+ * identity storage the token is never used and only the in-memory process-local identity applies.
  */
 async function claudeCliAccountIdentity(
   localDiagnostics: AnthropicLocalDiagnostics,
   claudeCodeRuntimeDetected: boolean,
 ): Promise<ResolvedAuthIdentity | null> {
+  // A transient probe failure carries no account evidence for this cycle. Reuse the last
+  // successful identity only while its credentials source is provably unchanged; otherwise this
+  // cycle deliberately has no scope, so another account's last-good can never be shown.
+  if (
+    localDiagnostics.authStatus === "unknown" &&
+    isTransientProviderFailureCategory(localDiagnostics.failureCategory)
+  ) {
+    return await recallClaudeIdentitySuccess();
+  }
+
+  const accountQualifiers = [
+    localDiagnostics.effectiveBinary ?? "",
+    claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
+    // Preserve the existing cache identity for the previously non-excluded CLI login.
+    "distinct",
+  ] as const;
+  let credentials: AnthropicCredentialsAccess | undefined;
+  let credentialSignature: ClaudeCredentialFileSignature | null = null;
   if (localDiagnostics.authStatus === "authenticated") {
-    const credentials = await readClaudeCliSubscriptionToken(localDiagnostics);
+    // Capture the source signature before the token is read: a file rewritten during the read
+    // leaves a mismatch here, so a later recall cannot attribute a new login to the old identity.
+    credentialSignature = await readClaudeCredentialFileSignature(localDiagnostics.configDirectory);
+    credentials = await readClaudeCliSubscriptionToken(localDiagnostics);
     if (credentials.state === "configured") {
-      return await deriveResolvedAuthIdentity({
+      const protectedIdentity = await deriveResolvedAuthIdentity({
         providerId: "anthropic:claude-cli-account",
         principal: { kind: "credential", value: credentials.accessToken },
-        qualifiers: [
-          localDiagnostics.effectiveBinary ?? "",
-          claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
-          // Preserve the existing cache identity for the previously non-excluded CLI login.
-          "distinct",
-        ],
+        qualifiers: accountQualifiers,
       });
+      if (protectedIdentity) {
+        if (credentials.storage === "file") {
+          rememberClaudeIdentitySuccess(
+            localDiagnostics.configDirectory,
+            protectedIdentity,
+            credentialSignature,
+          );
+        }
+        return protectedIdentity;
+      }
     }
   }
+  // An organization id alone is shared by every member, so it can neither key a scope nor
+  // authorize reusing a previous member's last-good. A readable user token above still wins.
+  if (localDiagnostics.orgOnlyAccountEvidence === true) {
+    forgetClaudeIdentitySuccess(localDiagnostics.configDirectory);
+    return null;
+  }
+  // Without protected identity storage (Windows) the non-secret CLI account evidence still gives
+  // an account-specific, in-memory-only scope. The token is never used for it.
+  if (localDiagnostics.accountHint !== undefined) {
+    const processLocalIdentity = deriveProcessLocalAuthIdentity({
+      providerId: "anthropic:claude-cli-account",
+      principal: { kind: "stable-id", value: localDiagnostics.accountHint },
+      qualifiers: accountQualifiers,
+    });
+    if (processLocalIdentity) {
+      if (credentials?.state === "configured" && credentials.storage === "file") {
+        rememberClaudeIdentitySuccess(
+          localDiagnostics.configDirectory,
+          processLocalIdentity,
+          credentialSignature,
+        );
+      }
+      return processLocalIdentity;
+    }
+  }
+  // A signed-in CLI with no account evidence this cycle cannot be attributed. Reuse the last
+  // success's scope only while its credentials source is provably unchanged.
+  if (
+    localDiagnostics.authStatus === "authenticated" &&
+    localDiagnostics.accountHint === undefined
+  ) {
+    const recalled = await recallClaudeIdentitySuccess();
+    if (recalled) return recalled;
+  }
+  if (localDiagnostics.localQuota && localDiagnostics.accountHint === undefined) return null;
   return await deriveResolvedAuthIdentity({
     providerId: "anthropic:claude-cli-state",
     principal: { kind: "stable-id", value: "claude-cli-state" },
@@ -2073,6 +2460,9 @@ async function claudeCliAccountIdentity(
       claudeConfigDirectoryQualifier(localDiagnostics.configDirectory),
       localDiagnostics.claudeAiLoginVerified === true ? "verified" : "unverified",
       claudeCodeRuntimeDetected ? "detected" : "undetected",
+      ...(localDiagnostics.accountHint === undefined
+        ? []
+        : [`account:${localDiagnostics.accountHint}`]),
     ],
   });
 }
