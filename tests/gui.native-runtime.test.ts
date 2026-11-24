@@ -561,6 +561,7 @@ describe("native window runtime", () => {
     );
     await waitFor(() => snapshots.at(-1)?.status === "ready", "initial child discovery");
     expect(fake.streams).toHaveLength(1);
+    const existing = snapshots.at(-1)?.children.find((child) => child.sessionId === "ses_existing");
 
     liveChildren.push({ id: "ses_created", parentID: "ses_root", title: "Created" });
     fake.streams[0]?.pushEvent({
@@ -575,6 +576,11 @@ describe("native window runtime", () => {
     await waitFor(
       () => snapshots.at(-1)?.children.some((child) => child.sessionId === "ses_created"),
       "created child arrives through the existing stream",
+    );
+    // Re-publishing the list keeps unchanged row objects, so keyed rendering
+    // reuses their DOM instead of remounting an open hover card.
+    expect(snapshots.at(-1)?.children.find((child) => child.sessionId === "ses_existing")).toBe(
+      existing,
     );
 
     liveChildren.splice(

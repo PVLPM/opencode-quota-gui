@@ -184,10 +184,17 @@ export function elementsNamed(node: TestNode, tag: string): TestNode[] {
  * carries the field's next value.
  */
 export interface TestEvent {
-  readonly currentTarget?: { readonly value?: string; readonly checked?: boolean };
+  readonly currentTarget?: {
+    readonly value?: string;
+    readonly checked?: boolean;
+    /** DOM traversal a row's drag-select guard reads from its click event. */
+    closest?: (selector: string) => { contains(node: unknown): boolean } | null;
+  };
   readonly target?: { checked: boolean };
   readonly stopPropagation?: () => void;
   readonly defaultPrevented?: boolean;
+  /** Mouse clicks carry a count; 0 means a keyboard-activated click. */
+  readonly detail?: number;
   /** Keyboard events: the grip's Alt+Arrow reorder reads `key` and `altKey`. */
   readonly key?: string;
   readonly altKey?: boolean;

@@ -564,7 +564,9 @@ export function createNativeCacheObserverRuntime(options: {
   function notifyChildren(watcher: ChildWatcher): void {
     const snapshot: NativeCacheObserverChildrenSnapshot = {
       status: watcher.status,
-      children: [...watcher.children.values()].map((child) => ({ ...child })),
+      // Reuse the stored child objects: keyed row rendering must not remount a
+      // row just because the list was re-published.
+      children: [...watcher.children.values()],
     };
     for (const listener of Array.from(watcher.listeners)) {
       try {
@@ -583,7 +585,11 @@ export function createNativeCacheObserverRuntime(options: {
     for (const [sessionId, child] of nextChildren) {
       const owner = childOwners.get(sessionId);
       if (owner !== undefined && owner !== watcher.parentSessionId) continue;
-      ownedChildren.set(sessionId, child);
+      const previous = watcher.children.get(sessionId);
+      ownedChildren.set(
+        sessionId,
+        previous !== undefined && previous.label === child.label ? previous : child,
+      );
     }
 
     let changed = watcher.children.size !== ownedChildren.size;

@@ -68,6 +68,7 @@ function makeDataset(parts: {
   projects?: OpenCodeProjectInfo[];
   messages?: OpenCodeRawAssistantRow[];
   compactions?: OpenCodeCompactionMarker[];
+  userMessages?: Array<{ sessionId: string; atMs: number; messageId: string }>;
 }): UsageAnalyticsDataset {
   const sessions: Record<string, OpenCodeSessionInfo> = {};
   for (const session of parts.sessions ?? []) sessions[session.id] = session;
@@ -78,6 +79,7 @@ function makeDataset(parts: {
     projects,
     messages: parts.messages ?? [],
     compactions: parts.compactions ?? [],
+    userMessages: parts.userMessages ?? [],
   };
 }
 
@@ -681,5 +683,126 @@ describe("session model identity and timing projection", () => {
     expect(root?.ownTokens.total).toBe(4);
     expect(root?.subtreeTokens.total).toBe(44);
     expect(child?.ownTokens.total).toBe(40);
+  });
+
+  it("marks only the first root step after each user prompt and excludes descendants' prompts", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "msg_a", 1_000, { input: 1 }),
+        assistantRow("ses_root", "msg_b", 3_000, { input: 2 }),
+        assistantRow("ses_root", "msg_c", 5_000, { input: 3 }),
+        assistantRow("ses_child", "msg_child", 3_000, { input: 4 }),
+      ],
+      userMessages: [
+        { sessionId: "ses_root", atMs: 500, messageId: "usr_first" },
+        { sessionId: "ses_root", atMs: 1_000, messageId: "usr_second" },
+        { sessionId: "ses_root", atMs: 2_500, messageId: "usr_follow_up" },
+        { sessionId: "ses_child", atMs: 2_600, messageId: "usr_child_task" },
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_root");
+    const rootSteps = snapshot.steps.filter((step) => step.sessionId === "ses_root");
+    // Two prompts before step 1 and one between steps 1 and 2: one marker each.
+    expect(rootSteps.map((step) => step.inputMarker === true)).toEqual([true, true, false]);
+    // A descendant prompt is not a marker on the main chart.
+    expect(snapshot.steps.find((step) => step.sessionId === "ses_child")?.inputMarker).toBe(
+      undefined,
+    );
+    // Positions only: prompt text and even message ids never enter the DTO.
+    expect(JSON.stringify(snapshot)).not.toContain("usr_first");
+    expect(JSON.stringify(snapshot)).not.toContain("usr_follow_up");
+  });
+
+  it("marks the step created after an input that arrives mid-step, not the running step", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        {
+          ...assistantRow("ses_root", "msg_running", 1_000, { input: 1 }),
+          completedAtMs: 10_000,
+        },
+        { ...assistantRow("ses_root", "msg_next", 12_000, { input: 2 }), completedAtMs: 15_000 },
+      ],
+      userMessages: [{ sessionId: "ses_root", atMs: 5_000, messageId: "usr_mid_step" }],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps.map((step) => step.inputMarker === true)).toEqual([false, true]);
+  });
+
+  it("uses stored assistant parentID linkage ahead of creation timing", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        {
+          ...assistantRow("ses_root", "msg_running", 1_000, { input: 1 }),
+          completedAtMs: 10_000,
+        },
+        { ...assistantRow("ses_root", "msg_next", 12_000, { input: 2 }), completedAtMs: 15_000 },
+      ],
+      userMessages: [
+        {
+          sessionId: "ses_root",
+          atMs: 5_000,
+          messageId: "usr_mid_step",
+          replyMessageIds: ["msg_running"],
+        },
+      ],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps.map((step) => step.inputMarker === true)).toEqual([true, false]);
+  });
+
+  it("leaves an input unmarked when the step has no verifiable creation time", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        {
+          ...assistantRow("ses_root", "msg_unknown_start", 1_000, { input: 1 }),
+          createdAtMs: 0,
+          completedAtMs: 10_000,
+        },
+      ],
+      userMessages: [{ sessionId: "ses_root", atMs: 5_000, messageId: "usr_mid_step" }],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps.map((step) => step.inputMarker === true)).toEqual([false]);
+  });
+
+  it("leaves an input unmarked when its time equals the next step's creation time", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }],
+      messages: [
+        { ...assistantRow("ses_root", "msg_same_ms", 5_000, { input: 1 }), completedAtMs: 9_000 },
+      ],
+      userMessages: [{ sessionId: "ses_root", atMs: 5_000, messageId: "usr_same_ms" }],
+    });
+    const steps = createUsageAnalytics(dataset).session("ses_root").steps;
+    expect(steps.map((step) => step.inputMarker === true)).toEqual([false]);
+  });
+
+  it("marks a child task prompt on step 1 and a follow-up mid-session without its parent's prompts", () => {
+    const dataset = makeDataset({
+      sessions: [{ id: "ses_root" }, { id: "ses_child", parentID: "ses_root" }],
+      messages: [
+        assistantRow("ses_root", "msg_root", 1_000, { input: 1 }),
+        assistantRow("ses_child", "msg_child_a", 1_000, { input: 2 }),
+        assistantRow("ses_child", "msg_child_b", 3_000, { input: 3 }),
+        assistantRow("ses_child", "msg_child_c", 5_000, { input: 4 }),
+      ],
+      userMessages: [
+        { sessionId: "ses_root", atMs: 1_000, messageId: "usr_root" },
+        { sessionId: "ses_child", atMs: 500, messageId: "usr_child_task" },
+        { sessionId: "ses_child", atMs: 4_500, messageId: "usr_child_follow_up" },
+      ],
+    });
+    const snapshot = createUsageAnalytics(dataset).session("ses_child");
+    const childSteps = snapshot.steps.filter((step) => step.sessionId === "ses_child");
+    expect(childSteps.map((step) => step.messageId)).toEqual([
+      "msg_child_a",
+      "msg_child_b",
+      "msg_child_c",
+    ]);
+    expect(childSteps.map((step) => step.inputMarker === true)).toEqual([true, false, true]);
   });
 });

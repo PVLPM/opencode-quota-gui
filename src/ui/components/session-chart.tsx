@@ -10,11 +10,12 @@ import { chartIndexAt, createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
 import {
   axisRangeCaption,
+  formatDateOnly,
   formatElapsed,
   formatExactCount,
   formatModelIdentity,
-  formatPercent,
   formatPercentExact,
+  formatTimeOnly,
   formatTimestamp,
   formatTokenCount,
 } from "../format";
@@ -22,23 +23,27 @@ import {
   formatCacheReuse,
   SESSION_GAP_LABELS,
   type SessionGap,
+  type StepTiming,
   sessionGapMetrics,
   stepTimings,
 } from "../session-gaps";
 import { modelTransitions } from "../session-timing";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
+import { ModelIdentityLabel } from "./model-identity";
 
 /**
  * Session graphs (design spec §3; owner 13–17).
  *
- * One shared chart for root sessions and subsessions. The blue context series
- * is measured in the focus session — never borrowed from child context — and
- * carries the last focus value through descendants. The gold Cache Rate line
- * sits in the same plot on a fixed 0–100% scale. The teal Main session series adds focus-session steps only and stays flat through descendants; the
- * orange tree series adds every scoped step. Both cumulative series share one
- * right-axis scale, while context keeps its own left axis. Compaction markers
- * annotate the tree scope without resetting either cumulative series.
+ * One shared chart. The main-session variant plots only the orchestrator's own
+ * steps: blue context, gold Cache Rate, turquoise own cumulative and the orange
+ * tree cumulative aligned to those same step positions. Subagents contribute
+ * only to the tree fold. The focus variant is one session's individual chart:
+ * its own context, own cumulative and Cache Rate, with no descendants at all.
+ *
+ * Both cumulative series share one right-axis scale, while context keeps its
+ * own left axis. Compaction markers annotate the main variant without resetting
+ * either cumulative series.
  *
  * The x axis is the 1-based chronological rendered step sequence: plain
  * numbers, no dates and no fabricated zero. Pointer movement selects the
@@ -48,6 +53,8 @@ import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
  */
 export function SessionChart(props: {
   snapshot: SessionSnapshot;
+  /** `main` is the project Session chart; `focus` is one session's individual chart. */
+  variant: "main" | "focus";
   title?: string;
   /** Anchor for the shell heading; the view keeps its page identity separate. */
   headingId?: string;
@@ -56,40 +63,119 @@ export function SessionChart(props: {
   const active = inspection.active;
   const { size, ref } = createChartLayout(DEFAULT_SESSION_SIZE);
   const geometry = createMemo(() => buildSessionChartGeometry(props.snapshot, size));
-  const transitions = createMemo(() =>
-    modelTransitions(props.snapshot.steps, props.snapshot.focusSessionId),
+  /** The plotted steps: this session's own rows, never its descendants'. */
+  const steps = createMemo(() =>
+    props.snapshot.steps.filter((step) => step.sessionId === props.snapshot.focusSessionId),
   );
+  const transitions = createMemo(() => modelTransitions(steps(), props.snapshot.focusSessionId));
   const transitionAt = (index: number) => transitions().find((entry) => entry.stepIndex === index);
+  /** Distinct model+variant identities; a single-model chart omits the per-step line. */
+  const modelIdentities = createMemo(() => {
+    const seen = new Set<string>();
+    const identities: string[] = [];
+    for (const step of steps()) {
+      if (!step.model) continue;
+      const identity = formatModelIdentity(step.model);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      identities.push(identity);
+    }
+    return identities;
+  });
   const rateAt = (index: number): number | null => geometry().cache.rates[index] ?? null;
-  const timings = createMemo(() => stepTimings(props.snapshot.steps));
+  const timings = createMemo(() => stepTimings(steps()));
   const timingAt = (index: number) => timings()[index];
   /** A stored 0 with an unknown counter is missing data, not a measured zero. */
   const cacheReadAt = (index: number): number | undefined => {
-    const step = props.snapshot.steps[index];
+    const step = steps()[index];
     return step === undefined || step.cacheReadUnknown ? undefined : step.stack.cacheRead;
   };
-  const gaps = createMemo(() => sessionGapMetrics(props.snapshot));
+  // Own-session sequencing, so gap step numbers match the plotted axis.
+  const gaps = createMemo(() => sessionGapMetrics({ ...props.snapshot, steps: steps() }));
   const own = () => props.snapshot.ownSummary;
   const tree = () => props.snapshot.treeTotals;
   const timeZone = () => props.snapshot.timeZone;
-  const gapItem = (label: string, gap: SessionGap | null): ChartSummaryItem => ({
-    label,
-    value:
-      gap === null
-        ? SESSION_GAP_LABELS.unavailable
-        : `${formatElapsed(gap.idleMs)} · ${formatCacheReuse(gap.cacheReusePct)}`,
-    // Honest basis: stored message times, never an HTTP request interval or a cache lifetime.
-    title:
-      gap === null
-        ? SESSION_GAP_LABELS.gapBasis
-        : `${SESSION_GAP_LABELS.gapBasis} (steps ${gap.fromStepIndex + 1} → ${gap.toStepIndex + 1})`,
+  /** Only the main chart carries the tree series; individual charts never show descendants. */
+  const showsTree = () => props.variant === "main" && geometry().hasDescendants;
+  // The main chart disambiguates its two cumulative series; an individual chart
+  // is the session itself, so its labels stay plain.
+  const isMain = () => props.variant === "main";
+  const contextSeriesLabel = () => (isMain() ? "Context · Main session" : "Context");
+  const ownSeriesLabel = () => (isMain() ? "Cumulative · Main session" : "Cumulative");
+  const cacheSeriesLabel = () => (isMain() ? "Cache Rate · Main session" : "Cache Rate");
+  const stepsLabel = () => (isMain() ? "Steps (own)" : "Steps");
+  const compactionsLabel = () => (isMain() ? "Compactions (focus session)" : "Compactions");
+  /**
+   * Prompt markers name their writer: the owner on the main chart or the root's
+   * own view, the parent agent on a child's individual chart. No prompt text.
+   */
+  const focusIsRoot = () =>
+    props.snapshot.nodes.find((node) => node.sessionId === props.snapshot.focusSessionId)
+      ?.parentId === undefined;
+  const inputMarkerLabel = () =>
+    isMain() || focusIsRoot() ? "User prompt" : "Orchestrator message";
+  const inputMarkerIndexes = createMemo(() =>
+    steps().flatMap((step, index) => (step.inputMarker === true ? [index] : [])),
+  );
+  /**
+   * Dates appear only when they add information: a cross-midnight step shows
+   * both timestamps, and a multi-day session anchors Created. Otherwise the
+   * tooltip stays time-only.
+   */
+  const multiDaySteps = createMemo(() => {
+    const list = steps();
+    const first = list[0];
+    const last = list[list.length - 1];
+    return (
+      first !== undefined &&
+      last !== undefined &&
+      formatDateOnly(first.atMs, timeZone()) !== formatDateOnly(last.atMs, timeZone())
+    );
   });
+  const crossesMidnight = (timing: StepTiming): boolean =>
+    timing.createdAtMs !== undefined &&
+    formatDateOnly(timing.createdAtMs, timeZone()) !==
+      formatDateOnly(timing.completedAtMs, timeZone());
+  const createdText = (timing: StepTiming): string =>
+    timing.createdAtMs === undefined
+      ? "—"
+      : crossesMidnight(timing) || multiDaySteps()
+        ? formatTimestamp(timing.createdAtMs, timeZone())
+        : formatTimeOnly(timing.createdAtMs, timeZone());
+  const completedText = (timing: StepTiming): string =>
+    crossesMidnight(timing)
+      ? formatTimestamp(timing.completedAtMs, timeZone())
+      : formatTimeOnly(timing.completedAtMs, timeZone());
+  /** Descendant tokens after the last plotted main step; these never become a fake point. */
+  const trailingTreeTokens = (): number => {
+    if (!showsTree() || geometry().stepCount === 0) return 0;
+    return Math.max(0, tree().total - (geometry().treeCumulativeValues.at(-1) ?? 0));
+  };
+  const compactionCount = () =>
+    props.snapshot.compactionMarkers.filter(
+      (marker) => marker.sessionId === props.snapshot.focusSessionId,
+    ).length;
+  const gapItem = (label: string, gap: SessionGap | null): ChartSummaryItem => {
+    const item: ChartSummaryItem = {
+      label,
+      // The idle span and the reuse share share one card but never one line:
+      // Cache reuse sits on its own row so the summary stays narrow.
+      value: gap === null ? SESSION_GAP_LABELS.unavailable : formatElapsed(gap.idleMs),
+      // Honest basis: stored message times, never an HTTP request interval or a cache lifetime.
+      title:
+        gap === null
+          ? SESSION_GAP_LABELS.gapBasis
+          : `${SESSION_GAP_LABELS.gapBasis} (steps ${gap.fromStepIndex + 1} → ${gap.toStepIndex + 1})`,
+    };
+    if (gap !== null) item.note = formatCacheReuse(gap.cacheReusePct);
+    return item;
+  };
   const gapItems = (): ChartSummaryItem[] => [
     gapItem(SESSION_GAP_LABELS.longestIdleGap, gaps().longestIdle),
     gapItem(SESSION_GAP_LABELS.longestHighReuseGap, gaps().longestHighReuse),
   ];
   const summaryItems = (): ChartSummaryItem[] => [
-    ...(geometry().hasDescendants
+    ...(showsTree()
       ? [
           {
             label: "Tree total tokens",
@@ -115,19 +201,9 @@ export function SessionChart(props: {
     geometry().compaction.filter((marker) => marker.stepIndex === index);
 
   const contextValue = (index: number) => geometry().contextValues[index];
-  const contextIsCarried = (index: number): boolean => {
-    const step = props.snapshot.steps[index];
-    return (
-      step !== undefined &&
-      step.sessionId !== props.snapshot.focusSessionId &&
-      contextValue(index) !== undefined
-    );
-  };
-  const contextLabel = (index: number): string =>
-    contextIsCarried(index) ? "Context · last known focus" : "Context · focus session";
   const activeStep = () => {
     const index = active();
-    return index === undefined ? undefined : props.snapshot.steps[index];
+    return index === undefined ? undefined : steps()[index];
   };
   const activeCompactions = (): SessionCompactionTick[] => {
     const index = active();
@@ -138,29 +214,38 @@ export function SessionChart(props: {
     const index = active();
     return index === undefined ? 0 : geometry().stepX(index) / size.width;
   });
+  /** One style object keeps the Session overlay separate from the shared tooltip. */
+  const tooltipStyle = (): JSX.CSSProperties => {
+    const position = tooltipLayout.position();
+    return {
+      left: `${position.left}px`,
+      top: `${position.top}px`,
+      "min-width": `min(280px, ${position.maxWidth}px)`,
+      "max-width": `${position.maxWidth}px`,
+      "max-height": `${position.maxHeight}px`,
+      visibility: position.visible ? "visible" : "hidden",
+    };
+  };
 
   const formatReuseWords = (rate: number | null): string =>
     rate === null ? SESSION_GAP_LABELS.unavailable : formatPercentExact(rate);
 
   const stepText = (index: number): string => {
-    const step = props.snapshot.steps[index];
+    const step = steps()[index];
     if (!step) return `Step ${index + 1}`;
     const context = contextValue(index);
     const contextText =
-      context === undefined
-        ? "Context —"
-        : contextIsCarried(index)
-          ? `Context last known focus ${formatExactCount(context)}`
-          : `Context ${formatExactCount(context)}`;
+      context === undefined ? "Context —" : `Context ${formatExactCount(context)}`;
     const parts = [
       `Step ${index + 1}`,
       formatTimestamp(step.atMs, timeZone()),
       contextText,
-      `Cumulative Main session ${formatExactCount(geometry().ownCumulativeValues[index] ?? 0)}`,
+      `${ownSeriesLabel()} ${formatExactCount(geometry().ownCumulativeValues[index] ?? 0)}`,
     ];
-    if (geometry().hasDescendants) {
+    if (step.inputMarker) parts.push(`Input ${inputMarkerLabel()}`);
+    if (showsTree()) {
       parts.push(
-        `Cumulative Session tree ${formatExactCount(geometry().treeCumulativeValues[index] ?? 0)}`,
+        `Cumulative · Session tree ${formatExactCount(geometry().treeCumulativeValues[index] ?? 0)}`,
       );
     }
     const rate = rateAt(index);
@@ -252,31 +337,33 @@ export function SessionChart(props: {
         <>
           <div class="qg-totals">
             <div class="qg-totals__row">
-              <span class="qg-totals__label">Steps (own)</span>
+              <span class="qg-totals__label">{stepsLabel()}</span>
               <span class="qg-totals__value">{formatExactCount(own().stepCount)}</span>
             </div>
+            <Show when={showsTree()}>
+              <div class="qg-totals__row">
+                <span class="qg-totals__label">Steps (tree)</span>
+                <span class="qg-totals__value">
+                  {formatExactCount(props.snapshot.steps.length)}
+                </span>
+              </div>
+            </Show>
             <div class="qg-totals__row">
-              <span class="qg-totals__label">Steps (tree)</span>
-              <span class="qg-totals__value">{formatExactCount(props.snapshot.steps.length)}</span>
-            </div>
-            <div class="qg-totals__row">
-              <span class="qg-totals__label">Compactions (focus session)</span>
-              <span class="qg-totals__value">
-                {formatExactCount(props.snapshot.compactionMarkers.length)}
-              </span>
+              <span class="qg-totals__label">{compactionsLabel()}</span>
+              <span class="qg-totals__value">{formatExactCount(compactionCount())}</span>
             </div>
           </div>
 
           <div class="qg-legend">
             <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-context)" }}>
               <span class="qg-legend__swatch" aria-hidden="true" />
-              <span class="qg-legend__label">Context · focus session</span>
+              <span class="qg-legend__label">{contextSeriesLabel()}</span>
             </div>
             <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-own)" }}>
-              <span class="qg-legend__swatch" aria-hidden="true" />
-              <span class="qg-legend__label">Cumulative · Main session</span>
+              <span class="qg-legend__swatch qg-legend__swatch--dashed" aria-hidden="true" />
+              <span class="qg-legend__label">{ownSeriesLabel()}</span>
             </div>
-            <Show when={geometry().hasDescendants}>
+            <Show when={showsTree()}>
               <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-total)" }}>
                 <span class="qg-legend__swatch qg-legend__swatch--dashed" aria-hidden="true" />
                 <span class="qg-legend__label">Cumulative · Session tree</span>
@@ -284,7 +371,7 @@ export function SessionChart(props: {
             </Show>
             <div class="qg-legend__item" style={{ "--qg-swatch": "var(--qg-chart-rate)" }}>
               <span class="qg-legend__swatch" aria-hidden="true" />
-              <span class="qg-legend__label">Cache Rate (0–100%)</span>
+              <span class="qg-legend__label">{cacheSeriesLabel()}</span>
             </div>
             <Show when={transitions().some((entry) => entry.kind === "model")}>
               <div class="qg-legend__item">
@@ -296,6 +383,12 @@ export function SessionChart(props: {
               <div class="qg-legend__item">
                 <span class="qg-legend__mark qg-legend__mark--effort" aria-hidden="true" />
                 <span class="qg-legend__label">Effort change</span>
+              </div>
+            </Show>
+            <Show when={inputMarkerIndexes().length > 0}>
+              <div class="qg-legend__item">
+                <span class="qg-legend__mark qg-legend__mark--input" aria-hidden="true" />
+                <span class="qg-legend__label">{inputMarkerLabel()}</span>
               </div>
             </Show>
           </div>
@@ -313,21 +406,22 @@ export function SessionChart(props: {
           when={geometry().stepCount > 0}
           fallback={
             <p class="qg-empty">
-              No completed steps in this {geometry().hasDescendants ? "session tree" : "session"}{" "}
-              yet.
+              No completed steps in the {props.variant === "main" ? "main session" : "session"} yet.
             </p>
           }
         >
           <svg
             viewBox={`0 0 ${size.width} ${geometry().viewHeight}`}
             role="img"
-            aria-label={`Step series for ${props.snapshot.focusSessionId}: focus-session context on the left axis and cumulative consumption ${
-              geometry().hasDescendants
-                ? "for this session and its session tree"
-                : "for this session"
+            aria-label={`Step series for ${props.snapshot.focusSessionId}: ${props.variant === "main" ? "main-session" : "focus-session"} context on the left axis and cumulative consumption ${
+              showsTree() ? "for this session and its session tree" : "for this session"
             } on the right axis, plus Cache rate from 0 to 100 percent of the plot height, over ${geometry().stepCount} completed ${
               geometry().stepCount === 1 ? "step" : "steps"
-            }.`}
+            }.${
+              trailingTreeTokens() > 0
+                ? " The orange Session tree line ends at the last step shown; descendants that ran later are counted only in the final tree total in the summary."
+                : ""
+            }`}
           >
             <text
               class="qg-chart__axis-title qg-chart__axis-title--context"
@@ -402,7 +496,7 @@ export function SessionChart(props: {
               )}
             </For>
 
-            <Show when={geometry().hasDescendants && geometry().tree.areaPath}>
+            <Show when={showsTree() && geometry().tree.areaPath}>
               <path class="qg-chart__area qg-chart__area--total" d={geometry().tree.areaPath} />
             </Show>
             <Show when={geometry().own.areaPath}>
@@ -415,7 +509,7 @@ export function SessionChart(props: {
               />
             </Show>
 
-            <Show when={geometry().hasDescendants && geometry().tree.points.length > 0}>
+            <Show when={showsTree() && geometry().tree.points.length > 0}>
               <path class="qg-chart__line qg-chart__line--total" d={geometry().tree.linePath} />
             </Show>
             <Show when={geometry().own.points.length > 0}>
@@ -430,7 +524,7 @@ export function SessionChart(props: {
 
             <Show
               when={
-                geometry().hasDescendants && geometry().tree.points.length === 1
+                showsTree() && geometry().tree.points.length === 1
                   ? geometry().tree.points[0]
                   : undefined
               }
@@ -488,6 +582,14 @@ export function SessionChart(props: {
                 />
               )}
             </For>
+            <For each={inputMarkerIndexes()}>
+              {(index) => (
+                <path
+                  class="qg-chart__transition qg-chart__transition--input"
+                  d={`M ${geometry().stepX(index) - 3.5} ${geometry().plot.top + 10} h 7 v 7 h -7 Z`}
+                />
+              )}
+            </For>
 
             <Show when={active() !== undefined}>
               <line
@@ -513,7 +615,7 @@ export function SessionChart(props: {
 
             <For each={geometry().labelIndexes}>
               {(index) => {
-                const step = () => props.snapshot.steps[index];
+                const step = () => steps()[index];
                 return (
                   <Show when={step()}>
                     <text
@@ -565,95 +667,151 @@ export function SessionChart(props: {
             {(step) => (
               <output
                 ref={tooltipLayout.tooltipRef}
-                class="qg-tooltip"
-                style={{
-                  left: `${tooltipLayout.position().left}px`,
-                  top: `${tooltipLayout.position().top}px`,
-                  "max-width": `${tooltipLayout.position().maxWidth}px`,
-                  "max-height": `${tooltipLayout.position().maxHeight}px`,
-                  visibility: tooltipLayout.position().visible ? "visible" : "hidden",
-                }}
+                class="qg-tooltip qg-tooltip--session"
+                style={tooltipStyle()}
               >
                 <p class="qg-tooltip__head">
                   <span>Step {(active() ?? 0) + 1}</span>
                 </p>
-                <p class="qg-tooltip__meta">{formatTimestamp(step().atMs, timeZone())}</p>
-                <div class="qg-totals__row qg-tooltip__row">
-                  <span
-                    class="qg-tooltip__swatch"
-                    aria-hidden="true"
-                    style={{ "--qg-swatch": "var(--qg-chart-context)" }}
-                  />
-                  <span class="qg-totals__label">{contextLabel(active() ?? 0)}</span>
-                  <span class="qg-totals__value">
-                    {contextValue(active() ?? 0) === undefined
-                      ? "—"
-                      : formatExactCount(contextValue(active() ?? 0) as number)}
-                  </span>
-                </div>
-                <div class="qg-totals__row qg-tooltip__row">
-                  <span
-                    class="qg-tooltip__swatch"
-                    aria-hidden="true"
-                    style={{ "--qg-swatch": "var(--qg-chart-own)" }}
-                  />
-                  <span class="qg-totals__label">Cumulative · Main session</span>
-                  <span class="qg-totals__value">
-                    {formatExactCount(geometry().ownCumulativeValues[active() ?? 0] ?? 0)}
-                  </span>
-                </div>
-                <Show when={geometry().hasDescendants}>
-                  <div class="qg-totals__row qg-tooltip__row">
+                <div class="qg-tooltip__group qg-tooltip__group--series">
+                  <div class="qg-tooltip__grid-row">
                     <span
                       class="qg-tooltip__swatch"
                       aria-hidden="true"
-                      style={{ "--qg-swatch": "var(--qg-chart-total)" }}
+                      style={{ "--qg-swatch": "var(--qg-chart-context)" }}
                     />
-                    <span class="qg-totals__label">Cumulative · Session tree</span>
-                    <span class="qg-totals__value">
-                      {formatExactCount(geometry().treeCumulativeValues[active() ?? 0] ?? 0)}
+                    <span class="qg-tooltip__label">{contextSeriesLabel()}</span>
+                    <span class="qg-tooltip__value">
+                      {contextValue(active() ?? 0) === undefined
+                        ? "—"
+                        : formatExactCount(contextValue(active() ?? 0) as number)}
                     </span>
                   </div>
-                </Show>
-                <Show when={step().model}>
+                  <div class="qg-tooltip__grid-row">
+                    <span
+                      class="qg-tooltip__swatch"
+                      aria-hidden="true"
+                      style={{ "--qg-swatch": "var(--qg-chart-own)" }}
+                    />
+                    <span class="qg-tooltip__label">{ownSeriesLabel()}</span>
+                    <span class="qg-tooltip__value">
+                      {formatExactCount(geometry().ownCumulativeValues[active() ?? 0] ?? 0)}
+                    </span>
+                  </div>
+                  <Show when={showsTree()}>
+                    <div class="qg-tooltip__grid-row">
+                      <span
+                        class="qg-tooltip__swatch"
+                        aria-hidden="true"
+                        style={{ "--qg-swatch": "var(--qg-chart-total)" }}
+                      />
+                      <span class="qg-tooltip__label">Cumulative · Session tree</span>
+                      <span class="qg-tooltip__value">
+                        {formatExactCount(geometry().treeCumulativeValues[active() ?? 0] ?? 0)}
+                      </span>
+                    </div>
+                  </Show>
+                  <div class="qg-tooltip__grid-row">
+                    <span
+                      class="qg-tooltip__swatch"
+                      aria-hidden="true"
+                      style={{ "--qg-swatch": "var(--qg-chart-rate)" }}
+                    />
+                    <span class="qg-tooltip__label">{cacheSeriesLabel()}</span>
+                    <span class="qg-tooltip__value">
+                      {rateAt(active() ?? 0) === null
+                        ? SESSION_GAP_LABELS.unavailable
+                        : formatPercentExact(rateAt(active() ?? 0))}
+                    </span>
+                  </div>
+                  <Show when={cacheReadAt(active() ?? 0) !== undefined}>
+                    <div class="qg-tooltip__grid-row qg-tooltip__grid-row--detail">
+                      <span class="qg-tooltip__swatch-spacer" aria-hidden="true" />
+                      <span class="qg-tooltip__label">{SESSION_GAP_LABELS.cacheReadTokens}</span>
+                      <span class="qg-tooltip__value">
+                        {formatExactCount(cacheReadAt(active() ?? 0) as number)}
+                      </span>
+                    </div>
+                  </Show>
+                  <Show when={steps()[active() ?? 0]?.inputMarker}>
+                    <div class="qg-tooltip__grid-row">
+                      <span
+                        class="qg-tooltip__swatch qg-tooltip__swatch--input"
+                        aria-hidden="true"
+                      />
+                      <span class="qg-tooltip__label">Input</span>
+                      <span class="qg-tooltip__value">{inputMarkerLabel()}</span>
+                    </div>
+                  </Show>
+                  <Show when={active() === geometry().stepCount - 1 && trailingTreeTokens() > 0}>
+                    <div class="qg-tooltip__grid-row">
+                      <span class="qg-tooltip__swatch-spacer" aria-hidden="true" />
+                      <span class="qg-tooltip__label">Session tree total</span>
+                      <span class="qg-tooltip__value">{formatExactCount(tree().total)}</span>
+                    </div>
+                    <p class="qg-tooltip__note">
+                      Descendants ran later; the tree line ends at this step.
+                    </p>
+                  </Show>
+                  <Show when={activeCompactions().length > 0}>
+                    <p class="qg-tooltip__note">
+                      Compaction{" "}
+                      {activeCompactions()
+                        .map((marker) =>
+                          multiDaySteps()
+                            ? formatTimestamp(marker.atMs, timeZone())
+                            : formatTimeOnly(marker.atMs, timeZone()),
+                        )
+                        .join(", ")}
+                    </p>
+                  </Show>
+                </div>
+                <Show when={modelIdentities().length > 1 ? step().model : undefined}>
                   {(model) => (
-                    <div class="qg-totals__row qg-tooltip__row">
-                      <span class="qg-totals__label">{SESSION_GAP_LABELS.providerModelEffort}</span>
-                      <span class="qg-totals__value">{formatModelIdentity(model())}</span>
+                    <div class="qg-tooltip__group qg-tooltip__group--model">
+                      <ModelIdentityLabel identity={model()} class="qg-tooltip__model" />
+                      <Show when={transitionAt(active() ?? 0)}>
+                        {(entry) => (
+                          <span class="qg-tooltip__note">
+                            {entry().kind === "model" ? "Model changed" : "Effort changed"} from{" "}
+                            {formatModelIdentity(entry().from)} to {formatModelIdentity(entry().to)}
+                          </span>
+                        )}
+                      </Show>
                     </div>
                   )}
                 </Show>
                 <Show when={timingAt(active() ?? 0)}>
                   {(timing) => (
-                    <>
+                    <div class="qg-tooltip__group qg-tooltip__group--timing">
                       <Show when={timing().createdAtMs !== undefined}>
-                        <div class="qg-totals__row qg-tooltip__row">
-                          <span class="qg-totals__label">{SESSION_GAP_LABELS.messageCreated}</span>
-                          <span class="qg-totals__value">
-                            {formatTimestamp(timing().createdAtMs, timeZone())}
+                        <div class="qg-tooltip__grid-row">
+                          <span class="qg-tooltip__label">{SESSION_GAP_LABELS.messageCreated}</span>
+                          <span class="qg-tooltip__value">{createdText(timing())}</span>
+                        </div>
+                      </Show>
+                      <div class="qg-tooltip__grid-row">
+                        <span class="qg-tooltip__label">{SESSION_GAP_LABELS.messageCompleted}</span>
+                        <span class="qg-tooltip__value">{completedText(timing())}</span>
+                      </div>
+                      <Show when={timing().durationMs !== undefined}>
+                        <div class="qg-tooltip__grid-row">
+                          <span class="qg-tooltip__label">
+                            {SESSION_GAP_LABELS.messageDuration}
+                          </span>
+                          <span class="qg-tooltip__value">
+                            {formatElapsed(timing().durationMs)}
                           </span>
                         </div>
                       </Show>
-                      <div class="qg-totals__row qg-tooltip__row">
-                        <span class="qg-totals__label">{SESSION_GAP_LABELS.messageCompleted}</span>
-                        <span class="qg-totals__value">
-                          {formatTimestamp(timing().completedAtMs, timeZone())}
-                        </span>
-                      </div>
-                      <Show when={timing().durationMs !== undefined}>
-                        <div class="qg-totals__row qg-tooltip__row">
-                          <span class="qg-totals__label">{SESSION_GAP_LABELS.messageDuration}</span>
-                          <span class="qg-totals__value">{formatElapsed(timing().durationMs)}</span>
-                        </div>
-                      </Show>
                       <Show when={timing().overlap || timing().idleMs !== undefined}>
-                        <div class="qg-totals__row qg-tooltip__row">
-                          <span class="qg-totals__label">
+                        <div class="qg-tooltip__grid-row">
+                          <span class="qg-tooltip__label">
                             {timing().overlap
                               ? SESSION_GAP_LABELS.overlapsPrevious
                               : SESSION_GAP_LABELS.idleSincePrevious}
                           </span>
-                          <span class="qg-totals__value">
+                          <span class="qg-tooltip__value">
                             {timing().overlap
                               ? timing().overlapMs === undefined
                                 ? "Yes"
@@ -662,51 +820,8 @@ export function SessionChart(props: {
                           </span>
                         </div>
                       </Show>
-                    </>
-                  )}
-                </Show>
-                <Show when={cacheReadAt(active() ?? 0) !== undefined}>
-                  <div class="qg-totals__row qg-tooltip__row">
-                    <span class="qg-totals__label">{SESSION_GAP_LABELS.cacheReadTokens}</span>
-                    <span class="qg-totals__value">
-                      {formatExactCount(cacheReadAt(active() ?? 0) as number)}
-                    </span>
-                  </div>
-                </Show>
-                <div class="qg-totals__row qg-tooltip__row">
-                  <span
-                    class="qg-tooltip__swatch"
-                    aria-hidden="true"
-                    style={{ "--qg-swatch": "var(--qg-chart-rate)" }}
-                  />
-                  <span class="qg-totals__label">{SESSION_GAP_LABELS.cacheReuse}</span>
-                  <span class="qg-totals__value" title={formatPercentExact(rateAt(active() ?? 0))}>
-                    {rateAt(active() ?? 0) === null
-                      ? SESSION_GAP_LABELS.unavailable
-                      : formatPercent(rateAt(active() ?? 0) ?? undefined)}
-                  </span>
-                </div>
-                <Show when={transitionAt(active() ?? 0)}>
-                  {(entry) => (
-                    <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--note">
-                      <span class="qg-totals__label">
-                        {entry().kind === "model" ? "Model changed" : "Effort changed"}
-                      </span>
-                      <span class="qg-totals__value">
-                        {formatModelIdentity(entry().from)} → {formatModelIdentity(entry().to)}
-                      </span>
                     </div>
                   )}
-                </Show>
-                <Show when={activeCompactions().length > 0}>
-                  <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--note">
-                    <span class="qg-totals__label">Compaction</span>
-                    <span class="qg-totals__value">
-                      {activeCompactions()
-                        .map((marker) => formatTimestamp(marker.atMs, timeZone()))
-                        .join(", ")}
-                    </span>
-                  </div>
                 </Show>
               </output>
             )}
@@ -718,19 +833,22 @@ export function SessionChart(props: {
         {(caption) => <p class="qg-chart__axis-caption">{caption()}</p>}
       </Show>
 
-      <Show when={geometry().stepCount > 0 && geometry().focusStepCount === 0}>
+      <Show when={geometry().stepCount > 0 && trailingTreeTokens() > 0}>
         <p class="qg-chart__note">
-          No completed steps in the focus session yet; the teal Main session line stays at zero
-          while the orange Session tree line still covers descendant steps.
+          Descendants added {formatExactCount(trailingTreeTokens())} tokens after the last main
+          session step; the orange Session tree line ends there. Tree total tokens in the summary is
+          the final total.
         </p>
       </Show>
 
       <div class="sr-only">
         <table>
           <caption>
-            {geometry().hasDescendants
-              ? "Completed steps in this session tree. Context is the focus session only; carried values are last known. Cumulative totals show this session and the session tree."
-              : "Completed steps in this session. Context is the focus session only; the cumulative total covers this session."}
+            Completed steps in the {props.variant === "main" ? "main session" : "session"}. Context
+            is this session's own; the cumulative total covers this session.
+            {showsTree()
+              ? " The Session tree cumulative is folded at these step positions only and ends at the last step; descendant activity that ran later appears only in the final tree total summary."
+              : ""}
           </caption>
           <thead>
             <tr>
@@ -738,21 +856,20 @@ export function SessionChart(props: {
               <th scope="col">Session</th>
               <th scope="col">Branch</th>
               <th scope="col">At</th>
+              <th scope="col">Context tokens</th>
               <th scope="col">
-                {geometry().hasDescendants
-                  ? "Context tokens (focus; last known on descendants)"
-                  : "Context tokens (focus)"}
+                {isMain() ? "Cumulative tokens (Main session)" : "Cumulative tokens"}
               </th>
-              <th scope="col">Cumulative tokens (Main session)</th>
-              <Show when={geometry().hasDescendants}>
+              <Show when={showsTree()}>
                 <th scope="col">Cumulative tokens (Session tree)</th>
               </Show>
-              <th scope="col">{SESSION_GAP_LABELS.cacheReuse}</th>
+              <th scope="col">{cacheSeriesLabel()}</th>
               <th scope="col">Compaction</th>
+              <th scope="col">Input</th>
             </tr>
           </thead>
           <tbody>
-            <For each={props.snapshot.steps}>
+            <For each={steps()}>
               {(step, index) => (
                 <tr>
                   <th scope="row">{index() + 1}</th>
@@ -765,7 +882,7 @@ export function SessionChart(props: {
                       : formatExactCount(contextValue(index()) as number)}
                   </td>
                   <td>{formatExactCount(geometry().ownCumulativeValues[index()] ?? 0)}</td>
-                  <Show when={geometry().hasDescendants}>
+                  <Show when={showsTree()}>
                     <td>{formatExactCount(geometry().treeCumulativeValues[index()] ?? 0)}</td>
                   </Show>
                   <td>{formatReuseWords(rateAt(index()))}</td>
@@ -779,6 +896,7 @@ export function SessionChart(props: {
                           )
                           .join("; ")}
                   </td>
+                  <td>{step.inputMarker ? inputMarkerLabel() : "—"}</td>
                 </tr>
               )}
             </For>

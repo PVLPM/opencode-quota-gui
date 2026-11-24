@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { placeChartTooltip } from "../src/ui/tooltip-layout";
 
@@ -63,14 +64,51 @@ describe("chart tooltip collision bounds", () => {
       tooltip: { width: 240, height: 153 },
       anchor: 1,
     });
-    // The visible chart/card intersection is 174x115; the 8px inset leaves
-    // 158x99 for the overlay.
+    // Horizontal collision stays inside the visible chart/card intersection
+    // (174px); vertical collision uses the whole visible scroller (120px).
     expect(result.maxWidth).toBe(158);
-    expect(result.maxHeight).toBe(99);
+    expect(result.maxHeight).toBe(104);
     expect(chart.left + result.left).toBeGreaterThanOrEqual(bounds.left + 8);
     expect(chart.left + result.left + 158).toBeLessThanOrEqual(bounds.left + bounds.width - 8);
     expect(chart.top + result.top).toBeGreaterThanOrEqual(bounds.top + 8);
-    expect(chart.top + result.top + 99).toBeLessThanOrEqual(bounds.top + bounds.height - 8);
+    expect(chart.top + result.top + 104).toBeLessThanOrEqual(bounds.top + bounds.height - 8);
+  });
+
+  it("keeps a tall tooltip's full content even when the plot itself is short", () => {
+    const chart = { left: 40, top: 400, width: 600, height: 240 };
+    const bounds = { left: 9, top: 60, width: 900, height: 700 };
+    const result = placeChartTooltip({
+      chart,
+      bounds,
+      tooltip: { width: 240, height: 430 },
+      anchor: 0.5,
+    });
+    expect(result.visible).toBe(true);
+    // The plot box is 240px tall, but the overlay is not clamped to it.
+    expect(result.maxHeight).toBe(684);
+    expect(result.maxHeight).toBeGreaterThanOrEqual(430);
+    expect(result.maxWidth).toBeGreaterThanOrEqual(240);
+    expect(chart.top + result.top).toBeGreaterThanOrEqual(bounds.top + 8);
+    expect(chart.top + result.top + 430).toBeLessThanOrEqual(bounds.top + bounds.height - 8);
+    const styles = readFileSync(new URL("../src/ui/styles.css", import.meta.url), "utf8");
+    expect(styles).toMatch(/\.qg-tooltip\s*\{[^}]*overflow:\s*hidden;/s);
+    expect(styles).not.toMatch(/\.qg-tooltip\s*\{[^}]*overflow(?:-y)?:\s*(?:auto|scroll);/s);
+    // The Session inspection is a two-column nowrap grid: one line per label
+    // and value, tabular values right-aligned, 280–380px wide.
+    expect(styles).toMatch(
+      /\.qg-tooltip--session\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*280px;[^}]*max-width:\s*380px;/s,
+    );
+    expect(styles).toMatch(
+      /\.qg-tooltip__group--series\s*\{[^}]*grid-template-columns:\s*8px minmax\(0, 1fr\) max-content;/s,
+    );
+    expect(styles).toMatch(/\.qg-tooltip__label\s*\{[^}]*white-space:\s*nowrap;/s);
+    expect(styles).toMatch(
+      /\.qg-tooltip__value\s*\{[^}]*font-variant-numeric:\s*tabular-nums;[^}]*white-space:\s*nowrap;[^}]*text-align:\s*right;/s,
+    );
+    // The Session panel must not clip a tooltip taller than its plot.
+    expect(styles).toMatch(
+      /\.qg-chart-shell__panel:has\(> \.qg-usage--session\)\s*\{[^}]*overflow:\s*visible;/s,
+    );
   });
 
   it("places the tooltip on the opposite half of the plot", () => {

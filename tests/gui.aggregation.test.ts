@@ -66,7 +66,11 @@ import type {
   OpenCodeRawAssistantRow,
   OpenCodeSessionInfo,
 } from "../src/lib/opencode-storage.js";
-import { formatCostText, isAuthoritativelyFree } from "../src/ui/model-analytics.js";
+import {
+  costValueTitle,
+  formatCostText,
+  isAuthoritativelyFree,
+} from "../src/ui/model-analytics.js";
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
@@ -575,6 +579,162 @@ describe("home usage token accounting and pricing", () => {
       expect(isAuthoritativelyFree(usage.totals)).toBe(true);
       expect(formatCostText(usage.totals)).toBe("Free");
     }
+  });
+
+  it("shows longcat-2.5-free as Free from explicit upstream zero rates in both id forms", () => {
+    for (const modelID of ["longcat-2.5-free", "opencode/longcat-2.5-free"]) {
+      const dataset = makeDataset({
+        sessions: [
+          sessionInfo({
+            id: "ses_longcat",
+            projectID: "proj_p",
+            createdMs: NOW - 2 * HOUR_MS,
+          }),
+        ],
+        messages: [
+          assistantRow(
+            "ses_longcat",
+            "msg_longcat",
+            NOW - HOUR_MS,
+            NOW - HOUR_MS + 500,
+            { input: 1_000_000, output: 500_000 },
+            { providerID: "opencode", modelID },
+          ),
+        ],
+      });
+
+      const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+      expect(usage.totals.total).toBe(1_500_000);
+      expect(usage.totals.apiEquivalentCostUsd).toBe(0);
+      expect(usage.totals.unpricedTokens).toBe(0);
+      expect(usage.totals.unknownTokens).toBe(0);
+      expect(isAuthoritativelyFree(usage.totals), modelID).toBe(true);
+      expect(formatCostText(usage.totals)).toBe("Free");
+    }
+  });
+
+  it("prices unpriced and unknown routes from positive recorded cost, never Free", () => {
+    const dataset = makeDataset({
+      sessions: [sessionInfo({ id: "ses_s", projectID: "proj_p", createdMs: NOW - 2 * HOUR_MS })],
+      messages: [
+        assistantRow(
+          "ses_s",
+          "msg_recorded_unpriced",
+          NOW - HOUR_MS,
+          NOW - HOUR_MS + 500,
+          { input: 1_000 },
+          { providerID: "unpriced-labs", modelID: "mystery-1", cost: 0.5 },
+        ),
+        assistantRow(
+          "ses_s",
+          "msg_recorded_unknown",
+          NOW - HOUR_MS,
+          NOW - HOUR_MS + 500,
+          { output: 500 },
+          { providerID: "no-such-provider", modelID: "no-such-model", cost: 0.25 },
+        ),
+      ],
+    });
+
+    const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+    expect(usage.totals.total).toBe(1_500);
+    expect(usage.totals.apiEquivalentCostUsd).toBe(0.75);
+    expect(usage.totals.unpricedTokens).toBe(0);
+    expect(usage.totals.unknownTokens).toBe(0);
+    expect(usage.totals.recordedCostUsd).toBe(0.75);
+    expect(usage.totals.recordedCostTokens).toBe(1_500);
+    expect(isAuthoritativelyFree(usage.totals)).toBe(false);
+    expect(formatCostText(usage.totals)).not.toBe("Free");
+    expect(costValueTitle(usage.totals)).toContain(
+      "Includes cost recorded by OpenCode for models without models.dev pricing.",
+    );
+  });
+
+  it("ignores zero, missing, negative, and non-finite recorded cost", () => {
+    const cases: Array<number | undefined> = [0, undefined, -1, Number.NaN];
+    let messageIndex = 0;
+    const messages = cases.map((cost) => {
+      messageIndex += 1;
+      return assistantRow(
+        "ses_s",
+        `msg_no_recorded_${messageIndex}`,
+        NOW - HOUR_MS,
+        NOW - HOUR_MS + 500,
+        { input: 100 },
+        { providerID: "unpriced-labs", modelID: "mystery-1", cost },
+      );
+    });
+    const dataset = makeDataset({
+      sessions: [sessionInfo({ id: "ses_s", projectID: "proj_p", createdMs: NOW - 2 * HOUR_MS })],
+      messages,
+    });
+
+    const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+    expect(usage.totals.total).toBe(400);
+    expect(usage.totals.apiEquivalentCostUsd).toBeNull();
+    expect(usage.totals.unpricedTokens).toBe(400);
+    expect(usage.totals.unknownTokens).toBe(0);
+    expect(usage.totals.recordedCostUsd).toBeUndefined();
+    expect(formatCostText(usage.totals)).toBe("Unpriced");
+  });
+
+  it("keeps models.dev pricing authoritative over recorded cost", () => {
+    const dataset = makeDataset({
+      sessions: [sessionInfo({ id: "ses_s", projectID: "proj_p", createdMs: NOW - 2 * HOUR_MS })],
+      messages: [
+        assistantRow(
+          "ses_s",
+          "msg_priced_with_recorded",
+          NOW - HOUR_MS,
+          NOW - HOUR_MS + 500,
+          { input: 1_000_000 },
+          { providerID: "openai", modelID: "gpt-4o-mini", cost: 99 },
+        ),
+        assistantRow(
+          "ses_s",
+          "msg_free_with_recorded",
+          NOW - HOUR_MS,
+          NOW - HOUR_MS + 500,
+          { input: 1_000_000 },
+          { providerID: "opencode", modelID: "longcat-2.5-free", cost: 99 },
+        ),
+      ],
+    });
+
+    const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+    expect(usage.totals.apiEquivalentCostUsd).toBe(0.15);
+    expect(usage.totals.unpricedTokens).toBe(0);
+    expect(usage.totals.unknownTokens).toBe(0);
+    expect(usage.totals.recordedCostUsd).toBeUndefined();
+    expect(isAuthoritativelyFree(usage.totals)).toBe(false);
+  });
+
+  it("keeps a partially priced row partial instead of applying recorded cost", () => {
+    const dataset = makeDataset({
+      sessions: [sessionInfo({ id: "ses_s", projectID: "proj_p", createdMs: NOW - 2 * HOUR_MS })],
+      messages: [
+        assistantRow(
+          "ses_s",
+          "msg_partial_with_recorded",
+          NOW - HOUR_MS,
+          NOW - HOUR_MS + 500,
+          { input: 1_000_000, output: 500_000 },
+          { providerID: "partial-labs", modelID: "input-only", cost: 5 },
+        ),
+      ],
+    });
+
+    const { usage } = createUsageAnalytics(dataset).home("24h", NOW);
+
+    expect(usage.totals.apiEquivalentCostUsd).toBe(2);
+    expect(usage.totals.unpricedTokens).toBe(500_000);
+    expect(usage.totals.unknownTokens).toBe(0);
+    expect(usage.totals.recordedCostUsd).toBeUndefined();
+    expect(formatCostText(usage.totals)).not.toBe("Free");
   });
 });
 

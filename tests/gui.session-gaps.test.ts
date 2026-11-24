@@ -68,9 +68,12 @@ describe("labels and formatting", () => {
     expect(SESSION_GAP_LABELS.longestIdleGap).toBe("Longest idle gap");
     expect(SESSION_GAP_LABELS.longestHighReuseGap).toBe("Longest high-reuse gap");
     expect(SESSION_GAP_LABELS.unavailable).toBe("Unavailable");
-    expect(SESSION_GAP_LABELS.messageDuration).toBe("Message created → completed");
+    expect(SESSION_GAP_LABELS.messageCreated).toBe("Created");
+    expect(SESSION_GAP_LABELS.messageCompleted).toBe("Completed");
+    expect(SESSION_GAP_LABELS.messageDuration).toBe("Duration");
+    expect(SESSION_GAP_LABELS.idleSincePrevious).toBe("Idle before");
     expect(HIGH_REUSE_THRESHOLD_PCT).toBe(90);
-    expect(formatCacheReuse(16.6)).toBe("Cache reuse: 17%");
+    expect(formatCacheReuse(16.6)).toBe("Cache reuse: 16.60%");
     expect(formatCacheReuse(null)).toBe("Cache reuse: Unavailable");
     expect(formatCacheReuse(Number.NaN)).toBe("Cache reuse: Unavailable");
   });
@@ -165,7 +168,7 @@ describe("longest idle / high-reuse gaps", () => {
     expect(metrics.longestIdle?.cacheReusePct).toBeCloseTo(10);
     expect(metrics.longestHighReuse).toMatchObject({ toStepIndex: 3, idleMs: 20_000 });
     expect(formatCacheReuse(metrics.longestHighReuse?.cacheReusePct ?? null)).toBe(
-      "Cache reuse: 95%",
+      "Cache reuse: 95.00%",
     );
     expect(metrics.overlappingSteps).toBe(0);
   });

@@ -1,26 +1,21 @@
 import type { JSX } from "solid-js";
 import { createMemo, createSignal, For, Show } from "solid-js";
-import type { SessionNode, SessionSnapshot } from "../../contracts/dashboard";
+import type { ModelIdentity, SessionNode, SessionSnapshot } from "../../contracts/dashboard";
 import type { RangeKey } from "../../contracts/ranges";
 import { cacheHitRate } from "../chart-geometry";
 import { InteractivePopover } from "../components/interactive-popover";
+import { ModelIdentityLabel } from "../components/model-identity";
 import { SessionChart } from "../components/session-chart";
+import { SessionModelStrip } from "../components/session-model-strip";
 import { SortControl } from "../components/sort-control";
 import {
   formatExactCount,
   formatModelIdentity,
-  formatPercent,
   formatPercentExact,
   formatTokenCount,
 } from "../format";
-import { SegmentedControl, SegmentedControlItem } from "../opencode-ui";
 import { formatPath } from "../routing";
-import {
-  defaultSessionScope,
-  SESSION_SCOPES,
-  type SessionScope,
-  scopeSessionSnapshot,
-} from "../session-scope";
+import { focusSessionSnapshot } from "../session-scope";
 import { sortSessionTree } from "../sorting";
 
 /** Very large trees are windowed for rendering only; totals and both graphs always cover every node. */
@@ -33,8 +28,8 @@ function SessionModelCell(props: { models: SessionNode["models"] }): JSX.Element
       <Show when={props.models[0]} fallback="—">
         {(primary) => (
           <>
-            <span class="qg-node__model-text" title={formatModelIdentity(primary())}>
-              {formatModelIdentity(primary())}
+            <span class="qg-node__model-text">
+              <ModelIdentityLabel identity={primary()} />
             </span>
             <Show when={props.models.length > 1}>
               <InteractivePopover
@@ -46,7 +41,11 @@ function SessionModelCell(props: { models: SessionNode["models"] }): JSX.Element
                 content={
                   <ol class="qg-node__model-list">
                     <For each={props.models}>
-                      {(identity) => <li>{formatModelIdentity(identity)}</li>}
+                      {(identity) => (
+                        <li>
+                          <ModelIdentityLabel identity={identity} />
+                        </li>
+                      )}
                     </For>
                   </ol>
                 }
@@ -75,23 +74,52 @@ function SessionCacheRate(props: { node: SessionNode }): JSX.Element {
           : formatPercentExact(rate())
       }
     >
-      {rate() === null ? "—" : formatPercent(rate() ?? undefined)}
+      {rate() === null ? "—" : formatPercentExact(rate())}
     </span>
   );
+}
+
+/** A pointer must travel this far before its click counts as a drag-select. */
+const DRAG_SELECT_DISTANCE = 4;
+
+/** Where a row's current press started; `undefined` until it is pressed. */
+type RowPointerStart = { x: number; y: number } | undefined;
+
+/**
+ * True only for a pointer drag that selected text inside this row. A plain
+ * click, a selection made anywhere else, and keyboard activation all navigate:
+ * `detail` is 0 for a click the browser synthesizes without a pointer.
+ */
+function rowDragSelectionBlocksNavigation(
+  event: MouseEvent & { currentTarget: Element },
+  start: RowPointerStart,
+): boolean {
+  if (event.detail === 0 || start === undefined) return false;
+  if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return false;
+  if (Math.hypot(event.clientX - start.x, event.clientY - start.y) <= DRAG_SELECT_DISTANCE)
+    return false;
+  const selection = typeof window === "undefined" ? null : window.getSelection();
+  if (selection === null || selection.isCollapsed || selection.toString() === "") return false;
+  const row = event.currentTarget.closest(".qg-node");
+  const anchor = selection.anchorNode;
+  return row !== null && anchor !== null && row.contains(anchor);
 }
 
 /**
  * Session page (design spec §10; R25–R27).
  *
  * Breadcrumbs carry the ancestors only — the current page is `aria-current`.
- * The focus session's own context and the tree's cumulative consumption stay
- * separate series. The session tree is an aligned Name | Agent | Model |
- * Cache Rate | Tokens table showing each session's own values; ordering
- * changes siblings only, so a parent always stays above its descendants.
+ * The project chart shows the main session's own steps with the tree cumulative
+ * aligned to them; every other session opens its own individual chart. The
+ * session tree is an aligned Name | Agent | Model | Cache Rate | Tokens table
+ * showing each session's own values; ordering changes siblings only, so a parent
+ * always stays above its descendants.
  */
 export function SessionView(props: {
   snapshot: SessionSnapshot;
   range: RangeKey;
+  /** Open this session's own analytics even when it is a project root. */
+  individual?: boolean;
   stale?: boolean;
 }): JSX.Element {
   const [visibleNodes, setVisibleNodes] = createSignal(NODE_PAGE_SIZE);
@@ -101,15 +129,42 @@ export function SessionView(props: {
   const focusedNode = createMemo(() =>
     props.snapshot.nodes.find((node) => node.sessionId === props.snapshot.focusSessionId),
   );
-  // The scope choice belongs to one focused session; opening another resets to its default.
-  const [override, setOverride] = createSignal<{ id: string; scope: SessionScope }>();
-  const scope = (): SessionScope => {
-    const chosen = override();
-    return chosen?.id === props.snapshot.focusSessionId
-      ? chosen.scope
-      : defaultSessionScope(props.snapshot);
-  };
-  const chartSnapshot = createMemo(() => scopeSessionSnapshot(props.snapshot, scope()));
+  /** The root's own individual view; only it needs a breadcrumb back to the tree chart. */
+  const individualRoot = () => props.individual === true && focusedNode()?.parentId === undefined;
+  /** A project root owns the main chart unless the individual view is explicitly requested. */
+  const variant = (): "main" | "focus" =>
+    props.individual === true || focusedNode()?.parentId !== undefined ? "focus" : "main";
+  // The individual chart never accounts for descendants, in its series or scale.
+  const chartSnapshot = createMemo(() =>
+    variant() === "main" ? props.snapshot : focusSessionSnapshot(props.snapshot),
+  );
+  /**
+   * The charted models in first-use order for an individual/subsession header.
+   * Only consecutive repeats collapse, so a model that returns later is listed
+   * again; the main project chart header never carries this line.
+   */
+  const headerModelIdentities = createMemo(() => {
+    if (variant() !== "focus") return [];
+    const identities: ModelIdentity[] = [];
+    let previous: string | undefined;
+    for (const step of chartSnapshot().steps) {
+      if (!step.model) continue;
+      const identity = formatModelIdentity(step.model);
+      if (identity === previous) continue;
+      previous = identity;
+      identities.push(step.model);
+    }
+    return identities;
+  });
+  /** The focused root's row opens its individual view; every other row keeps its own page. */
+  const sessionHref = (sessionId: string): string =>
+    formatPath(
+      sessionId === props.snapshot.focusSessionId &&
+        (variant() === "main" || props.individual === true)
+        ? { name: "session", sessionId, individual: true }
+        : { name: "session", sessionId },
+      props.range,
+    );
   // A focused child with no descendants adds no information beyond its own
   // chart; a root session and any child with descendants keep the tree.
   const showTree = createMemo(() => {
@@ -134,7 +189,23 @@ export function SessionView(props: {
                 <span aria-hidden="true">›</span>
                 <Show
                   when={!crumb.isFocus}
-                  fallback={<span aria-current="page">{crumb.title}</span>}
+                  fallback={
+                    <Show
+                      when={individualRoot()}
+                      fallback={<span aria-current="page">{crumb.title}</span>}
+                    >
+                      <a
+                        href={formatPath(
+                          { name: "session", sessionId: crumb.sessionId },
+                          props.range,
+                        )}
+                      >
+                        {crumb.title}
+                      </a>
+                      <span aria-hidden="true">›</span>
+                      <span aria-current="page">Individual view</span>
+                    </Show>
+                  }
                 >
                   <a
                     href={formatPath({ name: "session", sessionId: crumb.sessionId }, props.range)}
@@ -148,29 +219,17 @@ export function SessionView(props: {
         </nav>
 
         <header class="qg-page-head">
-          <h2 class="qg-page-title" id="qg-session-head">
-            {props.snapshot.breadcrumbs.find((crumb) => crumb.isFocus)?.title ??
-              props.snapshot.focusSessionId}
-          </h2>
-          <Show when={props.snapshot.nodes.length > 1}>
-            <SegmentedControl
-              class="qg-sort"
-              aria-label="Session chart scope"
-              value={scope()}
-              onChange={(value) => {
-                if (value === "main" || value === "tree")
-                  setOverride({ id: props.snapshot.focusSessionId, scope: value });
-              }}
-            >
-              <For each={SESSION_SCOPES}>
-                {(entry) => (
-                  <SegmentedControlItem value={entry.value}>{entry.label}</SegmentedControlItem>
-                )}
-              </For>
-            </SegmentedControl>
-          </Show>
+          <div class="qg-page-head__heading">
+            <h2 class="qg-page-title" id="qg-session-head">
+              {props.snapshot.breadcrumbs.find((crumb) => crumb.isFocus)?.title ??
+                props.snapshot.focusSessionId}
+            </h2>
+            <Show when={headerModelIdentities().length > 0}>
+              <SessionModelStrip identities={headerModelIdentities()} />
+            </Show>
+          </div>
         </header>
-        <SessionChart snapshot={chartSnapshot()} headingId="qg-session-usage" />
+        <SessionChart snapshot={chartSnapshot()} variant={variant()} headingId="qg-session-usage" />
       </div>
 
       <Show when={showTree()}>
@@ -190,45 +249,54 @@ export function SessionView(props: {
               <span>Tokens</span>
             </div>
             <For each={windowed()}>
-              {(node) => (
+              {(node) => {
                 // The row is a plain container so the "+N" disclosure is not
                 // nested inside a link; the name link stretches over the row.
-                <div
-                  class="qg-node"
-                  data-focus={node.sessionId === props.snapshot.focusSessionId ? "true" : undefined}
-                >
-                  <a
-                    class="qg-node__link"
-                    href={formatPath({ name: "session", sessionId: node.sessionId }, props.range)}
-                    aria-current={
-                      node.sessionId === props.snapshot.focusSessionId ? "page" : undefined
+                // It remembers where its press began, so only a drag that
+                // selected its own text suppresses navigation; a selection made
+                // elsewhere (or a keyboard activation) still follows the link.
+                let pointerStart: RowPointerStart;
+                return (
+                  <div
+                    class="qg-node"
+                    data-focus={
+                      node.sessionId === props.snapshot.focusSessionId ? "true" : undefined
                     }
-                    onClick={(event) => {
-                      // The focused row is the scope control for its own session.
-                      if (node.sessionId !== props.snapshot.focusSessionId) return;
-                      event.preventDefault();
-                      setOverride({ id: node.sessionId, scope: "main" });
+                    onPointerDown={(event) => {
+                      pointerStart = { x: event.clientX, y: event.clientY };
                     }}
                   >
-                    <span
-                      class="qg-node__name"
-                      title={node.title}
-                      style={{ "--qg-node-depth": String(node.depth) }}
+                    <a
+                      class="qg-node__link"
+                      href={sessionHref(node.sessionId)}
+                      aria-current={
+                        node.sessionId === props.snapshot.focusSessionId ? "page" : undefined
+                      }
+                      onClick={(event) => {
+                        if (rowDragSelectionBlocksNavigation(event, pointerStart))
+                          event.preventDefault();
+                      }}
                     >
-                      {node.title}
+                      <span
+                        class="qg-node__name"
+                        title={node.title}
+                        style={{ "--qg-node-depth": String(node.depth) }}
+                      >
+                        {node.title}
+                      </span>
+                    </a>
+                    <span class="qg-node__agent">{node.agent?.trim() ? node.agent : "—"}</span>
+                    <SessionModelCell models={node.models} />
+                    <SessionCacheRate node={node} />
+                    <span
+                      class="qg-list__tokens qg-node__tokens"
+                      title={formatExactCount(node.ownTokens.total)}
+                    >
+                      {formatTokenCount(node.ownTokens.total)}
                     </span>
-                  </a>
-                  <span class="qg-node__agent">{node.agent?.trim() ? node.agent : "—"}</span>
-                  <SessionModelCell models={node.models} />
-                  <SessionCacheRate node={node} />
-                  <span
-                    class="qg-list__tokens qg-node__tokens"
-                    title={formatExactCount(node.ownTokens.total)}
-                  >
-                    {formatTokenCount(node.ownTokens.total)}
-                  </span>
-                </div>
-              )}
+                  </div>
+                );
+              }}
             </For>
           </div>
           <Show when={visibleNodes() < nodes().length}>

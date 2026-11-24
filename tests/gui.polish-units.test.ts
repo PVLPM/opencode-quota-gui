@@ -48,6 +48,7 @@ import {
 } from "../src/ui/chart-geometry.js";
 import { BUSY_DELAY_MS, createBusyIndicator } from "../src/ui/components/busy.js";
 import { estimateExplanation } from "../src/ui/components/estimate.js";
+import { focusSessionSnapshot } from "../src/ui/session-scope.js";
 import { modelTransitions } from "../src/ui/session-timing.js";
 import { sortProjectRows, sortRootRows, sortSessionTree } from "../src/ui/sorting.js";
 
@@ -374,8 +375,29 @@ describe("buildUsageGeometry external gaps and rounded segments", () => {
   });
 });
 
-describe("buildSessionChartGeometry own, tree and context carry", () => {
-  it("carries focus context through children while own cumulative stays flat on the shared scale", () => {
+describe("focusSessionSnapshot", () => {
+  it("keeps only the focus session's own node, steps and totals", () => {
+    const focus = "session-focus";
+    const child = "session-child";
+    const snapshot = sessionOf(
+      focus,
+      [sessionNode(focus), sessionNode(child, focus, 1)],
+      [sessionStep(focus, 0, 500, 500), sessionStep(child, 1, 999, 100)],
+    );
+    const scoped = focusSessionSnapshot(snapshot);
+
+    expect(scoped.nodes.map((node) => node.sessionId)).toEqual([focus]);
+    expect(scoped.nodes[0]?.childIds).toEqual([]);
+    expect(scoped.steps.map((step) => step.sessionId)).toEqual([focus]);
+    expect(scoped.treeTotals).toEqual(snapshot.ownSummary);
+    // The source snapshot is never mutated.
+    expect(snapshot.steps).toHaveLength(2);
+    expect(snapshot.nodes).toHaveLength(2);
+  });
+});
+
+describe("buildSessionChartGeometry main-step axis and tree fold", () => {
+  it("plots only main-session steps and folds descendant tokens into the next main point", () => {
     const focus = "session-focus";
     const child = "session-child";
     const rootNode = sessionNode(focus);
@@ -393,28 +415,27 @@ describe("buildSessionChartGeometry own, tree and context carry", () => {
       ),
     );
 
+    expect(geometry.stepCount).toBe(2);
     expect(geometry.hasDescendants).toBe(true);
-    expect(geometry.focusStepCount).toBe(2);
-    // The child context is never borrowed; the last focus value carries.
-    expect(geometry.contextValues).toEqual([500, 500, 300, 300]);
-    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1, 2, 3]);
-    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 500, 300, 300]);
-    expect(geometry.ownCumulativeValues).toEqual([500, 500, 900, 900]);
-    expect(geometry.treeCumulativeValues).toEqual([500, 1200, 1600, 1650]);
-    expect(geometry.own.points.map((point) => point.value)).toEqual([500, 500, 900, 900]);
-    expect(geometry.tree.points.map((point) => point.value)).toEqual([500, 1200, 1600, 1650]);
-    for (let index = 0; index < geometry.own.points.length; index += 1) {
-      expect(geometry.ownCumulativeValues[index]).toBeLessThanOrEqual(
-        geometry.treeCumulativeValues[index] as number,
-      );
-    }
+    // No x position exists for a descendant step.
+    expect(geometry.contextValues).toEqual([500, 300]);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1]);
+    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 300]);
+    expect(geometry.ownCumulativeValues).toEqual([500, 900]);
+    // The child's 700 between two main steps belongs to the second point; the
+    // trailing 50 after the last main step is not plotted.
+    expect(geometry.treeCumulativeValues).toEqual([500, 1600]);
+    expect(geometry.own.points.map((point) => point.value)).toEqual([500, 900]);
+    expect(geometry.tree.points.map((point) => point.value)).toEqual([500, 1600]);
     expect(geometry.own.domainMax).toBe(1650);
     expect(geometry.tree.domainMax).toBe(1650);
     expect(geometry.cumulativeTicks).toEqual(geometry.tree.ticks);
     expect(geometry.own.points[0]?.y).toBeCloseTo(geometry.tree.points[0]?.y as number, 10);
+    expect(geometry.cache.rates).toHaveLength(2);
+    expect(geometry.labelIndexes).toEqual([0, 1]);
   });
 
-  it("retains unknown context before the first focus sample and starts own cumulative at zero", () => {
+  it("never invents a context value or a position for a descendant step before the first main step", () => {
     const focus = "session-focus";
     const child = "session-child";
     const geometry = buildSessionChartGeometry(
@@ -429,18 +450,17 @@ describe("buildSessionChartGeometry own, tree and context carry", () => {
       ),
     );
 
-    expect(geometry.hasDescendants).toBe(true);
-    expect(geometry.contextValues).toEqual([undefined, 500, 500]);
-    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([1, 2]);
-    expect(geometry.context.points.map((point) => point.value)).toEqual([500, 500]);
-    expect(geometry.focusStepCount).toBe(1);
-    expect(geometry.ownCumulativeValues).toEqual([0, 200, 200]);
-    expect(geometry.treeCumulativeValues).toEqual([100, 300, 350]);
+    expect(geometry.stepCount).toBe(1);
+    expect(geometry.contextValues).toEqual([500]);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0]);
+    expect(geometry.ownCumulativeValues).toEqual([200]);
+    // The earlier child's 100 folds into the first main point; the later 50 does not.
+    expect(geometry.treeCumulativeValues).toEqual([300]);
     expect(geometry.own.domainMax).toBe(350);
     expect(geometry.tree.domainMax).toBe(350);
   });
 
-  it("shows own and tree for a subsession with descendants and only own for a leaf", () => {
+  it("shows only own values for a leaf and aligns a descendant tree fold for a parent", () => {
     const focus = "session-child";
     const grandchild = "session-grandchild";
     const leaf = buildSessionChartGeometry(
@@ -462,15 +482,15 @@ describe("buildSessionChartGeometry own, tree and context carry", () => {
       ),
     );
     expect(withDescendant.hasDescendants).toBe(true);
-    expect(withDescendant.focusStepCount).toBe(1);
-    expect(withDescendant.contextValues).toEqual([1200, 1200]);
-    expect(withDescendant.ownCumulativeValues).toEqual([1400, 1400]);
-    expect(withDescendant.treeCumulativeValues).toEqual([1400, 1500]);
+    expect(withDescendant.stepCount).toBe(1);
+    expect(withDescendant.contextValues).toEqual([1200]);
+    expect(withDescendant.ownCumulativeValues).toEqual([1400]);
+    expect(withDescendant.treeCumulativeValues).toEqual([1400]);
     expect(withDescendant.own.domainMax).toBe(1500);
     expect(withDescendant.tree.domainMax).toBe(1500);
   });
 
-  it("does not reset own or tree prefixes at compaction and does not count carried context as focus steps", () => {
+  it("does not reset prefixes at compaction and does not plot a descendant step", () => {
     const focus = "session-focus";
     const child = "session-child";
     const snapshot = sessionOf(
@@ -485,11 +505,11 @@ describe("buildSessionChartGeometry own, tree and context carry", () => {
     snapshot.compactionMarkers = [{ sessionId: focus, atMs: 1500, messageId: "msg-compaction" }];
     const geometry = buildSessionChartGeometry(snapshot);
 
-    expect(geometry.focusStepCount).toBe(2);
-    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1, 2]);
-    expect(geometry.contextValues).toEqual([500, 300, 300]);
-    expect(geometry.ownCumulativeValues).toEqual([500, 900, 900]);
-    expect(geometry.treeCumulativeValues).toEqual([500, 900, 1000]);
+    expect(geometry.stepCount).toBe(2);
+    expect(geometry.context.points.map((point) => point.stepIndex)).toEqual([0, 1]);
+    expect(geometry.contextValues).toEqual([500, 300]);
+    expect(geometry.ownCumulativeValues).toEqual([500, 900]);
+    expect(geometry.treeCumulativeValues).toEqual([500, 900]);
     expect(geometry.compaction).toEqual([
       expect.objectContaining({ sessionId: focus, stepIndex: 1 }),
     ]);

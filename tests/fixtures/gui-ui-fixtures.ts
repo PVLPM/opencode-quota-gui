@@ -301,6 +301,7 @@ export function settingsSnapshot(overrides: Partial<SettingsSnapshot> = {}): Set
     "dashboard.hiddenRows": [],
     "dashboard.providerOrder": [],
     "dashboard.cardOrder": [],
+    "dashboard.rowOrder": {},
     "dashboard.port": 4144,
   };
   return {

@@ -107,6 +107,15 @@
   display: flex;
   flex-direction: column;
   gap: 0;
+  /* Host shells often disable selection around injected panels; product text stays copyable. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.qg-app input,
+.qg-app textarea {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .qg-chrome {
@@ -672,6 +681,21 @@
   vertical-align: -0.2em;
 }
 
+/* Compact model label: the provider mark takes the place of the text prefix.
+   It follows the line's font size and text color, and the surrounding
+   ellipsis/nowrap containers keep working because the label stays inline. */
+.qg-model-identity {
+  display: inline;
+  max-width: 100%;
+}
+
+.qg-model-identity__logo {
+  width: 1em;
+  height: 1em;
+  margin-right: 0.25em;
+  vertical-align: -0.15em;
+}
+
 .qg-card__logo {
   align-self: center;
   color: var(--qg-text-muted);
@@ -1168,6 +1192,13 @@
   stroke-width: 1.25;
 }
 
+/* Input markers are filled squares (below the transition row); model changes
+   stay diamonds and effort-only changes hollow squares. */
+.qg-chart__transition--input {
+  fill: var(--qg-text-secondary);
+  stroke: none;
+}
+
 .qg-legend__mark {
   display: inline-block;
   flex: none;
@@ -1183,6 +1214,11 @@
 
 .qg-legend__mark--effort {
   background: transparent;
+}
+
+.qg-legend__mark--input {
+  background: var(--qg-text-secondary);
+  border-color: var(--qg-text-secondary);
 }
 
 .qg-chart__marker {
@@ -1262,6 +1298,8 @@
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
+  /* Both cumulative series are dashed; hue separates main from tree. */
+  stroke-dasharray: 6 3;
 }
 
 .qg-chart__line--total {
@@ -1270,7 +1308,6 @@
   stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
-  /* Non-colour distinction from the solid own-session line. */
   stroke-dasharray: 6 3;
 }
 
@@ -1291,6 +1328,9 @@
   position: absolute;
   cursor: crosshair;
   outline: none;
+  /* Scrubbing must never start a text selection. */
+  user-select: none;
+  -webkit-user-select: none;
   /* Keep vertical page panning available on narrow touch screens. */
   touch-action: pan-y;
 }
@@ -1326,6 +1366,92 @@
   font-size: var(--font-size-small);
   pointer-events: none;
   overflow: hidden;
+}
+
+/* Session inspection: a two-column, nowrap grid so every label and number
+   stays on one line; section dividers keep series, model and timing scannable. */
+.qg-tooltip--session {
+  width: max-content;
+  min-width: 280px;
+  max-width: 380px;
+  padding: 10px 12px;
+}
+
+.qg-tooltip--session .qg-tooltip__head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  justify-content: flex-start;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--qg-border);
+  margin: 0 0 2px;
+  white-space: nowrap;
+}
+
+.qg-tooltip__group {
+  display: grid;
+  gap: 4px 16px;
+  padding: 6px 0;
+}
+
+.qg-tooltip__group + .qg-tooltip__group {
+  border-top: 1px solid var(--qg-border);
+}
+
+.qg-tooltip__group--series {
+  grid-template-columns: 8px minmax(0, 1fr) max-content;
+  align-items: center;
+}
+
+.qg-tooltip__group--model {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.qg-tooltip__group--timing {
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: baseline;
+}
+
+.qg-tooltip__grid-row {
+  display: contents;
+}
+
+.qg-tooltip__label {
+  min-width: 0;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qg-tooltip__value {
+  color: var(--qg-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.qg-tooltip__model {
+  grid-column: 1 / -1;
+  min-width: 0;
+  color: var(--qg-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qg-tooltip__note {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--qg-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .qg-tooltip__head {
@@ -1386,6 +1512,17 @@
   height: 2px;
   border-radius: 1px;
   background: var(--qg-chart-rate);
+}
+
+.qg-tooltip__swatch-spacer {
+  flex: none;
+  width: 8px;
+  height: 8px;
+}
+
+.qg-tooltip__swatch--input {
+  background: var(--qg-text-secondary);
+  border-radius: 1px;
 }
 
 .qg-legend {
@@ -2546,6 +2683,7 @@
   box-shadow: 0 10px 28px #0005;
   cursor: grabbing;
   user-select: none;
+  -webkit-user-select: none;
   transition: none;
 }
 
@@ -2601,6 +2739,9 @@
   color: var(--qg-text-muted);
   cursor: grab;
   touch-action: none;
+  /* A drag handle must not begin a text selection. */
+  user-select: none;
+  -webkit-user-select: none;
   transition:
     color var(--qg-transition),
     background var(--qg-transition);
@@ -2630,6 +2771,16 @@
   column-gap: 8px;
   padding: 5px 8px;
   border-top: 1px solid var(--qg-border);
+}
+
+.qg-vis-row-slot {
+  position: relative;
+  min-width: 0;
+}
+
+.qg-vis-row-slot[data-lifted="true"] {
+  border-radius: var(--qg-radius);
+  background: var(--qg-surface-raised);
 }
 
 .qg-vis-row__label {
@@ -2675,6 +2826,38 @@
   letter-spacing: -0.35px;
   line-height: 1.25;
 }
+.qg-page-head__heading {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.qg-page-head__models {
+  position: relative;
+  margin: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qg-page-head__models-entry,
+.qg-page-head__models-sep {
+  white-space: nowrap;
+}
+.qg-page-head__models .qg-node__more {
+  vertical-align: baseline;
+}
+.qg-page-head__models-measure {
+  position: absolute;
+  top: 0;
+  left: -10000px;
+  visibility: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
 .qg-page-head__meta {
   display: inline-flex;
   align-items: baseline;
@@ -2700,6 +2883,15 @@
 }
 .qg-usage--session {
   grid-template-columns: minmax(0, 1fr);
+}
+
+/*
+ * The Session tooltip may be taller than its plot. Let it leave the panel box
+ * instead of being clipped by the shared rounded frame; its placement already
+ * stays inside the visible scroller viewport.
+ */
+.qg-chart-shell__panel:has(> .qg-usage--session) {
+  overflow: visible;
 }
 .qg-usage--session .qg-legend {
   flex-direction: row;

@@ -137,6 +137,24 @@ export function formatTimestamp(ms: number | undefined, timeZone: string): strin
   return new Date(ms).toLocaleString("en-GB", { timeZone });
 }
 
+/** Compact tooltip date `23/11/2026` in the payload's host zone. */
+export function formatDateOnly(ms: number | undefined, timeZone: string): string {
+  if (ms === undefined || !Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleDateString("en-GB", { timeZone });
+}
+
+/** `23:05:04` in the payload's host zone, with no date. */
+export function formatTimeOnly(ms: number | undefined, timeZone: string): string {
+  if (ms === undefined || !Number.isFinite(ms)) return "—";
+  return new Date(ms).toLocaleTimeString("en-GB", {
+    timeZone,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 /** Elapsed time between stored message times: `850 ms`, `4.2s`, `12m 05s`, `2h 03m`. */
 export function formatElapsed(ms: number | undefined): string {
   if (ms === undefined || !Number.isFinite(ms) || ms < 0) return "-";

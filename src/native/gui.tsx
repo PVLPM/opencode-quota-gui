@@ -12,7 +12,7 @@ import {
 } from "@opencode/plugin/gui";
 import type { JSX } from "solid-js";
 import { createEffect, createSignal, onCleanup } from "solid-js";
-import { supportsNativeGui } from "../lib/opencode-version-core.js";
+import { hostRendersComposerMenuHeading, supportsNativeGui } from "../lib/opencode-version-core.js";
 import type { Location } from "../ui/routing.js";
 import productCss from "../ui/styles.css?inline";
 import { createCacheComposerPill } from "./cache-composer-pill.js";
@@ -145,15 +145,21 @@ export default Plugin.define({
     onCleanup(modelChangeToastSetting.stop);
     ctx.add(
       ComposerPill,
-      createCacheComposerPill(ctx.sessions, runtime, ctx.ui, (session, sessionId) => {
-        const next = navigateNative(
-          runtime.location(),
-          `/session/${encodeURIComponent(sessionId)}`,
-        );
-        if (next === undefined) return;
-        setLocation(next);
-        revealPanel(ctx, session);
-      }),
+      createCacheComposerPill(
+        ctx.sessions,
+        runtime,
+        ctx.ui,
+        (session, sessionId) => {
+          const next = navigateNative(
+            runtime.location(),
+            `/session/${encodeURIComponent(sessionId)}`,
+          );
+          if (next === undefined) return;
+          setLocation(next);
+          revealPanel(ctx, session);
+        },
+        { hostRendersMenuHeading: hostRendersComposerMenuHeading(ctx.app?.version) },
+      ),
     );
 
     // Notifications are a window-lifetime concern: setup runs once per window,

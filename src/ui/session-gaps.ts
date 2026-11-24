@@ -1,4 +1,5 @@
 import type { SessionSnapshot, StepPoint } from "../contracts/dashboard";
+import { formatPercentExact } from "./format";
 
 /** Labels the Session page uses for per-step timing and idle-gap observations. */
 export const SESSION_GAP_LABELS = {
@@ -7,10 +8,10 @@ export const SESSION_GAP_LABELS = {
   unavailable: "Unavailable",
   /** Exact wording for the gap basis: stored message times, not HTTP request times. */
   gapBasis: "Previous message completed → next message created",
-  messageCreated: "Message created",
-  messageCompleted: "Message completed",
-  messageDuration: "Message created → completed",
-  idleSincePrevious: "Idle since previous message",
+  messageCreated: "Created",
+  messageCompleted: "Completed",
+  messageDuration: "Duration",
+  idleSincePrevious: "Idle before",
   overlapsPrevious: "Overlaps previous message",
   cacheReadTokens: "Cache read",
   cacheReuse: "Cache reuse",
@@ -33,10 +34,12 @@ export function stepCacheReuse(step: StepPoint): number | null {
   return (cacheRead / denominator) * 100;
 }
 
-/** `Cache reuse: 17%`; unknown reuse reads `Cache reuse: Unavailable`. */
+/** `Cache reuse: 16.60%`; unknown reuse reads `Cache reuse: Unavailable`. */
 export function formatCacheReuse(pct: number | null): string {
   const value =
-    pct === null || !Number.isFinite(pct) ? SESSION_GAP_LABELS.unavailable : `${Math.round(pct)}%`;
+    pct === null || !Number.isFinite(pct)
+      ? SESSION_GAP_LABELS.unavailable
+      : formatPercentExact(pct);
   return `${SESSION_GAP_LABELS.cacheReuse}: ${value}`;
 }
 

@@ -32,6 +32,9 @@ export function ModelsView(props: {
   dimension: AnalyticsDimension;
   loading?: boolean;
   error?: string;
+  errorRecoverable?: boolean;
+  autoRetry?: boolean;
+  onAutoRetry?: () => void;
   onRetry?: () => void;
   onDimensionChange: (dimension: AnalyticsDimension) => void;
 }): JSX.Element {
@@ -110,6 +113,9 @@ export function ModelsView(props: {
         headingId="qg-models-usage"
         loading={props.loading}
         error={props.error}
+        errorRecoverable={props.errorRecoverable}
+        autoRetry={props.autoRetry}
+        {...(props.onAutoRetry === undefined ? {} : { onAutoRetry: props.onAutoRetry })}
         onRetry={props.onRetry}
         summary={<Show when={summaryItems()}>{(items) => <ChartSummary items={items()} />}</Show>}
         actions={
