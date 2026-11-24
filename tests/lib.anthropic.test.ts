@@ -2585,7 +2585,8 @@ describe("Claude CLI diagnostics", () => {
       // then simulate the request timeout while the body is still stalled.
       void options.consume(response, new AbortController().signal);
       const statePath = join(stateMocks.dir, "anthropic-oauth-throttle.json");
-      for (let attempt = 0; attempt < 200; attempt += 1) {
+      // Real timers: generous margins keep this stable under a loaded full-suite run.
+      for (let attempt = 0; attempt < 1000; attempt += 1) {
         try {
           const state = JSON.parse(readFileSync(statePath, "utf8")) as {
             blockedUntilMs?: number;
@@ -2600,7 +2601,7 @@ describe("Claude CLI diagnostics", () => {
       }
       // Let the publish continuation report the deadline to the caller before
       // this mock simulates the body-read timeout.
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolve) => setTimeout(resolve, 200));
       throw new Error("Request timeout after 5s");
     });
 
