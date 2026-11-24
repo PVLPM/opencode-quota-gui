@@ -211,6 +211,7 @@ const SNAPSHOT = makeSnapshot({
     "deepseek/deepseek-v4.1-flash-1017": {
       status: "supported",
       source: "providers/openrouter/models/deepseek/deepseek-v4.1-flash-1017.toml",
+      base: { input: 0.15, output: 0.6, cache_read: 0.003 },
       overrides: [
         {
           id: "text.input.overrides[0]",
@@ -475,6 +476,7 @@ describe("modelsdev temporal pricing runtime", () => {
     expect(getTemporalPolicy("openrouter", "deepseek/deepseek-v4.1-flash-1017")).toMatchObject({
       status: "supported",
       source: "providers/openrouter/models/deepseek/deepseek-v4.1-flash-1017.toml",
+      base: { input: 0.15, output: 0.6, cache_read: 0.003 },
     });
     expect(getTemporalPolicy("openrouter", "deepseek-v4.1-flash-1017")).toBeNull();
   });
@@ -811,6 +813,35 @@ describe("modelsdev temporal snapshot validation", () => {
       },
     });
     expect(() => normalizeTemporalSnapshot(badCondition)).toThrow();
+  });
+
+  it("validates optional policy base rates", () => {
+    const policy = {
+      status: "supported",
+      source: "providers/openai/models/gpt-5.5.toml",
+      base: { input: 1, output: 2 },
+      overrides: [
+        {
+          id: "text.input.overrides[0]",
+          field: "input",
+          when: { type: "utc_hours", op: "gte", value: "14:00" },
+          rates: { input: 2 },
+        },
+      ],
+      multipliers: [],
+    };
+    const valid = makeSnapshot({ openai: { "gpt-5.5": policy } });
+    expect(normalizeTemporalSnapshot(valid).providers.openai?.["gpt-5.5"]).toMatchObject({
+      base: { input: 1, output: 2 },
+    });
+
+    const unknownKey = makeSnapshot({
+      openai: { "gpt-5.5": { ...policy, base: { input: 1, audio: 2 } } },
+    });
+    expect(() => normalizeTemporalSnapshot(unknownKey)).toThrow(/base/);
+
+    const empty = makeSnapshot({ openai: { "gpt-5.5": { ...policy, base: {} } } });
+    expect(() => normalizeTemporalSnapshot(empty)).toThrow(/at least one rate/);
   });
 
   it("rejects a route that escapes the pinned provider/model namespace", () => {

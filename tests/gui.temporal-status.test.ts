@@ -482,6 +482,52 @@ describe("temporal status projection", () => {
     });
   });
 
+  it("compares absolute overrides with the policy's own base, not an unrelated live price", () => {
+    setTemporalSnapshotForTests(actualSnapshot());
+    const catalog = readBundledTemporalCatalog();
+    const status = buildTemporalStatus({
+      providers: [{ providerId: "openrouter", providerLabel: "OpenRouter", discovered: true }],
+      // The reported interval started at 2026-11-24 09:25 UTC, inside
+      // minimax's 01:00-15:00 peak window.
+      nowMs: Date.parse("2026-11-24T09:25:00.000Z"),
+      routes: catalog.routes,
+      holidays: catalog.holidays,
+      // A live price between the two schedule tiers used to make every
+      // interval unknown because it matched neither side of the policy.
+      baseRates: () => ({ input: 0.1, output: 0.4, cache_read: 0.025 }),
+    });
+    const model = status.providers[0]?.models.find(
+      (entry) => entry.modelId === "minimax/minimax-m3.1-flash",
+    );
+    expect(model).toMatchObject({
+      state: "peak",
+      effect: { factor: 2, direction: "peak", unit: "api_price" },
+      nextChangeAtMs: Date.parse("2026-11-24T15:00:00.000Z"),
+      nextState: "offpeak",
+    });
+  });
+
+  it("does not project OpenRouter schedules that the provider no longer publishes", () => {
+    setTemporalSnapshotForTests(actualSnapshot());
+    const catalog = readBundledTemporalCatalog();
+    expect(catalog.routes.openrouter).toEqual([
+      "minimax/minimax-m3.1-flash",
+      "tencent/hy3",
+      "tencent/hy4-preview",
+    ]);
+    const status = buildTemporalStatus({
+      providers: [{ providerId: "openrouter", providerLabel: "OpenRouter", discovered: true }],
+      nowMs: Date.parse("2026-11-25T02:00:00.000Z"),
+      routes: catalog.routes,
+      holidays: catalog.holidays,
+    });
+    expect(status.providers[0]?.models.map((model) => model.modelId)).toEqual([
+      "minimax/minimax-m3.1-flash",
+      "tencent/hy3",
+      "tencent/hy4-preview",
+    ]);
+  });
+
   it("describes the declared DeepSeek weekly windows and keeps CN holidays separate", () => {
     setTemporalSnapshotForTests(actualSnapshot());
     const catalog = readBundledTemporalCatalog();

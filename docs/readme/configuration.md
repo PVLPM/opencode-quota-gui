@@ -64,6 +64,8 @@ Older `dashboard.hiddenCards` lists had no semantics marker, so a full provider-
 
 **Settings → Temporal pricing** lists every provider with time-based pricing rules and toggles its live peak and off-peak status in the Quota header. Choices are stored sparsely in `dashboard.temporalProviderOverrides` as provider ids mapped to booleans. A provider with a discovered account is shown by default; an explicit `true` or `false` overrides that default. The setting changes presentation only: it does not change polling, quota values, or recorded usage.
 
+For absolute price rules, status compares each rule with the base rates captured from the same source policy, so an unrelated live or derived API price cannot turn a known schedule into **Unknown**. A route whose schedule cannot be verified stays **Unknown** instead of being guessed. The dated schedule preview projects at most three days ahead; its end is a display horizon, not an expiry or validity window.
+
 ### Web dashboard
 
 The browser dashboard default follows the OpenCode host version. On supported hosts below 2.2.1, including 2.2.0, it is on by default, including after an upgrade from `1.2.0` or earlier, because the full Native panel requires 2.2.1 or newer. At 2.2.1 and newer it is off by default. A valid explicit `dashboard.enabled: true` or `false` always wins. If the host version is missing or unparseable and the switch is absent, web access fails closed. A malformed canonical file or invalid `dashboard.enabled` also fails closed. When on, it starts the optional HTTP/SSE/static transport; when off, none starts.

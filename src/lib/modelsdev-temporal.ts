@@ -85,6 +85,12 @@ export type TemporalPolicyEntry =
   | {
       status: "supported";
       source: string;
+      /**
+       * Unconditional source rates (`cost.text.*`). Absolute overrides replace
+       * these rates, so comparison must use them instead of a live/derived
+       * pricing snapshot. Absent for multiplier-only policies.
+       */
+      base?: TemporalRates;
       overrides: TemporalOverride[];
       multipliers: TemporalMultiplier[];
     }
@@ -185,7 +191,8 @@ const SNAPSHOT_KEYS = new Set([
   "jurisdictions",
   "providers",
 ]);
-const POLICY_KEYS = new Set(["status", "source", "overrides", "multipliers", "reason"]);
+const POLICY_KEYS = new Set(["status", "source", "base", "overrides", "multipliers", "reason"]);
+const BASE_RATE_KEYS = new Set<string>(TEMPORAL_RATE_KEYS);
 const CALENDAR_KEYS = new Set(["timeZone", "source", "published", "intervals", "makeupWorkdays"]);
 const INTERVAL_KEYS = new Set(["id", "localStart", "localEnd", "startMs", "endMs"]);
 const OVERRIDE_KEYS = new Set(["id", "field", "when", "rates"]);
@@ -428,6 +435,17 @@ function parseRates(raw: JsonValue, field: "input" | "output", path: string): Te
   return rates;
 }
 
+function parseBaseRates(raw: JsonValue, path: string): TemporalRates {
+  const object = asObject(raw, path);
+  assertKeys(object, BASE_RATE_KEYS, path);
+  const rates: TemporalRates = {};
+  for (const key of TEMPORAL_RATE_KEYS) {
+    if (hasOwn(object, key)) rates[key] = asRate(object[key], `${path}.${key}`);
+  }
+  if (Object.keys(rates).length === 0) fail(`${path} must set at least one rate`);
+  return rates;
+}
+
 function parseMultiplierFactor(raw: JsonValue, path: string): number | { text: number } {
   if (typeof raw === "number") {
     return asRate(raw, path);
@@ -461,6 +479,7 @@ function parsePolicyEntry(
   }
   if (status !== "supported") fail(`${path}.status is not supported`);
 
+  const base = hasOwn(object, "base") ? parseBaseRates(object.base, `${path}.base`) : undefined;
   const rawOverrides = asArray(object.overrides, `${path}.overrides`);
   const rawMultipliers = asArray(object.multipliers, `${path}.multipliers`);
   if (rawOverrides.length === 0 && rawMultipliers.length === 0) {
@@ -499,7 +518,7 @@ function parsePolicyEntry(
     };
   });
 
-  return { status: "supported", source, overrides, multipliers };
+  return { status: "supported", source, ...(base ? { base } : {}), overrides, multipliers };
 }
 
 function parseHolidayCalendar(raw: JsonValue, path: string): TemporalHolidayYear {
