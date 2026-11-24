@@ -1481,7 +1481,12 @@ describe("session chart and tree presentation", () => {
       steps: SessionSnapshot["steps"],
       variant: "main" | "focus",
       index = 1,
-    ): Promise<{ text: string; header: string; label: TestNode | undefined; transitions: number }> => {
+    ): Promise<{
+      text: string;
+      header: string;
+      label: TestNode | undefined;
+      transitions: number;
+    }> => {
       const snapshot = sessionSnapshot({
         steps,
         nodes: [{ ...rootNode, childIds: [] }],
