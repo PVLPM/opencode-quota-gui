@@ -207,7 +207,7 @@ describe("Desktop GUI entry", () => {
     expect(routesSource).toContain("props.enabled?.() !== false");
     for (const [route, count] of [
       ["QuotaRoute", 3],
-      ["AnalyticsRoute", 2],
+      ["AnalyticsRoute", 1],
     ] as const) {
       const start = routesSource.indexOf(`function ${route}(`);
       const end = routesSource.indexOf("\n}\n", start);

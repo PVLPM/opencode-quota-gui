@@ -19,7 +19,6 @@ import {
 } from "../contracts/dashboard.js";
 import type { CardId } from "../contracts/identity.js";
 import { optionalRowId, rowIdForEntry } from "../contracts/identity.js";
-import { orderRowsByPreference } from "../contracts/row-order.js";
 import {
   formatAccountingQuantity,
   interpretAccountingRow,
@@ -91,9 +90,10 @@ export interface ProviderCardPreferences {
    */
   cardOrder?: readonly string[];
   /**
-   * Sparse per-card row display order (`dashboard.rowOrder`). A card with no
-   * entry keeps provider emission order; listed rows come first in saved order
-   * and every unlisted/new row follows in emission order. Presentation only.
+   * Sparse per-card row display order (`dashboard.rowOrder`) is presentation
+   * only and applied by the UI, native header and Settings surfaces. The card
+   * payload keeps provider emission order so legacy aggregate hidden ids keep
+   * resolving to the row that was emitted first.
    */
   rowOrder?: Readonly<Record<string, readonly string[]>>;
 }
@@ -309,7 +309,6 @@ function mapEntryRows(params: {
   providerId: string;
   cardId: CardId;
   preferences: ProviderCardPreferences;
-  rowOrder?: readonly string[];
   nowMs: number;
 }): {
   rows: QuotaCardRow[];
@@ -340,7 +339,7 @@ function mapEntryRows(params: {
   }
   const visibilityRows = optionalVisibilityRowsFor(params.providerId, params.cardId, rows);
   return {
-    rows: orderRowsByPreference(rows, params.rowOrder, undefined, visibilityRows),
+    rows,
     primaryQuotaWindows: [...windowsBySlot.values()].sort((left, right) => left.slot - right.slot),
     visibilityRows,
   };
@@ -425,7 +424,6 @@ function buildProviderCard(params: {
     providerId: params.providerId,
     cardId,
     preferences: params.preferences,
-    rowOrder: params.preferences.rowOrder?.[cardId],
     nowMs: params.nowMs,
   });
   const planLabel = params.planLabel ? sanitizeSingleLineDisplayText(params.planLabel).trim() : "";
@@ -470,7 +468,6 @@ function buildAccountCard(params: {
     providerId: params.providerId,
     cardId,
     preferences: params.preferences,
-    rowOrder: params.preferences.rowOrder?.[cardId],
     nowMs: params.nowMs,
   });
   const card: ProviderCard = {

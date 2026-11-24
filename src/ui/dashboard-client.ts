@@ -38,7 +38,7 @@ import { PRIMARY_QUOTA_WINDOW_LIMIT } from "../contracts/dashboard";
 import { isCostedTokens, isDashboardEvent, isTokenStack } from "../contracts/guards";
 import type { CardId, RowId } from "../contracts/identity";
 import type { BankedResetAvailability, BankedResetCredit } from "../contracts/openai-quota";
-import { PROVIDER_FAILURE_CATEGORIES } from "../contracts/provider-failure";
+import { isQuotaAttemptOutcome, PROVIDER_FAILURE_CATEGORIES } from "../contracts/provider-failure";
 import { type BucketUnit, isRangeKey, type RangeKey, type RangeWindow } from "../contracts/ranges";
 import type {
   TemporalEffect,
@@ -483,6 +483,12 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
         `${detail}.errors[].retryAtMs`,
       );
       if (retryAtMs !== undefined) parsedError.retryAtMs = retryAtMs;
+      if (error.attemptOutcome !== undefined) {
+        if (!isQuotaAttemptOutcome(error.attemptOutcome)) {
+          throw faulty(endpoint, `${detail}.errors[].attemptOutcome`);
+        }
+        parsedError.attemptOutcome = error.attemptOutcome;
+      }
       const kind = readOptionalEnum(
         error.kind,
         ["intentional-filter"] as const,
@@ -501,6 +507,12 @@ function readCard(value: JsonValue, endpoint: string): ProviderCard {
     }),
   };
 
+  if (card.stale !== undefined) {
+    if (readBoolean(card.stale, endpoint, `${detail}.stale`) !== true) {
+      throw faulty(endpoint, `${detail}.stale`);
+    }
+    parsed.stale = true;
+  }
   const accountLabel = readOptionalText(card.accountLabel, endpoint, `${detail}.accountLabel`);
   if (accountLabel !== undefined) parsed.accountLabel = accountLabel;
   const planLabel = readOptionalText(card.planLabel, endpoint, `${detail}.planLabel`);

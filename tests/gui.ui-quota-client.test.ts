@@ -513,6 +513,69 @@ describe("independent browser quota transport", () => {
     expect(() => parseQuotaSnapshot(wrong)).toThrow(DashboardError);
   });
 
+  it("keeps retained card stale and cooldown attempt outcome through the quota read", () => {
+    const card = {
+      cardId: "anthropic:test",
+      providerId: "anthropic",
+      providerLabel: "Anthropic",
+      accountLabel: "Claude",
+      labelSource: "connection",
+      stale: true,
+      observedAtIso: new Date(NOW - 4 * 60_000).toISOString(),
+      rows: [
+        {
+          rowId: "anthropic:test#window:five_hour|quota:percent",
+          label: "5h",
+          kind: "percent",
+          resultType: "quota",
+          percentRemaining: 40,
+          resetAtIso: new Date(NOW + 60 * 60_000).toISOString(),
+        },
+      ],
+      errors: [
+        {
+          label: "Claude Agent",
+          message: "Claude quota request failed.",
+          attemptOutcome: "cooldown",
+          retryAtMs: NOW + 120_000,
+        },
+      ],
+    };
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: { cards: [card], enabledProviders: "auto", polledAtMs: NOW },
+    };
+
+    expect(parseQuotaSnapshot(payload).providers.cards[0]).toMatchObject({
+      stale: true,
+      errors: [{ attemptOutcome: "cooldown" }],
+    });
+    // The stale marker is a literal `true`: a false or non-boolean value is a
+    // malformed card, not a fresh one.
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        providers: { ...payload.providers, cards: [{ ...card, stale: false }] },
+      }),
+    ).toThrow(DashboardError);
+    expect(() =>
+      parseQuotaSnapshot({
+        ...payload,
+        providers: {
+          ...payload.providers,
+          cards: [
+            {
+              ...card,
+              errors: [{ ...card.errors[0], attemptOutcome: "guess" }],
+            },
+          ],
+        },
+      }),
+    ).toThrow(DashboardError);
+  });
+
   it("rejects malformed provider data instead of inventing a successful empty read", () => {
     expect(() =>
       parseQuotaSnapshot({ generatedAtMs: NOW, stale: false, providers: { cards: null } }),

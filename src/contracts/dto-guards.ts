@@ -264,6 +264,7 @@ function isProviderCard(value: unknown): value is ProviderCard {
   }
   if (!isOptional(value.planLabel, isText)) return false;
   if (!isOptional(value.accountLabel, isText)) return false;
+  if (!isOptional(value.stale, (stale) => stale === true)) return false;
   if (!isOptional(value.providerScopeId, isText)) return false;
   if (!isOptional(value.providerScopeHash, isText)) return false;
   if (!isOptional(value.observedAtIso, isText)) return false;
@@ -546,6 +547,8 @@ export function isHomeSnapshot(value: unknown): value is HomeSnapshot {
     isFiniteNumber(value.generatedAtMs) &&
     isRangeKey(value.range) &&
     isBoolean(value.stale) &&
+    isOptional(value.provisional, (provisional) => provisional === true) &&
+    isOptional(value.exactError, isText) &&
     isProviders(value.providers) &&
     isUsage(value.usage) &&
     isArrayOf(value.projects, isProjectActivityRow)

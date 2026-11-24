@@ -169,7 +169,8 @@ function analyticsQuery<T>(fetcher: () => Promise<T>): Query<T> & {
 
 /**
  * Paints a retained payload immediately, then revalidates it. `fresh` anchors
- * the reconnect epoch when the hit or the read is applied.
+ * the reconnect epoch only after an applicable read is applied, so a cached
+ * paint never certifies data as post-reconnect fresh.
  */
 function readRetained<T extends object>(input: {
   query: Query<T> & { set: (value: T) => void };
@@ -182,8 +183,6 @@ function readRetained<T extends object>(input: {
   const hit = input.store.take<T>(input.retentionKey);
   if (hit !== undefined) {
     input.query.set(hit);
-    input.fresh();
-    input.onFresh?.();
   }
   void input.query.run().then((applied) => {
     if (!applied) return;
@@ -198,7 +197,7 @@ function readRetained<T extends object>(input: {
 
 /**
  * The retained-payload effect shared by Models, detail, Project, and Session
- * routes: paint a matching payload, revalidate it, and anchor the epoch.
+ * routes: paint a matching payload, revalidate it, then anchor the epoch.
  */
 function useRetainedRoute<T extends object>(
   props: RouteLifecycleProps & { store: AnalyticsPresentationStore },
@@ -477,10 +476,8 @@ function AnalyticsRoute(props: AnalyticsRouteProps): JSX.Element {
     const hit = props.store.take<HomeSnapshot>(`home:${range}`);
     if (hit !== undefined) {
       // Paint the retained payload now; the read below revalidates it without
-      // blocking the route or flashing a skeleton.
+      // blocking the route or flashing a skeleton. Freshness waits for that read.
       query.set(hit);
-      setFreshEpoch(epoch);
-      props.onFresh?.();
     }
     const endForeground = props.store.beginForeground(range);
     void query

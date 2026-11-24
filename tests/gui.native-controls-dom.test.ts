@@ -10,14 +10,18 @@ import {
   SegmentedControlItem,
   Switch,
 } from "../src/native/ui";
+import { createAnalyticsPresentationStore } from "../src/ui/analytics-cache";
 import { createQuotaQuery } from "../src/ui/quota-query";
-import { QuotaRoute } from "../src/ui/routes";
+import { AnalyticsViews, QuotaRoute } from "../src/ui/routes";
 import { displayPreferencesFromValues } from "../src/ui/settings-model";
-import { homeSnapshot } from "./fixtures/gui-ui-fixtures";
+import { homeSnapshot, projectSnapshot } from "./fixtures/gui-ui-fixtures";
 
 vi.mock("../src/native/dashboard-client.js", () => ({
   createNativeDashboardClient: () => ({ dispose() {} }),
 }));
+// The analytics views render a host SortControl, whose @opencode/ui segmented
+// control measures DOM offsets this jsdom test does not lay out.
+vi.mock("../src/ui/components/sort-control", () => ({ SortControl: () => null }));
 vi.mock("../src/native/rpc.js", () => ({ createGuiRpcCaller: () => ({}) }));
 vi.mock("../src/native/settings-page-state.js", () => ({
   createSettingsPageState: () => ({
@@ -416,6 +420,129 @@ it("revalidates a shell refresh after host recovery before marking the route fre
   } finally {
     disposeRoute();
     disposeState();
+    target.remove();
+  }
+});
+
+it("does not mark a retained analytics payload fresh before the reconnect read lands", async () => {
+  const retained = { ...homeSnapshot(), generatedAtMs: 1 };
+  const fresh = { ...homeSnapshot(), generatedAtMs: 2 };
+  let resolveRead!: (value: typeof fresh) => void;
+  let foregroundCalls = 0;
+  const client = {
+    home: (input: { range: "7d"; background?: boolean }) => {
+      if (input.background) return Promise.resolve(homeSnapshot({ range: input.range }));
+      foregroundCalls += 1;
+      if (foregroundCalls === 1) return Promise.resolve(retained);
+      return new Promise<typeof fresh>((resolve) => {
+        resolveRead = resolve;
+      });
+    },
+  };
+  const store = createAnalyticsPresentationStore(async ({ range }) => homeSnapshot({ range }));
+  const target = document.createElement("div");
+  document.body.append(target);
+  const [epoch, setEpoch] = createSignal(0);
+  let stale = false;
+  const onFresh = vi.fn();
+  const dispose = render(
+    () =>
+      createComponent(AnalyticsViews, {
+        client: client as never,
+        store,
+        connection: "live",
+        route: { name: "analytics" },
+        range: "7d",
+        reloadToken: 0,
+        get reconnectEpoch() {
+          return epoch();
+        },
+        onStale: (value: boolean) => {
+          stale = value;
+        },
+        onFresh,
+        onModelsDimensionChange: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() => expect(onFresh).toHaveBeenCalledTimes(1));
+    expect(stale).toBe(false);
+
+    setEpoch(1);
+    await vi.waitFor(() => expect(foregroundCalls).toBe(2));
+    await Promise.resolve();
+    // The retained payload may paint at once, but it is not certified fresh
+    // until the read that started after the reconnect is applied.
+    expect(stale).toBe(true);
+    expect(onFresh).toHaveBeenCalledTimes(1);
+
+    resolveRead(fresh);
+    await vi.waitFor(() => expect(stale).toBe(false));
+    expect(onFresh).toHaveBeenCalledTimes(2);
+  } finally {
+    dispose();
+    store.dispose();
+    target.remove();
+  }
+});
+
+it("does not mark a retained project payload fresh before the reconnect read lands", async () => {
+  const retained = projectSnapshot({ name: "Retained project" });
+  const fresh = projectSnapshot({ name: "Fresh project" });
+  let resolveRead!: (value: typeof fresh) => void;
+  let foregroundCalls = 0;
+  const client = {
+    project: () => {
+      foregroundCalls += 1;
+      if (foregroundCalls === 1) return Promise.resolve(retained);
+      return new Promise<typeof fresh>((resolve) => {
+        resolveRead = resolve;
+      });
+    },
+  };
+  const store = createAnalyticsPresentationStore(async ({ range }) => homeSnapshot({ range }));
+  const target = document.createElement("div");
+  document.body.append(target);
+  const [epoch, setEpoch] = createSignal(0);
+  let stale = false;
+  const onFresh = vi.fn();
+  const dispose = render(
+    () =>
+      createComponent(AnalyticsViews, {
+        client: client as never,
+        store,
+        connection: "live",
+        route: { name: "project", projectId: "project-alpha" },
+        range: "7d",
+        reloadToken: 0,
+        get reconnectEpoch() {
+          return epoch();
+        },
+        onStale: (value: boolean) => {
+          stale = value;
+        },
+        onFresh,
+        onModelsDimensionChange: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() => expect(onFresh).toHaveBeenCalledTimes(1));
+    expect(stale).toBe(false);
+
+    setEpoch(1);
+    await vi.waitFor(() => expect(foregroundCalls).toBe(2));
+    await Promise.resolve();
+    expect(stale).toBe(true);
+    expect(onFresh).toHaveBeenCalledTimes(1);
+
+    resolveRead(fresh);
+    await vi.waitFor(() => expect(stale).toBe(false));
+    expect(onFresh).toHaveBeenCalledTimes(2);
+  } finally {
+    dispose();
+    store.dispose();
     target.remove();
   }
 });

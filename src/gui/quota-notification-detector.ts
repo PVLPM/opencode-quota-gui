@@ -555,6 +555,15 @@ export function detectQuotaNotifications(
     }
 
     const isError = card.errors?.some(isNotifiableProviderError) ?? false;
+    // A cooldown skip made no request: it is neither a failure observation nor
+    // a recovery, so an existing failure streak and its retained-error
+    // suppression stay intact until a real attempt reports.
+    const isCooldownSkip =
+      !isError && (card.errors?.some((error) => error.attemptOutcome === "cooldown") ?? false);
+    if (isCooldownSkip && previousProvider !== undefined) {
+      nextProviders.set(card.cardId, { ...previousProvider });
+      continue;
+    }
     const status: QuotaNotificationProviderState["status"] = isError ? "error" : "healthy";
     const consecutiveErrors = isError
       ? previousProvider?.status === "error"

@@ -938,6 +938,51 @@ describe("quota notification detector", () => {
     expect(freshRepeat.notifications).toEqual([]);
   });
 
+  it("keeps the failure streak across a cooldown skip", () => {
+    const baseline = detect([card({ rows: [percentRow("row-1", 25)] })]);
+    const retainedFailure = card({
+      rows: [percentRow("row-1", 25)],
+      errors: [{ failureCategory: "provider_api" }],
+      stale: true,
+    });
+    const cooldown = card({
+      rows: [percentRow("row-1", 25)],
+      errors: [
+        {
+          failureCategory: "provider_api",
+          attemptOutcome: "cooldown",
+          retryAtMs: NOW + 120_000,
+        },
+      ],
+      stale: true,
+    });
+
+    const firstFailure = next(baseline, [retainedFailure], { cooldownMs: 0 });
+    expect(firstFailure.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 1,
+      staleError: true,
+    });
+
+    const skipped = next(firstFailure, [cooldown], { cooldownMs: 0 });
+    expect(skipped.notifications).toEqual([]);
+    // A skip made no request: it neither breaks nor recovers the failure streak.
+    expect(skipped.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 1,
+      staleError: true,
+    });
+
+    const secondFailure = next(skipped, [retainedFailure], { cooldownMs: 0 });
+    expect(secondFailure.notifications).toEqual([
+      expect.objectContaining({ kind: "provider-error", providerId: "openai" }),
+    ]);
+    expect(secondFailure.state.providers[CARD_ID]).toMatchObject({
+      status: "error",
+      consecutiveErrors: 2,
+    });
+  });
+
   it("does not count a cooldown skip as a failure observation", () => {
     const baseline = detect([card({ rows: [percentRow("row-1", 25)] })]);
     const cooldown = card({

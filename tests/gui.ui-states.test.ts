@@ -33,6 +33,7 @@ import {
   parseHomeSnapshot,
   parseImportPreview,
   parseProjectSnapshot,
+  parseQuotaSnapshot,
   parseSessionSnapshot,
   parseSettingsSnapshot,
   parseSettingsWriteResult,
@@ -892,6 +893,47 @@ describe("home view composition", () => {
     });
     expect(html).toContain("Unclassified failure.");
     expect(html).toContain('data-error="true"');
+  });
+
+  it("mutes a retained cooldown error after the Web quota transport", async () => {
+    const card = providerCard({
+      stale: true,
+      observedAtIso: new Date(NOW - 4 * 60_000).toISOString(),
+      rows: [percentRow({ resetAtIso: new Date(NOW + 60 * 60_000).toISOString() })],
+      errors: [
+        {
+          label: "Claude Agent",
+          message: "Claude quota request failed.",
+          attemptOutcome: "cooldown",
+          retryAtMs: NOW + 2 * 60_000,
+        },
+      ],
+    });
+    const payload = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: { cards: [card], enabledProviders: "auto", polledAtMs: NOW },
+    };
+    // Round-trip through JSON so the card is decoded exactly as the browser
+    // receives it, then render that decoded card.
+    const parsed = parseQuotaSnapshot(JSON.parse(JSON.stringify(payload)));
+    const [parsedCard] = parsed.providers.cards;
+    expect(parsedCard?.stale).toBe(true);
+    expect(parsedCard?.errors[0]?.attemptOutcome).toBe("cooldown");
+
+    const html = await renderView("/components/quota-card.tsx", "QuotaCardView", {
+      card: parsedCard,
+      preferences,
+      hiddenRows: [],
+      stale: true,
+      timeZone: "UTC",
+      nowMs: NOW,
+    });
+    expect(html).toContain("Updated 4m ago");
+    expect(html).toContain("retrying in 2m");
+    expect(html).not.toContain("Claude quota request failed.");
+    expect(html).not.toContain('data-error="true"');
   });
 
   it("mutes an explicitly transient retained failure even without a category", async () => {

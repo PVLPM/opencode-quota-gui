@@ -15,6 +15,7 @@ import {
   OPENAI_RESETS_INFO,
   OPENAI_RESETS_ROW_KEY,
 } from "../src/contracts/openai-quota.js";
+import { effectiveHiddenRowIds } from "../src/contracts/row-visibility.js";
 import type { UsageAnalyticsDataset } from "../src/gui/aggregation.js";
 import {
   buildCardId,
@@ -28,6 +29,7 @@ import {
   type ProviderCardPreferences,
   quotaEntryIsHidden,
 } from "../src/gui/provider-cards.js";
+import { detectQuotaNotifications } from "../src/gui/quota-notification-detector.js";
 import { createDashboardReadSource, DashboardSourceError } from "../src/gui/sources.js";
 import type {
   AccountingPercentageBasis,
@@ -40,7 +42,11 @@ import type {
 } from "../src/lib/entries.js";
 import type { OpenCodeRawAssistantRow } from "../src/lib/opencode-storage.js";
 import type { QuotaStatusLiveProbe } from "../src/lib/quota-render-data.js";
-import { DEFAULT_CONFIG, type QuotaToastConfig } from "../src/lib/types.js";
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_NATIVE_QUOTA_NOTIFICATION_POLICY,
+  type QuotaToastConfig,
+} from "../src/lib/types.js";
 import { buildSessionHeaderView } from "../src/native/session-header-model.js";
 import { visibleCards } from "../src/ui/view-model.js";
 
@@ -1422,7 +1428,7 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
     );
   });
 
-  it("orders rows from the saved per-card order and appends new rows in emission order", () => {
+  it("keeps provider emission order when dashboard.rowOrder moves a row", () => {
     const probes = [
       probe(
         "openai",
@@ -1461,7 +1467,52 @@ describe("gui provider cards — OpenAI optional visibility rows", () => {
     };
     const ordered = buildProviderCards({ probes, preferences, nowMs: NOW })[0]!;
 
-    expect(ordered.rows.map((row) => row.rowId)).toEqual([ids[2], ids[0], ids[1], ids[3]]);
+    // The payload keeps emission order; display surfaces apply dashboard.rowOrder
+    // themselves so a legacy aggregate hide cannot follow the dragged position.
+    expect(ordered.rows.map((row) => row.rowId)).toEqual(ids);
+  });
+
+  it("resolves a legacy aggregate hide against provider order after a row reorder", () => {
+    const probes = [
+      probe(
+        "openai",
+        result({
+          accounts: [{ sourceId: "raw-openai-one" }],
+          entries: [
+            percentEntry({ sourceId: "raw-openai-one", window: "five_hour", percentRemaining: 5 }),
+            percentEntry({ sourceId: "raw-openai-one", window: "week", percentRemaining: 80 }),
+          ],
+        }),
+      ),
+    ];
+    const base = cardsFor(probes)[0]!;
+    const [fiveHour, weekly] = base.rows.map((row) => row.rowId);
+    const card = buildProviderCards({
+      probes,
+      preferences: {
+        ...SUMMARY,
+        rowOrder: { [base.cardId]: base.rows.slice(1).map((row) => row.rowId) },
+      },
+      nowMs: NOW,
+    })[0]!;
+
+    expect(card.rows.map((row) => row.rowId)).toEqual([fiveHour, weekly]);
+    const legacy = `${card.cardId}#aggregate|quota:percent`;
+    expect(
+      effectiveHiddenRowIds(
+        card.rows.map((row) => row.rowId),
+        [legacy],
+      ),
+    ).toEqual(new Set([fiveHour]));
+    // Notification eligibility uses the same resolution: the hidden first-emitted
+    // row never enters detector state, even though display order moved Weekly first.
+    const detected = detectQuotaNotifications({
+      cards: [card],
+      hiddenRows: [legacy],
+      nowMs: NOW,
+      policy: DEFAULT_NATIVE_QUOTA_NOTIFICATION_POLICY,
+    });
+    expect(Object.keys(detected.state.rows)).toEqual([`${card.cardId}\u001f${weekly}`]);
   });
 
   it("keeps account-specific ids separate and adds no optional rows to other providers", () => {

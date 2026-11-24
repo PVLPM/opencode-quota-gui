@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { DASHBOARD_CONTRACT_VERSION, type SessionNode } from "../src/contracts/dashboard.js";
+import { isHomeSnapshot, isQuotaSnapshot } from "../src/contracts/dto-guards.js";
 import {
   DASHBOARD_EVENT_TOPICS,
   isCostedTokens,
@@ -19,6 +20,7 @@ import {
   rangeBucketUnit,
   rangeWindow,
 } from "../src/contracts/ranges.js";
+import { homeSnapshot } from "./fixtures/gui-ui-fixtures.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
 const HOUR_MS = 3_600_000;
@@ -211,6 +213,49 @@ describe("GUI contract guards", () => {
     expect(isDashboardEvent({ topic: "quota.changed", at: "123" })).toBe(false);
     expect(isDashboardEvent({ topic: "quota.changed", at: 123, scope: "everything" })).toBe(false);
     expect(isDashboardEvent(null)).toBe(false);
+  });
+
+  it("validates the retained-card, provisional and exact-error literals", () => {
+    const snapshot = homeSnapshot();
+    expect(isHomeSnapshot(snapshot)).toBe(true);
+    expect(isHomeSnapshot({ ...snapshot, provisional: true })).toBe(true);
+    expect(isHomeSnapshot({ ...snapshot, exactError: "The exact read failed." })).toBe(true);
+    expect(isHomeSnapshot({ ...snapshot, provisional: false })).toBe(false);
+    expect(isHomeSnapshot({ ...snapshot, exactError: 7 })).toBe(false);
+
+    const quota = {
+      generatedAtMs: NOW,
+      stale: false,
+      timeZone: "UTC",
+      providers: {
+        cards: [
+          {
+            cardId: "openai:test",
+            providerId: "openai",
+            providerLabel: "OpenAI",
+            labelSource: "provider",
+            rows: [],
+            errors: [],
+          },
+        ],
+        enabledProviders: "auto",
+        polledAtMs: NOW,
+      },
+    };
+    const card = quota.providers.cards[0];
+    expect(isQuotaSnapshot(quota)).toBe(true);
+    expect(
+      isQuotaSnapshot({
+        ...quota,
+        providers: { ...quota.providers, cards: [{ ...card, stale: true }] },
+      }),
+    ).toBe(true);
+    expect(
+      isQuotaSnapshot({
+        ...quota,
+        providers: { ...quota.providers, cards: [{ ...card, stale: false }] },
+      }),
+    ).toBe(false);
   });
 
   it("freezes contract version 2 for the required timeZone payload fields", () => {
