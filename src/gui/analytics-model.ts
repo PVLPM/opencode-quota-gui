@@ -742,8 +742,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
 
     const promptTokens = step.tokens.input + step.tokens.cacheRead + step.tokens.cacheWrite;
     const cost = lookupCost(key.provider, key.model);
-    if (cost === null) return undefined;
-    const base = selectCostAtContext(cost, promptTokens).rates;
+    // Absolute overrides are meaningful only against the policy's own base.
+    // The live snapshot can be a derived price that matches neither side, so
+    // prefer the base captured with the temporal policy when present.
+    const base = policy.base ?? (cost ? selectCostAtContext(cost, promptTokens).rates : null);
+    if (base === null) return undefined;
     const resolved = resolveTemporalRates(key.provider, key.model, step.completedAtMs, base);
     if (resolved.status !== "resolved" || resolved.rates === null) return undefined;
 

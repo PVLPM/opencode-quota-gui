@@ -1193,6 +1193,7 @@ describe("analytics model: price status", () => {
             [modelID]: {
               status: "supported",
               source: `providers/${providerID}/models/${modelID}.toml`,
+              base: { input: 1.32, output: 3.96, cache_read: 0.044 },
               overrides: [
                 {
                   id: "text.output.overrides[0]",
@@ -1268,6 +1269,7 @@ describe("analytics model: price status", () => {
             [modelID]: {
               status: "supported",
               source: `providers/${providerID}/models/${modelID}.toml`,
+              base: { input: 1.32, output: 3.96, cache_read: 0.044 },
               overrides: [
                 {
                   id: "text.output.overrides[0]",
