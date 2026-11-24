@@ -1369,7 +1369,7 @@
 }
 
 /* Session inspection: a two-column, nowrap grid so every label and number
-   stays on one line; section dividers keep series, model and timing scannable. */
+   stays on one line; section dividers keep the header, series and timing scannable. */
 .qg-tooltip--session {
   width: max-content;
   min-width: 280px;
@@ -1378,10 +1378,10 @@
 }
 
 .qg-tooltip--session .qg-tooltip__head {
-  display: flex;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
   align-items: baseline;
-  gap: 6px;
-  justify-content: flex-start;
+  gap: 4px 12px;
   color: var(--qg-text-muted);
   font-size: 11px;
   padding-bottom: 6px;
@@ -1403,10 +1403,6 @@
 .qg-tooltip__group--series {
   grid-template-columns: 8px minmax(0, 1fr) max-content;
   align-items: center;
-}
-
-.qg-tooltip__group--model {
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .qg-tooltip__group--timing {
@@ -1435,9 +1431,10 @@
 }
 
 .qg-tooltip__model {
-  grid-column: 1 / -1;
   min-width: 0;
   color: var(--qg-text);
+  text-align: right;
+  font-size: var(--font-size-small);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
@@ -1452,6 +1449,11 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.qg-tooltip__note.qg-tooltip__transition {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .qg-tooltip__head {

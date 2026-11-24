@@ -670,9 +670,24 @@ export function SessionChart(props: {
                 class="qg-tooltip qg-tooltip--session"
                 style={tooltipStyle()}
               >
-                <p class="qg-tooltip__head">
+                <div class="qg-tooltip__head">
                   <span>Step {(active() ?? 0) + 1}</span>
-                </p>
+                  <Show when={modelIdentities().length > 1 ? step().model : undefined}>
+                    {(model) => <ModelIdentityLabel identity={model()} class="qg-tooltip__model" />}
+                  </Show>
+                  <Show
+                    when={
+                      modelIdentities().length > 1 && step().model && transitionAt(active() ?? 0)
+                    }
+                  >
+                    {(entry) => (
+                      <span class="qg-tooltip__note qg-tooltip__transition">
+                        {entry().kind === "model" ? "Model changed" : "Effort changed"} from{" "}
+                        {formatModelIdentity(entry().from)} to {formatModelIdentity(entry().to)}
+                      </span>
+                    )}
+                  </Show>
+                </div>
                 <div class="qg-tooltip__group qg-tooltip__group--series">
                   <div class="qg-tooltip__grid-row">
                     <span
@@ -766,21 +781,6 @@ export function SessionChart(props: {
                     </p>
                   </Show>
                 </div>
-                <Show when={modelIdentities().length > 1 ? step().model : undefined}>
-                  {(model) => (
-                    <div class="qg-tooltip__group qg-tooltip__group--model">
-                      <ModelIdentityLabel identity={model()} class="qg-tooltip__model" />
-                      <Show when={transitionAt(active() ?? 0)}>
-                        {(entry) => (
-                          <span class="qg-tooltip__note">
-                            {entry().kind === "model" ? "Model changed" : "Effort changed"} from{" "}
-                            {formatModelIdentity(entry().from)} to {formatModelIdentity(entry().to)}
-                          </span>
-                        )}
-                      </Show>
-                    </div>
-                  )}
-                </Show>
                 <Show when={timingAt(active() ?? 0)}>
                   {(timing) => (
                     <div class="qg-tooltip__group qg-tooltip__group--timing">

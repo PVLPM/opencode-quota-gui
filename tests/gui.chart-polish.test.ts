@@ -1462,7 +1462,7 @@ describe("session chart and tree presentation", () => {
     }
   });
 
-  it("shows the per-step model line only when the chart used several models", async () => {
+  it("shows the model and transition in the tooltip header only for multi-model charts", async () => {
     const base = sessionSnapshot();
     const first = base.steps[0] as SessionSnapshot["steps"][number];
     const rootNode = base.nodes[0] as SessionSnapshot["nodes"][number];
@@ -1480,7 +1480,8 @@ describe("session chart and tree presentation", () => {
     const tooltipAt = async (
       steps: SessionSnapshot["steps"],
       variant: "main" | "focus",
-    ): Promise<{ text: string; label: TestNode | undefined }> => {
+      index = 1,
+    ): Promise<{ text: string; header: string; label: TestNode | undefined; transitions: number }> => {
       const snapshot = sessionSnapshot({
         steps,
         nodes: [{ ...rootNode, childIds: [] }],
@@ -1494,16 +1495,19 @@ describe("session chart and tree presentation", () => {
           surface,
           "onPointerMove",
         )?.(
-          pointerEvent(geometry.stepX(1), {
+          pointerEvent(geometry.stepX(index), {
             left: geometry.plot.left,
             width: geometry.plot.width,
           }),
         );
         await Promise.resolve();
         const output = graph.elementsNamed(mounted.root, "output")[0];
+        const header = byClass(output, "div", "qg-tooltip__head")[0];
         return {
           text: graph.textOf(output),
-          label: byClass(output, "span", "qg-model-identity")[0],
+          header: graph.textOf(header),
+          label: byClass(header, "span", "qg-model-identity")[0],
+          transitions: byClass(header, "span", "qg-tooltip__transition").length,
         };
       } finally {
         mounted.dispose();
@@ -1513,18 +1517,32 @@ describe("session chart and tree presentation", () => {
     // One model+variant across every charted step: the line is redundant.
     const single = [mk("a", "max"), mk("b", "max")];
     for (const variant of ["main", "focus"] as const) {
-      expect((await tooltipAt(single, variant)).text).not.toContain("mistral/zai-glm-5-3-flash");
+      const tooltip = await tooltipAt(single, variant);
+      expect(tooltip.label).toBeUndefined();
+      expect(tooltip.transitions).toBe(0);
+      expect(tooltip.header).toBe("Step 2");
+      expect(tooltip.text).not.toContain("mistral/zai-glm-5-3-flash");
     }
 
     // A second variant keeps the per-step identity (provider prefix replaced by
     // its mark) and the existing change note, which stays full text.
-    const mixed = await tooltipAt([mk("a", "max"), mk("b", "high")], "main");
-    expect(mixed.text).toContain("zai-glm-5-3-flash#high");
-    expect(mixed.text).toContain("Effort changed");
-    expect(mixed.text).toContain("#max");
-    expect(mixed.label?.props.title).toBe("mistral/zai-glm-5-3-flash#high");
-    expect(mixed.label?.props["aria-label"]).toBe("Mistral: mistral/zai-glm-5-3-flash#high");
-    expect(byClass(mixed.label as TestNode, "span", "qg-provider-logo")).toHaveLength(1);
+    const steps = [mk("a", "max"), mk("b", "high")];
+    for (const variant of ["main", "focus"] as const) {
+      const mixed = await tooltipAt(steps, variant);
+      expect(mixed.header).toContain("Step 2");
+      expect(mixed.header).toContain("zai-glm-5-3-flash#high");
+      expect(mixed.header).toContain("Effort changed");
+      expect(mixed.header).toContain("#max");
+      expect(mixed.transitions).toBe(1);
+      expect(mixed.text.indexOf("Effort changed")).toBeLessThan(mixed.text.indexOf("Context"));
+      expect(mixed.label?.props.title).toBe("mistral/zai-glm-5-3-flash#high");
+      expect(mixed.label?.props["aria-label"]).toBe("Mistral: mistral/zai-glm-5-3-flash#high");
+      expect(byClass(mixed.label as TestNode, "span", "qg-provider-logo")).toHaveLength(1);
+
+      const initial = await tooltipAt(steps, variant, 0);
+      expect(initial.header).toContain("zai-glm-5-3-flash#max");
+      expect(initial.transitions).toBe(0);
+    }
   });
 
   it("adds a date only for a midnight-crossing or multi-day step", async () => {
