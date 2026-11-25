@@ -12,10 +12,10 @@ const request = (kind = "generate", requestModel = model) => ({
   model: requestModel,
 });
 
-function ready() {
+function ready(stepModel = model) {
   const tracker = new OpencodeWarmingRefreshTracker();
-  tracker.onStepStarted(step);
-  tracker.onStepEnded(step);
+  tracker.onStepStarted({ data: { sessionID: "session", model: stepModel } });
+  tracker.onStepEnded({ data: { sessionID: "session", model: stepModel } });
   tracker.onUsageUpdated(usage(10));
   return tracker;
 }
@@ -28,6 +28,29 @@ describe("OpencodeWarmingRefreshTracker", () => {
       sessionID: "session",
       dispatchMs: 123,
       evidence: "warming-inferred",
+      route: { providerID: "provider", id: "model" },
+    });
+  });
+
+  it("rejects a different variant and carries a matching variant route", () => {
+    const high = { providerID: "provider", id: "model", variant: "high" };
+    const mismatch = ready(high);
+    mismatch.onModelRequest(request("generate", { ...high, variant: "low" }), 123);
+    expect(mismatch.onUsageUpdated(usage(11))).toBeUndefined();
+
+    const match = ready(high);
+    match.onModelRequest(request("generate", high), 123);
+    expect(match.onUsageUpdated(usage(11))?.route).toEqual(high);
+  });
+
+  it("normalizes the default variant to an omitted route variant", () => {
+    const tracker = ready({ providerID: "provider", id: "model", variant: "default" });
+    tracker.onModelRequest(request(), 123);
+    expect(tracker.onUsageUpdated(usage(11))).toEqual({
+      sessionID: "session",
+      dispatchMs: 123,
+      evidence: "warming-inferred",
+      route: { providerID: "provider", id: "model" },
     });
   });
 

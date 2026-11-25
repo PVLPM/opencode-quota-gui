@@ -583,6 +583,7 @@ export function createCacheObserverIngestor(
           sessionId !== undefined &&
           state !== undefined &&
           latest !== undefined &&
+          sameRouteProvenance(latest.route, warmingRouteIdentity(data.route)) &&
           estimate?.deadlineAtMs !== undefined &&
           typeof data.dispatchMs === "number" &&
           Number.isFinite(data.dispatchMs) &&
@@ -1096,8 +1097,8 @@ function startedStepKey(sessionId: string, messageId: string): string {
 }
 
 function sameRouteProvenance(
-  left: CacheRouteProvenance | undefined,
-  right: CacheRouteProvenance | undefined,
+  left: CacheRouteIdentity | undefined,
+  right: CacheRouteIdentity | undefined,
 ): boolean {
   return (
     left !== undefined &&
@@ -1132,6 +1133,21 @@ function isEligibleStepFinish(finish: unknown): boolean {
 function normalizedVariantId(value: unknown): string | undefined {
   const variantId = nonEmptyString(value);
   return variantId === "default" ? undefined : variantId;
+}
+
+/** Identity fields a warming event can prove; it carries no protocol or evidence basis. */
+type CacheRouteIdentity = Pick<
+  CacheRouteProvenance,
+  "providerId" | "modelId" | "variantId" | "protocolId"
+>;
+
+function warmingRouteIdentity(value: unknown): CacheRouteIdentity | undefined {
+  if (!isRecord(value)) return undefined;
+  const providerId = nonEmptyString(value.providerID);
+  const modelId = nonEmptyString(value.id);
+  if (providerId === undefined || modelId === undefined) return undefined;
+  const variantId = normalizedVariantId(value.variant);
+  return { providerId, modelId, ...(variantId === undefined ? {} : { variantId }) };
 }
 
 function ownFiniteNumber(record: Record<string, unknown>, key: string): number | undefined {

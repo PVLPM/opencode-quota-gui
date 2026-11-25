@@ -243,7 +243,13 @@ export type DashboardRpcCacheObserverEvent =
     }
   | {
       type: "session.cache.warming";
-      data: { sessionID: string; dispatchMs: number; evidence: "warming-inferred" };
+      data: {
+        sessionID: string;
+        dispatchMs: number;
+        evidence: "warming-inferred";
+        /** The dispatched route; absent on older route-blind producers. */
+        route?: { providerID: string; id: string; variant?: string };
+      };
     }
   | {
       type: "session.created";
@@ -738,16 +744,30 @@ export function isDashboardRpcCacheObserverEvent(
   }
 
   if (value.type === "session.cache.warming") {
+    if (
+      !hasExactKeys(value, ["type", "data"]) ||
+      !isObject(value.data) ||
+      !hasOnlyKeys(value.data, ["sessionID", "dispatchMs", "evidence", "route"]) ||
+      typeof value.data.sessionID !== "string" ||
+      !isValidResourceId(value.data.sessionID) ||
+      typeof value.data.dispatchMs !== "number" ||
+      !Number.isFinite(value.data.dispatchMs) ||
+      value.data.dispatchMs < 0 ||
+      value.data.evidence !== "warming-inferred"
+    ) {
+      return false;
+    }
+    if (value.data.route === undefined) return true;
     return (
-      hasExactKeys(value, ["type", "data"]) &&
-      isObject(value.data) &&
-      hasExactKeys(value.data, ["sessionID", "dispatchMs", "evidence"]) &&
-      typeof value.data.sessionID === "string" &&
-      isValidResourceId(value.data.sessionID) &&
-      typeof value.data.dispatchMs === "number" &&
-      Number.isFinite(value.data.dispatchMs) &&
-      value.data.dispatchMs >= 0 &&
-      value.data.evidence === "warming-inferred"
+      isObject(value.data.route) &&
+      hasOnlyKeys(value.data.route, ["providerID", "id", "variant"]) &&
+      typeof value.data.route.providerID === "string" &&
+      isValidResourceId(value.data.route.providerID) &&
+      typeof value.data.route.id === "string" &&
+      isValidResourceId(value.data.route.id) &&
+      (value.data.route.variant === undefined ||
+        (typeof value.data.route.variant === "string" &&
+          isValidResourceId(value.data.route.variant)))
     );
   }
 
