@@ -114,7 +114,7 @@ describe("dynamic Claude Agent alias pricing", () => {
     ).toMatchObject({ status: "priced", costUsd: 10 });
   });
 
-  it("keeps concrete ids, direct Anthropic aliases, and fable out of the dynamic step", async () => {
+  it("keeps concrete ids and direct Anthropic aliases out of the dynamic step", async () => {
     await loadSnapshot({
       names: {
         "claude-opus-5-5": "Claude Opus 5.5",
@@ -134,11 +134,11 @@ describe("dynamic Claude Agent alias pricing", () => {
       ok: true,
       key: { provider: "anthropic", model: "claude-opus-5-5" },
     });
-    expect(CLAUDE_AGENT_PRICING_ALIASES).toEqual(["opus", "sonnet", "haiku"]);
-    expect(isClaudeAgentPricingAlias("fable")).toBe(false);
+    expect(CLAUDE_AGENT_PRICING_ALIASES).toEqual(["opus", "sonnet", "haiku", "fable"]);
+    expect(isClaudeAgentPricingAlias("fable")).toBe(true);
   });
 
-  it("treats a non-unique covered catalog match as unresolved, never an older static price", async () => {
+  it("uses the static fallback when an ambiguous catalog match includes the static target", async () => {
     await loadSnapshot({
       prices: {
         "claude-opus-5-5": { input: 1, output: 2 },
@@ -150,6 +150,34 @@ describe("dynamic Claude Agent alias pricing", () => {
       },
     });
     await recordOpusEvidence("Opus 5.5");
+
+    expect(readModelAliasEvidenceSync()?.aliases.opus).toMatchObject({
+      resolvedModelID: null,
+      catalogObserved: true,
+    });
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "opus" })).toMatchObject({
+      ok: true,
+      key: { provider: "anthropic", model: "claude-opus-5-5" },
+    });
+    expect(
+      priceTokenBuckets({ providerID: "claude-agent", modelID: "opus", tokens: TOKENS }),
+    ).toMatchObject({ status: "priced", costUsd: 1 });
+  });
+
+  it("does not use an older static price when an ambiguous match establishes a new generation", async () => {
+    await loadSnapshot({
+      prices: {
+        "claude-opus-5-5": { input: 1, output: 2 },
+        "claude-opus-5-6": { input: 10, output: 20 },
+        "claude-opus-5-6-preview": { input: 30, output: 40 },
+      },
+      names: {
+        "claude-opus-5-5": "Claude Opus 5.5",
+        "claude-opus-5-6": "Claude Opus 5.6",
+        "claude-opus-5-6-preview": "Claude Opus 5.6",
+      },
+    });
+    await recordOpusEvidence("Opus 5.6");
 
     expect(readModelAliasEvidenceSync()?.aliases.opus).toMatchObject({
       resolvedModelID: null,
@@ -477,6 +505,127 @@ describe("dynamic Claude Agent alias pricing", () => {
     expect(priced.status === "priced" ? priced.key : null).not.toEqual({
       provider: "claude-agent",
       model: "opus",
+    });
+  });
+
+  it("recovers an unresolved alias after the catalog gains its target, repricing cached analytics", async () => {
+    await loadSnapshot({
+      prices: { "claude-opus-5-5": { input: 1, output: 2 } },
+      names: { "claude-opus-5-5": "Claude Opus 5.5" },
+      catalog: ["claude-opus-5-5"],
+    });
+    await recordOpusEvidence("Opus 5.6");
+
+    expect(readModelAliasEvidenceSync()?.aliases.opus).toMatchObject({
+      name: "Opus 5.6",
+      resolvedModelID: null,
+      catalogObserved: true,
+    });
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "opus" })).toMatchObject({
+      ok: false,
+    });
+
+    const sessions = {
+      ses_alias: { id: "ses_alias", projectID: "p_alias", time: { created: NOW - 1_000 } },
+    };
+    const projects = { p_alias: { id: "p_alias", directories: [], worktrees: [] } };
+    const row = {
+      sessionID: "ses_alias",
+      messageID: "msg_alias",
+      createdAtMs: NOW - 2_000,
+      completedAtMs: NOW - 1_000,
+      providerID: "claude-agent",
+      modelID: "opus",
+      tokens: { input: 1_000_000, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 },
+    };
+    const model = createAnalyticsModel();
+    const applyWorker = () => {
+      model.clear();
+      model.setMetadata(sessions, projects);
+      model.apply([row], []);
+      return model.home("24h", NOW).usage.totals.apiEquivalentCostUsd;
+    };
+
+    const initialFingerprint = getAnalyticsPricingFingerprint();
+    expect(applyWorker()).toBeNull();
+
+    // A later catalog refresh supplies the target name and tariff. No new
+    // Claude Agent observation is recorded.
+    await loadSnapshot({
+      prices: {
+        "claude-opus-5-5": { input: 1, output: 2 },
+        "claude-opus-5-6": { input: 10, output: 20 },
+      },
+      names: {
+        "claude-opus-5-5": "Claude Opus 5.5",
+        "claude-opus-5-6": "Claude Opus 5.6",
+      },
+      catalog: ["claude-opus-5-5", "claude-opus-5-6"],
+    });
+
+    expect(getAnalyticsPricingFingerprint()).not.toBe(initialFingerprint);
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "opus" })).toMatchObject({
+      ok: true,
+      method: "alias_evidence",
+      key: { provider: "anthropic", model: "claude-opus-5-6" },
+    });
+    expect(applyWorker()).toBe(10);
+    // Recovery is resolver-side; the last observation stays last-confirmed.
+    expect(readModelAliasEvidenceSync()?.aliases.opus?.resolvedModelID).toBeNull();
+  });
+
+  it("prices fable from unique native evidence without inventing a static fallback", async () => {
+    await loadSnapshot({
+      prices: {
+        "claude-fable-5-1": { input: 10, output: 50 },
+        "claude-fable-5-2": { input: 8, output: 40 },
+      },
+      names: {
+        "claude-fable-5-1": "Claude Fable 5.1",
+        "claude-fable-5-2": "Claude Fable 5.2",
+      },
+      catalog: ["claude-fable-5-1", "claude-fable-5-2"],
+    });
+
+    // Without native evidence there is no declared static fable target, so the
+    // route stays unpriced rather than guessing a generation.
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "fable" })).toMatchObject({
+      ok: false,
+    });
+    expect(
+      priceTokenBucketsWithRecordedCost({
+        providerID: "claude-agent",
+        modelID: "fable",
+        tokens: TOKENS,
+        recordedCostUsd: 0.42,
+      }),
+    ).toEqual({ status: "recorded_cost", costUsd: 0.42, recordedTokens: 1_000_000 });
+
+    await recordClaudeAgentModelEvidence([
+      { providerID: "claude-agent", id: "fable", name: "Fable 5.2" },
+    ]);
+    expect(readModelAliasEvidenceSync()?.aliases.fable).toMatchObject({
+      name: "Fable 5.2",
+      resolvedModelID: "claude-fable-5-2",
+      catalogObserved: true,
+    });
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "fable" })).toMatchObject({
+      ok: true,
+      method: "alias_evidence",
+      key: { provider: "anthropic", model: "claude-fable-5-2" },
+    });
+    expect(
+      priceTokenBuckets({ providerID: "claude-agent", modelID: "fable", tokens: TOKENS }),
+    ).toMatchObject({ status: "priced", costUsd: 8 });
+
+    // Native ambiguity has no static fable value to fall back to.
+    await recordClaudeAgentModelEvidence([
+      { providerID: "claude-agent", id: "fable", name: "Fable 5.1" },
+      { providerID: "claude-agent", id: "fable", name: "Fable 5.2" },
+    ]);
+    expect(readModelAliasEvidenceSync()?.aliases.fable).toMatchObject({ ambiguous: true });
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "fable" })).toMatchObject({
+      ok: false,
     });
   });
 });

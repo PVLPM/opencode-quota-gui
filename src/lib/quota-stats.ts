@@ -8,8 +8,8 @@ import {
 import {
   type ClaudeAgentPricingAlias,
   isClaudeAgentPricingAlias,
+  matchClaudeAgentCatalogName,
   readClaudeAgentAliasEvidence,
-  resolveClaudeAgentCatalogName,
 } from "./model-alias-evidence.js";
 import {
   type CostBuckets,
@@ -294,50 +294,7 @@ function resolveExplicitPricingAlias(
 /** Claude Agent's unversioned aliases price through the Anthropic catalog. */
 const CLAUDE_AGENT_PRICED_PROVIDER = "anthropic";
 
-function resolveClaudeAgentAliasPricing(
-  alias: ClaudeAgentPricingAlias,
-  sourceProviderID: string,
-  sourceModelID: string,
-): PricingResolution | null {
-  const evidence = readClaudeAgentAliasEvidence(alias);
-  if (evidence.kind === "ambiguous" || evidence.kind === "unavailable") return null;
-
-  if (evidence.kind === "resolved") {
-    return {
-      ok: true,
-      key: { provider: CLAUDE_AGENT_PRICED_PROVIDER, model: evidence.modelID },
-      method: "alias_evidence",
-    };
-  }
-
-  // A covered catalog already answered "no unique target"; never fall back to
-  // an older static price for this current observation.
-  if (evidence.kind === "unresolved") {
-    return {
-      ok: false,
-      unknown: {
-        sourceProviderID,
-        sourceModelID,
-        mappedProvider: CLAUDE_AGENT_PRICED_PROVIDER,
-        reason: "missing_provider",
-      },
-    };
-  }
-
-  // Name-only legacy evidence needs a name-coverage-aware catalog. A legacy
-  // snapshot without that marker keeps the established static fallback.
-  if (!hasPricingNameCoverage()) return null;
-
-  const matches = listModelDisplayNames(CLAUDE_AGENT_PRICED_PROVIDER);
-  const resolvedModelID = resolveClaudeAgentCatalogName(evidence.name, matches);
-  if (resolvedModelID) {
-    return {
-      ok: true,
-      key: { provider: CLAUDE_AGENT_PRICED_PROVIDER, model: resolvedModelID },
-      method: "alias_evidence",
-    };
-  }
-
+function claudeAgentUnknown(sourceProviderID: string, sourceModelID: string): PricingResolution {
   return {
     ok: false,
     unknown: {
@@ -347,6 +304,89 @@ function resolveClaudeAgentAliasPricing(
       reason: "missing_provider",
     },
   };
+}
+
+/**
+ * `null` keeps the established static alias path when this alias declares one.
+ * An alias without a declared fallback (fable) must stay unpriced instead of
+ * letting generic model heuristics guess an older generation.
+ */
+function claudeAgentStaticFallback(
+  alias: ClaudeAgentPricingAlias,
+  sourceProviderID: string,
+  sourceModelID: string,
+): PricingResolution | null {
+  return PROVIDER_MODEL_PRICING_ALIASES.anthropic?.[alias]
+    ? null
+    : claudeAgentUnknown(sourceProviderID, sourceModelID);
+}
+
+/** Resolve a saved native display name against the current covered catalog. */
+function resolveSavedClaudeAgentName(
+  name: string,
+  alias: ClaudeAgentPricingAlias,
+  sourceProviderID: string,
+  sourceModelID: string,
+): PricingResolution | null {
+  const match = matchClaudeAgentCatalogName(
+    name,
+    listModelDisplayNames(CLAUDE_AGENT_PRICED_PROVIDER),
+  );
+  if (match.kind === "unique") {
+    return {
+      ok: true,
+      key: { provider: CLAUDE_AGENT_PRICED_PROVIDER, model: match.modelID },
+      method: "alias_evidence",
+    };
+  }
+  if (match.kind === "absent") {
+    return claudeAgentUnknown(sourceProviderID, sourceModelID);
+  }
+  // Multiple catalog entries are ambiguous. The static alias remains an agreed
+  // answer only when it is one of the matched candidates; a positive newer
+  // name must not inherit an older generation's price.
+  const staticTarget = PROVIDER_MODEL_PRICING_ALIASES.anthropic?.[alias];
+  if (staticTarget && match.modelIDs.includes(staticTarget)) {
+    return claudeAgentStaticFallback(alias, sourceProviderID, sourceModelID);
+  }
+  return claudeAgentUnknown(sourceProviderID, sourceModelID);
+}
+
+function resolveClaudeAgentAliasPricing(
+  alias: ClaudeAgentPricingAlias,
+  sourceProviderID: string,
+  sourceModelID: string,
+): PricingResolution | null {
+  const evidence = readClaudeAgentAliasEvidence(alias);
+
+  if (evidence.kind === "resolved") {
+    return {
+      ok: true,
+      key: { provider: CLAUDE_AGENT_PRICED_PROVIDER, model: evidence.modelID },
+      method: "alias_evidence",
+    };
+  }
+
+  if (evidence.kind === "ambiguous" || evidence.kind === "unavailable") {
+    return claudeAgentStaticFallback(alias, sourceProviderID, sourceModelID);
+  }
+
+  // A covered catalog previously found no unique target. Retry the saved name
+  // against the current catalog so a later refresh can price it without
+  // another observation; without coverage the conservative answer stays
+  // unpriced rather than borrowing an older generation.
+  if (evidence.kind === "unresolved") {
+    if (!evidence.name || !hasPricingNameCoverage()) {
+      return claudeAgentUnknown(sourceProviderID, sourceModelID);
+    }
+    return resolveSavedClaudeAgentName(evidence.name, alias, sourceProviderID, sourceModelID);
+  }
+
+  // Name-only evidence was recorded before catalog coverage was available.
+  if (!hasPricingNameCoverage()) {
+    return claudeAgentStaticFallback(alias, sourceProviderID, sourceModelID);
+  }
+  return resolveSavedClaudeAgentName(evidence.name, alias, sourceProviderID, sourceModelID);
 }
 
 const SOURCE_PROVIDER_ALIASES: Record<string, string> = {

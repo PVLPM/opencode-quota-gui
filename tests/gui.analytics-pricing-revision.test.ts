@@ -171,7 +171,7 @@ describe("analytics pricing revision fingerprint", () => {
         identity({ pricingMeta: { providers: ["deepseek", "openai"] } }),
       ),
     ).toBe(fingerprint);
-    expect(ANALYTICS_PRICING_FINGERPRINT_SCHEMA).toBe(2);
+    expect(ANALYTICS_PRICING_FINGERPRINT_SCHEMA).toBe(3);
   });
 
   it("changes when the stable v1 pricing identity or actual content changes", () => {

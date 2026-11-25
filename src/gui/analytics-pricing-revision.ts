@@ -20,7 +20,7 @@ import {
  * Fingerprint format version. Bump whenever the covered inputs or their
  * canonical encoding change, so derived presentation caches are rebuilt.
  */
-export const ANALYTICS_PRICING_FINGERPRINT_SCHEMA = 2;
+export const ANALYTICS_PRICING_FINGERPRINT_SCHEMA = 3;
 /** Stable v1 models.dev pricing snapshot schema this fingerprint understands. */
 export const PRICING_SNAPSHOT_SCHEMA_VERSION = 1;
 /** Temporal snapshot schema this fingerprint understands. */

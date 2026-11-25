@@ -8,7 +8,7 @@ import { getOpencodeRuntimeDirs, type OpencodeRuntimeDirs } from "./opencode-run
 import { getGuiPrivateCacheDir } from "./private-state-paths.js";
 
 /** Unversioned Claude Agent aliases whose target moves without a version suffix. */
-export const CLAUDE_AGENT_PRICING_ALIASES = ["opus", "sonnet", "haiku"] as const;
+export const CLAUDE_AGENT_PRICING_ALIASES = ["opus", "sonnet", "haiku", "fable"] as const;
 export type ClaudeAgentPricingAlias = (typeof CLAUDE_AGENT_PRICING_ALIASES)[number];
 
 const RUNTIME_MODEL_ALIAS_FILENAME = "model-aliases.runtime.json";
@@ -47,10 +47,18 @@ export type ClaudeAgentAliasObservation = { kind: "ambiguous" } | { kind: "name"
 export type ClaudeAgentAliasEvidenceState =
   | { kind: "resolved"; modelID: string }
   | { kind: "ambiguous" }
-  /** A covered catalog had no unique match; do not use an older static price. */
-  | { kind: "unresolved" }
+  /**
+   * A covered catalog had no unique match. The saved native name lets a later
+   * catalog refresh resolve it without another Claude Agent observation.
+   */
+  | { kind: "unresolved"; name?: string }
   | { kind: "name"; name: string }
   | { kind: "unavailable" };
+
+export type ClaudeAgentCatalogMatch =
+  | { kind: "unique"; modelID: string }
+  | { kind: "ambiguous"; modelIDs: string[] }
+  | { kind: "absent" };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -157,15 +165,35 @@ export function getModelAliasEvidenceFingerprint(runtimeDirs?: OpencodeRuntimeDi
   }
 }
 
+/**
+ * Exact or vendor-prefix suffix match against display names. Zero matches
+ * (absent) and multiple matches (ambiguous) stay distinct so callers can keep
+ * the static fallback only where it is a same-generation answer.
+ */
+export function matchClaudeAgentCatalogName(
+  name: string,
+  catalogNames: readonly { modelID: string; name: string }[],
+): ClaudeAgentCatalogMatch {
+  const matches = catalogNames.filter(
+    (model) => model.name === name || model.name.endsWith(` ${name}`),
+  );
+  const [only] = matches;
+  if (only !== undefined && matches.length === 1) {
+    return { kind: "unique", modelID: only.modelID };
+  }
+  if (matches.length > 1) {
+    return { kind: "ambiguous", modelIDs: matches.map((model) => model.modelID) };
+  }
+  return { kind: "absent" };
+}
+
 /** One unique display-name match; null means ambiguous or absent. */
 export function resolveClaudeAgentCatalogName(
   name: string,
   catalogNames: readonly { modelID: string; name: string }[],
 ): string | null {
-  const matches = catalogNames.filter(
-    (model) => model.name === name || model.name.endsWith(` ${name}`),
-  );
-  return matches.length === 1 ? (matches[0]?.modelID ?? null) : null;
+  const match = matchClaudeAgentCatalogName(name, catalogNames);
+  return match.kind === "unique" ? match.modelID : null;
 }
 
 export function readClaudeAgentAliasEvidence(
@@ -178,7 +206,9 @@ export function readClaudeAgentAliasEvidence(
   if (typeof entry.resolvedModelID === "string") {
     return { kind: "resolved", modelID: entry.resolvedModelID };
   }
-  if (entry.catalogObserved) return { kind: "unresolved" };
+  if (entry.catalogObserved) {
+    return { kind: "unresolved", ...(entry.name ? { name: entry.name } : {}) };
+  }
   if (entry.name) return { kind: "name", name: entry.name };
   return { kind: "unavailable" };
 }
