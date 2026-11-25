@@ -1636,6 +1636,9 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       hours.clear();
       latestStepBySession.clear();
       earliestStepBySession.clear();
+      // Resolution depends on mutable alias evidence; a rebuilt model must not
+      // serve a pre-evidence answer from the previous hydration.
+      pricingCache.clear();
       earliestHourMs = undefined;
       earliestStepGlobal = undefined;
       earliestDirty = true;

@@ -99,6 +99,11 @@ export interface NativeCacheObserver {
   ): () => void;
   /** Notifies exact sessions whose history was invalidated by an observation gap. */
   subscribeGaps(listener: (sessionId: string) => void): () => void;
+  /**
+   * Notifies exact watched sessions whose completed step can newly justify a
+   * history read that was never loaded: no usable live observation exists yet.
+   */
+  subscribeHistoryEligibility(listener: (sessionId: string) => void): () => void;
   /** One-shot direct-child discovery; it does not start or retain a transport. */
   children(sessionId: string): Promise<NativeCacheObserverChild[]>;
   /** Lazily reads selected session history; callers cancel with a signal on selection changes. */
@@ -193,6 +198,13 @@ export function createNativeCacheObserverRuntime(options: {
   const childOwners = new Map<string, string>();
   const transportListeners = new Set<(transport: NativeCacheObserverTransport) => void>();
   const gapListeners = new Set<(sessionId: string) => void>();
+  const historyEligibilityListeners = new Set<(sessionId: string) => void>();
+  /**
+   * Completions already notified in the current observation. Reset when the
+   * session's history epoch is invalidated so a replayed completion can retry
+   * against fresh evidence.
+   */
+  const historyEligibilityCompletions = new Map<string, Set<string>>();
   const modelMismatchListeners = new Set<
     (transition: NativeCacheObserverModelMismatchTransition) => void
   >();
@@ -823,6 +835,37 @@ export function createNativeCacheObserverRuntime(options: {
     }
   }
 
+  function notifyHistoryEligibility(sessionId: string): void {
+    for (const listener of Array.from(historyEligibilityListeners)) {
+      try {
+        listener(sessionId);
+      } catch {
+        /* A consumer cannot interrupt ingestion. */
+      }
+    }
+  }
+
+  /** True only for a completion that has not already produced a notification. */
+  function noteHistoryEligibilityCompletion(sessionId: string, completionId: string): boolean {
+    let seen = historyEligibilityCompletions.get(sessionId);
+    if (seen === undefined) {
+      seen = new Set();
+      historyEligibilityCompletions.set(sessionId, seen);
+    }
+    if (seen.has(completionId)) return false;
+    seen.add(completionId);
+    if (seen.size > MAX_NOTIFIED_COMPLETIONS_PER_SESSION) {
+      const oldest = seen.values().next().value;
+      if (oldest !== undefined) seen.delete(oldest);
+    }
+    while (historyEligibilityCompletions.size > CACHE_OBSERVER_MAX_SESSIONS) {
+      const oldestSessionId = historyEligibilityCompletions.keys().next().value;
+      if (oldestSessionId === undefined) break;
+      historyEligibilityCompletions.delete(oldestSessionId);
+    }
+    return true;
+  }
+
   function markActiveObservationGaps(): void {
     const sessionIds = watchedSessions();
     // Put every watched session into the gap state before invalidating any
@@ -999,7 +1042,11 @@ export function createNativeCacheObserverRuntime(options: {
 
   function bumpHistoryEpoch(sessionId: string, invalidateLoadedHistory = false): void {
     historyEpochs.set(sessionId, historyEpoch(sessionId) + 1);
-    if (invalidateLoadedHistory) historyLoadedSessions.delete(sessionId);
+    if (invalidateLoadedHistory) {
+      historyLoadedSessions.delete(sessionId);
+      // A new observation epoch: a replayed completion may retry again.
+      historyEligibilityCompletions.delete(sessionId);
+    }
     trimHistoryEpochs();
   }
 
@@ -1142,10 +1189,12 @@ export function createNativeCacheObserverRuntime(options: {
 
         throwIfAborted(controller.signal);
         if (historyEpoch(sessionId) !== expectedEpoch) continue;
-        ingestor.ingestHistory(history);
+        const ingested = ingestor.ingestHistory(history);
         throwIfAborted(controller.signal);
         if (historyEpoch(sessionId) !== expectedEpoch) continue;
-        markHistoryLoaded(sessionId);
+        // An empty or fenced read can gain eligible evidence later, so it must
+        // stay retryable rather than load-once.
+        if (ingested) markHistoryLoaded(sessionId);
       }
     } finally {
       callerSignal?.removeEventListener("abort", abortForCaller);
@@ -1443,6 +1492,20 @@ export function createNativeCacheObserverRuntime(options: {
       if (!interestedSessions.has(sessionId) && !childOwners.has(sessionId) && !isOwnedChild)
         return;
       ingestor.ingest(event);
+      // A completion can make history newly readable while the live evidence
+      // stays unusable. The consumer's retained batch identity would otherwise
+      // suppress the retry; loaded history or usable live evidence needs none.
+      if (
+        update.kind === "invocation" &&
+        !historyLoadedSessions.has(sessionId) &&
+        !ingestor.hasUsableLiveObservation(sessionId) &&
+        noteHistoryEligibilityCompletion(
+          sessionId,
+          `${update.observation.order.completedAtMs}\u0000${update.observation.order.messageId}`,
+        )
+      ) {
+        notifyHistoryEligibility(sessionId);
+      }
     });
   }
 
@@ -1553,6 +1616,8 @@ export function createNativeCacheObserverRuntime(options: {
     historyEpochs.clear();
     transportListeners.clear();
     gapListeners.clear();
+    historyEligibilityListeners.clear();
+    historyEligibilityCompletions.clear();
     modelMismatchListeners.clear();
     releaseRpcConnection?.();
     releaseReconnect?.();
@@ -1584,6 +1649,11 @@ export function createNativeCacheObserverRuntime(options: {
       if (disposed) return () => {};
       gapListeners.add(listener);
       return () => gapListeners.delete(listener);
+    },
+    subscribeHistoryEligibility(listener) {
+      if (disposed) return () => {};
+      historyEligibilityListeners.add(listener);
+      return () => historyEligibilityListeners.delete(listener);
     },
     children,
     bootstrapHistory,
@@ -1629,6 +1699,8 @@ function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>
 const MAX_SESSION_LABEL_CODEPOINTS = 80;
 const MAX_CHILD_DELETION_TOMBSTONES = 128;
 const MAX_HOST_TEXT_CODEPOINTS = 128;
+/** Duplicate deliveries only replay recent completions; keep the set small. */
+const MAX_NOTIFIED_COMPLETIONS_PER_SESSION = 8;
 
 function isNonNegativeFinite(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;

@@ -13,10 +13,12 @@ const pricingState = vi.hoisted(() => {
     generatedAt: 1_793_112_222_447,
     providers: ["rate-labs"],
     units: "USD per 1M tokens",
+    namesVersion: undefined as number | undefined,
   });
   return {
     source: "bundled" as "runtime" | "bundled" | "empty",
     meta: makeMeta(),
+    names: undefined as Record<string, Record<string, string>> | undefined,
     models: new Map<string, Map<string, MockCost>>([
       ["rate-labs", new Map([["rate-1", { input: 1 }]])],
     ]),
@@ -24,9 +26,12 @@ const pricingState = vi.hoisted(() => {
   };
 });
 
+const aliasEvidenceState = vi.hoisted(() => ({ fingerprint: "alias-evidence-a" }));
+
 vi.mock("../src/lib/modelsdev-pricing.js", () => ({
   getPricingSnapshotMeta: () => pricingState.meta,
   getPricingSnapshotSource: () => pricingState.source,
+  getPricingSnapshotNames: () => pricingState.names,
   listProviders: () => [...pricingState.models.keys()],
   listModelsForProvider: (providerId: string) => [
     ...(pricingState.models.get(providerId)?.keys() ?? []),
@@ -35,6 +40,10 @@ vi.mock("../src/lib/modelsdev-pricing.js", () => ({
     pricingState.lookupCostCalls += 1;
     return pricingState.models.get(providerId)?.get(modelId) ?? null;
   },
+}));
+
+vi.mock("../src/lib/model-alias-evidence.js", () => ({
+  getModelAliasEvidenceFingerprint: () => aliasEvidenceState.fingerprint,
 }));
 
 import {
@@ -78,7 +87,9 @@ function resetPricingState(): void {
     units: "USD per 1M tokens",
   };
   pricingState.models = new Map([["rate-labs", new Map([["rate-1", { input: 1 }]])]]);
+  pricingState.names = undefined;
   pricingState.lookupCostCalls = 0;
+  aliasEvidenceState.fingerprint = "alias-evidence-a";
   __resetAnalyticsPricingFingerprintCacheForTests();
 }
 
@@ -160,7 +171,7 @@ describe("analytics pricing revision fingerprint", () => {
         identity({ pricingMeta: { providers: ["deepseek", "openai"] } }),
       ),
     ).toBe(fingerprint);
-    expect(ANALYTICS_PRICING_FINGERPRINT_SCHEMA).toBe(1);
+    expect(ANALYTICS_PRICING_FINGERPRINT_SCHEMA).toBe(3);
   });
 
   it("changes when the stable v1 pricing identity or actual content changes", () => {
@@ -249,6 +260,27 @@ describe("analytics pricing revision fingerprint", () => {
 
     expect(runtime).not.toBe(bundled);
     expect(pricingState.lookupCostCalls).toBeGreaterThan(callsAfterBundled);
+  });
+
+  it("changes when catalog display names or confirmed alias evidence changes", () => {
+    const base = getAnalyticsPricingFingerprint();
+
+    pricingState.meta = { ...pricingState.meta };
+    pricingState.names = { "rate-labs": { "rate-1": "Claude Opus 5.5" } };
+    const named = getAnalyticsPricingFingerprint();
+    expect(named).not.toBe(base);
+
+    pricingState.meta = { ...pricingState.meta };
+    pricingState.names = { "rate-labs": { "rate-1": "Claude Opus 5.6" } };
+    const movedName = getAnalyticsPricingFingerprint();
+    expect(movedName).not.toBe(named);
+
+    aliasEvidenceState.fingerprint = "alias-evidence-b";
+    const movedEvidence = getAnalyticsPricingFingerprint();
+    expect(movedEvidence).not.toBe(movedName);
+
+    pricingState.meta = { ...pricingState.meta, namesVersion: 1 };
+    expect(getAnalyticsPricingFingerprint()).not.toBe(movedEvidence);
   });
 
   it("detects same-metadata temporal policy value changes", () => {

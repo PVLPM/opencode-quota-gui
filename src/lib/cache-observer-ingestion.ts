@@ -77,8 +77,11 @@ export interface CacheObserverIngestor {
    */
   markObservationGap(sessionId: string): void;
   ingest(event: unknown): void;
-  /** Merge historical message-list DTOs without allowing them to supersede newer live observations. */
-  ingestHistory(invocations: readonly CacheObserverHistoryInvocation[]): void;
+  /**
+   * Merge historical message-list DTOs without allowing them to supersede newer live observations.
+   * True only when at least one invocation survived the live fences and was applied or retained.
+   */
+  ingestHistory(invocations: readonly CacheObserverHistoryInvocation[]): boolean;
   captureConfiguration(
     sessionId: string,
     messageId: string,
@@ -580,6 +583,7 @@ export function createCacheObserverIngestor(
           sessionId !== undefined &&
           state !== undefined &&
           latest !== undefined &&
+          sameRouteProvenance(latest.route, warmingRouteIdentity(data.route)) &&
           estimate?.deadlineAtMs !== undefined &&
           typeof data.dispatchMs === "number" &&
           Number.isFinite(data.dispatchMs) &&
@@ -864,8 +868,16 @@ export function createCacheObserverIngestor(
     );
   }
 
-  function ingestHistory(invocations: readonly CacheObserverHistoryInvocation[]): void {
-    if (disposed) return;
+  function historyRetained(sessionId: string, messageId: string): boolean {
+    return (
+      states.get(sessionId)?.invocations.some((entry) => entry.order.messageId === messageId) ===
+      true
+    );
+  }
+
+  function ingestHistory(invocations: readonly CacheObserverHistoryInvocation[]): boolean {
+    if (disposed) return false;
+    let ingested = false;
     for (const invocation of invocations) {
       const key = startedStepKey(invocation.sessionId, invocation.messageId);
       const pendingLiveEnd = pendingEndedSteps.get(key);
@@ -934,11 +946,14 @@ export function createCacheObserverIngestor(
           event: mergeHistoricalCountersIntoLiveEnd(pendingLiveEnd.event, endedEvent),
         });
         ingestEvent(startedEvent, "history");
+        if (historyRetained(invocation.sessionId, invocation.messageId)) ingested = true;
         continue;
       }
       ingestEvent(startedEvent, "history");
       ingestEvent(endedEvent, "history");
+      if (historyRetained(invocation.sessionId, invocation.messageId)) ingested = true;
     }
+    return ingested;
   }
 
   function subscribe(sessionId: string, listener: CacheObserverListener): () => void {
@@ -1082,8 +1097,8 @@ function startedStepKey(sessionId: string, messageId: string): string {
 }
 
 function sameRouteProvenance(
-  left: CacheRouteProvenance | undefined,
-  right: CacheRouteProvenance | undefined,
+  left: CacheRouteIdentity | undefined,
+  right: CacheRouteIdentity | undefined,
 ): boolean {
   return (
     left !== undefined &&
@@ -1118,6 +1133,21 @@ function isEligibleStepFinish(finish: unknown): boolean {
 function normalizedVariantId(value: unknown): string | undefined {
   const variantId = nonEmptyString(value);
   return variantId === "default" ? undefined : variantId;
+}
+
+/** Identity fields a warming event can prove; it carries no protocol or evidence basis. */
+type CacheRouteIdentity = Pick<
+  CacheRouteProvenance,
+  "providerId" | "modelId" | "variantId" | "protocolId"
+>;
+
+function warmingRouteIdentity(value: unknown): CacheRouteIdentity | undefined {
+  if (!isRecord(value)) return undefined;
+  const providerId = nonEmptyString(value.providerID);
+  const modelId = nonEmptyString(value.id);
+  if (providerId === undefined || modelId === undefined) return undefined;
+  const variantId = normalizedVariantId(value.variant);
+  return { providerId, modelId, ...(variantId === undefined ? {} : { variantId }) };
 }
 
 function ownFiniteNumber(record: Record<string, unknown>, key: string): number | undefined {

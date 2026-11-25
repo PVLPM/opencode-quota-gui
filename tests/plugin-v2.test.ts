@@ -23,9 +23,19 @@ vi.mock("../src/gui/rpc.js", () => ({
     dispose: async () => {},
   })),
 }));
+// Alias evidence is optional runtime state; keep its writer controllable so a
+// teardown test can hold an observation in flight without touching the cache.
+vi.mock("../src/lib/model-alias-evidence.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/model-alias-evidence.js")>();
+  return {
+    ...actual,
+    recordClaudeAgentModelEvidence: vi.fn(async () => {}),
+  };
+});
 
 import { startDashboard } from "../src/gui/lifecycle.js";
 import { registerDashboardRpc } from "../src/gui/rpc.js";
+import { recordClaudeAgentModelEvidence } from "../src/lib/model-alias-evidence.js";
 import {
   clearReadAuthFileCacheForTests,
   getCredentialSourceDiagnostics,
@@ -1415,5 +1425,38 @@ describe("V2 server plugin credential lifecycle", () => {
     });
 
     await cleanup?.();
+  });
+
+  it("fences an in-flight alias evidence refresh after teardown", async () => {
+    const recordEvidence = vi.mocked(recordClaudeAgentModelEvidence);
+    recordEvidence.mockClear();
+    let releaseEvidence!: () => void;
+    recordEvidence.mockImplementationOnce(
+      async () =>
+        new Promise<void>((resolve) => {
+          releaseEvidence = resolve;
+        }),
+    );
+
+    const modelList = vi.fn().mockResolvedValue({ data: [] });
+    const cleanup = await setupPlugin({
+      ...createContext(),
+      provider: {
+        list: vi.fn().mockResolvedValue({ data: [{ id: "claude-agent" }] }),
+      },
+      model: { list: modelList },
+      rpc: {} as never,
+      event: { subscribe: () => ({ async *[Symbol.asyncIterator]() {} }) },
+    });
+
+    await vi.waitFor(() => expect(recordEvidence).toHaveBeenCalledTimes(1));
+    const shouldAbort = recordEvidence.mock.calls[0]?.[1]?.shouldAbort;
+    expect(modelList).toHaveBeenCalledTimes(1);
+    expect(shouldAbort?.()).toBe(false);
+
+    await cleanup();
+    expect(shouldAbort?.()).toBe(true);
+
+    releaseEvidence();
   });
 });

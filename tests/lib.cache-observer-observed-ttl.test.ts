@@ -157,40 +157,80 @@ describe("session.cache.ttl DTO validation", () => {
 });
 
 describe("warming refresh", () => {
-  const warming = (dispatchMs: number, sessionID = SESSION) => ({
+  const ROUTE = { providerID: "claude-agent", id: "claude-test" };
+  const warming = (dispatchMs: number, sessionID = SESSION, route?: Record<string, unknown>) => ({
     type: "session.cache.warming",
-    data: { sessionID, dispatchMs, evidence: "warming-inferred" },
+    data: {
+      sessionID,
+      dispatchMs,
+      evidence: "warming-inferred",
+      ...(route === undefined ? {} : { route }),
+    },
   });
 
-  it("validates the exact relay shape", () => {
+  it("validates the exact relay shape with an optional route", () => {
+    expect(isDashboardRpcCacheObserverEvent(warming(1_500, SESSION, ROUTE))).toBe(true);
     expect(isDashboardRpcCacheObserverEvent(warming(1_500))).toBe(true);
+    expect(
+      isDashboardRpcCacheObserverEvent(warming(1_500, SESSION, { ...ROUTE, variant: "high" })),
+    ).toBe(true);
     for (const bad of [
-      warming(-1),
-      warming(Number.NaN),
-      warming(1_500, ""),
-      { ...warming(1_500), extra: true },
-      { ...warming(1_500), data: { ...warming(1_500).data, evidence: "observed" } },
+      warming(-1, SESSION, ROUTE),
+      warming(Number.NaN, SESSION, ROUTE),
+      warming(1_500, "", ROUTE),
+      { ...warming(1_500, SESSION, ROUTE), extra: true },
+      {
+        ...warming(1_500, SESSION, ROUTE),
+        data: { ...warming(1_500, SESSION, ROUTE).data, evidence: "observed" },
+      },
+      { ...warming(1_500), data: { ...warming(1_500).data, route: "route" } },
+      { ...warming(1_500), data: { ...warming(1_500).data, route: { providerID: "" } } },
+      { ...warming(1_500), data: { ...warming(1_500).data, route: { ...ROUTE, variant: "" } } },
+      {
+        ...warming(1_500),
+        data: { ...warming(1_500).data, route: { ...ROUTE, extra: true } },
+      },
     ])
       expect(isDashboardRpcCacheObserverEvent(bad)).toBe(false);
   });
 
   it("reanchors only an existing newer estimate and clears on a later completed step", () => {
     const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
-    ingestor.ingest(warming(1_500));
+    ingestor.ingest(warming(1_500, SESSION, ROUTE));
     expect(ingestor.query(SESSION)).toBeUndefined();
     ingestStep(ingestor);
     expect(ingestor.query(SESSION)?.ttlEstimate?.anchor).toBeUndefined();
-    ingestor.ingest(warming(1_500));
+    ingestor.ingest(warming(1_500, SESSION, ROUTE));
     expect(ingestor.query(SESSION)?.ttlEstimate).toMatchObject({
       ttlMs: 300_000,
       deadlineAtMs: 301_500,
       anchor: "warming-inferred",
       anchorAtMs: 1_500,
     });
-    ingestor.ingest(warming(1_200));
+    ingestor.ingest(warming(1_200, SESSION, ROUTE));
     expect(ingestor.query(SESSION)?.ttlEstimate?.anchorAtMs).toBe(1_500);
     ingestStep(ingestor, "claude-agent", "new", SESSION, 1_700);
     expect(ingestor.query(SESSION)?.ttlEstimate?.anchor).toBeUndefined();
+    ingestor.dispose();
+  });
+
+  it("does not anchor a route-less or differently-routed warming event", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    ingestStep(ingestor);
+    const before = ingestor.query(SESSION)?.ttlEstimate;
+    for (const event of [
+      warming(1_500),
+      warming(1_500, SESSION, { providerID: "claude-agent", id: "other" }),
+      warming(1_500, SESSION, { ...ROUTE, variant: "high" }),
+    ]) {
+      ingestor.ingest(event);
+      expect(ingestor.query(SESSION)?.ttlEstimate).toEqual(before);
+    }
+    ingestor.ingest(warming(1_500, SESSION, ROUTE));
+    expect(ingestor.query(SESSION)?.ttlEstimate).toMatchObject({
+      deadlineAtMs: 301_500,
+      anchor: "warming-inferred",
+    });
     ingestor.dispose();
   });
 });

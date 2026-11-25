@@ -2,14 +2,21 @@ export interface WarmingRefresh {
   sessionID: string;
   dispatchMs: number;
   evidence: "warming-inferred";
+  route?: { providerID: string; id: string; variant?: string };
+}
+
+interface WarmingRoute {
+  providerID: string;
+  id: string;
+  variant?: string;
 }
 
 interface SessionState {
-  model?: string;
+  route?: WarmingRoute;
   baseline?: number;
   requests: number;
   generate: boolean;
-  candidate?: { model: string; dispatchMs: number };
+  candidate?: { route: WarmingRoute; dispatchMs: number };
   step: boolean;
   tainted: boolean;
 }
@@ -25,11 +32,19 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function modelKey(value: unknown): string | undefined {
+function modelRoute(value: unknown): WarmingRoute | undefined {
   const model = record(value);
-  const provider = text(model?.providerID);
+  const providerID = text(model?.providerID);
   const id = text(model?.id) ?? text(model?.modelID);
-  return provider !== undefined && id !== undefined ? JSON.stringify([provider, id]) : undefined;
+  if (providerID === undefined || id === undefined) return undefined;
+  const variant = text(model?.variant);
+  return variant === undefined || variant === "default"
+    ? { providerID, id }
+    : { providerID, id, variant };
+}
+
+function routeKey(route: WarmingRoute): string {
+  return JSON.stringify([route.providerID, route.id, route.variant ?? null]);
 }
 
 export class OpencodeWarmingRefreshTracker {
@@ -59,9 +74,9 @@ export class OpencodeWarmingRefreshTracker {
     state.requests++;
     if (request?.kind === "generate") {
       state.generate = true;
-      const model = modelKey(request.model);
-      if (model !== undefined && Number.isFinite(nowMs))
-        state.candidate = { model, dispatchMs: nowMs };
+      const route = modelRoute(request.model);
+      if (route !== undefined && Number.isFinite(nowMs))
+        state.candidate = { route, dispatchMs: nowMs };
     }
   }
 
@@ -71,7 +86,7 @@ export class OpencodeWarmingRefreshTracker {
     if (id === undefined) return;
     const state = this.session(id);
     state.step = true;
-    if (started) state.model = modelKey(data?.model);
+    if (started) state.route = modelRoute(data?.model);
     else state.tainted = false;
   }
 
@@ -97,14 +112,19 @@ export class OpencodeWarmingRefreshTracker {
       state.requests === 1 &&
       state.generate &&
       state.candidate !== undefined &&
-      state.model !== undefined &&
-      state.candidate.model === state.model &&
+      state.route !== undefined &&
+      routeKey(state.candidate.route) === routeKey(state.route) &&
       state.baseline !== undefined &&
       cacheRead !== undefined &&
       cacheRead > state.baseline;
     const result: WarmingRefresh | undefined =
       accepted && state.candidate !== undefined
-        ? { sessionID: id, dispatchMs: state.candidate.dispatchMs, evidence: "warming-inferred" }
+        ? {
+            sessionID: id,
+            dispatchMs: state.candidate.dispatchMs,
+            evidence: "warming-inferred",
+            route: state.candidate.route,
+          }
         : undefined;
     if (!accepted && state.generate) state.tainted = true;
     state.baseline = cacheRead;

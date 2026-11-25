@@ -6,12 +6,20 @@ import {
   resolveCursorModel,
 } from "./cursor-pricing.js";
 import {
+  type ClaudeAgentPricingAlias,
+  isClaudeAgentPricingAlias,
+  matchClaudeAgentCatalogName,
+  readClaudeAgentAliasEvidence,
+} from "./model-alias-evidence.js";
+import {
   type CostBuckets,
   hasCatalogModel,
   hasCost,
   hasModel,
+  hasPricingNameCoverage,
   hasProvider,
   isModelsDevProviderId,
+  listModelDisplayNames,
   listProvidersForModelId,
   lookupCost,
   selectCostAtContext,
@@ -67,6 +75,7 @@ export type PricingResolution =
         | "model_prefix"
         | "unique_model"
         | "alias_fallback"
+        | "alias_evidence"
         | "cursor_local"
         | "cursor_api_alias";
     }
@@ -282,6 +291,104 @@ function resolveExplicitPricingAlias(
   return null;
 }
 
+/** Claude Agent's unversioned aliases price through the Anthropic catalog. */
+const CLAUDE_AGENT_PRICED_PROVIDER = "anthropic";
+
+function claudeAgentUnknown(sourceProviderID: string, sourceModelID: string): PricingResolution {
+  return {
+    ok: false,
+    unknown: {
+      sourceProviderID,
+      sourceModelID,
+      mappedProvider: CLAUDE_AGENT_PRICED_PROVIDER,
+      reason: "missing_provider",
+    },
+  };
+}
+
+/**
+ * `null` keeps the established static alias path when this alias declares one.
+ * An alias without a declared fallback (fable) must stay unpriced instead of
+ * letting generic model heuristics guess an older generation.
+ */
+function claudeAgentStaticFallback(
+  alias: ClaudeAgentPricingAlias,
+  sourceProviderID: string,
+  sourceModelID: string,
+): PricingResolution | null {
+  return PROVIDER_MODEL_PRICING_ALIASES.anthropic?.[alias]
+    ? null
+    : claudeAgentUnknown(sourceProviderID, sourceModelID);
+}
+
+/** Resolve a saved native display name against the current covered catalog. */
+function resolveSavedClaudeAgentName(
+  name: string,
+  alias: ClaudeAgentPricingAlias,
+  sourceProviderID: string,
+  sourceModelID: string,
+): PricingResolution | null {
+  const match = matchClaudeAgentCatalogName(
+    name,
+    listModelDisplayNames(CLAUDE_AGENT_PRICED_PROVIDER),
+  );
+  if (match.kind === "unique") {
+    return {
+      ok: true,
+      key: { provider: CLAUDE_AGENT_PRICED_PROVIDER, model: match.modelID },
+      method: "alias_evidence",
+    };
+  }
+  if (match.kind === "absent") {
+    return claudeAgentUnknown(sourceProviderID, sourceModelID);
+  }
+  // Multiple catalog entries are ambiguous. The static alias remains an agreed
+  // answer only when it is one of the matched candidates; a positive newer
+  // name must not inherit an older generation's price.
+  const staticTarget = PROVIDER_MODEL_PRICING_ALIASES.anthropic?.[alias];
+  if (staticTarget && match.modelIDs.includes(staticTarget)) {
+    return claudeAgentStaticFallback(alias, sourceProviderID, sourceModelID);
+  }
+  return claudeAgentUnknown(sourceProviderID, sourceModelID);
+}
+
+function resolveClaudeAgentAliasPricing(
+  alias: ClaudeAgentPricingAlias,
+  sourceProviderID: string,
+  sourceModelID: string,
+): PricingResolution | null {
+  const evidence = readClaudeAgentAliasEvidence(alias);
+
+  if (evidence.kind === "resolved") {
+    return {
+      ok: true,
+      key: { provider: CLAUDE_AGENT_PRICED_PROVIDER, model: evidence.modelID },
+      method: "alias_evidence",
+    };
+  }
+
+  if (evidence.kind === "ambiguous" || evidence.kind === "unavailable") {
+    return claudeAgentStaticFallback(alias, sourceProviderID, sourceModelID);
+  }
+
+  // A covered catalog previously found no unique target. Retry the saved name
+  // against the current catalog so a later refresh can price it without
+  // another observation; without coverage the conservative answer stays
+  // unpriced rather than borrowing an older generation.
+  if (evidence.kind === "unresolved") {
+    if (!evidence.name || !hasPricingNameCoverage()) {
+      return claudeAgentUnknown(sourceProviderID, sourceModelID);
+    }
+    return resolveSavedClaudeAgentName(evidence.name, alias, sourceProviderID, sourceModelID);
+  }
+
+  // Name-only evidence was recorded before catalog coverage was available.
+  if (!hasPricingNameCoverage()) {
+    return claudeAgentStaticFallback(alias, sourceProviderID, sourceModelID);
+  }
+  return resolveSavedClaudeAgentName(evidence.name, alias, sourceProviderID, sourceModelID);
+}
+
 const SOURCE_PROVIDER_ALIASES: Record<string, string> = {
   "claude-agent": "anthropic",
   cursor: "cursor",
@@ -465,6 +572,16 @@ export function resolvePricingKey(source: {
         method: "source_provider",
       };
     }
+  }
+
+  // Only the raw Claude Agent source is eligible; normalization maps it to
+  // Anthropic and would otherwise erase that distinction. Concrete model ids
+  // already returned above, so this only handles unversioned aliases.
+  const rawSourceProvider =
+    typeof source.providerID === "string" ? source.providerID.trim().toLowerCase() : "";
+  if (rawSourceProvider === "claude-agent" && isClaudeAgentPricingAlias(rawModelID)) {
+    const dynamicAlias = resolveClaudeAgentAliasPricing(rawModelID, srcProvider, srcModel);
+    if (dynamicAlias) return dynamicAlias;
   }
 
   const parsed = parseModelIdHint(rawModelID);

@@ -58,12 +58,24 @@ export type CostBuckets = CostRates & {
  */
 export type PricingCatalog = Record<string, string[]>;
 
+/**
+ * Display names from the last successful refresh, keyed by provider and model.
+ * Names are evidence for unversioned source aliases (for example Claude Agent
+ * `opus`); they never replace a concrete model id or a price.
+ */
+export type PricingNames = Record<string, Record<string, string>>;
+
+/** Name capture version; snapshots without it are not name-coverage aware. */
+export const PRICING_NAMES_VERSION = 1;
+
 export type PricingSnapshot = {
   _meta: {
     source: string;
     generatedAt: number;
     providers: string[];
     units: string;
+    /** Present when this snapshot captured display names from the same catalog. */
+    namesVersion?: number;
   };
   providers: Record<string, Record<string, CostBuckets>>;
   /**
@@ -72,6 +84,11 @@ export type PricingSnapshot = {
    * "retired" apart from "still listed but no longer priced".
    */
   catalog?: PricingCatalog;
+  /**
+   * Display names for catalog models, including catalog-only unpriced models.
+   * Optional so older bundled/runtime snapshots keep loading unchanged.
+   */
+  names?: PricingNames;
 };
 
 export const DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS = MS_PER_DAY;
@@ -81,6 +98,8 @@ export type PricingSnapshotHealth = {
   ageMs: number;
   maxAgeMs: number;
   stale: boolean;
+  /** Preserved snapshot name-coverage marker. */
+  namesVersion?: number;
 };
 
 /**
@@ -231,6 +250,43 @@ function normalizeCatalog(raw: unknown): PricingCatalog | undefined {
   return sortCatalog(catalog);
 }
 
+function sortNames(
+  names: Readonly<Record<string, Readonly<Record<string, string>>>>,
+): PricingNames {
+  const out: PricingNames = {};
+  for (const providerID of Object.keys(names).sort((a, b) => a.localeCompare(b))) {
+    const modelNames = names[providerID];
+    if (!modelNames) continue;
+    const sortedModels: Record<string, string> = {};
+    for (const modelID of Object.keys(modelNames).sort((a, b) => a.localeCompare(b))) {
+      const name = modelNames[modelID];
+      if (typeof name === "string" && name.length > 0) sortedModels[modelID] = name;
+    }
+    if (Object.keys(sortedModels).length > 0) out[providerID] = sortedModels;
+  }
+  return out;
+}
+
+function normalizeNames(raw: unknown): PricingNames | undefined {
+  const obj = asRecord(raw);
+  if (!obj) return undefined;
+
+  const names: Record<string, Record<string, string>> = {};
+  for (const providerID of Object.keys(obj)) {
+    const modelsRaw = asRecord(obj[providerID]);
+    if (!modelsRaw) continue;
+    const modelNames: Record<string, string> = {};
+    for (const modelID of Object.keys(modelsRaw)) {
+      const name = modelsRaw[modelID];
+      if (typeof name !== "string") continue;
+      const trimmed = name.trim();
+      if (trimmed) modelNames[modelID] = trimmed;
+    }
+    if (Object.keys(modelNames).length > 0) names[providerID] = modelNames;
+  }
+  return Object.keys(names).length > 0 ? sortNames(names) : undefined;
+}
+
 function pricingSnapshotDaysToMs(days: number | undefined): number {
   if (typeof days !== "number" || !Number.isFinite(days) || days <= 0) {
     return DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS;
@@ -283,15 +339,21 @@ function normalizeSnapshot(raw: unknown): PricingSnapshot | null {
 
   const providerList = Object.keys(providers).sort((a, b) => a.localeCompare(b));
   const catalog = normalizeCatalog(root.catalog);
+  const names = normalizeNames(root.names);
+  const namesVersion = Number(metaRaw.namesVersion);
 
   return {
     ...(catalog ? { catalog } : {}),
+    ...(names ? { names } : {}),
     _meta: {
       source: typeof metaRaw.source === "string" && metaRaw.source ? metaRaw.source : SOURCE_URL,
       generatedAt: Math.trunc(generatedAt),
       providers: providerList,
       units:
         typeof metaRaw.units === "string" && metaRaw.units ? metaRaw.units : "USD per 1M tokens",
+      ...(Number.isFinite(namesVersion) && namesVersion >= PRICING_NAMES_VERSION
+        ? { namesVersion: Math.trunc(namesVersion) }
+        : {}),
     },
     providers: sortRecordByKeys(providers),
   };
@@ -344,6 +406,10 @@ function countCatalogModels(snapshot: PricingSnapshot | null | undefined): numbe
   let total = 0;
   for (const modelIDs of Object.values(snapshot.catalog)) total += modelIDs.length;
   return total;
+}
+
+function snapshotHasNameCoverage(snapshot: PricingSnapshot | null | undefined): boolean {
+  return (snapshot?._meta.namesVersion ?? 0) >= PRICING_NAMES_VERSION;
 }
 
 function hasAuthoritativeCatalog(snapshot: PricingSnapshot | null): boolean {
@@ -1025,6 +1091,7 @@ function buildSnapshotFromApi(
     .sort((a, b) => a.localeCompare(b));
   const providers: Record<string, Record<string, CostBuckets>> = {};
   const catalog: PricingCatalog = {};
+  const names: PricingNames = {};
 
   // Catalog presence is authoritative only for the providers this refresh
   // actually replaced. Providers outside the scope stay catalog-unknown so
@@ -1037,16 +1104,22 @@ function buildSnapshotFromApi(
     catalog[providerID] = Object.keys(models);
 
     const pricedModels: Record<string, CostBuckets> = {};
+    const modelNames: Record<string, string> = {};
     for (const modelID of Object.keys(models)) {
       const modelNode = asRecord(models[modelID]);
       const cost = pickCostBuckets(modelNode?.cost);
       if (cost) {
         pricedModels[modelID] = cost;
       }
+      const name = typeof modelNode?.name === "string" ? modelNode.name.trim() : "";
+      if (name) modelNames[modelID] = name;
     }
 
     if (Object.keys(pricedModels).length > 0) {
       providers[providerID] = sortRecordByKeys(pricedModels);
+    }
+    if (Object.keys(modelNames).length > 0) {
+      names[providerID] = sortRecordByKeys(modelNames);
     }
   }
 
@@ -1054,11 +1127,13 @@ function buildSnapshotFromApi(
 
   return {
     catalog: sortCatalog(catalog),
+    ...(Object.keys(names).length > 0 ? { names: sortNames(names) } : {}),
     _meta: {
       generatedAt,
       providers: providerList,
       source: SOURCE_URL,
       units: "USD per 1M tokens",
+      namesVersion: PRICING_NAMES_VERSION,
     },
     providers: sortRecordByKeys(providers),
   };
@@ -1110,6 +1185,7 @@ function keepRetiredModels(params: {
 
   const sortedProviders = sortRecordByKeys(providers);
   return {
+    ...(params.current.names ? { names: params.current.names } : {}),
     ...(catalog ? { catalog: sortCatalog(catalog) } : {}),
     _meta: { ...params.current._meta, providers: Object.keys(sortedProviders) },
     providers: sortedProviders,
@@ -1159,9 +1235,18 @@ function retainPriorPricesForUnrefreshedProviders(params: {
       ...(providers[providerID] ?? {}),
     });
   }
+  const names = { ...(params.current.names ?? {}) };
+  for (const [providerID, modelNames] of Object.entries(params.previous.names ?? {})) {
+    if (params.replacedProviderIDs.has(providerID)) continue;
+    names[providerID] = sortRecordByKeys({
+      ...modelNames,
+      ...(names[providerID] ?? {}),
+    });
+  }
   const sortedProviders = sortRecordByKeys(providers);
   return {
     ...params.current,
+    ...(Object.keys(names).length > 0 ? { names: sortNames(names) } : {}),
     _meta: { ...params.current._meta, providers: Object.keys(sortedProviders) },
     providers: sortedProviders,
   };
@@ -1272,6 +1357,10 @@ export async function maybeRefreshPricingSnapshot(
       };
     }
 
+    // A snapshot written before name capture cannot prove a missing alias
+    // target; upgrade it once with an unconditional full refresh.
+    const nameCoverageMissing = !snapshotHasNameCoverage(ensureLoaded());
+
     const health = getPricingSnapshotHealth({ nowMs, maxAgeMs });
 
     if (!force && !policy.enabled) {
@@ -1287,7 +1376,13 @@ export async function maybeRefreshPricingSnapshot(
       };
     }
 
-    if (!force && !opts.refreshEvenIfFresh && !health.stale && !legacyRuntimePinnedByValidators) {
+    if (
+      !force &&
+      !opts.refreshEvenIfFresh &&
+      !health.stale &&
+      !legacyRuntimePinnedByValidators &&
+      !nameCoverageMissing
+    ) {
       return {
         attempted: false,
         updated: false,
@@ -1350,13 +1445,16 @@ export async function maybeRefreshPricingSnapshot(
         timeoutMs,
         state: attemptingState,
         fetchFn: opts.fetchFn,
-        conditional: runtimeHasAuthoritativeCatalog,
+        conditional: runtimeHasAuthoritativeCatalog && !nameCoverageMissing,
       });
 
-      if (fetchResult.kind === "not_modified" && !runtimeHasAuthoritativeCatalog) {
+      if (
+        fetchResult.kind === "not_modified" &&
+        (!runtimeHasAuthoritativeCatalog || nameCoverageMissing)
+      ) {
         // An unconditional request must not answer 304. Retry once without
-        // validators; a second 304 still cannot establish catalog presence, so
-        // fail the refresh instead of persisting a fresh catalog-less snapshot.
+        // validators; a second 304 still cannot establish catalog or name
+        // coverage, so fail the refresh instead of pinning a legacy snapshot.
         // The retry is a real network request and reserves its own budget slot.
         const retryReservation = await reserveRefreshAttempt({
           statePath,
@@ -1395,6 +1493,7 @@ export async function maybeRefreshPricingSnapshot(
         // Also heals runtime snapshots written before retired models were kept.
         const refreshedSnapshot = keepRetiredModels({
           current: {
+            ...(baseSnapshot.names ? { names: baseSnapshot.names } : {}),
             _meta: {
               ...baseSnapshot._meta,
               generatedAt: nowMs,
@@ -1540,6 +1639,7 @@ export async function refreshAnalyticsPricing(opts?: {
     maxAgeMs: getPricingRefreshPolicy().maxAgeMs,
   }).stale;
   if (
+    hasPricingNameCoverage() &&
     !currentlyStale &&
     nowMs - LAST_ANALYTICS_PRICING_CHECK_AT_MS < ANALYTICS_PRICING_CHECK_INTERVAL_MS &&
     preliminarySignature === LAST_ANALYTICS_UNPRICED_SIGNATURE
@@ -1554,6 +1654,7 @@ export async function refreshAnalyticsPricing(opts?: {
       : { bootstrapSnapshotOverride: opts.bootstrapSnapshotOverride }),
   });
 
+  const nameCoverageMissing = !hasPricingNameCoverage();
   const unpricedRoutes = routes.filter((route) => !pricingRouteIsPriced(route));
   const unpricedRouteKeys = unpricedRoutes.map(pricingRouteKey);
   const signature = [...unpricedRouteKeys].sort().join("\u0001");
@@ -1563,13 +1664,17 @@ export async function refreshAnalyticsPricing(opts?: {
   const state =
     (await readRefreshState(getRuntimePricingRefreshStatePath(opts?.runtimeDirs))) ?? undefined;
   const health = getPricingSnapshotHealth({ nowMs, maxAgeMs: getPricingRefreshPolicy().maxAgeMs });
-  if (!health.stale && unpricedRoutesUntried(unpricedRouteKeys, state).length === 0) {
+  if (
+    !nameCoverageMissing &&
+    !health.stale &&
+    unpricedRoutesUntried(unpricedRouteKeys, state).length === 0
+  ) {
     return undefined;
   }
 
   const result = await maybeRefreshPricingSnapshot({
     reason: unpricedRoutes.length > 0 ? "unpriced" : "status",
-    refreshEvenIfFresh: unpricedRoutes.length > 0,
+    refreshEvenIfFresh: unpricedRoutes.length > 0 || nameCoverageMissing,
     unpricedRouteKeys,
     nowMs,
     snapshotSelection: selection,
@@ -1614,7 +1719,8 @@ export function getPricingSnapshotHealth(opts?: {
   nowMs?: number;
   maxAgeMs?: number;
 }): PricingSnapshotHealth {
-  const generatedAt = getPricingSnapshotMeta().generatedAt;
+  const meta = getPricingSnapshotMeta();
+  const generatedAt = meta.generatedAt;
   const nowMs = opts?.nowMs ?? Date.now();
   const maxAgeMs = opts?.maxAgeMs ?? DEFAULT_PRICING_SNAPSHOT_MAX_AGE_MS;
   const ageMs = Math.max(0, nowMs - generatedAt);
@@ -1623,6 +1729,7 @@ export function getPricingSnapshotHealth(opts?: {
     ageMs,
     maxAgeMs,
     stale: ageMs > maxAgeMs,
+    ...(meta.namesVersion === undefined ? {} : { namesVersion: meta.namesVersion }),
   };
 }
 
@@ -1669,6 +1776,24 @@ export function listProviders(): string[] {
 
 export function listModelsForProvider(providerId: string): string[] {
   return Object.keys(ensureLoaded().providers[providerId] ?? {});
+}
+
+/** Snapshot display names, including catalog-only models without a price. */
+export function getPricingSnapshotNames(): PricingNames | undefined {
+  return ensureLoaded().names;
+}
+
+/** True when the active snapshot captured names from its catalog. */
+export function hasPricingNameCoverage(): boolean {
+  return snapshotHasNameCoverage(ensureLoaded());
+}
+
+export function listModelDisplayNames(
+  providerId: string,
+): Array<{ modelID: string; name: string }> {
+  const names = ensureLoaded().names?.[providerId];
+  if (!names) return [];
+  return Object.entries(names).map(([modelID, name]) => ({ modelID, name }));
 }
 
 export function listProvidersForModelId(modelId: string): string[] {

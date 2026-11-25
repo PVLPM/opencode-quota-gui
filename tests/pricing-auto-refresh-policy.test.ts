@@ -15,6 +15,7 @@ function createBootstrapSnapshot(generatedAt: number) {
       generatedAt,
       providers: ["openai"],
       units: "USD per 1M tokens",
+      namesVersion: 1,
     },
     providers: {
       openai: {
@@ -36,6 +37,7 @@ function createRuntimeSnapshot(generatedAt: number, input: number) {
       generatedAt,
       providers: ["openai"],
       units: "USD per 1M tokens",
+      namesVersion: 1,
     },
     providers: {
       openai: {
