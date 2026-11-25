@@ -150,6 +150,7 @@ async function writeFileAtomic(path, content) {
 
 function buildSnapshot(api, providerIDs) {
   const providers = {};
+  const names = {};
   const scopedProviderIDs = (providerIDs ?? Object.keys(api ?? {}))
     .slice()
     .sort((a, b) => a.localeCompare(b));
@@ -159,13 +160,20 @@ function buildSnapshot(api, providerIDs) {
     if (!models || typeof models !== "object") continue;
 
     const pricedModels = {};
+    const modelNames = {};
     for (const modelID of Object.keys(models)) {
       const cost = pickCostBuckets(models[modelID]?.cost);
       if (cost) pricedModels[modelID] = cost;
+      const rawName = models[modelID]?.name;
+      const name = typeof rawName === "string" ? rawName.trim() : "";
+      if (name) modelNames[modelID] = name;
     }
 
     if (Object.keys(pricedModels).length > 0) {
       providers[providerID] = sortObjectByKeys(pricedModels);
+    }
+    if (Object.keys(modelNames).length > 0) {
+      names[providerID] = sortObjectByKeys(modelNames);
     }
   }
 
@@ -178,8 +186,10 @@ function buildSnapshot(api, providerIDs) {
       providers: providerList,
       source: SOURCE_URL,
       units: "USD per 1M tokens",
+      namesVersion: 1,
     },
     providers: sortedProviders,
+    ...(Object.keys(names).length > 0 ? { names: sortObjectByKeys(names) } : {}),
   };
 }
 
@@ -248,6 +258,22 @@ function retainOutOfScopeProviders(snapshot, previous, providerIDs) {
   snapshot._meta.providers = Object.keys(snapshot.providers);
 }
 
+// Out-of-scope display names are presentation evidence, not refreshed content;
+// they move across verbatim so alias resolution outside the scope does not
+// regress on a scoped refresh.
+function retainOutOfScopeNames(snapshot, previous, providerIDs) {
+  const scope = new Set(providerIDs);
+  const names = { ...(snapshot.names ?? {}) };
+  let copied = false;
+  for (const [providerID, modelNames] of Object.entries(previous?.names ?? {})) {
+    if (scope.has(providerID)) continue;
+    names[providerID] = { ...modelNames };
+    copied = true;
+  }
+  if (!copied) return;
+  snapshot.names = sortObjectByKeys(names);
+}
+
 // models.dev drops retired models from its list. Keep their last known price so
 // older usage still gets a cost. Prices from models.dev always win.
 //
@@ -311,6 +337,7 @@ export function buildRefreshedSnapshot(api, previous, providerIDs) {
   }
   const keptModelIDs = keepRetiredModels(snapshot, previous, scope, fetchedCatalog);
   retainOutOfScopeProviders(snapshot, previous, scope);
+  retainOutOfScopeNames(snapshot, previous, scope);
   snapshot.catalog = scoped
     ? mergeScopedCatalog(previous?.catalog, fetchedCatalog, scope)
     : sortObjectByKeys(fetchedCatalog);

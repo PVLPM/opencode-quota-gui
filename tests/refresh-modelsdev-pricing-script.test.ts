@@ -15,6 +15,7 @@ function snapshot(
       providers: Object.keys(providers),
       source: "https://models.dev/api.json",
       units: "USD per 1M tokens",
+      namesVersion: 1,
     },
     providers,
     ...(catalog ? { catalog } : {}),
@@ -226,6 +227,56 @@ describe("refresh-modelsdev-pricing buildRefreshedSnapshot", () => {
 
     expect(keptModelIDs).toEqual(["anthropic/claude-old"]);
     expect(Object.keys(built.providers.anthropic)).toEqual(["claude-new", "claude-old"]);
+    expect(built._meta.namesVersion).toBe(1);
+  });
+
+  it("retains catalog display names but not names for kept retired models", () => {
+    const api = {
+      anthropic: {
+        models: {
+          "claude-opus-5-5": {
+            name: " Claude Opus 5.5 ",
+            cost: { input: 1, output: 2 },
+          },
+          "claude-opus-5-6": {
+            name: "Claude Opus 5.6",
+            cost: {},
+          },
+          "claude-opus-5-7": { name: "", cost: { input: 3, output: 4 } },
+        },
+      },
+    };
+    const previous = snapshot(
+      { anthropic: { "claude-opus-5-4": { input: 2, output: 4 } } },
+      { anthropic: ["claude-opus-5-4"] },
+    );
+
+    const { snapshot: built, keptModelIDs } = buildRefreshedSnapshot(api, previous, ["anthropic"]);
+
+    expect(keptModelIDs).toEqual(["anthropic/claude-opus-5-4"]);
+    expect(built.names).toEqual({
+      anthropic: {
+        "claude-opus-5-5": "Claude Opus 5.5",
+        "claude-opus-5-6": "Claude Opus 5.6",
+      },
+    });
+  });
+
+  it("retains out-of-scope display names on a scoped refresh", () => {
+    const api = {
+      openai: { models: { "gpt-new": { name: "GPT New", cost: { input: 1, output: 2 } } } },
+    };
+    const previous = {
+      ...snapshot({}, { openai: ["gpt-old"], anthropic: ["claude-opus-5-5"] }),
+      names: { anthropic: { "claude-opus-5-5": "Claude Opus 5.5" } },
+    };
+
+    const { snapshot: built } = buildRefreshedSnapshot(api, previous, ["openai"]);
+
+    expect(built.names).toEqual({
+      anthropic: { "claude-opus-5-5": "Claude Opus 5.5" },
+      openai: { "gpt-new": "GPT New" },
+    });
   });
 
   it("preserves explicit context tiers in deterministic order and drops unsupported tiers", () => {

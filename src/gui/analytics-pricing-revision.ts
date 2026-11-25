@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-
+import { getModelAliasEvidenceFingerprint } from "../lib/model-alias-evidence.js";
 import {
   type CostBuckets,
   getPricingSnapshotMeta,
+  getPricingSnapshotNames,
   getPricingSnapshotSource,
   listModelsForProvider,
   listProviders,
@@ -19,7 +20,7 @@ import {
  * Fingerprint format version. Bump whenever the covered inputs or their
  * canonical encoding change, so derived presentation caches are rebuilt.
  */
-export const ANALYTICS_PRICING_FINGERPRINT_SCHEMA = 1;
+export const ANALYTICS_PRICING_FINGERPRINT_SCHEMA = 2;
 /** Stable v1 models.dev pricing snapshot schema this fingerprint understands. */
 export const PRICING_SNAPSHOT_SCHEMA_VERSION = 1;
 /** Temporal snapshot schema this fingerprint understands. */
@@ -34,9 +35,13 @@ export type AnalyticsPricingFingerprintInput = {
       generatedAt: number;
       providers: readonly string[];
       units: string;
+      /** Name-coverage marker; its presence changes alias resolution behavior. */
+      namesVersion?: number;
     };
     /** Hash of the selected snapshot's actual provider/model rates and tiers. */
     contentFingerprint: string;
+    /** Hash of the confirmed Claude Agent alias evidence sidecar content. */
+    aliasEvidenceFingerprint?: string;
   };
   temporal: {
     schemaVersion: number;
@@ -112,6 +117,16 @@ function getPricingContentFingerprint(meta: object, source: string): string {
       hash.update("\n");
     }
   }
+  // Unversioned alias resolution depends on display-name evidence even when the
+  // monetary rates are unchanged.
+  const names = getPricingSnapshotNames();
+  for (const providerId of Object.keys(names ?? {}).sort(compareIds)) {
+    const modelNames = names?.[providerId] ?? {};
+    for (const modelId of Object.keys(modelNames).sort(compareIds)) {
+      hash.update(JSON.stringify(["name", providerId, modelId, modelNames[modelId]]));
+      hash.update("\n");
+    }
+  }
   const fingerprint = hash.digest("hex");
   bySource.set(source, fingerprint);
   return fingerprint;
@@ -177,8 +192,10 @@ export function buildAnalyticsPricingFingerprint(
     identity.pricing.meta.source,
     identity.pricing.meta.generatedAt,
     identity.pricing.meta.units,
+    identity.pricing.meta.namesVersion ?? null,
     providers,
     identity.pricing.contentFingerprint,
+    identity.pricing.aliasEvidenceFingerprint ?? null,
     identity.temporal.schemaVersion,
     identity.temporal.revision,
     identity.temporal.source,
@@ -199,6 +216,7 @@ export function getAnalyticsPricingFingerprint(): string {
       source: pricingSource,
       meta: pricingMeta,
       contentFingerprint: getPricingContentFingerprint(pricingMeta, pricingSource),
+      aliasEvidenceFingerprint: getModelAliasEvidenceFingerprint(),
     },
     temporal: {
       schemaVersion: TEMPORAL_SNAPSHOT_SCHEMA_VERSION,

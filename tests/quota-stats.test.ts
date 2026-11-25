@@ -94,6 +94,8 @@ vi.mock("../src/lib/modelsdev-pricing.js", () => ({
     if (modelID === "peak-1") return [TEMPORAL_PROVIDER];
     return [];
   }),
+  listModelDisplayNames: vi.fn(() => []),
+  hasPricingNameCoverage: vi.fn(() => false),
   lookupCost: vi.fn((providerID: string, modelID: string) => {
     if (providerID === "openai" && modelID === "gpt-5")
       return { input: 1, output: 1, reasoning: 1, cache_read: 1, cache_write: 1 };

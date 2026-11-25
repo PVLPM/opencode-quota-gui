@@ -17,6 +17,11 @@ import { readClaudeObservedTtl } from "./lib/claude-agent-transcript-ttl.js";
 import { createClaudeAgentTtlTracker } from "./lib/claude-agent-ttl-tracker.js";
 import { resolveOpenCodeLocationRoots } from "./lib/config-file-utils.js";
 import {
+  type ObservedModelEntry,
+  recordClaudeAgentModelEvidence,
+} from "./lib/model-alias-evidence.js";
+import { reloadPricingSnapshotFromDisk } from "./lib/modelsdev-pricing.js";
+import {
   bindCredentialSource,
   createIntegrationCredentialSource,
   notifyCredentialsChanged,
@@ -123,6 +128,63 @@ export const QuotaToastPlugin = Plugin.define({
       } catch {
         // Observation must never interfere with a request.
       }
+    });
+
+    // Claude Agent's unversioned aliases carry a host display name but no
+    // version in the model id. Persist that evidence beside the pricing cache so
+    // analytics and CLI runs can resolve the alias without a restart. No timer:
+    // startup plus a Claude Agent request refreshes it, throttled.
+    const ALIAS_EVIDENCE_REFRESH_INTERVAL_MS = 60_000;
+    type AliasEvidenceModelList = {
+      model?: { list?: () => Promise<{ data?: readonly ObservedModelEntry[] }> };
+    };
+    let aliasEvidenceRefreshInFlight = false;
+    let lastAliasEvidenceRefreshAtMs = 0;
+    let disposed = false;
+    const refreshClaudeAgentAliasEvidence = (verifyProvider: boolean): void => {
+      if (disposed) return;
+      const now = Date.now();
+      if (
+        aliasEvidenceRefreshInFlight ||
+        now - lastAliasEvidenceRefreshAtMs < ALIAS_EVIDENCE_REFRESH_INTERVAL_MS
+      ) {
+        return;
+      }
+      const modelList = (ctx as unknown as AliasEvidenceModelList).model?.list;
+      if (typeof modelList !== "function") return;
+      aliasEvidenceRefreshInFlight = true;
+      lastAliasEvidenceRefreshAtMs = now;
+      void (async () => {
+        try {
+          // Do not ask every host for a full model catalog when Claude Agent is
+          // not a configured provider.
+          if (verifyProvider) {
+            const providers = await ctx.provider.list();
+            if (disposed) return;
+            if (!providers.data.some((provider) => provider.id === "claude-agent")) {
+              lastAliasEvidenceRefreshAtMs = 0;
+              return;
+            }
+          }
+          const result = await modelList.call(ctx.model);
+          if (disposed) return;
+          // The worker may have upgraded the runtime snapshot since startup;
+          // resolve against what is on disk now, not a stale bundled cache.
+          reloadPricingSnapshotFromDisk();
+          await recordClaudeAgentModelEvidence(result?.data ?? [], {
+            shouldAbort: () => disposed,
+          });
+        } catch {
+          // Alias evidence is optional; pricing keeps its established fallback.
+        } finally {
+          aliasEvidenceRefreshInFlight = false;
+        }
+      })();
+    };
+    refreshClaudeAgentAliasEvidence(true);
+    await ctx.session.hook("model.request", (event) => {
+      const model = (event as { model?: { providerID?: unknown } }).model;
+      if (model?.providerID === "claude-agent") refreshClaudeAgentAliasEvidence(false);
     });
 
     // Read-only and synchronous: records allowlisted rate-limit headers from API-key Messages
@@ -438,6 +500,7 @@ export const QuotaToastPlugin = Plugin.define({
     }
 
     return async () => {
+      disposed = true;
       hostEvents.abort();
       autoResume.dispose();
       claudeTtl.dispose();
