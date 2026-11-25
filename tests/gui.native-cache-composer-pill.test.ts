@@ -251,6 +251,7 @@ function mockCacheObserver(overrides: Record<string, unknown> = {}): Record<stri
     transport: () => ({ rpc: "live", hostEvents: "observed" }),
     subscribeTransport: () => () => {},
     subscribeGaps: () => () => {},
+    subscribeHistoryEligibility: () => () => {},
     subscribeModelMismatchTransitions: () => () => {},
     modelMismatch: () => ({ status: "unknown" }),
     query: () => undefined,
@@ -515,6 +516,183 @@ it("does not restart an unchanged history batch when observations update", async
   await flush();
   dispose();
   expect(bootstrapHistory).toHaveBeenCalledTimes(1);
+});
+
+it("re-reads an empty child history when the runtime reports a completed lifecycle", async () => {
+  const a = session("a");
+  const observations = new Map<string, CacheObserverClassification>();
+  let childrenListener: ((snapshot: NativeCacheObserverChildrenSnapshot) => void) | undefined;
+  let notifyEligibility: ((sessionId: string) => void) | undefined;
+  const requests: Array<readonly string[]> = [];
+  const bootstrapHistory = vi.fn((ids: readonly string[]) => {
+    requests.push(ids);
+    // The first child read was empty; the completion becomes readable only
+    // after the lifecycle notification triggers the second one.
+    if (requests.length === 3) {
+      observations.set("child", {
+        color: "green",
+        reason: "observed-reuse-with-active-ttl",
+        primaryCacheReadRatio: { value: 0.9, observedAtMs: Date.now() },
+      } as CacheObserverClassification);
+    }
+    return Promise.resolve();
+  });
+  const runtime = mockRuntime(
+    mockCacheObserver({
+      query: (id: string) => observations.get(id),
+      subscribeChildren: (_id: string, listener: typeof childrenListener) => {
+        childrenListener = listener;
+        return () => {};
+      },
+      subscribeHistoryEligibility: (listener: typeof notifyEligibility) => {
+        notifyEligibility = listener;
+        return () => {};
+      },
+      bootstrapHistory,
+    }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => a } as unknown as Sessions, runtime),
+    dispose: cleanup,
+  }));
+  await flush();
+  expect(requests[0]).toEqual(["a"]);
+  childrenListener?.({ status: "ready", children: [{ sessionId: "child", label: "Worker" }] });
+  await flush();
+  // The child read found nothing, so the unchanged demand would suppress a
+  // retry after its step completes.
+  expect(requests.at(-1)).toEqual(["a", "child"]);
+  expect(bootstrapHistory).toHaveBeenCalledTimes(2);
+  notifyEligibility?.("child");
+  await flush();
+  const childRequests = requests.filter((ids) => ids.includes("child"));
+  expect(childRequests).toHaveLength(2);
+  expect(childRequests[1]).toEqual(["child"]);
+  renderMenu(pill, () => a, container);
+  await vi.waitFor(() =>
+    expect(container.querySelector(".qg-cache-child .qg-cache-metrics")?.textContent).toContain(
+      "90.00% · Hit",
+    ),
+  );
+  dispose();
+  container.remove();
+});
+
+it("queues a child completion behind an active read without aborting it", async () => {
+  const a = session("a");
+  let childrenListener: ((snapshot: NativeCacheObserverChildrenSnapshot) => void) | undefined;
+  let notifyEligibility: ((sessionId: string) => void) | undefined;
+  const requests: Array<{ ids: readonly string[]; signal: AbortSignal; settle: () => void }> = [];
+  const bootstrapHistory = vi.fn(
+    (ids: readonly string[], signal: AbortSignal) =>
+      new Promise<void>((resolve) => {
+        requests.push({ ids, signal, settle: resolve });
+      }),
+  );
+  const runtime = mockRuntime(
+    mockCacheObserver({
+      subscribeChildren: (_id: string, listener: typeof childrenListener) => {
+        childrenListener = listener;
+        return () => {};
+      },
+      subscribeHistoryEligibility: (listener: typeof notifyEligibility) => {
+        notifyEligibility = listener;
+        return () => {};
+      },
+      bootstrapHistory,
+    }),
+  );
+  const { dispose } = createRoot((cleanup) => ({
+    pill: createCacheComposerPill({ current: () => a } as unknown as Sessions, runtime),
+    dispose: cleanup,
+  }));
+  await flush();
+  expect(requests.map(({ ids }) => ids)).toEqual([["a"]]);
+  childrenListener?.({
+    status: "ready",
+    children: [
+      { sessionId: "child1", label: "One" },
+      { sessionId: "child2", label: "Two" },
+    ],
+  });
+  await flush();
+  // Discovery replaces the initial read with the full missing batch.
+  expect(requests.map(({ ids }) => ids)).toEqual([["a"], ["a", "child1", "child2"]]);
+  requests[1]?.settle();
+  await flush();
+
+  // child1 completes: the full batch already settled, so it is read alone.
+  notifyEligibility?.("child1");
+  await flush();
+  expect(requests.at(-1)?.ids).toEqual(["child1"]);
+  const active = requests[2];
+  expect(active?.signal.aborted).toBe(false);
+
+  // child2 completes while child1's retry is active: queued without touching
+  // the active read, and a duplicate notification is not queued twice.
+  notifyEligibility?.("child2");
+  notifyEligibility?.("child2");
+  await flush();
+  expect(requests.map(({ ids }) => ids)).toEqual([["a"], ["a", "child1", "child2"], ["child1"]]);
+  expect(active?.signal.aborted).toBe(false);
+
+  // Once child1's read settles, the queued child2 is read, and only once.
+  requests[2]?.settle();
+  await flush();
+  expect(requests.map(({ ids }) => ids)).toEqual([
+    ["a"],
+    ["a", "child1", "child2"],
+    ["child1"],
+    ["child2"],
+  ]);
+  requests[3]?.settle();
+  await flush();
+  expect(requests).toHaveLength(4);
+  dispose();
+});
+
+it("re-reads a session whose completion arrived after its active read started", async () => {
+  const a = session("a");
+  let notifyEligibility: ((sessionId: string) => void) | undefined;
+  const requests: Array<{ ids: readonly string[]; signal: AbortSignal; settle: () => void }> = [];
+  const bootstrapHistory = vi.fn(
+    (ids: readonly string[], signal: AbortSignal) =>
+      new Promise<void>((resolve) => {
+        requests.push({ ids, signal, settle: resolve });
+      }),
+  );
+  const runtime = mockRuntime(
+    mockCacheObserver({
+      subscribeHistoryEligibility: (listener: typeof notifyEligibility) => {
+        notifyEligibility = listener;
+        return () => {};
+      },
+      bootstrapHistory,
+    }),
+  );
+  const dispose = createRoot((cleanup) => {
+    createCacheComposerPill({ current: () => a } as unknown as Sessions, runtime);
+    return cleanup;
+  });
+  await flush();
+  expect(requests.map(({ ids }) => ids)).toEqual([["a"]]);
+
+  // The completion lands after the read started: it queues without aborting
+  // that read, then is read once more after settlement.
+  notifyEligibility?.("a");
+  await flush();
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.signal.aborted).toBe(false);
+
+  requests[0]?.settle();
+  await flush();
+  expect(requests.map(({ ids }) => ids)).toEqual([["a"], ["a"]]);
+  requests[1]?.settle();
+  await flush();
+  expect(requests).toHaveLength(2);
+  dispose();
 });
 
 it("sorts child rows least recent to most recent, ending directly above the divider", async () => {

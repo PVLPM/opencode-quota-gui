@@ -322,6 +322,9 @@ export function createCacheComposerPill(
   const [transport, setTransport] = createSignal(runtime.cacheObserver.transport());
   const [revision, setRevision] = createSignal(0);
   const [gapRevision, setGapRevision] = createSignal(0);
+  // Wakes the history coordinator after a queued completion's predecessor read
+  // settles or aborts; it never restarts an active read.
+  const [retrySignal, setRetrySignal] = createSignal(0);
   // One shared countdown clock for the whole pill, not one per session or row.
   const [clock, setClock] = createSignal(Date.now());
   let clockTimer: ReturnType<typeof setTimeout> | undefined;
@@ -361,6 +364,10 @@ export function createCacheComposerPill(
     status: "loading" | "ready" | "error";
   }>();
   let inFlightHistoryKey: string | undefined;
+  /** Sessions in the read that is currently in flight, if any. */
+  let activeHistorySessions: ReadonlySet<string> | undefined;
+  /** Demanded completions waiting for the active read to settle or abort. */
+  const pendingRetrySessions = new Set<string>();
   const gapHistory = new Set<string>();
   onCleanup(runtime.cacheObserver.subscribeTransport(setTransport));
   onCleanup(
@@ -373,6 +380,17 @@ export function createCacheComposerPill(
         gapHistory.add(id);
         setGapRevision((n) => n + 1);
       }
+    }),
+  );
+  onCleanup(
+    runtime.cacheObserver.subscribeHistoryEligibility((id) => {
+      // Always queue a demanded completion, even while its own read is active:
+      // the read may have started before the completion was persisted. The
+      // active read is never aborted from here; settlement drains the queue.
+      if (!(JSON.parse(historyDemand()) as string[]).includes(id)) return;
+      if (pendingRetrySessions.has(id)) return;
+      pendingRetrySessions.add(id);
+      if (activeHistorySessions === undefined) setRetrySignal((n) => n + 1);
     }),
   );
 
@@ -497,56 +515,92 @@ export function createCacheComposerPill(
     return JSON.stringify(missing);
   });
 
-  createEffect(() => {
-    const current = sessions.current();
-    const source = transport();
-    const gap = gapRevision();
-    const missing = JSON.parse(historyDemand()) as string[];
-    if (!current?.server.builtin || !current.server.connected || source.rpc !== "live") {
-      inFlightHistoryKey = undefined;
-      setHistory((previous) => (previous?.status === "loading" ? undefined : previous));
-      return;
-    }
-    if (!missing.length) {
-      inFlightHistoryKey = undefined;
-      setHistory({ key: current.key, status: "ready" });
-      return;
-    }
-    // The gap epoch is part of the batch identity: an identical missing set
-    // after a gap must re-bootstrap, while ordinary revision bumps that do not
-    // change demand must not restart (or abort) the active batch.
-    const batchKey = `${gap}|${current.key}|${missing.join(",")}`;
-    if (batchKey === inFlightHistoryKey) return;
-    inFlightHistoryKey = batchKey;
+  /**
+   * Start one history read through the existing coordinator. A full-demand
+   * read owns `inFlightHistoryKey`; a queued retry leaves it untouched so the
+   * settled full batch is not re-enqueued afterwards.
+   */
+  function startHistoryRead(
+    sessionIds: readonly string[],
+    key: string,
+    fullBatchKey?: string,
+  ): void {
     const controller = new AbortController();
     let settled = false;
-    setHistory({ key: current.key, status: "loading" });
+    activeHistorySessions = new Set(sessionIds);
+    setHistory({ key, status: "loading" });
     // Observer callbacks may fire while a stream gap is still invalidating its
     // old batch. Start after that synchronous invalidation has completed.
     queueMicrotask(() => {
       if (controller.signal.aborted) return;
       void runtime.cacheObserver
-        .bootstrapHistory(missing, controller.signal)
+        .bootstrapHistory(sessionIds, controller.signal)
         .then(() => {
           if (controller.signal.aborted) return;
           settled = true;
-          for (const id of missing) gapHistory.delete(id);
-          setHistory({ key: current.key, status: "ready" });
+          activeHistorySessions = undefined;
+          for (const id of sessionIds) gapHistory.delete(id);
+          setHistory({ key, status: "ready" });
           setRevision((n) => n + 1);
+          if (pendingRetrySessions.size > 0) setRetrySignal((n) => n + 1);
         })
         .catch(() => {
           if (controller.signal.aborted) return;
+          settled = true;
+          activeHistorySessions = undefined;
           // A failed batch stays retryable on the next triggering event.
-          if (inFlightHistoryKey === batchKey) inFlightHistoryKey = undefined;
-          setHistory({ key: current.key, status: "error" });
+          if (fullBatchKey !== undefined && inFlightHistoryKey === fullBatchKey)
+            inFlightHistoryKey = undefined;
+          setHistory({ key, status: "error" });
+          if (pendingRetrySessions.size > 0) setRetrySignal((n) => n + 1);
         });
     });
     onCleanup(() => {
       controller.abort();
       // A completed batch keeps its identity so the revision bump it caused
       // cannot re-enqueue it; an unfinished one is retryable.
-      if (!settled && inFlightHistoryKey === batchKey) inFlightHistoryKey = undefined;
+      if (!settled) {
+        activeHistorySessions = undefined;
+        if (fullBatchKey !== undefined && inFlightHistoryKey === fullBatchKey)
+          inFlightHistoryKey = undefined;
+      }
     });
+  }
+
+  createEffect(() => {
+    const current = sessions.current();
+    const source = transport();
+    const gap = gapRevision();
+    retrySignal();
+    const missing = JSON.parse(historyDemand()) as string[];
+    if (!current?.server.builtin || !current.server.connected || source.rpc !== "live") {
+      inFlightHistoryKey = undefined;
+      pendingRetrySessions.clear();
+      setHistory((previous) => (previous?.status === "loading" ? undefined : previous));
+      return;
+    }
+    if (!missing.length) {
+      inFlightHistoryKey = undefined;
+      pendingRetrySessions.clear();
+      setHistory({ key: current.key, status: "ready" });
+      return;
+    }
+    // A completion queued behind an active read retries only for sessions
+    // still in demand, and only once the full demand is already covered. A new
+    // demand identity (gap, selection, recovery) instead reads everything
+    // missing, so it cannot be starved by a child-only retry.
+    const queued = [...pendingRetrySessions].filter((id) => missing.includes(id));
+    pendingRetrySessions.clear();
+    // The gap epoch is part of the batch identity: an identical missing set
+    // after a gap must re-bootstrap, while ordinary revision bumps that do not
+    // change demand must not restart (or abort) the active batch.
+    const batchKey = `${gap}|${current.key}|${missing.join(",")}`;
+    if (batchKey === inFlightHistoryKey) {
+      if (queued.length > 0) startHistoryRead(queued, current.key);
+      return;
+    }
+    inFlightHistoryKey = batchKey;
+    startHistoryRead(missing, current.key, batchKey);
   });
 
   // Only the selected session and its listed children can show a countdown, so

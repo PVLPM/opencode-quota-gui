@@ -490,6 +490,164 @@ describe("native cache observer runtime", () => {
     runtime.dispose();
   });
 
+  it("reports history eligibility only for completions that leave no usable live observation", async () => {
+    let receiveEvent: ((event: never) => void) | undefined;
+    const listMessages = vi.fn(async (input: { sessionID: string }) => ({
+      data:
+        input.sessionID === "ses_eligibility_loaded"
+          ? [
+              {
+                id: "msg_eligibility_loaded",
+                type: "assistant",
+                finish: "stop",
+                model: { providerID: "openai", id: "gpt-test" },
+                time: { created: 1_000, completed: 1_100 },
+                tokens: { input: 10, cache: { read: 90, write: 0 } },
+              },
+            ]
+          : [],
+      cursor: { next: null },
+    }));
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async (parentSessionId) =>
+        parentSessionId === "ses_eligibility_parent"
+          ? [{ id: "ses_eligibility_unmatched", parentID: parentSessionId, title: "Child" }]
+          : [],
+      listMessages,
+      now: () => 2_000,
+    });
+    const eligible: string[] = [];
+    runtime.subscribeHistoryEligibility((sessionId) => eligible.push(sessionId));
+    const childrenListener = vi.fn();
+    const releases = [
+      runtime.subscribeChildren("ses_eligibility_parent", childrenListener),
+      runtime.subscribe("ses_eligibility_live", () => {}),
+      runtime.subscribe("ses_eligibility_loaded", () => {}),
+    ];
+    await vi.waitFor(() =>
+      expect(childrenListener).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: "ready",
+          children: [expect.objectContaining({ sessionId: "ses_eligibility_unmatched" })],
+        }),
+      ),
+    );
+
+    // Without a correlated Started, the completion is not usable live evidence,
+    // and its never-loaded history may now gain an eligible completed message.
+    const completion = {
+      type: "session.step.ended",
+      created: 1_100,
+      data: {
+        sessionID: "ses_eligibility_unmatched",
+        assistantMessageID: "msg_unmatched",
+        tokens: { input: 10, cache: { read: 20, write: 0 } },
+      },
+    };
+    receiveEvent?.(completion as never);
+    expect(eligible).toEqual(["ses_eligibility_unmatched"]);
+
+    // A duplicate delivery of the same completion is not a new retry.
+    receiveEvent?.(completion as never);
+    expect(eligible).toEqual(["ses_eligibility_unmatched"]);
+
+    // A distinct completion for the same session notifies again.
+    receiveEvent?.({
+      type: "session.step.ended",
+      created: 1_200,
+      data: {
+        sessionID: "ses_eligibility_unmatched",
+        assistantMessageID: "msg_unmatched_2",
+        tokens: { input: 10, cache: { read: 20, write: 0 } },
+      },
+    } as never);
+    expect(eligible).toEqual(["ses_eligibility_unmatched", "ses_eligibility_unmatched"]);
+
+    // A correlated completion is usable live evidence: no history retry.
+    receiveEvent?.({
+      type: "session.step.started",
+      created: 2_000,
+      data: {
+        sessionID: "ses_eligibility_live",
+        assistantMessageID: "msg_live",
+        model: { providerID: "openai", id: "gpt-test" },
+        started: 2_000,
+      },
+    } as never);
+    receiveEvent?.({
+      type: "session.step.ended",
+      created: 2_100,
+      data: {
+        sessionID: "ses_eligibility_live",
+        assistantMessageID: "msg_live",
+        tokens: { input: 10, cache: { read: 90, write: 0 } },
+      },
+    } as never);
+    expect(eligible).toEqual(["ses_eligibility_unmatched", "ses_eligibility_unmatched"]);
+
+    // Loaded history already supplied the evidence; a later unusable
+    // completion must not re-read it.
+    await runtime.bootstrapHistory(["ses_eligibility_loaded"]);
+    receiveEvent?.({
+      type: "session.step.ended",
+      created: 2_100,
+      data: {
+        sessionID: "ses_eligibility_loaded",
+        assistantMessageID: "msg_after_load",
+        tokens: { input: 10, cache: { read: 20, write: 0 } },
+      },
+    } as never);
+    expect(eligible).toEqual(["ses_eligibility_unmatched", "ses_eligibility_unmatched"]);
+
+    for (const release of releases) release();
+    runtime.dispose();
+  });
+
+  it("resets completion deduplication when the observation epoch is invalidated", () => {
+    let receiveEvent: ((event: never) => void) | undefined;
+    let retire = () => {};
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return () => {};
+      },
+      subscribeEventStreamRetire: (listener) => {
+        retire = listener;
+        return () => {};
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages: async () => ({ data: [], cursor: { next: null } }),
+    });
+    const eligible: string[] = [];
+    runtime.subscribeHistoryEligibility((sessionId) => eligible.push(sessionId));
+    const release = runtime.subscribe("ses_eligibility_reset", () => {});
+    const completion = {
+      type: "session.step.ended",
+      created: 1_100,
+      data: {
+        sessionID: "ses_eligibility_reset",
+        assistantMessageID: "msg_reset",
+        tokens: { input: 10, cache: { read: 20, write: 0 } },
+      },
+    };
+
+    receiveEvent?.(completion as never);
+    expect(eligible).toEqual(["ses_eligibility_reset"]);
+    retire();
+    // The gap starts a new observation epoch, so the same completion may retry.
+    receiveEvent?.(completion as never);
+    expect(eligible).toEqual(["ses_eligibility_reset", "ses_eligibility_reset"]);
+
+    release();
+    runtime.dispose();
+  });
+
   it("does not mark history loaded when every projected row is rejected by the live fence", async () => {
     const sessionId = "ses_history_live_fence";
     let receiveEvent: ((event: never) => void) | undefined;
