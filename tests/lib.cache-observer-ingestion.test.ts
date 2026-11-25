@@ -550,6 +550,45 @@ describe("cache observer event ingestion", () => {
     });
   });
 
+  it("does not report a recovered End as ingested when the retained-invocation cap evicted it", () => {
+    const ingestor = createCacheObserverIngestor({ now: () => 2_000 });
+    const sessionId = "ses_history_cap_recovery";
+    const messageId = "msg_evicted_recovery";
+    ingestor.ingestHistory(
+      Array.from({ length: 128 }, (_, index) =>
+        recoverableHistoryInvocation(sessionId, `msg_cap_${index}`, {
+          created: 1_000 + index,
+          completed: 1_100 + index,
+        }),
+      ),
+    );
+    // An unmatched live End leaves a pending correlation for this older message.
+    ingestor.ingest(
+      projectOpenCodeCacheObserverEvent(stepEndedEvent(sessionId, messageId, { input: 100 }, 500)),
+    );
+
+    expect(
+      ingestor.ingestHistory([
+        {
+          sessionId,
+          messageId,
+          completedAtMs: 500,
+          route: {
+            providerId: "anthropic",
+            modelId: "claude-test",
+            basis: {
+              source: "OpenCode message.list assistant model identity",
+              reference: messageId,
+            },
+          },
+          counts: { fresh: 100, read: 50, write: 0 },
+        },
+      ]),
+    ).toBe(false);
+    expect(ingestor.query(sessionId)?.primaryCacheReadRatio?.messageId).toBe("msg_cap_127");
+    ingestor.dispose();
+  });
+
   it("recovers history for an orphan without clearing a newer live Started on the current route", () => {
     const ingestor = createCacheObserverIngestor({ now: () => 10_000 });
     const sessionId = "ses_history_does_not_reset_live";

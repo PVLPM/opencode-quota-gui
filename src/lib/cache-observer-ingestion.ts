@@ -77,8 +77,11 @@ export interface CacheObserverIngestor {
    */
   markObservationGap(sessionId: string): void;
   ingest(event: unknown): void;
-  /** Merge historical message-list DTOs without allowing them to supersede newer live observations. */
-  ingestHistory(invocations: readonly CacheObserverHistoryInvocation[]): void;
+  /**
+   * Merge historical message-list DTOs without allowing them to supersede newer live observations.
+   * True only when at least one invocation survived the live fences and was applied or retained.
+   */
+  ingestHistory(invocations: readonly CacheObserverHistoryInvocation[]): boolean;
   captureConfiguration(
     sessionId: string,
     messageId: string,
@@ -864,8 +867,16 @@ export function createCacheObserverIngestor(
     );
   }
 
-  function ingestHistory(invocations: readonly CacheObserverHistoryInvocation[]): void {
-    if (disposed) return;
+  function historyRetained(sessionId: string, messageId: string): boolean {
+    return (
+      states.get(sessionId)?.invocations.some((entry) => entry.order.messageId === messageId) ===
+      true
+    );
+  }
+
+  function ingestHistory(invocations: readonly CacheObserverHistoryInvocation[]): boolean {
+    if (disposed) return false;
+    let ingested = false;
     for (const invocation of invocations) {
       const key = startedStepKey(invocation.sessionId, invocation.messageId);
       const pendingLiveEnd = pendingEndedSteps.get(key);
@@ -934,11 +945,14 @@ export function createCacheObserverIngestor(
           event: mergeHistoricalCountersIntoLiveEnd(pendingLiveEnd.event, endedEvent),
         });
         ingestEvent(startedEvent, "history");
+        if (historyRetained(invocation.sessionId, invocation.messageId)) ingested = true;
         continue;
       }
       ingestEvent(startedEvent, "history");
       ingestEvent(endedEvent, "history");
+      if (historyRetained(invocation.sessionId, invocation.messageId)) ingested = true;
     }
+    return ingested;
   }
 
   function subscribe(sessionId: string, listener: CacheObserverListener): () => void {

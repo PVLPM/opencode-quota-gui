@@ -1142,10 +1142,12 @@ export function createNativeCacheObserverRuntime(options: {
 
         throwIfAborted(controller.signal);
         if (historyEpoch(sessionId) !== expectedEpoch) continue;
-        ingestor.ingestHistory(history);
+        const ingested = ingestor.ingestHistory(history);
         throwIfAborted(controller.signal);
         if (historyEpoch(sessionId) !== expectedEpoch) continue;
-        markHistoryLoaded(sessionId);
+        // An empty or fenced read can gain eligible evidence later, so it must
+        // stay retryable rather than load-once.
+        if (ingested) markHistoryLoaded(sessionId);
       }
     } finally {
       callerSignal?.removeEventListener("abort", abortForCaller);

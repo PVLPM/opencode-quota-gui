@@ -445,6 +445,129 @@ describe("native cache observer runtime", () => {
     runtime.dispose();
   });
 
+  it("re-reads history when the first read found no eligible completed observation", async () => {
+    const sessionId = "ses_history_unfinished_child";
+    let finished = false;
+    const listMessages = vi.fn(async () => ({
+      data: finished
+        ? [
+            {
+              id: "msg_child_finished",
+              type: "assistant",
+              finish: "stop",
+              model: { providerID: "openai", id: "gpt-child" },
+              time: { created: 5_000, completed: 5_100 },
+              tokens: { input: 25, cache: { read: 75, write: 0 } },
+            },
+          ]
+        : [
+            {
+              id: "msg_child_running",
+              type: "assistant",
+              model: { providerID: "openai", id: "gpt-child" },
+            },
+          ],
+      cursor: { next: null },
+    }));
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => vi.fn(),
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+
+    await runtime.bootstrapHistory([sessionId]);
+    expect(runtime.query(sessionId)).toBeUndefined();
+
+    // The step completed after the first read; the empty read must stay retryable.
+    finished = true;
+    await runtime.bootstrapHistory([sessionId]);
+
+    expect(listMessages).toHaveBeenCalledTimes(2);
+    expect(runtime.query(sessionId)).toMatchObject({
+      primaryCacheReadRatio: { value: 0.75, messageId: "msg_child_finished" },
+    });
+    runtime.dispose();
+  });
+
+  it("does not mark history loaded when every projected row is rejected by the live fence", async () => {
+    const sessionId = "ses_history_live_fence";
+    let receiveEvent: ((event: never) => void) | undefined;
+    const listMessages = vi.fn(async () => ({
+      data: [
+        {
+          id: "msg_live_fence",
+          type: "assistant",
+          finish: "stop",
+          model: { providerID: "openai", id: "gpt-test" },
+          time: { created: 2_000, completed: 2_100 },
+          tokens: { input: 10, cache: { read: 90, write: 0 } },
+        },
+      ],
+      cursor: { next: null },
+    }));
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: (listener) => {
+        receiveEvent = listener;
+        return vi.fn();
+      },
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+    });
+    const release = runtime.subscribe(sessionId, vi.fn());
+    receiveEvent?.({
+      type: "session.step.started",
+      created: 2_050,
+      data: {
+        sessionID: sessionId,
+        assistantMessageID: "msg_live_fence",
+        model: { providerID: "openai", id: "gpt-test" },
+        started: 2_000,
+      },
+    } as never);
+
+    await runtime.bootstrapHistory([sessionId]);
+    // The row matches a live-started step, so ingestHistory applies nothing.
+    await runtime.bootstrapHistory([sessionId]);
+
+    expect(listMessages).toHaveBeenCalledTimes(2);
+    release();
+    runtime.dispose();
+  });
+
+  it("marks history loaded for an accepted row without cache counters", async () => {
+    const sessionId = "ses_history_ttl_only";
+    const listMessages = vi.fn(async () => ({
+      data: [
+        {
+          id: "msg_ttl_only",
+          type: "assistant",
+          finish: "stop",
+          model: { providerID: "openai", id: "gpt-test" },
+          time: { created: 1_000, completed: 1_100 },
+        },
+      ],
+      cursor: { next: null },
+    }));
+    const runtime = createNativeCacheObserverRuntime({
+      subscribeEvents: () => vi.fn(),
+      rpcConnection: () => "live",
+      listChildren: async () => [],
+      listMessages,
+      now: () => 2_000,
+    });
+
+    await runtime.bootstrapHistory([sessionId]);
+    await runtime.bootstrapHistory([sessionId]);
+
+    expect(listMessages).toHaveBeenCalledOnce();
+    expect(runtime.query(sessionId)).toMatchObject({
+      primaryCacheReadTelemetry: "unavailable",
+    });
+    runtime.dispose();
+  });
+
   it("cancels an in-flight historical request when the selected session changes", async () => {
     let firstSignal: AbortSignal | undefined;
     const listMessages = vi.fn((input: { sessionID: string }, options: { signal: AbortSignal }) => {
@@ -720,7 +843,19 @@ describe("native cache observer runtime", () => {
           firstSignal = options.signal;
           return new Promise<{ data: unknown[]; cursor: { next: null } }>(() => {});
         }
-        return Promise.resolve({ data: [], cursor: { next: null } });
+        return Promise.resolve({
+          data: [
+            {
+              id: "msg_history_gap_recovered",
+              type: "assistant",
+              finish: "stop",
+              model: { providerID: "openai", id: "gpt-test" },
+              time: { created: 100, completed: 200 },
+              tokens: { input: 10, cache: { read: 10, write: 0 } },
+            },
+          ],
+          cursor: { next: null },
+        });
       },
     );
     const runtime = createNativeCacheObserverRuntime({
