@@ -273,10 +273,11 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
               {(project) => {
                 const highlighted = () => highlightedProject() === project.projectId;
                 const dimmed = () => highlightedProject() !== undefined && !highlighted();
+                const composable = compositionFor(project) !== undefined;
                 return (
                   <a
                     class="qg-list__row"
-                    data-composition-target="row"
+                    data-composition-target={composable ? "row" : undefined}
                     data-clickable="true"
                     data-highlighted={highlighted() ? "true" : undefined}
                     data-dimmed={dimmed() ? "true" : undefined}

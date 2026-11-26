@@ -316,6 +316,10 @@ describe.each(ENGINES)("project bucket rollups: $name", ({ home }) => {
     const row = projectRow(rollup, "p5");
     expect(row.tokens.total).toBe(130);
     expect(row.latestActivityAtMs).toBe(NOW - 2 * DAY);
+    const p5Tree = rollup.projects.find((entry) => entry.projectId === "p5");
+    expect(p5Tree).toBeDefined();
+    expect(p5Tree?.rootSessionCount).toBe(1);
+    expect(p5Tree?.latestActivityAtMs).toBe(NOW - 2 * DAY);
     expectCostedConserved(bucketsOf(row), row.tokens);
 
     const contributions: CostedTokens[][] = rollup.usage.buckets.map(() => []);

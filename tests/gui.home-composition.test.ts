@@ -366,6 +366,34 @@ describe("home project composition", () => {
     }
   });
 
+  it("does not hand a preview to a row without composition", () => {
+    const snapshot = homeWithComposition();
+    const { root, dispose } = mountHome({
+      ...snapshot,
+      projects: snapshot.projects.map((project) =>
+        project.projectId === "project-beta" ? { ...project, buckets: undefined } : project,
+      ),
+    });
+    try {
+      const alpha = rowFor(root, "alpha");
+      const beta = rowFor(root, "beta");
+      expect(alpha.props["data-composition-target"]).toBe("row");
+      expect(beta.props["data-composition-target"]).toBeUndefined();
+
+      graph.listenerOf(alpha, "onPointerEnter")?.({});
+      expect(overlayRects(root)).toHaveLength(4);
+      graph.listenerOf(alpha, "onPointerLeave")?.({ relatedTarget: beta });
+      expect(overlayRects(root)).toHaveLength(0);
+
+      graph.listenerOf(beta, "onPointerEnter")?.({});
+      graph.listenerOf(beta, "onFocus")?.({});
+      expect(overlayRects(root)).toHaveLength(0);
+      expect(beta.props["data-highlighted"]).toBeUndefined();
+    } finally {
+      dispose();
+    }
+  });
+
   it("highlights the matching row from chart bucket pointer and focus", () => {
     const { root, dispose } = mountHome(homeWithComposition());
     try {
@@ -531,6 +559,7 @@ describe("home project composition", () => {
     const { root, dispose } = mountHome(homeSnapshot());
     try {
       const alpha = rowFor(root, "alpha");
+      expect(alpha.props["data-composition-target"]).toBeUndefined();
       graph.listenerOf(alpha, "onPointerEnter")?.({});
       graph.listenerOf(alpha, "onFocus")?.({});
       expect(overlayRects(root)).toHaveLength(0);

@@ -486,7 +486,12 @@ export function UsageChart(props: {
                       props.onCompositionFocusChange?.(props.composition.projectId);
                     }
                   }}
-                  onBlur={() => {
+                  onBlur={(event) => {
+                    const next = event.relatedTarget;
+                    const container = event.currentTarget?.parentElement ?? null;
+                    // Tabbing between buckets is one continuous chart focus;
+                    // only leaving the hit surface surrenders the selection.
+                    if (next !== null && container?.contains(next as Node) === true) return;
                     inspection.clearFocus();
                     props.onCompositionFocusChange?.(undefined);
                   }}

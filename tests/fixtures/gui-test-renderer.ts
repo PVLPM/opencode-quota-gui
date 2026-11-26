@@ -64,7 +64,7 @@ function elementNode(tag: string): TestNode {
     const attribute = selector.slice(1, -1);
     let current: TestNode | undefined = node;
     while (current !== undefined) {
-      if (Object.hasOwn(current.props, attribute)) return current;
+      if (current.props[attribute] !== undefined) return current;
       current = current.parent;
     }
     return null;

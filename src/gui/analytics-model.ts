@@ -1534,6 +1534,29 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     return latest;
   }
 
+  /** Any session whose newest step is outside the range can hide an older in-range step. */
+  function projectHasOutOfWindowLatestStep(projectId: string, window: RangeWindow): boolean {
+    for (const sessionId of sessionsByProject.get(projectId) ?? []) {
+      const stepLatest = latestStepBySession.get(sessionId);
+      if (stepLatest !== undefined && !inWindow(stepLatest, window)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A tree can be active through an older owned step even when its metadata and
+   * newest step are outside the range; root counts must use the same rule as
+   * project inclusion.
+   */
+  function treeHasOwnedStepInWindow(tree: ProjectTree, window: RangeWindow): boolean {
+    for (const sessionId of tree.memberIds) {
+      for (const step of ownedBySession.get(sessionId)?.values() ?? []) {
+        if (inWindow(step.completedAtMs, window)) return true;
+      }
+    }
+    return false;
+  }
+
   function treeLatestInWindow(tree: ProjectTree, window: RangeWindow): number | undefined {
     let latest: number | undefined;
     for (const sessionId of tree.memberIds) {
@@ -1600,14 +1623,25 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       // step falls inside the range. The last check keeps the row available
       // for the tokens global usage already counts.
       if (range !== "lifetime" && latest === undefined && rangeSum().stepCount === 0) continue;
+      const stepLatest =
+        latest === undefined || projectHasOutOfWindowLatestStep(projectId, window)
+          ? projectLatestOwnedStepInWindow(projectId, window)
+          : undefined;
       const latestActivity =
-        latest ??
-        (range === "lifetime" ? undefined : projectLatestOwnedStepInWindow(projectId, window));
+        latest === undefined
+          ? stepLatest
+          : stepLatest === undefined
+            ? latest
+            : Math.max(latest, stepLatest);
       const trees = treesFor(projectId);
       const rootSessionCount =
         range === "lifetime"
           ? trees.length
-          : trees.filter((tree) => treeLatestInWindow(tree, window) !== undefined).length;
+          : trees.filter(
+              (tree) =>
+                treeLatestInWindow(tree, window) !== undefined ||
+                treeHasOwnedStepInWindow(tree, window),
+            ).length;
       rows.push({
         projectId,
         name: projectName(projectId),
