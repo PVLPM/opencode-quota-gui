@@ -3277,7 +3277,9 @@ describe("Models styles", () => {
     expect(styles).toContain(".qg-chart__axis-title--cost");
     expect(styles).toContain(".qg-chart__child-slice");
     expect(styles).toContain(".qg-model-tooltip__cost");
-    expect(styles).not.toContain(".qg-composition");
+    // No legacy standalone composition class may return; the home chart's
+    // scoped `qg-chart__composition` and `qg-composition-summary` are separate.
+    expect(styles).not.toMatch(/\.qg-composition(?![-_a-z])/u);
     expect(styles).not.toContain(".qg-cost-trend");
     expect(styles).not.toContain(".qg-model-legend");
     expect(styles).toMatch(

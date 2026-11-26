@@ -7,7 +7,7 @@ import type {
   CostedTokens,
 } from "../../contracts/dashboard";
 import { createChartInspection } from "../chart-inspection";
-import { createChartLayout } from "../chart-layout";
+import { createChartLayout, plotInsetStyle, slotHitStyle } from "../chart-layout";
 import {
   axisRangeCaption,
   formatApiEquivalentCostTick,
@@ -593,12 +593,7 @@ export function ModelUsageChart(props: {
             <ul
               class="qg-chart__hits"
               aria-label={`${props.title} buckets`}
-              style={{
-                top: `${(geometry().plot.top / size.height) * 100}%`,
-                bottom: `${((size.height - geometry().plot.bottom) / size.height) * 100}%`,
-                left: `${(geometry().plot.left / size.width) * 100}%`,
-                right: `${((size.width - geometry().plot.right) / size.width) * 100}%`,
-              }}
+              style={plotInsetStyle(geometry().plot, size)}
               onPointerLeave={inspection.clearPointer}
             >
               <For each={buckets()}>
@@ -608,10 +603,11 @@ export function ModelUsageChart(props: {
                     aria-label={`Inspect ${bucketLabel(index())}`}
                     // biome-ignore lint/a11y/noNoninteractiveTabindex: a bucket is a focus-only inspection target; its label carries the data, so there is no activation action.
                     tabIndex={0}
-                    style={{
-                      left: `${((geometry().slotX(index()) - geometry().plot.left) / geometry().plot.width) * 100}%`,
-                      width: `${(Math.max(geometry().slot, 1) / geometry().plot.width) * 100}%`,
-                    }}
+                    style={slotHitStyle(
+                      geometry().plot,
+                      geometry().slotX(index()),
+                      geometry().slot,
+                    )}
                     onPointerEnter={() => inspection.inspectPointer(index())}
                     onFocus={() => inspection.inspectFocus(index())}
                     onBlur={inspection.clearFocus}

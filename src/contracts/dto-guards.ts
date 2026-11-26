@@ -23,6 +23,7 @@ import type {
   AnalyticsSeries,
   AnalyticsSeriesChildBucket,
   Bucket,
+  ClaudeAgentAliasPricingProvenance,
   DashboardHealth,
   HomeSnapshot,
   ImportPreview,
@@ -390,14 +391,18 @@ function isUsage(value: unknown): value is Usage {
   );
 }
 
-function isProjectActivityRow(value: unknown): value is ProjectActivityRow {
+function isProjectActivityRow(value: unknown, bucketCount: number): value is ProjectActivityRow {
   return (
     isRecord(value) &&
     isText(value.projectId) &&
     isText(value.name) &&
     isCostedTokens(value.tokens) &&
     isFiniteNumber(value.rootSessionCount) &&
-    isFiniteNumber(value.latestActivityAtMs)
+    isFiniteNumber(value.latestActivityAtMs) &&
+    isOptional(
+      value.buckets,
+      (buckets) => isArrayOf(buckets, isCostedTokens) && buckets.length === bucketCount,
+    )
   );
 }
 
@@ -542,17 +547,20 @@ export function isQuotaSnapshot(value: unknown): value is QuotaSnapshot {
 }
 
 export function isHomeSnapshot(value: unknown): value is HomeSnapshot {
-  return (
-    isRecord(value) &&
-    isFiniteNumber(value.generatedAtMs) &&
-    isRangeKey(value.range) &&
-    isBoolean(value.stale) &&
-    isOptional(value.provisional, (provisional) => provisional === true) &&
-    isOptional(value.exactError, isText) &&
-    isProviders(value.providers) &&
-    isUsage(value.usage) &&
-    isArrayOf(value.projects, isProjectActivityRow)
-  );
+  if (
+    !isRecord(value) ||
+    !isFiniteNumber(value.generatedAtMs) ||
+    !isRangeKey(value.range) ||
+    !isBoolean(value.stale) ||
+    !isOptional(value.provisional, (provisional) => provisional === true) ||
+    !isOptional(value.exactError, isText) ||
+    !isProviders(value.providers) ||
+    !isUsage(value.usage)
+  ) {
+    return false;
+  }
+  const bucketCount = value.usage.buckets.length;
+  return isArrayOf(value.projects, (row) => isProjectActivityRow(row, bucketCount));
 }
 
 function isAnalyticsIdentity(value: unknown): value is AnalyticsEntityIdentity {
@@ -684,12 +692,30 @@ function isSessionBreadcrumb(value: unknown): value is SessionSnapshot["breadcru
   );
 }
 
+function isClaudeAgentAliasPricingProvenance(
+  value: unknown,
+): value is ClaudeAgentAliasPricingProvenance {
+  return (
+    isRecord(value) &&
+    isText(value.alias) &&
+    isOneOf(value.state, ["catalog", "last-confirmed", "static-fallback", "unavailable"]) &&
+    isOptional(value.targetProviderId, isText) &&
+    isOptional(value.targetModelId, isText) &&
+    isOptional(value.targetName, isText) &&
+    isOptional(value.priced, isBoolean) &&
+    isOptional(value.unavailableReason, (reason): reason is "ambiguous" | "missing" =>
+      isOneOf(reason, ["ambiguous", "missing"]),
+    )
+  );
+}
+
 function isModelIdentity(value: unknown): value is ModelIdentity {
   return (
     isRecord(value) &&
     isText(value.providerId) &&
     isText(value.modelId) &&
-    isOptional(value.effort, isText)
+    isOptional(value.effort, isText) &&
+    isOptional(value.pricingAlias, isClaudeAgentAliasPricingProvenance)
   );
 }
 

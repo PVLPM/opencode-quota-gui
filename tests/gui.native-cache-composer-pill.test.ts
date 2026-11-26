@@ -60,7 +60,7 @@ it("provides an accessible cache legend and uses a native cache icon", () => {
   // Concise: four short lines for the lifetime basis, the observed share, the
   // invalidation risk, and what the colors mean. Lifetimes are provider-configured
   // or empirical, and the legend never claims a lifetime is not empirical.
-  // The popup shows the numbers only (3m 45s · 99.30% · Hit); this legend names them.
+  // The popup shows the numbers only (3:45 · 99.30% · Hit); this legend names them.
   // Caveats that used to sit in the status bubble live here, once.
   expect(legend?.children).toHaveLength(6);
   expect(legend?.textContent).toMatch(
@@ -803,7 +803,7 @@ it("labels rows with agent, provider, model and effort when authoritative metada
   expect(description).toContain("general");
   expect(description).toContain("anthropic/claude-test#high");
   expect(description).toContain("Cache 80.00%, partial reuse.");
-  expect(description).toMatch(/TTL about \+.*, estimated\./);
+  expect(description).toMatch(/TTL expired about .+, estimated\./);
   expect(
     [...container.querySelectorAll(".qg-cache-agent")].map((node) => node.textContent),
   ).toEqual(["general", "build"]);
@@ -828,7 +828,7 @@ it("labels rows with agent, provider, model and effort when authoritative metada
   const metricsTip = container.querySelector('[role="tooltip"]')?.textContent ?? "";
   expect(metricsTip).toContain("Cache 80.00%");
   expect(metricsTip).toContain("Partial reuse");
-  expect(metricsTip).toMatch(/^TTL /);
+  expect(metricsTip).toMatch(/^(TTL|Expired) /);
   metrics.dispatchEvent(new Event("pointerleave"));
   expect(container.textContent).not.toContain("\u202e");
   dispose();
@@ -1141,10 +1141,10 @@ it("carries the estimate's source, time and assumption in the detail bubble", as
   expect(tooltip?.textContent).not.toContain("Last qualifying call");
   // The pill renders the estimate as its own tone without asserting physical cache.
   expect(pill.show({ session: a } as ComposerPillProps)).toMatchObject({
-    label: "TTL ~5m 0s · Cache 80.00% · Partial reuse",
+    label: "TTL ~5:00 · Cache 80.00% · Partial reuse",
     tone: "success",
     icon: "server",
-    title: "TTL ~5m 0s · Cache 80.00% · Partial reuse",
+    title: "TTL ~5:00 · Cache 80.00% · Partial reuse",
   });
   dispose();
   container.remove();
@@ -1213,7 +1213,7 @@ it("appends Warming only while idle and anchored, with an inferred popover line"
   expect(container.textContent).not.toContain("🔥");
 
   // Idle + warming: " · Warming" ends the pill label and the row metrics.
-  expect(shown()).toBe("TTL ~4m 0s · Cache 80.00% · Partial reuse · Warming");
+  expect(shown()).toBe("TTL ~4:00 · Cache 80.00% · Partial reuse · Warming");
   expect(rowText()).toMatch(/Partial reuse · Warming$/);
   expect(rowTip()).toMatch(/Cache 80\.00% · Partial reuse · Warming$/);
   expect(spoken()).toContain(
@@ -1247,7 +1247,7 @@ it("appends Warming only while idle and anchored, with an inferred popover line"
   status = "idle";
   observed = make(false);
   notify();
-  expect(shown()).toBe("TTL ~4m 0s · Cache 80.00% · Partial reuse");
+  expect(shown()).toBe("TTL ~4:00 · Cache 80.00% · Partial reuse");
   expect(rowText()).not.toContain("Warming");
   expect(line()).toMatch(/last completed call \d{2}:\d{2}/);
   expect(line()).not.toContain("OpenCode warming");
@@ -1447,7 +1447,7 @@ it("renders the estimated-expiry red state with its historical provenance", asyn
   await flush();
   renderMenu(pill, () => a, container);
   expect(pill.show({ session: a } as ComposerPillProps)).toMatchObject({
-    label: "TTL ~+23h 55m 0s · Cache 80.00% · Partial reuse",
+    label: "Expired ~23:55:00 ago · Cache 80.00% · Partial reuse",
     tone: "danger",
   });
   const dot = container.querySelector<HTMLButtonElement>("button.qg-cache-danger");
@@ -1571,7 +1571,7 @@ it("shows a useful estimate when a successful call has zero cache reads and writ
     dispose: cleanup,
   }));
   expect(pill.show({ session: main } as ComposerPillProps)).toMatchObject({
-    label: "TTL ~5m 0s · Cache 0.00% · Unknown",
+    label: "TTL ~5:00 · Cache 0.00% · Unknown",
     tone: "success",
   });
   const close = renderMenu(pill, () => main, container);
@@ -1619,7 +1619,7 @@ it("does not interpret a real configured-minimum classification as verified expi
     dispose: cleanup,
   }));
   expect(pill.show({ session: sessionRef } as ComposerPillProps)).toMatchObject({
-    label: "TTL ~5m 0s · Cache 80.00% · Partial reuse",
+    label: "TTL ~5:00 · Cache 80.00% · Partial reuse",
     tone: "success",
   });
   // The only timer is the shared countdown tick; it is not an expiry verdict and
@@ -1663,7 +1663,7 @@ it("reboots history after a shared stream gap without an RPC disconnect", async 
   }));
   await vi.waitFor(() =>
     expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
-      /^TTL ~\+.* · Cache 80.00% · Partial reuse$/,
+      /^Expired ~.* · Cache 80.00% · Partial reuse$/,
     ),
   );
   expect(listMessages).toHaveBeenCalledTimes(1);
@@ -1671,7 +1671,7 @@ it("reboots history after a shared stream gap without an RPC disconnect", async 
   await vi.waitFor(() => expect(listMessages).toHaveBeenCalledTimes(2));
   await vi.waitFor(() =>
     expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
-      /^TTL ~\+.* · Cache 80.00% · Partial reuse$/,
+      /^Expired ~.* · Cache 80.00% · Partial reuse$/,
     ),
   );
   dispose();
@@ -1777,7 +1777,7 @@ it("renders real history bootstrap results independently without exposing messag
   }));
   await vi.waitFor(() =>
     expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
-      /^TTL ~\+.* · Cache 82.00% · Partial reuse$/,
+      /^Expired ~.* · Cache 82.00% · Partial reuse$/,
     ),
   );
   // Child history now loads with the selection, so both reads happen up front.
@@ -1946,10 +1946,10 @@ it("shows the collapsed TTL countdown and cache share in one label, with only th
     dispose: cleanup,
   }));
   expect(pill.show({ session: sessionRef } as ComposerPillProps)).toEqual({
-    label: "TTL ~4m 30s · Cache 98.70% · Hit",
+    label: "TTL ~4:30 · Cache 98.70% · Hit",
     icon: "server",
     tone: "success",
-    title: "TTL ~4m 30s · Cache 98.70% · Hit",
+    title: "TTL ~4:30 · Cache 98.70% · Hit",
   });
   dispose();
 });
@@ -1970,7 +1970,7 @@ it("keeps the cache share and TTL independent, with a valid 0% share and dashes 
   await flush();
   const label = () => pill.show({ session: sessionRef } as ComposerPillProps)?.label;
   observed = greenCountdown(Date.now(), 0);
-  expect(label()).toBe("TTL ~4m 30s · Cache 0.00% · Unknown");
+  expect(label()).toBe("TTL ~4:30 · Cache 0.00% · Unknown");
   observed = {
     ...greenCountdown(Date.now(), 0.82),
     color: "yellow",
@@ -1984,26 +1984,26 @@ it("keeps the cache share and TTL independent, with a valid 0% share and dashes 
 });
 
 it.each([
-  { name: "a large hit", ratio: 0.997, label: "TTL ~4m 30s · Cache 99.70% · Hit" },
-  { name: "a small positive read", ratio: 0.07, label: "TTL ~4m 30s · Cache 7.00% · Low reuse" },
-  { name: "a tiny positive read", ratio: 0.00001, label: "TTL ~4m 30s · Cache <0.01% · Low reuse" },
-  { name: "just under 50%", ratio: 0.4999, label: "TTL ~4m 30s · Cache 49.99% · Low reuse" },
-  { name: "exactly 50%", ratio: 0.5, label: "TTL ~4m 30s · Cache 50.00% · Low reuse" },
-  { name: "just over 50%", ratio: 0.5001, label: "TTL ~4m 30s · Cache 50.01% · Partial reuse" },
-  { name: "just under 90%", ratio: 0.8999, label: "TTL ~4m 30s · Cache 89.99% · Partial reuse" },
-  { name: "exactly 90%", ratio: 0.9, label: "TTL ~4m 30s · Cache 90.00% · Hit" },
-  { name: "exactly 100%", ratio: 1, label: "TTL ~4m 30s · Cache 100.00% · Hit" },
-  { name: "an invalid ratio above 1", ratio: 1.5, label: "TTL ~4m 30s · Cache unknown" },
-  { name: "an invalid negative ratio", ratio: -0.1, label: "TTL ~4m 30s · Cache unknown" },
+  { name: "a large hit", ratio: 0.997, label: "TTL ~4:30 · Cache 99.70% · Hit" },
+  { name: "a small positive read", ratio: 0.07, label: "TTL ~4:30 · Cache 7.00% · Low reuse" },
+  { name: "a tiny positive read", ratio: 0.00001, label: "TTL ~4:30 · Cache <0.01% · Low reuse" },
+  { name: "just under 50%", ratio: 0.4999, label: "TTL ~4:30 · Cache 49.99% · Low reuse" },
+  { name: "exactly 50%", ratio: 0.5, label: "TTL ~4:30 · Cache 50.00% · Low reuse" },
+  { name: "just over 50%", ratio: 0.5001, label: "TTL ~4:30 · Cache 50.01% · Partial reuse" },
+  { name: "just under 90%", ratio: 0.8999, label: "TTL ~4:30 · Cache 89.99% · Partial reuse" },
+  { name: "exactly 90%", ratio: 0.9, label: "TTL ~4:30 · Cache 90.00% · Hit" },
+  { name: "exactly 100%", ratio: 1, label: "TTL ~4:30 · Cache 100.00% · Hit" },
+  { name: "an invalid ratio above 1", ratio: 1.5, label: "TTL ~4:30 · Cache unknown" },
+  { name: "an invalid negative ratio", ratio: -0.1, label: "TTL ~4:30 · Cache unknown" },
   {
     name: "a reported zero read, unknown since the host maps missing usage to zero",
     ratio: 0,
-    label: "TTL ~4m 30s · Cache 0.00% · Unknown",
+    label: "TTL ~4:30 · Cache 0.00% · Unknown",
   },
   {
     name: "missing telemetry, never a miss",
     ratio: undefined,
-    label: "TTL ~4m 30s · Cache unknown",
+    label: "TTL ~4:30 · Cache unknown",
   },
 ])("labels $name with an estimated TTL and a Hit or unknown cache word", async ({
   ratio,
@@ -2060,7 +2060,7 @@ it("marks an elapsed count-up as estimated too", () => {
     dispose: cleanup,
   }));
   expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toMatch(
-    /^TTL ~\+\d+m \d+s · Cache 50\.00% · Low reuse$/,
+    /^Expired ~\d+:\d{2} ago · Cache 50\.00% · Low reuse$/,
   );
   dispose();
 });
@@ -2129,22 +2129,146 @@ it("counts the TTL down each second through the reactive label and shows expiry 
     });
     return node;
   }, document.createElement("div"));
-  expect(shown.at(-1)).toBe("TTL ~4m 30s · Cache 98.70% · Hit|success");
+  expect(shown.at(-1)).toBe("TTL ~4:30 · Cache 98.70% · Hit|success");
   vi.advanceTimersByTime(1_000);
-  expect(shown.at(-1)).toBe("TTL ~4m 29s · Cache 98.70% · Hit|success");
+  expect(shown.at(-1)).toBe("TTL ~4:29 · Cache 98.70% · Hit|success");
   vi.advanceTimersByTime(209_000);
-  expect(shown.at(-1)).toBe("TTL ~1m 0s · Cache 98.70% · Hit|success");
+  expect(shown.at(-1)).toBe("TTL ~1:00 · Cache 98.70% · Hit|success");
   vi.advanceTimersByTime(59_999);
-  expect(shown.at(-1)).toBe("TTL ~1s · Cache 98.70% · Hit|success");
+  expect(shown.at(-1)).toBe("TTL ~0:01 · Cache 98.70% · Hit|success");
   vi.advanceTimersByTime(1);
   // The backend still reports green until its own recheck; the pill shows
   // expiry as soon as the estimated deadline passes.
-  expect(shown.at(-1)).toBe("TTL ~+0s · Cache 98.70% · Hit|danger");
+  expect(shown.at(-1)).toBe("Expired ~0:00 ago · Cache 98.70% · Hit|danger");
   vi.advanceTimersByTime(72_000);
-  expect(shown.at(-1)).toBe("TTL ~+1m 12s · Cache 98.70% · Hit|danger");
+  expect(shown.at(-1)).toBe("Expired ~1:12 ago · Cache 98.70% · Hit|danger");
   // One shared tick, with no transport work.
   expect(vi.getTimerCount()).toBe(1);
   expect(subscribeTransport).toHaveBeenCalledTimes(1);
+  unmount();
+  dispose();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("writes compact clock durations across the minute and hour boundaries", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  const sessionRef = session("compact-ttl");
+  let observed: CacheObserverClassification | undefined;
+  const { pill, dispose } = createRoot((cleanup) => ({
+    dispose: cleanup,
+    pill: createCacheComposerPill(
+      { current: () => sessionRef } as unknown as Sessions,
+      mockRuntime(mockCacheObserver({ query: () => observed })),
+    ),
+  }));
+  const label = (remainingMs: number) => {
+    observed = greenCountdown(Date.now() - 270_000 + remainingMs, 0.987);
+    return pill.show({ session: sessionRef } as ComposerPillProps)?.label;
+  };
+  expect(label(330_000)).toBe("TTL ~5:30 · Cache 98.70% · Hit");
+  observed = greenCountdown(Date.now() - 270_000 - 35 * 60_000 - 45_000, 0.987);
+  expect(pill.show({ session: sessionRef } as ComposerPillProps)?.label).toBe(
+    "Expired ~35:45 ago · Cache 98.70% · Hit",
+  );
+  dispose();
+});
+
+it.each([
+  { name: "nine seconds", remainingMs: 9_000, expected: "TTL ~0:09 · Cache 98.70% · Hit" },
+  {
+    name: "fifty-nine minutes fifty-nine seconds",
+    remainingMs: 3_599_000,
+    expected: "TTL ~59:59 · Cache 98.70% · Hit",
+  },
+  {
+    name: "exactly one hour",
+    remainingMs: 3_600_000,
+    expected: "TTL ~1:00:00 · Cache 98.70% · Hit",
+  },
+  {
+    name: "one hour plus a second",
+    remainingMs: 3_601_000,
+    expected: "TTL ~1:00:01 · Cache 98.70% · Hit",
+  },
+  {
+    name: "twenty-four hours",
+    remainingMs: 86_400_000,
+    expected: "TTL ~24:00:00 · Cache 98.70% · Hit",
+  },
+])("compact clock for $name", ({ remainingMs, expected }) => {
+  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  const observed = greenCountdown(Date.now() - 270_000 + remainingMs, 0.987);
+  const { pill, dispose } = createRoot((cleanup) => ({
+    dispose: cleanup,
+    pill: createCacheComposerPill(
+      { current: () => session("compact") } as unknown as Sessions,
+      mockRuntime(mockCacheObserver({ query: () => observed })),
+    ),
+  }));
+  expect(pill.show({ session: session("compact") } as ComposerPillProps)?.label).toBe(expected);
+  dispose();
+});
+
+it("moves the compact label across the hour and minute boundaries through the real countdown", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  const now = Date.now();
+  const sessionRef = session("boundary-countdown");
+  // Date.now() is mocked by the fake timers, so each build anchors its deadline
+  // at the clock's current position and the tick does the rest.
+  const build = (remainingMs: number): CacheObserverClassification =>
+    ({
+      ...greenCountdown(Date.now(), 0.987),
+      ttlEstimate: {
+        ...greenCountdown(Date.now(), 0.987).ttlEstimate!,
+        deadlineAtMs: Date.now() + remainingMs,
+      },
+    }) as CacheObserverClassification;
+  let observed = build(3_601_000);
+  let notify = () => {};
+  const { pill, dispose } = createRoot((cleanup) => ({
+    dispose: cleanup,
+    pill: createCacheComposerPill(
+      { current: () => sessionRef } as unknown as Sessions,
+      mockRuntime(
+        mockCacheObserver({
+          subscribe: (_id: string, listener: () => void) => {
+            notify = listener;
+            return () => {};
+          },
+          query: () => observed,
+        }),
+      ),
+    ),
+  }));
+  const shown: string[] = [];
+  const unmount = render(() => {
+    const node = document.createElement("span");
+    createEffect(() => {
+      shown.push(pill.show({ session: sessionRef } as ComposerPillProps)?.label ?? "");
+    });
+    return node;
+  }, document.createElement("div"));
+  const last = () => shown.at(-1) ?? "";
+  expect(last()).toBe("TTL ~1:00:01 · Cache 98.70% · Hit");
+  // The hour boundary: one shared tick carries the label out of the hour form.
+  vi.advanceTimersByTime(1_000);
+  expect(last()).toBe("TTL ~1:00:00 · Cache 98.70% · Hit");
+  vi.advanceTimersByTime(1_000);
+  expect(last()).toBe("TTL ~59:59 · Cache 98.70% · Hit");
+  expect(vi.getTimerCount()).toBe(1);
+
+  // The minute boundary: a replaced estimate re-reads through the same tick.
+  observed = build(61_000);
+  notify();
+  expect(last()).toBe("TTL ~1:01 · Cache 98.70% · Hit");
+  vi.advanceTimersByTime(1_000);
+  expect(last()).toBe("TTL ~1:00 · Cache 98.70% · Hit");
+  vi.advanceTimersByTime(1_000);
+  expect(last()).toBe("TTL ~0:59 · Cache 98.70% · Hit");
+  expect(vi.getTimerCount()).toBe(1);
+
   unmount();
   dispose();
   expect(vi.getTimerCount()).toBe(0);
@@ -2177,7 +2301,7 @@ it("counts child rows down in the same format and names missing parts as unavail
   const childMetrics = () =>
     container.querySelector(".qg-cache-child .qg-cache-metrics")?.textContent;
   // Popup rows show values only; the accessible description keeps the words.
-  expect(childMetrics()).toBe("~4m 30s · 98.70% · Hit");
+  expect(childMetrics()).toBe("~4:30 · 98.70% · Hit");
   expect(
     container.querySelector(".qg-cache-row:not(.qg-cache-child) .qg-cache-metrics")?.textContent,
   ).toBe("unknown · unknown");
@@ -2188,7 +2312,7 @@ it("counts child rows down in the same format and names missing parts as unavail
     document.getElementById(childButton.getAttribute("aria-describedby") ?? "")?.textContent ?? "";
   expect(described).toContain("TTL about 4m 30s, estimated. Cache 98.70%, hit.");
   vi.advanceTimersByTime(1_000);
-  expect(childMetrics()).toBe("~4m 29s · 98.70% · Hit");
+  expect(childMetrics()).toBe("~4:29 · 98.70% · Hit");
   close();
   dispose();
   expect(vi.getTimerCount()).toBe(0);
@@ -2257,18 +2381,18 @@ it("keeps main and child timers independent across tool events and successful pr
   const childRow = () => container.querySelector(".qg-cache-child");
   expect(mainRow()?.querySelector(".qg-cache-success")).not.toBeNull();
   expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe(
-    "~4m 50s · 80.00% · Partial reuse",
+    "~4:50 · 80.00% · Partial reuse",
   );
   expect(childRow()?.querySelector(".qg-cache-danger")).not.toBeNull();
-  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("~+1s");
+  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("Expired ~0:01 ago");
   await flush(12);
   const childrenCalls = listChildren.mock.calls.length;
   const historyCalls = listMessages.mock.calls.length;
   vi.advanceTimersByTime(2_000);
   expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe(
-    "~4m 48s · 80.00% · Partial reuse",
+    "~4:48 · 80.00% · Partial reuse",
   );
-  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("~+3s");
+  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("Expired ~0:03 ago");
   expect(fetchSpy).not.toHaveBeenCalled();
   expect(listChildren).toHaveBeenCalledTimes(childrenCalls);
   expect(listMessages).toHaveBeenCalledTimes(historyCalls);
@@ -2280,16 +2404,16 @@ it("keeps main and child timers independent across tool events and successful pr
       data: { sessionID: child, assistantMessageID: "tool-only" },
     }),
   ).toBeUndefined();
-  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("~+3s");
+  expect(childRow()?.querySelector(".qg-cache-elapsed")?.textContent).toBe("Expired ~0:03 ago");
 
   // The request began one second before completion; completion must not anchor TTL.
   primary(child, "child-new", Date.now() - 1_000, Date.now());
   expect(childRow()?.querySelector(".qg-cache-success")).not.toBeNull();
   expect(childRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe(
-    "~4m 59s · 80.00% · Partial reuse",
+    "~4:59 · 80.00% · Partial reuse",
   );
   expect(mainRow()?.querySelector(".qg-cache-metrics")?.textContent).toBe(
-    "~4m 48s · 80.00% · Partial reuse",
+    "~4:48 · 80.00% · Partial reuse",
   );
   close();
   dispose();
@@ -2325,11 +2449,11 @@ it("keeps a valid green TTL estimate and its countdown when host-event coverage 
   // Owner spec: the observer's last observed estimate is shown; coverage loss
   // neither downgrades the color nor withholds the countdown.
   notifyTransport({ rpc: "live", hostEvents: "unavailable" });
-  expect(show()).toMatchObject({ label: "TTL ~4m 30s · Cache 98.70% · Hit", tone: "success" });
+  expect(show()).toMatchObject({ label: "TTL ~4:30 · Cache 98.70% · Hit", tone: "success" });
   vi.advanceTimersByTime(1_000);
-  expect(show().label).toBe("TTL ~4m 29s · Cache 98.70% · Hit");
+  expect(show().label).toBe("TTL ~4:29 · Cache 98.70% · Hit");
   notifyTransport({ rpc: "live", hostEvents: "observed" });
-  expect(show()).toMatchObject({ label: "TTL ~4m 29s · Cache 98.70% · Hit", tone: "success" });
+  expect(show()).toMatchObject({ label: "TTL ~4:29 · Cache 98.70% · Hit", tone: "success" });
   dispose();
 });
 
@@ -2338,28 +2462,28 @@ it.each([
     name: "an estimate and a share",
     ttl: 225_000,
     ratio: 0.993,
-    values: "~3m 45s · 99.30% · Hit",
+    values: "~3:45 · 99.30% · Hit",
     spoken: "TTL about 3m 45s, estimated. Cache 99.30%, hit.",
   },
   {
     name: "an expired estimate",
     ttl: -1_000,
     ratio: 0.993,
-    values: "~+1s · 99.30% · Hit",
-    spoken: "TTL about +1s, estimated. Cache 99.30%, hit.",
+    values: "Expired ~0:01 ago · 99.30% · Hit",
+    spoken: "TTL expired about 1s ago, estimated. Cache 99.30%, hit.",
   },
   {
     name: "an estimate and zero reported reads",
     ttl: 225_000,
     ratio: 0,
-    values: "~3m 45s · 0.00% · Unknown",
+    values: "~3:45 · 0.00% · Unknown",
     spoken: "TTL about 3m 45s, estimated. Cache 0.00%, unknown.",
   },
   {
     name: "an estimate without a share",
     ttl: 225_000,
     ratio: undefined,
-    values: "~3m 45s · unknown",
+    values: "~3:45 · unknown",
     spoken: "TTL about 3m 45s, estimated. Cache unknown.",
   },
   {

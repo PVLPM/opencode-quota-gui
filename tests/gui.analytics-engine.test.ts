@@ -15,6 +15,7 @@ import {
 import type { AnalyticsReader } from "../src/gui/analytics-reader.js";
 import {
   ANALYTICS_PRESENTATION_SESSION_LIMIT,
+  ANALYTICS_PRESENTATION_VERSION,
   type AnalyticsState,
   decodeAnalyticsPresentation,
   decodeAnalyticsState,
@@ -4276,7 +4277,7 @@ describe("analytics engine: zero-token usage exclusion", () => {
     await engine.close();
   });
 
-  it("rebuilds warm Home DTOs written under pre-zero-token presentation semantics", async () => {
+  it("rebuilds warm Home DTOs from the index when the saved presentation is legacy or previous-version", async () => {
     const db = baseDb();
     const zero = zeroRow("ses_root", "msg_zero", NOW - HOUR);
     db.rows.push(zero);
@@ -4297,17 +4298,51 @@ describe("analytics engine: zero-token usage exclusion", () => {
       frontierAtMs: NOW,
       presentation: { home: { "24h": legacyHome }, project: [] },
     };
-    const legacySidecar = JSON.parse(
+    const encoded = JSON.parse(
       JSON.stringify(encodeAnalyticsPresentation(legacyState, NOW)),
     ) as Record<string, unknown>;
-    delete legacySidecar.presentationVersion;
+    const unversioned = structuredClone(encoded);
+    delete unversioned.presentationVersion;
+    const previousVersion = structuredClone(encoded);
+    previousVersion.presentationVersion = ANALYTICS_PRESENTATION_VERSION - 1;
+
+    for (const sidecar of [unversioned, previousVersion]) {
+      const warm = harness(db, {
+        loadPresentation: async () => decodeAnalyticsPresentation(sidecar),
+      });
+      const home = await warm.engine.home("24h");
+      expect(home.usage.stepCount).toBe(3);
+      expect(home.usage.totals.input).toBe(700);
+      await warm.engine.close();
+    }
+  });
+
+  it("rebuilds a previous-version presentation from the persisted analytics index", async () => {
+    const db = baseDb();
+    const coldRun = harness(db);
+    const cold = await coldRun.engine.home("24h");
+    await coldRun.engine.close();
+    const persisted = decodeAnalyticsState(
+      JSON.parse(JSON.stringify(encodeAnalyticsState(coldRun.savedStates.at(-1)!, NOW))),
+    )!;
+    const presentation = JSON.parse(
+      JSON.stringify(
+        encodeAnalyticsPresentation(
+          { ...persisted, presentation: coldRun.savedPresentations.at(-1)! },
+          NOW,
+        ),
+      ),
+    ) as Record<string, unknown>;
+    presentation.presentationVersion = ANALYTICS_PRESENTATION_VERSION - 1;
 
     const warm = harness(db, {
-      loadPresentation: async () => decodeAnalyticsPresentation(legacySidecar),
+      loadSnapshot: async () => structuredClone(persisted),
+      loadPresentation: async () => decodeAnalyticsPresentation(presentation),
     });
-    const home = await warm.engine.home("24h");
-    expect(home.usage.stepCount).toBe(3);
-    expect(home.usage.totals.input).toBe(700);
+    const rebuilt = await warm.engine.home("24h");
+    expect(rebuilt.usage.stepCount).toBe(cold.usage.stepCount);
+    expect(rebuilt.usage.totals).toEqual(cold.usage.totals);
+    expect(rebuilt.projects).toEqual(cold.projects);
     await warm.engine.close();
   });
 

@@ -144,6 +144,8 @@ interface RangeSum {
   totals: Accumulator;
   stepCount: number;
   sessions: Set<string>;
+  /** Populated only when the caller asked for per-bucket sums. */
+  bucketTotals: Map<number, Accumulator> | undefined;
 }
 
 /**
@@ -289,12 +291,12 @@ function sortedChildEntries(node: GroupNode): GroupEntry[] {
 }
 
 function materializeBuckets(
-  bucketTotals: ReadonlyMap<number, Accumulator>,
+  bucketTotals: ReadonlyMap<number, Accumulator> | undefined,
   bucketCount: number,
 ): CostedTokens[] {
   const buckets: CostedTokens[] = new Array(bucketCount);
   for (let index = 0; index < bucketCount; index += 1) {
-    const accumulator = bucketTotals.get(index);
+    const accumulator = bucketTotals?.get(index);
     buckets[index] = finalize(accumulator ?? createAccumulator());
   }
   return buckets;
@@ -1186,6 +1188,8 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     sessionIds?: ReadonlySet<string>;
     /** Distinct session ids are only needed for usage/sessionCount views. */
     collectSessions?: boolean;
+    /** When set, each accepted step is also summed into its aligned bucket. */
+    bucketStarts?: readonly number[];
   }
 
   function accumulateRange(
@@ -1196,9 +1200,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const totals = createAccumulator();
     const sessionsSet = new Set<string>();
     const collectSessions = options.collectSessions !== false;
+    const bucketStarts = options.bucketStarts;
+    const bucketTotals = bucketStarts === undefined ? undefined : new Map<number, Accumulator>();
     let stepCount = 0;
     if (untilMs <= (sinceMs ?? Number.NEGATIVE_INFINITY)) {
-      return { totals, stepCount, sessions: sessionsSet };
+      return { totals, stepCount, sessions: sessionsSet, bucketTotals };
     }
     const requestedFirstHour = Math.floor((sinceMs ?? 0) / HOUR_MS) * HOUR_MS;
     const firstHour =
@@ -1206,9 +1212,12 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         ? requestedFirstHour
         : Math.max(requestedFirstHour, earliestHourMs);
     const lastHour = Math.floor((untilMs - 1) / HOUR_MS) * HOUR_MS;
-    if (firstHour > lastHour) return { totals, stepCount, sessions: sessionsSet };
+    if (firstHour > lastHour) return { totals, stepCount, sessions: sessionsSet, bucketTotals };
     const unfiltered =
-      options.projectId === undefined && options.sessionIds === undefined && !collectSessions;
+      bucketStarts === undefined &&
+      options.projectId === undefined &&
+      options.sessionIds === undefined &&
+      !collectSessions;
     for (let startMs = firstHour; startMs <= lastHour; startMs += HOUR_MS) {
       const bucket = hours.get(startMs);
       if (!bucket) continue;
@@ -1228,9 +1237,13 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         addStepToAccumulator(totals, step);
         stepCount += 1;
         if (collectSessions) sessionsSet.add(step.sessionID);
+        if (bucketTotals !== undefined && bucketStarts !== undefined) {
+          const bucketIndex = bucketIndexAt(bucketStarts, step.completedAtMs);
+          if (bucketIndex >= 0) addStepToBucket(bucketTotals, step, bucketIndex);
+        }
       }
     }
-    return { totals, stepCount, sessions: sessionsSet };
+    return { totals, stepCount, sessions: sessionsSet, bucketTotals };
   }
 
   /** Populated hour starts intersecting the window, chronologically ordered. */
@@ -1501,6 +1514,49 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     return latest;
   }
 
+  /**
+   * Fallback for a session whose stored `updated` and newest step sit beyond
+   * the range while an older owned step is inside it. The metadata shortcut
+   * above cannot see that step, so composition would otherwise count its
+   * tokens in usage without a project row to attribute them to.
+   */
+  function projectLatestOwnedStepInWindow(
+    projectId: string,
+    window: RangeWindow,
+  ): number | undefined {
+    let latest: number | undefined;
+    for (const sessionId of sessionsByProject.get(projectId) ?? []) {
+      for (const step of ownedBySession.get(sessionId)?.values() ?? []) {
+        if (!inWindow(step.completedAtMs, window)) continue;
+        if (latest === undefined || step.completedAtMs > latest) latest = step.completedAtMs;
+      }
+    }
+    return latest;
+  }
+
+  /** Any session whose newest step is outside the range can hide an older in-range step. */
+  function projectHasOutOfWindowLatestStep(projectId: string, window: RangeWindow): boolean {
+    for (const sessionId of sessionsByProject.get(projectId) ?? []) {
+      const stepLatest = latestStepBySession.get(sessionId);
+      if (stepLatest !== undefined && !inWindow(stepLatest, window)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A tree can be active through an older owned step even when its metadata and
+   * newest step are outside the range; root counts must use the same rule as
+   * project inclusion.
+   */
+  function treeHasOwnedStepInWindow(tree: ProjectTree, window: RangeWindow): boolean {
+    for (const sessionId of tree.memberIds) {
+      for (const step of ownedBySession.get(sessionId)?.values() ?? []) {
+        if (inWindow(step.completedAtMs, window)) return true;
+      }
+    }
+    return false;
+  }
+
   function treeLatestInWindow(tree: ProjectTree, window: RangeWindow): number | undefined {
     let latest: number | undefined;
     for (const sessionId of tree.memberIds) {
@@ -1548,25 +1604,51 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
   function home(range: RangeKey, nowMs: number): HomeAnalyticsRollup {
     const window = rangeWindow(range, nowMs);
     const usage = buildUsage(range, nowMs);
+    const bucketStarts = usage.buckets.map((bucket) => bucket.startMs);
     const rows: ProjectActivityRow[] = [];
     for (const projectId of projectIds()) {
       const latest = projectLatestInWindow(projectId, window);
-      if (range !== "lifetime" && latest === undefined) continue;
-      const sum = accumulateRange(window.sinceMs, window.untilMs, {
-        projectId,
-        collectSessions: false,
-      });
+      let sum: RangeSum | undefined;
+      const rangeSum = (): RangeSum => {
+        if (sum === undefined) {
+          sum = accumulateRange(window.sinceMs, window.untilMs, {
+            projectId,
+            collectSessions: false,
+            bucketStarts,
+          });
+        }
+        return sum;
+      };
+      // A project is active when its metadata, its newest step, or any owned
+      // step falls inside the range. The last check keeps the row available
+      // for the tokens global usage already counts.
+      if (range !== "lifetime" && latest === undefined && rangeSum().stepCount === 0) continue;
+      const stepLatest =
+        latest === undefined || projectHasOutOfWindowLatestStep(projectId, window)
+          ? projectLatestOwnedStepInWindow(projectId, window)
+          : undefined;
+      const latestActivity =
+        latest === undefined
+          ? stepLatest
+          : stepLatest === undefined
+            ? latest
+            : Math.max(latest, stepLatest);
       const trees = treesFor(projectId);
       const rootSessionCount =
         range === "lifetime"
           ? trees.length
-          : trees.filter((tree) => treeLatestInWindow(tree, window) !== undefined).length;
+          : trees.filter(
+              (tree) =>
+                treeLatestInWindow(tree, window) !== undefined ||
+                treeHasOwnedStepInWindow(tree, window),
+            ).length;
       rows.push({
         projectId,
         name: projectName(projectId),
-        tokens: finalize(sum.totals),
+        tokens: finalize(rangeSum().totals),
+        buckets: materializeBuckets(rangeSum().bucketTotals, bucketStarts.length),
         rootSessionCount,
-        latestActivityAtMs: latest ?? 0,
+        latestActivityAtMs: latestActivity ?? 0,
       });
     }
     rows.sort((a, b) => {

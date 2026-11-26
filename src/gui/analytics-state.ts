@@ -38,9 +38,10 @@ export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
  * cost totals. 6 adds input-source markers to session steps; older payloads
  * would render without them. 7 places markers by assistant creation time or
  * explicit parent linkage, so 6 payloads can mark a step that was already
- * running when the input arrived.
+ * running when the input arrived. 8 adds project composition buckets and
+ * Claude Agent alias pricing provenance; 7 payloads carry neither field.
  */
-export const ANALYTICS_PRESENTATION_VERSION = 7;
+export const ANALYTICS_PRESENTATION_VERSION = 8;
 
 export interface AnalyticsCoverage {
   /** Inclusive start; absent means the lifetime read reached the beginning. */

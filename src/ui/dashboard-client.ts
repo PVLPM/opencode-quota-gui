@@ -11,6 +11,7 @@ import type {
   AnalyticsSeries,
   AnalyticsSeriesChildBucket,
   Bucket,
+  ClaudeAgentAliasPricingProvenance,
   CostedTokens,
   DashboardDataSource,
   DashboardEvent,
@@ -617,10 +618,14 @@ function readEnabledProviders(
   );
 }
 
-function readProjectActivityRow(value: JsonValue, endpoint: string): ProjectActivityRow {
+function readProjectActivityRow(
+  value: JsonValue,
+  endpoint: string,
+  bucketCount: number,
+): ProjectActivityRow {
   const detail = "projects[]";
   const row = readRecord(value, endpoint, detail);
-  return {
+  const parsed: ProjectActivityRow = {
     projectId: readText(row.projectId, endpoint, `${detail}.projectId`),
     name: readText(row.name, endpoint, `${detail}.name`),
     tokens: readCostedTokens(row.tokens, endpoint, `${detail}.tokens`),
@@ -631,6 +636,16 @@ function readProjectActivityRow(value: JsonValue, endpoint: string): ProjectActi
       `${detail}.latestActivityAtMs`,
     ),
   };
+  if (row.buckets !== undefined) {
+    const buckets = readArray(row.buckets, endpoint, `${detail}.buckets`).map((bucket, index) =>
+      readCostedTokens(bucket, endpoint, `${detail}.buckets[${index}]`),
+    );
+    if (buckets.length !== bucketCount) {
+      throw faulty(endpoint, `${detail}.buckets length`);
+    }
+    parsed.buckets = buckets;
+  }
+  return parsed;
 }
 
 function readRangeWindow(
@@ -1097,6 +1112,7 @@ export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota")
 export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): HomeSnapshot {
   const root = readRecord(value, endpoint, "not an object");
   const providers = readRecord(root.providers, endpoint, "providers");
+  const usage = readUsage(root.usage, endpoint);
   const parsed: HomeSnapshot = {
     generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
     range: readRangeKey(root.range, endpoint, "range"),
@@ -1112,9 +1128,9 @@ export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): 
       ),
       polledAtMs: readNumber(providers.polledAtMs, endpoint, "providers.polledAtMs"),
     },
-    usage: readUsage(root.usage, endpoint),
+    usage,
     projects: readArray(root.projects, endpoint, "projects").map((row) =>
-      readProjectActivityRow(row, endpoint),
+      readProjectActivityRow(row, endpoint, usage.buckets.length),
     ),
   };
   if (readOptionalBoolean(root.provisional, endpoint, "provisional") === true) {
@@ -1178,6 +1194,47 @@ function readBreadcrumb(
   };
 }
 
+const ALIAS_PRICING_STATES = [
+  "catalog",
+  "last-confirmed",
+  "static-fallback",
+  "unavailable",
+] as const;
+const ALIAS_PRICING_UNAVAILABLE_REASONS = ["ambiguous", "missing"] as const;
+
+function readAliasPricingProvenance(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail: string,
+): ClaudeAgentAliasPricingProvenance | undefined {
+  if (value === undefined) return undefined;
+  const record = readRecord(value, endpoint, detail);
+  const parsed: ClaudeAgentAliasPricingProvenance = {
+    alias: readText(record.alias, endpoint, `${detail}.alias`),
+    state: readEnum(record.state, ALIAS_PRICING_STATES, endpoint, `${detail}.state`),
+  };
+  const targetProviderId = readOptionalText(
+    record.targetProviderId,
+    endpoint,
+    `${detail}.targetProviderId`,
+  );
+  if (targetProviderId !== undefined) parsed.targetProviderId = targetProviderId;
+  const targetModelId = readOptionalText(record.targetModelId, endpoint, `${detail}.targetModelId`);
+  if (targetModelId !== undefined) parsed.targetModelId = targetModelId;
+  const targetName = readOptionalText(record.targetName, endpoint, `${detail}.targetName`);
+  if (targetName !== undefined) parsed.targetName = targetName;
+  const priced = readOptionalBoolean(record.priced, endpoint, `${detail}.priced`);
+  if (priced !== undefined) parsed.priced = priced;
+  const unavailableReason = readOptionalEnum(
+    record.unavailableReason,
+    ALIAS_PRICING_UNAVAILABLE_REASONS,
+    endpoint,
+    `${detail}.unavailableReason`,
+  );
+  if (unavailableReason !== undefined) parsed.unavailableReason = unavailableReason;
+  return parsed;
+}
+
 function readModelIdentity(value: JsonValue, endpoint: string, detail: string): ModelIdentity {
   const identity = readRecord(value, endpoint, detail);
   const parsed: ModelIdentity = {
@@ -1186,6 +1243,12 @@ function readModelIdentity(value: JsonValue, endpoint: string, detail: string): 
   };
   const effort = readOptionalText(identity.effort, endpoint, `${detail}.effort`);
   if (effort !== undefined) parsed.effort = effort;
+  const pricingAlias = readAliasPricingProvenance(
+    identity.pricingAlias,
+    endpoint,
+    `${detail}.pricingAlias`,
+  );
+  if (pricingAlias !== undefined) parsed.pricingAlias = pricingAlias;
   return parsed;
 }
 

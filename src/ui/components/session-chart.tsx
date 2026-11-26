@@ -30,6 +30,7 @@ import {
 import { modelTransitions } from "../session-timing";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
+import { modelAliasPricingSummary } from "./model-alias-pricing";
 import { ModelIdentityLabel } from "./model-identity";
 
 /**
@@ -266,6 +267,7 @@ export function SessionChart(props: {
         `${change.kind === "model" ? "Model changed" : "Effort changed"} from ${formatModelIdentity(change.from)} to ${formatModelIdentity(change.to)}`,
       );
     }
+    if (step.model?.pricingAlias) parts.push(modelAliasPricingSummary(step.model.pricingAlias));
     return parts.join(", ");
   };
 
@@ -673,7 +675,13 @@ export function SessionChart(props: {
                 <div class="qg-tooltip__head">
                   <span>Step {(active() ?? 0) + 1}</span>
                   <Show when={modelIdentities().length > 1 ? step().model : undefined}>
-                    {(model) => <ModelIdentityLabel identity={model()} class="qg-tooltip__model" />}
+                    {(model) => (
+                      <ModelIdentityLabel
+                        identity={model()}
+                        class="qg-tooltip__model"
+                        showAliasTooltip={false}
+                      />
+                    )}
                   </Show>
                   <Show
                     when={
@@ -688,6 +696,13 @@ export function SessionChart(props: {
                     )}
                   </Show>
                 </div>
+                <Show when={step().model?.pricingAlias}>
+                  {(alias) => (
+                    <p class="qg-tooltip__note qg-tooltip__alias">
+                      {modelAliasPricingSummary(alias())}
+                    </p>
+                  )}
+                </Show>
                 <div class="qg-tooltip__group qg-tooltip__group--series">
                   <div class="qg-tooltip__grid-row">
                     <span

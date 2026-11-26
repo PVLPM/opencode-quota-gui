@@ -261,6 +261,41 @@ describe("GUI contract guards", () => {
   it("freezes contract version 2 for the required timeZone payload fields", () => {
     expect(DASHBOARD_CONTRACT_VERSION).toBe(2);
   });
+
+  it("accepts optional aligned project buckets and rejects malformed arrays", () => {
+    const snapshot = homeSnapshot();
+    const project = snapshot.projects[0];
+    const bucket = snapshot.usage.buckets[0];
+    if (!project || !bucket) throw new Error("home fixture is missing a project or bucket");
+
+    // Aggregate-only payloads stay valid; aligned contributions are additive.
+    expect(isHomeSnapshot(snapshot)).toBe(true);
+    expect(
+      isHomeSnapshot({
+        ...snapshot,
+        projects: [{ ...project, buckets: snapshot.usage.buckets.map((entry) => entry.tokens) }],
+      }),
+    ).toBe(true);
+
+    expect(isHomeSnapshot({ ...snapshot, projects: [{ ...project, buckets: "nope" }] })).toBe(
+      false,
+    );
+    // Alignment is part of the contract: one short array must be rejected whole.
+    expect(
+      isHomeSnapshot({
+        ...snapshot,
+        projects: [
+          { ...project, buckets: snapshot.usage.buckets.slice(0, 1).map((e) => e.tokens) },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      isHomeSnapshot({
+        ...snapshot,
+        projects: [{ ...project, buckets: [{ ...bucket.tokens, total: 999 }] }],
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("GUI contract identity seam", () => {

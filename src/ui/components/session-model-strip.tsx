@@ -16,8 +16,8 @@ const SEPARATOR = " → ";
  */
 export function SessionModelStrip(props: { identities: readonly ModelIdentity[] }): JSX.Element {
   const [visibleCount, setVisibleCount] = createSignal(props.identities.length);
-  let host: HTMLParagraphElement | undefined;
-  let measure: HTMLSpanElement | undefined;
+  let host: HTMLDivElement | undefined;
+  let measure: HTMLDivElement | undefined;
   let disposed = false;
 
   const refit = (): void => {
@@ -78,14 +78,14 @@ export function SessionModelStrip(props: { identities: readonly ModelIdentity[] 
       fallback={
         <Show when={props.identities[0]}>
           {(identity) => (
-            <p class="qg-page-head__models">
+            <div class="qg-page-head__models">
               <ModelIdentityLabel identity={identity()} />
-            </p>
+            </div>
           )}
         </Show>
       }
     >
-      <p class="qg-page-head__models" ref={host}>
+      <div class="qg-page-head__models" ref={host}>
         <For each={props.identities.slice(0, visibleCount())}>
           {(identity, index) => (
             <>
@@ -94,9 +94,9 @@ export function SessionModelStrip(props: { identities: readonly ModelIdentity[] 
                   {SEPARATOR}
                 </span>
               </Show>
-              <span class="qg-page-head__models-entry">
+              <div class="qg-page-head__models-entry">
                 <ModelIdentityLabel identity={identity} />
-              </span>
+              </div>
             </>
           )}
         </For>
@@ -127,18 +127,18 @@ export function SessionModelStrip(props: { identities: readonly ModelIdentity[] 
             +{overflowCount()}
           </InteractivePopover>
         </Show>
-        <span class="qg-page-head__models-measure" aria-hidden="true" ref={measure}>
+        <div class="qg-page-head__models-measure" aria-hidden="true" ref={measure}>
           <For each={props.identities}>
             {(identity) => (
-              <span data-fit-entry>
+              <div data-fit-entry>
                 <ModelIdentityLabel identity={identity} />
-              </span>
+              </div>
             )}
           </For>
           <span data-fit-separator>{SEPARATOR}</span>
           <span data-fit-overflow>+{props.identities.length}</span>
-        </span>
-      </p>
+        </div>
+      </div>
     </Show>
   );
 }

@@ -24,13 +24,13 @@ const NODE_PAGE_SIZE = 200;
 /** The last-used identity, plus a disclosure of every distinct identity when there are several. */
 function SessionModelCell(props: { models: SessionNode["models"] }): JSX.Element {
   return (
-    <span class="qg-node__model">
+    <div class="qg-node__model">
       <Show when={props.models[0]} fallback="—">
         {(primary) => (
           <>
-            <span class="qg-node__model-text">
+            <div class="qg-node__model-text">
               <ModelIdentityLabel identity={primary()} />
-            </span>
+            </div>
             <Show when={props.models.length > 1}>
               <InteractivePopover
                 label={`${props.models.length - 1} more model configurations. Show all ${props.models.length}.`}
@@ -56,7 +56,7 @@ function SessionModelCell(props: { models: SessionNode["models"] }): JSX.Element
           </>
         )}
       </Show>
-    </span>
+    </div>
   );
 }
 

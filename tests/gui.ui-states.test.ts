@@ -2384,10 +2384,8 @@ describe("session view composition", () => {
     expect(html).toContain('aria-label="Mistral: mistral/alpha"');
     // The server render has no layout yet, so every header entry is visible;
     // the measured overflow bubble appears only after hydration.
-    const modelsHtml = html.slice(
-      html.indexOf('class="qg-page-head__models"'),
-      html.indexOf("</p>", html.indexOf('class="qg-page-head__models"')),
-    );
+    const modelsStart = html.indexOf('class="qg-page-head__models"');
+    const modelsHtml = html.slice(modelsStart, html.indexOf("</header>", modelsStart));
     expect(modelsHtml).not.toContain("qg-node__more");
   });
 
@@ -6851,6 +6849,45 @@ describe("response boundary decoding", () => {
       usage: { ...payload.usage, window: { untilMs: 1_700_000_000_000 } },
     });
     expect(lifetime.usage.window).not.toHaveProperty("sinceMs");
+  });
+
+  it("preserves optional aligned project buckets and rejects malformed ones", () => {
+    const payload = validHome();
+    const project = payload.projects[0]!;
+    const bucket = payload.usage.buckets[0]!;
+
+    const parsed = parseHomeSnapshot({
+      ...payload,
+      projects: [{ ...project, buckets: [bucket.tokens] }],
+    });
+    expect(parsed.projects[0]?.buckets).toHaveLength(1);
+    expect(parsed.projects[0]?.buckets?.[0]).toEqual(bucket.tokens);
+
+    // Older aggregate-only payloads still parse without inventing the field.
+    expect(parseHomeSnapshot(payload).projects[0]).not.toHaveProperty("buckets");
+
+    expectRejected(
+      () => parseHomeSnapshot({ ...payload, projects: [{ ...project, buckets: "nope" }] }),
+      "projects[].buckets",
+    );
+    expectRejected(
+      () =>
+        parseHomeSnapshot({
+          ...payload,
+          projects: [{ ...project, buckets: [bucket.tokens, costed(0)] }],
+        }),
+      "projects[].buckets",
+    );
+    expectRejected(
+      () =>
+        parseHomeSnapshot({
+          ...payload,
+          projects: [
+            { ...project, buckets: [{ ...bucket.tokens, total: bucket.tokens.total + 1 }] },
+          ],
+        }),
+      "projects[].buckets[0]",
+    );
   });
 
   it("preserves the provisional first-paint marker for the Web client", () => {

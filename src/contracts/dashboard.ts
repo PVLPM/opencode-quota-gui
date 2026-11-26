@@ -397,6 +397,12 @@ export interface ProjectActivityRow {
   tokens: CostedTokens;
   rootSessionCount: number;
   latestActivityAtMs: number;
+  /**
+   * This project's contribution inside every home usage bucket, aligned
+   * index-for-index with `HomeSnapshot.usage.buckets`. Optional so older
+   * payloads and caches keep their aggregate-only behavior.
+   */
+  buckets?: CostedTokens[];
 }
 
 export interface HomeSnapshot {
@@ -495,6 +501,38 @@ export interface ModelIdentity {
   providerId: string;
   modelId: string;
   effort?: string;
+  /**
+   * Presentation-only pricing provenance for an unversioned Claude Agent
+   * alias. Never part of identity equality, dedupe, display text, tokens or
+   * cost: the displayed identity is still the raw alias OpenCode recorded.
+   */
+  pricingAlias?: ClaudeAgentAliasPricingProvenance;
+}
+
+/**
+ * How the resolver priced an unversioned Claude Agent alias, and which target
+ * it chose. Serializable so worker DTOs and both surfaces share one shape.
+ *
+ * `catalog` means the last observed native display name still matches the
+ * current models.dev catalog; it does not prove the native alias still points
+ * to that model. `last-confirmed` keeps the last observed target when the
+ * current catalog cannot corroborate it. `static-fallback` is a declared
+ * default that was never observed from the native alias.
+ */
+export interface ClaudeAgentAliasPricingProvenance {
+  alias: string;
+  state: "catalog" | "last-confirmed" | "static-fallback" | "unavailable";
+  targetProviderId?: string;
+  targetModelId?: string;
+  /** Saved native display name; never a static-fallback target name. */
+  targetName?: string;
+  /**
+   * `true` only when models.dev has rates for the target; absent on payloads
+   * written before this flag existed and never `true` for a catalog-listed
+   * target without rates.
+   */
+  priced?: boolean;
+  unavailableReason?: "ambiguous" | "missing";
 }
 
 export interface StepPoint {

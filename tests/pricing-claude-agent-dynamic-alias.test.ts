@@ -238,10 +238,35 @@ describe("dynamic Claude Agent alias pricing", () => {
       ok: true,
       method: "alias_evidence",
       key: { provider: "anthropic", model: "claude-opus-5-6" },
+      aliasPricing: { alias: "opus", state: "last-confirmed", priced: false },
     });
     expect(
       priceTokenBuckets({ providerID: "claude-agent", modelID: "opus", tokens: TOKENS }),
     ).toMatchObject({ status: "unknown" });
+  });
+
+  it("falls through to the generic resolver when a declared static target has no rates", async () => {
+    // The catalog lists the raw Anthropic alias but publishes no rate for the
+    // declared static target, so the base resolver must keep its own answer.
+    await loadSnapshot({
+      prices: { "claude-opus-5-5": { input: 1, output: 2 } },
+      catalog: ["sonnet", "claude-opus-5-5"],
+    });
+
+    const resolution = resolvePricingKey({ providerID: "claude-agent", modelID: "sonnet" });
+    expect(resolution).toMatchObject({
+      ok: true,
+      method: "source_provider",
+      key: { provider: "anthropic", model: "sonnet" },
+    });
+    // A generic answer carries no alias provenance claiming an estimate.
+    expect(resolution.aliasPricing).toBeUndefined();
+    expect(
+      priceTokenBuckets({ providerID: "claude-agent", modelID: "sonnet", tokens: TOKENS }),
+    ).toMatchObject({
+      status: "unpriced",
+      key: { provider: "anthropic", model: "sonnet" },
+    });
   });
 
   it("keeps the static fallback when the snapshot has no name coverage", async () => {
@@ -290,6 +315,7 @@ describe("dynamic Claude Agent alias pricing", () => {
       ok: true,
       method: "alias_evidence",
       key: { provider: "anthropic", model: "claude-opus-5-6" },
+      aliasPricing: { alias: "opus", state: "last-confirmed", priced: true },
     });
   });
 
