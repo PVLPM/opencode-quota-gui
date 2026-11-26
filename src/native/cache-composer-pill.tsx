@@ -73,11 +73,17 @@ function formatWallTime(ms: number | undefined, nowMs: number): string | undefin
  * Compact clock for the pill label and popup value: `M:SS` below an hour and
  * `H:MM:SS` at an hour or more, minutes and seconds zero-padded, hours unbounded.
  */
-function formatTtlClock(ms: number): string {
+function ttlUnits(ms: number): { hours: number; minutes: number; seconds: number } {
   const totalSeconds = Math.ceil(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
+  return {
+    hours: Math.floor(totalSeconds / 3600),
+    minutes: Math.floor((totalSeconds % 3600) / 60),
+    seconds: totalSeconds % 60,
+  };
+}
+
+function formatTtlClock(ms: number): string {
+  const { hours, minutes, seconds } = ttlUnits(ms);
   const pad = (value: number) => String(value).padStart(2, "0");
   return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
 }
@@ -88,10 +94,7 @@ function formatTtlClock(ms: number): string {
  * reads "1s" until the deadline itself.
  */
 function formatTtlSpoken(ms: number): string {
-  const totalSeconds = Math.ceil(ms / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
+  const { hours, minutes, seconds } = ttlUnits(ms);
   if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
   if (minutes > 0) return `${minutes}m ${seconds}s`;
   return `${seconds}s`;
