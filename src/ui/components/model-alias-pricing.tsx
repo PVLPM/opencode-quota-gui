@@ -27,21 +27,26 @@ const UNAVAILABLE_SUMMARY = {
   missing: "no confirmed target",
 } as const;
 
+/**
+ * `catalog` only establishes that the last observed native display name still
+ * matches the current models.dev catalog. It is not a fresh observation of the
+ * native alias, so neither state claims the alias's current target.
+ */
 const SOURCE_LABELS: Record<
   Exclude<ClaudeAgentAliasPricingProvenance["state"], "unavailable">,
   string
 > = {
-  catalog: "OpenCode model catalog + models.dev",
-  "last-confirmed": "last confirmed OpenCode model catalog evidence + models.dev",
-  "static-fallback": "static alias fallback + models.dev",
+  catalog: "last observed native alias name + current models.dev catalog match",
+  "last-confirmed": "last observed native alias target; no current models.dev catalog match",
+  "static-fallback": "static alias fallback + models.dev rates",
 };
 
 const SUMMARY_STATE_LABELS: Record<
   Exclude<ClaudeAgentAliasPricingProvenance["state"], "unavailable">,
   string
 > = {
-  catalog: "current catalog target",
-  "last-confirmed": "last confirmed",
+  catalog: "last observed native target, current catalog match",
+  "last-confirmed": "last observed native target, no current catalog match",
   "static-fallback": "static fallback",
 };
 
@@ -71,15 +76,21 @@ export function modelAliasPricingLines(
   const lines = [`Model: ${formatModelIdentity(model)}`];
   switch (alias.state) {
     case "catalog":
-      lines.push(`Current alias target: ${targetLabel(alias)}`);
+      lines.push(
+        `Last observed native alias target: ${targetLabel(alias)}`,
+        "The observed name matches the current models.dev catalog; the alias's current native target is not verified.",
+      );
       break;
     case "last-confirmed":
-      lines.push(`Last confirmed alias target: ${targetLabel(alias)}`);
+      lines.push(
+        `Last observed native alias target: ${targetLabel(alias)}`,
+        "The current models.dev catalog does not corroborate this observed name; the last observed target is retained for pricing.",
+      );
       break;
     case "static-fallback":
       lines.push(
         `Static fallback target: ${targetLabel(alias)}`,
-        "Not confirmed as the current native model.",
+        "Not observed from the native alias; no current native target is verified.",
       );
       break;
     case "unavailable":

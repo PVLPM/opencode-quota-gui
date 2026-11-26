@@ -27,10 +27,13 @@ const CASES: Array<{
       targetName: "Opus 5.6",
       priced: true,
     },
-    target: "Current alias target: Opus 5.6",
+    target: "Last observed native alias target: Opus 5.6",
     pricing: "Pricing: API-equivalent estimate",
-    summary: "Pricing: Opus 5.6 (current catalog target); historical version unknown",
-    source: "Source: OpenCode model catalog + models.dev",
+    summary:
+      "Pricing: Opus 5.6 (last observed native target, current catalog match); historical version unknown",
+    source: "Source: last observed native alias name + current models.dev catalog match",
+    extra:
+      "The observed name matches the current models.dev catalog; the alias's current native target is not verified.",
   },
   {
     name: "catalog without rates",
@@ -42,11 +45,13 @@ const CASES: Array<{
       targetName: "Opus 5.6",
       priced: false,
     },
-    target: "Current alias target: Opus 5.6",
+    target: "Last observed native alias target: Opus 5.6",
     pricing: "Pricing: Not estimated (no rate is available for this target)",
     summary:
       "Pricing: target Opus 5.6, rates unavailable; not estimated; historical version unknown",
-    source: "Source: OpenCode model catalog + models.dev",
+    source: "Source: last observed native alias name + current models.dev catalog match",
+    extra:
+      "The observed name matches the current models.dev catalog; the alias's current native target is not verified.",
   },
   {
     name: "last confirmed",
@@ -58,10 +63,13 @@ const CASES: Array<{
       targetName: "Opus 5.6",
       priced: true,
     },
-    target: "Last confirmed alias target: Opus 5.6",
+    target: "Last observed native alias target: Opus 5.6",
     pricing: "Pricing: API-equivalent estimate",
-    summary: "Pricing: Opus 5.6 (last confirmed); historical version unknown",
-    source: "Source: last confirmed OpenCode model catalog evidence + models.dev",
+    summary:
+      "Pricing: Opus 5.6 (last observed native target, no current catalog match); historical version unknown",
+    source: "Source: last observed native alias target; no current models.dev catalog match",
+    extra:
+      "The current models.dev catalog does not corroborate this observed name; the last observed target is retained for pricing.",
   },
   {
     name: "static fallback",
@@ -75,8 +83,8 @@ const CASES: Array<{
     target: "Static fallback target: anthropic/claude-opus-5-5",
     pricing: "Pricing: API-equivalent estimate",
     summary: "Pricing: anthropic/claude-opus-5-5 (static fallback); historical version unknown",
-    source: "Source: static alias fallback + models.dev",
-    extra: "Not confirmed as the current native model.",
+    source: "Source: static alias fallback + models.dev rates",
+    extra: "Not observed from the native alias; no current native target is verified.",
   },
   {
     name: "unavailable ambiguous",

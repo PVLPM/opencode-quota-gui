@@ -512,6 +512,12 @@ export interface ModelIdentity {
 /**
  * How the resolver priced an unversioned Claude Agent alias, and which target
  * it chose. Serializable so worker DTOs and both surfaces share one shape.
+ *
+ * `catalog` means the last observed native display name still matches the
+ * current models.dev catalog; it does not prove the native alias still points
+ * to that model. `last-confirmed` keeps the last observed target when the
+ * current catalog cannot corroborate it. `static-fallback` is a declared
+ * default that was never observed from the native alias.
  */
 export interface ClaudeAgentAliasPricingProvenance {
   alias: string;

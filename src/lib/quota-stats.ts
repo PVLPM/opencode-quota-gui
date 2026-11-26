@@ -392,8 +392,9 @@ function resolveClaudeAgentAliasPricing(
   const evidence = readClaudeAgentAliasEvidence(alias);
 
   if (evidence.kind === "resolved") {
-    // The saved bit records when the target was resolved; only the active
-    // catalog can still call it current.
+    // The saved bit records when the target was resolved; the active catalog
+    // can only corroborate the saved native name, never prove the alias still
+    // points there.
     const catalogNames = listModelDisplayNames(CLAUDE_AGENT_PRICED_PROVIDER);
     const corroborated =
       hasPricingNameCoverage() &&

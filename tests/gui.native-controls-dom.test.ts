@@ -14,7 +14,7 @@ import { createAnalyticsPresentationStore } from "../src/ui/analytics-cache";
 import { createQuotaQuery } from "../src/ui/quota-query";
 import { AnalyticsViews, QuotaRoute } from "../src/ui/routes";
 import { displayPreferencesFromValues } from "../src/ui/settings-model";
-import { homeSnapshot, projectSnapshot } from "./fixtures/gui-ui-fixtures";
+import { homeSnapshot, projectSnapshot, sessionSnapshot } from "./fixtures/gui-ui-fixtures";
 
 vi.mock("../src/native/dashboard-client.js", () => ({
   createNativeDashboardClient: () => ({ dispose() {} }),
@@ -540,6 +540,66 @@ it("does not mark a retained project payload fresh before the reconnect read lan
     resolveRead(fresh);
     await vi.waitFor(() => expect(stale).toBe(false));
     expect(onFresh).toHaveBeenCalledTimes(2);
+  } finally {
+    dispose();
+    store.dispose();
+    target.remove();
+  }
+});
+
+it("exposes the alias pricing tooltip in the shared Native Analytics session view", async () => {
+  const pricingAlias = {
+    alias: "opus",
+    state: "catalog",
+    targetProviderId: "anthropic",
+    targetModelId: "claude-opus-5-6",
+    targetName: "Opus 5.6",
+    priced: true,
+  } as const;
+  const identity = {
+    providerId: "claude-agent",
+    modelId: "opus",
+    effort: "medium",
+    pricingAlias,
+  };
+  const snapshot = sessionSnapshot();
+  snapshot.nodes[0]!.models = [identity];
+  snapshot.steps = snapshot.steps.map((step, index) =>
+    index === 0 ? { ...step, model: identity } : step,
+  );
+  const client = { session: () => Promise.resolve(snapshot) };
+  const store = createAnalyticsPresentationStore(async ({ range }) => homeSnapshot({ range }));
+  const target = document.createElement("div");
+  document.body.append(target);
+  const dispose = render(
+    () =>
+      createComponent(AnalyticsViews, {
+        client: client as never,
+        store,
+        connection: "live",
+        route: { name: "session", sessionId: snapshot.focusSessionId },
+        range: "7d",
+        reloadToken: 0,
+        reconnectEpoch: 0,
+        onStale: () => {},
+        onFresh: () => {},
+        onModelsDimensionChange: () => {},
+      }),
+    target,
+  );
+  try {
+    await vi.waitFor(() =>
+      expect(target.querySelector(".qg-alias-pricing-trigger")).not.toBeNull(),
+    );
+    const trigger = target.querySelector<HTMLElement>(".qg-alias-pricing-trigger");
+    if (trigger === null) throw new Error("Native Analytics alias trigger is missing");
+    trigger.focus();
+    await vi.waitFor(() => expect(trigger.getAttribute("aria-describedby")).not.toBeNull());
+    const id = trigger.getAttribute("aria-describedby");
+    if (id === null) throw new Error("Native Analytics alias trigger has no tooltip id");
+    const text = document.getElementById(id)?.textContent ?? "";
+    expect(text).toContain("Last observed native alias target: Opus 5.6");
+    expect(text).toContain("the alias's current native target is not verified");
   } finally {
     dispose();
     store.dispose();
