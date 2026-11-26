@@ -70,11 +70,25 @@ function formatWallTime(ms: number | undefined, nowMs: number): string | undefin
 }
 
 /**
- * Whole-second countdown text. A partial second rounds up, so the last second
- * still reads "1s" until the deadline itself.
+ * Compact clock for the pill label and popup value: `M:SS` below an hour and
+ * `H:MM:SS` at an hour or more, minutes and seconds zero-padded, hours unbounded.
  */
-function formatTtlRemaining(remainingMs: number): string {
-  const totalSeconds = Math.ceil(remainingMs / 1000);
+function formatTtlClock(ms: number): string {
+  const totalSeconds = Math.ceil(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
+}
+
+/**
+ * Whole-second countdown text for assistive technology: `1h 25m 30s`,
+ * `4m 30s`, `9s`. A partial second rounds up, so the last second still
+ * reads "1s" until the deadline itself.
+ */
+function formatTtlSpoken(ms: number): string {
+  const totalSeconds = Math.ceil(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
@@ -104,19 +118,20 @@ function ttlMetric(deadlineAtMs: number | undefined, nowMs: number): TtlMetric {
     return { label: "TTL —", short: "unknown", spoken: "TTL unavailable", expired: false };
   }
   if (deadlineAtMs <= nowMs) {
-    const elapsed = `+${formatTtlRemaining(Math.floor((nowMs - deadlineAtMs) / 1000) * 1000)}`;
+    const elapsedMs = Math.floor((nowMs - deadlineAtMs) / 1000) * 1000;
+    const elapsed = formatTtlClock(elapsedMs);
     return {
-      label: `TTL ~${elapsed}`,
-      short: `~${elapsed}`,
-      spoken: `TTL about ${elapsed}, estimated`,
+      label: `Expired ~${elapsed} ago`,
+      short: `Expired ~${elapsed} ago`,
+      spoken: `TTL expired about ${formatTtlSpoken(elapsedMs)} ago, estimated`,
       expired: true,
     };
   }
-  const remaining = formatTtlRemaining(deadlineAtMs - nowMs);
+  const remaining = formatTtlClock(deadlineAtMs - nowMs);
   return {
     label: `TTL ~${remaining}`,
     short: `~${remaining}`,
-    spoken: `TTL about ${remaining}, estimated`,
+    spoken: `TTL about ${formatTtlSpoken(deadlineAtMs - nowMs)}, estimated`,
     expired: false,
   };
 }
