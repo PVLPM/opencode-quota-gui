@@ -16,12 +16,46 @@ function targetLabel(alias: ClaudeAgentAliasPricingProvenance): string {
   return alias.alias;
 }
 
+const UNAVAILABLE_COPY = {
+  ambiguous: "More than one candidate target was observed; pricing needs one unambiguous match.",
+  missing: "No confirmed target could be verified for this alias.",
+} as const;
+
+const UNAVAILABLE_SUMMARY = {
+  ambiguous: "ambiguous target",
+  missing: "no confirmed target",
+} as const;
+
 const SOURCE_LABELS: Record<ClaudeAgentAliasPricingProvenance["state"], string> = {
   catalog: "OpenCode model catalog + models.dev",
   "last-confirmed": "last confirmed OpenCode model catalog evidence + models.dev",
   "static-fallback": "static alias fallback + models.dev",
   unavailable: "OpenCode model catalog + models.dev (no unique match)",
 };
+
+const SUMMARY_STATE_LABELS: Record<
+  Exclude<ClaudeAgentAliasPricingProvenance["state"], "unavailable">,
+  string
+> = {
+  catalog: "current catalog target",
+  "last-confirmed": "last confirmed",
+  "static-fallback": "static fallback",
+};
+
+/**
+ * One line for surfaces that already show the model (session-chart readout,
+ * Desktop pill description). Truthful about an unresolved price.
+ */
+export function modelAliasPricingSummary(alias: ClaudeAgentAliasPricingProvenance): string {
+  if (alias.state === "unavailable") {
+    return `Pricing: not estimated (${UNAVAILABLE_SUMMARY[alias.unavailableReason ?? "missing"]})`;
+  }
+  const label = targetLabel(alias);
+  if (alias.priced !== true) {
+    return `Pricing: target ${label}, rates unavailable; not estimated; historical version unknown`;
+  }
+  return `Pricing: ${label} (${SUMMARY_STATE_LABELS[alias.state]}); historical version unknown`;
+}
 
 /**
  * One wording for both surfaces. The alias is always the stored identity; only
@@ -48,14 +82,16 @@ export function modelAliasPricingLines(
     case "unavailable":
       lines.push(
         "Pricing target unavailable",
-        alias.unavailableReason === "ambiguous"
-          ? "More than one catalog model matches this alias."
-          : "No catalog model matches this alias.",
+        UNAVAILABLE_COPY[alias.unavailableReason ?? "missing"],
       );
       break;
   }
   lines.push(
-    alias.state === "unavailable" ? "Pricing: Not estimated" : "Pricing: API-equivalent estimate",
+    alias.state === "unavailable"
+      ? "Pricing: Not estimated"
+      : alias.priced === true
+        ? "Pricing: API-equivalent estimate"
+        : "Pricing: Not estimated (no rate is available for this target)",
     `Source: ${SOURCE_LABELS[alias.state]}`,
     "Historical model version: unknown — usage was recorded under the alias and may predate the current pricing target.",
   );

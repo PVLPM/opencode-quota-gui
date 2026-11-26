@@ -11,6 +11,7 @@ import {
   isClaudeAgentPricingAlias,
   matchClaudeAgentCatalogName,
   readClaudeAgentAliasEvidence,
+  resolveClaudeAgentCatalogName,
 } from "./model-alias-evidence.js";
 import {
   type CostBuckets,
@@ -315,12 +316,6 @@ function claudeAgentUnknown(
   };
 }
 
-function catalogDisplayName(modelID: string): string | undefined {
-  return listModelDisplayNames(CLAUDE_AGENT_PRICED_PROVIDER).find(
-    (entry) => entry.modelID === modelID,
-  )?.name;
-}
-
 function claudeAgentPriced(
   alias: ClaudeAgentPricingAlias,
   state: "catalog" | "last-confirmed" | "static-fallback",
@@ -338,27 +333,27 @@ function claudeAgentPriced(
       targetProviderId: CLAUDE_AGENT_PRICED_PROVIDER,
       targetModelId: modelID,
       ...(targetName ? { targetName } : {}),
+      priced: hasCost(CLAUDE_AGENT_PRICED_PROVIDER, modelID),
     },
   };
 }
 
 /**
  * The declared static target keeps its existing priced key and
- * `source_provider` method, but carries explicit provenance instead of
- * disappearing into the generic path. An alias without a declared or priced
- * fallback (fable) stays unpriced rather than letting generic heuristics guess
- * an older generation.
+ * `source_provider` method when it has rates. A declared but unpriced target
+ * returns `null` so the generic resolver keeps its base "catalog-listed,
+ * unpriced" answer. An alias without a declared fallback (fable) stays
+ * unpriced rather than letting generic heuristics guess an older generation.
  */
 function claudeAgentStaticFallback(
   alias: ClaudeAgentPricingAlias,
   sourceProviderID: string,
   sourceModelID: string,
   unavailableReason: "ambiguous" | "missing",
-): PricingResolution {
+): PricingResolution | null {
   const target = PROVIDER_MODEL_PRICING_ALIASES.anthropic?.[alias];
-  if (!target || !hasCost(CLAUDE_AGENT_PRICED_PROVIDER, target)) {
-    return claudeAgentUnknown(sourceProviderID, sourceModelID, alias, unavailableReason);
-  }
+  if (!target) return claudeAgentUnknown(sourceProviderID, sourceModelID, alias, unavailableReason);
+  if (!hasCost(CLAUDE_AGENT_PRICED_PROVIDER, target)) return null;
   return claudeAgentPriced(alias, "static-fallback", target, "source_provider");
 }
 
@@ -368,7 +363,7 @@ function resolveSavedClaudeAgentName(
   alias: ClaudeAgentPricingAlias,
   sourceProviderID: string,
   sourceModelID: string,
-): PricingResolution {
+): PricingResolution | null {
   const match = matchClaudeAgentCatalogName(
     name,
     listModelDisplayNames(CLAUDE_AGENT_PRICED_PROVIDER),
@@ -393,17 +388,23 @@ function resolveClaudeAgentAliasPricing(
   alias: ClaudeAgentPricingAlias,
   sourceProviderID: string,
   sourceModelID: string,
-): PricingResolution {
+): PricingResolution | null {
   const evidence = readClaudeAgentAliasEvidence(alias);
 
   if (evidence.kind === "resolved") {
-    const state = evidence.catalogObserved ? "catalog" : "last-confirmed";
+    // The saved bit records when the target was resolved; only the active
+    // catalog can still call it current.
+    const catalogNames = listModelDisplayNames(CLAUDE_AGENT_PRICED_PROVIDER);
+    const corroborated =
+      hasPricingNameCoverage() &&
+      evidence.name !== undefined &&
+      resolveClaudeAgentCatalogName(evidence.name, catalogNames) === evidence.modelID;
     return claudeAgentPriced(
       alias,
-      state,
+      corroborated ? "catalog" : "last-confirmed",
       evidence.modelID,
       "alias_evidence",
-      evidence.name ?? (state === "catalog" ? catalogDisplayName(evidence.modelID) : undefined),
+      evidence.name ?? catalogNames.find((entry) => entry.modelID === evidence.modelID)?.name,
     );
   }
 
@@ -625,7 +626,8 @@ export function resolvePricingKey(source: {
   const rawSourceProvider =
     typeof source.providerID === "string" ? source.providerID.trim().toLowerCase() : "";
   if (rawSourceProvider === "claude-agent" && isClaudeAgentPricingAlias(rawModelID)) {
-    return resolveClaudeAgentAliasPricing(rawModelID, srcProvider, srcModel);
+    const dynamicAlias = resolveClaudeAgentAliasPricing(rawModelID, srcProvider, srcModel);
+    if (dynamicAlias) return dynamicAlias;
   }
 
   const parsed = parseModelIdHint(rawModelID);

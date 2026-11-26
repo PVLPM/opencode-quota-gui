@@ -43,6 +43,8 @@ const ALL_NAMES = {
 async function loadSnapshot(params: {
   prices?: Record<string, { input?: number; output?: number }>;
   names?: Record<string, string>;
+  catalog?: string[];
+  legacy?: boolean;
 }): Promise<void> {
   await maybeRefreshPricingSnapshot({
     nowMs: NOW,
@@ -54,10 +56,10 @@ async function loadSnapshot(params: {
         generatedAt: NOW,
         providers: ["anthropic"],
         units: "USD per 1M tokens",
-        namesVersion: 1,
+        ...(params.legacy ? {} : { namesVersion: 1 }),
       },
       providers: { anthropic: params.prices ?? ALL_PRICES },
-      catalog: { anthropic: Object.keys(params.prices ?? ALL_PRICES) },
+      catalog: { anthropic: params.catalog ?? Object.keys(params.prices ?? ALL_PRICES) },
       ...(params.names ? { names: { anthropic: params.names } } : {}),
     },
   });
@@ -103,27 +105,31 @@ describe("Claude Agent alias pricing provenance", () => {
       targetProviderId: "anthropic",
       targetModelId: "claude-opus-5-6",
       targetName: "Opus 5.6",
+      priced: true,
     });
     expect(provenance("claude-agent", "sonnet")).toMatchObject({
       state: "catalog",
       targetModelId: "claude-sonnet-5-6",
       targetName: "Sonnet 5.6",
+      priced: true,
     });
     expect(provenance("claude-agent", "haiku")).toMatchObject({
       state: "catalog",
       targetModelId: "claude-haiku-5-6",
       targetName: "Haiku 5.6",
+      priced: true,
     });
     expect(provenance("claude-agent", "fable")).toMatchObject({
       state: "catalog",
       targetModelId: "claude-fable-5-2",
       targetName: "Fable 5.2",
+      priced: true,
     });
     expect(provenance("claude-agent", "opus")?.unavailableReason).toBeUndefined();
   });
 
   it("labels a persisted target without catalog coverage as last confirmed", async () => {
-    await loadSnapshot({ names: ALL_NAMES });
+    await loadSnapshot({ legacy: true, names: ALL_NAMES });
     await writeSidecar({
       opus: { name: "Opus 5.6", resolvedModelID: "claude-opus-5-6", catalogObserved: false },
     });
@@ -134,11 +140,12 @@ describe("Claude Agent alias pricing provenance", () => {
       targetProviderId: "anthropic",
       targetModelId: "claude-opus-5-6",
       targetName: "Opus 5.6",
+      priced: true,
     });
   });
 
   it("labels a target saved without a name but resolved as last confirmed", async () => {
-    await loadSnapshot({ names: ALL_NAMES });
+    await loadSnapshot({ legacy: true, names: ALL_NAMES });
     await writeSidecar({
       sonnet: { resolvedModelID: "claude-sonnet-5-6", catalogObserved: false },
     });
@@ -148,7 +155,90 @@ describe("Claude Agent alias pricing provenance", () => {
       state: "last-confirmed",
       targetProviderId: "anthropic",
       targetModelId: "claude-sonnet-5-6",
+      targetName: "Claude Sonnet 5.6",
+      priced: true,
     });
+  });
+
+  it("keeps a saved target catalog-labeled only while the active catalog corroborates it", async () => {
+    await loadSnapshot({ names: ALL_NAMES });
+    await writeSidecar({
+      opus: { name: "Opus 5.6", resolvedModelID: "claude-opus-5-6", catalogObserved: true },
+    });
+
+    expect(provenance("claude-agent", "opus")).toMatchObject({
+      state: "catalog",
+      targetModelId: "claude-opus-5-6",
+      priced: true,
+    });
+
+    // The stored catalogObserved bit is not proof once the catalog moves away.
+    await loadSnapshot({ names: { "claude-opus-5-5": "Claude Opus 5.5" } });
+    expect(provenance("claude-agent", "opus")).toMatchObject({
+      state: "last-confirmed",
+      targetModelId: "claude-opus-5-6",
+      targetName: "Opus 5.6",
+      priced: true,
+    });
+  });
+
+  it("keeps a same-name observation last confirmed after coverage loss", async () => {
+    await loadSnapshot({ names: ALL_NAMES });
+    await recordClaudeAgentModelEvidence([
+      { providerID: "claude-agent", id: "opus", name: "Opus 5.6" },
+    ]);
+
+    await loadSnapshot({ legacy: true });
+    await recordClaudeAgentModelEvidence([
+      { providerID: "claude-agent", id: "opus", name: "Opus 5.6" },
+    ]);
+
+    expect(provenance("claude-agent", "opus")).toEqual({
+      alias: "opus",
+      state: "last-confirmed",
+      targetProviderId: "anthropic",
+      targetModelId: "claude-opus-5-6",
+      targetName: "Opus 5.6",
+      priced: true,
+    });
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "opus" })).toMatchObject({
+      ok: true,
+      method: "alias_evidence",
+      key: { provider: "anthropic", model: "claude-opus-5-6" },
+    });
+  });
+
+  it("marks a resolved target without rates as not estimated", async () => {
+    await loadSnapshot({
+      prices: { "claude-opus-5-5": { input: 1, output: 2 } },
+      catalog: ["claude-opus-5-5", "claude-opus-5-6"],
+      names: {
+        "claude-opus-5-5": "Claude Opus 5.5",
+        "claude-opus-5-6": "Claude Opus 5.6",
+      },
+    });
+    await writeSidecar({
+      opus: { name: "Opus 5.6", resolvedModelID: "claude-opus-5-6", catalogObserved: true },
+    });
+
+    const alias = provenance("claude-agent", "opus");
+    expect(alias).toEqual({
+      alias: "opus",
+      state: "catalog",
+      targetProviderId: "anthropic",
+      targetModelId: "claude-opus-5-6",
+      targetName: "Opus 5.6",
+      priced: false,
+    });
+    expect(alias?.priced).not.toBe(true);
+    expect(resolvePricingKey({ providerID: "claude-agent", modelID: "opus" })).toMatchObject({
+      ok: true,
+      method: "alias_evidence",
+      key: { provider: "anthropic", model: "claude-opus-5-6" },
+    });
+    expect(
+      priceTokenBuckets({ providerID: "claude-agent", modelID: "opus", tokens: TOKENS }),
+    ).toMatchObject({ status: "unpriced" });
   });
 
   it("labels the static fallback for opus, sonnet and haiku", async () => {
@@ -164,6 +254,7 @@ describe("Claude Agent alias pricing provenance", () => {
         state: "static-fallback",
         targetProviderId: "anthropic",
         targetModelId: target,
+        priced: true,
       });
       expect(resolvePricingKey({ providerID: "claude-agent", modelID: alias })).toMatchObject({
         ok: true,
@@ -250,6 +341,7 @@ describe("Claude Agent alias pricing provenance", () => {
       state: "static-fallback",
       targetProviderId: "anthropic",
       targetModelId: "claude-opus-5-5",
+      priced: true,
     });
   });
 

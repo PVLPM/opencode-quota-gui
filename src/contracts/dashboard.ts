@@ -514,6 +514,12 @@ export interface ClaudeAgentAliasPricingProvenance {
   targetModelId?: string;
   /** Saved native display name; never a static-fallback target name. */
   targetName?: string;
+  /**
+   * `true` only when models.dev has rates for the target; absent on payloads
+   * written before this flag existed and never `true` for a catalog-listed
+   * target without rates.
+   */
+  priced?: boolean;
   unavailableReason?: "ambiguous" | "missing";
 }
 

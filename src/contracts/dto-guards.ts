@@ -695,6 +695,7 @@ function isClaudeAgentAliasPricingProvenance(
     isOptional(value.targetProviderId, isText) &&
     isOptional(value.targetModelId, isText) &&
     isOptional(value.targetName, isText) &&
+    isOptional(value.priced, isBoolean) &&
     isOptional(value.unavailableReason, (reason): reason is "ambiguous" | "missing" =>
       isOneOf(reason, ["ambiguous", "missing"]),
     )

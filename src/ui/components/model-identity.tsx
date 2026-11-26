@@ -13,6 +13,12 @@ function webLogo(providerId: string): JSX.Element {
 export function ModelIdentityLabel(props: {
   identity: ModelIdentity;
   class?: string;
+  /**
+   * The transient session-chart overlay is `pointer-events: none` and unmounts
+   * on blur, so its label must not own a focusable trigger. The overlay shows
+   * `modelAliasPricingSummary` as plain text instead.
+   */
+  showAliasTooltip?: boolean;
 }): JSX.Element {
   const mark = () => (
     <ModelIdentityMark
@@ -24,7 +30,10 @@ export function ModelIdentityLabel(props: {
     />
   );
   return (
-    <Show when={props.identity.pricingAlias} fallback={mark()}>
+    <Show
+      when={props.showAliasTooltip === false ? undefined : props.identity.pricingAlias}
+      fallback={mark()}
+    >
       {(alias) => (
         <Tooltip
           value={<ModelAliasPricingDetails model={props.identity} pricingAlias={alias()} />}

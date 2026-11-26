@@ -705,9 +705,8 @@
   vertical-align: baseline;
 }
 
-/* Readable multi-line tooltip body shared by the web and native surfaces. */
-[data-component="tooltip-v2"].qg-alias-pricing,
-.qg-native-tooltip__bubble.qg-alias-pricing {
+/* Readable multi-line tooltip body for the web alias disclosure. */
+[data-component="tooltip-v2"].qg-alias-pricing {
   display: block;
   max-width: 320px;
   line-height: 1.45;
@@ -2888,6 +2887,14 @@
 .qg-page-head__models-entry,
 .qg-page-head__models-sep {
   white-space: nowrap;
+}
+/* The entries are containers for the inline Tooltip trigger (a div), so they
+   keep one baseline instead of stacking as blocks. */
+.qg-page-head__models-entry,
+.qg-page-head__models-measure [data-fit-entry] {
+  display: inline-flex;
+  align-items: baseline;
+  vertical-align: baseline;
 }
 .qg-page-head__models .qg-node__more {
   vertical-align: baseline;

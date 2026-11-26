@@ -1208,6 +1208,8 @@ function readAliasPricingProvenance(
   if (targetModelId !== undefined) parsed.targetModelId = targetModelId;
   const targetName = readOptionalText(record.targetName, endpoint, `${detail}.targetName`);
   if (targetName !== undefined) parsed.targetName = targetName;
+  const priced = readOptionalBoolean(record.priced, endpoint, `${detail}.priced`);
+  if (priced !== undefined) parsed.priced = priced;
   const unavailableReason = readOptionalEnum(
     record.unavailableReason,
     ALIAS_PRICING_UNAVAILABLE_REASONS,

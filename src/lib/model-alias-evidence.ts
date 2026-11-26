@@ -46,10 +46,11 @@ export type ClaudeAgentAliasObservation = { kind: "ambiguous" } | { kind: "name"
 
 export type ClaudeAgentAliasEvidenceState =
   /**
-   * `catalogObserved` separates a target resolved against the catalog from a
-   * target saved before name coverage was available (last confirmed).
+   * A saved target. The stored `catalogObserved` bit only records when it was
+   * resolved; whether the active catalog still corroborates it is the
+   * resolver's decision against the current snapshot.
    */
-  | { kind: "resolved"; modelID: string; name?: string; catalogObserved: boolean }
+  | { kind: "resolved"; modelID: string; name?: string }
   | { kind: "ambiguous" }
   /**
    * A covered catalog had no unique match. The saved native name lets a later
@@ -212,7 +213,6 @@ export function readClaudeAgentAliasEvidence(
       kind: "resolved",
       modelID: entry.resolvedModelID,
       ...(entry.name ? { name: entry.name } : {}),
-      catalogObserved: entry.catalogObserved,
     };
   }
   if (entry.catalogObserved) {

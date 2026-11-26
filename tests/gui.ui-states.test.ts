@@ -2384,10 +2384,8 @@ describe("session view composition", () => {
     expect(html).toContain('aria-label="Mistral: mistral/alpha"');
     // The server render has no layout yet, so every header entry is visible;
     // the measured overflow bubble appears only after hydration.
-    const modelsHtml = html.slice(
-      html.indexOf('class="qg-page-head__models"'),
-      html.indexOf("</p>", html.indexOf('class="qg-page-head__models"')),
-    );
+    const modelsStart = html.indexOf('class="qg-page-head__models"');
+    const modelsHtml = html.slice(modelsStart, html.indexOf("</header>", modelsStart));
     expect(modelsHtml).not.toContain("qg-node__more");
   });
 

@@ -8,6 +8,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isSessionSnapshot } from "../src/contracts/dto-guards.js";
 import { createUsageAnalytics, type UsageAnalyticsDataset } from "../src/gui/aggregation.js";
 import { getRuntimeModelAliasEvidencePath } from "../src/lib/model-alias-evidence.js";
+import {
+  __resetPricingSnapshotForTests,
+  maybeRefreshPricingSnapshot,
+} from "../src/lib/modelsdev-pricing.js";
 import type {
   OpenCodeProjectInfo,
   OpenCodeRawAssistantRow,
@@ -68,6 +72,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  __resetPricingSnapshotForTests();
   vi.unstubAllEnvs();
   for (const root of TEMP_ROOTS.splice(0)) {
     await rm(root, { recursive: true, force: true });
@@ -120,6 +125,23 @@ describe("session model identity alias provenance", () => {
   });
 
   it("distinguishes a catalog target from last-confirmed evidence", async () => {
+    await maybeRefreshPricingSnapshot({
+      nowMs: NOW,
+      fetchFn: vi.fn(),
+      snapshotSelection: "bundled",
+      bootstrapSnapshotOverride: {
+        _meta: {
+          source: "test-bootstrap",
+          generatedAt: NOW,
+          providers: ["anthropic"],
+          units: "USD per 1M tokens",
+          namesVersion: 1,
+        },
+        providers: { anthropic: { "claude-opus-5-6": { input: 10, output: 20 } } },
+        catalog: { anthropic: ["claude-opus-5-6"] },
+        names: { anthropic: { "claude-opus-5-6": "Claude Opus 5.6" } },
+      },
+    });
     await writeSidecar({
       opus: { name: "Opus 5.6", resolvedModelID: "claude-opus-5-6", catalogObserved: true },
       sonnet: { name: "Sonnet 5.6", resolvedModelID: "claude-sonnet-5-6", catalogObserved: false },
@@ -137,6 +159,7 @@ describe("session model identity alias provenance", () => {
       targetProviderId: "anthropic",
       targetModelId: "claude-opus-5-6",
       targetName: "Opus 5.6",
+      priced: true,
     });
     expect(identityOf(snapshot, "sonnet")?.pricingAlias).toEqual({
       alias: "sonnet",
@@ -144,6 +167,7 @@ describe("session model identity alias provenance", () => {
       targetProviderId: "anthropic",
       targetModelId: "claude-sonnet-5-6",
       targetName: "Sonnet 5.6",
+      priced: false,
     });
   });
 });
@@ -169,11 +193,39 @@ describe("session snapshot contract with alias provenance", () => {
         state: "static-fallback",
         targetProviderId: "anthropic",
         targetModelId: "claude-opus-5-5",
+        priced: true,
       },
     );
     expect(
       parsed.nodes[0]?.models.find((model) => model.modelId === "gpt-5")?.pricingAlias,
     ).toBeUndefined();
+  });
+
+  it("round-trips a provenance without the optional priced flag", () => {
+    const wire = JSON.parse(JSON.stringify(sessionSnapshot()));
+    const opus = wire.nodes[0].models.find(
+      (model: { modelId: string }) => model.modelId === "opus",
+    );
+    delete opus.pricingAlias.priced;
+    const parsed = parseSessionSnapshot(wire, "/api/v1/session/ses_root");
+    expect(parsed.nodes[0]?.models.find((model) => model.modelId === "opus")?.pricingAlias).toEqual(
+      {
+        alias: "opus",
+        state: "static-fallback",
+        targetProviderId: "anthropic",
+        targetModelId: "claude-opus-5-5",
+      },
+    );
+  });
+
+  it("rejects a malformed priced flag", () => {
+    const wire = JSON.parse(JSON.stringify(sessionSnapshot()));
+    const opus = wire.nodes[0].models.find(
+      (model: { modelId: string }) => model.modelId === "opus",
+    );
+    opus.pricingAlias.priced = "yes";
+    expect(isSessionSnapshot(wire)).toBe(false);
+    expect(() => parseSessionSnapshot(wire, "/api/v1/session/ses_root")).toThrow();
   });
 
   it("keeps older payloads without the field working", () => {
@@ -227,10 +279,11 @@ describe("alias pricing UI boundary", () => {
       }
     }
 
-    // Each surface wraps the shared body in its own Tooltip; neither imports
-    // the other surface's tooltip.
+    // The web label owns the only interactive alias disclosure. The Desktop
+    // cache pill supplies no provenance and must not nest a focusable trigger
+    // inside its identity button.
     expect(read("src/ui/components/model-identity.tsx")).toContain('from "../opencode-ui"');
-    expect(read("src/native/model-identity.tsx")).toContain('from "./ui"');
-    expect(read("src/native/model-identity.tsx")).not.toContain("opencode-ui");
+    expect(read("src/native/model-identity.tsx")).not.toContain('from "./ui"');
+    expect(read("src/native/model-identity.tsx")).not.toContain("ModelAliasPricingDetails");
   });
 });
