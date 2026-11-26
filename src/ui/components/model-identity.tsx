@@ -1,5 +1,7 @@
-import type { JSX } from "solid-js";
+import { type JSX, Show } from "solid-js";
 import type { ModelIdentity } from "../../contracts/dashboard";
+import { Tooltip } from "../opencode-ui";
+import { ModelAliasPricingDetails } from "./model-alias-pricing";
 import { ModelIdentityMark } from "./model-identity-mark";
 import { ProviderLogo } from "./provider-logo";
 
@@ -12,7 +14,7 @@ export function ModelIdentityLabel(props: {
   identity: ModelIdentity;
   class?: string;
 }): JSX.Element {
-  return (
+  const mark = () => (
     <ModelIdentityMark
       providerId={props.identity.providerId}
       modelId={props.identity.modelId}
@@ -20,5 +22,20 @@ export function ModelIdentityLabel(props: {
       renderLogo={webLogo}
       class={props.class}
     />
+  );
+  return (
+    <Show when={props.identity.pricingAlias} fallback={mark()}>
+      {(alias) => (
+        <Tooltip
+          value={<ModelAliasPricingDetails model={props.identity} pricingAlias={alias()} />}
+          triggerTabIndex={0}
+          appearance="large"
+          class="qg-alias-pricing-trigger"
+          contentClass="qg-alias-pricing"
+        >
+          {mark()}
+        </Tooltip>
+      )}
+    </Show>
   );
 }

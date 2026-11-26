@@ -1,4 +1,6 @@
+import { encodeIdentityKey } from "../contracts/collision-safe-key.js";
 import type {
+  ClaudeAgentAliasPricingProvenance,
   CostedTokens,
   ModelIdentity,
   ProjectActivityRow,
@@ -26,7 +28,11 @@ import {
   type OpenCodeSessionInfo,
   rawAssistantRowFingerprint,
 } from "../lib/opencode-storage.js";
-import { type PricingResolution, priceTokenBucketsWithRecordedCost } from "../lib/quota-stats.js";
+import {
+  type PricingResolution,
+  priceTokenBucketsWithRecordedCost,
+  resolveAliasPricingProvenance,
+} from "../lib/quota-stats.js";
 import type { TokenBuckets } from "../lib/token-buckets.js";
 import { type ForkOwnerCandidate, selectForkOwnerCandidates } from "../lib/usage-ownership.js";
 
@@ -857,16 +863,40 @@ function sessionAgent(
   return latest?.row.agent?.trim();
 }
 
+/** Per-session provenance lookup; `null` caches a non-alias identity. */
+type AliasPricingCache = Map<string, ClaudeAgentAliasPricingProvenance | null>;
+
+function aliasPricingFor(
+  cache: AliasPricingCache,
+  providerID: string,
+  modelID: string,
+): ClaudeAgentAliasPricingProvenance | undefined {
+  const key = encodeIdentityKey([providerID, modelID]);
+  const known = cache.get(key);
+  if (known !== undefined) return known ?? undefined;
+  const provenance = resolveAliasPricingProvenance({ providerID, modelID }) ?? null;
+  cache.set(key, provenance);
+  return provenance ?? undefined;
+}
+
 /**
  * Identity actually recorded for one invocation. OpenCode stores the effort as
  * `model.variant`; `default` is its "no explicit effort" value, so neither it
  * nor an empty string is shown as an effort.
  */
-function modelIdentityOf(row: OpenCodeRawAssistantRow): ModelIdentity | undefined {
+function modelIdentityOf(
+  row: OpenCodeRawAssistantRow,
+  aliasPricing?: AliasPricingCache,
+): ModelIdentity | undefined {
   if (!row.providerID || !row.modelID) return undefined;
   const identity: ModelIdentity = { providerId: row.providerID, modelId: row.modelID };
   const effort = row.variant?.trim();
   if (effort && effort !== "default") identity.effort = effort;
+  const provenance =
+    aliasPricing === undefined
+      ? undefined
+      : aliasPricingFor(aliasPricing, row.providerID, row.modelID);
+  if (provenance) identity.pricingAlias = provenance;
   return identity;
 }
 
@@ -875,10 +905,13 @@ function identityKey(identity: ModelIdentity): string {
 }
 
 /** Distinct identities of one session's own steps, most recently used first. */
-function sessionModelIdentities(ownSteps: readonly OwnedStep[]): ModelIdentity[] {
+function sessionModelIdentities(
+  ownSteps: readonly OwnedStep[],
+  aliasPricing?: AliasPricingCache,
+): ModelIdentity[] {
   const lastUse = new Map<string, { identity: ModelIdentity; step: OwnedStep }>();
   for (const step of ownSteps) {
-    const identity = modelIdentityOf(step.row);
+    const identity = modelIdentityOf(step.row, aliasPricing);
     if (!identity) continue;
     const key = identityKey(identity);
     const known = lastUse.get(key);
@@ -1004,6 +1037,7 @@ function buildSessionSnapshot(
   }
 
   const pricingCache = new Map<string, PricingResolution>();
+  const aliasPricingCache: AliasPricingCache = new Map();
   const ownAccumulators = new Map<string, CostedAccumulator>();
   for (const node of order) {
     const accumulator = createAccumulator();
@@ -1052,7 +1086,7 @@ function buildSessionSnapshot(
       stepCount: ownSteps.length,
       subtreeNodeCount: subtreeNodeCounts.get(id)!,
       latestActivityAtMs: subtreeLatest.get(id)!,
-      models: sessionModelIdentities(ownSteps),
+      models: sessionModelIdentities(ownSteps, aliasPricingCache),
     };
     const cacheUnknownSteps = ownSteps.filter(
       (step) => step.row.cacheReadMissing || step.row.cacheWriteMissing,
@@ -1086,7 +1120,7 @@ function buildSessionSnapshot(
         contextTokens: stack.input + stack.cacheRead + stack.cacheWrite,
         totalTokens: sumTokenStack(stack),
       };
-      const identity = modelIdentityOf(row);
+      const identity = modelIdentityOf(row, aliasPricingCache);
       if (identity) step.model = identity;
       if (row.createdAtMs > 0 && Number.isFinite(row.createdAtMs)) {
         step.createdAtMs = row.createdAtMs;

@@ -11,6 +11,7 @@ import type {
   AnalyticsSeries,
   AnalyticsSeriesChildBucket,
   Bucket,
+  ClaudeAgentAliasPricingProvenance,
   CostedTokens,
   DashboardDataSource,
   DashboardEvent,
@@ -1178,6 +1179,45 @@ function readBreadcrumb(
   };
 }
 
+const ALIAS_PRICING_STATES = [
+  "catalog",
+  "last-confirmed",
+  "static-fallback",
+  "unavailable",
+] as const;
+const ALIAS_PRICING_UNAVAILABLE_REASONS = ["ambiguous", "missing"] as const;
+
+function readAliasPricingProvenance(
+  value: JsonValue | undefined,
+  endpoint: string,
+  detail: string,
+): ClaudeAgentAliasPricingProvenance | undefined {
+  if (value === undefined) return undefined;
+  const record = readRecord(value, endpoint, detail);
+  const parsed: ClaudeAgentAliasPricingProvenance = {
+    alias: readText(record.alias, endpoint, `${detail}.alias`),
+    state: readEnum(record.state, ALIAS_PRICING_STATES, endpoint, `${detail}.state`),
+  };
+  const targetProviderId = readOptionalText(
+    record.targetProviderId,
+    endpoint,
+    `${detail}.targetProviderId`,
+  );
+  if (targetProviderId !== undefined) parsed.targetProviderId = targetProviderId;
+  const targetModelId = readOptionalText(record.targetModelId, endpoint, `${detail}.targetModelId`);
+  if (targetModelId !== undefined) parsed.targetModelId = targetModelId;
+  const targetName = readOptionalText(record.targetName, endpoint, `${detail}.targetName`);
+  if (targetName !== undefined) parsed.targetName = targetName;
+  const unavailableReason = readOptionalEnum(
+    record.unavailableReason,
+    ALIAS_PRICING_UNAVAILABLE_REASONS,
+    endpoint,
+    `${detail}.unavailableReason`,
+  );
+  if (unavailableReason !== undefined) parsed.unavailableReason = unavailableReason;
+  return parsed;
+}
+
 function readModelIdentity(value: JsonValue, endpoint: string, detail: string): ModelIdentity {
   const identity = readRecord(value, endpoint, detail);
   const parsed: ModelIdentity = {
@@ -1186,6 +1226,12 @@ function readModelIdentity(value: JsonValue, endpoint: string, detail: string): 
   };
   const effort = readOptionalText(identity.effort, endpoint, `${detail}.effort`);
   if (effort !== undefined) parsed.effort = effort;
+  const pricingAlias = readAliasPricingProvenance(
+    identity.pricingAlias,
+    endpoint,
+    `${detail}.pricingAlias`,
+  );
+  if (pricingAlias !== undefined) parsed.pricingAlias = pricingAlias;
   return parsed;
 }
 

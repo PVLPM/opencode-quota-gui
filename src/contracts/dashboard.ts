@@ -495,6 +495,26 @@ export interface ModelIdentity {
   providerId: string;
   modelId: string;
   effort?: string;
+  /**
+   * Presentation-only pricing provenance for an unversioned Claude Agent
+   * alias. Never part of identity equality, dedupe, display text, tokens or
+   * cost: the displayed identity is still the raw alias OpenCode recorded.
+   */
+  pricingAlias?: ClaudeAgentAliasPricingProvenance;
+}
+
+/**
+ * How the resolver priced an unversioned Claude Agent alias, and which target
+ * it chose. Serializable so worker DTOs and both surfaces share one shape.
+ */
+export interface ClaudeAgentAliasPricingProvenance {
+  alias: string;
+  state: "catalog" | "last-confirmed" | "static-fallback" | "unavailable";
+  targetProviderId?: string;
+  targetModelId?: string;
+  /** Saved native display name; never a static-fallback target name. */
+  targetName?: string;
+  unavailableReason?: "ambiguous" | "missing";
 }
 
 export interface StepPoint {

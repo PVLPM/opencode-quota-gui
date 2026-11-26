@@ -11,6 +11,7 @@ const DOM_TESTS = [
   "tests/gui.runway-web-dom.test.ts",
   "tests/gui.native-compatibility-runtime.test.ts",
   "tests/gui.native-cache-composer-pill.test.ts",
+  "tests/gui.model-alias-tooltip-dom.test.ts",
 ];
 const SOLID_DEV = fileURLToPath(new URL("./node_modules/solid-js/dist/dev.js", import.meta.url));
 const SOLID_WEB_DEV = fileURLToPath(

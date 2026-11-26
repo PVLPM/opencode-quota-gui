@@ -45,7 +45,11 @@ export interface ObservedModelEntry {
 export type ClaudeAgentAliasObservation = { kind: "ambiguous" } | { kind: "name"; name: string };
 
 export type ClaudeAgentAliasEvidenceState =
-  | { kind: "resolved"; modelID: string }
+  /**
+   * `catalogObserved` separates a target resolved against the catalog from a
+   * target saved before name coverage was available (last confirmed).
+   */
+  | { kind: "resolved"; modelID: string; name?: string; catalogObserved: boolean }
   | { kind: "ambiguous" }
   /**
    * A covered catalog had no unique match. The saved native name lets a later
@@ -204,7 +208,12 @@ export function readClaudeAgentAliasEvidence(
   if (!entry) return { kind: "unavailable" };
   if (entry.ambiguous) return { kind: "ambiguous" };
   if (typeof entry.resolvedModelID === "string") {
-    return { kind: "resolved", modelID: entry.resolvedModelID };
+    return {
+      kind: "resolved",
+      modelID: entry.resolvedModelID,
+      ...(entry.name ? { name: entry.name } : {}),
+      catalogObserved: entry.catalogObserved,
+    };
   }
   if (entry.catalogObserved) {
     return { kind: "unresolved", ...(entry.name ? { name: entry.name } : {}) };

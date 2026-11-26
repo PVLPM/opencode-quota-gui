@@ -696,6 +696,33 @@
   vertical-align: -0.15em;
 }
 
+/* Alias pricing disclosure keeps the identity inline in headers and rows. */
+.qg-alias-pricing-trigger,
+[data-component="tooltip-v2-trigger"].qg-alias-pricing-trigger {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  vertical-align: baseline;
+}
+
+/* Readable multi-line tooltip body shared by the web and native surfaces. */
+[data-component="tooltip-v2"].qg-alias-pricing,
+.qg-native-tooltip__bubble.qg-alias-pricing {
+  display: block;
+  max-width: 320px;
+  line-height: 1.45;
+  white-space: normal;
+  text-wrap: pretty;
+}
+
+.qg-alias-pricing > p {
+  margin: 0;
+}
+
+.qg-alias-pricing > p + p {
+  margin-top: 4px;
+}
+
 .qg-card__logo {
   align-self: center;
   color: var(--qg-text-muted);
