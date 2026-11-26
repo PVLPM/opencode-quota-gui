@@ -1,6 +1,6 @@
 import type { JSX } from "solid-js";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import type { Bucket, Usage } from "../../contracts/dashboard";
+import type { Bucket, CostedTokens, TokenStack, Usage } from "../../contracts/dashboard";
 import { buildUsageGeometry, cacheHitRate, DEFAULT_USAGE_SIZE } from "../chart-geometry";
 import { createChartInspection } from "../chart-inspection";
 import { createChartLayout } from "../chart-layout";
@@ -15,7 +15,13 @@ import {
   formatTokenCount,
   usageChartTitle,
 } from "../format";
-import { formatCostText } from "../model-analytics";
+import { estimateNote, formatCostText } from "../model-analytics";
+import {
+  compositionBucket,
+  compositionTokenShare,
+  costContribution,
+  type ProjectChartComposition,
+} from "../project-composition";
 import { createChartTooltipLayout } from "../tooltip-layout";
 import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
 import { EstimateNote } from "./cost-estimate";
@@ -46,6 +52,12 @@ export function UsageChart(props: {
   summary?: JSX.Element;
   /** Shown inside the panel when a page has no buckets to plot. */
   emptyMessage?: string;
+  /** One project's aligned contribution, shown transiently over the stack. */
+  composition?: ProjectChartComposition;
+  /** The active bucket pointer changed; `undefined` clears the contribution. */
+  onCompositionPointerChange?: (projectId: string | undefined) => void;
+  /** The active bucket focus changed; `undefined` clears the contribution. */
+  onCompositionFocusChange?: (projectId: string | undefined) => void;
 }): JSX.Element {
   const inspection = createChartInspection();
   const [hoveredCategory, setHoveredCategory] = createSignal<string | undefined>();
@@ -104,36 +116,126 @@ export function UsageChart(props: {
   );
   const timeZone = () => props.usage.timeZone;
   const title = () => props.title ?? usageChartTitle(props.usage.bucketUnit);
-  const summaryItems = (): ChartSummaryItem[] => [
-    {
-      label: "Total tokens",
-      value: formatExactCount(props.usage.totals.total),
-      emphasis: "primary",
-    },
-    {
-      label: "API-equivalent estimate",
-      value: formatCostText(props.usage.totals),
-      info: <EstimateInfo totals={props.usage.totals} />,
-      note: <EstimateNote totals={props.usage.totals} showExclusionTitle={false} />,
-    },
-  ];
+  /** The selected project's slice of every visible category segment. */
+  const compositionOverlays = createMemo(() => {
+    const overlays: {
+      key: keyof TokenStack;
+      colorVar: string;
+      bucketIndex: number;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      radius: number;
+    }[] = [];
+    const composition = props.composition;
+    if (composition === undefined) return overlays;
+    for (const bar of geometry().bars) {
+      for (const segment of bar.segments) {
+        const bucket = compositionBucket(composition, segment.bucketIndex);
+        if (bucket === undefined) continue;
+        const share = compositionTokenShare(bucket[segment.key], segment.value);
+        if (share === undefined) continue;
+        const height = segment.height * share;
+        if (!(height > 0)) continue;
+        overlays.push({
+          key: segment.key,
+          colorVar: segment.colorVar,
+          bucketIndex: segment.bucketIndex,
+          x: segment.x,
+          y: segment.y + segment.height - height,
+          width: segment.width,
+          height,
+          radius: Math.min(segment.radius, height / 2),
+        });
+      }
+    }
+    return overlays;
+  });
+  const compositionSummary = (): ChartSummaryItem | undefined => {
+    const composition = props.composition;
+    if (composition === undefined) return undefined;
+    const tokenShare = compositionTokenShare(composition.totals.total, props.usage.totals.total);
+    const contribution = costContribution(composition.totals, props.usage.totals);
+    const costShareText =
+      contribution.share === undefined
+        ? undefined
+        : `${formatPercentExact(contribution.share * 100)} of estimate`;
+    return {
+      label: composition.label,
+      value: `${formatTokenCount(composition.totals.total)} tokens · ${formatPercentExact(tokenShare === undefined ? undefined : tokenShare * 100)}`,
+      info: <EstimateInfo totals={composition.totals} />,
+      emphasis: "secondary",
+      note: (
+        <span class="qg-composition-summary">
+          <span>{formatCostText(composition.totals)}</span>
+          <Show
+            when={costShareText}
+            fallback={
+              <>
+                <Show when={contribution.partial}>
+                  <EstimateNote totals={composition.totals} showExclusionTitle={false} />
+                </Show>
+                <Show
+                  when={
+                    !contribution.partial && !contribution.unpriced && composition.totals.total > 0
+                  }
+                >
+                  <span>Cost share unavailable: estimate incomplete.</span>
+                </Show>
+              </>
+            }
+          >
+            {(text) => <span>· {text()}</span>}
+          </Show>
+        </span>
+      ),
+    };
+  };
+  const summaryItems = (): ChartSummaryItem[] => {
+    const items: ChartSummaryItem[] = [
+      {
+        label: "Total tokens",
+        value: formatExactCount(props.usage.totals.total),
+        emphasis: "primary",
+      },
+      {
+        label: "API-equivalent estimate",
+        value: formatCostText(props.usage.totals),
+        info: <EstimateInfo totals={props.usage.totals} />,
+        note: <EstimateNote totals={props.usage.totals} showExclusionTitle={false} />,
+      },
+    ];
+    const project = compositionSummary();
+    if (project !== undefined) items.push(project);
+    return items;
+  };
   const activeBucket = (): Bucket | undefined => {
     const index = active();
     return index === undefined ? undefined : props.usage.buckets[index];
+  };
+  const activeCompositionBucket = (): CostedTokens | undefined => {
+    const index = active();
+    return index === undefined ? undefined : compositionBucket(props.composition, index);
   };
   const rateText = (value: number | null | undefined): string => formatPercentExact(value);
   const activeRate = (): number | null | undefined => {
     const bucket = activeBucket();
     return bucket === undefined ? undefined : cacheHitRate(bucket.tokens);
   };
-  const bucketLabel = (bucket: Bucket): string => {
+  const bucketLabel = (bucket: Bucket, index: number): string => {
     const rate = cacheHitRate(bucket.tokens);
     const categories = geometry()
       .visibleCategories.map(
         (category) => `${category.label} ${formatExactCount(bucket.tokens[category.key])}`,
       )
       .join(", ");
-    return `${formatBucketTick(bucket.startMs, props.usage.bucketUnit, timeZone())}: total ${formatExactCount(bucket.tokens.total)} tokens${categories.length > 0 ? `, ${categories}` : ""}, cache rate ${rateText(rate)}`;
+    const project = compositionBucket(props.composition, index);
+    const composition =
+      project === undefined
+        ? ""
+        : `, ${props.composition?.label ?? "Project"} ${formatExactCount(project.total)} tokens, API-equivalent ${formatCostText(project)}`;
+    return `${formatBucketTick(bucket.startMs, props.usage.bucketUnit, timeZone())}: total ${formatExactCount(bucket.tokens.total)} tokens${categories.length > 0 ? `, ${categories}` : ""}, cache rate ${rateText(rate)}${composition}`;
   };
   const rangeEndCaption = (): string | undefined => {
     const buckets = props.usage.buckets;
@@ -274,6 +376,7 @@ export function UsageChart(props: {
                     <rect
                       class="qg-chart__segment"
                       data-category={segment.key}
+                      data-composition={props.composition === undefined ? undefined : "base"}
                       data-highlighted={
                         highlight() === undefined || highlight() === segment.key
                           ? "true"
@@ -289,6 +392,26 @@ export function UsageChart(props: {
                     />
                   )}
                 </For>
+              )}
+            </For>
+
+            <For each={compositionOverlays()}>
+              {(segment) => (
+                <rect
+                  class="qg-chart__composition"
+                  data-category={segment.key}
+                  data-bucket={segment.bucketIndex}
+                  data-highlighted={
+                    highlight() === undefined || highlight() === segment.key ? "true" : undefined
+                  }
+                  x={segment.x}
+                  y={segment.y}
+                  width={segment.width}
+                  height={segment.height}
+                  rx={segment.radius}
+                  ry={segment.radius}
+                  fill={`var(${segment.colorVar})`}
+                />
               )}
             </For>
 
@@ -338,21 +461,37 @@ export function UsageChart(props: {
               left: `${(geometry().plot.left / size.width) * 100}%`,
               right: `${((size.width - geometry().plot.right) / size.width) * 100}%`,
             }}
-            onPointerLeave={inspection.clearPointer}
+            onPointerLeave={() => {
+              inspection.clearPointer();
+              props.onCompositionPointerChange?.(undefined);
+            }}
           >
             <For each={props.usage.buckets}>
               {(bucket, index) => (
                 <button
                   type="button"
                   class="qg-chart__hit"
-                  aria-label={bucketLabel(bucket)}
+                  aria-label={bucketLabel(bucket, index())}
                   style={{
                     left: `${((geometry().slotX(index()) - geometry().plot.left) / geometry().plot.width) * 100}%`,
                     width: `${(Math.max(geometry().slot, 1) / geometry().plot.width) * 100}%`,
                   }}
-                  onPointerEnter={() => inspection.inspectPointer(index())}
-                  onFocus={() => inspection.inspectFocus(index())}
-                  onBlur={inspection.clearFocus}
+                  onPointerEnter={() => {
+                    inspection.inspectPointer(index());
+                    if (props.composition !== undefined) {
+                      props.onCompositionPointerChange?.(props.composition.projectId);
+                    }
+                  }}
+                  onFocus={() => {
+                    inspection.inspectFocus(index());
+                    if (props.composition !== undefined) {
+                      props.onCompositionFocusChange?.(props.composition.projectId);
+                    }
+                  }}
+                  onBlur={() => {
+                    inspection.clearFocus();
+                    props.onCompositionFocusChange?.(undefined);
+                  }}
                 />
               )}
             </For>
@@ -397,6 +536,34 @@ export function UsageChart(props: {
                     </div>
                   )}
                 </For>
+                <Show when={activeCompositionBucket()}>
+                  {(part) => (
+                    <>
+                      <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--project">
+                        <span
+                          class="qg-tooltip__swatch qg-tooltip__swatch--project"
+                          aria-hidden="true"
+                        />
+                        <span class="qg-totals__label">{props.composition?.label}</span>
+                        <span
+                          class="qg-totals__value"
+                          data-cost-status={
+                            part().total > 0 && part().apiEquivalentCostUsd === null
+                              ? "unpriced"
+                              : undefined
+                          }
+                        >
+                          {formatExactCount(part().total)} · {formatCostText(part())}
+                        </span>
+                      </div>
+                      <Show when={estimateNote(part()) === "Partial estimate"}>
+                        <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--note">
+                          <EstimateNote totals={part()} showExclusionTitle={false} />
+                        </div>
+                      </Show>
+                    </>
+                  )}
+                </Show>
                 <div class="qg-totals__row qg-tooltip__row qg-tooltip__row--rate">
                   <span class="qg-tooltip__swatch qg-tooltip__swatch--line" aria-hidden="true" />
                   <span class="qg-totals__label">Cache rate</span>
@@ -422,13 +589,16 @@ export function UsageChart(props: {
                 <For each={geometry().visibleCategories}>
                   {(category) => <th scope="col">{category.label}</th>}
                 </For>
+                <Show when={props.composition}>
+                  {(composition) => <th scope="col">{composition().label} tokens</th>}
+                </Show>
                 <th scope="col">Cache rate</th>
                 <th scope="col">Total</th>
               </tr>
             </thead>
             <tbody>
               <For each={props.usage.buckets}>
-                {(bucket) => (
+                {(bucket, index) => (
                   <tr>
                     <th scope="row">
                       {formatBucketTick(bucket.startMs, props.usage.bucketUnit, timeZone())}
@@ -436,6 +606,13 @@ export function UsageChart(props: {
                     <For each={geometry().visibleCategories}>
                       {(category) => <td>{formatExactCount(bucket.tokens[category.key])}</td>}
                     </For>
+                    <Show when={props.composition}>
+                      {(composition) => (
+                        <td>
+                          {formatExactCount(compositionBucket(composition(), index())?.total ?? 0)}
+                        </td>
+                      )}
+                    </Show>
                     <td>{rateText(cacheHitRate(bucket.tokens))}</td>
                     <td>{formatExactCount(bucket.tokens.total)}</td>
                   </tr>

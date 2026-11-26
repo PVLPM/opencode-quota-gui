@@ -335,6 +335,15 @@
   font-weight: var(--font-weight-medium);
 }
 
+/* Home keeps its chart and project list in one transient-composition region. */
+.qg-home-composition {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  gap: 28px;
+  min-width: 0;
+}
+
 .qg-section__meta {
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
@@ -1127,6 +1136,21 @@
   transition: opacity var(--qg-transition);
 }
 
+/* The selected project's share is an inset overlay. The base segment keeps its
+   exact geometry and only quiets, so totals, ticks and stack order never move. */
+.qg-chart__segment[data-composition="base"] {
+  opacity: 0.3;
+}
+
+.qg-chart__composition {
+  pointer-events: none;
+  stroke: none;
+}
+
+.qg-chart[data-highlight] .qg-chart__composition:not([data-highlighted="true"]) {
+  opacity: 0.42;
+}
+
 /* On-demand composition: parent-coloured neutral shades, never a second
    opposite-entity palette. The child selection only quiets its siblings. */
 .qg-chart__child-slice {
@@ -1525,6 +1549,32 @@
   margin-left: 0;
   color: var(--qg-text-muted);
   font-size: 11px;
+}
+
+.qg-tooltip__row--project {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--qg-border);
+}
+
+.qg-tooltip__row--project .qg-totals__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qg-tooltip__swatch--project {
+  border: 1px solid var(--qg-text-muted);
+  background: transparent;
+}
+
+/* Project composition keeps its token, cost and share strings on one wrap. */
+.qg-composition-summary {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
 }
 
 .qg-tooltip__swatch {
@@ -2183,6 +2233,16 @@
 
 .qg-list__row[data-clickable="true"] {
   cursor: pointer;
+}
+
+/* Transient composition: the active project keeps the row, peers recede. */
+.qg-list__row[data-highlighted="true"] {
+  background: var(--surface-raised-base-hover);
+  box-shadow: inset 2px 0 0 var(--qg-text);
+}
+
+.qg-list__row[data-dimmed="true"] {
+  opacity: 0.55;
 }
 
 .qg-list__title {

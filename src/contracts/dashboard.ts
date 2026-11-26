@@ -397,6 +397,12 @@ export interface ProjectActivityRow {
   tokens: CostedTokens;
   rootSessionCount: number;
   latestActivityAtMs: number;
+  /**
+   * This project's contribution inside every home usage bucket, aligned
+   * index-for-index with `HomeSnapshot.usage.buckets`. Optional so older
+   * payloads and caches keep their aggregate-only behavior.
+   */
+  buckets?: CostedTokens[];
 }
 
 export interface HomeSnapshot {

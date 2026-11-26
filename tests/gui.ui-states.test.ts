@@ -6851,6 +6851,37 @@ describe("response boundary decoding", () => {
     expect(lifetime.usage.window).not.toHaveProperty("sinceMs");
   });
 
+  it("preserves optional aligned project buckets and rejects malformed ones", () => {
+    const payload = validHome();
+    const project = payload.projects[0]!;
+    const bucket = payload.usage.buckets[0]!;
+
+    const parsed = parseHomeSnapshot({
+      ...payload,
+      projects: [{ ...project, buckets: [bucket.tokens, costed(0)] }],
+    });
+    expect(parsed.projects[0]?.buckets).toHaveLength(2);
+    expect(parsed.projects[0]?.buckets?.[0]).toEqual(bucket.tokens);
+
+    // Older aggregate-only payloads still parse without inventing the field.
+    expect(parseHomeSnapshot(payload).projects[0]).not.toHaveProperty("buckets");
+
+    expectRejected(
+      () => parseHomeSnapshot({ ...payload, projects: [{ ...project, buckets: "nope" }] }),
+      "projects[].buckets",
+    );
+    expectRejected(
+      () =>
+        parseHomeSnapshot({
+          ...payload,
+          projects: [
+            { ...project, buckets: [{ ...bucket.tokens, total: bucket.tokens.total + 1 }] },
+          ],
+        }),
+      "projects[].buckets[0]",
+    );
+  });
+
   it("preserves the provisional first-paint marker for the Web client", () => {
     const payload = validHome();
     expect(parseHomeSnapshot(payload)).not.toHaveProperty("provisional");

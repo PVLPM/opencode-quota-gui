@@ -398,7 +398,8 @@ function isProjectActivityRow(value: unknown): value is ProjectActivityRow {
     isText(value.name) &&
     isCostedTokens(value.tokens) &&
     isFiniteNumber(value.rootSessionCount) &&
-    isFiniteNumber(value.latestActivityAtMs)
+    isFiniteNumber(value.latestActivityAtMs) &&
+    isOptional(value.buckets, (buckets) => isArrayOf(buckets, isCostedTokens))
   );
 }
 

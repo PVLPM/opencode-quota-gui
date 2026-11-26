@@ -144,6 +144,8 @@ interface RangeSum {
   totals: Accumulator;
   stepCount: number;
   sessions: Set<string>;
+  /** Populated only when the caller asked for per-bucket sums. */
+  bucketTotals: Map<number, Accumulator> | undefined;
 }
 
 /**
@@ -289,12 +291,12 @@ function sortedChildEntries(node: GroupNode): GroupEntry[] {
 }
 
 function materializeBuckets(
-  bucketTotals: ReadonlyMap<number, Accumulator>,
+  bucketTotals: ReadonlyMap<number, Accumulator> | undefined,
   bucketCount: number,
 ): CostedTokens[] {
   const buckets: CostedTokens[] = new Array(bucketCount);
   for (let index = 0; index < bucketCount; index += 1) {
-    const accumulator = bucketTotals.get(index);
+    const accumulator = bucketTotals?.get(index);
     buckets[index] = finalize(accumulator ?? createAccumulator());
   }
   return buckets;
@@ -1186,6 +1188,8 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     sessionIds?: ReadonlySet<string>;
     /** Distinct session ids are only needed for usage/sessionCount views. */
     collectSessions?: boolean;
+    /** When set, each accepted step is also summed into its aligned bucket. */
+    bucketStarts?: readonly number[];
   }
 
   function accumulateRange(
@@ -1196,9 +1200,11 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const totals = createAccumulator();
     const sessionsSet = new Set<string>();
     const collectSessions = options.collectSessions !== false;
+    const bucketStarts = options.bucketStarts;
+    const bucketTotals = bucketStarts === undefined ? undefined : new Map<number, Accumulator>();
     let stepCount = 0;
     if (untilMs <= (sinceMs ?? Number.NEGATIVE_INFINITY)) {
-      return { totals, stepCount, sessions: sessionsSet };
+      return { totals, stepCount, sessions: sessionsSet, bucketTotals };
     }
     const requestedFirstHour = Math.floor((sinceMs ?? 0) / HOUR_MS) * HOUR_MS;
     const firstHour =
@@ -1206,9 +1212,12 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         ? requestedFirstHour
         : Math.max(requestedFirstHour, earliestHourMs);
     const lastHour = Math.floor((untilMs - 1) / HOUR_MS) * HOUR_MS;
-    if (firstHour > lastHour) return { totals, stepCount, sessions: sessionsSet };
+    if (firstHour > lastHour) return { totals, stepCount, sessions: sessionsSet, bucketTotals };
     const unfiltered =
-      options.projectId === undefined && options.sessionIds === undefined && !collectSessions;
+      bucketStarts === undefined &&
+      options.projectId === undefined &&
+      options.sessionIds === undefined &&
+      !collectSessions;
     for (let startMs = firstHour; startMs <= lastHour; startMs += HOUR_MS) {
       const bucket = hours.get(startMs);
       if (!bucket) continue;
@@ -1228,9 +1237,13 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         addStepToAccumulator(totals, step);
         stepCount += 1;
         if (collectSessions) sessionsSet.add(step.sessionID);
+        if (bucketTotals !== undefined && bucketStarts !== undefined) {
+          const bucketIndex = bucketIndexAt(bucketStarts, step.completedAtMs);
+          if (bucketIndex >= 0) addStepToBucket(bucketTotals, step, bucketIndex);
+        }
       }
     }
-    return { totals, stepCount, sessions: sessionsSet };
+    return { totals, stepCount, sessions: sessionsSet, bucketTotals };
   }
 
   /** Populated hour starts intersecting the window, chronologically ordered. */
@@ -1548,6 +1561,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
   function home(range: RangeKey, nowMs: number): HomeAnalyticsRollup {
     const window = rangeWindow(range, nowMs);
     const usage = buildUsage(range, nowMs);
+    const bucketStarts = usage.buckets.map((bucket) => bucket.startMs);
     const rows: ProjectActivityRow[] = [];
     for (const projectId of projectIds()) {
       const latest = projectLatestInWindow(projectId, window);
@@ -1555,6 +1569,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       const sum = accumulateRange(window.sinceMs, window.untilMs, {
         projectId,
         collectSessions: false,
+        bucketStarts,
       });
       const trees = treesFor(projectId);
       const rootSessionCount =
@@ -1565,6 +1580,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         projectId,
         name: projectName(projectId),
         tokens: finalize(sum.totals),
+        buckets: materializeBuckets(sum.bucketTotals, bucketStarts.length),
         rootSessionCount,
         latestActivityAtMs: latest ?? 0,
       });

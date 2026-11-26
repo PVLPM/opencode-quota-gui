@@ -726,8 +726,14 @@ function buildHome(
     if (range !== "lifetime" && latest === undefined) continue;
 
     const accumulator = createAccumulator();
+    const bucketAccumulators = usage.buckets.map(() => createAccumulator());
     const pricingCache = new Map<string, PricingResolution>();
-    for (const step of steps) addRawStep(accumulator, step.row, pricingCache);
+    for (const step of steps) {
+      addRawStep(accumulator, step.row, pricingCache);
+      const bucketIndex = bucketIndexFor(usage.buckets, step.timeMs);
+      const bucketAccumulator = bucketAccumulators[bucketIndex];
+      if (bucketAccumulator !== undefined) addRawStep(bucketAccumulator, step.row, pricingCache);
+    }
 
     const trees = model.treesByProject.get(projectId) ?? [];
     const rootSessionCount =
@@ -739,6 +745,7 @@ function buildHome(
       projectId,
       name: projectName(model, projectId),
       tokens: finalizeAccumulator(accumulator),
+      buckets: bucketAccumulators.map((bucket) => finalizeAccumulator(bucket)),
       rootSessionCount,
       latestActivityAtMs: latest ?? 0,
     });

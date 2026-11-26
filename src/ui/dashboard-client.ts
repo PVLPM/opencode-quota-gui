@@ -621,7 +621,7 @@ function readEnabledProviders(
 function readProjectActivityRow(value: JsonValue, endpoint: string): ProjectActivityRow {
   const detail = "projects[]";
   const row = readRecord(value, endpoint, detail);
-  return {
+  const parsed: ProjectActivityRow = {
     projectId: readText(row.projectId, endpoint, `${detail}.projectId`),
     name: readText(row.name, endpoint, `${detail}.name`),
     tokens: readCostedTokens(row.tokens, endpoint, `${detail}.tokens`),
@@ -632,6 +632,12 @@ function readProjectActivityRow(value: JsonValue, endpoint: string): ProjectActi
       `${detail}.latestActivityAtMs`,
     ),
   };
+  if (row.buckets !== undefined) {
+    parsed.buckets = readArray(row.buckets, endpoint, `${detail}.buckets`).map((bucket, index) =>
+      readCostedTokens(bucket, endpoint, `${detail}.buckets[${index}]`),
+    );
+  }
+  return parsed;
 }
 
 function readRangeWindow(
