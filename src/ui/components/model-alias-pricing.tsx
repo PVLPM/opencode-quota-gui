@@ -37,7 +37,8 @@ const SOURCE_LABELS: Record<
   string
 > = {
   catalog: "last observed native alias name + current models.dev catalog match",
-  "last-confirmed": "last observed native alias target; no current models.dev catalog match",
+  "last-confirmed":
+    "last observed native alias target; current models.dev catalog does not corroborate",
   "static-fallback": "static alias fallback + models.dev rates",
 };
 
@@ -46,7 +47,7 @@ const SUMMARY_STATE_LABELS: Record<
   string
 > = {
   catalog: "last observed native target, current catalog match",
-  "last-confirmed": "last observed native target, no current catalog match",
+  "last-confirmed": "last observed native target, no current catalog corroboration",
   "static-fallback": "static fallback",
 };
 

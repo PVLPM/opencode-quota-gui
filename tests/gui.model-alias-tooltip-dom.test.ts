@@ -66,8 +66,9 @@ const CASES: Array<{
     target: "Last observed native alias target: Opus 5.6",
     pricing: "Pricing: API-equivalent estimate",
     summary:
-      "Pricing: Opus 5.6 (last observed native target, no current catalog match); historical version unknown",
-    source: "Source: last observed native alias target; no current models.dev catalog match",
+      "Pricing: Opus 5.6 (last observed native target, no current catalog corroboration); historical version unknown",
+    source:
+      "Source: last observed native alias target; current models.dev catalog does not corroborate",
     extra:
       "The current models.dev catalog does not corroborate this observed name; the last observed target is retained for pricing.",
   },
