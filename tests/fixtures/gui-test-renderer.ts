@@ -41,7 +41,7 @@ export interface TestNode {
 }
 
 function elementNode(tag: string): TestNode {
-  return {
+  const node: TestNode = {
     kind: "element",
     tag,
     props: {},
@@ -57,6 +57,19 @@ function elementNode(tag: string): TestNode {
     getBoundingClientRect: () => ({ left: 0, top: 0, bottom: 90, width: 400, height: 90 }),
     ...domMechanics(),
   };
+  // Attribute-presence selectors only; the home composition handoff marker
+  // uses `[data-composition-target]` on rows and the chart hit surface.
+  node.closest = (selector: string): TestNode | null => {
+    if (!selector.startsWith("[") || !selector.endsWith("]")) return null;
+    const attribute = selector.slice(1, -1);
+    let current: TestNode | undefined = node;
+    while (current !== undefined) {
+      if (Object.hasOwn(current.props, attribute)) return current;
+      current = current.parent;
+    }
+    return null;
+  };
+  return node;
 }
 
 function textNode(value: string): TestNode {
@@ -190,6 +203,8 @@ export interface TestEvent {
     /** DOM traversal a row's drag-select guard reads from its click event. */
     closest?: (selector: string) => { contains(node: unknown): boolean } | null;
   };
+  /** Focus or pointer event targets inside these controls hand off composition. */
+  readonly relatedTarget?: unknown;
   readonly target?: { checked: boolean };
   readonly stopPropagation?: () => void;
   readonly defaultPrevented?: boolean;

@@ -618,7 +618,11 @@ function readEnabledProviders(
   );
 }
 
-function readProjectActivityRow(value: JsonValue, endpoint: string): ProjectActivityRow {
+function readProjectActivityRow(
+  value: JsonValue,
+  endpoint: string,
+  bucketCount: number,
+): ProjectActivityRow {
   const detail = "projects[]";
   const row = readRecord(value, endpoint, detail);
   const parsed: ProjectActivityRow = {
@@ -633,9 +637,13 @@ function readProjectActivityRow(value: JsonValue, endpoint: string): ProjectActi
     ),
   };
   if (row.buckets !== undefined) {
-    parsed.buckets = readArray(row.buckets, endpoint, `${detail}.buckets`).map((bucket, index) =>
+    const buckets = readArray(row.buckets, endpoint, `${detail}.buckets`).map((bucket, index) =>
       readCostedTokens(bucket, endpoint, `${detail}.buckets[${index}]`),
     );
+    if (buckets.length !== bucketCount) {
+      throw faulty(endpoint, `${detail}.buckets length`);
+    }
+    parsed.buckets = buckets;
   }
   return parsed;
 }
@@ -1104,6 +1112,7 @@ export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota")
 export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): HomeSnapshot {
   const root = readRecord(value, endpoint, "not an object");
   const providers = readRecord(root.providers, endpoint, "providers");
+  const usage = readUsage(root.usage, endpoint);
   const parsed: HomeSnapshot = {
     generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
     range: readRangeKey(root.range, endpoint, "range"),
@@ -1119,9 +1128,9 @@ export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): 
       ),
       polledAtMs: readNumber(providers.polledAtMs, endpoint, "providers.polledAtMs"),
     },
-    usage: readUsage(root.usage, endpoint),
+    usage,
     projects: readArray(root.projects, endpoint, "projects").map((row) =>
-      readProjectActivityRow(row, endpoint),
+      readProjectActivityRow(row, endpoint, usage.buckets.length),
     ),
   };
   if (readOptionalBoolean(root.provisional, endpoint, "provisional") === true) {

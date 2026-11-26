@@ -303,12 +303,13 @@ describe("home project composition", () => {
     }
   });
 
-  it("reveals the same composition from row focus and clears it on wrapper focus blur", () => {
+  it("reveals the same composition from row focus and clears it on unrelated focus", () => {
     const snapshot = homeWithComposition();
     const geometry = buildUsageGeometry(snapshot.usage.buckets, DEFAULT_USAGE_SIZE);
     const { root, dispose } = mountHome(snapshot);
     try {
       const alpha = rowFor(root, "alpha");
+      const chartHits = byClass(root, "div", "qg-chart__hits")[0] as TestNode;
       graph.listenerOf(alpha, "onFocus")?.({});
       expect(overlayRects(root)).toHaveLength(4);
       expect(alpha.props["data-highlighted"]).toBe("true");
@@ -323,12 +324,14 @@ describe("home project composition", () => {
         expect(overlay.props.height).toBeCloseTo(input.height * 0.4, 6);
       }
 
-      graph.listenerOf(alpha, "onBlur")?.({});
+      // A handoff into the chart keeps the selection for the chart's handlers.
+      graph.listenerOf(alpha, "onBlur")?.({ relatedTarget: chartHits });
+      const wrapper = byClass(root, "div", "qg-home-composition")[0] as TestNode;
+      graph.listenerOf(wrapper, "onFocusOut")?.({ relatedTarget: chartHits });
       expect(alpha.props["data-highlighted"]).toBeUndefined();
-      // The selected project survives the row blur so chart focus can keep it.
       expect(overlayRects(root)).toHaveLength(4);
 
-      const wrapper = byClass(root, "div", "qg-home-composition")[0] as TestNode;
+      // Leaving to an unrelated control must drop the preview.
       graph.listenerOf(wrapper, "onFocusOut")?.({});
       expect(overlayRects(root)).toHaveLength(0);
       expect(baseRects(root).every((rect) => rect.props["data-composition"] === undefined)).toBe(
@@ -339,26 +342,51 @@ describe("home project composition", () => {
     }
   });
 
+  it("drops a row preview when the pointer leaves for an unrelated control", () => {
+    const { root, dispose } = mountHome(homeWithComposition());
+    try {
+      const alpha = rowFor(root, "alpha");
+      const heading = byClass(root, "h2", "qg-section__title")[0] as TestNode;
+      graph.listenerOf(alpha, "onPointerEnter")?.({});
+      expect(overlayRects(root)).toHaveLength(4);
+
+      graph.listenerOf(alpha, "onPointerLeave")?.({ relatedTarget: heading });
+      expect(overlayRects(root)).toHaveLength(0);
+      expect(alpha.props["data-highlighted"]).toBeUndefined();
+
+      // Moving into another project row keeps a handoff, then its own enter wins.
+      graph.listenerOf(alpha, "onPointerEnter")?.({});
+      const beta = rowFor(root, "beta");
+      graph.listenerOf(alpha, "onPointerLeave")?.({ relatedTarget: beta });
+      expect(overlayRects(root)).toHaveLength(4);
+      graph.listenerOf(beta, "onPointerEnter")?.({});
+      expect(beta.props["data-highlighted"]).toBe("true");
+    } finally {
+      dispose();
+    }
+  });
+
   it("highlights the matching row from chart bucket pointer and focus", () => {
     const { root, dispose } = mountHome(homeWithComposition());
     try {
       const alpha = rowFor(root, "alpha");
       graph.listenerOf(alpha, "onFocus")?.({});
-      graph.listenerOf(alpha, "onBlur")?.({});
+      const hit = byClass(root, "button", "qg-chart__hit")[0] as TestNode;
+      graph.listenerOf(alpha, "onBlur")?.({ relatedTarget: hit });
       expect(alpha.props["data-highlighted"]).toBeUndefined();
       expect(overlayRects(root)).toHaveLength(4);
 
-      const hit = byClass(root, "button", "qg-chart__hit")[0] as TestNode;
       graph.listenerOf(hit, "onPointerEnter")?.({});
       expect(alpha.props["data-highlighted"]).toBe("true");
       expect(rowFor(root, "beta").props["data-dimmed"]).toBe("true");
+      expect(overlayRects(root)).toHaveLength(4);
 
       const wrapper = byClass(root, "div", "qg-home-composition")[0] as TestNode;
       graph.listenerOf(wrapper, "onPointerLeave")?.({});
       expect(overlayRects(root)).toHaveLength(0);
 
       graph.listenerOf(alpha, "onFocus")?.({});
-      graph.listenerOf(alpha, "onBlur")?.({});
+      graph.listenerOf(alpha, "onBlur")?.({ relatedTarget: hit });
       graph.listenerOf(hit, "onFocus")?.({});
       expect(alpha.props["data-highlighted"]).toBe("true");
       graph.listenerOf(hit, "onBlur")?.({});
@@ -463,6 +491,37 @@ describe("home project composition", () => {
       expect(summary).toContain("115 tokens · 46.00%");
       expect(summary).toContain("Cost share unavailable: estimate incomplete.");
       expect(summary).not.toContain("of estimate");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("does not call a fully priced free range incomplete", () => {
+    const chart = usage("7d", [
+      {
+        startMs: NOW - 2 * DAY_MS,
+        endMs: NOW - DAY_MS,
+        tokens: costed({ input: 100 }, { apiEquivalentCostUsd: 0 }),
+      },
+      {
+        startMs: NOW - DAY_MS,
+        endMs: NOW,
+        tokens: costed({ input: 50 }, { apiEquivalentCostUsd: 0 }),
+      },
+    ]);
+    const free = alphaProject({
+      tokens: costed({ input: 75, output: 25, cacheRead: 15 }, { apiEquivalentCostUsd: 0 }),
+      buckets: [
+        costed({ input: 40, output: 25 }, { apiEquivalentCostUsd: 0 }),
+        costed({ input: 35, cacheRead: 15 }, { apiEquivalentCostUsd: 0 }),
+      ],
+    });
+    const { root, dispose } = mountUsage(chart, compositionFor(chart, free));
+    try {
+      const summary = graph.textOf(summaryOf(root));
+      expect(summary).toContain("Free");
+      expect(summary).not.toContain("Cost share unavailable");
+      expect(summary).not.toContain("estimate incomplete");
     } finally {
       dispose();
     }

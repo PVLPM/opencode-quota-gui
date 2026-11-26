@@ -55,6 +55,8 @@ export interface CostContributionState {
   readonly partial: boolean;
   /** The project's whole visible usage has no numeric API-equivalent cost. */
   readonly unpriced: boolean;
+  /** Both this project and the chart total are fully priced, even at $0. */
+  readonly complete: boolean;
   /**
    * The project's share of the range estimate. Only present when both the
    * project and the chart total are fully priced; a partially priced side has
@@ -86,14 +88,16 @@ export function costContribution(
     project.total > 0 && priced && (project.unpricedTokens > 0 || project.unknownTokens > 0);
   const unpriced = project.total > 0 && project.apiEquivalentCostUsd === null;
   const totalCost = total.apiEquivalentCostUsd;
+  const complete = fullyPriced(project) && fullyPriced(total);
   const share =
-    fullyPriced(project) && fullyPriced(total) && totalCost !== null && totalCost > 0
+    complete && totalCost !== null && totalCost > 0
       ? (project.apiEquivalentCostUsd as number) / totalCost
       : undefined;
   return {
     priced,
     partial,
     unpriced,
+    complete,
     ...(share === undefined ? {} : { share }),
   };
 }

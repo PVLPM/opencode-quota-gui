@@ -1514,6 +1514,26 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     return latest;
   }
 
+  /**
+   * Fallback for a session whose stored `updated` and newest step sit beyond
+   * the range while an older owned step is inside it. The metadata shortcut
+   * above cannot see that step, so composition would otherwise count its
+   * tokens in usage without a project row to attribute them to.
+   */
+  function projectLatestOwnedStepInWindow(
+    projectId: string,
+    window: RangeWindow,
+  ): number | undefined {
+    let latest: number | undefined;
+    for (const sessionId of sessionsByProject.get(projectId) ?? []) {
+      for (const step of ownedBySession.get(sessionId)?.values() ?? []) {
+        if (!inWindow(step.completedAtMs, window)) continue;
+        if (latest === undefined || step.completedAtMs > latest) latest = step.completedAtMs;
+      }
+    }
+    return latest;
+  }
+
   function treeLatestInWindow(tree: ProjectTree, window: RangeWindow): number | undefined {
     let latest: number | undefined;
     for (const sessionId of tree.memberIds) {
@@ -1565,12 +1585,24 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const rows: ProjectActivityRow[] = [];
     for (const projectId of projectIds()) {
       const latest = projectLatestInWindow(projectId, window);
-      if (range !== "lifetime" && latest === undefined) continue;
-      const sum = accumulateRange(window.sinceMs, window.untilMs, {
-        projectId,
-        collectSessions: false,
-        bucketStarts,
-      });
+      let sum: RangeSum | undefined;
+      const rangeSum = (): RangeSum => {
+        if (sum === undefined) {
+          sum = accumulateRange(window.sinceMs, window.untilMs, {
+            projectId,
+            collectSessions: false,
+            bucketStarts,
+          });
+        }
+        return sum;
+      };
+      // A project is active when its metadata, its newest step, or any owned
+      // step falls inside the range. The last check keeps the row available
+      // for the tokens global usage already counts.
+      if (range !== "lifetime" && latest === undefined && rangeSum().stepCount === 0) continue;
+      const latestActivity =
+        latest ??
+        (range === "lifetime" ? undefined : projectLatestOwnedStepInWindow(projectId, window));
       const trees = treesFor(projectId);
       const rootSessionCount =
         range === "lifetime"
@@ -1579,10 +1611,10 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       rows.push({
         projectId,
         name: projectName(projectId),
-        tokens: finalize(sum.totals),
-        buckets: materializeBuckets(sum.bucketTotals, bucketStarts.length),
+        tokens: finalize(rangeSum().totals),
+        buckets: materializeBuckets(rangeSum().bucketTotals, bucketStarts.length),
         rootSessionCount,
-        latestActivityAtMs: latest ?? 0,
+        latestActivityAtMs: latestActivity ?? 0,
       });
     }
     rows.sort((a, b) => {

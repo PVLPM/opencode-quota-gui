@@ -112,11 +112,12 @@ describe("project chart composition", () => {
       priced: true,
       partial: false,
       unpriced: false,
+      complete: true,
       share: 0.25,
     });
     expect(
       costContribution(tokens({ total: 50, apiEquivalentCostUsd: 0 }), chartTotal),
-    ).toMatchObject({ priced: true, partial: false, unpriced: false, share: 0 });
+    ).toMatchObject({ priced: true, partial: false, unpriced: false, complete: true, share: 0 });
   });
 
   it("never invents a cost share for unpriced or partially priced usage", () => {
@@ -151,12 +152,18 @@ describe("project chart composition", () => {
       priced: false,
       partial: false,
       unpriced: false,
+      complete: false,
     });
     const zeroEstimate = costContribution(
       tokens({ total: 5, apiEquivalentCostUsd: 0 }),
       tokens({ total: 10, apiEquivalentCostUsd: 0 }),
     );
-    expect(zeroEstimate).toMatchObject({ priced: true, partial: false, unpriced: false });
+    expect(zeroEstimate).toMatchObject({
+      priced: true,
+      partial: false,
+      unpriced: false,
+      complete: true,
+    });
     expect(zeroEstimate.share).toBeUndefined();
   });
 });

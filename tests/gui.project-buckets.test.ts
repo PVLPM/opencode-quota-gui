@@ -296,6 +296,39 @@ describe.each(ENGINES)("project bucket rollups: $name", ({ home }) => {
     });
   });
 
+  it("keeps a project whose only in-range step is hidden by a newer out-of-range step", () => {
+    const dataset = makeDataset();
+    dataset.sessions.ses_future = sessionInfo("ses_future", "p5", NOW - 10 * DAY, NOW + DAY);
+    dataset.projects.p5 = projectInfo("p5");
+    dataset.messages.push(
+      assistantRow(
+        "ses_future",
+        "msg_future_in",
+        NOW - 2 * DAY,
+        { input: 120, output: 10 },
+        "openai",
+        "gpt-5",
+      ),
+      assistantRow("ses_future", "msg_future_out", NOW + HOUR, { input: 5 }, "openai", "gpt-5"),
+    );
+
+    const rollup = home(dataset, "7d");
+    const row = projectRow(rollup, "p5");
+    expect(row.tokens.total).toBe(130);
+    expect(row.latestActivityAtMs).toBe(NOW - 2 * DAY);
+    expectCostedConserved(bucketsOf(row), row.tokens);
+
+    const contributions: CostedTokens[][] = rollup.usage.buckets.map(() => []);
+    for (const project of rollup.projects) {
+      bucketsOf(project).forEach((bucket, index) => {
+        contributions[index]?.push(bucket);
+      });
+    }
+    rollup.usage.buckets.forEach((bucket, index) => {
+      expectCostedConserved(contributions[index] ?? [], bucket.tokens);
+    });
+  });
+
   it("zero-fills inactive buckets and keeps lifetime rows aligned", () => {
     const dataset = makeDataset();
     const finite = home(dataset, "7d");

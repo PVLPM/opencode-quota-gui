@@ -1,9 +1,10 @@
 import type { JSX } from "solid-js";
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import type { Bucket, CostedTokens, TokenStack, Usage } from "../../contracts/dashboard";
+import type { UsageBarSegment } from "../chart-geometry";
 import { buildUsageGeometry, cacheHitRate, DEFAULT_USAGE_SIZE } from "../chart-geometry";
 import { createChartInspection } from "../chart-inspection";
-import { createChartLayout } from "../chart-layout";
+import { createChartLayout, plotInsetStyle, slotHitStyle } from "../chart-layout";
 import {
   axisRangeCaption,
   formatBucketEnd,
@@ -27,6 +28,25 @@ import { ChartShell, ChartSummary, type ChartSummaryItem } from "./chart-shell";
 import { EstimateNote } from "./cost-estimate";
 import { EstimateInfo } from "./estimate";
 import { EmptyNotice } from "./states";
+
+/** Shared geometry attributes for a base segment and its composition overlay. */
+function segmentRectProps(
+  segment: Pick<UsageBarSegment, "x" | "y" | "width" | "height" | "radius" | "colorVar">,
+): { x: number; y: number; width: number; height: number; rx: number; ry: number; fill: string } {
+  return {
+    x: segment.x,
+    y: segment.y,
+    width: segment.width,
+    height: segment.height,
+    rx: segment.radius,
+    ry: segment.radius,
+    fill: `var(${segment.colorVar})`,
+  };
+}
+
+function highlightAttr(active: string | undefined, key: string): "true" | undefined {
+  return active === undefined || active === key ? "true" : undefined;
+}
 
 /**
  * Usage — shared stacked vertical bars (design spec §2; owner 6–12).
@@ -178,7 +198,10 @@ export function UsageChart(props: {
                 </Show>
                 <Show
                   when={
-                    !contribution.partial && !contribution.unpriced && composition.totals.total > 0
+                    !contribution.partial &&
+                    !contribution.unpriced &&
+                    !contribution.complete &&
+                    composition.totals.total > 0
                   }
                 >
                   <span>Cost share unavailable: estimate incomplete.</span>
@@ -377,18 +400,8 @@ export function UsageChart(props: {
                       class="qg-chart__segment"
                       data-category={segment.key}
                       data-composition={props.composition === undefined ? undefined : "base"}
-                      data-highlighted={
-                        highlight() === undefined || highlight() === segment.key
-                          ? "true"
-                          : undefined
-                      }
-                      x={segment.x}
-                      y={segment.y}
-                      width={segment.width}
-                      height={segment.height}
-                      rx={segment.radius}
-                      ry={segment.radius}
-                      fill={`var(${segment.colorVar})`}
+                      data-highlighted={highlightAttr(highlight(), segment.key)}
+                      {...segmentRectProps(segment)}
                     />
                   )}
                 </For>
@@ -401,16 +414,8 @@ export function UsageChart(props: {
                   class="qg-chart__composition"
                   data-category={segment.key}
                   data-bucket={segment.bucketIndex}
-                  data-highlighted={
-                    highlight() === undefined || highlight() === segment.key ? "true" : undefined
-                  }
-                  x={segment.x}
-                  y={segment.y}
-                  width={segment.width}
-                  height={segment.height}
-                  rx={segment.radius}
-                  ry={segment.radius}
-                  fill={`var(${segment.colorVar})`}
+                  data-highlighted={highlightAttr(highlight(), segment.key)}
+                  {...segmentRectProps(segment)}
                 />
               )}
             </For>
@@ -455,12 +460,8 @@ export function UsageChart(props: {
         */}
           <div
             class="qg-chart__hits"
-            style={{
-              top: `${(geometry().plot.top / size.height) * 100}%`,
-              bottom: `${((size.height - geometry().plot.bottom) / size.height) * 100}%`,
-              left: `${(geometry().plot.left / size.width) * 100}%`,
-              right: `${((size.width - geometry().plot.right) / size.width) * 100}%`,
-            }}
+            data-composition-target="chart"
+            style={plotInsetStyle(geometry().plot, size)}
             onPointerLeave={() => {
               inspection.clearPointer();
               props.onCompositionPointerChange?.(undefined);
@@ -472,10 +473,7 @@ export function UsageChart(props: {
                   type="button"
                   class="qg-chart__hit"
                   aria-label={bucketLabel(bucket, index())}
-                  style={{
-                    left: `${((geometry().slotX(index()) - geometry().plot.left) / geometry().plot.width) * 100}%`,
-                    width: `${(Math.max(geometry().slot, 1) / geometry().plot.width) * 100}%`,
-                  }}
+                  style={slotHitStyle(geometry().plot, geometry().slotX(index()), geometry().slot)}
                   onPointerEnter={() => {
                     inspection.inspectPointer(index());
                     if (props.composition !== undefined) {

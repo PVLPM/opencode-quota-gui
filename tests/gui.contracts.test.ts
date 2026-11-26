@@ -280,6 +280,15 @@ describe("GUI contract guards", () => {
     expect(isHomeSnapshot({ ...snapshot, projects: [{ ...project, buckets: "nope" }] })).toBe(
       false,
     );
+    // Alignment is part of the contract: one short array must be rejected whole.
+    expect(
+      isHomeSnapshot({
+        ...snapshot,
+        projects: [
+          { ...project, buckets: snapshot.usage.buckets.slice(0, 1).map((e) => e.tokens) },
+        ],
+      }),
+    ).toBe(false);
     expect(
       isHomeSnapshot({
         ...snapshot,

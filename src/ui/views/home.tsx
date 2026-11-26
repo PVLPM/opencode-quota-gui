@@ -28,6 +28,20 @@ import {
 } from "../view-model";
 
 /**
+ * A row or chart hit surface that legitimately carries the composition handoff.
+ * Focus/pointer leaving into one of these keeps the selected project for the
+ * target's own handlers; anything else is an unrelated control.
+ */
+function isCompositionTarget(target: unknown): boolean {
+  if (target === null || target === undefined) return false;
+  const candidate = target as { closest?: (selector: string) => unknown };
+  return (
+    typeof candidate.closest === "function" &&
+    candidate.closest("[data-composition-target]") !== null
+  );
+}
+
+/**
  * Quota is the default independent surface. Analytics below uses the compatible
  * HomeSnapshot for usage and projects only; it never renders provider cards.
  *
@@ -121,7 +135,6 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
   const [chartPointerProject, setChartPointerProject] = createSignal<string>();
   const [chartFocusProject, setChartFocusProject] = createSignal<string>();
   const [retainedProject, setRetainedProject] = createSignal<string>();
-  let compositionWrapper: HTMLDivElement | undefined;
 
   const compositionFor = (project: ProjectActivityRow): ProjectChartComposition | undefined =>
     createProjectChartComposition(props.snapshot.usage, project);
@@ -162,49 +175,57 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
     if (activateProject(project)) setFocusedProject(project.projectId);
   };
 
-  const onProjectBlur = (project: ProjectActivityRow): void => {
+  const releaseRetainedIfIdle = (): void => {
+    if (
+      pointerProject() === undefined &&
+      focusedProject() === undefined &&
+      chartPointerProject() === undefined &&
+      chartFocusProject() === undefined
+    ) {
+      setRetainedProject(undefined);
+    }
+  };
+
+  const onProjectPointerLeave = (project: ProjectActivityRow, event: PointerEvent): void => {
+    setPointerProject((current) => (current === project.projectId ? undefined : current));
+    if (isCompositionTarget(event.relatedTarget)) return;
+    releaseRetainedIfIdle();
+  };
+
+  const onProjectBlur = (project: ProjectActivityRow, event: FocusEvent): void => {
     setFocusedProject((current) => (current === project.projectId ? undefined : current));
+    if (isCompositionTarget(event.relatedTarget)) return;
+    releaseRetainedIfIdle();
   };
 
   const onChartPointerChange = (projectId: string | undefined): void => {
     setChartPointerProject(projectId);
     if (projectId !== undefined) setRetainedProject(projectId);
+    else releaseRetainedIfIdle();
   };
 
   const onChartFocusChange = (projectId: string | undefined): void => {
     setChartFocusProject(projectId);
     if (projectId !== undefined) setRetainedProject(projectId);
+    else releaseRetainedIfIdle();
   };
 
   const clearPointerState = (): void => {
     setPointerProject(undefined);
     setChartPointerProject(undefined);
-    if (focusedProject() === undefined && chartFocusProject() === undefined) {
-      setRetainedProject(undefined);
-    }
+    releaseRetainedIfIdle();
   };
 
   const clearFocusState = (event: FocusEvent): void => {
-    const next = event.relatedTarget;
-    const wrapper = compositionWrapper as unknown as
-      | { contains?: (candidate: Node) => boolean }
-      | undefined;
-    if (next != null && typeof wrapper?.contains === "function" && wrapper.contains(next as Node)) {
-      return;
-    }
     setFocusedProject(undefined);
     setChartFocusProject(undefined);
-    if (pointerProject() === undefined && chartPointerProject() === undefined) {
-      setRetainedProject(undefined);
-    }
+    if (isCompositionTarget(event.relatedTarget)) return;
+    releaseRetainedIfIdle();
   };
 
   return (
     <div
       class="qg-home-composition"
-      ref={(element) => {
-        compositionWrapper = element;
-      }}
       onPointerLeave={clearPointerState}
       onFocusOut={clearFocusState}
     >
@@ -255,6 +276,7 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
                 return (
                   <a
                     class="qg-list__row"
+                    data-composition-target="row"
                     data-clickable="true"
                     data-highlighted={highlighted() ? "true" : undefined}
                     data-dimmed={dimmed() ? "true" : undefined}
@@ -263,8 +285,9 @@ export function HomeView(props: { snapshot: HomeSnapshot; range: RangeKey }): JS
                       props.range,
                     )}
                     onPointerEnter={() => onProjectPointerEnter(project)}
+                    onPointerLeave={(event) => onProjectPointerLeave(project, event)}
                     onFocus={() => onProjectFocus(project)}
-                    onBlur={() => onProjectBlur(project)}
+                    onBlur={(event) => onProjectBlur(project, event)}
                   >
                     <span class="qg-list__title" title={project.name}>
                       {project.name}

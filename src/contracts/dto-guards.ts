@@ -391,7 +391,7 @@ function isUsage(value: unknown): value is Usage {
   );
 }
 
-function isProjectActivityRow(value: unknown): value is ProjectActivityRow {
+function isProjectActivityRow(value: unknown, bucketCount: number): value is ProjectActivityRow {
   return (
     isRecord(value) &&
     isText(value.projectId) &&
@@ -399,7 +399,10 @@ function isProjectActivityRow(value: unknown): value is ProjectActivityRow {
     isCostedTokens(value.tokens) &&
     isFiniteNumber(value.rootSessionCount) &&
     isFiniteNumber(value.latestActivityAtMs) &&
-    isOptional(value.buckets, (buckets) => isArrayOf(buckets, isCostedTokens))
+    isOptional(
+      value.buckets,
+      (buckets) => isArrayOf(buckets, isCostedTokens) && buckets.length === bucketCount,
+    )
   );
 }
 
@@ -544,17 +547,20 @@ export function isQuotaSnapshot(value: unknown): value is QuotaSnapshot {
 }
 
 export function isHomeSnapshot(value: unknown): value is HomeSnapshot {
-  return (
-    isRecord(value) &&
-    isFiniteNumber(value.generatedAtMs) &&
-    isRangeKey(value.range) &&
-    isBoolean(value.stale) &&
-    isOptional(value.provisional, (provisional) => provisional === true) &&
-    isOptional(value.exactError, isText) &&
-    isProviders(value.providers) &&
-    isUsage(value.usage) &&
-    isArrayOf(value.projects, isProjectActivityRow)
-  );
+  if (
+    !isRecord(value) ||
+    !isFiniteNumber(value.generatedAtMs) ||
+    !isRangeKey(value.range) ||
+    !isBoolean(value.stale) ||
+    !isOptional(value.provisional, (provisional) => provisional === true) ||
+    !isOptional(value.exactError, isText) ||
+    !isProviders(value.providers) ||
+    !isUsage(value.usage)
+  ) {
+    return false;
+  }
+  const bucketCount = value.usage.buckets.length;
+  return isArrayOf(value.projects, (row) => isProjectActivityRow(row, bucketCount));
 }
 
 function isAnalyticsIdentity(value: unknown): value is AnalyticsEntityIdentity {

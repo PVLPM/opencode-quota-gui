@@ -6858,9 +6858,9 @@ describe("response boundary decoding", () => {
 
     const parsed = parseHomeSnapshot({
       ...payload,
-      projects: [{ ...project, buckets: [bucket.tokens, costed(0)] }],
+      projects: [{ ...project, buckets: [bucket.tokens] }],
     });
-    expect(parsed.projects[0]?.buckets).toHaveLength(2);
+    expect(parsed.projects[0]?.buckets).toHaveLength(1);
     expect(parsed.projects[0]?.buckets?.[0]).toEqual(bucket.tokens);
 
     // Older aggregate-only payloads still parse without inventing the field.
@@ -6868,6 +6868,14 @@ describe("response boundary decoding", () => {
 
     expectRejected(
       () => parseHomeSnapshot({ ...payload, projects: [{ ...project, buckets: "nope" }] }),
+      "projects[].buckets",
+    );
+    expectRejected(
+      () =>
+        parseHomeSnapshot({
+          ...payload,
+          projects: [{ ...project, buckets: [bucket.tokens, costed(0)] }],
+        }),
       "projects[].buckets",
     );
     expectRejected(
