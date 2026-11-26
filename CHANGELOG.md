@@ -2,6 +2,26 @@
 
 User-facing release notes for OpenCode Quota GUI.
 
+## 1.3.3
+
+### Improved
+
+- **Compact cache TTL.** The Native composer pill shows the estimated cache TTL as `M:SS` below one hour and `H:MM:SS` from one hour up, for example `TTL ~4:30`, while screen-reader text keeps the full duration. An elapsed estimate now reads `Expired ~0:15 ago` instead of a negative countdown.
+- **Dynamic Claude Agent alias pricing.** Unversioned `claude-agent` aliases `opus`, `sonnet`, `haiku` and `fable` resolve to an Anthropic pricing target through a unique models.dev display-name match. Current native evidence wins, then the last confirmed target, then the established static alias when one exists. Ambiguous evidence never guesses, and a current target the catalog cannot price stays **Unpriced** rather than inheriting an older rate.
+- **Alias pricing in model tooltips.** The model tooltip shows the resolved pricing target, whether it came from the last observed native alias name with a current models.dev catalog match, the last observed target without catalog corroboration, a static fallback, or no confirmed target. It also states whether an API-equivalent estimate is available and that historical usage recorded under an alias does not identify an exact historical model version.
+- **Project composition in Analytics.** Hovering or focusing a project row previews that project's proportional token contribution inside each chart bucket and emphasizes its share without changing totals or bar geometry; hovering or focusing the chart highlights the matching project row. The chart summary adds the project's token share and, when both the project and the range total are fully priced, its API-equivalent cost share. Partial or unpriced data never produces a fabricated cost share (#5).
+
+### Fixed
+
+- **Completed subagent cache metrics.** A completed child can make cache history readable after an empty or fenced first read. The pill now retries only the still-missing session behind the active read, without aborting sibling pagination or re-enqueueing itself, so completed subagents gain cache metrics when their history becomes available.
+- **Warming cannot extend another model's TTL.** `session.cache.warming` now carries provider, model and optional variant, and it anchors an estimate only when the latest retained invocation has the same route. A warming request for one model can no longer extend another model's estimated cache retention; route-less events from older producers no longer anchor.
+- **Alias prices recover after a catalog refresh.** A previously unresolved Claude Agent alias keeps its observed native display name and is re-matched against the current models.dev catalog. When a later refresh adds the model, the alias becomes priced without another Claude Agent request or an OpenCode restart. Zero matches stay **Unpriced**, and ambiguity no longer lets a newer model inherit an older generation's static price.
+
+### Compatibility
+
+- **Analytics rebuild after upgrading.** The analytics presentation cache moves from version 7 to 8 so saved cards are rebuilt with project composition buckets and alias pricing provenance. The analytics index remains version 4, so an existing index is reused and no full reindex is forced.
+- **OpenCode support unchanged.** The `@opencode/plugin` peer range remains `>=2.0.16 <2.5.0`; the full Native integration requires OpenCode Desktop 2.2.1 or newer, with Node.js 22.13+ or 23.4+.
+
 ## 1.3.2
 
 ### Added
