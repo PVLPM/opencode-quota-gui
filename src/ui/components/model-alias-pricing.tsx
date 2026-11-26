@@ -27,11 +27,13 @@ const UNAVAILABLE_SUMMARY = {
   missing: "no confirmed target",
 } as const;
 
-const SOURCE_LABELS: Record<ClaudeAgentAliasPricingProvenance["state"], string> = {
+const SOURCE_LABELS: Record<
+  Exclude<ClaudeAgentAliasPricingProvenance["state"], "unavailable">,
+  string
+> = {
   catalog: "OpenCode model catalog + models.dev",
   "last-confirmed": "last confirmed OpenCode model catalog evidence + models.dev",
   "static-fallback": "static alias fallback + models.dev",
-  unavailable: "recorded alias evidence (no unique target)",
 };
 
 const SUMMARY_STATE_LABELS: Record<
@@ -93,7 +95,11 @@ export function modelAliasPricingLines(
       : alias.priced === true
         ? "Pricing: API-equivalent estimate"
         : "Pricing: Not estimated (no rate is available for this target)",
-    `Source: ${SOURCE_LABELS[alias.state]}`,
+  );
+  if (alias.state !== "unavailable") {
+    lines.push(`Source: ${SOURCE_LABELS[alias.state]}`);
+  }
+  lines.push(
     "Historical model version: unknown — usage was recorded under the alias and may predate the current pricing target.",
   );
   return lines;

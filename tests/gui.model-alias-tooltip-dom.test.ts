@@ -14,7 +14,7 @@ const CASES: Array<{
   target: string;
   pricing: string;
   summary: string;
-  source: string;
+  source?: string;
   extra?: string;
 }> = [
   {
@@ -88,7 +88,6 @@ const CASES: Array<{
     target: "Pricing target unavailable",
     pricing: "Pricing: Not estimated",
     summary: "Pricing: not estimated (unresolved target)",
-    source: "Source: recorded alias evidence (no unique target)",
     extra:
       "The observed alias evidence does not identify one pricing target; pricing needs a single unambiguous match.",
   },
@@ -102,7 +101,6 @@ const CASES: Array<{
     target: "Pricing target unavailable",
     pricing: "Pricing: Not estimated",
     summary: "Pricing: not estimated (no confirmed target)",
-    source: "Source: recorded alias evidence (no unique target)",
     extra: "No confirmed target could be verified for this alias.",
   },
 ];
@@ -122,7 +120,11 @@ function expectWording(text: string, entry: (typeof CASES)[number]): void {
   expect(text).not.toContain(
     entry.pricingAlias.priced === true ? "Pricing: Not estimated" : "Pricing: API-equivalent",
   );
-  expect(text).toContain(entry.source);
+  if (entry.source === undefined) {
+    expect(text).not.toContain("Source:");
+  } else {
+    expect(text).toContain(entry.source);
+  }
   expect(text).toContain(CAVEAT);
   // One truthful line for the non-interactive surfaces.
   const summary = modelAliasPricingSummary(entry.pricingAlias);
