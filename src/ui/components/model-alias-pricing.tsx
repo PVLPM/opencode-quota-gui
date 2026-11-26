@@ -17,12 +17,13 @@ function targetLabel(alias: ClaudeAgentAliasPricingProvenance): string {
 }
 
 const UNAVAILABLE_COPY = {
-  ambiguous: "More than one candidate target was observed; pricing needs one unambiguous match.",
+  ambiguous:
+    "The observed alias evidence does not identify one pricing target; pricing needs a single unambiguous match.",
   missing: "No confirmed target could be verified for this alias.",
 } as const;
 
 const UNAVAILABLE_SUMMARY = {
-  ambiguous: "ambiguous target",
+  ambiguous: "unresolved target",
   missing: "no confirmed target",
 } as const;
 
@@ -30,7 +31,7 @@ const SOURCE_LABELS: Record<ClaudeAgentAliasPricingProvenance["state"], string> 
   catalog: "OpenCode model catalog + models.dev",
   "last-confirmed": "last confirmed OpenCode model catalog evidence + models.dev",
   "static-fallback": "static alias fallback + models.dev",
-  unavailable: "OpenCode model catalog + models.dev (no unique match)",
+  unavailable: "recorded alias evidence (no unique target)",
 };
 
 const SUMMARY_STATE_LABELS: Record<

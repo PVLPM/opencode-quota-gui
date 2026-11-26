@@ -87,9 +87,10 @@ const CASES: Array<{
     },
     target: "Pricing target unavailable",
     pricing: "Pricing: Not estimated",
-    summary: "Pricing: not estimated (ambiguous target)",
-    source: "Source: OpenCode model catalog + models.dev (no unique match)",
-    extra: "More than one candidate target was observed; pricing needs one unambiguous match.",
+    summary: "Pricing: not estimated (unresolved target)",
+    source: "Source: recorded alias evidence (no unique target)",
+    extra:
+      "The observed alias evidence does not identify one pricing target; pricing needs a single unambiguous match.",
   },
   {
     name: "unavailable missing",
@@ -101,7 +102,7 @@ const CASES: Array<{
     target: "Pricing target unavailable",
     pricing: "Pricing: Not estimated",
     summary: "Pricing: not estimated (no confirmed target)",
-    source: "Source: OpenCode model catalog + models.dev (no unique match)",
+    source: "Source: recorded alias evidence (no unique target)",
     extra: "No confirmed target could be verified for this alias.",
   },
 ];
