@@ -118,6 +118,12 @@ export interface UsageInterval {
   attributedBurnPercentPoints: number;
   unattributedBurnPercentPoints: number;
   unattributedReason?: UsageUnattributedReason;
+  /**
+   * Conflicting stored evidence at this exact time. Present on a flat run's
+   * interval (`fromPoint === toPoint`); the run is uncertain there, so clients
+   * keep the measured endpoints but draw a conflict marker and not a solid span.
+   */
+  conflictAtMs?: number;
   activity: UsageActivity[];
 }
 

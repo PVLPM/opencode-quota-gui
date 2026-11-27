@@ -379,6 +379,24 @@ describe("usage intervals: finite-range coverage", () => {
 });
 
 describe("usage intervals: expired current epoch", () => {
+  it("keeps the latest epoch when an estimated reset passed with no newer sample", () => {
+    const window = buildUsageWindowSeries(
+      series([
+        point({
+          firstAtMs: BASE,
+          lastAtMs: BASE + 20 * SECOND,
+          remainingPercent: 70,
+          resetAtMs: BASE + 30 * SECOND,
+          resetPrecision: "estimated",
+        }),
+      ]),
+      { range: "current", nowMs: BASE + 60 * SECOND },
+    );
+
+    expect(window.points).toHaveLength(1);
+    expect(window.axis).toEqual({ startMs: BASE, endMs: BASE + 60 * SECOND });
+  });
+
   it("returns an empty axis when the scheduled reset passed without a newer sample", () => {
     const window = buildUsageWindowSeries(
       series([
@@ -487,6 +505,32 @@ describe("usage intervals: conflicting samples", () => {
     expect(window.totals.observedBurnPercentPoints).toBe(0);
   });
 
+  it("renders a conflict inside the only flat run with a marker and no solid span", () => {
+    const window = buildUsageWindowSeries(
+      {
+        ...series([point({ firstAtMs: BASE, lastAtMs: BASE + 60 * SECOND, remainingPercent: 80 })]),
+        conflicts: [{ atMs: BASE + 30 * SECOND, remainingPercent: 40 }],
+      },
+      { range: "lifetime", nowMs: BASE + 60 * SECOND },
+    );
+
+    expect(window.points).toHaveLength(1);
+    expect(window.links).toEqual([]);
+    expect(window.intervals).toEqual([
+      expect.objectContaining({
+        fromPoint: 0,
+        toPoint: 0,
+        link: "boundary",
+        burnPercentPoints: null,
+        conflictAtMs: BASE + 30 * SECOND,
+      }),
+    ]);
+    expect(window.coverage.observedMs).toBe(0);
+    expect(window.totals.observedBurnPercentPoints).toBe(0);
+    expect(window.points[0]?.startMs).toBe(BASE);
+    expect(window.points[0]?.endMs).toBe(BASE + 60 * SECOND);
+  });
+
   it("treats a conflict inside a gap as an uncertain boundary", () => {
     const window = buildUsageWindowSeries(
       {
@@ -507,6 +551,19 @@ describe("usage intervals: conflicting samples", () => {
       window.intervals.find((interval) => interval.fromPoint === 0 && interval.toPoint === 1)
         ?.burnPercentPoints,
     ).toBeNull();
+  });
+});
+
+describe("usage intervals: point provenance", () => {
+  it("carries the stored series source onto every point", () => {
+    const window = buildUsageWindowSeries(
+      {
+        ...series([point({ firstAtMs: BASE, remainingPercent: 50 })]),
+        source: "codex-import",
+      },
+      { range: "lifetime", nowMs: BASE },
+    );
+    expect(window.points[0]?.source).toBe("codex-import");
   });
 });
 

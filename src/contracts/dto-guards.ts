@@ -660,6 +660,7 @@ function isUsageInterval(value: unknown, modelCount: number): value is UsageInte
     isNonNegative(value.attributedBurnPercentPoints) &&
     isNonNegative(value.unattributedBurnPercentPoints) &&
     isOptional(value.unattributedReason, (entry) => isOneOf(entry, USAGE_UNATTRIBUTED_REASONS)) &&
+    isOptional(value.conflictAtMs, isFiniteNumber) &&
     isArrayOf(value.activity, (entry) => isUsageActivity(entry, modelCount))
   );
 }

@@ -21,6 +21,7 @@ import type {
   UsageMeasurementKind,
   UsagePoint,
   UsageRangeKey,
+  UsageSource,
   UsageWindowSeries,
 } from "../contracts/usage.js";
 import type { UsageStoredRun } from "../lib/usage-store.js";
@@ -58,6 +59,8 @@ export interface UsageSeriesInput {
   metric?: AccountingMetric;
   measurement: UsageMeasurementKind;
   points: readonly UsageSamplePoint[];
+  /** Provenance of the stored series (`opencode-poll`, `codex-import`, ...). */
+  source?: UsageSource;
   /** Conflicts render as `uncertain` boundaries, never as stored steps. */
   conflicts?: readonly UsageConflictPoint[];
 }
@@ -232,6 +235,10 @@ function includedIndexes(
     const resetAtMs = last.resetAtMs;
     if (
       resetAtMs !== undefined &&
+      // An estimated reset (`now + offset`) is not enough to expire the epoch:
+      // the boundary may only have jittered past the clock. Expire only on an
+      // absolute provider reset with no observation after it.
+      last.resetPrecision !== "estimated" &&
       resetAtMs <= input.nowMs &&
       !points.slice(latestStart).some((point) => point.firstAtMs >= resetAtMs)
     ) {
@@ -282,13 +289,14 @@ function buildIntervals(
   points: readonly UsagePoint[],
   links: readonly UsageLink[],
   axis: { startMs: number; endMs: number },
-  conflicted: readonly boolean[] = [],
+  conflictAtByPoint: readonly (number | undefined)[] = [],
 ): UsageInterval[] {
   const intervals: UsageInterval[] = [];
   for (let index = 0; index < points.length; index += 1) {
     const point = points[index] as UsagePoint;
     const flatStartMs = Math.max(point.startMs, axis.startMs);
     const flatEndMs = Math.min(point.endMs, axis.endMs);
+    const conflictAtMs = conflictAtByPoint[index];
     if (flatEndMs > flatStartMs) {
       intervals.push({
         fromPoint: index,
@@ -297,10 +305,13 @@ function buildIntervals(
         endMs: flatEndMs,
         previousRemainingPercent: point.remainingPercent,
         currentRemainingPercent: point.remainingPercent,
-        link: conflicted[index] === true ? "boundary" : "observed",
-        burnPercentPoints: 0,
+        // Conflicting evidence inside the flat run makes that span uncertain.
+        // The measured endpoints remain in `points`; the burn is unknown.
+        link: conflictAtMs === undefined ? "observed" : "boundary",
+        burnPercentPoints: conflictAtMs === undefined ? 0 : null,
         attributedBurnPercentPoints: 0,
         unattributedBurnPercentPoints: 0,
+        ...(conflictAtMs !== undefined ? { conflictAtMs } : {}),
         activity: [],
       });
     }
@@ -375,16 +386,18 @@ export function buildUsageWindowSeries(
   const conflicts = [...(input.conflicts ?? [])].sort((left, right) => left.atMs - right.atMs);
   const { indexes, axis } = includedIndexes(sorted, axisInput, conflicts);
   const included = indexes.map((index) => sorted[index] as UsageSamplePoint);
-  const conflictedPoint = (point: UsageSamplePoint): boolean =>
-    conflicts.some((item) => item.atMs >= point.firstAtMs && item.atMs <= point.lastAtMs);
 
+  const conflictsAt = included.map(
+    (point) =>
+      conflicts.find((item) => item.atMs >= point.firstAtMs && item.atMs <= point.lastAtMs)?.atMs,
+  );
   const points: UsagePoint[] = included.map((point) => ({
     startMs: point.firstAtMs,
     endMs: point.lastAtMs,
     remainingPercent: point.remainingPercent,
     sampleCount: point.sampleCount,
     ...(point.resetAtMs !== undefined ? { resetAtMs: point.resetAtMs } : {}),
-    source: "opencode-poll",
+    source: input.source ?? "opencode-poll",
   }));
 
   const links: UsageLink[] = [];
@@ -398,16 +411,19 @@ export function buildUsageWindowSeries(
     );
   }
 
-  const intervals = buildIntervals(points, links, axis, included.map(conflictedPoint));
+  const intervals = buildIntervals(points, links, axis, conflictsAt);
   const observedBurn = intervals.reduce(
     (total, interval) => total + (interval.burnPercentPoints ?? 0),
     0,
   );
 
   let observedMs = 0;
-  for (const point of included) {
+  included.forEach((point, index) => {
+    // A run that contains conflicting evidence is not continuously observed;
+    // its measured endpoints stay points but the flat span is uncertain.
+    if (conflictsAt[index] !== undefined) return;
     observedMs += overlap(point.firstAtMs, point.lastAtMs, axis.startMs, axis.endMs);
-  }
+  });
   for (let position = 0; position < links.length; position += 1) {
     if ((links[position] as UsageLink).kind !== "observed") continue;
     const previous = included[position] as UsageSamplePoint;

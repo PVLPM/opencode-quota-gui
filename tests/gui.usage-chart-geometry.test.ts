@@ -139,6 +139,31 @@ describe("usage chart geometry", () => {
     expect(geometry.solidPaths[0]?.match(/L /g)).toHaveLength(points.length * 3 - 2);
   });
 
+  it("breaks a conflicted flat run without drawing a solid span", () => {
+    const points = [point(100, 300, 80)];
+    const conflicted: UsageInterval = {
+      ...interval(0, 0, 100, 300, "boundary", 80, 80),
+      burnPercentPoints: null,
+      conflictAtMs: 200,
+    };
+    const geometry = buildUsageStepGeometry({
+      axis: AXIS,
+      plot: PLOT,
+      mode: "remaining",
+      points,
+      links: [],
+      intervals: [conflicted],
+    });
+
+    expect(geometry.solidPaths).toEqual([]);
+    expect(geometry.markers).toEqual([{ x: 20, atMs: 200, boundary: "uncertain", between: false }]);
+    // Measured endpoints remain visible as marks.
+    expect(geometry.isolated).toEqual([
+      { x: 10, y: 20 },
+      { x: 30, y: 20 },
+    ]);
+  });
+
   it("inspects the server intervals in chronological order", () => {
     const intervals = [
       interval(0, 1, 200, 300, "unobserved", 80, 70),

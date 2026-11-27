@@ -1363,6 +1363,12 @@ function readUsageInterval(
     `${detail}.unattributedReason`,
   );
   if (reason !== undefined) parsed.unattributedReason = reason;
+  const conflictAtMs = readOptionalNumber(
+    interval.conflictAtMs,
+    endpoint,
+    `${detail}.conflictAtMs`,
+  );
+  if (conflictAtMs !== undefined) parsed.conflictAtMs = conflictAtMs;
   return parsed;
 }
 

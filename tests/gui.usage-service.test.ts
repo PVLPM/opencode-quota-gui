@@ -312,6 +312,33 @@ describe("usage snapshot: attribution", () => {
     }
   });
 
+  it("keeps a lone conflicted run inspectable and carries its stored source", async () => {
+    const db = await store();
+    const codex = series("codex-import:aaaaaa", "window:five_hour|quota:percent", {
+      providerId: "openai",
+      providerLabel: "OpenAI Codex (imported)",
+      source: "codex-import",
+    });
+    record(db, at(0), [{ series: codex, remaining: 80 }]);
+    record(db, at(1), [{ series: codex, remaining: 80 }]);
+    record(db, at(0.5), [{ series: codex, remaining: 40 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => []),
+    }).usage({ range: "lifetime" });
+
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+    const window = snapshot.accounts[0]?.windows[0];
+    expect(window?.points.map((point) => point.source)).toEqual(["codex-import"]);
+    expect(window?.intervals[0]).toMatchObject({
+      fromPoint: 0,
+      toPoint: 0,
+      link: "boundary",
+      burnPercentPoints: null,
+      conflictAtMs: at(0.5),
+    });
+  });
+
   it("marks an account ambiguous when a rival's older epoch overlaps its current interval", async () => {
     const db = await store();
     const first = series("anthropic:aaaaaa", "window:five_hour|quota:percent");

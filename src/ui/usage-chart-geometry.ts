@@ -89,6 +89,17 @@ export function buildUsageStepGeometry(input: {
   const isolated: { x: number; y: number }[] = [];
   const markers: UsageBoundaryMarker[] = [];
 
+  // A conflict inside a flat run has no link of its own, so it is carried on
+  // that run's interval. The affected span is not drawn solid; the measured
+  // endpoints stay visible as marks and the conflict time gets a marker.
+  const conflictsByPoint = new Map<number, number[]>();
+  for (const interval of intervals) {
+    if (interval.fromPoint !== interval.toPoint || interval.conflictAtMs === undefined) continue;
+    const times = conflictsByPoint.get(interval.fromPoint);
+    if (times === undefined) conflictsByPoint.set(interval.fromPoint, [interval.conflictAtMs]);
+    else times.push(interval.conflictAtMs);
+  }
+
   let path = "";
   let open = false;
   for (let index = 0; index < points.length; index += 1) {
@@ -104,8 +115,22 @@ export function buildUsageStepGeometry(input: {
       // The previous observed link already extended the horizontal run here.
       path += ` L ${coordinate(startX)} ${coordinate(y)}`;
     }
-    if (endX > startX + 0.005) path += ` L ${coordinate(endX)} ${coordinate(y)}`;
-    if (endX - startX < 0.5) isolated.push({ x: endX, y });
+    const conflictTimes = conflictsByPoint.get(index);
+    if (conflictTimes === undefined) {
+      if (endX > startX + 0.005) path += ` L ${coordinate(endX)} ${coordinate(y)}`;
+      if (endX - startX < 0.5) isolated.push({ x: endX, y });
+    } else {
+      // End the trustworthy path at the measured endpoint; do not draw the
+      // uncertain flat span. A path that never left its start is not solid.
+      if (open && path.includes(" L ")) solidPaths.push(path);
+      open = false;
+      path = "";
+      isolated.push({ x: startX, y });
+      if (endX > startX + 0.005) isolated.push({ x: endX, y });
+      for (const atMs of conflictTimes) {
+        markers.push({ x: xAt(atMs), atMs, boundary: "uncertain", between: false });
+      }
+    }
 
     const link = links[index];
     if (!link) {
@@ -118,6 +143,10 @@ export function buildUsageStepGeometry(input: {
       const next = points[index + 1];
       if (next) {
         const nextX = xAt(next.startMs);
+        if (!open) {
+          path = `M ${coordinate(endX)} ${coordinate(y)}`;
+          open = true;
+        }
         if (nextX > endX + 0.005) path += ` L ${coordinate(nextX)} ${coordinate(y)}`;
       }
       continue;

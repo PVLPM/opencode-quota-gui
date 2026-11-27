@@ -616,6 +616,7 @@ export function createUsageSnapshotBuilder(
             label: plan.cardRow?.label ?? plan.series.label,
             ...(plan.metric !== undefined ? { metric: plan.metric } : {}),
             measurement: plan.series.measurement,
+            source: plan.series.source,
             points: usagePointsFromRuns(group.runsBySeries.get(plan.series.rowId) ?? []),
             ...(conflicts !== undefined ? { conflicts } : {}),
           },
@@ -816,6 +817,7 @@ export function createUsageSnapshotBuilder(
           attributedBurnPercentPoints: interval.attributedBurnPercentPoints,
           unattributedBurnPercentPoints: interval.unattributedBurnPercentPoints,
           ...(reason !== undefined ? { unattributedReason: reason } : {}),
+          ...(original?.conflictAtMs !== undefined ? { conflictAtMs: original.conflictAtMs } : {}),
           activity: [
             ...interval.activity.map((entry) => toUsageActivity(entry, account.source, index)),
             ...importedActivity,
