@@ -199,6 +199,8 @@ export type OpenAIResult =
       success: true;
       label: string;
       email?: string;
+      /** Response receipt time of this account's request (provider observation time). */
+      observedAtMs?: number;
       windows: {
         hourly?: OpenAIWindowValue;
         weekly?: OpenAIWindowValue;
@@ -574,6 +576,7 @@ export async function queryOpenAIQuota(
               success: true,
               label: derivePlanLabel(data.plan_type),
               email: resolvedAuth.email,
+              observedAtMs,
               windows,
               credits: mappedCredits,
               ...(availableResetCount !== null

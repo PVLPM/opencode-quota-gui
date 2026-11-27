@@ -18,8 +18,8 @@ import type { CostedTokens } from "../contracts/dashboard.js";
 import type { UsageBreakdownRow, UsageLink, UsageUnattributedReason } from "../contracts/usage.js";
 import type { UsageActivityInterval } from "../contracts/usage-activity.js";
 import {
+  type CanonicalQuotaProviderId,
   getQuotaProviderRegistration,
-  getQuotaProviderRuntimeIds,
 } from "../lib/provider-metadata.js";
 import { modelIncludesAny } from "../lib/provider-model-matching.js";
 
@@ -71,9 +71,123 @@ export interface UsageAttributionResult {
   breakdown: UsageBreakdownRow[];
 }
 
-/** Quota card provider id -> OpenCode runtime provider ids. */
-export function quotaProviderRuntimeIds(quotaProviderId: string): readonly string[] {
-  return getQuotaProviderRuntimeIds(quotaProviderId);
+/**
+ * Attribution billing scope per quota provider, reviewed against the provider
+ * sources. These are the runtime provider ids whose activity bills that card;
+ * they are deliberately not the broader discovery/availability aliases
+ * (`getQuotaProviderRuntimeIds`) because a discovery alias can route several
+ * providers or a non-plan API. Unknown ids are never attributed.
+ *
+ * Sources: `src/lib/provider-registration.ts` (row contracts),
+ * `src/providers/*.ts` `matchesCurrentModel`, and `docs/readme/providers.md`.
+ */
+const ATTRIBUTION_RUNTIME_IDS: Readonly<Record<CanonicalQuotaProviderId, readonly string[]>> = {
+  anthropic: ["anthropic"],
+  "claude-agent": ["claude-agent", "claude-code"],
+  copilot: ["copilot", "github-copilot", "copilot-chat", "github-copilot-chat"],
+  openai: ["openai", "chatgpt", "codex"],
+  openrouter: ["openrouter"],
+  kilo: ["kilo"],
+  cursor: ["cursor", "cursor-acp"],
+  "alibaba-coding-plan": ["alibaba-coding-plan"],
+  "alibaba-token-plan": ["alibaba-token-plan"],
+  synthetic: ["synthetic"],
+  chutes: ["chutes", "chutes-ai"],
+  // Generic `google` is a discovery alias that can serve non-Gemini routes, so
+  // it is not billing evidence for a Gemini Code Assist plan.
+  "google-gemini-cli": ["google-gemini-cli", "gemini-cli", "gemini", "opencode-gemini-auth"],
+  "google-agy": ["google-agy", "opencode-agy-auth", "google-agy-auth"],
+  zai: ["zai", "glm", "zai-coding-plan"],
+  zhipu: ["zhipu", "glm-coding-plan", "zhipu-coding-plan", "zhipuai-coding-plan"],
+  nanogpt: ["nanogpt", "nano-gpt"],
+  // `minimax` is claimed by the global registration and conditionally by the CN
+  // provider (`minimax-coding-plan.ts` matches provider `minimax` when the CN
+  // plan is explicitly enabled), so neither card may claim it.
+  "minimax-coding-plan": ["minimax-coding-plan"],
+  "minimax-china-coding-plan": [
+    "minimax-china-coding-plan",
+    "minimax-cn-coding-plan",
+    "minimax-cn",
+    "minimax-china",
+  ],
+  "kimi-code-plan-global": ["kimi-code-plan-global"],
+  "kimi-code-plan-cn": ["kimi-code-plan-cn", "kimi-for-coding", "kimi", "kimi-code"],
+  deepseek: ["deepseek"],
+  xai: ["xai"],
+  xiaomi: ["xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp"],
+  "opencode-go": ["opencode-go"],
+  opencode: ["opencode", "opencode-zen"],
+  "ollama-cloud": ["ollama-cloud"],
+  "quota-providers": [],
+};
+
+interface AttributionRowRule {
+  /** Extra model scope; absent = every model of the eligible providers. */
+  modelFragments?: readonly string[];
+  /** This row's quota is not consumed by the account's model activity. */
+  unattributable?: true;
+}
+
+/** Row-specific overrides keyed by `${quotaProviderId}\0${baseRowKey}`. */
+const ATTRIBUTION_ROW_RULES: Readonly<Record<string, AttributionRowRule>> = {
+  // Code Review has its own product quota, not the ChatGPT/Codex windows.
+  "openai\u0000window:code_review": { unattributable: true },
+  // Fable weekly is the only model-scoped Claude Agent window.
+  "claude-agent\u0000named:Fable weekly": { modelFragments: ["fable"] },
+  // AGY reports one family row per model family (`agyBucketRowKey`).
+  "google-agy\u0000named:Gemini Models weekly": { modelFragments: ["gemini"] },
+  "google-agy\u0000named:Gemini Models 5h": { modelFragments: ["gemini"] },
+  "google-agy\u0000named:Claude and GPT models weekly": { modelFragments: ["claude", "gpt"] },
+  "google-agy\u0000named:Claude and GPT models 5h": { modelFragments: ["claude", "gpt"] },
+};
+
+/** AGY rows are family rows; an unrecognized family has unknown billing scope. */
+const ROW_SCOPED_PROVIDERS: ReadonlySet<CanonicalQuotaProviderId> = new Set(["google-agy"]);
+
+export interface UsageAttributionScope {
+  /** False when the row's billing scope cannot be proven; never attribute then. */
+  known: boolean;
+  /** Runtime provider ids whose activity bills this row. */
+  providerIds: readonly string[];
+  /** Model-family narrowing; absent = every model is eligible. */
+  isEligibleModel?: (modelId: string) => boolean;
+}
+
+const UNKNOWN_ATTRIBUTION_SCOPE: UsageAttributionScope = { known: false, providerIds: [] };
+
+/** Stored row keys end with `|<resultType>:<kind>`; rules use the base row key. */
+function baseRowKey(rowKey: string): string {
+  const discriminator = rowKey.lastIndexOf("|");
+  return discriminator >= 0 ? rowKey.slice(0, discriminator) : rowKey;
+}
+
+/**
+ * Billing scope for one quota row. Keyed by (quotaProviderId, rowKey), never by
+ * a discovered runtime-id list. An unknown provider, an unknown family row or
+ * an explicitly non-attributable window returns `known: false` with no ids.
+ */
+export function attributionScopeForRow(
+  quotaProviderId: string,
+  rowKey: string,
+): UsageAttributionScope {
+  const registration = getQuotaProviderRegistration(quotaProviderId);
+  if (registration === undefined) return UNKNOWN_ATTRIBUTION_SCOPE;
+  const providerId = registration.id;
+  const rule = ATTRIBUTION_ROW_RULES[`${providerId}\u0000${baseRowKey(rowKey)}`];
+  if (rule?.unattributable === true) return UNKNOWN_ATTRIBUTION_SCOPE;
+  if (rule === undefined && ROW_SCOPED_PROVIDERS.has(providerId)) {
+    return UNKNOWN_ATTRIBUTION_SCOPE;
+  }
+  const providerIds = ATTRIBUTION_RUNTIME_IDS[providerId];
+  if (providerIds.length === 0) return UNKNOWN_ATTRIBUTION_SCOPE;
+  const fragments = rule?.modelFragments;
+  return {
+    known: true,
+    providerIds,
+    ...(fragments !== undefined
+      ? { isEligibleModel: (modelId: string) => modelIncludesAny(modelId, fragments) }
+      : {}),
+  };
 }
 
 export interface UsageNamedWindowEligibility {
@@ -159,6 +273,11 @@ function attributeInterval(
   });
   if (interval.link === "unobserved") return unattributed("unobserved-interval");
   if (!interval.soleObservedAccount) return unattributed("ambiguous-account");
+  // A matching-provider step without a model id has positive tokens but no way
+  // to be priced or weighted, so the burn cannot be complete.
+  if ((activity.unidentifiedSteps ?? 0) > 0 || (activity.unidentifiedTokens ?? 0) > 0) {
+    return unattributed("unidentified-activity");
+  }
   if (reported.length === 0) return unattributed("no-activity");
   if (eligible.length === 0) return unattributed("zero-weight");
   if (!eligible.every((entry) => isFullyPriced(entry.tokens))) return unattributed("unpriced");
@@ -167,7 +286,9 @@ function attributeInterval(
   for (const entry of eligible) {
     totalWeight += Math.max(0, entry.tokens.apiEquivalentCostUsd ?? 0);
   }
-  if (!(totalWeight > 0)) return unattributed("zero-weight");
+  if (!Number.isFinite(totalWeight) || !(totalWeight > 0)) {
+    return unattributed("zero-weight");
+  }
 
   return {
     ...result,
@@ -175,7 +296,7 @@ function attributeInterval(
     activity: eligible.map((entry) => ({
       ...entry,
       estimatedBurnPercentPoints:
-        (burn * Math.max(0, entry.tokens.apiEquivalentCostUsd ?? 0)) / totalWeight,
+        burn * (Math.max(0, entry.tokens.apiEquivalentCostUsd ?? 0) / totalWeight),
     })),
   };
 }
@@ -201,6 +322,9 @@ interface TokenTotal {
   tokens: CostedTokens;
   stepCount: number;
   estimatedBurnPercentPoints?: number;
+}
+
+interface ModelTokenTotal extends TokenTotal {
   efforts: Map<string | undefined, TokenTotal>;
 }
 
@@ -239,7 +363,11 @@ function addCostedTokens(target: CostedTokens, source: CostedTokens): void {
 }
 
 function createTokenTotal(): TokenTotal {
-  return { tokens: emptyCostedTokens(), stepCount: 0, efforts: new Map() };
+  return { tokens: emptyCostedTokens(), stepCount: 0 };
+}
+
+function createModelTokenTotal(): ModelTokenTotal {
+  return { ...createTokenTotal(), efforts: new Map() };
 }
 
 function addEntryToTotal(total: TokenTotal, entry: UsageAttributionEntry): void {
@@ -248,17 +376,6 @@ function addEntryToTotal(total: TokenTotal, entry: UsageAttributionEntry): void 
   if (entry.estimatedBurnPercentPoints !== undefined) {
     total.estimatedBurnPercentPoints =
       (total.estimatedBurnPercentPoints ?? 0) + entry.estimatedBurnPercentPoints;
-  }
-  let effort = total.efforts.get(entry.effort);
-  if (effort === undefined) {
-    effort = createTokenTotal();
-    total.efforts.set(entry.effort, effort);
-  }
-  addCostedTokens(effort.tokens, entry.tokens);
-  effort.stepCount += entry.stepCount;
-  if (entry.estimatedBurnPercentPoints !== undefined) {
-    effort.estimatedBurnPercentPoints =
-      (effort.estimatedBurnPercentPoints ?? 0) + entry.estimatedBurnPercentPoints;
   }
 }
 
@@ -274,16 +391,26 @@ function compareIds(a: string, b: string): number {
 export function buildUsageAttributionBreakdown(
   intervals: readonly UsageAttributionInterval[],
 ): UsageBreakdownRow[] {
-  const models = new Map<string, TokenTotal & { providerId: string; modelId: string }>();
+  const models = new Map<string, ModelTokenTotal & { providerId: string; modelId: string }>();
   for (const interval of intervals) {
     for (const entry of interval.activity) {
       const key = `${entry.providerId}\u0000${entry.modelId}`;
       let model = models.get(key);
       if (model === undefined) {
-        model = { ...createTokenTotal(), providerId: entry.providerId, modelId: entry.modelId };
+        model = {
+          ...createModelTokenTotal(),
+          providerId: entry.providerId,
+          modelId: entry.modelId,
+        };
         models.set(key, model);
       }
       addEntryToTotal(model, entry);
+      let effort = model.efforts.get(entry.effort);
+      if (effort === undefined) {
+        effort = createTokenTotal();
+        model.efforts.set(entry.effort, effort);
+      }
+      addEntryToTotal(effort, entry);
     }
   }
 

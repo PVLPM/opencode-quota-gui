@@ -3,8 +3,8 @@ import type { CostedTokens } from "../src/contracts/dashboard.js";
 import type { UsageActivityEntry, UsageActivityInterval } from "../src/contracts/usage-activity.js";
 import {
   attributeUsageWindow,
+  attributionScopeForRow,
   modelEligibilityForNamedWindow,
-  quotaProviderRuntimeIds,
   type UsageAttributionIntervalInput,
 } from "../src/gui/usage-attribution.js";
 
@@ -31,6 +31,12 @@ function activity(
   startMs: number,
   endMs: number,
   entries: UsageActivityEntry[],
+  counts: Partial<
+    Pick<
+      UsageActivityInterval,
+      "unidentifiedTokens" | "unidentifiedSteps" | "unmatchedTokens" | "unmatchedSteps"
+    >
+  > = {},
 ): UsageActivityInterval {
   return {
     startMs,
@@ -44,6 +50,10 @@ function activity(
     ),
     unpricedTokens: entries.reduce((sum, entry) => sum + entry.tokens.unpricedTokens, 0),
     unknownTokens: entries.reduce((sum, entry) => sum + entry.tokens.unknownTokens, 0),
+    unidentifiedTokens: counts.unidentifiedTokens ?? 0,
+    unidentifiedSteps: counts.unidentifiedSteps ?? 0,
+    unmatchedTokens: counts.unmatchedTokens ?? 0,
+    unmatchedSteps: counts.unmatchedSteps ?? 0,
   };
 }
 
@@ -138,6 +148,70 @@ describe("usage attribution D7", () => {
     expect(first?.activity[1]?.tokens.total).toBe(100);
   });
 
+  it("leaves burn unattributed when a matching provider step has no model identity", () => {
+    const result = attributeUsageWindow({
+      intervals: [interval()],
+      activity: [
+        activity(
+          0,
+          1_000,
+          [{ providerId: "openai", modelId: "gpt-5", tokens: costed(100, 1), stepCount: 1 }],
+          { unidentifiedTokens: 250, unidentifiedSteps: 1 },
+        ),
+      ],
+      providerIds: ["openai"],
+    });
+
+    const first = result.intervals[0];
+    expect(first?.unattributedReason).toBe("unidentified-activity");
+    expect(first?.attributedBurnPercentPoints).toBe(0);
+    expect(first?.unattributedBurnPercentPoints).toBe(10);
+    expect(first?.activity).toHaveLength(1);
+    expect(first?.activity[0]?.estimatedBurnPercentPoints).toBeUndefined();
+  });
+
+  it("does not let unidentified steps hide behind an empty entry list", () => {
+    const result = attributeUsageWindow({
+      intervals: [interval()],
+      activity: [activity(0, 1_000, [], { unidentifiedTokens: 250, unidentifiedSteps: 1 })],
+      providerIds: ["openai"],
+    });
+
+    expect(result.intervals[0]?.unattributedReason).toBe("unidentified-activity");
+    expect(result.intervals[0]?.unattributedBurnPercentPoints).toBe(10);
+  });
+
+  it("rejects a non-finite summed weight instead of dividing by it", () => {
+    const result = attributeUsageWindow({
+      intervals: [interval()],
+      activity: [
+        activity(0, 1_000, [
+          {
+            providerId: "openai",
+            modelId: "gpt-5",
+            tokens: costed(1, Number.MAX_VALUE),
+            stepCount: 1,
+          },
+          {
+            providerId: "openai",
+            modelId: "o3",
+            tokens: costed(1, Number.MAX_VALUE),
+            stepCount: 1,
+          },
+        ]),
+      ],
+      providerIds: ["openai"],
+    });
+
+    expect(result.intervals[0]?.unattributedReason).toBe("zero-weight");
+    expect(result.intervals[0]?.attributedBurnPercentPoints).toBe(0);
+    expect(
+      result.intervals[0]?.activity.every(
+        (entry) => entry.estimatedBurnPercentPoints === undefined,
+      ),
+    ).toBe(true);
+  });
+
   it("treats an all-free priced interval as zero weight", () => {
     const result = attributeUsageWindow({
       intervals: [interval()],
@@ -209,6 +283,7 @@ describe("usage attribution D7", () => {
   });
 
   it("attributes activity across every runtime id of the card's provider", () => {
+    const scope = attributionScopeForRow("claude-agent", "window:five_hour|quota:percent");
     const result = attributeUsageWindow({
       intervals: [interval()],
       activity: [
@@ -228,7 +303,7 @@ describe("usage attribution D7", () => {
           { providerId: "openai", modelId: "gpt-5", tokens: costed(900, 9), stepCount: 1 },
         ]),
       ],
-      providerIds: quotaProviderRuntimeIds("claude-agent"),
+      providerIds: scope.providerIds,
     });
 
     const first = result.intervals[0];
@@ -350,16 +425,62 @@ describe("usage attribution breakdown", () => {
   });
 });
 
-describe("quota provider runtime id mapping", () => {
-  it("maps canonical and synonymous quota ids to registration runtime ids", () => {
-    expect(quotaProviderRuntimeIds("claude-agent")).toEqual(["claude-agent", "claude-code"]);
-    expect(quotaProviderRuntimeIds("github-copilot")).toEqual([
-      "copilot",
-      "github-copilot",
-      "copilot-chat",
-      "github-copilot-chat",
-    ]);
-    expect(quotaProviderRuntimeIds("not-a-provider")).toEqual([]);
+describe("quota provider attribution scope", () => {
+  it("maps a known row to the card's billing runtime ids", () => {
+    expect(attributionScopeForRow("claude-agent", "window:five_hour|quota:percent")).toEqual({
+      known: true,
+      providerIds: ["claude-agent", "claude-code"],
+    });
+    expect(attributionScopeForRow("github-copilot", "window:month|quota:percent")).toEqual({
+      known: true,
+      providerIds: ["copilot", "github-copilot", "copilot-chat", "github-copilot-chat"],
+    });
+    expect(attributionScopeForRow("not-a-provider", "window:week|quota:percent").known).toBe(false);
+  });
+
+  it("never awards the shared minimax runtime id to either MiniMax card", () => {
+    for (const providerId of ["minimax-coding-plan", "minimax-china-coding-plan"]) {
+      const scope = attributionScopeForRow(providerId, "window:five_hour|quota:percent");
+      expect(scope.known).toBe(true);
+      expect(scope.providerIds).not.toContain("minimax");
+    }
+  });
+
+  it("does not attribute the OpenAI Code Review window", () => {
+    expect(attributionScopeForRow("openai", "window:code_review|rate_limit:percent").known).toBe(
+      false,
+    );
+    expect(attributionScopeForRow("openai", "window:week|rate_limit:percent")).toEqual({
+      known: true,
+      providerIds: ["openai", "chatgpt", "codex"],
+    });
+  });
+
+  it("narrows AGY family rows to their model families and rejects unknown families", () => {
+    const gemini = attributionScopeForRow("google-agy", "named:Gemini Models weekly|quota:percent");
+    expect(gemini.known).toBe(true);
+    expect(gemini.providerIds).toEqual(["google-agy", "opencode-agy-auth", "google-agy-auth"]);
+    expect(gemini.isEligibleModel?.("gemini-2.5-pro")).toBe(true);
+    expect(gemini.isEligibleModel?.("claude-sonnet-4-5")).toBe(false);
+
+    const claudeGpt = attributionScopeForRow(
+      "google-agy",
+      "named:Claude and GPT models 5h|quota:percent",
+    );
+    expect(claudeGpt.isEligibleModel?.("claude-sonnet-4-5")).toBe(true);
+    expect(claudeGpt.isEligibleModel?.("gpt-5")).toBe(true);
+    expect(claudeGpt.isEligibleModel?.("gemini-2.5-pro")).toBe(false);
+
+    expect(
+      attributionScopeForRow("google-agy", "named:Mystery Models 5h|quota:percent").known,
+    ).toBe(false);
+  });
+
+  it("keeps Fable scoped to its family through the row table", () => {
+    const scope = attributionScopeForRow("claude-agent", "named:Fable weekly|quota:percent");
+    expect(scope.known).toBe(true);
+    expect(scope.isEligibleModel?.("claude-fable-5")).toBe(true);
+    expect(scope.isEligibleModel?.("claude-sonnet-4-5")).toBe(false);
   });
 
   it("recognizes Fable as the model-scoped named window for the Anthropic family", () => {
