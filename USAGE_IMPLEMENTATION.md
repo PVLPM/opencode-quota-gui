@@ -15,7 +15,7 @@ Branch `feat/v1.4.0`, base `main@8c0aad2e` (v1.3.3).
 | A | Investigation, contracts, plan | done (this file) |
 | B | Observation store + polling capture | pending |
 | C | Effort on owned steps + interval activity query + attribution | pending |
-| D | Claude Code / Codex opt-in import + dedupe | pending |
+| D | Claude Code / Codex opt-in import + dedupe | part 1: privacy-minimal parsers/readers; settings + store wiring pending |
 | E | Usage navigation, charts, inspection, breakdown (browser + native) | pending |
 | F | Integration, benchmarks, review, screenshots, draft PR | pending |
 
@@ -138,6 +138,14 @@ Claude Agent invocations that also write Claude Code transcripts are excluded
 from import when the shared identifier links them; otherwise kept as a
 separate source and never merged into a "complete" attribution.
 
+D10.1 implementation notes: Codex uses only `token_count` totals (per-delta;
+`token_usage_record` is ignored to avoid double counting; a total decrease uses
+`last_token_usage`). Claude Code groups identical `message.id + requestId`
+lines by per-counter maximum. Only hashed thread/session/message identifiers
+and file-cursor keys are persisted. Discovery reads plain `.jsonl` rollouts
+(`sessions/`, `archived_sessions/`) and Claude `projects/` recursively; Codex
+`.jsonl.zst` archives are not decompressed.
+
 ### D11 No new traffic
 Capture hooks into the existing `createDelegatingSource.quota` observation
 path next to the notification observer. No provider request is added, and
@@ -156,3 +164,7 @@ Usage reads never trigger provider polling.
 ## Progress log
 
 - A: investigation complete; plan recorded.
+- D1: privacy-minimal Claude Code and Codex history parsers plus incremental
+  readers added (`src/lib/{codex-history,claude-code-history,usage-import,
+  claude-transcript-usage}.ts`). Settings flags, store writes and cross-harness
+  exclusion wiring remain with the integration lane.
