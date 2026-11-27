@@ -126,7 +126,15 @@ export type CodexRolloutLine =
       /** sha256 of `creator_account_id` when recorded. */
       accountHint?: string;
     }
-  | { kind: "turn-context"; model?: string; effort?: string }
+  | {
+      kind: "turn-context";
+      model?: string;
+      /** Present when the transcript carried a model that failed sanitization. */
+      modelRejected?: true;
+      effort?: string;
+      /** Present when the transcript carried an effort that failed sanitization. */
+      effortRejected?: true;
+    }
   | {
       kind: "token-count";
       atMs?: number;
@@ -234,7 +242,13 @@ export function parseCodexRolloutLine(line: string): CodexRolloutLine | undefine
     return {
       kind: "turn-context",
       ...(model === undefined ? {} : { model }),
+      ...(payload.model !== undefined && model === undefined
+        ? { modelRejected: true as const }
+        : {}),
       ...(effort === undefined ? {} : { effort }),
+      ...(payload.effort !== undefined && effort === undefined
+        ? { effortRejected: true as const }
+        : {}),
     };
   }
 
@@ -432,8 +446,12 @@ function applyCodexLine(line: string, state: CodexParseState, sink: CodexBatchSi
     return;
   }
   if (parsed.kind === "turn-context") {
-    if (parsed.model !== undefined) state.model = parsed.model;
-    if (parsed.effort !== undefined) state.effort = parsed.effort;
+    // A present-but-rejected value is evidence that the previous identity no
+    // longer applies: clear it. Only an absent field carries forward.
+    if (parsed.modelRejected === true) state.model = undefined;
+    else if (parsed.model !== undefined) state.model = parsed.model;
+    if (parsed.effortRejected === true) state.effort = undefined;
+    else if (parsed.effort !== undefined) state.effort = parsed.effort;
     return;
   }
   if (parsed.atMs === undefined || state.threadKey === undefined) return;

@@ -146,7 +146,12 @@ describe("parseCodexRolloutLine", () => {
     });
 
     const sensitive = parseCodexRolloutLine(turnContext(SECRET_MODEL, SECRET_EFFORT).trim());
-    expect(sensitive).toEqual({ kind: "turn-context" });
+    // A present-but-rejected value is reported as a rejection, never echoed.
+    expect(sensitive).toEqual({
+      kind: "turn-context",
+      modelRejected: true,
+      effortRejected: true,
+    });
     expect(JSON.stringify(sensitive)).not.toContain(SECRET_MODEL);
     expect(JSON.stringify(sensitive)).not.toContain(SECRET_EFFORT);
 
@@ -222,6 +227,28 @@ describe("readCodexHistory", () => {
     await writeFile(path, content);
     return path;
   }
+
+  it("clears a previous turn context when a new one carries rejected values", async () => {
+    await writeRollout(
+      sessionMeta() +
+        turnContext("gpt-5", "high") +
+        tokenCount(SECOND, counters(), { ordinal: 1 }) +
+        turnContext(SECRET_MODEL, SECRET_EFFORT) +
+        tokenCount(
+          THIRD,
+          counters({ input_tokens: 2000, cached_input_tokens: 800, total_tokens: 2600 }),
+          { ordinal: 2 },
+        ),
+    );
+    const batch = await readCodexHistory({ root });
+    const invocations = batch.threads[0]?.invocations ?? [];
+    expect(invocations).toHaveLength(2);
+    expect(invocations[0]).toMatchObject({ model: "gpt-5", effort: "high" });
+    // Present-but-rejected evidence must not inherit the previous identity:
+    // the model is sanitized to the `unknown` sentinel and effort disappears.
+    expect(invocations[1]?.model).toBe("unknown");
+    expect(invocations[1]?.effort).toBeUndefined();
+  });
 
   it("uses cumulative token_count deltas, skips repeats, and handles a baseline decrease", async () => {
     await writeRollout(

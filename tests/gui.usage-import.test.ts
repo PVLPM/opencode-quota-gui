@@ -20,7 +20,7 @@ import {
 } from "../src/gui/quota-observation.js";
 import { createUsageRecorder, type UsageRecorder } from "../src/gui/usage-recorder.js";
 import { openOpenCodeSqliteReadOnly } from "../src/lib/opencode-sqlite.js";
-import { hashUsageImport } from "../src/lib/usage-import.js";
+import { hashUsageImport, sanitizeUsageImportModelId } from "../src/lib/usage-import.js";
 import { openUsageStore, type UsageStore } from "../src/lib/usage-store.js";
 
 const BASE = Date.parse("2026-11-01T10:00:00.000Z");
@@ -521,7 +521,7 @@ describe("usage import", () => {
     ]);
     const account = `codex-import:${hashUsageImport("codex-account", CODEX_ACCOUNT)}`;
     expect(imported.every((series) => series.cardId === account)).toBe(true);
-    expect(imported.every((series) => series.providerId === "openai")).toBe(true);
+    expect(imported.every((series) => series.providerId === "codex-import")).toBe(true);
     expect(imported.every((series) => series.measurement === "provider-observed")).toBe(true);
 
     const fiveHour = imported.find((series) => series.rowKey === "window:five_hour");
@@ -777,5 +777,18 @@ describe("usage import", () => {
     } finally {
       reader.close();
     }
+  });
+});
+
+describe("imported model id recognition", () => {
+  it("accepts only model ids the pricing catalog knows", () => {
+    // A transcript may carry any string; the persisted identity must be a
+    // catalog id so analytics pricing and model keys stay sound.
+    expect(sanitizeUsageImportModelId("gpt-5")).toBe("gpt-5");
+    expect(sanitizeUsageImportModelId("claude-sonnet-4-5")).toBe("claude-sonnet-4-5");
+    expect(sanitizeUsageImportModelId("projects/private.jsonl")).toBeUndefined();
+    expect(sanitizeUsageImportModelId("model-0123456789abcdef")).toBeUndefined();
+    expect(sanitizeUsageImportModelId("sk-SECRET-model")).toBeUndefined();
+    expect(sanitizeUsageImportModelId(undefined)).toBeUndefined();
   });
 });

@@ -3,6 +3,8 @@ import { constants, type Dirent } from "node:fs";
 import { open, readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { listProvidersForModelId } from "./modelsdev-pricing.js";
+
 /** Token counters shared by imported harnesses; `input` is fresh (non-cached) input. */
 export interface UsageImportTokens {
   input: number;
@@ -68,16 +70,29 @@ export function sanitizeUsageImportEffort(value: unknown): string | undefined {
   return typeof value === "string" && USAGE_IMPORT_EFFORTS.has(value) ? value : undefined;
 }
 
-/** Conservative model-id shape: no whitespace, backslash, `@`, URL or path. */
+/**
+ * Conservative model-id shape: no whitespace, backslash, `@`, URL or path. The
+ * shape alone is not enough: a relative path such as `projects/private.jsonl`
+ * fits it. Recognition is therefore decided by the pricing catalog below.
+ */
 const IMPORTED_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._:/-]{0,63}$/i;
 const IMPORTED_CREDENTIAL_LIKE = /^(?:sk|pk|rk)[-_]|^(?:gh[pousr]_|github_pat_|xox[abposr]-)|^AKIA/;
 
+/**
+ * True only for a model id the pricing engine knows (in any provider). A
+ * transcript-controlled string that merely looks like a model id, including a
+ * relative path or opaque identifier, must never be persisted.
+ */
+export function isRecognizedUsageImportModelId(value: string): boolean {
+  if (!IMPORTED_MODEL_ID_PATTERN.test(value)) return false;
+  if (IMPORTED_CREDENTIAL_LIKE.test(value)) return false;
+  if (/^[a-z]:[\\/]/i.test(value) || value.includes("..") || value.includes("://")) return false;
+  return listProvidersForModelId(value).length > 0;
+}
+
 export function sanitizeUsageImportModelId(value: unknown): string | undefined {
-  if (typeof value !== "string" || !IMPORTED_MODEL_ID_PATTERN.test(value)) return undefined;
-  if (IMPORTED_CREDENTIAL_LIKE.test(value)) return undefined;
-  if (/^[a-z]:[\\/]/i.test(value) || value.includes("..") || value.includes("://"))
-    return undefined;
-  return value;
+  if (typeof value !== "string") return undefined;
+  return isRecognizedUsageImportModelId(value) ? value : undefined;
 }
 
 /** Opaque cursor key for a transcript path; the raw path is never persisted. */
