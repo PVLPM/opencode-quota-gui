@@ -31,6 +31,7 @@ import {
   SYNTHETIC_PROVIDER_LABEL,
   seedSyntheticFixture,
 } from "./fixtures/synthetic-gui-dashboard.mjs";
+import { buildSyntheticUsageSnapshot } from "./fixtures/synthetic-usage.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -139,6 +140,9 @@ export async function startSyntheticDashboard(options = {}) {
         return providerId;
       },
     });
+    // Usage history is synthetic and deterministic: the smoke never reads real
+    // observation history, and the read stays local (no provider request).
+    source.usage = async (input) => buildSyntheticUsageSnapshot({ range: input.range, nowMs });
     const port = options.port ?? modules.types.DEFAULT_DASHBOARD_PORT;
     // Mirror the lifecycle-owned runtime: one shared snapshot service per host,
     // handed to the HTTP transport rather than constructed inside it.
