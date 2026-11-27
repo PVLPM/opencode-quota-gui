@@ -85,6 +85,7 @@ describe("contract layer import rules", () => {
       "src/contracts/settings.ts",
       "src/contracts/temporal.ts",
       "src/contracts/time-zone.ts",
+      "src/contracts/usage-activity.ts",
       "src/contracts/usage.ts",
     ]);
   });
