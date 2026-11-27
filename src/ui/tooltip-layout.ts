@@ -58,6 +58,30 @@ export function placeChartTooltip(input: {
   };
 }
 
+export function chartTooltipStyle(position: {
+  left: number;
+  top: number;
+  maxWidth: number;
+  maxHeight: number;
+  visible: boolean;
+}): {
+  left: string;
+  top: string;
+  "min-width": string;
+  "max-width": string;
+  "max-height": string;
+  visibility: "visible" | "hidden";
+} {
+  return {
+    left: `${position.left}px`,
+    top: `${position.top}px`,
+    "min-width": `min(280px, ${position.maxWidth}px)`,
+    "max-width": `${position.maxWidth}px`,
+    "max-height": `${position.maxHeight}px`,
+    visibility: position.visible ? "visible" : "hidden",
+  };
+}
+
 export function createChartTooltipLayout(anchor: () => number, gap?: () => number) {
   const [position, setPosition] = createSignal({
     left: 0,

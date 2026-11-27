@@ -1,5 +1,6 @@
 import type { Bucket, SessionSnapshot, TokenStack } from "../contracts/dashboard";
 import { type CategoryDescriptor, TOKEN_CATEGORIES } from "./format";
+import { plotRect } from "./plot-rect";
 import { stepCacheReuse } from "./session-gaps";
 
 /**
@@ -96,19 +97,6 @@ export interface UsageGeometry {
   /** Left edge pixel of a bucket slot; the hit areas use these. */
   slotX: (index: number) => number;
   bucketIndexAt: (x: number) => number;
-}
-
-function plotRect(size: ChartSize): PlotRect {
-  const width = Math.max(size.width - size.padding.left - size.padding.right, 1);
-  const height = Math.max(size.height - size.padding.top - size.padding.bottom, 1);
-  return {
-    left: size.padding.left,
-    top: size.padding.top,
-    width,
-    height,
-    bottom: size.padding.top + height,
-    right: size.padding.left + width,
-  };
 }
 
 /** Round tick steps: 1/2/5 × 10ⁿ, so axis labels stay readable. */
