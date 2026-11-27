@@ -57,14 +57,19 @@ JSON + lock files (existing convention) are unsuitable for indefinitely
 growing, range-queried history. No retention cutoff, no deletion.
 
 Durability: `synchronous = NORMAL` in WAL means a process crash loses nothing
-already committed, but a sudden power loss may lose the most recent commits
-(at most the last poll cycle). That is an accepted trade-off for local quota
+already committed, but a sudden power loss may lose recent committed
+transactions. The exact number is not bounded to one poll cycle: losses depend
+on the OS, the filesystem and when WAL checkpoints complete, so several
+collected cycles can be lost. That is an accepted trade-off for local quota
 history: it avoids one fsync per cycle. `busy_timeout` is applied before the
 `journal_mode = WAL` switch so opening a database another process is writing
-never blocks on the default multi-second timeout; the recorder uses a 250 ms
-timeout and carries a small bounded number of cycles over to the next
-observation instead of blocking the host event loop. A failed open is retried
-on a later observation, and a failed setup closes the handle.
+does not wait on the default multi-second timeout. The recorder uses a 250 ms
+timeout and carries a small bounded number of cycles over to a later
+observation. This is a bounded synchronous wait, not nonblocking: a contended
+open or write can still stall the host event loop for up to that timeout, which
+is why it is kept short. A failed open is retried on a later observation, and a
+failed setup closes the handle. Dashboard reads use the same 250 ms read-only
+timeout and never trigger a provider request.
 
 Windows file permissions: the directory is created with mode 0700, but Windows
 ignores POSIX modes. The database file therefore inherits the ACL of the
