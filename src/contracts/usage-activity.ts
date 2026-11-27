@@ -35,10 +35,23 @@ export interface UsageActivityInterval {
   startMs: number;
   endMs: number;
   entries: UsageActivityEntry[];
-  /** Some reported step has no complete price (unpriced or unknown route). */
+  /** Some reported step cannot be completely priced or identified. */
   incomplete: boolean;
   unpricedTokens: number;
   unknownTokens: number;
+  /**
+   * Positive-token steps of a requested provider whose model id is empty or
+   * unknown. They cannot be priced or attributed; their burn share stays
+   * unattributed as `unidentified-activity`.
+   */
+  unidentifiedTokens?: number;
+  unidentifiedSteps?: number;
+  /**
+   * Positive-token steps with no provider id. They match no requested provider,
+   * so they are reported for transparency but never attributed.
+   */
+  unmatchedTokens?: number;
+  unmatchedSteps?: number;
 }
 
 export interface UsageActivityResult {

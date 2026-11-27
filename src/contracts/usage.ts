@@ -79,7 +79,9 @@ export type UsageUnattributedReason =
   | "ambiguous-account"
   | "unpriced"
   | "zero-weight"
-  | "unobserved-interval";
+  | "unobserved-interval"
+  /** Matching-provider activity exists but has no model identity, so its share cannot be priced. */
+  | "unidentified-activity";
 
 /** One provider/model/effort identity as recorded. `effort` absent = unknown. */
 export interface UsageModelKey {
