@@ -12,7 +12,9 @@
  * - OpenAI Personal: a 5h window whose reset time is unknown ("reset between
  *   observations").
  * - Claude Agent: 5h, Weekly and Fable weekly windows, including a
- *   locally-estimated window and Claude Code imported activity.
+ *   locally-estimated window.
+ * - Imported activity: separate Claude Code and Codex sections, outside every
+ *   quota window and attribution weight.
  */
 const HOUR_MS = 60 * 60 * 1_000;
 const DAY_MS = 24 * HOUR_MS;
@@ -446,8 +448,35 @@ export function buildSyntheticUsageSnapshot({ range, nowMs = Date.now() }) {
       },
       {
         harness: "codex",
-        enabled: false,
-        status: "disabled",
+        enabled: true,
+        lastImportedAtMs: nowMs - HOUR_MS,
+        status: "ok",
+      },
+    ],
+    importedActivity: [
+      {
+        harness: "claude-code",
+        span: { startMs: finite.startMs, endMs: finite.endMs },
+        models: [
+          breakdownRow("anthropic", "claude-sonnet-4-5", TOKENS.sonnet, 2, undefined, [
+            effortTokens(TOKENS.sonnet, 2, undefined),
+          ]),
+        ],
+        totals: TOKENS.sonnet,
+        stepCount: 2,
+        incomplete: false,
+      },
+      {
+        harness: "codex",
+        span: { startMs: finite.startMs, endMs: finite.endMs },
+        models: [
+          breakdownRow("openai", "gpt-5.2-codex", TOKENS.codexHigh, 3, undefined, [
+            effortTokens(TOKENS.codexHigh, 3, undefined, "high"),
+          ]),
+        ],
+        totals: TOKENS.codexHigh,
+        stepCount: 3,
+        incomplete: false,
       },
     ],
   };

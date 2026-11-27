@@ -96,6 +96,20 @@ describe("parseClaudeCodeLine", () => {
     expect(parseClaudeCodeLine(assistant({ isApiErrorMessage: true }).trim())).toBeUndefined();
     expect(parseClaudeCodeLine(assistant({ model: "<synthetic>" }).trim())).toBeUndefined();
   });
+
+  it("replaces a token-like, path-like or whitespace model id with unknown", () => {
+    for (const model of [
+      "sk-SECRET-model",
+      "C:/SECRET/WORKSPACE",
+      "model with spaces",
+      "user@example.com",
+      "claude-sonnet..4",
+    ]) {
+      const parsed = parseClaudeCodeLine(assistant({ model }).trim());
+      expect(parsed?.model).toBe("unknown");
+      expect(JSON.stringify(parsed)).not.toContain(model);
+    }
+  });
 });
 
 describe("readClaudeCodeHistory", () => {

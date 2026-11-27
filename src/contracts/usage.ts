@@ -176,6 +176,24 @@ export interface UsageAccount {
   windows: UsageWindowSeries[];
 }
 
+/**
+ * Activity imported from another harness, read over the requested range and
+ * deliberately independent of quota-window intervals. It is recorded evidence,
+ * never attributed to OpenCode quota burn and never merged into
+ * `UsageWindowSeries.breakdown`.
+ */
+export interface UsageImportedActivity {
+  harness: "claude-code" | "codex";
+  /** Requested span this activity was read over. */
+  span: { startMs: number; endMs: number };
+  /** Model-first totals. `estimatedBurnPercentPoints` is never set here. */
+  models: UsageBreakdownRow[];
+  totals: CostedTokens;
+  stepCount: number;
+  /** Some tokens are unpriced or unknown; any cost is therefore partial. */
+  incomplete: boolean;
+}
+
 export interface UsageSnapshot {
   generatedAtMs: number;
   range: UsageRangeKey;
@@ -191,6 +209,8 @@ export interface UsageSnapshot {
     lastImportedAtMs?: number;
     status: "disabled" | "ok" | "unavailable" | "error";
   }[];
+  /** Priced recorded activity per enabled imported harness, outside attribution. */
+  importedActivity: UsageImportedActivity[];
   /** Activity history unavailable (analytics not ready); quota history still valid. */
   activityUnavailable?: true;
 }

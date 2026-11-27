@@ -69,6 +69,7 @@ import {
   type UsageBoundaryKind,
   type UsageBreakdownRow,
   type UsageCoverage,
+  type UsageImportedActivity,
   type UsageInterval,
   type UsageLink,
   type UsageMeasurementKind,
@@ -762,6 +763,21 @@ function isUsageImport(value: unknown): boolean {
   );
 }
 
+function isUsageImportedActivity(value: unknown): value is UsageImportedActivity {
+  return (
+    isRecord(value) &&
+    isOneOf(value.harness, USAGE_IMPORT_HARNESSES) &&
+    isRecord(value.span) &&
+    isFiniteNumber(value.span.startMs) &&
+    isFiniteNumber(value.span.endMs) &&
+    value.span.endMs >= value.span.startMs &&
+    isArrayOf(value.models, isUsageBreakdownRow) &&
+    isCostedTokens(value.totals) &&
+    isIntegerBetween(value.stepCount, 0, Number.MAX_SAFE_INTEGER) &&
+    isBoolean(value.incomplete)
+  );
+}
+
 /** Strict structural guard for the v1.4.0 usage history payload. */
 export function isUsageSnapshot(value: unknown): value is UsageSnapshot {
   if (
@@ -771,6 +787,7 @@ export function isUsageSnapshot(value: unknown): value is UsageSnapshot {
     !isText(value.timeZone) ||
     !isArrayOf(value.models, isUsageModelKey) ||
     !isArrayOf(value.imports, isUsageImport) ||
+    !isArrayOf(value.importedActivity, isUsageImportedActivity) ||
     !isOptional(value.activityUnavailable, (entry) => entry === true)
   ) {
     return false;

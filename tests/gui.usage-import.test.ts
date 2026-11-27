@@ -39,6 +39,14 @@ const CODEX_THREAD = "thread-SECRET-0001";
 const CODEX_ACCOUNT = "acct-SECRET-0001";
 const CODEX_PROMPT = "SECRET-CODEX-PROMPT";
 const CODEX_PATH = "C:\\SECRET-CODEX-WORKSPACE";
+const CODEX_CLI = "SECRET-CLI-VERSION";
+const CODEX_PROVIDER = "C:\\SECRET-CODEX-PROVIDER";
+const CODEX_LIMIT = "SECRET-LIMIT-ID";
+const CODEX_PLAN = "SECRET-PLAN";
+const CODEX_MODEL = "sk-SECRET-CODEX-MODEL@example.com";
+const CODEX_EFFORT = "SECRET-EFFORT";
+const CODEX_EMAIL = "SECRET-EMAIL@example.com";
+const CLAUDE_MODEL = "sk-SECRET-CLAUDE-MODEL@example.com";
 
 let root: string;
 let dbPath: string;
@@ -193,8 +201,8 @@ function codexLine(
           window_minutes: 10080,
           resets_in_seconds: Number(RESET_SECONDARY) - Math.floor(Date.parse(timestamp) / 1000),
         },
-        plan_type: "pro",
-        limit_id: "codex",
+        plan_type: CODEX_PLAN,
+        limit_id: CODEX_LIMIT,
       },
     },
   })}\n`;
@@ -211,10 +219,18 @@ async function writeCodex(): Promise<string> {
       payload: {
         id: CODEX_THREAD,
         creator_account_id: CODEX_ACCOUNT,
-        cli_version: "0.1.0",
-        model_provider: "openai",
+        creator_user_id: CODEX_EMAIL,
+        cli_version: CODEX_CLI,
+        model_provider: CODEX_PROVIDER,
+        cwd: CODEX_PATH,
+        base_instructions: { text: CODEX_PROMPT },
       },
     })}\n` +
+      `${JSON.stringify({
+        type: "turn_context",
+        timestamp: "2026-11-01T10:00:35.000Z",
+        payload: { model: CODEX_MODEL, effort: CODEX_EFFORT, turn_id: "turn-SECRET-1" },
+      })}\n` +
       `${JSON.stringify({
         type: "turn_context",
         timestamp: "2026-11-01T10:00:40.000Z",
@@ -524,8 +540,174 @@ describe("usage import", () => {
     expect(weekRuns[0]?.resetAtMs).toBe(Number(RESET_SECONDARY) * 1000);
   });
 
-  it("persists no raw ids, paths or prompt text in any text column", async () => {
-    await writeClaude(claudeLine() + claudeLine({ requestId: "req-SECRET-0002" }));
+  it("re-reads the enabled flag before each harness scan so a disable stops Codex", async () => {
+    await writeClaude(claudeLine());
+    await writeCodex();
+    const db = await store();
+    let codexEnabled = true;
+    let codexRootLookups = 0;
+    const recorder = createUsageRecorder({
+      store: db,
+      now: () => BASE,
+      loadImportSettings: async () => ({ claudeCode: true, codex: codexEnabled }),
+      importRootFor: (harness) => {
+        if (harness === "claude-code") {
+          // The disable lands while the Claude Code scan is in flight.
+          codexEnabled = false;
+          return claudeRoot;
+        }
+        codexRootLookups += 1;
+        return codexRoot;
+      },
+    });
+    recorders.push(recorder);
+
+    recorder.observe(liveSnapshot());
+    await recorder.flush();
+
+    expect(codexRootLookups).toBe(0);
+    expect(db.getImportState("codex")?.enabled).toBe(false);
+    const result = await recorder.queryImportedActivity({
+      intervals: [{ startMs: 0, endMs: BASE + 60 * MINUTE }],
+      providerIds: ["alpha"],
+    });
+    const entries = result.intervals[0]?.entries ?? [];
+    expect(entries.some((entry) => entry.providerId === "openai")).toBe(false);
+    expect(entries.some((entry) => entry.providerId === "anthropic")).toBe(true);
+  });
+
+  it("hashes opaque Codex limit ids and shows a neutral label", async () => {
+    const path = join(codexRoot, "sessions", "rollout-2026-11-01T10-00-00.jsonl");
+    await mkdir(join(path, ".."), { recursive: true });
+    await writeFile(
+      path,
+      `${JSON.stringify({
+        type: "session_meta",
+        timestamp: "2026-11-01T10:00:00.000Z",
+        payload: { id: CODEX_THREAD, creator_account_id: CODEX_ACCOUNT },
+      })}\n${JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-11-01T10:01:00.000Z",
+        payload: {
+          type: "token_count",
+          info: null,
+          rate_limits: {
+            primary: { used_percent: 10, window_minutes: 45, resets_at: Number(RESET_PRIMARY) },
+            limit_id: CODEX_LIMIT,
+            plan_type: CODEX_PLAN,
+          },
+        },
+      })}\n`,
+    );
+    const db = await store();
+    const recorder = makeRecorder({
+      store: db,
+      settings: { claudeCode: false, codex: true },
+      now: () => BASE,
+    });
+    recorder.observe(liveSnapshot());
+    await recorder.flush();
+
+    const slice = db.query({ startMs: 0, endMs: BASE + 60 * MINUTE });
+    const named = slice.series.find((series) => series.rowKey.startsWith("named:codex-"));
+    expect(named).toBeDefined();
+    expect(named?.rowKey).not.toContain(CODEX_LIMIT);
+    expect(named?.metricJson).not.toContain(CODEX_LIMIT);
+    expect(named?.label).toMatch(/^Codex limit [0-9a-f]{6} \(primary 45m\)$/);
+    expect(slice.series.every((series) => !series.label.includes(CODEX_LIMIT))).toBe(true);
+  });
+
+  it("aggregates imported activity across intervals in one ordered pass", async () => {
+    const db = await store();
+    const tokens = { input: 10, cacheRead: 0, cacheWrite: 0, output: 5, reasoning: 0 };
+    db.recordImportedInvocations("claude-code", [
+      {
+        atMs: BASE + 1_000,
+        model: "claude-sonnet-4-5",
+        tokens,
+        dedupeKey: hashUsageImport("claude-invocation", "interval-a"),
+      },
+      {
+        atMs: BASE + 10_000,
+        model: "claude-sonnet-4-5",
+        tokens,
+        dedupeKey: hashUsageImport("claude-invocation", "interval-b"),
+      },
+    ]);
+    db.recordImportedInvocations("codex", [
+      {
+        atMs: BASE + 20_000,
+        model: "gpt-5",
+        effort: "high",
+        tokens,
+        dedupeKey: hashUsageImport("codex-invocation", "interval-c"),
+      },
+    ]);
+
+    const result = db.queryImportedActivity(
+      {
+        intervals: [
+          { startMs: BASE, endMs: BASE + 10_000 },
+          { startMs: BASE + 10_000, endMs: BASE + 30_000 },
+        ],
+        providerIds: ["alpha"],
+      },
+      ["claude-code", "codex"],
+    );
+    const first = result.intervals[0]?.entries ?? [];
+    const second = result.intervals[1]?.entries ?? [];
+    expect(first).toHaveLength(1);
+    expect(first[0]?.providerId).toBe("anthropic");
+    expect(first[0]?.stepCount).toBe(2);
+    expect(second).toHaveLength(1);
+    expect(second[0]?.providerId).toBe("openai");
+    expect(second[0]?.stepCount).toBe(1);
+  });
+
+  it("re-reads settings before each Claude ownership write", async () => {
+    const db = await store();
+    let claudeCode = true;
+    const recorder = createUsageRecorder({
+      store: db,
+      now: () => BASE,
+      loadImportSettings: async () => ({ claudeCode, codex: false }),
+      importRootFor: () => undefined,
+    });
+    recorders.push(recorder);
+
+    const exclusionCount = async (): Promise<number> => {
+      const reader = await openOpenCodeSqliteReadOnly(dbPath);
+      try {
+        return (
+          reader.get<{ count: number }>("SELECT COUNT(*) AS count FROM usage_import_exclusions")
+            ?.count ?? 0
+        );
+      } finally {
+        reader.close();
+      }
+    };
+
+    recorder.recordClaudeOwnership(CLAUDE_SESSION, CLAUDE_UUID);
+    await recorder.flush();
+    expect(await exclusionCount()).toBe(2);
+
+    // The old 30s settings cache would still see claudeCode:true here.
+    claudeCode = false;
+    recorder.recordClaudeOwnership(CLAUDE_SESSION_B, "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff");
+    await recorder.flush();
+    expect(await exclusionCount()).toBe(2);
+  });
+
+  it("persists no raw ids, paths, prompt text, models, efforts or limits in any text column", async () => {
+    await writeClaude(
+      claudeLine() +
+        claudeLine({
+          id: "msg-SECRET-0002",
+          requestId: "req-SECRET-0002",
+          uuid: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+          model: CLAUDE_MODEL,
+        }),
+    );
     await writeCodex();
     const db = await store();
     const recorder = makeRecorder({
@@ -536,7 +718,21 @@ describe("usage import", () => {
     recorder.recordClaudeOwnership(CLAUDE_SESSION, CLAUDE_UUID);
     recorder.observe(liveSnapshot());
     await recorder.flush();
+    const codexCursor = db.getImportState("codex")?.cursor ?? "";
     await recorder.close();
+
+    // The persisted cursor is itself a text column; it must not carry the
+    // transcript-controlled fields the parser dropped.
+    for (const secret of [
+      CODEX_CLI,
+      CODEX_PROVIDER,
+      CODEX_LIMIT,
+      CODEX_PLAN,
+      CODEX_MODEL,
+      CODEX_EFFORT,
+    ]) {
+      expect(codexCursor).not.toContain(secret);
+    }
 
     const reader = await openOpenCodeSqliteReadOnly(dbPath);
     try {
@@ -561,10 +757,18 @@ describe("usage import", () => {
         CLAUDE_UUID,
         CLAUDE_PROMPT,
         CLAUDE_PATH,
+        CLAUDE_MODEL,
         CODEX_THREAD,
         CODEX_ACCOUNT,
         CODEX_PROMPT,
         CODEX_PATH,
+        CODEX_CLI,
+        CODEX_PROVIDER,
+        CODEX_LIMIT,
+        CODEX_PLAN,
+        CODEX_MODEL,
+        CODEX_EFFORT,
+        CODEX_EMAIL,
         claudeRoot,
         codexRoot,
       ]) {
