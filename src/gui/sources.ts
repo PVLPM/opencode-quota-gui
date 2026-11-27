@@ -40,7 +40,7 @@ import {
   collectQuotaDashboardProviderResults,
   type QuotaStatusLiveProbe,
 } from "../lib/quota-render-data.js";
-import { withoutClaudeAgentSavedResets } from "../lib/quota-state.js";
+import { quotaResultMeasuredAtMs, withoutClaudeAgentSavedResets } from "../lib/quota-state.js";
 import type { QuotaToastConfig } from "../lib/types.js";
 import { getProviders } from "../providers/registry.js";
 import {
@@ -62,7 +62,8 @@ import {
   type SourceKey,
   UNSCOPED,
 } from "./provider-cards.js";
-import { markQuotaObservationLive } from "./quota-observation.js";
+import { markQuotaObservationCycle, markQuotaObservationLive } from "./quota-observation.js";
+import { DEFAULT_POLL_INTERVAL_MS } from "./snapshot-service.js";
 import { TEMPORAL_QUOTA_POLICIES } from "./temporal-quota-policy-data.js";
 import {
   buildTemporalStatus,
@@ -647,6 +648,35 @@ export function createDashboardReadSource(
       };
       const temporal = temporalStatusForCards(cards, nowMs);
       if (temporal) snapshot.temporal = temporal;
+      // Genuine measurement identity per card, never part of the DTO: the
+      // provider's own accounting time when supplied, else the fetch/cache
+      // timestamp propagated through `fetchQuotaProviderResult`.
+      const measuredAtByProvider = new Map<string, number>();
+      for (const probe of probes) {
+        const measuredAt = quotaResultMeasuredAtMs(probe.result);
+        if (measuredAt !== undefined) measuredAtByProvider.set(probe.providerId, measuredAt);
+      }
+      const measuredAtByCard = new Map<string, number>();
+      for (const card of cards) {
+        const observedAtMs =
+          card.observedAtIso === undefined ? undefined : Date.parse(card.observedAtIso);
+        const measuredAt =
+          observedAtMs !== undefined && Number.isFinite(observedAtMs)
+            ? observedAtMs
+            : measuredAtByProvider.get(card.providerId);
+        if (measuredAt !== undefined) measuredAtByCard.set(card.cardId, measuredAt);
+      }
+      const configuredInterval = config.minIntervalMs;
+      markQuotaObservationCycle(snapshot, {
+        measuredAtByCard,
+        intervalMs:
+          typeof configuredInterval === "number" &&
+          Number.isFinite(configuredInterval) &&
+          configuredInterval > 0
+            ? configuredInterval
+            : DEFAULT_POLL_INTERVAL_MS,
+        providerIds: selected.map((provider) => provider.id),
+      });
       lastQuotaSnapshot = snapshot;
       return markQuotaObservationLive(snapshot);
     } catch (error) {

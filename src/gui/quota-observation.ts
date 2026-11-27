@@ -19,3 +19,46 @@ export function markQuotaObservationLive(snapshot: QuotaSnapshot): QuotaSnapshot
 export function isLiveQuotaObservation(snapshot: QuotaSnapshot): boolean {
   return liveQuotaObservations.has(snapshot);
 }
+
+/**
+ * Collection metadata for one live cycle, kept off the DTO. `collectorRunId`
+ * is unique per quota cycle (one attempt per card), `collectorSessionId` is
+ * stable for one process lifetime, so usage continuity never spans a restart.
+ */
+export interface QuotaObservationCycle {
+  /** Genuine measurement time per card; absent means the card was not measured. */
+  readonly measuredAtByCard: ReadonlyMap<string, number>;
+  readonly collectorRunId: string;
+  readonly collectorSessionId: string;
+  /** Configured poll interval of the collector at this cycle. */
+  readonly intervalMs: number;
+  /** Provider ids selected for this cycle. */
+  readonly providerIds: readonly string[];
+}
+
+const cycles = new WeakMap<object, QuotaObservationCycle>();
+const collectorSessionId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let collectorRunSequence = 0;
+
+export function markQuotaObservationCycle(
+  snapshot: QuotaSnapshot,
+  input: {
+    measuredAtByCard: ReadonlyMap<string, number>;
+    intervalMs: number;
+    providerIds: readonly string[];
+  },
+): QuotaSnapshot {
+  collectorRunSequence += 1;
+  cycles.set(snapshot, {
+    measuredAtByCard: input.measuredAtByCard,
+    collectorRunId: `${collectorSessionId}:${collectorRunSequence}`,
+    collectorSessionId,
+    intervalMs: input.intervalMs,
+    providerIds: input.providerIds,
+  });
+  return snapshot;
+}
+
+export function quotaObservationCycle(snapshot: QuotaSnapshot): QuotaObservationCycle | undefined {
+  return cycles.get(snapshot);
+}
