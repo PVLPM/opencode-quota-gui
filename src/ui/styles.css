@@ -249,18 +249,15 @@
 }
 
 /* Peer Analytics / Models and Quota / Usage tabs replace the single frame label. */
-.qg-analytics-tabs,
-.qg-quota-tabs {
+.qg-analytics-tabs {
   gap: 20px;
 }
 
-.qg-analytics-tabs::after,
-.qg-quota-tabs::after {
+.qg-analytics-tabs::after {
   display: none;
 }
 
-.qg-analytics-tabs a,
-.qg-quota-tabs a {
+.qg-analytics-tabs a {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -272,19 +269,15 @@
 }
 
 .qg-analytics-tabs a:hover,
-.qg-analytics-tabs a:focus-visible,
-.qg-quota-tabs a:hover,
-.qg-quota-tabs a:focus-visible {
+.qg-analytics-tabs a:focus-visible {
   color: var(--qg-text);
 }
 
-.qg-analytics-tabs a[aria-current="page"],
-.qg-quota-tabs a[aria-current="page"] {
+.qg-analytics-tabs a[aria-current="page"] {
   color: var(--qg-text);
 }
 
-.qg-analytics-tabs a[aria-current="page"]::after,
-.qg-quota-tabs a[aria-current="page"]::after {
+.qg-analytics-tabs a[aria-current="page"]::after {
   content: "";
   position: absolute;
   inset-inline: 0;
@@ -293,8 +286,7 @@
   background: var(--qg-text-secondary);
 }
 
-.qg-analytics-tabs a:focus-visible,
-.qg-quota-tabs a:focus-visible {
+.qg-analytics-tabs a:focus-visible {
   outline: 1px solid var(--qg-accent-border);
   outline-offset: 4px;
 }
@@ -424,13 +416,14 @@
   padding-inline: 8px;
 }
 
-/* Usage adds two long labels ("Current window", "Lifetime"), so its segments
-   keep their content width instead of sharing the range equally. The viewport
-   cap keeps the control inside a narrow phone; it scrolls internally only when
-   the topbar cannot fit its full width. */
+/* Usage adds a long label ("Lifetime"), so its segments keep their content
+   width instead of sharing the range equally. The control caps itself to its
+   own row — never the viewport, which in the Native side panel is much wider
+   than the panel — and scrolls internally only when that row cannot fit it. */
 .qg-usage-range[data-slot="segmented-control-v2"] {
+  flex: 0 1 auto;
   width: fit-content;
-  max-width: calc(100vw - 44px);
+  max-width: 100%;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -440,7 +433,7 @@
 }
 
 .qg-usage-range [data-slot="segmented-control-v2-item"] {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-width: max-content;
 }
 
@@ -3267,8 +3260,7 @@
     gap: 8px;
   }
   .qg-frame-tab::after,
-  .qg-analytics-tabs a[aria-current="page"]::after,
-  .qg-quota-tabs a[aria-current="page"]::after {
+  .qg-analytics-tabs a[aria-current="page"]::after {
     bottom: -7px;
   }
   .qg-settings__scroll {
@@ -3635,170 +3627,163 @@
 
 /* ---------- Usage (v1.4.0) ---------- */
 
-/* Quota / Usage are peers inside the Quota area; the tab row reuses the
-   frame-tab chrome so it reads as part of the shell, not a second nav. */
-.qg-quota-tabs {
-  display: inline-flex;
-  align-items: stretch;
-}
-
+/* The tab names the view, so there is no page heading, count, legend or
+   footer: accounts start immediately and one info trigger carries the caveats. */
 .qg-usage-view {
-  gap: 16px;
+  gap: 12px;
 }
 
-.qg-usage-view__notice,
-.qg-usage-view__imports,
-.qg-usage-view__note {
-  margin: 0;
+/* One view-level caveat trigger, seated at the end of the first account header
+   so it never costs a row of its own. */
+.qg-usage-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 24px;
+  height: 24px;
+  margin-left: auto;
+  border-radius: var(--qg-radius);
   color: var(--qg-text-muted);
-  font-size: var(--font-size-small);
-  line-height: 1.5;
-  overflow-wrap: anywhere;
+  cursor: help;
 }
 
-/* The library's weak warning surface is pale even in the app's dark theme, so
-   white-on-cream would vanish. Match the range-failure notice: raised dark
-   surface, semantic border, secondary text. */
+.qg-usage-info:hover,
+.qg-usage-info:focus-visible {
+  background: var(--surface-raised-base-hover);
+  color: var(--qg-text);
+  outline: none;
+}
+
+.qg-usage-info:focus-visible {
+  outline: 1px solid var(--qg-accent-border);
+  outline-offset: 2px;
+}
+
+.qg-usage-info__icon {
+  display: inline-flex;
+}
+
+.qg-usage-caveats {
+  max-width: 300px;
+  font-size: var(--font-size-small);
+  line-height: 1.45;
+}
+
+.qg-usage-caveats__body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .qg-usage-view__notice {
-  padding: 10px 12px;
+  margin: 0;
+  padding: 8px 12px;
   border: 1px solid var(--qg-warning-border);
   border-radius: var(--qg-radius);
   background: var(--qg-surface-raised);
   color: var(--qg-text-secondary);
+  font-size: var(--font-size-small);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
-.qg-usage-accounts {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 18px;
-}
-
-/* Observed and monitoring-gap keys are line samples, matching the plot strokes. */
-.qg-usage-legend .qg-legend__swatch {
-  width: 16px;
-  height: 0;
-  border-top: 1.5px solid var(--qg-chart-context);
-  border-radius: 0;
-  background: transparent;
-}
-
-.qg-usage-legend .qg-legend__swatch--dashed {
-  border-top-color: var(--qg-text-muted);
-  border-top-style: dashed;
-}
-
+.qg-usage-accounts,
 .qg-usage-imported-activity {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 18px;
-}
-
-.qg-usage-imported {
-  gap: 10px;
-  padding-bottom: 14px;
-}
-
-.qg-usage-imported > .qg-usage-view__note,
-.qg-usage-imported > .qg-usage-breakdown__model,
-.qg-usage-imported > .qg-usage-account__empty {
-  margin-inline: 16px;
+  gap: 12px;
 }
 
 .qg-usage-account {
   min-width: 0;
 }
 
-.qg-usage-account__head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px 20px;
-  flex-wrap: wrap;
-}
-
-.qg-usage-account__identity {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
+/* The Quota card header supplies identity layout; the heading resets its h2
+   defaults so provider, plan and account read as one line. */
 .qg-usage-account__title {
   margin: 0;
-  color: var(--qg-text);
-  font-size: var(--font-size-large);
+  font: inherit;
   font-weight: var(--font-weight-medium);
   line-height: 1.3;
-  overflow-wrap: anywhere;
-}
-
-.qg-usage-account__plan {
-  color: var(--qg-text-muted);
-  font-weight: 400;
-}
-
-.qg-usage-account__label {
-  display: block;
-  margin-top: 2px;
-  color: var(--qg-text-muted);
-  font-size: var(--font-size-small);
-  overflow-wrap: anywhere;
 }
 
 .qg-usage-account__empty {
   margin: 0;
+  padding: 12px 16px;
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
 }
 
 /* One full-width row per quota window at every width: comparison happens by
-   reading down the card, never by squeezing plots side by side. The windows
-   share the card's inner padding so headings and panels align with the header. */
+   reading down the card, never by squeezing plots side by side. */
 .qg-usage-account__windows {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
-  padding: 16px;
+  padding: 10px 16px 6px;
 }
 
-/* Empty accounts keep that same inner padding instead of touching the border. */
-.qg-usage-account > .qg-usage-account__empty {
-  padding: 16px;
+.qg-usage-window {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-/* Qualifications under each summary value carry real caveats; one step above
-   the axis micro-labels keeps them readable without competing with the value. */
-.qg-usage-window .qg-chart-shell__note {
-  font-size: 11px;
-  line-height: 1.45;
+.qg-usage-window__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 12px;
+  flex-wrap: wrap;
 }
 
-/* A window plot is shorter than an inspected step's tooltip. The shared tooltip
-   keeps itself inside the scroller; the panel must not clip that overlay back
-   at the plot's edge. Nothing else in this panel relies on the clip. */
-.qg-usage-window .qg-chart-shell__panel {
-  overflow: visible;
-}
-
-.qg-usage-badge {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-  padding: 2px 8px;
-  border: 1px solid var(--qg-border);
-  border-radius: 999px;
-  color: var(--qg-text-secondary);
-  font-size: 10px;
+.qg-usage-window__title {
+  margin: 0;
+  color: var(--qg-text);
+  font-size: var(--font-size-small);
   font-weight: 550;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  white-space: nowrap;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
-.qg-usage-badge[data-measurement="locally-estimated"] {
-  border-color: var(--qg-warning-border);
+.qg-usage-window__estimate-tag {
+  margin-left: 4px;
   color: var(--qg-warning);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.qg-usage-window__stats {
+  display: flex;
+  align-items: baseline;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.qg-usage-window__value {
+  color: var(--qg-text);
+  font-size: var(--font-size-small);
+  font-weight: 550;
+}
+
+.qg-usage-window__mode {
+  color: var(--qg-text-muted);
+  font-weight: 400;
+}
+
+.qg-usage-window__change,
+.qg-usage-window__estimate {
+  color: var(--qg-text-muted);
+  font-size: 11px;
+}
+
+.qg-usage-chart {
+  position: relative;
+  min-width: 0;
 }
 
 .qg-usage-chart__plot {
@@ -3844,86 +3829,103 @@
   fill: var(--qg-danger);
 }
 
-.qg-usage-chart__axis-label {
-  font-size: 10px;
+/* Amber and short-dashed: a projection from the last measured point, never a
+   monitoring gap and never a stored point. */
+.qg-usage-chart__projection {
+  fill: none;
+  stroke: var(--qg-warning);
+  stroke-width: 1.25;
+  stroke-dasharray: 2 3;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.qg-usage-chart__projection-end {
+  fill: var(--qg-warning);
+}
+
+.qg-usage-chart__latest {
+  fill: var(--qg-chart-context);
+  stroke: var(--qg-frame);
+  stroke-width: 1;
+}
+
+.qg-usage-chart__active-point {
+  fill: var(--qg-text);
 }
 
 .qg-usage-chart__empty {
   position: absolute;
-  inset: 24% 18% auto;
+  inset: 20% 18% auto;
   margin: 0;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border-radius: var(--qg-radius);
   background: color-mix(in srgb, var(--qg-frame) 82%, transparent);
   color: var(--qg-text-muted);
-  font-size: var(--font-size-small);
+  font-size: 11px;
   text-align: center;
 }
 
-.qg-usage-chart__state {
-  color: var(--qg-text-secondary);
-  font-weight: 550;
+/* A small, content-width readout: one time, at most three values and one short
+   state word. */
+.qg-usage-chart__tooltip {
+  width: max-content;
+  padding: 6px 9px;
+  font-size: 11px;
 }
 
-/* The window tooltip has no swatch column, so its label/value rows own the
-   full width. Long state and disclosure sentences wrap instead of trailing
-   into an ellipsis. */
-.qg-usage-chart__tooltip .qg-tooltip__group--series {
-  grid-template-columns: minmax(0, 1fr) max-content;
+.qg-usage-tooltip__time {
+  margin-bottom: 2px;
+  color: var(--qg-text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qg-usage-tooltip__row {
+  display: flex;
   align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  white-space: nowrap;
 }
 
-/* The date range alone can fill the tooltip; wrap the interval state onto its
-   own line instead of letting both phrases break mid-word beside each other. */
-.qg-usage-chart__tooltip .qg-tooltip__head {
-  flex-wrap: wrap;
-  gap: 2px 12px;
+.qg-usage-tooltip__row > :last-child {
+  color: var(--qg-text);
+  font-variant-numeric: tabular-nums;
 }
 
-.qg-usage-chart__tooltip .qg-tooltip__note {
+.qg-usage-tooltip__note {
+  margin: 2px 0 0;
+  color: var(--qg-text-muted);
+  font-size: 10px;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 
-/* One activity line per model: identity first, then its own metrics. Without
-   the wrap the identity and the numbers collide in one run-on line. */
-.qg-usage-chart__activity {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 10px;
+.qg-usage-imported {
+  gap: 8px;
+  padding-bottom: 10px;
 }
 
-.qg-usage-chart__activity-model {
-  min-width: 0;
+.qg-usage-imported > .qg-usage-view__note,
+.qg-usage-imported > .qg-usage-breakdown__model,
+.qg-usage-imported > .qg-usage-account__empty {
+  margin-inline: 16px;
+}
+
+.qg-usage-view__note {
+  margin: 0;
+  color: var(--qg-text-muted);
+  font-size: var(--font-size-small);
+  line-height: 1.45;
   overflow-wrap: anywhere;
-}
-
-.qg-usage-chart__activity .qg-totals__value {
-  margin-left: 0;
-}
-
-.qg-usage-legend__marker {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  margin: 0 1px;
-  background: var(--qg-danger);
-  transform: rotate(45deg);
-}
-
-.qg-usage-legend__unavailable {
-  flex: none;
-  width: 14px;
-  height: 10px;
-  border-radius: 2px;
-  background: var(--qg-text-muted);
-  opacity: 0.2;
 }
 
 .qg-usage-breakdown {
   margin: 0 16px;
-  padding-top: 12px;
-  padding-bottom: 14px;
+  padding-top: 10px;
+  padding-bottom: 12px;
   border-top: 1px solid var(--qg-border);
 }
 
@@ -3943,14 +3945,14 @@
 .qg-usage-breakdown__content {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding-top: 10px;
+  gap: 8px;
+  padding-top: 8px;
 }
 
 .qg-usage-breakdown__controls {
   display: flex;
   align-items: center;
-  gap: 8px 12px;
+  gap: 6px 10px;
   flex-wrap: wrap;
   color: var(--qg-text-muted);
   font-size: var(--font-size-small);
@@ -3958,11 +3960,10 @@
 
 .qg-usage-breakdown__select {
   width: auto;
-  min-width: 140px;
+  min-width: 130px;
 }
 
 .qg-usage-breakdown__coverage,
-.qg-usage-breakdown__history,
 .qg-usage-breakdown__meta,
 .qg-usage-breakdown__note {
   margin: 0;
@@ -3985,7 +3986,7 @@
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
   gap: 4px 14px;
   align-items: baseline;
-  padding: 10px 12px 10px 26px;
+  padding: 8px 12px 8px 24px;
   cursor: pointer;
   color: var(--qg-text-secondary);
   font-size: var(--font-size-small);
@@ -3994,8 +3995,8 @@
 .qg-usage-breakdown__model > summary::before {
   content: "";
   position: absolute;
-  top: 20px;
-  left: 13px;
+  top: 18px;
+  left: 12px;
   width: 5px;
   height: 5px;
   border-right: 1.5px solid var(--qg-text-muted);
@@ -4038,8 +4039,8 @@
 .qg-usage-breakdown__body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 0 12px 12px;
+  gap: 5px;
+  padding: 0 12px 10px;
 }
 
 /* Same track ratios and content start as the model summary: a child's token,
@@ -4049,7 +4050,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 1fr);
   gap: 4px 14px;
-  padding: 6px 0 0 14px;
+  padding: 5px 0 0 14px;
   border-top: 1px dashed var(--qg-border);
   color: var(--qg-text-secondary);
   font-size: var(--font-size-small);
@@ -4079,7 +4080,7 @@
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 2fr);
   gap: 4px 14px;
   align-items: baseline;
-  padding: 10px 12px;
+  padding: 8px 12px;
   border: 1px dashed var(--qg-border-strong);
   border-radius: var(--qg-radius);
   font-size: var(--font-size-small);

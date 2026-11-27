@@ -13,6 +13,8 @@ import { CostValue } from "./cost-estimate";
 /**
  * Imported harness activity is recorded evidence only: it is never merged into
  * quota attribution weights and never appears inside a quota-window interval.
+ * The header stays as quiet as an account card; the full qualification is its
+ * accessible name.
  */
 export function UsageImportedSection(props: {
   activity: UsageImportedActivity;
@@ -23,20 +25,19 @@ export function UsageImportedSection(props: {
 
   return (
     <section class="qg-card qg-usage-imported" aria-label={title()}>
-      <header class="qg-card__head qg-usage-account__head">
-        <h2 class="qg-usage-account__title">{title()}</h2>
-        <span class="qg-usage-badge">Imported history</span>
+      <header class="qg-card__head">
+        <div class="qg-card__identity">
+          <h2 class="qg-card__provider">{harnessLabel(props.activity.harness)}</h2>
+          <span class="qg-card__account">imported</span>
+        </div>
       </header>
 
       <p class="qg-usage-view__note">
-        {formatTimestampMinutes(props.activity.span.startMs, props.timeZone)} to{" "}
-        {formatTimestampMinutes(props.activity.span.endMs, props.timeZone)} ·{" "}
-        {formatExactCount(props.activity.stepCount)} recorded steps ·{" "}
+        {formatExactCount(props.activity.stepCount)} steps ·{" "}
         {formatTokenCount(props.activity.totals.total)} tokens ·{" "}
         <CostValue tokens={props.activity.totals} /> API-equivalent
         <Show when={props.activity.incomplete}>
-          {" "}
-          (some tokens are unpriced, so the total is partial)
+          <span title="Some tokens are unpriced, so the total is partial"> · partial</span>
         </Show>
       </p>
 

@@ -183,9 +183,54 @@ describe("usage chart geometry", () => {
     // interval carries no `conflictAtMs` of its own.
     expect(geometry.markers).toEqual([{ x: 50, atMs: 500, boundary: "uncertain", between: false }]);
     expect(geometry.units).toEqual([
-      { intervalIndex: 0, startMs: 500, endMs: 500, kind: "observed" },
+      { intervalIndex: 0, startMs: 500, endMs: 500, anchorMs: 500, kind: "observed" },
     ]);
     expect(geometry.unitAtX(50)).toBe(0);
+  });
+
+  it("snaps inspection to the measured endpoint, including the latest dot", () => {
+    const intervals = [
+      interval(0, 0, 100, 400, "observed", 80, 70),
+      interval(1, 1, 400, 800, "observed", 70, 40),
+    ];
+    const geometry = buildUsageStepGeometry({
+      axis: AXIS,
+      plot: PLOT,
+      mode: "remaining",
+      points: POINTS,
+      links: LINKS,
+      intervals,
+    });
+
+    expect(geometry.units.map((unit) => unit.anchorMs)).toEqual([400, 800]);
+    // The latest reading is reachable exactly on its dot, not between dots.
+    expect(geometry.unitAtX(geometry.xForMs(800))).toBe(1);
+    expect(geometry.unitAtX(geometry.xForMs(400))).toBe(0);
+    expect(geometry.latest).toEqual({ x: 80, y: 60 });
+  });
+
+  it("draws a dashed projection from the latest reading without inventing points", () => {
+    const projectionAxis = { startMs: 0, endMs: 1_000 };
+    const geometry = buildUsageStepGeometry({
+      axis: projectionAxis,
+      plot: PLOT,
+      mode: "remaining",
+      points: POINTS,
+      links: LINKS,
+      intervals: [],
+      historyEndMs: 800,
+      projection: {
+        fromMs: 800,
+        fromRemainingPercent: 40,
+        toMs: 1_000,
+        toRemainingPercent: 0,
+      },
+    });
+
+    expect(geometry.projectionPath).toBe("M 80.00 60.00 L 100.00 100.00");
+    expect(geometry.projectionEnd).toEqual({ x: 100, y: 100 });
+    // The future span is a projection, never marked as missing history.
+    expect(geometry.unavailable).toEqual([{ startMs: 0, endMs: 100 }]);
   });
 
   it("inspects the server intervals in chronological order", () => {

@@ -41,6 +41,16 @@ export function observedChangeText(
     : `−${formatPp(burnPercentPoints)} remaining`;
 }
 
+/** The compact inline form: direction only, with the unit and mode alongside it. */
+export function observedChangeCompact(
+  burnPercentPoints: number | null,
+  mode: QuotaPercentMode,
+): string {
+  if (burnPercentPoints === null || !Number.isFinite(burnPercentPoints)) return "—";
+  if (burnPercentPoints === 0) return "0.00 pp";
+  return mode === "used" ? `+${formatPp(burnPercentPoints)}` : `−${formatPp(burnPercentPoints)}`;
+}
+
 export function effortLabel(effort: string | undefined): string {
   if (effort === undefined) return "Unknown effort";
   if (effort === "default") return "Default effort (recorded)";

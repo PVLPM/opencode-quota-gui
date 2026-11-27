@@ -436,6 +436,8 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                       enabled={props.visible}
                       onFresh={panel.markFresh}
                       preferences={displayPreferencesFromValues(panel.settings()?.values ?? {})}
+                      cards={homeSnapshot()?.providers.cards}
+                      cardsStale={homeSnapshot()?.stale}
                       onStale={setRouteStale}
                     />
                   )}

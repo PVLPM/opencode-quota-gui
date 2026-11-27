@@ -526,6 +526,8 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                     reloadToken={usageReloadToken()}
                     reconnectEpoch={reconnectEpoch()}
                     preferences={preferences()}
+                    cards={homeSnapshot()?.providers.cards}
+                    cardsStale={homeSnapshot()?.stale}
                     onStale={setRouteStale}
                   />
                 )}

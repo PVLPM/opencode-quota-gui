@@ -27,7 +27,10 @@ export function slotHitStyle(
 }
 
 /** Match the SVG coordinate space to its container so narrow-screen labels stay legible. */
-export function createChartLayout(defaults: ChartSize): {
+export function createChartLayout(
+  defaults: ChartSize,
+  options: { narrowHeight?: number } = {},
+): {
   size: ChartSize;
   ref: (element: HTMLDivElement) => void;
 } {
@@ -59,7 +62,7 @@ export function createChartLayout(defaults: ChartSize): {
         return width();
       },
       get height() {
-        return width() < 600 ? 220 : defaults.height;
+        return width() < 600 ? (options.narrowHeight ?? 220) : defaults.height;
       },
       padding: defaults.padding,
     },
