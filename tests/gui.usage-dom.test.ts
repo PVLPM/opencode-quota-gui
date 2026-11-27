@@ -138,6 +138,29 @@ describe("Usage view DOM", () => {
     dispose();
   });
 
+  it("renders imported harness activity as its own labelled section", () => {
+    const { target, dispose } = mount("remaining");
+
+    const sections = target.querySelectorAll(".qg-usage-imported");
+    expect(sections).toHaveLength(2);
+    expect(target.textContent).toContain(
+      "Imported from Claude Code — recorded activity, not attributed to quota",
+    );
+    expect(target.textContent).toContain(
+      "Imported from Codex — recorded activity, not attributed to quota",
+    );
+    expect(sections[0]?.textContent).toContain("claude-sonnet-4-5");
+    expect(sections[0]?.textContent).toContain("API-equivalent");
+    expect(sections[1]?.textContent).toContain("gpt-5.2-codex");
+    expect(sections[1]?.textContent).toContain("high");
+
+    // Imported sections sit after every quota account card, outside their charts.
+    const cards = [...target.querySelectorAll(".qg-usage-account")];
+    expect(cards.some((card) => card.querySelector(".qg-usage-imported"))).toBe(false);
+
+    dispose();
+  });
+
   it("expands the model breakdown, switches quota windows and keeps Unattributed explicit", async () => {
     const { target, dispose } = mount("remaining");
     const breakdown = target.querySelector<HTMLDetailsElement>(

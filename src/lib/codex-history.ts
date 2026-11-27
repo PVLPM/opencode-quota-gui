@@ -11,6 +11,8 @@ import {
   listJsonlFiles,
   readIncrementalJsonlFile,
   readJsonlFilesWithBudget,
+  sanitizeUsageImportEffort,
+  sanitizeUsageImportModelId,
   type UsageImportTokens,
   type UsageResetPrecision,
 } from "./usage-import.js";
@@ -61,8 +63,6 @@ export interface CodexRateLimitObservation {
 export interface CodexImportedThread {
   /** sha256 of the Codex thread id; the raw id never leaves the parser. */
   threadKey: string;
-  cliVersion?: string;
-  provider?: string;
   /** sha256 of `creator_account_id` when recorded. */
   accountHint?: string;
   invocations: CodexImportedInvocation[];
@@ -74,8 +74,6 @@ export interface CodexFileCursor {
   mtimeMs: number;
   byteOffset: number;
   threadKey?: string;
-  cliVersion?: string;
-  provider?: string;
   accountHint?: string;
   totals?: CodexTokenCounters;
   model?: string;
@@ -125,8 +123,7 @@ export type CodexRolloutLine =
   | {
       kind: "session-meta";
       threadKey: string;
-      cliVersion?: string;
-      provider?: string;
+      /** sha256 of `creator_account_id` when recorded. */
       accountHint?: string;
     }
   | { kind: "turn-context"; model?: string; effort?: string }
@@ -193,11 +190,16 @@ function parseRateLimits(value: unknown): CodexRateLimitSnapshot | undefined {
   const primary = parseRateLimitWindow(limits.primary);
   const secondary = parseRateLimitWindow(limits.secondary);
   if (primary === undefined && secondary === undefined) return undefined;
+  const limitId = asString(limits.limit_id);
   return {
     ...(primary === undefined ? {} : { primary }),
     ...(secondary === undefined ? {} : { secondary }),
     ...(asString(limits.plan_type) === undefined ? {} : { planType: asString(limits.plan_type) }),
-    ...(asString(limits.limit_id) === undefined ? {} : { limitId: asString(limits.limit_id) }),
+    // Opaque and provider-controlled: the raw value never leaves the parser and
+    // row keys/labels use only this bounded hash.
+    ...(limitId === undefined
+      ? {}
+      : { limitId: hashUsageImport("codex-limit", limitId).slice(0, 16) }),
   };
 }
 
@@ -220,12 +222,6 @@ export function parseCodexRolloutLine(line: string): CodexRolloutLine | undefine
     return {
       kind: "session-meta",
       threadKey: hashUsageImport("codex-thread", threadId),
-      ...(asString(payload.cli_version) === undefined
-        ? {}
-        : { cliVersion: asString(payload.cli_version) }),
-      ...(asString(payload.model_provider) === undefined
-        ? {}
-        : { provider: asString(payload.model_provider) }),
       ...(accountId === undefined
         ? {}
         : { accountHint: hashUsageImport("codex-account", accountId) }),
@@ -233,10 +229,12 @@ export function parseCodexRolloutLine(line: string): CodexRolloutLine | undefine
   }
 
   if (record.type === "turn_context") {
+    const model = sanitizeUsageImportModelId(payload.model);
+    const effort = sanitizeUsageImportEffort(payload.effort);
     return {
       kind: "turn-context",
-      ...(asString(payload.model) === undefined ? {} : { model: asString(payload.model) }),
-      ...(asString(payload.effort) === undefined ? {} : { effort: asString(payload.effort) }),
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
     };
   }
 
@@ -294,8 +292,6 @@ export function resolveCodexHome(
 
 interface CodexParseState {
   threadKey?: string;
-  cliVersion?: string;
-  provider?: string;
   accountHint?: string;
   totals?: CodexTokenCounters;
   model?: string;
@@ -383,10 +379,11 @@ function tokenCountInvocation(
           last === undefined ? "" : codexCountersKey(last)
         }`
       : `ordinal:${parsed.ordinal}`;
+  const effort = sanitizeUsageImportEffort(state.effort);
   return {
     atMs: parsed.atMs,
-    model: state.model ?? "unknown",
-    ...(state.effort === undefined ? {} : { effort: state.effort }),
+    model: sanitizeUsageImportModelId(state.model) ?? "unknown",
+    ...(effort === undefined ? {} : { effort }),
     tokens,
     dedupeKey: hashUsageImport("codex-invocation", state.threadKey, identity),
   };
@@ -431,8 +428,6 @@ function applyCodexLine(line: string, state: CodexParseState, sink: CodexBatchSi
   if (parsed === undefined) return;
   if (parsed.kind === "session-meta") {
     state.threadKey = parsed.threadKey;
-    if (parsed.cliVersion !== undefined) state.cliVersion = parsed.cliVersion;
-    if (parsed.provider !== undefined) state.provider = parsed.provider;
     if (parsed.accountHint !== undefined) state.accountHint = parsed.accountHint;
     return;
   }
@@ -467,8 +462,6 @@ function createCodexAccumulator(): CodexBatchSink & { result: () => CodexImporte
       };
       threads.set(threadKey, entry);
     }
-    entry.record.cliVersion ??= state.cliVersion;
-    entry.record.provider ??= state.provider;
     entry.record.accountHint ??= state.accountHint;
     return entry;
   };
@@ -512,14 +505,14 @@ function createCodexAccumulator(): CodexBatchSink & { result: () => CodexImporte
 
 function parseStateFromCursor(cursor: CodexFileCursor | undefined): CodexParseState {
   if (cursor === undefined) return {};
+  const model = sanitizeUsageImportModelId(cursor.model);
+  const effort = sanitizeUsageImportEffort(cursor.effort);
   return {
     threadKey: cursor.threadKey,
-    cliVersion: cursor.cliVersion,
-    provider: cursor.provider,
     accountHint: cursor.accountHint,
     totals: cursor.totals === undefined ? undefined : { ...cursor.totals },
-    model: cursor.model,
-    effort: cursor.effort,
+    ...(model === undefined ? {} : { model }),
+    ...(effort === undefined ? {} : { effort }),
   };
 }
 

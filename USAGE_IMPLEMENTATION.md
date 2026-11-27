@@ -210,7 +210,15 @@ D10.2 integration (part 2):
   `named:<limitId>|<window>|<minutes>`. They are not merged into OpenAI cards.
 - Imported activity is grouped by provider/model/effort and priced through
   `priceTokenBuckets`; provider ids are `anthropic` for Claude Code and
-  `openai` for Codex, and the caller keeps the import source separate.
+  `openai` for Codex. It is returned only as `UsageSnapshot.importedActivity`
+  sections labelled per harness, read over the requested range and never
+  attached to a quota-window interval.
+- Imported fields are whitelisted before persistence: effort must be a known
+  Codex/OpenCode value, model ids must match a conservative model-id shape
+  (otherwise `unknown`), and an opaque Codex `limit_id` is hashed for row keys,
+  metrics and neutral "Codex limit <hash>" labels. Cursor state carries only
+  consumed metadata (hashed thread/account keys, counters, sanitized
+  model/effort).
 
 ### D11 No new traffic
 Capture hooks into the existing `createDelegatingSource.quota` observation
@@ -241,10 +249,9 @@ Import limitations:
   period. Imported invocations dedupe by key, and repeated Codex rate-limit
   points are idempotent under the stored-sample policy: an exact
   `(series, measuredAtMs, value)` replay is a no-op, never a second point.
-- Imported activity entries carry no source field; the caller labels them
-  `claude-code-import` / `codex-import` when composing `UsageSnapshot`. Imported
-  Claude Code activity is shown only as separate recorded activity; it is never
-  merged into OpenCode attribution weights or estimated burn.
+- Imported activity is shown only as separate recorded activity in
+  `UsageSnapshot.importedActivity`; it is never merged into OpenCode
+  attribution weights or estimated burn, and Codex activity is included.
 
 ## Open product questions (owner)
 

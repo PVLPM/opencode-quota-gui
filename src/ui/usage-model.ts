@@ -47,6 +47,10 @@ export function effortLabel(effort: string | undefined): string {
   return effort;
 }
 
+export function harnessLabel(harness: "claude-code" | "codex"): string {
+  return harness === "claude-code" ? "Claude Code" : "Codex";
+}
+
 export const UNATTRIBUTED_REASON_LABELS: Record<UsageUnattributedReason, string> = {
   "no-activity": "No recorded OpenCode activity in this interval",
   "ambiguous-account": "Activity could not be assigned to one account",

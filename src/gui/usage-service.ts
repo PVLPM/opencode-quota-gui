@@ -29,6 +29,8 @@ import type { CardId, RowId } from "../contracts/identity.js";
 import type {
   UsageAccount,
   UsageActivity,
+  UsageBreakdownRow,
+  UsageImportedActivity,
   UsageInterval,
   UsageModelKey,
   UsageQuery,
@@ -46,6 +48,7 @@ import type {
 import { getGuiPrivateStatePath } from "../lib/private-state-paths.js";
 import {
   openUsageStoreReadOnly,
+  USAGE_IMPORT_PROVIDER_IDS,
   type UsageHistorySlice,
   type UsageReadStore,
   type UsageRivalRun,
@@ -74,6 +77,24 @@ const FINITE_RANGE_MS: Readonly<Record<"24h" | "7d" | "30d", number>> = {
   "24h": 24 * 60 * 60 * 1000,
   "7d": 7 * 24 * 60 * 60 * 1000,
   "30d": 30 * 24 * 60 * 60 * 1000,
+};
+
+/** Inverse of the store's fixed import provider mapping; sections stay per harness. */
+const IMPORTED_HARNESS_BY_PROVIDER: Readonly<Record<string, "claude-code" | "codex">> = {
+  [USAGE_IMPORT_PROVIDER_IDS["claude-code"]]: "claude-code",
+  [USAGE_IMPORT_PROVIDER_IDS.codex]: "codex",
+};
+
+const ZERO_TOKENS: CostedTokens = {
+  input: 0,
+  output: 0,
+  reasoning: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  total: 0,
+  apiEquivalentCostUsd: 0,
+  unpricedTokens: 0,
+  unknownTokens: 0,
 };
 
 const EMPTY_SLICE: UsageHistorySlice = {
@@ -742,59 +763,127 @@ export function createUsageSnapshotBuilder(
     return { attributed, unavailable: false };
   }
 
-  function intervalKey(interval: { startMs: number; endMs: number }): string {
-    return `${interval.startMs}\u0000${interval.endMs}`;
+  /** Model-first rows for one imported harness; never merged into attribution. */
+  function importedModels(entries: readonly UsageActivityEntry[]): UsageBreakdownRow[] {
+    const models = new Map<string, UsageBreakdownRow>();
+    for (const entry of entries) {
+      const modelKey = `${entry.providerId}\u0000${entry.modelId}`;
+      let model = models.get(modelKey);
+      if (model === undefined) {
+        model = {
+          providerId: entry.providerId,
+          modelId: entry.modelId,
+          tokens: { ...ZERO_TOKENS },
+          stepCount: 0,
+          efforts: [],
+        };
+        models.set(modelKey, model);
+      }
+      model.tokens = combinedTokens(model.tokens, entry.tokens);
+      model.stepCount += entry.stepCount;
+      const effortKey = entry.effort ?? "";
+      let effort = model.efforts.find((item) => (item.effort ?? "") === effortKey);
+      if (effort === undefined) {
+        effort = {
+          ...(entry.effort === undefined ? {} : { effort: entry.effort }),
+          tokens: { ...ZERO_TOKENS },
+          stepCount: 0,
+        };
+        model.efforts.push(effort);
+      }
+      effort.tokens = combinedTokens(effort.tokens, entry.tokens);
+      effort.stepCount += entry.stepCount;
+    }
+    return [...models.values()].sort(compareModelIdentity);
+  }
+
+  function importedSection(
+    harness: UsageImportedActivity["harness"],
+    entries: readonly UsageActivityEntry[],
+    span: { startMs: number; endMs: number },
+  ): UsageImportedActivity | undefined {
+    const models = importedModels(entries);
+    if (models.length === 0) return undefined;
+    let totals = { ...ZERO_TOKENS };
+    let stepCount = 0;
+    let incomplete = false;
+    for (const model of models) {
+      totals = combinedTokens(totals, model.tokens);
+      stepCount += model.stepCount;
+      if (
+        model.tokens.apiEquivalentCostUsd === null ||
+        model.tokens.unpricedTokens > 0 ||
+        model.tokens.unknownTokens > 0
+      ) {
+        incomplete = true;
+      }
+    }
+    return { harness, span, models, totals, stepCount, incomplete };
   }
 
   /**
-   * Imported Claude Code activity is separate recorded activity. It is never
-   * merged into OpenCode attribution weights or estimated burn because it came
-   * from a different harness and cannot prove which quota account consumed it.
+   * Imported activity is its own source-labelled section over the requested
+   * range. It never touches quota intervals, attribution weights or `models`.
    */
-  async function loadImportedClaudeActivity(
-    accounts: readonly WorkingAccount[],
-  ): Promise<Map<string, UsageActivityEntry[]>> {
+  async function loadImportedActivity(
+    imports: readonly UsageImportStatus[],
+    span: { startMs: number; endMs: number } | undefined,
+  ): Promise<UsageImportedActivity[]> {
     const read = options.importedActivity;
-    if (read === undefined) return new Map();
-    const boundaries = new Set<number>();
-    for (const account of accounts) {
-      for (const window of account.windows) {
-        for (const interval of window.window.intervals) {
-          if (interval.endMs <= interval.startMs) continue;
-          boundaries.add(interval.startMs);
-          boundaries.add(interval.endMs);
-        }
-      }
-    }
-    const segments = segmentsFromBoundaries(boundaries);
-    if (segments.length === 0) return new Map();
+    if (read === undefined || span === undefined) return [];
+    const enabled = imports.filter((entry) => entry.enabled);
+    if (enabled.length === 0) return [];
     try {
-      const result = await read({ intervals: segments, providerIds: ["anthropic"] });
-      if (result.intervals.length !== segments.length) return new Map();
-      const byInterval = new Map<string, UsageActivityEntry[]>();
-      result.intervals.forEach((part, index) => {
-        const segment = segments[index];
-        if (
-          segment === undefined ||
-          part.startMs !== segment.startMs ||
-          part.endMs !== segment.endMs
-        ) {
-          return;
-        }
-        const entries = part.entries.filter((entry) => entry.providerId === "anthropic");
-        if (entries.length > 0) byInterval.set(intervalKey(part), entries);
+      const result = await read({
+        intervals: [span],
+        providerIds: [...new Set(enabled.map((entry) => USAGE_IMPORT_PROVIDER_IDS[entry.harness]))],
       });
-      return byInterval;
+      const part = result.intervals[0];
+      if (part === undefined || part.startMs !== span.startMs || part.endMs !== span.endMs) {
+        return [];
+      }
+      const byHarness = new Map<UsageImportedActivity["harness"], UsageActivityEntry[]>();
+      for (const entry of part.entries) {
+        const harness = IMPORTED_HARNESS_BY_PROVIDER[entry.providerId];
+        if (harness === undefined) continue;
+        const list = byHarness.get(harness);
+        if (list === undefined) byHarness.set(harness, [entry]);
+        else list.push(entry);
+      }
+      const sections: UsageImportedActivity[] = [];
+      for (const harness of ["claude-code", "codex"] as const) {
+        const entries = byHarness.get(harness);
+        if (entries === undefined) continue;
+        const section = importedSection(harness, entries, span);
+        if (section !== undefined) sections.push(section);
+      }
+      return sections;
     } catch {
       // Imported activity is additive; a failure never hides quota history.
-      return new Map();
+      return [];
     }
   }
 
-  function finalize(
-    attributed: readonly AttributedWindow[],
-    imported: ReadonlyMap<string, UsageActivityEntry[]>,
-  ): UsageModelKey[] {
+  /** `current` has no snapshot span, so cover the union of its window axes. */
+  function importedSpan(
+    span: { startMs: number; endMs: number } | undefined,
+    accounts: readonly WorkingAccount[],
+  ): { startMs: number; endMs: number } | undefined {
+    if (span !== undefined) return span;
+    let startMs: number | undefined;
+    let endMs: number | undefined;
+    for (const account of accounts) {
+      for (const window of account.windows) {
+        const axis = window.window.axis;
+        startMs = startMs === undefined ? axis.startMs : Math.min(startMs, axis.startMs);
+        endMs = endMs === undefined ? axis.endMs : Math.max(endMs, axis.endMs);
+      }
+    }
+    if (startMs === undefined || endMs === undefined || endMs <= startMs) return undefined;
+    return { startMs, endMs };
+  }
+
+  function finalize(attributed: readonly AttributedWindow[]): UsageModelKey[] {
     const keys = new Map<string, UsageModelKey>();
     for (const { result } of attributed) {
       for (const interval of result.intervals) {
@@ -804,21 +893,12 @@ export function createUsageSnapshotBuilder(
         }
       }
     }
-    for (const entries of imported.values()) {
-      for (const entry of entries) {
-        const key = modelKeyOf(entry);
-        if (!keys.has(key)) keys.set(key, modelKey(entry));
-      }
-    }
     const models = [...keys.values()].sort(compareModelIdentity);
     const index = new Map(models.map((entry, position) => [modelKeyOf(entry), position] as const));
     for (const { account, window, result } of attributed) {
       window.window.intervals = result.intervals.map((interval, position) => {
         const original = window.window.intervals[position];
         const reason = interval.unattributedReason ?? original?.unattributedReason;
-        const importedActivity = (imported.get(intervalKey(interval)) ?? []).map((entry) =>
-          toUsageActivity(entry, "claude-code-import", index),
-        );
         return {
           fromPoint: original?.fromPoint ?? position,
           toPoint: original?.toPoint ?? position,
@@ -832,10 +912,7 @@ export function createUsageSnapshotBuilder(
           unattributedBurnPercentPoints: interval.unattributedBurnPercentPoints,
           ...(reason !== undefined ? { unattributedReason: reason } : {}),
           ...(original?.conflictAtMs !== undefined ? { conflictAtMs: original.conflictAtMs } : {}),
-          activity: [
-            ...interval.activity.map((entry) => toUsageActivity(entry, account.source, index)),
-            ...importedActivity,
-          ],
+          activity: interval.activity.map((entry) => toUsageActivity(entry, account.source, index)),
         };
       });
       window.window.totals = totalsFrom(window.window.intervals);
@@ -867,15 +944,12 @@ export function createUsageSnapshotBuilder(
       const span = duration === undefined ? undefined : { startMs: nowMs - duration, endMs: nowMs };
       const { slice, historyUnavailable } = await readSlice(query.range, nowMs);
       const imports = await importStatus();
-      const claudeEnabled = imports.some(
-        (entry) => entry.harness === "claude-code" && entry.enabled,
-      );
       const { accounts, activityByProvider } = buildAccounts(slice, query.range, nowMs, span);
-      const { attributed, unavailable } = await attribute(accounts, activityByProvider);
-      const imported = claudeEnabled
-        ? await loadImportedClaudeActivity(accounts)
-        : new Map<string, UsageActivityEntry[]>();
-      const models = finalize(attributed, imported);
+      const [attributedResult, importedActivity] = await Promise.all([
+        attribute(accounts, activityByProvider),
+        loadImportedActivity(imports, importedSpan(span, accounts)),
+      ]);
+      const models = finalize(attributedResult.attributed);
 
       return {
         generatedAtMs: nowMs,
@@ -897,7 +971,8 @@ export function createUsageSnapshotBuilder(
         models,
         imports,
         ...(historyUnavailable ? { historyUnavailable: true as const } : {}),
-        ...(unavailable ? { activityUnavailable: true as const } : {}),
+        importedActivity,
+        ...(attributedResult.unavailable ? { activityUnavailable: true as const } : {}),
       };
     },
   };

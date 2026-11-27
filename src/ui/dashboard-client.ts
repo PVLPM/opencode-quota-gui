@@ -1586,6 +1586,34 @@ function readUsageImport(
   return parsed;
 }
 
+function readUsageImportedActivity(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+): UsageSnapshot["importedActivity"][number] {
+  const entry = readRecord(value, endpoint, detail);
+  const span = readRecord(entry.span, endpoint, `${detail}.span`);
+  return {
+    harness: readEnum(entry.harness, USAGE_IMPORT_HARNESSES, endpoint, `${detail}.harness`),
+    span: {
+      startMs: readNumber(span.startMs, endpoint, `${detail}.span.startMs`),
+      endMs: readNumber(span.endMs, endpoint, `${detail}.span.endMs`),
+    },
+    models: readArray(entry.models, endpoint, `${detail}.models`).map((model) =>
+      readUsageBreakdownRow(model, endpoint, `${detail}.models[]`),
+    ),
+    totals: readCostedTokens(entry.totals, endpoint, `${detail}.totals`),
+    stepCount: readIntegerInRange(
+      entry.stepCount,
+      endpoint,
+      `${detail}.stepCount`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    incomplete: readBoolean(entry.incomplete, endpoint, `${detail}.incomplete`),
+  };
+}
+
 /** Decodes the v1.4.0 observation-history payload (`/api/v1/usage`). */
 export function parseUsageSnapshot(value: JsonValue, endpoint = "/api/v1/usage"): UsageSnapshot {
   const root = readRecord(value, endpoint, "not an object");
@@ -1603,6 +1631,9 @@ export function parseUsageSnapshot(value: JsonValue, endpoint = "/api/v1/usage")
     models,
     imports: readArray(root.imports, endpoint, "imports").map((entry) =>
       readUsageImport(entry, endpoint, "imports[]"),
+    ),
+    importedActivity: readArray(root.importedActivity, endpoint, "importedActivity").map((entry) =>
+      readUsageImportedActivity(entry, endpoint, "importedActivity[]"),
     ),
   };
   if (root.span !== undefined) {

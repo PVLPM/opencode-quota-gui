@@ -368,6 +368,18 @@ describe("GUI contract guards", () => {
     expect(isUsageSnapshot({ ...snapshot, range: "90d" })).toBe(false);
     expect(isUsageSnapshot({ ...snapshot, accounts: "nope" })).toBe(false);
     expect(isUsageSnapshot({ ...snapshot, models: [{ providerId: "openai" }] })).toBe(false);
+    expect(
+      isUsageSnapshot({
+        ...snapshot,
+        importedActivity: [{ ...snapshot.importedActivity[0], harness: "other" }],
+      }),
+    ).toBe(false);
+    expect(
+      isUsageSnapshot({
+        ...snapshot,
+        importedActivity: [{ ...snapshot.importedActivity[0], totals: { input: 1 } }],
+      }),
+    ).toBe(false);
   });
 
   it("freezes contract version 2 for the required timeZone payload fields", () => {
