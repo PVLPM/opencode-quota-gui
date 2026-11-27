@@ -211,4 +211,52 @@ describe("analytics generation notifications", () => {
     snapshots.close();
     await source.close?.();
   });
+
+  it("exposes the internal activity read without touching quota polling", async () => {
+    const transport: AnalyticsTransport = {
+      async init() {},
+      async home(range) {
+        return homeFor(range, 0);
+      },
+      async project() {
+        throw new Error("unused");
+      },
+      async session() {
+        throw new Error("unused");
+      },
+      async groups() {
+        throw new Error("unused");
+      },
+      async refresh() {},
+      async activity(query) {
+        return {
+          intervals: query.intervals.map(({ startMs, endMs }) => ({
+            startMs,
+            endMs,
+            entries: [],
+            incomplete: false,
+            unpricedTokens: 0,
+            unknownTokens: 0,
+          })),
+        };
+      },
+      async close() {},
+    };
+    const analytics = createAnalyticsReadService({ createTransport: () => transport });
+    const collectProviderResults = vi.fn();
+    const source = createDashboardReadSource({
+      client: {} as never,
+      workspaceRoot: ".",
+      analyticsService: analytics,
+      collectProviderResults,
+    });
+
+    const result = await source.activity({
+      intervals: [{ startMs: NOW - 3_600_000, endMs: NOW }],
+      providerIds: ["openai"],
+    });
+    expect(result.intervals[0]?.startMs).toBe(NOW - 3_600_000);
+    expect(collectProviderResults).not.toHaveBeenCalled();
+    await source.close?.();
+  });
 });

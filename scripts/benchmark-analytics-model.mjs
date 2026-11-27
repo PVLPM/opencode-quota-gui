@@ -12,12 +12,14 @@
  *
  * Read scenarios compare the existing Home view (`home`) with the grouped
  * analytics view (`groups`) for all four ranges and both dimensions. Each read
- * is warmed, then repeated without retaining results. A separate GC-backed
- * sample reports the retained bytes of one Home and one grouped result. The
- * grouped result must agree with Home totals/counts, map every grouped
- * lifetime boundary into Home (Home may lead with metadata-only buckets),
- * start lifetime at the fixture's earliest owned day, keep rows bucket-free,
- * and keep bucket arrays bounded to the series (top five + Other).
+ * is warmed, then repeated without retaining results. A separate activity read
+ * sweeps 8,760 contiguous intervals over the fixture lifetime and must conserve
+ * every owned step, token count and priced cost against Home lifetime. A
+ * GC-backed sample reports the retained bytes of one Home and one grouped
+ * result. The grouped result must agree with Home totals/counts, map every
+ * grouped lifetime boundary into Home (Home may lead with metadata-only
+ * buckets), start lifetime at the fixture's earliest owned day, keep rows
+ * bucket-free, and keep bucket arrays bounded to the series (top five + Other).
  *
  * Analytics reads come from the model's owned in-memory steps only. The script
  * never queries the OpenCode analytics database/storage. Pricing resolution may
@@ -108,6 +110,7 @@ const READ_RANGES = ["24h", "7d", "30d", "lifetime"];
 const READ_DIMENSIONS = ["model", "provider"];
 const READ_WARMUP = 2;
 const MEMORY_SAMPLES = 3;
+const ACTIVITY_INTERVAL_COUNT = 8_760;
 
 function parseArgs(argv) {
   const options = {
@@ -193,14 +196,20 @@ function* rowsBetween(start, end, sessions, stride = 1) {
  * the earliest completion over all generated rows is the earliest owned one.
  * This is intentionally independent of Home's metadata-derived lifetime start.
  */
-function fixtureEarliestOwnedDayStart(rows) {
+/** Earliest positive owned completion; one millisecond before it starts the activity axis. */
+function fixtureEarliestOwnedCompletionMs(rows) {
   let earliest = Number.POSITIVE_INFINITY;
   const sessions = sessionCountFor(rows);
   for (let index = 0; index < rows; index += 1) {
     const completedAtMs = rowAt(index, sessions).completedAtMs;
     if (completedAtMs < earliest) earliest = completedAtMs;
   }
-  return Number.isFinite(earliest) ? Math.floor(earliest / DAY_MS) * DAY_MS : undefined;
+  return Number.isFinite(earliest) ? earliest : undefined;
+}
+
+function fixtureEarliestOwnedDayStart(rows) {
+  const earliest = fixtureEarliestOwnedCompletionMs(rows);
+  return earliest === undefined ? undefined : Math.floor(earliest / DAY_MS) * DAY_MS;
 }
 
 function metadataFor(sessions) {
@@ -599,6 +608,86 @@ function measureGroupedReads(model, iterations, expectedLifetimeStartMs) {
   };
 }
 
+function activityIntervals(rows) {
+  const earliest = fixtureEarliestOwnedCompletionMs(rows);
+  if (earliest === undefined) return [];
+  const first = earliest - 1;
+  const span = NOW - first;
+  return Array.from({ length: ACTIVITY_INTERVAL_COUNT }, (_, index) => ({
+    startMs: first + Math.floor((index * span) / ACTIVITY_INTERVAL_COUNT),
+    endMs: first + Math.floor(((index + 1) * span) / ACTIVITY_INTERVAL_COUNT),
+  }));
+}
+
+/** Thousands of contiguous intervals over the fixture lifetime must conserve every step. */
+function measureActivityReads(model, rows, iterations) {
+  const intervals = activityIntervals(rows);
+  const providerIds = [...new Set(PROVIDER_MODELS.map(([providerID]) => providerID))];
+  const query = { intervals, providerIds };
+  const read = () => model.activity(query);
+
+  let warm = read();
+  for (let index = 1; index < READ_WARMUP; index += 1) warm = read();
+  const home = model.home("lifetime", NOW).usage;
+  let steps = 0;
+  let total = 0;
+  let unpriced = 0;
+  let unknown = 0;
+  let cost = 0;
+  let anyCost = false;
+  let nonEmptyIntervals = 0;
+  let entries = 0;
+  for (const interval of warm.intervals) {
+    if (interval.entries.length > 0) nonEmptyIntervals += 1;
+    for (const entry of interval.entries) {
+      entries += 1;
+      steps += entry.stepCount;
+      total += entry.tokens.total;
+      unpriced += entry.tokens.unpricedTokens;
+      unknown += entry.tokens.unknownTokens;
+      if (entry.tokens.apiEquivalentCostUsd !== null) {
+        anyCost = true;
+        cost += entry.tokens.apiEquivalentCostUsd;
+      }
+    }
+  }
+  const expectedCost = home.totals.apiEquivalentCostUsd;
+  const costConserved =
+    expectedCost === null
+      ? !anyCost
+      : anyCost && Math.abs(cost - expectedCost) <= 1e-9 * Math.max(1, Math.abs(expectedCost));
+  const stepConserved = steps === home.stepCount;
+  const conserved =
+    stepConserved &&
+    total === home.totals.total &&
+    unpriced === home.totals.unpricedTokens &&
+    unknown === home.totals.unknownTokens &&
+    costConserved;
+  const payloadBytes = Buffer.byteLength(JSON.stringify(warm));
+  warm = null;
+
+  const timing = timedRead(read, iterations);
+  return {
+    intervals: intervals.length,
+    providers: providerIds.length,
+    entries,
+    nonEmptyIntervals,
+    expectedSteps: home.stepCount,
+    steps,
+    totalTokens: total,
+    stepConserved,
+    tokenConserved: total === home.totals.total,
+    unpricedConserved: unpriced === home.totals.unpricedTokens,
+    unknownConserved: unknown === home.totals.unknownTokens,
+    costConserved,
+    conserved,
+    iterations,
+    warmup: READ_WARMUP,
+    activity: timing.stats,
+    payloadBytes,
+  };
+}
+
 async function measureSize(createAnalyticsModel, rows, warmMetadata, reads, homeOnly) {
   const sessions = sessionCountFor(rows);
   const metadata = metadataFor(sessions);
@@ -641,6 +730,7 @@ async function measureSize(createAnalyticsModel, rows, warmMetadata, reads, home
     ? { homeRead: measureHomeReads(model, reads) }
     : {
         groupedRead: measureGroupedReads(model, reads, fixtureEarliestOwnedDayStart(rows)),
+        activityRead: measureActivityReads(model, rows, reads),
       };
 
   // Churn: drop every tenth row, then re-add the same rows. Both passes
@@ -793,6 +883,26 @@ function printGroupedTable(results) {
         ].join(" "),
       );
     }
+    const activity = result.activityRead;
+    console.log(
+      [
+        "  activity",
+        `intervals=${activity.intervals}`,
+        `providers=${activity.providers}`,
+        `entries=${activity.entries}`,
+        `nonEmpty=${activity.nonEmptyIntervals}`,
+        `mean=${activity.activity.meanMs}ms`,
+        `max=${activity.activity.maxMs}ms`,
+        `steps=${activity.steps}/${activity.expectedSteps}`,
+        `conserved=${activity.conserved}`,
+        `step=${activity.stepConserved}`,
+        `tokens=${activity.tokenConserved}`,
+        `unpriced=${activity.unpricedConserved}`,
+        `unknown=${activity.unknownConserved}`,
+        `cost=${activity.costConserved}`,
+        `payload=${formatKiB(activity.payloadBytes)}`,
+      ].join(" "),
+    );
   }
 }
 
@@ -827,6 +937,7 @@ const payload = {
     readSource: "owned-steps",
     rawDbReads: 0,
     rawDbReadsIsMeasured: false,
+    activityIntervalCount: ACTIVITY_INTERVAL_COUNT,
     pricingSnapshotReads: "possible-bundled-or-runtime",
     gcExposed: typeof globalThis.gc === "function",
   },

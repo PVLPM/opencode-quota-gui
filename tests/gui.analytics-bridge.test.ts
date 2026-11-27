@@ -77,6 +77,17 @@ function answerEcho(command: AnalyticsWorkerRequest["command"]): unknown {
         : "none";
       return { marker: `groups:${command.query.dimension}:${command.query.range}:${marker}` };
     }
+    case "activity":
+      return {
+        intervals: command.query.intervals.map(({ startMs, endMs }) => ({
+          startMs,
+          endMs,
+          entries: [],
+          incomplete: false,
+          unpricedTokens: 0,
+          unknownTokens: 0,
+        })),
+      };
     default:
       return undefined;
   }
@@ -103,6 +114,27 @@ describe("analytics worker bridge", () => {
     await vi.waitFor(() => expect(worker.terminated).toBe(1));
     expect(framesOf(worker, "close")).toHaveLength(1);
     await bridge.close();
+  });
+
+  it("coalesces identical activity reads into one worker frame", async () => {
+    const worker = new FakeWorker(answerEcho);
+    const bridge = createAnalyticsBridge({
+      createWorker: () => worker,
+      idleRetireMs: 60_000,
+      logger,
+    });
+    try {
+      await bridge.init({});
+      const query = { intervals: [{ startMs: 1, endMs: 2 }], providerIds: ["openai"] };
+      const [first, second] = await Promise.all([
+        bridge.activity(query),
+        bridge.activity({ ...query, intervals: [{ startMs: 1, endMs: 2 }] }),
+      ]);
+      expect(first).toEqual(second);
+      expect(framesOf(worker, "activity")).toHaveLength(1);
+    } finally {
+      await bridge.close();
+    }
   });
 
   it("keeps a warm worker through the idle grace and retires after it", async () => {
@@ -795,6 +827,16 @@ describe("analytics worker bridge", () => {
       stale: false,
     };
     const groups = vi.fn(async () => snapshot);
+    const activity = vi.fn(async (query: { intervals: { startMs: number; endMs: number }[] }) => ({
+      intervals: query.intervals.map(({ startMs, endMs }) => ({
+        startMs,
+        endMs,
+        entries: [],
+        incomplete: false,
+        unpricedTokens: 0,
+        unknownTokens: 0,
+      })),
+    }));
     const engine = {
       home: async () => {
         throw new Error("not used");
@@ -806,6 +848,7 @@ describe("analytics worker bridge", () => {
         throw new Error("not used");
       },
       groups,
+      activity,
       refresh: async () => {},
       stats: async () => ({
         rss: 0,
@@ -843,6 +886,28 @@ describe("analytics worker bridge", () => {
       }),
     ).rejects.toMatchObject({ code: "bad-request" });
     expect(groups).toHaveBeenCalledTimes(1);
+
+    const activityQuery = { intervals: [{ startMs: 1, endMs: 2 }], providerIds: ["openai"] };
+    await expect(runtime.handle({ kind: "activity", query: activityQuery })).resolves.toEqual({
+      intervals: [
+        {
+          startMs: 1,
+          endMs: 2,
+          entries: [],
+          incomplete: false,
+          unpricedTokens: 0,
+          unknownTokens: 0,
+        },
+      ],
+    });
+    expect(activity).toHaveBeenCalledWith(activityQuery);
+    await expect(
+      runtime.handle({
+        kind: "activity",
+        query: { intervals: [{ startMs: 2, endMs: 1 }], providerIds: [] },
+      }),
+    ).rejects.toMatchObject({ code: "bad-request" });
+    expect(activity).toHaveBeenCalledTimes(1);
     await runtime.close();
   });
 

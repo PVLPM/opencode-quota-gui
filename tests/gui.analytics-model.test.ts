@@ -98,6 +98,7 @@ vi.mock("../src/lib/modelsdev-pricing.js", async (importOriginal) => {
 
 import type { CostedTokens } from "../src/contracts/dashboard.js";
 import { RANGE_KEYS } from "../src/contracts/ranges.js";
+import type { UsageActivityQuery } from "../src/contracts/usage-activity.js";
 import {
   type AnalyticsModel,
   createAnalyticsModel,
@@ -158,6 +159,7 @@ function row(input: {
   modelID?: string;
   cost?: number;
   agent?: string;
+  variant?: string;
 }): OpenCodeRawAssistantRow {
   const result: OpenCodeRawAssistantRow = {
     sessionID: input.sessionID,
@@ -174,6 +176,7 @@ function row(input: {
     },
     ...(input.cost === undefined ? {} : { cost: input.cost }),
     ...(input.agent === undefined ? {} : { agent: input.agent }),
+    ...(input.variant === undefined ? {} : { variant: input.variant }),
   };
   // An explicit `undefined` leaves the raw identity missing; omitting the
   // property keeps the common default. Empty strings stay present.
@@ -3461,5 +3464,259 @@ describe("analytics model: recorded-cost fallback", () => {
     expect(
       repriced.groups({ range: "24h", dimension: "provider" }, NOW).rows[0]?.tokens,
     ).not.toHaveProperty("recordedCostUsd");
+  });
+});
+
+describe("analytics model: interval activity", () => {
+  const sessions = [sessionInfo("ses_activity_a", "p1"), sessionInfo("ses_activity_b", "p1")];
+
+  function activity(query: UsageActivityQuery, rows: OpenCodeRawAssistantRow[]) {
+    return createModel(sessions, rows).activity(query);
+  }
+
+  it("groups provider/model/effort, keeps explicit default distinct, and normalizes empty effort", () => {
+    const at = NOW - 2 * HOUR;
+    const result = activity(
+      { intervals: [{ startMs: at - HOUR, endMs: at }], providerIds: ["zero-labs"] },
+      [
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_high",
+          completedAtMs: at,
+          tokens: { input: 100 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+          variant: "high",
+        }),
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_default",
+          completedAtMs: at,
+          tokens: { input: 200 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+          variant: "default",
+        }),
+        row({
+          sessionID: "ses_activity_b",
+          messageID: "msg_unknown",
+          completedAtMs: at,
+          tokens: { input: 300 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+        }),
+        row({
+          sessionID: "ses_activity_b",
+          messageID: "msg_empty",
+          completedAtMs: at,
+          tokens: { input: 400 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+          variant: "",
+        }),
+      ],
+    );
+
+    expect(result.intervals).toHaveLength(1);
+    const entries = result.intervals[0]?.entries ?? [];
+    expect(entries.map((entry) => entry.effort)).toEqual(["default", "high", undefined]);
+    expect(entries.find((entry) => entry.effort === "default")?.tokens.input).toBe(200);
+    expect(entries.find((entry) => entry.effort === "high")?.tokens.input).toBe(100);
+    expect(entries.find((entry) => entry.effort === undefined)?.tokens.input).toBe(700);
+    expect(result.intervals[0]?.incomplete).toBe(false);
+    expect(entries.reduce((sum, entry) => sum + entry.stepCount, 0)).toBe(4);
+  });
+
+  it("deduplicates parent/child fork copies and filters by runtime provider id", () => {
+    const at = NOW - 2 * HOUR;
+    const shared = {
+      completedAtMs: at,
+      tokens: { input: 100 },
+      providerID: "zero-labs",
+      modelID: "zero-1",
+      variant: "high",
+    };
+    const result = activity(
+      { intervals: [{ startMs: at - HOUR, endMs: at }], providerIds: ["zero-labs"] },
+      [
+        row({ sessionID: "ses_activity_a", messageID: "msg_owner", ...shared }),
+        row({ sessionID: "ses_activity_b", messageID: "msg_fork", ...shared }),
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_openai",
+          completedAtMs: at,
+          tokens: { input: 500 },
+        }),
+      ],
+    );
+
+    expect(result.intervals[0]?.entries).toHaveLength(1);
+    expect(result.intervals[0]?.entries[0]?.stepCount).toBe(1);
+    expect(result.intervals[0]?.entries[0]?.providerId).toBe("zero-labs");
+  });
+
+  it("skips steps without a non-empty provider or model identity", () => {
+    const at = NOW - 2 * HOUR;
+    const result = activity(
+      { intervals: [{ startMs: at - HOUR, endMs: at }], providerIds: ["zero-labs", ""] },
+      [
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_empty_provider",
+          completedAtMs: at,
+          tokens: { input: 100 },
+          providerID: "",
+          modelID: "zero-1",
+        }),
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_empty_model",
+          completedAtMs: at,
+          tokens: { input: 200 },
+          providerID: "zero-labs",
+          modelID: "",
+        }),
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_identified",
+          completedAtMs: at,
+          tokens: { input: 300 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+        }),
+      ],
+    );
+
+    expect(result.intervals[0]?.entries).toHaveLength(1);
+    expect(result.intervals[0]?.entries[0]?.tokens.input).toBe(300);
+  });
+
+  it("assigns steps to the half-open interval (startMs, endMs] and across a model switch", () => {
+    const boundary = NOW - 3 * HOUR;
+    const result = activity(
+      {
+        intervals: [
+          { startMs: boundary - HOUR, endMs: boundary },
+          { startMs: boundary, endMs: boundary + HOUR },
+        ],
+        providerIds: ["zero-labs", "free-labs"],
+      },
+      [
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_at_start",
+          completedAtMs: boundary - HOUR,
+          tokens: { input: 10 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+        }),
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_first",
+          completedAtMs: boundary - 1,
+          tokens: { input: 20 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+          variant: "high",
+        }),
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_at_end",
+          completedAtMs: boundary,
+          tokens: { input: 30 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+          variant: "high",
+        }),
+        row({
+          sessionID: "ses_activity_b",
+          messageID: "msg_second",
+          completedAtMs: boundary + 1,
+          tokens: { input: 40 },
+          providerID: "free-labs",
+          modelID: "free-1",
+          variant: "low",
+        }),
+      ],
+    );
+
+    expect(result.intervals[0]?.entries.map((entry) => entry.tokens.input)).toEqual([50]);
+    expect(result.intervals[1]?.entries.map((entry) => entry.modelId)).toEqual(["free-1"]);
+    expect(result.intervals[1]?.entries[0]?.effort).toBe("low");
+  });
+
+  it("keeps an unpriced interval signal while still reporting grouped tokens", () => {
+    const at = NOW - 2 * HOUR;
+    const result = activity(
+      { intervals: [{ startMs: at - HOUR, endMs: at }], providerIds: ["unpriced-labs"] },
+      [
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_unpriced",
+          completedAtMs: at,
+          tokens: { input: 120 },
+          providerID: "unpriced-labs",
+          modelID: "mystery-1",
+        }),
+      ],
+    );
+    const interval = result.intervals[0];
+    expect(interval?.incomplete).toBe(true);
+    expect(interval?.unpricedTokens).toBe(120);
+    expect(interval?.entries[0]?.tokens).toMatchObject({
+      total: 120,
+      apiEquivalentCostUsd: null,
+      unpricedTokens: 120,
+    });
+  });
+
+  it("handles thousands of intervals and a large owned set in one sweep", () => {
+    const rows: OpenCodeRawAssistantRow[] = [];
+    const steps = 10_000;
+    const spanHours = 1_000;
+    for (let index = 0; index < steps; index += 1) {
+      const completedAtMs = NOW - (spanHours + 1) * HOUR + Math.floor(index / 10) * HOUR + 1;
+      rows.push(
+        row({
+          sessionID: `ses_scale_${index % 20}`,
+          messageID: `msg_scale_${index}`,
+          completedAtMs,
+          tokens: { input: 10 + (index % 97) },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+          variant: index % 3 === 0 ? "high" : index % 3 === 1 ? "default" : undefined,
+        }),
+      );
+    }
+    const model = createModel(
+      Array.from({ length: 20 }, (_, index) => sessionInfo(`ses_scale_${index}`, "p1")),
+      rows,
+    );
+    const intervals = Array.from({ length: spanHours }, (_, index) => ({
+      startMs: NOW - (spanHours + 1) * HOUR + index * HOUR,
+      endMs: NOW - (spanHours + 1) * HOUR + (index + 1) * HOUR,
+    }));
+    const started = performance.now();
+    const result = model.activity({ intervals, providerIds: ["zero-labs"] });
+    const elapsedMs = performance.now() - started;
+
+    expect(result.intervals).toHaveLength(spanHours);
+    expect(
+      result.intervals.reduce(
+        (sum, interval) =>
+          sum + interval.entries.reduce((entrySum, entry) => entrySum + entry.stepCount, 0),
+        0,
+      ),
+    ).toBe(steps);
+    expect(
+      result.intervals.reduce(
+        (sum, interval) =>
+          sum + interval.entries.reduce((entrySum, entry) => entrySum + entry.tokens.input, 0),
+        0,
+      ),
+    ).toBe(rows.reduce((sum, entry) => sum + entry.tokens.input, 0));
+    expect(model.ownedStepCount()).toBe(steps);
+    // Generous CI bound; the dedicated benchmark reports the real timing.
+    expect(elapsedMs).toBeLessThan(3_000);
   });
 });

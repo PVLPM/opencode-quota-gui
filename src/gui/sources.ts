@@ -32,6 +32,7 @@ import type {
 import { OPENAI_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE } from "../contracts/openai-quota.js";
 import { isTransientProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import { createLoadConfigMeta, loadConfig } from "../lib/config.js";
 import type { QuotaProvider, QuotaProviderContext, QuotaToastEntry } from "../lib/entries.js";
 import { rawAssistantRowHasTokenUsage } from "../lib/opencode-storage.js";
@@ -134,6 +135,8 @@ export type DashboardReadSource = Pick<
   DashboardDataSource,
   "home" | "quota" | "project" | "session" | "groups"
 > & {
+  /** Host-only usage-activity read; never added to the browser DashboardDataSource. */
+  activity(query: UsageActivityQuery): Promise<UsageActivityResult>;
   /** One shared analytics refresh per transport tick, if the service loaded. */
   refreshAnalytics?(): Promise<void>;
   /** Worker background-generation notifications (lazy; never starts analytics). */
@@ -322,6 +325,15 @@ export function createDashboardReadSource(
         .map((row) => ({ sessionId: row.sessionID, atMs: messagePositionMs(row) })),
     });
 
+    /** Fresh legacy model over the in-memory dataset; shared by groups/activity. */
+    const loadLegacyModel = async () => {
+      const dataset = await loadDataset();
+      const model = createAnalyticsModel({ timeZone });
+      model.setMetadata(dataset.sessions, dataset.projects);
+      model.apply(dataset.messages, []);
+      return model;
+    };
+
     return {
       async home({ range }) {
         const analytics = createAnalytics(usageDataset(await loadDataset()));
@@ -356,11 +368,10 @@ export function createDashboardReadSource(
         }
       },
       async groups(query) {
-        const dataset = await loadDataset();
-        const model = createAnalyticsModel({ timeZone });
-        model.setMetadata(dataset.sessions, dataset.projects);
-        model.apply(dataset.messages, []);
-        return model.groups(query, now());
+        return (await loadLegacyModel()).groups(query, now());
+      },
+      async activity(query) {
+        return (await loadLegacyModel()).activity(query);
       },
       // The in-memory dataset is rebuilt per request; there is no worker.
       async refresh() {},
@@ -710,6 +721,10 @@ export function createDashboardReadSource(
     return (await getAnalyticsService()).groups(query);
   }
 
+  async function activity(query: UsageActivityQuery): Promise<UsageActivityResult> {
+    return (await getAnalyticsService()).activity(query);
+  }
+
   async function refreshAnalytics(): Promise<void> {
     // A quota-only dashboard never loaded analytics, so never start the worker.
     if (!analyticsPromise) return;
@@ -746,5 +761,15 @@ export function createDashboardReadSource(
     await service?.close?.();
   }
 
-  return { home, quota, project, session, groups, refreshAnalytics, subscribeAnalytics, close };
+  return {
+    home,
+    quota,
+    project,
+    session,
+    groups,
+    activity,
+    refreshAnalytics,
+    subscribeAnalytics,
+    close,
+  };
 }

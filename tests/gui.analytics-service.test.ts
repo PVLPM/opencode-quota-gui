@@ -128,6 +128,19 @@ function fakeTransport(trace: TransportTrace): AnalyticsTransport {
     async refresh() {
       trace.calls.push("refresh");
     },
+    async activity(query) {
+      trace.calls.push(`activity:${query.intervals.length}`);
+      return {
+        intervals: query.intervals.map(({ startMs, endMs }) => ({
+          startMs,
+          endMs,
+          entries: [],
+          incomplete: false,
+          unpricedTokens: 0,
+          unknownTokens: 0,
+        })),
+      };
+    },
     async close() {
       trace.closed += 1;
       rejectHome?.(new AnalyticsReadError("closed"));
@@ -192,6 +205,34 @@ describe("analytics read service", () => {
         range: "24h",
         dimension: "model",
         filter: { dimension: "model", identity: { kind: "other" } } as never,
+      }),
+    ).rejects.toMatchObject({ code: "bad-request" });
+    expect(createTransport).toHaveBeenCalledTimes(1);
+    await service.close();
+  });
+
+  it("forwards activity queries and rejects malformed ones before starting a worker", async () => {
+    const trace: TransportTrace = { init: 0, calls: [], closed: 0 };
+    const createTransport = vi.fn(() => fakeTransport(trace));
+    const service = createAnalyticsReadService({ createTransport: createTransport as never });
+
+    const result = await service.activity({
+      intervals: [{ startMs: NOW - 2 * DAY, endMs: NOW - DAY }],
+      providerIds: ["openai"],
+    });
+    expect(result.intervals).toHaveLength(1);
+    expect(trace.calls).toEqual(["activity:1"]);
+
+    await expect(
+      service.activity({
+        intervals: [{ startMs: NOW, endMs: NOW - DAY }],
+        providerIds: ["openai"],
+      }),
+    ).rejects.toMatchObject({ code: "bad-request" });
+    await expect(
+      service.activity({
+        intervals: [{ startMs: NOW - DAY, endMs: NOW }],
+        providerIds: [""],
       }),
     ).rejects.toMatchObject({ code: "bad-request" });
     expect(createTransport).toHaveBeenCalledTimes(1);

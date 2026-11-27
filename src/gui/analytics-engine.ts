@@ -26,6 +26,7 @@ import type {
   SessionSnapshot,
 } from "../contracts/dashboard.js";
 import { isRangeKey, type RangeKey, rangeWindow } from "../contracts/ranges.js";
+import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import {
   compareOpenCodeSourceIdentity,
   type OpenCodeMessageRevisionSnapshot,
@@ -148,6 +149,8 @@ export interface AnalyticsWorkerMemory {
 }
 
 export interface AnalyticsEngine extends AnalyticsRangeReader {
+  /** Internal usage-activity read over owned hour buckets; never polls providers. */
+  activity(query: UsageActivityQuery): Promise<UsageActivityResult>;
   stats(): Promise<AnalyticsWorkerMemory>;
   /** Best-effort GC trigger; false when the runtime exposes no hook. */
   gc(): Promise<boolean>;
@@ -2335,6 +2338,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const agentAffectedSessionIds = new Set<string>();
     const sourceUnchanged = candidate.sourceUnchanged === true;
     let updatedAtChanged = false;
+    let variantChanged = false;
     let occurrenceRemoved = false;
 
     // The final staged row is the only authoritative payload for a message id:
@@ -2378,13 +2382,15 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
         agentProjected &&
         (row.agent !== occurrence.agent || row.variant !== occurrence.variant)
       ) {
-        // Compact occurrences do not persist agent/variant; filling them from
-        // the first unchanged-source detail read does not change the cached DTO.
+        // Agent stays detail-only; effort is persisted, so a changed recorded
+        // variant must flush the compact occurrence.
         const wasKnown = occurrence.agent !== undefined || occurrence.variant !== undefined;
+        const nextVariantChanged = row.variant !== occurrence.variant;
         if (row.agent === undefined) delete occurrence.agent;
         else occurrence.agent = row.agent;
         if (row.variant === undefined) delete occurrence.variant;
         else occurrence.variant = row.variant;
+        if (nextVariantChanged) variantChanged = true;
         agentUpserts.push(row);
         if (wasKnown || !sourceUnchanged) agentAffectedSessionIds.add(row.sessionID);
       }
@@ -2574,6 +2580,7 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
     const snapshotNeeded =
       dataChanged ||
       updatedAtChanged ||
+      variantChanged ||
       cursorChanged ||
       repairChanged ||
       signatureChanged ||
@@ -2833,6 +2840,15 @@ export function createAnalyticsEngine(options: AnalyticsEngineOptions = {}): Ana
       };
       storeGroupSnapshot(query, result);
       return result;
+    },
+
+    async activity(query) {
+      if (closed) throw new Error("analytics closed");
+      await ensureLoaded();
+      ensurePricingRevision();
+      await ensureIndexLoaded();
+      ensureModel();
+      return measureSync("dtoAggregation", () => model.activity(query));
     },
 
     async project(projectId, range) {
