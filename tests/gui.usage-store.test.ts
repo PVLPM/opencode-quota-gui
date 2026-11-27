@@ -5,7 +5,8 @@
  * of retained/cooldown/error cycles, restart and concurrent-writer behaviour,
  * out-of-order splitting, missing-row evidence and the privacy-safe schema.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -845,5 +846,82 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
     const second = recorder.close();
     expect(second).toBe(first);
     await first;
+  });
+});
+
+describe("usage recorder: store recovery and lock carry-over", () => {
+  it("retries a failed store open on a later observation instead of memoizing the error", async () => {
+    const logs: string[] = [];
+    const nested = join(root, "not-yet", "usage-history.sqlite");
+    // A directory at the DB path makes the first open fail deterministically.
+    await mkdir(nested, { recursive: true });
+    const recorder = createUsageRecorder({
+      path: nested,
+      now: () => BASE,
+      logger: createGuiLogger({ sink: (line) => logs.push(line) }),
+    });
+
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)])]),
+        new Map([["card-a", BASE]]),
+      ),
+    );
+    await recorder.flush();
+    expect(logs.some((line) => line.includes("store-unavailable"))).toBe(true);
+
+    await rm(nested, { recursive: true, force: true });
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 70)])]),
+        new Map([["card-a", BASE + MINUTE]]),
+      ),
+    );
+    await recorder.flush();
+    expect(existsSync(nested)).toBe(true);
+    const opened = await openUsageStore(nested);
+    stores.push(opened);
+    expect(runsOf(opened, ROW_A)).toHaveLength(1);
+    expect(runsOf(opened, ROW_A)[0]?.remainingPercent).toBe(70);
+    await recorder.close();
+  });
+
+  it("carries a cycle over after a write lock and records it on the next observation", async () => {
+    const recorded: UsageCycleObservation[] = [];
+    let failures = 2;
+    const fake = {
+      path: "memory",
+      recordCycle(value: UsageCycleObservation) {
+        if (failures > 0) {
+          failures -= 1;
+          throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        }
+        recorded.push(value);
+      },
+      close() {},
+    } as unknown as UsageStore;
+    const recorder = createUsageRecorder({ store: fake, now: () => BASE });
+
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)])]),
+        new Map([["card-a", BASE]]),
+      ),
+    );
+    // The first write and the flush retry both hit the lock: bounded carry-over.
+    await recorder.flush();
+    expect(recorded).toHaveLength(0);
+
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 70)])]),
+        new Map([["card-a", BASE + MINUTE]]),
+      ),
+    );
+    await recorder.flush();
+    expect(recorded).toHaveLength(2);
+    expect(recorded[0]?.samples[0]?.remainingPercent).toBe(80);
+    expect(recorded[1]?.samples[0]?.remainingPercent).toBe(70);
+    await recorder.close();
   });
 });
