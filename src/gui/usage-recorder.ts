@@ -228,7 +228,10 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
   let closing: Promise<void> | undefined;
   let chain: Promise<void> = Promise.resolve();
   let importChain: Promise<void> = Promise.resolve();
-  const carryOver: UsageCycleObservation[] = [];
+  // Every valid observation is queued before the store is opened or drained.
+  // A held write lock (or a lock during open) therefore delays a cycle instead
+  // of dropping it; overflow discards the oldest cycle with an explicit code.
+  const pending: { observation: UsageCycleObservation; epoch: number }[] = [];
 
   function store(): Promise<UsageStore> {
     if (storePromise === undefined) {
@@ -265,33 +268,49 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
     logger.warn("usage history write deferred", "write-busy");
   }
 
-  function enqueueCarryOver(cycle: UsageCycleObservation): void {
-    if (carryOver.some((item) => item.collectorRunId === cycle.collectorRunId)) return;
-    if (carryOver.length >= CARRY_OVER_LIMIT) {
-      carryOver.shift();
+  function enqueuePending(cycle: UsageCycleObservation, epoch: number): void {
+    if (pending.some((item) => item.observation.collectorRunId === cycle.collectorRunId)) return;
+    if (pending.length >= CARRY_OVER_LIMIT) {
+      pending.shift();
       logger.warn("usage history carry-over dropped", "carry-over-dropped");
     }
-    carryOver.push(cycle);
+    pending.push({ observation: cycle, epoch });
+  }
+
+  /** A new owner inherited the source: its predecessor's cycles must never land. */
+  function discardPreviousOwnerCycles(): void {
+    let dropped = false;
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      if ((pending[index] as { epoch: number }).epoch === sourceEpoch) continue;
+      pending.splice(index, 1);
+      dropped = true;
+    }
+    if (dropped) logger.warn("usage history cycles discarded after handoff", "carry-over-handoff");
   }
 
   function recordPending(target: UsageStore): boolean {
-    while (carryOver.length > 0) {
-      const next = carryOver[0] as UsageCycleObservation;
+    while (pending.length > 0) {
+      const next = pending[0] as { observation: UsageCycleObservation; epoch: number };
+      if (next.epoch !== sourceEpoch) {
+        pending.shift();
+        logger.warn("usage history cycle discarded after handoff", "carry-over-handoff");
+        continue;
+      }
       try {
-        target.recordCycle(next);
+        target.recordCycle(next.observation);
       } catch (error) {
         if (isLockError(error)) {
           warnBusy();
           return false;
         }
-        carryOver.shift();
+        pending.shift();
         if (!writeWarned) {
           writeWarned = true;
           logger.warn("usage history write failed", "write-failed");
         }
         continue;
       }
-      carryOver.shift();
+      pending.shift();
     }
     return true;
   }
@@ -328,6 +347,15 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
       return undefined;
     }
 
+    const { observation, unmarkedSamples } = buildCycle(snapshot, cycle, now());
+    if (unmarkedSamples > 0 && !measurementWarned) {
+      measurementWarned = true;
+      logger.warn("usage measurement unmarked; sample rejected", "measurement-unmarked");
+    }
+    // Queue before opening: a lock during open delays this cycle instead of
+    // losing it (the next observation or a later flush drains the FIFO).
+    enqueuePending(observation, epoch);
+
     let target: UsageStore;
     try {
       target = await store();
@@ -336,29 +364,10 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
         openWarned = true;
         logger.warn("usage history unavailable", "store-unavailable");
       }
-      return undefined;
+      return observation.intervalMs;
     }
-    if (closed || epoch !== sourceEpoch) return undefined;
-
-    const { observation, unmarkedSamples } = buildCycle(snapshot, cycle, now());
-    if (unmarkedSamples > 0 && !measurementWarned) {
-      measurementWarned = true;
-      logger.warn("usage measurement unmarked; sample rejected", "measurement-unmarked");
-    }
-    if (!recordPending(target)) return observation.intervalMs;
-    try {
-      target.recordCycle(observation);
-    } catch (error) {
-      if (isLockError(error)) {
-        enqueueCarryOver(observation);
-        warnBusy();
-        return observation.intervalMs;
-      }
-      if (!writeWarned) {
-        writeWarned = true;
-        logger.warn("usage history write failed", "write-failed");
-      }
-    }
+    if (closed || epoch !== sourceEpoch) return observation.intervalMs;
+    recordPending(target);
     return observation.intervalMs;
   }
 
@@ -382,6 +391,7 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
 
     sourceChanged() {
       sourceEpoch += 1;
+      discardPreviousOwnerCycles();
     },
 
     recordClaudeOwnership(sessionId, messageId) {
@@ -417,7 +427,7 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
         await pendingChain;
         pendingChain = chain;
       } while (pendingChain !== chain);
-      if (carryOver.length > 0) {
+      if (pending.length > 0) {
         try {
           await store().then((target) => {
             recordPending(target);
@@ -451,8 +461,8 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
         // another process and is discarded with an explicit code (the store
         // stays durable; only this bounded in-memory carry-over is lost).
         recordPending(target);
-        if (carryOver.length > 0) {
-          carryOver.length = 0;
+        if (pending.length > 0) {
+          pending.length = 0;
           logger.warn("usage history carry-over discarded at close", "carry-over-discarded");
         }
         try {

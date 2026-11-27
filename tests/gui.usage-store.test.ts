@@ -850,7 +850,7 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
 });
 
 describe("usage recorder: store recovery and lock carry-over", () => {
-  it("retries a failed store open on a later observation instead of memoizing the error", async () => {
+  it("retains cycles across a failed store open and retries on a later observation", async () => {
     const logs: string[] = [];
     const nested = join(root, "not-yet", "usage-history.sqlite");
     // A directory at the DB path makes the first open fail deterministically.
@@ -881,8 +881,8 @@ describe("usage recorder: store recovery and lock carry-over", () => {
     expect(existsSync(nested)).toBe(true);
     const opened = await openUsageStore(nested);
     stores.push(opened);
-    expect(runsOf(opened, ROW_A)).toHaveLength(1);
-    expect(runsOf(opened, ROW_A)[0]?.remainingPercent).toBe(70);
+    // Both queued cycles are drained in order; the failed open lost nothing.
+    expect(runsOf(opened, ROW_A).map((run) => run.remainingPercent)).toEqual([80, 70]);
     await recorder.close();
   });
 
@@ -922,6 +922,84 @@ describe("usage recorder: store recovery and lock carry-over", () => {
     expect(recorded).toHaveLength(2);
     expect(recorded[0]?.samples[0]?.remainingPercent).toBe(80);
     expect(recorded[1]?.samples[0]?.remainingPercent).toBe(70);
+    await recorder.close();
+  });
+
+  it("commits several polls in order after one held write lock is released", async () => {
+    const recorded: UsageCycleObservation[] = [];
+    let locked = true;
+    const fake = {
+      path: "memory",
+      recordCycle(value: UsageCycleObservation) {
+        if (locked) {
+          throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        }
+        recorded.push(value);
+      },
+      close() {},
+    } as unknown as UsageStore;
+    const logs: string[] = [];
+    const recorder = createUsageRecorder({
+      store: fake,
+      now: () => BASE,
+      logger: createGuiLogger({ sink: (line) => logs.push(line) }),
+    });
+
+    for (const [minute, remaining] of [
+      [0, 80],
+      [1, 70],
+      [2, 60],
+    ] as const) {
+      recorder.observe(
+        live(
+          snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", remaining)])]),
+          new Map([["card-a", BASE + minute * MINUTE]]),
+        ),
+      );
+    }
+    await recorder.flush();
+    expect(recorded).toHaveLength(0);
+    expect(logs.some((line) => line.includes("write-busy"))).toBe(true);
+
+    locked = false;
+    await recorder.flush();
+    expect(recorded.map((cycle) => cycle.samples[0]?.remainingPercent)).toEqual([80, 70, 60]);
+    await recorder.close();
+  });
+
+  it("discards cycles queued before a source-owner handoff", async () => {
+    const recorded: UsageCycleObservation[] = [];
+    let locked = true;
+    const fake = {
+      path: "memory",
+      recordCycle(value: UsageCycleObservation) {
+        if (locked) {
+          throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+        }
+        recorded.push(value);
+      },
+      close() {},
+    } as unknown as UsageStore;
+    const logs: string[] = [];
+    const recorder = createUsageRecorder({
+      store: fake,
+      now: () => BASE,
+      logger: createGuiLogger({ sink: (line) => logs.push(line) }),
+    });
+
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)])]),
+        new Map([["card-a", BASE]]),
+      ),
+    );
+    // Let the capture enqueue and hit the held lock before the handoff.
+    await recorder.flush();
+    recorder.sourceChanged();
+    locked = false;
+    await recorder.flush();
+    expect(recorded).toHaveLength(0);
+    expect(logs.some((line) => line.includes("carry-over-handoff"))).toBe(true);
     await recorder.close();
   });
 });
