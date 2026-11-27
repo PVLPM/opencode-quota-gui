@@ -53,6 +53,7 @@ export const UNATTRIBUTED_REASON_LABELS: Record<UsageUnattributedReason, string>
   unpriced: "Eligible activity has no pricing",
   "zero-weight": "Eligible activity has zero API-equivalent weight",
   "unobserved-interval": "Monitoring gap: the trajectory is unknown",
+  "unidentified-activity": "Some activity has no recorded model, so the split is incomplete",
 };
 
 /** `undefined` for an observed or unobserved link; the boundary sentence otherwise. */

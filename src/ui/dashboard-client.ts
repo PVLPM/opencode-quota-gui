@@ -261,6 +261,7 @@ const USAGE_UNATTRIBUTED_REASONS = [
   "unpriced",
   "zero-weight",
   "unobserved-interval",
+  "unidentified-activity",
 ] as const satisfies readonly UsageInterval["unattributedReason"][];
 const USAGE_IMPORT_HARNESSES = [
   "claude-code",
