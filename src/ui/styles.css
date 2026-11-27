@@ -248,16 +248,19 @@
   background: var(--qg-text-secondary);
 }
 
-/* Peer Analytics / Models tabs replace the single frame label inside Analytics. */
-.qg-analytics-tabs {
+/* Peer Analytics / Models and Quota / Usage tabs replace the single frame label. */
+.qg-analytics-tabs,
+.qg-quota-tabs {
   gap: 20px;
 }
 
-.qg-analytics-tabs::after {
+.qg-analytics-tabs::after,
+.qg-quota-tabs::after {
   display: none;
 }
 
-.qg-analytics-tabs a {
+.qg-analytics-tabs a,
+.qg-quota-tabs a {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -269,15 +272,19 @@
 }
 
 .qg-analytics-tabs a:hover,
-.qg-analytics-tabs a:focus-visible {
+.qg-analytics-tabs a:focus-visible,
+.qg-quota-tabs a:hover,
+.qg-quota-tabs a:focus-visible {
   color: var(--qg-text);
 }
 
-.qg-analytics-tabs a[aria-current="page"] {
+.qg-analytics-tabs a[aria-current="page"],
+.qg-quota-tabs a[aria-current="page"] {
   color: var(--qg-text);
 }
 
-.qg-analytics-tabs a[aria-current="page"]::after {
+.qg-analytics-tabs a[aria-current="page"]::after,
+.qg-quota-tabs a[aria-current="page"]::after {
   content: "";
   position: absolute;
   inset-inline: 0;
@@ -286,7 +293,8 @@
   background: var(--qg-text-secondary);
 }
 
-.qg-analytics-tabs a:focus-visible {
+.qg-analytics-tabs a:focus-visible,
+.qg-quota-tabs a:focus-visible {
   outline: 1px solid var(--qg-accent-border);
   outline-offset: 4px;
 }
@@ -414,6 +422,32 @@
 }
 .qg-range [data-slot="segmented-control-v2-item"] {
   padding-inline: 8px;
+}
+
+/* Usage adds two long labels ("Current window", "Lifetime"), so its segments
+   keep their content width instead of sharing the range equally. The viewport
+   cap keeps the control inside a narrow phone; it scrolls internally only when
+   the topbar cannot fit its full width. */
+.qg-usage-range[data-slot="segmented-control-v2"] {
+  width: fit-content;
+  max-width: calc(100vw - 44px);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.qg-usage-range[data-slot="segmented-control-v2"]::-webkit-scrollbar {
+  display: none;
+}
+
+.qg-usage-range [data-slot="segmented-control-v2-item"] {
+  flex: 1 1 auto;
+  min-width: max-content;
+}
+
+/* An x-scroller clips both axes, so keep the focus ring inside the item. */
+.qg-usage-range [data-slot="segmented-control-v2-item"]:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--qg-accent-border);
 }
 
 /* A range still being prefetched: the same thin spinning ring as the native
@@ -3232,7 +3266,9 @@
     padding: 6px 12px;
     gap: 8px;
   }
-  .qg-frame-tab::after {
+  .qg-frame-tab::after,
+  .qg-analytics-tabs a[aria-current="page"]::after,
+  .qg-quota-tabs a[aria-current="page"]::after {
     bottom: -7px;
   }
   .qg-settings__scroll {
@@ -3248,8 +3284,8 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .qg-chart-shell .qg-summary {
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 10px 20px;
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+    gap: 10px 16px;
     padding: 14px 16px;
   }
   .qg-chart-shell__value[data-emphasis="primary"] {
@@ -3604,7 +3640,6 @@
 .qg-quota-tabs {
   display: inline-flex;
   align-items: stretch;
-  gap: 2px;
 }
 
 .qg-usage-view {
@@ -3633,6 +3668,20 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 18px;
+}
+
+/* Observed and monitoring-gap keys are line samples, matching the plot strokes. */
+.qg-usage-legend .qg-legend__swatch {
+  width: 16px;
+  height: 0;
+  border-top: 1.5px solid var(--qg-chart-context);
+  border-radius: 0;
+  background: transparent;
+}
+
+.qg-usage-legend .qg-legend__swatch--dashed {
+  border-top-color: var(--qg-text-muted);
+  border-top-style: dashed;
 }
 
 .qg-usage-imported-activity {
@@ -3700,12 +3749,26 @@
 }
 
 /* One full-width row per quota window at every width: comparison happens by
-   reading down the card, never by squeezing plots side by side. */
+   reading down the card, never by squeezing plots side by side. The windows
+   share the card's inner padding so headings and panels align with the header. */
 .qg-usage-account__windows {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   min-width: 0;
+  padding: 16px;
+}
+
+/* Empty accounts keep that same inner padding instead of touching the border. */
+.qg-usage-account > .qg-usage-account__empty {
+  padding: 16px;
+}
+
+/* Qualifications under each summary value carry real caveats; one step above
+   the axis micro-labels keeps them readable without competing with the value. */
+.qg-usage-window .qg-chart-shell__note {
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .qg-usage-badge {
@@ -3820,8 +3883,10 @@
 }
 
 .qg-usage-breakdown {
-  border-top: 1px solid var(--qg-border);
+  margin: 0 16px;
   padding-top: 12px;
+  padding-bottom: 14px;
+  border-top: 1px solid var(--qg-border);
 }
 
 .qg-usage-breakdown > summary {
