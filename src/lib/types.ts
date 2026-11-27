@@ -112,6 +112,12 @@ export interface QuotaTelemetryConfig {
   enabled: boolean;
 }
 
+/** Opt-in local history import; both harnesses default off. */
+export interface UsageImportConfig {
+  claudeCode: boolean;
+  codex: boolean;
+}
+
 /**
  * Local dashboard (GUI) configuration, owned by the global canonical
  * `opencode-quota-gui/config.jsonc` layer (spec §5.4, §7).
@@ -350,6 +356,9 @@ export interface QuotaToastConfig {
   /** Opt-in quota metrics through the host's global OpenTelemetry MeterProvider. */
   telemetry: QuotaTelemetryConfig;
 
+  /** Opt-in import of local Claude Code / Codex history. */
+  usageImport: UsageImportConfig;
+
   /** Local dashboard settings (global canonical `opencode-quota-gui/config.jsonc`). */
   dashboard: QuotaDashboardConfig;
 
@@ -434,6 +443,10 @@ export const DEFAULT_CONFIG: QuotaToastConfig = {
   },
   telemetry: {
     enabled: false,
+  },
+  usageImport: {
+    claudeCode: false,
+    codex: false,
   },
   dashboard: {
     enabled: false,
