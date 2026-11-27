@@ -1039,20 +1039,17 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         sameValue(run, sample.remainingPercent, sample.quantity, sample.capacityKey),
       );
       if (sameValueRun !== undefined) {
-        if (measuredAtMs > sameValueRun.first_at_ms && measuredAtMs < sameValueRun.last_at_ms) {
-          // Same value inside a run: the sample is real evidence, but it adds no
-          // endpoint. The run keeps its first/last pair.
-          conn.run(
-            "UPDATE usage_runs SET sample_count = sample_count + 1, attempted_at_ms = MAX(COALESCE(attempted_at_ms, 0), ?) WHERE run_id = ?",
-            [attemptedAtMs, sameValueRun.run_id],
-          );
-        } else {
-          // Exact duplicate of a run endpoint (replay of the same measurement).
-          conn.run(
-            "UPDATE usage_runs SET attempted_at_ms = MAX(COALESCE(attempted_at_ms, 0), ?) WHERE run_id = ?",
-            [attemptedAtMs, sameValueRun.run_id],
-          );
-        }
+        // A compressed run stores only its endpoints, so an interior sample
+        // cannot be distinguished from a replay under a new cycle id. Counting
+        // it would inflate sample_count on every cache replay; conservative
+        // semantics count endpoints and newly inserted runs only.
+        //
+        // An exact endpoint replay (same time and value) is the same
+        // measurement, not a new success. It must never advance
+        // `attempted_at_ms`: otherwise a cached replay would mask an
+        // intervening failed attempt and keep continuity alive. Reset-only
+        // differences at the same time cannot be ordered, so the stored
+        // endpoint keeps its original reset evidence (documented ignore).
         return;
       }
       // A different value at/inside stored evidence never splits or fabricates

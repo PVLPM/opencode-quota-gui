@@ -273,16 +273,73 @@ describe("usage store: series identity and run compression", () => {
     expect(runs).toHaveLength(1);
   });
 
-  it("counts an out-of-order same-value sample without moving run endpoints", async () => {
+  it("does not count an interior replay of a compressed run as a new sample", async () => {
     const db = await store();
     db.recordCycle(observation([sample(ROW_A, BASE, 50)]));
     db.recordCycle(observation([sample(ROW_A, BASE + MINUTE, 50)], { collectorRunId: "run-2" }));
     db.recordCycle(observation([sample(ROW_A, BASE + 30_000, 50)], { collectorRunId: "run-3" }));
     const runs = runsOf(db, ROW_A);
     expect(runs).toHaveLength(1);
-    expect(runs[0]?.sampleCount).toBe(3);
+    expect(runs[0]?.sampleCount).toBe(2);
     expect(runs[0]?.lastAtMs).toBe(BASE + MINUTE);
     expect(db.query({ startMs: BASE, endMs: BASE + MINUTE }).conflicts).toEqual([]);
+  });
+
+  it("treats same-time same-value reset-only differences as a duplicate observation", async () => {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80, { resetAtMs: BASE + 10 * MINUTE })], {
+        collectorRunId: "run-1",
+      }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80, { resetAtMs: BASE + 11 * MINUTE })], {
+        collectorRunId: "run-2",
+      }),
+    );
+    const runs = runsOf(db, ROW_A);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.sampleCount).toBe(1);
+    expect(runs[0]?.resetAtMs).toBe(BASE + 10 * MINUTE);
+    expect(db.query({ startMs: BASE, endMs: BASE + MINUTE }).conflicts).toEqual([]);
+  });
+
+  it("does not advance the success watermark on a replayed measurement", async () => {
+    const db = await store();
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80)], {
+        collectorRunId: "run-1",
+        attemptedAtMs: BASE,
+      }),
+    );
+    db.recordCycle(
+      observation([], {
+        collectorRunId: "failed",
+        attemptedAtMs: BASE + 30_000,
+        interruptions: [
+          { cardId: "card-a", providerId: "alpha", kind: "error", atMs: BASE + 30_000 },
+        ],
+      }),
+    );
+    // A cache replay returns the original measurement time under a new cycle id.
+    db.recordCycle(
+      observation([sample(ROW_A, BASE, 80)], {
+        collectorRunId: "replay",
+        attemptedAtMs: BASE + MINUTE,
+      }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 2 * MINUTE, 70)], {
+        collectorRunId: "run-2",
+        attemptedAtMs: BASE + 2 * MINUTE,
+      }),
+    );
+
+    const runs = runsOf(db, ROW_A);
+    expect(runs.map((run) => run.remainingPercent)).toEqual([80, 70]);
+    // The failed attempt is still between the two genuine measurements, so the
+    // following run is not continuously linked.
+    expect(runs[1]?.linked).toBe(false);
   });
 
   it("inserts a gap sample as an unlinked run and unlinks the following run", async () => {
