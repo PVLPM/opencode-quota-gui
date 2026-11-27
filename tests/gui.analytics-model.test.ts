@@ -3555,6 +3555,42 @@ describe("analytics model: interval activity", () => {
     expect(result.intervals[0]?.entries[0]?.providerId).toBe("zero-labs");
   });
 
+  it("skips steps without a non-empty provider or model identity", () => {
+    const at = NOW - 2 * HOUR;
+    const result = activity(
+      { intervals: [{ startMs: at - HOUR, endMs: at }], providerIds: ["zero-labs", ""] },
+      [
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_empty_provider",
+          completedAtMs: at,
+          tokens: { input: 100 },
+          providerID: "",
+          modelID: "zero-1",
+        }),
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_empty_model",
+          completedAtMs: at,
+          tokens: { input: 200 },
+          providerID: "zero-labs",
+          modelID: "",
+        }),
+        row({
+          sessionID: "ses_activity_a",
+          messageID: "msg_identified",
+          completedAtMs: at,
+          tokens: { input: 300 },
+          providerID: "zero-labs",
+          modelID: "zero-1",
+        }),
+      ],
+    );
+
+    expect(result.intervals[0]?.entries).toHaveLength(1);
+    expect(result.intervals[0]?.entries[0]?.tokens.input).toBe(300);
+  });
+
   it("assigns steps to the half-open interval (startMs, endMs] and across a model switch", () => {
     const boundary = NOW - 3 * HOUR;
     const result = activity(

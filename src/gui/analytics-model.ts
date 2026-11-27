@@ -1588,11 +1588,14 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         for (const step of bucket.steps.values()) {
           const completedAtMs = step.completedAtMs;
           if (completedAtMs < hourStart || completedAtMs >= hourEnd) continue;
-          if (step.providerID === undefined || step.modelID === undefined) continue;
-          if (!providerIds.has(step.providerID)) continue;
+          const providerId = step.providerID;
+          const modelId = step.modelID;
+          // Unidentified steps are metadata-only for this read.
+          if (!providerId || !modelId) continue;
+          if (!providerIds.has(providerId)) continue;
           const intervalIndex = intervalIndexFor(intervals, intervalCursor, completedAtMs);
           if (intervalIndex < 0) continue;
-          const key = `${step.providerID}\u0000${step.modelID}\u0000${step.effort ?? ""}`;
+          const key = `${providerId}\u0000${modelId}\u0000${step.effort ?? ""}`;
           let groups = groupsByInterval[intervalIndex];
           if (groups === undefined) {
             groups = new Map();
@@ -1601,8 +1604,8 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
           let group = groups.get(key);
           if (group === undefined) {
             group = {
-              providerId: step.providerID,
-              modelId: step.modelID,
+              providerId,
+              modelId,
               accumulator: createAccumulator(),
               stepCount: 0,
             };
