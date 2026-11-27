@@ -138,6 +138,12 @@ export type DashboardReadSource = Pick<
 > & {
   /** Host-only usage-activity read; never added to the browser DashboardDataSource. */
   activity(query: UsageActivityQuery): Promise<UsageActivityResult>;
+  /**
+   * Optional local observation-history read. This workstream types only the
+   * seam: the producing backend lands separately, so an absent implementation
+   * answers exactly like an absent quota read (a controlled unavailable error).
+   */
+  usage?: DashboardDataSource["usage"];
   /** One shared analytics refresh per transport tick, if the service loaded. */
   refreshAnalytics?(): Promise<void>;
   /** Worker background-generation notifications (lazy; never starts analytics). */

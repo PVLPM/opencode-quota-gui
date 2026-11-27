@@ -37,6 +37,40 @@ export interface ChartIndexInput {
 }
 
 /**
+ * The plot-local x for a pointer event over the inspection surface, or
+ * `undefined` before layout. Shared so every chart maps the pointer the same
+ * way.
+ */
+export function pointerPlotX(
+  event: PointerEvent,
+  plot: { left: number; width: number },
+): number | undefined {
+  const surface = event.currentTarget as HTMLElement | null;
+  if (!surface) return undefined;
+  const rect = surface.getBoundingClientRect();
+  if (!(rect.width > 0)) return undefined;
+  return plot.left + ((event.clientX - rect.left) / rect.width) * plot.width;
+}
+
+/** Arrow/Home/End step navigation shared by the keyboard-inspectable charts. */
+export function nextInspectionIndex(
+  event: KeyboardEvent,
+  count: number,
+  current: number,
+): number | undefined {
+  if (count <= 0) return undefined;
+  if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+    return Math.min(count - 1, current + 1);
+  }
+  if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+    return Math.max(0, current - 1);
+  }
+  if (event.key === "Home") return 0;
+  if (event.key === "End") return count - 1;
+  return undefined;
+}
+
+/**
  * Maps a chart-local x coordinate to the nearest rendered step. Session is the
  * only chart with point marks; Usage selects a bucket directly from its button.
  */

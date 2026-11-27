@@ -13,6 +13,7 @@ import type {
 import type { CardId, RowId } from "../src/contracts/identity.js";
 import type { RangeKey } from "../src/contracts/ranges.js";
 import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts/ranges.js";
+import type { UsageRangeKey, UsageSnapshot } from "../src/contracts/usage.js";
 import { createGuiLogger } from "../src/gui/log.js";
 import {
   createSnapshotService,
@@ -248,6 +249,76 @@ function countedProjectSource(): { calls: Map<string, number>; source: SnapshotS
 }
 
 describe("GUI snapshot service", () => {
+  function usageSnapshot(range: UsageRangeKey): UsageSnapshot {
+    return {
+      generatedAtMs: NOW,
+      range,
+      timeZone: "UTC",
+      accounts: [],
+      models: [],
+      imports: [],
+    };
+  }
+
+  it("delegates usage, caches per range and marks it stale after a quota poll", async () => {
+    vi.useFakeTimers();
+    try {
+      const ranges: UsageRangeKey[] = [];
+      let quotaPolls = 0;
+      const { source } = fakeSource({
+        usage: async ({ range }) => {
+          ranges.push(range);
+          return usageSnapshot(range);
+        },
+        quota: async () => {
+          quotaPolls += 1;
+          const snapshot = quota();
+          snapshot.providers.polledAtMs = NOW + quotaPolls;
+          return snapshot;
+        },
+      });
+      const service = createSnapshotService({
+        source,
+        logger: quiet(),
+        quotaIntervalMs: 10,
+      });
+      const events: DashboardEvent[] = [];
+      const unsubscribe = service.subscribe((event) => events.push(event));
+      const release = service.addViewer();
+
+      await expect(service.usage({ range: "7d" })).resolves.toEqual(usageSnapshot("7d"));
+      await expect(service.usage({ range: "7d" })).resolves.toEqual(usageSnapshot("7d"));
+      expect(ranges).toEqual(["7d"]);
+      expect(events).toEqual([]);
+
+      // A quota reader registers the provider poll; the next tick observes the
+      // changed snapshot and broadcasts the history refresh topic.
+      await service.quota();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(events.map((event) => event.topic)).toEqual(["quota.changed"]);
+
+      // The provider poll fills history; its quota.changed tick makes the next
+      // Usage read recompute locally instead of serving the old cached page.
+      await expect(service.usage({ range: "7d" })).resolves.toEqual(usageSnapshot("7d"));
+      expect(ranges).toEqual(["7d", "7d"]);
+
+      await expect(service.usage({ range: "24h" })).resolves.toEqual(usageSnapshot("24h"));
+      expect(ranges).toEqual(["7d", "7d", "24h"]);
+      release();
+      unsubscribe();
+      service.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("answers a controlled unavailable error when the source has no usage read", async () => {
+    const { source } = fakeSource();
+    const service = makeService(source);
+    await expect(service.usage({ range: "7d" })).rejects.toThrow("Usage source unavailable");
+    service.close();
+  });
+
   it("retries a recoverable quota poll once before the normal cadence", async () => {
     vi.useFakeTimers();
     let calls = 0;

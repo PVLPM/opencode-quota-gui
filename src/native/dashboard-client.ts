@@ -32,6 +32,7 @@ import type {
 } from "../contracts/dashboard.js";
 import { isDashboardEvent } from "../contracts/guards.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { UsageQuery, UsageSnapshot } from "../contracts/usage.js";
 import type {
   DashboardRpcCacheObserverEvent,
   DashboardRpcEventData,
@@ -57,6 +58,7 @@ export interface DashboardRpcCallOptions {
 export interface DashboardRpcCaller {
   health(input: DashboardRpcNoInput, options?: DashboardRpcCallOptions): Promise<DashboardHealth>;
   quota(input: { refresh?: boolean }, options?: DashboardRpcCallOptions): Promise<QuotaSnapshot>;
+  usage(input: UsageQuery, options?: DashboardRpcCallOptions): Promise<UsageSnapshot>;
   home(
     input: { range: RangeKey; background?: boolean },
     options?: DashboardRpcCallOptions,
@@ -411,6 +413,9 @@ export function createNativeDashboardClient(
     },
     async quota(input) {
       return rpc.quota(input ?? {});
+    },
+    async usage(input) {
+      return rpc.usage(input);
     },
     async home(input) {
       return rpc.home(input);
