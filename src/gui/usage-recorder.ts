@@ -25,13 +25,15 @@ import { createGuiLogger, type GuiLogger } from "./log.js";
 import { isLiveQuotaObservation, quotaObservationCycle } from "./quota-observation.js";
 import {
   createUsageImporter,
+  emptyImportedActivity,
   type UsageImporter,
   type UsageImportSettings,
   type UsageImportStatus,
 } from "./usage-import-service.js";
 
-const USAGE_HISTORY_FILE = "usage-history.sqlite";
+export const USAGE_HISTORY_FILE = "usage-history.sqlite";
 const DEFAULT_INTERVAL_MS = 60_000;
+
 /** Keep the host event loop responsive when another process holds the write lock. */
 const USAGE_STORE_BUSY_TIMEOUT_MS = 250;
 /** Bounded carry-over: a small number of cycles can wait for the lock. */
@@ -402,16 +404,7 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
 
     queryImportedActivity(query) {
       if (importer === undefined) {
-        return Promise.resolve({
-          intervals: query.intervals.map((interval) => ({
-            startMs: interval.startMs,
-            endMs: interval.endMs,
-            entries: [],
-            incomplete: false,
-            unpricedTokens: 0,
-            unknownTokens: 0,
-          })),
-        });
+        return Promise.resolve(emptyImportedActivity(query));
       }
       return importer.queryActivity(query, USAGE_IMPORT_HARNESSES);
     },

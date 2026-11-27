@@ -33,6 +33,7 @@ import type {
 import { OPENAI_RESETS_ROW_KEY, OPENAI_RESETS_ROW_RESULT_TYPE } from "../contracts/openai-quota.js";
 import { isTransientProviderFailureCategory } from "../contracts/provider-failure.js";
 import type { RangeKey } from "../contracts/ranges.js";
+import type { UsageQuery, UsageSnapshot } from "../contracts/usage.js";
 import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import { createLoadConfigMeta, loadConfig } from "../lib/config.js";
 import type { QuotaProvider, QuotaProviderContext, QuotaToastEntry } from "../lib/entries.js";
@@ -77,6 +78,8 @@ import {
   readBundledTemporalCatalog,
 } from "./temporal-status.js";
 import { resolveHostTimeZone } from "./time-zone.js";
+import type { UsageImportStatus } from "./usage-import-service.js";
+import { createUsageSnapshotBuilder } from "./usage-service.js";
 
 /**
  * Controlled source error codes the HTTP layer maps to status codes
@@ -136,6 +139,11 @@ export interface DashboardReadSourceOptions {
   /** Test/embedding seam for the provider registry; defaults to `getProviders()`. */
   providers?: QuotaProvider[];
   providerLabel?: (providerId: string) => string;
+  /** Test/embedding seam: the same usage-history path the recorder writes. */
+  usageStorePath?: string;
+  /** Recorder import seams; absent reports imports disabled. */
+  usageImportStatus?: () => Promise<UsageImportStatus[]>;
+  usageImportedActivity?: (query: UsageActivityQuery) => Promise<UsageActivityResult>;
 }
 
 export type DashboardReadSource = Pick<
@@ -856,6 +864,24 @@ export function createDashboardReadSource(
     return (await getAnalyticsService()).activity(query);
   }
 
+  const usageSnapshots = createUsageSnapshotBuilder({
+    ...(options.usageStorePath !== undefined ? { path: options.usageStorePath } : {}),
+    // Only a real usage request starts the analytics worker (via `activity`),
+    // never provider polling or a refresh of the source database.
+    activity: (query) => activity(query),
+    ...(options.usageImportStatus !== undefined ? { importStatus: options.usageImportStatus } : {}),
+    ...(options.usageImportedActivity !== undefined
+      ? { importedActivity: options.usageImportedActivity }
+      : {}),
+    now,
+    timeZone,
+    latestQuotaCards: () => lastQuotaSnapshot?.providers.cards,
+  });
+
+  async function usage(input: UsageQuery): Promise<UsageSnapshot> {
+    return usageSnapshots.usage(input);
+  }
+
   async function refreshAnalytics(): Promise<void> {
     // A quota-only dashboard never loaded analytics, so never start the worker.
     if (!analyticsPromise) return;
@@ -899,6 +925,7 @@ export function createDashboardReadSource(
     session,
     groups,
     activity,
+    usage,
     refreshAnalytics,
     subscribeAnalytics,
     close,

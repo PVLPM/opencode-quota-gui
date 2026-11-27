@@ -17,7 +17,12 @@ import type {
   UsageActivityQuery,
   UsageActivityResult,
 } from "../contracts/usage-activity.js";
-import { openOpenCodeSqliteWritable, type WritableSqliteConn } from "./opencode-sqlite.js";
+import {
+  openOpenCodeSqliteReadOnly,
+  openOpenCodeSqliteWritable,
+  type SqliteConn,
+  type WritableSqliteConn,
+} from "./opencode-sqlite.js";
 import { hashQuotaCardIdentity } from "./quota-identity.js";
 import { type PricingResolution, priceTokenBuckets } from "./quota-stats.js";
 import { type TokenBuckets, totalTokenBuckets } from "./token-buckets.js";
@@ -281,11 +286,20 @@ export interface UsageImportedCodexRateLimit {
   accountHint?: string;
 }
 
-export interface UsageStore {
+export interface UsageReadStore {
+  query(span: { startMs: number; endMs: number }): UsageHistorySlice;
+  /**
+   * Only the latest reset/identity epoch of every series: the walks back from
+   * the newest run through `usage_runs_series_time`, never a full scan.
+   */
+  queryLatestEpochs(): UsageHistorySlice;
+  close(): void;
+}
+
+export interface UsageStore extends UsageReadStore {
   readonly path: string;
   /** One full collector cycle; synchronous and single-transaction. */
   recordCycle(observation: UsageCycleObservation): void;
-  query(span: { startMs: number; endMs: number }): UsageHistorySlice;
   /** Upsert imported invocations; counters take the per-counter maximum. */
   recordImportedInvocations(
     harness: UsageImportHarness,
@@ -321,7 +335,14 @@ interface SeriesRow {
   last_at_ms: number;
 }
 
-interface RunRow {
+interface RunRow extends RunReadRow {
+  collector_run_id: string;
+  collector_session_id: string;
+  collector_interval_ms: number;
+}
+
+/** Columns every reader needs; collector bookkeeping stays write-only. */
+interface RunReadRow {
   run_id: number;
   series_id: string;
   first_at_ms: number;
@@ -335,9 +356,6 @@ interface RunRow {
   capacity_key: string | null;
   attempted_at_ms: number | null;
   linked: number;
-  collector_run_id: string;
-  collector_session_id: string;
-  collector_interval_ms: number;
 }
 
 interface InterruptionRow {
@@ -350,8 +368,9 @@ interface InterruptionRow {
   count: number;
 }
 
-const RUN_COLUMNS =
-  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, capacity_key, attempted_at_ms, linked, collector_run_id, collector_session_id, collector_interval_ms";
+const RUN_READ_COLUMNS =
+  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, capacity_key, linked";
+const RUN_COLUMNS = `${RUN_READ_COLUMNS}, attempted_at_ms, collector_run_id, collector_session_id, collector_interval_ms`;
 
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(", ");
@@ -374,7 +393,7 @@ function seriesRowToInfo(row: SeriesRow): UsageSeriesInfo {
   };
 }
 
-function runRowToStored(row: RunRow): UsageStoredRun {
+function runRowToStored(row: RunReadRow): UsageStoredRun {
   return {
     runId: row.run_id,
     seriesId: row.series_id,
@@ -540,7 +559,232 @@ function migrate(conn: WritableSqliteConn): void {
   }
 }
 
+const LATEST_EPOCH_PAGE = 256;
+
+/**
+ * True when `newer` starts a new reset/identity epoch relative to `older`.
+ * Mirrors the boundaries of `src/gui/usage-intervals.ts` D4. The walk-back is
+ * conservative: extra history before a missed boundary is harmless because the
+ * interval builder re-derives the latest epoch from the returned points.
+ */
+function startsNewEpoch(older: RunReadRow, newer: RunReadRow): boolean {
+  if (older.quantity_unit_json !== newer.quantity_unit_json) return true;
+  if (older.capacity_key !== newer.capacity_key) return true;
+  if (newer.remaining_percent > older.remaining_percent) return true;
+  if (
+    older.reset_at_ms === null ||
+    newer.reset_at_ms === null ||
+    older.last_at_ms > older.reset_at_ms ||
+    newer.first_at_ms < older.reset_at_ms ||
+    !(newer.reset_at_ms > older.reset_at_ms)
+  ) {
+    return false;
+  }
+  if (older.reset_precision === "estimated" || newer.reset_precision === "estimated") {
+    const gapMs = Math.max(0, newer.first_at_ms - older.last_at_ms);
+    return (
+      newer.remaining_percent > older.remaining_percent ||
+      newer.reset_at_ms > older.reset_at_ms + gapMs
+    );
+  }
+  return true;
+}
+
+/** Newest run first, stopping at the first boundary; uses the series-time index. */
+function latestEpochRuns(conn: SqliteConn, seriesId: string, columns: string): RunReadRow[] {
+  const descending: RunReadRow[] = [];
+  let cursor: { firstAtMs: number; runId: number } | undefined;
+  for (;;) {
+    const page =
+      cursor === undefined
+        ? conn.all<RunReadRow>(
+            `SELECT ${columns} FROM usage_runs WHERE series_id = ?
+             ORDER BY first_at_ms DESC, run_id DESC LIMIT ?`,
+            [seriesId, LATEST_EPOCH_PAGE],
+          )
+        : conn.all<RunReadRow>(
+            `SELECT ${columns} FROM usage_runs
+             WHERE series_id = ? AND (first_at_ms < ? OR (first_at_ms = ? AND run_id < ?))
+             ORDER BY first_at_ms DESC, run_id DESC LIMIT ?`,
+            [seriesId, cursor.firstAtMs, cursor.firstAtMs, cursor.runId, LATEST_EPOCH_PAGE],
+          );
+    for (const row of page) {
+      const newer = descending[descending.length - 1];
+      if (newer !== undefined && startsNewEpoch(row, newer)) return descending.reverse();
+      descending.push(row);
+    }
+    const last = page[page.length - 1];
+    if (page.length < LATEST_EPOCH_PAGE || last === undefined) return descending.reverse();
+    cursor = { firstAtMs: last.first_at_ms, runId: last.run_id };
+  }
+}
+
+/** Read-only queries shared by the writer store and the dashboard read path. */
+function createReader(conn: SqliteConn): UsageReadStore {
+  const runColumns = (() => {
+    const columns = new Set(
+      conn.all<{ name: string }>("PRAGMA table_info(usage_runs)").map((column) => column.name),
+    );
+    return [
+      "run_id",
+      "series_id",
+      "first_at_ms",
+      "last_at_ms",
+      "sample_count",
+      "remaining_percent",
+      "quantity_decimal",
+      "quantity_unit_json",
+      "reset_at_ms",
+      columns.has("reset_precision") ? "reset_precision" : "NULL AS reset_precision",
+      columns.has("capacity_key") ? "capacity_key" : "NULL AS capacity_key",
+      "linked",
+    ].join(", ");
+  })();
+  const conflictsAvailable =
+    conn.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_conflicts'",
+    ).length > 0;
+
+  function readConflicts(
+    seriesIds: readonly string[],
+    span?: { startMs: number; endMs: number },
+  ): UsageConflictRecord[] {
+    if (!conflictsAvailable || seriesIds.length === 0) return [];
+    const timeFilter = span === undefined ? "" : " AND at_ms >= ? AND at_ms <= ?";
+    const rows = conn.all<{
+      conflict_id: number;
+      series_id: string;
+      at_ms: number;
+      remaining_percent: number;
+      existing_remaining_percent: number;
+      kind: string;
+    }>(
+      `SELECT conflict_id, series_id, at_ms, remaining_percent, existing_remaining_percent, kind
+       FROM usage_conflicts
+       WHERE series_id IN (${placeholders(seriesIds.length)})${timeFilter}
+       ORDER BY series_id, at_ms, conflict_id`,
+      span === undefined ? [...seriesIds] : [...seriesIds, span.startMs, span.endMs],
+    );
+    return rows.map((row) => ({
+      conflictId: row.conflict_id,
+      seriesId: row.series_id,
+      atMs: row.at_ms,
+      remainingPercent: row.remaining_percent,
+      existingRemainingPercent: row.existing_remaining_percent,
+      kind: row.kind === "inside-run" ? "inside-run" : "same-time",
+    }));
+  }
+
+  /** One read transaction gives every returned row one consistent snapshot. */
+  function inReadTransaction<T>(read: () => T): T {
+    conn.exec("BEGIN");
+    try {
+      const result = read();
+      conn.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        conn.exec("ROLLBACK");
+      } catch {
+        // the original failure is the one worth reporting
+      }
+      throw error;
+    }
+  }
+
+  function query(span: { startMs: number; endMs: number }): UsageHistorySlice {
+    const startMs = Math.min(span.startMs, span.endMs);
+    const endMs = Math.max(span.startMs, span.endMs);
+    return inReadTransaction(() => {
+      const runs = conn.all<RunReadRow>(
+        `SELECT ${runColumns} FROM usage_runs
+         WHERE last_at_ms >= ? AND first_at_ms <= ?
+         ORDER BY series_id, first_at_ms, last_at_ms, run_id`,
+        [startMs, endMs],
+      );
+      const seriesIds = [...new Set(runs.map((run) => run.series_id))];
+      const seriesById = new Map<string, UsageSeriesInfo>();
+      if (seriesIds.length > 0) {
+        const rows = conn.all<SeriesRow>(
+          `SELECT * FROM usage_series WHERE series_id IN (${placeholders(seriesIds.length)})`,
+          seriesIds,
+        );
+        for (const row of rows) seriesById.set(row.series_id, seriesRowToInfo(row));
+      }
+      const preceding: UsageStoredRun[] = [];
+      for (const seriesId of seriesIds) {
+        const row = conn.get<RunReadRow>(
+          `SELECT ${runColumns} FROM usage_runs
+           WHERE series_id = ? AND last_at_ms < ?
+           ORDER BY last_at_ms DESC, run_id DESC LIMIT 1`,
+          [seriesId, startMs],
+        );
+        if (row !== null) preceding.push(runRowToStored(row));
+      }
+      const interruptions = conn.all<InterruptionRow>(
+        `SELECT interruption_id, card_id, provider_id, kind, first_at_ms, last_at_ms, count
+         FROM usage_interruptions
+         WHERE last_at_ms >= ? AND first_at_ms <= ?
+         ORDER BY first_at_ms, interruption_id`,
+        [startMs, endMs],
+      );
+      return {
+        series: seriesIds.flatMap((seriesId) => {
+          const info = seriesById.get(seriesId);
+          return info === undefined ? [] : [info];
+        }),
+        runs: runs.map(runRowToStored),
+        preceding,
+        interruptions: interruptions.map((row) => ({
+          interruptionId: row.interruption_id,
+          cardId: row.card_id,
+          providerId: row.provider_id,
+          kind: row.kind as UsageInterruptionKind,
+          firstAtMs: row.first_at_ms,
+          lastAtMs: row.last_at_ms,
+          count: row.count,
+        })),
+        conflicts: readConflicts(seriesIds, { startMs, endMs }),
+      };
+    });
+  }
+
+  function queryLatestEpochs(): UsageHistorySlice {
+    return inReadTransaction(() => {
+      const series: UsageSeriesInfo[] = [];
+      const runs: UsageStoredRun[] = [];
+      const conflicts: UsageConflictRecord[] = [];
+      const rows = conn.all<SeriesRow>("SELECT * FROM usage_series ORDER BY card_id, series_id");
+      for (const row of rows) {
+        const latest = latestEpochRuns(conn, row.series_id, runColumns);
+        if (latest.length === 0) continue;
+        series.push(seriesRowToInfo(row));
+        for (const run of latest) runs.push(runRowToStored(run));
+        const firstAtMs = latest[0]?.first_at_ms;
+        if (firstAtMs !== undefined) {
+          conflicts.push(
+            ...readConflicts([row.series_id], {
+              startMs: firstAtMs,
+              endMs: Number.MAX_SAFE_INTEGER,
+            }),
+          );
+        }
+      }
+      return { series, runs, preceding: [], interruptions: [], conflicts };
+    });
+  }
+
+  return {
+    query,
+    queryLatestEpochs,
+    close() {
+      conn.close();
+    },
+  };
+}
+
 function createStore(conn: WritableSqliteConn, path: string): UsageStore {
+  const reader = createReader(conn);
   // A shared in-flight snapshot can reach the observer twice. Cycle ids are
   // process/session scoped, so an in-memory recent window is idempotent without
   // growing forever; a cross-process replay cannot reuse the same id.
@@ -1319,103 +1563,11 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     };
   }
 
-  function query(span: { startMs: number; endMs: number }): UsageHistorySlice {
-    const startMs = Math.min(span.startMs, span.endMs);
-    const endMs = Math.max(span.startMs, span.endMs);
-    // One read transaction gives the runs/series/preceding/conflict reads a
-    // single consistent snapshot while another process may be writing.
-    conn.exec("BEGIN");
-    try {
-      const runs = conn.all<RunRow>(
-        `SELECT ${RUN_COLUMNS} FROM usage_runs
-         WHERE last_at_ms >= ? AND first_at_ms <= ?
-         ORDER BY series_id, first_at_ms, last_at_ms, run_id`,
-        [startMs, endMs],
-      );
-      const seriesIds = [...new Set(runs.map((run) => run.series_id))];
-      const seriesById = new Map<string, UsageSeriesInfo>();
-      if (seriesIds.length > 0) {
-        const rows = conn.all<SeriesRow>(
-          `SELECT * FROM usage_series WHERE series_id IN (${placeholders(seriesIds.length)})`,
-          seriesIds,
-        );
-        for (const row of rows) seriesById.set(row.series_id, seriesRowToInfo(row));
-      }
-      const preceding: UsageStoredRun[] = [];
-      for (const seriesId of seriesIds) {
-        const row = conn.get<RunRow>(
-          `SELECT ${RUN_COLUMNS} FROM usage_runs
-           WHERE series_id = ? AND last_at_ms < ?
-           ORDER BY last_at_ms DESC, run_id DESC LIMIT 1`,
-          [seriesId, startMs],
-        );
-        if (row !== null) preceding.push(runRowToStored(row));
-      }
-      const interruptions = conn.all<InterruptionRow>(
-        `SELECT interruption_id, card_id, provider_id, kind, first_at_ms, last_at_ms, count
-         FROM usage_interruptions
-         WHERE last_at_ms >= ? AND first_at_ms <= ?
-         ORDER BY first_at_ms, interruption_id`,
-        [startMs, endMs],
-      );
-      const conflicts =
-        seriesIds.length === 0
-          ? []
-          : conn.all<{
-              conflict_id: number;
-              series_id: string;
-              at_ms: number;
-              remaining_percent: number;
-              existing_remaining_percent: number;
-              kind: string;
-            }>(
-              `SELECT conflict_id, series_id, at_ms, remaining_percent, existing_remaining_percent, kind
-             FROM usage_conflicts
-             WHERE series_id IN (${placeholders(seriesIds.length)})
-               AND at_ms >= ? AND at_ms <= ?
-             ORDER BY series_id, at_ms, conflict_id`,
-              [...seriesIds, startMs, endMs],
-            );
-      conn.exec("COMMIT");
-      return {
-        series: seriesIds.flatMap((seriesId) => {
-          const info = seriesById.get(seriesId);
-          return info === undefined ? [] : [info];
-        }),
-        runs: runs.map(runRowToStored),
-        preceding,
-        interruptions: interruptions.map((row) => ({
-          interruptionId: row.interruption_id,
-          cardId: row.card_id,
-          providerId: row.provider_id,
-          kind: row.kind as UsageInterruptionKind,
-          firstAtMs: row.first_at_ms,
-          lastAtMs: row.last_at_ms,
-          count: row.count,
-        })),
-        conflicts: conflicts.map((row) => ({
-          conflictId: row.conflict_id,
-          seriesId: row.series_id,
-          atMs: row.at_ms,
-          remainingPercent: row.remaining_percent,
-          existingRemainingPercent: row.existing_remaining_percent,
-          kind: row.kind === "inside-run" ? "inside-run" : "same-time",
-        })),
-      };
-    } catch (error) {
-      try {
-        conn.exec("ROLLBACK");
-      } catch {
-        // the original failure is the one worth reporting
-      }
-      throw error;
-    }
-  }
-
   return {
     path,
     recordCycle,
-    query,
+    query: reader.query,
+    queryLatestEpochs: reader.queryLatestEpochs,
     recordImportedInvocations,
     recordCodexRateLimitObservations,
     addImportExclusionKeys,
@@ -1440,4 +1592,12 @@ export async function openUsageStore(
     throw error;
   }
   return createStore(conn, dbPath);
+}
+
+/**
+ * Open an existing usage-history database read-only. A missing file throws
+ * (the caller decides whether that means "no history"); no schema is created.
+ */
+export async function openUsageStoreReadOnly(dbPath: string): Promise<UsageReadStore> {
+  return createReader(await openOpenCodeSqliteReadOnly(dbPath));
 }

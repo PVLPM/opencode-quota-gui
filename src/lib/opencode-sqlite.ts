@@ -180,17 +180,14 @@ function writableConn(db: NodeSqliteDatabase | BunSqliteDatabase): WritableSqlit
   };
 }
 
-async function openWritableWithNodeSqlite(
+async function finishWritableOpen(
+  db: NodeSqliteDatabase | BunSqliteDatabase,
   dbPath: string,
   busyTimeoutMs: number,
 ): Promise<WritableSqliteConn> {
-  const mod = (await import("node:sqlite")) as unknown as NodeSqliteModule;
-  const db = new mod.DatabaseSync(dbPath, {
-    enableForeignKeyConstraints: true,
-    open: true,
-  });
   try {
     configureWritableDb(db, busyTimeoutMs);
+    await restrictFileMode(dbPath);
   } catch (error) {
     // A half-configured handle must not leak.
     try {
@@ -200,13 +197,19 @@ async function openWritableWithNodeSqlite(
     }
     throw error;
   }
-  try {
-    await restrictFileMode(dbPath);
-  } catch (error) {
-    db.close();
-    throw error;
-  }
   return writableConn(db);
+}
+
+async function openWritableWithNodeSqlite(
+  dbPath: string,
+  busyTimeoutMs: number,
+): Promise<WritableSqliteConn> {
+  const mod = (await import("node:sqlite")) as unknown as NodeSqliteModule;
+  const db = new mod.DatabaseSync(dbPath, {
+    enableForeignKeyConstraints: true,
+    open: true,
+  });
+  return finishWritableOpen(db, dbPath, busyTimeoutMs);
 }
 
 async function openWritableWithBunSqlite(
@@ -215,23 +218,7 @@ async function openWritableWithBunSqlite(
 ): Promise<WritableSqliteConn> {
   const mod = (await import("bun:sqlite")) as unknown as BunSqliteModule;
   const db = new mod.Database(dbPath);
-  try {
-    configureWritableDb(db, busyTimeoutMs);
-  } catch (error) {
-    try {
-      db.close();
-    } catch {
-      // the setup failure is the one worth reporting
-    }
-    throw error;
-  }
-  try {
-    await restrictFileMode(dbPath);
-  } catch (error) {
-    db.close();
-    throw error;
-  }
-  return writableConn(db);
+  return finishWritableOpen(db, dbPath, busyTimeoutMs);
 }
 
 /**
