@@ -258,6 +258,78 @@ describe("usage snapshot: attribution", () => {
       { harness: "claude-code", enabled: false, status: "disabled" },
       { harness: "codex", enabled: false, status: "disabled" },
     ]);
+    expect(snapshot.importedActivity).toEqual([]);
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+  });
+
+  it("keeps imported harness activity in separate sections, never quota intervals or models", async () => {
+    const db = await store();
+    const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent", {
+      label: "5h",
+    });
+    record(db, at(0), [{ series: fiveHour, remaining: 80 }]);
+    record(db, at(1), [{ series: fiveHour, remaining: 70 }]);
+
+    const importedQueries: UsageActivityQuery[] = [];
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      importStatus: async () => [
+        { harness: "claude-code", enabled: true, status: "ok" },
+        { harness: "codex", enabled: true, status: "ok" },
+      ],
+      importedActivity: async (query) => {
+        importedQueries.push(query);
+        return aligned(query, () => [
+          entry({
+            providerId: "anthropic",
+            modelId: "claude-sonnet-4-5",
+            effort: "high",
+            tokens: costed(300, 3),
+            stepCount: 3,
+          }),
+          entry({
+            providerId: "openai",
+            modelId: "gpt-5.2-codex",
+            effort: "xhigh",
+            tokens: costed(200, 2),
+            stepCount: 2,
+          }),
+        ]);
+      },
+    }).usage({ range: "24h" });
+
+    expect(importedQueries).toHaveLength(1);
+    expect(importedQueries[0]?.intervals).toEqual([snapshot.span]);
+    expect(importedQueries[0]?.providerIds.sort()).toEqual(["anthropic", "openai"]);
+
+    // Both harnesses are reported, each with its own model/effort totals.
+    expect(snapshot.importedActivity.map((section) => section.harness)).toEqual([
+      "claude-code",
+      "codex",
+    ]);
+    const [claude, codex] = snapshot.importedActivity;
+    expect(claude?.models).toMatchObject([
+      {
+        providerId: "anthropic",
+        modelId: "claude-sonnet-4-5",
+        stepCount: 3,
+        efforts: [{ effort: "high", stepCount: 3 }],
+      },
+    ]);
+    expect(claude?.totals.apiEquivalentCostUsd).toBe(3);
+    expect(claude?.stepCount).toBe(3);
+    expect(codex?.models[0]?.modelId).toBe("gpt-5.2-codex");
+    expect(codex?.totals.apiEquivalentCostUsd).toBe(2);
+
+    // Nothing imported leaks into attribution: the OpenCode model dictionary
+    // and every quota interval keep only OpenCode activity.
+    expect(snapshot.models).toEqual([
+      { providerId: "anthropic", modelId: "claude-sonnet", effort: "high" },
+    ]);
+    const interval = snapshot.accounts[0]?.windows[0]?.intervals[0];
+    expect(interval?.activity).toHaveLength(1);
+    expect(interval?.activity[0]?.source).toBe("opencode-poll");
+    expect(interval?.attributedBurnPercentPoints).toBe(10);
     expect(isUsageSnapshot(snapshot)).toBe(true);
   });
 

@@ -3635,6 +3635,23 @@
   gap: 18px;
 }
 
+.qg-usage-imported-activity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+.qg-usage-imported {
+  gap: 10px;
+  padding-bottom: 14px;
+}
+
+.qg-usage-imported > .qg-usage-view__note,
+.qg-usage-imported > .qg-usage-breakdown__model,
+.qg-usage-imported > .qg-usage-account__empty {
+  margin-inline: 16px;
+}
+
 .qg-usage-account {
   min-width: 0;
 }

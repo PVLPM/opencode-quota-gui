@@ -52,5 +52,11 @@ describe("usage HTTP client", () => {
         ],
       }),
     ).toThrow(DashboardError);
+    expect(() =>
+      parseUsageSnapshot({
+        ...payload,
+        importedActivity: [{ ...payload.importedActivity[0], incomplete: "nope" }],
+      }),
+    ).toThrow(DashboardError);
   });
 });

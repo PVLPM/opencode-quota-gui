@@ -4,13 +4,9 @@ import type { UsageSnapshot } from "../../contracts/usage";
 import type { DisplayPreferences } from "../components/quota-card";
 import { EmptyNotice, Skeleton } from "../components/states";
 import { UsageAccountCard } from "../components/usage-account";
+import { UsageImportedSection } from "../components/usage-imported";
 import { formatTimestampMinutes, pluralize } from "../format";
-import { ATTRIBUTION_DISCLOSURE } from "../usage-model";
-
-const HARNESS_LABELS = {
-  "claude-code": "Claude Code",
-  codex: "Codex",
-} as const;
+import { ATTRIBUTION_DISCLOSURE, harnessLabel } from "../usage-model";
 
 /**
  * Usage is a Quota-area view, not Analytics: it reads the stored observation
@@ -84,6 +80,14 @@ export function UsageView(props: {
         </div>
       </Show>
 
+      <div class="qg-usage-imported-activity">
+        <For each={props.snapshot.importedActivity}>
+          {(activity) => (
+            <UsageImportedSection activity={activity} timeZone={props.snapshot.timeZone} />
+          )}
+        </For>
+      </div>
+
       <Show when={enabledImports().length > 0}>
         <p class="qg-usage-view__imports">
           Imports:{" "}
@@ -93,7 +97,7 @@ export function UsageView(props: {
                 entry.lastImportedAtMs === undefined
                   ? "no import yet"
                   : `last ${formatTimestampMinutes(entry.lastImportedAtMs, props.snapshot.timeZone)}`;
-              return `${HARNESS_LABELS[entry.harness]} (${entry.status}, ${last})`;
+              return `${harnessLabel(entry.harness)} (${entry.status}, ${last})`;
             })
             .join(" · ")}
         </p>
