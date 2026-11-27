@@ -191,7 +191,7 @@ function codexLine(
         secondary: {
           used_percent: usedSecondary,
           window_minutes: 10080,
-          resets_at: Number(RESET_SECONDARY),
+          resets_in_seconds: Number(RESET_SECONDARY) - Math.floor(Date.parse(timestamp) / 1000),
         },
         plan_type: "pro",
         limit_id: "codex",
@@ -518,6 +518,8 @@ describe("usage import", () => {
     const weekRuns = runsFor(week.rowId);
     expect(fiveHourRuns.map((run) => run.remainingPercent)).toEqual([80, 70]);
     expect(weekRuns.map((run) => run.remainingPercent)).toEqual([60, 50]);
+    expect(fiveHourRuns.map((run) => run.reset_precision)).toEqual(["exact", "exact"]);
+    expect(weekRuns.map((run) => run.reset_precision)).toEqual(["estimated", "estimated"]);
     expect(fiveHourRuns[0]?.resetAtMs).toBe(Number(RESET_PRIMARY) * 1000);
     expect(weekRuns[0]?.resetAtMs).toBe(Number(RESET_SECONDARY) * 1000);
   });

@@ -12,6 +12,9 @@ export interface UsageImportTokens {
   reasoning: number;
 }
 
+/** A provider-supplied absolute reset timestamp versus a relative estimate. */
+export type UsageResetPrecision = "exact" | "estimated";
+
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)

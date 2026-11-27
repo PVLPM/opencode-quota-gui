@@ -535,6 +535,7 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
           "quantity_unit_json",
           "remaining_percent",
           "reset_at_ms",
+          "reset_precision",
           "run_id",
           "sample_count",
           "series_id",

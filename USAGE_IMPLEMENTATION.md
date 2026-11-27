@@ -15,7 +15,7 @@ Branch `feat/v1.4.0`, base `main@8c0aad2e` (v1.3.3).
 | A | Investigation, contracts, plan | done (this file) |
 | B | Observation store + polling capture | pending |
 | C | Effort on owned steps + interval activity query + attribution | pending |
-| D | Claude Code / Codex opt-in import + dedupe | done: parsers/readers, settings, schema v2, scheduling, exclusions, activity query |
+| D | Claude Code / Codex opt-in import + dedupe | done: parsers/readers, settings, schema v3, scheduling, exclusions, activity query |
 | E | Usage navigation, charts, inspection, breakdown (browser + native) | pending |
 | F | Integration, benchmarks, review, screenshots, draft PR | pending |
 
@@ -151,7 +151,10 @@ D10.2 integration (part 2):
   validated and GUI-writable, and appear in normal settings provenance. No UI
   controls were added by this lane.
 - Store schema v2 adds `usage_import_invocations`, hashed per-message keys,
-  and the hash-only exclusion set. Import cursors and last outcome live in
+  and the hash-only exclusion set. Schema v3 adds `usage_runs.reset_precision`,
+  which imported Codex readings fill from the provider: `resets_at` is an
+  absolute provider timestamp (`exact`), while `resets_in_seconds` is a local
+  offset (`estimated`). Import cursors and last outcome live in
   `usage_meta` (`import_state:<harness>`), so restarts resume, and a
   disabled-to-enabled transition re-reads from offset 0 (idempotent through
   dedupe keys).
@@ -190,7 +193,7 @@ Usage reads never trigger provider polling.
 | Harness | Structured data imported | Priced activity | Quota observations | Ownership exclusion |
 |---|---|---|---|---|
 | Claude Code | assistant token counters, model, timestamp; `message.id + requestId` dedupe | yes, provider `anthropic` | none (transcripts carry no rate limits) | session + message UUID hashes from OpenCode Claude Agent native ids |
-| Codex | `token_count` totals/deltas, model, effort, rate limits | yes, provider `openai` | `codex-import` series from `rate_limits`, 5h/7d semantic or named windows | not needed: OpenCode writes no Codex rollouts |
+| Codex | `token_count` totals/deltas, model, effort, rate limits | yes, provider `openai` | `codex-import` series from `rate_limits`, 5h/7d semantic or named windows, exact/estimated reset precision | not needed: OpenCode writes no Codex rollouts |
 
 Import limitations:
 

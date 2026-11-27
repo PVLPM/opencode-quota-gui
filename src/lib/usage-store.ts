@@ -20,9 +20,9 @@ import type {
 import { openOpenCodeSqliteWritable, type WritableSqliteConn } from "./opencode-sqlite.js";
 import { type PricingResolution, priceTokenBuckets } from "./quota-stats.js";
 import { type TokenBuckets, totalTokenBuckets } from "./token-buckets.js";
-import type { UsageImportTokens } from "./usage-import.js";
+import type { UsageImportTokens, UsageResetPrecision } from "./usage-import.js";
 
-export const USAGE_HISTORY_SCHEMA_VERSION = 2;
+export const USAGE_HISTORY_SCHEMA_VERSION = 3;
 
 const MIGRATIONS: readonly string[] = [
   `
@@ -107,6 +107,9 @@ const MIGRATIONS: readonly string[] = [
     exclusion_key TEXT PRIMARY KEY
   );
   `,
+  `
+  ALTER TABLE usage_runs ADD COLUMN reset_precision TEXT;
+  `,
 ];
 
 export const USAGE_INTERRUPTION_KINDS = ["error", "cooldown", "retained", "missing-row"] as const;
@@ -141,6 +144,8 @@ export interface UsageStoredRun {
   remainingPercent: number;
   quantity?: { decimal: string; unit: AccountingUnit };
   resetAtMs?: number;
+  /** `exact` when the provider supplied the reset instant, `estimated` when derived. */
+  reset_precision?: UsageResetPrecision;
   /** Evidence of continuous observation from the preceding run. */
   linked: boolean;
 }
@@ -160,6 +165,7 @@ export interface UsageCycleSample {
   remainingPercent: number;
   quantity?: { decimal: string; unit: AccountingUnit };
   resetAtMs?: number;
+  resetPrecision?: UsageResetPrecision;
   measuredAtMs: number;
 }
 
@@ -224,6 +230,8 @@ export interface UsageImportedCodexRateLimit {
   windowMinutes?: number;
   usedPercent: number;
   resetsAtMs?: number;
+  /** `exact` for a provider-supplied reset instant, `estimated` for an offset. */
+  resetPrecision?: UsageResetPrecision;
   planType?: string;
   limitId?: string;
   /** Hashed account hint; absent means "unknown". */
@@ -280,6 +288,7 @@ interface RunRow {
   quantity_decimal: string | null;
   quantity_unit_json: string | null;
   reset_at_ms: number | null;
+  reset_precision: string | null;
   linked: number;
   collector_run_id: string;
   collector_session_id: string;
@@ -297,7 +306,7 @@ interface InterruptionRow {
 }
 
 const RUN_COLUMNS =
-  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, linked, collector_run_id, collector_session_id, collector_interval_ms";
+  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked, collector_run_id, collector_session_id, collector_interval_ms";
 
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(", ");
@@ -333,6 +342,9 @@ function runRowToStored(row: RunRow): UsageStoredRun {
       ? { quantity: { decimal: row.quantity_decimal, unit: JSON.parse(row.quantity_unit_json) } }
       : {}),
     ...(row.reset_at_ms !== null ? { resetAtMs: row.reset_at_ms } : {}),
+    ...(row.reset_precision === "exact" || row.reset_precision === "estimated"
+      ? { reset_precision: row.reset_precision }
+      : {}),
     linked: row.linked === 1,
   };
 }
@@ -518,9 +530,9 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     conn.run(
       `INSERT INTO usage_runs (
          series_id, first_at_ms, last_at_ms, sample_count, remaining_percent,
-         quantity_decimal, quantity_unit_json, reset_at_ms, linked,
+         quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked,
          collector_run_id, collector_session_id, collector_interval_ms
-       ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sample.series.rowId,
         measuredAtMs,
@@ -529,6 +541,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         decimal,
         unitJson,
         sample.resetAtMs ?? null,
+        sample.resetPrecision ?? null,
         linked ? 1 : 0,
         run.collectorRunId,
         run.collectorSessionId,
@@ -590,9 +603,9 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     conn.run(
       `INSERT INTO usage_runs (
          series_id, first_at_ms, last_at_ms, sample_count, remaining_percent,
-         quantity_decimal, quantity_unit_json, reset_at_ms, linked,
+         quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked,
          collector_run_id, collector_session_id, collector_interval_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       [
         covering.series_id,
         measuredAtMs,
@@ -602,6 +615,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         covering.quantity_decimal,
         covering.quantity_unit_json,
         covering.reset_at_ms,
+        covering.reset_precision,
         covering.collector_run_id,
         covering.collector_session_id,
         covering.collector_interval_ms,
@@ -868,6 +882,9 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         remainingPercent: Math.max(0, Math.min(100, 100 - observation.usedPercent)),
         ...(observation.resetsAtMs !== undefined && Number.isFinite(observation.resetsAtMs)
           ? { resetAtMs: Math.round(observation.resetsAtMs) }
+          : {}),
+        ...(observation.resetPrecision !== undefined
+          ? { resetPrecision: observation.resetPrecision }
           : {}),
         measuredAtMs: atMs,
       });

@@ -12,6 +12,7 @@ import {
   readIncrementalJsonlFile,
   readJsonlFilesWithBudget,
   type UsageImportTokens,
+  type UsageResetPrecision,
 } from "./usage-import.js";
 
 /**
@@ -51,6 +52,8 @@ export interface CodexRateLimitObservation {
   windowMinutes?: number;
   usedPercent: number;
   resetsAtMs?: number;
+  /** `exact` for `resets_at`; `estimated` for a relative `resets_in_seconds`. */
+  resetPrecision?: UsageResetPrecision;
   planType?: string;
   limitId?: string;
 }
@@ -398,15 +401,24 @@ function rateLimitObservations(
   for (const window of ["primary", "secondary"] as const) {
     const value = rateLimits[window];
     if (value === undefined) continue;
+    // `resets_at` is a provider-supplied absolute timestamp; `resets_in_seconds`
+    // is only an offset from local observation time, so its point is estimated.
+    const absolute =
+      value.resetsAtMs !== undefined && Number.isFinite(value.resetsAtMs)
+        ? value.resetsAtMs
+        : undefined;
     const resetsAtMs =
-      value.resetsAtMs ??
+      absolute ??
       (value.resetsInSeconds === undefined ? undefined : atMs + value.resetsInSeconds * 1000);
+    const resetPrecision: UsageResetPrecision | undefined =
+      absolute !== undefined ? "exact" : resetsAtMs === undefined ? undefined : "estimated";
     observations.push({
       atMs,
       window,
       ...(value.windowMinutes === undefined ? {} : { windowMinutes: value.windowMinutes }),
       usedPercent: value.usedPercent,
       ...(resetsAtMs === undefined || !Number.isFinite(resetsAtMs) ? {} : { resetsAtMs }),
+      ...(resetPrecision === undefined ? {} : { resetPrecision }),
       ...(rateLimits.planType === undefined ? {} : { planType: rateLimits.planType }),
       ...(rateLimits.limitId === undefined ? {} : { limitId: rateLimits.limitId }),
     });
@@ -474,6 +486,7 @@ function createCodexAccumulator(): CodexBatchSink & { result: () => CodexImporte
         observation.windowMinutes ?? "",
         observation.usedPercent,
         observation.resetsAtMs ?? "",
+        observation.resetPrecision ?? "",
       ].join("\0");
       threadFor(threadKey, state).observations.set(key, observation);
     },
