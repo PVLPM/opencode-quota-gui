@@ -1,8 +1,11 @@
 import { encodeAnalyticsEntityToken } from "../contracts/analytics-entity";
 import type {
+  AccountingComponent,
   AccountingCountUnit,
+  AccountingMetric,
   AccountingResultType,
   AccountingUnit,
+  AccountingWindow,
   AnalyticsDimension,
   AnalyticsEntityIdentity,
   AnalyticsGroupFilter,
@@ -54,6 +57,20 @@ import type {
   TemporalWeeklySchedule,
   TemporalWeeklyWindow,
 } from "../contracts/temporal";
+import {
+  isUsageRangeKey,
+  type UsageAccount,
+  type UsageActivity,
+  type UsageBreakdownRow,
+  type UsageCoverage,
+  type UsageInterval,
+  type UsageLink,
+  type UsageModelKey,
+  type UsagePoint,
+  type UsageSnapshot,
+  type UsageSource,
+  type UsageWindowSeries,
+} from "../contracts/usage";
 
 /**
  * Browser-side HTTP data source (design spec §5.1, §5.3; R37).
@@ -184,6 +201,78 @@ const TEMPORAL_WEEKDAYS = [
   "sat",
   "sun",
 ] as const satisfies readonly TemporalWeekday[];
+
+const ACCOUNTING_METRIC_KINDS = [
+  "aggregate",
+  "window",
+  "component",
+  "named",
+] as const satisfies readonly AccountingMetric["kind"][];
+
+const ACCOUNTING_WINDOWS = [
+  "rpm",
+  "hour",
+  "five_hour",
+  "day",
+  "week",
+  "month",
+  "year",
+  "mcp",
+  "code_review",
+] as const satisfies readonly AccountingWindow[];
+
+const ACCOUNTING_COMPONENTS = [
+  "current_balance",
+  "total_balance",
+  "cash_balance",
+  "gift_balance",
+  "granted_balance",
+  "topped_up_balance",
+  "remaining_credits",
+  "auto_reload",
+  "auto_reload_amount",
+  "auto_reload_trigger",
+] as const satisfies readonly AccountingComponent[];
+
+const USAGE_SOURCES = ["opencode-poll", "codex-import"] as const satisfies readonly UsageSource[];
+const USAGE_ACTIVITY_SOURCES = [
+  "opencode-poll",
+  "codex-import",
+  "claude-code-import",
+] as const satisfies readonly UsageActivity["source"][];
+const USAGE_MEASUREMENTS = [
+  "provider-observed",
+  "locally-estimated",
+] as const satisfies readonly UsageWindowSeries["measurement"][];
+const USAGE_LINK_KINDS = [
+  "observed",
+  "unobserved",
+  "boundary",
+] as const satisfies readonly UsageLink["kind"][];
+const USAGE_BOUNDARY_KINDS = [
+  "reset",
+  "replenished",
+  "identity-change",
+  "uncertain",
+] as const satisfies readonly (UsageLink & { kind: "boundary" })["boundary"][];
+const USAGE_UNATTRIBUTED_REASONS = [
+  "no-activity",
+  "ambiguous-account",
+  "unpriced",
+  "zero-weight",
+  "unobserved-interval",
+  "unidentified-activity",
+] as const satisfies readonly UsageInterval["unattributedReason"][];
+const USAGE_IMPORT_HARNESSES = [
+  "claude-code",
+  "codex",
+] as const satisfies readonly UsageSnapshot["imports"][number]["harness"][];
+const USAGE_IMPORT_STATUSES = [
+  "disabled",
+  "ok",
+  "unavailable",
+  "error",
+] as const satisfies readonly UsageSnapshot["imports"][number]["status"][];
 
 function faulty(endpoint: string, detail: string): DashboardError {
   return new DashboardError(
@@ -1083,25 +1172,471 @@ function readTemporalStatus(
   };
 }
 
+function readAccountingMetric(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+): AccountingMetric {
+  const metric = readRecord(value, endpoint, detail);
+  const kind = readEnum(metric.kind, ACCOUNTING_METRIC_KINDS, endpoint, `${detail}.kind`);
+  if (kind === "aggregate") return { kind };
+  if (kind === "window") {
+    return {
+      kind,
+      window: readEnum(metric.window, ACCOUNTING_WINDOWS, endpoint, `${detail}.window`),
+    };
+  }
+  if (kind === "component") {
+    return {
+      kind,
+      component: readEnum(metric.component, ACCOUNTING_COMPONENTS, endpoint, `${detail}.component`),
+    };
+  }
+  return { kind, name: readText(metric.name, endpoint, `${detail}.name`) };
+}
+
+function readUsageModelKey(value: JsonValue, endpoint: string, detail: string): UsageModelKey {
+  const model = readRecord(value, endpoint, detail);
+  const parsed: UsageModelKey = {
+    providerId: readText(model.providerId, endpoint, `${detail}.providerId`),
+    modelId: readText(model.modelId, endpoint, `${detail}.modelId`),
+  };
+  const effort = readOptionalText(model.effort, endpoint, `${detail}.effort`);
+  if (effort !== undefined) parsed.effort = effort;
+  return parsed;
+}
+
+function readUsagePoint(value: JsonValue, endpoint: string, detail: string): UsagePoint {
+  const point = readRecord(value, endpoint, detail);
+  const remainingPercent = readNumber(
+    point.remainingPercent,
+    endpoint,
+    `${detail}.remainingPercent`,
+  );
+  if (remainingPercent < 0 || remainingPercent > 100) throw faulty(endpoint, detail);
+  const parsed: UsagePoint = {
+    startMs: readNumber(point.startMs, endpoint, `${detail}.startMs`),
+    endMs: readNumber(point.endMs, endpoint, `${detail}.endMs`),
+    remainingPercent,
+    sampleCount: readIntegerInRange(
+      point.sampleCount,
+      endpoint,
+      `${detail}.sampleCount`,
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    source: readEnum(point.source, USAGE_SOURCES, endpoint, `${detail}.source`),
+  };
+  if (parsed.endMs < parsed.startMs) throw faulty(endpoint, detail);
+  const resetAtMs = readOptionalNumber(point.resetAtMs, endpoint, `${detail}.resetAtMs`);
+  if (resetAtMs !== undefined) parsed.resetAtMs = resetAtMs;
+  return parsed;
+}
+
+function readUsageLink(value: JsonValue, endpoint: string, detail: string): UsageLink {
+  const link = readRecord(value, endpoint, detail);
+  const kind = readEnum(link.kind, USAGE_LINK_KINDS, endpoint, `${detail}.kind`);
+  if (kind === "observed") return { kind };
+  if (kind === "unobserved") return { kind };
+  const parsed: UsageLink = {
+    kind,
+    boundary: readEnum(link.boundary, USAGE_BOUNDARY_KINDS, endpoint, `${detail}.boundary`),
+  };
+  const atMs = readOptionalNumber(link.atMs, endpoint, `${detail}.atMs`);
+  if (atMs !== undefined) parsed.atMs = atMs;
+  return parsed;
+}
+
+function readUsageActivity(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+  modelCount: number,
+): UsageActivity {
+  const activity = readRecord(value, endpoint, detail);
+  const parsed: UsageActivity = {
+    model: readIntegerInRange(
+      activity.model,
+      endpoint,
+      `${detail}.model`,
+      0,
+      Math.max(0, modelCount - 1),
+    ),
+    tokens: readCostedTokens(activity.tokens, endpoint, `${detail}.tokens`),
+    stepCount: readIntegerInRange(
+      activity.stepCount,
+      endpoint,
+      `${detail}.stepCount`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    source: readEnum(activity.source, USAGE_ACTIVITY_SOURCES, endpoint, `${detail}.source`),
+  };
+  const estimated = readOptionalNumber(
+    activity.estimatedBurnPercentPoints,
+    endpoint,
+    `${detail}.estimatedBurnPercentPoints`,
+  );
+  if (estimated !== undefined) {
+    if (estimated < 0) throw faulty(endpoint, `${detail}.estimatedBurnPercentPoints`);
+    parsed.estimatedBurnPercentPoints = estimated;
+  }
+  return parsed;
+}
+
+function readUsageInterval(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+  modelCount: number,
+): UsageInterval {
+  const interval = readRecord(value, endpoint, detail);
+  const previousRemainingPercent = readNumber(
+    interval.previousRemainingPercent,
+    endpoint,
+    `${detail}.previousRemainingPercent`,
+  );
+  const currentRemainingPercent = readNumber(
+    interval.currentRemainingPercent,
+    endpoint,
+    `${detail}.currentRemainingPercent`,
+  );
+  if (
+    previousRemainingPercent < 0 ||
+    previousRemainingPercent > 100 ||
+    currentRemainingPercent < 0 ||
+    currentRemainingPercent > 100
+  ) {
+    throw faulty(endpoint, detail);
+  }
+  const parsed: UsageInterval = {
+    fromPoint: readIntegerInRange(
+      interval.fromPoint,
+      endpoint,
+      `${detail}.fromPoint`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    toPoint: readIntegerInRange(
+      interval.toPoint,
+      endpoint,
+      `${detail}.toPoint`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    startMs: readNumber(interval.startMs, endpoint, `${detail}.startMs`),
+    endMs: readNumber(interval.endMs, endpoint, `${detail}.endMs`),
+    previousRemainingPercent,
+    currentRemainingPercent,
+    link: readEnum(interval.link, USAGE_LINK_KINDS, endpoint, `${detail}.link`),
+    burnPercentPoints:
+      interval.burnPercentPoints === null
+        ? null
+        : readNumber(interval.burnPercentPoints, endpoint, `${detail}.burnPercentPoints`),
+    attributedBurnPercentPoints: readNumber(
+      interval.attributedBurnPercentPoints,
+      endpoint,
+      `${detail}.attributedBurnPercentPoints`,
+    ),
+    unattributedBurnPercentPoints: readNumber(
+      interval.unattributedBurnPercentPoints,
+      endpoint,
+      `${detail}.unattributedBurnPercentPoints`,
+    ),
+    activity: readArray(interval.activity, endpoint, `${detail}.activity`).map((entry) =>
+      readUsageActivity(entry, endpoint, `${detail}.activity[]`, modelCount),
+    ),
+  };
+  if (
+    parsed.toPoint < parsed.fromPoint ||
+    parsed.endMs < parsed.startMs ||
+    (parsed.burnPercentPoints !== null && parsed.burnPercentPoints < 0) ||
+    parsed.attributedBurnPercentPoints < 0 ||
+    parsed.unattributedBurnPercentPoints < 0
+  ) {
+    throw faulty(endpoint, detail);
+  }
+  const reason = readOptionalEnum(
+    interval.unattributedReason,
+    USAGE_UNATTRIBUTED_REASONS,
+    endpoint,
+    `${detail}.unattributedReason`,
+  );
+  if (reason !== undefined) parsed.unattributedReason = reason;
+  return parsed;
+}
+
+function readUsageCoverage(value: JsonValue, endpoint: string, detail: string): UsageCoverage {
+  const coverage = readRecord(value, endpoint, detail);
+  const parsed: UsageCoverage = {
+    observedMs: readNumber(coverage.observedMs, endpoint, `${detail}.observedMs`),
+    sampleCount: readIntegerInRange(
+      coverage.sampleCount,
+      endpoint,
+      `${detail}.sampleCount`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+  };
+  if (parsed.observedMs < 0) throw faulty(endpoint, detail);
+  const first = readOptionalNumber(
+    coverage.firstObservedAtMs,
+    endpoint,
+    `${detail}.firstObservedAtMs`,
+  );
+  if (first !== undefined) parsed.firstObservedAtMs = first;
+  const last = readOptionalNumber(
+    coverage.lastObservedAtMs,
+    endpoint,
+    `${detail}.lastObservedAtMs`,
+  );
+  if (last !== undefined) parsed.lastObservedAtMs = last;
+  return parsed;
+}
+
+function readUsageEffort(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+): UsageBreakdownRow["efforts"][number] {
+  const effort = readRecord(value, endpoint, detail);
+  const parsed: UsageBreakdownRow["efforts"][number] = {
+    tokens: readCostedTokens(effort.tokens, endpoint, `${detail}.tokens`),
+    stepCount: readIntegerInRange(
+      effort.stepCount,
+      endpoint,
+      `${detail}.stepCount`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+  };
+  const label = readOptionalText(effort.effort, endpoint, `${detail}.effort`);
+  if (label !== undefined) parsed.effort = label;
+  const estimated = readOptionalNumber(
+    effort.estimatedBurnPercentPoints,
+    endpoint,
+    `${detail}.estimatedBurnPercentPoints`,
+  );
+  if (estimated !== undefined) {
+    if (estimated < 0) throw faulty(endpoint, `${detail}.estimatedBurnPercentPoints`);
+    parsed.estimatedBurnPercentPoints = estimated;
+  }
+  return parsed;
+}
+
+function readUsageBreakdownRow(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+): UsageBreakdownRow {
+  const row = readRecord(value, endpoint, detail);
+  const parsed: UsageBreakdownRow = {
+    providerId: readText(row.providerId, endpoint, `${detail}.providerId`),
+    modelId: readText(row.modelId, endpoint, `${detail}.modelId`),
+    tokens: readCostedTokens(row.tokens, endpoint, `${detail}.tokens`),
+    stepCount: readIntegerInRange(
+      row.stepCount,
+      endpoint,
+      `${detail}.stepCount`,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    efforts: readArray(row.efforts, endpoint, `${detail}.efforts`).map((entry) =>
+      readUsageEffort(entry, endpoint, `${detail}.efforts[]`),
+    ),
+  };
+  const estimated = readOptionalNumber(
+    row.estimatedBurnPercentPoints,
+    endpoint,
+    `${detail}.estimatedBurnPercentPoints`,
+  );
+  if (estimated !== undefined) {
+    if (estimated < 0) throw faulty(endpoint, `${detail}.estimatedBurnPercentPoints`);
+    parsed.estimatedBurnPercentPoints = estimated;
+  }
+  return parsed;
+}
+
+function readUsageWindow(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+  modelCount: number,
+): UsageWindowSeries {
+  const window = readRecord(value, endpoint, detail);
+  const axis = readRecord(window.axis, endpoint, `${detail}.axis`);
+  const points = readArray(window.points, endpoint, `${detail}.points`).map((entry) =>
+    readUsagePoint(entry, endpoint, `${detail}.points[]`),
+  );
+  const links = readArray(window.links, endpoint, `${detail}.links`).map((entry) =>
+    readUsageLink(entry, endpoint, `${detail}.links[]`),
+  );
+  if (links.length !== Math.max(0, points.length - 1)) throw faulty(endpoint, `${detail}.links`);
+  const intervals = readArray(window.intervals, endpoint, `${detail}.intervals`).map((entry) =>
+    readUsageInterval(entry, endpoint, `${detail}.intervals[]`, modelCount),
+  );
+  for (const interval of intervals) {
+    if (
+      interval.fromPoint >= points.length ||
+      interval.toPoint >= points.length ||
+      interval.toPoint > interval.fromPoint + 1
+    ) {
+      throw faulty(endpoint, `${detail}.intervals`);
+    }
+  }
+  const totals = readRecord(window.totals, endpoint, `${detail}.totals`);
+  const parsed: UsageWindowSeries = {
+    rowId: readRowId(window.rowId, endpoint, `${detail}.rowId`),
+    label: readText(window.label, endpoint, `${detail}.label`),
+    measurement: readEnum(
+      window.measurement,
+      USAGE_MEASUREMENTS,
+      endpoint,
+      `${detail}.measurement`,
+    ),
+    axis: {
+      startMs: readNumber(axis.startMs, endpoint, `${detail}.axis.startMs`),
+      endMs: readNumber(axis.endMs, endpoint, `${detail}.axis.endMs`),
+    },
+    coverage: readUsageCoverage(window.coverage, endpoint, `${detail}.coverage`),
+    points,
+    links,
+    intervals,
+    totals: {
+      observedBurnPercentPoints: readNumber(
+        totals.observedBurnPercentPoints,
+        endpoint,
+        `${detail}.totals.observedBurnPercentPoints`,
+      ),
+      attributedBurnPercentPoints: readNumber(
+        totals.attributedBurnPercentPoints,
+        endpoint,
+        `${detail}.totals.attributedBurnPercentPoints`,
+      ),
+      unattributedBurnPercentPoints: readNumber(
+        totals.unattributedBurnPercentPoints,
+        endpoint,
+        `${detail}.totals.unattributedBurnPercentPoints`,
+      ),
+    },
+    breakdown: readArray(window.breakdown, endpoint, `${detail}.breakdown`).map((entry) =>
+      readUsageBreakdownRow(entry, endpoint, `${detail}.breakdown[]`),
+    ),
+  };
+  if (parsed.axis.endMs < parsed.axis.startMs) throw faulty(endpoint, `${detail}.axis`);
+  if (
+    parsed.totals.observedBurnPercentPoints < 0 ||
+    parsed.totals.attributedBurnPercentPoints < 0 ||
+    parsed.totals.unattributedBurnPercentPoints < 0
+  ) {
+    throw faulty(endpoint, `${detail}.totals`);
+  }
+  if (window.metric !== undefined) {
+    parsed.metric = readAccountingMetric(window.metric, endpoint, `${detail}.metric`);
+  }
+  return parsed;
+}
+
+function readUsageAccount(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+  modelCount: number,
+): UsageAccount {
+  const account = readRecord(value, endpoint, detail);
+  const parsed: UsageAccount = {
+    accountKey: readText(account.accountKey, endpoint, `${detail}.accountKey`),
+    providerId: readText(account.providerId, endpoint, `${detail}.providerId`),
+    providerLabel: readText(account.providerLabel, endpoint, `${detail}.providerLabel`),
+    source: readEnum(account.source, USAGE_SOURCES, endpoint, `${detail}.source`),
+    windows: readArray(account.windows, endpoint, `${detail}.windows`).map((entry) =>
+      readUsageWindow(entry, endpoint, `${detail}.windows[]`, modelCount),
+    ),
+  };
+  const planLabel = readOptionalText(account.planLabel, endpoint, `${detail}.planLabel`);
+  if (planLabel !== undefined) parsed.planLabel = planLabel;
+  const accountLabel = readOptionalText(account.accountLabel, endpoint, `${detail}.accountLabel`);
+  if (accountLabel !== undefined) parsed.accountLabel = accountLabel;
+  return parsed;
+}
+
+function readUsageImport(
+  value: JsonValue,
+  endpoint: string,
+  detail: string,
+): UsageSnapshot["imports"][number] {
+  const entry = readRecord(value, endpoint, detail);
+  const parsed: UsageSnapshot["imports"][number] = {
+    harness: readEnum(entry.harness, USAGE_IMPORT_HARNESSES, endpoint, `${detail}.harness`),
+    enabled: readBoolean(entry.enabled, endpoint, `${detail}.enabled`),
+    status: readEnum(entry.status, USAGE_IMPORT_STATUSES, endpoint, `${detail}.status`),
+  };
+  const lastImportedAtMs = readOptionalNumber(
+    entry.lastImportedAtMs,
+    endpoint,
+    `${detail}.lastImportedAtMs`,
+  );
+  if (lastImportedAtMs !== undefined) parsed.lastImportedAtMs = lastImportedAtMs;
+  return parsed;
+}
+
+/** Decodes the v1.4.0 observation-history payload (`/api/v1/usage`). */
+export function parseUsageSnapshot(value: JsonValue, endpoint = "/api/v1/usage"): UsageSnapshot {
+  const root = readRecord(value, endpoint, "not an object");
+  if (!isUsageRangeKey(root.range)) throw faulty(endpoint, "range");
+  const models = readArray(root.models, endpoint, "models").map((entry) =>
+    readUsageModelKey(entry, endpoint, "models[]"),
+  );
+  const parsed: UsageSnapshot = {
+    generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
+    range: root.range,
+    timeZone: readText(root.timeZone, endpoint, "timeZone"),
+    accounts: readArray(root.accounts, endpoint, "accounts").map((entry) =>
+      readUsageAccount(entry, endpoint, "accounts[]", models.length),
+    ),
+    models,
+    imports: readArray(root.imports, endpoint, "imports").map((entry) =>
+      readUsageImport(entry, endpoint, "imports[]"),
+    ),
+  };
+  if (root.span !== undefined) {
+    const span = readRecord(root.span, endpoint, "span");
+    parsed.span = {
+      startMs: readNumber(span.startMs, endpoint, "span.startMs"),
+      endMs: readNumber(span.endMs, endpoint, "span.endMs"),
+    };
+    if (parsed.span.endMs < parsed.span.startMs) throw faulty(endpoint, "span");
+  }
+  if (root.activityUnavailable !== undefined) {
+    if (root.activityUnavailable !== true) throw faulty(endpoint, "activityUnavailable");
+    parsed.activityUnavailable = true;
+  }
+  return parsed;
+}
+
+function readQuotaProviders(root: JsonRecord, endpoint: string): QuotaSnapshot["providers"] {
+  const providers = readRecord(root.providers, endpoint, "providers");
+  return {
+    cards: readArray(providers.cards, endpoint, "providers.cards").map((card) =>
+      readCard(card, endpoint),
+    ),
+    enabledProviders: readEnabledProviders(
+      providers.enabledProviders,
+      endpoint,
+      "providers.enabledProviders",
+    ),
+    polledAtMs: readNumber(providers.polledAtMs, endpoint, "providers.polledAtMs"),
+  };
+}
+
 /** Decodes the independent, range-free quota payload. */
 export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota"): QuotaSnapshot {
   const root = readRecord(value, endpoint, "not an object");
-  const providers = readRecord(root.providers, endpoint, "providers");
   const parsed: QuotaSnapshot = {
     generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
     stale: readBoolean(root.stale, endpoint, "stale"),
     timeZone: readText(root.timeZone, endpoint, "timeZone"),
-    providers: {
-      cards: readArray(providers.cards, endpoint, "providers.cards").map((card) =>
-        readCard(card, endpoint),
-      ),
-      enabledProviders: readEnabledProviders(
-        providers.enabledProviders,
-        endpoint,
-        "providers.enabledProviders",
-      ),
-      polledAtMs: readNumber(providers.polledAtMs, endpoint, "providers.polledAtMs"),
-    },
+    providers: readQuotaProviders(root, endpoint),
   };
   const temporal = readTemporalStatus(root.temporal, endpoint);
   if (temporal !== undefined) parsed.temporal = temporal;
@@ -1111,23 +1646,12 @@ export function parseQuotaSnapshot(value: JsonValue, endpoint = "/api/v1/quota")
 /** Decodes the compatible Analytics payload (`HomeSnapshot`, spec §5.2). */
 export function parseHomeSnapshot(value: JsonValue, endpoint = "/api/v1/home"): HomeSnapshot {
   const root = readRecord(value, endpoint, "not an object");
-  const providers = readRecord(root.providers, endpoint, "providers");
   const usage = readUsage(root.usage, endpoint);
   const parsed: HomeSnapshot = {
     generatedAtMs: readNumber(root.generatedAtMs, endpoint, "generatedAtMs"),
     range: readRangeKey(root.range, endpoint, "range"),
     stale: readBoolean(root.stale, endpoint, "stale"),
-    providers: {
-      cards: readArray(providers.cards, endpoint, "providers.cards").map((card) =>
-        readCard(card, endpoint),
-      ),
-      enabledProviders: readEnabledProviders(
-        providers.enabledProviders,
-        endpoint,
-        "providers.enabledProviders",
-      ),
-      polledAtMs: readNumber(providers.polledAtMs, endpoint, "providers.polledAtMs"),
-    },
+    providers: readQuotaProviders(root, endpoint),
     usage,
     projects: readArray(root.projects, endpoint, "projects").map((row) =>
       readProjectActivityRow(row, endpoint, usage.buckets.length),
@@ -1627,6 +2151,11 @@ export function createHttpDashboardClient(options: DashboardClientOptions = {}):
       return parseQuotaSnapshot(
         input?.refresh ? await write("/api/v1/quota", {}, "POST") : await request("/api/v1/quota"),
       );
+    },
+
+    async usage(input) {
+      const endpoint = `/api/v1/usage?range=${encodeURIComponent(input.range)}`;
+      return parseUsageSnapshot(await request(endpoint), endpoint);
     },
 
     async home(input) {

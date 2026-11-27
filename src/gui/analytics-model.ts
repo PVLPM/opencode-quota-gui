@@ -1513,9 +1513,26 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     return found;
   }
 
+  interface ActivityCounts {
+    tokens: number;
+    steps: number;
+  }
+
+  function stepTokenTotal(step: OwnedStep): number {
+    return (
+      step.tokens.input +
+      step.tokens.output +
+      step.tokens.reasoning +
+      step.tokens.cacheRead +
+      step.tokens.cacheWrite
+    );
+  }
+
   function materializeActivityInterval(
     interval: UsageActivityQuery["intervals"][number],
     groups: Map<string, ActivityGroup> | undefined,
+    unidentified: ActivityCounts | undefined,
+    unmatched: ActivityCounts | undefined,
   ): UsageActivityInterval {
     const entries: UsageActivityEntry[] = [];
     let incomplete = false;
@@ -1547,6 +1564,7 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
         compareIds(a.modelId, b.modelId) ||
         compareEfforts(a.effort, b.effort),
     );
+    if ((unidentified?.steps ?? 0) > 0) incomplete = true;
     return {
       startMs: interval.startMs,
       endMs: interval.endMs,
@@ -1554,14 +1572,20 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
       incomplete,
       unpricedTokens,
       unknownTokens,
+      unidentifiedTokens: unidentified?.tokens ?? 0,
+      unidentifiedSteps: unidentified?.steps ?? 0,
+      unmatchedTokens: unmatched?.tokens ?? 0,
+      unmatchedSteps: unmatched?.steps ?? 0,
     };
   }
 
   /**
    * One sweep over populated hour buckets intersecting the sorted intervals,
    * then a binary search per owned step. No interval rescans the step list and
-   * no storage read happens here. Only identified provider/model steps are
-   * eligible for grouping.
+   * no storage read happens here. Identified provider/model steps are grouped;
+   * a requested provider with no model identity is counted as unidentified and
+   * a step with no provider identity is counted as unmatched. Neither guessed
+   * group is attributed.
    */
   function activity(query: UsageActivityQuery): UsageActivityResult {
     const intervals = query.intervals;
@@ -1569,6 +1593,8 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     const groupsByInterval: Array<Map<string, ActivityGroup> | undefined> = new Array(
       intervals.length,
     );
+    const unidentifiedByInterval: Array<ActivityCounts | undefined> = new Array(intervals.length);
+    const unmatchedByInterval: Array<ActivityCounts | undefined> = new Array(intervals.length);
     if (intervals.length > 0 && providerIds.size > 0 && hours.size > 0) {
       const hourStarts = [...hours.keys()].sort((a, b) => a - b);
       let intervalCursor = 0;
@@ -1590,8 +1616,27 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
           if (completedAtMs < hourStart || completedAtMs >= hourEnd) continue;
           const providerId = step.providerID;
           const modelId = step.modelID;
-          // Unidentified steps are metadata-only for this read.
-          if (!providerId || !modelId) continue;
+          if (!providerId || !modelId) {
+            const totalTokens = stepTokenTotal(step);
+            if (!(totalTokens > 0)) continue;
+            const intervalIndex = intervalIndexFor(intervals, intervalCursor, completedAtMs);
+            if (intervalIndex < 0) continue;
+            const target =
+              providerId && providerIds.has(providerId)
+                ? unidentifiedByInterval
+                : providerId
+                  ? undefined
+                  : unmatchedByInterval;
+            if (target === undefined) continue;
+            let counts = target[intervalIndex];
+            if (counts === undefined) {
+              counts = { tokens: 0, steps: 0 };
+              target[intervalIndex] = counts;
+            }
+            counts.tokens += totalTokens;
+            counts.steps += 1;
+            continue;
+          }
           if (!providerIds.has(providerId)) continue;
           const intervalIndex = intervalIndexFor(intervals, intervalCursor, completedAtMs);
           if (intervalIndex < 0) continue;
@@ -1619,7 +1664,12 @@ export function createAnalyticsModel(options: AnalyticsModelOptions = {}): Analy
     }
     return {
       intervals: intervals.map((interval, index) =>
-        materializeActivityInterval(interval, groupsByInterval[index]),
+        materializeActivityInterval(
+          interval,
+          groupsByInterval[index],
+          unidentifiedByInterval[index],
+          unmatchedByInterval[index],
+        ),
       ),
     };
   }

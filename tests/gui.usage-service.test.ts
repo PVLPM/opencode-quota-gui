@@ -14,6 +14,7 @@ import type {
   ProviderCard,
   QuotaCardRow,
 } from "../src/contracts/dashboard.js";
+import { isUsageSnapshot } from "../src/contracts/dto-guards.js";
 import type { RowId } from "../src/contracts/identity.js";
 import type { UsageActivityEntry, UsageActivityQuery } from "../src/contracts/usage-activity.js";
 import { isUsageActivityQuery } from "../src/contracts/usage-activity.js";
@@ -257,6 +258,7 @@ describe("usage snapshot: attribution", () => {
       { harness: "claude-code", enabled: false, status: "disabled" },
       { harness: "codex", enabled: false, status: "disabled" },
     ]);
+    expect(isUsageSnapshot(snapshot)).toBe(true);
   });
 
   it("leaves burn unattributed as ambiguous when two accounts share the provider", async () => {
@@ -291,17 +293,28 @@ describe("usage snapshot: attribution", () => {
 
   it("narrows a model-specific named window to its model family", async () => {
     const db = await store();
-    const fable = series("anthropic:cccccc", "named:fable weekly|quota:percent", {
+    const fable = series("claude-agent:cccccc", "named:Fable weekly|quota:percent", {
+      providerId: "claude-agent",
+      providerLabel: "Claude Agent",
       label: "Fable weekly",
-      metricJson: JSON.stringify({ kind: "named", name: "fable weekly" }),
+      metricJson: JSON.stringify({ kind: "named", name: "Fable weekly" }),
     });
     record(db, at(0), [{ series: fable, remaining: 80 }]);
     record(db, at(1), [{ series: fable, remaining: 70 }]);
 
     const snapshot = await build(db, {
       activity: activityReturning(() => [
-        entry({ modelId: "claude-fable-5", tokens: costed(100, 1) }),
-        entry({ modelId: "gpt-5", effort: undefined, tokens: costed(300, 3) }),
+        entry({
+          providerId: "claude-agent",
+          modelId: "claude-fable-5",
+          tokens: costed(100, 1),
+        }),
+        entry({
+          providerId: "claude-code",
+          modelId: "claude-sonnet-4-5",
+          effort: undefined,
+          tokens: costed(300, 3),
+        }),
       ]),
     }).usage({ range: "lifetime" });
 
@@ -310,6 +323,60 @@ describe("usage snapshot: attribution", () => {
     expect(window?.intervals[0]?.attributedBurnPercentPoints).toBe(10);
     expect(window?.breakdown.map((model) => model.modelId)).toEqual(["claude-fable-5"]);
     expect(snapshot.models.map((model) => model.modelId)).toEqual(["claude-fable-5"]);
+  });
+
+  it("never attributes a row whose billing scope is unknown", async () => {
+    const db = await store();
+    const codeReview = series("openai:aaaaaa", "window:code_review|rate_limit:percent", {
+      providerId: "openai",
+      providerLabel: "OpenAI",
+      label: "Code review",
+      metricJson: JSON.stringify({ kind: "window", window: "code_review" }),
+    });
+    record(db, at(0), [{ series: codeReview, remaining: 80 }]);
+    record(db, at(1), [{ series: codeReview, remaining: 70 }]);
+
+    const queries: UsageActivityQuery[] = [];
+    const snapshot = await build(db, {
+      activity: async (query) => {
+        queries.push(query);
+        return aligned(query, () => [entry()]);
+      },
+    }).usage({ range: "lifetime" });
+
+    expect(queries).toEqual([]);
+    const interval = snapshot.accounts[0]?.windows[0]?.intervals[0];
+    expect(interval?.attributedBurnPercentPoints).toBe(0);
+    expect(interval?.unattributedBurnPercentPoints).toBe(10);
+    expect(interval?.unattributedReason).toBe("no-activity");
+    expect(interval?.activity).toEqual([]);
+  });
+
+  it("reports unidentified activity instead of attributing around it", async () => {
+    const db = await store();
+    const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: fiveHour, remaining: 80 }]);
+    record(db, at(1), [{ series: fiveHour, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      activity: async (query) => ({
+        intervals: query.intervals.map((interval) => ({
+          startMs: interval.startMs,
+          endMs: interval.endMs,
+          entries: [entry()],
+          incomplete: true,
+          unpricedTokens: 0,
+          unknownTokens: 0,
+          unidentifiedTokens: 50,
+          unidentifiedSteps: 1,
+        })),
+      }),
+    }).usage({ range: "lifetime" });
+
+    const interval = snapshot.accounts[0]?.windows[0]?.intervals[0];
+    expect(interval?.attributedBurnPercentPoints).toBe(0);
+    expect(interval?.unattributedReason).toBe("unidentified-activity");
+    expect(interval?.activity).toHaveLength(1);
   });
 });
 

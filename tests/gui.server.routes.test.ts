@@ -20,6 +20,7 @@ import type {
 } from "../src/contracts/dashboard.js";
 import type { RangeKey } from "../src/contracts/ranges.js";
 import { planRangeBuckets, rangeBucketUnit, rangeWindow } from "../src/contracts/ranges.js";
+import type { UsageRangeKey, UsageSnapshot } from "../src/contracts/usage.js";
 import { GuiSettingsError } from "../src/gui/config.js";
 import { createGuiLogger } from "../src/gui/log.js";
 import {
@@ -77,6 +78,17 @@ function quotaSnapshot(): QuotaSnapshot {
     generatedAtMs: NOW,
     stale: false,
     providers: { cards: [], enabledProviders: "auto", polledAtMs: NOW },
+  };
+}
+
+function usageSnapshot(range: UsageRangeKey): UsageSnapshot {
+  return {
+    generatedAtMs: NOW,
+    range,
+    timeZone: "UTC",
+    accounts: [],
+    models: [],
+    imports: [],
   };
 }
 
@@ -138,6 +150,7 @@ interface RouteFixtures {
   state: {
     homeRanges: RangeKey[];
     quotaCalls: number;
+    usageRanges: UsageRangeKey[];
     projectRanges: RangeKey[];
     groupQueries: AnalyticsGroupQuery[];
     lastSettingsInput?: { patch: Record<string, JsonValue>; expectedRevision: string };
@@ -157,6 +170,7 @@ function buildFixtures(): RouteFixtures {
   const state: RouteFixtures["state"] = {
     homeRanges: [],
     quotaCalls: 0,
+    usageRanges: [],
     projectRanges: [],
     groupQueries: [],
     openCalls: 0,
@@ -169,6 +183,10 @@ function buildFixtures(): RouteFixtures {
     quota: async () => {
       state.quotaCalls += 1;
       return quotaSnapshot();
+    },
+    usage: async ({ range }) => {
+      state.usageRanges.push(range);
+      return usageSnapshot(range);
     },
     project: async ({ projectId, range }) => {
       state.projectRanges.push(range);
@@ -352,6 +370,8 @@ describe("GUI HTTP routes", () => {
 
   it.each([
     "/quota",
+    "/usage",
+    "/usage?range=30d",
     "/analytics?range=7d",
     "/project/a%20b?range=30d",
     "/project/a%2Fb?range=7d",
@@ -371,6 +391,7 @@ describe("GUI HTTP routes", () => {
       expect(await head.text()).toBe("");
       expect(state.homeRanges).toEqual([]);
       expect(state.projectRanges).toEqual([]);
+      expect(state.usageRanges).toEqual([]);
       const post = await fetch(`${base(handle.port)}${path}`, { method: "POST" });
       expect(post.status).toBe(405);
     } finally {
@@ -533,6 +554,41 @@ describe("GUI HTTP routes", () => {
       const head = await fetch(`${base(handle.port)}/api/v1/quota`, { method: "HEAD" });
       expect(head.status).toBe(200);
       expect(await head.text()).toBe("");
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("serves usage history with its own range vocabulary and no analytics work", async () => {
+    const { handle, state } = await start();
+    try {
+      const current = await get(handle.port, "/api/v1/usage");
+      expect(current.status).toBe(200);
+      expect(current.body).toEqual(usageSnapshot("current"));
+      expect(state.usageRanges).toEqual(["current"]);
+
+      const lifetime = await get(handle.port, "/api/v1/usage?range=lifetime");
+      expect(lifetime.status).toBe(200);
+      expect(lifetime.body).toEqual(usageSnapshot("lifetime"));
+      expect(state.usageRanges).toEqual(["current", "lifetime"]);
+
+      const head = await fetch(`${base(handle.port)}/api/v1/usage?range=7d`, {
+        method: "HEAD",
+      });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+
+      const invalid = await get(handle.port, "/api/v1/usage?range=1d");
+      expect(invalid.status).toBe(400);
+      expect(errorOf(invalid.body).code).toBe("bad-request");
+      expect(state.usageRanges).toEqual(["current", "lifetime", "7d"]);
+
+      const post = await fetch(`${base(handle.port)}/api/v1/usage`, { method: "POST" });
+      expect(post.status).toBe(405);
+
+      // Usage belongs to the Quota area: it must not start Home/Analytics.
+      expect(state.homeRanges).toEqual([]);
+      expect(state.quotaCalls).toBe(0);
     } finally {
       await handle.close();
     }

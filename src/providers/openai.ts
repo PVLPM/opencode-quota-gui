@@ -73,6 +73,8 @@ function hasPositiveCreditBalance(balance: string | null | undefined): boolean {
 function openAiOptionalValueEntries(params: {
   group: string;
   sourceId?: string;
+  /** Response time of this account's quota request, when known. */
+  observedAtIso?: string;
   credits?: { hasCredits: boolean; unlimited: boolean; balance: string | null };
   bankedResets?: BankedResetAvailability;
 }): QuotaToastEntry[] {
@@ -80,6 +82,7 @@ function openAiOptionalValueEntries(params: {
   const baseAccounting = {
     ...OPENAI_OPTIONAL_ACCOUNTING,
     ...(params.sourceId ? { sourceId: params.sourceId } : {}),
+    ...(params.observedAtIso !== undefined ? { observedAtIso: params.observedAtIso } : {}),
   };
 
   const resets = params.bankedResets;
@@ -210,9 +213,14 @@ export const openaiProvider: QuotaProvider = {
         errorLabel: options.group ?? "OpenAI",
         onSuccess: (result) => {
           const group = options.group ?? result.label;
+          const observedAtIso =
+            typeof result.observedAtMs === "number" && Number.isFinite(result.observedAtMs)
+              ? new Date(result.observedAtMs).toISOString()
+              : undefined;
           const optionalEntries = openAiOptionalValueEntries({
             group,
             ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+            ...(observedAtIso !== undefined ? { observedAtIso } : {}),
             credits: result.credits,
             bankedResets: result.bankedResets,
           });
@@ -224,6 +232,7 @@ export const openaiProvider: QuotaProvider = {
               ownership: "maintained",
               authority: "provider_reported",
               ...(options.sourceId ? { sourceId: options.sourceId } : {}),
+              ...(observedAtIso !== undefined ? { observedAtIso } : {}),
             },
             windows: [
               {

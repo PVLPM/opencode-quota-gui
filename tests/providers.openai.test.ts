@@ -126,6 +126,54 @@ describe("openai provider", () => {
     expectAttemptedWithErrorLabel(out, "OpenAI");
   });
 
+  it("carries each account's own response time into its entries", async () => {
+    const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
+    const { queryOpenAIQuota, resolveOpenAIOAuth } = await import("../src/lib/openai.js");
+    (readCredentialRows as any).mockResolvedValueOnce([
+      {
+        id: "first-id",
+        integrationId: "openai",
+        label: "First",
+        active: true,
+        value: { type: "oauth", access: "first" },
+      },
+      {
+        id: "second-id",
+        integrationId: "openai",
+        label: "Second",
+        active: false,
+        value: { type: "oauth", access: "second" },
+      },
+    ]);
+    (resolveOpenAIOAuth as any).mockImplementation((auth: any) => ({
+      state: "configured",
+      sourceKey: "openai",
+      accessToken: auth.openai.access,
+    }));
+    (queryOpenAIQuota as any)
+      .mockResolvedValueOnce({
+        success: true,
+        label: "OpenAI",
+        observedAtMs: Date.parse("2026-01-01T00:00:05.000Z"),
+        windows: { hourly: { percentRemaining: 42 } },
+      })
+      .mockResolvedValueOnce({
+        success: true,
+        label: "OpenAI",
+        observedAtMs: Date.parse("2026-01-01T00:00:07.000Z"),
+        windows: { hourly: { percentRemaining: 51 } },
+      });
+
+    const out = await openaiProvider.fetch({} as any);
+
+    expect(
+      out.entries.map((entry) => [entry.accounting.sourceId, entry.accounting.observedAtIso]),
+    ).toEqual([
+      ["first-id", "2026-01-01T00:00:05.000Z"],
+      ["second-id", "2026-01-01T00:00:07.000Z"],
+    ]);
+  });
+
   it("queries and labels every database credential independently", async () => {
     const { readCredentialRows } = await import("../src/lib/opencode-auth.js");
     const { queryOpenAIQuota, resolveOpenAIOAuth } = await import("../src/lib/openai.js");

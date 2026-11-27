@@ -17,27 +17,30 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import { isRangeKey, RANGE_KEYS, type RangeKey } from "../contracts/ranges";
+import { isUsageRangeKey, USAGE_RANGE_KEYS, type UsageRangeKey } from "../contracts/usage";
 import { createAnalyticsPresentationStore } from "./analytics-cache";
 import { AnalyticsTabs } from "./components/analytics-tabs";
 import { BuildMismatchStatus } from "./components/build-info";
 import { AnalyticsIcon, QuotaIcon } from "./components/icons";
+import { QuotaUsageTabs } from "./components/quota-usage-tabs";
 import { RangeLabel } from "./components/range-label";
 import { ReloadRequired } from "./components/states";
 import { TemporalStatusStrip } from "./components/temporal-status";
 import { createToaster, ToastRegion } from "./components/toast";
 import type { ActiveViewScope, ConnectionState, DashboardClient } from "./dashboard-client";
-import { RANGE_LABELS } from "./format";
+import { RANGE_LABELS, USAGE_RANGE_LABELS } from "./format";
 import { analyticsTabForRoute, viewScopeForRoute } from "./navigation-model";
 import { Icon, SegmentedControl, SegmentedControlItem, Tooltip } from "./opencode-ui";
 import { createQuery } from "./query";
 import { createQuotaQuery } from "./quota-query";
-import { AnalyticsViews, QuotaRoute, SettingsRoute } from "./routes";
+import { AnalyticsViews, QuotaRoute, SettingsRoute, UsageRoute } from "./routes";
 import {
   canonicalizeLocation,
   formatPath,
   type Location,
   modelsGroupForRoute,
   parseLocation,
+  type Route,
   readStoredRange,
   routeShowsRangeSelector,
   writeStoredRange,
@@ -118,6 +121,10 @@ export function App(props: { client: DashboardClient }): JSX.Element {
 
   const range = () => location().range;
   const route = () => location().route;
+  const usageRoute = (): Extract<Route, { name: "usage" }> | undefined => {
+    const current = route();
+    return current.name === "usage" ? current : undefined;
+  };
   // Diagnostic only: never the argument to the contract/load-state gate below.
   const buildWarning = createMemo(() => buildMismatchMessage(health()));
   const analyticsTab = (): "analytics" | "models" | undefined => analyticsTabForRoute(route());
@@ -189,6 +196,11 @@ export function App(props: { client: DashboardClient }): JSX.Element {
 
   function updateRange(next: RangeKey): void {
     navigate(formatPath(route(), next));
+  }
+
+  /** Usage keeps its own range vocabulary; the Analytics range is untouched. */
+  function updateUsageRange(next: UsageRangeKey): void {
+    navigate(formatPath({ name: "usage", usageRange: next }, range()));
   }
 
   function navigate(path: string): void {
@@ -395,13 +407,20 @@ export function App(props: { client: DashboardClient }): JSX.Element {
             <Show
               when={analyticsTab()}
               fallback={
-                <span class="qg-frame-tab">
-                  {route().name === "home"
-                    ? "Quota"
-                    : route().name === "settings"
-                      ? "Settings"
-                      : "Dashboard"}
-                </span>
+                <Show
+                  when={route().name === "home" || route().name === "usage"}
+                  fallback={
+                    <span class="qg-frame-tab">
+                      {route().name === "settings" ? "Settings" : "Dashboard"}
+                    </span>
+                  }
+                >
+                  <QuotaUsageTabs
+                    active={route().name === "usage" ? "usage" : "quota"}
+                    range={range()}
+                    usageRange={usageRoute()?.usageRange}
+                  />
+                </Show>
               }
             >
               {(tab) => (
@@ -420,6 +439,24 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   providers={temporal().providers}
                   overrides={preferences().temporalProviderOverrides}
                 />
+              )}
+            </Show>
+            <Show when={usageRoute()}>
+              {(usageRoute) => (
+                <SegmentedControl
+                  class="qg-range qg-usage-range"
+                  aria-label="Usage range"
+                  value={usageRoute().usageRange}
+                  onChange={(value) => {
+                    if (isUsageRangeKey(value)) updateUsageRange(value);
+                  }}
+                >
+                  {USAGE_RANGE_KEYS.map((key) => (
+                    <SegmentedControlItem value={key}>
+                      {USAGE_RANGE_LABELS[key] ?? key}
+                    </SegmentedControlItem>
+                  ))}
+                </SegmentedControl>
               )}
             </Show>
             <Show when={routeShowsRangeSelector(route())}>
@@ -474,6 +511,18 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                       .catch(setHealthError);
                   }}
                 />
+              </Match>
+              <Match when={usageRoute()}>
+                {(usageRoute) => (
+                  <UsageRoute
+                    client={props.client}
+                    route={usageRoute()}
+                    reloadToken={quotaReloadToken()}
+                    reconnectEpoch={reconnectEpoch()}
+                    preferences={preferences()}
+                    onStale={setRouteStale}
+                  />
+                )}
               </Match>
               <Match when={analyticsTab() !== undefined}>
                 <AnalyticsViews

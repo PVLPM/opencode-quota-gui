@@ -54,11 +54,11 @@ import {
 import { resolveHostTimeZone } from "./time-zone.js";
 import {
   attributeUsageWindow,
-  modelEligibilityForNamedWindow,
-  quotaProviderRuntimeIds,
+  attributionScopeForRow,
   type UsageAttributionEntry,
   type UsageAttributionIntervalInput,
   type UsageAttributionResult,
+  type UsageAttributionScope,
 } from "./usage-attribution.js";
 import {
   buildUsageWindowSeries,
@@ -114,8 +114,8 @@ interface SeriesGroup {
 
 interface WorkingWindow {
   window: UsageWindowSeries;
-  rowKey: string;
-  metric?: AccountingMetric;
+  /** Per-row billing scope; `known: false` never attributes. */
+  scope: UsageAttributionScope;
 }
 
 interface WorkingAccount {
@@ -133,7 +133,8 @@ interface WorkingAccount {
 }
 
 interface ProviderActivity {
-  providerIds: string[];
+  /** Union of this provider's known per-row attribution runtime ids. */
+  providerIds: Set<string>;
   /** Union of every window interval boundary for this provider. */
   boundaries: Set<number>;
   segments: { startMs: number; endMs: number }[];
@@ -323,10 +324,18 @@ function combineActivity(
   let incomplete = false;
   let unpricedTokens = 0;
   let unknownTokens = 0;
+  let unidentifiedTokens = 0;
+  let unidentifiedSteps = 0;
+  let unmatchedTokens = 0;
+  let unmatchedSteps = 0;
   for (const part of parts) {
     incomplete ||= part.incomplete;
     unpricedTokens += part.unpricedTokens;
     unknownTokens += part.unknownTokens;
+    unidentifiedTokens += part.unidentifiedTokens ?? 0;
+    unidentifiedSteps += part.unidentifiedSteps ?? 0;
+    unmatchedTokens += part.unmatchedTokens ?? 0;
+    unmatchedSteps += part.unmatchedSteps ?? 0;
     for (const entry of part.entries) {
       const key = entryKey(entry);
       const existing = entries.get(key);
@@ -345,6 +354,10 @@ function combineActivity(
     incomplete,
     unpricedTokens,
     unknownTokens,
+    ...(unidentifiedTokens > 0 ? { unidentifiedTokens } : {}),
+    ...(unidentifiedSteps > 0 ? { unidentifiedSteps } : {}),
+    ...(unmatchedTokens > 0 ? { unmatchedTokens } : {}),
+    ...(unmatchedSteps > 0 ? { unmatchedSteps } : {}),
   };
 }
 
@@ -382,13 +395,6 @@ function activityForInterval(
   if (parts.length === 0) return emptyActivity(interval);
   if (parts.length === 1) return parts[0] as UsageActivityInterval;
   return combineActivity(interval, parts);
-}
-
-function namedWindowName(rowKey: string, metric: AccountingMetric | undefined): string | undefined {
-  if (metric?.kind === "named") return metric.name;
-  const prefix = "named:";
-  if (!rowKey.startsWith(prefix)) return undefined;
-  return rowKey.slice(prefix.length).split("|", 1)[0];
 }
 
 function rivalCoverage(runs: readonly UsageStoredRun[]): {
@@ -581,21 +587,20 @@ export function createUsageSnapshotBuilder(
           },
           axis,
         );
-        account.windows.push({
-          window,
-          rowKey: plan.series.rowKey,
-          ...(plan.metric !== undefined ? { metric: plan.metric } : {}),
-        });
+        const scope = attributionScopeForRow(group.providerId, plan.series.rowKey);
+        account.windows.push({ window, scope });
 
         let activity = activityByProvider.get(group.providerId);
         if (activity === undefined) {
           activity = {
-            providerIds: [...quotaProviderRuntimeIds(group.providerId)],
+            providerIds: new Set<string>(),
             boundaries: new Set<number>(),
             segments: [],
           };
           activityByProvider.set(group.providerId, activity);
         }
+        if (scope.known)
+          for (const providerId of scope.providerIds) activity.providerIds.add(providerId);
         for (const interval of window.intervals) {
           if (interval.endMs <= interval.startMs) continue;
           activity.boundaries.add(interval.startMs);
@@ -616,7 +621,7 @@ export function createUsageSnapshotBuilder(
     activityByProvider: Map<string, ProviderActivity>,
   ): Promise<{ attributed: AttributedWindow[]; unavailable: boolean }> {
     const needing = [...activityByProvider.entries()].filter(
-      ([, activity]) => activity.segments.length > 0 && activity.providerIds.length > 0,
+      ([, activity]) => activity.segments.length > 0 && activity.providerIds.size > 0,
     );
     let unavailable = false;
     if (needing.length > 0) {
@@ -626,7 +631,10 @@ export function createUsageSnapshotBuilder(
       } else {
         const settled = await Promise.allSettled(
           needing.map(([, activity]) =>
-            read({ intervals: activity.segments, providerIds: activity.providerIds }),
+            read({
+              intervals: activity.segments,
+              providerIds: [...activity.providerIds],
+            }),
           ),
         );
         settled.forEach((outcome, index) => {
@@ -659,13 +667,9 @@ export function createUsageSnapshotBuilder(
     const attributed: AttributedWindow[] = [];
     for (const account of accounts) {
       const activity = activityByProvider.get(account.providerId);
-      const providerIds = activity?.providerIds ?? [...quotaProviderRuntimeIds(account.providerId)];
       for (const window of account.windows) {
-        const named = namedWindowName(window.rowKey, window.metric);
-        const isEligibleModel =
-          named === undefined
-            ? undefined
-            : modelEligibilityForNamedWindow(account.providerId, named).matches;
+        const providerIds = window.scope.known ? window.scope.providerIds : [];
+        const isEligibleModel = window.scope.isEligibleModel;
         const intervals: UsageAttributionIntervalInput[] = window.window.intervals.map(
           (interval) => ({
             startMs: interval.startMs,

@@ -12,6 +12,7 @@ import type {
   SettingsSnapshot,
 } from "../contracts/dashboard";
 import type { RangeKey } from "../contracts/ranges";
+import type { UsageSnapshot } from "../contracts/usage";
 import type { AnalyticsPresentationStore } from "./analytics-cache";
 import { BuildAbout } from "./components/build-info";
 import { type BusyIndicator, BusyOverlay, createBusyIndicator } from "./components/busy";
@@ -39,6 +40,7 @@ import { ProjectView } from "./views/project";
 import { ProviderDetailView } from "./views/provider";
 import { SessionView } from "./views/session";
 import { SettingsView } from "./views/settings";
+import { UsageLoading, UsageView } from "./views/usage";
 import type { VisibilityCatalog } from "./visibility-catalog";
 
 /**
@@ -153,6 +155,24 @@ function useReadStale(
 
 function routeEnabled(props: RouteLifecycleProps): boolean {
   return props.enabled?.() !== false;
+}
+
+/**
+ * The shared resolved state for a route that keeps a previous payload while a
+ * new one loads: a payload from another range or identity stays hidden, but a
+ * failed hand-off surfaces the error instead of spinning forever.
+ */
+function retainedLoadState<T>(
+  query: Pick<Query<T>, "data" | "error" | "loading">,
+  displayed: () => T | undefined,
+) {
+  return resolveLoadState({
+    data: displayed(),
+    error: query.error(),
+    loading:
+      query.loading() ||
+      (query.error() === undefined && query.data() !== undefined && displayed() === undefined),
+  });
 }
 
 /**
@@ -419,6 +439,75 @@ export function QuotaRoute(props: QuotaRouteProps): JSX.Element {
   );
 }
 
+export interface UsageRouteProps extends RouteLifecycleProps {
+  client: DashboardDataSource;
+  route: Extract<Route, { name: "usage" }>;
+  preferences: ReturnType<typeof displayPreferencesFromValues>;
+}
+
+/**
+ * Usage is range-scoped by its own `UsageRangeKey`, not the Analytics
+ * `RangeKey`. A quota change (the poll that fills history) re-reads it; the
+ * read itself never asks a provider for anything.
+ */
+export function UsageRoute(props: UsageRouteProps): JSX.Element {
+  const query = createQuery<UsageSnapshot>(() =>
+    props.client.usage({ range: props.route.usageRange }),
+  );
+  const [freshEpoch, setFreshEpoch] = createSignal(0);
+  const busy = createBusyIndicator();
+  const displayed = () => {
+    const data = query.data();
+    return data !== undefined && data.range === props.route.usageRange ? data : undefined;
+  };
+
+  createEffect(() =>
+    busy.update({
+      active: query.loading() && displayed() === undefined,
+      hasData: displayed() !== undefined,
+    }),
+  );
+  onCleanup(() => {
+    busy.dispose();
+    query.invalidate();
+  });
+
+  createEffect(() => {
+    if (!routeEnabled(props)) return;
+    const epoch = props.reconnectEpoch;
+    // Read through the range and both refresh tokens so a quota.changed tick,
+    // a reconnect or a new history range starts exactly one new read.
+    void props.route.usageRange;
+    void props.reloadToken;
+    void query.run().then((applied) => {
+      if (!applied) return;
+      setFreshEpoch(epoch);
+      props.onFresh?.();
+    });
+  });
+
+  createEffect(() =>
+    props.onStale(
+      query.error() !== undefined || isStaleAfterReconnect(props.reconnectEpoch, freshEpoch()),
+    ),
+  );
+
+  const state = () => retainedLoadState(query, displayed);
+
+  return (
+    <>
+      <BusyOverlay indicator={busy} label="usage" />
+      <QueryState
+        state={state()}
+        label="Loading usage history"
+        skeleton={<UsageLoading />}
+        onRetry={() => void query.run()}
+        render={(snapshot) => <UsageView snapshot={snapshot} preferences={props.preferences} />}
+      />
+    </>
+  );
+}
+
 interface AnalyticsRouteProps extends RouteLifecycleProps {
   client: DashboardDataSource;
   range: RangeKey;
@@ -661,32 +750,17 @@ function GroupDetailRoute(props: GroupDetailRouteProps): JSX.Element {
       return undefined;
     return data;
   };
-  const state = () =>
-    resolveLoadState({
-      data: displayed(),
-      error: query.error(),
-      // A retained payload from another identity is not this route's data.
-      // Keep the first-load skeleton during that hand-off, but once the
-      // hand-off has failed, surface the error instead of spinning forever.
-      loading:
-        query.loading() ||
-        (query.error() === undefined && query.data() !== undefined && displayed() === undefined),
-    });
+  const state = () => retainedLoadState(query, displayed);
   const rangeFailure = () =>
     describeRangeFailure(displayed(), props.range, query.loading(), query.error() !== undefined);
   const busy = createBusyIndicator();
-  createEffect(() => {
-    const data = query.data();
+  createEffect(() =>
     busy.update({
-      active:
-        query.loading() &&
-        (data === undefined ||
-          data.dimension !== grouping() ||
-          data.filter === undefined ||
-          !sameIdentity(data.filter.identity, props.identity)),
+      // A payload from another grouping/filter is not this route's data.
+      active: query.loading() && displayed() === undefined,
       hasData: displayed() !== undefined,
-    });
-  });
+    }),
+  );
   onCleanup(() => busy.dispose());
   useReadStale(props, freshEpoch, () => query.error() !== undefined || displayed()?.stale === true);
 
