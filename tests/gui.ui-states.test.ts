@@ -2718,6 +2718,8 @@ describe("settings page", () => {
         "lowQuotaThresholdRemainingPercent",
         "minIntervalMs",
         "nativeQuotaNotifications",
+        "usageImport.claudeCode",
+        "usageImport.codex",
         "opencodeGoWindows",
         "opencodeMonthlyLimit",
         "percentDisplayMode",
@@ -2825,6 +2827,7 @@ describe("settings page", () => {
       "display",
       "temporal",
       "advanced",
+      "usage-import",
       "visibility",
       "dashboard",
     ]);
@@ -5674,6 +5677,47 @@ describe("the settings editor keeps its draft across refetches", () => {
       enabled: false,
       modelChangeToastEnabled: false,
     });
+    mounted.dispose();
+  });
+
+  it("renders usage history import off by default and saves the toggled patch", async () => {
+    const base = settingsSnapshot();
+    const mounted = mountSettings({
+      initial: settingsSnapshot({
+        values: {
+          ...base.values,
+          "usageImport.claudeCode": false,
+          "usageImport.codex": false,
+        },
+        writable: [...base.writable, "usageImport.claudeCode", "usageImport.codex"],
+      }),
+    });
+    const usageSwitch = (label: string): TestNode => {
+      const control = findNode(
+        renderGraph.elementsNamed(mounted.root, "div"),
+        (node) =>
+          node.props["data-component"] === "switch" && renderGraph.textOf(node).includes(label),
+        `switch ${label}`,
+      );
+      return findNode(
+        renderGraph.elementsNamed(control, "input"),
+        () => true,
+        `switch input ${label}`,
+      );
+    };
+
+    expect(usageSwitch("Claude Code").props.checked).toBe(false);
+    expect(usageSwitch("Codex").props.checked).toBe(false);
+
+    fire(usageSwitch("Claude Code"), "onChange", {
+      target: { checked: true },
+      stopPropagation: () => {},
+    });
+    await settle();
+    click(buttonByText(mounted.root, "Save"));
+    await until(() => mounted.saves.length === 1, "the usage import save");
+    expect(mounted.saves[0]?.patch).toEqual({ "usageImport.claudeCode": true });
+    expect(mounted.saves[0]?.expectedRevision).toBe("revision-1");
     mounted.dispose();
   });
 

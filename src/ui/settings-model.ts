@@ -19,6 +19,7 @@ export type SettingsGroupId =
   | "display"
   | "temporal"
   | "advanced"
+  | "usage-import"
   | "visibility"
   | "dashboard";
 
@@ -40,6 +41,11 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDescriptor[] = [
     id: "advanced",
     title: "Advanced",
     note: "Provider selection, polling intervals, and accounting detail.",
+  },
+  {
+    id: "usage-import",
+    title: "Usage history import",
+    note: "Both are off by default. Turning one on starts a one-time import of its existing local history on the next quota refresh.",
   },
   {
     id: "visibility",
@@ -187,6 +193,20 @@ export const SETTINGS_FIELDS: readonly SettingsField[] = withImportEligibility([
       { value: "singleWindow", label: "Single window" },
       { value: "allWindows", label: "All windows" },
     ],
+  },
+  {
+    key: "usageImport.claudeCode",
+    group: "usage-import",
+    control: "switch",
+    label: "Claude Code",
+    help: "Import token activity from local Claude Code history. Reads only timestamps, models and token counts from Claude Code's local history on this computer. Prompts, responses and file paths are never stored. Sessions OpenCode already recorded through Claude Agent are skipped.",
+  },
+  {
+    key: "usageImport.codex",
+    group: "usage-import",
+    control: "switch",
+    label: "Codex",
+    help: "Import token activity and quota readings from local Codex history. Reads only timestamps, models, effort, token counts and quota readings from Codex's local history on this computer. Nothing is uploaded.",
   },
   {
     key: "enabledProviders",
