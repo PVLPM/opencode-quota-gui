@@ -1,14 +1,15 @@
 /**
- * Compact, versioned analytics snapshot persistence (schema v3).
+ * Compact, versioned analytics snapshot persistence (schema v5).
  *
  * The worker owns the large in-memory analytics index. Persistence keeps one
  * compact fingerprint contribution dictionary (referenced by numeric index),
- * occurrence membership (message/session identity + revision watermark), the
- * stable source identity, the coverage extent/frontier, the trusted source
- * cursor and rare-repair wall time. The compact index excludes raw message
- * JSON, assistant agent strings, compaction markers, and duplicate raw rows. A separate
- * local presentation sidecar may carry bounded Home/Project/Session DTO detail
- * (including the DTO's agent fields and compaction markers).
+ * occurrence membership (message/session identity, revision watermark, recorded
+ * reasoning effort), the stable source identity, the coverage extent/frontier,
+ * the trusted source cursor and rare-repair wall time. The compact index
+ * excludes raw message JSON, assistant agent strings, compaction markers, and
+ * duplicate raw rows. A separate local presentation sidecar may carry bounded
+ * Home/Project/Session DTO detail (including the DTO's agent fields and
+ * compaction markers).
  */
 import { existsSync } from "node:fs";
 import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
@@ -27,7 +28,8 @@ import {
 import { getAnalyticsPricingFingerprint } from "./analytics-pricing-revision.js";
 
 /** 4: compact fingerprints carry unknown-vs-zero cache telemetry (v3 files rebuild). */
-export const ANALYTICS_SNAPSHOT_VERSION = 4;
+/** 5: compact occurrences persist recorded reasoning effort (v4 files rebuild). */
+export const ANALYTICS_SNAPSHOT_VERSION = 5;
 export const ANALYTICS_SNAPSHOT_SCHEMA = "ocq-analytics-state";
 /**
  * Warm DTO aggregation semantics. This is separate from the compact candidate
@@ -234,7 +236,14 @@ interface PersistedAnalyticsStateV3 {
   extent: { sinceMs: number | null; untilMs: number } | null;
   fingerprints: CompactFingerprint[];
   occurrences: Array<
-    [fingerprintIndex: number, sessionID: string, messageID: string, updatedAtMs: number | null]
+    [
+      fingerprintIndex: number,
+      sessionID: string,
+      messageID: string,
+      updatedAtMs: number | null,
+      /** Additive v5 field: recorded `model.variant`; absent = unknown. */
+      variant?: string | null,
+    ]
   >;
   sessions: Array<
     [
@@ -275,12 +284,14 @@ export function encodeAnalyticsState(
 ): PersistedAnalyticsStateV3 {
   const occurrences: PersistedAnalyticsStateV3["occurrences"] = [];
   for (const occurrence of state.occurrences.values()) {
-    occurrences.push([
+    const tuple: PersistedAnalyticsStateV3["occurrences"][number] = [
       occurrence.fingerprintIndex,
       occurrence.sessionID,
       occurrence.messageID,
       occurrence.updatedAtMs,
-    ]);
+    ];
+    if (occurrence.variant !== undefined) tuple.push(occurrence.variant);
+    occurrences.push(tuple);
   }
 
   const sessions: PersistedAnalyticsStateV3["sessions"] = Object.values(state.sessions)
@@ -380,8 +391,9 @@ function isCompactFingerprint(value: unknown): value is CompactFingerprint {
 }
 
 function isOccurrenceTuple(value: unknown, fingerprintCount: number): boolean {
-  if (!Array.isArray(value) || value.length !== 4) return false;
+  if (!Array.isArray(value) || (value.length !== 4 && value.length !== 5)) return false;
   if (!Number.isInteger(value[0]) || value[0] < 0 || value[0] >= fingerprintCount) return false;
+  if (value.length === 5 && !isStringOrNull(value[4])) return false;
   return (
     typeof value[1] === "string" &&
     value[1].length > 0 &&
@@ -572,6 +584,7 @@ export function decodeAnalyticsState(value: unknown): AnalyticsState | undefined
       sessionID: tuple[1],
       messageID: tuple[2],
       updatedAtMs: tuple[3],
+      ...(tuple[4] === undefined || tuple[4] === null ? {} : { variant: tuple[4] }),
     });
   }
 

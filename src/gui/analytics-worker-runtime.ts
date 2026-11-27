@@ -6,6 +6,7 @@
 
 import { isAnalyticsGroupQuery } from "../contracts/analytics-entity.js";
 import { isRangeKey } from "../contracts/ranges.js";
+import { isUsageActivityQuery } from "../contracts/usage-activity.js";
 import {
   setPricingSnapshotAutoRefresh,
   setPricingSnapshotSelection,
@@ -97,6 +98,10 @@ export function createAnalyticsWorkerRuntime(
     if (command.kind === "groups") {
       if (!isAnalyticsGroupQuery(command.query)) throw new AnalyticsReadError("bad-request");
       return await engine.groups(command.query);
+    }
+    if (command.kind === "activity") {
+      if (!isUsageActivityQuery(command.query)) throw new AnalyticsReadError("bad-request");
+      return await engine.activity(command.query);
     }
     if (command.kind === "refresh") {
       await engine.refresh();

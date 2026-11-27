@@ -193,6 +193,7 @@ function withRows(): AnalyticsState {
       messageID: entry.messageID,
       updatedAtMs: 1_700_000_000_000,
       ...(entry.agent === undefined ? {} : { agent: entry.agent }),
+      ...(entry.variant === undefined ? {} : { variant: entry.variant }),
     });
   }
   return state;
@@ -238,6 +239,21 @@ describe("analytics snapshot codec v3", () => {
     expect(decoded?.sourceSignature).toBe("v1|sig-1");
     expect(decoded?.futureCompletionAtMs).toBe(NOW + 3_600_000);
     expect(decoded?.fingerprintIndex.size).toBe(1);
+  });
+
+  it("round-trips recorded effort and keeps unknown distinct from explicit default", () => {
+    const state = withRows();
+    state.occurrences.get(rowKey("ses_parent", "msg_a"))!.variant = "default";
+    state.occurrences.get(rowKey("ses_fork", "msg_a_copy"))!.variant = "high";
+    const persisted = encodeAnalyticsState(state, NOW);
+    const decoded = decodeAnalyticsState(JSON.parse(JSON.stringify(persisted)) as unknown);
+    expect(decoded?.occurrences.get("msg_a")?.variant).toBe("default");
+    expect(decoded?.occurrences.get("msg_a_copy")?.variant).toBe("high");
+
+    const plain = decodeAnalyticsState(
+      JSON.parse(JSON.stringify(encodeAnalyticsState(withRows(), NOW))) as unknown,
+    );
+    expect(plain?.occurrences.get("msg_a")).not.toHaveProperty("variant");
   });
 
   it("never infers a source cursor from wall freshness or cached occurrence times", () => {
@@ -517,6 +533,12 @@ describe("analytics snapshot codec v3", () => {
     expect(
       decodeAnalyticsState({
         ...persisted,
+        occurrences: [[0, "ses", "msg", null, 7]],
+      }),
+    ).toBeUndefined();
+    expect(
+      decodeAnalyticsState({
+        ...persisted,
         presentation: { home: { "24h": { projects: [] } }, project: [] },
       }),
     ).toBeUndefined();
@@ -549,7 +571,7 @@ describe("analytics snapshot codec v3", () => {
     // Same tokens, different telemetry completeness: distinct contributions.
     expect(state.fingerprints).toHaveLength(2);
     const persisted = encodeAnalyticsState(state, NOW);
-    expect(persisted.version).toBe(4);
+    expect(persisted.version).toBe(5);
     const decoded = decodeAnalyticsState(JSON.parse(JSON.stringify(persisted)));
     const rebuilt = [...(decoded?.occurrences.values() ?? [])].map((occurrence) =>
       rowFromFingerprint(decoded!.fingerprints[occurrence.fingerprintIndex]!, occurrence),
@@ -559,7 +581,10 @@ describe("analytics snapshot codec v3", () => {
       cacheReadMissing: true,
       cacheWriteMissing: true,
     });
-    // Old (v3) compact files and 10-field tuples are discarded, so they rebuild.
+    // Old (v3/v4) compact files and 10-field tuples are discarded, so they rebuild.
+    expect(
+      decodeAnalyticsState({ ...JSON.parse(JSON.stringify(persisted)), version: 4 }),
+    ).toBeUndefined();
     expect(
       decodeAnalyticsState({ ...JSON.parse(JSON.stringify(persisted)), version: 3 }),
     ).toBeUndefined();

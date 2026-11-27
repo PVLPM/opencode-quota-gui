@@ -10,6 +10,7 @@
  */
 
 import { encodeAnalyticsGroupQueryKey } from "../contracts/analytics-entity.js";
+import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import type {
   AnalyticsInitOptions,
   AnalyticsTransport,
@@ -112,6 +113,8 @@ function coalescedCommandKey(command: AnalyticsWorkerRequest["command"]): string
       return `session\u0000${command.sessionId}`;
     case "groups":
       return `groups\u0000${encodeAnalyticsGroupQueryKey(command.query)}`;
+    case "activity":
+      return `activity\u0000${JSON.stringify(command.query)}`;
     case "refresh":
       return "refresh";
     default:
@@ -555,6 +558,8 @@ export function createAnalyticsBridge(options: AnalyticsBridgeOptions = {}): Ana
     project: (projectId, range) => call({ kind: "project", projectId, range }),
     session: (sessionId) => call({ kind: "session", sessionId }),
     groups: (query) => call({ kind: "groups", query }),
+    activity: (query: UsageActivityQuery): Promise<UsageActivityResult> =>
+      call({ kind: "activity", query }),
     refresh: () => call<void>({ kind: "refresh" }),
     stats: () => call({ kind: "stats" }),
     gc: () => call({ kind: "gc" }),

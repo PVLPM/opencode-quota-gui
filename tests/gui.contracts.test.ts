@@ -20,6 +20,7 @@ import {
   rangeBucketUnit,
   rangeWindow,
 } from "../src/contracts/ranges.js";
+import { isUsageActivityQuery } from "../src/contracts/usage-activity.js";
 import { homeSnapshot } from "./fixtures/gui-ui-fixtures.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
@@ -160,6 +161,61 @@ describe("GUI contract range vocabulary", () => {
   it("rejects a non-finite now instead of looping", () => {
     expect(() => planRangeBuckets("24h", Number.NaN)).toThrow(/finite/);
     expect(() => planRangeBuckets("lifetime", Number.POSITIVE_INFINITY)).toThrow(/finite/);
+  });
+});
+
+describe("usage activity query contract", () => {
+  const providerIds = ["openai"];
+
+  it("accepts sorted non-overlapping half-open intervals", () => {
+    expect(
+      isUsageActivityQuery({
+        intervals: [
+          { startMs: 0, endMs: 10 },
+          { startMs: 10, endMs: 20 },
+        ],
+        providerIds,
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects overlapping, unsorted, degenerate, and non-finite intervals", () => {
+    expect(
+      isUsageActivityQuery({
+        intervals: [
+          { startMs: 0, endMs: 10 },
+          { startMs: 9, endMs: 20 },
+        ],
+        providerIds,
+      }),
+    ).toBe(false);
+    expect(
+      isUsageActivityQuery({
+        intervals: [
+          { startMs: 10, endMs: 20 },
+          { startMs: 0, endMs: 10 },
+        ],
+        providerIds,
+      }),
+    ).toBe(false);
+    expect(isUsageActivityQuery({ intervals: [{ startMs: 10, endMs: 10 }], providerIds })).toBe(
+      false,
+    );
+    expect(
+      isUsageActivityQuery({
+        intervals: [{ startMs: Number.POSITIVE_INFINITY, endMs: 10 }],
+        providerIds,
+      }),
+    ).toBe(false);
+  });
+
+  it("rejects empty or non-string runtime provider ids", () => {
+    expect(isUsageActivityQuery({ intervals: [{ startMs: 0, endMs: 1 }], providerIds: [""] })).toBe(
+      false,
+    );
+    expect(isUsageActivityQuery({ intervals: [{ startMs: 0, endMs: 1 }], providerIds: [1] })).toBe(
+      false,
+    );
   });
 });
 
