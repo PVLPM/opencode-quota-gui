@@ -4,13 +4,14 @@ import { dirname } from "node:path";
 export interface SqliteConn {
   all<T = unknown>(sql: string, params?: unknown[]): T[];
   get<T = unknown>(sql: string, params?: unknown[]): T | null;
+  /** Non-query statements such as `BEGIN`/`COMMIT`; never used for binding. */
+  exec(sql: string): void;
   close(): void;
 }
 
 /** A read/write connection; every mutation is a prepared statement or `exec`. */
 export interface WritableSqliteConn extends SqliteConn {
   run(sql: string, params?: unknown[]): void;
-  exec(sql: string): void;
 }
 
 interface SqliteStatement {
@@ -79,6 +80,10 @@ function createConn(db: NodeSqliteDatabase | BunSqliteDatabase): SqliteConn {
       return row ?? null;
     },
 
+    exec(sql: string): void {
+      db.exec(sql);
+    },
+
     close(): void {
       try {
         db.close();
@@ -127,13 +132,22 @@ async function openWithBunSqlite(dbPath: string): Promise<SqliteConn> {
  * crash and loses at most the last committed poll on sudden power loss, which
  * is acceptable for local quota history and avoids an fsync per cycle. The
  * caller owns the schema and every transaction.
+ *
+ * `busyTimeoutMs` is set before WAL is enabled so opening a database another
+ * process is writing cannot block for the default multi-second timeout. The
+ * recorder uses a short timeout and carries a cycle over instead of stalling
+ * the host event loop.
  */
-export async function openOpenCodeSqliteWritable(dbPath: string): Promise<WritableSqliteConn> {
+export async function openOpenCodeSqliteWritable(
+  dbPath: string,
+  options: { busyTimeoutMs?: number } = {},
+): Promise<WritableSqliteConn> {
   await mkdir(dirname(dbPath), { recursive: true, mode: 0o700 });
+  const busyTimeoutMs = options.busyTimeoutMs ?? 5000;
   if ("Bun" in globalThis) {
-    return openWritableWithBunSqlite(dbPath);
+    return openWritableWithBunSqlite(dbPath, busyTimeoutMs);
   }
-  return openWritableWithNodeSqlite(dbPath);
+  return openWritableWithNodeSqlite(dbPath, busyTimeoutMs);
 }
 
 async function restrictFileMode(dbPath: string): Promise<void> {
@@ -145,10 +159,15 @@ async function restrictFileMode(dbPath: string): Promise<void> {
   }
 }
 
-function configureWritableDb(db: NodeSqliteDatabase | BunSqliteDatabase): void {
+function configureWritableDb(
+  db: NodeSqliteDatabase | BunSqliteDatabase,
+  busyTimeoutMs: number,
+): void {
+  // Order matters: a contended database must never block on the WAL switch
+  // with the default timeout before the caller's short one applies.
+  db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(busyTimeoutMs))};`);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA synchronous = NORMAL;");
-  db.exec("PRAGMA busy_timeout = 5000;");
 }
 
 function writableConn(db: NodeSqliteDatabase | BunSqliteDatabase): WritableSqliteConn {
@@ -158,29 +177,60 @@ function writableConn(db: NodeSqliteDatabase | BunSqliteDatabase): WritableSqlit
     run(sql: string, params?: unknown[]): void {
       db.prepare(sql).run(...toParams(params));
     },
-
-    exec(sql: string): void {
-      db.exec(sql);
-    },
   };
 }
 
-async function openWritableWithNodeSqlite(dbPath: string): Promise<WritableSqliteConn> {
+async function openWritableWithNodeSqlite(
+  dbPath: string,
+  busyTimeoutMs: number,
+): Promise<WritableSqliteConn> {
   const mod = (await import("node:sqlite")) as unknown as NodeSqliteModule;
   const db = new mod.DatabaseSync(dbPath, {
     enableForeignKeyConstraints: true,
     open: true,
   });
-  configureWritableDb(db);
-  await restrictFileMode(dbPath);
+  try {
+    configureWritableDb(db, busyTimeoutMs);
+  } catch (error) {
+    // A half-configured handle must not leak.
+    try {
+      db.close();
+    } catch {
+      // the setup failure is the one worth reporting
+    }
+    throw error;
+  }
+  try {
+    await restrictFileMode(dbPath);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   return writableConn(db);
 }
 
-async function openWritableWithBunSqlite(dbPath: string): Promise<WritableSqliteConn> {
+async function openWritableWithBunSqlite(
+  dbPath: string,
+  busyTimeoutMs: number,
+): Promise<WritableSqliteConn> {
   const mod = (await import("bun:sqlite")) as unknown as BunSqliteModule;
   const db = new mod.Database(dbPath);
-  configureWritableDb(db);
-  await restrictFileMode(dbPath);
+  try {
+    configureWritableDb(db, busyTimeoutMs);
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+      // the setup failure is the one worth reporting
+    }
+    throw error;
+  }
+  try {
+    await restrictFileMode(dbPath);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   return writableConn(db);
 }
 

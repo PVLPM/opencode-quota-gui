@@ -143,6 +143,8 @@ export const cursorProvider: QuotaProvider = {
         group,
         percentRemaining: 100 - (usage.api.costUsd / includedApiUsd) * 100,
         resetTimeIso,
+        // The billing-cycle reset is derived locally, not reported by the provider.
+        resetPrecision: "estimated",
         ...(fixedWindow ? { fixedWindow } : {}),
         semantic: {
           metric: { kind: "named", name: "API" },

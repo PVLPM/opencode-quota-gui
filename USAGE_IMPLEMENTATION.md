@@ -56,6 +56,22 @@ transaction; unique constraints make concurrent identical writes idempotent.
 JSON + lock files (existing convention) are unsuitable for indefinitely
 growing, range-queried history. No retention cutoff, no deletion.
 
+Durability: `synchronous = NORMAL` in WAL means a process crash loses nothing
+already committed, but a sudden power loss may lose the most recent commits
+(at most the last poll cycle). That is an accepted trade-off for local quota
+history: it avoids one fsync per cycle. `busy_timeout` is applied before the
+`journal_mode = WAL` switch so opening a database another process is writing
+never blocks on the default multi-second timeout; the recorder uses a 250 ms
+timeout and carries a small bounded number of cycles over to the next
+observation instead of blocking the host event loop. A failed open is retried
+on a later observation, and a failed setup closes the handle.
+
+Windows file permissions: the directory is created with mode 0700, but Windows
+ignores POSIX modes. The database file therefore inherits the ACL of the
+private state directory (`%LOCALAPPDATA%`/OpenCode state) just like the other
+plugin state files; no explicit per-file ACL is set. Unix additionally applies
+`chmod 0600` best effort.
+
 ### D2 Observation identity
 A sample is `(seriesId, measuredAtMs)`. `measuredAtMs` = provider
 `accounting.observedAtIso` when supplied, else the cache-entry timestamp of the
@@ -68,12 +84,15 @@ Cursor's `observedAtIso` is local compute time, so Cursor is marked
 
 ### D3 Series and run-length storage
 `series` = one (cardId, rowKey) percent or quantity row, with last-seen
-provider/account display labels (local display data already present in the
-existing caches; never tokens). Unchanged consecutive samples of a series in
-the same epoch extend one `run` row (`first_at`, `last_at`, `sample_count`)
-instead of inserting a row per poll — lossless for every derived quantity
-(flat interval, endpoints, sample count) and bounded by change frequency, not
-poll frequency. A run is only extended across a continuous link (D5).
+provider label and row label only. Account and plan labels are identity-bearing
+(possibly an email or workspace name) and are never persisted; Usage resolves
+those from the current live cards or a neutral opaque-hash fallback. A late or
+duplicate sample never overwrites newer series metadata. Unchanged consecutive
+samples of a series in the same epoch extend one `run` row (`first_at`,
+`last_at`, `sample_count`) instead of inserting a row per poll — lossless for
+every derived quantity (flat interval, endpoints, sample count) and bounded by
+change frequency, not poll frequency. A run is only extended across a
+continuous link (D5).
 
 ### D4 Epoch / reset semantics (pure, `src/gui/usage-intervals.ts`)
 Reuses the proven-reset rule of `src/lib/quota-reset-notifications.ts`
@@ -83,11 +102,22 @@ is at/after the earlier observation's `resetAt` and the new `resetAt` is later.
   offset-derived providers does not split an epoch).
 - remaining increased without a proven reset → `replenished` boundary
   (refill, banked/manual reset, correction) — never negative burn.
-- unit / capacity / limit change → `identity-change` boundary.
+- unit / capacity / limit / plan identity change → `identity-change` boundary.
+  Capacity and plan identity are carried per sample through an internal side
+  channel (never new card-DTO fields); standalone quantity rows are out of
+  scope because they carry no capacity.
 - no reset information and value increased → `uncertain` boundary.
 - duplicates (same sample) ignored; out-of-order samples ordered by
-  `measuredAtMs`; a sample inside an existing run of different value is kept
-  as its own point and the run is split (no data dropped).
+  `measuredAtMs`. A sample inside an existing run with the same value only
+  increments `sample_count`. A different value never splits or fabricates an
+  endpoint: it is stored as conflict evidence and the derivation renders an
+  `uncertain` boundary at that time instead of a step. A sample in a gap between
+  runs becomes its own unlinked run and unlinks the following run.
+- reset precision is stored per run: an absolute provider reset is `exact`; a
+  provider-derived `now + offset` reset (MiniMax, OpenAI
+  `reset_after_seconds`, Cursor's local cycle) is `estimated`. Run extension
+  compares estimated reset epochs with poll-scale jitter tolerance, not exact
+  timestamps.
 Reset marker time: the earlier observation's `resetAt` when the provider
 supplied it as an absolute timestamp; otherwise "reset between observations".
 
@@ -203,10 +233,13 @@ Import limitations:
   cycle with no linked live polling, so intervals between them render as
   unobserved rather than continuous monitoring.
 - Toggling an import off and on re-reads from offset 0 to pick up the disabled
-  period. Imported invocations dedupe by key, but Codex rate-limit points can
-  repeat on that re-read.
+  period. Imported invocations dedupe by key, and repeated Codex rate-limit
+  points are idempotent under the stored-sample policy: an exact
+  `(series, measuredAtMs, value)` replay is a no-op, never a second point.
 - Imported activity entries carry no source field; the caller labels them
-  `claude-code-import` / `codex-import` when composing `UsageSnapshot`.
+  `claude-code-import` / `codex-import` when composing `UsageSnapshot`. Imported
+  Claude Code activity is shown only as separate recorded activity; it is never
+  merged into OpenCode attribution weights or estimated burn.
 
 ## Open product questions (owner)
 

@@ -26,6 +26,7 @@ import type {
   DashboardDataSource,
   HomeSnapshot,
   ProjectSnapshot,
+  ProviderCard,
   QuotaSnapshot,
   SessionSnapshot,
 } from "../contracts/dashboard.js";
@@ -52,7 +53,12 @@ import {
 } from "./aggregation.js";
 import { createAnalyticsModel } from "./analytics-model.js";
 import { type AnalyticsReadService, createAnalyticsReadService } from "./analytics-service.js";
-import { buildCardId, hashQuotaCardIdentity } from "./identity.js";
+import {
+  buildCardId,
+  buildProviderScopeCardId,
+  hashQuotaCardIdentity,
+  rowIdForEntry,
+} from "./identity.js";
 import {
   buildProviderCards,
   cardSourceKey,
@@ -279,6 +285,92 @@ function cardPreferences(config: QuotaToastConfig): ProviderCardPreferences {
   }
   if (config.resetTimeSpaced !== undefined) preferences.resetTimeSpaced = config.resetTimeSpaced;
   return preferences;
+}
+
+/** Per-row evidence the card projection intentionally drops (never a DTO field). */
+interface RowMeasurementEvidence {
+  providerId: string;
+  limitKey?: string;
+  resetPrecision?: "exact" | "estimated";
+}
+
+/**
+ * Recover reset precision and percent-row capacity from the provider entries
+ * before `buildProviderCards` reduces them to display rows. The row id is the
+ * same identity the card projection emits, so the recorder can attach the
+ * evidence to the stored sample without provider-id string matching.
+ */
+function rowMeasurementEvidence(
+  probes: readonly MergedProbe[],
+  cards: readonly ProviderCard[],
+): {
+  resetPrecisionByRow?: Map<string, "exact" | "estimated">;
+  capacityKeyByRow?: Map<string, string>;
+} {
+  const rows = new Map<string, RowMeasurementEvidence>();
+  for (const probe of probes) {
+    const accounts = probe.result.accounts ?? [];
+    const accountIds = new Set(accounts.map((account) => account.sourceId));
+    const cardIdBySource = new Map(
+      accounts.map((account) => [
+        account.sourceId,
+        buildCardId(
+          probe.providerId,
+          account.identityKey?.trim() ? account.identityKey : account.sourceId,
+        ),
+      ]),
+    );
+    const providerScopeCardId = buildProviderScopeCardId(probe.providerId);
+    for (const entry of probe.result.entries) {
+      const sourceId = entry.accounting.sourceId;
+      const cardId =
+        sourceId !== undefined && accountIds.has(sourceId)
+          ? (cardIdBySource.get(sourceId) ?? providerScopeCardId)
+          : providerScopeCardId;
+      const rowId = rowIdForEntry(cardId, entry);
+      const limit = "basis" in entry ? entry.basis?.limit?.quantity : undefined;
+      const limitKey =
+        limit !== undefined ? `limit:${limit.decimal}:${JSON.stringify(limit.unit)}` : undefined;
+      const resetPrecision =
+        "resetPrecision" in entry && entry.resetPrecision !== undefined
+          ? entry.resetPrecision
+          : undefined;
+      rows.set(rowId, {
+        providerId: probe.providerId,
+        ...(limitKey !== undefined ? { limitKey } : {}),
+        ...(resetPrecision !== undefined ? { resetPrecision } : {}),
+      });
+    }
+  }
+
+  // A plan change is an identity change even when capacity is unchanged. The
+  // hash is persisted; the display label itself is never stored.
+  const planKeyByCard = new Map<string, string>();
+  for (const card of cards) {
+    if (card.planLabel === undefined) continue;
+    planKeyByCard.set(
+      card.cardId,
+      `plan:${hashQuotaCardIdentity(card.providerId, card.planLabel)}`,
+    );
+  }
+
+  const resetPrecisionByRow = new Map<string, "exact" | "estimated">();
+  const capacityKeyByRow = new Map<string, string>();
+  for (const [rowId, evidence] of rows) {
+    if (evidence.resetPrecision !== undefined) {
+      resetPrecisionByRow.set(rowId, evidence.resetPrecision);
+    }
+    const cardId = rowId.slice(0, rowId.indexOf("#"));
+    const parts = [
+      ...(evidence.limitKey !== undefined ? [evidence.limitKey] : []),
+      ...(planKeyByCard.get(cardId) !== undefined ? [planKeyByCard.get(cardId) as string] : []),
+    ];
+    if (parts.length > 0) capacityKeyByRow.set(rowId, parts.join("|"));
+  }
+  return {
+    ...(resetPrecisionByRow.size > 0 ? { resetPrecisionByRow } : {}),
+    ...(capacityKeyByRow.size > 0 ? { capacityKeyByRow } : {}),
+  };
 }
 
 export function createDashboardReadSource(
@@ -673,8 +765,11 @@ export function createDashboardReadSource(
         if (measuredAt !== undefined) measuredAtByCard.set(card.cardId, measuredAt);
       }
       const configuredInterval = config.minIntervalMs;
+      const evidence = rowMeasurementEvidence(merged.probes, cards);
       markQuotaObservationCycle(snapshot, {
         measuredAtByCard,
+        attemptedAtMs: nowMs,
+        ...evidence,
         intervalMs:
           typeof configuredInterval === "number" &&
           Number.isFinite(configuredInterval) &&

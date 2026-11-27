@@ -18,11 +18,12 @@ import type {
   UsageActivityResult,
 } from "../contracts/usage-activity.js";
 import { openOpenCodeSqliteWritable, type WritableSqliteConn } from "./opencode-sqlite.js";
+import { hashQuotaCardIdentity } from "./quota-identity.js";
 import { type PricingResolution, priceTokenBuckets } from "./quota-stats.js";
 import { type TokenBuckets, totalTokenBuckets } from "./token-buckets.js";
 import type { UsageImportTokens, UsageResetPrecision } from "./usage-import.js";
 
-export const USAGE_HISTORY_SCHEMA_VERSION = 3;
+export const USAGE_HISTORY_SCHEMA_VERSION = 4;
 
 const MIGRATIONS: readonly string[] = [
   `
@@ -110,6 +111,28 @@ const MIGRATIONS: readonly string[] = [
   `
   ALTER TABLE usage_runs ADD COLUMN reset_precision TEXT;
   `,
+  `
+  ALTER TABLE usage_runs ADD COLUMN capacity_key TEXT;
+  ALTER TABLE usage_runs ADD COLUMN attempted_at_ms INTEGER;
+
+  -- Account and plan labels can contain identifiers (emails, workspace names).
+  -- History is display-neutral: Usage resolves labels from live cards only.
+  UPDATE usage_series SET account_label = NULL, plan_label = NULL;
+
+  CREATE TABLE usage_conflicts (
+    conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    series_id TEXT NOT NULL REFERENCES usage_series(series_id),
+    at_ms INTEGER NOT NULL,
+    remaining_percent REAL NOT NULL,
+    existing_remaining_percent REAL NOT NULL,
+    kind TEXT NOT NULL,
+    collector_run_id TEXT NOT NULL,
+    collector_session_id TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX usage_conflicts_unique ON usage_conflicts(series_id, at_ms, remaining_percent);
+  CREATE INDEX usage_conflicts_series_time ON usage_conflicts(series_id, at_ms);
+  CREATE INDEX usage_conflicts_time ON usage_conflicts(at_ms);
+  `,
 ];
 
 export const USAGE_INTERRUPTION_KINDS = ["error", "cooldown", "retained", "missing-row"] as const;
@@ -122,7 +145,9 @@ export interface UsageSeriesMetadata {
   rowKey: string;
   providerId: string;
   providerLabel: string;
+  /** Accepted for compatibility but never persisted (privacy, schema v4). */
   accountLabel?: string;
+  /** Accepted for compatibility but never persisted (privacy, schema v4). */
   planLabel?: string;
   label: string;
   metricJson?: string;
@@ -146,6 +171,8 @@ export interface UsageStoredRun {
   resetAtMs?: number;
   /** `exact` when the provider supplied the reset instant, `estimated` when derived. */
   reset_precision?: UsageResetPrecision;
+  /** Normalized capacity/limit + unit + plan identity; a change is an identity change. */
+  capacityKey?: string;
   /** Evidence of continuous observation from the preceding run. */
   linked: boolean;
 }
@@ -160,12 +187,24 @@ export interface UsageInterruptionRecord {
   count: number;
 }
 
+/** A sample that disagreed with already-stored evidence at overlapping time. */
+export interface UsageConflictRecord {
+  conflictId: number;
+  seriesId: string;
+  atMs: number;
+  remainingPercent: number;
+  existingRemainingPercent: number;
+  kind: "inside-run" | "same-time";
+}
+
 export interface UsageCycleSample {
   series: UsageSeriesMetadata;
   remainingPercent: number;
   quantity?: { decimal: string; unit: AccountingUnit };
   resetAtMs?: number;
   resetPrecision?: UsageResetPrecision;
+  /** Normalized percent capacity/limit + plan identity, when known. */
+  capacityKey?: string;
   measuredAtMs: number;
 }
 
@@ -181,6 +220,8 @@ export interface UsageCycleObservation {
   collectorSessionId: string;
   /** Collector poll interval at this cycle; continuity tolerance is 2×. */
   intervalMs: number;
+  /** Collector attempt time; interruption evidence is stamped with it. Defaults to `nowMs`. */
+  attemptedAtMs?: number;
   /** Every card present in the live snapshot, including excluded ones. */
   observedCards: readonly { cardId: string; providerId: string; atMs: number }[];
   /** Providers the collector attempted this cycle. */
@@ -196,6 +237,8 @@ export interface UsageHistorySlice {
   /** The last run strictly before the queried span, per returned series. */
   preceding: UsageStoredRun[];
   interruptions: UsageInterruptionRecord[];
+  /** Overlapping-time disagreements; the derivation renders them as uncertain. */
+  conflicts: UsageConflictRecord[];
 }
 
 export const USAGE_IMPORT_HARNESSES = ["claude-code", "codex"] as const;
@@ -289,6 +332,8 @@ interface RunRow {
   quantity_unit_json: string | null;
   reset_at_ms: number | null;
   reset_precision: string | null;
+  capacity_key: string | null;
+  attempted_at_ms: number | null;
   linked: number;
   collector_run_id: string;
   collector_session_id: string;
@@ -306,7 +351,7 @@ interface InterruptionRow {
 }
 
 const RUN_COLUMNS =
-  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked, collector_run_id, collector_session_id, collector_interval_ms";
+  "run_id, series_id, first_at_ms, last_at_ms, sample_count, remaining_percent, quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, capacity_key, attempted_at_ms, linked, collector_run_id, collector_session_id, collector_interval_ms";
 
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(", ");
@@ -319,8 +364,7 @@ function seriesRowToInfo(row: SeriesRow): UsageSeriesInfo {
     rowKey: row.row_key,
     providerId: row.provider_id,
     providerLabel: row.provider_label,
-    ...(row.account_label !== null ? { accountLabel: row.account_label } : {}),
-    ...(row.plan_label !== null ? { planLabel: row.plan_label } : {}),
+    // account_label / plan_label are cleared and never selected for display.
     label: row.label,
     ...(row.metric_json !== null ? { metricJson: row.metric_json } : {}),
     measurement: row.measurement as UsageMeasurementKind,
@@ -345,6 +389,7 @@ function runRowToStored(row: RunRow): UsageStoredRun {
     ...(row.reset_precision === "exact" || row.reset_precision === "estimated"
       ? { reset_precision: row.reset_precision }
       : {}),
+    ...(row.capacity_key !== null ? { capacityKey: row.capacity_key } : {}),
     linked: row.linked === 1,
   };
 }
@@ -357,6 +402,7 @@ function quantityParts(
 
 const CODEX_IMPORT_PROVIDER = "openai";
 const CODEX_IMPORT_PROVIDER_LABEL = "OpenAI Codex (imported)";
+let codexImportSequence = 0;
 const IMPORT_PROVIDER_BY_HARNESS: Readonly<Record<UsageImportHarness, string>> = {
   "claude-code": "anthropic",
   codex: "openai",
@@ -408,18 +454,47 @@ function counter(value: number): number {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
 
-function sameMeasurement(
+/** Value identity of a sample: remaining, quantity and capacity. */
+function sameValue(
   run: RunRow,
   remainingPercent: number,
   quantity: { decimal: string; unit: AccountingUnit } | undefined,
-  resetAtMs: number | undefined,
+  capacityKey: string | undefined,
 ): boolean {
   const [decimal, unitJson] = quantityParts(quantity);
   return (
     run.remaining_percent === remainingPercent &&
     run.quantity_decimal === decimal &&
     run.quantity_unit_json === unitJson &&
-    run.reset_at_ms === (resetAtMs ?? null)
+    run.capacity_key === (capacityKey ?? null)
+  );
+}
+
+/**
+ * Reset epoch identity. Exact resets must match; estimated resets jitter by up
+ * to about a poll interval, so a small forward/backward drift still describes
+ * the same window and must not split a run.
+ */
+function sameResetEpoch(
+  run: RunRow,
+  resetAtMs: number | undefined,
+  resetPrecision: UsageResetPrecision | undefined,
+  intervalMs: number,
+): boolean {
+  if (run.reset_at_ms === null || resetAtMs === undefined) {
+    return run.reset_at_ms === null && resetAtMs === undefined;
+  }
+  if (run.reset_at_ms === resetAtMs) return true;
+  const estimated = run.reset_precision === "estimated" || resetPrecision === "estimated";
+  if (!estimated) return false;
+  const tolerance = 2 * Math.max(intervalMs, run.collector_interval_ms);
+  return Math.abs(run.reset_at_ms - resetAtMs) <= tolerance;
+}
+
+function sameMeasurement(run: RunRow, sample: UsageCycleSample, intervalMs: number): boolean {
+  return (
+    sameValue(run, sample.remainingPercent, sample.quantity, sample.capacityKey) &&
+    sameResetEpoch(run, sample.resetAtMs, sample.resetPrecision, intervalMs)
   );
 }
 
@@ -466,6 +541,23 @@ function migrate(conn: WritableSqliteConn): void {
 }
 
 function createStore(conn: WritableSqliteConn, path: string): UsageStore {
+  // A shared in-flight snapshot can reach the observer twice. Cycle ids are
+  // process/session scoped, so an in-memory recent window is idempotent without
+  // growing forever; a cross-process replay cannot reuse the same id.
+  const RECENT_CYCLE_LIMIT = 64;
+  const recentCycles = new Set<string>();
+  const recentCycleOrder: string[] = [];
+
+  function rememberCycle(collectorRunId: string): void {
+    if (recentCycles.has(collectorRunId)) return;
+    recentCycles.add(collectorRunId);
+    recentCycleOrder.push(collectorRunId);
+    if (recentCycleOrder.length > RECENT_CYCLE_LIMIT) {
+      const dropped = recentCycleOrder.shift();
+      if (dropped !== undefined) recentCycles.delete(dropped);
+    }
+  }
+
   function latestRun(seriesId: string): RunRow | null {
     return conn.get<RunRow>(
       `SELECT ${RUN_COLUMNS} FROM usage_runs WHERE series_id = ? ORDER BY first_at_ms DESC, run_id DESC LIMIT 1`,
@@ -483,19 +575,34 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
   }
 
   function upsertSeries(series: UsageSeriesMetadata, measuredAtMs: number): void {
+    // Display labels are never persisted. A late sample also must not overwrite
+    // newer metadata (label/metric/source) from a later measurement.
     conn.run(
       `INSERT INTO usage_series (
          series_id, card_id, row_key, provider_id, provider_label, account_label, plan_label,
          label, metric_json, measurement, source, first_at_ms, last_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(series_id) DO UPDATE SET
-         provider_label = excluded.provider_label,
-         account_label = excluded.account_label,
-         plan_label = excluded.plan_label,
-         label = excluded.label,
-         metric_json = excluded.metric_json,
-         measurement = excluded.measurement,
-         source = excluded.source,
+         provider_label = CASE
+           WHEN excluded.last_at_ms >= usage_series.last_at_ms THEN excluded.provider_label
+           ELSE usage_series.provider_label
+         END,
+         label = CASE
+           WHEN excluded.last_at_ms >= usage_series.last_at_ms THEN excluded.label
+           ELSE usage_series.label
+         END,
+         metric_json = CASE
+           WHEN excluded.last_at_ms >= usage_series.last_at_ms THEN excluded.metric_json
+           ELSE usage_series.metric_json
+         END,
+         measurement = CASE
+           WHEN excluded.last_at_ms >= usage_series.last_at_ms THEN excluded.measurement
+           ELSE usage_series.measurement
+         END,
+         source = CASE
+           WHEN excluded.last_at_ms >= usage_series.last_at_ms THEN excluded.source
+           ELSE usage_series.source
+         END,
          first_at_ms = MIN(usage_series.first_at_ms, excluded.first_at_ms),
          last_at_ms = MAX(usage_series.last_at_ms, excluded.last_at_ms)`,
       [
@@ -504,8 +611,6 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         series.rowKey,
         series.providerId,
         series.providerLabel,
-        series.accountLabel ?? null,
-        series.planLabel ?? null,
         series.label,
         series.metricJson ?? null,
         series.measurement,
@@ -524,15 +629,16 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       collectorRunId: string;
       collectorSessionId: string;
       intervalMs: number;
+      attemptedAtMs: number;
     },
   ): void {
     const [decimal, unitJson] = quantityParts(sample.quantity);
     conn.run(
       `INSERT INTO usage_runs (
          series_id, first_at_ms, last_at_ms, sample_count, remaining_percent,
-         quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked,
-         collector_run_id, collector_session_id, collector_interval_ms
-       ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, capacity_key,
+         attempted_at_ms, linked, collector_run_id, collector_session_id, collector_interval_ms
+       ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         sample.series.rowId,
         measuredAtMs,
@@ -542,6 +648,8 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         unitJson,
         sample.resetAtMs ?? null,
         sample.resetPrecision ?? null,
+        sample.capacityKey ?? null,
+        run.attemptedAtMs,
         linked ? 1 : 0,
         run.collectorRunId,
         run.collectorSessionId,
@@ -564,64 +672,64 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
 
   function isContinuous(
     latest: RunRow,
-    sample: UsageCycleSample,
+    cardId: string,
     measuredAtMs: number,
     observation: UsageCycleObservation,
     watermarks: Map<string, number>,
   ): boolean {
     // The previous run stores the poll interval that governed the gap after it.
+    // Interruption evidence is ordered against the last successful attempt, not
+    // the (possibly older) measurement time, so a failed attempt between two
+    // successes always breaks the link.
+    const successAtMs = latest.attempted_at_ms ?? latest.last_at_ms;
     return (
       latest.collector_session_id === observation.collectorSessionId &&
       measuredAtMs > latest.last_at_ms &&
       measuredAtMs - latest.last_at_ms <= 2 * latest.collector_interval_ms &&
-      interruptionWatermark(sample.series.cardId, watermarks) <= latest.last_at_ms
+      interruptionWatermark(cardId, watermarks) <= successAtMs
     );
   }
 
-  /**
-   * An out-of-order sample inside an identical-value run cannot be merged and
-   * must not be dropped. The covering run is split at the new sample's time;
-   * the original sample count is preserved as `1 + (count - 1)` because the
-   * store only knows the run's endpoints, and the new sample becomes its own
-   * point. Endpoint collisions are kept as a same-time point instead.
-   */
-  function splitCoveringRun(
-    covering: RunRow,
+  function writeConflict(
+    run: RunRow,
+    sample: UsageCycleSample,
+    measuredAtMs: number,
+    kind: UsageConflictRecord["kind"],
+    observation: UsageCycleObservation,
+  ): void {
+    conn.run(
+      `INSERT OR IGNORE INTO usage_conflicts (
+         series_id, at_ms, remaining_percent, existing_remaining_percent, kind,
+         collector_run_id, collector_session_id
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        sample.series.rowId,
+        measuredAtMs,
+        sample.remainingPercent,
+        run.remaining_percent,
+        kind,
+        observation.collectorRunId,
+        observation.collectorSessionId,
+      ],
+    );
+  }
+
+  /** Insert a sample in a gap and break the link into the following run. */
+  function insertGapRun(
     sample: UsageCycleSample,
     measuredAtMs: number,
     observation: UsageCycleObservation,
+    attemptedAtMs: number,
   ): void {
-    if (measuredAtMs <= covering.first_at_ms || measuredAtMs >= covering.last_at_ms) {
-      insertRun(sample, measuredAtMs, false, observation);
-      return;
-    }
-    const rightCount = Math.max(1, covering.sample_count - 1);
-    conn.run("UPDATE usage_runs SET last_at_ms = ?, sample_count = 1 WHERE run_id = ?", [
-      measuredAtMs,
-      covering.run_id,
-    ]);
+    insertRun(sample, measuredAtMs, false, { ...observation, attemptedAtMs });
     conn.run(
-      `INSERT INTO usage_runs (
-         series_id, first_at_ms, last_at_ms, sample_count, remaining_percent,
-         quantity_decimal, quantity_unit_json, reset_at_ms, reset_precision, linked,
-         collector_run_id, collector_session_id, collector_interval_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-      [
-        covering.series_id,
-        measuredAtMs,
-        covering.last_at_ms,
-        rightCount,
-        covering.remaining_percent,
-        covering.quantity_decimal,
-        covering.quantity_unit_json,
-        covering.reset_at_ms,
-        covering.reset_precision,
-        covering.collector_run_id,
-        covering.collector_session_id,
-        covering.collector_interval_ms,
-      ],
+      `UPDATE usage_runs SET linked = 0 WHERE run_id = (
+         SELECT run_id FROM usage_runs
+         WHERE series_id = ? AND first_at_ms > ?
+         ORDER BY first_at_ms, run_id LIMIT 1
+       )`,
+      [sample.series.rowId, measuredAtMs],
     );
-    insertRun(sample, measuredAtMs, false, observation);
   }
 
   function writeSample(
@@ -631,6 +739,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
   ): void {
     if (!Number.isFinite(sample.remainingPercent) || !Number.isFinite(sample.measuredAtMs)) return;
     const measuredAtMs = Math.round(sample.measuredAtMs);
+    const attemptedAtMs = observation.attemptedAtMs ?? observation.nowMs;
     upsertSeries(sample.series, measuredAtMs);
 
     // Fast path: an append-only sample newer than the latest run cannot be
@@ -641,40 +750,73 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       latest !== null && measuredAtMs <= latest.last_at_ms
         ? coveringRuns(sample.series.rowId, measuredAtMs)
         : [];
-    if (
-      covering.some((run) =>
-        sameMeasurement(run, sample.remainingPercent, sample.quantity, sample.resetAtMs),
-      )
-    ) {
-      return;
-    }
-    const interior = covering.find(
-      (run) => run.first_at_ms < measuredAtMs && run.last_at_ms > measuredAtMs,
-    );
-    if (interior !== undefined) {
-      splitCoveringRun(interior, sample, measuredAtMs, observation);
-      return;
-    }
     if (covering.length > 0) {
-      insertRun(sample, measuredAtMs, false, observation);
+      const sameValueRun = covering.find((run) =>
+        sameValue(run, sample.remainingPercent, sample.quantity, sample.capacityKey),
+      );
+      if (sameValueRun !== undefined) {
+        if (measuredAtMs > sameValueRun.first_at_ms && measuredAtMs < sameValueRun.last_at_ms) {
+          // Same value inside a run: the sample is real evidence, but it adds no
+          // endpoint. The run keeps its first/last pair.
+          conn.run(
+            "UPDATE usage_runs SET sample_count = sample_count + 1, attempted_at_ms = MAX(COALESCE(attempted_at_ms, 0), ?) WHERE run_id = ?",
+            [attemptedAtMs, sameValueRun.run_id],
+          );
+        } else {
+          // Exact duplicate of a run endpoint (replay of the same measurement).
+          conn.run(
+            "UPDATE usage_runs SET attempted_at_ms = MAX(COALESCE(attempted_at_ms, 0), ?) WHERE run_id = ?",
+            [attemptedAtMs, sameValueRun.run_id],
+          );
+        }
+        return;
+      }
+      // A different value at/inside stored evidence never splits or fabricates
+      // an endpoint: it is conflict evidence the derivation renders as uncertain.
+      const interior = covering.find(
+        (run) => run.first_at_ms < measuredAtMs && run.last_at_ms > measuredAtMs,
+      );
+      writeConflict(
+        interior ?? (covering[0] as RunRow),
+        sample,
+        measuredAtMs,
+        interior !== undefined ? "inside-run" : "same-time",
+        observation,
+      );
+      return;
+    }
+    if (latest !== null && measuredAtMs <= latest.last_at_ms) {
+      insertGapRun(sample, measuredAtMs, observation, attemptedAtMs);
       return;
     }
 
     const linked =
-      latest !== null && isContinuous(latest, sample, measuredAtMs, observation, watermarks);
+      latest !== null &&
+      isContinuous(latest, sample.series.cardId, measuredAtMs, observation, watermarks);
     if (
       latest !== null &&
       linked &&
-      sameMeasurement(latest, sample.remainingPercent, sample.quantity, sample.resetAtMs) &&
+      sameMeasurement(latest, sample, observation.intervalMs) &&
       measuredAtMs > latest.last_at_ms
     ) {
       conn.run(
-        "UPDATE usage_runs SET last_at_ms = ?, sample_count = sample_count + 1 WHERE run_id = ?",
-        [measuredAtMs, latest.run_id],
+        `UPDATE usage_runs SET
+           last_at_ms = ?, sample_count = sample_count + 1,
+           reset_at_ms = COALESCE(?, reset_at_ms),
+           reset_precision = COALESCE(?, reset_precision),
+           attempted_at_ms = ?
+         WHERE run_id = ?`,
+        [
+          measuredAtMs,
+          sample.resetAtMs ?? null,
+          sample.resetPrecision ?? null,
+          attemptedAtMs,
+          latest.run_id,
+        ],
       );
       return;
     }
-    insertRun(sample, measuredAtMs, linked, observation);
+    insertRun(sample, measuredAtMs, linked, { ...observation, attemptedAtMs });
   }
 
   function writeInterruption(
@@ -700,11 +842,23 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       atMs >= last.last_at_ms &&
       atMs - last.last_at_ms <= 2 * observation.intervalMs
     ) {
-      conn.run(
-        "UPDATE usage_interruptions SET last_at_ms = ?, count = count + 1 WHERE interruption_id = ?",
-        [atMs, last.interruption_id],
+      // A successful attempt between two failures ends the span; never
+      // compress across it even when the timer gap is small.
+      const success = conn.get<{ present: number }>(
+        `SELECT 1 AS present FROM usage_runs r
+         JOIN usage_series s ON s.series_id = r.series_id
+         WHERE s.card_id = ? AND COALESCE(r.attempted_at_ms, r.last_at_ms) > ?
+           AND COALESCE(r.attempted_at_ms, r.last_at_ms) < ?
+         LIMIT 1`,
+        [interruption.cardId, last.last_at_ms, atMs],
       );
-      return;
+      if (success === null) {
+        conn.run(
+          "UPDATE usage_interruptions SET last_at_ms = ?, count = count + 1 WHERE interruption_id = ?",
+          [atMs, last.interruption_id],
+        );
+        return;
+      }
     }
     conn.run(
       `INSERT INTO usage_interruptions (card_id, provider_id, kind, first_at_ms, last_at_ms, count, collector_session_id)
@@ -726,6 +880,24 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     sampledSeries: ReadonlySet<string>,
     interruptedCards: Set<string>,
   ): void {
+    // Only cards this collector previously observed in this collector session
+    // may produce missing-row evidence. A card another process/credential owns
+    // must never be reported missing here.
+    const previouslyObserved = new Map<string, string>();
+    for (const row of conn.all<{ card_id: string; provider_id: string }>(
+      `SELECT DISTINCT s.card_id, s.provider_id FROM usage_series s
+       WHERE EXISTS (
+         SELECT 1 FROM usage_runs r
+         WHERE r.series_id = s.series_id AND r.collector_session_id = ?
+       ) OR EXISTS (
+         SELECT 1 FROM usage_interruptions i
+         WHERE i.card_id = s.card_id AND i.collector_session_id = ?
+       )`,
+      [observation.collectorSessionId, observation.collectorSessionId],
+    )) {
+      previouslyObserved.set(row.card_id, row.provider_id);
+    }
+    const attemptAtMs = observation.attemptedAtMs ?? observation.nowMs;
     const missing = new Map<string, { providerId: string; atMs: number }>();
     const seriesForCards = () => {
       const cardIds = [...observedByCard.keys()];
@@ -738,7 +910,8 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     for (const series of seriesForCards()) {
       const card = observedByCard.get(series.card_id);
       if (card === undefined || sampledSeries.has(series.series_id)) continue;
-      missing.set(series.card_id, { providerId: series.provider_id, atMs: card.atMs });
+      if (!previouslyObserved.has(series.card_id)) continue;
+      missing.set(series.card_id, { providerId: series.provider_id, atMs: attemptAtMs });
     }
 
     const providerIds = [...new Set(observation.providerIds)];
@@ -749,7 +922,8 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       );
       for (const series of dropped) {
         if (observedByCard.has(series.card_id) || interruptedCards.has(series.card_id)) continue;
-        missing.set(series.card_id, { providerId: series.provider_id, atMs: observation.nowMs });
+        if (!previouslyObserved.has(series.card_id)) continue;
+        missing.set(series.card_id, { providerId: series.provider_id, atMs: attemptAtMs });
       }
     }
 
@@ -764,6 +938,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
   }
 
   function recordCycle(observation: UsageCycleObservation): void {
+    if (recentCycles.has(observation.collectorRunId)) return;
     const observedByCard = new Map(
       observation.observedCards.map((card) => [card.cardId, card] as const),
     );
@@ -786,6 +961,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       }
       throw error;
     }
+    rememberCycle(observation.collectorRunId);
   }
 
   function recordImportedInvocations(
@@ -865,7 +1041,10 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
       const atMs = Math.round(observation.atMs);
       const cardId = `codex-import:${observation.accountHint ?? "unknown"}`;
       const identity = codexWindowIdentity(observation);
-      const planLabel = observation.planType?.trim().slice(0, 100);
+      const planKey =
+        observation.planType !== undefined && observation.planType.trim().length > 0
+          ? `plan:${hashQuotaCardIdentity(CODEX_IMPORT_PROVIDER, observation.planType)}`
+          : undefined;
       samples.push({
         series: {
           rowId: `${cardId}#${identity.rowKey}`,
@@ -873,7 +1052,8 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
           rowKey: identity.rowKey,
           providerId: CODEX_IMPORT_PROVIDER,
           providerLabel: CODEX_IMPORT_PROVIDER_LABEL,
-          ...(planLabel !== undefined && planLabel.length > 0 ? { planLabel } : {}),
+          // Plan display labels are never persisted; the hashed identity below
+          // still detects a plan change as an identity boundary.
           label: identity.label,
           metricJson: JSON.stringify(identity.metric),
           measurement: "provider-observed",
@@ -886,6 +1066,7 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         ...(observation.resetPrecision !== undefined
           ? { resetPrecision: observation.resetPrecision }
           : {}),
+        ...(planKey !== undefined ? { capacityKey: planKey } : {}),
         measuredAtMs: atMs,
       });
     }
@@ -893,8 +1074,11 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     samples.sort((left, right) => left.measuredAtMs - right.measuredAtMs);
     const lastSample = samples.at(-1);
     if (lastSample === undefined) return;
+    codexImportSequence += 1;
     recordCycle({
-      collectorRunId: "codex-import",
+      // Each import batch is one synthetic cycle. Re-reading the same points is
+      // deduplicated by (series, time, value), never by this batch id.
+      collectorRunId: `codex-import:${lastSample.measuredAtMs}:${codexImportSequence}`,
       collectorSessionId: "codex-import",
       intervalMs: 0,
       observedCards: [],
@@ -1138,55 +1322,94 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
   function query(span: { startMs: number; endMs: number }): UsageHistorySlice {
     const startMs = Math.min(span.startMs, span.endMs);
     const endMs = Math.max(span.startMs, span.endMs);
-    const runs = conn.all<RunRow>(
-      `SELECT ${RUN_COLUMNS} FROM usage_runs
-       WHERE last_at_ms >= ? AND first_at_ms <= ?
-       ORDER BY series_id, first_at_ms, last_at_ms, run_id`,
-      [startMs, endMs],
-    );
-    const seriesIds = [...new Set(runs.map((run) => run.series_id))];
-    const seriesById = new Map<string, UsageSeriesInfo>();
-    if (seriesIds.length > 0) {
-      const rows = conn.all<SeriesRow>(
-        `SELECT * FROM usage_series WHERE series_id IN (${placeholders(seriesIds.length)})`,
-        seriesIds,
-      );
-      for (const row of rows) seriesById.set(row.series_id, seriesRowToInfo(row));
-    }
-    const preceding: UsageStoredRun[] = [];
-    for (const seriesId of seriesIds) {
-      const row = conn.get<RunRow>(
+    // One read transaction gives the runs/series/preceding/conflict reads a
+    // single consistent snapshot while another process may be writing.
+    conn.exec("BEGIN");
+    try {
+      const runs = conn.all<RunRow>(
         `SELECT ${RUN_COLUMNS} FROM usage_runs
-         WHERE series_id = ? AND last_at_ms < ?
-         ORDER BY last_at_ms DESC, run_id DESC LIMIT 1`,
-        [seriesId, startMs],
+         WHERE last_at_ms >= ? AND first_at_ms <= ?
+         ORDER BY series_id, first_at_ms, last_at_ms, run_id`,
+        [startMs, endMs],
       );
-      if (row !== null) preceding.push(runRowToStored(row));
+      const seriesIds = [...new Set(runs.map((run) => run.series_id))];
+      const seriesById = new Map<string, UsageSeriesInfo>();
+      if (seriesIds.length > 0) {
+        const rows = conn.all<SeriesRow>(
+          `SELECT * FROM usage_series WHERE series_id IN (${placeholders(seriesIds.length)})`,
+          seriesIds,
+        );
+        for (const row of rows) seriesById.set(row.series_id, seriesRowToInfo(row));
+      }
+      const preceding: UsageStoredRun[] = [];
+      for (const seriesId of seriesIds) {
+        const row = conn.get<RunRow>(
+          `SELECT ${RUN_COLUMNS} FROM usage_runs
+           WHERE series_id = ? AND last_at_ms < ?
+           ORDER BY last_at_ms DESC, run_id DESC LIMIT 1`,
+          [seriesId, startMs],
+        );
+        if (row !== null) preceding.push(runRowToStored(row));
+      }
+      const interruptions = conn.all<InterruptionRow>(
+        `SELECT interruption_id, card_id, provider_id, kind, first_at_ms, last_at_ms, count
+         FROM usage_interruptions
+         WHERE last_at_ms >= ? AND first_at_ms <= ?
+         ORDER BY first_at_ms, interruption_id`,
+        [startMs, endMs],
+      );
+      const conflicts =
+        seriesIds.length === 0
+          ? []
+          : conn.all<{
+              conflict_id: number;
+              series_id: string;
+              at_ms: number;
+              remaining_percent: number;
+              existing_remaining_percent: number;
+              kind: string;
+            }>(
+              `SELECT conflict_id, series_id, at_ms, remaining_percent, existing_remaining_percent, kind
+             FROM usage_conflicts
+             WHERE series_id IN (${placeholders(seriesIds.length)})
+               AND at_ms >= ? AND at_ms <= ?
+             ORDER BY series_id, at_ms, conflict_id`,
+              [...seriesIds, startMs, endMs],
+            );
+      conn.exec("COMMIT");
+      return {
+        series: seriesIds.flatMap((seriesId) => {
+          const info = seriesById.get(seriesId);
+          return info === undefined ? [] : [info];
+        }),
+        runs: runs.map(runRowToStored),
+        preceding,
+        interruptions: interruptions.map((row) => ({
+          interruptionId: row.interruption_id,
+          cardId: row.card_id,
+          providerId: row.provider_id,
+          kind: row.kind as UsageInterruptionKind,
+          firstAtMs: row.first_at_ms,
+          lastAtMs: row.last_at_ms,
+          count: row.count,
+        })),
+        conflicts: conflicts.map((row) => ({
+          conflictId: row.conflict_id,
+          seriesId: row.series_id,
+          atMs: row.at_ms,
+          remainingPercent: row.remaining_percent,
+          existingRemainingPercent: row.existing_remaining_percent,
+          kind: row.kind === "inside-run" ? "inside-run" : "same-time",
+        })),
+      };
+    } catch (error) {
+      try {
+        conn.exec("ROLLBACK");
+      } catch {
+        // the original failure is the one worth reporting
+      }
+      throw error;
     }
-    const interruptions = conn.all<InterruptionRow>(
-      `SELECT interruption_id, card_id, provider_id, kind, first_at_ms, last_at_ms, count
-       FROM usage_interruptions
-       WHERE last_at_ms >= ? AND first_at_ms <= ?
-       ORDER BY first_at_ms, interruption_id`,
-      [startMs, endMs],
-    );
-    return {
-      series: seriesIds.flatMap((seriesId) => {
-        const info = seriesById.get(seriesId);
-        return info === undefined ? [] : [info];
-      }),
-      runs: runs.map(runRowToStored),
-      preceding,
-      interruptions: interruptions.map((row) => ({
-        interruptionId: row.interruption_id,
-        cardId: row.card_id,
-        providerId: row.provider_id,
-        kind: row.kind as UsageInterruptionKind,
-        firstAtMs: row.first_at_ms,
-        lastAtMs: row.last_at_ms,
-        count: row.count,
-      })),
-    };
   }
 
   return {
@@ -1205,8 +1428,11 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
   };
 }
 
-export async function openUsageStore(dbPath: string): Promise<UsageStore> {
-  const conn = await openOpenCodeSqliteWritable(dbPath);
+export async function openUsageStore(
+  dbPath: string,
+  options: { busyTimeoutMs?: number } = {},
+): Promise<UsageStore> {
+  const conn = await openOpenCodeSqliteWritable(dbPath, options);
   try {
     migrate(conn);
   } catch (error) {

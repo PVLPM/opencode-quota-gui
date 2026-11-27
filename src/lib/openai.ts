@@ -79,6 +79,8 @@ type OpenAIWindowKind = "hourly" | "weekly" | "monthly";
 type OpenAIWindowValue = {
   percentRemaining: number;
   resetTimeIso?: string;
+  /** Internal: provider `reset_at` is exact, `reset_after_seconds` is estimated. */
+  resetPrecision?: "exact" | "estimated";
   fixedWindow?: FixedWindowProjectionEvidence;
 };
 
@@ -117,11 +119,14 @@ function parseWindowValue(window: unknown, observedAtMs: number): OpenAIWindowVa
     return null;
   }
 
+  const exactReset = resetIsoFromResetAt(value.reset_at);
+  const resetTimeIso =
+    exactReset ?? resetIsoFromNowSeconds(value.reset_after_seconds, observedAtMs);
   return {
     percentRemaining: clampPercent(100 - value.used_percent),
-    resetTimeIso:
-      resetIsoFromResetAt(value.reset_at) ??
-      resetIsoFromNowSeconds(value.reset_after_seconds, observedAtMs),
+    ...(resetTimeIso !== undefined
+      ? { resetTimeIso, resetPrecision: exactReset !== undefined ? "exact" : "estimated" }
+      : {}),
   };
 }
 
@@ -136,11 +141,14 @@ function parseRemainingWindowValue(
     return null;
   }
 
+  const exactReset = resetIsoFromResetAt(value.reset_at);
+  const resetTimeIso =
+    exactReset ?? resetIsoFromNowSeconds(value.reset_after_seconds, observedAtMs);
   return {
     percentRemaining: clampPercent(value.remaining_percent),
-    resetTimeIso:
-      resetIsoFromResetAt(value.reset_at) ??
-      resetIsoFromNowSeconds(value.reset_after_seconds, observedAtMs),
+    ...(resetTimeIso !== undefined
+      ? { resetTimeIso, resetPrecision: exactReset !== undefined ? "exact" : "estimated" }
+      : {}),
   };
 }
 

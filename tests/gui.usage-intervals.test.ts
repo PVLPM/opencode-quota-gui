@@ -465,6 +465,69 @@ describe("usage intervals: continuity and coverage", () => {
   });
 });
 
+describe("usage intervals: conflicting samples", () => {
+  it("renders conflict evidence as an uncertain boundary, never as a fabricated step", () => {
+    const window = buildUsageWindowSeries(
+      {
+        ...series([
+          point({ firstAtMs: BASE, lastAtMs: BASE + 60 * SECOND, remainingPercent: 80 }),
+          point({ firstAtMs: BASE + 120 * SECOND, remainingPercent: 70 }),
+        ]),
+        conflicts: [{ atMs: BASE + 30 * SECOND, remainingPercent: 40 }],
+      },
+      { range: "lifetime", nowMs: BASE + 120 * SECOND },
+    );
+
+    expect(window.points.map((item) => item.remainingPercent)).toEqual([80, 70]);
+    expect(window.links).toEqual([
+      { kind: "boundary", boundary: "uncertain", atMs: BASE + 30 * SECOND },
+    ]);
+    expect(window.intervals[0]?.link).toBe("boundary");
+    expect(window.intervals[1]?.burnPercentPoints).toBeNull();
+    expect(window.totals.observedBurnPercentPoints).toBe(0);
+  });
+
+  it("treats a conflict inside a gap as an uncertain boundary", () => {
+    const window = buildUsageWindowSeries(
+      {
+        ...series([
+          point({ firstAtMs: BASE, remainingPercent: 80 }),
+          point({ firstAtMs: BASE + 120 * SECOND, remainingPercent: 70, linked: false }),
+        ]),
+        conflicts: [{ atMs: BASE + 60 * SECOND, remainingPercent: 50 }],
+      },
+      { range: "lifetime", nowMs: BASE + 120 * SECOND },
+    );
+    expect(window.links[0]).toEqual({
+      kind: "boundary",
+      boundary: "uncertain",
+      atMs: BASE + 60 * SECOND,
+    });
+    expect(
+      window.intervals.find((interval) => interval.fromPoint === 0 && interval.toPoint === 1)
+        ?.burnPercentPoints,
+    ).toBeNull();
+  });
+});
+
+describe("usage intervals: capacity identity", () => {
+  it("passes a stored capacity/plan key through the existing identity field", () => {
+    const points = usagePointsFromRuns([
+      {
+        runId: 1,
+        seriesId: "series",
+        firstAtMs: BASE,
+        lastAtMs: BASE,
+        sampleCount: 1,
+        remainingPercent: 50,
+        capacityKey: "limit:100:requests|plan:abc",
+        linked: true,
+      },
+    ]);
+    expect(points[0]?.unitKey).toBe("limit:100:requests|plan:abc");
+  });
+});
+
 describe("usage intervals: multi-reset ranges", () => {
   it("sums per-epoch burn without ever carrying it across a reset", () => {
     const at = (seconds: number): number => BASE + seconds * SECOND;
