@@ -693,6 +693,8 @@ async function startHost(
           codex: snapshot.values["usageImport.codex"] === true,
         };
       },
+      // Late-bound: the snapshot service is created after the recorder.
+      onActivityImported: () => runtime.snapshots?.notifyUsageChanged(),
     });
     runtime.usage = usage;
     observation.usage = usage;

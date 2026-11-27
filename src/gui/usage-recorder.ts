@@ -48,6 +48,8 @@ export interface UsageRecorderOptions {
   logger?: GuiLogger;
   /** Settings seam for opt-in harness import; absent disables import entirely. */
   loadImportSettings?: () => Promise<UsageImportSettings>;
+  /** The import opportunity finished; cached Usage reads may now be stale. */
+  onActivityImported?: () => void;
   /** Test seam: config root per harness; production resolves env/home. */
   importRootFor?: (harness: UsageImportHarness) => string | undefined;
 }
@@ -330,6 +332,9 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
     if (importer === undefined || closed) return;
     importChain = importChain
       .then(() => importer.maybeRun(intervalMs))
+      .then(() => {
+        options.onActivityImported?.();
+      })
       .catch(() => {
         logger.warn("usage import failed", "import-failed");
       });

@@ -694,6 +694,28 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
     expect(runsOf(db, ROW_A)).toHaveLength(1);
   });
 
+  it("notifies after an import opportunity completes", async () => {
+    const db = await store();
+    let notified = 0;
+    const recorder = createUsageRecorder({
+      store: db,
+      now: () => BASE,
+      loadImportSettings: async () => ({ claudeCode: false, codex: false }),
+      onActivityImported: () => {
+        notified += 1;
+      },
+    });
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)])]),
+        new Map([["card-a", BASE]]),
+      ),
+    );
+    await recorder.flush();
+    expect(notified).toBe(1);
+    await recorder.close();
+  });
+
   it("marks Cursor as locally estimated", async () => {
     const db = await store();
     const cursorCard = card("card-cursor", [row("card-cursor", "window:day|quota:percent", 60)], {

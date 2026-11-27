@@ -151,6 +151,8 @@ export interface SnapshotService
    * current selected-provider set.
    */
   notifySettingsChanged(options?: { scope?: "visibility" }): void;
+  /** Local usage history changed outside a quota cycle (import completion). */
+  notifyUsageChanged(): void;
   /**
    * Viewer-scoped interest signal. An explicit `signal` (UI route change) wins
    * over an inferred `request` (a read of that kind) until the last disconnect;
@@ -850,9 +852,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       // New provider observations change the local history this read serves.
       // Mark it stale instead of polling it: the next Usage read recomputes from
       // the stored observations without touching a provider.
-      for (const [key, entry] of cache) {
-        if (kindOf(key) === "usage") entry.stale = true;
-      }
+      staleUsageEntries();
       emit({ topic: "quota.changed", at: now() });
     }
   }
@@ -950,6 +950,13 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     for (const entry of cache.values()) {
       entry.stale = true;
       entry.invalidated = true;
+    }
+  }
+
+  /** Local history changed: recompute every cached Usage range on next read. */
+  function staleUsageEntries(): void {
+    for (const [key, entry] of cache) {
+      if (kindOf(key) === "usage") entry.stale = true;
     }
   }
 
@@ -1052,7 +1059,11 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         const forcedCompute = () => options.source.quota!({ refresh: true });
         try {
           const result = await load(quotaKey(), forcedCompute, true);
-          if (!closed) emit({ topic: "quota.changed", at: now() });
+          if (!closed) {
+            // A manual refresh records observations too, exactly like the timer.
+            staleUsageEntries();
+            emit({ topic: "quota.changed", at: now() });
+          }
           return result;
         } finally {
           if (!closed && computes.get(quotaKey()) === forcedCompute)
@@ -1123,6 +1134,12 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       };
     },
 
+    notifyUsageChanged(): void {
+      if (closed) return;
+      staleUsageEntries();
+      emit({ topic: "quota.changed", at: now() });
+    },
+
     notifySettingsChanged(settingsOptions?: { scope?: "visibility" }): void {
       if (closed) return;
       if (settingsOptions?.scope !== "visibility") {
@@ -1133,6 +1150,8 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
             entry.invalidated = true;
           }
         }
+        // Import toggles and visibility settings change what Usage serves.
+        staleUsageEntries();
         // Re-read both interval getters from live settings (R16).
         restartPollers();
       }

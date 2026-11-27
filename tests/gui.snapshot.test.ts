@@ -312,6 +312,34 @@ describe("GUI snapshot service", () => {
     }
   });
 
+  it("stales cached usage on manual refresh, settings and import completion", async () => {
+    let usageReads = 0;
+    const { source } = fakeSource({
+      usage: async ({ range }) => {
+        usageReads += 1;
+        return usageSnapshot(range);
+      },
+    });
+    const service = makeService(source);
+
+    await service.usage({ range: "7d" });
+    await service.usage({ range: "7d" });
+    expect(usageReads).toBe(1);
+
+    await service.quota({ refresh: true });
+    await service.usage({ range: "7d" });
+    expect(usageReads).toBe(2);
+
+    service.notifySettingsChanged();
+    await service.usage({ range: "7d" });
+    expect(usageReads).toBe(3);
+
+    service.notifyUsageChanged();
+    await service.usage({ range: "7d" });
+    expect(usageReads).toBe(4);
+    service.close();
+  });
+
   it("answers a controlled unavailable error when the source has no usage read", async () => {
     const { source } = fakeSource();
     const service = makeService(source);
