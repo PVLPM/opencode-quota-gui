@@ -35,6 +35,8 @@ import type {
   GuiSettingsStore,
   QuotaSnapshot,
 } from "../contracts/dashboard.js";
+import type { UsageQuery, UsageSnapshot } from "../contracts/usage.js";
+import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import { createLoadConfigMeta, getGuiConfigPath, loadConfig } from "../lib/config.js";
 import {
   getDashboardEnabledSetting,
@@ -83,6 +85,8 @@ export type DashboardReadSource = Pick<
   "home" | "project" | "session" | "groups"
 > & {
   quota?(input?: { refresh?: boolean }): Promise<QuotaSnapshot>;
+  activity(query: UsageActivityQuery): Promise<UsageActivityResult>;
+  usage?(input: UsageQuery): Promise<UsageSnapshot>;
   /** One shared analytics refresh per transport tick, when the owner loaded analytics. */
   refreshAnalytics?(): Promise<void>;
   /** Owner dispose / host close: releases lazily created analytics resources. */
@@ -93,6 +97,8 @@ export interface DashboardSourceOptions {
   client: DashboardClient;
   workspaceRoot: string;
   configDir: string;
+  /** Same plugin-owned usage-history path the host recorder writes. */
+  usageStorePath?: string;
 }
 
 export type DashboardSourceFactory = (
@@ -260,6 +266,7 @@ function createOwner(options: StartDashboardOptions, configDir: string): Dashboa
       client: options.client,
       workspaceRoot: options.workspaceRoot,
       configDir,
+      ...(options.usageStorePath !== undefined ? { usageStorePath: options.usageStorePath } : {}),
     },
     disposed: false,
   };
@@ -425,6 +432,12 @@ function createDelegatingSource(
     project: async (input) => (await requireSource()).project(input),
     session: async (input) => (await requireSource()).session(input),
     groups: async (query) => (await requireSource()).groups(query),
+    activity: async (query) => (await requireSource()).activity(query),
+    usage: async (input) => {
+      const source = await requireSource();
+      if (!source.usage) throw new Error("Usage source unavailable");
+      return source.usage(input);
+    },
     quota: async (input) => {
       // Capture the source generation before resolving the owner and before the
       // asynchronous provider read. A handoff during either step changes the
@@ -732,6 +745,20 @@ function transportRuntime(runtime: DashboardRuntime): DashboardTransportRuntime 
   };
 }
 
+/**
+ * Owner handoff: cached pages, notification baselines and queued usage captures
+ * all belong to the old source identity and must not cross to the new owner.
+ */
+export function notifyRuntimeSourceChanged(runtime: {
+  snapshots?: { sourceChanged(): void };
+  quotaNotifications?: { sourceChanged(): void };
+  usage?: { sourceChanged(): void };
+}): void {
+  runtime.snapshots?.sourceChanged();
+  runtime.quotaNotifications?.sourceChanged();
+  runtime.usage?.sourceChanged();
+}
+
 function makeDispose(
   host: DashboardHost,
   owner: DashboardOwner,
@@ -748,10 +775,7 @@ function makeDispose(
       // A live lease keeps the socket and the shared runtime. The surviving
       // owner serves the next request, so cached pages from the disposed owner
       // are invalidated before any client can see them as fresh.
-      if (activeChanged) {
-        host.runtime.snapshots?.sourceChanged();
-        host.runtime.quotaNotifications?.sourceChanged();
-      }
+      if (activeChanged) notifyRuntimeSourceChanged(host.runtime);
       await closing;
       return;
     }
