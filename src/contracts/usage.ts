@@ -150,6 +150,12 @@ export interface UsageWindowSeries {
   points: UsagePoint[];
   links: UsageLink[];
   intervals: UsageInterval[];
+  /**
+   * Conflicting stored evidence that falls inside an included point span.
+   * Carried independently of intervals so a zero-duration (lone) run can still
+   * expose its conflict marker and keyboard-inspection unit.
+   */
+  conflicts?: { atMs: number }[];
   totals: {
     observedBurnPercentPoints: number;
     attributedBurnPercentPoints: number;

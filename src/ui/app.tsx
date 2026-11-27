@@ -101,6 +101,8 @@ export function App(props: { client: DashboardClient }): JSX.Element {
   const [contractMismatch, setContractMismatch] = createSignal<string | undefined>(undefined);
   const [reloadToken, setReloadToken] = createSignal(0);
   const [quotaReloadToken, setQuotaReloadToken] = createSignal(0);
+  /** Usage reloads on quota observations and on settings/import changes. */
+  const [usageReloadToken, setUsageReloadToken] = createSignal(0);
   const analyticsStore = createAnalyticsPresentationStore((input) => props.client.home(input), {
     owner: () => props.client,
   });
@@ -292,11 +294,15 @@ export function App(props: { client: DashboardClient }): JSX.Element {
     const unsubscribeEvents = props.client.subscribe((event) => {
       // Invalidation is silent by design: only meaningful events toast.
       if (event.topic === "settings.changed") {
+        // Import opt-in/opt-out changes what Usage serves, even when the
+        // settings read itself is still in flight.
+        setUsageReloadToken((token) => token + 1);
         void settingsQuery.run();
         return;
       }
       if (event.topic === "quota.changed") {
         setQuotaReloadToken((token) => token + 1);
+        setUsageReloadToken((token) => token + 1);
         return;
       }
       setReloadToken((token) => token + 1);
@@ -517,7 +523,7 @@ export function App(props: { client: DashboardClient }): JSX.Element {
                   <UsageRoute
                     client={props.client}
                     route={usageRoute()}
-                    reloadToken={quotaReloadToken()}
+                    reloadToken={usageReloadToken()}
                     reconnectEpoch={reconnectEpoch()}
                     preferences={preferences()}
                     onStale={setRouteStale}

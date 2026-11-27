@@ -340,6 +340,47 @@ describe("GUI snapshot service", () => {
     service.close();
   });
 
+  it("does not join or cache usage work invalidated while in flight", async () => {
+    const pending: (() => void)[] = [];
+    let reads = 0;
+    const { source } = fakeSource({
+      usage: async ({ range }) => {
+        reads += 1;
+        const generatedAtMs = NOW + reads;
+        return new Promise((resolve) => {
+          pending.push(() => resolve({ ...usageSnapshot(range), generatedAtMs }));
+        });
+      },
+    });
+    const service = makeService(source);
+
+    const first = service.usage({ range: "7d" });
+    expect(reads).toBe(1);
+
+    // Local history changed while the first read was still computing.
+    service.notifyUsageChanged();
+    const second = service.usage({ range: "7d" });
+    // The new read must not join work that predates the invalidation.
+    expect(reads).toBe(2);
+
+    // The pre-invalidation result must neither paint nor cache: it retries by
+    // joining the newer read instead of issuing a third compute.
+    pending[0]!();
+    await Promise.resolve();
+    expect(reads).toBe(2);
+
+    pending[1]!();
+    await expect(first).resolves.toMatchObject({ generatedAtMs: NOW + 2 });
+    await expect(second).resolves.toMatchObject({ generatedAtMs: NOW + 2 });
+
+    // Only the post-invalidation result is cached.
+    await expect(service.usage({ range: "7d" })).resolves.toMatchObject({
+      generatedAtMs: NOW + 2,
+    });
+    expect(reads).toBe(2);
+    service.close();
+  });
+
   it("answers a controlled unavailable error when the source has no usage read", async () => {
     const { source } = fakeSource();
     const service = makeService(source);

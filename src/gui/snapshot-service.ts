@@ -188,6 +188,8 @@ interface InflightTask {
   sourceGeneration: number;
   /** Recency generation captured when this compute should be allowed to cache. */
   version: number;
+  /** Usage invalidation generation at creation; older work never re-caches. */
+  usageVersion: number;
 }
 
 function quotaKey(): string {
@@ -357,6 +359,9 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
   /** Key -> recency generation; Map insertion order is LRU order. */
   const tracked = new Map<string, number>();
   let versionCounter = 0;
+  /** Bumped on every Usage invalidation; in-flight usage work is versioned. */
+  let usageVersionCounter = 0;
+  const MAX_USAGE_INVALIDATION_RETRIES = 3;
 
   let viewers = 0;
   /**
@@ -591,9 +596,11 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     force = false,
     promote?: () => void,
     foreground = false,
+    usageRetry = 0,
   ): Promise<T> {
     const epoch = viewerEpoch;
     const generation = sourceGeneration;
+    const usageVersion = usageVersionCounter;
     // A closed service does not track, register, or cache: the caller still
     // gets its computation, but a probe (or a late request) cannot repopulate
     // state that close() released.
@@ -613,7 +620,14 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
     }
 
     const pending = inflight.get(key);
-    if (pending && pending.epoch === epoch && pending.sourceGeneration === generation) {
+    if (
+      pending &&
+      pending.epoch === epoch &&
+      pending.sourceGeneration === generation &&
+      // A usage read must not join work that started before the latest local
+      // history invalidation: that result may already be known stale.
+      (kindOf(key) !== "usage" || pending.usageVersion === usageVersion)
+    ) {
       if (foreground && pending.promote) {
         pending.promote();
         pending.promote = undefined;
@@ -655,6 +669,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
       sourceGeneration: generation,
       promise: Promise.resolve(),
       version,
+      usageVersion,
     };
     const attempt = (async (): Promise<T> => {
       let snapshot: T;
@@ -688,6 +703,16 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         return markStale(fallback.snapshot) as T;
       }
 
+      // Local history changed while this usage read was computed: the result
+      // may predate the newest observation. Drop it and retry rather than paint
+      // or cache it; a bounded retry prevents a pathological livelock.
+      if (kindOf(key) === "usage" && task.usageVersion !== usageVersionCounter) {
+        if (usageRetry >= MAX_USAGE_INVALIDATION_RETRIES) {
+          throw new Error("usage snapshot invalidated");
+        }
+        return loadSingleFlight(key, compute, true, promote, foreground, usageRetry + 1);
+      }
+
       settledFailures.delete(key);
       // A commit belongs to the viewer session and source identity that started
       // the load: a disconnect or owner handoff already dirtied the entries, so
@@ -696,6 +721,7 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
         !closed &&
         task.epoch === viewerEpoch &&
         task.sourceGeneration === sourceGeneration &&
+        task.usageVersion === usageVersionCounter &&
         tracked.get(key) === task.version
       ) {
         cache.set(key, {
@@ -955,6 +981,9 @@ export function createSnapshotService(options: SnapshotServiceOptions): Snapshot
 
   /** Local history changed: recompute every cached Usage range on next read. */
   function staleUsageEntries(): void {
+    // Version the invalidation so in-flight reads cannot join pre-invalidation
+    // work or cache its result, and retry instead.
+    usageVersionCounter += 1;
     for (const [key, entry] of cache) {
       if (kindOf(key) === "usage") entry.stale = true;
     }

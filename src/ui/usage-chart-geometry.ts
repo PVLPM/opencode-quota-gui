@@ -72,6 +72,8 @@ export function buildUsageStepGeometry(input: {
   points: UsagePoint[];
   links: UsageLink[];
   intervals: UsageInterval[];
+  /** Series-level conflict markers that do not depend on an interval. */
+  conflicts?: readonly { atMs: number }[];
 }): UsageStepGeometry {
   const { axis, plot, mode, points, links, intervals } = input;
   const span = axis.endMs - axis.startMs;
@@ -98,6 +100,17 @@ export function buildUsageStepGeometry(input: {
     const times = conflictsByPoint.get(interval.fromPoint);
     if (times === undefined) conflictsByPoint.set(interval.fromPoint, [interval.conflictAtMs]);
     else times.push(interval.conflictAtMs);
+  }
+  // Series-level markers also cover a zero-duration run, where no positive
+  // interval exists to carry `conflictAtMs`.
+  for (const conflict of input.conflicts ?? []) {
+    const index = points.findIndex(
+      (point) => conflict.atMs >= point.startMs && conflict.atMs <= point.endMs,
+    );
+    if (index < 0) continue;
+    const times = conflictsByPoint.get(index);
+    if (times === undefined) conflictsByPoint.set(index, [conflict.atMs]);
+    else if (!times.includes(conflict.atMs)) times.push(conflict.atMs);
   }
 
   let path = "";

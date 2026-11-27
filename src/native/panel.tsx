@@ -431,7 +431,7 @@ export function DashboardPanel(props: DashboardPanelProps): JSX.Element {
                     <UsageRoute
                       client={props.client}
                       route={currentUsage()}
-                      reloadToken={panel.quotaReloadToken()}
+                      reloadToken={panel.usageReloadToken()}
                       reconnectEpoch={panel.reconnectEpoch()}
                       enabled={props.visible}
                       onFresh={panel.markFresh}

@@ -27,6 +27,10 @@ export interface UsageActivityEntry {
   modelId: string;
   /** Recorded `model.variant`; `"default"` is an explicit recorded value. */
   effort?: string;
+  /** Earliest completion timestamp contributing to this group, when known. */
+  firstAtMs?: number;
+  /** Latest completion timestamp contributing to this group, when known. */
+  lastAtMs?: number;
   tokens: CostedTokens;
   stepCount: number;
 }

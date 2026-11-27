@@ -64,6 +64,10 @@ export function validUsageSnapshot(): UsageSnapshot {
     accounts: [],
     models: [],
     imports: [],
+    importedActivity: [],
+    // Additive flags: the fixture exercises the optional markers too, so the
+    // RPC output validator cannot silently drop them from the contract.
+    historyUnavailable: true,
   };
 }
 

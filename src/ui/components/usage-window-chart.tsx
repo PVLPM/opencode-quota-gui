@@ -74,6 +74,7 @@ export function UsageWindowChart(props: {
       points: props.window.points,
       links: props.window.links,
       intervals: props.window.intervals,
+      ...(props.window.conflicts !== undefined ? { conflicts: props.window.conflicts } : {}),
     }),
   );
   const activeUnit = () => {

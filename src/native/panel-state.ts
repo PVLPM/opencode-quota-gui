@@ -77,6 +77,8 @@ export interface DashboardPanelState {
   reloadToken: Accessor<number>;
   /** Bumped for quota invalidations and for the Quota route. */
   quotaReloadToken: Accessor<number>;
+  /** Bumped for usage history and import-setting invalidations. */
+  usageReloadToken: Accessor<number>;
   /** True when the host server dropped and no routed read has landed since. */
   hostStale: Accessor<boolean>;
   /** Anchors the current routed payload as fresh for the current host epoch. */
@@ -101,6 +103,7 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
   const [freshSettingsEpoch, setFreshSettingsEpoch] = createSignal(0);
   const [reloadToken, setReloadToken] = createSignal(0);
   const [quotaReloadToken, setQuotaReloadToken] = createSignal(0);
+  const [usageReloadToken, setUsageReloadToken] = createSignal(0);
   const [hostEpoch, setHostEpoch] = createSignal(0);
   const [freshHostEpoch, setFreshHostEpoch] = createSignal(0);
   /** The host epoch a successful transport reconnect has restored. */
@@ -143,11 +146,13 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
 
   function handleEvent(event: DashboardEvent): void {
     if (event.topic === "settings.changed") {
+      setUsageReloadToken((token) => token + 1);
       refreshSettings(true);
       return;
     }
     if (event.topic === "quota.changed") {
       setQuotaReloadToken((token) => token + 1);
+      setUsageReloadToken((token) => token + 1);
       return;
     }
     // Session activity invalidates analytics and drilldown payloads.
@@ -200,6 +205,7 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
       if (reentered) {
         setReloadToken((token) => token + 1);
         setQuotaReloadToken((token) => token + 1);
+        setUsageReloadToken((token) => token + 1);
         // If the host dropped while this tab was hidden, no viewer existed to
         // reopen; the show path is where that recovery is completed.
         if (hostEpoch() > recoveredHostEpoch() && (options.hostConnected?.() ?? true)) {
@@ -251,6 +257,7 @@ export function createDashboardPanelState(options: DashboardPanelOptions): Dashb
     reconnectEpoch,
     reloadToken,
     quotaReloadToken,
+    usageReloadToken,
     hostStale: () => hostEpoch() > freshHostEpoch(),
     markFresh: () => {
       // A response can only anchor freshness after the host has returned and a

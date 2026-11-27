@@ -438,7 +438,13 @@ function quantityParts(
   return quantity === undefined ? [null, null] : [quantity.decimal, JSON.stringify(quantity.unit)];
 }
 
-const CODEX_IMPORT_PROVIDER = "openai";
+/**
+ * Imported Codex quota series get their own provider identity. Sharing
+ * `openai` made them look like rival OpenCode accounts and let OpenCode
+ * activity attribute to them; a distinct id keeps both concerns isolated.
+ * The card id stays `codex-import:<account>` so stored rows remain stable.
+ */
+const CODEX_IMPORT_PROVIDER = "codex-import";
 const CODEX_IMPORT_PROVIDER_LABEL = "OpenAI Codex (imported)";
 let codexImportSequence = 0;
 /** The one provider id each imported harness prices under. */
@@ -772,11 +778,33 @@ function createReader(conn: SqliteConn): UsageReadStore {
       const runs: UsageStoredRun[] = [];
       const conflicts: UsageConflictRecord[] = [];
       const rows = conn.all<SeriesRow>("SELECT * FROM usage_series ORDER BY card_id, series_id");
+      // Rival coverage only matters for a provider that has more than one
+      // live account. Imported series are never OpenCode rivals.
+      const cardsByProvider = new Map<string, Set<string>>();
+      for (const row of rows) {
+        if (row.source === "codex-import") continue;
+        const cards = cardsByProvider.get(row.provider_id);
+        if (cards === undefined) cardsByProvider.set(row.provider_id, new Set([row.card_id]));
+        else cards.add(row.card_id);
+      }
+      const rivalProviders = new Set(
+        [...cardsByProvider]
+          .filter(([, cards]) => cards.size > 1)
+          .map(([providerId]) => providerId),
+      );
+      /** Latest-epoch spans per eligible provider; each can host a rival run. */
+      const rivalSpans = new Map<string, { startMs: number; endMs: number }[]>();
       for (const row of rows) {
         const latest = latestEpochRuns(conn, row.series_id, runColumns);
         if (latest.length === 0) continue;
         series.push(seriesRowToInfo(row));
-        for (const run of latest) runs.push(runRowToStored(run));
+        for (const run of latest) {
+          runs.push(runRowToStored(run));
+          if (!rivalProviders.has(row.provider_id)) continue;
+          const spans = rivalSpans.get(row.provider_id) ?? [];
+          spans.push({ startMs: run.first_at_ms, endMs: run.last_at_ms });
+          rivalSpans.set(row.provider_id, spans);
+        }
         const firstAtMs = latest[0]?.first_at_ms;
         if (firstAtMs !== undefined) {
           conflicts.push(
@@ -787,13 +815,20 @@ function createReader(conn: SqliteConn): UsageReadStore {
           );
         }
       }
-      const firstLatestAtMs = runs.reduce(
-        (earliest, run) => Math.min(earliest, run.firstAtMs),
-        Number.POSITIVE_INFINITY,
-      );
-      const rivalRuns =
-        Number.isFinite(firstLatestAtMs) && rows.length > 0
-          ? conn
+      // Read rival runs only around displayed latest epochs, never across the
+      // dead gap between a dormant series and the live one. A run can only
+      // overlap a displayed interval if it overlaps some latest-epoch span, so
+      // merge those spans per provider and query each merged range.
+      const rivalRuns: UsageRivalRun[] = [];
+      for (const [providerId, spans] of rivalSpans) {
+        spans.sort((left, right) => left.startMs - right.startMs || left.endMs - right.endMs);
+        let merged: { startMs: number; endMs: number } | undefined;
+        const flush = (): void => {
+          if (merged === undefined) return;
+          const range = merged;
+          merged = undefined;
+          rivalRuns.push(
+            ...conn
               .all<{
                 card_id: string;
                 provider_id: string;
@@ -802,17 +837,38 @@ function createReader(conn: SqliteConn): UsageReadStore {
               }>(
                 `SELECT s.card_id, s.provider_id, r.first_at_ms, r.last_at_ms
                  FROM usage_runs r JOIN usage_series s ON s.series_id = r.series_id
-                 WHERE r.last_at_ms >= ?
-                 ORDER BY s.provider_id, s.card_id, r.first_at_ms, r.last_at_ms`,
-                [firstLatestAtMs],
+                 WHERE s.provider_id = ?
+                   AND s.source <> 'codex-import'
+                   AND r.last_at_ms >= ?
+                   AND r.first_at_ms <= ?
+                 ORDER BY s.card_id, r.first_at_ms, r.last_at_ms`,
+                [providerId, range.startMs, range.endMs],
               )
               .map((row) => ({
                 cardId: row.card_id,
                 providerId: row.provider_id,
                 firstAtMs: row.first_at_ms,
                 lastAtMs: row.last_at_ms,
-              }))
-          : [];
+              })),
+          );
+        };
+        for (const span of spans) {
+          if (merged !== undefined && span.startMs <= merged.endMs) {
+            merged.endMs = Math.max(merged.endMs, span.endMs);
+          } else {
+            flush();
+            merged = { ...span };
+          }
+        }
+        flush();
+      }
+      rivalRuns.sort(
+        (left, right) =>
+          left.providerId.localeCompare(right.providerId) ||
+          left.cardId.localeCompare(right.cardId) ||
+          left.firstAtMs - right.firstAtMs ||
+          left.lastAtMs - right.lastAtMs,
+      );
       return { series, runs, preceding: [], interruptions: [], conflicts, rivalRuns };
     });
   }
@@ -1446,6 +1502,8 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
     unpricedTokens: number;
     unknownTokens: number;
     stepCount: number;
+    firstAtMs?: number;
+    lastAtMs?: number;
   }
 
   type ImportedActivityGroup = ImportedActivityAccumulator & {
@@ -1570,6 +1628,14 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
         accumulator.output += tokens.output;
         accumulator.reasoning += tokens.reasoning;
         accumulator.stepCount += 1;
+        accumulator.firstAtMs =
+          accumulator.firstAtMs === undefined
+            ? row.at_ms
+            : Math.min(accumulator.firstAtMs, row.at_ms);
+        accumulator.lastAtMs =
+          accumulator.lastAtMs === undefined
+            ? row.at_ms
+            : Math.max(accumulator.lastAtMs, row.at_ms);
         const priced = priceTokenBuckets({
           providerID: providerId,
           modelID: row.model,
@@ -1596,6 +1662,8 @@ function createStore(conn: WritableSqliteConn, path: string): UsageStore {
             providerId: accumulator.providerId,
             modelId: accumulator.modelId,
             ...(accumulator.effort === undefined ? {} : { effort: accumulator.effort }),
+            ...(accumulator.firstAtMs === undefined ? {} : { firstAtMs: accumulator.firstAtMs }),
+            ...(accumulator.lastAtMs === undefined ? {} : { lastAtMs: accumulator.lastAtMs }),
             tokens: finalizeImportedActivity(accumulator),
             stepCount: accumulator.stepCount,
           }))

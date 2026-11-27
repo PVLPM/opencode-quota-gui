@@ -676,26 +676,35 @@ function isUsageCoverage(value: unknown): value is UsageCoverage {
   );
 }
 
-function isUsageBreakdownEffort(value: unknown): boolean {
+function isUsageBreakdownEffort(value: unknown, allowEstimatedBurn = true): boolean {
   return (
     isRecord(value) &&
     isOptional(value.effort, isText) &&
     isCostedTokens(value.tokens) &&
     isIntegerBetween(value.stepCount, 0, Number.MAX_SAFE_INTEGER) &&
+    (allowEstimatedBurn || value.estimatedBurnPercentPoints === undefined) &&
     isOptional(value.estimatedBurnPercentPoints, isNonNegative)
   );
 }
 
-function isUsageBreakdownRow(value: unknown): value is UsageBreakdownRow {
+function isUsageBreakdownRow(
+  value: unknown,
+  allowEstimatedBurn = true,
+): value is UsageBreakdownRow {
   return (
     isRecord(value) &&
     isText(value.providerId) &&
     isText(value.modelId) &&
     isCostedTokens(value.tokens) &&
     isIntegerBetween(value.stepCount, 0, Number.MAX_SAFE_INTEGER) &&
+    (allowEstimatedBurn || value.estimatedBurnPercentPoints === undefined) &&
     isOptional(value.estimatedBurnPercentPoints, isNonNegative) &&
-    isArrayOf(value.efforts, isUsageBreakdownEffort)
+    isArrayOf(value.efforts, (entry) => isUsageBreakdownEffort(entry, allowEstimatedBurn))
   );
+}
+
+function isUsageWindowConflict(value: unknown): value is { atMs: number } {
+  return isRecord(value) && isFiniteNumber(value.atMs);
 }
 
 function isUsageWindowSeries(
@@ -716,11 +725,12 @@ function isUsageWindowSeries(
     !isArrayOf(value.points, isUsagePoint) ||
     !isArrayOf(value.links, isUsageLink) ||
     !isArrayOf(value.intervals, (entry) => isUsageInterval(entry, modelCount)) ||
+    !isOptional(value.conflicts, (entry) => isArrayOf(entry, isUsageWindowConflict)) ||
     !isRecord(value.totals) ||
     !isNonNegative(value.totals.observedBurnPercentPoints) ||
     !isNonNegative(value.totals.attributedBurnPercentPoints) ||
     !isNonNegative(value.totals.unattributedBurnPercentPoints) ||
-    !isArrayOf(value.breakdown, isUsageBreakdownRow)
+    !isArrayOf(value.breakdown, (entry) => isUsageBreakdownRow(entry, true))
   ) {
     return false;
   }
@@ -772,7 +782,7 @@ function isUsageImportedActivity(value: unknown): value is UsageImportedActivity
     isFiniteNumber(value.span.startMs) &&
     isFiniteNumber(value.span.endMs) &&
     value.span.endMs >= value.span.startMs &&
-    isArrayOf(value.models, isUsageBreakdownRow) &&
+    isArrayOf(value.models, (entry) => isUsageBreakdownRow(entry, false)) &&
     isCostedTokens(value.totals) &&
     isIntegerBetween(value.stepCount, 0, Number.MAX_SAFE_INTEGER) &&
     isBoolean(value.incomplete)

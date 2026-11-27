@@ -3,7 +3,12 @@ import { fileURLToPath } from "node:url";
 import type { ViteDevServer } from "vite";
 import solid from "vite-plugin-solid";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { DASHBOARD_CONTRACT_VERSION, type DashboardHealth } from "../src/contracts/dashboard";
+import {
+  DASHBOARD_CONTRACT_VERSION,
+  type DashboardEvent,
+  type DashboardHealth,
+} from "../src/contracts/dashboard";
+import type { UsageRangeKey } from "../src/contracts/usage";
 import type { DashboardClient } from "../src/ui/dashboard-client";
 import { SOLID_JSX_SOURCES } from "../vite.ui.config.mjs";
 import type { TestNode } from "./fixtures/gui-test-renderer.js";
@@ -13,6 +18,7 @@ import {
   sessionSnapshot,
   settingsSnapshot,
 } from "./fixtures/gui-ui-fixtures.js";
+import { validUsageSnapshot } from "./helpers/dashboard-dto-fixtures.js";
 import { createIsolatedViteServer } from "./helpers/vite-test-harness.js";
 
 /**
@@ -157,7 +163,10 @@ function browserStub(initialPath = "/quota") {
   };
 }
 
-function makeClient(health: DashboardClient["health"]): DashboardClient {
+function makeClient(
+  health: DashboardClient["health"],
+  overrides: Partial<DashboardClient> = {},
+): DashboardClient {
   return {
     connection: () => "live",
     onConnectionChange: () => () => {},
@@ -165,6 +174,7 @@ function makeClient(health: DashboardClient["health"]): DashboardClient {
     health,
     quota: async () => homeSnapshot(),
     home: async () => homeSnapshot(),
+    usage: async ({ range }) => ({ ...validUsageSnapshot(), range }),
     project: async () => projectSnapshot(),
     session: async () => sessionSnapshot(),
     settings: async () => settingsSnapshot(),
@@ -177,13 +187,18 @@ function makeClient(health: DashboardClient["health"]): DashboardClient {
       expectedRevision: "r",
     }),
     importApply: async () => ({ revision: "r", applied: {}, warnings: [] }),
+    ...overrides,
   };
 }
 
-function mountApp(health: DashboardClient["health"], initialPath = "/quota") {
+function mountApp(
+  health: DashboardClient["health"],
+  initialPath = "/quota",
+  overrides: Partial<DashboardClient> = {},
+) {
   vi.stubGlobal("window", browserStub(initialPath));
   const root = graph.createTestRoot();
-  const stop = graph.mount(() => graph.app({ client: makeClient(health) }), root);
+  const stop = graph.mount(() => graph.app({ client: makeClient(health, overrides) }), root);
   return {
     root,
     text: () => graph.textOf(root),
@@ -321,6 +336,38 @@ describe("About section", () => {
       // Restrained: no action, image, or decorative card inside the section.
       expect(graph.elementsNamed(about, "button")).toHaveLength(0);
       expect(graph.elementsNamed(about, "img")).toHaveLength(0);
+    } finally {
+      app.dispose();
+    }
+  });
+});
+
+describe("usage invalidation", () => {
+  it("re-reads Usage on settings changes on the web surface", async () => {
+    let emit: ((event: DashboardEvent) => void) | undefined;
+    const reads: UsageRangeKey[] = [];
+    const app = mountApp(async () => matchingHealth(), "/usage?range=7d", {
+      subscribe: (listener) => {
+        emit = listener;
+        return () => {
+          emit = undefined;
+        };
+      },
+      usage: async ({ range }) => {
+        reads.push(range);
+        return { ...validUsageSnapshot(), range };
+      },
+    });
+    try {
+      await settle();
+      expect(reads).toEqual(["7d"]);
+
+      // Import opt-in/opt-out is a settings change: Usage must reload even
+      // when the quota poll itself did not change.
+      emit?.({ topic: "settings.changed", at: 1 });
+      await settle();
+      await settle();
+      expect(reads).toEqual(["7d", "7d"]);
     } finally {
       app.dispose();
     }

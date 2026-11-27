@@ -92,7 +92,9 @@ const ZERO_TOKENS: CostedTokens = {
   cacheRead: 0,
   cacheWrite: 0,
   total: 0,
-  apiEquivalentCostUsd: 0,
+  // Nothing has been priced yet. `null` is the "no priced rows" sentinel;
+  // adding any priced row replaces it with its cost.
+  apiEquivalentCostUsd: null,
   unpricedTokens: 0,
   unknownTokens: 0,
 };
@@ -329,10 +331,15 @@ const COSTED_TOKEN_KEYS = [
 function combinedTokens(left: CostedTokens, right: CostedTokens): CostedTokens {
   const total = { ...left };
   for (const key of COSTED_TOKEN_KEYS) total[key] = left[key] + right[key];
-  total.apiEquivalentCostUsd =
-    left.apiEquivalentCostUsd === null || right.apiEquivalentCostUsd === null
-      ? null
-      : left.apiEquivalentCostUsd + right.apiEquivalentCostUsd;
+  // Mirror the dashboard's CostedTokens semantics: partial pricing sums every
+  // available cost and reports remaining tokens as unpriced/unknown; `null`
+  // means no row in this total was priced at all.
+  if (left.apiEquivalentCostUsd === null && right.apiEquivalentCostUsd === null) {
+    total.apiEquivalentCostUsd = null;
+  } else {
+    total.apiEquivalentCostUsd =
+      (left.apiEquivalentCostUsd ?? 0) + (right.apiEquivalentCostUsd ?? 0);
+  }
   const recordedCostUsd = optionalSum(left.recordedCostUsd, right.recordedCostUsd);
   if (recordedCostUsd !== undefined) total.recordedCostUsd = recordedCostUsd;
   const recordedCostTokens = optionalSum(left.recordedCostTokens, right.recordedCostTokens);
@@ -582,8 +589,16 @@ export function createUsageSnapshotBuilder(
     // `current`, `rivalRuns` also carries older rival epochs that the displayed
     // latest-epoch slice omits but which still overlap the displayed interval.
     const seriesById = new Map(slice.series.map((series) => [series.rowId, series] as const));
+    // Imported quota series are not OpenCode accounts: they must never become
+    // rival coverage for a live provider or receive OpenCode activity.
+    const importedCardIds = new Set(
+      slice.series
+        .filter((series) => series.source === "codex-import")
+        .map((series) => series.cardId),
+    );
     const rivalRunsByProvider = new Map<string, UsageRivalRun[]>();
     const addRivalRun = (run: UsageRivalRun): void => {
+      if (importedCardIds.has(run.cardId)) return;
       const list = rivalRunsByProvider.get(run.providerId);
       if (list === undefined) rivalRunsByProvider.set(run.providerId, [run]);
       else list.push(run);
@@ -618,14 +633,20 @@ export function createUsageSnapshotBuilder(
 
     const accounts: WorkingAccount[] = [];
     const activityByProvider = new Map<string, ProviderActivity>();
+    // Imported quota history is not an OpenCode account: it has no rivals and
+    // no attributable activity, even if a legacy row carries a live provider id.
+    const importedScope: UsageAttributionScope = { known: false, providerIds: [] };
     for (const group of groups) {
+      const imported = group.source === "codex-import";
       const card = cardById.get(group.cardId);
       const providerLabel = card?.providerLabel ?? group.providerLabel;
-      const rivals = rivalCoverage(
-        (rivalRunsByProvider.get(group.providerId) ?? []).filter(
-          (other) => other.cardId !== group.cardId,
-        ),
-      );
+      const rivals = imported
+        ? rivalCoverage([])
+        : rivalCoverage(
+            (rivalRunsByProvider.get(group.providerId) ?? []).filter(
+              (other) => other.cardId !== group.cardId,
+            ),
+          );
       const account: WorkingAccount = {
         cardId: group.cardId,
         providerId: group.providerId,
@@ -657,8 +678,15 @@ export function createUsageSnapshotBuilder(
           },
           axis,
         );
-        const scope = attributionScopeForRow(group.providerId, plan.series.rowKey);
+        const scope = imported
+          ? importedScope
+          : attributionScopeForRow(group.providerId, plan.series.rowKey);
         account.windows.push({ window, scope });
+
+        // Only live OpenCode sources can carry an activity query. Imported
+        // quota history has no OpenCode activity to attribute; its burn stays
+        // `no-activity` through the normal unattributed path.
+        if (imported) continue;
 
         let activity = activityByProvider.get(group.providerId);
         if (activity === undefined) {
@@ -804,6 +832,23 @@ export function createUsageSnapshotBuilder(
   ): UsageImportedActivity | undefined {
     const models = importedModels(entries);
     if (models.length === 0) return undefined;
+    // The query span is an envelope. For Lifetime it starts at the epoch, so
+    // report the actual recorded range when the read carried timestamps.
+    let firstAtMs: number | undefined;
+    let lastAtMs: number | undefined;
+    for (const entry of entries) {
+      if (entry.firstAtMs !== undefined) {
+        firstAtMs =
+          firstAtMs === undefined ? entry.firstAtMs : Math.min(firstAtMs, entry.firstAtMs);
+      }
+      if (entry.lastAtMs !== undefined) {
+        lastAtMs = lastAtMs === undefined ? entry.lastAtMs : Math.max(lastAtMs, entry.lastAtMs);
+      }
+    }
+    const sectionSpan =
+      firstAtMs !== undefined && lastAtMs !== undefined && lastAtMs >= firstAtMs
+        ? { startMs: firstAtMs, endMs: lastAtMs }
+        : span;
     let totals = { ...ZERO_TOKENS };
     let stepCount = 0;
     let incomplete = false;
@@ -818,7 +863,7 @@ export function createUsageSnapshotBuilder(
         incomplete = true;
       }
     }
-    return { harness, span, models, totals, stepCount, incomplete };
+    return { harness, span: sectionSpan, models, totals, stepCount, incomplete };
   }
 
   /**
@@ -866,10 +911,15 @@ export function createUsageSnapshotBuilder(
 
   /** `current` has no snapshot span, so cover the union of its window axes. */
   function importedSpan(
+    range: UsageRangeKey,
     span: { startMs: number; endMs: number } | undefined,
+    nowMs: number,
     accounts: readonly WorkingAccount[],
   ): { startMs: number; endMs: number } | undefined {
     if (span !== undefined) return span;
+    // Lifetime is all imported history, not the union of whatever quota
+    // windows happen to exist. This also lets an import-only user see it.
+    if (range === "lifetime") return { startMs: 0, endMs: nowMs };
     let startMs: number | undefined;
     let endMs: number | undefined;
     for (const account of accounts) {
@@ -947,7 +997,7 @@ export function createUsageSnapshotBuilder(
       const { accounts, activityByProvider } = buildAccounts(slice, query.range, nowMs, span);
       const [attributedResult, importedActivity] = await Promise.all([
         attribute(accounts, activityByProvider),
-        loadImportedActivity(imports, importedSpan(span, accounts)),
+        loadImportedActivity(imports, importedSpan(query.range, span, nowMs, accounts)),
       ]);
       const models = finalize(attributedResult.attributed);
 

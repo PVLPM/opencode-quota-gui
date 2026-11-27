@@ -341,7 +341,9 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
   }
 
   async function capture(snapshot: QuotaSnapshot, epoch: number): Promise<number | undefined> {
-    if (closed || epoch !== sourceEpoch) return undefined;
+    // Once admitted by `observe`, an observation is drained even if close()
+    // started while it waited: close only stops new admissions.
+    if (epoch !== sourceEpoch) return undefined;
     if (!isLiveQuotaObservation(snapshot)) return undefined;
     const cycle = quotaObservationCycle(snapshot);
     if (cycle === undefined) {
@@ -371,7 +373,7 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
       }
       return observation.intervalMs;
     }
-    if (closed || epoch !== sourceEpoch) return observation.intervalMs;
+    if (epoch !== sourceEpoch) return observation.intervalMs;
     recordPending(target);
     return observation.intervalMs;
   }
@@ -449,7 +451,8 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
       if (closing !== undefined) return closing;
       closing = (async () => {
         closed = true;
-        sourceEpoch += 1;
+        // Do not bump the owner epoch: the queue admitted for the current owner
+        // must still be drained once. `sourceChanged()` owns epoch changes.
         await chain;
         await importChain;
         await importer?.flush();

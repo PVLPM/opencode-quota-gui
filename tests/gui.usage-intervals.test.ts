@@ -503,6 +503,9 @@ describe("usage intervals: conflicting samples", () => {
     expect(window.intervals[0]?.link).toBe("boundary");
     expect(window.intervals[1]?.burnPercentPoints).toBeNull();
     expect(window.totals.observedBurnPercentPoints).toBe(0);
+    // The conflict is carried at series level as well, independent of how the
+    // intervals are split.
+    expect(window.conflicts).toEqual([{ atMs: BASE + 30 * SECOND }]);
   });
 
   it("renders a conflict inside the only flat run with a marker and no solid span", () => {
@@ -531,6 +534,30 @@ describe("usage intervals: conflicting samples", () => {
     expect(window.points[0]?.endMs).toBe(BASE + 60 * SECOND);
   });
 
+  it("keeps a zero-duration conflicted run inspectable", () => {
+    const window = buildUsageWindowSeries(
+      {
+        ...series([point({ firstAtMs: BASE, remainingPercent: 80 })]),
+        conflicts: [{ atMs: BASE, remainingPercent: 40 }],
+      },
+      { range: "lifetime", nowMs: BASE + 60 * SECOND },
+    );
+
+    expect(window.points).toHaveLength(1);
+    expect(window.conflicts).toEqual([{ atMs: BASE }]);
+    expect(window.intervals).toHaveLength(1);
+    expect(window.intervals[0]).toMatchObject({
+      fromPoint: 0,
+      toPoint: 0,
+      startMs: BASE,
+      endMs: BASE,
+      link: "boundary",
+      burnPercentPoints: null,
+      conflictAtMs: BASE,
+    });
+    expect(window.coverage.observedMs).toBe(0);
+  });
+
   it("treats a conflict inside a gap as an uncertain boundary", () => {
     const window = buildUsageWindowSeries(
       {
@@ -551,6 +578,9 @@ describe("usage intervals: conflicting samples", () => {
       window.intervals.find((interval) => interval.fromPoint === 0 && interval.toPoint === 1)
         ?.burnPercentPoints,
     ).toBeNull();
+    // A conflict that falls outside every included point span is not series
+    // evidence; it remains the gap's uncertain boundary only.
+    expect(window.conflicts).toBeUndefined();
   });
 });
 

@@ -1404,6 +1404,7 @@ function readUsageEffort(
   value: JsonValue,
   endpoint: string,
   detail: string,
+  allowEstimatedBurn = true,
 ): UsageBreakdownRow["efforts"][number] {
   const effort = readRecord(value, endpoint, detail);
   const parsed: UsageBreakdownRow["efforts"][number] = {
@@ -1418,6 +1419,9 @@ function readUsageEffort(
   };
   const label = readOptionalText(effort.effort, endpoint, `${detail}.effort`);
   if (label !== undefined) parsed.effort = label;
+  if (!allowEstimatedBurn && effort.estimatedBurnPercentPoints !== undefined) {
+    throw faulty(endpoint, `${detail}.estimatedBurnPercentPoints`);
+  }
   const estimated = readOptionalNumber(
     effort.estimatedBurnPercentPoints,
     endpoint,
@@ -1434,6 +1438,7 @@ function readUsageBreakdownRow(
   value: JsonValue,
   endpoint: string,
   detail: string,
+  allowEstimatedBurn = true,
 ): UsageBreakdownRow {
   const row = readRecord(value, endpoint, detail);
   const parsed: UsageBreakdownRow = {
@@ -1448,9 +1453,12 @@ function readUsageBreakdownRow(
       Number.MAX_SAFE_INTEGER,
     ),
     efforts: readArray(row.efforts, endpoint, `${detail}.efforts`).map((entry) =>
-      readUsageEffort(entry, endpoint, `${detail}.efforts[]`),
+      readUsageEffort(entry, endpoint, `${detail}.efforts[]`, allowEstimatedBurn),
     ),
   };
+  if (!allowEstimatedBurn && row.estimatedBurnPercentPoints !== undefined) {
+    throw faulty(endpoint, `${detail}.estimatedBurnPercentPoints`);
+  }
   const estimated = readOptionalNumber(
     row.estimatedBurnPercentPoints,
     endpoint,
@@ -1529,6 +1537,12 @@ function readUsageWindow(
       readUsageBreakdownRow(entry, endpoint, `${detail}.breakdown[]`),
     ),
   };
+  if (window.conflicts !== undefined) {
+    parsed.conflicts = readArray(window.conflicts, endpoint, `${detail}.conflicts`).map((entry) => {
+      const conflict = readRecord(entry, endpoint, `${detail}.conflicts[]`);
+      return { atMs: readNumber(conflict.atMs, endpoint, `${detail}.conflicts[].atMs`) };
+    });
+  }
   if (parsed.axis.endMs < parsed.axis.startMs) throw faulty(endpoint, `${detail}.axis`);
   if (
     parsed.totals.observedBurnPercentPoints < 0 ||
@@ -1593,14 +1607,14 @@ function readUsageImportedActivity(
 ): UsageSnapshot["importedActivity"][number] {
   const entry = readRecord(value, endpoint, detail);
   const span = readRecord(entry.span, endpoint, `${detail}.span`);
+  const startMs = readNumber(span.startMs, endpoint, `${detail}.span.startMs`);
+  const endMs = readNumber(span.endMs, endpoint, `${detail}.span.endMs`);
+  if (endMs < startMs) throw faulty(endpoint, `${detail}.span`);
   return {
     harness: readEnum(entry.harness, USAGE_IMPORT_HARNESSES, endpoint, `${detail}.harness`),
-    span: {
-      startMs: readNumber(span.startMs, endpoint, `${detail}.span.startMs`),
-      endMs: readNumber(span.endMs, endpoint, `${detail}.span.endMs`),
-    },
+    span: { startMs, endMs },
     models: readArray(entry.models, endpoint, `${detail}.models`).map((model) =>
-      readUsageBreakdownRow(model, endpoint, `${detail}.models[]`),
+      readUsageBreakdownRow(model, endpoint, `${detail}.models[]`, false),
     ),
     totals: readCostedTokens(entry.totals, endpoint, `${detail}.totals`),
     stepCount: readIntegerInRange(

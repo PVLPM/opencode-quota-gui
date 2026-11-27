@@ -333,6 +333,94 @@ describe("usage snapshot: attribution", () => {
     expect(isUsageSnapshot(snapshot)).toBe(true);
   });
 
+  it("sums available imported costs instead of blanking a partially priced section", async () => {
+    const db = await store();
+    const fiveHour = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: fiveHour, remaining: 80 }]);
+    record(db, at(1), [{ series: fiveHour, remaining: 70 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+      importStatus: async () => [{ harness: "codex", enabled: true, status: "ok" }],
+      importedActivity: async (query) =>
+        aligned(query, () => [
+          entry({
+            providerId: "openai",
+            modelId: "gpt-5",
+            effort: "high",
+            tokens: costed(200, 2),
+            stepCount: 1,
+          }),
+          entry({
+            providerId: "openai",
+            modelId: "gpt-5",
+            effort: "high",
+            tokens: {
+              ...costed(100, 0),
+              apiEquivalentCostUsd: null,
+              unpricedTokens: 100,
+            },
+            stepCount: 1,
+          }),
+        ]),
+    }).usage({ range: "24h" });
+
+    const section = snapshot.importedActivity[0];
+    // Partial pricing mirrors CostedTokens: the priced read contributes, the
+    // unpriced one is reported as incomplete instead of making the total null.
+    expect(section?.models[0]?.tokens.apiEquivalentCostUsd).toBe(2);
+    expect(section?.models[0]?.tokens.unpricedTokens).toBe(100);
+    expect(section?.totals.apiEquivalentCostUsd).toBe(2);
+    expect(section?.incomplete).toBe(true);
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+  });
+
+  it("serves all imported history for lifetime without a live quota account", async () => {
+    const importedQueries: UsageActivityQuery[] = [];
+    const snapshot = await build(undefined, {
+      importStatus: async () => [{ harness: "codex", enabled: true, status: "ok" }],
+      importedActivity: async (query) => {
+        importedQueries.push(query);
+        return aligned(query, () => [
+          entry({
+            providerId: "openai",
+            modelId: "gpt-5",
+            effort: "high",
+            tokens: costed(10, 1),
+            stepCount: 1,
+            firstAtMs: at(30),
+            lastAtMs: at(120),
+          }),
+        ]);
+      },
+    }).usage({ range: "lifetime" });
+
+    // Lifetime is all imported history, even when there is no live account
+    // whose quota axis could have supplied a span.
+    expect(importedQueries[0]?.intervals).toEqual([{ startMs: 0, endMs: at(240) }]);
+    expect(snapshot.accounts).toEqual([]);
+    expect(snapshot.importedActivity).toHaveLength(1);
+    expect(snapshot.importedActivity[0]?.span).toEqual({ startMs: at(30), endMs: at(120) });
+    expect(snapshot.importedActivity[0]?.totals.apiEquivalentCostUsd).toBe(1);
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+  });
+
+  it("does not fabricate an imported span for current", async () => {
+    const importedQueries: UsageActivityQuery[] = [];
+    const snapshot = await build(undefined, {
+      importStatus: async () => [{ harness: "codex", enabled: true, status: "ok" }],
+      importedActivity: async (query) => {
+        importedQueries.push(query);
+        return aligned(query, () => [entry({ providerId: "openai", modelId: "gpt-5" })]);
+      },
+    }).usage({ range: "current" });
+
+    expect(snapshot.accounts).toEqual([]);
+    expect(snapshot.importedActivity).toEqual([]);
+    expect(importedQueries).toEqual([]);
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+  });
+
   it("leaves burn unattributed as ambiguous when two accounts share the provider", async () => {
     const db = await store();
     const first = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
@@ -432,6 +520,53 @@ describe("usage snapshot: attribution", () => {
     expect(interval?.burnPercentPoints).toBe(10);
     expect(interval?.attributedBurnPercentPoints).toBe(0);
     expect(interval?.unattributedReason).toBe("ambiguous-account");
+  });
+
+  it("isolates imported Codex quota history from rivals and OpenCode activity", async () => {
+    const db = await store();
+    const live = series("openai:aaaaaa", "window:five_hour|quota:percent", {
+      providerId: "openai",
+      providerLabel: "OpenAI",
+    });
+    // Legacy/adversarial imported series that shares the live provider id: the
+    // source, not the id string, must decide isolation.
+    const imported = series("codex-import:bbbbbb", "window:five_hour|quota:percent", {
+      providerId: "openai",
+      providerLabel: "OpenAI Codex (imported)",
+      source: "codex-import",
+    });
+    record(db, at(0), [
+      { series: live, remaining: 80 },
+      { series: imported, remaining: 80 },
+    ]);
+    record(db, at(1), [
+      { series: live, remaining: 70 },
+      { series: imported, remaining: 70 },
+    ]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [
+        entry({ providerId: "openai", modelId: "gpt-5", effort: "high" }),
+      ]),
+    }).usage({ range: "24h" });
+
+    // The imported series must not count as a rival coverage epoch: the live
+    // account keeps its activity attribution.
+    const liveInterval = snapshot.accounts.find((account) => account.accountKey === live.cardId)
+      ?.windows[0]?.intervals[0];
+    expect(liveInterval?.attributedBurnPercentPoints).toBe(10);
+    expect(liveInterval?.unattributedReason).toBeUndefined();
+
+    // Imported quota history has no OpenCode activity: its burn stays
+    // unattributed rather than consuming the live account's hourly activity.
+    const importedInterval = snapshot.accounts.find(
+      (account) => account.accountKey === imported.cardId,
+    )?.windows[0]?.intervals[0];
+    expect(importedInterval?.burnPercentPoints).toBe(10);
+    expect(importedInterval?.attributedBurnPercentPoints).toBe(0);
+    expect(importedInterval?.unattributedBurnPercentPoints).toBe(10);
+    expect(importedInterval?.unattributedReason).toBe("no-activity");
+    expect(importedInterval?.activity).toEqual([]);
   });
 
   it("narrows a model-specific named window to its model family", async () => {

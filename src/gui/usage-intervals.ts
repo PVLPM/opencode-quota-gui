@@ -295,7 +295,7 @@ function buildIntervals(
     const flatStartMs = Math.max(point.startMs, axis.startMs);
     const flatEndMs = Math.min(point.endMs, axis.endMs);
     const conflictAtMs = conflictAtByPoint[index];
-    if (flatEndMs > flatStartMs) {
+    if (flatEndMs > flatStartMs || (flatEndMs === flatStartMs && conflictAtMs !== undefined)) {
       intervals.push({
         fromPoint: index,
         toPoint: index,
@@ -410,6 +410,11 @@ export function buildUsageWindowSeries(
   }
 
   const intervals = buildIntervals(points, links, axis, conflictsAt);
+  const includedConflicts = conflicts
+    .filter((conflict) =>
+      included.some((point) => conflict.atMs >= point.firstAtMs && conflict.atMs <= point.lastAtMs),
+    )
+    .map((conflict) => ({ atMs: conflict.atMs }));
   const observedBurn = intervals.reduce(
     (total, interval) => total + (interval.burnPercentPoints ?? 0),
     0,
@@ -450,6 +455,7 @@ export function buildUsageWindowSeries(
     points,
     links,
     intervals,
+    ...(includedConflicts.length > 0 ? { conflicts: includedConflicts } : {}),
     totals: {
       observedBurnPercentPoints: observedBurn,
       attributedBurnPercentPoints: 0,

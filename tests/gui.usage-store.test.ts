@@ -408,6 +408,74 @@ describe("usage store: latest epoch reads", () => {
     expect(runsOf(ROW_B)).toEqual([50]);
     expect(slice.runs.find((run) => run.seriesId === ROW_B)?.firstAtMs).toBe(BASE + MINUTE);
   });
+
+  it("scopes rival coverage to eligible providers and displayed epoch spans", async () => {
+    const db = await store();
+    const alphaB = series(ROW_B, { providerId: "alpha", providerLabel: "Alpha" });
+    const dormantRow = "card-dormant#window:five_hour|quota:percent";
+    const dormant = series(dormantRow, { providerId: "alpha", providerLabel: "Alpha" });
+    const betaRow = "card-beta#window:five_hour|quota:percent";
+    const beta = series(betaRow, { providerId: "beta", providerLabel: "Beta" });
+    const betaImportRow = "codex-import:beta#window:five_hour|quota:percent";
+    const betaImport = series(betaImportRow, {
+      providerId: "beta",
+      providerLabel: "Beta (imported)",
+      source: "codex-import",
+    });
+
+    // Historical runs: the dormant account's latest epoch is far older.
+    db.recordCycle(observation([sample(ROW_A, BASE, 80)], { collectorRunId: "history-a" }));
+    db.recordCycle(
+      observation([sample(ROW_B, BASE - 10 * MINUTE, 40, { series: alphaB })], {
+        collectorRunId: "history-b",
+      }),
+    );
+    db.recordCycle(
+      observation([sample(dormantRow, BASE, 60, { series: dormant })], {
+        collectorRunId: "history-dormant",
+      }),
+    );
+    db.recordCycle(
+      observation([sample(betaImportRow, BASE, 70, { series: betaImport })], {
+        collectorRunId: "history-import",
+      }),
+    );
+    // Displayed latest epochs: alpha has two live accounts; beta has one live
+    // account and one imported series.
+    db.recordCycle(
+      observation([sample(ROW_A, BASE + 100 * MINUTE, 75)], { collectorRunId: "latest-a" }),
+    );
+    db.recordCycle(
+      observation([sample(ROW_B, BASE + 100 * MINUTE, 55, { series: alphaB })], {
+        collectorRunId: "latest-b",
+      }),
+    );
+    db.recordCycle(
+      observation([sample(betaRow, BASE + 100 * MINUTE, 65, { series: beta })], {
+        collectorRunId: "latest-beta",
+      }),
+    );
+
+    const slice = db.queryLatestEpochs();
+    // The dormant epoch's query returns only what overlaps that epoch; the
+    // dead gap is never scanned, so card-b's pre-dormant run is not reported.
+    expect(
+      slice.rivalRuns?.filter((run) => run.cardId === "card-b").map((run) => run.firstAtMs),
+    ).toEqual([BASE + 100 * MINUTE]);
+    expect(slice.rivalRuns).toContainEqual({
+      cardId: "card-dormant",
+      providerId: "alpha",
+      firstAtMs: BASE,
+      lastAtMs: BASE,
+    });
+    // An imported series never makes a single-account provider eligible.
+    expect(slice.rivalRuns?.some((run) => run.providerId === "beta")).toBe(false);
+    expect([...new Set(slice.rivalRuns?.map((run) => run.cardId))].sort()).toEqual([
+      "card-a",
+      "card-b",
+      "card-dormant",
+    ]);
+  });
 });
 
 describe("usage store: interruptions and missing rows", () => {
@@ -926,6 +994,42 @@ describe("usage recorder: live capture, exclusions and measurement identity", ()
     const second = recorder.close();
     expect(second).toBe(first);
     await first;
+  });
+
+  it("drains an admitted observation when close starts before it reaches the store", async () => {
+    const recorded: UsageCycleObservation[] = [];
+    const fake = {
+      path: "memory",
+      recordCycle(value: UsageCycleObservation) {
+        recorded.push(value);
+      },
+      close() {},
+    } as unknown as UsageStore;
+    const recorder = createUsageRecorder({ store: fake, now: () => BASE });
+    const epoch = recorder.epoch();
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 80)])]),
+        new Map([["card-a", BASE]]),
+      ),
+    );
+
+    // Closing stops new admissions but must not disown the cycle that was
+    // already admitted, nor change the owner epoch.
+    const closing = recorder.close();
+    expect(recorder.epoch()).toBe(epoch);
+    await closing;
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.samples[0]?.remainingPercent).toBe(80);
+
+    recorder.observe(
+      live(
+        snapshot([card("card-a", [row("card-a", "window:five_hour|quota:percent", 70)])]),
+        new Map([["card-a", BASE + MINUTE]]),
+      ),
+    );
+    await recorder.flush();
+    expect(recorded).toHaveLength(1);
   });
 });
 

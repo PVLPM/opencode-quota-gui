@@ -82,6 +82,25 @@ try {
   }
   const writeMs = performance.now() - seedStart;
 
+  // One dormant account in an existing provider: its only run is old, so a
+  // naive Current rival scan starts at the epoch and walks the whole history.
+  const dormantSeries = {
+    ...series(0),
+    rowId: "card-dormant#window:five_hour|quota:percent",
+    cardId: "card-dormant",
+    providerLabel: "Provider 0",
+  };
+  store.recordCycle({
+    collectorRunId: "run-dormant",
+    collectorSessionId: "bench-session",
+    intervalMs: MINUTE,
+    observedCards: [{ cardId: dormantSeries.cardId, providerId: "provider-0", atMs: BASE }],
+    providerIds: ["provider-0"],
+    samples: [{ series: dormantSeries, measuredAtMs: BASE, remainingPercent: 50 }],
+    interruptions: [],
+    nowMs: BASE,
+  });
+
   const lifetimeStart = performance.now();
   const lifetime = store.query({ startMs: 0, endMs: Number.MAX_SAFE_INTEGER });
   const lifetimeQueryMs = performance.now() - lifetimeStart;
@@ -91,14 +110,21 @@ try {
   const day = store.query({ startMs: lastEnd - 24 * 60 * MINUTE, endMs: lastEnd });
   const range24hQueryMs = performance.now() - dayStart;
 
-  if (lifetime.runs.length !== TOTAL_RUNS) {
-    throw new Error(`expected ${TOTAL_RUNS} runs, got ${lifetime.runs.length}`);
+  const currentStart = performance.now();
+  const current = store.queryLatestEpochs();
+  const currentQueryMs = performance.now() - currentStart;
+
+  if (lifetime.runs.length !== TOTAL_RUNS + 1) {
+    throw new Error(`expected ${TOTAL_RUNS + 1} runs, got ${lifetime.runs.length}`);
   }
-  if (lifetime.series.length !== SERIES_COUNT) {
-    throw new Error(`expected ${SERIES_COUNT} series, got ${lifetime.series.length}`);
+  if (lifetime.series.length !== SERIES_COUNT + 1) {
+    throw new Error(`expected ${SERIES_COUNT + 1} series, got ${lifetime.series.length}`);
   }
   if (day.runs.length === 0 || day.runs.length >= TOTAL_RUNS) {
     throw new Error(`unexpected 24h range run count ${day.runs.length}`);
+  }
+  if (current.series.length !== SERIES_COUNT + 1) {
+    throw new Error(`unexpected Current series count ${current.series.length}`);
   }
 
   const result = {
@@ -107,6 +133,8 @@ try {
     writeMs: Math.round(writeMs),
     lifetimeQueryMs: Number(lifetimeQueryMs.toFixed(1)),
     range24hQueryMs: Number(range24hQueryMs.toFixed(1)),
+    currentQueryMs: Number(currentQueryMs.toFixed(1)),
+    currentRivalRuns: current.rivalRuns?.length ?? 0,
   };
   if (process.argv.includes("--json")) {
     console.log(JSON.stringify(result));
@@ -114,7 +142,8 @@ try {
     console.log(
       `[usage-store bench] runs=${result.runs} series=${result.series} ` +
         `writeMs=${result.writeMs} lifetimeQueryMs=${result.lifetimeQueryMs} ` +
-        `range24hQueryMs=${result.range24hQueryMs}`,
+        `range24hQueryMs=${result.range24hQueryMs} currentQueryMs=${result.currentQueryMs} ` +
+        `currentRivalRuns=${result.currentRivalRuns}`,
     );
   }
 } finally {

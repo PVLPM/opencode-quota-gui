@@ -23,6 +23,7 @@ import {
 } from "../src/contracts/ranges.js";
 import { isUsageRangeKey, USAGE_RANGE_KEYS } from "../src/contracts/usage.js";
 import { isUsageActivityQuery } from "../src/contracts/usage-activity.js";
+import { parseUsageSnapshot } from "../src/ui/dashboard-client.js";
 import { homeSnapshot } from "./fixtures/gui-ui-fixtures.js";
 
 const NOW = Date.parse("2026-10-18T10:30:00.000Z");
@@ -380,6 +381,37 @@ describe("GUI contract guards", () => {
         importedActivity: [{ ...snapshot.importedActivity[0], totals: { input: 1 } }],
       }),
     ).toBe(false);
+  });
+
+  it("keeps guard and HTTP parser parity for imported activity", () => {
+    const snapshot = buildSyntheticUsageSnapshot({ range: "7d", nowMs: NOW });
+    const imported = snapshot.importedActivity[0]!;
+    const model = imported.models[0]!;
+    const reversed = {
+      ...snapshot,
+      importedActivity: [{ ...imported, span: { startMs: NOW, endMs: NOW - 1 } }],
+    };
+    const estimated = {
+      ...snapshot,
+      importedActivity: [
+        {
+          ...imported,
+          models: [
+            {
+              ...model,
+              estimatedBurnPercentPoints: 5,
+              efforts: [{ ...model.efforts[0]!, estimatedBurnPercentPoints: 5 }],
+            },
+          ],
+        },
+      ],
+    };
+    for (const payload of [reversed, estimated]) {
+      expect(isUsageSnapshot(payload)).toBe(false);
+      expect(() => parseUsageSnapshot(payload)).toThrow();
+    }
+    expect(isUsageSnapshot(snapshot)).toBe(true);
+    expect(() => parseUsageSnapshot(snapshot)).not.toThrow();
   });
 
   it("freezes contract version 2 for the required timeZone payload fields", () => {

@@ -164,6 +164,30 @@ describe("usage chart geometry", () => {
     ]);
   });
 
+  it("marks and inspects a zero-duration conflicted run from series evidence", () => {
+    const zero: UsageInterval = {
+      ...interval(0, 0, 500, 500, "observed", 80, 80),
+      burnPercentPoints: 0,
+    };
+    const geometry = buildUsageStepGeometry({
+      axis: AXIS,
+      plot: PLOT,
+      mode: "remaining",
+      points: [point(500, 500, 80)],
+      links: [],
+      intervals: [zero],
+      conflicts: [{ atMs: 500 }],
+    });
+
+    // Series-level conflicts mark the point even though the zero-duration
+    // interval carries no `conflictAtMs` of its own.
+    expect(geometry.markers).toEqual([{ x: 50, atMs: 500, boundary: "uncertain", between: false }]);
+    expect(geometry.units).toEqual([
+      { intervalIndex: 0, startMs: 500, endMs: 500, kind: "observed" },
+    ]);
+    expect(geometry.unitAtX(50)).toBe(0);
+  });
+
   it("inspects the server intervals in chronological order", () => {
     const intervals = [
       interval(0, 1, 200, 300, "unobserved", 80, 70),

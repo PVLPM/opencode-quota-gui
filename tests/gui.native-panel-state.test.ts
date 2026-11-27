@@ -230,6 +230,7 @@ describe("native dashboard panel state", () => {
     expect(fake.counts.health).toBe(0);
     expect(state.reloadToken()).toBe(0);
     expect(state.quotaReloadToken()).toBe(0);
+    expect(state.usageReloadToken()).toBe(0);
   });
 
   it("subscribes and loads settings and diagnostics when the tab becomes visible", async () => {
@@ -278,16 +279,20 @@ describe("native dashboard panel state", () => {
     expect(fake.counts.settings).toBe(2);
     expect(state.reloadToken()).toBe(0);
     expect(state.quotaReloadToken()).toBe(0);
+    // Import opt-in/opt-out changes what Usage serves.
+    expect(state.usageReloadToken()).toBe(1);
 
     fake.emit({ topic: "quota.changed", at: 2 });
     await flush();
     expect(state.quotaReloadToken()).toBe(1);
+    expect(state.usageReloadToken()).toBe(2);
     expect(state.reloadToken()).toBe(0);
 
     fake.emit({ topic: "sessions.changed", at: 3 });
     await flush();
     expect(state.reloadToken()).toBe(1);
     expect(state.quotaReloadToken()).toBe(1);
+    expect(state.usageReloadToken()).toBe(2);
   });
 
   it("refreshes settings and advances the reconnect epoch on transport recovery", async () => {
