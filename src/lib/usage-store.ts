@@ -236,6 +236,14 @@ export interface UsageCycleObservation {
   nowMs: number;
 }
 
+/** Minimal run coverage used only to detect rival accounts of one provider. */
+export interface UsageRivalRun {
+  cardId: string;
+  providerId: string;
+  firstAtMs: number;
+  lastAtMs: number;
+}
+
 export interface UsageHistorySlice {
   series: UsageSeriesInfo[];
   runs: UsageStoredRun[];
@@ -244,6 +252,12 @@ export interface UsageHistorySlice {
   interruptions: UsageInterruptionRecord[];
   /** Overlapping-time disagreements; the derivation renders them as uncertain. */
   conflicts: UsageConflictRecord[];
+  /**
+   * All stored runs that can overlap a latest epoch, including epochs the
+   * `current` range does not display. Rival-account checks need them because an
+   * older rival epoch can still overlap the displayed one.
+   */
+  rivalRuns?: UsageRivalRun[];
 }
 
 export const USAGE_IMPORT_HARNESSES = ["claude-code", "codex"] as const;
@@ -770,7 +784,33 @@ function createReader(conn: SqliteConn): UsageReadStore {
           );
         }
       }
-      return { series, runs, preceding: [], interruptions: [], conflicts };
+      const firstLatestAtMs = runs.reduce(
+        (earliest, run) => Math.min(earliest, run.firstAtMs),
+        Number.POSITIVE_INFINITY,
+      );
+      const rivalRuns =
+        Number.isFinite(firstLatestAtMs) && rows.length > 0
+          ? conn
+              .all<{
+                card_id: string;
+                provider_id: string;
+                first_at_ms: number;
+                last_at_ms: number;
+              }>(
+                `SELECT s.card_id, s.provider_id, r.first_at_ms, r.last_at_ms
+                 FROM usage_runs r JOIN usage_series s ON s.series_id = r.series_id
+                 WHERE r.last_at_ms >= ?
+                 ORDER BY s.provider_id, s.card_id, r.first_at_ms, r.last_at_ms`,
+                [firstLatestAtMs],
+              )
+              .map((row) => ({
+                cardId: row.card_id,
+                providerId: row.provider_id,
+                firstAtMs: row.first_at_ms,
+                lastAtMs: row.last_at_ms,
+              }))
+          : [];
+      return { series, runs, preceding: [], interruptions: [], conflicts, rivalRuns };
     });
   }
 

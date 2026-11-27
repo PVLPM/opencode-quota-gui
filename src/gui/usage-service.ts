@@ -48,6 +48,7 @@ import {
   openUsageStoreReadOnly,
   type UsageHistorySlice,
   type UsageReadStore,
+  type UsageRivalRun,
   type UsageSeriesInfo,
   type UsageStoredRun,
 } from "../lib/usage-store.js";
@@ -404,7 +405,7 @@ function activityForInterval(
   return combineActivity(interval, parts);
 }
 
-function rivalCoverage(runs: readonly UsageStoredRun[]): {
+function rivalCoverage(runs: readonly { firstAtMs: number; lastAtMs: number }[]): {
   rivalFirstAtMs: number[];
   rivalMaxLastAtMs: number[];
 } {
@@ -542,11 +543,29 @@ export function createUsageSnapshotBuilder(
     const cardRank = new Map<string, number>(
       cards.map((card, index) => [card.cardId, index] as const),
     );
-    const groupsByProvider = new Map<string, SeriesGroup[]>();
-    for (const group of groups) {
-      const list = groupsByProvider.get(group.providerId);
-      if (list === undefined) groupsByProvider.set(group.providerId, [group]);
-      else list.push(group);
+    // Rival evidence may only come from other cards of the same provider. For
+    // `current`, `rivalRuns` also carries older rival epochs that the displayed
+    // latest-epoch slice omits but which still overlap the displayed interval.
+    const seriesById = new Map(slice.series.map((series) => [series.rowId, series] as const));
+    const rivalRunsByProvider = new Map<string, UsageRivalRun[]>();
+    const addRivalRun = (run: UsageRivalRun): void => {
+      const list = rivalRunsByProvider.get(run.providerId);
+      if (list === undefined) rivalRunsByProvider.set(run.providerId, [run]);
+      else list.push(run);
+    };
+    if (slice.rivalRuns !== undefined) {
+      for (const run of slice.rivalRuns) addRivalRun(run);
+    } else {
+      for (const run of slice.runs) {
+        const series = seriesById.get(run.seriesId);
+        if (series === undefined) continue;
+        addRivalRun({
+          cardId: series.cardId,
+          providerId: series.providerId,
+          firstAtMs: run.firstAtMs,
+          lastAtMs: run.lastAtMs,
+        });
+      }
     }
 
     groups.sort((left, right) => {
@@ -568,9 +587,9 @@ export function createUsageSnapshotBuilder(
       const card = cardById.get(group.cardId);
       const providerLabel = card?.providerLabel ?? group.providerLabel;
       const rivals = rivalCoverage(
-        (groupsByProvider.get(group.providerId) ?? [])
-          .filter((other) => other.cardId !== group.cardId)
-          .flatMap((other) => [...other.runsBySeries.values()].flat()),
+        (rivalRunsByProvider.get(group.providerId) ?? []).filter(
+          (other) => other.cardId !== group.cardId,
+        ),
       );
       const account: WorkingAccount = {
         cardId: group.cardId,

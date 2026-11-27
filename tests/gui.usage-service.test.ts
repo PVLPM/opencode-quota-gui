@@ -291,6 +291,50 @@ describe("usage snapshot: attribution", () => {
     }
   });
 
+  it("attributes each account when their observed epochs do not overlap", async () => {
+    const db = await store();
+    const first = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    const second = series("anthropic:bbbbbb", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: first, remaining: 80 }]);
+    record(db, at(1), [{ series: first, remaining: 70 }]);
+    record(db, at(10), [{ series: second, remaining: 60 }]);
+    record(db, at(11), [{ series: second, remaining: 55 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+    }).usage({ range: "lifetime" });
+
+    expect(snapshot.accounts).toHaveLength(2);
+    for (const account of snapshot.accounts) {
+      const interval = account.windows[0]?.intervals[0];
+      expect(interval?.attributedBurnPercentPoints).toBeGreaterThan(0);
+      expect(interval?.unattributedReason).toBeUndefined();
+    }
+  });
+
+  it("marks an account ambiguous when a rival's older epoch overlaps its current interval", async () => {
+    const db = await store();
+    const first = series("anthropic:aaaaaa", "window:five_hour|quota:percent");
+    const second = series("anthropic:bbbbbb", "window:five_hour|quota:percent");
+    record(db, at(0), [{ series: first, remaining: 80 }]);
+    record(db, at(1), [{ series: first, remaining: 70 }]);
+    // The rival resets at minute 5; its older epoch still overlaps minutes 0-1.
+    record(db, at(0), [{ series: second, remaining: 60 }]);
+    record(db, at(0.5), [{ series: second, remaining: 60 }]);
+    record(db, at(5), [{ series: second, remaining: 100 }]);
+    record(db, at(6), [{ series: second, remaining: 90 }]);
+
+    const snapshot = await build(db, {
+      activity: activityReturning(() => [entry()]),
+    }).usage({ range: "current" });
+
+    const firstAccount = snapshot.accounts.find((account) => account.accountKey === first.cardId);
+    const interval = firstAccount?.windows[0]?.intervals[0];
+    expect(interval?.burnPercentPoints).toBe(10);
+    expect(interval?.attributedBurnPercentPoints).toBe(0);
+    expect(interval?.unattributedReason).toBe("ambiguous-account");
+  });
+
   it("narrows a model-specific named window to its model family", async () => {
     const db = await store();
     const fable = series("claude-agent:cccccc", "named:Fable weekly|quota:percent", {
