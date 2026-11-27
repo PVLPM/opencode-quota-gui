@@ -8,18 +8,27 @@
  */
 import type { ProviderCard, QuotaCardRow, QuotaSnapshot } from "../contracts/dashboard.js";
 import type { UsageMeasurementKind } from "../contracts/usage.js";
+import type { UsageActivityQuery, UsageActivityResult } from "../contracts/usage-activity.js";
 import { sanitizeSingleLineDisplayText } from "../lib/display-sanitize.js";
 import { getGuiPrivateStatePath } from "../lib/private-state-paths.js";
 import {
   openUsageStore,
+  USAGE_IMPORT_HARNESSES,
   type UsageCycleInterruption,
   type UsageCycleObservation,
   type UsageCycleSample,
+  type UsageImportHarness,
   type UsageSeriesMetadata,
   type UsageStore,
 } from "../lib/usage-store.js";
 import { createGuiLogger, type GuiLogger } from "./log.js";
 import { isLiveQuotaObservation, quotaObservationCycle } from "./quota-observation.js";
+import {
+  createUsageImporter,
+  type UsageImporter,
+  type UsageImportSettings,
+  type UsageImportStatus,
+} from "./usage-import-service.js";
 
 const USAGE_HISTORY_FILE = "usage-history.sqlite";
 const DEFAULT_INTERVAL_MS = 60_000;
@@ -31,6 +40,10 @@ export interface UsageRecorderOptions {
   path?: string;
   now?: () => number;
   logger?: GuiLogger;
+  /** Settings seam for opt-in harness import; absent disables import entirely. */
+  loadImportSettings?: () => Promise<UsageImportSettings>;
+  /** Test seam: config root per harness; production resolves env/home. */
+  importRootFor?: (harness: UsageImportHarness) => string | undefined;
 }
 
 export interface UsageRecorder {
@@ -40,10 +53,16 @@ export interface UsageRecorder {
   epoch(): number;
   /** The host's active source changed; queued observations are discarded. */
   sourceChanged(): void;
-  /** Resolves after every queued observation finished. */
+  /** Resolves after every queued observation and import run finished. */
   flush(): Promise<void>;
   /** Stop accepting observations, wait for the chain, then close the store. */
   close(): Promise<void>;
+  /** Persist hashed host-native Claude Agent ids for import exclusion. */
+  recordClaudeOwnership(sessionId: string, messageId: string): void;
+  /** Enabled/disabled and last outcome for the Usage snapshot builder. */
+  importStatus(): Promise<UsageImportStatus[]>;
+  /** Priced imported Claude Code / Codex activity for the enabled harnesses. */
+  queryImportedActivity(query: UsageActivityQuery): Promise<UsageActivityResult>;
 }
 
 function label(value: string | undefined): string | undefined {
@@ -179,6 +198,7 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
   let sourceEpoch = 0;
   let closed = false;
   let chain: Promise<void> = Promise.resolve();
+  let importChain: Promise<void> = Promise.resolve();
 
   function store(): Promise<UsageStore> {
     if (storePromise === undefined) {
@@ -188,9 +208,29 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
     return storePromise;
   }
 
-  async function capture(snapshot: QuotaSnapshot, epoch: number): Promise<void> {
-    if (closed || epoch !== sourceEpoch) return;
-    if (!isLiveQuotaObservation(snapshot)) return;
+  const importer: UsageImporter | undefined =
+    options.loadImportSettings === undefined
+      ? undefined
+      : createUsageImporter({
+          store,
+          loadSettings: options.loadImportSettings,
+          ...(options.importRootFor !== undefined ? { rootFor: options.importRootFor } : {}),
+          now,
+          logger,
+        });
+
+  function scheduleImport(intervalMs: number): void {
+    if (importer === undefined || closed) return;
+    importChain = importChain
+      .then(() => importer.maybeRun(intervalMs))
+      .catch(() => {
+        logger.warn("usage import failed", "import-failed");
+      });
+  }
+
+  async function capture(snapshot: QuotaSnapshot, epoch: number): Promise<number | undefined> {
+    if (closed || epoch !== sourceEpoch) return undefined;
+    if (!isLiveQuotaObservation(snapshot)) return undefined;
 
     let target: UsageStore;
     try {
@@ -200,18 +240,20 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
         openWarned = true;
         logger.warn("usage history unavailable", "store-unavailable");
       }
-      return;
+      return undefined;
     }
-    if (closed || epoch !== sourceEpoch) return;
+    if (closed || epoch !== sourceEpoch) return undefined;
 
+    const cycle = buildCycle(snapshot, now());
     try {
-      target.recordCycle(buildCycle(snapshot, now()));
+      target.recordCycle(cycle);
     } catch {
       if (!writeWarned) {
         writeWarned = true;
         logger.warn("usage history write failed", "write-failed");
       }
     }
+    return cycle.intervalMs;
   }
 
   return {
@@ -219,7 +261,10 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
       if (closed) return;
       const epoch = capturedEpoch ?? sourceEpoch;
       chain = chain
-        .then(() => capture(snapshot, epoch))
+        .then(async () => {
+          const intervalMs = await capture(snapshot, epoch);
+          if (intervalMs !== undefined) scheduleImport(intervalMs);
+        })
         .catch(() => {
           logger.warn("usage observation failed", "capture-failed");
         });
@@ -233,8 +278,50 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
       sourceEpoch += 1;
     },
 
-    flush() {
-      return chain;
+    recordClaudeOwnership(sessionId, messageId) {
+      if (closed || importer === undefined) return;
+      importer.recordClaudeOwnership(sessionId, messageId);
+    },
+
+    importStatus() {
+      if (importer === undefined) {
+        return Promise.resolve(
+          USAGE_IMPORT_HARNESSES.map((harness) => ({
+            harness,
+            enabled: false,
+            status: "disabled" as const,
+          })),
+        );
+      }
+      return importer.status();
+    },
+
+    queryImportedActivity(query) {
+      if (importer === undefined) {
+        return Promise.resolve({
+          intervals: query.intervals.map((interval) => ({
+            startMs: interval.startMs,
+            endMs: interval.endMs,
+            entries: [],
+            incomplete: false,
+            unpricedTokens: 0,
+            unknownTokens: 0,
+          })),
+        });
+      }
+      return importer.queryActivity(query, USAGE_IMPORT_HARNESSES);
+    },
+
+    async flush() {
+      // `scheduleImport` extends `importChain` while `chain` settles, so wait
+      // for the observation chain first, then for the import it queued.
+      let pendingChain = chain;
+      do {
+        await pendingChain;
+        pendingChain = chain;
+      } while (pendingChain !== chain);
+      await importChain;
+      await importer?.flush();
     },
 
     async close() {
@@ -242,6 +329,8 @@ export function createUsageRecorder(options: UsageRecorderOptions = {}): UsageRe
       closed = true;
       sourceEpoch += 1;
       await chain;
+      await importChain;
+      await importer?.flush();
       const pending = storePromise;
       storePromise = undefined;
       if (pending === undefined) return;

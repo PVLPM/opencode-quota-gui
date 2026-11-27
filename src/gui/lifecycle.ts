@@ -114,6 +114,8 @@ export interface DashboardTransportRuntime {
   readonly settings: GuiSettingsStore;
   /** One host-owned observer; its safe events use the quota notification channel. */
   readonly quotaNotifications?: QuotaNotificationObserver;
+  /** One host-owned usage recorder; also the import exclusion sink. */
+  readonly usage?: UsageRecorder;
 }
 
 /**
@@ -653,6 +655,13 @@ async function startHost(
     const usage = createUsageRecorder({
       ...(options.usageStorePath !== undefined ? { path: options.usageStorePath } : {}),
       logger: context.logger,
+      loadImportSettings: async () => {
+        const snapshot = await settings.settings();
+        return {
+          claudeCode: snapshot.values["usageImport.claudeCode"] === true,
+          codex: snapshot.values["usageImport.codex"] === true,
+        };
+      },
     });
     runtime.usage = usage;
     observation.usage = usage;
@@ -729,6 +738,7 @@ function transportRuntime(runtime: DashboardRuntime): DashboardTransportRuntime 
     snapshots: runtime.snapshots,
     settings: runtime.settings,
     ...(runtime.quotaNotifications ? { quotaNotifications: runtime.quotaNotifications } : {}),
+    ...(runtime.usage ? { usage: runtime.usage } : {}),
   };
 }
 
