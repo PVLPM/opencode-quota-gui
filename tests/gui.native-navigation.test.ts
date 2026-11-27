@@ -38,6 +38,8 @@ describe("native navigation", () => {
     const token = encodeAnalyticsEntityToken(identity);
     const cases = [
       ["/quota", { name: "home" }],
+      ["/usage", { name: "usage", usageRange: "current" }],
+      ["/usage?range=7d", { name: "usage", usageRange: "7d" }],
       ["/analytics?range=24h", { name: "analytics" }],
       ["/models?range=30d", { name: "models", dimension: "provider" }],
       ["/models?range=30d&group=model", { name: "models", dimension: "model" }],
@@ -62,6 +64,8 @@ describe("native navigation", () => {
     expect(navigateNative(start, "/analytics")?.range).toBe("30d");
     expect(navigateNative(start, "/analytics?range=24h")?.range).toBe("24h");
     expect(navigateNative(start, "/session/ses%201")?.range).toBe("30d");
+    // The usage query selects its own vocabulary; the analytics range stays put.
+    expect(navigateNative(start, "/usage?range=7d")?.range).toBe("30d");
   });
 
   it("ignores an unknown or malformed path instead of leaving the dashboard", () => {
@@ -103,6 +107,7 @@ describe("native navigation", () => {
     const modelToken = encodeAnalyticsEntityToken(identity);
     const cases = [
       [{ name: "home" } as const, undefined, "quota" as const],
+      [{ name: "usage", usageRange: "7d" } as const, undefined, "quota" as const],
       [{ name: "analytics" } as const, "analytics" as const, "analytics" as const],
       [{ name: "project", projectId: "p" } as const, "analytics" as const, "analytics" as const],
       [{ name: "session", sessionId: "s" } as const, "analytics" as const, "analytics" as const],
@@ -142,6 +147,10 @@ describe("native navigation", () => {
   });
 
   it("formats the same internal paths the shared views emit", () => {
+    expect(formatPath({ name: "usage", usageRange: "current" }, "7d")).toBe("/usage");
+    expect(formatPath({ name: "usage", usageRange: "lifetime" }, "7d")).toBe(
+      "/usage?range=lifetime",
+    );
     expect(formatPath({ name: "analytics" }, "7d")).toBe("/analytics?range=7d");
     expect(formatPath({ name: "models", dimension: "model" }, "24h")).toBe(
       "/models?range=24h&group=model",
